@@ -183,50 +183,195 @@ def _nearest(m, buckets):
 
 
 # --------------------------------------------------------------------------- #
-# Generic (attn / norm / elementwise / linear-attn / editable): meta carries captured cases with
-# explicit shapes; the profile usually exposes the same shapes -> match per case.
+# Case-based op_kinds (attn / linear-attn-recurrent / norm / elementwise / editable): meta carries
+# explicit shape cases, EACH TAGGED WITH A `regime` by the extractor. They all share ONE distribution
+# engine (`_distribute`); each op_kind differs only in its thin REGIME CLASSIFIER — how it splits the
+# kernel's profiled time into per-regime totals. GEMM/MoE keep the precise grid-based path above; this
+# is the unification for everything the trace can't pin to a shape (e.g. HIP/CUDA-graph decode).
 # --------------------------------------------------------------------------- #
-def attribute_generic(meta, entries, notes):
-    meta_cases = meta.get("cases") or []
-    # gather all profiled cases (with real dims) across the matched kernel entries
+def _case_size(dims):
+    """Size proxy for a case = element count of its first (principal) operand (e.g. tokens x feature,
+    batch x packed-dim). time ~ this proxy, so within a regime the larger-batch case gets more weight."""
+    for t in dims:
+        if t and all(isinstance(x, int) for x in t):
+            p = 1
+            for x in t:
+                p *= x
+            return p
+    return 1
+
+
+def _norm_meta_cases(meta):
+    """Normalize meta.cases -> [{name, dims, dtypes, regime, size}] (regime tagged by the extractor)."""
+    out = []
+    for mc in meta.get("cases") or []:
+        dims = mc.get("input_shapes") or mc.get("dims") or []
+        out.append({
+            "name": mc.get("sig") or mc.get("name") or _shape_name(dims),
+            "dims": dims,
+            "dtypes": mc.get("input_dtypes") or mc.get("dtypes") or [],
+            "regime": (mc.get("regime") or "").lower(),
+            "size": _case_size(dims),
+        })
+    return out
+
+
+def _members_split(members):
+    """Fractions to split a regime's total time across its member cases, proportional to the size
+    proxy (time ~ elements). Falls back to even split when sizes are unknown."""
+    sizes = [m["size"] for m in members]
+    ssum = sum(sizes)
+    if ssum <= 0:
+        return [(m, 1.0 / len(members)) for m in members]
+    return [(m, s / ssum) for m, s in zip(members, sizes)]
+
+
+def _distribute(mcases, regime_us, matched, notes, src="regime"):
+    """THE shared case-based engine. For each meta case: if a profiled shape matched it -> trace
+    weight; else split its regime's unmatched total (`regime_us[regime]`) across that regime's
+    unmatched members by the size prior. A regime meta declares but the profile timed at ZERO ->
+    weight 0 prior + loud warning (a capture-口径 artifact, not proof it's free; floor it via
+    --min-regime-share). `src` labels the prior weights (regime|regime_prior)."""
+    out = []
+    by_regime = {}
+    for c in mcases:
+        if c["name"] in matched:
+            m = matched[c["name"]]
+            out.append({"name": c["name"], "dims": c["dims"], "dtypes": c["dtypes"],
+                        "count": m.get("count"), "weight": round(m.get("weight", 0.0), 3),
+                        "weight_source": "trace", "regime": c["regime"]})
+        else:
+            by_regime.setdefault(c["regime"], []).append(c)
+    for regime, members in by_regime.items():
+        total = regime_us.get(regime, 0.0)
+        if total <= 0:
+            if regime:
+                notes.append(f"WARNING: regime '{regime}' present in meta but ZERO profiled time — "
+                             "likely a capture-biased window; set --min-regime-share to keep it.")
+            for c in members:
+                out.append({"name": c["name"], "dims": c["dims"], "dtypes": c["dtypes"],
+                            "count": None, "weight": 0.0, "weight_source": "prior", "regime": regime})
+            continue
+        for c, frac in _members_split(members):
+            out.append({"name": c["name"], "dims": c["dims"], "dtypes": c["dtypes"],
+                        "count": None, "weight": round(total * frac, 3),
+                        "weight_source": src, "regime": regime})
+    return out
+
+
+def _collect_prof(entries):
     prof = []
     for k in entries:
         for c in k.get("cases", []):
             if c.get("dims"):
                 prof.append(c)
-    cases = []
-    if not meta_cases:
-        # no explicit meta case list -> just pass the profile's own per-(shape,dtype) weights through
-        for c in prof:
-            cases.append({
-                "name": _shape_name(c["dims"]),
-                "dims": c["dims"], "dtypes": c.get("dtypes", []),
-                "count": c.get("count"), "weight": c.get("weight", 0.0),
-                "weight_source": "trace", "regime": "",
-            })
-        if not cases:
-            notes.append("no meta cases and no profiled shapes; nothing to weight.")
-        return cases
+    return prof
 
-    for mc in meta_cases:
-        dims = mc.get("input_shapes") or mc.get("dims") or []
-        dtypes = mc.get("input_dtypes") or mc.get("dtypes") or []
-        match = _best_shape_match(dims, prof)
-        if match is not None:
-            cases.append({
-                "name": mc.get("sig") or _shape_name(dims),
-                "dims": dims, "dtypes": dtypes,
-                "count": match.get("count"), "weight": match.get("weight", 0.0),
-                "weight_source": "trace", "regime": "",
-            })
+
+def _total_time(entries):
+    return sum(c.get("weight", 0.0) for k in entries for c in k.get("cases", []))
+
+
+def _shape_match_pass(mcases, prof):
+    """Match each meta case to a profiled (real-shape) case. Returns {case_name: prof_case} and the
+    summed matched weight."""
+    matched, matched_w = {}, 0.0
+    for c in mcases:
+        m = _best_shape_match(c["dims"], prof)
+        if m is not None:
+            matched[c["name"]] = m
+            matched_w += m.get("weight", 0.0)
+    return matched, matched_w
+
+
+def _classify_attn(mcases, entries, matched_w, total_w, notes):
+    """Attention regime classifier: a serving attn kernel runs in two regimes that the kernel NAME
+    discriminates — prefill (`...prefill...`, big-q causal FMHA) vs decode (`...paged...`/`...decode...`,
+    q=1 over the KV cache, usually graph-hidden). Split the UNMATCHED profiled time into those two
+    regime totals by name; whatever can't be named falls to the regime mix present in meta by size."""
+    decode_us = prefill_us = other_us = 0.0
+    for k in entries:
+        kw = sum(c.get("weight", 0.0) for c in k.get("cases", []) if not c.get("dims"))  # unmatched only
+        name = (k.get("name", "") + " " + k.get("short_name", "")).lower()
+        if any(t in name for t in ("decode", "paged", "_gqa", "mqa_decode")):
+            decode_us += kw
+        elif any(t in name for t in ("prefill", "context", "varlen", "fwd")):
+            prefill_us += kw
         else:
-            cases.append({
-                "name": mc.get("sig") or _shape_name(dims),
-                "dims": dims, "dtypes": dtypes, "count": None, "weight": 0.0,
-                "weight_source": "prior", "regime": "",
-            })
-    if any(c["weight_source"] == "prior" for c in cases):
-        notes.append("some meta cases had no matching profiled shape -> weight=0 prior (logged).")
+            other_us += kw
+    regime_us = {"decode": decode_us, "prefill": prefill_us}
+    if other_us > 0:  # spread unnamed remainder across whatever regimes meta declares, by size
+        regs = {c["regime"] for c in mcases if c["regime"]}
+        sz = {r: sum(c["size"] for c in mcases if c["regime"] == r) for r in regs}
+        ssum = sum(sz.values()) or 1.0
+        for r in regs:
+            regime_us[r] = regime_us.get(r, 0.0) + other_us * sz[r] / ssum
+        notes.append(f"attn: {other_us:.0f}us of unnamed launches spread across meta regimes by size.")
+    return regime_us
+
+
+def _classify_fallback(mcases, entries, matched_w, total_w, notes):
+    """Generic classifier (recurrent / norm / elementwise / editable): no name-based regime signal.
+    Assign ALL unmatched profiled time to the regime(s) the extractor tagged on the cases — if the
+    cases share a single regime (e.g. a pure-decode recurrent kernel) it all lands there; if they
+    span regimes (or are untagged) it is pooled and the within-regime size prior splits it. This is
+    what lets a HIP/CUDA-graph kernel (shapes hidden) still get a real time-proportional weight."""
+    remainder = total_w - matched_w
+    regs = [r for r in {c["regime"] for c in mcases}]
+    if remainder <= 0:
+        return {}
+    # pool everything; distribute across regimes proportional to each regime's total size, so a single
+    # tagged regime gets 100% and multi-regime splits by size (then _members_split splits within).
+    sz = {r: sum(c["size"] for c in mcases if c["regime"] == r) for r in regs}
+    ssum = sum(sz.values()) or 1.0
+    out = {r: remainder * (sz[r] / ssum) for r in regs}
+    notes.append(f"distributed {remainder:.0f}us of unattributed kernel time across "
+                 f"{len(mcases)} shape-hidden case(s) by size prior (regime_prior) — shapes absent "
+                 "from the trace (e.g. HIP/CUDA-graph decode); larger-batch case dominates.")
+    return out
+
+
+def attribute_attn(meta, entries, notes):
+    mcases = _norm_meta_cases(meta)
+    if not mcases:                      # no explicit cases -> degrade to pass-through of profiled shapes
+        return _passthrough(entries, notes)
+    prof = _collect_prof(entries)
+    matched, matched_w = _shape_match_pass(mcases, prof)
+    total_w = _total_time(entries)
+    regime_us = _classify_attn(mcases, entries, matched_w, total_w, notes)
+    return _distribute(mcases, regime_us, matched, notes, src="regime")
+
+
+def attribute_moe(meta, entries, notes):
+    """MoE grouped-GEMM = a GEMM whose effective M per expert = tokens*top_k/num_experts (routing-
+    dependent). The extractor bakes that effective M into decode/prefill m_buckets, so MoE reuses the
+    precise grid-based GEMM engine; routing skew makes the weights lower-confidence (noted)."""
+    notes.append("op_kind=moe: per-expert token counts are routing-dependent; effective-M buckets "
+                 "from meta drive a GEMM-style regime split. Treat weights as lower-confidence.")
+    return attribute_gemm(meta, entries, notes)
+
+
+def attribute_generic(meta, entries, notes):
+    mcases = _norm_meta_cases(meta)
+    if not mcases:
+        return _passthrough(entries, notes)
+    prof = _collect_prof(entries)
+    matched, matched_w = _shape_match_pass(mcases, prof)
+    total_w = _total_time(entries)
+    regime_us = _classify_fallback(mcases, entries, matched_w, total_w, notes)
+    src = "regime_prior" if regime_us else "prior"
+    return _distribute(mcases, regime_us, matched, notes, src=src)
+
+
+def _passthrough(entries, notes):
+    """No meta cases at all -> emit the profile's own per-(shape,dtype) weights verbatim."""
+    cases = []
+    for c in _collect_prof(entries):
+        cases.append({"name": _shape_name(c["dims"]), "dims": c["dims"], "dtypes": c.get("dtypes", []),
+                      "count": c.get("count"), "weight": c.get("weight", 0.0),
+                      "weight_source": "trace", "regime": ""})
+    if not cases:
+        notes.append("no meta cases and no profiled shapes; nothing to weight.")
     return cases
 
 
@@ -280,13 +425,16 @@ def main():
     if not entries:
         notes.append(f"no profile entries matched name '{name_match}'; weights are prior only.")
 
+    # op_kind-aware attribution. gemm/moe use the precise grid/bucket engine; attn and the case-based
+    # kinds (recurrent / norm / elementwise / editable) share the _distribute engine, differing only
+    # in their thin regime classifier. All roads produce the same {..., regime, weight_source} schema.
     if op_kind == "gemm":
         cases = attribute_gemm(meta, entries, notes)
+    elif op_kind == "moe":
+        cases = attribute_moe(meta, entries, notes)
+    elif op_kind == "attn":
+        cases = attribute_attn(meta, entries, notes)
     else:
-        # attn / moe / norm / elementwise / editable all carry explicit shapes in meta -> generic path.
-        if op_kind == "moe":
-            notes.append("op_kind=moe: per-expert token counts are routing-dependent; weights are "
-                         "shape-matched where possible, else prior. Treat as low-confidence.")
         cases = attribute_generic(meta, entries, notes)
 
     # optional regime floor (serving decode-protection): redistribute so each regime present in meta

@@ -121,7 +121,26 @@ to build its weighted TIMING cases + the time-weighted metric. Also return the p
 (kernel_workflow reads it only to know the run is workload-aligned). The SHAPES always come from your
 `meta.json` (config-derived M-buckets for GEMM, captured cases for attn/editable) — `attribute_weights.py`
 only attaches a time-proportional WEIGHT per case + the in-regime `quant` operands, labelling each
-`weight_source` (`trace`/`regime`/`regime_floor`/`prior`). **Set `--min-regime-share 0.3` for serving**
+`weight_source` (`trace`/`regime`/`regime_prior`/`regime_floor`/`prior`).
+
+> **🔴 TAG EVERY CASE WITH ITS `regime` — the attribution is op_kind-aware for ALL kinds, not just GEMM.**
+> `attribute_weights.py` splits a kernel's profiled time into per-regime totals and distributes each
+> across that regime's cases. It needs to know which regime each case belongs to. How you supply that
+> depends on op_kind — but it is ALWAYS your job (the profiler stays regime-agnostic; it only measures):
+> - **gemm / moe** → the `decode_m_buckets` / `prefill_m_buckets` lists (regime is implicit in the
+>   bucket list). MoE reuses the GEMM engine with effective-M = `tokens*top_k/num_experts` per expert.
+> - **attn** → put `"regime": "prefill"|"decode"` on each `cases[]` entry. Time is split by KERNEL NAME
+>   (prefill FMHA vs paged/decode), so decode — which the server runs under a HIP/CUDA graph with its
+>   shape hidden — still gets its share instead of collapsing to a zero-weight prior.
+> - **linear-attn-recurrent / norm / elementwise / editable** → put `"regime"` on each `cases[]` entry
+>   (often all `"decode"` for a decode-path kernel). A graph-hidden kernel with no per-call shape then
+>   gets its total time distributed across your cases by the size prior (`weight_source:"regime_prior"`,
+>   larger-batch case dominant) rather than an unweighted geomean.
+>
+> If a case has no natural regime, leave `"regime": ""` — the total is pooled and size-split. Never
+> hand-write weights; only tag `regime` + supply shapes, and let the deterministic tool attribute.
+
+**Set `--min-regime-share 0.3` for serving**
 (this run's objective): the profiling window is often prefill-biased and would otherwise zero-weight
 decode — the floor guarantees decode (TPOT-critical) is never optimized away. Read the tool's `notes`
 and carry anything notable into your own `notes`. CORRECTNESS still uses the frozen golden cases

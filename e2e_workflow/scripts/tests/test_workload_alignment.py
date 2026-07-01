@@ -274,5 +274,98 @@ class TestBuildWorkload(unittest.TestCase):
         self.assertEqual(wl["kernels"][0]["name"], "foo_kernel")
 
 
+# --------------------------------------------------------------------------- #
+# op_kind-aware attribution beyond GEMM (attn / moe / recurrent) — the unified engine
+# --------------------------------------------------------------------------- #
+class TestAttributeAttn(unittest.TestCase):
+    """Attention: the regime is discriminated by the KERNEL NAME (prefill FMHA vs paged decode), and
+    the extractor tags each meta case with its regime. Decode usually hides its shape behind a graph,
+    so its time must still be attributed from the kernel total, not dropped."""
+    def _meta(self):
+        return {"op_kind": "attn", "short_name": "attn",
+                "cases": [{"sig": "prefill_q2048", "dims": [[2048, 24, 128]], "dtypes": ["bf16"],
+                           "regime": "prefill"},
+                          {"sig": "decode_q1", "dims": [[64, 24, 128]], "dtypes": ["bf16"],
+                           "regime": "decode"}]}
+
+    def test_name_based_regime_split_when_shapes_hidden(self):
+        # both launches are graph-hidden (dims=[]); only the NAME says which regime.
+        entries = [
+            {"name": "fmha_prefill_kernel", "short_name": "attn",
+             "cases": [{"dims": [], "weight": 800.0}]},
+            {"name": "paged_attention_decode_kernel", "short_name": "attn",
+             "cases": [{"dims": [], "weight": 200.0}]},
+        ]
+        notes = []
+        cases = attribute_weights.attribute_attn(self._meta(), entries, notes)
+        by = {c["name"]: c for c in cases}
+        self.assertEqual(by["prefill_q2048"]["regime"], "prefill")
+        self.assertEqual(by["decode_q1"]["regime"], "decode")
+        # prefill got the 800us, decode the 200us — NOT collapsed to 0 prior
+        self.assertAlmostEqual(by["prefill_q2048"]["weight"], 800.0, places=1)
+        self.assertAlmostEqual(by["decode_q1"]["weight"], 200.0, places=1)
+        self.assertTrue(all(c["weight_source"] == "regime" for c in cases))
+
+    def test_shape_matched_decode_uses_trace(self):
+        # profile exposed the decode shape -> trace weight; prefill stays name-classified.
+        entries = [
+            {"name": "fmha_prefill_kernel", "short_name": "attn",
+             "cases": [{"dims": [], "weight": 500.0}]},
+            {"name": "paged_attention_decode_kernel", "short_name": "attn",
+             "cases": [{"dims": [[64, 24, 128]], "dtypes": ["bf16"], "weight": 300.0, "count": 9}]},
+        ]
+        notes = []
+        cases = attribute_weights.attribute_attn(self._meta(), entries, notes)
+        by = {c["name"]: c for c in cases}
+        self.assertEqual(by["decode_q1"]["weight_source"], "trace")
+        self.assertAlmostEqual(by["decode_q1"]["weight"], 300.0, places=1)
+
+
+class TestAttributeRecurrent(unittest.TestCase):
+    """A pure-decode recurrent kernel runs only under a HIP/CUDA graph: shapes hidden, one regime.
+    Its total time must be distributed across the meta cases by the size prior (larger batch dominates),
+    NOT dropped to weight-0 prior (which would collapse the weighted metric to a geomean)."""
+    def test_size_prior_batch_dominates(self):
+        meta = {"op_kind": "linear_attn_recurrent", "short_name": "gdn_decode",
+                "cases": [{"sig": "decode_B64", "dims": [[64, 10240], [64, 48]], "regime": "decode"},
+                          {"sig": "decode_B1", "dims": [[1, 10240], [1, 48]], "regime": "decode"}]}
+        entries = [{"name": "gdn_decode_kernel", "short_name": "gdn_decode",
+                    "cases": [{"dims": [], "weight": 200000.0, "count": 1824}]}]
+        notes = []
+        cases = attribute_weights.attribute_generic(meta, entries, notes)
+        by = {c["name"]: c for c in cases}
+        self.assertEqual(by["decode_B64"]["weight_source"], "regime_prior")
+        total = sum(c["weight"] for c in cases)
+        # B64 element count 64*10240 >> B1 1*10240 -> ~0.985 share
+        self.assertGreater(by["decode_B64"]["weight"] / total, 0.95)
+        self.assertGreater(by["decode_B1"]["weight"], 0.0)   # tail is present, not zero
+
+    def test_no_total_no_shape_stays_prior_zero(self):
+        # no profiled time at all -> honest weight-0 prior (nothing to distribute)
+        meta = {"op_kind": "editable", "short_name": "k",
+                "cases": [{"sig": "c0", "dims": [[8, 8]], "regime": ""}]}
+        cases = attribute_weights.attribute_generic(meta, [], [])
+        self.assertEqual(cases[0]["weight"], 0.0)
+        self.assertEqual(cases[0]["weight_source"], "prior")
+
+
+class TestAttributeMoe(unittest.TestCase):
+    """MoE grouped-GEMM reuses the precise bucket/grid GEMM engine (effective-M from routing) and adds
+    a low-confidence note."""
+    def test_moe_delegates_to_gemm_engine(self):
+        meta = {"op_kind": "moe", "short_name": "fused_moe",
+                "a_shape": ["M", 512], "b_shape": [1024, 512], "dtype": "fp8_e4m3",
+                "decode_m_buckets": [8], "prefill_m_buckets": [2048]}
+        entries = [{"name": "fused_moe GRID_MN_8 BLOCK_SIZE_N_128", "short_name": "fused_moe",
+                    "cases": [{"dims": [], "weight": 1000.0}]},
+                   {"name": "fused_moe GRID_MN_512 BLOCK_SIZE_N_128", "short_name": "fused_moe",
+                    "cases": [{"dims": [], "weight": 5000.0}]}]
+        notes = []
+        cases = attribute_weights.attribute_moe(meta, entries, notes)
+        regimes = {c["regime"] for c in cases}
+        self.assertEqual(regimes, {"decode", "prefill"})
+        self.assertTrue(any("routing-dependent" in n for n in notes))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
