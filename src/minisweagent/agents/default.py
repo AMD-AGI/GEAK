@@ -61,6 +61,9 @@ class AgentConfig:
     use_skills: bool = False
     tool_profile: str = "full"
     model_config: dict | None = None
+    backend: str = "minisweagent"
+    """Agent loop backend: 'minisweagent' (hand-rolled loop) or 'claude_sdk'
+    (delegate to the Claude Agent SDK). Overridable via ``GEAK_AGENT_BACKEND``."""
 
 
 # Unified observation truncation for both bash output and tool call results (head + tail).
@@ -306,7 +309,17 @@ class DefaultAgent:
         return log
 
     def run(self, task: str, **kwargs) -> tuple[str, str]:
-        """Run step() until agent is finished. Return exit status & message"""
+        """Run step() until agent is finished. Return exit status & message.
+
+        When ``config.backend == "claude_sdk"`` the loop is driven by the Claude
+        Agent SDK (see :mod:`minisweagent.agents.sdk_backend`) instead of the
+        hand-rolled ``step()`` loop below.
+        """
+        from minisweagent.agents import sdk_backend
+
+        if sdk_backend.backend_enabled(self.config):
+            return sdk_backend.run_sdk_agent(self, task, **kwargs)
+
         self.extra_template_vars |= {"task": task, **kwargs}
         self.extra_template_vars["tool_names"] = set(self.toolruntime._tool_table.keys())
         self.messages = []

@@ -321,6 +321,9 @@ class PreprocessOrchestratorConfig:
     gpu_id: int = 0
     repo: Path | None = None
     flydsl_repo: Path | None = None
+    backend: str = "minisweagent"
+    """Agent loop backend: 'minisweagent' (hand-rolled loop) or 'claude_sdk'
+    (delegate to the Claude Agent SDK). Overridable via ``GEAK_AGENT_BACKEND``."""
     system_template: str = _SYSTEM_PROMPT_TEMPLATE
     instance_template: str = (
         "Begin the v3 preprocess flow.\n\n"
@@ -718,24 +721,32 @@ class PreprocessOrchestratorAgent:
         finish_payload: dict[str, Any] | None = None
         errors: list[str] = []
 
-        try:
-            while True:
-                try:
-                    self.step()
-                except FinishedSuccessfully as fin:
-                    finish_payload = fin.payload
-                    break
-                except FormatError as fmt:
-                    self.add_message("user", str(fmt))
-                except LimitsExceeded as lim:
-                    errors.append(str(lim))
-                    break
-                except TerminatingException as term:
-                    errors.append(str(term))
-                    break
-        except Exception as exc:
-            logger.exception("Orchestrator run() crashed")
-            errors.append(f"{type(exc).__name__}: {exc}")
+        from minisweagent.agents import sdk_backend
+
+        if sdk_backend.backend_enabled(self.config):
+            # The Claude Agent SDK owns the turn loop; our tools (and their side
+            # effects on ``self._collected`` / ``self._tool_calls``) still run
+            # through ``self._dispatch_tool``. ``finish_preprocess`` terminates.
+            finish_payload, errors = sdk_backend.run_preprocess_via_sdk(self)
+        else:
+            try:
+                while True:
+                    try:
+                        self.step()
+                    except FinishedSuccessfully as fin:
+                        finish_payload = fin.payload
+                        break
+                    except FormatError as fmt:
+                        self.add_message("user", str(fmt))
+                    except LimitsExceeded as lim:
+                        errors.append(str(lim))
+                        break
+                    except TerminatingException as term:
+                        errors.append(str(term))
+                        break
+            except Exception as exc:
+                logger.exception("Orchestrator run() crashed")
+                errors.append(f"{type(exc).__name__}: {exc}")
 
         elapsed_s = round(time.monotonic() - t0, 3)
         return self._build_result(

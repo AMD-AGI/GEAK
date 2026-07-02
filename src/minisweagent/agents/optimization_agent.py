@@ -148,6 +148,12 @@ class AgentConfig:
     tool_profile: str = "full"
     """ToolRuntime profile: 'swe' for reduced tool set, 'full' for all tools."""
 
+    # ─── agent loop backend ───
+    backend: str = "minisweagent"
+    """Which agent loop drives the run: 'minisweagent' (GEAK's hand-rolled loop)
+    or 'claude_sdk' (delegate the loop to the Claude Agent SDK; see
+    :mod:`minisweagent.agents.sdk_backend`). Overridable via ``GEAK_AGENT_BACKEND``."""
+
     # ─── interactive-mode field kept for caller-config compatibility ───
     # Production always uses "yolo". Confirm/human modes removed — they were
     # dead code in GEAK's automated pipeline. Accepting this field (defaulting
@@ -773,7 +779,17 @@ class OptimizationAgent:
     # ===============================================================
 
     def run(self, task: str, **kwargs) -> tuple[str, str]:
-        """Run step() until agent terminates. Return (exit_status, message)."""
+        """Run step() until agent terminates. Return (exit_status, message).
+
+        When ``config.backend == "claude_sdk"`` the turn-by-turn loop is driven
+        by the Claude Agent SDK instead of GEAK's hand-rolled ``step()`` loop;
+        GEAK's tools, prompts and trajectory bookkeeping are preserved.
+        """
+        from minisweagent.agents import sdk_backend
+
+        if sdk_backend.backend_enabled(self.config):
+            return sdk_backend.run_sdk_agent(self, task, **kwargs)
+
         self.extra_template_vars |= {"task": task, **kwargs}
         self.extra_template_vars["tool_names"] = set(self.toolruntime._tool_table.keys())
         self.messages = []

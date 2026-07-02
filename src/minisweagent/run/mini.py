@@ -303,6 +303,17 @@ def main(
 
     config = _deep_merge(config, user_config)
 
+    # Propagate the agent-loop backend (agent.backend) to a process-wide env var
+    # so *every* loop picks it up uniformly — the main OptimizationAgent, the v3
+    # preprocess orchestrator, the task planner and all subagents. This keeps a
+    # single switch (geak.yaml `agent.backend: claude_sdk`) authoritative without
+    # threading the flag through every construction site. An explicit
+    # GEAK_AGENT_BACKEND already in the environment wins.
+    _agent_backend = str((config.get("agent") or {}).get("backend", "") or "").strip()
+    if _agent_backend and not os.environ.get("GEAK_AGENT_BACKEND"):
+        os.environ["GEAK_AGENT_BACKEND"] = _agent_backend
+        logger.info("Agent loop backend: [bold green]%s[/bold green]", _agent_backend)
+
     # Validate --mode early but defer the full precedence resolution + preset
     # injection until AFTER parse_pipeline_params runs.
     if mode is not None:

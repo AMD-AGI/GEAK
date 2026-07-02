@@ -3,6 +3,11 @@ agent:
   cost_limit: 0.
   mode: confirm
   use_skills: True
+  # Agent loop backend. 'claude_sdk' delegates the turn-by-turn loop to the
+  # Claude Agent SDK (GEAK tools are exposed as an in-process MCP server);
+  # 'minisweagent' uses GEAK's original hand-rolled loop. Override at runtime
+  # with the GEAK_AGENT_BACKEND env var.
+  backend: claude_sdk
 env:
   env:
     PAGER: cat

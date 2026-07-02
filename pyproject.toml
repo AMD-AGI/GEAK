@@ -49,6 +49,7 @@ dependencies = [
     "metrix @ git+https://github.com/AMDResearch/intellikit.git@bcbfa0252df9d55f3aab68c95dd3ce45ccbe5b46#subdirectory=metrix",  # AMD GPU profiling — pinned for production stability
     "fastmcp>=2.0.0",
     "mcp[cli]>=1.2.0",
+    "claude-agent-sdk>=0.2.0",  # Claude Agent SDK backend (bundles the Claude Code CLI)
 ]
 
 [project.optional-dependencies]
