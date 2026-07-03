@@ -1,0 +1,82 @@
+name: CI L0 — checks
+
+# L0: cheap, fast, GPU-free checks that gate every push / PR.
+# Runs entirely on GitHub-hosted ubuntu runners — no dataset, no GPU, no Claude,
+# no secrets. The expensive GPU e2e lives in the self-hosted L1 workflow.
+
+on:
+  # v4 line only — never run on main (that's the separate GEAK v3 product line).
+  push:
+    branches: ["GEAK_v4", "ci/**"]
+  pull_request:
+    # NOTE: ci/** is TEMPORARY (self-test via a PR into ci/GEAK_v4). Revert to
+    # just ["GEAK_v4"] before real use.
+    branches: ["GEAK_v4", "ci/**"]
+
+# Supersede in-flight runs for the same ref (a new push cancels the old run).
+concurrency:
+  group: l0-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (ruff, advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      # Advisory only for now (the tree has pre-existing findings); surfaces
+      # issues in the log without blocking merges. Flip to blocking once clean.
+      - name: ruff check (non-blocking)
+        continue-on-error: true
+        run: ruff check .
+
+  pytest:
+    name: Python unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pytest
+      # Stdlib-only tests (import run_e2e via importlib; no claude_agent_sdk / GPU).
+      # The examples/ task tests need torch/triton+GPU, so they are excluded here.
+      - name: unit tests (no GPU)
+        run: |
+          python -m pytest -q \
+            interface/test_run_e2e_recovery.py \
+            e2e_workflow/scripts/tests/test_workload_alignment.py
+
+  node-regression:
+    name: Node regression (expert_skills)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # Proves the use_expert_skills=OFF path injects nothing (byte-identical).
+      # Pure node (fs/path only) — no npm install needed.
+      - name: expert_skills OFF-identical regression
+        run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+
+  dry-run:
+    name: run_e2e dry-run mapping
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Validates the handoff -> e2e_workflow.js args mapping against a committed
+      # fixture (ci/fixtures/handoff.dry.json), so it needs no huggingface_logs
+      # dataset, GPU, or Claude. Guards the map_args / build_prompt code path.
+      - name: handoff -> args mapping (fixture)
+        run: python interface/run_e2e.py ci/fixtures/handoff.dry.json /tmp/l0_result.json --dry-run
