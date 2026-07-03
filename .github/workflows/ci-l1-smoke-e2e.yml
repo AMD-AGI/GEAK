@@ -1,0 +1,122 @@
+name: CI L1 — smoke e2e
+
+# L1: real single-model GEAK e2e on the self-hosted ROCm box (GPU + Docker +
+# Claude). Runs the CODE UNDER TEST against the STABLE dataset/weights under
+# ci_workspace.
+#
+# Triggers (v4 line only; nothing on the default branch / v3 is needed):
+#   - pull_request into GEAK_v4 that gets the `ci-verified` label -> GPU smoke.
+#     A human applying the label is the GPU-cost gate. The workflow file is taken
+#     from the PR HEAD branch, so no default-branch requirement (unlike dispatch).
+#   - workflow_dispatch is kept for convenience; its "Run" button only appears if
+#     this file also lives on the repo default branch, so it's a no-op until then.
+
+on:
+  pull_request:
+    types: [labeled]
+    # NOTE: ci/** is TEMPORARY (self-test via a PR into ci/GEAK_v4). Revert to
+    # just ["GEAK_v4"] before real use.
+    branches: ["GEAK_v4", "ci/**"]
+  workflow_dispatch:
+    inputs:
+      model_key:
+        description: "Model key (must exist in ci/models.tsv and huggingface_logs/)"
+        type: string
+        default: "Qwen-Qwen3-8B"
+      budget_s:
+        description: "GEAK wall-clock budget in seconds (PERFSKILLS_E2E_TIMEOUT_S)"
+        type: string
+        default: "1800"
+
+# Only one GPU smoke at a time on this box (they contend for all 8 GPUs / disk).
+concurrency:
+  group: l1-smoke-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: smoke e2e (${{ github.event.inputs.model_key || 'Qwen-Qwen3-8B' }})
+    # Gate: dispatch runs unconditionally; PR runs ONLY when the added label is
+    # exactly `ci-verified` (a human vouching that this PR may burn GPU).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'ci-verified'
+    runs-on: self-hosted
+    # Hard outer cap so a stuck run can't pin the box forever (budget + image
+    # pull + Claude install + baseline/profile headroom). Well above budget_s.
+    timeout-minutes: 150
+    env:
+      # Stable environment on this box (siblings of the code under test).
+      WS: /home/ethany/ci_workspace
+      HF_LOGS: /home/ethany/ci_workspace/huggingface_logs
+      INFERENCEX_PATH: /home/ethany/ci_workspace/InferenceX
+      # Model + budget: from dispatch inputs when present, else defaults (the PR
+      # label path has no inputs).
+      MODEL_KEY: ${{ github.event.inputs.model_key || 'Qwen-Qwen3-8B' }}
+      BUDGET_S: ${{ github.event.inputs.budget_s || '1800' }}
+      # Claude auth for the container. Falls back to the baked default in
+      # ci/claude_setup.sh when the secrets are absent (forward-compatible).
+      LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+      LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+    steps:
+      - name: Checkout code under test
+        uses: actions/checkout@v4
+
+      - name: Preflight (docker + GPU visible + dataset present)
+        run: |
+          set -e
+          docker version >/dev/null
+          ls -d "$HF_LOGS/$MODEL_KEY" >/dev/null \
+            || { echo "::error::no dataset dir $HF_LOGS/$MODEL_KEY"; exit 1; }
+          test -f "$HF_LOGS/docker_select.log" \
+            || { echo "::error::missing $HF_LOGS/docker_select.log"; exit 1; }
+
+      - name: Run GEAK e2e smoke
+        id: run
+        run: |
+          set -e
+          export GEAK_ROOT="$GITHUB_WORKSPACE"
+          # Deterministic timestamp so we know exactly where artifacts land.
+          RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "RUN_TS=$RUN_TS" >> "$GITHUB_ENV"
+          OUT_DIR="$HF_LOGS/$MODEL_KEY/ci_runs/$RUN_TS"
+          echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
+          echo "out_dir=$OUT_DIR" >> "$GITHUB_OUTPUT"
+          RUN_TS="$RUN_TS" bash "$GEAK_ROOT/ci/run_local.sh" \
+            "$MODEL_KEY" --budget "$BUDGET_S"
+
+      - name: Summarize result
+        if: always()
+        run: |
+          RESULT="$OUT_DIR/result.json"
+          echo "## L1 smoke — $MODEL_KEY" >> "$GITHUB_STEP_SUMMARY"
+          echo "- out_dir: \`$OUT_DIR\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$RESULT" ]; then
+            python3 - "$RESULT" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          for k in ("status", "error_class", "baseline_throughput_tok_s",
+                    "final_throughput_tok_s", "throughput_speedup",
+                    "validation_status"):
+              if k in d:
+                  print(f"- {k}: `{d[k]}`")
+          PY
+          else
+            echo "- result.json: **missing**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: l1-${{ env.MODEL_KEY }}-${{ env.RUN_TS }}
+          # result + logs + the workflow's own return; skip the (large) Claude
+          # temp tree and install dir to keep the artifact lean.
+          path: |
+            ${{ env.OUT_DIR }}/result.json
+            ${{ env.OUT_DIR }}/run.log
+          if-no-files-found: warn
+          retention-days: 90
