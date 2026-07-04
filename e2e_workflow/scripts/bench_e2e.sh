@@ -21,11 +21,14 @@
 #                                      median_ttft_ms, median_tpot_ms). PROF=1 => also emit a trace
 #                                      into $PROFILE_DIR. Honors optional REQUEST_RATE (req/s; empty=inf)
 #                                      to stagger arrivals.
-#   adapter_profile_window          -> OPTIONAL. Capture a profiler window (PROFILE_NUM_STEPS steps,
-#                                      record_shapes) on the ALREADY-RUNNING, warm, mid-load server, so
-#                                      the trace is the real steady-state prefill+decode MIX rather than
-#                                      a cold prefill ramp. If undefined, the PROFILE step falls back to
-#                                      a (less faithful) saturated PROF=1 bench.
+#   adapter_profile_window          -> OPTIONAL. Capture a profiler window (record_shapes) on the
+#                                      ALREADY-RUNNING, warm, mid-load server, so the trace is the real
+#                                      steady-state prefill+decode MIX rather than a cold prefill ramp.
+#                                      The window is sized per-backend: sglang by PROFILE_NUM_STEPS (its
+#                                      /start_profile takes num_steps); vllm by PROFILE_WINDOW_SEC (its
+#                                      /start_profile has no step count, so start->sleep->stop). If
+#                                      undefined, the PROFILE step falls back to a (less faithful)
+#                                      saturated PROF=1 bench.
 #
 # KEY OUTPUTS (written to $OUT_DIR):
 #   bench_runs.jsonl       one bench result object per repeat
@@ -56,7 +59,7 @@ done
 # The serving server is always launched by the backend adapter (sglang/vllm).
 # BENCH_CLIENT swaps ONLY the client that drives the benchmark, so a run can use
 # the EXACT same client as another harness. BENCH_CLIENT=inferencex => Hyperloom/
-# Magpie's own InferenceX benchmark_serving.py (口径-identical client). Default
+# Magpie's own InferenceX benchmark_serving.py (convention-identical client). Default
 # 'native' keeps each backend's built-in bench (sglang.bench_serving / vllm).
 BENCH_CLIENT=${BENCH_CLIENT:-native}
 copy_function() {  # copy_function SRC DST — clone a shell function under a new name
@@ -159,7 +162,7 @@ CONC=${CONC:-64}
 # NUM_PROMPTS default.
 #  * native client (standalone GEAK default): keep the original CONC*5 default so
 #    standalone behaviour is byte-identical to before the inferencex integration.
-#  * inferencex client (Hyperloom口径 alignment): mirror Hyperloom's ADAPTIVE
+#  * inferencex client (Hyperloom convention alignment): mirror Hyperloom's ADAPTIVE
 #    factor — the number of timed prompts scales DOWN as the per-request sequence
 #    cost (ISL+OSL) grows so each repeat stays bounded.
 #    factor = {<=1024:10, <=4096:5, <=16384:3, else 2}.
@@ -176,15 +179,15 @@ if [ -z "${NUM_PROMPTS:-}" ]; then
     NUM_PROMPTS=$((CONC * 5))
   fi
 fi
-# Client-side warmup prompts (口径 alignment with Hyperloom's materialize default
+# Client-side warmup prompts (convention alignment with Hyperloom's materialize default
 # NUM_WARMUPS=min(CONC,8)). Consumed by the inferencex client adapter; the native
 # adapters use their own warmup round instead.
 NUM_WARMUPS=${NUM_WARMUPS:-$(( CONC < 8 ? CONC : 8 ))}
-# RANDOM_RANGE_RATIO / NUM_PROMPTS / NUM_WARMUPS / SEED are the measurement 口径.
+# RANDOM_RANGE_RATIO / NUM_PROMPTS / NUM_WARMUPS / SEED are the measurement convention.
 # These are STANDALONE defaults: when an external orchestrator (Hyperloom) drives
 # the run it exports its own values (interface/run_e2e.py:apply_bench_protocol from
 # handoff.bench_protocol) and they override these via the env. Do NOT hard-code a
-# value assuming the caller's 口径 — ratio=0 is fixed-length, ratio>0 is variable
+# value assuming the caller's convention — ratio=0 is fixed-length, ratio>0 is variable
 # (lengths sampled in [(1-ratio)*len, (1+ratio)*len]), and the caller may use
 # either. Standalone default = fixed-length (matches infer.sh --random-range-ratio 0).
 RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0}
@@ -224,6 +227,17 @@ PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}  # >CONC so the queue 
 PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}            # optional req/s to stagger arrivals; empty
                                              # = inf (max_concurrency still caps in-flight at CONC).
 PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}     # max wait for the trace file to appear.
+PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-40}             # capture DURATION for time-windowed backends
+                                             # (vllm: /start_profile has no num_steps, so the window is
+                                             # controlled by start -> sleep this long -> /stop_profile).
+                                             # sglang ignores this (it uses PROFILE_NUM_STEPS instead).
+                                             # ~40s spans many decode steps + enough prefill events even
+                                             # at long OSL + low concurrency (prefills are sparse: rate
+                                             # ~ CONC/(OSL*step_time), e.g. only ~1 every few sec at low
+                                             # CONC). Longer is NOT free: a torch trace grows ~linearly
+                                             # with the window and flush time with it (must stay <
+                                             # PROFILE_WINDOW_TIMEOUT, and can OOM the profiler buffer) —
+                                             # lower it if flush fails / the trace is huge.
 OUT_DIR=${OUT_DIR:-$(pwd)/e2e_bench_out}
 LOG=${LOG:-$OUT_DIR/server.log}
 
@@ -236,7 +250,7 @@ RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 # export everything the adapter reads
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
-export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT
+export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
 export BENCH_TRUST_REMOTE_CODE HF_HUB_TRUST_REMOTE_CODE
 
@@ -376,7 +390,7 @@ summ = {
     "tpot_ms_median": round(med(tpot), 3) if tpot else None,
     "runs": len(tps),
     "all_throughput": tps,
-    # Aggregate output tok/s (NOT divided by TP) — matches Hyperloom/Magpie output_throughput 口径.
+    # Aggregate output tok/s (NOT divided by TP) — matches Hyperloom/Magpie output_throughput convention.
     "metric_basis": "aggregate_output_tok_s",
 }
 with open(out_path, "w") as fh: json.dump(summ, fh, indent=2)

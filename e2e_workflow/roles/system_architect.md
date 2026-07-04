@@ -87,7 +87,7 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    (`kernel_path`/`launcher_source_file`), and `bound_type` — so the Kernel Extractor can locate the
    source/seam faster. **NEVER let TraceLens override the on-box measured `pct_gpu_time`/ranking — the
    profile is the judge; TraceLens only ADDs hints/candidates, never prunes them.** Treat any `shapes` it
-   carries as a STARTING hint that the Extractor will re-verify against a live capture (they "不一定准").
+   carries as a STARTING hint that the Extractor will re-verify against a live capture (they may be inaccurate).
    If the prior is absent, proceed exactly as before.
 2. Partition the Top-N into FOUR routes (by what optimization the op admits, NOT by edit flag):
    - **config fast path** — service-level env/flag with no op isolation: `--attention-backend` swap,

@@ -76,7 +76,7 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   ```
   Then **reconcile**: the parser's per-launch `shapes`/`dtypes` are derived directly from the trace and
   are MORE RELIABLE than the `<br>` shapes in `analysis.md` — **prefer the parser shapes for any kernel
-  that matches** (this is the mandatory shape double-check, since `analysis.md` shapes "不一定准"). Keep
+  that matches** (this is the mandatory shape double-check, since `analysis.md` shapes may be inaccurate). Keep
   the TraceLens ranking/`%gpu` as the primary impact signal, but cross-check that the same heads top both
   views; note any disagreement in `notes`. Emit the final reconciled `profile_topN.json`/`.md` with
   `source:"tracelens+trace"`.

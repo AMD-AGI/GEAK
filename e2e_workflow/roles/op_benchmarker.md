@@ -152,7 +152,13 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
      2>&1 | tee "$EVAL_DIR/logs/opbench_<short>.log"
    ```
    Read `opbench_result.json`: per-backend {available, correct, ms, max_rel_err}, the winner, the
-   `isolated_speedup` vs the default (hipblaslt) backend, `winner_editable`, `winner_kind`.
+   `isolated_speedup` vs the default (hipblaslt) backend, `winner_editable`, `winner_kind`, and
+   `amdahl_ceiling_e2e_pct` (the MAX e2e delta this isolated speedup can produce at the kernel's
+   `pct_gpu_time` — op_bench computes it via `harness_lib.amdahl_ceiling`). Surface the ceiling in your
+   report: if it is at/below `NOISE_BAND_PCT` (e.g. a 1.1x win on a 3%-GPU kernel → ~0.3% ceiling), the
+   op cannot clear the e2e noise band alone — flag it as `stack`-only headroom so nobody chases an
+   isolated number the e2e gate can never bank. A large isolated speedup with a tiny ceiling means the
+   op's GPU-time share is small; do not over-invest authoring it.
    Set `best_known_ms` = fastest correct backend's ms — this is the BAR any authored kernel must beat.
    The default backend set now includes **flydsl** (aiter's `flydsl_hgemm` for bf16/fp16; gated by
    `is_flydsl_available()`). For an **fp8 (a8w8) GEMM**, op_bench records flydsl as a graceful skip (the

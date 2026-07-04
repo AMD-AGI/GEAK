@@ -16,9 +16,14 @@ You are invoked once per kernel candidate. Read first:
 <EVAL_DIR>/kernels/<short_name>_task/
   kernel_src/...        # editable copy of the kernel source (the sglang/aiter subtree that owns it)
   reference_io.pt       # recorded inputs + golden outputs (oracle) — READ-ONLY for optimizers
+  harness_lib.py        # VENDORED copy of scripts/harness_lib.py — the SHARED timing/correctness lib; IMMUTABLE
   unittest.py           # builds(opt)/runs/checks-correctness vs oracle/times speedup; IMMUTABLE
   meta.json             # name, source path in sglang, target callable, shapes, dtypes, backend, regime, build, checksum
 ```
+**Vendor the shared harness library into the task dir** (`cp "$SKILL_DIR/scripts/harness_lib.py"
+"$TASK/harness_lib.py"`). `unittest.py` imports it for ALL timing + correctness — never hand-roll a
+timing loop or an allclose check. This is what makes every task measure the same way; it also keeps the
+task self-contained + immutable (the validator sha-checks `harness_lib.py` alongside `reference_io.pt`).
 
 ---
 
@@ -28,6 +33,44 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (the Architect'
 short_name, classification, extract_hint = the `module:attr` callable to hook, candidate_backends,
 regime, and — when an upstream TraceLens prior was available — OPTIONAL `source_hint` (resolved source
 file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`.
+
+### Resolve + HONOR the ONLINE REGIME first (same contract as PHASE=extract_op)
+The #1 cause of "isolated win, e2e loss/crash" is a unittest that SYNTHESIZES its inputs with OFFLINE
+DEFAULTS (`DTYPE=bf16`, `x = 16 // element_size(bf16) = 8`, `k_scale/v_scale = ones`) instead of the
+regime the live server runs. Synthesis is fine — perf is value-independent and the oracle is a
+high-precision compute over the same in-regime inputs — but it MUST be DRIVEN BY the parsed regime.
+Before capturing/synthesizing anything, resolve the regime from the SERVER LAUNCH FLAGS + model config,
+write it into `meta.json`, then build EVERY operand from it (never from the compute dtype):
+```bash
+python3 "$SKILL_DIR/scripts/parse_regime.py" \
+  --server-args "$CURRENT_FLAGS" --model-config "$MODEL_PATH/config.json" \
+  --server-script "$EVAL_DIR/launch_baseline.sh" \
+  --out "<task_dir>/regime.json"
+# then merge regime.json into meta.json under the "regime" key
+# (--server-script carries flags EXTRA_SERVER_ARGS omits, notably the chunked-prefill budget that
+#  sizes the serving prefill pass count in attribute_weights.py)
+```
+Honor every axis **generically** via the shared `harness_lib` primitives — do NOT hand-roll dtype/layout:
+- **Quantization** (`regime.quant`): extract the seam that is LIVE under this quant. Under
+  `--quantization fp8` the real GEMM seam is the fp8 path (Fp8LinearMethod / a8w8); an UNQUANTIZED gemm
+  seam only serves lm_head/embeddings — do NOT extract it as hot (it mis-attributes GPU% and tests a
+  dead shape → e2e loss). Build operands in the quantized form (`h.regime_spec(regime)["operand_dtype"]`
+  + scales), not bf16.
+- **KV cache** (`regime.kv_cache_dtype`): build the paged K/V cache via
+  `h.synth_kv_cache(num_blocks, num_heads, head_size, block_size, regime)` — its inner factor `x` comes
+  from `h.pack_x(kv_dtype)` (the KV dtype, NOT the compute dtype: fp8/int8→16, bf16→8) with real
+  `k_scale/v_scale` when the KV dtype is quantized. A bf16-hardcoded KV kernel reads fp8 bytes with the
+  wrong stride → GPU fault → engine crash. Non-negotiable for attention.
+- **Compile** (`regime.compile`): if `torch_compile`, baseline against the COMPILED/fused path, not
+  unfused eager (else the speedup is a strawman).
+- **fp8 format is arch-specific** (the ONE hardware axis): MI300/MI325 (gfx942/CDNA3) use AMD `fnuz`
+  fp8; MI355 (gfx950/CDNA4) use OCP `fn` fp8. `h.regime_dtype("fp8")` picks the running GPU's variant
+  automatically (or pass `arch=` for offline cross-arch synth); an explicit `fp8_e4m3fnuz`/`fp8_e4m3fn`
+  from the checkpoint config wins. The layout (`h.pack_x`) is arch-independent — every fp8 is 1 byte →
+  `x=16` on both. So do NOT hardcode `float8_e4m3fnuz`.
+If the live regime genuinely cannot be reproduced offline (op only exists fused in the compile graph,
+routing-dependent MoE token counts), say so in `notes` and report `editable:false`/drop rather than
+freeze an out-of-regime oracle nobody should trust.
 
 1. **Locate the source.** **If `KERNEL.source_hint`/`KERNEL.launcher_hint` is provided (TraceLens
    pre-resolved the file/seam), look there FIRST** — but always CONFIRM by importing the package +
@@ -53,32 +96,109 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
    EXTRA_ENV="CAPTURE_TARGET=<module:attr> CAPTURE_OUT=$TASK CAPTURE_MAX=5" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/capture_<short_name>.log"
    ```
-   (REPEATS=0 → just warmup drives a short window; capture flushes on server exit via atexit.) Verify
+   (REPEATS=0 → just warmup drives a short window; capture flushes incrementally + on server exit.) Verify
    `reference_io.pt` + `meta.json` exist and `num_cases` ≥ 1. For a head GEMM that serves both regimes
    you MUST capture/synthesize BOTH a decode case (M ≈ `WORKLOAD.conc`) and a prefill case (large M) —
    see the mandatory both-regimes rule below. Decode M is often under-ranked by GPU-time in the capture
    window; add it explicitly from WORKLOAD if the capture missed it.
+
+   > **🔴 SOURCE PRECEDENCE + FALLBACK (many sources emit shapes/counts — do NOT trust all equally).**
+   > Shapes/weights arrive from TraceLens priors, the profiler trace, config M-buckets, AND live capture
+   > (`meta.cases` oracle + `meta.shape_counts`). Resolve by PURPOSE, and let the deterministic tools own
+   > the merge — never hand-pick:
+   > - **Correctness oracle (exact operands/dtype/LAYOUT): live capture ONLY.** If capture is
+   >   `meta.oracle_complete == false` or empty (server didn't boot / hook missed the seam / OOM), do NOT
+   >   freeze a partial oracle. For value-INDEPENDENT dense GEMM you may synth from config (`GEMM_SYNTH`);
+   >   for anything value/layout-dependent (quant / attn / swizzled-scale) **DROP (`editable:false`) —
+   >   never fabricate an oracle.** Capture is best-effort, never load-bearing.
+   > - **Which shapes exist (coverage): config M-buckets are the deterministic spine** (can't crash);
+   >   live capture augments/corrects; profiler + TraceLens are hints you re-verify against capture. The
+   >   mandatory both-regimes floor still applies even if a source missed decode.
+   > - **Weight (importance): profiler TIME wins** (`attribute_weights.py`: `trace` > `regime` > prior >
+   >   `--min-regime-share` floor). **`meta.shape_counts` is a COUNT, not a time** — a prefill call is 1
+   >   count but huge GPU-time; decode is thousands of counts, tiny each. So counts must NOT outrank
+   >   profiler time; use them only as (i) coverage evidence, (ii) a within-regime prior when the profiler
+   >   is shape-hidden, (iii) a cross-check (flag in `notes` if capture-count and profiler regime split
+   >   disagree). Never weight by raw count.
 3. **Copy the editable source** into `kernel_src/` (the minimal owning subtree), so the kernel layer
    and the later overlay can diff against it.
 4. **Write `unittest.py`** — backend-agnostic and IMMUTABLE. It is the SINGLE harness: it judges
    correctness AND measures the workload-weighted speedup; there is no separate downstream perf harness.
-   - **Correctness** on the FROZEN golden cases: load `reference_io.pt`; reconstruct input tensors on
-     the GPU (honor recorded dtype/device/contiguity; for in-place-output kernels, restore the pre-call
-     buffer as input). Call the CURRENT kernel entry point (import by the meta `module:attr`, or the
-     copied `kernel_src`), compare to the golden output with dtype-appropriate tolerance (bf16/fp16
-     rtol=atol=2e-2; fp8 looser; fp32 tight). Print PASS/FAIL per case. This set is NEVER re-weighted.
-   - **Timing** on the WORKLOAD cases when `meta.workload` is present (see step 4b): build one timing
-     case per `meta.workload.cases[]` entry, each input tensor with its OWN `dims`+`dtype` and the case's
-     `quant` operands (fp8 + scales etc., in-regime — NOT bf16), random values (perf is value-
-     independent). Time baseline-vs-current per case (warmup + repeats + cuda/hip synchronize), print
-     `per_case` `baseline_ms/optimized_ms/speedup`. If `meta.workload` is absent, fall back to timing the
-     golden/captured cases (unweighted), exactly as before.
+   **It MUST import the vendored `harness_lib` and use it for all timing + correctness** — do NOT
+   hand-roll a `_time()` loop or an allclose check (that is exactly how the two "isolated win / e2e
+   loss" holes below crept in). Import pattern that survives the `sys.path` fix (the file is named
+   `unittest.py`, so its dir is dropped before importing torch to unshadow stdlib `unittest`):
+   ```python
+   import importlib.util, os
+   HERE = os.path.dirname(os.path.abspath(__file__))
+   _spec = importlib.util.spec_from_file_location("harness_lib", os.path.join(HERE, "harness_lib.py"))
+   h = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(h)   # BEFORE dropping HERE / importing torch
+   ```
+   - **Correctness** on the FROZEN golden cases, via `h.check_correct_multi(call, cases, tol)`: load
+     `reference_io.pt`; reconstruct input tensors on the GPU honoring the recorded **regime**, not the
+     compute dtype — use `h.regime_spec(meta["regime"])` for operand dtype/scales and
+     `h.synth_kv_cache(...)` for any paged K/V cache (its `x`/dtype/scales follow `regime.kv_cache_dtype`).
+     NEVER hardcode `DTYPE=bf16`, `x = 16 // element_size(DTYPE)`, or `scales = ones` as offline defaults.
+     Honor recorded device/contiguity; for in-place-output kernels, restore the pre-call buffer as input.
+     Build a `cases` list of
+     `{"args": <args for one call>, "ref": <golden out>, "sig": <label>}` and pass a `call(args) -> out`
+     closure that invokes the CURRENT kernel entry point (import by the meta `module:attr`, or the copied
+     `kernel_src`). Tolerance is dtype-appropriate (bf16/fp16 rtol=atol=2e-2; fp8 looser; fp32 tight).
+     `check_correct_multi` keeps all outputs live before comparing AND runs the output-independence
+     check — so a candidate that returns a shared/persistent buffer FAILS. Print PASS/FAIL per case.
+     This set is NEVER re-weighted.
+   - **Deployment-context correctness (MANDATORY when `meta.graph_replayed` or
+     `meta.num_distinct_shapes > 1`).** Single-shape eager `check_correct_multi` does NOT
+     reproduce the path that actually faults on the live server: the op runs inside the server's
+     REPLAYED CUDA graph with buffers reused ACROSS interleaved shapes (chunked-prefill big-M ⇄ decode
+     M=1). A kernel that captures a wrong-layout scale pointer or a workspace sized to the first shape it
+     saw is only wrong on the SECOND, differently-shaped replay. So ALSO run:
+     - `h.check_correct_sequence(call, ordered_cases, tol)` — build `ordered_cases` from
+       `meta.call_sequence` (WITH repeats, in order; map each `sig` back to its reconstructed args +
+       oracle) to catch cross-call stale state from the real interleave.
+     - `h.check_graph_replay(fill, run, read_out, cases, tol, capture_idx=<the padded/decode shape>)`
+       when `meta.graph_replayed` — allocate the static input/output buffers ONCE at the capture shape,
+       supply `fill(case)` (copy into that storage, honoring recorded dtype/stride/**layout** — for a
+       swizzled scale, fill the swizzled buffer, not an un-swizzled one), `run()` (one graph-safe launch
+       on the static buffers), `read_out()`. This reproduces capture-once/replay-many; a candidate that
+       OOB-faults or returns stale data under replay FAILS here instead of crashing the server. Fold
+       both verdicts into the overall PASS/FAIL and print them per case. (Both no-op safely on an
+       eager-only image, so this never false-fails offline.)
+   - **Timing** via `h.time_op(call, warmup, repeats, inner=16, graph=h.deployment_graph_mode(meta["regime"]))`
+     — the AMORTIZED per-call timer, run in the DEPLOYMENT GRAPH CONTEXT. `h.deployment_graph_mode(regime)`
+     returns True whenever the live server replays this op under a CUDA/HIP graph (the default; False only
+     when the regime is enforce-eager / disable-cuda-graph). Pass the SAME `graph=` to BOTH baseline and
+     current. **🔴 Never author an EAGER baseline (a bare loop, or `graph=False`) when the regime deploys
+     under a graph** — that is the strawman that manufactures an isolated win a candidate collapsing launch
+     overhead cannot reproduce in the live graphed server. Time baseline-vs-current per case with the SAME
+     `time_op`. When `meta.workload` is present (see step 4b)
+     build one timing case per `meta.workload.cases[]` entry (own `dims`+`dtype` + the case's `quant`
+     operands, in-regime — NOT bf16, random values; perf is value-independent). Print `per_case`
+     `baseline_ms/optimized_ms/speedup`. If `meta.workload` is absent, fall back to timing the
+     golden/captured cases (unweighted).
    - **Metric**: print the geomean AND, when `meta.workload` is present, the PRIMARY time-weighted
      speedup `GEAK_WEIGHTED_SPEEDUP = Σ_i weight_i / Σ_i (weight_i / speedup_i)` using each case's
      `weight`. Keep the same `per_case`/geomean print shape so the kernel-layer Director/verify math is
      unchanged; the weighted line is additive. The baseline per case is the ORIGINAL/in-regime path.
-   - It must NOT import any backend by name and must NOT read anything outside the task dir, so it
-     transparently judges a triton/HIP/CK/aiter/asm reimplementation.
+   - It must NOT import any backend by name and must NOT read anything outside the task dir (except the
+     vendored `harness_lib.py`), so it transparently judges a triton/HIP/CK/aiter/asm reimplementation.
+
+   > **🔴 TWO MANDATORY ANTI-EXPLOIT RULES (baked into `harness_lib`; do not bypass them by hand-rolling).**
+   > These are the exact reasons a kernel scores a big isolated speedup that vanishes on integration:
+   > - **(a) No launch-overhead theatre.** Do NOT time the launcher in a bare `for _ in range(N): fn();
+   >   sync()` loop. For decode shapes (small M) that wall clock is floored by PYTHON DISPATCH, not the
+   >   GEMM — a candidate then wraps the whole op in a `torch.cuda.CUDAGraph` + `graph.replay()` and
+   >   "wins" by collapsing a dispatch floor that in the LIVE server is ALREADY gone (decode runs inside
+   >   the server's own CUDA graph). `h.time_op` amortizes that floor across `inner` back-to-back
+   >   launches for BOTH legs, so the graph trick buys nothing. Always use it — and time in the DEPLOYMENT
+   >   graph context: pass `graph=h.deployment_graph_mode(meta["regime"])` so the baseline is measured
+   >   exactly where the live server runs it (graph replay), never as an eager strawman.
+   > - **(b) Fresh output, always.** The launcher contract is `fn(args) -> FRESH out`. Returning a
+   >   persistent/static `out` buffer (the graph-replay `static_out` shortcut) is a CHEAT that is only
+   >   "correct" for the harness's call-then-read-immediately pattern and is WRONG for any batched
+   >   caller. `h.check_correct_multi` catches it (later call overwrites the earlier return; distinct
+   >   `data_ptr` + no-mutation asserted). Never write a correctness check that reads each output right
+   >   after its own call — check them all together, as the shared lib does.
 5. **Finalize `meta.json`**: set `build` (false for pure-Triton; true + a build cmd for HIP/CK/asm
    candidates), `candidate_backends`, `regime`, the source path in sglang, and re-confirm the
    `reference_io_sha256` checksum (the validator re-checks it to detect tampering).
@@ -112,9 +232,21 @@ python3 "$SKILL_DIR/scripts/attribute_weights.py" \
   --meta "<task_dir>/meta.json" \
   --profile-weights "$PROFILE_WORKLOAD_JSON" \
   --name-match "<the kernel's base symbol, e.g. _gemm_a8w8_blockscale_kernel>" \
+  --isl "$ISL" --osl "$OSL" \
   --min-regime-share 0.3 \
   --out "<task_dir>/workload.json"
 ```
+> **🔴 PASS `--isl`/`--osl` (from `WORKLOAD`) — the profiling window is capped at ~40 forward steps
+> (`PROFILE_NUM_STEPS`), so at large OSL it captures only a sliver of decode while it sees the single
+> prefill pass in full. The raw per-case `weight` (= count × avg_us) therefore UNDER-counts decode and
+> gives a WRONG decode:prefill split (an inaccurate weight-share). `--isl/--osl` rescale each regime's
+> weight from the window to the full serving lifecycle (prefill = `ceil(isl/chunk)` passes, decode = `osl`
+> passes) using the well-measured per-call latency × the analytic call count. The chunked-prefill budget
+> is taken from `regime.prefill_chunk` (parsed by `parse_regime.py` from the launch script/server flags)
+> automatically; pass `--prefill-chunk <chunked_prefill_size>` to override. Default is one prefill pass over ISL.
+> This is the primary fix for the split; `--min-regime-share 0.3` remains as a coarse floor for the case
+> where even the corrected decode share is a zero-time capture artifact. The correction is a no-op if
+> `--isl/--osl` are omitted, so it never changes a run that doesn't pass them.
 Then **merge `workload.json` into `meta.json` under the `"workload"` key** (same pattern as the regime
 merge), so the immutable oracle is self-contained and `unittest.py` (step 4) reads `meta.workload.cases`
 to build its weighted TIMING cases + the time-weighted metric. Also return the path as `workload_path`
@@ -165,7 +297,7 @@ per-(shape,dtype) weighted workload model — slice this kernel's cases into `wo
 
 > **TraceLens shape double-check (mandatory when the shapes came from TraceLens).** If `KERNEL.shapes`
 > originated from the upstream `analysis.md`/`kernel_candidates.json` prior, treat them ONLY as a
-> starting hint — they "不一定准" (may be inaccurate, mis-parsed from the `<br>` arg list, or for the
+> starting hint — they may be inaccurate (mis-parsed from the `<br>` arg list, or for the
 > wrong regime). You MUST re-verify them against a live capture (the `capture_shapes.py` overlay below,
 > or the profiler's own torch-trace `profile_topN.json` shapes) before freezing the unittest, and use
 > the live-captured `(M,N,K)`/dtype as authoritative whenever they disagree. Note any correction in
@@ -178,8 +310,11 @@ capturing anything, resolve the regime from the SERVER LAUNCH FLAGS + model conf
 ```bash
 python3 "$SKILL_DIR/scripts/parse_regime.py" \
   --server-args "$CURRENT_FLAGS" --model-config "$MODEL_PATH/config.json" \
+  --server-script "$EVAL_DIR/launch_baseline.sh" \
   --out "<task_dir>/regime.json"
 # then merge regime.json into meta.json under the "regime" key
+# (--server-script carries flags EXTRA_SERVER_ARGS omits, notably the chunked-prefill budget that
+#  sizes the serving prefill pass count in attribute_weights.py)
 ```
 Then HONOR it:
 - **Quantization** (`regime.quant`): pick the seam that is LIVE under this quant. If the server runs
@@ -201,9 +336,15 @@ report `editable:false`/drop rather than freeze an out-of-regime oracle nobody s
 <EVAL_DIR>/kernels/<short_name>_task/
   meta.json         # op_kind, dtype, math_contract, + (gemm) a_shape/b_shape/transpose_b/bias
                     #                                  + (attn) captured tensor spec
+                    # ALSO carry pct_gpu_time (the Architect's GPU-time share) so the Amdahl ceiling
+                    # can be computed downstream (op_bench annotates it; the e2e gate enforces it).
   reference_io.pt   # golden oracle (REQUIRED for attn; OPTIONAL for gemm if GEMM_SYNTH)
+  harness_lib.py    # VENDORED copy of scripts/harness_lib.py (cp it in); IMMUTABLE
   unittest.py       # immutable correctness+timing harness (same shape as the kernel-layer one)
 ```
+Same rule as PHASE=extract: `cp "$SKILL_DIR/scripts/harness_lib.py" "$TASK/"` and have `unittest.py`
+use `h.time_op` (amortized) + `h.check_correct_multi` (fresh-output enforced). Record `pct_gpu_time`
+in `meta.json` (op_bench reads it to annotate the Amdahl ceiling on the isolated speedup).
 
 ### GEMM (preferred: synthesize — perf is value-independent)
 1. Parse the profiled `shapes` into `a_shape`, `b_shape`. Decide `transpose_b` from the math
@@ -216,8 +357,10 @@ report `editable:false`/drop rather than freeze an out-of-regime oracle nobody s
 3. (Only if a real activation distribution matters) capture a real `(A,B,bias,output)` via the same
    capture overlay as PHASE=extract, save as `reference_io.pt` with keys `A,B,bias,output`.
 4. Write an immutable `unittest.py` that loads/synthesizes `A,B,bias`, computes `ref = A·Bᵀ(+bias)` with
-   the default (in-regime) backend once, then times the current path and checks a candidate against `ref`
-   (bf16 rtol=atol=2e-2). Same per-case/geomean print shape as the kernel-layer unittest, AND — when
+   the default (in-regime) backend once, then — via the vendored `harness_lib` — times the current path
+   with `h.time_op` (amortized; no launch-overhead theatre) and checks a candidate against `ref` with
+   `h.check_correct_multi` (fresh-output enforced; a shared/static return buffer FAILS), bf16
+   rtol=atol=2e-2. Same per-case/geomean print shape as the kernel-layer unittest, AND — when
    `meta.workload` is present — its TIMING cases are the weighted `meta.workload.cases[]` (each built
    with its own dims/dtype/`quant` operands) and it prints the time-weighted
    `GEAK_WEIGHTED_SPEEDUP = Σ wᵢ/Σ(wᵢ/speedupᵢ)` as the PRIMARY metric (geomean stays as secondary).

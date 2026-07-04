@@ -11,6 +11,11 @@ None of that is visible in a shape. It lives in the LAUNCH FLAGS and the model's
 parser turns those into a `regime` descriptor that the extractor writes into meta.json, so every
 downstream step (oracle capture, baseline choice, shape/dtype, weight attribution) matches online.
 
+Flags can come from a flag STRING (`--server-args`, e.g. EXTRA_SERVER_ARGS) and/or the actual server
+LAUNCH SCRIPT (`--server-script`, e.g. the recipe `launch_baseline.sh`). The script often carries flags
+the live EXTRA_SERVER_ARGS does not — notably the chunked-prefill budget — so pass it when available. On
+overlap, `--server-args` wins (it is the live/override config).
+
 Output (json):
 {
   "quant": {"method": "fp8|fp8_blockscale|awq|gptq|compressed-tensors|none",
@@ -18,8 +23,13 @@ Output (json):
             "block_size": [..]|null, "source": "flag|model_config|none"},
   "kv_cache_dtype": "fp8|bf16|auto",
   "compile": "torch_compile|eager",      # the baseline-relevant fusion state
+  "enforce_eager": true|false,           # --enforce-eager / --disable-cuda-graph: eager (strawman) baseline
   "cuda_graph": true|false,
   "attention_backend": "<str>|''",
+  "prefill_chunk": <int>|null,           # chunked-prefill token budget (chunked-prefill-size /
+                                         # max-num-batched-tokens); null = one prefill pass over the prompt.
+                                         # attribute_weights.py uses it to size the serving-lifecycle
+                                         # prefill pass count (ceil(isl/prefill_chunk)).
   "notes": "..."
 }
 
@@ -49,6 +59,38 @@ def _tokenize(server_args):
     return out
 
 
+def _read_script_flags(script_path):
+    """Extract `--flag value` / `--flag=value` pairs from a server LAUNCH SCRIPT. Shell line
+    continuations (`\\`+newline) are joined first so a flag and its value on separate lines still pair
+    up; `_tokenize` then ignores everything that isn't a `--` flag (echo/if/env lines pass through
+    harmlessly). Returns {} if the path is missing/unreadable."""
+    if not script_path or not os.path.isfile(script_path):
+        return {}
+    try:
+        with open(script_path) as fh:
+            text = fh.read()
+    except Exception:
+        return {}
+    return _tokenize(text.replace("\\\n", " "))
+
+
+def _prefill_chunk(flags):
+    """The chunked-prefill token budget from the launch flags: sglang `--chunked-prefill-size`, vllm
+    `--max-num-batched-tokens`. A value <= 0 (sglang's -1 = disabled) or absent -> None (the caller then
+    treats prefill as a single pass over the whole prompt)."""
+    for k in ("chunked-prefill-size", "chunked_prefill_size",
+              "max-num-batched-tokens", "max_num_batched_tokens"):
+        v = flags.get(k)
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, int):
+            return v if v > 0 else None
+        if isinstance(v, str) and v.lstrip("-").isdigit():
+            iv = int(v)
+            return iv if iv > 0 else None
+    return None
+
+
 def _load_model_quant(model_config_path):
     """Read the model's own quantization_config from config.json (a pre-quantized checkpoint)."""
     if not model_config_path or not os.path.isfile(model_config_path):
@@ -70,8 +112,9 @@ def _load_model_quant(model_config_path):
     return {"method": method or "fp8", "weight_dtype": wdt, "block_size": block, "fmt": fmt}
 
 
-def parse_regime(server_args, model_config_path=""):
-    flags = _tokenize(server_args)
+def parse_regime(server_args, model_config_path="", server_script=""):
+    # Launch-script flags fill the base; the live --server-args string overrides on overlap.
+    flags = {**_read_script_flags(server_script), **_tokenize(server_args)}
     notes = []
 
     # ---- quantization: flag wins, else the model's own config ----
@@ -112,19 +155,36 @@ def parse_regime(server_args, model_config_path=""):
                       or flags.get("torch-compile"))
     compile_state = "torch_compile" if compile_on else "eager"
 
+    # ---- enforce-eager: the STRAWMAN-baseline flag. vllm's --enforce-eager disables BOTH cuda graphs
+    # and compilation; sglang's equivalent is --disable-cuda-graph. When set, the online baseline runs
+    # every forward pass eagerly, so launch/dispatch overhead is unmasked and an e2e A/B over-credits
+    # launch-overhead kernels (isolated win, e2e loss). Recorded so the unittest-writing module times its
+    # baseline under deployment_graph_mode (harness_lib) and the live-seam guard can flag the strawman. ----
+    enforce_eager = bool(flags.get("enforce-eager") or flags.get("enforce_eager")
+                         or flags.get("disable-cuda-graph") or flags.get("disable_cuda_graph"))
+    if enforce_eager:
+        notes.append("enforce-eager/disable-cuda-graph set: the online baseline runs eagerly (no "
+                     "graph replay); an e2e A/B on it is a strawman for launch-overhead kernels.")
+
     # ---- cuda graph (decode is graph-captured unless disabled) ----
-    cuda_graph = not bool(flags.get("disable-cuda-graph") or flags.get("disable_cuda_graph"))
+    cuda_graph = not bool(flags.get("disable-cuda-graph") or flags.get("disable_cuda_graph")
+                          or flags.get("enforce-eager") or flags.get("enforce_eager"))
 
     attn = flags.get("attention-backend") or flags.get("attention_backend") or ""
     if attn is True:
         attn = ""
 
+    # ---- chunked-prefill budget (sizes the serving prefill pass count in attribute_weights.py) ----
+    prefill_chunk = _prefill_chunk(flags)
+
     return {
         "quant": quant,
         "kv_cache_dtype": kv,
         "compile": compile_state,
+        "enforce_eager": enforce_eager,
         "cuda_graph": cuda_graph,
         "attention_backend": attn,
+        "prefill_chunk": prefill_chunk,
         "notes": " ".join(notes),
     }
 
@@ -135,9 +195,12 @@ def main():
                     help="the server launch flag string (e.g. EXTRA_SERVER_ARGS / the recipe flags)")
     ap.add_argument("--model-config", default="",
                     help="path to the model's config.json (for a pre-quantized checkpoint)")
+    ap.add_argument("--server-script", default="",
+                    help="path to the server launch script (e.g. launch_baseline.sh); "
+                         "carries flags EXTRA_SERVER_ARGS may omit, notably the chunked-prefill budget")
     ap.add_argument("--out", default="", help="write regime json here (also printed to stdout)")
     args = ap.parse_args()
-    regime = parse_regime(args.server_args, args.model_config)
+    regime = parse_regime(args.server_args, args.model_config, args.server_script)
     js = json.dumps(regime, indent=2)
     if args.out:
         with open(args.out, "w") as fh:
