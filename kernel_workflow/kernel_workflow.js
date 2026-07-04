@@ -4,7 +4,7 @@ export const meta = {
   whenToUse: 'Optimize the inference speed of a kernel directory (single kernel, fused kernels) or an end-to-end vLLM/SGLang model. Pass args.kernel_path (required), args.budget, args.gpu_ids, args.task.',
   phases: [
     { title: 'Setup', detail: 'director builds the isolated eval dir + canonical workspace' },
-    { title: 'Author', detail: 'author_engineer writes a fresh baseline (only when mode=author)' },
+    { title: 'Author', detail: 'author_engineer writes a fresh optimize-loop seed (only when mode=author); speedup denominator stays the frozen online kernel' },
     { title: 'Analyze', detail: 'tech_lead analyzes kernel + writes roadmap' },
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
     { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
@@ -60,11 +60,12 @@ const EVAL_DIR_OVERRIDE = A.eval_dir || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
 const KERNEL_NAME_HINT = KERNEL_PATH_ORIG.replace(/\/+$/, '').split('/').pop();
 
-// --- author mode: when there is NO existing source, write a fresh baseline first, then optimize it.
+// --- author mode: when there is NO existing source, write a fresh from-scratch SEED first, then optimize it.
 // mode=optimize (default) keeps the exact original behavior (backward compatible). mode=author seeds
-// the workspace from an op task dir (immutable oracle), the author_engineer writes a passing baseline,
-// then the SAME optimize loop runs. KERNEL_KNOWLEDGE_DIR is the AMD authoring knowledge base — REFERENCE
-// ONLY (facts/how-to, never decisions; the author always writes a measured baseline regardless). Default:
+// the workspace from an op task dir (immutable oracle + frozen online kernel in baseline_src/), the
+// author_engineer writes a passing seed, then the SAME optimize loop runs — always timing against the
+// frozen online kernel, never against the seed's own language. KERNEL_KNOWLEDGE_DIR is the AMD authoring
+// knowledge base — REFERENCE ONLY (facts/how-to, never decisions; the author always measures regardless). Default:
 // sibling perf_knowledge/ so standalone runs use it too; empty if WORKFLOW_DIR is unset (no behavior change).
 const MODE = String(A.mode != null ? A.mode : 'optimize').trim() || 'optimize';
 const TARGET_LANGUAGE = String(A.target_language != null ? A.target_language : 'triton').trim() || 'triton';
@@ -186,6 +187,11 @@ const obj = (props, required) => ({ type: 'object', properties: props, required:
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
   kernel_name: { type: 'string' }, source_files: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
+  // Frozen-baseline verdict (BOTH modes). The unittest's timing + random-value parity baseline MUST be
+  // the real online kernel — the immutable baseline_src/ dir OR an importable meta.baseline_callable —
+  // never kernel_src/ (the candidate's own scaffold). The director sets baseline_frozen=true after it
+  // copies baseline_src/ + confirms meta.baseline_callable; the script aborts the run if neither holds.
+  baseline_frozen: { type: 'boolean' }, baseline_callable: { type: 'string' },
   // DEEP-MODE resume only: populated by the director ONLY when STATE_DIR was provided AND a prior best
   // exists there. Lets a continued wave restore its cumulative speedup + insight/ledger history so it
   // does not re-explore dead directions. Absent (undefined) on a fresh run -> no behavior change.
@@ -413,11 +419,36 @@ const KERNEL_NAME = setup.kernel_name;
 const COMMANDMENT = `${EVAL_DIR}/COMMANDMENT.md`;
 log(`Setup done. EVAL_DIR=${EVAL_DIR}`);
 
+// ---------------------------------------------------------------------------
+// Enforce a FROZEN REAL-ONLINE BASELINE in BOTH modes (author AND same-language
+// optimize). The immutable unittest times + parity-checks the candidate against
+// baseline_src/ / meta.baseline_callable (the live online kernel); if neither
+// exists it would silently fall back to timing kernel_src/ against itself — the
+// "optimized-HIP vs naive-HIP = fake 15.7×" bug this harness exists to prevent.
+// The script has no FS access, so we trust the director's structured verdict
+// (it copied baseline_src/ + confirmed the callable). Missing -> abort/re-extract.
+// ---------------------------------------------------------------------------
+const hasBaseline = setup.baseline_frozen === true ||
+  (typeof setup.baseline_callable === 'string' && setup.baseline_callable.trim().length > 0);
+if (!hasBaseline) {
+  const reason = `no frozen baseline (baseline_src/ or meta.baseline_callable) for ${KERNEL_NAME} — ` +
+    `re-extract; refusing to time the candidate against kernel_src/ (fake-win risk)`;
+  log(`Setup ABORT: ${reason}`);
+  return {
+    mode: MODE, authored: false, target_language: TARGET_LANGUAGE,
+    eval_dir: EVAL_DIR, kernel_name: KERNEL_NAME,
+    final_geomean: 0, final_patch: '', validation_status: 'no_baseline', reason,
+  };
+}
+
 // ===========================================================================
-// PHASE: Author (mode=author only) — write a fresh baseline from scratch.
-// On success, HEAD of CANONICAL becomes the authored baseline and the rest of
-// the pipeline (Analyze/Benchmark/Profile/optimize loop) runs UNCHANGED on it.
-// On failure (no correct baseline), abort early with a structured result so the
+// PHASE: Author (mode=author only) — write a fresh from-scratch impl as the
+// optimize loop's CODE SEED. On success, HEAD of CANONICAL becomes that seed
+// (what the optimize loop diffs its edits against) and the rest of the pipeline
+// (Analyze/Benchmark/Profile/optimize loop) runs UNCHANGED on it. The SPEEDUP
+// denominator is NEVER the seed — it is the frozen REAL ONLINE kernel in
+// baseline_src/ (meta.baseline_callable), regardless of TARGET_LANGUAGE.
+// On failure (no correct seed), abort early with a structured result so the
 // e2e caller drops this language.
 // ===========================================================================
 if (MODE === 'author') {
@@ -429,7 +460,7 @@ if (MODE === 'author') {
     }),
     { phase: 'Author', label: `author:${TARGET_LANGUAGE}`, schema: AUTHOR_SCHEMA });
   if (!authored || !authored.authored || authored.correctness !== 'pass') {
-    log(`Author mode FAILED for ${TARGET_LANGUAGE}: ${authored ? authored.notes || authored.correctness : 'no result'}. Aborting (no baseline to optimize).`);
+    log(`Author mode FAILED for ${TARGET_LANGUAGE}: ${authored ? authored.notes || authored.correctness : 'no result'}. Aborting (no seed to optimize).`);
     return {
       mode: 'author', authored: false, target_language: TARGET_LANGUAGE,
       eval_dir: EVAL_DIR, kernel_name: KERNEL_NAME,
@@ -437,7 +468,7 @@ if (MODE === 'author') {
       reason: authored ? authored.notes || 'author produced no correct baseline' : 'author returned nothing',
     };
   }
-  log(`Author mode: ${TARGET_LANGUAGE} baseline written (correct, ${authored.baseline_ms || '?'} ms). Optimizing it now.`);
+  log(`Author mode: ${TARGET_LANGUAGE} seed written (correct, seed ${authored.baseline_ms || '?'} ms; denominator = frozen online kernel). Optimizing it now.`);
 }
 
 // ===========================================================================

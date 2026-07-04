@@ -631,5 +631,64 @@ class TestHarnessRegime(unittest.TestCase):
         self.assertEqual(harness_lib.regime_dtype("fp8_e4m3fnuz", arch="gfx950"), torch.float8_e4m3fnuz)
 
 
+class TestRandomVsBaseline(unittest.TestCase):
+    """harness_lib.check_random_vs_baseline — value-parity vs the live frozen baseline on random input
+    DRAWS at FIXED online shapes. Correctness is a hard gate; speedup is report-only. Torch-guarded."""
+
+    def _shapes(self, torch):
+        def mk(rng):
+            return torch.randn(64, 128, generator=rng)
+        return [{"sig": "M=64", "make_inputs": mk}]
+
+    def test_identical_all_correct(self):
+        try:
+            import torch  # noqa: F401
+        except Exception:
+            self.skipTest("torch not available")
+        ok, pc = harness_lib.check_random_vs_baseline(
+            lambda a: a * 2.0, lambda a: a * 2.0, self._shapes(torch), tol=2e-2,
+            draws=3, warmup=1, repeats=3)
+        self.assertTrue(ok)
+        self.assertEqual(len(pc), 3)
+        self.assertTrue(all(p["correct"] for p in pc))
+        # dims fixed per sig — NOT random shapes; only values vary across draws
+        self.assertEqual({p["case"].split(":", 1)[1] for p in pc}, {"M=64"})
+
+    def test_wrong_draw_fails_gate(self):
+        try:
+            import torch  # noqa: F401
+        except Exception:
+            self.skipTest("torch not available")
+        state = {"i": 0}
+
+        def cur(a):
+            state["i"] += 1
+            return a * 2.0 + (5.0 if state["i"] == 2 else 0.0)
+
+        ok, pc = harness_lib.check_random_vs_baseline(
+            lambda a: a * 2.0, cur, self._shapes(torch), tol=2e-2,
+            draws=3, warmup=0, repeats=1)
+        self.assertFalse(ok)
+        self.assertFalse(all(p["correct"] for p in pc))
+
+    def test_shared_buffer_baseline_snapshotted(self):
+        """A baseline that returns a persistent buffer must still be compared against its SNAPSHOT, so a
+        divergent candidate is caught (not masked by aliasing)."""
+        try:
+            import torch  # noqa: F401
+        except Exception:
+            self.skipTest("torch not available")
+        static = torch.zeros(64, 128)
+
+        def base_static(a):
+            static.copy_(a * 2.0)
+            return static
+
+        ok, pc = harness_lib.check_random_vs_baseline(
+            base_static, lambda a: a * 3.0, self._shapes(torch), tol=2e-2,
+            draws=1, warmup=0, repeats=1)
+        self.assertFalse(ok)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

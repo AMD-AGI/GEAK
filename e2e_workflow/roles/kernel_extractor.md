@@ -14,11 +14,12 @@ You are invoked once per kernel candidate. Read first:
 ## The task-dir contract you must emit (what the kernel layer expects)
 ```
 <EVAL_DIR>/kernels/<short_name>_task/
-  kernel_src/...        # editable copy of the kernel source (the sglang/aiter subtree that owns it)
+  kernel_src/...        # editable copy of the kernel source (the sglang/aiter subtree that owns it) — OVERWRITTEN by optimize/author
+  baseline_src/...      # IMMUTABLE frozen copy of the REAL ONLINE kernel — the timing-baseline denominator; sha-checked
   reference_io.pt       # recorded inputs + golden outputs (oracle) — READ-ONLY for optimizers
   harness_lib.py        # VENDORED copy of scripts/harness_lib.py — the SHARED timing/correctness lib; IMMUTABLE
-  unittest.py           # builds(opt)/runs/checks-correctness vs oracle/times speedup; IMMUTABLE
-  meta.json             # name, source path in sglang, target callable, shapes, dtypes, backend, regime, build, checksum
+  unittest.py           # builds(opt)/runs/checks-correctness vs oracle + random-value parity vs baseline_src/times speedup; IMMUTABLE
+  meta.json             # name, source path in sglang, target callable, baseline_callable (real online kernel), shapes, dtypes, backend, regime, build, random_draws (default 3), checksum
 ```
 **Vendor the shared harness library into the task dir** (`cp "$SKILL_DIR/scripts/harness_lib.py"
 "$TASK/harness_lib.py"`). `unittest.py` imports it for ALL timing + correctness — never hand-roll a
@@ -122,6 +123,18 @@ freeze an out-of-regime oracle nobody should trust.
    >   disagree). Never weight by raw count.
 3. **Copy the editable source** into `kernel_src/` (the minimal owning subtree), so the kernel layer
    and the later overlay can diff against it.
+   > **🔴 FREEZE THE REAL ONLINE KERNEL AS THE IMMUTABLE TIMING BASELINE — this is what stops a
+   > cross-language rewrite from timing against a fake baseline.** In addition to `kernel_src/` (which the
+   > optimizer/author OVERWRITES — e.g. rewrites the Triton kernel as HIP/CK), snapshot the ORIGINAL live
+   > kernel into a SEPARATE, IMMUTABLE `baseline_src/` (copy the same subtree) AND record its callable in
+   > `meta.json` as `baseline_callable` (`module:attr` of the real online kernel — for minimax that is the
+   > Triton `_gqa_sparse_fwd_kernel` via `target_callable`). The unittest's baseline leg is bound to THIS
+   > frozen callable, NEVER to whatever is currently in `kernel_src/`. Reason: `mode=author` starts
+   > `kernel_src/` from a naive from-scratch impl in the target language; if the baseline followed
+   > `kernel_src/`, the reported speedup would be "optimized-HIP vs my-own-naive-HIP" (observed 15.7×) — a
+   > fake win against a strawman the author itself wrote, not against the production Triton kernel that
+   > actually serves the workload. Freezing the real online kernel makes the speedup denominator
+   > **language-independent and always the live path**. sha-check `baseline_src/` alongside `reference_io.pt`.
 4. **Write `unittest.py`** — backend-agnostic and IMMUTABLE. It is the SINGLE harness: it judges
    correctness AND measures the workload-weighted speedup; there is no separate downstream perf harness.
    **It MUST import the vendored `harness_lib` and use it for all timing + correctness** — do NOT
@@ -147,6 +160,22 @@ freeze an out-of-regime oracle nobody should trust.
      `check_correct_multi` keeps all outputs live before comparing AND runs the output-independence
      check — so a candidate that returns a shared/persistent buffer FAILS. Print PASS/FAIL per case.
      This set is NEVER re-weighted.
+   - **Random-input parity vs the live baseline (MANDATORY).** The frozen oracle pins ONE recorded
+     input+golden; a candidate can be correct on that draw but wrong on other value distributions
+     (masking, NaN/denormals, accumulation across magnitudes). Since the real online kernel is frozen
+     (`meta.baseline_callable` / `baseline_src/`), use it as the truth source on MANY random value draws
+     at the SAME online shapes. Build `shapes` from the SAME online set as the weighted timing cases
+     (`meta.workload.cases[]` dims, else the captured case sigs) — each entry
+     `{"sig": <label>, "make_inputs": rng -> args}` where `make_inputs` draws FRESH random in-regime
+     values (via `h.regime_spec(meta["regime"])` / `h.synth_kv_cache(...)`) at the FIXED online dims.
+     Then call `h.check_random_vs_baseline(baseline_call, current_call, shapes, tol,
+     draws=meta.get("random_draws", 3), graph=h.deployment_graph_mode(meta["regime"]))`. **🔴 Do NOT
+     randomize SHAPES — dims stay online-aligned; only the input VALUES vary.** `baseline_call` binds to
+     `meta.baseline_callable` / `baseline_src/` (the frozen real online kernel), `current_call` to
+     `kernel_src/` (the candidate). Fold its correctness verdict into the overall PASS/FAIL (a delta vs
+     baseline on ANY draw FAILS the unittest); print its per-draw `speedup` as a SECONDARY robustness
+     signal only — it is NOT re-weighted and NEVER the win metric (the primary metric stays the
+     workload-weighted oracle speedup).
    - **Deployment-context correctness (MANDATORY when `meta.graph_replayed` or
      `meta.num_distinct_shapes > 1`).** Single-shape eager `check_correct_multi` does NOT
      reproduce the path that actually faults on the live server: the op runs inside the server's
@@ -179,9 +208,21 @@ freeze an out-of-regime oracle nobody should trust.
    - **Metric**: print the geomean AND, when `meta.workload` is present, the PRIMARY time-weighted
      speedup `GEAK_WEIGHTED_SPEEDUP = Σ_i weight_i / Σ_i (weight_i / speedup_i)` using each case's
      `weight`. Keep the same `per_case`/geomean print shape so the kernel-layer Director/verify math is
-     unchanged; the weighted line is additive. The baseline per case is the ORIGINAL/in-regime path.
+     unchanged; the weighted line is additive.
+     > **🔴 THE BASELINE LEG IS ALWAYS THE FROZEN REAL ONLINE KERNEL — never the candidate's own language
+     > scaffold.** Bind the baseline `call` to `meta.baseline_callable` / the frozen `baseline_src/` copy
+     > of the PRODUCTION kernel (step 3), and bind the current `call` to whatever is in `kernel_src/` (the
+     > optimized/authored candidate). `speedup = baseline_ms / current_ms` is therefore ALWAYS measured
+     > against the live path, no matter what LANGUAGE the candidate is written in (Triton→HIP→CK all
+     > compete against the SAME production baseline). Do NOT time the candidate against a freshly-authored
+     > naive impl in the target language, and do NOT let `mode=author` substitute its from-scratch seed as
+     > the baseline — that manufactured the fake 15.7× (optimized-HIP vs naive-HIP) that vanished at e2e.
+     > If `baseline_callable` cannot be imported/frozen (the live op only exists fused in the compile
+     > graph), say so in `notes` and report `editable:false` rather than fall back to a same-language
+     > strawman baseline.
    - It must NOT import any backend by name and must NOT read anything outside the task dir (except the
-     vendored `harness_lib.py`), so it transparently judges a triton/HIP/CK/aiter/asm reimplementation.
+     vendored `harness_lib.py` and the frozen `baseline_src/`), so it transparently judges a
+     triton/HIP/CK/aiter/asm reimplementation against the real online baseline.
 
    > **🔴 TWO MANDATORY ANTI-EXPLOIT RULES (baked into `harness_lib`; do not bypass them by hand-rolling).**
    > These are the exact reasons a kernel scores a big isolated speedup that vanishes on integration:
@@ -204,6 +245,11 @@ freeze an out-of-regime oracle nobody should trust.
    `reference_io_sha256` checksum (the validator re-checks it to detect tampering).
 6. Smoke-test the unittest on the baseline kernel (must PASS correctness, speedup≈1.0):
    `cd "$TASK" && bash "$SKILL_DIR/../kernel_workflow/scripts/gpu_lock.sh" "$GPU_ID" python3 unittest.py`.
+   **The smoke run MUST prove the baseline leg actually binds** — `meta.baseline_callable` imports/runs
+   (or `baseline_src/` is importable) so `h.check_random_vs_baseline` and the timing baseline resolve to
+   the REAL online kernel. If the baseline cannot be frozen/imported (the live op only exists fused in the
+   compile graph), do NOT fall back to a `kernel_src/` strawman: return `editable:false` /
+   `baseline_frozen:false` with a clear reason so the caller re-routes or drops it.
 
 Return JSON:
 ```json
@@ -213,6 +259,8 @@ Return JSON:
   "task_dir": "<EVAL_DIR>/kernels/<short_name>_task",
   "source_path_in_sglang": "<abs path under site-packages>",
   "target_callable": "<module:attr>",
+  "baseline_callable": "<module:attr of the frozen real online kernel>",
+  "baseline_frozen": true,
   "num_cases": 0,
   "regimes_captured": ["prefill","decode"],
   "candidate_backends": ["triton","hip","ck"],
@@ -370,7 +418,12 @@ in `meta.json` (op_bench reads it to annotate the Amdahl ceiling on the isolated
    the default (in-regime) backend once, then — via the vendored `harness_lib` — times the current path
    with `h.time_op` (amortized; no launch-overhead theatre) and checks a candidate against `ref` with
    `h.check_correct_multi` (fresh-output enforced; a shared/static return buffer FAILS), bf16
-   rtol=atol=2e-2. Same per-case/geomean print shape as the kernel-layer unittest, AND — when
+   rtol=atol=2e-2. **ALSO run `h.check_random_vs_baseline(baseline_call, current_call, shapes, tol,
+   draws=meta.get("random_draws", 3), graph=h.deployment_graph_mode(meta["regime"]))`** — each `shapes`
+   entry's `make_inputs(rng)` draws FRESH random in-regime `A/B/bias` at the FIXED online dims (do NOT
+   randomize shapes) and `baseline_call` binds to `meta.baseline_callable` (the live default GEMM
+   backend); fold its correctness into PASS/FAIL, print its per-draw speedup as a secondary signal.
+   Same per-case/geomean print shape as the kernel-layer unittest, AND — when
    `meta.workload` is present — its TIMING cases are the weighted `meta.workload.cases[]` (each built
    with its own dims/dtype/`quant` operands) and it prints the time-weighted
    `GEAK_WEIGHTED_SPEEDUP = Σ wᵢ/Σ(wᵢ/speedupᵢ)` as the PRIMARY metric (geomean stays as secondary).
@@ -411,6 +464,12 @@ force real compact-operand compute:
    SERVER flag, so the Op Benchmarker delegates Tier-A attn swaps to the Config Tuner fast path; the op
    task dir mainly validates the oracle + enables Tier-C Triton-FA rewrites.
 4. Immutable `unittest.py`: load the captured tensors, run the current attention entry, check vs oracle.
+   **ALSO run `h.check_random_vs_baseline(baseline_call, current_call, shapes, tol,
+   draws=meta.get("random_draws", 3), graph=h.deployment_graph_mode(meta["regime"]))`** — each `shapes`
+   entry's `make_inputs(rng)` draws FRESH random in-regime q/k/v + paged K/V cache (via
+   `h.synth_kv_cache`, honoring `regime.kv_cache_dtype`) at the FIXED online dims (do NOT randomize
+   shapes); `baseline_call` binds to `meta.baseline_callable` / `baseline_src/` (the frozen real online
+   attention). Fold its correctness into PASS/FAIL, print its per-draw speedup as a secondary signal.
    Timing follows the SAME rule as the kernel-layer unittest: weighted `meta.workload.cases[]` (built
    in-regime, incl. the fp8 KV layout when `regime.kv_cache_dtype==fp8`) + the time-weighted
    `GEAK_WEIGHTED_SPEEDUP` as PRIMARY when `meta.workload` is present, else unweighted geomean.
@@ -464,6 +523,8 @@ Return JSON:
   "candidate_backends": ["aiter","hipblaslt","triton","ck"],
   "reference_io_sha256": "<or '' if synthesized>",
   "target_callable": "<module:attr rebind seam if one exists, else ''>",
+  "baseline_callable": "<module:attr of the frozen real online kernel / default backend>",
+  "baseline_frozen": true,
   "smoke": "pass|fail",
   "notes": "transpose/bias inference, regime, whether oracle was synthesized vs captured"
 }

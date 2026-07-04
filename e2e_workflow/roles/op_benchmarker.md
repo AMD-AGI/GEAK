@@ -95,14 +95,24 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
 - **Tier C — code (author or rewrite)** (editable languages: triton/**flydsl**/hip/ck): the **workflows route**.
   Two cases, both handed to the recursive `kernel_workflow` (it enforces the immutable unittest):
   - **rewrite** — an editable implementation already exists → optimize it (`mode=optimize`).
-  - **author (NEW)** — no existing editable implementation → write a fresh baseline in the target
-    language, then optimize it (`mode=author`, `target_language=<lang>`). This is the path that lets a
-    library GEMM/attention get a from-scratch Triton / **FlyDSL** (or HIP/CK) implementation that the
-    optimize loop then improves. **Triton is always a viable author target. For a dense / quantized GEMM
-    (esp. fp8 / A4W4 / mxfp4), FlyDSL is the preferred author target** — it's aiter's SOTA GEMM DSL, the
-    author baseline reuses aiter's production `flydsl_hgemm` / `flydsl_preshuffle_gemm_a8`, and the
+  - **author (NEW)** — no existing editable implementation → write a fresh from-scratch impl in the target
+    language as the optimize loop's CODE SEED, then optimize it (`mode=author`, `target_language=<lang>`).
+    This is the path that lets a library GEMM/attention get a from-scratch Triton / **FlyDSL** (or HIP/CK)
+    implementation that the optimize loop then improves. **Triton is always a viable author target. For a
+    dense / quantized GEMM (esp. fp8 / A4W4 / mxfp4), FlyDSL is the preferred author target** — it's aiter's
+    SOTA GEMM DSL, the seed reuses aiter's production `flydsl_hgemm` / `flydsl_preshuffle_gemm_a8`, and the
     optimize loop tunes its tile/split_k/preshuffle knobs (JIT, no build). HIP/CK only when
     requested/feasible.
+    > **🔴 The authored same-language impl is ONLY the optimizer's code seed — NEVER the speedup
+    > denominator.** Regardless of `target_language`, the reported speedup is ALWAYS measured by the
+    > immutable unittest against the FROZEN REAL ONLINE kernel (`meta.baseline_callable` / `baseline_src/` —
+    > e.g. the production Triton `_gqa_sparse_fwd_kernel`), never against the naive same-language scaffold
+    > you just wrote. Authoring a naive HIP impl and letting the optimize loop beat THAT (optimized-HIP vs
+    > naive-HIP = fake 15.7× isolated, ~0% e2e) is exactly the fake-win bug this harness exists to prevent.
+    > Your seed competes against the live online path, not against itself. Correctness is likewise judged
+    > vs the frozen online kernel: the immutable unittest ALSO runs a random-input parity check (candidate
+    > output vs the live baseline on several random in-regime value draws at the same online shapes), so a
+    > candidate correct only on the one recorded oracle draw is caught.
 
   **FlyDSL has TWO reachability paths — use both as candidates:**
   1. **env (cheapest, no author)** — FlyDSL is one of the backends aiter's per-shape DB tune races

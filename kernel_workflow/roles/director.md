@@ -56,11 +56,16 @@ Do this instead of the optimize-mode steps below:
    mkdir -p "$EVAL_DIR/workspace/kernel_src" "$EVAL_DIR/baseline"
    echo "$KERNEL_PATH_ORIG" > "$EVAL_DIR/original_kernel_path.txt"
    # Copy the IMMUTABLE oracle in read-only (the Author/optimize loop judge against it, never edit it).
-   for f in meta.json unittest.py reference_io.pt; do
+   # This INCLUDES baseline_src/ + harness_lib.py: the frozen REAL ONLINE kernel is the timing-baseline
+   # denominator regardless of TARGET_LANGUAGE — it must ride along, immutable, so the unittest can time
+   # the authored seed against the live online path (never against the seed's own language scaffold).
+   for f in meta.json unittest.py reference_io.pt harness_lib.py; do
      [ -e "$KERNEL_PATH_ORIG/$f" ] && cp "$KERNEL_PATH_ORIG/$f" "$EVAL_DIR/workspace/$f"
    done
-   chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" 2>/dev/null || true
+   [ -d "$KERNEL_PATH_ORIG/baseline_src" ] && cp -r "$KERNEL_PATH_ORIG/baseline_src" "$EVAL_DIR/workspace/baseline_src"
+   chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
    [ -e "$EVAL_DIR/workspace/reference_io.pt" ] && chmod -w "$EVAL_DIR/workspace/reference_io.pt" 2>/dev/null || true
+   [ -d "$EVAL_DIR/workspace/baseline_src" ] && chmod -R -w "$EVAL_DIR/workspace/baseline_src" 2>/dev/null || true
    cd "$EVAL_DIR/workspace"
    printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
@@ -69,9 +74,20 @@ Do this instead of the optimize-mode steps below:
    git -c user.email=team@workflow -c user.name=team commit -q -m "empty baseline (author mode, lang=$TARGET_LANGUAGE)"
    ```
    `kernel_src/` is the empty dir the Author Engineer will write its fresh implementation into. HEAD is
-   the empty baseline; the Author's first commit becomes the real baseline the optimize loop diffs from.
+   the empty seed; the Author's first commit becomes the optimize loop's **CODE starting point** (what it
+   diffs its edits against) — NOT the speedup denominator. The speedup denominator is ALWAYS the frozen
+   REAL ONLINE kernel in `baseline_src/` (via `meta.baseline_callable`), regardless of `TARGET_LANGUAGE`.
+   Authoring a naive same-language impl and letting the optimize loop beat THAT (optimized-HIP vs naive-HIP)
+   is the fake-win bug this harness exists to prevent; the seed competes against the live online path.
 3. Return the same JSON shape as below, with `kernel_name` = `OP_SPEC.op_kind` (+ language), and
    `source_files` listing the oracle files present. Note in `notes` that this is an author-mode seed.
+   > **🔴 REPORT THE FROZEN-BASELINE VERDICT (the script aborts the run without it).** Set
+   > `baseline_frozen: true` and `baseline_callable: "<module:attr>"` ONLY when the frozen real online
+   > kernel is actually available — i.e. `baseline_src/` was copied in (the `[ -d ... ] && cp -r` above
+   > succeeded) OR `meta.json` carries a resolvable `baseline_callable`. If NEITHER holds (the live op
+   > only exists fused in the compile graph, so the extractor could not freeze it), set
+   > `baseline_frozen: false` and explain in `notes`: the orchestrator will ABORT rather than let the
+   > unittest time the seed against `kernel_src/` (the fake-win bug). Do NOT fabricate a baseline.
 
 ### `mode=optimize` (default) — copy + commit an existing kernel
 Steps:
@@ -116,6 +132,23 @@ Steps:
    git --no-pager log --oneline | head    # sanity (never pages)
    ```
    Do NOT run any other git command that could open a pager or editor.
+3a. **Freeze the real-online baseline (MANDATORY — same rule as author mode).** The immutable unittest
+   times + random-value-parity-checks the candidate against the frozen online kernel, NEVER against the
+   mutating `kernel_src/`. Resolve it in this order and record the verdict for the return JSON:
+   - If `KERNEL_PATH_ORIG` is an EXTRACTED task dir that already carries `baseline_src/` and/or
+     `meta.json:baseline_callable`, the tar-pipe already copied them into `workspace/`. Make them
+     immutable and read the callable:
+     ```bash
+     [ -d "$EVAL_DIR/workspace/baseline_src" ] && chmod -R -w "$EVAL_DIR/workspace/baseline_src" 2>/dev/null || true
+     [ -e "$EVAL_DIR/workspace/meta.json" ] && chmod -w "$EVAL_DIR/workspace/meta.json" 2>/dev/null || true
+     ```
+     Set `baseline_frozen: true` + `baseline_callable` from `meta.json`.
+   - Else (a plain hand-written kernel dir with no `baseline_src/`/`baseline_callable`): the frozen
+     baseline IS the pristine `EVAL_DIR/baseline` copy + the initial git commit (same-language original =
+     the real path). That always exists, so set `baseline_frozen: true` and note the baseline source is
+     the pristine original (set `baseline_callable` from `meta.json:target_callable` if present, else "").
+   Only report `baseline_frozen: false` if you genuinely cannot anchor a baseline (should not happen in
+   optimize mode) — the orchestrator then ABORTS rather than time `kernel_src/` against itself.
 4. List the source files (so downstream agents know what exists):
    `find "$EVAL_DIR/workspace" -maxdepth 3 -type f \( -name '*.py' -o -name '*.hip' -o -name '*.cu' -o -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cuh' -o -name '*.yaml' \) | sort`
 
@@ -127,9 +160,13 @@ Return JSON:
   "baseline_dir": "<EVAL_DIR>/baseline",
   "kernel_name": "<basename>",
   "source_files": ["<relative paths under workspace>"],
+  "baseline_frozen": true,
+  "baseline_callable": "<module:attr of the frozen real online kernel, or '' if the pristine EVAL_DIR/baseline is the anchor>",
   "notes": "anything unusual about the layout"
 }
 ```
+(`baseline_frozen`/`baseline_callable` are REQUIRED — the orchestrator aborts the run if `baseline_frozen`
+is false AND `baseline_callable` is empty, to avoid timing the candidate against `kernel_src/`.)
 (DEEP-MODE resume only: also include `"resumed": true` and `"prior_state": {cumulative, insights, ledger,
 bottleneck_now, best_per_case}` when you seeded from `$STATE_DIR/best/`; omit both on a normal/first run.)
 

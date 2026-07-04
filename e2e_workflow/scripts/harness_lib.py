@@ -448,6 +448,60 @@ def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3)
     return all_ok, per_case
 
 
+# --------------------------------------------------------------------------- (b) random-value parity vs live baseline
+def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
+                             draws=3, warmup=10, repeats=50, inner=16, graph=False, seed=0):
+    """Validate the candidate against the LIVE frozen baseline on MANY RANDOM INPUT VALUE DRAWS at the
+    SAME online-aligned shapes (NOT random shapes — dims are fixed per `sig`, only values vary). The
+    frozen oracle (`reference_io.pt`) pins ONE recorded input+golden; this catches value-dependent bugs
+    that single draw misses (masking, NaN/denormal handling, accumulation across magnitudes) by using the
+    real production kernel as the truth source for each fresh draw — no stored golden needed.
+
+    CORRECTNESS is a HARD GATE: for every shape × every draw, `correct(candidate_out, baseline_out, tol)`
+    must pass, else `all_ok=False`. The baseline output is snapshotted (clone) BEFORE the candidate runs,
+    so a candidate that aliases the baseline's storage (or returns a shared/static buffer) is caught.
+    SPEEDUP is REPORT-ONLY: `baseline_ms / current_ms` per draw is recorded as a secondary robustness
+    signal (value-independent perf variance / cliff detection), NOT the win metric — the primary metric
+    stays the workload-weighted oracle speedup.
+
+    `baseline_call(args) -> out`  invokes the frozen real online kernel (meta.baseline_callable /
+        baseline_src/). `current_call(args) -> out` invokes the candidate in kernel_src/.
+    `shapes` is a list of {"sig": <label>, "make_inputs": callable(rng) -> args}. `make_inputs` builds a
+        FRESH random in-regime input set for that shape's fixed dims (the unittest closes over
+        regime_spec/synth_kv_cache); `rng` is a seeded torch.Generator for reproducibility.
+    Returns (all_ok, per_case_list).
+    """
+    torch = _torch()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    per_case = []
+    all_ok = True
+    for shape in shapes:
+        sig = shape.get("sig", "")
+        make_inputs = shape["make_inputs"]
+        for i in range(max(1, int(draws))):
+            rng = torch.Generator(device=device).manual_seed(int(seed) + i)
+            try:
+                args = make_inputs(rng)
+                base_out = baseline_call(args)
+                base_snap = base_out.detach().clone()      # snapshot BEFORE current runs (anti-alias)
+                cand_out = current_call(args)
+            except Exception as e:
+                all_ok = False
+                per_case.append({"case": f"random[{i}]:{sig}", "correct": False, "max_rel_err": None,
+                                 "speedup": None, "note": f"value-parity raised: {e!r}"})
+                continue
+            ok, err = correct(cand_out, base_snap, tol)
+            all_ok = all_ok and ok
+            ms_base = time_op(lambda: baseline_call(args), warmup, repeats, inner, graph)
+            ms_cand = time_op(lambda: current_call(args), warmup, repeats, inner, graph)
+            speedup = (ms_base / ms_cand) if (ms_base and ms_cand) else None
+            per_case.append({"case": f"random[{i}]:{sig}", "correct": ok,
+                             "max_rel_err": round(err, 5) if math.isfinite(err) else None,
+                             "speedup": round(speedup, 3) if speedup else None,
+                             "note": "value-parity vs live baseline (correctness gates; speedup reports)"})
+    return all_ok, per_case
+
+
 # --------------------------------------------------------------------------- (b) Amdahl gate
 def amdahl_ceiling(pct_gpu, isolated_speedup):
     """Max end-to-end THROUGHPUT delta (%) attributable to speeding up a kernel that is `pct_gpu` of
