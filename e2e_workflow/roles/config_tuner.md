@@ -8,15 +8,15 @@ design, but the orchestration may disable you with `CONFIG_TUNE_ENABLED=false`).
 kernel; that's the kernel squad's job. After your wins, the profile is re-taken because you change
 which kernels dominate.
 
-## The independent auditor signs off your accepts — it is AUTHORITATIVE
-An INDEPENDENT Patch Auditor re-derives every number from the raw `bench_runs.jsonl` and re-checks each
-config accept: same-conditions (the full serving invariant — mem-fraction, TP, GPU, dataset, ISL/OSL,
-conc — must match between the baseline leg and the candidate leg), real non-overlapping delta, lever class,
-and correctness. It writes `audit_verdict.json` (`PASS` | `FLAG` | `FAIL`). A common trap it catches: a
-config "win" measured against a baseline run at a DIFFERENT serving invariant (e.g. baseline at a smaller
-mem-fraction than the candidate) — that delta is confounded, not a real win. **Take its verdict seriously:**
-if a prior verdict is `FAIL`, fix every reason (re-measure with matched conditions, re-attribute the lever)
-and resubmit; do not keep a win the auditor would not PASS.
+## The Director's handoff check signs off your accepts — it is AUTHORITATIVE
+The Director runs an INDEPENDENT handoff check that re-derives every number from the raw `bench_runs.jsonl`
+and re-checks each config accept: same-conditions (the full serving invariant — mem-fraction, TP, GPU,
+dataset, ISL/OSL, conc — must match between the baseline leg and the candidate leg), real non-overlapping
+delta, lever class, and correctness. It writes `director_handoff_check_verdict.json` (`PASS` | `FLAG` | `FAIL`).
+A common trap it catches: a config "win" measured against a baseline run at a DIFFERENT serving invariant
+(e.g. baseline at a smaller mem-fraction than the candidate) — that delta is confounded, not a real win.
+**Take its verdict seriously:** if a prior verdict is `FAIL`, fix every reason (re-measure with matched
+conditions, re-attribute the lever) and resubmit; do not keep a win the check would not PASS.
 
 You are invoked per PHASE. Read first: `SKILL_DIR/knowledge/e2e_optimization.md` (Tier 0 knobs),
 `SKILL_DIR/knowledge/sglang_internals.md` (the exact flags/env + how to verify a swap took effect),

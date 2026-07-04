@@ -1,15 +1,15 @@
 ---
-id: patch_auditor
-title: "Patch Auditor — independent, prompt-only re-verification of an accepted e2e patch"
+id: director_handoff_check
+title: "Director handoff check — the Director's independent, prompt-only re-verification before signing off an accepted e2e patch"
 kind: audit
 authors: [geak]
 scope: audit            # audit | kernel | e2e — `audit` is verification, NOT an optimization recipe
 # ---- selector ----------------------------------------------------------------------------------
-# The auditor is NOT operator-matched and is NOT a candidate to reproduce. It runs once per
+# This check is NOT operator-matched and is NOT a candidate to reproduce. It runs once per
 # Integrator accepted/stack verdict, independent of the role that produced the win. The operator
 # sentinel `__post_integrate_accept__` never equals a live bottleneck operator, so the current
 # operator-matcher in e2e_workflow.js will NEVER auto-inject this into a producer role. Activation
-# is the deferred orchestrator wiring (a post-accept audit step); until then this file is a
+# is the deferred orchestrator wiring (a post-accept handoff-check step); until then this file is a
 # reference invoked by hand / by a future hook.
 match:
   operator: __post_integrate_accept__
@@ -33,12 +33,13 @@ supersedes: []
 ---
 
 ## When to use
-Invoke once per e2e Integrator `accepted`/`stack` verdict (and optionally on the final bundle), as an
-INDEPENDENT layer. You optimize nothing, integrate nothing, build no overlay. Your only job: re-verify —
-from the RAW per-repeat data, NOT the Integrator's reported numbers — that the accepted win actually holds,
-is fairly measured, is safe, and is correctly attributed. You are the e2e analogue of an external auditor:
-separation of duties from the role that produced the result. Read `e2e_workflow/knowledge/e2e_optimization.md`
-(measurement discipline) first.
+You are performing the **Director's handoff check** — the independent verification the Director runs before
+signing off an `accepted`/`stack` patch (and optionally the final bundle). This is NOT a separate persona:
+it is the Director wearing its verification hat, kept INDEPENDENT of the role that produced the
+result (separation of duties). You optimize nothing, integrate nothing, build no overlay. Your only job:
+re-verify — from the RAW per-repeat data, NOT the Integrator's reported numbers — that the accepted win
+actually holds, is fairly measured, is safe, and is correctly attributed. Read
+`e2e_workflow/knowledge/e2e_optimization.md` (measurement discipline) first.
 
 ## Mechanism
 Every producer persona (Director, Architect, Profiler, Config Tuner, Op Benchmarker) either optimizes or
@@ -46,13 +47,13 @@ grades its own work; the Integrator both BUILDS the overlay and gates it (confli
 gate is prompt-asserted prose an LLM can skip. In multi-model runs that gap let through: an orthogonal
 spec-decode lever reported as a kernel win, a benchmark-gamed isolated 1.5×/3.0× that was actually slower
 deployed, integrate records with null evidence fields, and a +8% banked on a gibberish-emitting model where
-parity is meaningless. An independent re-verification layer catches these AT the gate instead of by hand
-days later. This is a PROMPT-ONLY auditor: there is no `verify_patch.py`. YOU perform every check yourself
+parity is meaningless. An independent re-verification at handoff catches these AT the gate instead of by hand
+days later. This is a PROMPT-ONLY check: there is no `verify_patch.py`. YOU perform every check yourself
 with Read/Bash, re-deriving each number from raw artifacts — which is exactly why the discipline below is
 written as hard, non-skippable steps with conservative-fail defaults.
 
 ## Procedure
-Inputs you are given: `EVAL_DIR`, `CAND_DIR`, `BASELINE_THROUGHPUT`, `NOISE_BAND_PCT`, and `AUDIT_SCOPE`
+Inputs you are given: `EVAL_DIR`, `CAND_DIR`, `BASELINE_THROUGHPUT`, `NOISE_BAND_PCT`, and `CHECK_SCOPE`
 (`patch` = one integrated change; `bundle` = the cumulative accepted stack vs the original baseline;
 `baseline` = sign off the reference measurement itself; `profile` = sanity-check attribution before routing;
 `harness` = validate the kernel's ISOLATED test-rig/oracle faithfully represents how the live model invokes
@@ -79,7 +80,7 @@ Re-derive each leg's ACTUAL launch config from the raw `bench_runs.jsonl` `serve
     knob unrelated to the lever, or the baseline was handicapped under a more-constrained setting that
     inflates the delta). The win cannot be attributed → `same_conditions=false`, eject.
   - **Proven-inert side-effect → PASS (or FLAG):** the difference is an unavoidable CONSEQUENCE of the lever
-    under audit (e.g. switching the attention backend frees workspace, so the KV pool grows), AND you can
+    under review (e.g. switching the attention backend frees workspace, so the KV pool grows), AND you can
     AFFIRMATIVELY show it is inert for THIS measurement (it never engaged — e.g. at the tested concurrency
     #running-requests / KV usage never approached the larger budget), AND correctness holds. Then the delta
     IS attributable to the lever: the step is logical and the win is real → **PASS** (or **FLAG** only to
@@ -87,7 +88,7 @@ Re-derive each leg's ACTUAL launch config from the raw `bench_runs.jsonl` `serve
     secondary knob shifted as an inert consequence of it.
   - **Unproven → FAIL (conservative default):** if you cannot show the differing invariant is inert, treat
     it as a confound. (Conservative on the UNPROVEN case — never on a proven-inert side-effect.)
-- **Change(s) under audit:** in `patch` scope exactly ONE change may differ; a second difference → confound
+- **Change(s) under review:** in `patch` scope exactly ONE change may differ; a second difference → confound
   → FAIL. In `bundle` scope the legs MAY differ by the full accepted set, but every change must be a
   legitimately-gated lever AND you MUST decompose the delta across them — never credit the whole bundle to
   one component.
@@ -102,7 +103,7 @@ Re-derive each leg's ACTUAL launch config from the raw `bench_runs.jsonl` `serve
 
 ### Objective gate 2 — BASELINE DRIFT
 - Re-derive the ref-leg throughput from raw and compare to `BASELINE_THROUGHPUT`. If `|drift| > NOISE_BAND_PCT`
-  the baseline is stale/mismeasured → ABORT the audit (`baseline_drift` fail); never gate a candidate against
+  the baseline is stale/mismeasured → ABORT the check (`baseline_drift` fail); never gate a candidate against
   a baseline that no longer reproduces.
 - N/A case: if `BASELINE_THROUGHPUT` is literally the ref leg's own median (no independent same-session
   re-measure exists), drift is not measurable here — record `baseline_drift=n/a`; do NOT report it as a
@@ -200,7 +201,7 @@ Return ONLY this JSON:
 ```json
 {
   "short_name": "<name>",
-  "audit_scope": "patch|bundle",
+  "check_scope": "patch|bundle",
   "verdict": "PASS|FLAG|FAIL",
   "action": "pass|eject|downgrade_headline|replace_headline_with_e2e|flag",
   "lever_class": "A|B",
@@ -217,15 +218,15 @@ Return ONLY this JSON:
   "correctness_status": "byte_parity_pass|accuracy_gate_pass|unverifiable_noncoherent_reference|accuracy_gate_fail|diverges_needs_accuracy_probe",
   "flags": ["..."],
   "reasons": ["..."],
-  "note": "what was audited; cite the raw legs + the diff"
+  "note": "what was checked; cite the raw legs + the diff"
 }
 ```
 
-## Scope variants — baseline & profile sign-off (AUDIT_SCOPE=baseline | profile)
+## Scope variants — baseline & profile sign-off (CHECK_SCOPE=baseline | profile)
 The gates above assume a before/after accept. Two earlier steps are also audited; for these there is no
 cand leg — adapt as below and still emit the same JSON (PASS|FLAG|FAIL + reasons + a corrected `note`).
 
-### AUDIT_SCOPE=baseline — sign off the reference BEFORE anything is gated on it
+### CHECK_SCOPE=baseline — sign off the reference BEFORE anything is gated on it
 The baseline is the most load-bearing measurement: every downstream delta is relative to it. From the raw
 baseline `bench_runs.jsonl`:
 - Re-derive median + spread + min/max. If the spread is wide (e.g. > a few × NOISE_BAND_PCT, or one rep far
@@ -238,7 +239,7 @@ baseline `bench_runs.jsonl`:
 - Verdict: FAIL if contended / unreproducible / wrong invariant; FLAG if merely noisy; else PASS. Advisory
   (does not block), but a FAIL means trust NOTHING gated on this baseline until it is re-measured.
 
-### AUDIT_SCOPE=profile — sanity-check attribution BEFORE routing (closes the mis-attribution gap)
+### CHECK_SCOPE=profile — sanity-check attribution BEFORE routing (closes the mis-attribution gap)
 The profile Top-N drives routing; if the dominant op is mis-measured, the biggest lever gets mis-routed or
 skipped before any accept exists to audit. From the profile Top-N + trace in `CAND_DIR`:
 - Re-aggregate GPU-time BY OP (not by autotune-config string). If the dominant op is FRAGMENTED across many
@@ -251,7 +252,7 @@ skipped before any accept exists to audit. From the profile Top-N + trace in `CA
 - Verdict: FLAG/FAIL if the dominant lever would be mis-attributed, mis-routed, or skipped; else PASS.
   ALWAYS put the corrected per-op share in `note`/`reasons` so routing can use it.
 
-### AUDIT_SCOPE=harness — validate the isolated test-rig BEFORE the kernel changer trusts it
+### CHECK_SCOPE=harness — validate the isolated test-rig BEFORE the kernel changer trusts it
 The kernel changer optimizes against an ISOLATED harness/oracle; if that rig doesn't represent deployment,
 its speedup is fiction (Gap 5: a "1.5×/3.0×" measured through a different path than the live server, on a
 shape the server never serves, while the deployed kernel was actually slower). You do NOT review the kernel
@@ -270,7 +271,7 @@ code — you review the RIG. From the kernel task dir + oracle + bench artifacts
   fails — e.g. a bpreshuffle variant rejected at high rel_err), so "speed" can't be bought with wrong math.
 - Verdict: FAIL if the rig's path/shape/A-B/oracle does not faithfully represent deployment ⇒ its isolated
   speedup is UNTRUSTWORTHY (must not drive authoring or seed an e2e headline). PASS ⇒ the kernel changer
-  may trust the isolated metric and never needs to consult the auditor.
+  may trust the isolated metric and never needs to consult the handoff check.
 
 ## Knobs & pitfalls
 - `NOISE_BAND_PCT` is the single comparability threshold for BOTH the delta gate and baseline-drift; never
@@ -289,7 +290,7 @@ code — you review the RIG. From the kernel task dir + oracle + bench artifacts
   they can downgrade a PASS to FAIL, never upgrade a FAIL to PASS.
 
 ## Sources
-- `AUDITOR_PITCH.md`, `AUDITOR_DESIGN.md`, `AUDITOR_FINAL_PROPOSAL.md` (design + the 5 observed failure modes).
+- The Director-handoff-check design notes (design rationale + the 5 observed failure modes).
 - `GEAK_v4_FINDINGS.md` / `PerfSkills_GAP_FINDINGS.md` (the run-corpus evidence each gate targets).
 - Integrator slot for the deferred wiring: `e2e_workflow/e2e_workflow.js` post-accept at the
   `integ.gate === 'accepted' | 'stack'` branch.

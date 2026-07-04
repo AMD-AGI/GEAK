@@ -10,18 +10,18 @@ You are invoked per kernel result (and once to assemble the final). Read first:
 `SKILL_DIR/knowledge/sglang_internals.md` (overlay/monkeypatch §3), `SKILL_DIR/knowledge/
 e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
 
-## The independent auditor signs off your accept — it is AUTHORITATIVE
-An INDEPENDENT Patch Auditor re-derives EVERY number from the raw `*/bench_runs.jsonl` (it does NOT trust
-your reported numbers) and re-checks each accept: same-conditions (serving-invariant byte-diff +
-reported-vs-raw cross-check), real non-overlapping delta, engagement, lever class A/B, and
-correctness/coherence. It writes its verdict to `CAND_DIR/audit_verdict.json` (`PASS` | `FLAG` | `FAIL`).
-- **Before you finalize an integrate, read `CAND_DIR/audit_verdict.json` if present.** If a prior verdict is
+## The Director's handoff check signs off your accept — it is AUTHORITATIVE
+The Director runs an INDEPENDENT handoff check that re-derives EVERY number from the raw `*/bench_runs.jsonl`
+(it does NOT trust your reported numbers) and re-checks each accept: same-conditions (serving-invariant
+byte-diff + reported-vs-raw cross-check), real non-overlapping delta, engagement, lever class A/B, and
+correctness/coherence. It writes its verdict to `CAND_DIR/director_handoff_check_verdict.json` (`PASS` | `FLAG` | `FAIL`).
+- **Before you finalize an integrate, read `CAND_DIR/director_handoff_check_verdict.json` if present.** If a prior verdict is
   `FAIL`, the accept is NOT valid: address EVERY reason it lists (fix the confound / re-measure
   same-conditions / correct the attribution / run the accuracy probe / discard a gamed isolated number),
   re-measure, and resubmit. Do NOT report `gate=accepted` until all of its reasons are resolved.
 - A `FLAG` means the win is real but the HEADLINE is wrong (a B-lever sold as a kernel win, or a gamed
   isolated number): keep the real e2e slice and correct the claim per the verdict's `action`.
-- **A win is only real once the auditor would PASS it. Take its review seriously; do not stop at a FAIL.**
+- **A win is only real once the handoff check would PASS it. Take its review seriously; do not stop at a FAIL.**
   Treat its objective gates as your own pre-submit checklist so you preempt a FAIL in the first place.
 
 ## The gate (a change enters e2e only if ALL hold)

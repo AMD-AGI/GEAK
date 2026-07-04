@@ -388,32 +388,32 @@ async function safeAgent(prompt, opts, tries = 3) {
 }
 
 // ---------------------------------------------------------------------------
-// Patch Auditor hook — INDEPENDENT post-accept sign-off. PURELY ADDITIVE + default OFF: when
-// use_auditor is not 'true', auditAccept() returns null immediately and EVERY accept branch behaves
+// Director handoff check hook — INDEPENDENT post-accept sign-off. PURELY ADDITIVE + default OFF: when
+// use_director_handoff_check is not 'true', directorHandoffCheck() returns null immediately and EVERY accept branch behaves
 // byte-identically to a build without this feature. When ON, after each accept (config sweep, every
-// kernel/head integrate, and the final bundle) an INDEPENDENT auditor agent re-derives every number
+// kernel/head integrate, and the final bundle) an INDEPENDENT handoff check agent re-derives every number
 // from the raw bench_runs.jsonl (NEVER the producer's reported numbers), runs the objective gates +
-// interpretive judgments per the patch_auditor skill, and returns a PASS|FLAG|FAIL verdict. A FAIL is
+// interpretive judgments per the director_handoff_check skill, and returns a PASS|FLAG|FAIL verdict. A FAIL is
 // NOT banked and its reasons are fed back as a ledger lesson so the producing role can fix it on a
 // later attempt; a FLAG keeps the real win but records the headline correction. Banking is FAIL-CLOSED:
-// a producing role CANNOT ignore the auditor — only an explicit PASS or FLAG sign-off lets the accept be
+// a producing role CANNOT ignore the handoff check — only an explicit PASS or FLAG sign-off lets the accept be
 // banked; a FAIL or a missing verdict (degraded after retries) BLOCKS it. The decision lives in code here,
 // not in the producing agent's self-report.
 // ---------------------------------------------------------------------------
-const USE_AUDITOR = String(A.use_auditor != null ? A.use_auditor : 'false') === 'true';
-const AUDITOR_SKILL = String(A.auditor_skill ||
-  `${WORKFLOW_DIR}/../perf_knowledge/expert_skills/skills/patch_auditor/skill.md`);
-const AUDITOR_MAX_REMEASURE = parseInt(A.auditor_max_remeasure != null ? A.auditor_max_remeasure : '1', 10);
-// Bound on the head-kernel HARNESS auditor redo loop: how many times the op_benchmarker re-measures its
-// isolated rig after the independent harness auditor REJECTS it (dispatch/launch parity, served shapes,
-// fair baseline, immutable oracle). Mirrors AUDITOR_MAX_REMEASURE; override via args.auditor_max_fix.
-const AUDITOR_MAX_FIX = parseInt(A.auditor_max_fix != null ? A.auditor_max_fix : '1', 10);
+const USE_DIRECTOR_HANDOFF_CHECK = String(A.use_director_handoff_check != null ? A.use_director_handoff_check : 'false') === 'true';
+const DIRECTOR_HANDOFF_CHECK_SKILL = String(A.director_handoff_check_skill ||
+  `${WORKFLOW_DIR}/../perf_knowledge/expert_skills/skills/director_handoff_check/skill.md`);
+const DIRECTOR_HANDOFF_CHECK_MAX_REMEASURE = parseInt(A.director_handoff_check_max_remeasure != null ? A.director_handoff_check_max_remeasure : '1', 10);
+// Bound on the head-kernel HARNESS handoff check redo loop: how many times the op_benchmarker re-measures its
+// isolated rig after the independent harness handoff check REJECTS it (dispatch/launch parity, served shapes,
+// fair baseline, immutable oracle). Mirrors DIRECTOR_HANDOFF_CHECK_MAX_REMEASURE; override via args.director_handoff_check_max_fix.
+const DIRECTOR_HANDOFF_CHECK_MAX_FIX = parseInt(A.director_handoff_check_max_fix != null ? A.director_handoff_check_max_fix : '1', 10);
 // Tolerant verdict parse (case/whitespace-insensitive) so a string variant never brittle-breaks a gate.
 // ONLY an explicit FAIL blocks a bank; PASS/FLAG bank; a degraded/absent verdict is advisory (banks with a
 // loud flag) — a tooling failure must never silently kill a real win. The real "fix until it passes"
-// enforcement lives in the producing agents' prompts (they receive AUDITOR_FEEDBACK and must address it).
+// enforcement lives in the producing agents' prompts (they receive DIRECTOR_HANDOFF_CHECK_FEEDBACK and must address it).
 const verdictIs = (a, w) => !!(a && typeof a.verdict === 'string' && a.verdict.trim().toUpperCase().startsWith(w));
-const AUDIT_SCHEMA = obj({
+const DIRECTOR_HANDOFF_CHECK_SCHEMA = obj({
   verdict: { type: 'string' }, action: { type: 'string' }, lever_class: { type: 'string' },
   counts_as_kernel_win: { type: 'boolean' }, e2e_delta_pct: { type: 'number' },
   same_conditions_ok: { type: 'boolean' }, engagement_ok: { type: 'boolean' },
@@ -421,15 +421,15 @@ const AUDIT_SCHEMA = obj({
   correctness_status: { type: 'string' }, reasons: arrStr, note: { type: 'string' },
 }, ['verdict']);
 
-async function auditAccept(o) {
-  if (!USE_AUDITOR) return null;
-  const prompt = `You are the Patch Auditor — an INDEPENDENT verification layer. You optimize and integrate
+async function directorHandoffCheck(o) {
+  if (!USE_DIRECTOR_HANDOFF_CHECK) return null;
+  const prompt = `You are performing the Director's handoff check — an INDEPENDENT verification layer. You optimize and integrate
 NOTHING; you ONLY re-verify, from the RAW data (NEVER the producer's reported numbers), that this step is
-sound per the skill's checks for the given AUDIT_SCOPE (an accept must be real/fair/safe/attributed; a
+sound per the skill's checks for the given CHECK_SCOPE (an accept must be real/fair/safe/attributed; a
 baseline must be a sound reference; a profile must attribute the dominant lever correctly before routing).
-First Read ${AUDITOR_SKILL} and follow it EXACTLY — its gates, verdict states (PASS|FLAG|FAIL), and output JSON.
+First Read ${DIRECTOR_HANDOFF_CHECK_SKILL} and follow it EXACTLY — its gates, verdict states (PASS|FLAG|FAIL), and output JSON.
 Inputs:
-- AUDIT_SCOPE: ${o.scope}
+- CHECK_SCOPE: ${o.scope}
 - EVAL_DIR: ${EVAL_DIR}
 - CAND_DIR: ${o.candDir}   (locate the ref/before and cand/after timed legs yourself by their bench_runs.jsonl)
 - BASELINE_THROUGHPUT: ${o.baselineTput || BASELINE_TPUT}
@@ -439,10 +439,10 @@ Do all file IO yourself (Read/Bash). Re-derive medians/min-max/non-overlap from 
 (same-conditions incl. serving invariant + reported-vs-raw cross-check; baseline-drift; real non-overlapping
 delta; engagement; headline integrity) and the interpretive judgments (lever A/B; correctness/coherence).
 Write your verdict JSON to ${o.candDir}/audit_verdict.json, then return ONLY that JSON.`;
-  const v = await safeAgent(prompt, { phase: 'Audit', label: `audit:${o.label}`, schema: AUDIT_SCHEMA }, 3);
-  if (v) log(`  [AUDITOR] ${o.label}: ${v.verdict}${v.action ? ' -> ' + v.action : ''}` +
+  const v = await safeAgent(prompt, { phase: 'DirectorHandoffCheck', label: `director_handoff_check:${o.label}`, schema: DIRECTOR_HANDOFF_CHECK_SCHEMA }, 3);
+  if (v) log(`  [DIRECTOR_CHECK] ${o.label}: ${v.verdict}${v.action ? ' -> ' + v.action : ''}` +
     `${(v.reasons && v.reasons.length) ? ' | ' + v.reasons.join('; ') : ''}`);
-  else log(`  [AUDITOR] ${o.label}: no verdict after retries — treated as NOT signed off (fail-closed); accept will be blocked.`);
+  else log(`  [DIRECTOR_CHECK] ${o.label}: no verdict after retries — treated as NOT signed off (fail-closed); accept will be blocked.`);
   return v;
 }
 
@@ -541,29 +541,29 @@ if (want('setup')) {
   curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
   curEnv = INIT_ENV || (setup.server_env || '');
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
-  // Sign off the BASELINE itself before anything is gated on it, and ACT on the verdict: if the auditor
+  // Sign off the BASELINE itself before anything is gated on it, and ACT on the verdict: if the handoff check
   // FLAGs/FAILs it (noisy spread / wrong invariant / contention), AUTO RE-MEASURE up to
-  // AUDITOR_MAX_REMEASURE times (director re-measures in the SAME EVAL_DIR: discard warm-up rep, add reps),
-  // then re-audit — so nothing downstream is gated on a baseline the auditor rejected. Inert when OFF.
-  let baselineAudit = await auditAccept({ scope: 'baseline', candDir: `${EVAL_DIR}/baseline`, baselineTput: BASELINE_TPUT,
+  // DIRECTOR_HANDOFF_CHECK_MAX_REMEASURE times (director re-measures in the SAME EVAL_DIR: discard warm-up rep, add reps),
+  // then re-audit — so nothing downstream is gated on a baseline the handoff check rejected. Inert when OFF.
+  let baselineAudit = await directorHandoffCheck({ scope: 'baseline', candDir: `${EVAL_DIR}/baseline`, baselineTput: BASELINE_TPUT,
     what: `baseline reference ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`, label: 'baseline' });
-  for (let rb = 0; USE_AUDITOR && baselineAudit && baselineAudit.verdict !== 'PASS' && rb < AUDITOR_MAX_REMEASURE; rb++) {
-    log(`  [AUDITOR] baseline ${baselineAudit.verdict} -> RE-MEASURING (attempt ${rb + 1}/${AUDITOR_MAX_REMEASURE}). ${(baselineAudit.reasons || []).join('; ')}`);
+  for (let rb = 0; USE_DIRECTOR_HANDOFF_CHECK && baselineAudit && baselineAudit.verdict !== 'PASS' && rb < DIRECTOR_HANDOFF_CHECK_MAX_REMEASURE; rb++) {
+    log(`  [DIRECTOR_CHECK] baseline ${baselineAudit.verdict} -> RE-MEASURING (attempt ${rb + 1}/${DIRECTOR_HANDOFF_CHECK_MAX_REMEASURE}). ${(baselineAudit.reasons || []).join('; ')}`);
     const reb = await safeAgent(
       roleAgent('director', 'setup', 'RE-MEASURE THE BASELINE ONLY in the EXISTING EVAL_DIR (EVAL_DIR_OVERRIDE is set — do NOT create a new dir, do NOT rebuild the env or re-run preflight): discard the first warm-up repeat, run additional WARM repeats until the inter-repeat spread is within (or near) the noise band, and update the TRUE baseline throughput. Keep the SAME serving invariant.', {
         LAUNCH_SCRIPT, MODEL_PATH, EXP_ROOT, EVAL_DIR_OVERRIDE: EVAL_DIR, MODEL_NAME_HINT: MODEL_NAME, TASK,
         GPU_IDS, WORKLOAD, INIT_FLAGS: curFlags, INIT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        REMEASURE_BASELINE: 'true', AUDITOR_REASONS: (baselineAudit.reasons || []).join('; '),
+        REMEASURE_BASELINE: 'true', DIRECTOR_HANDOFF_CHECK_REASONS: (baselineAudit.reasons || []).join('; '),
       }),
       { phase: 'Setup', label: `director:remeasure-baseline ${rb + 1}`, schema: SETUP_SCHEMA });
     if (reb && reb.eval_dir) EVAL_DIR = reb.eval_dir;
     if (reb && reb.baseline_throughput_tok_s) BASELINE_TPUT = reb.baseline_throughput_tok_s;
     log(`  Baseline re-measured -> ${BASELINE_TPUT} tok/s. Re-auditing.`);
-    baselineAudit = await auditAccept({ scope: 'baseline', candDir: `${EVAL_DIR}/baseline`, baselineTput: BASELINE_TPUT,
+    baselineAudit = await directorHandoffCheck({ scope: 'baseline', candDir: `${EVAL_DIR}/baseline`, baselineTput: BASELINE_TPUT,
       what: `re-measured baseline ${BASELINE_TPUT} tok/s`, label: `baseline:remeasure${rb + 1}` });
   }
-  if (USE_AUDITOR && baselineAudit && baselineAudit.verdict !== 'PASS')
-    log(`  [AUDITOR] baseline still ${baselineAudit.verdict} after ${AUDITOR_MAX_REMEASURE} re-measure(s) — proceeding; downstream gates are advised the reference is imperfect.`);
+  if (USE_DIRECTOR_HANDOFF_CHECK && baselineAudit && baselineAudit.verdict !== 'PASS')
+    log(`  [DIRECTOR_CHECK] baseline still ${baselineAudit.verdict} after ${DIRECTOR_HANDOFF_CHECK_MAX_REMEASURE} re-measure(s) — proceeding; downstream gates are advised the reference is imperfect.`);
 
   phase('Profile');
   profile = await safeAgent(
@@ -575,8 +575,8 @@ if (want('setup')) {
   log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
   // Sign off the PROFILE's attribution BEFORE routing (closes the mis-attribution gap): a fragmented /
   // misclassified dominant op would be mis-routed or skipped before any accept exists to audit. The note
-  // is fed into strategize so the architect routes on corrected shares. Inert when use_auditor is off.
-  const profileAudit = await auditAccept({ scope: 'profile', candDir: `${EVAL_DIR}/profile/round_0`,
+  // is fed into strategize so the architect routes on corrected shares. Inert when use_director_handoff_check is off.
+  const profileAudit = await directorHandoffCheck({ scope: 'profile', candDir: `${EVAL_DIR}/profile/round_0`,
     baselineTput: BASELINE_TPUT, what: 'initial profile Top-N used for routing', label: 'profile:round_0' });
 
   phase('Strategize');
@@ -584,7 +584,7 @@ if (want('setup')) {
     roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
       EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
       WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
-      ...(USE_AUDITOR && profileAudit ? { PROFILE_AUDIT_NOTE: `${profileAudit.verdict}: ${(profileAudit.reasons || []).join('; ')}${profileAudit.note ? ' | ' + profileAudit.note : ''}` } : {}),
+      ...(USE_DIRECTOR_HANDOFF_CHECK && profileAudit ? { PROFILE_CHECK_NOTE: `${profileAudit.verdict}: ${(profileAudit.reasons || []).join('; ')}${profileAudit.note ? ' | ' + profileAudit.note : ''}` } : {}),
     }),
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
@@ -620,14 +620,14 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
     }),
     { phase: 'ConfigSweep', label: 'config_tuner:sweep', schema: SWEEP_SCHEMA });
   const configAudit = (sweep && sweep.best_throughput_tok_s > curTput)
-    ? await auditAccept({ scope: 'patch', candDir: `${EVAL_DIR}/config`, baselineTput: BASELINE_TPUT,
+    ? await directorHandoffCheck({ scope: 'patch', candDir: `${EVAL_DIR}/config`, baselineTput: BASELINE_TPUT,
         what: `config sweep accept: ${(sweep.accepted_flags || '')} ${(sweep.accepted_env || '')}`.trim(),
         label: 'config_sweep' })
     : null;
-  if (sweep && sweep.best_throughput_tok_s > curTput && USE_AUDITOR && verdictIs(configAudit, 'FAIL')) {
-    log(`Config sweep AUDITOR FAIL — not banked; carrying prior config (reasons fed back). ${(configAudit.reasons || []).join('; ')}`);
+  if (sweep && sweep.best_throughput_tok_s > curTput && USE_DIRECTOR_HANDOFF_CHECK && verdictIs(configAudit, 'FAIL')) {
+    log(`Config sweep HANDOFF-CHECK FAIL — not banked; carrying prior config (reasons fed back). ${(configAudit.reasons || []).join('; ')}`);
   } else if (sweep && sweep.best_throughput_tok_s > curTput) {
-    if (configAudit && configAudit.verdict === 'FLAG') log(`Config sweep AUDITOR FLAG (${configAudit.action}) — kept; headline corrected. ${(configAudit.reasons || []).join('; ')}`);
+    if (configAudit && configAudit.verdict === 'FLAG') log(`Config sweep HANDOFF-CHECK FLAG (${configAudit.action}) — kept; headline corrected. ${(configAudit.reasons || []).join('; ')}`);
     curFlags = sweep.accepted_flags || curFlags;
     curEnv = sweep.accepted_env || curEnv;
     curTput = sweep.best_throughput_tok_s;
@@ -836,19 +836,19 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         }),
         { phase: 'HeadKernel', label: `integrate ${h.short_name}`, schema: INTEGRATE_SCHEMA });
       if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
-        const audit = await auditAccept({ scope: 'patch', candDir: integ.accepted_overlay || `${EVAL_DIR}/overlay/cand_${h.short_name}`, baselineTput: BASELINE_TPUT, what: `head integrate ${h.short_name} (${cand.source} ${cand.winner_kind}, isolated ${cand.isolated})`, label: `integrate ${h.short_name}` });
-        if (USE_AUDITOR && verdictIs(audit, 'FAIL')) {
+        const audit = await directorHandoffCheck({ scope: 'patch', candDir: integ.accepted_overlay || `${EVAL_DIR}/overlay/cand_${h.short_name}`, baselineTput: BASELINE_TPUT, what: `head integrate ${h.short_name} (${cand.source} ${cand.winner_kind}, isolated ${cand.isolated})`, label: `integrate ${h.short_name}` });
+        if (USE_DIRECTOR_HANDOFF_CHECK && verdictIs(audit, 'FAIL')) {
           const why = (audit.reasons || []).join('; ');
-          log(`  ${h.short_name}: AUDITOR FAIL — not banked; reasons fed back for the integrator to fix. ${why}`);
-          history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'auditor_reject', lesson: `AUDITOR FAIL — take seriously, fix every point, resubmit: ${why}` });
+          log(`  ${h.short_name}: HANDOFF-CHECK FAIL — not banked; reasons fed back for the integrator to fix. ${why}`);
+          history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'handoff check_reject', lesson: `HANDOFF-CHECK FAIL — take seriously, fix every point, resubmit: ${why}` });
         } else {
         curOverlay = integ.accepted_overlay || curOverlay;
         if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
         if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
         curTput = integ.e2e_throughput_tok_s;
         acceptedHeads.push({ short_name: h.short_name, op_kind: st.ext.op_kind, backend: cand.source, kind: cand.winner_kind, e2e_delta_pct: integ.e2e_delta_pct, isolated: cand.isolated });
-        log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).${audit && audit.verdict === 'FLAG' ? ' [AUDITOR FLAG: ' + audit.action + ']' : ''}`);
-        history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: (integ.reason || '') + (audit && audit.verdict === 'FLAG' ? ` | AUDITOR FLAG: ${(audit.reasons || []).join('; ')}` : '') });
+        log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).${audit && audit.verdict === 'FLAG' ? ' [HANDOFF-CHECK FLAG: ' + audit.action + ']' : ''}`);
+        history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: (integ.reason || '') + (audit && audit.verdict === 'FLAG' ? ` | HANDOFF-CHECK FLAG: ${(audit.reasons || []).join('; ')}` : '') });
         }
       } else {
         log(`  ${h.short_name}: REJECTED at e2e gate (${integ ? integ.reason || integ.gate : 'none'}).`);
@@ -904,15 +904,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // HARNESS/ORACLE fidelity sign-off: validate the isolated rig measures the op the SAME way the live
     // server invokes it (dispatch/launch parity, served shapes, fair baseline!=candidate, immutable oracle)
     // BEFORE the number is trusted for authoring/integrate. On FAIL the op_benchmarker REDOES the
-    // measurement and the auditor re-checks (bounded). Inert when use_auditor is off.
-    for (let hf = 0; USE_AUDITOR && bake && (bake.gate === 'have_winner' || bake.gate === 'author_recommended') && hf < AUDITOR_MAX_FIX; hf++) {
-      const hAudit = await auditAccept({ scope: 'harness', candDir: ext.task_dir, baselineTput: BASELINE_TPUT,
+    // measurement and the handoff check re-checks (bounded). Inert when use_director_handoff_check is off.
+    for (let hf = 0; USE_DIRECTOR_HANDOFF_CHECK && bake && (bake.gate === 'have_winner' || bake.gate === 'author_recommended') && hf < DIRECTOR_HANDOFF_CHECK_MAX_FIX; hf++) {
+      const hAudit = await directorHandoffCheck({ scope: 'harness', candDir: ext.task_dir, baselineTput: BASELINE_TPUT,
         what: `isolated harness/oracle + bake-off for ${h.short_name} (reported isolated ${bake.isolated_speedup})`, label: `harness ${h.short_name}` });
       if (!verdictIs(hAudit, 'FAIL')) break;
-      log(`  ${h.short_name}: HARNESS AUDITOR FAIL -> op_benchmarker REDO (${hf + 1}/${AUDITOR_MAX_FIX}): ${(hAudit.reasons || []).join('; ')}`);
+      log(`  ${h.short_name}: HARNESS HANDOFF-CHECK FAIL -> op_benchmarker REDO (${hf + 1}/${DIRECTOR_HANDOFF_CHECK_MAX_FIX}): ${(hAudit.reasons || []).join('; ')}`);
       history.ledger.push({ direction: h.short_name, verdict: 'harness_reject', lesson: `HARNESS FAIL (fix rig & re-measure): ${(hAudit.reasons || []).join('; ')}` });
       bake = await safeAgent(
-        roleAgent('op_benchmarker', 'bakeoff', 'REDO the bake-off: the INDEPENDENT harness auditor REJECTED your measurement rig — fix EVERY reason (dispatch/launch parity with how the LIVE server invokes the op, representative served shapes, fair baseline != candidate, immutable oracle) and re-measure. Do NOT report an isolated number the auditor would reject.', { ...bakeInputs, HARNESS_AUDIT_FEEDBACK: (hAudit.reasons || []).join('; ') }),
+        roleAgent('op_benchmarker', 'bakeoff', 'REDO the bake-off: the INDEPENDENT harness handoff check REJECTED your measurement rig — fix EVERY reason (dispatch/launch parity with how the LIVE server invokes the op, representative served shapes, fair baseline != candidate, immutable oracle) and re-measure. Do NOT report an isolated number the handoff check would reject.', { ...bakeInputs, HARNESS_CHECK_FEEDBACK: (hAudit.reasons || []).join('; ') }),
         { phase: 'HeadKernel', label: `bakeoff-redo ${h.short_name}`, schema: OPBENCH_SCHEMA });
     }
     if (!bake || (bake.gate !== 'have_winner' && bake.gate !== 'author_recommended')) {
@@ -1025,11 +1025,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       { phase: 'HeadKernel', label: `integrate ${h.short_name}`, schema: INTEGRATE_SCHEMA });
 
     if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
-      const audit = await auditAccept({ scope: 'patch', candDir: integ.accepted_overlay || `${EVAL_DIR}/overlay/cand_${h.short_name}`, baselineTput: BASELINE_TPUT, what: `head integrate ${h.short_name} (${cand.source} ${cand.winner_kind}, isolated ${cand.isolated})`, label: `integrate ${h.short_name}` });
-      if (USE_AUDITOR && verdictIs(audit, 'FAIL')) {
+      const audit = await directorHandoffCheck({ scope: 'patch', candDir: integ.accepted_overlay || `${EVAL_DIR}/overlay/cand_${h.short_name}`, baselineTput: BASELINE_TPUT, what: `head integrate ${h.short_name} (${cand.source} ${cand.winner_kind}, isolated ${cand.isolated})`, label: `integrate ${h.short_name}` });
+      if (USE_DIRECTOR_HANDOFF_CHECK && verdictIs(audit, 'FAIL')) {
         const why = (audit.reasons || []).join('; ');
-        log(`  ${h.short_name}: AUDITOR FAIL — not banked; reasons fed back for the integrator to fix. ${why}`);
-        history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'auditor_reject', lesson: `AUDITOR FAIL — take seriously, fix every point, resubmit: ${why}` });
+        log(`  ${h.short_name}: HANDOFF-CHECK FAIL — not banked; reasons fed back for the integrator to fix. ${why}`);
+        history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'handoff check_reject', lesson: `HANDOFF-CHECK FAIL — take seriously, fix every point, resubmit: ${why}` });
       } else {
       // a head winner may be carried as overlay (authored/patch) AND/OR config (env/flag) — capture both.
       curOverlay = integ.accepted_overlay || curOverlay;
@@ -1037,8 +1037,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
       curTput = integ.e2e_throughput_tok_s;
       acceptedHeads.push({ short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: cand.winner_kind, e2e_delta_pct: integ.e2e_delta_pct, isolated: cand.isolated });
-      log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).${audit && audit.verdict === 'FLAG' ? ' [AUDITOR FLAG: ' + audit.action + ']' : ''}`);
-      history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: (integ.reason || '') + (audit && audit.verdict === 'FLAG' ? ` | AUDITOR FLAG: ${(audit.reasons || []).join('; ')}` : '') });
+      log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).${audit && audit.verdict === 'FLAG' ? ' [HANDOFF-CHECK FLAG: ' + audit.action + ']' : ''}`);
+      history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: (integ.reason || '') + (audit && audit.verdict === 'FLAG' ? ` | HANDOFF-CHECK FLAG: ${(audit.reasons || []).join('; ')}` : '') });
       }
     } else {
       log(`  ${h.short_name}: REJECTED at e2e gate (${integ ? integ.reason || integ.gate : 'none'}).`);
@@ -1171,18 +1171,18 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
       { phase: 'Milestone', label: `integrate ${c.short_name}`, schema: INTEGRATE_SCHEMA });
 
     if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
-      const audit = await auditAccept({ scope: 'patch', candDir: integ.accepted_overlay || `${EVAL_DIR}/overlay/cand_${c.short_name}`, baselineTput: BASELINE_TPUT, what: `kernel integrate ${c.short_name} (isolated ${kl.final_geomean})`, label: `integrate ${c.short_name}` });
-      if (USE_AUDITOR && verdictIs(audit, 'FAIL')) {
+      const audit = await directorHandoffCheck({ scope: 'patch', candDir: integ.accepted_overlay || `${EVAL_DIR}/overlay/cand_${c.short_name}`, baselineTput: BASELINE_TPUT, what: `kernel integrate ${c.short_name} (isolated ${kl.final_geomean})`, label: `integrate ${c.short_name}` });
+      if (USE_DIRECTOR_HANDOFF_CHECK && verdictIs(audit, 'FAIL')) {
         const why = (audit.reasons || []).join('; ');
-        log(`  ${c.short_name}: AUDITOR FAIL — not banked; reasons fed back for the integrator to fix. ${why}`);
-        history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'auditor_reject', lesson: `AUDITOR FAIL — take seriously, fix every point, resubmit: ${why}` });
+        log(`  ${c.short_name}: HANDOFF-CHECK FAIL — not banked; reasons fed back for the integrator to fix. ${why}`);
+        history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'handoff check_reject', lesson: `HANDOFF-CHECK FAIL — take seriously, fix every point, resubmit: ${why}` });
       } else {
       curOverlay = integ.accepted_overlay || curOverlay;
       curTput = integ.e2e_throughput_tok_s;
       acceptedKernels.push({ short_name: c.short_name, backend: kl.note || '', e2e_delta_pct: integ.e2e_delta_pct, isolated: kl.final_geomean });
       milestoneImproved = true;
-      log(`  ${c.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).${audit && audit.verdict === 'FLAG' ? ' [AUDITOR FLAG: ' + audit.action + ']' : ''}`);
-      history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: (integ.reason || '') + (audit && audit.verdict === 'FLAG' ? ` | AUDITOR FLAG: ${(audit.reasons || []).join('; ')}` : '') });
+      log(`  ${c.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).${audit && audit.verdict === 'FLAG' ? ' [HANDOFF-CHECK FLAG: ' + audit.action + ']' : ''}`);
+      history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: (integ.reason || '') + (audit && audit.verdict === 'FLAG' ? ` | HANDOFF-CHECK FLAG: ${(audit.reasons || []).join('; ')}` : '') });
       }
     } else {
       log(`  ${c.short_name}: REJECTED at e2e gate (${integ ? integ.reason || integ.gate : 'none'}).`);
@@ -1261,10 +1261,10 @@ if (want('final')) {
   // Independent sign-off on the FINAL bundle (the headline). Advisory at this stage: the run is done, but
   // a FAIL/FLAG here is the loud "do not trust this headline as-is" record (confound, misattribution,
   // unverifiable correctness) the producing roles graded themselves on.
-  const bundleAudit = await auditAccept({ scope: 'bundle', candDir: `${EVAL_DIR}/validation`,
+  const bundleAudit = await directorHandoffCheck({ scope: 'bundle', candDir: `${EVAL_DIR}/validation`,
     baselineTput: BASELINE_TPUT, what: `final bundle: ${MODEL_NAME} ${BASELINE_TPUT} -> ${validation ? validation.director_verified_throughput_tok_s : finalTput} tok/s`,
     label: 'final_bundle' });
-  if (bundleAudit && bundleAudit.verdict !== 'PASS') log(`  [AUDITOR] FINAL BUNDLE ${bundleAudit.verdict} (${bundleAudit.action || ''}) — headline needs correction, NOT a clean win. ${(bundleAudit.reasons || []).join('; ')}`);
+  if (bundleAudit && bundleAudit.verdict !== 'PASS') log(`  [DIRECTOR_CHECK] FINAL BUNDLE ${bundleAudit.verdict} (${bundleAudit.action || ''}) — headline needs correction, NOT a clean win. ${(bundleAudit.reasons || []).join('; ')}`);
 } else {
   log(`Phase(s) [${PHASES.join(',')}] done. Carried throughput ${curTput} tok/s. Pass the returned 'state' to the next phase invocation.`);
 }
