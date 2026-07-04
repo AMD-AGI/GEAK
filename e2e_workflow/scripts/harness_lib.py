@@ -9,17 +9,19 @@ self-contained + immutable + sha-checkable.
 
 It exists to close two systematic "isolated win / e2e loss" holes that a naive per-op harness has:
 
-(a) DEPLOYMENT-REPRESENTATIVE TIMING — do not reward collapsing Python launch/dispatch overhead.
-    The classic exploit: time the launcher in a tight `for _ in range(50): fn(); sync()` loop. For
-    decode shapes (small M) the wall clock is floored by per-call Python dispatch, NOT the GEMM. A
-    candidate then wraps the whole op in a CUDA graph and `graph.replay()` — collapsing a dispatch
-    floor that in the LIVE server is ALREADY gone (decode runs inside the server's own CUDA graph).
-    Result: a huge isolated "speedup" that evaporates on integration.
-    Fix: `time_op` amortizes the per-call host floor by issuing `inner` back-to-back launches between
-    two syncs and dividing by `inner`. Baseline and candidate are timed under the IDENTICAL loop, so a
-    graph wrapper buys nothing the amortization didn't already give the baseline — the number reflects
-    kernel work, not dispatch. (Optional `graph=True` times the same amortized body under a captured
-    graph, i.e. exactly the deployment context, for ops where that is reproducible.)
+(a) DEPLOYMENT-REPRESENTATIVE TIMING — score device work, not host launch/dispatch overhead, and read
+    memory-bound kernels COLD from HBM like the live server does.
+    The classic exploit: time the launcher in a tight `for _ in range(50): fn(); sync()` wall-clock loop.
+    For decode shapes (small M) the wall clock is floored by per-call Python dispatch, NOT the GEMM. A
+    candidate then wraps the op in a CUDA graph and `graph.replay()` — collapsing a dispatch floor that
+    in the LIVE server is ALREADY gone (decode runs inside the server's own CUDA graph). Result: a huge
+    isolated "speedup" that evaporates on integration.
+    Fix: `time_op` scores CUDA-EVENT DEVICE time (the GPU timeline between two events), which excludes
+    host launch/dispatch entirely — so collapsing dispatch buys nothing and no `inner` amortization is
+    needed (inner=1). WALL time is measured alongside as a reference only. It also FLUSHES the last-level/
+    Infinity cache before each sample so a memory-bound decode kernel reads its weights cold from HBM,
+    matching deployment (the model working set >> cache, evicted between decode steps). `graph=True` times
+    a captured-graph replay (the exact decode deployment context) with the same event+flush method.
 
 (b) MULTI-ACCESS CORRECTNESS + AMDAHL SANITY.
     - `check_correct_multi` runs several DISTINCT-input cases, keeps ALL returned tensors live, and
@@ -35,6 +37,7 @@ It exists to close two systematic "isolated win / e2e loss" holes that a naive p
       the ceiling is box drift / measurement error, not the kernel.
 """
 import math
+import os
 import time
 
 
@@ -225,48 +228,120 @@ def deployment_graph_mode(regime):
     return bool(regime.get("cuda_graph", True))
 
 
-def time_op(call, warmup=10, repeats=50, inner=16, graph=False):
-    """Median PER-CALL milliseconds, with the per-call host dispatch floor amortized.
+def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=True, detail=False):
+    """Median PER-CALL milliseconds. PRIMARY metric = CUDA-EVENT DEVICE time; wall-clock is a reference.
 
-    `call` is a zero-arg closure that issues ONE op launch (and returns its output; the return is
-    ignored for timing). We measure `inner` back-to-back launches between two syncs and divide by
-    `inner`, so the Python/dispatch floor is spread across `inner` calls instead of dominating the
-    small-M (decode) number. Baseline and candidate MUST be timed with the SAME `inner`, so no
-    candidate can win purely by collapsing that floor (e.g. a CUDA-graph replay wrapper) — the
-    baseline already gets the same amortization. This is the core of hole (a).
+    `call` is a zero-arg closure that issues ONE op launch (its return is ignored for timing).
+      - DEVICE time is measured with cuda.Event around the launch(es) — the GPU-timeline duration, which
+        EXCLUDES host launch/dispatch. This is the number a speedup is scored on, so a candidate cannot
+        win by collapsing dispatch (a graph wrapper), and no amortization is needed: inner=1 gives clean
+        device time for any kernel whose runtime >> event resolution (~1us). Raise `inner` only for
+        sub-microsecond kernels (amortizes event/launch resolution).
+      - WALL time (perf_counter+sync) is measured in the SAME loop and reported as a REFERENCE only
+        (host+device); a large wall≫device gap flags a host-bound op.
+    `flush_cache` (default True) evicts the last-level/Infinity cache BEFORE each timed sample so a
+    memory-bound decode kernel reads its weights COLD from HBM — matching the live server, where the model
+    working set >> cache and every weight is evicted between decode steps. Flushed OUTSIDE the event window.
 
-    Set `graph=True` to time the amortized body under a captured CUDA graph — i.e. the actual
-    deployment context (decode runs inside the server's graph). Falls back to eager amortized timing
-    if capture is unavailable/unsupported for this `call`.
+    `graph=True` times a captured CUDA-graph replay (the decode deployment context) with the same
+    event+flush method; falls back to eager event timing if capture is unavailable (see the `timer` field).
 
-    Returns median ms for a SINGLE launch, or None if `call` raises.
-    """
+    Returns median device ms (float), or {ms, wall_ms, timer} when detail=True. None if `call` raises.
+    On a box without CUDA, device time is unavailable so ms == wall_ms and timer='wall'."""
     torch = _torch()
     inner = max(1, int(inner))
     try:
-        if graph and torch.cuda.is_available():
+        have_cuda = bool(torch.cuda.is_available())
+    except Exception:
+        have_cuda = False
+    try:
+        if have_cuda and graph:
             g = _try_capture(torch, call, inner)
             if g is not None:
-                return _time_graph(torch, g, warmup, repeats)
-        for _ in range(max(1, warmup)):
-            call()
-        sync(torch)
-        samples = []
-        for _ in range(max(1, repeats)):
-            t0 = time.perf_counter()
-            for _ in range(inner):
-                call()
-            sync(torch)
-            samples.append((time.perf_counter() - t0) * 1e3 / inner)
-        samples.sort()
-        return samples[len(samples) // 2]
+                dev, wall = _time_graph(torch, g, warmup, repeats, flush_cache)
+                return _timing_result(dev, wall, "cuda_event_graph", detail)
+        if have_cuda:
+            dev, wall = _time_events(torch, call, warmup, repeats, inner, flush_cache)
+            return _timing_result(dev, wall, "cuda_event", detail)
+        wall = _time_wall(torch, call, warmup, repeats, inner)   # no device timeline -> wall only
+        return _timing_result(wall, wall, "wall", detail)
     except Exception:
         return None
 
 
+def _timing_result(dev_ms, wall_ms, timer, detail):
+    if detail:
+        return {"ms": dev_ms, "wall_ms": wall_ms, "timer": timer}
+    return dev_ms
+
+
+_CACHE_FLUSH_BUF = None
+
+
+def flush_cache(torch=None, mb=None):
+    """Evict the GPU last-level / Infinity cache so the NEXT launch reads cold from HBM (matches decode:
+    the model working set >> cache, so every weight is evicted between reuses). Writes a persistent buffer
+    larger than the cache (default 512MB > MI300's 256MB Infinity Cache; override HARNESS_CACHE_FLUSH_MB).
+    No-op without CUDA."""
+    global _CACHE_FLUSH_BUF
+    torch = torch or _torch()
+    try:
+        if not torch.cuda.is_available():
+            return
+    except Exception:
+        return
+    mb = int(os.environ.get("HARNESS_CACHE_FLUSH_MB", "512")) if mb is None else int(mb)
+    n = max(1, (mb << 20) // 4)
+    if _CACHE_FLUSH_BUF is None or _CACHE_FLUSH_BUF.numel() < n:
+        _CACHE_FLUSH_BUF = torch.empty(n, dtype=torch.float32, device="cuda")
+    _CACHE_FLUSH_BUF.zero_()
+
+
+def _time_events(torch, call, warmup, repeats, inner, flush):
+    """Median (device_ms, wall_ms) over `repeats` samples of `inner` back-to-back launches: device via
+    cuda.Event (host-free), wall via perf_counter (reference). Cache flushed before each sample when
+    `flush`, so a memory-bound kernel is timed cold."""
+    for _ in range(max(1, warmup)):
+        call()
+    sync(torch)
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    dev, wall = [], []
+    for _ in range(max(1, repeats)):
+        if flush:
+            flush_cache(torch)
+        sync(torch)
+        t0 = time.perf_counter()
+        start.record()
+        for _ in range(inner):
+            call()
+        end.record()
+        end.synchronize()
+        wall.append((time.perf_counter() - t0) * 1e3 / inner)
+        dev.append(start.elapsed_time(end) / inner)
+    dev.sort(); wall.sort()
+    return dev[len(dev) // 2], wall[len(wall) // 2]
+
+
+def _time_wall(torch, call, warmup, repeats, inner):
+    """Wall-clock-only fallback for boxes with no CUDA-event device timeline (CPU/no-CUDA)."""
+    for _ in range(max(1, warmup)):
+        call()
+    sync(torch)
+    samples = []
+    for _ in range(max(1, repeats)):
+        t0 = time.perf_counter()
+        for _ in range(inner):
+            call()
+        sync(torch)
+        samples.append((time.perf_counter() - t0) * 1e3 / inner)
+    samples.sort()
+    return samples[len(samples) // 2]
+
+
 def _try_capture(torch, call, inner):
     """Capture `inner` launches into a CUDA graph. Returns the graph or None if capture is unsafe
-    (host sync in the op, dynamic alloc, etc.) — the caller then falls back to eager amortized timing."""
+    (host sync in the op, dynamic alloc, etc.) — the caller then falls back to eager event timing."""
     try:
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
@@ -284,19 +359,30 @@ def _try_capture(torch, call, inner):
         return None
 
 
-def _time_graph(torch, g, warmup, repeats):
+def _time_graph(torch, g, warmup, repeats, flush):
+    """Median (device_ms, wall_ms) of a captured-graph replay, device via cuda.Event, cache flushed
+    before each sample when `flush` (replay reuses static buffers, so without a flush the weights stay
+    hot — unrepresentative of cold decode)."""
     graph, inner = g
     for _ in range(max(1, warmup)):
         graph.replay()
     sync(torch)
-    samples = []
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    dev, wall = [], []
     for _ in range(max(1, repeats)):
-        t0 = time.perf_counter()
-        graph.replay()
+        if flush:
+            flush_cache(torch)
         sync(torch)
-        samples.append((time.perf_counter() - t0) * 1e3 / inner)
-    samples.sort()
-    return samples[len(samples) // 2]
+        t0 = time.perf_counter()
+        start.record()
+        graph.replay()
+        end.record()
+        end.synchronize()
+        wall.append((time.perf_counter() - t0) * 1e3 / inner)
+        dev.append(start.elapsed_time(end) / inner)
+    dev.sort(); wall.sort()
+    return dev[len(dev) // 2], wall[len(wall) // 2]
 
 
 # --------------------------------------------------------------------------- (b) correctness
@@ -450,7 +536,7 @@ def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3)
 
 # --------------------------------------------------------------------------- (b) random-value parity vs live baseline
 def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
-                             draws=3, warmup=10, repeats=50, inner=16, graph=False, seed=0):
+                             draws=3, warmup=10, repeats=50, inner=1, graph=False, seed=0):
     """Validate the candidate against the LIVE frozen baseline on MANY RANDOM INPUT VALUE DRAWS at the
     SAME online-aligned shapes (NOT random shapes — dims are fixed per `sig`, only values vary). The
     frozen oracle (`reference_io.pt`) pins ONE recorded input+golden; this catches value-dependent bugs
@@ -462,7 +548,9 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
     so a candidate that aliases the baseline's storage (or returns a shared/static buffer) is caught.
     SPEEDUP is REPORT-ONLY: `baseline_ms / current_ms` per draw is recorded as a secondary robustness
     signal (value-independent perf variance / cliff detection), NOT the win metric — the primary metric
-    stays the workload-weighted oracle speedup.
+    stays the workload-weighted oracle speedup. Both times are `time_op` DEVICE time (CUDA events), taken
+    with the L2/Infinity cache flushed cold before each iteration; `inner=1` (one launch per event window)
+    since events time the GPU timeline directly — no host-side amortization loop is needed.
 
     `baseline_call(args) -> out`  invokes the frozen real online kernel (meta.baseline_callable /
         baseline_src/). `current_call(args) -> out` invokes the candidate in kernel_src/.

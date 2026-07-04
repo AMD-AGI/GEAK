@@ -184,8 +184,17 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
      --out "<OP_TASK_DIR>/opbench_result.json" \
      2>&1 | tee "$EVAL_DIR/logs/opbench_<short>.log"
    ```
-   Read `opbench_result.json`: per-backend {available, correct, ms, max_rel_err}, the winner, the
+   Read `opbench_result.json`: per-backend {available, correct, ms, wall_ms, max_rel_err}, the winner, the
    `isolated_speedup` vs the default (hipblaslt) backend, `winner_editable`, `winner_kind`, and
+   > **`ms` is CUDA-EVENT DEVICE time (GPU-timeline duration); `wall_ms` is host+device REFERENCE.** The
+   > winner and `isolated_speedup` are scored on `ms`, timed with the L2/Infinity cache flushed COLD before
+   > each sample. Consequence for what you optimize: (1) device time already EXCLUDES host launch/dispatch,
+   > so shaving Python/dispatch overhead earns ZERO here — real wins come from cutting HBM traffic (memory-
+   > bound decode) or MFMA/compute work (compute-bound prefill), NOT launch-overhead tricks (those only pay
+   > off in the server via its decode CUDA graph, which already collapses dispatch). (2) A large `wall_ms ≫
+   > ms` gap flags a host-bound op whose isolated device win won't transfer e2e — surface it. (3) Because
+   > caches are flushed cold, a candidate that only wins hot (back-to-back same-buffer reuse) will show its
+   > true cold cost here; do not optimize for cache residency the live server never gets.
    `amdahl_ceiling_e2e_pct` (the MAX e2e delta this isolated speedup can produce at the kernel's
    `pct_gpu_time` — op_bench computes it via `harness_lib.amdahl_ceiling`). Surface the ceiling in your
    report: if it is at/below `NOISE_BAND_PCT` (e.g. a 1.1x win on a 3%-GPU kernel → ~0.3% ceiling), the
@@ -288,7 +297,7 @@ Return JSON:
   "apply_env": "<KEY=VAL ... for an env-kind direct_light winner>",
   "apply_flags": "<server flags for a flag-kind winner>",
   "code_patch": "<final_patch.diff path if a rewrite produced one, else ''>",
-  "per_backend": [{"backend":"...","ms":0.0,"correct":true,"max_rel_err":0.0}],
+  "per_backend": [{"backend":"...","ms":0.0,"wall_ms":0.0,"correct":true,"max_rel_err":0.0}],
   "parity_note": "expected_close|needs_accuracy_gate",
   "gate": "have_winner|author_recommended|no_win|harness_error|tamper",
   "harness_suspect": false,

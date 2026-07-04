@@ -57,13 +57,17 @@ _GRAPH_MODE = False
 
 
 def _time_call(fn, warmup, repeats):
-    """Return median PER-CALL ms with the host dispatch floor amortized (harness_lib.time_op), timed under
-    the deployment graph context (_GRAPH_MODE) so a candidate cannot win purely by collapsing Python
-    launch overhead (a CUDA-graph replay wrapper) against an eager baseline — both sides get the SAME
-    amortization AND the SAME graph mode. Falls back to a naive tight loop only if harness_lib is absent.
-    Returns None if `fn` raises."""
+    """Return (event_ms, wall_ms): the PRIMARY metric is CUDA-EVENT DEVICE time (GPU-timeline duration,
+    excludes host dispatch); wall-clock is a REFERENCE (host+device). Timed via harness_lib.time_op under
+    the deployment graph context (_GRAPH_MODE) and with the cache flushed cold each sample, so a candidate
+    cannot win by collapsing Python launch overhead (device time already excludes it) and a memory-bound
+    kernel is measured against real HBM traffic. Falls back to a naive wall-clock loop (event_ms==wall_ms)
+    only if harness_lib is absent. Returns (None, None) if `fn` raises."""
     if _hlib is not None:
-        return _hlib.time_op(fn, warmup=warmup, repeats=repeats, graph=_GRAPH_MODE)
+        r = _hlib.time_op(fn, warmup=warmup, repeats=repeats, graph=_GRAPH_MODE, detail=True)
+        if not r:
+            return None, None
+        return r.get("ms"), r.get("wall_ms")
     torch = _torch()
     try:
         for _ in range(max(1, warmup)):
@@ -76,9 +80,10 @@ def _time_call(fn, warmup, repeats):
             _sync(torch)
             samples.append((time.perf_counter() - t0) * 1e3)
         samples.sort()
-        return samples[len(samples) // 2]
+        m = samples[len(samples) // 2]
+        return m, m
     except Exception:
-        return None
+        return None, None
 
 
 def _correct(torch, out, ref, tol):
@@ -254,10 +259,12 @@ def bench_blockscale_gemm(args, meta):
                             "note": f"call raised: {e!r}", "raised": True})
             return
         ok, err = _correct(torch, out, case["ref"], args.tol)
-        ms = _time_call(lambda: _call(fn), args.warmup, args.repeats)
+        ms, wall_ms = _time_call(lambda: _call(fn), args.warmup, args.repeats)
         results.append({"backend": name, "available": True, "correct": bool(ok),
                         "max_rel_err": round(err, 5) if math.isfinite(err) else None,
-                        "ms": round(ms, 4) if ms else None, "note": note, "raised": False})
+                        "ms": round(ms, 4) if ms else None,
+                        "wall_ms": round(wall_ms, 4) if wall_ms else None,
+                        "note": note, "raised": False})
 
     base_spec = meta.get("baseline_callable") or meta.get("target_callable")
     tgt_spec = meta.get("target_callable") or base_spec
@@ -399,10 +406,12 @@ def bench_gemm(args, meta):
                             "note": f"call failed: {e!r}", "artifact": artifact})
             return
         ok, err = _correct(torch, out, ref, args.tol)
-        ms = _time_call(fn, args.warmup, args.repeats)
+        ms, wall_ms = _time_call(fn, args.warmup, args.repeats)
         results.append({"backend": name, "available": True, "correct": bool(ok),
                         "max_rel_err": round(err, 5) if math.isfinite(err) else None,
-                        "ms": round(ms, 4) if ms else None, "note": note, "artifact": artifact})
+                        "ms": round(ms, 4) if ms else None,
+                        "wall_ms": round(wall_ms, 4) if wall_ms else None,
+                        "note": note, "artifact": artifact})
 
     base_fn = _gemm_fn(torch, A, B, bias, transpose_b)
 

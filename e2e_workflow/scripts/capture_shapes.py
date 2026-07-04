@@ -47,11 +47,10 @@ _STATE = {
     # Separate from the heavy oracle `records` (capped at max_cases for memory): every distinct shape is
     # counted here even when its full I/O is not saved.
     "shape_counts": {}, "shape_meta": {},
-    # crash resilience: flush periodically, not only at atexit. OOM / SIGKILL never fires atexit, so a
-    # capture that only flushed on exit loses EVERYTHING on a mid-window crash. We rewrite the light
-    # meta.json every `flush_every` calls and write the heavy reference_io.pt ONCE the oracle records
-    # are complete, so a crash after that still leaves a usable partial capture on disk.
-    "flush_every": 64, "oracle_written": False, "oracle_sha": None,
+    # crash resilience: flush periodically, not only at atexit (OOM/SIGKILL never fires atexit, losing
+    # a whole capture). `oracle_records` = records already on disk; a late regime-coverage case appended
+    # past max_cases makes the oracle stale and triggers a rewrite so it never disagrees with meta.json.
+    "flush_every": 64, "oracle_written": False, "oracle_sha": None, "oracle_records": 0,
 }
 
 
@@ -200,8 +199,9 @@ def _wrapper(*args, **kwargs):
 
 def _maybe_flush(in_graph=False):
     """Called after every wrapped call. Rewrite the light meta.json every `flush_every` calls, and write
-    the heavy reference_io.pt exactly ONCE the oracle records are complete — so a later OOM/SIGKILL (which
-    never fires atexit) still leaves a usable partial capture on disk.
+    the heavy reference_io.pt once there are at least `max_cases` records AND the on-disk oracle is behind
+    the in-memory records — so a later OOM/SIGKILL (which never fires atexit) still leaves a usable partial
+    capture on disk, and a late regime-coverage case (appended past max_cases) is not lost.
 
     NEVER flush while the server is capturing a CUDA graph: the oracle write does a device sync / host
     copy, which is ILLEGAL inside graph capture and would corrupt the server's decode-graph capture. We
@@ -213,7 +213,7 @@ def _maybe_flush(in_graph=False):
     n = s["calls"]
     if not n or (n % max(1, s["flush_every"])) != 0:
         return
-    write_oracle = (not s["oracle_written"]) and len(s["records"]) >= s["max_cases"]
+    write_oracle = len(s["records"]) >= s["max_cases"] and len(s["records"]) > s["oracle_records"]
     _flush(write_oracle=write_oracle)
 
 
@@ -232,9 +232,9 @@ def _flush(write_oracle=True):
         shape_meta = dict(s["shape_meta"])
         records = list(s["records"])
     io_path = os.path.join(out_dir, "reference_io.pt")
-    # Write the heavy oracle only when asked AND not already written (once) — keeps the periodic light
-    # meta refresh cheap. The sha is cached so meta.json always carries the checksum of the file on disk.
-    if write_oracle and records and not s["oracle_written"]:
+    # (Re)freeze the oracle only when the on-disk copy is behind the records, so a late regime-coverage
+    # case (appended past max_cases) is captured; records is bounded, so this rewrites at most twice.
+    if write_oracle and records and len(records) > s["oracle_records"]:
         torch.save({"target": s["target"], "records": records}, io_path)
         import hashlib
         h = hashlib.sha256()
@@ -243,6 +243,7 @@ def _flush(write_oracle=True):
                 h.update(chunk)
         s["oracle_sha"] = h.hexdigest()
         s["oracle_written"] = True
+        s["oracle_records"] = len(records)
     cases = []
     for r in records:
         shapes, dtypes = [], []

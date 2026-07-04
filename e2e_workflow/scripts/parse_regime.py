@@ -166,9 +166,8 @@ def parse_regime(server_args, model_config_path="", server_script=""):
         notes.append("enforce-eager/disable-cuda-graph set: the online baseline runs eagerly (no "
                      "graph replay); an e2e A/B on it is a strawman for launch-overhead kernels.")
 
-    # ---- cuda graph (decode is graph-captured unless disabled) ----
-    cuda_graph = not bool(flags.get("disable-cuda-graph") or flags.get("disable_cuda_graph")
-                          or flags.get("enforce-eager") or flags.get("enforce_eager"))
+    # ---- cuda graph: on unless the baseline is forced eager (same flags as enforce_eager) ----
+    cuda_graph = not enforce_eager
 
     attn = flags.get("attention-backend") or flags.get("attention_backend") or ""
     if attn is True:
