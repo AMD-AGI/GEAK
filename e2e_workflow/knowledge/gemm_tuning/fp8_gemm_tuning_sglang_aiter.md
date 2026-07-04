@@ -11,6 +11,19 @@ This workflow tunes **FP8 block-scaled GEMM** used on **HIP/AMD** when SGLang ru
 
 **Assumptions:** ROCm/HIP GPU, Python env where SGLang and aiter are importable from the workload script, and write access to the **SGLang** sources you run when adding §5 hooks.
 
+**Backend availability (check FIRST; provision, do not silently drop).** This playbook's CK path needs the
+aiter **CK tuner** (`csrc/ck_gemm_a8w8_blockscale/`), and the sibling FlyDSL lever needs aiter's
+`aiter/ops/flydsl/` wrapper. If `EVAL_DIR/env_report.json` lists a lever in `absent_backends`, it is a
+PROVISIONING issue, not a measured no-win — record the actionable remedy and fall back to an available
+lever, never drop the head silently:
+- **FlyDSL absent** (`import aiter.ops.flydsl` → `ModuleNotFoundError`, the common case): needs BOTH
+  (1) the top-level `flydsl` pip package (`pip install 'flydsl>=0.1.5'`, on PyPI) AND (2) a flydsl-enabled
+  `amd_aiter` build that ships `aiter/ops/flydsl/`. **`pip install flydsl` alone is INSUFFICIENT** —
+  `aiter.ops.flydsl` stays a `ModuleNotFoundError` until the wrapper is present (verified empirically).
+- **CK tuner / ckProfiler absent**: install/build the aiter CK tuner (pin per §2) so
+  `gemm_a8w8_blockscale_tune.py` is runnable; until then the CK lever is unavailable — use the Triton or
+  (if available) FlyDSL author route and flag the missing CK lever.
+
 Similar steps could potentially apply to ck bpreshuffle gemm, etc. 
 
 ---

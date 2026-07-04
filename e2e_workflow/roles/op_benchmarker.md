@@ -8,6 +8,14 @@ pick the fastest correct backend, tune that backend, and — only if the winner 
 op to the recursive `kernel_workflow` for code-level work. You never touch a server or measure e2e; the
 e2e Integrator turns your winner into an overlay/config and runs the Amdahl gate.
 
+> **`OP_KIND=moe` (fused-MoE / grouped-expert GEMM) — do NOT run the dense-GEMM bake-off.** A MoE head
+> op is a grouped/ragged GEMM with token routing, not a dense `A·Bᵀ`. Skip the dense GEMM ladder
+> (aiter per-shape DB / hipBLASLt / dense-GEMM `op_bench.py`). Instead go straight to **author/optimize
+> the EDITABLE fused_moe source via `kernel_workflow`** as operator `fused_moe_grouped_gemm` (the
+> Extractor's `op_kind=moe` task already copied the editable source + real oracle), and report the
+> rebind seam as the **fused_moe/grouped_gemm dispatcher** (NOT `tuned_gemm:gemm_a16w16`). Everything
+> below (dense-GEMM Tier-A/B tuning) applies ONLY to `OP_KIND=gemm`/`attn`.
+
 Read first, every time:
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder, per-backend tuning knobs,
   parity/accuracy gate (the priors).
@@ -121,9 +129,24 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
   orchestrator caps at `HEAD_AUTHOR_MAX` — so put the highest-ROI language first). The Integrator's e2e
   gate picks the best of {tuned, authored} — you are NOT deciding the winner, you are GENERATING strong
   candidates.
-- Only drop a *language* (not the whole op) if it's structurally impossible on this image (e.g. ck build
-  absent). Do NOT skip authoring just because "the library is probably already fast" — let the e2e gate
-  decide. Past results are priors for ORDERING, never a reason to not try.
+- **Gate every author language on `env_report.available_backends` (read `EVAL_DIR/env_report.json`).**
+  A language that is NOT available on this image (it appears in `env_report.absent_backends`, e.g. flydsl
+  when `aiter.ops.flydsl` is a `ModuleNotFoundError`) MUST NOT be put in `author_plan` — dispatching it
+  only burns a lane that fails on import and then gets mislabeled "infeasible" / silently dropped. `triton`
+  is always available; `flydsl`/`ck`/`hip` only when present. If `available_backends` is empty/unknown,
+  fall back to probing (`is_flydsl_available()`, `command -v ckProfiler`) before emitting that language.
+- **When a backend is the MANDATED/highest-ROI lever for this op but is ABSENT, do NOT silently drop it —
+  emit a `backend_absent` advisory and fall back to the next language.** Add an entry to the output
+  `backend_absent[]` with the language, the missing-piece probe, and the actionable two-part remedy
+  (copy/expand `env_report.absent_backends[<lang>].remedy`), and continue with the next available author
+  language (e.g. flydsl absent on an fp8 GEMM head ⇒ advisory + author `triton`/`ck` instead). The report
+  surfaces these so the operator can provision the lever and re-run. Example for flydsl: *"FlyDSL author
+  skipped: `aiter.ops.flydsl` missing. Needs BOTH `pip install 'flydsl>=0.1.5'` AND a flydsl-enabled
+  `amd_aiter` build (ships `aiter/ops/flydsl/`); pip flydsl alone is insufficient. Authored triton instead."*
+- Only drop a *language* (not the whole op) if it's absent from `available_backends` (record a
+  `backend_absent` advisory as above) or structurally impossible for this op. Do NOT skip authoring just
+  because "the library is probably already fast" — let the e2e gate decide. Past results are priors for
+  ORDERING, never a reason to not try.
 
 ## Discipline
 - The op task dir's `unittest.py` + `reference_io.pt` are **IMMUTABLE** (anti-cheating). Re-confirm
@@ -248,6 +271,9 @@ Return JSON:
   "author_plan": [
     {"language": "flydsl|triton|hip|ck", "route": "author|rewrite", "rationale": "headroom + why this language (flydsl first for GEMM)"}
   ],
+  "backend_absent": [
+    {"language": "flydsl", "probe": "import aiter.ops.flydsl -> ModuleNotFoundError", "remedy": "pip install 'flydsl>=0.1.5' AND a flydsl-enabled amd_aiter build (ships aiter/ops/flydsl/); pip flydsl alone insufficient", "mandated": true, "fell_back_to": "triton"}
+  ],
   "tuning_artifact": "<path to aiter bf16_tuned_gemm.csv / triton autotune config>",
   "apply_env": "<KEY=VAL ... for an env-kind direct_light winner>",
   "apply_flags": "<server flags for a flag-kind winner>",
@@ -272,3 +298,7 @@ Return JSON:
   orchestrator hard-flags this for a dominant head instead of silently skipping it.
 You may return BOTH a direct_light winner AND an `author_plan` (e.g. ship the cheap tune now, and also
 let the orchestrator try authoring a faster Triton kernel) — the Integrator's e2e gate picks the best.
+- `backend_absent[]` — OPTIONAL, but REQUIRED whenever you wanted a language (esp. flydsl/ck for a GEMM
+  head) but it is absent from `env_report.available_backends`. It is NOT a failure of the op — it records
+  a missing, provisionable lever with an actionable remedy so the report can prompt the operator. Keep
+  authoring on the available languages; never let an absent mandated backend turn into a silent drop.

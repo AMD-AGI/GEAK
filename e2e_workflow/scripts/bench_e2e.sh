@@ -59,7 +59,7 @@ done
 # The serving server is always launched by the backend adapter (sglang/vllm).
 # BENCH_CLIENT swaps ONLY the client that drives the benchmark, so a run can use
 # the EXACT same client as another harness. BENCH_CLIENT=inferencex => Hyperloom/
-# Magpie's own InferenceX benchmark_serving.py (convention-identical client). Default
+# Magpie's own InferenceX benchmark_serving.py (measurement-protocol-identical client). Default
 # 'native' keeps each backend's built-in bench (sglang.bench_serving / vllm).
 BENCH_CLIENT=${BENCH_CLIENT:-native}
 copy_function() {  # copy_function SRC DST — clone a shell function under a new name
@@ -162,7 +162,7 @@ CONC=${CONC:-64}
 # NUM_PROMPTS default.
 #  * native client (standalone GEAK default): keep the original CONC*5 default so
 #    standalone behaviour is byte-identical to before the inferencex integration.
-#  * inferencex client (Hyperloom convention alignment): mirror Hyperloom's ADAPTIVE
+#  * inferencex client (Hyperloom measurement-protocol alignment): mirror Hyperloom's ADAPTIVE
 #    factor — the number of timed prompts scales DOWN as the per-request sequence
 #    cost (ISL+OSL) grows so each repeat stays bounded.
 #    factor = {<=1024:10, <=4096:5, <=16384:3, else 2}.
@@ -179,15 +179,15 @@ if [ -z "${NUM_PROMPTS:-}" ]; then
     NUM_PROMPTS=$((CONC * 5))
   fi
 fi
-# Client-side warmup prompts (convention alignment with Hyperloom's materialize default
+# Client-side warmup prompts (measurement-protocol alignment with Hyperloom's materialize default
 # NUM_WARMUPS=min(CONC,8)). Consumed by the inferencex client adapter; the native
 # adapters use their own warmup round instead.
 NUM_WARMUPS=${NUM_WARMUPS:-$(( CONC < 8 ? CONC : 8 ))}
-# RANDOM_RANGE_RATIO / NUM_PROMPTS / NUM_WARMUPS / SEED are the measurement convention.
+# RANDOM_RANGE_RATIO / NUM_PROMPTS / NUM_WARMUPS / SEED are the measurement protocol.
 # These are STANDALONE defaults: when an external orchestrator (Hyperloom) drives
 # the run it exports its own values (interface/run_e2e.py:apply_bench_protocol from
 # handoff.bench_protocol) and they override these via the env. Do NOT hard-code a
-# value assuming the caller's convention — ratio=0 is fixed-length, ratio>0 is variable
+# value assuming the caller's measurement protocol — ratio=0 is fixed-length, ratio>0 is variable
 # (lengths sampled in [(1-ratio)*len, (1+ratio)*len]), and the caller may use
 # either. Standalone default = fixed-length (matches infer.sh --random-range-ratio 0).
 RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0}
@@ -301,15 +301,53 @@ if [ "$REUSE_SERVER" != "1" ]; then
   if [ -z "${SERVER_PID:-}" ]; then echo "!!! adapter_launch did not set SERVER_PID"; exit 2; fi
 
   echo ">>> Waiting for server health ..."
-  for i in $(seq 1 180); do
-    if adapter_health >/dev/null 2>&1; then echo ">>> Server up after ~$((i*5))s."; break; fi
+  # An overlaid candidate can wedge: process stays alive but /health 503s forever (JIT deadlock /
+  # cuda-graph capture failure). Don't burn the whole window while holding the serving-GPU lock —
+  # fail fast on a fatal server-log marker, and use a TIGHTER budget when an overlay is active so a
+  # broken candidate is rejected quickly instead of starving the box. Non-overlay runs keep 180*5s.
+  HEALTH_TRIES=${HEALTH_TRIES:-180}
+  [ -n "$OVERLAY_PYTHONPATH" ] && HEALTH_TRIES=${OVERLAY_HEALTH_TRIES:-72}   # ~6min for overlays
+  _up=0
+  for i in $(seq 1 "$HEALTH_TRIES"); do
+    if adapter_health >/dev/null 2>&1; then echo ">>> Server up after ~$((i*5))s."; _up=1; break; fi
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then echo "!!! Server died. Last log:"; tail -n 60 "$LOG"; exit 2; fi
+    if grep -Eq 'CUDA out of memory|HIP out of memory|watchdog timeout|Capturing cuda graph failed|FATAL' "$LOG" 2>/dev/null; then
+      echo "!!! Fatal server-log marker before health; aborting wait. Last log:"; tail -n 60 "$LOG"; exit 2
+    fi
     sleep 5
   done
-  adapter_health >/dev/null 2>&1 || { echo "!!! Server not healthy."; tail -n 60 "$LOG"; exit 2; }
+  [ "$_up" = "1" ] || { echo "!!! Server not healthy within $((HEALTH_TRIES*5))s."; tail -n 60 "$LOG"; exit 2; }
 else
   echo ">>> Reusing warm server at $BASE_URL"
   adapter_health >/dev/null 2>&1 || { echo "!!! No healthy server at $BASE_URL"; exit 2; }
+fi
+
+# ---- overlay resident-memory parity guard (only when an overlay is active) ----
+# An authored kernel that builds a PERSISTENT dequant/shuffle cache inflates resident VRAM beyond the
+# baseline, so a "win" measured with less memory headroom is unfair (and usually OOMs under load anyway).
+# Reject such a candidate BEFORE the timed legs instead of after a full A/B. The integrator records the
+# free-VRAM floor the baseline leg cleared into MEM_HEADROOM_MIN_MB; a candidate below it fails parity.
+# Fail-OPEN on any parse error (missing rocm-smi / unexpected schema) so non-AMD or partial rigs are
+# unaffected — this only ever rejects when it can POSITIVELY prove the headroom regressed.
+if [ -n "$OVERLAY_PYTHONPATH" ] && [ -n "${MEM_HEADROOM_MIN_MB:-}" ]; then
+  _free_mb=$(rocm-smi --showmeminfo vram --json 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    vals = [int(v["VRAM Total Free Memory (B)"]) // (1024*1024)
+            for v in d.values()
+            if isinstance(v, dict) and "VRAM Total Free Memory (B)" in v]
+    print(min(vals) if vals else "")
+except Exception:
+    print("")
+' 2>/dev/null || echo "")
+  if [ -n "$_free_mb" ] && [ "$_free_mb" -lt "$MEM_HEADROOM_MIN_MB" ] 2>/dev/null; then
+    echo "!!! Overlay resident VRAM headroom ${_free_mb}MB < baseline floor ${MEM_HEADROOM_MIN_MB}MB"
+    echo "    -> memory-parity FAIL; rejecting candidate before timed legs."
+    tail -n 30 "$LOG" 2>/dev/null || true
+    exit 2
+  fi
+  echo ">>> overlay memory-parity OK (free ${_free_mb:-?}MB >= floor ${MEM_HEADROOM_MIN_MB}MB)"
 fi
 
 # ---- warmup (one short round; never timed) ----
@@ -390,7 +428,7 @@ summ = {
     "tpot_ms_median": round(med(tpot), 3) if tpot else None,
     "runs": len(tps),
     "all_throughput": tps,
-    # Aggregate output tok/s (NOT divided by TP) — matches Hyperloom/Magpie output_throughput convention.
+    # Aggregate output tok/s (NOT divided by TP) — matches Hyperloom/Magpie output_throughput protocol.
     "metric_basis": "aggregate_output_tok_s",
 }
 with open(out_path, "w") as fh: json.dump(summ, fh, indent=2)

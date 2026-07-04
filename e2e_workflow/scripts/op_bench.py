@@ -165,6 +165,31 @@ def _is_blockscale_gemm(meta):
     return is_fp8 and has_block
 
 
+def _is_grouped_or_quant_gemm(meta):
+    """True for a grouped/packed-quant GEMM the dense torch-BLAS bake-off CANNOT represent:
+    MoE fused-experts (3D [E,N,K] weights), int4/awq/gptq packed weights, or per-group quant.
+    These are Tier-C authored grouped-GEMM ops (GEMM1->act->GEMM2 over experts on packed weights),
+    NOT an F.linear bake-off candidate — forcing them through bench_gemm raises ValueError (no
+    a_shape/b_shape) or RuntimeError (.t() on a 3D weight). We classify them out so op_bench records a
+    clean "needs authored kernel" result instead of a spurious harness self-fault."""
+    kc = str(meta.get("kernel_class", "")).lower()
+    dt = str(meta.get("dtype", "")).lower()
+    qs = str(meta.get("quant_scheme", "")).lower()
+    if any(t in kc for t in ("moe", "grouped", "experts")):
+        return True
+    if any(t in dt for t in ("int4", "int8", "uint4", "awq", "gptq", "w4a16", "w8a16")):
+        return True
+    if any(t in qs for t in ("awq", "gptq", "int4", "compressed_tensors")):
+        return True
+    b = meta.get("b_shape")
+    if isinstance(b, (list, tuple)) and len(b) >= 3:        # explicit 3D weight => grouped
+        return True
+    sh = meta.get("shape")
+    if isinstance(sh, dict) and "E" in sh:                  # structured MoE shape block (E,N,K,...)
+        return True
+    return False
+
+
 def _synth_blockscale_case(torch, meta, M, device, seed):
     """Synthesize an fp8 a8w8 blockscale GEMM case + its dequant oracle, MIRRORING the extracted
     unittest's `_synth_case` exactly (so op_bench's correctness target matches the immutable oracle).
@@ -341,6 +366,20 @@ def bench_gemm(args, meta):
     # on `randn(str,int,...)`; it is now benched with the immutable-oracle construction).
     if _is_blockscale_gemm(meta):
         return bench_blockscale_gemm(args, meta)
+    # Grouped/packed-quant MoE GEMM (int4_w4a16 / awq / gptq / 3D [E,N,K] / structured shape:{E,..}):
+    # the dense torch-BLAS bake-off below cannot represent packed/3D weights — it would raise ValueError
+    # (no a_shape/b_shape) or RuntimeError (.t() on a 3D weight). Record a clean, non-raising skip so the
+    # dominant head is reported as "needs a Tier-C authored grouped GEMM", NOT a harness self-fault.
+    if _is_grouped_or_quant_gemm(meta):
+        return [{
+            "backend": "grouped_quant_gemm", "available": False, "correct": False,
+            "ms": None, "raised": False,
+            "note": ("grouped/quantized MoE GEMM (kernel_class=%s dtype=%s): not a dense torch-BLAS "
+                     "bake-off candidate; requires a Tier-C authored fused-experts grouped GEMM "
+                     "(GEMM1->act->GEMM2 over experts on packed weights). Skipped at op_bench "
+                     "(dense path cannot represent packed/3D weights)."
+                     % (meta.get("kernel_class"), meta.get("dtype"))),
+        }]
     device = "cuda" if torch.cuda.is_available() else "cpu"
     A, B, bias, transpose_b, ref = _load_or_synth_gemm(torch, args.task, meta, device, args.seed)
     ref = ref.to(device)

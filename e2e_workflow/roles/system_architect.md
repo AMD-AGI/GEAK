@@ -309,6 +309,14 @@ attempt, win or not. REQUIRED sections, in order:
    not measure — NOT a real no-win), and the `reason`. State plainly these dominant ops were NOT optimized and
    carry the LARGEST remaining headroom (top "next direction"). Never bury a flagged head in the no-ops.
 
+6b. **🔌 BACKEND ABSENT (env provisioning)** — MANDATORY if `EVAL_DIR/env_report.json` has a non-empty
+   `absent_backends`, or any op's `opbench_result.json` carries `backend_absent[]`. A table
+   `backend | mandated for | what's missing (probe) | remedy | fell back to`. State plainly that a
+   strategy-mandated lever was UNAVAILABLE on this image (NOT a measured no-win), quote the actionable
+   two-part remedy verbatim (e.g. flydsl: `pip install 'flydsl>=0.1.5'` AND a flydsl-enabled `amd_aiter`
+   build that ships `aiter/ops/flydsl/` — pip flydsl alone is insufficient), and note which language was
+   authored instead. This makes a missing lever a re-runnable provisioning action, never a silent drop.
+
 7. **Final deliverable + measurement caveats** (box drift → trust ONLY same-session A/B; the official number
    is the Director's same-session value) **+ next directions to explore.** Quote the FINAL serving numbers
    from `EVAL_DIR/validation/final/bench_summary.json` — throughput (median + spread), **TTFT and TPOT** —
@@ -317,7 +325,8 @@ attempt, win or not. REQUIRED sections, in order:
 
 Data sources (read the ACTUAL files, never invent): `director_e2e_validation.json`,
 `final/bench/bench_summary.json`, `config/sweep_results.json`, `overlay/cand_*/integrate_result.json`,
-`kernels/_exp/*/*/director_validation.json`, `kernels/*/opbench_result.json`,
+`kernels/_exp/*/*/director_validation.json`, `kernels/*/opbench_result.json` (incl. its `backend_absent[]`),
+`env_report.json` (`absent_backends` → the BACKEND ABSENT section),
 `profile/round_*/profile_topN.{md,json}`, and artifact mtimes for the timeline.
 Read the actual files under `EVAL_DIR` for real numbers; do not invent. Return JSON (report_path points
 to architect_report.md; also mention `final_report.md` in `note` if the schema lacks a field):

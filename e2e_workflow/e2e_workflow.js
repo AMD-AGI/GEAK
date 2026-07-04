@@ -141,12 +141,6 @@ const HEAD_AUTHOR_MAX = parseInt(A.head_author_max != null ? A.head_author_max :
 // hits a harness fault / no-win / extraction failure, the orchestrator LOUDLY flags it (and still tries
 // the author route when a plan exists) instead of dropping the biggest lever on the floor. Default 30%.
 const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_pct : 30);
-// FAST-MODE ONLY head priority (opt-in, default ''=OFF): a regex matched against each head candidate's
-// op_kind/short_name/name; matching heads are pulled to the FRONT of the head queue BEFORE the budget
-// slice, so e.g. head_priority="gemm" guarantees the dense/scaled-GEMM head is selected AND
-// integrated/stacked FIRST. Applied ONLY when FAST_MODE is on (see the heads[] construction below);
-// default '' leaves every mode (default/fast/deep) byte-identical.
-const HEAD_PRIORITY = String(A.head_priority != null ? A.head_priority : '').trim();
 // Corrective re-author: when a verified-isolated head winner is REJECTED at the e2e gate for a FIXABLE
 // integration reason (it ENGAGED live + beat the isolated oracle, only the integration POSTURE is wrong —
 // e.g. a JIT/DSL kernel lazily compiling in the TP>1 warmup -> NO_BINARY_FOR_GPU / cuda_graph_capture_unsafe,
@@ -799,7 +793,17 @@ if (want('setup')) {
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
   headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
-  log(`Strategy: ${headQueue.length} head (GEMM/attn) candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
+  // A fused-MoE / grouped-expert GEMM STAYS in the head-kernel sequence (if its pct earns it — same
+  // Amdahl priority/budget as any head op), but it must NOT be decomposed into a dense-GEMM optimization:
+  // its ragged per-expert M + token routing make a dense A·Bᵀ bake-off the wrong target and the wrong
+  // rebind seam. Force its op_kind to `moe` so the head track takes the grouped-GEMM branch
+  // (extract editable source + optimize as `fused_moe_grouped_gemm`) instead of `extract_op` dense synth.
+  const _isMoe = (c) => /(?:^|[^a-z])moe(?:[^a-z]|$)|grouped_gemm|group_gemm|ck_moe|expert/i
+    .test(`${(c && c.op_kind) || ''} ${(c && c.short_name) || ''} ${(c && c.name) || ''} ${(c && c.classification) || ''}`);
+  let _moeTagged = 0;
+  for (const c of headQueue) { if (_isMoe(c) && c.op_kind !== 'moe') { c.op_kind = 'moe'; _moeTagged++; } }
+  if (_moeTagged) log(`[route-guard] ${_moeTagged} fused-MoE/grouped head op(s) kept in the head track but tagged op_kind=moe (grouped-GEMM branch, never dense-GEMM).`);
+  log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
 } else {
   // Load carried state from a prior phase invocation (args.state).
   EVAL_DIR = ST.eval_dir || EVAL_DIR_OVERRIDE;
@@ -882,18 +886,8 @@ const history = ST.history || { insights: [], ledger: [], milestones: [], bottle
 if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   phase('HeadKernel');
   log(`Head-kernel track: ${headQueue.length} candidate op(s), head_budget=${HEAD_BUDGET}, threshold=${HEAD_THRESHOLD_PCT}%.`);
-  // FAST-MODE head priority: pull HEAD_PRIORITY-matching ops to the front BEFORE the budget slice, so the
-  // prioritized op (e.g. "gemm") is guaranteed selected and gated/stacked FIRST. Gated on FAST_MODE ->
-  // default/deep are byte-identical. Array.sort is stable: non-matches keep their Amdahl order, and among
-  // matches the original order is preserved (only the matched group is promoted ahead of the rest).
-  let _hq = headQueue;
-  if (FAST_MODE && HEAD_PRIORITY) {
-    const _re = new RegExp(HEAD_PRIORITY, 'i');
-    const _isPri = (c) => _re.test(`${c.op_kind || ''} ${c.short_name || ''} ${c.name || ''}`);
-    _hq = headQueue.slice().sort((a, b) => (_isPri(b) ? 1 : 0) - (_isPri(a) ? 1 : 0));
-    log(`[fast-mode] head_priority='${HEAD_PRIORITY}': ${_hq.filter(_isPri).length}/${_hq.length} head(s) match; integrate order=[${_hq.slice(0, HEAD_BUDGET).map((c) => c.short_name || c.op_kind || 'op').join(', ')}].`);
-  }
-  const heads = _hq.slice(0, HEAD_BUDGET).map((c, i) => ({
+  // Head ops are taken in the Architect's Amdahl-ranked order — no forced GEMM-first reordering.
+  const heads = headQueue.slice(0, HEAD_BUDGET).map((c, i) => ({
     ...c, idx: i, gpu_id: GPU_LIST[i % GPU_LIST.length],
     short_name: c.short_name || `${c.op_kind || 'op'}${i}`,
   }));
@@ -1899,6 +1893,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
 let allAccepted = acceptedHeads.concat(acceptedKernels);
 let finalize = null, report = null, validation = null;
 let finalTput = curTput, finalSpeedup = BASELINE_TPUT ? curTput / BASELINE_TPUT : 1.0;
+let validatedOk = false;   // did the independent Validate produce a usable (positive) number?
 
 // --- Fix C: EVERY incomplete A/B must be finished (both legs) before final ----
 // Completeness guarantee (general, not per-kernel): an A/B that measured only the
@@ -2035,9 +2030,17 @@ if (want('final')) {
       CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL, E2E_REPEATS, SKILL_DIR: WORKFLOW_DIR,
     }),
     { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
-  finalSpeedup = validation ? validation.throughput_speedup : (finalTput / BASELINE_TPUT);
-  log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validation ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
-    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
+  // A Validate that did NOT produce a usable number (e.g. its server crashed in
+  // engine-core init) must NEVER erase the accepted same-session A/B win we
+  // already carry in finalTput/curTput. Trust the Director's independent number
+  // ONLY when it is a real positive measurement; otherwise fall back to the
+  // carried best-accepted throughput so a real, parity-checked win is never
+  // reported as 0 / no_gain downstream.
+  validatedOk = !!(validation && validation.director_verified_throughput_tok_s > 0 && validation.throughput_speedup > 0);
+  finalSpeedup = validatedOk ? validation.throughput_speedup : (BASELINE_TPUT ? finalTput / BASELINE_TPUT : finalSpeedup);
+  log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validatedOk ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
+    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}` +
+    `${validation && !validatedOk ? '; Validate produced no number — using carried accepted A/B win' : ''}). Results in ${EVAL_DIR}`);
 } else {
   log(`Phase(s) [${PHASES.join(',')}] done. Carried throughput ${curTput} tok/s. Pass the returned 'state' to the next phase invocation.`);
 }
@@ -2069,9 +2072,15 @@ const wfReturn = {
   eval_dir: EVAL_DIR,
   model_name: MODEL_NAME,
   baseline_throughput_tok_s: BASELINE_TPUT,
-  final_throughput_tok_s: validation ? validation.director_verified_throughput_tok_s : finalTput,
+  // Trust the Director's independent number ONLY when it is a real positive
+  // measurement (validatedOk). A crashed/degenerate Validate falls back to the
+  // carried accepted same-session A/B win — never 0 — so a real, parity-checked
+  // gain is not silently demoted to no_gain by run_e2e.py.
+  final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : finalTput,
   throughput_speedup: finalSpeedup,
-  validation_status: validation ? validation.validation_status : (want('final') ? 'unknown' : 'phase_partial'),
+  validation_status: validatedOk ? validation.validation_status
+    : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
+       : (want('final') ? 'unknown' : 'phase_partial')),
   output_parity: validation ? validation.output_parity : 'unknown',
   accepted_config: { flags: curFlags, env: curEnv },
   accepted_kernels: acceptedKernels,
