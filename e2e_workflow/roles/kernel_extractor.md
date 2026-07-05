@@ -205,10 +205,26 @@ freeze an out-of-regime oracle nobody should trust.
      operands, in-regime — NOT bf16, random values; perf is value-independent). Print `per_case`
      `baseline_ms/optimized_ms/speedup`. If `meta.workload` is absent, fall back to timing the
      golden/captured cases (unweighted).
-   - **Metric**: print the geomean AND, when `meta.workload` is present, the PRIMARY time-weighted
-     speedup `GEAK_WEIGHTED_SPEEDUP = Σ_i weight_i / Σ_i (weight_i / speedup_i)` using each case's
-     `weight`. Keep the same `per_case`/geomean print shape so the kernel-layer Director/verify math is
-     unchanged; the weighted line is additive.
+   - **🔴 Metric — SELF-WEIGHT from the latency you just measured; do NOT trust `meta.workload[].weight`.**
+     The profile-derived `weight`/`weight_norm` in `meta.workload` is a shape-less capture-window PRIOR: a
+     prefill-biased profiling window, or a kernel whose name/trace exposes no GRID_MN/shape (e.g.
+     `triton_kernels.matmul_ogs`), makes the profiler unable to see the decode regime and zeroes it
+     (then floors it) — inverting the weighting on a decode-critical serving run (see the
+     `moe-mxfp4-gptoss-matmul-ogs-gfx942` card). Instead compute each case's weight FROM ITS MEASURED
+     BASELINE LATENCY × its analytic serving call count:
+     `weight_i = baseline_ms_i × calls(regime_i)`, where the calls come from
+     `meta.workload.serving_weight_model` — use `analytic_calls.{decode,prefill}` if present, else derive
+     from `isl`/`osl`: `decode = OSL` passes, `prefill = ceil(ISL/chunk)` passes. Assign the decode passes
+     to the LARGEST (== CONC) decode bucket; smaller decode buckets are transient → `calls=1` (kept
+     visible); split the prefill passes across prefill buckets proportional to M. Then the PRIMARY metric
+     `GEAK_WEIGHTED_SPEEDUP = Σ_i weight_i / Σ_i (weight_i / speedup_i)` is exactly
+     `total_baseline_lifecycle_time / total_optimized_lifecycle_time` — the true overall speedup, using
+     REAL per-shape latency instead of the profile prior. Keep the same `per_case`/geomean print shape so
+     the kernel-layer Director/verify math is unchanged; the weighted line is additive.
+     > **Why self-weight:** shape ← meta M-buckets, per-call latency ← measured HERE, call count ← serving
+     > params (isl/osl). The profile's shape-less latency is only trustworthy for this kernel's GPU-time
+     > SHARE vs OTHER kernels (kernel selection) — NEVER for the intra-kernel prefill/decode split, which
+     > you reconstruct from measured latency × analytic calls.
      > **🔴 THE BASELINE LEG IS ALWAYS THE FROZEN REAL ONLINE KERNEL — never the candidate's own language
      > scaffold.** Bind the baseline `call` to `meta.baseline_callable` / the frozen `baseline_src/` copy
      > of the PRODUCTION kernel (step 3), and bind the current `call` to whatever is in `kernel_src/` (the
@@ -424,9 +440,11 @@ in `meta.json` (op_bench reads it to annotate the Amdahl ceiling on the isolated
    randomize shapes) and `baseline_call` binds to `meta.baseline_callable` (the live default GEMM
    backend); fold its correctness into PASS/FAIL, print its per-draw speedup as a secondary signal.
    Same per-case/geomean print shape as the kernel-layer unittest, AND — when
-   `meta.workload` is present — its TIMING cases are the weighted `meta.workload.cases[]` (each built
+   `meta.workload` is present — its TIMING cases are `meta.workload.cases[]` (each built
    with its own dims/dtype/`quant` operands) and it prints the time-weighted
    `GEAK_WEIGHTED_SPEEDUP = Σ wᵢ/Σ(wᵢ/speedupᵢ)` as the PRIMARY metric (geomean stays as secondary).
+   Compute `wᵢ` by the SELF-WEIGHT rule in step 4 (measured `baseline_msᵢ × analytic serving calls`),
+   NOT from `meta.workload[].weight` (that profile prior can be prefill-biased / decode-zeroed).
 
 #### Quantized GEMM (int4/fp8 W*A16, compressed-tensors / GPTQ-AWQ / A4W4) — ANTI-CHEAT ORACLE CONTRACT (mandatory)
 For a **quantized-weight** head (e.g. the int4 W4A16 `fused_moe_kernel_gptq_awq` MoE GEMM), the naive
