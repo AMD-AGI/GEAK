@@ -72,16 +72,35 @@ Record which trace sources are available; the Profiler reads this from `env_repo
 removed from the candidate list, not errors:
 ```bash
 python3 -c "import aiter; print('aiter ok')" 2>/dev/null || echo "no aiter"
-# FlyDSL (aiter's GEMM/attn DSL — SOTA author target for dense/quantized GEMM). It is NOT a top-level
-# module: probe via aiter.ops.flydsl.is_flydsl_available() (a function), NOT `import flydsl` /
-# `aiter.flydsl` (those raise ImportError even when FlyDSL is installed → false "no flydsl").
-python3 -c "import aiter.ops.flydsl as f; print('flydsl', f.installed_flydsl_version if f.is_flydsl_available() else 'unavailable')" 2>/dev/null || echo "no flydsl"
+# FlyDSL (aiter's GEMM/attn DSL — SOTA author target for dense/quantized GEMM). TWO independent
+# availability signals — flydsl counts as available if EITHER passes:
+#   (a) aiter.ops.flydsl.is_flydsl_available()  — the aiter per-shape DB `libtype=flydsl` GEMM path.
+#   (b) `import flydsl, kernels.moe_gemm_2stage` under FLYDSL_ROOT — the SOURCE-checkout path used by
+#       the int4-MoE rewrite/apply skills (flydsl_rewrite_quantized_moe + apply_flydsl_moe_to_vllm).
+#       On images whose aiter LACKS the ops.flydsl wrapper, (a) fails but (b) is the one that matters.
+[ -f "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh" ] && source "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh"
+python3 -c "import aiter.ops.flydsl as f; print('flydsl(aiter)', f.installed_flydsl_version if f.is_flydsl_available() else 'unavailable')" 2>/dev/null || echo "flydsl(aiter) unavailable"
+python3 -c "import flydsl, kernels.moe_gemm_2stage; print('flydsl(src) ok', getattr(flydsl,'__version__','?'))" 2>/dev/null || echo "flydsl(src) unavailable"
 command -v hipblaslt-bench || echo "no hipblaslt-bench (offline GEMM tune unavailable)"
 command -v ckProfiler   || echo "no ckProfiler (CK instance sweep unavailable)"
 ```
-When `is_flydsl_available()` is true, **flydsl MUST appear in `available_backends`** (it is reachable
-via the aiter per-shape DB tune `libtype=flydsl` AND as a Tier-C author target). Do not infer its
-absence from an `import flydsl` failure — only `is_flydsl_available()` is authoritative.
+**MANDATORY self-install (do NOT just skip).** If BOTH flydsl signals above are unavailable, this is an
+int4/A4W4 quantized-MoE model where FlyDSL is the highest-ROI lever — you MUST install it here in
+preflight, not drop it. Run the repo's clone-only bootstrap (NO pip), then re-probe and source its env:
+```bash
+bash e2e_workflow/scripts/ensure_flydsl.sh   # (cwd=GEAK repo) clone ROCm/FlyDSL @ pinned a35627a into container-internal /opt/flydsl + build; idempotent; heavy build_llvm one-time
+source "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh"
+python3 -c "import flydsl, kernels.moe_gemm_2stage; print('flydsl(src) ok after install')"   # must now pass
+```
+`ensure_flydsl.sh` is the single source of truth for the install (pinned commit, clone-only, verifies
+`import flydsl, kernels.moe_gemm_2stage`, writes `flydsl_env.sh` with FLYDSL_ROOT/PYTHONPATH/
+FLYDSL_SHIM_DIR/VLLM_USE_FLYDSL_MOE). Only if the install itself FAILS (exit!=0) do you record flydsl
+unavailable + WHY (do not silently fall back to triton).
+
+When EITHER flydsl signal is true (after the install above if it was needed), **flydsl MUST appear in
+`available_backends`** — via the aiter per-shape DB tune `libtype=flydsl` (signal a) AND/OR as a Tier-C
+author target for the int4-MoE rewrite (signal b). Never mark flydsl unavailable on signal (a) alone
+when (b) passes (source-checkout MoE path is the high-ROI lever here).
 
 **6. Tooling.** `curl`, `python3`, free disk under `EXP_ROOT`. Missing `curl` → adapters that health-
 check via curl must be adjusted (note it); low disk → `block` (traces + overlays need room).
