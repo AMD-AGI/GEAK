@@ -72,6 +72,21 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    grouped/fused-MoE GEMM in the Top-N; hybrid-mamba → expect linear-attn Triton kernels; MLA → expect
    MLA decode). Restrict every `candidate_backends` list to `available_backends`. Gate playbook priors
    on `gfx`.
+0a. **FlyDSL build-on-demand (flydsl-only exception; all other backends keep the strict
+   `candidate_backends ⊆ available_backends` rule unchanged).** FlyDSL is no longer built in preflight.
+   If `env_report.flydsl_signals.buildable == true` (int4/A4W4 MoE on gfx942, checkout reachable, not yet
+   built), you MAY still list `flydsl` in a head's `candidate_backends` even though it is NOT yet in
+   `available_backends`. THEN, before flydsl is actually used (i.e. as soon as you route flydsl onto any
+   head), build it ONCE — blocking — so downstream never selects flydsl and fails on a missing import:
+   ```bash
+   bash e2e_workflow/scripts/ensure_flydsl.sh   # (cwd=GEAK repo) clone ROCm/FlyDSL @ pinned commit into container-internal /opt/flydsl + build; idempotent
+   source "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh"
+   python3 -c "import flydsl, kernels.moe_gemm_2stage; print('flydsl(src) ready')"   # must pass before proceeding
+   ```
+   After it succeeds, treat flydsl as available for the rest of the run. If the build FAILS (exit!=0),
+   drop flydsl from the affected `candidate_backends` and record why (do not silently fall to triton
+   without noting it). If `flydsl_signals.buildable` is false AND neither signal (a)/(b) is true, do NOT
+   route flydsl (it is genuinely unavailable). This clause changes flydsl routing ONLY — no other backend.
 1. Read the Top-N. For EACH top entry compute an Amdahl priority = `pct_gpu_time × plausible_speedup`
    (use the backend playbook priors for plausible_speedup per class, keyed by `model_class`+`gfx` when
    present). Note the regime each serves (large-M shape = prefill, small-M/batch = decode). **Dedupe

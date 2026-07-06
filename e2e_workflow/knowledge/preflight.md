@@ -84,23 +84,22 @@ python3 -c "import flydsl, kernels.moe_gemm_2stage; print('flydsl(src) ok', geta
 command -v hipblaslt-bench || echo "no hipblaslt-bench (offline GEMM tune unavailable)"
 command -v ckProfiler   || echo "no ckProfiler (CK instance sweep unavailable)"
 ```
-**MANDATORY self-install (do NOT just skip).** If BOTH flydsl signals above are unavailable, this is an
-int4/A4W4 quantized-MoE model where FlyDSL is the highest-ROI lever — you MUST install it here in
-preflight, not drop it. Run the repo's clone-only bootstrap (NO pip), then re-probe and source its env:
-```bash
-bash e2e_workflow/scripts/ensure_flydsl.sh   # (cwd=GEAK repo) clone ROCm/FlyDSL @ pinned a35627a into container-internal /opt/flydsl + build; idempotent; heavy build_llvm one-time
-source "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh"
-python3 -c "import flydsl, kernels.moe_gemm_2stage; print('flydsl(src) ok after install')"   # must now pass
-```
-`ensure_flydsl.sh` is the single source of truth for the install (pinned commit, clone-only, verifies
-`import flydsl, kernels.moe_gemm_2stage`, writes `flydsl_env.sh` with FLYDSL_ROOT/PYTHONPATH/
-FLYDSL_SHIM_DIR/VLLM_USE_FLYDSL_MOE). Only if the install itself FAILS (exit!=0) do you record flydsl
-unavailable + WHY (do not silently fall back to triton).
+**DETECT-ONLY in preflight — do NOT build FlyDSL here.** The heavy `ensure_flydsl.sh` source build is
+NO LONGER run at setup (it wasted a ~one-time LLVM build for runs that never end up choosing flydsl, and
+competed for CPU with other workloads). Preflight only PROBES and records buildability; the actual build
+is deferred to Strategize, triggered only when the Architect decides to use flydsl (see
+`roles/system_architect.md`). Record the FlyDSL state in `env_report.json`:
+- signal (a) `aiter.ops.flydsl.is_flydsl_available()` and signal (b) `import flydsl, kernels.moe_gemm_2stage`;
+- if NEITHER passes but this is an int4/A4W4 quantized-MoE on gfx942 with the FlyDSL checkout reachable,
+  set `flydsl_signals.buildable=true` (build-on-demand at Strategize) — do NOT clone/build now.
 
-When EITHER flydsl signal is true (after the install above if it was needed), **flydsl MUST appear in
-`available_backends`** — via the aiter per-shape DB tune `libtype=flydsl` (signal a) AND/OR as a Tier-C
-author target for the int4-MoE rewrite (signal b). Never mark flydsl unavailable on signal (a) alone
-when (b) passes (source-checkout MoE path is the high-ROI lever here).
+FlyDSL availability for routing:
+- If signal (a) OR (b) is true → flydsl is present now; **flydsl MUST appear in `available_backends`**
+  (via aiter per-shape DB tune `libtype=flydsl` for signal a, AND/OR as a Tier-C author target for
+  signal b). Never mark flydsl unavailable on signal (a) alone when (b) passes.
+- If only `flydsl_signals.buildable=true` (neither signal yet) → leave `available_backends` as-is (do
+  NOT add flydsl to it), but the Architect may still route flydsl as a build-on-demand candidate in
+  Strategize (it consults `flydsl_signals.buildable`, then builds via `ensure_flydsl.sh` before use).
 
 **Record WHY each optional backend is absent + HOW to provision it (don't just drop it).** For every
 backend NOT in `available_backends`, write an `absent_backends[<name>] = {probe, remedy}` entry to

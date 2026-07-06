@@ -9,12 +9,10 @@
 # runs. This script makes flydsl available WITHOUT disturbing environments that already have a
 # good-enough flydsl (so GEAK is portable across boxes/other workloads).
 #
-# GATING (pin = a MINIMUM, not an exact requirement):
-#   - flydsl+kernels importable AND __version__  >  MIN_VERSION           -> USE it (no build)
-#   - flydsl+kernels importable AND __version__ ==  MIN_VERSION:
-#         its checkout HEAD is at-or-after PIN (git ancestry)             -> USE it (no build)
-#         else (older commit / not a git checkout)                        -> clone+build PIN
+# GATING (VERSION-ONLY — commit is NOT checked; MIN_VERSION is the floor):
+#   - flydsl+kernels importable AND __version__ >= MIN_VERSION            -> USE it (no build)
 #   - __version__ < MIN_VERSION, kernels missing, or not importable       -> clone+build PIN
+# (PIN is still the commit we clone/build when a build IS needed; it just no longer gates reuse.)
 # A build ONLY ever writes to the isolated container-internal FLYDSL_ROOT — it never pip-installs
 # system-wide and never overwrites an ambient flydsl, so a newer flydsl in another env is left alone.
 #
@@ -86,22 +84,14 @@ PY
 decide_use() {
   [ -n "$EFF_VER" ] || { return 1; }               # not importable
   [ "$EFF_KOK" = "1" ] || { log "flydsl present ($EFF_VER) but 'import kernels.moe_gemm_2stage' fails — will build."; return 1; }
+  # VERSION-ONLY gate (commit NOT checked): __version__ >= MIN_VERSION -> reuse; else build PIN.
   local cmp; cmp="$(ver_cmp "$EFF_VER" "$MIN_VERSION")"
-  if [ "$cmp" -gt 0 ]; then
-    log "flydsl $EFF_VER > floor $MIN_VERSION (at $EFF_DIR) — using it, no build."
+  if [ "$cmp" -ge 0 ]; then
+    log "flydsl $EFF_VER >= floor $MIN_VERSION (at $EFF_DIR) — using it, no build."
     return 0
-  elif [ "$cmp" -eq 0 ]; then
-    if [ -n "$EFF_ROOT" ] && [ -d "$EFF_ROOT/.git" ] && \
-       git -C "$EFF_ROOT" merge-base --is-ancestor "$PIN" HEAD 2>/dev/null; then
-      log "flydsl $EFF_VER == floor and checkout HEAD >= PIN (at $EFF_ROOT) — using it, no build."
-      return 0
-    fi
-    log "flydsl $EFF_VER == floor but commit < PIN or not a git checkout — will build PIN."
-    return 1
-  else
-    log "flydsl $EFF_VER < floor $MIN_VERSION — will build PIN."
-    return 1
   fi
+  log "flydsl $EFF_VER < floor $MIN_VERSION — will build PIN."
+  return 1
 }
 
 # Write the env file (stable location $ENV_FILE) pointing FLYDSL_ROOT/PYTHONPATH at the resolved
