@@ -568,6 +568,16 @@ def main():
                          "this fraction of total weight, even if the profile under-captured it (e.g. a "
                          "prefill-only window). 0 (default) = faithful to the profile. For decode-"
                          "critical serving, set e.g. 0.3 so decode is never optimized away.")
+    ap.add_argument("--served-regimes", default="",
+                    help="comma-separated serving regimes THIS kernel actually executes in "
+                         "(e.g. 'prefill', 'decode', or 'prefill,decode'). Cases whose regime is not "
+                         "in this set are dropped BEFORE the floor/normalize, so decode shapes are "
+                         "never synthesized/floored onto a prefill-only kernel (or vice-versa). This is "
+                         "a kernel->regime gate: capture/inference decides shape WITHIN a served "
+                         "regime; this flag decides WHICH regimes exist for the kernel. Empty (default) "
+                         "= no gate = faithful to prior behavior. The extractor sets it per kernel: a "
+                         "*_fwd_kernel/prefill wrapper that has a separate *_decode_kernel is "
+                         "'prefill'; the decode kernel is 'decode'.")
     ap.add_argument("--isl", type=int, default=None,
                     help="input seq len (prompt tokens). With --osl, corrects the regime weight split "
                          "from the SHORT profiling window (sees only ~PROFILE_NUM_STEPS decode steps) to "
@@ -617,6 +627,28 @@ def main():
         cases = attribute_attn(meta, entries, notes, workload=workload)
     else:
         cases = attribute_generic(meta, entries, notes, workload=workload)
+
+    # kernel->regime gate (capture-over-inference): keep only the serving regimes THIS kernel
+    # actually runs in. A prefill-only kernel (a *_fwd_kernel with a separate *_decode_kernel) must
+    # NOT get decode shapes/weights synthesized or floored onto it (and vice-versa) — that is what
+    # produced "optimize a decode win on a prefill kernel -> isolated speedup, e2e regression".
+    # MUST run BEFORE _apply_regime_floor so the floor cannot re-inject a dropped regime. Empty
+    # --served-regimes = no gate = byte-identical to prior behavior.
+    served = {r.strip().lower() for r in (args.served_regimes or "").split(",") if r.strip()}
+    if served:
+        kept = [c for c in cases if (not c.get("regime")) or str(c.get("regime")).lower() in served]
+        dropped = sorted({str(c.get("regime")) for c in cases
+                          if c.get("regime") and str(c.get("regime")).lower() not in served})
+        if not kept:
+            notes.append(f"served-regimes gate: filtering to {sorted(served)} would drop ALL cases; "
+                         f"kept original set (check --served-regimes vs the kernel's meta regimes).")
+        else:
+            if dropped:
+                notes.append(f"served-regimes gate: kernel serves {sorted(served)}; dropped "
+                             f"{len(cases) - len(kept)} case(s) in unserved regime(s) {dropped} before "
+                             f"floor/normalize (prevents synthesizing/flooring a regime this kernel "
+                             f"never runs, e.g. decode shapes on a prefill-only kernel).")
+            cases = kept
 
     # optional regime floor (serving decode-protection): redistribute so each regime present in meta
     # gets >= min_regime_share of the total. Applied BEFORE normalization, on raw weights.

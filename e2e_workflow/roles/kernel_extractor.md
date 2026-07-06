@@ -298,8 +298,22 @@ python3 "$SKILL_DIR/scripts/attribute_weights.py" \
   --name-match "<the kernel's base symbol, e.g. _gemm_a8w8_blockscale_kernel>" \
   --isl "$ISL" --osl "$OSL" \
   --min-regime-share 0.3 \
+  --served-regimes "<the regimes THIS kernel actually runs in>" \
   --out "<task_dir>/workload.json"
 ```
+> **🔴 SET `--served-regimes` = the serving regimes THIS kernel actually executes in — a kernel→regime
+> gate that runs BEFORE the floor.** Decide it from the call graph / source, NOT from the profile window:
+> if the kernel is a prefill `*_fwd_kernel` (or prefill wrapper) and a SEPARATE `*_decode_kernel` exists,
+> this kernel serves **`prefill`** only — pass `--served-regimes prefill`. The decode kernel is its own
+> extraction task with `--served-regimes decode`. Only pass `prefill,decode` when the SAME kernel truly
+> serves both (e.g. a unified attention/GEMM path with no separate decode kernel). Rationale: `--isl/--osl`
+> and `--min-regime-share 0.3` will otherwise SYNTHESIZE and FLOOR a decode regime onto a prefill-only
+> kernel (the window sees ~0 decode for it, so the correction/floor manufacture it), and the harness then
+> optimizes a decode win on the prefill kernel — isolated speedup, e2e regression. `--served-regimes`
+> drops those unserved-regime cases so this cannot happen. Leaving it empty preserves the old (buggy for
+> split prefill/decode kernels) behavior, so it MUST be set for any op that has separate prefill/decode kernels.
+> **Binding↔shape consistency:** the `meta.baseline_callable`/wrapper you bind (step 4) must be the one
+> that launches the kernel for the served regime(s) — never bind a prefill wrapper for decode-shaped cases.
 > **🔴 PASS `--isl`/`--osl` (from `WORKLOAD`) — the profiling window is capped at ~40 forward steps
 > (`PROFILE_NUM_STEPS`), so at large OSL it captures only a sliver of decode while it sees the single
 > prefill pass in full. The raw per-case `weight` (= count × avg_us) therefore UNDER-counts decode and
