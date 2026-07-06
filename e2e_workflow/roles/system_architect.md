@@ -78,7 +78,7 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    built), you MAY still list `flydsl` in a head's `candidate_backends` even though it is NOT yet in
    `available_backends`. **You do NOT build it here — Strategize only DECIDES.** The actual (blocking)
    build is owned by the FlyDSL expert skills (`apply_flydsl_moe_to_vllm` / `flydsl_rewrite_quantized_moe`):
-   their Procedure runs the bundled `ensure_flydsl.sh` as step 0 the first time flydsl is authored/applied
+   their Procedure runs the `ensure_flydsl` skill as step 0 the first time flydsl is authored/applied
    downstream, so it is built exactly once, right before its first use, scoped to the skill. If that build
    later fails (exit!=0), flydsl is dropped from the affected candidates with a recorded reason (do not
    silently fall to triton). If `flydsl_signals.buildable` is false AND neither signal (a)/(b) is true, do

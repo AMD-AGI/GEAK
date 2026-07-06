@@ -121,20 +121,20 @@ installed vLLM (off by default ⇒ byte-identical stock; back up the two files f
    `vllm bench serve` (ISL/OSL/conc), plus GSM8K within noise. Quote same-session ratios only.
 
 ## Knobs & pitfalls
-- **Obtain & PIN FlyDSL — this skill OWNS the build via its bundled `ensure_flydsl.sh` (single source of
-  truth).** The shim needs both `flydsl` and `kernels.moe_gemm_2stage` importable from ONE consistent tree.
-  Do NOT hand-roll clone/build steps here and do NOT hardcode a machine-specific checkout path — just run
-  the skill's own script as step 0:
+- **Obtain & PIN FlyDSL — DELEGATE to the `ensure_flydsl` skill (the single source of truth for the
+  build).** The shim needs both `flydsl` and `kernels.moe_gemm_2stage` importable from ONE consistent tree.
+  Do NOT hand-roll clone/build steps here and do NOT hardcode a machine-specific checkout path — run the
+  `ensure_flydsl` skill as step 0:
   ```bash
-  bash "$FLYDSL_SHIM_DIR/ensure_flydsl.sh"                 # this skill's dir; version-gated (>=MIN_VERSION reuse,
+  bash perf_knowledge/expert_skills/skills/ensure_flydsl/ensure_flydsl.sh   # version-gated (>=MIN_VERSION reuse,
                                                            # else clone+build PIN into container-internal /opt/flydsl),
                                                            # flock-guarded, applies hip-cmake + patchelf fixes, writes flydsl_env.sh
   source "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh"
   python3 -c "import flydsl, kernels.moe_gemm_2stage as k; print(flydsl.__file__, k.__file__)"   # must resolve under ONE tree
   ```
-  `ensure_flydsl.sh` reuses any ambient flydsl whose `__version__ >= MIN_VERSION` (never overwrites a newer
-  one / never pip-installs system-wide), else builds the PIN into an isolated `/opt/flydsl` — so it is safe
-  to run on shared boxes. Only if it exits non-zero is flydsl genuinely unavailable.
+  The `ensure_flydsl` skill reuses any ambient flydsl whose `__version__ >= MIN_VERSION` (never overwrites
+  a newer one / never pip-installs system-wide), else builds the PIN into an isolated `/opt/flydsl` — safe
+  on shared boxes. Only if it exits non-zero is flydsl genuinely unavailable.
   **Pin pitfall:** a stale `FLYDSL_ROOT` from a DIFFERENT/older tree hijacking the bindings while kernels load
   from another fails kernel compile with `Dynamic int_tuple leaf must be an i32 or i64 value, got: <unknown
   type>` (eager) / `... got: gl$v` (graph) — a **version mismatch, NOT a torch.compile incompatibility** (do not

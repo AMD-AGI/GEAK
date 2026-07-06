@@ -6,6 +6,20 @@
 schema: {id, file, scope, match, expects, validation_status}
 
 skills:
+- id: ensure_flydsl
+  file: skills/ensure_flydsl/skill.md
+  scope: dependency          # build/dependency skill: makes flydsl importable; invoked BY the flydsl skills, not profile-matched
+  match:
+    needs: flydsl
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - int4_w4a16
+    - fp8_e4m3_fnuz
+  validation_status: n/a
 - id: apply_flydsl_moe_to_vllm
   file: skills/apply_flydsl_moe_to_vllm/skill.md
   scope: e2e
