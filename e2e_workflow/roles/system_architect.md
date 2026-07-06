@@ -74,18 +74,27 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    on `gfx`.
 0a. **FlyDSL build-on-demand — DECISION only (flydsl-only exception; all other backends keep the strict
    `candidate_backends ⊆ available_backends` rule unchanged; preflight is UNCHANGED from stock — it does
-   NOT build flydsl and does NOT need any flydsl-specific field).** Decide buildability HERE from the
-   stock env_report fields: if `model_arch_class` denotes an **int4/A4W4 quantized MoE** (e.g.
-   `*moe*int4_w4a16*` / `*a4w4*`) AND `gfx` ∈ {gfx942, gfx950}, then FlyDSL is a build-on-demand lever —
-   you MAY list `flydsl` in that head's `candidate_backends` **even if flydsl is NOT in
-   `available_backends`** (it may be uninstalled; that's expected). **You do NOT build it here —
-   Strategize only DECIDES.** The actual (blocking) build is owned by the FlyDSL expert skills
-   (`apply_flydsl_moe_to_vllm` / `flydsl_rewrite_quantized_moe`): their Procedure runs the `ensure_flydsl`
-   skill as step 0 the first time flydsl is authored/applied downstream, so it is built exactly once,
-   right before its first use, scoped to the skill. If that build later fails (exit!=0), flydsl is dropped
-   from the affected candidates with a recorded reason (do not silently fall to triton). If the model is
-   not an int4/A4W4 MoE or gfx is not gfx942/gfx950 (and flydsl isn't already in `available_backends`), do
-   NOT route flydsl. This clause changes flydsl routing ONLY — no other backend.
+   NOT build flydsl and does NOT need any flydsl-specific field).** FlyDSL is a build-on-demand lever for a
+   head — you MAY list `flydsl` in that head's `candidate_backends` **even if flydsl is NOT in
+   `available_backends`** (it may be uninstalled; that's expected). The decision is driven ENTIRELY by
+   whether a **FlyDSL expert skill** (`apply_flydsl_moe_to_vllm` / `flydsl_rewrite_quantized_moe`) matches
+   this head — its `match` block is the single source of truth for "flydsl applies here" (operator, dtype
+   `int4_w4a16`/`fp8_e4m3_fnuz`, `gens` gfx942/950, `arch_class`, `profile_signature`). Do NOT hand-write a
+   separate arch/dtype/gfx condition here. Two modes, differing ONLY in the profile term:
+   - **profile Top-N populated** → the skill must match its FULL `match` block, including
+     `profile_signature` (op-name regex + min %GPU). Precise.
+   - **profile empty/blocked** (Top-N unavailable — e.g. baseline blocked at strategize time, the
+     Kimi-style case) → the skill matches on all match fields EXCEPT `profile_signature`, which is WAIVED
+     (you can't evaluate an op signature with no Top-N). i.e. operator/dtype/`gens`/`arch_class` still
+     must match the skill; only the profile-op check is skipped.
+
+   **You do NOT build it here — Strategize only DECIDES.** The actual (blocking) build is owned by the
+   FlyDSL expert skills (`apply_flydsl_moe_to_vllm` / `flydsl_rewrite_quantized_moe`): their Procedure runs
+   the `ensure_flydsl` skill as step 0 the first time flydsl is authored/applied downstream, so it is built
+   exactly once, right before its first use, scoped to the skill. If that build later fails (exit!=0),
+   flydsl is dropped from the affected candidates with a recorded reason (do not silently fall to triton).
+   If NEITHER branch holds (and flydsl isn't already in `available_backends`), do NOT route flydsl. This
+   clause changes flydsl routing ONLY — no other backend.
 1. Read the Top-N. For EACH top entry compute an Amdahl priority = `pct_gpu_time × plausible_speedup`
    (use the backend playbook priors for plausible_speedup per class, keyed by `model_class`+`gfx` when
    present). Note the regime each serves (large-M shape = prefill, small-M/batch = decode). **Dedupe
