@@ -22,12 +22,12 @@ fix/xxx     ──┘                                   hotfix ─────�
 
 | Branch | Purpose | Who merges |
 |--------|---------|------------|
-| `main` | Protected default branch for day-to-day development. All reviewed features, fixes, and docs changes land here via PR. | Maintainers via PR review |
-| `release/vX.Y` | Cut from `main` when preparing a release. Only bug fixes and release prep (version bump, changelog) go here. Once ready, tag the release and merge any stabilization fixes back into `main`. | Maintainers |
+| `main` | Protected default branch for day-to-day development. All reviewed features, fixes, and docs changes land here via PRs. | Maintainers via PR reviews |
+| `release/vX.Y` | Cut from `main` when preparing a release. Only bug fixes and release preparation changes (version bump, changelog) go here. Once ready, tag the release and merge any stabilization fixes back into `main`. | Maintainers |
 | `feature/<topic>` | New features, enhancements. Branch from `main`, merge back to `main` via PR. | Any contributor |
 | `fix/<topic>` | Bug fixes. Branch from `main`, merge back to `main` via PR. | Any contributor |
 | `hotfix/<topic>` | Critical fixes. Branch from the active `release/*` branch when patching a release; otherwise branch from `main`. Merge back into the source branch, then propagate to `main` if needed. | Maintainers only |
-| `docs/<topic>` | Documentation-only changes. Branch from `main`, merge back to `main`. | Any contributor |
+| `docs/<topic>` | Documentation-only changes. Branch from `main`, merge back into `main`. | Any contributor |
 
 ### Branch rules
 
@@ -75,7 +75,7 @@ git checkout -b feature/my-new-feature
 ### Develop
 
 - Write code following the [Code Standards](#code-standards) below.
-- Add or update tests for any behavioral change.
+- Add or update tests for any behavioral changes.
 - Run the linter and tests locally before pushing (see [Local checks](#local-checks)).
 
 ### Commit messages
@@ -172,7 +172,7 @@ Adjust paths if your change is narrow. See [CI/CD](#cicd) for the full matrix on
 Every PR automatically runs the following checks:
 
 1. **Lint and format** — `ruff check` and `ruff format --check`.
-2. **Correctness tests** — `pytest` runs the full test suite to verify functional correctness.
+2. **Correctness tests**—`pytest` runs the full test suite to verify functional correctness.
 3. **Benchmark tests** (non-blocking) — only triggered when the PR carries the `feat` label **and** touches performance-sensitive code (kernel implementations, optimization passes, etc.). Compares benchmark results against the `main` baseline and posts a summary in the PR comments. **Does not block merge** — maintainers review the benchmark results and decide whether to merge.
 
 > A PR cannot be merged unless lint and correctness checks pass. Benchmark results are advisory — maintainers use them to make informed merge decisions.

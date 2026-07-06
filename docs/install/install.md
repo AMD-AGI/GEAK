@@ -7,7 +7,7 @@ myst:
 
 # Install GEAK
 
-Install GEAK and run the `geak` CLI against a GPU kernel or repository. This topic covers Docker, local pip install, and model configuration for AMD LLM and LiteLLM backends.
+Install GEAK and run the `geak` CLI against a GPU kernel or repository. This topic covers Docker and local pip installation, along with model configuration for AMD LLM and LiteLLM backends.
 
 ## Prerequisites
 
@@ -15,8 +15,8 @@ Before installing GEAK, ensure your environment meets these requirements.
 
 - **Python** 3.10 or later
 - **Git** (parallel runs use worktrees)
-- **GPU** and the stack your kernels use — for example, Triton, PyTorch, CUDA, or compiled HIP.
-- **AMD Instinct or Radeon (ROCm)**: Install a normal ROCm user-space environment so tools like `rocminfo` and `rocm-smi` work when the agent inspects hardware. For HIP C++, you also need `hipcc`. `HIP_VISIBLE_DEVICES` is often set by the scheduler or your shell when pinning a card.
+- **An AMD GPU** and the stack your kernels use — for example, Triton, PyTorch, CUDA, or compiled HIP.
+- **AMD Instinct or Radeon software stack (ROCm)**: Install a normal ROCm user-space environment so tools like `rocminfo` and `rocm-smi` work when the agent inspects hardware. For HIP C++, you also need `hipcc`. `HIP_VISIBLE_DEVICES` is often set by the scheduler or your shell when pinning a card.
 
 ## Install
 
@@ -50,17 +50,17 @@ For Docker-based setup, export the API key before running `scripts/run-docker.sh
 3. env `GEAK_MODEL` 
 4. `MSWEA_MODEL_NAME`.
 
-YAML `model.model_class` selects the backend. If it's missing or empty, `get_model_class` in `src/minisweagent/models/__init__.py` still returns `LitellmModel`. You can also set it explicitly to `litellm` — that is the registered shortcut for the same class in `_MODEL_CLASS_MAPPING`.
+YAML `model.model_class` selects the backend. If it's missing or empty, `get_model_class` in `src/minisweagent/models/__init__.py` returns `LitellmModel`. You can also set it explicitly to `litellm`, which is the registered alias for the `LitellmModel` class in `_MODEL_CLASS_MAPPING`.
 
 | `model_class` (YAML) | Backend |
 |----------------------|---------|
-| `litellm` | `LitellmModel` — any `provider/model` string supported by [LiteLLM](https://docs.litellm.ai/) |
-| `amd_llm` | `AmdLlmModel` — AMD LLM gateway; `model_name` examples: `claude-opus-4.6`, `claude-sonnet-4.5`, `gpt-5`, `gpt-5-codex`, Gemini-style names with `gemini` |
+| `litellm` | `LitellmModel`—any `provider/model` string supported by [LiteLLM](https://docs.litellm.ai/) |
+| `amd_llm` | `AmdLlmModel`—AMD LLM gateway; `model_name` examples: `claude-opus-4.6`, `claude-sonnet-4.5`, `gpt-5`, `gpt-5-codex`, Gemini-style names starting with `gemini` |
 | `anthropic_model` | Direct Anthropic SDK |
 
-Optional global override: `MSWEA_MODEL_API_KEY` is copied into `model_kwargs.api_key` when set.
+`MSWEA_MODEL_API_KEY` is an optional global override: when set, it overrides `model_kwargs.api_key`.
 
-You can configure the model in two ways: via CLI flags and environment variables (applied after YAML is loaded), or via a YAML file passed with `--config` (merged over the base strategy file). The next two subsections follow that split.
+You can configure the model in two ways: via CLI flags and environment variables (applied after YAML is loaded), or via a YAML file passed with `--config` (merged over the base strategy file). The following two sections cover each approach.
 
 ### CLI and environment variables
 
@@ -71,7 +71,7 @@ CLI flags:
 - `-m` / `--model` — forces `model_name` for this run. Default `model_class` is `amd_llm`.
 - `--model-class` — forces `model_class` for this run (`litellm`, `amd_llm`, …).
 
-Example 1 — AMD LLM gateway:
+**Example 1 — AMD LLM gateway:**
 
 ```bash
 export AMD_LLM_API_KEY="YOUR_KEY"
@@ -80,7 +80,7 @@ export AMD_LLM_API_KEY="YOUR_KEY"
 geak --yolo --model claude-sonnet-4.5 -t "Your task here"
 ```
 
-Example 2 — LiteLLM + OpenAI:
+**Example 2 — LiteLLM + OpenAI:**
 
 ```bash
 export MSWEA_MODEL_NAME="openai/gpt-5"
@@ -88,7 +88,7 @@ export OPENAI_API_KEY="YOUR_KEY"
 geak --model-class litellm --kernel-url /path/to/kernel/file --repo /path/to/kernel/repo
 ```
 
-Example 3 — LiteLLM + Anthropic:
+**Example 3 — LiteLLM + Anthropic:**
 
 ```bash
 export MSWEA_MODEL_NAME="anthropic/claude-sonnet-4-5-20250929"
@@ -96,7 +96,7 @@ export ANTHROPIC_API_KEY="YOUR_KEY"
 geak --model-class litellm --kernel-url /path/to/kernel/file --repo /path/to/kernel/repo
 ```
 
-Other LiteLLM providers (Azure, Vertex, and so on): Set the `MSWEA_MODEL_NAME` or `GEAK_MODEL` string and provider env vars per [LiteLLM](https://docs.litellm.ai/) and pass `--model-class litellm` when the merged YAML isn't already LiteLLM.
+For other LiteLLM providers (Azure, Vertex, and so on): Set the `MSWEA_MODEL_NAME` or `GEAK_MODEL` string and provider environment variables per [LiteLLM](https://docs.litellm.ai/) and pass `--model-class litellm` when the merged YAML doesn't already specify LiteLLM.
 
 ### Config file (`--config`)
 
@@ -121,7 +121,7 @@ model:
   # or set OPENAI_API_KEY / ANTHROPIC_API_KEY / … in the environment instead of api_key
 ```
 
-Keep secrets in `export …` and YAML only for `model_name`, `model_kwargs`, `agent:`, and so on. Still pass `--config` so the file merges without storing keys in git.
+Keep secrets in exported variables and YAML only for `model_name`, `model_kwargs`, `agent`, and so on. Always pass `--config` so the file merges without storing keys in git.
 
 ## Related topics
 

@@ -13,8 +13,8 @@ GEAK uses a layered YAML configuration system. A built-in base file sets sensibl
 
 GEAK loads configuration in two steps:
 
-1. Base — `src/minisweagent/config/geak.yaml` is always loaded first.
-2. Override — If you pass `-c` / `--config`, that file is deep-merged on top. Keys you set in the user file replace or merge into the result.
+1. Base—`src/minisweagent/config/geak.yaml` is always loaded first.
+2. Override—If you pass `-c` / `--config`, that file is deep-merged on top. Keys you set in the user file replace or merge into the result.
 
 
 ## What’s in the default config file (`src/minisweagent/config/geak.yaml`)
@@ -49,6 +49,6 @@ GEAK loads configuration in two steps:
 
 ## Related topics
 
-- [Model configuration](model-config.md) — select a model backend and configure API keys.
+- [Model configuration](model-config.md)—select a model backend and configure API keys.
 - [API reference](../docs/reference/api-reference.md) — full CLI flag reference including `--config` and `--mode`.
 - [Install GEAK](../docs/install/install.md) — install GEAK and run the initial configuration.

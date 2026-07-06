@@ -18,7 +18,7 @@ GEAK agent loop
 
 ## Inputs
 
-Every GEAK run starts from two inputs:
+Every GEAK run requires two inputs:
 
 - **Kernel repo**: The Git repository containing the kernel to optimize. GEAK reads the repository structure, locates the target kernel, and builds a codebase context document before any optimization begins.
 - **Prompt**: A natural-language task description that tells GEAK what to optimize and what metric to improve (for example, latency, bandwidth, or throughput). The prompt can include the kernel URL, GPU IDs, and a test harness path, or GEAK can discover these automatically during preprocessing.
@@ -29,7 +29,7 @@ Once preprocessing is complete, GEAK enters the agent loop. Multiple agents run 
 
 ### Task plan and update
 
-At the start of each cycle the agent reviews the current state: what optimizations have been tried, what the profiler reported, and what the knowledge base suggests. It produces a task plan — a concrete set of code changes to attempt in this iteration — and updates its working memory with observations from prior cycles.
+At the start of each cycle the agent reviews the current state: what optimizations have been tried, what the profiler reported, and what the knowledge base suggests. It produces a task plan—a concrete set of code changes to attempt in this iteration—and updates its working memory with observations from prior cycles.
 
 ### Optimization
 
@@ -64,7 +64,7 @@ MCP (Model Context Protocol) tools run as subprocess servers and are discovered 
 
 At the end of a run, GEAK produces:
 
-- **Best kernel and speedup**: The winning patch, applied to the repository and committed. The speedup relative to the baseline is reported in `final_report.json`.
+- **Best kernel and speedup**: The winning patch is applied to the repository and committed. The speedup relative to the baseline is reported in `final_report.json`.
 - **Strategy summary**: A record of which strategies were explored, which succeeded, and which were discarded. This feeds back into cross-session memory for future runs.
 - **Updated memory**: New insights are persisted to the knowledge base so subsequent runs on similar kernels benefit from the current run's findings.
 

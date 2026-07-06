@@ -33,7 +33,7 @@ geak --kernel-url /path/to/kernel/file \
 
 ### Parallel agents
 
-Pass `--gpu-ids` as a comma-separated list of device indices (`0,1,2,3`). Each parallel agent is bound to one GPU: agent `i` uses `gpu_ids[i]` (0-based). For full isolation, set `--num-parallel` to the same count as the IDs you list; if you supply fewer IDs than agents, some runs share or fall back without per-agent GPU pinning (the CLI prints a warning).
+Pass `--gpu-ids` as a comma-separated list of device indices (`0,1,2,3`). Each parallel agent is bound to one GPU: agent `i` uses `gpu_ids[i]` (0-based). For full isolation, set `--num-parallel` to the same count as the IDs you list; if you supply fewer IDs than agents, some agents share a GPU, and the CLI prints a warning.
 
 ```bash
 geak --num-parallel 4 \
@@ -72,7 +72,7 @@ geak --kernel-url 'https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/topk
   2>&1 | tee '/workspace/GEAK_ARTIFACTS/topk_wo_task_w_harness.log'
 ```
 
-Task 3 — With NL, without harness: everything is expressed in a single natural-language `-t` string; GEAK parses the kernel URL, GPU count, and mode from the text.
+Task 3 — With NL, without harness: everything is expressed in a single natural-language `-t` string. GEAK parses the kernel URL, GPU count, and mode from the text.
 
 ```bash
 geak -t 'Optimize the topk kernel at https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/topk.py. Use GPUs 0-7.' \

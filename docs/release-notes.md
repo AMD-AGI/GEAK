@@ -11,11 +11,11 @@ This topic lists what changed in each GEAK release, including new features, bug 
 
 ## GEAK v3.2.2
 
-Patch release cut from the `chore/subagent-docs-upstream-resource` branch HEAD (`d44e1cb`), the head of PR #290.
+Patch release cut from the HEAD commit (`d44e1cb`) of PR [#290](https://github.com/AMD-AGI/GEAK/pull/290) on branch `chore/subagent-docs-upstream-resource`.
 
-Carries harness shape-faithfulness improvements and backend-rewrite subagents, plus upstreamed subagent docs and resources, on top of the v3.2.1 GEMM tuning entry point.
+Includes the harness shape-faithfulness improvements, backend-rewrite subagents, and upstreamed subagent documentation and resources, building on the v3.2.1 GEMM tuning entry point.
 
-Tagged independently of PR #290's merge status so downstream consumers get a durable, reproducible ref regardless of how or when the PR lands on `main`.
+Tagged independently of PR #290's merge status so downstream consumers have a durable, reproducible reference, regardless of when or how the PR is merged into `main`.
 
 ---
 
@@ -59,7 +59,7 @@ Release built from `main` (`c0a1f937`). This release focuses on GPU scheduler re
 
 ### Unified multi-agent optimization pipeline
 
-Replaced the Triton/HIP language router with a unified orchestrator that dispatches subagents based on task type, following a Claude Code/Codex-style multi-agent architecture. The framework is more flexible and easier to extend: new workflows can be supported by adding new subagent definitions and system prompts. Multi-round optimization is now unified across all kernel optimization workflows, with future support for resuming from intermediate checkpoints.
+Replaced the Triton/HIP language router with a unified orchestrator that dispatches subagents based on task type, following a Claude Code/Codex-style multi-agent architecture. The framework is more flexible and easier to extend: new workflows require new subagent definitions and system prompts. Multi-round optimization is now unified across all kernel optimization workflows, with future support for resuming from intermediate checkpoints.
 
 ### FlyDSL support
 

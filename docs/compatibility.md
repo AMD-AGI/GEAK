@@ -156,7 +156,7 @@ pip install -e '.[full]'        # Everything (dev + langchain + swe-rex)
 
 ## Notes
 
-- Only verified and tested configurations are listed. Untested versions are intentionally omitted.
+- Only tested configurations are listed. Untested versions are intentionally omitted.
 - To report a verified configuration not listed here, open a pull request.
 
 ## Related topics

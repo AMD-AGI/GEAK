@@ -26,14 +26,14 @@ To get started quickly, see [Install GEAK](../install/install.md) and keep secre
 ## Model backend (`model_class`)
 
 
-YAML `model.model_class` selects the backend. If it is **missing or empty**, `get_model_class` in `src/minisweagent/models/__init__.py` still returns `LitellmModel`.
+YAML `model.model_class` selects the backend. If it is **missing or empty**, `get_model_class` in `src/minisweagent/models/__init__.py` returns `LitellmModel`.
 
-You can also set it explicitly to `litellm` — that is the registered shortcut for the same class in `_MODEL_CLASS_MAPPING`.
+You can also set it explicitly to `litellm`, which is the registered alias for the `LitellmModel` class in `_MODEL_CLASS_MAPPING`.
 
 | `model_class` (YAML) | Backend |
 |----------------------|---------|
-| `litellm` | `LitellmModel` — any `provider/model` string supported by [LiteLLM](https://docs.litellm.ai/) |
-| `amd_llm` | `AmdLlmModel` — AMD LLM gateway; `model_name` examples: `claude-opus-4.6`, `claude-sonnet-4.5`, `gpt-5`, `gpt-5-codex`, Gemini-style names with `gemini` |
+| `litellm` | `LitellmModel`—any `provider/model` string supported by [LiteLLM](https://docs.litellm.ai/) |
+| `amd_llm` | `AmdLlmModel`—AMD LLM gateway; `model_name` examples: `claude-opus-4.6`, `claude-sonnet-4.5`, `gpt-5`, `gpt-5-codex`, Gemini-style names starting with `gemini` |
 | `anthropic_model` | Direct Anthropic SDK |
 
 ## API keys

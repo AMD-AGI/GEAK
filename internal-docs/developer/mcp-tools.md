@@ -14,7 +14,7 @@ This guide is for contributors or integrators who want the GEAK agent to call a 
 Create a new immediate subdirectory of `mcp_tools/` (repository root) with this layout:
 
 ```text
-mcp_tools/<server-folder>/          # use hyphens, e.g. my-tools-mcp
+mcp_tools/<server-folder>/         # use hyphens, e.g. my-tools-mcp
   pyproject.toml                   # recommended: declare dependencies
   src/
     <package_name>/                # folder name with "-" → "_" e.g. my_tools_mcp
@@ -42,7 +42,7 @@ GEAK expects servers implemented with FastMCP:
 - Use clear docstrings and typed parameters; they drive what the model sees and the tool JSON schema.
 - Provide an entry in `server.py` so `python3 -m <package_name>.server` runs the server (typically `mcp.run()` in `main()`).
 
-In-repo examples: `mcp_tools/profiler-mcp/` (Metrix + rocprof-compute) and `mcp_tools/README.md` (detailed checklist and patterns — read that file when adding a new server).
+In-repo examples: `mcp_tools/profiler-mcp/` (Metrix + rocprof-compute) and `mcp_tools/README.md` (detailed checklist and patterns—read that file when adding a new server).
 
 Dependencies: put them in your server’s `pyproject.toml` (or equivalent) so the subprocess environment can import your code. If the server fails to start or list tools, GEAK skips it for that run rather than break the whole agent.
 
@@ -72,4 +72,4 @@ Fix import and startup errors before expecting the agent to see your tools. For 
 ## Native tools (alternative)
 
 
-If you prefer a tool implemented in-process in Python (no MCP subprocess), add a native tool: implement the callable, register it, and add a matching entry in `src/minisweagent/tools/tools.json` — see `src/minisweagent/tools/tools_runtime.py` for how built-ins are wired. Prefer MCP when the feature has heavy or optional dependencies so the main install stays smaller.
+If you prefer a tool implemented in-process in Python (no MCP subprocess), add a native tool: implement the callable, register it, and add a matching entry in `src/minisweagent/tools/tools.json`—see `src/minisweagent/tools/tools_runtime.py` for how built-ins are wired. Prefer MCP when the feature has heavy or optional dependencies so the main install stays smaller.
