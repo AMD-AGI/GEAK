@@ -234,22 +234,30 @@ Write TWO files:
 > polished template — match its structure, tables, emoji, and the timed/aligned phase tree exactly so
 > every run's report looks the same. The OFFICIAL headline number is ALWAYS the Director's same-session
 > validation (`EVAL_DIR/director_e2e_validation.json` → `director_verified_throughput_tok_s` /
-> `throughput_speedup`), NOT the Finalize-bundle sanity bench — if they differ, quote the Director value
-> and note the finalize bench in parentheses. Read REAL files for every number; never invent.
+> `throughput_speedup`), NOT the Finalize-bundle sanity bench. Read REAL files for every number; never invent.
+>
+> **Ordering note:** your `report` phase runs BEFORE the Director's `validate` phase, so
+> `director_e2e_validation.json` does NOT exist yet. Write the headline throughput / speedup / TTFT / TPOT
+> from `FINAL_THROUGHPUT` + `EVAL_DIR/final/bench_final/bench_summary.json` (the Finalize bench) as a
+> **provisional** headline, and mark it e.g. `(provisional — pending Director validation)`. The Director,
+> in the subsequent `validate` phase, will **overwrite** those exact headline numbers with its authoritative
+> same-session A/B and drop the provisional tag. Everything else you write is final; only the headline
+> metrics are provisional. Keep them on clearly-identifiable lines so the Director can reconcile them.
 
-**(a) `EVAL_DIR/architect_report.md`** — the concise English summary. Its **Headline MUST quote the
-OFFICIAL Director-validated result** (`director_verified_throughput_tok_s`, `throughput_speedup`,
-`output_parity`); if the Finalize bundle bench read higher, add one line stating the conservative Director
-number is official. Then list the accepted stack (config + each kernel with its per-item e2e %), and the
+**(a) `EVAL_DIR/architect_report.md`** — the concise English summary. Its **Headline** carries throughput
+/ speedup / `output_parity` written **provisionally** from the Finalize bench (tag it `(provisional —
+pending Director validation)`); the Director's `validate` phase overwrites these with the OFFICIAL
+same-session numbers. Then list the accepted stack (config + each kernel with its per-item e2e %), and the
 remaining headroom. Keep it short.
 
 **(b) `EVAL_DIR/final_report.md`** — the COMPLETE timeline report (the headline deliverable). Keep EVERY
 attempt, win or not. REQUIRED sections, in order:
 
 1. **Run overview** — model/architecture, serving stack, workload (ISL/OSL/conc), GPU + serving invariant,
-   date, and a one-line **final conclusion that quotes the OFFICIAL Director number** (e.g.
-   `1581.4 → 2058.8 tok/s, 1.300× (+30.0%), parity pass`). If the finalize-bundle bench was higher, add a
-   parenthetical that the conservative Director value is official.
+   date, and a one-line **final conclusion** with the headline throughput/speedup (e.g.
+   `1581.4 → 2058.8 tok/s, 1.300× (+30.0%), parity pass`), written **provisionally** from the Finalize
+   bench and tagged `(provisional — pending Director validation)`. The Director overwrites this line with
+   its OFFICIAL same-session number in the `validate` phase.
 
 2. **Phases tree + timeline (wall-clock)** — MANDATORY, one timed fenced tree (NOT a plain tree). Rules:
    - Derive each phase's wall-clock from artifact mtimes (`t0` = eval-dir / `model_path.txt` mtime; phase
@@ -266,19 +274,36 @@ attempt, win or not. REQUIRED sections, in order:
    - One node per phase that actually ran (Setup→Validate). Under **HeadKernel**, show each head op (h0/h1…)
      as a child, and under each op its sub-steps (extract / bake-off+tune / each author language / integrate),
      each with its own `[ Δ ]`.
+   - **Backend provenance is MANDATORY in the tree** (this is a headline requirement — do not omit it):
+     - Each head-op child node MUST name the op's **ORIGINAL/stock backend + dtype** exactly as the live
+       server ran it (from the baseline profile Top-N `backend`/`class` + `meta.json` dtype/quant), e.g.
+       `h0 GEMM (mxfp4, stock=triton matmul_ogs)`. This is "what the kernel was before we touched it".
+     - Under each op, show **one sub-node per backend that was ATTEMPTED**, naming the backend and its
+       outcome — every Tier-A bake-off candidate AND every Tier-C author language. In **deep mode** this is
+       one sub-node per `(op × backend)` lane (`triton-fused/-splitk/-opt/-deep`, `flydsl`, `hip`, `ck`, …),
+       each with its best isolated `×` and the e2e verdict (`✓`/`✘`/`⊘`).
+     - Backends **considered but not run** MUST still appear, marked **`⊘`** with the one-word reason
+       (`⊘ CK — ckProfiler absent`, `⊘ hipBLASLt — no offline tune`, `⊘ flydsl — seam mismatch`,
+       `⊘ aiter — no mxfp4-grouped path`), so the timeline shows the FULL backend ladder that was weighed,
+       not just the one that ran. Never silently drop a backend.
    - Below the fence: a blockquote with **`🏁 TOTAL ≈ <wall-clock>`**, a **`🔥 top costs`** line, and any
      **`⚠️`** caveats; then a **Legend** line and a one-line **Final stack + official speedup**.
-   - Reference shape (reproduce emoji + alignment):
+   - Reference shape (reproduce emoji + alignment; note the stock backend on each op and one line per
+     attempted/skipped backend):
      ```
-     Phases                                                   [  step · cum  ]
-     ✅ 1  Setup        preflight + TRUE baseline <tok/s>      [ Δ17m  · 0:17 ]
-     ✅ 3  ConfigSweep  cfg0 ✘−X% · ⭐ aiter +Y% · cuda-graph ✓ [ Δ45m  · 1:49 ]
-     🔧 5  HeadKernel   extract+bake-off+author+integrate      [ Δ5h41m· 8:13 ]
-        ❌ h0 GEMM   <pct>%GPU — already optimal               [ Δ2h03m       ]
-           └ ✘ Triton  0.60× (prefill ✓ / decode ✘)           [ Δ1h24m       ]
-        ⭐ h1 attn    <pct>%GPU — ACCEPTED +Z%                 [ Δ3h39m       ]
-           └ ⭐ integrate  A/B <ref>→<cand> = +Z% · parity ✓   [ Δ27m         ]
-     🏁 9  Validate    Director A/B <base>→<final> = +W% (<x>×) [ Δ37m  · 9:43 ]
+     Phases                                                     [  step · cum  ]
+     ✅ 1  Setup        preflight + TRUE baseline <tok/s>        [ Δ17m  · 0:17 ]
+     ✅ 3  ConfigSweep  cfg0 ✘−X% · ⭐ aiter +Y% · cuda-graph ✓   [ Δ45m  · 1:49 ]
+     🔧 5  HeadKernel   extract+bake-off+author+integrate        [ Δ5h41m· 8:13 ]
+        ❌ h0 GEMM  <pct>%GPU · stock=triton matmul_ogs (mxfp4)  [ Δ2h03m       ]
+           ├ ✘ triton-opt     tile tune  1.12× iso · e2e ✘−0.4% [ Δ38m         ]
+           ├ ✘ triton-splitk  split-K    1.64× iso · e2e ✘−13%  [ Δ41m         ]
+           ├ ⊘ flydsl         author     seam mismatch (skipped)[ Δ0m          ]
+           └ ⊘ CK/hipBLASLt   bake-off   ckProfiler/bench absent[ Δ0m          ]
+        ⭐ h1 attn   <pct>%GPU · stock=CK unified_attn (bf16)    [ Δ3h39m       ]
+           ├ ⭐ aiter          backend    1.31× iso · e2e ✓+Z%   [ Δ12m         ]
+           └ ⭐ integrate      A/B <ref>→<cand> = +Z% · parity ✓ [ Δ27m         ]
+     🏁 9  Validate    Director A/B <base>→<final> = +W% (<x>×)   [ Δ37m  · 9:43 ]
      ```
 
 3. **Head-kernel deep-dive** (the centerpiece) — for EACH head op a `####` sub-section titled
@@ -286,11 +311,18 @@ attempt, win or not. REQUIRED sections, in order:
    - **GPU-time-share table**: rows `stock baseline` vs `accepted config`; columns `live kernel | backend |
      %GPU | calls` — shows how the accepted config (e.g. aiter) already re-routed the op and its %GPU on the
      final stack (stock from `profile/round_0`, accepted-stack from `profile/round_config`).
-   - **Original backend** line: dtype/quant, transpose/bias, and the live kernel on stock vs accepted.
+   - **Original backend** line: the op's stock/original backend + dtype/quant + transpose/bias, and the
+     live kernel name on stock vs accepted (stock backend/class from the baseline profile Top-N; dtype/quant
+     from `meta.json`). State it plainly, e.g. `stock: triton matmul_ogs (mxfp4 grouped MoE, NNT, bias=0)`.
    - **Weight-shape table** (GEMM: the distinct (N,K) served + the M-buckets).
-   - **Directions table** — one row per direction tried: `# | direction (cost tier) | what it did | result`.
+   - **Backend ladder** line — the FULL set of backends weighed for this op and each one's disposition:
+     `tried` (ran a lane), `⊘ unavailable` (+ reason: tool absent / arch-unavailable), or `⊘ dropped`
+     (+ reason: seam mismatch / wrong op). Mirrors the timeline's per-backend sub-nodes so the two agree.
+   - **Directions table** — one row per direction tried, WITH a backend column:
+     `# | backend | direction (cost tier) | what it did | isolated× | e2e Δ% | result`.
      Cover Tier-A backend bake-off, Tier-B per-shape tune, and Tier-C author **per language** — EVERY
-     direction incl. any that died on an infra/API error (say so explicitly; don't omit it).
+     direction incl. any that died on an infra/API error (say so explicitly; don't omit it), and one row
+     per `⊘` backend that was skipped (backend = its name, result = the skip reason).
    - For a **rejected authored kernel**: a **per-(N,K) × M speedup table** vs the baseline (from the recursive
      run's `director_validation.json` `per_case`) to expose the prefill-win/decode-loss split; end with geomean
      + the reject decision + root cause.
@@ -319,9 +351,12 @@ attempt, win or not. REQUIRED sections, in order:
 
 7. **Final deliverable + measurement caveats** (box drift → trust ONLY same-session A/B; the official number
    is the Director's same-session value) **+ next directions to explore.** Quote the FINAL serving numbers
-   from `EVAL_DIR/validation/final/bench_summary.json` — throughput (median + spread), **TTFT and TPOT** —
-   next to the baseline numbers, so the report shows the full E2E throughput / TTFT / TPOT delta (not just
-   throughput).
+   — throughput (median + spread), **TTFT and TPOT** — next to the baseline numbers, so the report shows the
+   full E2E throughput / TTFT / TPOT delta (not just throughput). At `report` time these come
+   **provisionally** from the Finalize bench (`EVAL_DIR/final/bench_final/bench_summary.json`, baseline
+   `EVAL_DIR/final/bench_baseline_ab/bench_summary.json`); tag them provisional. The Director's `validate`
+   phase reconciles this section to `EVAL_DIR/validation/{base,final}/bench_summary.json` (its authoritative
+   same-session TTFT/TPOT/throughput).
 
 Data sources (read the ACTUAL files, never invent): `director_e2e_validation.json`,
 `final/bench/bench_summary.json`, `config/sweep_results.json`, `overlay/cand_*/integrate_result.json`,
