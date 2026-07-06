@@ -72,36 +72,16 @@ Record which trace sources are available; the Profiler reads this from `env_repo
 removed from the candidate list, not errors:
 ```bash
 python3 -c "import aiter; print('aiter ok')" 2>/dev/null || echo "no aiter"
-# FlyDSL (aiter's GEMM/attn DSL — SOTA author target for dense/quantized GEMM). TWO independent
-# availability signals — flydsl counts as available if EITHER passes:
-#   (a) aiter.ops.flydsl.is_flydsl_available()  — the aiter per-shape DB `libtype=flydsl` GEMM path.
-#   (b) `import flydsl, kernels.moe_gemm_2stage` under FLYDSL_ROOT — the SOURCE-checkout path used by
-#       the int4-MoE rewrite/apply skills (flydsl_rewrite_quantized_moe + apply_flydsl_moe_to_vllm).
-#       On images whose aiter LACKS the ops.flydsl wrapper, (a) fails but (b) is the one that matters.
-[ -f "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh" ] && source "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh"
-python3 -c "import aiter.ops.flydsl as f; print('flydsl(aiter)', f.installed_flydsl_version if f.is_flydsl_available() else 'unavailable')" 2>/dev/null || echo "flydsl(aiter) unavailable"
-python3 -c "import flydsl, kernels.moe_gemm_2stage; print('flydsl(src) ok', getattr(flydsl,'__version__','?'))" 2>/dev/null || echo "flydsl(src) unavailable"
+# FlyDSL (aiter's GEMM/attn DSL — SOTA author target for dense/quantized GEMM). It is NOT a top-level
+# module: probe via aiter.ops.flydsl.is_flydsl_available() (a function), NOT `import flydsl` /
+# `aiter.flydsl` (those raise ImportError even when FlyDSL is installed → false "no flydsl").
+python3 -c "import aiter.ops.flydsl as f; print('flydsl', f.installed_flydsl_version if f.is_flydsl_available() else 'unavailable')" 2>/dev/null || echo "no flydsl"
 command -v hipblaslt-bench || echo "no hipblaslt-bench (offline GEMM tune unavailable)"
 command -v ckProfiler   || echo "no ckProfiler (CK instance sweep unavailable)"
 ```
-**DETECT-ONLY in preflight — do NOT build FlyDSL here.** The heavy source build is NO LONGER run at setup
-(it wasted a ~one-time LLVM build for runs that never end up choosing flydsl, and competed for CPU with
-other workloads). Preflight only PROBES and records buildability; the actual build is owned by the
-`ensure_flydsl` expert skill (the FlyDSL optimization skills delegate to it), triggered downstream only
-when the Architect decides to use flydsl (Strategize; see `roles/system_architect.md`). Record FlyDSL state
-in `env_report.json`:
-- signal (a) `aiter.ops.flydsl.is_flydsl_available()` and signal (b) `import flydsl, kernels.moe_gemm_2stage`;
-- if NEITHER passes but this is an int4/A4W4 quantized-MoE on gfx942 with the FlyDSL checkout reachable,
-  set `flydsl_signals.buildable=true` (build-on-demand at Strategize) — do NOT clone/build now.
-
-FlyDSL availability for routing:
-- If signal (a) OR (b) is true → flydsl is present now; **flydsl MUST appear in `available_backends`**
-  (via aiter per-shape DB tune `libtype=flydsl` for signal a, AND/OR as a Tier-C author target for
-  signal b). Never mark flydsl unavailable on signal (a) alone when (b) passes.
-- If only `flydsl_signals.buildable=true` (neither signal yet) → leave `available_backends` as-is (do
-  NOT add flydsl to it), but the Architect may still route flydsl as a build-on-demand candidate in
-  Strategize (it consults `flydsl_signals.buildable`; the `ensure_flydsl` skill then builds it before
-  first use).
+When `is_flydsl_available()` is true, **flydsl MUST appear in `available_backends`** (it is reachable
+via the aiter per-shape DB tune `libtype=flydsl` AND as a Tier-C author target). Do not infer its
+absence from an `import flydsl` failure — only `is_flydsl_available()` is authoritative.
 
 **Record WHY each optional backend is absent + HOW to provision it (don't just drop it).** For every
 backend NOT in `available_backends`, write an `absent_backends[<name>] = {probe, remedy}` entry to

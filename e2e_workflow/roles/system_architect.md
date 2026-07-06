@@ -73,15 +73,18 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    MLA decode). Restrict every `candidate_backends` list to `available_backends`. Gate playbook priors
    on `gfx`.
 0a. **FlyDSL build-on-demand — DECISION only (flydsl-only exception; all other backends keep the strict
-   `candidate_backends ⊆ available_backends` rule unchanged).** FlyDSL is no longer built in preflight.
-   If `env_report.flydsl_signals.buildable == true` (int4/A4W4 MoE on gfx942, checkout reachable, not yet
-   built), you MAY still list `flydsl` in a head's `candidate_backends` even though it is NOT yet in
-   `available_backends`. **You do NOT build it here — Strategize only DECIDES.** The actual (blocking)
-   build is owned by the FlyDSL expert skills (`apply_flydsl_moe_to_vllm` / `flydsl_rewrite_quantized_moe`):
-   their Procedure runs the `ensure_flydsl` skill as step 0 the first time flydsl is authored/applied
-   downstream, so it is built exactly once, right before its first use, scoped to the skill. If that build
-   later fails (exit!=0), flydsl is dropped from the affected candidates with a recorded reason (do not
-   silently fall to triton). If `flydsl_signals.buildable` is false AND neither signal (a)/(b) is true, do
+   `candidate_backends ⊆ available_backends` rule unchanged; preflight is UNCHANGED from stock — it does
+   NOT build flydsl and does NOT need any flydsl-specific field).** Decide buildability HERE from the
+   stock env_report fields: if `model_arch_class` denotes an **int4/A4W4 quantized MoE** (e.g.
+   `*moe*int4_w4a16*` / `*a4w4*`) AND `gfx` ∈ {gfx942, gfx950}, then FlyDSL is a build-on-demand lever —
+   you MAY list `flydsl` in that head's `candidate_backends` **even if flydsl is NOT in
+   `available_backends`** (it may be uninstalled; that's expected). **You do NOT build it here —
+   Strategize only DECIDES.** The actual (blocking) build is owned by the FlyDSL expert skills
+   (`apply_flydsl_moe_to_vllm` / `flydsl_rewrite_quantized_moe`): their Procedure runs the `ensure_flydsl`
+   skill as step 0 the first time flydsl is authored/applied downstream, so it is built exactly once,
+   right before its first use, scoped to the skill. If that build later fails (exit!=0), flydsl is dropped
+   from the affected candidates with a recorded reason (do not silently fall to triton). If the model is
+   not an int4/A4W4 MoE or gfx is not gfx942/gfx950 (and flydsl isn't already in `available_backends`), do
    NOT route flydsl. This clause changes flydsl routing ONLY — no other backend.
 1. Read the Top-N. For EACH top entry compute an Amdahl priority = `pct_gpu_time × plausible_speedup`
    (use the backend playbook priors for plausible_speedup per class, keyed by `model_class`+`gfx` when
