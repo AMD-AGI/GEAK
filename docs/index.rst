@@ -29,5 +29,4 @@ The GEAK public repository is located at `AMD-AGI/GEAK <https://github.com/AMD-A
 
       * :doc:`API reference <reference/api-reference>`
 
-For information on contributing to the GEAK code base, see
-:doc:`GEAK GitHub repository <https://github.com/AMD-AGI/GEAK/blob/rocm-docs-review/CONTRIBUTING.md>`.
+For information on contributing to the GEAK code base, see `GEAK GitHub repository <https://github.com/AMD-AGI/GEAK/blob/rocm-docs-review/CONTRIBUTING.md>`.

@@ -11,7 +11,7 @@ Install GEAK and run the `geak` CLI against a GPU kernel or repository. This top
 
 ## Prerequisites
 
-Before installing GEAK, ensure your environment meets these requirements.
+Before installing GEAK, ensure the following are installed on your system:
 
 - **Python** 3.10 or later
 - **Git** (parallel runs use worktrees)

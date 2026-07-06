@@ -129,7 +129,7 @@ These precision formats are verified.
 
 ## Core Python dependencies
 
-These Python packages are required or optional.
+These Python packages are used, but some are optional.
 
 | Package | Version constraint | Required | Notes |
 |---|---|---|---|

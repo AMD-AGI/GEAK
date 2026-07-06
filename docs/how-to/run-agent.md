@@ -28,7 +28,7 @@ Use explicit flags to specify the kernel and repository when you want precise co
 ```bash
 geak --kernel-url /path/to/kernel/file \
   --repo /path/to/kernel/repo \
-  --task "Optimize the block_reduce kernel" \
+  --task "Optimize the block_reduce kernel" 
 ```
 
 ### Parallel agents
