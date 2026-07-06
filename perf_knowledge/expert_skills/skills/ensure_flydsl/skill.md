@@ -27,10 +27,12 @@ for the e2e apply-back) can run. It is a **dependency skill**: other skills / th
 invoke it; it is not selected from the profile Top-N on its own.
 
 ## When to run
-As **step 0** of any FlyDSL skill, the first time flydsl is about to be authored or applied. The
-Architect routes flydsl as a build-on-demand candidate in Strategize (see `roles/system_architect.md`
-§0a) but does NOT build there; the build happens here, once, right before first use. Idempotent — safe
-to invoke from every flydsl skill; later calls short-circuit.
+**Primary: at Strategize, the moment a FlyDSL expert skill matches** — the System Architect runs this
+skill BLOCKING right then (see `roles/system_architect.md` §0a), before routing flydsl, and updates the
+environment (source `flydsl_env.sh`; add `flydsl` to `available_backends`). So flydsl is fully built and
+importable before any downstream author/apply.
+Also safe to invoke as an idempotent **step 0** of the flydsl author/apply skills as a belt-and-suspenders
+guard — later calls short-circuit (version-gate reuse), so it never rebuilds.
 
 ## Procedure
 Run the bundled executor (do NOT hand-roll clone/build — it carries the version gate, the ROCm-image
