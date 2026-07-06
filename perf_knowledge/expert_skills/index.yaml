@@ -6,6 +6,29 @@
 schema: {id, file, scope, match, expects, validation_status}
 
 skills:
+- id: apply_flydsl_moe_to_vllm
+  file: skills/apply_flydsl_moe_to_vllm/skill.md
+  scope: e2e
+  match:
+    operator: fused_moe_grouped_gemm
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - int4_w4a16
+    regimes:
+    - prefill
+    - decode
+    from_backend: triton
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: fused_moe_kernel_gptq_awq|invoke_fused_moe_wna16
+      min_pct_gpu: 10.0
+  expects:
+    e2e_delta_min_pct: 1.0
+    parity: required
+  validation_status: validated
 - id: flydsl_fp8_gemm_playbook
   file: skills/flydsl_fp8_gemm_playbook/skill.md
   scope: e2e
