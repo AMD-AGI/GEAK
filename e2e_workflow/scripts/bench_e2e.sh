@@ -373,20 +373,54 @@ if [ "$PROFILE" = "1" ]; then
     echo ">>> Profiling steady-state mix: warm ${PROFILE_WARMUP_SEC}s on a saturated load " \
          "(${PROFILE_NUM_PROMPTS} prompts, conc ${CONC}${PROFILE_REQUEST_RATE:+, rate ${PROFILE_REQUEST_RATE}/s}), " \
          "then capture ${PROFILE_NUM_STEPS} steps ..."
-    # Sustained background load (NOT timed, NOT profiled). Varied OSL (RANDOM_RANGE_RATIO>0) + more
-    # prompts than CONC means early finishers are replaced by fresh arrivals, so the in-flight
-    # sequences de-synchronize into a realistic prefill+decode mix.
-    REQUEST_RATE="${PROFILE_REQUEST_RATE}" \
-      adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 0 >/dev/null 2>&1 &
-    _bg_load=$!
-    sleep "$PROFILE_WARMUP_SEC"
-    if kill -0 "$_bg_load" 2>/dev/null; then
-      adapter_profile_window || echo "!!! profile window failed"
-    else
-      echo "!!! background load exited before the profile window (load too short?) — falling back"
-      adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"
-    fi
-    kill "$_bg_load" 2>/dev/null || true; wait "$_bg_load" 2>/dev/null || true
+    # Representativeness gate: the profiled window must capture >= N DECODE forward steps, else BOTH head
+    # selection (raw %GPU) and the decode weight-share are biased by an under-captured window (e.g. one
+    # that landed in the prefill ramp). N scales with the workload:
+    #   N = max(30, 5*ceil(OSL/CONC))  — a statistical floor (>=30 stable decode samples) PLUS ~5
+    #   prefill-admission cycles (a slot frees every ~OSL/CONC decode steps) so the phase ratio is
+    #   representative. If short, ENLARGE the window and re-capture, up to PROFILE_DECODE_TMAX seconds
+    #   total; if still short, proceed and FLAG low-confidence (never hang). Reaching N is cheap at steady
+    #   state (~N*TPOT), so a good first capture is a single pass — only pathological windows re-capture.
+    _N_DECODE=$(python3 -c "import math;print(max(30,5*math.ceil($OSL/max($CONC,1))))" 2>/dev/null || echo 30)
+    _PROF_TMAX="${PROFILE_DECODE_TMAX:-120}"
+    _prof_t0=$SECONDS; _dsteps=0; _attempt=0
+    while : ; do
+      _attempt=$((_attempt+1))
+      # (re)start the sustained, replenishing background load for THIS attempt (>CONC prompts, varied OSL
+      # -> realistic prefill+decode mix; NOT timed, NOT profiled). Restarted per attempt (finite prompts).
+      # The representativeness gate below guarantees the window still captures enough decode, so we keep
+      # the realistic mixed load (prefill shapes stay visible for head selection) rather than a decode-only
+      # load that would bias head selection toward decode-only kernels.
+      REQUEST_RATE="${PROFILE_REQUEST_RATE}" \
+        adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 0 >/dev/null 2>&1 &
+      _bg_load=$!
+      sleep "$PROFILE_WARMUP_SEC"
+      if kill -0 "$_bg_load" 2>/dev/null; then
+        adapter_profile_window || echo "!!! profile window failed"
+      else
+        echo "!!! background load exited before the profile window (load too short?) — falling back"
+        adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"
+      fi
+      kill "$_bg_load" 2>/dev/null || true; wait "$_bg_load" 2>/dev/null || true
+      # count decode (graph-replay / shape-hidden) forward steps in the newest trace
+      _dsteps=$(python3 "$HERE/decode_steps.py" "$PROFILE_DIR" 2>/dev/null || echo 0)
+      case "$_dsteps" in ''|*[!0-9]*) _dsteps=0 ;; esac
+      if [ "$_dsteps" -ge "$_N_DECODE" ]; then
+        echo ">>> decode-capture OK: ${_dsteps} >= ${_N_DECODE} decode steps (attempt ${_attempt})"
+        break
+      fi
+      if [ $((SECONDS - _prof_t0)) -ge "$_PROF_TMAX" ]; then
+        echo "!!! decode-capture LOW-CONFIDENCE: ${_dsteps} < ${_N_DECODE} decode steps after ${_PROF_TMAX}s — proceeding + flagging"
+        break
+      fi
+      PROFILE_WINDOW_SEC=$((PROFILE_WINDOW_SEC * 2)); PROFILE_NUM_STEPS=$((PROFILE_NUM_STEPS * 2))
+      echo ">>> decode-capture short (${_dsteps} < ${_N_DECODE}); enlarging window -> ${PROFILE_WINDOW_SEC}s / ${PROFILE_NUM_STEPS} steps; re-capturing ..."
+    done
+    python3 - "$PROFILE_DIR/decode_capture.json" "$_dsteps" "$_N_DECODE" "$_attempt" <<'PY' 2>/dev/null || true
+import json, sys
+p, ds, n, att = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+json.dump({"decode_steps": ds, "N": n, "attempts": att, "low_confidence": ds < n}, open(p, "w"))
+PY
   else
     # Backend without an HTTP profiler hook: can't profile a mid-stream window, but at least avoid the
     # pure cold burst — send more prompts so the queue stays full past the prefill ramp and the captured
@@ -400,12 +434,20 @@ fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----
 python3 - "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" <<'PY'
-import json, sys, statistics
+import json, os, sys, statistics
 runs_path, out_path = sys.argv[1], sys.argv[2]
 def pick(d, *keys):
     for k in keys:
         if k in d and isinstance(d[k], (int, float)): return float(d[k])
     return None
+# metric selection: default = output tok/s (Magpie-aligned, backward-compatible); set E2E_METRIC=total
+# to gate on TOTAL token throughput ((input+output)/s). Same key is read for baseline+cand so the
+# accept RATIO is consistent; metric_basis records which was used.
+_metric = (os.environ.get("E2E_METRIC") or "output").strip().lower()
+_is_total = _metric in ("total", "total_token", "total_throughput")
+_TPUT_KEYS = (("total_token_throughput", "total_throughput", "total_token_throughput_tok_s")
+              if _is_total else
+              ("output_throughput", "output_token_throughput", "output_throughput_tok_s"))
 tps, ttft, tpot = [], [], []
 with open(runs_path) as fh:
     for line in fh:
@@ -413,7 +455,7 @@ with open(runs_path) as fh:
         if not line: continue
         try: d = json.loads(line)
         except Exception: continue
-        v = pick(d, "output_throughput", "output_token_throughput", "output_throughput_tok_s")
+        v = pick(d, *_TPUT_KEYS)
         if v is not None: tps.append(v)
         t = pick(d, "median_ttft_ms", "mean_ttft_ms");   ttft.append(t) if t is not None else None
         p = pick(d, "median_tpot_ms", "mean_tpot_ms");   tpot.append(p) if p is not None else None
@@ -428,8 +470,9 @@ summ = {
     "tpot_ms_median": round(med(tpot), 3) if tpot else None,
     "runs": len(tps),
     "all_throughput": tps,
-    # Aggregate output tok/s (NOT divided by TP) — matches Hyperloom/Magpie output_throughput protocol.
-    "metric_basis": "aggregate_output_tok_s",
+    # Aggregate tok/s (NOT divided by TP). Default matches Hyperloom/Magpie output_throughput protocol;
+    # E2E_METRIC=total switches to total (input+output) token throughput.
+    "metric_basis": ("aggregate_total_token_tok_s" if _is_total else "aggregate_output_tok_s"),
 }
 with open(out_path, "w") as fh: json.dump(summ, fh, indent=2)
 print(f"E2E_SUMMARY output_tok_s={summ['output_throughput_tok_s_median']} "

@@ -150,21 +150,30 @@ def parse_regime(server_args, model_config_path="", server_script=""):
         kv = "auto"
         notes.append("kv-cache-dtype=auto -> follows model compute dtype (usually bf16); confirm if fp8 desired.")
 
-    # ---- compile / fusion state (the baseline-relevant axis) ----
-    compile_on = bool(flags.get("enable-torch-compile") or flags.get("enable_torch_compile")
-                      or flags.get("torch-compile"))
-    compile_state = "torch_compile" if compile_on else "eager"
-
     # ---- enforce-eager: the STRAWMAN-baseline flag. vllm's --enforce-eager disables BOTH cuda graphs
     # and compilation; sglang's equivalent is --disable-cuda-graph. When set, the online baseline runs
     # every forward pass eagerly, so launch/dispatch overhead is unmasked and an e2e A/B over-credits
-    # launch-overhead kernels (isolated win, e2e loss). Recorded so the unittest-writing module times its
-    # baseline under deployment_graph_mode (harness_lib) and the live-seam guard can flag the strawman. ----
+    # launch-overhead kernels (isolated win, e2e loss). Computed BEFORE compile because it gates it. ----
     enforce_eager = bool(flags.get("enforce-eager") or flags.get("enforce_eager")
                          or flags.get("disable-cuda-graph") or flags.get("disable_cuda_graph"))
     if enforce_eager:
         notes.append("enforce-eager/disable-cuda-graph set: the online baseline runs eagerly (no "
                      "graph replay); an e2e A/B on it is a strawman for launch-overhead kernels.")
+
+    # ---- compile / fusion state (the baseline-relevant axis) ----
+    # Explicit opt-in flags always win. Otherwise vLLM V1 compiles the backbone BY DEFAULT (opt-OUT via
+    # --enforce-eager), so an ABSENT --enable-torch-compile does NOT mean eager — the old flag-only check
+    # mis-reported eager and made GEMM harnesses time a naked-eager baseline. Infer compile-on for vLLM
+    # unless enforce_eager; sglang has no default torch.compile. The extractor still CONFIRMS from the
+    # server log and the log wins (kernel_extractor.md). ----
+    explicit_compile = bool(flags.get("enable-torch-compile") or flags.get("enable_torch_compile")
+                            or flags.get("torch-compile"))
+    is_vllm = "vllm" in f"{server_script} {server_args}".lower()
+    compile_on = explicit_compile or (is_vllm and not enforce_eager)
+    compile_state = "torch_compile" if compile_on else "eager"
+    if compile_on and not explicit_compile:
+        notes.append("vLLM V1 compiles the backbone by default (no --enforce-eager) -> compile=torch_compile; "
+                     "confirm via server log compilation_config (log wins).")
 
     # ---- cuda graph: on unless the baseline is forced eager (same flags as enforce_eager) ----
     cuda_graph = not enforce_eager

@@ -228,6 +228,77 @@ def deployment_graph_mode(regime):
     return bool(regime.get("cuda_graph", True))
 
 
+def deployment_compile_mode(regime):
+    """Whether the LIVE server runs this op inside a torch.compile'd (fused) region — the deployment
+    context the isolated unittest MUST time its BASELINE in. vLLM V1 compiles the backbone BY DEFAULT
+    (opt-out via --enforce-eager); sglang has no default torch.compile (regime.compile from
+    parse_regime.py -> "torch_compile" | "eager").
+
+    WHY the unittest author needs this: the FUSION analog of deployment_graph_mode's graph strawman. A
+    baseline timed EAGERLY when deployment runs under torch.compile omits the fusion the live server
+    already got (epilogue/elementwise fusion, dtype-cast folding), so a candidate posts an isolated win
+    that fusion had already captured -> isolated win, e2e loss. Time BOTH baseline and candidate through
+    compiled_op(fn, regime) so fusion parity is enforced. Returns True when deployment compiles this op."""
+    regime = regime or {}
+    if regime.get("enforce_eager"):
+        return False
+    return str(regime.get("compile") or "eager").lower() in (
+        "torch_compile", "compile", "inductor", "true", "1")
+
+
+def compiled_op(fn, regime, *, fullgraph=True, dynamic=False, mode=None):
+    """Wrap the op callable `fn` in torch.compile WHEN the live regime deploys it compiled, else return
+    `fn` unchanged (eager) — so the generated unittest times baseline AND candidate with the SAME fusion
+    state the server uses. Build the timed closure from the result:
+
+        base = h.compiled_op(BASELINE_FN, REGIME)
+        cand = h.compiled_op(CANDIDATE_FN, REGIME)
+        h.time_op(lambda: base(x, w, b), graph=h.deployment_graph_mode(REGIME))
+
+    `fullgraph=True` (no graph breaks -> one fused region, matching a captured graph) and `dynamic=False`
+    (specialize per timed shape; the harness times one shape at a time) mirror the server's per-shape
+    compiled kernels. Compilation is triggered by the timer's warmup launches.
+
+    Degrades gracefully and PARITY-SAFELY: returns `fn` unchanged when the regime is eager, when
+    torch.compile is unavailable, or when compile raises. When the regime IS compiled but compile fails,
+    the fallback is eager for the returned callable AND the failure is recorded on it via
+    `._geak_compile_error` so the unittest can surface it — it NEVER silently reports an eager baseline as
+    if it were compiled. Use it symmetrically on both sides so a fallback keeps baseline==candidate fusion."""
+    if not deployment_compile_mode(regime):
+        return fn
+    try:
+        import torch
+    except Exception:
+        try:
+            setattr(fn, "_geak_compile_error", "torch import failed; compiled path skipped")
+        except Exception:
+            pass
+        return fn
+    if not hasattr(torch, "compile"):
+        try:
+            setattr(fn, "_geak_compile_error", "torch.compile unavailable (torch<2.0)")
+        except Exception:
+            pass
+        return fn
+    try:
+        if not torch.cuda.is_available():
+            setattr(fn, "_geak_compile_error", "no cuda; compiled path skipped")
+            return fn
+    except Exception:
+        pass
+    try:
+        kw = {"fullgraph": bool(fullgraph), "dynamic": bool(dynamic)}
+        if mode is not None:
+            kw["mode"] = mode
+        return torch.compile(fn, **kw)
+    except Exception as exc:
+        try:
+            setattr(fn, "_geak_compile_error", f"{type(exc).__name__}: {str(exc)[:200]}")
+        except Exception:
+            pass
+        return fn
+
+
 def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=True, detail=False):
     """Median PER-CALL milliseconds. PRIMARY metric = CUDA-EVENT DEVICE time; wall-clock is a reference.
 
