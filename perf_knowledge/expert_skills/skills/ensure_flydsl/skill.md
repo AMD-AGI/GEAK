@@ -36,13 +36,24 @@ guard — later calls short-circuit (version-gate reuse), so it never rebuilds.
 
 ## Procedure
 Run the bundled executor (do NOT hand-roll clone/build — it carries the version gate, the ROCm-image
-fixes, the concurrency lock, and the env file):
+fixes, the concurrency lock, and the env file). A from-scratch build is ~15–18 min — **longer than the
+Bash tool's 600 s ceiling — so launch it DETACHED and poll**, never as one foreground call:
 
 ```bash
-bash "$(dirname "$0")/ensure_flydsl.sh"    # or: perf_knowledge/expert_skills/skills/ensure_flydsl/ensure_flydsl.sh
-source "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh"
-python3 -c "import flydsl, kernels.moe_gemm_2stage as k; print(flydsl.__file__, k.__file__)"   # must resolve under ONE tree
+FR="${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}"; ENV="$FR/flydsl_env.sh"; FAIL="$(dirname "$FR")/.flydsl_build.failed"
+SH="perf_knowledge/expert_skills/skills/ensure_flydsl/ensure_flydsl.sh"
+nohup bash "$SH" > "$(dirname "$FR")/ensure_flydsl.log" 2>&1 &   # detached
+for i in $(seq 1 180); do                                        # deadline 1800s (30 min)
+  [ -f "$ENV" ]  && break                                        # success: flydsl_env.sh written
+  [ -f "$FAIL" ] && { echo "flydsl build FAILED (see ensure_flydsl.log)"; break; }
+  sleep 10
+done
+[ -f "$ENV" ] && source "$ENV" && \
+  python3 -c "import flydsl, kernels.moe_gemm_2stage as k; print(flydsl.__file__, k.__file__)"  # ONE tree
 ```
+Completion markers: **success = `flydsl_env.sh` exists**; **failure = `.flydsl_build.failed` exists**
+(next to `$FLYDSL_ROOT`). Idempotent: if flydsl is already present the script writes `flydsl_env.sh`
+almost immediately (version-gate reuse), so the poll returns in one tick.
 
 ## What the executor guarantees (`ensure_flydsl.sh`)
 - **Version-only reuse gate**: if an ambient flydsl+kernels is importable with `__version__ >=

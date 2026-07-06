@@ -32,8 +32,15 @@ PIN="a35627a2fef0a5a70c63536c4174674223866737"   # known-good for Kimi-K2.6 int4
 MIN_VERSION="${FLYDSL_MIN_VERSION:-0.2.2}"        # semver floor the PIN corresponds to (v0.2.2-12-ga35627a2)
 REPO="https://github.com/ROCm/FlyDSL.git"
 SHIM_DIR="$GEAK_ROOT/perf_knowledge/expert_skills/skills/apply_flydsl_moe_to_vllm"   # flydsl_moe_shim.py lives in the apply skill
-ENV_FILE="$ROOT/flydsl_env.sh"                    # stable location preflight/launcher source
+ENV_FILE="$ROOT/flydsl_env.sh"                    # stable location preflight/launcher source; also the SUCCESS marker
+FAIL_MARKER="${FLYDSL_BUILD_FAILED:-$(dirname "$ROOT")/.flydsl_build.failed}"   # written iff this run exits non-zero
 JOBS="$(nproc 2>/dev/null || echo 32)"
+
+# Completion markers for a background poller (this script is launched detached for long builds):
+#   success -> $ENV_FILE exists (written last, on exit 0);  failure -> $FAIL_MARKER exists.
+mkdir -p "$(dirname "$FAIL_MARKER")" 2>/dev/null || true
+rm -f "$FAIL_MARKER" 2>/dev/null || true                     # clear any stale marker at start
+trap 'rc=$?; [ "$rc" -ne 0 ] && : > "'"$FAIL_MARKER"'"' EXIT # any non-zero exit -> drop the fail marker
 
 log(){ echo "[ensure_flydsl] $*"; }
 

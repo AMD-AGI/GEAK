@@ -88,13 +88,24 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
      (operator/dtype/`gens`/`arch_class` still required; only the profile-op check is skipped).
 
    **(ii) Build NOW — blocking — the moment a flydsl skill matches** (before routing flydsl anywhere),
-   so downstream never selects flydsl and fails on a missing import. Run the `ensure_flydsl` skill
-   (it owns the build; idempotent — reuses if already present, else clone+builds the pin):
+   so downstream never selects flydsl and fails on a missing import. The `ensure_flydsl` skill owns the
+   build (idempotent — reuses if already present, else clone+builds the pin). A from-scratch build is
+   ~15–18 min (LLVM ~11 min + FlyDSL) — **longer than the Bash tool's 600 s ceiling**, so you MUST run it
+   **detached and poll for completion**, NOT as one foreground call (that would be killed at 600 s):
    ```bash
-   bash perf_knowledge/expert_skills/skills/ensure_flydsl/ensure_flydsl.sh
-   source "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh"
-   python3 -c "import flydsl, kernels.moe_gemm_2stage; print('flydsl ready')"   # must pass
+   FR="${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}"; ENV="$FR/flydsl_env.sh"; FAIL="$(dirname "$FR")/.flydsl_build.failed"
+   nohup bash perf_knowledge/expert_skills/skills/ensure_flydsl/ensure_flydsl.sh \
+         > "$(dirname "$FR")/ensure_flydsl.log" 2>&1 &        # detached background build
+   # poll to completion — deadline 1800 s (30 min; override via a longer loop if the box is contended)
+   for i in $(seq 1 180); do
+     [ -f "$ENV" ]  && { echo "flydsl ready";  break; }       # success marker
+     [ -f "$FAIL" ] && { echo "flydsl build FAILED"; break; } # failure marker
+     sleep 10
+   done
+   [ -f "$ENV" ] && source "$ENV" && python3 -c "import flydsl, kernels.moe_gemm_2stage; print('ok')"
    ```
+   The architect BLOCKS on this poll (workflow does not advance until flydsl is ready or the build fails
+   or the 30-min deadline passes). This is "blocking" without holding a single 15-min Bash call.
 
    **(iii) Update the environment after a successful build** so the rest of the run treats flydsl as
    genuinely available:
