@@ -376,6 +376,25 @@ needs an op task dir the **Op Benchmarker** can bake-off across backends. `edit=
 > and `build` per the kernel. Return `op_kind:"moe"`. The Op Benchmarker then optimizes it as
 > `fused_moe_grouped_gemm` via kernel_workflow — it must never be dense-GEMM baked off. The GEMM-synth
 > path below applies ONLY to `op_kind=gemm`.
+>
+> **Routing values are NOT value-independent — `randperm`/uniform synthesis is FORBIDDEN for MoE.**
+> Unlike a dense GEMM (where perf is value-independent, so `GEMM_SYNTH` may fabricate operands), the real
+> routing distribution IS the MoE performance signal: production routing is heavily SKEWED (hot experts +
+> a shared expert), which drives `moe_align_block_size` block/padding counts, per-expert effective-M, and
+> the dispatch count. A uniform `torch.randperm(E)[:top_k]` oracle flattens that skew and makes BOTH the
+> baseline denominator and every candidate score on an UNREAL load (root cause of the MiniMax-M3
+> fused_moe over/under-estimate). Therefore, for `op_kind=moe`:
+> - Set `GEMM_SYNTH=false` and `synthesized=false`. Capture the REAL `topk_ids`/`topk_weights` (and the
+>   activation) from the live server via `capture_shapes.py` on the dispatcher seam, and write a
+>   NON-EMPTY `reference_io.pt` / `reference_io_sha256`. Never fabricate routing.
+> - If live capture cannot record routing for a regime (e.g. decode only appears under CUDA-graph, where
+>   snapshotting is illegal — `capture_shapes` records eager cases only), capture what you can eagerly
+>   (server warmup / a short enforce-eager window) and FLAG `notes` "routing not captured for regime X".
+>   Do NOT silently fall back to `randperm`: a synthesized-uniform MoE oracle is a hard quality defect,
+>   not an acceptable degrade — prefer fewer real cases over many fake-uniform ones.
+> - The baseline leg must bind the FULL fused dispatch (GEMM1 -> act(swiglu) -> GEMM2 -> top-k weighted
+>   reduce, one dispatcher call), NOT per-GEMM stages timed in isolation — the fusion boundary, the
+>   intermediate-activation residency, and the reduce are part of the op being optimized/measured.
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (Architect head candidate: short_name,
 op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for attn, and OPTIONAL
