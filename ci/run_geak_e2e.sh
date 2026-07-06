@@ -66,21 +66,66 @@ export INFERENCEX_PATH
 # stale /hyperloom/... path that won't exist on your box).
 LOCAL_RECIPE="$MODEL_DIR/baseline_config.with_envs.yaml"
 HANDOFF="$OUT_DIR/handoff.patched.json"
-python3 - "$HANDOFF_SRC" "$HANDOFF" "$EXP_ROOT" "${MODEL_PATH:-}" "$LOCAL_RECIPE" "${INFERENCEX_PATH:-}" <<'PY'
+python3 - "$HANDOFF_SRC" "$HANDOFF" "$EXP_ROOT" "${MODEL_PATH:-}" "$LOCAL_RECIPE" "${INFERENCEX_PATH:-}" "${DRY:-}" <<'PY'
+# Localize a Hyperloom handoff for THIS box: overwrite path keys with local values (never parse the
+# old cluster prefix), pin schema_version + assert required keys, then reachability-check the result.
 import json, os, sys
-src, dst, exp_root, model_path, local_recipe, ix = sys.argv[1:7]
+src, dst, exp_root, model_path, local_recipe, ix, dry = (list(sys.argv[1:8]) + [""] * 7)[:7]
+is_dry = bool(dry)
 h = json.load(open(src))
-h["exp_root"] = exp_root
-if model_path:
-    h["model_path"] = model_path
-if os.path.isfile(local_recipe):
-    h["launch_recipe"] = os.path.abspath(local_recipe)
-# Repoint inferencex_path to the local checkout (or drop it so $INFERENCEX_PATH / native applies).
-if ix and os.path.isdir(ix):
-    h["inferencex_path"] = os.path.abspath(ix)
-else:
-    h.pop("inferencex_path", None)
+
+# ---- A. schema pin + required-key assert (fail fast, name the offender) ----
+KNOWN_SCHEMA = {1}
+sv = h.get("schema_version")
+if sv not in KNOWN_SCHEMA:
+    sys.exit(f"[handoff] unknown schema_version={sv!r} (this harness knows {sorted(KNOWN_SCHEMA)}). "
+             f"Handoff format changed — update run_geak_e2e.sh REWRITES/leak-scan before running.")
+for req in ("model_path", "exp_root"):   # run_e2e.py does a hard h[<key>] on these
+    if not h.get(req):
+        sys.exit(f"[handoff] required key {req!r} missing/empty in {src} — cannot localize.")
+
+# ---- C. declarative rewrite table: key -> how to derive its local value ----
+# Each entry returns (new_value_or_None, drop_if_none). Add a line here when a new path key appears.
+def _recipe(_):   return (os.path.abspath(local_recipe) if os.path.isfile(local_recipe) else None, False)
+def _ix(_):       return (os.path.abspath(ix) if (ix and os.path.isdir(ix)) else None, True)
+REWRITES = {
+    "exp_root":        lambda _: (exp_root, False),
+    "model_path":      lambda _: (model_path or None, False),   # keep handoff value if MODEL_PATH unset
+    "launch_recipe":   _recipe,
+    "inferencex_path": _ix,                                     # drop -> $INFERENCEX_PATH / native applies
+}
+for key, derive in REWRITES.items():
+    new, drop_if_none = derive(h.get(key))
+    if new is not None:
+        h[key] = new
+    elif drop_if_none:
+        h.pop(key, None)
+
 json.dump(h, open(dst, "w"), indent=2)
+
+# ---- B. reachability check: every absolute path in the patched handoff must EXIST on this box ----
+# Existence, not a source-prefix blacklist: a /wekafs path is fine if actually mounted; a stale/unpatched
+# one just won't exist. Hard-fail on real runs; warn in --dry-run (weights/etc. legitimately absent).
+leaks = []
+def _scan(node, path):
+    if isinstance(node, str):
+        if node.startswith("/") and not os.path.exists(node):
+            leaks.append((path, node))
+    elif isinstance(node, dict):
+        for k, v in node.items(): _scan(v, f"{path}.{k}" if path else k)
+    elif isinstance(node, list):
+        for i, v in enumerate(node): _scan(v, f"{path}[{i}]")
+_scan(h, "")
+if leaks:
+    msg = "\n".join(f"    {k} = {v}" for k, v in leaks)
+    if is_dry:
+        sys.stderr.write(f"[handoff] WARN: {len(leaks)} path(s) not present on this host — expected in "
+                         f"--dry-run wiring checks; a real run re-validates and fails:\n{msg}\n")
+    else:
+        sys.exit(f"[handoff] {len(leaks)} path(s) do not exist on this box after localization — likely a "
+                 f"new/renamed handoff key not rewritten, or a missing local artifact:\n{msg}\n"
+                 f"  Fix: add the key to REWRITES in run_geak_e2e.sh, or provide the file/dir there.")
+
 print(f"patched handoff -> {dst}\n  exp_root={h['exp_root']}\n  model_path={h.get('model_path')}\n  launch_recipe={h.get('launch_recipe')}\n  inferencex_path={h.get('inferencex_path')}")
 PY
 

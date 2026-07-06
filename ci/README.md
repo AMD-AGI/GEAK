@@ -21,7 +21,7 @@ are baked in. The workspace just needs to look like this (siblings of the repo):
 <workspace>/
   GEAK/                 # this repo (contains ci/, interface/, e2e_workflow/)
   InferenceX/           # bench client (cloned separately)
-  huggingface_logs/     # per-model handoff.json / recipe / tracelens priors (cloned separately)
+  geak_runtime/         # per-model handoff.json / recipe / tracelens priors (data repo)
     docker_select.log   # "<framework> (<arch>): <image>" lines used to pick the image
     Qwen-Qwen3-8B/
       handoff.json
@@ -60,7 +60,7 @@ bash ci/run_local.sh Qwen-Qwen3-8B --budget 1800
 IMAGE=rocm/vllm-dev:some-gfx950-tag bash ci/run_local.sh Qwen-Qwen3-8B
 ```
 
-Outputs land in `huggingface_logs/<model_key>/ci_runs/<timestamp>/`:
+Outputs land in `geak_runtime/<model_key>/ci_runs/<timestamp>/`:
 
 - `run.log` — full stdout/stderr of the run
 - `result.json` — the workflow result (source of truth for pass/fail)
@@ -78,7 +78,7 @@ else fails. `error_class = workflow_parse_error` is the fingerprint of the
 | `GEAK_ROOT` | `ci/..` | GEAK repo root |
 | `WS` | `GEAK_ROOT/..` | workspace root |
 | `INFERENCEX_PATH` | `$WS/InferenceX` | bench client checkout (empty = native bench) |
-| `HF_LOGS` | `$WS/huggingface_logs` | per-model dataset root |
+| `HF_LOGS` | `$WS/geak_runtime` | per-model dataset root |
 | `MODELS_TSV` | `ci/models.tsv` | model registry |
 | `DOCKER_SELECT` | `$HF_LOGS/docker_select.log` | image selection table |
 | `IMAGE` | resolved from `docker_select.log` | override the container image |

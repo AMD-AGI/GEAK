@@ -59,7 +59,7 @@ mkdir -p "$DBG_TMP"
 log "TMPDIR=$DBG_TMP (Claude task tree persisted here)"
 
 # Same-path bind mounts so paths are identical inside and outside the container:
-#   $WS          — workspace (huggingface_logs, InferenceX, ...)
+#   $WS          — workspace (geak_runtime, InferenceX, ...)
 #   $MODELS_ROOT — model weights (usually outside the workspace)
 #   $GEAK_ROOT   — the code under test. In CI it's a fresh checkout OUTSIDE $WS
 #                  (the runner's _work dir), so mount it too. When it already
