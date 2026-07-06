@@ -20,8 +20,9 @@
 set -uo pipefail
 
 # Resolve GEAK repo root from THIS script's location — no hardcoded personal host paths.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GEAK_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"      # scripts/ -> e2e_workflow/ -> GEAK
+# This script lives IN the apply_flydsl_moe_to_vllm expert skill (its build artifact).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../skills/apply_flydsl_moe_to_vllm
+GEAK_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"           # skill -> skills -> expert_skills -> perf_knowledge -> GEAK
 
 # Our own build (when we DO build) lives INSIDE the container (overlay fs), NOT on a bind-mounted
 # host dir: avoids cross-container sharing (the concurrent-build corruption) and keeps personal
@@ -30,7 +31,7 @@ ROOT="${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}"
 PIN="a35627a2fef0a5a70c63536c4174674223866737"   # known-good for Kimi-K2.6 int4-W4A16 MoE on gfx942/MI300X
 MIN_VERSION="${FLYDSL_MIN_VERSION:-0.2.2}"        # semver floor the PIN corresponds to (v0.2.2-12-ga35627a2)
 REPO="https://github.com/ROCm/FlyDSL.git"
-SHIM_DIR="$GEAK_ROOT/perf_knowledge/expert_skills/skills/apply_flydsl_moe_to_vllm"
+SHIM_DIR="$SCRIPT_DIR"   # the shim lives next to this script (same skill dir)
 ENV_FILE="$ROOT/flydsl_env.sh"                    # stable location preflight/launcher source
 JOBS="$(nproc 2>/dev/null || echo 32)"
 

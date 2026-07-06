@@ -121,21 +121,20 @@ installed vLLM (off by default ⇒ byte-identical stock; back up the two files f
    `vllm bench serve` (ISL/OSL/conc), plus GSM8K within noise. Quote same-session ratios only.
 
 ## Knobs & pitfalls
-- **Obtain & PIN FlyDSL — bootstrap if `import flydsl` fails; kernels source AND MLIR bindings from the SAME
-  tree.** The shim needs both `flydsl` and `kernels.moe_gemm_2stage` importable from ONE consistent build. Do
-  NOT hardcode a machine-specific checkout path; resolve in this order:
-  1. If `python3 -c "import flydsl, kernels.moe_gemm_2stage"` already works → use it (and `export FLYDSL_ROOT`
-     to that checkout if it is source-based, so the shim adds its `build-fly/python_packages`).
-  2. Else `pip install flydsl` — the published wheel bundles the MLIR python bindings (no LLVM/MLIR source
-     build needed). Pin the version for reproducibility.
-  3. Else **clone + build at a PINNED commit** (clone fresh so a remote `main` update can't drift the API):
-     ```bash
-     git clone https://github.com/ROCm/FlyDSL.git "$ROOT/FlyDSL"
-     git -C "$ROOT/FlyDSL" checkout a35627a2fef0a5a70c63536c4174674223866737   # PIN: known-good for Kimi-K2.6 int4-W4A16 MoE on gfx942/MI300X
-     bash "$ROOT/FlyDSL/scripts/build_llvm.sh" -j64   # builds LLVM/MLIR (heavy; skip if a valid MLIR_PATH is already exported)
-     bash "$ROOT/FlyDSL/scripts/build.sh"      -j64   # builds C++ + python bindings into build-fly/python_packages
-     export FLYDSL_ROOT="$ROOT/FlyDSL"
-     ```
+- **Obtain & PIN FlyDSL — this skill OWNS the build via its bundled `ensure_flydsl.sh` (single source of
+  truth).** The shim needs both `flydsl` and `kernels.moe_gemm_2stage` importable from ONE consistent tree.
+  Do NOT hand-roll clone/build steps here and do NOT hardcode a machine-specific checkout path — just run
+  the skill's own script as step 0:
+  ```bash
+  bash "$FLYDSL_SHIM_DIR/ensure_flydsl.sh"                 # this skill's dir; version-gated (>=MIN_VERSION reuse,
+                                                           # else clone+build PIN into container-internal /opt/flydsl),
+                                                           # flock-guarded, applies hip-cmake + patchelf fixes, writes flydsl_env.sh
+  source "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh"
+  python3 -c "import flydsl, kernels.moe_gemm_2stage as k; print(flydsl.__file__, k.__file__)"   # must resolve under ONE tree
+  ```
+  `ensure_flydsl.sh` reuses any ambient flydsl whose `__version__ >= MIN_VERSION` (never overwrites a newer
+  one / never pip-installs system-wide), else builds the PIN into an isolated `/opt/flydsl` — so it is safe
+  to run on shared boxes. Only if it exits non-zero is flydsl genuinely unavailable.
   **Pin pitfall:** a stale `FLYDSL_ROOT` from a DIFFERENT/older tree hijacking the bindings while kernels load
   from another fails kernel compile with `Dynamic int_tuple leaf must be an i32 or i64 value, got: <unknown
   type>` (eager) / `... got: gl$v` (graph) — a **version mismatch, NOT a torch.compile incompatibility** (do not

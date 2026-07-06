@@ -107,7 +107,10 @@ correctness is judged identically.
 - The topk=1 generic-GEMM framing streams more weight bytes than `moe_align` → reported speedup is
   **conservative** vs a fully-fused MoE.
 - FlyDSL kernels need the **repo source** checkout (new `value_attrs` API), not just `pip install flydsl`;
-  a stale py3.10 build won't load under py3.12.
+  a stale py3.10 build won't load under py3.12. **To obtain/build it, run the single-source-of-truth
+  bootstrap `perf_knowledge/expert_skills/skills/apply_flydsl_moe_to_vllm/ensure_flydsl.sh`** (version-gated
+  reuse-or-build PIN into container-internal `/opt/flydsl`, flock + hip-cmake/patchelf fixes) then
+  `source "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh"` — do NOT hand-roll clone/build here.
 - ABI/JIT-cache staleness: bump `module_name` on signature change or you'll silently run an old binary.
 
 ## Do-no-harm notes

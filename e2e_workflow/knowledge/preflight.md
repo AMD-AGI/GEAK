@@ -84,11 +84,12 @@ python3 -c "import flydsl, kernels.moe_gemm_2stage; print('flydsl(src) ok', geta
 command -v hipblaslt-bench || echo "no hipblaslt-bench (offline GEMM tune unavailable)"
 command -v ckProfiler   || echo "no ckProfiler (CK instance sweep unavailable)"
 ```
-**DETECT-ONLY in preflight — do NOT build FlyDSL here.** The heavy `ensure_flydsl.sh` source build is
-NO LONGER run at setup (it wasted a ~one-time LLVM build for runs that never end up choosing flydsl, and
-competed for CPU with other workloads). Preflight only PROBES and records buildability; the actual build
-is deferred to Strategize, triggered only when the Architect decides to use flydsl (see
-`roles/system_architect.md`). Record the FlyDSL state in `env_report.json`:
+**DETECT-ONLY in preflight — do NOT build FlyDSL here.** The heavy source build is NO LONGER run at setup
+(it wasted a ~one-time LLVM build for runs that never end up choosing flydsl, and competed for CPU with
+other workloads). Preflight only PROBES and records buildability; the actual build is owned by the FlyDSL
+expert skills (their bundled `apply_flydsl_moe_to_vllm/ensure_flydsl.sh`), triggered downstream only when
+the Architect decides to use flydsl (Strategize; see `roles/system_architect.md`). Record FlyDSL state
+in `env_report.json`:
 - signal (a) `aiter.ops.flydsl.is_flydsl_available()` and signal (b) `import flydsl, kernels.moe_gemm_2stage`;
 - if NEITHER passes but this is an int4/A4W4 quantized-MoE on gfx942 with the FlyDSL checkout reachable,
   set `flydsl_signals.buildable=true` (build-on-demand at Strategize) — do NOT clone/build now.
@@ -99,7 +100,8 @@ FlyDSL availability for routing:
   signal b). Never mark flydsl unavailable on signal (a) alone when (b) passes.
 - If only `flydsl_signals.buildable=true` (neither signal yet) → leave `available_backends` as-is (do
   NOT add flydsl to it), but the Architect may still route flydsl as a build-on-demand candidate in
-  Strategize (it consults `flydsl_signals.buildable`, then builds via `ensure_flydsl.sh` before use).
+  Strategize (it consults `flydsl_signals.buildable`; the FlyDSL skill then builds it via its bundled
+  `ensure_flydsl.sh` before first use).
 
 **Record WHY each optional backend is absent + HOW to provision it (don't just drop it).** For every
 backend NOT in `available_backends`, write an `absent_backends[<name>] = {probe, remedy}` entry to
