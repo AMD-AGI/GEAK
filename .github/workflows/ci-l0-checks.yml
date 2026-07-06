@@ -76,7 +76,7 @@ jobs:
         with:
           python-version: "3.11"
       # Validates the handoff -> e2e_workflow.js args mapping against a committed
-      # fixture (ci/fixtures/handoff.dry.json), so it needs no huggingface_logs
+      # fixture (ci/fixtures/handoff.dry.json), so it needs no geak_runtime
       # dataset, GPU, or Claude. Guards the map_args / build_prompt code path.
       - name: handoff -> args mapping (fixture)
         run: python interface/run_e2e.py ci/fixtures/handoff.dry.json /tmp/l0_result.json --dry-run

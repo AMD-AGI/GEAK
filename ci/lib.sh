@@ -5,14 +5,14 @@
 # Paths are DERIVED from this file's location, so the tree just needs to look like:
 #   <workspace>/GEAK/ci/*.sh   (this repo)
 #   <workspace>/InferenceX     (cloned separately)
-#   <workspace>/huggingface_logs  (cloned separately: per-model handoff/recipe/tracelens)
+#   <workspace>/geak_runtime   (per-model handoff/recipe/tracelens priors + docker_select.log)
 # Any of these can be overridden by exporting the matching env var.
 
 CI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"          # <ws>/GEAK/ci
 GEAK_ROOT="${GEAK_ROOT:-$(dirname "$CI_DIR")}"                   # <ws>/GEAK
 WS="${WS:-$(dirname "$GEAK_ROOT")}"                              # <ws>
 INFERENCEX_PATH="${INFERENCEX_PATH:-$WS/InferenceX}"
-HF_LOGS="${HF_LOGS:-$WS/huggingface_logs}"
+HF_LOGS="${HF_LOGS:-$WS/geak_runtime}"
 CLAUDE_SETUP="${CLAUDE_SETUP:-$CI_DIR/claude_setup.sh}"
 MODELS_TSV="${MODELS_TSV:-$CI_DIR/models.tsv}"
 DOCKER_SELECT="${DOCKER_SELECT:-$HF_LOGS/docker_select.log}"

@@ -2,7 +2,7 @@ name: CI L1 — smoke e2e
 
 # L1: real single-model GEAK e2e on the self-hosted ROCm box (GPU + Docker +
 # Claude). Runs the CODE UNDER TEST against the STABLE dataset/weights under
-# ci_workspace.
+# geak_ci_workspace.
 #
 # Triggers (v4 line only; nothing on the default branch / v3 is needed):
 #   - pull_request into GEAK_v4 that gets the `ci-verified` label -> GPU smoke.
@@ -20,13 +20,13 @@ on:
   workflow_dispatch:
     inputs:
       model_key:
-        description: "Model key (must exist in ci/models.tsv and huggingface_logs/)"
+        description: "Model key (must exist in ci/models.tsv and geak_runtime/)"
         type: string
         default: "Qwen-Qwen3-8B"
       budget_s:
         description: "GEAK wall-clock budget in seconds (PERFSKILLS_E2E_TIMEOUT_S)"
         type: string
-        default: "1800"
+        default: "43200"
 
 # Only one GPU smoke at a time on this box (they contend for all 8 GPUs / disk).
 concurrency:
@@ -47,16 +47,16 @@ jobs:
     runs-on: self-hosted
     # Hard outer cap so a stuck run can't pin the box forever (budget + image
     # pull + Claude install + baseline/profile headroom). Well above budget_s.
-    timeout-minutes: 150
+    timeout-minutes: 840
     env:
       # Stable environment on this box (siblings of the code under test).
-      WS: /home/ethany/ci_workspace
-      HF_LOGS: /home/ethany/ci_workspace/huggingface_logs
-      INFERENCEX_PATH: /home/ethany/ci_workspace/InferenceX
+      WS: /home/ethany/geak_ci_workspace
+      HF_LOGS: /home/ethany/geak_ci_workspace/geak_runtime
+      INFERENCEX_PATH: /home/ethany/geak_ci_workspace/InferenceX
       # Model + budget: from dispatch inputs when present, else defaults (the PR
       # label path has no inputs).
       MODEL_KEY: ${{ github.event.inputs.model_key || 'Qwen-Qwen3-8B' }}
-      BUDGET_S: ${{ github.event.inputs.budget_s || '1800' }}
+      BUDGET_S: ${{ github.event.inputs.budget_s || '43200' }}
       # Claude auth for the container. Falls back to the baked default in
       # ci/claude_setup.sh when the secrets are absent (forward-compatible).
       LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
