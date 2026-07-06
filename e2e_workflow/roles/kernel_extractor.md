@@ -67,6 +67,21 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
      buffer as input). Call the CURRENT kernel entry point (import by the meta `module:attr`, or the
      copied `kernel_src`), compare to the golden output with dtype-appropriate tolerance (bf16/fp16
      rtol=atol=2e-2; fp8 looser; fp32 tight). Print PASS/FAIL per case. This set is NEVER re-weighted.
+   - **Cross-call robustness (MANDATORY — closes the #1 isolated↔e2e correctness gap).** A single-snapshot
+     replay reuses the SAME tensors with the SAME contents, so any candidate that caches by
+     `tensor.data_ptr()`/`id()`, reuses a stale index/mask, or carries per-call state PASSES in isolation
+     yet CORRUPTS the live server (which calls the op every step with NEW contents in REUSED buffers —
+     changed routing / gather-scatter indices / masks). The unittest MUST additionally probe this,
+     generically (no op-specifics): (a) **interleaved / buffer-reuse replay** — when ≥2 golden cases of the
+     SAME shape exist, run case A, then WRITE case B's inputs into case A's buffers (`bufA.copy_(inB)` —
+     preserves data_ptr, changes contents) and assert B's output still matches B's golden; also run A→B→A
+     interleaved and re-check A. (b) **fresh-buffer repeat** — call the kernel twice on the same case with
+     freshly-allocated input buffers (new data_ptr) and assert identical results. Any data_ptr-keyed cache
+     or stale reuse then FAILS here. Degrade gracefully: if only ONE snapshot/shape exists, still do the
+     fresh-buffer repeat (a). To enable (a), the capture step SHOULD record ≥2 snapshots per shape bucket
+     when the live window provides them (same shape, different routing/contents) — set `CAPTURE_MAX` high
+     enough and keep distinct-content records; this is generic and additive (extra records only strengthen
+     the oracle). Print `CROSS_CALL PASS/FAIL`; a FAIL is a correctness FAIL (do not smoke-accept).
    - **Timing** on the WORKLOAD cases when `meta.workload` is present (see step 4b): build one timing
      case per `meta.workload.cases[]` entry, each input tensor with its OWN `dims`+`dtype` and the case's
      `quant` operands (fp8 + scales etc., in-regime — NOT bf16), random values (perf is value-

@@ -150,6 +150,69 @@ const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_
 // skipped once the kernel-phase wall-clock deadline has fired. head_corrective_max=0 disables it.
 const HEAD_CORRECTIVE_MAX = parseInt(A.head_corrective_max != null ? A.head_corrective_max : 2, 10);
 const FIXABLE_REJECT_RX = /cuda_graph_capture_unsafe|no[_ ]?binary|NO_BINARY_FOR_GPU|hipErrorNoBinaryForGpu|capture[_ ]?(unsafe|hang)|host[_ ]?sync|graph[_ ]?capture/i;
+// ---- CORRECTNESS-class reject (auto-correct) --------------------------------------------------------
+// A SECOND fix-and-retryable class: the candidate ENGAGED and beat the isolated oracle but produces the
+// WRONG output on the LIVE path (parity/accuracy failure) — OR posts an IMPLAUSIBLE e2e speedup (faster
+// only because it computes degenerate/less work). Distinct from the integration-POSTURE class above: the
+// kernel over-fit the single captured snapshot, assuming input-buffer identity / contents / routing are
+// stable across calls (e.g. a cache keyed by data_ptr(), a stale reused index/mask, a persistent-state
+// assumption). A single-snapshot isolated unittest can NEVER catch this (fixed tensors → any such cache
+// is always "correct"), so a blind re-run reproduces the bug; the corrective loop below feeds this
+// diagnosis back so the re-author actually removes the over-fit. GENERIC — no kernel/model specifics.
+const CORRECTNESS_REJECT_RX = /parit|corrupt|mismatch|diverge|garbage|degener|\bnan\b|\binf\b|accuracy[_ ]?regress|wrong[_ ]?output|incorrect|implausible/i;
+// Amdahl ceiling: the MOST e2e speedup an op that is `pct`% of GPU time can yield at isolated speedup S is
+// 1/(1 - (pct/100)(1 - 1/S)). A measured e2e delta far above this ceiling can be the fingerprint of a
+// kernel doing degenerate/less work (corruption). Uses ONLY the profile pct + isolated speedup.
+const IMPLAUSIBLE_SPEEDUP_MARGIN = parseFloat(A.implausible_speedup_margin != null ? A.implausible_speedup_margin : 1.0); // headroom over the theoretical ceiling before flagging (1.0 = must exceed 2x the ceiling)
+function amdahlCeilingPct(pct_gpu_time, isolated) {
+  const p = Math.max(0, Math.min(1, (pct_gpu_time || 0) / 100));
+  const s = (isolated && isolated > 1) ? isolated : 1;
+  if (p <= 0 || s <= 1) return Infinity;   // unknown inputs -> never flag (fail-open)
+  return (1 / (1 - p * (1 - 1 / s)) - 1) * 100;
+}
+// PARITY-AWARE guard (fixes the false-positive that would DROP real wins). The Amdahl ceiling is derived
+// from an imperfect profile `pct_gpu_time`; a genuine win can legitimately exceed it when the profile
+// under-counts the op, or when the change has system-wide effects (memory pressure / batching / a config
+// swap). So the implausible-speedup verdict is applied ONLY when the acceptance rests on the SOFT gate —
+// a sampled task-accuracy probe (quant / `accuracy_gate=gsm8k`), where a degenerate output could squeak
+// past a small sample. A BYTE-EXACT parity pass is a HARD correctness guarantee → its speedup is real
+// even above the ceiling → never flagged. This removes the false-positive on byte-exact (incl. config
+// env/flag) wins while keeping the backstop exactly where byte-parity is waived. Backward-safe: an
+// integrator that doesn't report `parity_kind` only trips the guard when the RUN uses an accuracy gate.
+function parityIsSoft(integ) {
+  const pk = integ && integ.parity_kind;               // 'byte_exact' | 'accuracy' | 'none' (optional)
+  if (pk === 'accuracy') return true;
+  if (pk === 'byte_exact' || pk === 'none') return false;
+  return ACCURACY_GATE !== 'none';                      // unknown -> soft only when the run uses an accuracy gate
+}
+function isImplausibleSpeedup(pct_gpu_time, isolated, integ) {
+  if (!parityIsSoft(integ)) return false;              // hard byte-exact correctness -> trust the speedup
+  const ceilPct = amdahlCeilingPct(pct_gpu_time, isolated);
+  if (!Number.isFinite(ceilPct)) return false;
+  return ((integ && integ.e2e_delta_pct) || 0) > ceilPct * (1 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9;
+}
+// Classify a reject reason into a fix-and-retry class ('' = terminal, not auto-correctable).
+function rejectClass(reason) {
+  const r = reason || '';
+  if (CORRECTNESS_REJECT_RX.test(r)) return 'correctness';
+  if (FIXABLE_REJECT_RX.test(r)) return 'integration';
+  return '';
+}
+// A gate 'accept'/'stack' only counts as a REAL win if the measured e2e delta is not an implausible
+// (corruption) speedup. Centralizes the guard so every integrate site treats a too-good-to-be-true
+// delta as a reject instead of banking it. GENERIC (uses only pct_gpu_time + isolated speedup).
+function integAccepted(integ, pct_gpu_time, isolated) {
+  return !!(integ && (integ.gate === 'accepted' || integ.gate === 'stack')
+    && !isImplausibleSpeedup(pct_gpu_time, isolated, integ));
+}
+// The reason string to feed the corrective loop: if the gate "passed" but the delta is impossible, emit
+// an implausible_speedup verdict (routes to the correctness corrective); else the integrator's own reason.
+function gateRejectReason(integ, pct_gpu_time, isolated) {
+  if (integ && (integ.gate === 'accepted' || integ.gate === 'stack')
+      && isImplausibleSpeedup(pct_gpu_time, isolated, integ))
+    return `implausible_speedup (+${(integ.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pct_gpu_time, isolated).toFixed(1)}% on a soft/accuracy-gated accept — likely corruption/degenerate work)`;
+  return integ ? (integ.reason || integ.gate || '') : '';
+}
 // ---- DEEP MODE (opt-in, default OFF) ----------------------------------------------------------------
 // A long, thorough HeadKernel mode that pursues SOTA per head op via CROSS-BACKEND CO-OPTIMIZATION:
 // N backends optimize the SAME head op in parallel (one exclusive GPU lane each), continuously
@@ -403,6 +466,10 @@ const INTEGRATE_SCHEMA = obj({
   ref_med: { type: 'number' }, cand_med: { type: 'number' },
   ab_complete: { type: 'boolean' },
   output_parity: { type: 'string' },
+  // How the correctness of an ACCEPT was established: 'byte_exact' (hard greedy byte-parity vs the true
+  // baseline), 'accuracy' (soft sampled task-accuracy probe — quant / accuracy_gate), or 'none'. The
+  // implausible-speedup guard only distrusts an 'accuracy'/soft accept; a byte_exact accept is trusted.
+  parity_kind: { type: 'string' },
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
   accepted_overlay: { type: 'string' }, reason: { type: 'string' },
 }, ['gate', 'e2e_throughput_tok_s']);
@@ -574,12 +641,40 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
 // ineligible or still rejected). See knowledge/learned/method-cudagraph-safe-integration.
 async function tryCorrectiveReauthor(spec) {
   let reason = spec.reason || '';
+  // Which fix-and-retry class is this reject? '' = terminal (not auto-correctable).
+  let fixClass = spec.fix_class || rejectClass(reason);
   const eligible = HEAD_CORRECTIVE_MAX > 0 && !((FAST_MODE && FAST_DEADLINE_HIT) || TIME_DEADLINE_HIT)
-    && (spec.kernel_eval_dir || spec.task_dir) && (spec.isolated || 0) > 1.0 && FIXABLE_REJECT_RX.test(reason);
+    && (spec.kernel_eval_dir || spec.task_dir) && (spec.isolated || 0) > 1.0 && fixClass !== '';
   if (!eligible) return { banked: false };
   const curTput = (spec.cur && spec.cur.tput) || 0;
+  // The corrective instruction is CLASS-SPECIFIC. `integration` = the posture is wrong (JIT/capture/
+  // host-sync); `correctness` = the output is wrong on the live path (parity/accuracy fail or an
+  // implausible speedup), i.e. the kernel over-fit the single captured snapshot. Both KEEP the
+  // algorithm + isolated win and fix only the defect. GENERIC — the text describes the failure CLASS,
+  // never this specific kernel/model.
+  const INTEGRATION_FIX_TASK =
+    `Fix ONLY the integration posture per knowledge/learned/method-cudagraph-safe-integration: ` +
+    `precompile/register EVERY (shape-bucket × config) the LIVE workload hits — PREFILL buckets AND decode buckets, ` +
+    `every per-bucket tile/config the kernel selects — at WARMUP before capture (an *_overlay_precompile(weights, ` +
+    `scales, buckets) hook the integrator calls once, pre-capture) so ALL TP workers load a prebuilt code object ` +
+    `instead of lazily compiling in the multiproc warmup (the cause of NO_BINARY_FOR_GPU / capture hang). If the cause ` +
+    `is a host-sync (.item()/.cpu()/.sum().item()) on the hot path, remove it and cache weight prep by data_ptr(). ` +
+    `Keep the steady-state hot path host-sync-free.`;
+  const CORRECTNESS_FIX_TASK =
+    `The kernel is WRONG on the LIVE path (reject: "${reason}") even though it passed the isolated oracle — the ` +
+    `classic single-snapshot OVER-FIT. Live serving calls this op every step with CHANGING contents (routing / ` +
+    `token→expert assignment / gather-scatter indices / masks) while REUSING the same buffers (stable data_ptr, ` +
+    `new contents); the fixed-tensor unittest hides this. Fix the CORRECTNESS without giving up the speedup: ` +
+    `(1) NEVER key a cache on tensor.data_ptr()/id() for any tensor whose CONTENTS vary per call (routing/gather/ ` +
+    `scatter/mask/index) — recompute it each call (cheap, and CUDA-graph-capture-safe) or key on a value hash; ` +
+    `only cache things that depend purely on SHAPE/DTYPE (e.g. tile/occupancy config). (2) Do not carry per-call ` +
+    `state across calls or assume the previous call's indices/mask still apply. (3) If you use atomics/scatter-add ` +
+    `into a reused output, zero it each call inside the captured region. VALIDATE your fix adversarially: call the ` +
+    `kernel on TWO different routing snapshots back-to-back REUSING the same input buffers, and on repeated calls ` +
+    `with fresh contents, asserting bit/tol correctness on EACH — a data_ptr cache or stale reuse must fail this. ` +
+    `An implausible speedup (far above the op's Amdahl ceiling) means it is doing less/degenerate work — treat as wrong.`;
   for (let cAttempt = 1; cAttempt <= HEAD_CORRECTIVE_MAX; cAttempt++) {
-    log(`  ${spec.short_name}: FIXABLE reject (${reason}) — corrective re-author ${cAttempt}/${HEAD_CORRECTIVE_MAX} (fix-and-retry the iso winner; NOT a new head, NOT charged to head_budget).`);
+    log(`  ${spec.short_name}: ${fixClass.toUpperCase()} reject (${reason}) — corrective re-author ${cAttempt}/${HEAD_CORRECTIVE_MAX} (fix-and-retry the iso winner; NOT a new head, NOT charged to head_budget).`);
     let fix;
     try {
       fix = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
@@ -591,13 +686,8 @@ async function tryCorrectiveReauthor(spec) {
         budget: KERNEL_BUDGET, gpu_ids: spec.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
         task: `CORRECTIVE FIX — do NOT re-discover the algorithm; KEEP the ${(spec.isolated || 0).toFixed(2)}x isolated win. ` +
           `This kernel PASSED the isolated oracle and ENGAGED on all live workers but was REJECTED at the e2e serving gate ` +
-          `for: "${reason}". Fix ONLY the integration posture per knowledge/learned/method-cudagraph-safe-integration: ` +
-          `precompile/register EVERY (shape-bucket × config) the LIVE workload hits — PREFILL buckets AND decode buckets, ` +
-          `every per-bucket tile/config the kernel selects — at WARMUP before capture (an *_overlay_precompile(weights, ` +
-          `scales, buckets) hook the integrator calls once, pre-capture) so ALL TP workers load a prebuilt code object ` +
-          `instead of lazily compiling in the multiproc warmup (the cause of NO_BINARY_FOR_GPU / capture hang). If the cause ` +
-          `is a host-sync (.item()/.cpu()/.sum().item()) on the hot path, remove it and cache weight prep by data_ptr(). ` +
-          `Keep the steady-state hot path host-sync-free. Emit a fixed final_patch. ` + GRAPH_REQ + (TASK || ''),
+          `for: "${reason}". ` + (fixClass === 'correctness' ? CORRECTNESS_FIX_TASK : INTEGRATION_FIX_TASK) +
+          ` Emit a fixed final_patch. ` + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
       }, `${spec.short_name}:corrective`);
     } catch (e) { fix = { authored: false, validation_status: 'error', reason: String(e) }; }
@@ -624,12 +714,21 @@ async function tryCorrectiveReauthor(spec) {
       'Apply the CORRECTIVELY-FIXED kernel winner; gate on e2e throughput.', fixInputs,
       `integrate ${spec.short_name} corrective`, spec.phase_name || 'HeadKernel');
     const ab2 = !!(integ2 && integ2.gate !== 'incomplete' && integ2.ab_complete !== false);
-    if (ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack') && integ2.e2e_throughput_tok_s > curTput) {
+    const pctForGuard = spec.pct_gpu_time || (spec.base_inputs && spec.base_inputs.KERNEL_RESULT && spec.base_inputs.KERNEL_RESULT.pct_gpu_time) || 0;
+    // Implausible-speedup guard: a "win" whose e2e delta blows past the op's Amdahl ceiling is corruption
+    // masquerading as a win (does less/degenerate work) — never bank it; treat as a correctness reject and
+    // let the next corrective attempt fix it. GENERIC (uses only pct_gpu_time + isolated).
+    const implausible2 = ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack')
+      && isImplausibleSpeedup(pctForGuard, fix.final_geomean, integ2);
+    if (ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack') && integ2.e2e_throughput_tok_s > curTput && !implausible2) {
       return { banked: true, integ: integ2, isolated: fix.final_geomean };
     }
-    reason = (integ2 && (integ2.reason || integ2.gate)) || reason;
+    reason = implausible2
+      ? `implausible_speedup (+${(integ2.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pctForGuard, fix.final_geomean).toFixed(1)}% — corruption)`
+      : ((integ2 && (integ2.reason || integ2.gate)) || reason);
     log(`  ${spec.short_name}: corrective re-author still rejected (${reason}).`);
-    if (!FIXABLE_REJECT_RX.test(reason)) break;   // new failure not in the fixable class -> stop retrying
+    fixClass = rejectClass(reason);
+    if (fixClass === '') break;   // new failure not auto-correctable -> stop retrying
     // Progressive: the NEXT attempt builds on this attempt's (partially) fixed kernel, not the original.
     spec.kernel_eval_dir = fix.eval_dir || spec.kernel_eval_dir;
   }
@@ -1104,18 +1203,19 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (integ && integ.output_parity === 'fail') {
           log(`  [deep] ${c.uid}: REJECTED — output_parity=fail vs true baseline.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
-        } else if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+        } else if (integAccepted(integ, c.head.pct_gpu_time, c.best) && integ.e2e_throughput_tok_s > curTput) {
           curOverlay = integ.accepted_overlay || curOverlay; curTput = integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
           acceptedHeads.push({ short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', e2e_delta_pct: integ.e2e_delta_pct, isolated: c.best });
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
         } else {
-          const dreason = integ ? (integ.reason || integ.gate || '') : '';
-          // Corrective re-author (same general helper as the default path) for a FIXABLE deep reject.
+          // gateRejectReason converts an implausible "pass" into a corruption reject so it routes to the
+          // correctness corrective (the deep site already calls the corrective helper for every reject).
+          const dreason = gateRejectReason(integ, c.head.pct_gpu_time, c.best);
           const dcorr = await tryCorrectiveReauthor({
             short_name: c.head.short_name, op_kind: c.ext.op_kind, shapes: c.ext.shapes, dtype: c.ext.dtype, regime: c.head.regime,
             gpu_id: SERVING_GPU, kernel_eval_dir: c.lastEval, task_dir: c.ext.task_dir, language: c.lang,
-            isolated: c.best, reason: dreason,
+            isolated: c.best, reason: dreason, fix_class: rejectClass(dreason), pct_gpu_time: c.head.pct_gpu_time,
             base_inputs: {
               EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
               KERNEL_RESULT: {
@@ -1414,7 +1514,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
         },
         `integrate ${h.short_name}`, 'HeadKernel');
-      if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+      if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput) {
         curOverlay = integ.accepted_overlay || curOverlay;
         if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
         if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
@@ -1423,12 +1523,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
         history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
       } else {
-        const reason = integ ? (integ.reason || integ.gate || '') : '';
-        const corr = (cand.kind === 'authored' && FIXABLE_REJECT_RX.test(reason))
+        // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
+        // impossible (corruption) — so a fake win routes to the correctness corrective instead of banking.
+        const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
+        const corr = (cand.kind === 'authored' && rejectClass(reason) !== '')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: st.ext.op_kind, shapes: st.ext.shapes, dtype: st.ext.dtype, regime: h.regime,
               gpu_id: SERVING_GPU, kernel_eval_dir: cand.kernel_eval_dir, task_dir: st.ext.task_dir, language: cand.language,
-              isolated: cand.isolated, reason, phase_name: 'HeadKernel',
+              isolated: cand.isolated, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time, phase_name: 'HeadKernel',
               base_inputs: {
                 EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
                 KERNEL_RESULT: { short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
@@ -1620,7 +1722,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // itself incomplete (gate:'incomplete' or ab_complete===false). A legacy
     // integrator that omits ab_complete still accepts/rejects exactly as before.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
-    if (abDone && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone && integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput) {
       // a head winner may be carried as overlay (authored/patch) AND/OR config (env/flag) — capture both.
       curOverlay = integ.accepted_overlay || curOverlay;
       if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
@@ -1659,15 +1761,18 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
       }
     } else {
-      const reason = integ.reason || integ.gate || '';
-      // (h3-fix) Corrective re-author: a FIXABLE reject of an authored, iso-verified winner gets up to
-      // HEAD_CORRECTIVE_MAX cheap fix-and-retries (optimize the EXISTING kernel, no re-discovery; re-gate).
+      // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
+      // impossible (corruption); rejectClass then routes parity/accuracy/implausible rejects to the
+      // correctness corrective and JIT/capture/host-sync rejects to the integration corrective.
+      const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
+      // (h3-fix) Corrective re-author: a fix-and-retryable reject of an authored, iso-verified winner gets up
+      // to HEAD_CORRECTIVE_MAX cheap fix-and-retries (optimize the EXISTING kernel, no re-discovery; re-gate).
       // Not a new head -> not charged to HEAD_BUDGET. See tryCorrectiveReauthor.
       const corr = (cand.kind === 'authored')
         ? await tryCorrectiveReauthor({
             short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
             gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
-            isolated: cand.isolated, base_inputs: headIntegrateInputs, reason,
+            isolated: cand.isolated, base_inputs: headIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time,
             cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
           })
         : { banked: false };
@@ -1817,7 +1922,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // Backward-compatible: null (timeout/hang/degrade) or an explicit incomplete
     // flag => not done; a legacy return without ab_complete behaves as before.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
-    if (abDone && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.final_geomean) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       curTput = integ.e2e_throughput_tok_s;
       acceptedKernels.push({ short_name: c.short_name, backend: kl.note || '', e2e_delta_pct: integ.e2e_delta_pct, isolated: kl.final_geomean });
@@ -1829,12 +1934,12 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       // crash-during-warmup (ab_complete=false) of an iso-verified editable kernel earns a corrective
       // re-author (re-optimize the EXISTING kernel; NOT charged to HEAD_BUDGET); only keep PENDING if the
       // A/B was merely incomplete for a NON-fixable reason (real transient timeout/hang). See tryCorrectiveReauthor.
-      const reason = integ ? (integ.reason || integ.gate || '') : '';
-      const corr = FIXABLE_REJECT_RX.test(reason)
+      const reason = gateRejectReason(integ, c.pct_gpu_time, kl.final_geomean);
+      const corr = (rejectClass(reason) !== '')
         ? await tryCorrectiveReauthor({
             short_name: c.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: c.regime,
             gpu_id: c.gpu_id, kernel_eval_dir: kl.kernel_eval_dir, task_dir: ext.task_dir, language: kl.language || '',
-            isolated: kl.final_geomean, base_inputs: mileIntegrateInputs, reason, phase_name: 'Milestone',
+            isolated: kl.final_geomean, base_inputs: mileIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: c.pct_gpu_time, phase_name: 'Milestone',
             cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
           })
         : { banked: false };
@@ -1975,7 +2080,7 @@ if (want('final')) {
       // measured against the latest accepted baseline.
       { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
       `finish-integrate ${p.short_name}`, 'Finalize');
-    if (abDone(integ) && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       if (p.track === 'head') {
         if (p.winner_kind === 'env' && p.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + p.apply_env;
