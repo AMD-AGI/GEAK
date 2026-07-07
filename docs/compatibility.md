@@ -18,7 +18,7 @@ These GEAK releases are tracked with their status.
 | Release tag | Commit SHA | Release date | Status |
 |---|---|---|---|
 | `v3.2.2` | `9e14d4a` | 2026-06-23 | Latest |
-| `v3.2.1` | `c0a1f93` | 2026-06-15 | Latest |
+| `v3.2.1` | `c0a1f93` | 2026-06-15 | Stable |
 | `v3.2.0` | `d9a80f7` | 2026-05-21 | Stable |
 | `v3.1.0` | `1501039` | 2026-04-20 | Stable |
 | `v3.0.0` | `bc2d6d5` | 2026-04-01 | Stable |
