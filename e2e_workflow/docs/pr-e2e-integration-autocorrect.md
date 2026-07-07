@@ -56,11 +56,27 @@ bucket when the live window provides them (additive; degrades to the fresh-buffe
 snapshot). The `e2e_integrator` role documents the implausible-speedup guard and the reject-reason
 vocabulary the classifier keys on.
 
+**4. Two-tier corrective (fast surgical patch before the heavy re-author) + structured stop.** A correctness/
+integration reject is usually a tiny seam bug (writes the return value while the live seam uses `y=` in
+place; caches a per-call routing tensor by `data_ptr`). Re-running the whole kernel_workflow (~hours) for
+that is wasteful. So the corrective now tries **Tier 1: a lightweight `kernel_surgeon` agent** — reads the
+reject diagnosis + the failing kernel + the live seam, makes the SMALLEST edit, self-verifies on the
+immutable unittest (incl. the cross-call check), emits a minimal patch (minutes) — and only escalates to
+**Tier 2: the heavyweight kernel_workflow re-author** if the surgical patch fails. Plus a **structured stop**:
+the loop-continue decision now keys on `output_parity`/implausible (structured), not the prose reason — so
+once a corrective makes the kernel CORRECT but throughput-neutral (do-no-harm), it STOPS instead of burning
+more attempts (this was a real bug: a reason string saying "RESOLVES the corruption, but −0.2% throughput"
+matched the `corrupt` regex and triggered a needless second ~2 h re-author). `surgical_fix=false` restores
+the heavy-only behavior.
+
 ## Files
 - `e2e_workflow.js` — `CORRECTNESS_REJECT_RX`, `amdahlCeilingPct`/`isImplausibleSpeedup` (parity-aware
-  via `parityIsSoft`), `rejectClass`/`integAccepted`/`gateRejectReason`; `tryCorrectiveReauthor`
-  class-aware; all 5 integrate sites (default head, fast/parallel head, deep head, milestone, finalize)
-  apply the guard + route correctness rejects to corrective; `parity_kind` added to the integrate schema.
+  via `parityIsSoft`), `rejectClass`/`integAccepted`/`gateRejectReason`; `parity_kind` in the integrate
+  schema; **two-tier `tryCorrectiveReauthor` (`trySurgicalFix` Tier 1 → kernel_workflow Tier 2) + structured
+  stop**; all 5 integrate sites (default head, fast/parallel head, deep head, milestone, finalize) apply the
+  guard + route correctness rejects to corrective.
+- `roles/kernel_surgeon.md` (NEW) — the lightweight surgical-fix agent (minimal patch, self-verified on the
+  immutable unittest, escalates when a minimal fix is insufficient).
 - `roles/kernel_extractor.md` — mandatory cross-call robustness oracle + ≥2-snapshot capture.
 - `roles/e2e_integrator.md` — report `parity_kind`; soft-gate implausible-speedup guard + reject vocabulary.
 

@@ -149,6 +149,14 @@ const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_
 // head discovery, so it does NOT consume HEAD_BUDGET; it is bounded per head by HEAD_CORRECTIVE_MAX and is
 // skipped once the kernel-phase wall-clock deadline has fired. head_corrective_max=0 disables it.
 const HEAD_CORRECTIVE_MAX = parseInt(A.head_corrective_max != null ? A.head_corrective_max : 2, 10);
+// SURGICAL-FIX tier (default ON): before escalating a corrective to the HEAVYWEIGHT kernel_workflow
+// re-author (multi-round, multi-engineer, ~hours), first try a LIGHTWEIGHT single-agent targeted patch
+// (the kernel_surgeon role): read the reject diagnosis + the failing kernel + the live call seam, make
+// the SMALLEST edit that fixes the defect, self-verify on the immutable unittest (correctness + isolated
+// win preserved), re-gate. Most integration/correctness rejects are a tiny seam bug (write into y=
+// instead of returning; stop caching a per-call tensor by data_ptr) — minutes, not hours. Escalates to
+// the heavy re-author only when the surgical patch fails. surgical_fix=false => old heavy-only behavior.
+const SURGICAL_FIX = String(A.surgical_fix != null ? A.surgical_fix : 'true') === 'true';
 const FIXABLE_REJECT_RX = /cuda_graph_capture_unsafe|no[_ ]?binary|NO_BINARY_FOR_GPU|hipErrorNoBinaryForGpu|capture[_ ]?(unsafe|hang)|host[_ ]?sync|graph[_ ]?capture/i;
 // ---- CORRECTNESS-class reject (auto-correct) --------------------------------------------------------
 // A SECOND fix-and-retryable class: the candidate ENGAGED and beat the isolated oracle but produces the
@@ -628,6 +636,40 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
   return integ;
 }
 
+// Lightweight SURGICAL FIX (Tier 1 of the corrective). One focused kernel_surgeon agent reads the reject
+// diagnosis + the failing kernel + the live call seam (from the task's meta.json), makes the SMALLEST
+// edit that fixes the defect WITHOUT giving up the isolated win, self-verifies on the IMMUTABLE unittest
+// (correctness PASS + geomean preserved), and emits a final_patch. Returns a fix object shaped like the
+// kernel_workflow result ({final_patch, final_geomean, eval_dir, authored}) so the corrective re-gate path
+// is identical, or null if it could not produce a verified patch (=> escalate to the heavy re-author).
+const SURGEON_SCHEMA = obj({
+  fixed: { type: 'boolean' }, final_patch: { type: 'string' }, final_geomean: { type: 'number' },
+  eval_dir: { type: 'string' }, root_cause: { type: 'string' }, note: { type: 'string' },
+}, ['fixed']);
+async function trySurgicalFix(spec, reason, fixClass, attempt) {
+  if (!SURGICAL_FIX) return null;
+  const intro = `A verified-isolated ${spec.language || 'triton'} kernel winner for op "${spec.short_name}" ` +
+    `(${(spec.isolated || 0).toFixed(2)}x isolated) ENGAGED live but was REJECTED at the e2e gate. ` +
+    `Reject class = ${fixClass}. Reject reason: "${reason}". Make the SMALLEST possible fix that clears it ` +
+    `while KEEPING the algorithm + the isolated win; do NOT re-optimize or re-explore. Self-verify on the ` +
+    `IMMUTABLE unittest, then emit a minimal final_patch.`;
+  const s = await safeAgent(
+    roleAgent('kernel_surgeon', 'surgical_fix', intro, {
+      TASK_DIR: spec.task_dir || '', KERNEL_EVAL_DIR: spec.kernel_eval_dir || '',
+      CURRENT_PATCH: (spec.base_inputs && spec.base_inputs.KERNEL_RESULT &&
+        (spec.base_inputs.KERNEL_RESULT.code_patch || spec.base_inputs.KERNEL_RESULT.final_patch)) || '',
+      REJECT_REASON: reason, FIX_CLASS: fixClass, ISOLATED: spec.isolated || 0,
+      LANGUAGE: spec.language || 'triton', GPU_ID: spec.gpu_id, KERNEL_WF_DIR,
+    }),
+    { phase: spec.phase_name || 'HeadKernel', label: `surgeon ${spec.short_name} (${attempt})`, schema: SURGEON_SCHEMA });
+  if (s && s.fixed && s.final_patch && (s.final_geomean || 0) > 1.0) {
+    return { authored: true, final_patch: s.final_patch, final_geomean: s.final_geomean,
+      eval_dir: s.eval_dir || spec.kernel_eval_dir || '', reason: s.root_cause || 'surgical fix' };
+  }
+  log(`  ${spec.short_name}: surgical fix did not produce a verified patch (${s ? (s.note || s.root_cause || 'not fixed') : 'null'}) — escalating to re-author.`);
+  return null;
+}
+
 // Reusable CORRECTIVE RE-AUTHOR (general; used by every head-integration site, any mode). A head
 // candidate that PASSED the isolated oracle and ENGAGED live but was REJECTED at the e2e gate for a
 // FIXABLE integration reason (JIT/DSL kernel lazily compiling in TP>1 warmup -> NO_BINARY_FOR_GPU /
@@ -674,27 +716,33 @@ async function tryCorrectiveReauthor(spec) {
     `with fresh contents, asserting bit/tol correctness on EACH — a data_ptr cache or stale reuse must fail this. ` +
     `An implausible speedup (far above the op's Amdahl ceiling) means it is doing less/degenerate work — treat as wrong.`;
   for (let cAttempt = 1; cAttempt <= HEAD_CORRECTIVE_MAX; cAttempt++) {
-    log(`  ${spec.short_name}: ${fixClass.toUpperCase()} reject (${reason}) — corrective re-author ${cAttempt}/${HEAD_CORRECTIVE_MAX} (fix-and-retry the iso winner; NOT a new head, NOT charged to head_budget).`);
-    let fix;
-    try {
-      fix = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
-        kernel_path: spec.kernel_eval_dir || spec.task_dir, workflow_dir: KERNEL_WF_DIR,
-        mode: 'optimize', target_language: spec.language || 'triton',
-        op_spec: { op_kind: spec.op_kind, shapes: spec.shapes || {}, dtype: spec.dtype || 'bf16', regime: spec.regime || '', cuda_graph_safe: true, ...(spec.workload_path ? { workload_path: spec.workload_path } : {}) },
-        perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
-        use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
-        budget: KERNEL_BUDGET, gpu_ids: spec.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
-        task: `CORRECTIVE FIX — do NOT re-discover the algorithm; KEEP the ${(spec.isolated || 0).toFixed(2)}x isolated win. ` +
-          `This kernel PASSED the isolated oracle and ENGAGED on all live workers but was REJECTED at the e2e serving gate ` +
-          `for: "${reason}". ` + (fixClass === 'correctness' ? CORRECTNESS_FIX_TASK : INTEGRATION_FIX_TASK) +
-          ` Emit a fixed final_patch. ` + GRAPH_REQ + (TASK || ''),
-        apply_to_original: 'false',
-      }, `${spec.short_name}:corrective`);
-    } catch (e) { fix = { authored: false, validation_status: 'error', reason: String(e) }; }
+    log(`  ${spec.short_name}: ${fixClass.toUpperCase()} reject (${reason}) — corrective ${cAttempt}/${HEAD_CORRECTIVE_MAX} (fix-and-retry the iso winner; NOT a new head, NOT charged to head_budget).`);
+    // TIER 1 — lightweight SURGICAL patch (one agent, minutes). Most rejects are a tiny seam bug.
+    let fix = await trySurgicalFix(spec, reason, fixClass, cAttempt);
+    const viaSurgical = !!(fix && fix.final_patch && (fix.final_geomean || 0) > 1.0);
+    // TIER 2 — escalate to the HEAVYWEIGHT kernel_workflow re-author ONLY if the surgical patch failed.
+    if (!viaSurgical) {
+      try {
+        fix = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+          kernel_path: spec.kernel_eval_dir || spec.task_dir, workflow_dir: KERNEL_WF_DIR,
+          mode: 'optimize', target_language: spec.language || 'triton',
+          op_spec: { op_kind: spec.op_kind, shapes: spec.shapes || {}, dtype: spec.dtype || 'bf16', regime: spec.regime || '', cuda_graph_safe: true, ...(spec.workload_path ? { workload_path: spec.workload_path } : {}) },
+          perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
+          use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
+          budget: KERNEL_BUDGET, gpu_ids: spec.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
+          task: `CORRECTIVE FIX — do NOT re-discover the algorithm; KEEP the ${(spec.isolated || 0).toFixed(2)}x isolated win. ` +
+            `This kernel PASSED the isolated oracle and ENGAGED on all live workers but was REJECTED at the e2e serving gate ` +
+            `for: "${reason}". ` + (fixClass === 'correctness' ? CORRECTNESS_FIX_TASK : INTEGRATION_FIX_TASK) +
+            ` Emit a fixed final_patch. ` + GRAPH_REQ + (TASK || ''),
+          apply_to_original: 'false',
+        }, `${spec.short_name}:corrective`);
+      } catch (e) { fix = { authored: false, validation_status: 'error', reason: String(e) }; }
+    }
     if (!fix || fix.authored === false || !(fix.final_geomean > 1.0) || !fix.final_patch) {
-      log(`  ${spec.short_name}: corrective re-author produced no usable kernel (${fix ? fix.reason || fix.validation_status : 'null'}).`);
+      log(`  ${spec.short_name}: corrective produced no usable kernel (${fix ? fix.reason || fix.validation_status : 'null'}).`);
       return { banked: false };
     }
+    log(`  ${spec.short_name}: fix via ${viaSurgical ? 'SURGICAL patch (light)' : 'kernel_workflow re-author (heavy)'}; iso geomean ${(fix.final_geomean || 0).toFixed(2)}. Re-gating e2e.`);
     // Re-gate the FIXED kernel. Preserve the caller's KERNEL_RESULT SHAPE (head=authored/code_patch,
     // milestone=editable/final_patch) and only swap in the corrected patch + eval_dir + iso speedup, so the
     // helper is track-agnostic. Set BOTH patch fields to the new patch — the integrator reads whichever
@@ -726,8 +774,16 @@ async function tryCorrectiveReauthor(spec) {
     reason = implausible2
       ? `implausible_speedup (+${(integ2.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pctForGuard, fix.final_geomean).toFixed(1)}% — corruption)`
       : ((integ2 && (integ2.reason || integ2.gate)) || reason);
-    log(`  ${spec.short_name}: corrective re-author still rejected (${reason}).`);
-    fixClass = rejectClass(reason);
+    // STRUCTURED stop (do NOT re-classify from the prose reason — it may MENTION "corruption" while saying
+    // it was RESOLVED, which would loop wastefully). If this attempt made the kernel CORRECT (parity no
+    // longer failing) and it was not an implausible speedup, the ONLY remaining problem is throughput/
+    // do-no-harm — more re-authoring cannot create Amdahl headroom that isn't there, so STOP now.
+    if (ab2 && integ2.output_parity !== 'fail' && !implausible2) {
+      log(`  ${spec.short_name}: corrective produced a CORRECT kernel with no e2e win (do-no-harm: ${reason}) — stopping; throughput headroom for this op is exhausted.`);
+      break;
+    }
+    log(`  ${spec.short_name}: corrective still rejected (${reason}).`);
+    fixClass = implausible2 ? 'correctness' : rejectClass(reason);
     if (fixClass === '') break;   // new failure not auto-correctable -> stop retrying
     // Progressive: the NEXT attempt builds on this attempt's (partially) fixed kernel, not the original.
     spec.kernel_eval_dir = fix.eval_dir || spec.kernel_eval_dir;
