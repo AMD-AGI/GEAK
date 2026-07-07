@@ -132,6 +132,12 @@ python3 scripts/run_roofline.py \
     --output ./roofline_out \
     --gpu 1 \
     --hbm-peak-const 5300        # optional: fixed HBM peak for cross-run util
+
+# Target one kernel when setup/RNG kernels dominate a 1-iter --profile run
+python3 scripts/run_roofline.py \
+    --workdir /path/to/tests \
+    --cmd "python3 test_tilelang_main_kernel.py --profile --filter mqa_logits_prefill" \
+    --gpu 1 --kernel mqa_logits --output ./roofline_out
 ```
 
 `--workdir` is the directory the unit test runs from; `--cmd` is the command
@@ -181,8 +187,8 @@ the peaks are this-run empirical, not datasheet:
 
 ```
 Peak_BW_emp   = HBM Bandwidth "Peak (Empirical)" column        [GB/s]
-Peak_Compute  = MFMA BF16 peak (attention/GEMM)  OR
-                VALU F32  peak (elementwise)                   [GFLOP/s]
+Peak_Compute  = empirical peak of the kernel's dominant achieved
+                dtype (see "Choosing Peak_Compute" below)      [GFLOP/s]
 AI_HBM        = "AI HBM" arithmetic intensity                  [FLOP/byte]
 Perf          = achieved "Performance"                         [GFLOP/s]
 
@@ -192,9 +198,23 @@ ridge(emp)    = Peak_Compute / Peak_BW_emp                     [FLOP/byte]
                 AI_HBM < ridge → memory-bound; AI_HBM > ridge → compute-bound
 ```
 
-Choosing `Peak_Compute`: `--compute-peak auto` (default) picks MFMA-BF16 when
-the kernel's achieved MFMA throughput dominates (attention/GEMM), else VALU-F32
-(elementwise). Force it with `--compute-peak mfma_bf16|valu_f32`.
+Choosing `Peak_Compute` — **dtype-based** `--compute-peak auto` (default): the
+script scans every FLOP/IOP rate metric and picks the empirical peak of the
+dtype the kernel *actually ran on* (the dominant **achieved** counter). So a
+BF16 attention/GEMM uses the MFMA-BF16 peak, an fp8 GEMM the MFMA-F8 peak, an
+elementwise kernel the VALU-F32 peak — automatically, no per-kernel hinting.
+
+`rocprof-compute` reports **no empirical peak for MFMA F6F4** (fp4/fp6) on some
+versions. When the dominant dtype is F6F4 with an `N/A` peak, the script
+**estimates** it as `2 × peak(MFMA-F8 empirical)` (fp4/fp6 packs ~2× the matrix
+throughput of fp8); the peak label then reads `mfma_f6f4,est=2xF8emp` so the
+estimate is explicit.
+
+Force a specific dtype with `--compute-peak mfma_bf16|mfma_f8|valu_f32|...`
+(any key in `COMPUTE_METRICS`). Or bypass the empirical peak entirely with
+`--compute-peak-const <GFLOP/s>` — a fixed datasheet ceiling (e.g. a datasheet
+fp4/fp8 MFMA peak), useful when the empirical peak is missing or unreliable.
+`--compute-peak-const` overrides `--compute-peak`.
 
 `HBM util (real)` = `achieved_HBM_BW / fixed machine-constant peak`
 (`--hbm-peak-const`, e.g. `5300` for MI300X). It is reported for **cross-run
@@ -283,9 +303,98 @@ python3 scripts/run_roofline.py --mode full \
 - **Performance (TFLOPs)** — y-axis; compare to the peak compute ceiling.
 - **HBM BANDWIDTH UTILIZATION utilization_pct** — how close to peak DRAM BW.
 - **COMPUTE UTILIZATION utilization_pct** — how close to peak FLOP/IOP rate.
-- The summary skips noise kernels (PyTorch fill/copy/distribution etc. — see
-  `SKIP_PATTERNS` in the script); the kernel name comes from
-  `pmc_kernel_top.csv` (hottest first).
+- By default the summary reports **every** kernel with a roofline block —
+  nothing is filtered by name, so a rocBLAS `Cijk_` GEMM or an `at::native`
+  kernel that *is* the kernel under test is never silently dropped. Kernel
+  names come from the `analyze` block **headers** (`Kernel N: <name> (pct%)`),
+  which are inherently 1:1 and in-order with the parsed 4.1/4.2 blocks;
+  `pmc_kernel_top.csv` is only an optional fallback to un-truncate a long name.
+
+### Filtering / targeting a specific kernel
+
+- `--skip-noise` — opt-in dropping of genuine framework input-generation / init
+  kernels (RNG fill, HIP memset, `arange`; see `NOISE_PATTERNS` in the script).
+  Off by default. It deliberately does **not** list rocBLAS / `at::native`
+  compute kernels, since those are often the kernel under test.
+- `--kernel <substr>` — roofline **only** the kernel(s) whose name contains this
+  (case-sensitive) substring. This is the right tool when setup/RNG kernels
+  dominate a 1-iteration `--profile` run and bury the kernel under test (e.g. a
+  tilelang / Triton kernel drowned by dozens of `torch.randn`/sort/fill
+  kernels). It resolves the substring to rocprof kernel id(s) via
+  `rocprof-compute analyze -p <dir> --list-stats`, then re-runs the block-4
+  analyze with `-k <id> [<id> ...]`. If the substring matches no kernel, the
+  script prints the available kernel names and exits nonzero. Default (no
+  `--kernel`): analyze all kernels.
+
+## Empirical vs datasheet peaks (`--peaks`)
+
+The efficiency can be driven by two kinds of ceiling:
+
+- **empirical** (default) — per-run peaks parsed from the roofline block
+  (`Peak (Empirical)` column + the fp4=2×fp8 estimate). These come from
+  rocprof's on-device microbenchmark and run **well below datasheet** because
+  the microbench does not fully saturate the units.
+- **datasheet** — fixed vendor peaks from `DATASHEET_PEAKS[arch]` in the script.
+  For **gfx950 / MI350–MI355** (dense, no sparsity):
+
+  | resource | peak |
+  |---|---|
+  | HBM | 8 TB/s |
+  | MFMA FP8 | 5 PFLOP/s |
+  | MFMA FP4/FP6 (F6F4) | 10 PFLOP/s (2× FP8) |
+  | MFMA BF16 / FP16 | 2.5 PFLOP/s |
+
+  The datasheet compute roof is selected by the kernel's **dominant achieved
+  FP metric** (`MFMA FLOPs (F8)`→FP8, `(BF16)`→BF16, `VALU FLOPs (F32)`→F32,
+  …), exactly as the empirical path does.
+
+`--peaks {empirical,datasheet,both}` — **default `both`**: every run prints an
+empirical block **and** a datasheet cross-check per kernel, i.e. the built-in
+double-check is on by default (pass `empirical`/`datasheet` to get just one).
+Because empirical fp8/fp4 peaks measured here are ≈ half datasheet,
+**empirical Roofline Eff. ≈ 2× datasheet Eff.** for fp8/fp4 GEMMs; the two
+ceilings agree on the **bound classification** (memory- vs compute-bound), which
+is the robust takeaway. Datasheet Eff. is the conservative number to quote.
+
+Formula (identical for both, per §10 of the pure-agent flow):
+
+```text
+ceiling      = min(dtype_compute_peak, AI_HBM * HBM_peak)
+roofline_eff = achieved_perf / ceiling
+```
+
+## Multi-shape aggregation by coverage weight
+
+A single kernel runs many shapes in a real workload. To roofline the *kernel*
+(not one shape), profile each representative shape (one `--kernel`-targeted run
+per shape), then aggregate by that shape's **coverage weight** — its share of
+real dispatches / time from the serving/profiler trace (not from the roofline
+run itself):
+
+```text
+weighted_metric = sum(metric(shape_i) * coverage_i) / sum(coverage_i)
+```
+
+Report, per kernel: number of profiled shapes; cumulative shape coverage;
+weighted Roofline Eff.; weighted achieved TFLOP/s; weighted HBM GB/s; weighted
+AI; and the per-shape roofline details. (The DSV4 `kernel_unit_tests/shapes/*.json`
+give the shape *variants* per kernel; the coverage weights come from the kineto/
+profiler trace that recorded how often each shape actually ran.)
+
+## Pure-agent flow (no helper script)
+
+The same result can be produced by an agent driving `rocprof-compute` directly —
+the method the helper script encodes:
+
+1. `rocprof-compute profile ... --roof-only -- <bench cmd>` on each **unit test**,
+   never on a live multiprocess serving server (profiling wait-loops destabilizes
+   startup and pollutes the roofline).
+2. `rocprof-compute analyze -p <dir> -b 4 > raw.txt`.
+3. Parse `raw.txt` **by block**: each `Kernel N: <name> (pct%)` header owns the
+   `4.1 Roofline Rate Metrics` and `4.2 Roofline AI Plot Points` immediately
+   below it — take name and metrics from the **same block**. Never `zip`
+   `pmc_kernel_top.csv` names against the analyze text (order need not match).
+4. Compute efficiency with the peaks above; aggregate by coverage weight.
 
 ## Limitations / pitfalls
 
@@ -293,8 +402,14 @@ python3 scripts/run_roofline.py --mode full \
   use a CDNA / MI-series GPU.
 - **RNG / setup pollution.** If the harness fills inputs with
   `torch.randn` on-GPU, those PyTorch kernels show up as top kernels and can
-  outweigh the target. Pre-generate inputs on CPU / outside the timed region
-  so the kernel under test is the hottest function.
+  outweigh the target (common in a 1-iteration `--profile` run). Either
+  pre-generate inputs on CPU / outside the timed region, or target the kernel
+  under test directly with `--kernel <substr>` (see above).
+- **int8 (MFMA IOPs) kernels report Roofline Eff. ≈ 0.** The roofline is
+  **FLOP-based**: an int8 GEMM does integer MFMA ops (MFMA IOPs), so rocprof's
+  `Performance` (FLOP/s) reads ≈ 0 and AI/Perf collapse. The HBM-BW and
+  IOP-utilization numbers are still meaningful, but the derived **Roofline Eff.
+  is not** for int8 kernels — read the achieved IOP rate / bandwidth instead.
 - **Counter access required.** A permission failure in step 1 surfaces as a
   profile error in `<name>_roofline_error.txt`.
 - The unit-test command must actually **launch the kernel on the GPU**; a
