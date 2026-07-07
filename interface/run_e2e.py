@@ -28,6 +28,7 @@ import atexit
 import glob
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -82,6 +83,100 @@ DONE_POLL_S = float(os.environ.get("PERFSKILLS_DONE_POLL_S", "15"))
 
 
 # ---------------------------------------------------------------------------
+# Serving-launch FIDELITY: backend-agnostic knob -> per-adapter CLI flag map.
+# ---------------------------------------------------------------------------
+# Each serving adapter (scripts/adapters/<backend>.sh) names the same physical
+# knob differently (max context window, GPU-memory headroom). This map lets ONE
+# generic fold translate the handoff's structured fidelity knobs into whatever
+# the CURRENT backend expects — so a new backend is a one-line map entry, never a
+# case-by-case patch. A knob whose backend has no mapping is left to the adapter
+# default (we never guess a flag name for an unknown stack).
+_SERVING_FIDELITY_FLAGS: dict[str, dict[str, str]] = {
+    "vllm": {"max_model_len": "--max-model-len", "mem_fraction": "--gpu-memory-utilization"},
+    "sglang": {"max_model_len": "--context-length", "mem_fraction": "--mem-fraction-static"},
+}
+
+
+def _flag_present(server_args: str, flag: str) -> bool:
+    """True when ``flag`` already appears in a server-args string.
+
+    Matches both the ``--flag value`` and ``--flag=value`` forms so an explicit
+    caller choice is never silently duplicated/overridden by the fidelity fold.
+
+    Args:
+        server_args: The server-args string to scan.
+        flag: The flag to look for, INCLUDING leading dashes (e.g. ``--max-model-len``).
+
+    Returns:
+        Whether the flag is already present.
+    """
+    if not server_args or not flag:
+        return False
+    try:
+        toks = shlex.split(server_args)
+    except ValueError:
+        toks = server_args.split()
+    prefix = flag + "="
+    return any(t == flag or t.startswith(prefix) for t in toks)
+
+
+def _fold_serving_fidelity_flags(
+    server_args: str,
+    *,
+    backend: str,
+    max_model_len: int = 0,
+    mem_fraction: float = 0.0,
+) -> str:
+    """Fold serving-fidelity knobs into a server-args string as backend flags.
+
+    The e2e workflow applies ``initial_extra_server_args`` (JS ``INIT_FLAGS`` ->
+    ``curFlags``) to EVERY serving launch — baseline, config sweep, integrate
+    ref/cand, and validation — so folding the orchestrator's max-model-len /
+    gpu-mem-util here makes GEAK launch the IDENTICAL vLLM/sglang engine that
+    Hyperloom measured, WITHOUT the JS or the adapters needing a per-knob change
+    (see #805: a slower default stack silently eats the kernel win e2e). Generic
+    and non-destructive:
+
+      * translates each knob to the CURRENT backend's flag via
+        ``_SERVING_FIDELITY_FLAGS`` (unknown backend => returned untouched),
+      * NEVER overrides a flag the caller already set (explicit config wins),
+      * appends nothing when a knob is unset => byte-identical to the input.
+
+    Args:
+        server_args: The seed server-args string (Hyperloom accepted_flags).
+        backend: The serving backend ("vllm" | "sglang" | ...).
+        max_model_len: Resolved max-model-len (<=0 => omitted).
+        mem_fraction: Resolved gpu-memory-utilization / mem-fraction (<=0 => omitted).
+
+    Returns:
+        The server-args string with the resolved, non-duplicate knobs appended.
+    """
+    fmap = _SERVING_FIDELITY_FLAGS.get(str(backend or "").strip().lower())
+    if not fmap:
+        return str(server_args or "")
+    out = str(server_args or "").strip()
+
+    pending: list[tuple[str, str]] = []
+    try:
+        mml = int(max_model_len or 0)
+    except (TypeError, ValueError):
+        mml = 0
+    if mml > 0 and fmap.get("max_model_len"):
+        pending.append((fmap["max_model_len"], str(mml)))
+    try:
+        mem = float(mem_fraction or 0.0)
+    except (TypeError, ValueError):
+        mem = 0.0
+    if mem > 0 and fmap.get("mem_fraction"):
+        pending.append((fmap["mem_fraction"], f"{mem:g}"))
+
+    for flag, val in pending:
+        if not _flag_present(out, flag):
+            out = (out + " " + flag + " " + val).strip()
+    return out
+
+
+# ---------------------------------------------------------------------------
 # handoff (stable)  ->  e2e_workflow.js args (volatile, owned here)
 # ---------------------------------------------------------------------------
 def map_args(h: dict, timeout_s: int | None = None) -> dict:
@@ -122,6 +217,35 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         ps_args["time_budget_s"] = int(timeout_s)
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
+    # Serving-launch fidelity (see Hyperloom handoff builder / #805): forward the
+    # SAME max-model-len / gpu-mem-util Hyperloom's baseline served with so GEAK's
+    # baseline launches the IDENTICAL vLLM engine (else it re-baselines a slower
+    # default stack and kernel deltas do not reproduce e2e). Only forwarded when
+    # the handoff carried them; absent => the vllm adapter keeps its own defaults.
+    try:
+        _mml = int(h.get("max_model_len") or 0)
+    except (TypeError, ValueError):
+        _mml = 0
+    if _mml > 0:
+        ps_args["max_model_len"] = _mml
+    try:
+        _mem = float(h.get("mem_fraction") or 0.0)
+    except (TypeError, ValueError):
+        _mem = 0.0
+    if _mem > 0:
+        ps_args["mem_fraction"] = _mem
+    # Close the loop: also fold the SAME knobs into the seed server-args so the
+    # workflow APPLIES them on every serving launch through its existing
+    # INIT_FLAGS -> curFlags channel. The standalone keys above are advisory
+    # metadata; these flags are what the adapters actually launch with. Backend
+    # translation + dedup live in _fold_serving_fidelity_flags (generic; a new
+    # backend is one map entry). No knobs / unknown backend => unchanged.
+    ps_args["initial_extra_server_args"] = _fold_serving_fidelity_flags(
+        ps_args["initial_extra_server_args"],
+        backend=str(ps_args.get("backend") or ""),
+        max_model_len=_mml,
+        mem_fraction=_mem,
+    )
     # Optional phase scoping / resume. Pass-through of the workflow's own
     # phase-by-phase driving (args.phases): e.g. "final" re-enters only the
     # Finalize gate against a pinned eval_dir, which (with the disk-reconstruct +
@@ -943,16 +1067,38 @@ def normalize_result(h: dict, wf: dict) -> dict:
         orch_baseline = float(h.get("raw_baseline_tput") or 0.0)
     except (TypeError, ValueError):
         orch_baseline = 0.0
+    # Orchestrator throughput measured on the SAME config GEAK seeds with
+    # (== Hyperloom current_best config). When present it isolates the PURE
+    # cross-harness measurement residue (identical config, both harnesses) from
+    # the explore/framework config gain that is baked into the raw-baseline
+    # comparison. Falls back to raw baseline when absent (older handoffs).
+    try:
+        orch_same_cfg = float(h.get("orchestrator_best_tput_same_config") or 0.0)
+    except (TypeError, ValueError):
+        orch_same_cfg = 0.0
     baseline_basis = {
         # GEAK's own measured baseline (Hyperloom-accepted config = fair engagement baseline; gating uses this).
         "geak_measured_baseline_tok_s": geak_baseline or None,
         # Hyperloom's own measured baseline forwarded in the handoff (the orchestrator reference).
         "orchestrator_baseline_tok_s": orch_baseline or None,
-        # How far GEAK's baseline drifted from Hyperloom's - a large value flags a measurement mismatch, not a win.
+        # How far GEAK's baseline drifted from Hyperloom's RAW baseline. NOTE:
+        # this conflates the explore/framework CONFIG gain (GEAK seeds with the
+        # accepted config, raw baseline does not) with measurement residue, so it
+        # is NOT a clean measurement-mismatch signal. Kept for continuity.
         "baseline_divergence_pct": (
             round(100.0 * (geak_baseline - orch_baseline) / orch_baseline, 2)
             if (geak_baseline > 0 and orch_baseline > 0) else None
         ),
+        # PURE cross-harness measurement residue: GEAK baseline vs the
+        # orchestrator's throughput on the SAME (accepted) config. Both sides
+        # run the identical config, so this isolates client/protocol/warm-cold
+        # differences from the config gain. This is the value promote-side gating
+        # should use. None when the same-config baseline was not forwarded.
+        "measurement_divergence_pct": (
+            round(100.0 * (geak_baseline - orch_same_cfg) / orch_same_cfg, 2)
+            if (geak_baseline > 0 and orch_same_cfg > 0) else None
+        ),
+        "orchestrator_best_tput_same_config": orch_same_cfg or None,
         # Gain measured against the ORCHESTRATOR baseline (what Hyperloom sees end-to-end).
         "gain_vs_orchestrator_baseline": (
             round(geak_final / orch_baseline, 4)
@@ -1064,6 +1210,12 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # client to Hyperloom/Magpie (benchmark_serving.py); "native" => the
         # backend's own client (small cross-harness differences may remain).
         "bench_client": os.environ.get("BENCH_CLIENT", "native"),
+        # Measurement protocol forwarded from the handoff, surfaced at TOP LEVEL
+        # (not only inside baseline_basis) so a sweep/validated reuse can pin the
+        # SAME num_prompts / random_range_ratio / num_warmups / seed the headline
+        # result was measured with. Empty {} when running standalone (no handoff),
+        # in which case the reuse path keeps bench_e2e.sh's per-conc defaults.
+        "bench_protocol": h.get("bench_protocol") or {},
         # The kernels are only extracted/validated at this single workload point;
         # the caller must redo parity on out-of-regime sweep points.
         "validated_regimes": [workload],
@@ -1372,8 +1524,16 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
         "final_overlay": "",                 # config-only: applied via env/flags
         "final_launch_script": "",
         "accepted_config": {
-            "flags": str(_ir_get(best, "apply_flags") or ""),
-            "env": str(_ir_get(best, "apply_env") or ""),
+            # The integrator emits the winning config under either key family:
+            # ``apply_flags``/``apply_env`` (flat/nested-e2e schema) OR
+            # ``accepted_flags``/``accepted_env`` (the integrate_result.json
+            # summary schema). Read BOTH so a disk-recovered win never loses its
+            # server flags/env — otherwise the recovered result.json carries an
+            # empty accepted_config and every downstream reuse (sweep /
+            # conc_sweep) relaunches an UN-optimized server. General across every
+            # env/flags/config winner, not model-specific.
+            "flags": str(_ir_get(best, "apply_flags", "accepted_flags") or ""),
+            "env": str(_ir_get(best, "apply_env", "accepted_env") or ""),
         },
         "accepted_kernels": (
             [{"short_name": name, "kind": "authored", "backend": "geak",
