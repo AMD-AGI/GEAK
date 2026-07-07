@@ -107,6 +107,12 @@ jobs:
           else
             echo "- result.json: **missing**" >> "$GITHUB_STEP_SUMMARY"
           fi
+          if [ -f "$OUT_DIR/monitor_verdict.json" ]; then
+            echo "- **liveness monitor killed this run:**" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat "$OUT_DIR/monitor_verdict.json" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload run artifacts
         if: always()
@@ -118,5 +124,7 @@ jobs:
           path: |
             ${{ env.OUT_DIR }}/result.json
             ${{ env.OUT_DIR }}/run.log
+            ${{ env.OUT_DIR }}/monitor.log
+            ${{ env.OUT_DIR }}/monitor_verdict.json
           if-no-files-found: warn
           retention-days: 90

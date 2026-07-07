@@ -68,7 +68,27 @@ if [ "$ERRCLASS" = "workflow_parse_error" ]; then
   log "      ci/setup_claude.sh installed claude-agent-sdk (import must succeed)."
 fi
 
+# A trustworthy ok/no_gain REQUIRES a real measured baseline (>0). A zero/absent
+# baseline_throughput_tok_s means NOTHING was actually measured — GPU unusable,
+# the serving path never came up, etc. — which perfskills reports as a graceful
+# no_gain. Treat that as a HARD failure (error_class=gpu_unusable) so the CI goes
+# red instead of a false-green no_gain. (baseline_throughput_tok_s is always
+# present on the ok/no_gain result path; error/timeout are caught by the * case.)
+measured_baseline() {
+  python3 -c 'import json,sys
+try:
+    b = json.load(open(sys.argv[1])).get("baseline_throughput_tok_s") or 0
+    print("1" if float(b) > 0 else "0")
+except Exception:
+    print("0")' "$RESULT" 2>/dev/null || echo "0"
+}
+
 case "$STATUS" in
-  ok|no_gain) log "PASS ($STATUS)"; exit 0 ;;
-  *)          die "FAIL status='$STATUS' error_class=${ERRCLASS:-<none>} rc=$RC" ;;
+  ok|no_gain)
+    if [ "$(measured_baseline)" = "1" ]; then
+      log "PASS ($STATUS)"; exit 0
+    fi
+    die "FAIL status='$STATUS' but baseline_throughput_tok_s<=0 (unmeasured — GPU unusable / serving never healthy) error_class=gpu_unusable rc=$RC"
+    ;;
+  *) die "FAIL status='$STATUS' error_class=${ERRCLASS:-<none>} rc=$RC" ;;
 esac
