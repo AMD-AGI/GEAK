@@ -13,10 +13,11 @@ Install GEAK and run the `geak` CLI against a GPU kernel or repository. This top
 
 Before installing GEAK, ensure the following are installed on your system:
 
+- [**ROCm** 7.2 or later](../compatibility.md#rocm-stack)
 - **Python** 3.10 or later
 - **Git** (parallel runs use worktrees)
 - **An AMD GPU** and the stack your kernels use — for example, Triton, PyTorch, CUDA, or compiled HIP.
-- **AMD Instinct or Radeon software stack (ROCm)**: Install a normal ROCm user-space environment so tools like `rocminfo` and `rocm-smi` work when the agent inspects hardware. For HIP C++, you also need `hipcc`. `HIP_VISIBLE_DEVICES` is often set by the scheduler or your shell when pinning a card.
+- **AMD Instinct or Radeon software stack (ROCm)**: Install a normal ROCm user-space environment so tools like `rocminfo` and `rocm-smi` work when the agent inspects hardware. For HIP C++, you also need `hipcc`. `HIP_VISIBLE_DEVICES` is often set by the scheduler or your shell when pinning a card. See [Compatibility Matrix](../compatibility.md) and [ROCm stack](../compatibility.md#rocm-stack) for more information.
 
 ## Install
 
