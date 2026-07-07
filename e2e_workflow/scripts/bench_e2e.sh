@@ -58,9 +58,7 @@ done
 # the EXACT same client as another harness. BENCH_CLIENT=inferencex => Hyperloom/
 # Magpie's own InferenceX benchmark_serving.py (measurement-protocol-identical client). Default
 # 'native' keeps each backend's built-in bench (sglang.bench_serving / vllm).
-BENCH_CLIENT=${BENCH_CLIENT:-inferencex}
-INFERENCEX_PATH=${INFERENCEX_PATH:-/wekafs/InferenceX}
-export INFERENCEX_PATH
+BENCH_CLIENT=${BENCH_CLIENT:-native}
 copy_function() {  # copy_function SRC DST — clone a shell function under a new name
   declare -F "$1" >/dev/null || return 1
   eval "${2}() $(declare -f "$1" | sed '1d')"
