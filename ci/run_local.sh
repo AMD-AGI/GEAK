@@ -70,19 +70,38 @@ case "$GEAK_ROOT/" in
   *) GEAK_MOUNT=(-v "$GEAK_ROOT:$GEAK_ROOT") ;;
 esac
 
+# ---- GPU wedge pre-check: bail BEFORE touching the GPU if the driver is hung ----
+# A driver-level wedge parks tasks in uninterruptible (D) state, which NOTHING can
+# kill (not SIGKILL, not `timeout`). If we ran rocminfo/torch against that, our own
+# probe would hang forever too. So first cheaply scan /proc (touches no GPU) and
+# fail fast if the box is already wedged. Set GEAK_SKIP_DSTATE_CHECK=1 to skip.
+if [ "${GEAK_SKIP_DSTATE_CHECK:-0}" != "1" ]; then
+  log "GPU wedge pre-check (D-state scan, no GPU access) ..."
+  if ! bash "$HERE/gpu_dstate_check.sh"; then
+    echo "::error::GPU appears wedged at the driver level (process(es) stuck in D-state in the amdgpu/kfd path). Refusing to start — the box likely needs a GPU reset or reboot." >&2
+    die "GPU wedge pre-check failed (D-state in amdgpu/kfd) — needs GPU reset/reboot; not starting the run"
+  fi
+fi
+
 # ---- GPU preflight gate: fail FAST if the GPU is unusable BEFORE the long run ----
 # A short, timeout-bounded probe in the SAME image + device flags as the real run.
 # Catches a dead/wedged GPU (or a docker/device problem) in seconds instead of
 # discovering it hours into the workflow (which then limps to a false-green
 # no_gain). Set GPU_HEALTHCHECK_TIMEOUT_S=0 to skip (e.g. CPU-only debugging).
 HEALTHCHECK_CAP="${GPU_HEALTHCHECK_TIMEOUT_S:-120}"
+PF_NAME="geak_pf_${MODEL_KEY//[^A-Za-z0-9_.-]/_}_${RUN_TS}"
 if [ "$HEALTHCHECK_CAP" != "0" ]; then
   log "GPU preflight: probing $IMAGE (rocminfo + torch matmul, ${HEALTHCHECK_CAP}s cap)"
-  if ! timeout "$HEALTHCHECK_CAP" docker run --rm \
+  # --kill-after escalates SIGTERM->SIGKILL so a FRESH wedge (one the D-state
+  # pre-check couldn't foresee) still can't hang the job past the cap; the probe
+  # is NAMED so we can best-effort force-remove the (possibly orphaned) container.
+  if ! timeout --kill-after=30 "$HEALTHCHECK_CAP" docker run --rm --name "$PF_NAME" \
       --device /dev/kfd --device /dev/dri --group-add video \
       --security-opt seccomp=unconfined \
       -v "$WS:$WS" "${GEAK_MOUNT[@]}" \
       --entrypoint bash "$IMAGE" "$HERE/gpu_healthcheck.sh"; then
+    # Best-effort reap of a wedged probe container (may itself refuse if D-state).
+    ( docker kill "$PF_NAME" >/dev/null 2>&1; docker rm -f "$PF_NAME" >/dev/null 2>&1 ) &
     echo "::error::GPU preflight failed for $MODEL_KEY (image=$IMAGE) — GPU unusable, or docker/probe error/timeout. Refusing to start the run." >&2
     die "GPU preflight failed (model=$MODEL_KEY image=$IMAGE) — GPU unusable or probe error/timeout; not starting the run"
   fi
