@@ -70,5 +70,5 @@ At the end of a run, GEAK produces:
 
 ## Related topics
 
-- [What is GEAK?](../what-is-geak.md) — overview of GEAK's capabilities and design goals.
-- [Run the agent](../how-to/run-agent.md) — how to invoke `geak` from the command line.
+- [What is GEAK?](../what-is-geak.md)—overview of GEAK's capabilities and design goals.
+- [Run the agent](../how-to/run-agent.md)—how to invoke `geak` from the command line.

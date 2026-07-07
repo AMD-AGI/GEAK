@@ -77,6 +77,6 @@ The following additional libraries are available in the ROCm monorepo.
 
 ## Related topics
 
-- [GEAK agent loop](../docs/conceptual/geak-pipeline.md) — how GEAK uses ROCm libraries during profiling and optimization.
-- [API reference](../docs/reference/api-reference.md) — environment variables and tools that interact with the ROCm stack.
-- [GEAK compatibility matrix](../docs/compatibility.md) — verified ROCm versions and GPU hardware.
+- [GEAK agent loop](../docs/conceptual/geak-pipeline.md)—how GEAK uses ROCm libraries during profiling and optimization.
+- [API reference](../docs/reference/api-reference.md)—environment variables and tools that interact with the ROCm stack.
+- [GEAK compatibility matrix](../docs/compatibility.md)—verified ROCm versions and GPU hardware.
