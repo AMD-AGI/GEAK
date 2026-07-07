@@ -7,8 +7,9 @@ optimization workflow on a ROCm GPU box, exactly the way Hyperloom's
 Everything is driven from `ci/run_local.sh`. A run:
 
 1. resolves the container image + model weights for a model key,
-2. **GPU preflight**: a short throwaway container probes the GPU (`rocminfo` +
-   torch matmul) and fails fast if it's dead/wedged — before committing to a run,
+2. **GPU health gate**: a host-side D-state scan (`gpu_dstate_check.sh`) bails if
+   the driver is already wedged, then a short throwaway container probes the GPU
+   (`rocminfo` + torch matmul) and fails fast if it's dead — before committing,
 3. spins up the ROCm/vllm container with GPU passthrough (in the background),
 4. installs Claude Code + the Python `claude_agent_sdk` inside it,
 5. runs the GEAK e2e workflow for one model into a timestamped folder,
@@ -48,7 +49,8 @@ e.g. `/home/ethany/models/Qwen3-8B`); that dir is same-path bind-mounted too.
 | `models.tsv` | registry: `<model_key>\t<weights_dir>\t<framework>` |
 | `claude_setup.sh` | install + configure Claude Code (global AMD LiteLLM proxy). Re-run every container start (ephemeral fs). |
 | `setup_claude.sh` | Step D: install Claude into `$CLAUDE_HOME`, install `claude_agent_sdk`, probe `claude -p`. |
-| `gpu_healthcheck.sh` | GPU preflight probe run INSIDE the framework image: `rocminfo` + a tiny torch matmul on GPU 0. Fast, timeout-capped. |
+| `gpu_dstate_check.sh` | host-side GPU-wedge pre-check: scans `/proc` (touches no GPU) for tasks stuck in uninterruptible **D-state** in the amdgpu/kfd path. Runs BEFORE the probe so a hung driver fails fast instead of hanging the probe itself. |
+| `gpu_healthcheck.sh` | GPU preflight probe run INSIDE the framework image: `rocminfo` + a tiny torch matmul on GPU 0. Fast, timeout-capped (`--kill-after` escalates to SIGKILL). |
 | `run_geak_e2e.sh` | mirror Hyperloom's `run_e2e.py` launch; patches `exp_root`/`model_path`/`launch_recipe`/`inferencex_path` in the handoff. |
 | `run_model.sh` | Step E+F: run ONE model into a timestamped dir, then deterministically judge (status + measured baseline). |
 | `run_monitor.sh` | host-side liveness monitor: every 5 min feeds `run.log` tail to a `claude -p` arbiter; `docker kill`s a confirmed-stuck run. |
@@ -126,6 +128,7 @@ HOST (run_local.sh — orchestrator)
 
 | when | layer | catches |
 |------|-------|---------|
+| before probe | D-state pre-check (`gpu_dstate_check.sh`) | already-wedged driver (unkillable D-state tasks) — bail before our probe hangs too |
 | before run | GPU preflight (`gpu_healthcheck.sh`) | dead/wedged GPU, docker/device broken |
 | during run | Claude watchdog (`run_monitor.sh`) | mid-run stall, GPU wedge, NFS/OOM loop |
 | after run | deterministic judge (`run_model.sh` Step F) | false-green `no_gain`, unmeasured baseline, errors |
@@ -178,6 +181,8 @@ The host-side liveness monitor (`run_monitor.sh`) is on by default; tune via env
 | `GEAK_MONITOR_MODEL` | `claude-opus-4-8` | model for the arbiter (host login) |
 | `GEAK_MONITOR_TAIL_LINES` | `300` | how much of `run.log` to feed each poll |
 | `GPU_HEALTHCHECK_TIMEOUT_S` | `120` | preflight probe cap; `0` skips preflight (CPU-only debugging) |
+| `GEAK_SKIP_DSTATE_CHECK` | `0` | set `1` to skip the D-state wedge pre-check |
+| `GEAK_DSTATE_SAMPLE_GAP_S` | `3` | seconds between the two D-state samples (sustained-detection window) |
 
 The monitor no-ops gracefully if `claude` isn't on the host PATH (the run proceeds
 unwatched, protected by the workflow's wall-clock cap).
