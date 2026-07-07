@@ -70,10 +70,37 @@ case "$GEAK_ROOT/" in
   *) GEAK_MOUNT=(-v "$GEAK_ROOT:$GEAK_ROOT") ;;
 esac
 
+# ---- GPU preflight gate: fail FAST if the GPU is unusable BEFORE the long run ----
+# A short, timeout-bounded probe in the SAME image + device flags as the real run.
+# Catches a dead/wedged GPU (or a docker/device problem) in seconds instead of
+# discovering it hours into the workflow (which then limps to a false-green
+# no_gain). Set GPU_HEALTHCHECK_TIMEOUT_S=0 to skip (e.g. CPU-only debugging).
+HEALTHCHECK_CAP="${GPU_HEALTHCHECK_TIMEOUT_S:-120}"
+if [ "$HEALTHCHECK_CAP" != "0" ]; then
+  log "GPU preflight: probing $IMAGE (rocminfo + torch matmul, ${HEALTHCHECK_CAP}s cap)"
+  if ! timeout "$HEALTHCHECK_CAP" docker run --rm \
+      --device /dev/kfd --device /dev/dri --group-add video \
+      --security-opt seccomp=unconfined \
+      -v "$WS:$WS" "${GEAK_MOUNT[@]}" \
+      --entrypoint bash "$IMAGE" "$HERE/gpu_healthcheck.sh"; then
+    echo "::error::GPU preflight failed for $MODEL_KEY (image=$IMAGE) — GPU unusable, or docker/probe error/timeout. Refusing to start the run." >&2
+    die "GPU preflight failed (model=$MODEL_KEY image=$IMAGE) — GPU unusable or probe error/timeout; not starting the run"
+  fi
+  log "GPU preflight OK"
+fi
+
+# Named so the host-side monitor can `docker kill` it on a confirmed-stuck run.
+CONTAINER_NAME="geak_l1_${MODEL_KEY//[^A-Za-z0-9_.-]/_}_${RUN_TS}"
+
 # Pass the resolved paths through explicitly: inside the container lib.sh would
 # otherwise re-derive WS/HF_LOGS/INFERENCEX_PATH from $GEAK_ROOT's location,
 # which is wrong when the code under test is a checkout outside $WS.
-docker run --rm \
+#
+# Launched in the BACKGROUND so a host-side liveness monitor (ci/run_monitor.sh)
+# can watch $OUT_DIR/run.log and kill this container if the run wedges (dead GPU,
+# NFS stall, OOM loop) instead of hanging until the job's wall-clock timeout. We
+# then `wait` for the real exit code so the CI step reports pass/fail correctly.
+docker run --rm --name "$CONTAINER_NAME" \
   --device /dev/kfd --device /dev/dri --group-add video \
   --security-opt seccomp=unconfined --ipc=host --shm-size 32g \
   -v "$WS:$WS" -v "$MODELS_ROOT:$MODELS_ROOT" "${GEAK_MOUNT[@]}" \
@@ -89,4 +116,30 @@ docker run --rm \
     set -e
     bash '$GEAK_ROOT/ci/setup_claude.sh'
     bash '$GEAK_ROOT/ci/run_model.sh' '$MODEL_KEY'
-  "
+  " &
+DOCKER_PID=$!
+
+# Start the host-side liveness monitor (Claude arbiter, runs on the host, never
+# touches the GPU). Set GEAK_MONITOR=0 to disable. It self-exits when the
+# container stops; the EXIT trap tears it down on any early exit of this script.
+MON_PID=""
+if [ "${GEAK_MONITOR:-1}" != "0" ]; then
+  bash "$HERE/run_monitor.sh" "$CONTAINER_NAME" "$OUT_DIR/run.log" "$OUT_DIR" "$DOCKER_PID" &
+  MON_PID=$!
+  log "monitor started (pid=$MON_PID, container=$CONTAINER_NAME)"
+fi
+cleanup() { [ -n "$MON_PID" ] && kill "$MON_PID" 2>/dev/null || true; }
+trap cleanup EXIT
+
+RC=0
+wait "$DOCKER_PID" || RC=$?
+trap - EXIT
+cleanup
+
+# Surface a monitor kill as the failure reason even if docker's own rc is generic.
+if [ -f "$OUT_DIR/monitor_verdict.json" ]; then
+  echo "::error::run killed by liveness monitor (see monitor_verdict.json / monitor.log)" >&2
+  log "monitor verdict present -> $OUT_DIR/monitor_verdict.json"
+  [ "$RC" -eq 0 ] && RC=1
+fi
+exit "$RC"
