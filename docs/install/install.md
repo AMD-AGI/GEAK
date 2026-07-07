@@ -126,8 +126,8 @@ Keep secrets in exported variables and YAML only for `model_name`, `model_kwargs
 
 ## Related topics
 
-- [GEAK compatibility matrix](../compatibility.md) — verify your GPU, ROCm version, and Python version before installing.
-- [Run the agent](../how-to/run-agent.md) — invoke `geak` from the command line after installation.
+- [GEAK compatibility matrix](../compatibility.md)—verify your GPU, ROCm version, and Python version before installing.
+- [Run the agent](../how-to/run-agent.md)—invoke `geak` from the command line after installation.
 
 
 

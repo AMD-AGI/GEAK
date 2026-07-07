@@ -260,6 +260,6 @@ Four cooperating modules:
 
 ## Related topics
 
-- [What is GEAK?](what-is-geak.md) — overview of GEAK's capabilities and design goals.
-- [GEAK compatibility matrix](compatibility.md) — verified hardware and software configurations per release.
-- [Install GEAK](install/install.md) — install the latest version.
+- [What is GEAK?](what-is-geak.md)—overview of GEAK's capabilities and design goals.
+- [GEAK compatibility matrix](compatibility.md)—verified hardware and software configurations per release.
+- [Install GEAK](install/install.md)—install the latest version.

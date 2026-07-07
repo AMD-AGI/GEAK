@@ -162,6 +162,6 @@ pip install -e '.[full]'        # Everything (dev + langchain + swe-rex)
 
 ## Related topics
 
-- [Install GEAK](install/install.md) — installation instructions for verified configurations.
-- [What is GEAK?](what-is-geak.md) — overview of GEAK's capabilities and supported kernel types.
-- [Release notes](release-notes.md) — per-version changelog and feature history.
+- [Install GEAK](install/install.md)—installation instructions for verified configurations.
+- [What is GEAK?](what-is-geak.md)—overview of GEAK's capabilities and supported kernel types.
+- [Release notes](release-notes.md)—per-version changelog and feature history.
