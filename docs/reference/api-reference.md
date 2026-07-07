@@ -368,6 +368,3 @@ from minisweagent.agents.gemm_tuning_agent import run_gemm_tuning_agent
 
 ---
 
-## See also
-
-- [Install GEAK](../install/install.md) — install GEAK and configure a model backend.
