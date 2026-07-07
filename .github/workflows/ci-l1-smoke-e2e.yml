@@ -26,7 +26,7 @@ on:
       budget_s:
         description: "GEAK wall-clock budget in seconds (PERFSKILLS_E2E_TIMEOUT_S)"
         type: string
-        default: "43200"
+        default: "57600"
 
 # Only one GPU smoke at a time on this box (they contend for all 8 GPUs / disk).
 concurrency:
@@ -47,7 +47,7 @@ jobs:
     runs-on: self-hosted
     # Hard outer cap so a stuck run can't pin the box forever (budget + image
     # pull + Claude install + baseline/profile headroom). Well above budget_s.
-    timeout-minutes: 840
+    timeout-minutes: 1080
     env:
       # Stable environment on this box (siblings of the code under test).
       WS: /home/ethany/geak_ci_workspace
@@ -56,7 +56,7 @@ jobs:
       # Model + budget: from dispatch inputs when present, else defaults (the PR
       # label path has no inputs).
       MODEL_KEY: ${{ github.event.inputs.model_key || 'Qwen-Qwen3-8B' }}
-      BUDGET_S: ${{ github.event.inputs.budget_s || '43200' }}
+      BUDGET_S: ${{ github.event.inputs.budget_s || '57600' }}
       # Claude auth for the container. Falls back to the baked default in
       # ci/claude_setup.sh when the secrets are absent (forward-compatible).
       LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
