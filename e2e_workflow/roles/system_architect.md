@@ -254,20 +254,31 @@ remaining headroom. Keep it short.
 attempt, win or not. REQUIRED sections, in order:
 
 1. **Run overview** — model/architecture, serving stack, workload (ISL/OSL/conc), GPU + serving invariant,
-   date, and a one-line **final conclusion** with the headline throughput/speedup (e.g.
-   `1581.4 → 2058.8 tok/s, 1.300× (+30.0%), parity pass`), written **provisionally** from the Finalize
-   bench and tagged `(provisional — pending Director validation)`. The Director overwrites this line with
-   its OFFICIAL same-session number in the `validate` phase.
+   date, and a one-line **final conclusion** with the headline throughput/speedup + the Director status word
+   (`validated_win` / `validated_no_win` / `flagged`), e.g. a win →
+   `1581.4 → 2058.8 tok/s, 1.300× (+30.0%), parity pass — validated_win`; a no-win →
+   `1790.8 → 1790.3 tok/s, 0.9997× (−0.03%) — validated_no_win (no regression, no win)`. Never phrase a
+   `validated_no_win` as a success and never use the bare word "accepted". Written **provisionally** from the
+   Finalize bench and tagged `(provisional — pending Director validation)`; the Director overwrites this line
+   with its OFFICIAL same-session number + final status in the `validate` phase.
 
 2. **Phases tree + timeline (wall-clock)** — MANDATORY, one timed fenced tree (NOT a plain tree). Rules:
    - Derive each phase's wall-clock from artifact mtimes (`t0` = eval-dir / `model_path.txt` mtime; phase
      boundaries from the relevant `*.log` / `*_summary.json` / `_exp/*` dir mtimes).
    - Every phase node ends with **`[ Δ<step> · <cum> ]`** (step duration + cumulative elapsed since t0);
      sub-step nodes show **`[ Δ<step> ]`** only, padded to the SAME closing column.
-   - **Color = emoji** (the only thing that renders colored inside a code fence): `✅` done/accepted ·
-     `❌` rejected/no-win · `⭐` entered the final stack (a real win) · `🔧` a work phase · `🏁` the
-     official validation/total · `⚠️` a caveat. Inside descriptions use the NARROW marks **`✓` / `✘`**
-     (width-1), never `✅/❌`, so the time column stays aligned.
+   - **Color = emoji** (the only thing that renders colored inside a code fence): `✅` phase done ·
+     `❌` rejected / no-win · `⭐` entered the final stack (a real, e2e-gated win) · `🔧` a work phase ·
+     `🏁` the official validation/total · `⚠️` a caveat. Inside descriptions use the NARROW marks
+     **`✓` / `✘`** (width-1), never `✅/❌`, so the time column stays aligned.
+   - **The emoji MUST reflect the node's actual gate/outcome — do not decorate.** `⭐` is ONLY for a
+     candidate that was ACCEPTED into the final stack (integrate `gate=accepted|stack`, a positive e2e
+     delta that cleared the noise band). A candidate whose A/B **regressed or was rejected** (e.g.
+     `integrate … ✘−13.1%`, `gate=rejected`) MUST use **`❌`**, never `⭐` — a slowdown never gets a star.
+     `parity ✓` marks NUMERIC output parity only; it is NOT a throughput result and never upgrades a `✘`
+     delta. The **Validate** node shows the Director status verbatim — `🏁 …= <x>× · validated_win` /
+     `❌ …= <x>× · flagged` / and for a no-improvement run **`✅ …= <x>× · validated_no_win`** (validated,
+     no regression, NO win — never write "accepted" and never imply a gain).
    - **Align the time column**: pad each line by VISUAL width — count emoji (`✅❌⭐🔧🏁🔥⚠`) as 2 cells and
      `├└│✓✘→·×–` as 1 — so every `[` starts at the same column (a tiny Python padder is fine). Keep lines
      **≤ ~96 cols**; push long detail to the per-op deep-dive below, not into the tree.
@@ -302,9 +313,13 @@ attempt, win or not. REQUIRED sections, in order:
            └ ⊘ CK/hipBLASLt   bake-off   ckProfiler/bench absent[ Δ0m          ]
         ⭐ h1 attn   <pct>%GPU · stock=CK unified_attn (bf16)    [ Δ3h39m       ]
            ├ ⭐ aiter          backend    1.31× iso · e2e ✓+Z%   [ Δ12m         ]
-           └ ⭐ integrate      A/B <ref>→<cand> = +Z% · parity ✓ [ Δ27m         ]
-     🏁 9  Validate    Director A/B <base>→<final> = +W% (<x>×)   [ Δ37m  · 9:43 ]
+           └ ⭐ integrate      A/B <ref>→<cand> = ✓+Z% · parity ✓[ Δ27m         ]
+     🏁 9  Validate    Director A/B <base>→<final> = +W% (<x>×) · validated_win [ Δ37m · 9:43 ]
      ```
+     A **rejected** integrate node uses `❌`, never `⭐` (a slowdown never gets a star), e.g.
+     `❌ integrate  A/B 1768.5 → 1536.7 = ✘−13.1% · parity ✓` — parity ✓ is numeric-only, the throughput
+     still ✘. A **no-win** run closes with `✅ Validate  Director A/B <b>→<f> = 0.9997× · validated_no_win`
+     (validated, no regression, NO win). Only `validated_win` earns a `🏁`+`⭐` final stack.
 
 3. **Head-kernel deep-dive** (the centerpiece) — for EACH head op a `####` sub-section titled
    `<id> — <op> (<pct>% GPU) — RESULT: <ACCEPTED +X% | no win | flagged>`, containing:

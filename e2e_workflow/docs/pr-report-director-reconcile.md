@@ -47,6 +47,16 @@ verdict. Backends **considered but not run** appear marked `⊘` with a one-word
 absent`, `⊘ flydsl — seam mismatch`, …) — never silently dropped. The head-kernel deep-dive is aligned: an
 explicit **Backend ladder** line + a **backend column** in the Directions table.
 
+**4. Clearer validation vocabulary + honest emoji (report readability).** `validation_status = accepted`
+was misleading — on a no-win run (empty overlay, `0.9997×`) "accepted" read like a success. The Director
+verdict is now **three self-explaining values**: `validated_win` (real e2e-gated win over the noise band),
+`validated_no_win` (measurement trustworthy, final ≈ baseline — no regression, no win), `flagged`
+(regression / parity fail / claim mismatch / crash). The word `accepted` is no longer used for this field
+(no code branches on the literal, so this is safe). Separately, the timeline emoji must reflect the actual
+gate: a **rejected/regressed** integrate node (e.g. `A/B 1768.5 → 1536.7 = ✘−13.1%`) must use `❌`, never
+`⭐` — a slowdown never gets a star; `parity ✓` marks numeric parity only and never upgrades a `✘` delta;
+`⭐` is reserved for a candidate actually banked into the final stack.
+
 ## Files
 - `e2e_workflow.js` — `Validate` agent gets `ARCHITECT_REPORT` + `FINAL_REPORT`; task string asks it to
   reconcile the report. No phase reorder (order stays `Finalize → Report → Validate`).
@@ -54,7 +64,10 @@ explicit **Backend ladder** line + a **backend column** in the Directions table.
   the two report paths added to Inputs.
 - `roles/system_architect.md` — headline written provisionally from the Finalize bench (tagged), reconciled
   by the Director; timeline now requires stock-backend per op + one node per attempted/skipped backend; the
-  deep-dive gains a Backend-ladder line and a backend column in the Directions table.
+  deep-dive gains a Backend-ladder line and a backend column in the Directions table; emoji rule tightened
+  (rejected/regressed → `❌`, `⭐` only for a banked win) and the Validate node prints the status word.
+- `roles/director.md` — validate arbitration emits `validated_win|validated_no_win|flagged` (no more
+  `accepted`); step 7 reconciles the report status/conclusion to match honestly.
 - Add `e2e_workflow/docs/pr-report-director-reconcile.md`.
 
 ## Behavior when off / neutral
