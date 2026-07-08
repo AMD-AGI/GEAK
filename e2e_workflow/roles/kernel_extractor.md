@@ -35,8 +35,14 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
    launcher/wrapper rather than the true defining file). If no hint, resolve as usual
    (`python3 -c "import sglang,os;print(os.path.dirname(sglang.__file__))"`, then grep the
    `short_name` / the `module:attr` target). Confirm it's truly editable (Triton/custom/aiter) — if
-   it resolves to a library GEMM/attention, STOP and report `editable=false` (it belongs to the
-   Config Tuner, not here).
+   it resolves to a library GEMM/attention (hipBLASLt/rocBLAS/CK/asm) whose op executes INSIDE a
+   monolithic kernel with no standalone Python call site, STOP and report `editable=false` with
+   `target_callable=""` — a source rewrite could not bind (no_rebind_seam), so it belongs to the config
+   tune-hook, not here. The orchestrator routes such a head to config on this exact signal, so be honest:
+   do NOT synthesize a standalone-GEMM proxy for a fused/library op just to make it look extractable.
+   **Honor the routing inputs when present:** if `INTEGRATION_LEVER=author-fused-replacement`, extract the
+   FUSED op (not its constituent standalone GEMMs) and set `target_callable` to `LIVE_CALL_SEAM` (the
+   fused dispatcher actually called at runtime) so the authored kernel binds at the live fused seam.
 2. **Capture shapes + oracle** from a live server using `scripts/capture_shapes.py` via a temporary
    capture overlay, driven by the SAME workload as the profile so shapes match the regime:
    ```bash

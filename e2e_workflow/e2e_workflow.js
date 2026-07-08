@@ -1033,10 +1033,34 @@ const flaggedHeads = (ST.flagged_heads || []).slice();   // dominant heads that 
 let headDispatched = 0;
 const history = ST.history || { insights: [], ledger: [], milestones: [], bottleneck_now: '', suggest_next: '' };
 
+// ---- Seam-reachability routing (consumes the System Architect's planning fields; see
+// roles/system_architect.md "Seam-reachability gate"). A GEMM/MoE head is only worth SOURCE-REWRITING if
+// the authored kernel can BIND to the op actually dispatched at runtime. A fused/asm/library kernel whose
+// constituent GEMMs execute INSIDE a monolithic kernel (e.g. an aiter fused-MoE / a hipBLASLt library
+// GEMM) has NO standalone call site to bind to — authoring a standalone replacement is un-integrable
+// (spends ~hours to produce a candidate that fails no_rebind_seam / 0 live engagement, observed on the
+// aiter-routed Mixtral MoE). Such a head's ONLY lever is the config/tune-hook the fused kernel itself
+// consumes (aiter tuned DB / AITER_CONFIG_* / a backend env), or an author-fused-REPLACEMENT bound at the
+// fused seam. This returns the route to take. GENERIC — it keys on the Architect's is_fused_kernel /
+// integration_lever, NEVER on a backend name. When those fields are absent (older strategies) it returns
+// 'author' → byte-identical to the previous behavior.
+//   'author' — a standalone/rewrite candidate can bind (standalone-gemm-swap, author-fused-replacement,
+//              or unmarked): take the normal extract → bake-off → author head track.
+//   'config' — no source-rewrite seam: route to the fused-op tune-hook / config lever; do NOT author.
+function headIntegrationRoute(h) {
+  const lever = String((h && h.integration_lever) || '').trim().toLowerCase();
+  const fused = !!(h && h.is_fused_kernel === true);
+  if (lever === 'fused-op-tune-hook' || lever === 'dense-linear-env-overlay') return 'config';
+  if (fused && lever !== 'author-fused-replacement') return 'config';   // fused, not authoring a fused replacement → un-rewritable
+  return 'author';
+}
+
 // ===========================================================================
 // PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized
 // regardless of edit flag, via the bake-off ladder. This is the lever the old
 // design missed for GEMM (~78% of GPU time). Runs BEFORE the editable-kernel loop.
+// A head whose only reachable lever is a config/tune-hook (headIntegrationRoute==='config') is NOT
+// source-rewritten here — it is flagged + recorded as a config direction (never silently dropped).
 // ===========================================================================
 if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   phase('HeadKernel');
@@ -1076,6 +1100,16 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // ---- per-head prep: extract + bake-off + roofline + lane roster (cheap agents on GPU_LIST[0]) ----
     const GLOBAL_KB = `${EVAL_DIR}/deep_head/GLOBAL_KB.md`;
     const prepHead = async (h) => {
+      // Seam-reachability gate (same as the serial/fast tracks): a fused/library head with no source-
+      // rewrite seam gets no lanes — routed to the config tune-hook, flagged, never silently dropped.
+      if (headIntegrationRoute(h) === 'config') {
+        const lever = h.integration_lever || 'fused-op-tune-hook';
+        log(`  [deep] ${h.short_name}: fused/library head (lever=${lever}) — routed to config tune-hook, no source-rewrite lanes.`);
+        flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'planning', gate: 'routed_to_config',
+          is_fused_kernel: !!h.is_fused_kernel, integration_lever: lever, reason: `fused/library kernel — no live rebind seam; real lever is config tune-hook (${lever})` });
+        history.ledger.push({ direction: h.short_name, verdict: 'routed_to_config', lesson: `fused head → config lever ${lever} (lanes skipped)` });
+        return null;
+      }
       const ext = await safeAgent(
         roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH,
@@ -1434,6 +1468,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // ---- opt-A: per-head extract + bake-off, parallel, exclusive 1-card lease each ----
     const prepared = await parallel(heads.map((h) => async () => {
       if (FAST_DEADLINE_HIT) return { h, dead: 'deadline' };
+      // Seam-reachability gate (same as the serial track): a fused/library head with no source-rewrite
+      // seam is not extracted/authored — routed to the config tune-hook instead.
+      if (headIntegrationRoute(h) === 'config') return { h, dead: 'config' };
       return ISO.with(1, async (g) => {
         const gpu = g[0];
         const ext = await safeAgent(
@@ -1465,6 +1502,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const h = p.h;
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
       if (p.dead === 'deadline') { log(`  [fast-mode] ${h.short_name}: skipped (dispatch deadline).`); continue; }
+      if (p.dead === 'config') {
+        const lever = h.integration_lever || 'fused-op-tune-hook';
+        log(`  [fast-mode] ${h.short_name}: fused/library head (lever=${lever}) — routed to config tune-hook, NOT authored (no source-rewrite seam).`);
+        flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'planning', gate: 'routed_to_config',
+          is_fused_kernel: !!h.is_fused_kernel, integration_lever: lever, reason: `fused/library kernel — no live rebind seam; real lever is config tune-hook (${lever})` });
+        history.ledger.push({ direction: h.short_name, verdict: 'routed_to_config', lesson: `fused head → config lever ${lever} (author skipped)` });
+        continue;
+      }
       if (p.dead === 'extract' || !p.ext || !p.ext.task_dir) {
         const why = p.ext ? p.ext.notes || p.ext.smoke : 'none';
         if (isDominant) { log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head op extraction FAILED (${why}) — flagged, NOT skipped.`);
@@ -1565,9 +1610,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
             code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
             verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time,
+            // Pass the Architect's live seam + a concrete engagement assertion so the Integrator can
+            // VERIFY the overlay actually binds on the live path BEFORE spending a full e2e A/B — an
+            // unreachable lever is then rejected in minutes (no_engagement), not hours.
+            live_call_seam: h.live_call_seam || '', engagement_check: h.engagement_check || '',
             parity_note: cand.parity_note || 'expected_close' },
           CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
           CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
+          ENGAGEMENT_CHECK: h.engagement_check || '',
         },
         `integrate ${h.short_name}`, 'HeadKernel');
       if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput) {
@@ -1622,10 +1672,27 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       break;
     }
     headDispatched++;
+    // (h0) Seam-reachability gate — do NOT extract+author a fused/library head that has no source-rewrite
+    // seam; its only lever is the config tune-hook. Skipping here avoids the ~hours wasted authoring an
+    // un-integrable standalone candidate (no_rebind_seam). Dominant heads are FLAGGED, never dropped.
+    if (headIntegrationRoute(h) === 'config') {
+      const lever = h.integration_lever || 'fused-op-tune-hook';
+      log(`  ${h.short_name}: fused/library head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU, lever=${lever}) — no source-rewrite seam; routing to config tune-hook, NOT authoring (would be un-integrable).`);
+      flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'planning',
+        gate: 'routed_to_config', is_fused_kernel: !!h.is_fused_kernel, integration_lever: lever,
+        live_call_seam: h.live_call_seam || '', engagement_check: h.engagement_check || '',
+        reason: `fused/library kernel — source rewrite has no live rebind seam; real lever is the config tune-hook (${lever})` });
+      history.ledger.push({ direction: h.short_name, verdict: 'routed_to_config', lesson: `fused head → config lever ${lever} (no source-rewrite seam; author skipped to avoid no_rebind_seam)` });
+      continue;
+    }
     // (h1) Extract the op into a standalone immutable unittest (GEMM synth / attn capture).
     const ext = await safeAgent(
       roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH,
+        // For an author-fused-replacement head, bind the authored kernel at the LIVE fused seam (never a
+        // stale standalone/dense seam) so it is integrable; pass the Architect's live_call_seam through.
+        ...(h.live_call_seam ? { LIVE_CALL_SEAM: h.live_call_seam } : {}),
+        ...(h.integration_lever ? { INTEGRATION_LEVER: h.integration_lever } : {}),
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
@@ -1648,6 +1715,19 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ${h.short_name}: op extraction failed (${why}); skipping.`);
         history.ledger.push({ direction: h.short_name, verdict: 'dead_end', lesson: 'op extraction failed' });
       }
+      continue;
+    }
+    // (h1b) Second seam backstop — honor the Extractor's OWN honest signal: if it reports the op is not
+    // editable AND gave no rebind seam (its contract: a library GEMM/attention → editable=false), then a
+    // source rewrite cannot bind (no_rebind_seam). Route to config + flag instead of authoring. Catches
+    // the case where the Architect did not mark is_fused_kernel. Only fires on an EXPLICIT editable=false
+    // (undefined/true → unchanged behavior), so it never blocks a genuinely rewritable head.
+    if (ext.editable === false && !(ext.target_callable && String(ext.target_callable).trim())) {
+      log(`  ${h.short_name}: extractor reports non-editable / no rebind seam — routing to config, NOT authoring (would be un-integrable).`);
+      flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'planning', gate: 'routed_to_config',
+        is_fused_kernel: !!h.is_fused_kernel, integration_lever: h.integration_lever || 'config-tune-hook',
+        reason: 'extractor: non-editable library op, no live rebind seam — source rewrite un-integrable; use config/tune-hook lever' });
+      history.ledger.push({ direction: h.short_name, verdict: 'routed_to_config', lesson: 'extractor editable=false, no seam → config lever (author skipped)' });
       continue;
     }
 

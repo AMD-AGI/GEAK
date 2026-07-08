@@ -18,6 +18,12 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
    GEMM DB env: `grep -c 'is tuned on cu_num'` must be >0 (and "not found tuned config" must drop). For
    an authored/patched kernel: confirm the overlay module is imported / the rebind took (a load banner
    or an injected marker). **No engagement proof → REJECT (it's not really applied).**
+   **Verify engagement BEFORE the timed A/B — die in minutes, not hours.** If your inputs carry an
+   `ENGAGEMENT_CHECK` (a concrete live-server assertion the Architect attached to this head, e.g.
+   "`grep -c 'is tuned on cu_num' > 0`" or "overlay module injected in the cand server log"), start the
+   candidate server, assert it, and if it FAILS report `gate:"rejected"` with reason `no_engagement` /
+   `no_rebind_seam` immediately — do NOT run the (expensive) throughput legs for a candidate that never
+   bound on the live path. This is the cheap pre-gate that stops an un-reachable lever from wasting a full A/B.
 3. The measured e2e throughput delta **EXCEEDS `NOISE_BAND_PCT` (default 0.5%)** under the tight
    protocol below, AND the candidate and reference run distributions **do not overlap**
    (`cand_min > ref_max`). A 0.5% median gap with overlapping runs is noise → REJECT.
