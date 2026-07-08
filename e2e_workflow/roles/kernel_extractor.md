@@ -306,13 +306,15 @@ freeze an out-of-regime oracle nobody should trust.
    `baseline_frozen:false` with a clear reason so the caller re-routes or drops it.
    > **Exit-code contract — a missing replay leg is a UT DEFECT, not a kernel/smoke failure.** The UT
    > routes correctness through `h.run_correctness(...)`, which for a graph-deploy kernel (`cuda_graph=true`)
-   > RAISES `h.HarnessIncompleteError` and prints a `UT_HARNESS_INCOMPLETE: …` line when no ≥2-shape replay
-   > bundle was wired. The generated `main()` MUST translate this to a DEDICATED exit code:
+   > RAISES `h.HarnessIncompleteError` when no ≥2-shape replay bundle was wired — and it has ALREADY
+   > printed the `UT_HARNESS_INCOMPLETE: …` sentinel line itself (so the smoke sees it even if `main()`
+   > forgets to catch). The generated `main()` MUST translate the exception to a DEDICATED exit code; do
+   > NOT re-print the sentinel (it is already on stdout — a second print is just noise):
    > ```python
    > try:
    >     ok, report = h.run_correctness(META["regime"], ...)      # eager+random+replay legs
-   > except h.HarnessIncompleteError as e:
-   >     print(f"{h.UT_HARNESS_INCOMPLETE_SENTINEL}: {e}"); sys.exit(3)   # 3 = regenerate UT
+   > except h.HarnessIncompleteError:
+   >     sys.exit(3)                                              # 3 = regenerate UT (sentinel already printed)
    > sys.exit(0 if ok else 1)                                     # 1 = real correctness FAIL, 2 = env
    > ```
    > On smoke **exit 3 OR a `UT_HARNESS_INCOMPLETE` line on stdout: REGENERATE the UT** — add the replay

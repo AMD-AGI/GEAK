@@ -717,9 +717,10 @@ def amdahl_check(e2e_delta_pct, pct_gpu, isolated_speedup, noise_band_pct=0.5, s
 class HarnessIncompleteError(Exception):
     """The generated UT is INCOMPLETE for this kernel (a harness/GENERATION defect), NOT a kernel-
     correctness failure. Raised by `run_correctness` when a graph-deploy kernel is handed no usable
-    (>=2-shape) replay bundle. The UT's main() should catch it, print the `UT_HARNESS_INCOMPLETE:`
-    sentinel, and exit 3 so the smoke-test REGENERATES the UT (add the replay leg) instead of blaming
-    the candidate. Distinct from a correctness FAIL (exit 1) and an env error (exit 2)."""
+    (>=2-shape) replay bundle. `run_correctness` has ALREADY printed the `UT_HARNESS_INCOMPLETE:` sentinel
+    to stdout before raising, so the UT's main() should just catch this and exit 3 (do NOT re-print the
+    sentinel) — the smoke-test then REGENERATES the UT (add the replay leg) instead of blaming the
+    candidate. Distinct from a correctness FAIL (exit 1) and an env error (exit 2)."""
 
 
 UT_HARNESS_INCOMPLETE_SENTINEL = "UT_HARNESS_INCOMPLETE"
@@ -776,9 +777,10 @@ def run_correctness(regime, *, eager_cases, baseline_call, current_call, random_
                         "(capture-once/replay-many reused static buffer). This is a UT-GENERATION defect "
                         "(the harness is incomplete), NOT a kernel-correctness failure: regenerate the UT "
                         "with a replay bundle rather than blaming the candidate.")
-            # Print the sentinel so the smoke-test recognizes "regenerate UT" even if main() forgets to
-            # translate the exception, then raise the DISTINCT harness error (never a silent correctness
-            # FAIL that would wrongly reject the candidate).
+            # Print the sentinel HERE — this is the SINGLE source of the stdout line, so the smoke-test
+            # recognizes "regenerate UT" even if the generated main() forgets to catch the exception.
+            # main() must NOT re-print it (just exit 3); then raise the DISTINCT harness error (never a
+            # silent correctness FAIL that would wrongly reject the candidate).
             print(f"{UT_HARNESS_INCOMPLETE_SENTINEL}: {reason}")
             report["graph_replay"] = [{"case": "graph_replay", "correct": None,
                                        "note": f"{UT_HARNESS_INCOMPLETE_SENTINEL}: {reason}"}]
