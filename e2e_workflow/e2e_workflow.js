@@ -948,31 +948,24 @@ if (want('setup')) {
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
   headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
-  // OP-IDENTITY GUARD — the head must be optimized as the SAME op the live kernel dispatches (same
-  // signature + same rebind seam), so ANY lever (backend swap / per-shape tune / authored replacement)
-  // binds. The failure this prevents: a FUSED/monolithic kernel (fused-MoE, grouped-expert GEMM, an
-  // asm/CK library kernel) gets DECOMPOSED into its constituent standalone dense GEMMs and optimized as a
-  // dense A·Bᵀ — but the live kernel never dispatches those standalone GEMMs, so the candidate has no
-  // call site and dies at integration (no_rebind_seam / 0 engagement). This is orthogonal to
-  // editability: even a NON-editable library fused kernel can be BACKEND-SWAPPED at its dispatcher seam
-  // (e.g. re-route the vLLM fused_moe dispatcher onto aiter/flydsl/triton) — what must never happen is
-  // optimizing the WRONG op. So for a fused head we (a) force op_kind=`moe` → the grouped-GEMM branch,
-  // (b) FORBID dense-GEMM synthesis (GEMM_SYNTH off for it), and (c) preserve the live dispatcher seam as
-  // target_callable so the candidate binds where the kernel is actually called. The head STAYS in the
-  // optimization track (never skipped). GENERIC — keys on the Architect's is_fused_kernel + the profile
-  // class/backend + name, NEVER on a specific backend name.
+  // OP-IDENTITY GUARD — a fused-MoE / grouped-expert GEMM must be optimized AS the fused op at its live
+  // dispatcher seam, never decomposed into standalone dense GEMMs (a dense candidate has no live call site
+  // → no_rebind_seam). So force op_kind='moe' (the grouped-GEMM branch; gemmSynthFor keys on this to keep
+  // dense synth OFF) and preserve the live seam as target_callable, so ANY lever (backend-swap / tune /
+  // author-fused) binds. The head is never SKIPPED — editability is irrelevant, since a non-editable fused
+  // kernel is still backend-swapped at its (editable) dispatcher. GENERIC: detects via the Architect's
+  // is_fused_kernel OR the profile class/name; never keys on a backend name.
   const _isFusedOp = (c) => (c && c.is_fused_kernel === true) ||
-    /(?:^|[^a-z])moe(?:[^a-z]|$)|grouped[_ ]?gemm|group_gemm|ck_moe|expert|fused[_ ]?moe|fmoe|asm_moe|fused_custom/i
+    /(?:^|[^a-z])moe(?:[^a-z]|$)|group(?:ed)?[_ ]?gemm|ck_moe|expert|fused[_ ]?moe|fmoe|asm_moe|fused_custom/i
       .test(`${(c && c.op_kind) || ''} ${(c && c.short_name) || ''} ${(c && c.name) || ''} ${(c && c.classification) || ''} ${(c && c.class) || ''} ${(c && c.backend) || ''}`);
   let _fusedTagged = 0;
   for (const c of headQueue) {
     if (!_isFusedOp(c)) continue;
-    if (c.op_kind !== 'moe') c.op_kind = 'moe';        // grouped-GEMM branch, never dense synth
-    c._forbid_gemm_synth = true;                        // consumed at extract: pass GEMM_SYNTH=false for this head
-    if (!c.target_callable && c.live_call_seam) c.target_callable = c.live_call_seam;   // bind at the live dispatcher seam
+    c.op_kind = 'moe';                                                                // grouped-GEMM branch (gemmSynthFor → no dense synth)
+    if (!c.target_callable && c.live_call_seam) c.target_callable = c.live_call_seam;  // bind at the live seam
     _fusedTagged++;
   }
-  if (_fusedTagged) log(`[op-identity] ${_fusedTagged} fused/monolithic head op(s): op_kind=moe, dense-GEMM synth FORBIDDEN, bound at the live seam — optimized as the fused op (backend-swap/tune/author-fused), never as standalone GEMMs.`);
+  if (_fusedTagged) log(`[op-identity] ${_fusedTagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
   log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
 } else {
   // Load carried state from a prior phase invocation (args.state).
@@ -1048,11 +1041,9 @@ const flaggedHeads = (ST.flagged_heads || []).slice();   // dominant heads that 
 let headDispatched = 0;
 const history = ST.history || { insights: [], ledger: [], milestones: [], bottleneck_now: '', suggest_next: '' };
 
-// GEMM-synth selector: the op-identity guard tags a fused/monolithic head with `_forbid_gemm_synth` so its
-// extractor NEVER decomposes it into a standalone dense GEMM (which would be un-integrable). Every head is
-// still optimized (backend-swap / tune / author-fused) — nothing is skipped on editability grounds; only
-// the OP the extractor builds is constrained to match the live kernel.
-function gemmSynthFor(h) { return (h && h._forbid_gemm_synth) ? 'false' : GEMM_SYNTH; }
+// A fused op (op_kind='moe', set by the op-identity guard OR the Architect) is extracted AS the fused op,
+// never decomposed into a standalone dense GEMM — so dense-GEMM synth is off for it.
+function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
 
 // ===========================================================================
 // PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized
@@ -1103,8 +1094,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const ext = await safeAgent(
         roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
-          ...(h.live_call_seam ? { LIVE_CALL_SEAM: h.live_call_seam } : {}),
-          ...(h.integration_lever ? { INTEGRATION_LEVER: h.integration_lever } : {}),
           ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
           CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
           REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
@@ -1465,8 +1454,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const ext = await safeAgent(
           roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
-            ...(h.live_call_seam ? { LIVE_CALL_SEAM: h.live_call_seam } : {}),
-            ...(h.integration_lever ? { INTEGRATION_LEVER: h.integration_lever } : {}),
             ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
             CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
             REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
@@ -1662,10 +1649,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     const ext = await safeAgent(
       roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
-        // For an author-fused-replacement head, bind the authored kernel at the LIVE fused seam (never a
-        // stale standalone/dense seam) so it is integrable; pass the Architect's live_call_seam through.
-        ...(h.live_call_seam ? { LIVE_CALL_SEAM: h.live_call_seam } : {}),
-        ...(h.integration_lever ? { INTEGRATION_LEVER: h.integration_lever } : {}),
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a

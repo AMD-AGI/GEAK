@@ -41,14 +41,14 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
      call site is that library call, no editable body) → STOP, report `editable=false`, `target_callable=""`;
      it belongs to the config/tune-hook track (per-shape DB tune / backend env), not a source rewrite. Do
      NOT synthesize a standalone-GEMM proxy just to make it look extractable.
-   - **FUSED / monolithic op** (fused-MoE, grouped-expert GEMM, asm/CK fused kernel — arrives with
+   - **FUSED / monolithic op** (fused-MoE, grouped-expert GEMM, asm/CK fused kernel — `KERNEL` arrives with
      `op_kind=moe` and `GEMM_SYNTH=false`): **extract the FUSED op** (capture its live I/O oracle), NOT its
-     constituent standalone GEMMs. Set `target_callable` to `LIVE_CALL_SEAM` — the **dispatcher** actually
-     called at runtime (e.g. the vLLM `fused_moe`/`fused_experts` dispatcher), which is editable Python
-     EVEN WHEN the underlying kernel is a non-editable library/asm `.so`. That dispatcher seam is what lets
-     a fused op be BACKEND-SWAPPED (aiter/flydsl/triton fused) or AUTHOR-fused-replaced regardless of the
-     underlying kernel's editability. Report `editable=true` for this fused-op extraction (the seam is
-     rebindable). NEVER decompose it into a dense A·Bᵀ GEMM — that candidate has no live call site.
+     constituent standalone GEMMs. Set `target_callable` to the **dispatcher** actually called at runtime —
+     use `KERNEL.target_callable`/`KERNEL.live_call_seam` if provided (e.g. the vLLM `fused_moe`/
+     `fused_experts` dispatcher), which is editable Python EVEN WHEN the underlying kernel is a non-editable
+     library/asm `.so`. That dispatcher seam is what lets a fused op be BACKEND-SWAPPED (aiter/flydsl/triton
+     fused) or AUTHOR-fused-replaced regardless of the underlying kernel's editability. Report
+     `editable=true` (the seam is rebindable). NEVER decompose it into a dense A·Bᵀ GEMM — no live call site.
 2. **Capture shapes + oracle** from a live server using `scripts/capture_shapes.py` via a temporary
    capture overlay, driven by the SAME workload as the profile so shapes match the regime:
    ```bash
