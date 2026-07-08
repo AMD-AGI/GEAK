@@ -32,6 +32,19 @@ done
 FW="$(model_framework "$MODEL_KEY")" || die "unknown model: $MODEL_KEY (add it to $MODELS_TSV)"
 [ -n "$FW" ] || die "unknown model: $MODEL_KEY (add it to $MODELS_TSV)"
 
+# ---- optional GPU pinning ----
+# GEAK_GPUS is a comma-separated list of ROCm GPU indices (e.g. "4,5,6,7" to use
+# the last 4 of an 8-GPU box). Empty => use all visible GPUs. We pass it as both
+# HIP_VISIBLE_DEVICES and ROCR_VISIBLE_DEVICES so torch/ROCr only ever see (and
+# renumber) the selected devices; the /dev/dri passthrough still exposes all
+# render nodes, but the runtime mask keeps work off the others.
+GPUS="${GEAK_GPUS:-}"
+GPU_ENV=()
+if [ -n "$GPUS" ]; then
+  GPU_ENV=(-e HIP_VISIBLE_DEVICES="$GPUS" -e ROCR_VISIBLE_DEVICES="$GPUS")
+  log "GPU pinning: HIP/ROCR_VISIBLE_DEVICES=$GPUS"
+fi
+
 # RUN_TS may be provided by the caller (e.g. CI) so it can predict OUT_DIR and
 # collect artifacts; otherwise mint a fresh one here.
 RUN_TS="${RUN_TS:-$(new_ts)}"
@@ -98,7 +111,7 @@ if [ "$HEALTHCHECK_CAP" != "0" ]; then
   if ! timeout --kill-after=30 "$HEALTHCHECK_CAP" docker run --rm --name "$PF_NAME" \
       --device /dev/kfd --device /dev/dri --group-add video \
       --security-opt seccomp=unconfined \
-      -v "$WS:$WS" "${GEAK_MOUNT[@]}" \
+      -v "$WS:$WS" "${GEAK_MOUNT[@]}" "${GPU_ENV[@]}" \
       --entrypoint bash "$IMAGE" "$HERE/gpu_healthcheck.sh"; then
     # Best-effort reap of a wedged probe container (may itself refuse if D-state).
     ( docker kill "$PF_NAME" >/dev/null 2>&1; docker rm -f "$PF_NAME" >/dev/null 2>&1 ) &
@@ -130,6 +143,7 @@ docker run --rm --name "$CONTAINER_NAME" \
   -e CLAUDE_HOME="$OUT_DIR/claude" \
   -e PERFSKILLS_E2E_TIMEOUT_S="$BUDGET" \
   -e TMPDIR="$DBG_TMP" \
+  "${GPU_ENV[@]}" \
   --entrypoint bash \
   "$IMAGE" -lc "
     set -e
