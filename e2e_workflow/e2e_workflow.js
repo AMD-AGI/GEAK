@@ -2023,11 +2023,17 @@ if (want('final')) {
 
   phase('Validate');
   validation = await safeAgent(
-    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate.', {
+    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
       FINAL_FLAGS: { flags: curFlags, env: curEnv },
       CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL, E2E_REPEATS, SKILL_DIR: WORKFLOW_DIR,
+      // The Report phase already wrote these files with the Finalize-bundle bench (the Director had not
+      // run yet). After validation the Director MUST review + rewrite their headline throughput / speedup
+      // / TTFT / TPOT (and status/parity) to its authoritative same-session numbers, so report-vs-director
+      // can never disagree. Paths default to the standard EVAL_DIR names if the report result is absent.
+      ARCHITECT_REPORT: (report && report.report_path) || `${EVAL_DIR}/architect_report.md`,
+      FINAL_REPORT: `${EVAL_DIR}/final_report.md`,
     }),
     { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
   // A Validate that did NOT produce a usable number (e.g. its server crashed in
