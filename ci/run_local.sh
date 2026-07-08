@@ -34,15 +34,19 @@ FW="$(model_framework "$MODEL_KEY")" || die "unknown model: $MODEL_KEY (add it t
 
 # ---- optional GPU pinning ----
 # GEAK_GPUS is a comma-separated list of ROCm GPU indices (e.g. "4,5,6,7" to use
-# the last 4 of an 8-GPU box). Empty => use all visible GPUs. We pass it as both
-# HIP_VISIBLE_DEVICES and ROCR_VISIBLE_DEVICES so torch/ROCr only ever see (and
-# renumber) the selected devices; the /dev/dri passthrough still exposes all
-# render nodes, but the runtime mask keeps work off the others.
+# the last 4 of an 8-GPU box). Empty => use all visible GPUs. We pin with ONLY
+# ROCR_VISIBLE_DEVICES: it masks at the ROCr level so rocminfo, torch and vLLM
+# all see just the selected devices (renumbered 0..N-1). Do NOT also set
+# HIP_VISIBLE_DEVICES to the same list — HIP applies its mask ON TOP of the
+# already-renumbered ROCr set, so e.g. both set to "4,5,6,7" selects indices
+# 4-7 of the 4 remaining devices {0,1,2,3} => nothing, and torch.cuda goes away.
+# The /dev/dri passthrough still exposes all render nodes; the mask keeps work
+# off the others.
 GPUS="${GEAK_GPUS:-}"
 GPU_ENV=()
 if [ -n "$GPUS" ]; then
-  GPU_ENV=(-e HIP_VISIBLE_DEVICES="$GPUS" -e ROCR_VISIBLE_DEVICES="$GPUS")
-  log "GPU pinning: HIP/ROCR_VISIBLE_DEVICES=$GPUS"
+  GPU_ENV=(-e ROCR_VISIBLE_DEVICES="$GPUS")
+  log "GPU pinning: ROCR_VISIBLE_DEVICES=$GPUS"
 fi
 
 # RUN_TS may be provided by the caller (e.g. CI) so it can predict OUT_DIR and

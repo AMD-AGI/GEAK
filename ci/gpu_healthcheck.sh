@@ -20,7 +20,12 @@ fail() {
 }
 
 echo ">>> gpu_healthcheck: rocminfo (ROCm sees a gfx GPU agent) ..."
-if ! rocminfo 2>/dev/null | grep -qE 'gfx[0-9]'; then
+# Capture rocminfo output first, THEN grep it. Piping straight into `grep -q`
+# makes grep close the pipe on its first match, so rocminfo (which prints a lot)
+# dies with SIGPIPE (exit 141); under `set -o pipefail` that non-zero would sink
+# the whole pipeline and spuriously report "no gfx agent" even on a healthy GPU.
+ROCMINFO_OUT="$(rocminfo 2>/dev/null || true)"
+if ! grep -qE 'gfx[0-9]' <<<"$ROCMINFO_OUT"; then
   fail "rocminfo found no gfx GPU agent (ROCm/KFD not usable in this container)"
 fi
 
