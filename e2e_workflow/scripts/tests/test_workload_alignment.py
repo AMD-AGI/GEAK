@@ -240,19 +240,32 @@ class TestServingCallModel(unittest.TestCase):
                 if os.path.exists(p):
                     os.unlink(p)
 
-    def test_main_emits_call_model_without_touching_weight(self):
-        # with --isl/--osl: serving_weight_model.analytic_calls is surfaced for the unittest to consume.
+    def test_main_surfaces_self_weight_and_floors_graph_hidden_decode(self):
+        # The AUTHORITATIVE decode:prefill split is NOT the static `weight` — it is the unittest
+        # self-weight (measured ms x analytic_calls), surfaced verbatim under serving_weight_model for the
+        # UT to consume. --isl/--osl NEVER lifecycle-rescale the static `weight`; the ONLY way they touch
+        # it is the documented auto decode-floor, which protects a graph-hidden decode regime (profiled
+        # decode share here = 1000/6000 = 0.167 < 0.20) from being under-weighted in the coarse prior.
         got = self._run_main(["--isl", "1000", "--osl", "1000"])
         self.assertIsNotNone(got["serving_weight_model"])
         self.assertEqual(got["serving_weight_model"]["analytic_calls"], {"prefill": 1, "decode": 1000})
         w_with = {c["regime"]: c["weight"] for c in got["cases"]}
-        # weights reflect the RAW profiled TIME split (prefill 5000 > decode 1000), NOT a lifecycle rescale.
+        norm_with = {c["regime"]: c["weight_norm"] for c in got["cases"]}
+        # prefill still dominates; the floor only lifts decode to its 0.20 floor (does not invert the order).
         self.assertGreater(w_with["prefill"], w_with["decode"])
+        self.assertIn("auto decode-floor", got["notes"])
+        self.assertAlmostEqual(norm_with["decode"], attribute_weights._DECODE_AUTOFLOOR, places=6)   # floored up to 0.20
+        self.assertAlmostEqual(norm_with["prefill"], 1.0 - attribute_weights._DECODE_AUTOFLOOR, places=6)
 
-        # without the flags: no serving model, and the `weight` split is byte-identical (flags never touch it).
+        # without the flags: no serving model, NO analytic calls -> the auto decode-floor cannot fire, so
+        # the static `weight` is the RAW profiled TIME split (decode 1000/6000 = 0.167), NOT floored.
         base = self._run_main([])
         self.assertIsNone(base["serving_weight_model"])
-        self.assertEqual(w_with, {c["regime"]: c["weight"] for c in base["cases"]})
+        self.assertNotIn("auto decode-floor", base["notes"])
+        norm_base = {c["regime"]: c["weight_norm"] for c in base["cases"]}
+        self.assertAlmostEqual(norm_base["decode"], 1000.0 / 6000.0, places=6)     # raw, unfloored
+        # the flags moved decode's prior share UP from the raw 0.167 to the 0.20 floor — and only that.
+        self.assertGreater(norm_with["decode"], norm_base["decode"])
 
 
 class TestQuantStamping(unittest.TestCase):
