@@ -605,25 +605,19 @@ force real compact-operand compute:
    > This is the AUTHORED-kernel rebind seam only. It does **not** touch the aiter per-shape GEMM DB-tune
    > lever (gradlib → `bf16_tuned_gemm.csv`): that is a separate Tier-A / config lever, probed independently
    > by `op_bench._aiter_gemm` and deployed via env + tuned CSV — it stays available.
-   Resolve it deterministically:
-   ```bash
-   python3 "$SKILL_DIR/scripts/resolve_seam.py" \
-     --regime "<task_dir>/regime.json" --op-kind gemm \
-     --backend "$BACKEND" --gpu-arch "$GPU_ARCH" \
-     --out "<task_dir>/seam.json"
-   # -> {baseline_callable, target_callable, transpose_b, seam_confidence, seam_note, engagement_probe}
-   ```
-   Use `seam.json`'s `baseline_callable` / `target_callable` verbatim (the operand convention —
-   `transpose_b=true`, `B=[N,K]`, `out=A@Bᵀ` — is identical to the old aiter seam, so operands do NOT
-   change). Summary of what it returns: unquantized bf16/fp16 on ROCm →
-   `vllm.model_executor.layers.utils:rocm_unquantized_gemm_impl`; on CUDA → `torch.nn.functional:linear`;
-   fp8/quantized or non-vllm → `""` (resolve the live quant/backend apply seam by grepping the server —
-   never hardcode a gated seam). For attention, the seam is the backend forward you captured.
-   **Before authoring, prove engagement** (`seam.json.engagement_probe`): rebind the seam with a call
-   counter and run a few live forwards; `engagement_hits==0` means the seam is dead on this arch/dtype —
-   switch seam or skip the head, do NOT spend authoring budget. Only return `target_callable=""` if no
-   Python seam genuinely exists (then an authored kernel can't be wired and a direct_light env winner
-   still applies).
+   Resolve it by dtype/arch/backend (the operand convention — `transpose_b=true`, `B=[N,K]`, `out=A@Bᵀ`
+   — is identical to the old aiter seam, so operands do NOT change; only the `module:attr` changes):
+   - **vLLM · unquantized bf16/fp16 · ROCm (gfx\*)** → `vllm.model_executor.layers.utils:rocm_unquantized_gemm_impl`
+     (the OUTER leaf described above — engages on ALL gfx and subsumes aiter tuned_gemm; confirm the symbol
+     imports in the serving venv before trusting it).
+   - **vLLM · unquantized bf16/fp16 · CUDA** → `torch.nn.functional:linear`.
+   - **fp8/quantized · non-vLLM backend (sglang/atom) · attention · MoE** → do NOT guess a seam (a wrong
+     fp8/attn seam is just another dead rebind). GREP the live server for the actual quant-apply / backend
+     forward and use that verbatim; for attention the seam is the backend forward you captured.
+   **Before authoring, prove engagement**: rebind the chosen seam with a call counter and run a few live
+   forwards; `engagement_hits==0` means the seam is dead on this arch/dtype — switch seam or skip the head,
+   do NOT spend authoring budget. Only return `target_callable=""` if no Python seam genuinely exists (then
+   an authored kernel can't be wired and a direct_light env winner still applies).
 
 > **Shapes must be the REAL ones the server issues — and they MUST span BOTH regimes.** A head GEMM
 > serves many M buckets: the **decode** regime at small M = the steady-state running batch (M ≈ `WORKLOAD.conc`,
