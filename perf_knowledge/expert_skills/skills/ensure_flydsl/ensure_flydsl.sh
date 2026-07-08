@@ -28,9 +28,10 @@ GEAK_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"           # skill -> skills -
 # host dir: avoids cross-container sharing (the concurrent-build corruption) and keeps personal
 # host paths out of the workflow. Override via FLYDSL_ROOT.
 ROOT="${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}"
-PIN="a35627a2fef0a5a70c63536c4174674223866737"   # known-good for Kimi-K2.6 int4-W4A16 MoE on gfx942/MI300X
+PIN="${FLYDSL_PIN:-a35627a2fef0a5a70c63536c4174674223866737}"   # known-good for Kimi-K2.6 int4-W4A16 MoE on gfx942/MI300X; override via FLYDSL_PIN
 MIN_VERSION="${FLYDSL_MIN_VERSION:-0.2.2}"        # semver floor the PIN corresponds to (v0.2.2-12-ga35627a2)
-REPO="https://github.com/ROCm/FlyDSL.git"
+REPO="${FLYDSL_REPO:-https://github.com/ROCm/FlyDSL.git}"        # override via FLYDSL_REPO for a mirror / air-gapped clone
+ROCM_PATH="${ROCM_PATH:-/opt/rocm}"                              # ROCm install prefix (hip cmake + libamdhip64 live under $ROCM_PATH/lib)
 SHIM_DIR="$GEAK_ROOT/perf_knowledge/expert_skills/skills/apply_flydsl_moe_to_vllm"   # flydsl_moe_shim.py lives in the apply skill
 ENV_FILE="$ROOT/flydsl_env.sh"                    # stable location preflight/launcher source; also the SUCCESS marker
 FAIL_MARKER="${FLYDSL_BUILD_FAILED:-$(dirname "$ROOT")/.flydsl_build.failed}"   # written iff this run exits non-zero
@@ -165,11 +166,11 @@ git -C "$ROOT" submodule update --init --recursive 2>/dev/null || true
 # references <file> but this file does not exist'. Create a compat symlink from each missing
 # referenced name to the real libamdhip64.so (SONAME libamdhip64.so.7 still resolves it).
 # Idempotent + guarded: only acts when the referenced file is actually missing.
-REAL_HIP="$(readlink -f /opt/rocm/lib/libamdhip64.so 2>/dev/null)"
+REAL_HIP="$(readlink -f "$ROCM_PATH/lib/libamdhip64.so" 2>/dev/null)"
 if [ -n "$REAL_HIP" ] && [ -f "$REAL_HIP" ]; then
-  for want in $(grep -hoE 'libamdhip64\.so\.[0-9.]+' /opt/rocm/lib/cmake/hip/hip-targets-*.cmake 2>/dev/null | sort -u); do
-    if [ ! -e "/opt/rocm/lib/$want" ]; then
-      ln -sf "$REAL_HIP" "/opt/rocm/lib/$want" && log "hip cmake compat symlink: /opt/rocm/lib/$want -> $REAL_HIP"
+  for want in $(grep -hoE 'libamdhip64\.so\.[0-9.]+' "$ROCM_PATH"/lib/cmake/hip/hip-targets-*.cmake 2>/dev/null | sort -u); do
+    if [ ! -e "$ROCM_PATH/lib/$want" ]; then
+      ln -sf "$REAL_HIP" "$ROCM_PATH/lib/$want" && log "hip cmake compat symlink: $ROCM_PATH/lib/$want -> $REAL_HIP"
     fi
   done
 fi
@@ -180,7 +181,12 @@ fi
 # command not found') AFTER LLVM + all C++ compiled — a late, expensive-to-hit failure.
 if ! command -v patchelf >/dev/null 2>&1; then
   log "installing patchelf (required by FlyDSL build.sh CopyFlyPythonSources)..."
-  apt-get install -y patchelf >/dev/null 2>&1 || pip install patchelf >/dev/null 2>&1 || \
+  # Multi-distro fallback: apt (Debian/Ubuntu) -> dnf/yum (RHEL/Fedora) -> apk (Alpine) -> pip wheel.
+  { command -v apt-get >/dev/null 2>&1 && apt-get install -y patchelf >/dev/null 2>&1; } || \
+  { command -v dnf     >/dev/null 2>&1 && dnf install -y patchelf     >/dev/null 2>&1; } || \
+  { command -v yum     >/dev/null 2>&1 && yum install -y patchelf     >/dev/null 2>&1; } || \
+  { command -v apk     >/dev/null 2>&1 && apk add patchelf            >/dev/null 2>&1; } || \
+  pip install patchelf >/dev/null 2>&1 || \
     log "WARN: patchelf install failed — build.sh CopyFlyPythonSources will fail (code=127)"
 fi
 
