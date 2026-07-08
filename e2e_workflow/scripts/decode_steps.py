@@ -51,17 +51,21 @@ def main():
     # decode forward steps, since a per-layer kernel fires once per layer) — a conservative floor that
     # reliably catches the pathological under-capture (hidden ~= 0) and guarantees >= N decode latency
     # samples for a stable decode weight-share.
-    heads = sorted(
-        ((info.get("total_us", 0.0), name, info) for name, info in agg.items()
-         if not any(s in name.lower() for s in _SKIP)),
-        reverse=True,
-    )[:5]
-    best = 0
-    for _t, _name, info in heads:
-        by_case = info.get("by_case") or {}
-        hidden = sum(c.get("count", 0) for (sig, _dt), c in by_case.items() if not sig)
-        if hidden > best:
-            best = hidden
+    try:
+        heads = sorted(
+            ((info.get("total_us", 0.0), name, info) for name, info in agg.items()
+             if not any(s in name.lower() for s in _SKIP)),
+            reverse=True,
+        )[:5]
+        best = 0
+        for _t, _name, info in heads:
+            by_case = info.get("by_case") or {}
+            hidden = sum(c.get("count", 0) for (sig, _dt), c in by_case.items() if not sig)
+            if hidden > best:
+                best = hidden
+    except Exception:
+        print(0)
+        return
     print(int(best))
 
 

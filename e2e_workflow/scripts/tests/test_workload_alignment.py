@@ -185,10 +185,12 @@ class TestAttributeGeneric(unittest.TestCase):
         self.assertEqual(by["q2"]["weight"], 0.0)
 
 
-class TestServingCountCorrection(unittest.TestCase):
-    """The short profiling window (~40 steps) under-counts decode at large OSL, so the raw decode:prefill
-    weight split is wrong. --isl/--osl rescale each regime from window counts to lifecycle counts using
-    the measured per-call latency."""
+class TestServingCallModel(unittest.TestCase):
+    """--isl/--osl EXPOSE the analytic serving call model (serving_weight_model.analytic_calls) for the
+    immutable unittest to SELF-WEIGHT with its own MEASURED latency (weight_i = baseline_ms_i ×
+    analytic_calls[regime_i]). They must NOT rescale the profile `weight` here — the intra-kernel
+    prefill/decode split is reconstructed from measured latency in the unittest, not patched onto the
+    biased short profiling window (that used to fight the self-weight)."""
     def test_estimate_calls_basic(self):
         est = attribute_weights.estimate_serving_regime_calls(1000, 1000)
         self.assertEqual(est, {"prefill": 1, "decode": 1000})
@@ -203,51 +205,54 @@ class TestServingCountCorrection(unittest.TestCase):
     def _meta(self):
         return {"op_kind": "gemm", "short_name": "_gemm_a8w8",
                 "a_shape": ["M", 512], "b_shape": [1024, 512], "dtype": "fp8_e4m3",
-                "decode_m_buckets": [128], "prefill_m_buckets": [2048]}
+                "decode_m_buckets": [128], "prefill_m_buckets": [2048], "regime": {}}
 
-    def _entries_with_counts(self):
-        # decode kernel: cheap per call but 40 window steps; prefill: 1 pass, expensive.
-        # window weights: decode 1000us(count40 -> 25us/call), prefill 5000us(count1). Raw: prefill wins.
-        return [
+    def _prof(self):
+        # window weights: decode 1000us, prefill 5000us. The raw profiled TIME split, verbatim.
+        return {"schema": "workload-v1", "kernels": [
             {"name": "_gemm_a8w8 GRID_MN_8 BLOCK_SIZE_N_128", "short_name": "_gemm_a8w8",
              "pct_gpu_time": 5.0, "cases": [{"dims": [], "weight": 1000.0, "count": 40}]},
             {"name": "_gemm_a8w8 GRID_MN_512 BLOCK_SIZE_N_128", "short_name": "_gemm_a8w8",
-             "pct_gpu_time": 20.0, "cases": [{"dims": [], "weight": 5000.0, "count": 1}]},
-        ]
+             "pct_gpu_time": 20.0, "cases": [{"dims": [], "weight": 5000.0, "count": 1}]}]}
 
-    def test_gemm_decode_reweighted_to_lifecycle(self):
-        notes = []
-        workload = {"isl": 1000, "osl": 1000, "prefill_chunk": None}  # decode=1000, prefill=1
-        cases = attribute_weights.attribute_gemm(self._meta(), self._entries_with_counts(), notes,
-                                                 workload=workload)
-        w = {c["regime"]: c["weight"] for c in cases}
-        # per-call latency: decode 25us x 1000 = 25000; prefill 5000us x 1 = 5000. Decode now dominates.
-        self.assertGreater(w["decode"], w["prefill"])
-        # scale normalized to min: prefill x1 (5000), decode x25 (1000->25000)
-        self.assertAlmostEqual(w["prefill"], 5000.0, places=1)
-        self.assertAlmostEqual(w["decode"], 25000.0, places=1)
-        self.assertTrue(any("serving-count correction" in n for n in notes))
+    def test_attribute_gemm_takes_no_workload(self):
+        # the intra-kernel weight rescale is gone: attribute_gemm must NOT accept a workload kwarg.
+        import inspect
+        self.assertNotIn("workload", inspect.signature(attribute_weights.attribute_gemm).parameters)
+        self.assertFalse(hasattr(attribute_weights, "_apply_serving_scale"))
+        self.assertFalse(hasattr(attribute_weights, "serving_regime_scale"))
 
-    def test_gemm_no_workload_is_unchanged(self):
-        base = attribute_weights.attribute_gemm(self._meta(), self._entries_with_counts(), [])
-        corr = attribute_weights.attribute_gemm(self._meta(), self._entries_with_counts(), [],
-                                                workload=None)
-        self.assertEqual({c["regime"]: c["weight"] for c in base},
-                         {c["regime"]: c["weight"] for c in corr})
+    def _run_main(self, extra):
+        import sys
+        meta_p = _write_json(self._meta())
+        prof_p = _write_json(self._prof())
+        out_p = tempfile.mkstemp(suffix=".json")[1]
+        argv = sys.argv
+        sys.argv = ["attribute_weights.py", "--meta", meta_p, "--profile-weights", prof_p,
+                    "--name-match", "_gemm_a8w8", "--out", out_p] + extra
+        try:
+            attribute_weights.main()
+            with open(out_p) as fh:
+                return json.load(fh)
+        finally:
+            sys.argv = argv
+            for p in (meta_p, prof_p, out_p):
+                if os.path.exists(p):
+                    os.unlink(p)
 
-    def test_missing_counts_skips_correction(self):
-        notes = []
-        # entries without a `count` field -> can't recover per-call latency -> no-op + note.
-        entries = [{"name": "_gemm_a8w8 GRID_MN_8 BLOCK_SIZE_N_128", "short_name": "_gemm_a8w8",
-                    "cases": [{"dims": [], "weight": 1000.0}]},
-                   {"name": "_gemm_a8w8 GRID_MN_512 BLOCK_SIZE_N_128", "short_name": "_gemm_a8w8",
-                    "cases": [{"dims": [], "weight": 5000.0}]}]
-        cases = attribute_weights.attribute_gemm(self._meta(), entries, notes,
-                                                 workload={"isl": 1000, "osl": 1000})
-        w = {c["regime"]: c["weight"] for c in cases}
-        self.assertAlmostEqual(w["prefill"], 5000.0, places=1)   # unchanged
-        self.assertAlmostEqual(w["decode"], 1000.0, places=1)
-        self.assertTrue(any("no observed per-regime call counts" in n for n in notes))
+    def test_main_emits_call_model_without_touching_weight(self):
+        # with --isl/--osl: serving_weight_model.analytic_calls is surfaced for the unittest to consume.
+        got = self._run_main(["--isl", "1000", "--osl", "1000"])
+        self.assertIsNotNone(got["serving_weight_model"])
+        self.assertEqual(got["serving_weight_model"]["analytic_calls"], {"prefill": 1, "decode": 1000})
+        w_with = {c["regime"]: c["weight"] for c in got["cases"]}
+        # weights reflect the RAW profiled TIME split (prefill 5000 > decode 1000), NOT a lifecycle rescale.
+        self.assertGreater(w_with["prefill"], w_with["decode"])
+
+        # without the flags: no serving model, and the `weight` split is byte-identical (flags never touch it).
+        base = self._run_main([])
+        self.assertIsNone(base["serving_weight_model"])
+        self.assertEqual(w_with, {c["regime"]: c["weight"] for c in base["cases"]})
 
 
 class TestQuantStamping(unittest.TestCase):

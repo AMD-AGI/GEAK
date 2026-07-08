@@ -19,12 +19,18 @@ falls back to a coarser, explicitly-labelled weight (`weight_source`) so downstr
                 recorded per-case frequencies.
   prior       - no usable profile signal; even weight across the meta cases (logged, low confidence)
 
-An ORTHOGONAL correction (not a weight_source — it rescales counts, not shapes): when --isl/--osl are
-given, each regime's weight is rescaled from the SHORT profiling window (which sees only ~PROFILE_NUM_STEPS
-forward steps, so it under-counts decode) to the full serving lifecycle (prefill=ceil(isl/chunk) passes,
-decode=osl passes). Per-call latency is measured; only the biased CALL COUNT is corrected. This directly
-fixes the inaccurate shape weight-share for decode-heavy (large-OSL) workloads. See
-estimate_serving_regime_calls.
+SCOPE — what this profile `weight` is (and is NOT) authoritative for. The profile is a SHORT window
+(~PROFILE_NUM_STEPS forward steps) that under-counts decode at large OSL, and for a shape-hidden kernel
+it cannot see the intra-kernel prefill/decode split at all. So this `weight` is trustworthy ONLY for a
+kernel's CROSS-kernel GPU-time SHARE (head selection: is this op worth optimizing?) and as a coarse
+within-regime PRIOR / fallback. It is NOT the authority for the intra-kernel prefill/decode split — that
+is reconstructed downstream in the immutable unittest by SELF-WEIGHTING each case with its own MEASURED
+baseline latency × its analytic serving call count (weight_i = baseline_ms_i × calls(regime_i)). Only the
+unittest's per-shape latency and the metric's speedup come from the SAME instrument, so the weighted
+speedup collapses to the true lifecycle-time ratio; mixing this profile latency into that metric would
+not. We therefore do NOT rescale `weight` by --isl/--osl here (that used to double as an intra-kernel
+split fix and fought the self-weight). Instead --isl/--osl only EXPOSE the analytic call-count model in
+`serving_weight_model.analytic_calls` for the unittest to consume. See estimate_serving_regime_calls.
 
 Output: a workload-v1 json (the WORKLOAD_SPEC kernel_workflow's benchmark_engineer consumes):
   {schema:"workload-v1", op_kind, kernel, num_cases,
@@ -57,18 +63,15 @@ def _field(name, key):
 
 
 # --------------------------------------------------------------------------- #
-# SERVING-LIFECYCLE COUNT CORRECTION (fixes inaccurate shape weight-share from a short profiling window)
+# SERVING-LIFECYCLE CALL-COUNT MODEL (consumed by the unittest's self-weighting, NOT applied to `weight`)
 # --------------------------------------------------------------------------- #
 # The profiler captures only PROFILE_NUM_STEPS (~40) forward steps. A request emits OSL (e.g. 1000)
 # decode tokens but runs prefill exactly once, so the window sees the prefill pass in full while it
-# catches only a sliver of decode. The per-case `weight` (= count x avg_us) therefore UNDER-counts
-# decode. Per-call latency (weight/count = avg_us) is measured fine even in a short window; the biased
-# quantity is the CALL COUNT, and that is analytically derivable from the workload params. So we rescale
-# each regime's weight to what its FULL serving lifecycle would produce:
-#     corrected_weight[r] = observed_per_call_latency[r] x analytic_calls[r]
-#                         = observed_weight[r] x (analytic_calls[r] / observed_calls[r])
-# The scale is applied uniformly within a regime, so the within-regime split is untouched and only the
-# cross-regime (decode:prefill) ratio is corrected. No-op when ISL/OSL (or observed counts) are absent.
+# catches only a sliver of decode: any window-derived decode:prefill ratio is biased. The FIX for the
+# intra-kernel split is not to patch this profile `weight` (see the module docstring — that fought the
+# self-weight and mixed instruments), but to hand the immutable unittest the analytic per-regime call
+# count so it can compute weight_i = MEASURED baseline_ms_i × calls(regime_i) itself. This function
+# provides exactly that call model; it is surfaced in `serving_weight_model` and never mutates `weight`.
 def estimate_serving_regime_calls(isl, osl, prefill_chunk=None):
     """Analytic per-request forward-pass counts per regime for a steady-state serving run — the
     denominator the short profiling window cannot observe. Per request:
@@ -90,71 +93,10 @@ def estimate_serving_regime_calls(isl, osl, prefill_chunk=None):
     return {"prefill": math.ceil(isl / chunk) if isl > 0 else 0, "decode": max(0, osl)}
 
 
-def serving_regime_scale(regime_calls_obs, workload, notes):
-    """Per-regime weight multiplier converting a regime's WINDOW-observed weight to its full serving-
-    lifecycle weight (see the block comment above). Returns {regime: scale}, normalized so the least-
-    adjusted regime stays at 1.0 (only ratios matter after within-kernel normalization). No-op ({})
-    when workload params or observed counts are missing."""
-    if not workload:
-        return {}
-    est = estimate_serving_regime_calls(workload.get("isl"), workload.get("osl"),
-                                        workload.get("prefill_chunk"))
-    if not est:
-        return {}
-    scale = {}
-    for r, obs in regime_calls_obs.items():
-        analytic = est.get(r)
-        if obs and obs > 0 and analytic is not None:
-            scale[r] = analytic / obs
-    if not scale:
-        notes.append("serving-count correction requested (ISL/OSL given) but no observed per-regime "
-                     "call counts in the profile/capture — skipped (weights use the raw window split).")
-        return {}
-    base = min(scale.values())
-    if base > 0:
-        scale = {r: s / base for r, s in scale.items()}
-    notes.append(
-        "serving-count correction (window→lifecycle): analytic calls "
-        + ", ".join(f"{r}={est.get(r)}" for r in sorted(est))
-        + "; observed " + ", ".join(f"{r}={regime_calls_obs.get(r, 0)}" for r in sorted(regime_calls_obs))
-        + "; regime weight scale " + ", ".join(f"{r}×{scale[r]:.2f}" for r in sorted(scale))
-        + " (per-call latency measured; call count from ISL/OSL — fixes short-window decode under-count).")
-    return scale
-
-
-def _apply_serving_scale(cases, regime_calls_obs, workload, notes):
-    """Multiply every case's weight by its regime's serving-count scale. Uniform within a regime, so
-    the within-regime split is preserved and only the cross-regime ratio changes. weight_source labels
-    (shape/time provenance) are LEFT UNCHANGED — the count correction is an orthogonal axis, reported in
-    `notes` and the top-level `serving_weight_model`. Returns the (mutated) cases."""
-    scale = serving_regime_scale(regime_calls_obs, workload, notes)
-    if not scale:
-        return cases
-    for c in cases:
-        s = scale.get(c.get("regime"))
-        if s:
-            c["weight"] = round(c.get("weight", 0.0) * s, 3)
-    return cases
-
-
-def _regime_obs_calls(mcases, matched):
-    """Observed per-regime call counts for the case-based paths: the capture window's per-case count,
-    or the profiled trace count when the shape matched the profile (trace count is the harder signal)."""
-    obs = {}
-    for c in mcases:
-        r = c.get("regime") or ""
-        cnt = c.get("count")
-        m = matched.get(c["name"])
-        if m is not None and m.get("count") is not None:
-            cnt = m.get("count")
-        obs[r] = obs.get(r, 0) + int(cnt or 0)
-    return obs
-
-
 # --------------------------------------------------------------------------- #
 # GEMM: cases = config M-buckets x (fixed N,K); weight = profiled time split by regime
 # --------------------------------------------------------------------------- #
-def attribute_gemm(meta, entries, notes, workload=None):
+def attribute_gemm(meta, entries, notes):
     a_shape = meta.get("a_shape") or ["M", None]   # [M, K]
     b_shape = meta.get("b_shape") or [None, None]  # [N, K]
     K = a_shape[1] if len(a_shape) > 1 else None
@@ -170,14 +112,11 @@ def attribute_gemm(meta, entries, notes, workload=None):
     # A triton GEMM hides M behind the launch grid. We do NOT need exact M, only regime:
     # M_blocks ~ GRID_MN / ceil(N/BLOCK_N); M_blocks<=~1 => decode (single M-tile), else prefill.
     decode_us = prefill_us = 0.0
-    decode_calls = prefill_calls = 0     # observed WINDOW launch counts per regime (for serving correction)
     matched_by_shape = {}   # bucket_M -> summed weight, when the profile DID expose a real shape
-    matched_calls = {}      # bucket_M -> summed observed count
-    grid_vals = []          # unresolved launches (grid, weight, count, entry) for the median second pass
+    grid_vals = []          # unresolved launches (grid, weight, entry) for the median second pass
     for k in entries:
         kcases = k.get("cases", [])
         kw = sum(c.get("weight", 0.0) for c in kcases)
-        kcount = sum(int(c.get("count") or 0) for c in kcases)
         # (a) precise: profile exposed a real input shape for this launch
         real = next((c for c in kcases if c.get("dims")), None)
         if real and real["dims"]:
@@ -185,7 +124,6 @@ def attribute_gemm(meta, entries, notes, workload=None):
             if isinstance(m, int):
                 bucket = _nearest(m, decode + prefill)
                 matched_by_shape[bucket] = matched_by_shape.get(bucket, 0.0) + kw
-                matched_calls[bucket] = matched_calls.get(bucket, 0) + kcount
                 continue
         # (b) regime via grid magnitude
         name = k.get("name", "")
@@ -197,12 +135,12 @@ def attribute_gemm(meta, entries, notes, workload=None):
             mblk = grid / nblk
             is_decode = mblk <= 1.5
         if is_decode is None:
-            grid_vals.append((grid, kw, kcount, k))  # mark for second-pass median split
+            grid_vals.append((grid, kw, k))  # mark for second-pass median split
             continue
         if is_decode:
-            decode_us += kw; decode_calls += kcount
+            decode_us += kw
         else:
-            prefill_us += kw; prefill_calls += kcount
+            prefill_us += kw
 
     # second pass: any launches we couldn't classify by N/BLOCK_N -> split by GRID_MN median
     if grid_vals:
@@ -210,11 +148,11 @@ def attribute_gemm(meta, entries, notes, workload=None):
         med = gs[len(gs) // 2] if gs else 0
         notes.append(f"{len(grid_vals)} launches classified by GRID_MN median split (median={med}); "
                      "N/BLOCK_N not parseable for them.")
-        for grid, kw, kcount, _k in grid_vals:
+        for grid, kw, _k in grid_vals:
             if grid and grid <= med:
-                decode_us += kw; decode_calls += kcount
+                decode_us += kw
             else:
-                prefill_us += kw; prefill_calls += kcount
+                prefill_us += kw
 
     cases = []
 
@@ -237,10 +175,6 @@ def attribute_gemm(meta, entries, notes, workload=None):
         regime = "decode" if bucket in decode else "prefill"
         emit(bucket, regime, w, "trace")
         used_shape_buckets.add(bucket)
-        if regime == "decode":
-            decode_calls += matched_calls.get(bucket, 0)
-        else:
-            prefill_calls += matched_calls.get(bucket, 0)
 
     # ---- regime totals distributed across the remaining buckets ----
     rem_decode = [m for m in decode if m not in used_shape_buckets]
@@ -262,7 +196,6 @@ def attribute_gemm(meta, entries, notes, workload=None):
             continue
         for M, frac in _within_regime_split(buckets, regime):
             emit(M, regime, total * frac, "regime")
-    _apply_serving_scale(cases, {"decode": decode_calls, "prefill": prefill_calls}, workload, notes)
     return cases
 
 
@@ -482,7 +415,7 @@ def _classify_fallback(mcases, entries, matched_w, total_w, notes):
     return out
 
 
-def attribute_attn(meta, entries, notes, workload=None):
+def attribute_attn(meta, entries, notes):
     mcases = _norm_meta_cases(meta)
     if not mcases:                      # no explicit cases -> degrade to pass-through of profiled shapes
         return _passthrough(entries, notes)
@@ -491,21 +424,19 @@ def attribute_attn(meta, entries, notes, workload=None):
     total_w = _total_time(entries)
     regime_us = _classify_attn(mcases, entries, matched_w, total_w, notes)
     _count_time_crosscheck(mcases, regime_us, notes)
-    cases = _distribute(mcases, regime_us, matched, notes, src="regime")
-    _apply_serving_scale(cases, _regime_obs_calls(mcases, matched), workload, notes)
-    return cases
+    return _distribute(mcases, regime_us, matched, notes, src="regime")
 
 
-def attribute_moe(meta, entries, notes, workload=None):
+def attribute_moe(meta, entries, notes):
     """MoE grouped-GEMM = a GEMM whose effective M per expert = tokens*top_k/num_experts (routing-
     dependent). The extractor bakes that effective M into decode/prefill m_buckets, so MoE reuses the
     precise grid-based GEMM engine; routing skew makes the weights lower-confidence (noted)."""
     notes.append("op_kind=moe: per-expert token counts are routing-dependent; effective-M buckets "
                  "from meta drive a GEMM-style regime split. Treat weights as lower-confidence.")
-    return attribute_gemm(meta, entries, notes, workload=workload)
+    return attribute_gemm(meta, entries, notes)
 
 
-def attribute_generic(meta, entries, notes, workload=None):
+def attribute_generic(meta, entries, notes):
     mcases = _norm_meta_cases(meta)
     if not mcases:
         return _passthrough(entries, notes)
@@ -515,9 +446,7 @@ def attribute_generic(meta, entries, notes, workload=None):
     regime_us = _classify_fallback(mcases, entries, matched_w, total_w, notes)
     _count_time_crosscheck(mcases, regime_us, notes)
     src = "regime_prior" if regime_us else "prior"
-    cases = _distribute(mcases, regime_us, matched, notes, src=src)
-    _apply_serving_scale(cases, _regime_obs_calls(mcases, matched), workload, notes)
-    return cases
+    return _distribute(mcases, regime_us, matched, notes, src=src)
 
 
 def _passthrough(entries, notes):
@@ -579,13 +508,15 @@ def main():
                          "*_fwd_kernel/prefill wrapper that has a separate *_decode_kernel is "
                          "'prefill'; the decode kernel is 'decode'.")
     ap.add_argument("--isl", type=int, default=None,
-                    help="input seq len (prompt tokens). With --osl, corrects the regime weight split "
-                         "from the SHORT profiling window (sees only ~PROFILE_NUM_STEPS decode steps) to "
-                         "the full serving lifecycle: prefill=ceil(isl/chunk) passes vs decode=osl passes. "
-                         "Per-call latency is measured; only the call COUNT is rescaled. Omit = raw window.")
+                    help="input seq len (prompt tokens). With --osl, emits the analytic serving call "
+                         "model (serving_weight_model.analytic_calls: prefill=ceil(isl/chunk), decode=osl) "
+                         "for the unittest to SELF-WEIGHT each case (weight_i = measured baseline_ms_i × "
+                         "analytic_calls[regime_i]). It does NOT rescale the profile `weight` here — the "
+                         "intra-kernel split is reconstructed from measured latency in the unittest, not "
+                         "from the biased short profiling window. Omit = no serving model emitted.")
     ap.add_argument("--osl", type=int, default=None,
                     help="output seq len (tokens generated per request) = the true decode forward-pass "
-                         "count the profiling window under-captures. Needs --isl to take effect.")
+                         "count. Feeds serving_weight_model (needs --isl to take effect).")
     ap.add_argument("--prefill-chunk", type=int, default=None,
                     help="chunked-prefill token budget (chunked_prefill_size / max_num_batched_tokens). "
                          "Default: isl (one prefill pass over the whole prompt).")
@@ -602,13 +533,13 @@ def main():
     op_kind = (meta.get("op_kind") or "").lower()
     regime = meta.get("regime") or {}      # written by the extractor from parse_regime.py
 
-    # workload params drive the serving-lifecycle count correction (see estimate_serving_regime_calls).
-    # Empty when neither --isl nor --osl is given -> correction is a no-op (byte-identical to before).
-    # The chunked-prefill budget falls back to the regime's parsed prefill_chunk (from the launch
-    # script / server flags) when --prefill-chunk is not given explicitly.
+    # workload params -> the serving-lifecycle call-count model (see estimate_serving_regime_calls).
+    # This does NOT touch `weight` (the unittest self-weights with measured latency × these calls);
+    # it only decides whether `serving_weight_model` is emitted for the unittest to consume. The
+    # chunked-prefill budget falls back to the regime's parsed prefill_chunk (from the launch script /
+    # server flags) when --prefill-chunk is not given explicitly.
     prefill_chunk = args.prefill_chunk if args.prefill_chunk is not None else regime.get("prefill_chunk")
-    workload = ({"isl": args.isl, "osl": args.osl, "prefill_chunk": prefill_chunk}
-                if (args.isl is not None or args.osl is not None) else None)
+    has_workload = args.isl is not None or args.osl is not None
     name_match = args.name_match or _base_token(meta.get("short_name", ""))
     entries = load_profile_entries(args.profile_weights, name_match)
 
@@ -620,13 +551,13 @@ def main():
     # kinds (recurrent / norm / elementwise / editable) share the _distribute engine, differing only
     # in their thin regime classifier. All roads produce the same {..., regime, weight_source} schema.
     if op_kind == "gemm":
-        cases = attribute_gemm(meta, entries, notes, workload=workload)
+        cases = attribute_gemm(meta, entries, notes)
     elif op_kind == "moe":
-        cases = attribute_moe(meta, entries, notes, workload=workload)
+        cases = attribute_moe(meta, entries, notes)
     elif op_kind == "attn":
-        cases = attribute_attn(meta, entries, notes, workload=workload)
+        cases = attribute_attn(meta, entries, notes)
     else:
-        cases = attribute_generic(meta, entries, notes, workload=workload)
+        cases = attribute_generic(meta, entries, notes)
 
     # kernel->regime gate (capture-over-inference): keep only the serving regimes THIS kernel
     # actually runs in. A prefill-only kernel (a *_fwd_kernel with a separate *_decode_kernel) must
@@ -650,10 +581,17 @@ def main():
                              f"never runs, e.g. decode shapes on a prefill-only kernel).")
             cases = kept
 
-    # optional regime floor (serving decode-protection): redistribute so each regime present in meta
-    # gets >= min_regime_share of the total. Applied BEFORE normalization, on raw weights.
-    if args.min_regime_share > 0:
-        _apply_regime_floor(cases, args.min_regime_share, notes)
+    # regime floor (serving decode-protection): redistribute so each regime present in meta gets >=
+    # floor of the total. Applied BEFORE normalization, on raw weights. The explicit --min-regime-share
+    # always applies; ADDITIONALLY, when the analytic serving model shows decode is non-trivial but the
+    # (short / graph-hidden) profile window under-captured it, auto-floor decode so it is never silently
+    # zeroed. The authoritative decode:prefill split is still the unittest self-weight (measured ms x
+    # analytic_calls) -- this floor only protects the coarse static prior.
+    _analytic_calls = estimate_serving_regime_calls(args.isl, args.osl, prefill_chunk) if has_workload else {}
+    eff_floor = max(args.min_regime_share,
+                    _auto_decode_floor(cases, _analytic_calls, args.min_regime_share, notes))
+    if eff_floor > 0:
+        _apply_regime_floor(cases, eff_floor, notes)
 
     # normalize weights within the kernel
     cases.sort(key=lambda c: c.get("weight", 0.0), reverse=True)
@@ -679,10 +617,10 @@ def main():
         "quant": quant,                    # per-operand dtypes + scales for THIS kernel
         "live_pct_gpu": live_pct,          # this seam's share of GPU time under the online regime
         "regime_warning": regime_warning,  # non-empty => seam/regime mismatch; don't trust the weight
-        "serving_weight_model": (          # None unless ISL/OSL drove the window→lifecycle correction
-            {"isl": args.isl, "osl": args.osl, "prefill_chunk": prefill_chunk,
-             "analytic_calls": estimate_serving_regime_calls(args.isl, args.osl, prefill_chunk)}
-            if workload else None),
+        "serving_weight_model": (          # None unless ISL/OSL given. Consumed by the unittest to
+            {"isl": args.isl, "osl": args.osl, "prefill_chunk": prefill_chunk,   # SELF-WEIGHT each case
+             "analytic_calls": estimate_serving_regime_calls(args.isl, args.osl, prefill_chunk)}  # (weight_i
+            if has_workload else None),    # = measured baseline_ms_i × analytic_calls[regime_i]); NOT applied to `weight` here.
         "num_cases": len(cases),
         "weights_provenance": _provenance(cases),
         "cases": cases,
@@ -693,6 +631,38 @@ def main():
     sys.stderr.write(f"wrote {args.out}: {len(cases)} cases, provenance={out['weights_provenance']}\n")
     print(json.dumps({"out": args.out, "num_cases": len(cases),
                       "weights_provenance": out["weights_provenance"], "notes": out["notes"]}))
+
+
+_DECODE_AUTOFLOOR = 0.2
+
+
+def _auto_decode_floor(cases, analytic_calls, explicit_floor, notes):
+    """Automatic decode-protection (no need for the operator to remember --min-regime-share).
+
+    A short profiling window under-captures decode -- and on this stack decode runs under a HIP/CUDA
+    graph the torch profiler cannot see, so the profiled decode time is often ZERO -- which would leave
+    the decode STATIC weight at 0. This returns a conservative floor so the decode case keeps a
+    non-trivial static share (for bake-off ranking / records). The AUTHORITATIVE decode:prefill split is
+    unchanged: it remains the unittest self-weight (measured baseline_ms x analytic_calls), which is
+    time-accurate and independent of this static weight. Fires ONLY when the analytic serving model has
+    decode calls AND meta has a decode regime AND the profiled decode share is below the floor. Returns
+    the floor to apply (0.0 = no auto-floor)."""
+    calls = analytic_calls or {}
+    if int(calls.get("decode") or 0) <= 0:
+        return 0.0
+    if not any(str(c.get("regime") or "").lower() == "decode" for c in cases):
+        return 0.0
+    total = sum(c.get("weight", 0.0) for c in cases)
+    dshare = (sum(c.get("weight", 0.0) for c in cases
+                  if str(c.get("regime") or "").lower() == "decode") / total) if total > 0 else 0.0
+    floor = max(explicit_floor, _DECODE_AUTOFLOOR)
+    if dshare >= floor:
+        return 0.0
+    notes.append(f"auto decode-floor: analytic serving model has decode={int(calls.get('decode'))} calls "
+                 f"but profiled decode share={dshare:.2f} < {floor:.2f} (graph-hidden / under-captured "
+                 f"decode) -> flooring decode to {floor:.2f}; authoritative split remains the unittest "
+                 f"self-weight (measured ms x analytic_calls).")
+    return floor
 
 
 def _apply_regime_floor(cases, floor, notes):

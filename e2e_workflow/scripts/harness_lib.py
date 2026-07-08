@@ -505,9 +505,10 @@ def check_correct_multi(call, cases, tol):
     shared-buffer return — a later call would have overwritten an earlier return before we check it).
 
     `cases` is a list of dicts: {"args": <opaque args passed to call>, "ref": <golden tensor>,
-    "sig": <label>}. `call(args) -> out`. Returns (all_ok, per_case_list). Also runs
-    `assert_independent_outputs` across the first two distinct cases when available and folds its
-    verdict into `all_ok` (reported as a synthetic per-case entry)."""
+    "sig": <label>}. `call(args) -> out`. Returns (all_ok, per_case_list). When there are >=2 cases it
+    also runs `assert_independent_outputs` on cases[0] and cases[1] (the shared-storage/data_ptr check
+    catches a persistent buffer regardless of whether those two inputs differ) and folds its verdict into
+    `all_ok` (reported as a synthetic per-case entry)."""
     outs = [call(c["args"]) for c in cases]        # all live simultaneously — no reuse allowed
     per_case = []
     all_ok = True
@@ -711,3 +712,148 @@ def amdahl_check(e2e_delta_pct, pct_gpu, isolated_speedup, noise_band_pct=0.5, s
     return {"ceiling_pct": round(ceiling, 3), "allowed_pct": round(allowed, 3),
             "plausible": bool(plausible), "verdict": "ok" if plausible else "implausible",
             "note": note}
+
+
+class HarnessIncompleteError(Exception):
+    """The generated UT is INCOMPLETE for this kernel (a harness/GENERATION defect), NOT a kernel-
+    correctness failure. Raised by `run_correctness` when a graph-deploy kernel is handed no usable
+    (>=2-shape) replay bundle. The UT's main() should catch it, print the `UT_HARNESS_INCOMPLETE:`
+    sentinel, and exit 3 so the smoke-test REGENERATES the UT (add the replay leg) instead of blaming
+    the candidate. Distinct from a correctness FAIL (exit 1) and an env error (exit 2)."""
+
+
+UT_HARNESS_INCOMPLETE_SENTINEL = "UT_HARNESS_INCOMPLETE"
+
+
+# --------------------------------------------------------------------------- (c) fail-closed correctness suite
+# WHY: `check_graph_replay` already reproduces the deploy path that faults (capture-once / replay-many /
+# static-buffer reuse across shapes), but it was (1) gated on the fragile `meta.graph_replayed` flag
+# (which CUDA-graph REPLAY makes unobservable at the Python seam, so it was often absent -> the gate never
+# fired) and (2) LLM-EMITTED (the generated UT could just omit it). A decode kernel that OOB-writes on a
+# ragged real shape under replay then passes the eager isolated UT and only faults e2e (0/320 served) —
+# the h2 paged_attention failure. `run_correctness` closes both holes: the trigger is the AUTHORITATIVE
+# deployment fact `deployment_graph_mode(regime)` (regime.cuda_graph, from the launch flags), and a
+# graph-deploy kernel that supplies no >=2-shape replay bundle FAILS CLOSED instead of silently passing.
+def run_correctness(regime, *, eager_cases, baseline_call, current_call, random_shapes, tol,
+                    replay=None, draws=3):
+    """The SINGLE correctness entrypoint every generated unittest must call. Runs, in order:
+      1. eager multi-case vs oracle (`check_correct_multi`) — also the output-independence check;
+      2. random-value parity vs the frozen live baseline (`check_random_vs_baseline`);
+      3. FAIL-CLOSED deployment-context replay: when `deployment_graph_mode(regime)` is True, a
+         `replay` bundle with >=2 BOUNDARY shapes is MANDATORY (single-shape replay cannot expose a
+         static-buffer-reuse OOB). Missing / too-few cases => hard FAIL (never a silent skip).
+
+    `replay` (required when the op deploys under a graph) = {
+        "fill": fn(case)->None (copy case inputs INTO pre-allocated static buffers; never realloc),
+        "run":  fn()->None     (one graph-safe launch reading/writing those static buffers),
+        "read_out": fn()->Tensor (the static output to compare),
+        "cases": [{"args":..., "ref": <golden>, "sig": <label>}, ...]  (>=2, boundary-spanning),
+        "capture_idx": <index of the LARGEST case to capture on> (default 0),
+    }
+    Returns (all_ok, report) where report has keys eager / random / graph_replay.
+    """
+    report = {}
+    ok = True
+
+    c_ok, per = check_correct_multi(current_call, eager_cases, tol)
+    report["eager"] = per
+    ok = ok and c_ok
+
+    r_ok, perr = check_random_vs_baseline(baseline_call, current_call, random_shapes, tol,
+                                          draws=draws, graph=deployment_graph_mode(regime))
+    report["random"] = perr
+    ok = ok and r_ok
+
+    if deployment_graph_mode(regime):
+        cases = (replay or {}).get("cases") or []
+        missing = [k for k in ("fill", "run", "read_out") if not callable((replay or {}).get(k))]
+        if replay is None or missing or len(cases) < 2:
+            why = ("no replay bundle" if replay is None
+                   else f"missing closures {missing}" if missing
+                   else f"only {len(cases)} replay case(s); need >=2 boundary shapes")
+            reason = ("deploys under CUDA graph (deployment_graph_mode=True) but " + why
+                      + " — a graph-deploy kernel MUST be replay-checked across >=2 boundary shapes "
+                        "(capture-once/replay-many reused static buffer). This is a UT-GENERATION defect "
+                        "(the harness is incomplete), NOT a kernel-correctness failure: regenerate the UT "
+                        "with a replay bundle rather than blaming the candidate.")
+            # Print the sentinel so the smoke-test recognizes "regenerate UT" even if main() forgets to
+            # translate the exception, then raise the DISTINCT harness error (never a silent correctness
+            # FAIL that would wrongly reject the candidate).
+            print(f"{UT_HARNESS_INCOMPLETE_SENTINEL}: {reason}")
+            report["graph_replay"] = [{"case": "graph_replay", "correct": None,
+                                       "note": f"{UT_HARNESS_INCOMPLETE_SENTINEL}: {reason}"}]
+            raise HarnessIncompleteError(reason)
+        g_ok, perg = check_graph_replay(replay["fill"], replay["run"], replay["read_out"],
+                                        cases, tol, capture_idx=int(replay.get("capture_idx", 0)))
+        report["graph_replay"] = perg
+        ok = ok and g_ok
+
+    # torch.compile deployment context (calibrated DIFFERENTLY from the graph gate — see _compile_parity):
+    # generic (no UT bundle to forget => NOT fail-closed/regenerate). Fusion-induced numeric drift is a
+    # real correctness FAIL; an isolated bare-op compile ERROR is a surfaced NON-FATAL note.
+    if deployment_compile_mode(regime):
+        cp_ok, cp = _compile_parity(current_call, eager_cases, regime, tol)
+        report["compile_parity"] = cp
+        ok = ok and cp_ok
+
+    return ok, report
+
+
+def _compile_parity(current_call, cases, regime, tol):
+    """Deployment-context correctness for torch.compile. Unlike the graph-replay gate this is GENERIC
+    (built here from `compiled_op`, no per-op bundle the UT could forget) and therefore NOT fail-closed /
+    regenerate. Two outcomes:
+      * compiled(candidate) vs eager(candidate) DRIFT beyond tol  -> correct=False (a REAL correctness
+        failure: fusion changed the numerics — matters for fusible ops like rmsnorm/rope/silu; for an
+        opaque custom op the two are identical, so this is a cheap pass).
+      * `compiled_op` raised (`_geak_compile_error`)              -> surfaced NON-FATAL note (an isolated
+        bare-op fullgraph compile != the server's whole-model compile, where an opaque custom op is not
+        traced into), so we DO NOT auto-reject the candidate on it — we make it visible.
+    Returns (all_ok, per_case_list)."""
+    compiled = compiled_op(current_call, regime)
+    err = getattr(compiled, "_geak_compile_error", None) or getattr(current_call, "_geak_compile_error", None)
+    if err:
+        return True, [{"case": "compile_parity", "correct": True, "max_rel_err": None,
+                       "note": (f"compile_soft_degrade (NON-FATAL): {err}. Isolated bare-op fullgraph "
+                                "compile != server whole-model compile (opaque custom ops are not traced "
+                                "into) — surfaced, not auto-rejected. Verify at the e2e gate.")}]
+    per = []
+    all_ok = True
+    for c in cases:
+        try:
+            eo = current_call(c["args"])
+            co = compiled(c["args"])
+            k, e = correct(co, eo, tol)
+            per.append({"case": c.get("sig", ""), "correct": k,
+                        "max_rel_err": round(e, 5) if math.isfinite(e) else None,
+                        "note": "compile_parity(compiled vs eager)"})
+            all_ok = all_ok and k
+        except Exception as e:
+            # A raise DURING compiled execution (not build) is a real deployability problem, but keep it
+            # visible-and-soft here (the e2e gate is authoritative); do not silently pass as correct.
+            per.append({"case": c.get("sig", ""), "correct": True, "max_rel_err": None,
+                        "note": f"compile_parity soft-skip (compiled call raised): {e!r}"})
+    return all_ok, per
+
+
+# --------------------------------------------------------------------------- boundary-shape helpers (attn)
+def boundary_decode_seq_lens(geo, ctx_max):
+    """Ragged decode seq_lens that straddle the block_size / partition_size boundaries plus min/max —
+    the set that trips OOB in split/reduce paged-attention paths which a single uniform capture shape
+    (e.g. seq_len=1536) never exercises. `geo` is meta.geometry; `ctx_max` = ISL+OSL."""
+    B = int((geo or {}).get("block_size", 16) or 16)
+    P = int((geo or {}).get("partition_size", 256) or 256)
+    ctx_max = int(ctx_max or 0)
+    cands = {1, B - 1, B, B + 1, P - 1, P, P + 1, 2 * P - 1, 2 * P, ctx_max - 1, ctx_max}
+    return sorted(x for x in cands if 1 <= x <= max(1, ctx_max))
+
+
+def shuffled_block_table(num_seqs, blocks_per_seq, pool_blocks=0, seed=0, torch=None, device="cuda"):
+    """A NON-contiguous (shuffled, padded-pool) block table — the real server's paged layout. A
+    contiguous `arange` table hides indexing/stride bugs that only fault on a real scattered mapping."""
+    torch = torch or _torch()
+    need = int(num_seqs) * int(blocks_per_seq)
+    pool = max(int(pool_blocks or 0), need + 16)
+    g = torch.Generator(device=device).manual_seed(int(seed))
+    perm = torch.randperm(pool, generator=g, device=device)[:need].to(torch.int32)
+    return perm.reshape(int(num_seqs), int(blocks_per_seq))

@@ -32,8 +32,9 @@
 #
 # KEY OUTPUTS (written to $OUT_DIR):
 #   bench_runs.jsonl       one bench result object per repeat
-#   bench_summary.json     {output_throughput_tok_s_median, ttft_ms_median, tpot_ms_median, spread, runs}
-#   SUMMARY line on stdout: "E2E_SUMMARY output_tok_s=<median> spread=<pct> ttft_ms=<med> tpot_ms=<med>"
+#   bench_summary.json     {throughput_tok_s_median (metric-neutral; see metric_basis), metric_basis,
+#                           ttft_ms_median, tpot_ms_median, spread, runs}  (E2E_METRIC=total default)
+#   SUMMARY line on stdout: "E2E_SUMMARY <metric_basis>=<median> spread=<pct> ttft_ms=<med> tpot_ms=<med>"
 #   profile/                trace (if PROFILE=1)
 set -uo pipefail
 
@@ -440,10 +441,10 @@ def pick(d, *keys):
     for k in keys:
         if k in d and isinstance(d[k], (int, float)): return float(d[k])
     return None
-# metric selection: default = output tok/s (Magpie-aligned, backward-compatible); set E2E_METRIC=total
-# to gate on TOTAL token throughput ((input+output)/s). Same key is read for baseline+cand so the
-# accept RATIO is consistent; metric_basis records which was used.
-_metric = (os.environ.get("E2E_METRIC") or "output").strip().lower()
+# metric selection: default = TOTAL token throughput ((input+output)/s); set E2E_METRIC=output for
+# output-only tok/s (Magpie-aligned). Same key is read for baseline+cand so the accept RATIO is
+# consistent; metric_basis records which was used.
+_metric = (os.environ.get("E2E_METRIC") or "total").strip().lower()
 _is_total = _metric in ("total", "total_token", "total_throughput")
 _TPUT_KEYS = (("total_token_throughput", "total_throughput", "total_token_throughput_tok_s")
               if _is_total else
@@ -463,9 +464,17 @@ def med(xs): return statistics.median(xs) if xs else None
 def spread(xs):
     if len(xs) < 2: return 0.0
     m = med(xs); return round(100.0 * (max(xs)-min(xs)) / m, 2) if m else 0.0
+_tput_med = round(med(tps), 3) if tps else None
+_tput_spread = spread(tps)
 summ = {
-    "output_throughput_tok_s_median": round(med(tps), 3) if tps else None,
-    "output_throughput_tok_s_spread_pct": spread(tps),
+    # Canonical, metric-neutral throughput of the SELECTED basis (see metric_basis). Downstream should
+    # read this + metric_basis; the accept RATIO is basis-consistent (baseline+cand use the same metric).
+    "throughput_tok_s_median": _tput_med,
+    "throughput_tok_s_spread_pct": _tput_spread,
+    # Legacy output-named alias: populated ONLY in output mode (its literal meaning). In total mode it is
+    # None so nobody silently reads total throughput under an "output" name — read throughput_tok_s_median.
+    "output_throughput_tok_s_median": _tput_med if not _is_total else None,
+    "output_throughput_tok_s_spread_pct": _tput_spread if not _is_total else None,
     "ttft_ms_median": round(med(ttft), 3) if ttft else None,
     "tpot_ms_median": round(med(tpot), 3) if tpot else None,
     "runs": len(tps),
@@ -475,8 +484,8 @@ summ = {
     "metric_basis": ("aggregate_total_token_tok_s" if _is_total else "aggregate_output_tok_s"),
 }
 with open(out_path, "w") as fh: json.dump(summ, fh, indent=2)
-print(f"E2E_SUMMARY output_tok_s={summ['output_throughput_tok_s_median']} "
-      f"spread={summ['output_throughput_tok_s_spread_pct']}% "
+print(f"E2E_SUMMARY {summ['metric_basis']}={summ['throughput_tok_s_median']} "
+      f"spread={summ['throughput_tok_s_spread_pct']}% "
       f"ttft_ms={summ['ttft_ms_median']} tpot_ms={summ['tpot_ms_median']} runs={summ['runs']}")
 PY
 

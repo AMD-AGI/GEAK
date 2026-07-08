@@ -74,6 +74,61 @@ def _read_script_flags(script_path):
     return _tokenize(text.replace("\\\n", " "))
 
 
+def _read_script_text(script_path):
+    """Raw (lowercased) text of a launch script/recipe, for backend/framework detection. '' if unreadable."""
+    if not script_path or not os.path.isfile(script_path):
+        return ""
+    try:
+        with open(script_path) as fh:
+            return fh.read().lower()
+    except Exception:
+        return ""
+
+
+def _detect_backend(backend, server_script, server_args, flags):
+    """Resolve the serving backend ROBUSTLY.
+
+    The old check was `is_vllm = "vllm" in f"{server_script} {server_args}"` — a fragile substring sniff
+    over the script PATH + args string only. It missed runs whose recipe path was e.g.
+    `.../launch_baseline.sh` and whose EXTRA_SERVER_ARGS was empty (the `vllm serve` command lives in a
+    Magpie wrapper, and `framework: vllm` lives in the recipe CONTENT, neither of which is the path). vLLM
+    then went undetected -> `compile` mis-reported `eager` even though `enforce_eager=false` (vLLM V1
+    compiles by default) -> GEMM harnesses timed a naked-eager baseline. Priority:
+      1. explicit `--backend` (the workflow already knows it — strongest);
+      2. serve-command / framework tags in the script CONTENT + args + path
+         (`vllm serve` / `vllm.entrypoints` / `framework: vllm` / `vllm_*.sh`;
+          `sglang.launch_server` / `framework: sglang`; `atom.entrypoints` / `framework: atom`);
+      3. backend-specific launch flags as a last resort.
+    Returns 'vllm' | 'sglang' | 'atom' | '' (unknown -> caller stays conservative)."""
+    b = (backend or "").strip().lower()
+    if b in ("vllm", "sglang", "atom"):
+        return b
+    hay = f"{server_script} {server_args} {_read_script_text(server_script)}".lower()
+    # Strong anchors first: serve invocations / explicit framework tags.
+    if any(s in hay for s in ("vllm serve", "vllm.entrypoints", "framework: vllm", "framework:vllm")):
+        return "vllm"
+    if any(s in hay for s in ("sglang.launch_server", "framework: sglang", "framework:sglang")):
+        return "sglang"
+    if any(s in hay for s in ("atom.entrypoints", "framework: atom", "framework:atom")):
+        return "atom"
+    # Recipe/script-name hints (e.g. `benchmark_script: vllm_mi300x.sh`).
+    if any(s in hay for s in ("vllm_", "vllm-", "/vllm")):
+        return "vllm"
+    if any(s in hay for s in ("sglang_", "sglang-", "/sglang")):
+        return "sglang"
+    if any(s in hay for s in ("atom_", "/atom")):
+        return "atom"
+    # Last resort: backend-specific launch flags.
+    if any(k in flags for k in ("gpu-memory-utilization", "gpu_memory_utilization",
+                                "max-num-batched-tokens", "max_num_batched_tokens",
+                                "served-model-name", "served_model_name")):
+        return "vllm"
+    if any(k in flags for k in ("mem-fraction-static", "mem_fraction_static",
+                                "tp-size", "tp_size", "disable-radix-cache", "disable_radix_cache")):
+        return "sglang"
+    return ""
+
+
 def _prefill_chunk(flags):
     """The chunked-prefill token budget from the launch flags: sglang `--chunked-prefill-size`, vllm
     `--max-num-batched-tokens`. A value <= 0 (sglang's -1 = disabled) or absent -> None (the caller then
@@ -112,10 +167,16 @@ def _load_model_quant(model_config_path):
     return {"method": method or "fp8", "weight_dtype": wdt, "block_size": block, "fmt": fmt}
 
 
-def parse_regime(server_args, model_config_path="", server_script=""):
+def parse_regime(server_args, model_config_path="", server_script="", backend=""):
     # Launch-script flags fill the base; the live --server-args string overrides on overlap.
     flags = {**_read_script_flags(server_script), **_tokenize(server_args)}
     notes = []
+
+    # Resolve the serving backend up-front (drives the compile-default inference below).
+    backend_resolved = _detect_backend(backend, server_script, server_args, flags)
+    if not backend_resolved:
+        notes.append("backend UNRESOLVED (no --backend, no serve-command/framework tag) -> assuming "
+                     "no default compile; confirm compile/cuda_graph from the server log.")
 
     # ---- quantization: flag wins, else the model's own config ----
     q_flag = flags.get("quantization")
@@ -168,12 +229,19 @@ def parse_regime(server_args, model_config_path="", server_script=""):
     # server log and the log wins (kernel_extractor.md). ----
     explicit_compile = bool(flags.get("enable-torch-compile") or flags.get("enable_torch_compile")
                             or flags.get("torch-compile"))
-    is_vllm = "vllm" in f"{server_script} {server_args}".lower()
+    is_vllm = backend_resolved == "vllm"
     compile_on = explicit_compile or (is_vllm and not enforce_eager)
     compile_state = "torch_compile" if compile_on else "eager"
     if compile_on and not explicit_compile:
         notes.append("vLLM V1 compiles the backbone by default (no --enforce-eager) -> compile=torch_compile; "
                      "confirm via server log compilation_config (log wins).")
+    # Consistency invariant: on vLLM, enforce_eager=false CANNOT coexist with compile=eager (no
+    # --enforce-eager => VLLM_COMPILE is on). Repair defensively so a backend mis-detect can never
+    # re-introduce the (enforce_eager=false, compile=eager) contradiction that timed a naked-eager baseline.
+    if is_vllm and not enforce_eager and compile_state == "eager":
+        compile_state = "torch_compile"
+        notes.append("repaired contradiction: vLLM with enforce_eager=false cannot be compile=eager "
+                     "-> forced torch_compile.")
 
     # ---- cuda graph: on unless the baseline is forced eager (same flags as enforce_eager) ----
     cuda_graph = not enforce_eager
@@ -186,6 +254,7 @@ def parse_regime(server_args, model_config_path="", server_script=""):
     prefill_chunk = _prefill_chunk(flags)
 
     return {
+        "backend": backend_resolved,
         "quant": quant,
         "kv_cache_dtype": kv,
         "compile": compile_state,
@@ -206,9 +275,13 @@ def main():
     ap.add_argument("--server-script", default="",
                     help="path to the server launch script (e.g. launch_baseline.sh); "
                          "carries flags EXTRA_SERVER_ARGS may omit, notably the chunked-prefill budget")
+    ap.add_argument("--backend", default="",
+                    help="serving backend (vllm|sglang|atom); the strongest signal for the compile "
+                         "default. When omitted it is auto-detected from the serve command / framework "
+                         "tag / launch flags (robust to a recipe path that lacks the backend name).")
     ap.add_argument("--out", default="", help="write regime json here (also printed to stdout)")
     args = ap.parse_args()
-    regime = parse_regime(args.server_args, args.model_config, args.server_script)
+    regime = parse_regime(args.server_args, args.model_config, args.server_script, args.backend)
     js = json.dumps(regime, indent=2)
     if args.out:
         with open(args.out, "w") as fh:

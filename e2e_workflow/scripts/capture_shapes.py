@@ -199,9 +199,12 @@ def _wrapper(*args, **kwargs):
 
 def _maybe_flush(in_graph=False):
     """Called after every wrapped call. Rewrite the light meta.json every `flush_every` calls, and write
-    the heavy reference_io.pt once there are at least `max_cases` records AND the on-disk oracle is behind
-    the in-memory records — so a later OOM/SIGKILL (which never fires atexit) still leaves a usable partial
-    capture on disk, and a late regime-coverage case (appended past max_cases) is not lost.
+    the heavy reference_io.pt whenever the on-disk oracle is behind the in-memory records (even before
+    `max_cases` is reached) — so a small workload with fewer distinct shapes than `max_cases` (the common
+    single-/few-shape decode case) is NOT left with no oracle on disk until atexit. A later OOM/SIGKILL
+    (which never fires atexit) then still leaves a usable partial capture, and a late regime-coverage case
+    (appended past max_cases) is not lost. `records` is bounded (max_cases + a couple regime-coverage
+    cases), so this rewrites the oracle only a handful of times over the whole capture.
 
     NEVER flush while the server is capturing a CUDA graph: the oracle write does a device sync / host
     copy, which is ILLEGAL inside graph capture and would corrupt the server's decode-graph capture. We
@@ -213,7 +216,7 @@ def _maybe_flush(in_graph=False):
     n = s["calls"]
     if not n or (n % max(1, s["flush_every"])) != 0:
         return
-    write_oracle = len(s["records"]) >= s["max_cases"] and len(s["records"]) > s["oracle_records"]
+    write_oracle = len(s["records"]) > s["oracle_records"]
     _flush(write_oracle=write_oracle)
 
 
@@ -232,8 +235,9 @@ def _flush(write_oracle=True):
         shape_meta = dict(s["shape_meta"])
         records = list(s["records"])
     io_path = os.path.join(out_dir, "reference_io.pt")
-    # (Re)freeze the oracle only when the on-disk copy is behind the records, so a late regime-coverage
-    # case (appended past max_cases) is captured; records is bounded, so this rewrites at most twice.
+    # (Re)freeze the oracle only when the on-disk copy is behind the records, so both an early small-
+    # workload capture (< max_cases distinct shapes) and a late regime-coverage case (appended past
+    # max_cases) land on disk; records is bounded, so this rewrites only a handful of times.
     if write_oracle and records and len(records) > s["oracle_records"]:
         torch.save({"target": s["target"], "records": records}, io_path)
         import hashlib

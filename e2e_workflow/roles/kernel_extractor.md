@@ -46,6 +46,7 @@ write it into `meta.json`, then build EVERY operand from it (never from the comp
 python3 "$SKILL_DIR/scripts/parse_regime.py" \
   --server-args "$CURRENT_FLAGS" --model-config "$MODEL_PATH/config.json" \
   --server-script "$EVAL_DIR/launch_baseline.sh" \
+  --backend "$BACKEND" \
   --out "<task_dir>/regime.json"
 # then merge regime.json into meta.json under the "regime" key
 # (--server-script carries flags EXTRA_SERVER_ARGS omits, notably the chunked-prefill budget that
@@ -63,7 +64,8 @@ Honor every axis **generically** via the shared `harness_lib` primitives — do 
   `k_scale/v_scale` when the KV dtype is quantized. A bf16-hardcoded KV kernel reads fp8 bytes with the
   wrong stride → GPU fault → engine crash. Non-negotiable for attention.
 - **Compile** (`regime.compile`): if `torch_compile`, baseline against the COMPILED/fused path, not
-  unfused eager (else the speedup is a strawman).
+  unfused eager (else the speedup is a strawman). Enforce it via `h.compiled_op(fn, regime)` on BOTH the
+  baseline and candidate before timing (no-op when the regime is eager) — see the timing rule in step 4.
 - **fp8 format is arch-specific** (the ONE hardware axis): MI300/MI325 (gfx942/CDNA3) use AMD `fnuz`
   fp8; MI355 (gfx950/CDNA4) use OCP `fn` fp8. `h.regime_dtype("fp8")` picks the running GPU's variant
   automatically (or pass `arch=` for offline cross-arch synth); an explicit `fp8_e4m3fnuz`/`fp8_e4m3fn`
@@ -115,12 +117,15 @@ freeze an out-of-regime oracle nobody should trust.
    > - **Which shapes exist (coverage): config M-buckets are the deterministic spine** (can't crash);
    >   live capture augments/corrects; profiler + TraceLens are hints you re-verify against capture. The
    >   mandatory both-regimes floor still applies even if a source missed decode.
-   > - **Weight (importance): profiler TIME wins** (`attribute_weights.py`: `trace` > `regime` > prior >
-   >   `--min-regime-share` floor). **`meta.shape_counts` is a COUNT, not a time** — a prefill call is 1
-   >   count but huge GPU-time; decode is thousands of counts, tiny each. So counts must NOT outrank
-   >   profiler time; use them only as (i) coverage evidence, (ii) a within-regime prior when the profiler
-   >   is shape-hidden, (iii) a cross-check (flag in `notes` if capture-count and profiler regime split
-   >   disagree). Never weight by raw count.
+   > - **Weight (importance): baseline LATENCY × serving-call COUNT — NOT profiler %GPU time.** The weight
+   >   that decides KEEP/REVERT is the unittest self-weight `weight_i = MEASURED baseline_ms_i ×
+   >   analytic_calls[regime_i]` (latency from the frozen-baseline microbench, per shape; counts from the
+   >   analytic serving model `estimate_serving_regime_calls` — decode=`osl`, prefill=`ceil(isl/chunk)` —
+   >   cross-checked against capture `meta.shape_counts`). Profiler %GPU TIME is used for **head SELECTION**
+   >   and as the **pre-measurement / within-regime PRIOR** only (the static `attribute_weights.py` weight:
+   >   `trace` > `regime` > prior > `--min-regime-share` floor), because the short / graph-hidden window
+   >   under-counts decode — it is NOT the weight authority. `meta.shape_counts` is a COUNT, not a time — a
+   >   prefill call is 1 count but huge GPU-time, decode is thousands of tiny calls; never weight by raw count.
 3. **Copy the editable source** into `kernel_src/` (the minimal owning subtree), so the kernel layer
    and the later overlay can diff against it.
    > **🔴 FREEZE THE REAL ONLINE KERNEL AS THE IMMUTABLE TIMING BASELINE — this is what stops a
@@ -176,31 +181,63 @@ freeze an out-of-regime oracle nobody should trust.
      baseline on ANY draw FAILS the unittest); print its per-draw `speedup` as a SECONDARY robustness
      signal only — it is NOT re-weighted and NEVER the win metric (the primary metric stays the
      workload-weighted oracle speedup).
-   - **Deployment-context correctness (MANDATORY when `meta.graph_replayed` or
-     `meta.num_distinct_shapes > 1`).** Single-shape eager `check_correct_multi` does NOT
-     reproduce the path that actually faults on the live server: the op runs inside the server's
-     REPLAYED CUDA graph with buffers reused ACROSS interleaved shapes (chunked-prefill big-M ⇄ decode
-     M=1). A kernel that captures a wrong-layout scale pointer or a workspace sized to the first shape it
-     saw is only wrong on the SECOND, differently-shaped replay. So ALSO run:
-     - `h.check_correct_sequence(call, ordered_cases, tol)` — build `ordered_cases` from
-       `meta.call_sequence` (WITH repeats, in order; map each `sig` back to its reconstructed args +
-       oracle) to catch cross-call stale state from the real interleave.
-     - `h.check_graph_replay(fill, run, read_out, cases, tol, capture_idx=<the padded/decode shape>)`
-       when `meta.graph_replayed` — allocate the static input/output buffers ONCE at the capture shape,
-       supply `fill(case)` (copy into that storage, honoring recorded dtype/stride/**layout** — for a
-       swizzled scale, fill the swizzled buffer, not an un-swizzled one), `run()` (one graph-safe launch
-       on the static buffers), `read_out()`. This reproduces capture-once/replay-many; a candidate that
-       OOB-faults or returns stale data under replay FAILS here instead of crashing the server. Fold
-       both verdicts into the overall PASS/FAIL and print them per case. (Both no-op safely on an
-       eager-only image, so this never false-fails offline.)
-   - **Timing** via `h.time_op(call, warmup, repeats, inner=16, graph=h.deployment_graph_mode(meta["regime"]))`
-     — the AMORTIZED per-call timer, run in the DEPLOYMENT GRAPH CONTEXT. `h.deployment_graph_mode(regime)`
+   - **Deployment-context correctness — route ALL of the above through the fail-closed
+     `h.run_correctness(...)` entrypoint (MANDATORY; do NOT hand-call the individual checks).**
+     `run_correctness` runs the eager multi-case + random-parity legs AND, when
+     `h.deployment_graph_mode(meta["regime"])` is True (`regime.cuda_graph`, from the launch flags — the
+     AUTHORITATIVE deploy fact, **NOT** the fragile `meta.graph_replayed`, which CUDA-graph replay makes
+     unobservable and was often absent → the old gate silently never fired), it **REQUIRES a `replay`
+     bundle with ≥2 boundary shapes and FAILS CLOSED without one.** Rationale: the op runs inside the
+     server's REPLAYED CUDA graph with a static buffer reused ACROSS interleaved shapes (chunked-prefill
+     big-M ⇄ decode M=1); a kernel that OOB-writes / captures a wrong-layout scale pointer / sizes a
+     workspace to the first shape it saw is only wrong on a LATER differently-shaped replay — invisible
+     to eager checks, fatal e2e (the h2 paged_attention `0/320` fault). Call:
+     ```python
+     ok, report = h.run_correctness(
+         meta["regime"], eager_cases=eager_cases, baseline_call=baseline_call,
+         current_call=current_call, random_shapes=random_shapes, tol=tol,
+         draws=meta.get("random_draws", 3), replay=replay_bundle)   # replay_bundle REQUIRED if graph-deploy
+     ```
+     Build `replay_bundle` with **≥2 BOUNDARY shapes** (single-shape replay cannot expose static-buffer
+     reuse). For attention: ragged `seq_lens` from `h.boundary_decode_seq_lens(meta["geometry"], ISL+OSL)`
+     (spans block_size / partition_size boundaries + min/max) and a NON-contiguous paged layout from
+     `h.shuffled_block_table(...)`; capture on the LARGEST case (`capture_idx`) and `fill()` the
+     smaller/edge cases into the SAME static buffers (pad exactly as the server pads a decode batch).
+     For GEMM the ≥2 shapes are the existing family × M-buckets. Each case `ref` = the frozen
+     `baseline_call` on those inputs. `replay_bundle = {fill, run, read_out, cases, capture_idx}` (see the
+     `harness_lib.run_correctness` docstring for the closure contract). Also pass `ordered_cases` from
+     `meta.call_sequence` to `h.check_correct_sequence(call, ordered_cases, tol)` to catch cross-call
+     stale state from the real interleave. (All replay legs no-op safely on an eager-only image, so this
+     never false-fails offline — the e2e gate still catches it there.)
+   - **Timing** via `h.time_op(call, warmup, repeats, graph=h.deployment_graph_mode(meta["regime"]))`
+     — the CUDA-EVENT DEVICE-time timer (default `inner=1`), run in the DEPLOYMENT GRAPH CONTEXT. Device
+     time already EXCLUDES host launch/dispatch, so a candidate cannot win by collapsing dispatch and no
+     `inner` amortization is needed — leave `inner=1` unless the kernel runs sub-microsecond (near event
+     resolution), only then raise it. `h.deployment_graph_mode(regime)`
      returns True whenever the live server replays this op under a CUDA/HIP graph (the default; False only
      when the regime is enforce-eager / disable-cuda-graph). Pass the SAME `graph=` to BOTH baseline and
      current. **🔴 Never author an EAGER baseline (a bare loop, or `graph=False`) when the regime deploys
      under a graph** — that is the strawman that manufactures an isolated win a candidate collapsing launch
-     overhead cannot reproduce in the live graphed server. Time baseline-vs-current per case with the SAME
-     `time_op`. When `meta.workload` is present (see step 4b)
+     overhead cannot reproduce in the live graphed server.
+     **🔴 ENFORCE COMPILE PARITY the SAME way (the fusion analog of the graph strawman).** When the regime
+     deploys under `torch.compile` (`meta.regime.compile == "torch_compile"`, e.g. vLLM V1's default
+     backbone), an EAGER baseline omits the epilogue/cast fusion the live server already has — a candidate
+     then "wins" by adding fusion the compiled path already captured (isolated win, e2e loss). Wrap BOTH
+     legs symmetrically before timing: `base = h.compiled_op(BASELINE_FN, meta["regime"]); cand =
+     h.compiled_op(CANDIDATE_FN, meta["regime"])`, then `h.time_op(lambda: base(args), graph=...)` /
+     `h.time_op(lambda: cand(args), graph=...)`. `compiled_op` is a no-op (returns the fn unchanged) when
+     the regime is eager, so this is safe to apply always; if the regime IS compiled but compilation
+     raised, it records `._geak_compile_error` — surface that in `notes` rather than silently timing an
+     eager baseline. Time baseline-vs-current per case with the SAME `time_op` (same `graph=` and same
+     compile wrap on both).
+     > **Compile CORRECTNESS is handled for you inside `h.run_correctness`** — you do NOT wire anything
+     > extra (unlike the graph-replay bundle). When `h.deployment_compile_mode(regime)` is True it runs a
+     > `compile_parity` leg: compiled(candidate) vs eager(candidate). A numeric DRIFT beyond tol is a real
+     > correctness FAIL (matters for fusible ops — rmsnorm/rope/silu/act epilogues); for an opaque custom
+     > op the two match (cheap pass). A `compiled_op` BUILD error is a surfaced NON-FATAL note, NOT a
+     > reject (isolated bare-op fullgraph compile ≠ the server's whole-model compile, where an opaque op is
+     > not traced into) — and it is NOT a regenerate signal (nothing op-specific to author, so it differs
+     > from the graph-replay bundle). The e2e gate remains authoritative for compile behavior. When `meta.workload` is present (see step 4b)
      build one timing case per `meta.workload.cases[]` entry (own `dims`+`dtype` + the case's `quant`
      operands, in-regime — NOT bf16, random values; perf is value-independent). Print `per_case`
      `baseline_ms/optimized_ms/speedup`. If `meta.workload` is absent, fall back to timing the
@@ -243,13 +280,14 @@ freeze an out-of-regime oracle nobody should trust.
    > **🔴 TWO MANDATORY ANTI-EXPLOIT RULES (baked into `harness_lib`; do not bypass them by hand-rolling).**
    > These are the exact reasons a kernel scores a big isolated speedup that vanishes on integration:
    > - **(a) No launch-overhead theatre.** Do NOT time the launcher in a bare `for _ in range(N): fn();
-   >   sync()` loop. For decode shapes (small M) that wall clock is floored by PYTHON DISPATCH, not the
-   >   GEMM — a candidate then wraps the whole op in a `torch.cuda.CUDAGraph` + `graph.replay()` and
-   >   "wins" by collapsing a dispatch floor that in the LIVE server is ALREADY gone (decode runs inside
-   >   the server's own CUDA graph). `h.time_op` amortizes that floor across `inner` back-to-back
-   >   launches for BOTH legs, so the graph trick buys nothing. Always use it — and time in the DEPLOYMENT
-   >   graph context: pass `graph=h.deployment_graph_mode(meta["regime"])` so the baseline is measured
-   >   exactly where the live server runs it (graph replay), never as an eager strawman.
+   >   sync()` WALL-clock loop. For decode shapes (small M) that wall clock is floored by PYTHON DISPATCH,
+   >   not the GEMM — a candidate then wraps the whole op in a `torch.cuda.CUDAGraph` + `graph.replay()`
+   >   and "wins" by collapsing a dispatch floor that in the LIVE server is ALREADY gone (decode runs
+   >   inside the server's own CUDA graph). `h.time_op` scores CUDA-EVENT DEVICE time, which EXCLUDES host
+   >   dispatch for BOTH legs, so the graph trick buys nothing (that is why `inner=1` is fine — the
+   >   protection is the device-event measurement, not loop amortization). Always use it — and time in the
+   >   DEPLOYMENT graph context: pass `graph=h.deployment_graph_mode(meta["regime"])` so the baseline is
+   >   measured exactly where the live server runs it (graph replay), never as an eager strawman.
    > - **(b) Fresh output, always.** The launcher contract is `fn(args) -> FRESH out`. Returning a
    >   persistent/static `out` buffer (the graph-replay `static_out` shortcut) is a CHEAT that is only
    >   "correct" for the harness's call-then-read-immediately pattern and is WRONG for any batched
@@ -266,6 +304,23 @@ freeze an out-of-regime oracle nobody should trust.
    the REAL online kernel. If the baseline cannot be frozen/imported (the live op only exists fused in the
    compile graph), do NOT fall back to a `kernel_src/` strawman: return `editable:false` /
    `baseline_frozen:false` with a clear reason so the caller re-routes or drops it.
+   > **Exit-code contract — a missing replay leg is a UT DEFECT, not a kernel/smoke failure.** The UT
+   > routes correctness through `h.run_correctness(...)`, which for a graph-deploy kernel (`cuda_graph=true`)
+   > RAISES `h.HarnessIncompleteError` and prints a `UT_HARNESS_INCOMPLETE: …` line when no ≥2-shape replay
+   > bundle was wired. The generated `main()` MUST translate this to a DEDICATED exit code:
+   > ```python
+   > try:
+   >     ok, report = h.run_correctness(META["regime"], ...)      # eager+random+replay legs
+   > except h.HarnessIncompleteError as e:
+   >     print(f"{h.UT_HARNESS_INCOMPLETE_SENTINEL}: {e}"); sys.exit(3)   # 3 = regenerate UT
+   > sys.exit(0 if ok else 1)                                     # 1 = real correctness FAIL, 2 = env
+   > ```
+   > On smoke **exit 3 OR a `UT_HARNESS_INCOMPLETE` line on stdout: REGENERATE the UT** — add the replay
+   > bundle (build ≥2 boundary cases via `h.boundary_decode_seq_lens`/`h.shuffled_block_table` for attn, or
+   > the family×M-buckets for gemm; wire `fill/run/read_out`) and re-run the smoke. Retry up to 3 times.
+   > Do **NOT** record `unittest_smoke:"fail"` or drop the head for exit 3 — that status is reserved for a
+   > genuine baseline-bind / correctness failure (exit 1). Only after 3 failed regenerations set
+   > `unittest_smoke:"fail"` with `reason="harness_incomplete_unrecoverable"`.
 
 Return JSON:
 ```json
@@ -288,9 +343,10 @@ Return JSON:
 }
 ```
 **4b. Workload weighting (fold into `meta.json`, performance alignment).** If `PROFILE_WORKLOAD_JSON`
-is in your inputs (the profiler's per-kernel WEIGHT SIGNAL from `parse_profile.py --workload-out`),
-produce the weighted case set for THIS kernel by JOINING your `meta.json` shape cases with that weight
-signal — do NOT hand-slice or hand-weight it. The join is op_kind-aware and deterministic; run:
+is in your inputs (the profiler's per-kernel weight-PRIOR signal from `parse_profile.py --workload-out` —
+a PRE-MEASUREMENT prior; the immutable unittest self-weights by measured latency × analytic calls at
+runtime, step 4), produce the weighted case set for THIS kernel by JOINING your `meta.json` shape cases
+with that weight signal — do NOT hand-slice or hand-weight it. The join is op_kind-aware and deterministic; run:
 ```bash
 python3 "$SKILL_DIR/scripts/attribute_weights.py" \
   --meta "<task_dir>/meta.json" \
@@ -306,25 +362,30 @@ python3 "$SKILL_DIR/scripts/attribute_weights.py" \
 > if the kernel is a prefill `*_fwd_kernel` (or prefill wrapper) and a SEPARATE `*_decode_kernel` exists,
 > this kernel serves **`prefill`** only — pass `--served-regimes prefill`. The decode kernel is its own
 > extraction task with `--served-regimes decode`. Only pass `prefill,decode` when the SAME kernel truly
-> serves both (e.g. a unified attention/GEMM path with no separate decode kernel). Rationale: `--isl/--osl`
-> and `--min-regime-share 0.3` will otherwise SYNTHESIZE and FLOOR a decode regime onto a prefill-only
-> kernel (the window sees ~0 decode for it, so the correction/floor manufacture it), and the harness then
-> optimizes a decode win on the prefill kernel — isolated speedup, e2e regression. `--served-regimes`
+> serves both (e.g. a unified attention/GEMM path with no separate decode kernel). Rationale:
+> `--min-regime-share 0.3` would otherwise FLOOR a decode regime onto a prefill-only kernel (the window
+> sees ~0 decode for it), and the unittest's self-weight would then assign decode serving-calls to that
+> kernel's decode buckets — so the harness optimizes a decode win on the prefill kernel — isolated
+> speedup, e2e regression. `--served-regimes`
 > drops those unserved-regime cases so this cannot happen. Leaving it empty preserves the old (buggy for
 > split prefill/decode kernels) behavior, so it MUST be set for any op that has separate prefill/decode kernels.
 > **Binding↔shape consistency:** the `meta.baseline_callable`/wrapper you bind (step 4) must be the one
 > that launches the kernel for the served regime(s) — never bind a prefill wrapper for decode-shaped cases.
-> **🔴 PASS `--isl`/`--osl` (from `WORKLOAD`) — the profiling window is capped at ~40 forward steps
-> (`PROFILE_NUM_STEPS`), so at large OSL it captures only a sliver of decode while it sees the single
-> prefill pass in full. The raw per-case `weight` (= count × avg_us) therefore UNDER-counts decode and
-> gives a WRONG decode:prefill split (an inaccurate weight-share). `--isl/--osl` rescale each regime's
-> weight from the window to the full serving lifecycle (prefill = `ceil(isl/chunk)` passes, decode = `osl`
-> passes) using the well-measured per-call latency × the analytic call count. The chunked-prefill budget
-> is taken from `regime.prefill_chunk` (parsed by `parse_regime.py` from the launch script/server flags)
-> automatically; pass `--prefill-chunk <chunked_prefill_size>` to override. Default is one prefill pass over ISL.
-> This is the primary fix for the split; `--min-regime-share 0.3` remains as a coarse floor for the case
-> where even the corrected decode share is a zero-time capture artifact. The correction is a no-op if
-> `--isl/--osl` are omitted, so it never changes a run that doesn't pass them.
+> **🔴 PASS `--isl`/`--osl` (from `WORKLOAD`) — they carry the ANALYTIC SERVING CALL MODEL the
+> unittest self-weights with.** The profiling window is capped at ~40 forward steps (`PROFILE_NUM_STEPS`),
+> so at large OSL it sees only a sliver of decode while it catches the single prefill pass in full: the
+> window's decode:prefill split is biased, and for a shape-hidden kernel the profiler can't see the
+> intra-kernel split at all. So `attribute_weights.py` does **not** patch its `weight` with `--isl/--osl`
+> — instead it emits `serving_weight_model.analytic_calls` (prefill = `ceil(isl/chunk)`, decode = `osl`),
+> and the immutable unittest reconstructs the split by **self-weighting** each case with its OWN measured
+> baseline latency × these calls (`weight_i = baseline_ms_i × analytic_calls[regime_i]` — see the metric
+> rule in step 4). This is the fix for the split; the profile `weight` stays a cross-kernel-share prior +
+> fallback, never the split authority. Same-instrument weight-and-speedup is what makes the weighted
+> speedup equal the true lifecycle-time ratio — mixing the profile's window latency into it would not. The
+> chunked-prefill budget is taken from `regime.prefill_chunk` (parsed by `parse_regime.py` from the launch
+> script/server flags) automatically; pass `--prefill-chunk <chunked_prefill_size>` to override (default:
+> one prefill pass over ISL). `--min-regime-share 0.3` remains a coarse floor so a served regime the window
+> timed at ~0 is still benchmarked. Omitting `--isl/--osl` just skips the serving model (no split fix).
 Then **merge `workload.json` into `meta.json` under the `"workload"` key** (same pattern as the regime
 merge), so the immutable oracle is self-contained and `unittest.py` (step 4) reads `meta.workload.cases`
 to build its weighted TIMING cases + the time-weighted metric. Also return the path as `workload_path`
@@ -384,9 +445,11 @@ needs an op task dir the **Op Benchmarker** can bake-off across backends. `edit=
 > the dispatch count. A uniform `torch.randperm(E)[:top_k]` oracle flattens that skew and makes BOTH the
 > baseline denominator and every candidate score on an UNREAL load (root cause of the MiniMax-M3
 > fused_moe over/under-estimate). Therefore, for `op_kind=moe`:
-> - Set `GEMM_SYNTH=false` and `synthesized=false`. Capture the REAL `topk_ids`/`topk_weights` (and the
->   activation) from the live server via `capture_shapes.py` on the dispatcher seam, and write a
->   NON-EMPTY `reference_io.pt` / `reference_io_sha256`. Never fabricate routing.
+> - Do NOT take the GEMM-synth path even if the input `GEMM_SYNTH` is true — for `op_kind=moe` it does not
+>   apply (that flag gates only the `op_kind=gemm` value-independent synth above). Set `synthesized=false`
+>   in your returned meta, capture the REAL `topk_ids`/`topk_weights` (and the activation) from the live
+>   server via `capture_shapes.py` on the dispatcher seam, and write a NON-EMPTY `reference_io.pt` /
+>   `reference_io_sha256`. Never fabricate routing.
 > - If live capture cannot record routing for a regime (e.g. decode only appears under CUDA-graph, where
 >   snapshotting is illegal — `capture_shapes` records eager cases only), capture what you can eagerly
 >   (server warmup / a short enforce-eager window) and FLAG `notes` "routing not captured for regime X".
@@ -418,6 +481,7 @@ capturing anything, resolve the regime from the SERVER LAUNCH FLAGS + model conf
 python3 "$SKILL_DIR/scripts/parse_regime.py" \
   --server-args "$CURRENT_FLAGS" --model-config "$MODEL_PATH/config.json" \
   --server-script "$EVAL_DIR/launch_baseline.sh" \
+  --backend "$BACKEND" \
   --out "<task_dir>/regime.json"
 # then merge regime.json into meta.json under the "regime" key
 # (--server-script carries flags EXTRA_SERVER_ARGS omits, notably the chunked-prefill budget that
@@ -432,7 +496,8 @@ Then HONOR it:
   **fp8 KV layout/stride**. A bf16-hardcoded KV kernel reads fp8 bytes with the wrong stride → GPU fault
   → engine crash. This is non-negotiable for attention.
 - **Compile** (`regime.compile`): if `torch_compile`, the perf BASELINE is the COMPILED/fused path, not
-  unfused eager — record the baseline against the fused path or the speedup is a strawman.
+  unfused eager — wrap both legs with `h.compiled_op(fn, regime)` before timing (no-op when eager) or the
+  speedup is a strawman.
 Building the oracle in-regime is YOUR job here — there is no downstream "regime warning"/gate to fall
 back on. If the live seam genuinely cannot be reproduced in-regime offline (e.g. the op only exists
 fused inside the torch.compile graph, or routing-dependent MoE token counts), say so in `notes` and
@@ -529,13 +594,36 @@ force real compact-operand compute:
    `op_bench.py --task <dir> --backends hipblaslt --repeats 5` (gemm) so the harness is proven before
    the bake-off.
 6. **Report a `target_callable` rebind seam** (`module:attr`) — this is where the e2e Integrator rebinds
-   the op's call site to an AUTHORED kernel. **For dense GEMM on sglang/gfx942 there IS a clean seam:
-   the live path goes through aiter's `aiter.tuned_gemm:gemm_a16w16` (and `aiter.tuned_gemm.tgemm.mm`),
-   not raw `F.linear`** — so return `target_callable="aiter.tuned_gemm:gemm_a16w16"` (or the specific
-   sglang Linear method that calls it, whichever the Integrator can monkeypatch cleanly). Confirm by
-   grepping the server for `tuned_gemm`/`gemm_a16w16` on the live path. For attention, the seam is the
-   backend forward you captured. Only return `target_callable=""` if no Python seam genuinely exists
-   (then an authored kernel can't be wired and a direct_light env winner still applies).
+   the op's call site to an AUTHORED kernel. **For dense GEMM, DO NOT hardcode `aiter.tuned_gemm:gemm_a16w16`
+   — resolve the seam by dtype/arch/backend.** The live vLLM Linear reaches the OUTER dispatcher
+   `vllm.model_executor.layers.utils:rocm_unquantized_gemm_impl`, which itself routes to aiter tuned_gemm
+   (`tgemm.mm`, gfx950-only via `is_tgemm_enabled`), aiter triton (off when `is_fp8_fnuz()`, e.g. MI300),
+   skinny, or hipBLASLt. So on **gfx942/bf16 both aiter legs are gated off** → the live path is hipBLASLt,
+   and binding a candidate to `aiter.tuned_gemm:gemm_a16w16` rebinds a DEAD seam (`engagement_hits=0`,
+   `rebound=0`, e2e no-op — the observed h0 failure). Rebinding the OUTER leaf instead engages on ALL arch
+   and **SUBSUMES aiter tuned_gemm (does NOT remove it)** — on gfx950 the same leaf routes into aiter.
+   > This is the AUTHORED-kernel rebind seam only. It does **not** touch the aiter per-shape GEMM DB-tune
+   > lever (gradlib → `bf16_tuned_gemm.csv`): that is a separate Tier-A / config lever, probed independently
+   > by `op_bench._aiter_gemm` and deployed via env + tuned CSV — it stays available.
+   Resolve it deterministically:
+   ```bash
+   python3 "$SKILL_DIR/scripts/resolve_seam.py" \
+     --regime "<task_dir>/regime.json" --op-kind gemm \
+     --backend "$BACKEND" --gpu-arch "$GPU_ARCH" \
+     --out "<task_dir>/seam.json"
+   # -> {baseline_callable, target_callable, transpose_b, seam_confidence, seam_note, engagement_probe}
+   ```
+   Use `seam.json`'s `baseline_callable` / `target_callable` verbatim (the operand convention —
+   `transpose_b=true`, `B=[N,K]`, `out=A@Bᵀ` — is identical to the old aiter seam, so operands do NOT
+   change). Summary of what it returns: unquantized bf16/fp16 on ROCm →
+   `vllm.model_executor.layers.utils:rocm_unquantized_gemm_impl`; on CUDA → `torch.nn.functional:linear`;
+   fp8/quantized or non-vllm → `""` (resolve the live quant/backend apply seam by grepping the server —
+   never hardcode a gated seam). For attention, the seam is the backend forward you captured.
+   **Before authoring, prove engagement** (`seam.json.engagement_probe`): rebind the seam with a call
+   counter and run a few live forwards; `engagement_hits==0` means the seam is dead on this arch/dtype —
+   switch seam or skip the head, do NOT spend authoring budget. Only return `target_callable=""` if no
+   Python seam genuinely exists (then an authored kernel can't be wired and a direct_light env winner
+   still applies).
 
 > **Shapes must be the REAL ones the server issues — and they MUST span BOTH regimes.** A head GEMM
 > serves many M buckets: the **decode** regime at small M = the steady-state running batch (M ≈ `WORKLOAD.conc`,
