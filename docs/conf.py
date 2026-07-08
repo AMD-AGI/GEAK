@@ -21,7 +21,7 @@ html_theme_options = {
         "Infinity Hub": "https://www.amd.com/en/developer/resources/infinity-hub.html",
         "Support": "https://github.com/AMD-AGI/GEAK/issues/new/choose",
     },
-    "link_main_doc": False,
+    "link_main_doc": "https://advanced-micro-devices-demo--660.com.readthedocs.build/projects/hyperloom/en/660/",
 }
 
 # This section turns on/off article info
