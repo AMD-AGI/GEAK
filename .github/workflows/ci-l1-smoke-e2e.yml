@@ -57,6 +57,11 @@ jobs:
       # label path has no inputs).
       MODEL_KEY: ${{ github.event.inputs.model_key || 'Qwen-Qwen3-8B' }}
       BUDGET_S: ${{ github.event.inputs.budget_s || '57600' }}
+      # TEMPORARY: pin the run to the last 4 GPUs (ROCm indices 4-7) so the other
+      # 4 stay free for concurrent use on this box. run_local.sh maps this onto
+      # HIP/ROCR_VISIBLE_DEVICES for both the preflight probe and the real run.
+      # Remove (or set empty) to go back to using all 8 GPUs.
+      GEAK_GPUS: "6,7"
       # Claude auth for the container. Falls back to the baked default in
       # ci/claude_setup.sh when the secrets are absent (forward-compatible).
       LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
