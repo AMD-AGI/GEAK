@@ -25,7 +25,6 @@ JS-Workflow GPU optimizer; no pip package, no CLI). Only tested configurations a
 | Natural language → `Workflow` tool | Describe the task to Claude Code; it maps the prompt onto `Workflow({ scriptPath, args })` | Verified |
 | Direct `Workflow` call (e2e) | `scriptPath: "<repo>/e2e_workflow/e2e_workflow.js"` | Verified |
 | Direct `Workflow` call (single kernel) | `scriptPath: "<repo>/kernel_workflow/kernel_workflow.js"` | Verified |
-| Batch (many kernels) | `scriptPath: "<repo>/kernel_workflow/kernel_workflow_bmk.js"` | Verified |
 | External orchestrator (Hyperloom) | `python interface/run_e2e.py <handoff.json> <result.json>` | Verified |
 
 ---
