@@ -34,7 +34,7 @@ JS-Workflow GPU optimizer; no pip package, no CLI). Only tested configurations a
 
 | OS | Status |
 |---|---|
-| Linux (ROCm-supported distro) | Verified |
+| Ubuntu | Verified |
 
 ---
 
@@ -54,12 +54,9 @@ to the local `gfx` at build time.
 
 | Architecture | gfx target | Example cards | Status |
 |---|---|---|---|
-| CDNA3 | gfx942 | MI300X, MI300A, MI308X, MI325X | Verified |
-| CDNA4 | gfx950 | MI350X, MI355X | Verified |
-| CDNA2 | gfx90a | MI200 / MI250X | Reference (perf_knowledge) |
-| CDNA1 | gfx908 | MI100 | Reference (perf_knowledge) |
+| CDNA3 | gfx942 | MI300X, MI308X | Verified |
+| CDNA4 | gfx950 | MI355X | Verified |
 
-> Single-kernel results (12 HIP kernels) are measured on **MI300X (gfx942)**.
 
 ---
 
@@ -67,22 +64,23 @@ to the local `gfx` at build time.
 
 | Component | Version / Requirement | Status |
 |---|---|---|
-| ROCm | 6+ | Required |
+| ROCm | 7.2.x | Verified |
+| ROCm | 7.1.x | Verified |
+| ROCm | 7.0.x | Verified |
+| ROCm | 6.4.x | Verified |
 
 ---
 
 ## 7. Profilers
 
 The profiler is auto-detected via a degrade ladder
-(`PROFILER_PRIORITY="rocprof-compute omniperf rocprofv3 rocprof metrix"`).
+(`PROFILER_PRIORITY="rocprof-compute rocprofv3 rocprof"`).
 
 | Profiler | Status |
 |---|---|
 | `rocprof-compute` | Verified (preferred) |
-| `omniperf` | Verified |
 | `rocprofv3` | Verified |
 | `rocprof` | Verified |
-| `metrix` | Supported (`METRIX_ARGS`) |
 
 ---
 
