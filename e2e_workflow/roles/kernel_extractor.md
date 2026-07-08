@@ -34,15 +34,21 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
    grepping the `short_name`/`module:attr` target; never trust the hint blindly (it may point at a
    launcher/wrapper rather than the true defining file). If no hint, resolve as usual
    (`python3 -c "import sglang,os;print(os.path.dirname(sglang.__file__))"`, then grep the
-   `short_name` / the `module:attr` target). Confirm it's truly editable (Triton/custom/aiter) — if
-   it resolves to a library GEMM/attention (hipBLASLt/rocBLAS/CK/asm) whose op executes INSIDE a
-   monolithic kernel with no standalone Python call site, STOP and report `editable=false` with
-   `target_callable=""` — a source rewrite could not bind (no_rebind_seam), so it belongs to the config
-   tune-hook, not here. The orchestrator routes such a head to config on this exact signal, so be honest:
-   do NOT synthesize a standalone-GEMM proxy for a fused/library op just to make it look extractable.
-   **Honor the routing inputs when present:** if `INTEGRATION_LEVER=author-fused-replacement`, extract the
-   FUSED op (not its constituent standalone GEMMs) and set `target_callable` to `LIVE_CALL_SEAM` (the
-   fused dispatcher actually called at runtime) so the authored kernel binds at the live fused seam.
+   `short_name` / the `module:attr` target).
+   **OP-IDENTITY IS THE RULE: extract the op the LIVE kernel actually is, at the seam it is actually called
+   from — never a different op.** Two cases:
+   - **Standalone LIBRARY op** (a discrete hipBLASLt/rocBLAS `gemm(...)` / library attention whose only
+     call site is that library call, no editable body) → STOP, report `editable=false`, `target_callable=""`;
+     it belongs to the config/tune-hook track (per-shape DB tune / backend env), not a source rewrite. Do
+     NOT synthesize a standalone-GEMM proxy just to make it look extractable.
+   - **FUSED / monolithic op** (fused-MoE, grouped-expert GEMM, asm/CK fused kernel — arrives with
+     `op_kind=moe` and `GEMM_SYNTH=false`): **extract the FUSED op** (capture its live I/O oracle), NOT its
+     constituent standalone GEMMs. Set `target_callable` to `LIVE_CALL_SEAM` — the **dispatcher** actually
+     called at runtime (e.g. the vLLM `fused_moe`/`fused_experts` dispatcher), which is editable Python
+     EVEN WHEN the underlying kernel is a non-editable library/asm `.so`. That dispatcher seam is what lets
+     a fused op be BACKEND-SWAPPED (aiter/flydsl/triton fused) or AUTHOR-fused-replaced regardless of the
+     underlying kernel's editability. Report `editable=true` for this fused-op extraction (the seam is
+     rebindable). NEVER decompose it into a dense A·Bᵀ GEMM — that candidate has no live call site.
 2. **Capture shapes + oracle** from a live server using `scripts/capture_shapes.py` via a temporary
    capture overlay, driven by the SAME workload as the profile so shapes match the regime:
    ```bash

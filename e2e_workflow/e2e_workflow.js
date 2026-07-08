@@ -948,16 +948,31 @@ if (want('setup')) {
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
   headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
-  // A fused-MoE / grouped-expert GEMM STAYS in the head-kernel sequence (if its pct earns it — same
-  // Amdahl priority/budget as any head op), but it must NOT be decomposed into a dense-GEMM optimization:
-  // its ragged per-expert M + token routing make a dense A·Bᵀ bake-off the wrong target and the wrong
-  // rebind seam. Force its op_kind to `moe` so the head track takes the grouped-GEMM branch
-  // (extract editable source + optimize as `fused_moe_grouped_gemm`) instead of `extract_op` dense synth.
-  const _isMoe = (c) => /(?:^|[^a-z])moe(?:[^a-z]|$)|grouped_gemm|group_gemm|ck_moe|expert/i
-    .test(`${(c && c.op_kind) || ''} ${(c && c.short_name) || ''} ${(c && c.name) || ''} ${(c && c.classification) || ''}`);
-  let _moeTagged = 0;
-  for (const c of headQueue) { if (_isMoe(c) && c.op_kind !== 'moe') { c.op_kind = 'moe'; _moeTagged++; } }
-  if (_moeTagged) log(`[route-guard] ${_moeTagged} fused-MoE/grouped head op(s) kept in the head track but tagged op_kind=moe (grouped-GEMM branch, never dense-GEMM).`);
+  // OP-IDENTITY GUARD — the head must be optimized as the SAME op the live kernel dispatches (same
+  // signature + same rebind seam), so ANY lever (backend swap / per-shape tune / authored replacement)
+  // binds. The failure this prevents: a FUSED/monolithic kernel (fused-MoE, grouped-expert GEMM, an
+  // asm/CK library kernel) gets DECOMPOSED into its constituent standalone dense GEMMs and optimized as a
+  // dense A·Bᵀ — but the live kernel never dispatches those standalone GEMMs, so the candidate has no
+  // call site and dies at integration (no_rebind_seam / 0 engagement). This is orthogonal to
+  // editability: even a NON-editable library fused kernel can be BACKEND-SWAPPED at its dispatcher seam
+  // (e.g. re-route the vLLM fused_moe dispatcher onto aiter/flydsl/triton) — what must never happen is
+  // optimizing the WRONG op. So for a fused head we (a) force op_kind=`moe` → the grouped-GEMM branch,
+  // (b) FORBID dense-GEMM synthesis (GEMM_SYNTH off for it), and (c) preserve the live dispatcher seam as
+  // target_callable so the candidate binds where the kernel is actually called. The head STAYS in the
+  // optimization track (never skipped). GENERIC — keys on the Architect's is_fused_kernel + the profile
+  // class/backend + name, NEVER on a specific backend name.
+  const _isFusedOp = (c) => (c && c.is_fused_kernel === true) ||
+    /(?:^|[^a-z])moe(?:[^a-z]|$)|grouped[_ ]?gemm|group_gemm|ck_moe|expert|fused[_ ]?moe|fmoe|asm_moe|fused_custom/i
+      .test(`${(c && c.op_kind) || ''} ${(c && c.short_name) || ''} ${(c && c.name) || ''} ${(c && c.classification) || ''} ${(c && c.class) || ''} ${(c && c.backend) || ''}`);
+  let _fusedTagged = 0;
+  for (const c of headQueue) {
+    if (!_isFusedOp(c)) continue;
+    if (c.op_kind !== 'moe') c.op_kind = 'moe';        // grouped-GEMM branch, never dense synth
+    c._forbid_gemm_synth = true;                        // consumed at extract: pass GEMM_SYNTH=false for this head
+    if (!c.target_callable && c.live_call_seam) c.target_callable = c.live_call_seam;   // bind at the live dispatcher seam
+    _fusedTagged++;
+  }
+  if (_fusedTagged) log(`[op-identity] ${_fusedTagged} fused/monolithic head op(s): op_kind=moe, dense-GEMM synth FORBIDDEN, bound at the live seam — optimized as the fused op (backend-swap/tune/author-fused), never as standalone GEMMs.`);
   log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
 } else {
   // Load carried state from a prior phase invocation (args.state).
@@ -1033,34 +1048,19 @@ const flaggedHeads = (ST.flagged_heads || []).slice();   // dominant heads that 
 let headDispatched = 0;
 const history = ST.history || { insights: [], ledger: [], milestones: [], bottleneck_now: '', suggest_next: '' };
 
-// ---- Seam-reachability routing (consumes the System Architect's planning fields; see
-// roles/system_architect.md "Seam-reachability gate"). A GEMM/MoE head is only worth SOURCE-REWRITING if
-// the authored kernel can BIND to the op actually dispatched at runtime. A fused/asm/library kernel whose
-// constituent GEMMs execute INSIDE a monolithic kernel (e.g. an aiter fused-MoE / a hipBLASLt library
-// GEMM) has NO standalone call site to bind to — authoring a standalone replacement is un-integrable
-// (spends ~hours to produce a candidate that fails no_rebind_seam / 0 live engagement, observed on the
-// aiter-routed Mixtral MoE). Such a head's ONLY lever is the config/tune-hook the fused kernel itself
-// consumes (aiter tuned DB / AITER_CONFIG_* / a backend env), or an author-fused-REPLACEMENT bound at the
-// fused seam. This returns the route to take. GENERIC — it keys on the Architect's is_fused_kernel /
-// integration_lever, NEVER on a backend name. When those fields are absent (older strategies) it returns
-// 'author' → byte-identical to the previous behavior.
-//   'author' — a standalone/rewrite candidate can bind (standalone-gemm-swap, author-fused-replacement,
-//              or unmarked): take the normal extract → bake-off → author head track.
-//   'config' — no source-rewrite seam: route to the fused-op tune-hook / config lever; do NOT author.
-function headIntegrationRoute(h) {
-  const lever = String((h && h.integration_lever) || '').trim().toLowerCase();
-  const fused = !!(h && h.is_fused_kernel === true);
-  if (lever === 'fused-op-tune-hook' || lever === 'dense-linear-env-overlay') return 'config';
-  if (fused && lever !== 'author-fused-replacement') return 'config';   // fused, not authoring a fused replacement → un-rewritable
-  return 'author';
-}
+// GEMM-synth selector: the op-identity guard tags a fused/monolithic head with `_forbid_gemm_synth` so its
+// extractor NEVER decomposes it into a standalone dense GEMM (which would be un-integrable). Every head is
+// still optimized (backend-swap / tune / author-fused) — nothing is skipped on editability grounds; only
+// the OP the extractor builds is constrained to match the live kernel.
+function gemmSynthFor(h) { return (h && h._forbid_gemm_synth) ? 'false' : GEMM_SYNTH; }
 
 // ===========================================================================
 // PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized
 // regardless of edit flag, via the bake-off ladder. This is the lever the old
 // design missed for GEMM (~78% of GPU time). Runs BEFORE the editable-kernel loop.
-// A head whose only reachable lever is a config/tune-hook (headIntegrationRoute==='config') is NOT
-// source-rewritten here — it is flagged + recorded as a config direction (never silently dropped).
+// The op-identity guard (see Strategize) has already forced fused/monolithic heads to op_kind=moe with
+// dense-GEMM synth OFF + the live seam preserved, so each head is optimized AS the op the live kernel
+// dispatches (backend-swap / tune / author-fused) — never decomposed into an un-integrable dense GEMM.
 // ===========================================================================
 if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   phase('HeadKernel');
@@ -1100,19 +1100,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // ---- per-head prep: extract + bake-off + roofline + lane roster (cheap agents on GPU_LIST[0]) ----
     const GLOBAL_KB = `${EVAL_DIR}/deep_head/GLOBAL_KB.md`;
     const prepHead = async (h) => {
-      // Seam-reachability gate (same as the serial/fast tracks): a fused/library head with no source-
-      // rewrite seam gets no lanes — routed to the config tune-hook, flagged, never silently dropped.
-      if (headIntegrationRoute(h) === 'config') {
-        const lever = h.integration_lever || 'fused-op-tune-hook';
-        log(`  [deep] ${h.short_name}: fused/library head (lever=${lever}) — routed to config tune-hook, no source-rewrite lanes.`);
-        flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'planning', gate: 'routed_to_config',
-          is_fused_kernel: !!h.is_fused_kernel, integration_lever: lever, reason: `fused/library kernel — no live rebind seam; real lever is config tune-hook (${lever})` });
-        history.ledger.push({ direction: h.short_name, verdict: 'routed_to_config', lesson: `fused head → config lever ${lever} (lanes skipped)` });
-        return null;
-      }
       const ext = await safeAgent(
         roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
-          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH,
+          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
+          ...(h.live_call_seam ? { LIVE_CALL_SEAM: h.live_call_seam } : {}),
+          ...(h.integration_lever ? { INTEGRATION_LEVER: h.integration_lever } : {}),
           ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
           CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
           REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
@@ -1468,14 +1460,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // ---- opt-A: per-head extract + bake-off, parallel, exclusive 1-card lease each ----
     const prepared = await parallel(heads.map((h) => async () => {
       if (FAST_DEADLINE_HIT) return { h, dead: 'deadline' };
-      // Seam-reachability gate (same as the serial track): a fused/library head with no source-rewrite
-      // seam is not extracted/authored — routed to the config tune-hook instead.
-      if (headIntegrationRoute(h) === 'config') return { h, dead: 'config' };
       return ISO.with(1, async (g) => {
         const gpu = g[0];
         const ext = await safeAgent(
           roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
-            EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH,
+            EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
+            ...(h.live_call_seam ? { LIVE_CALL_SEAM: h.live_call_seam } : {}),
+            ...(h.integration_lever ? { INTEGRATION_LEVER: h.integration_lever } : {}),
             ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
             CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
             REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
@@ -1501,14 +1492,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (!p) continue;
       const h = p.h;
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
-      if (p.dead === 'deadline') { log(`  [fast-mode] ${h.short_name}: skipped (dispatch deadline).`); continue; }
-      if (p.dead === 'config') {
-        const lever = h.integration_lever || 'fused-op-tune-hook';
-        log(`  [fast-mode] ${h.short_name}: fused/library head (lever=${lever}) — routed to config tune-hook, NOT authored (no source-rewrite seam).`);
-        flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'planning', gate: 'routed_to_config',
-          is_fused_kernel: !!h.is_fused_kernel, integration_lever: lever, reason: `fused/library kernel — no live rebind seam; real lever is config tune-hook (${lever})` });
-        history.ledger.push({ direction: h.short_name, verdict: 'routed_to_config', lesson: `fused head → config lever ${lever} (author skipped)` });
-        continue;
+      if (p.dead === 'deadline') { log(`  [fast-mode] ${h.short_name}: skipped (dispatch deadline).`); continue;
       }
       if (p.dead === 'extract' || !p.ext || !p.ext.task_dir) {
         const why = p.ext ? p.ext.notes || p.ext.smoke : 'none';
@@ -1672,23 +1656,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       break;
     }
     headDispatched++;
-    // (h0) Seam-reachability gate — do NOT extract+author a fused/library head that has no source-rewrite
-    // seam; its only lever is the config tune-hook. Skipping here avoids the ~hours wasted authoring an
-    // un-integrable standalone candidate (no_rebind_seam). Dominant heads are FLAGGED, never dropped.
-    if (headIntegrationRoute(h) === 'config') {
-      const lever = h.integration_lever || 'fused-op-tune-hook';
-      log(`  ${h.short_name}: fused/library head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU, lever=${lever}) — no source-rewrite seam; routing to config tune-hook, NOT authoring (would be un-integrable).`);
-      flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'planning',
-        gate: 'routed_to_config', is_fused_kernel: !!h.is_fused_kernel, integration_lever: lever,
-        live_call_seam: h.live_call_seam || '', engagement_check: h.engagement_check || '',
-        reason: `fused/library kernel — source rewrite has no live rebind seam; real lever is the config tune-hook (${lever})` });
-      history.ledger.push({ direction: h.short_name, verdict: 'routed_to_config', lesson: `fused head → config lever ${lever} (no source-rewrite seam; author skipped to avoid no_rebind_seam)` });
-      continue;
-    }
-    // (h1) Extract the op into a standalone immutable unittest (GEMM synth / attn capture).
+    // (h1) Extract the op into a standalone immutable unittest. The op-identity guard already forced a
+    // fused/monolithic head to op_kind=moe with GEMM_SYNTH off (gemmSynthFor) so it is extracted as the
+    // fused op bound at its live seam — never decomposed into a standalone dense GEMM. Nothing is skipped.
     const ext = await safeAgent(
       roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH,
+        EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
         // For an author-fused-replacement head, bind the authored kernel at the LIVE fused seam (never a
         // stale standalone/dense seam) so it is integrable; pass the Architect's live_call_seam through.
         ...(h.live_call_seam ? { LIVE_CALL_SEAM: h.live_call_seam } : {}),
@@ -1717,20 +1690,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
       continue;
     }
-    // (h1b) Second seam backstop — honor the Extractor's OWN honest signal: if it reports the op is not
-    // editable AND gave no rebind seam (its contract: a library GEMM/attention → editable=false), then a
-    // source rewrite cannot bind (no_rebind_seam). Route to config + flag instead of authoring. Catches
-    // the case where the Architect did not mark is_fused_kernel. Only fires on an EXPLICIT editable=false
-    // (undefined/true → unchanged behavior), so it never blocks a genuinely rewritable head.
-    if (ext.editable === false && !(ext.target_callable && String(ext.target_callable).trim())) {
-      log(`  ${h.short_name}: extractor reports non-editable / no rebind seam — routing to config, NOT authoring (would be un-integrable).`);
-      flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'planning', gate: 'routed_to_config',
-        is_fused_kernel: !!h.is_fused_kernel, integration_lever: h.integration_lever || 'config-tune-hook',
-        reason: 'extractor: non-editable library op, no live rebind seam — source rewrite un-integrable; use config/tune-hook lever' });
-      history.ledger.push({ direction: h.short_name, verdict: 'routed_to_config', lesson: 'extractor editable=false, no seam → config lever (author skipped)' });
-      continue;
-    }
-
     // (h2) DISCOVER existing impls + tune cheap levers + DECIDE an author_plan.
     const bake = await safeAgent(
       roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {

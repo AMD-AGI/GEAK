@@ -1,49 +1,52 @@
-# Planning: enforce seam-reachability (stop authoring un-integrable fused/library heads)
+# Planning: op-identity fidelity (optimize the op the LIVE kernel actually is)
 
 ## Problem
-When the Config sweep swaps a hot op onto a **library/fused backend** (e.g. aiter fused-MoE → CK
-`kernel_moe_gemm_2lds`, or a hipBLASLt GEMM), the re-profile makes those **non-editable library kernels**
-the top heads. The System Architect then nominated them as **source-rewrite heads**, so the kernel layer
-spent ~hours authoring a standalone/dense replacement that has **no live call site to bind to** →
-every candidate failed `no_rebind_seam` / 0 live engagement. Observed on the aiter-routed Mixtral MoE
-(the profiler correctly marked them `class=library_gemm, edit=N`, but nothing acted on it).
+Planning must dispatch a task that MATCHES the real running kernel. The failure: a **fused / monolithic
+kernel** (fused-MoE, grouped-expert GEMM, an aiter/CK/asm library kernel) was DECOMPOSED into its
+constituent standalone **dense GEMMs** and optimized as a dense `A·Bᵀ`. But the live kernel never
+dispatches those standalone GEMMs, so the candidate has **no live call site** and dies at integration
+(`no_rebind_seam` / 0 engagement) — ~hours wasted. Observed on both the aiter-routed CK MoE and the
+Triton `fused_moe_kernel`.
 
-An earlier commit (`858e1ea4`) added the **planning contract** to `roles/system_architect.md`
-(`is_fused_kernel`, `live_call_seam`, `integration_lever`, `engagement_check`) — but **no code consumed
-those fields**, so the LLM emitted them and the orchestrator ignored them.
+This is **NOT about editability.** A non-editable library fused kernel can still be **backend-swapped** at
+its dispatcher seam (the vLLM `fused_moe`/`fused_experts` dispatcher is editable Python even when the
+underlying kernel is a `.so`). The one rule: **optimize the op the live kernel actually is, at the seam it
+is actually called from** — never a different op.
 
-## Fix (this change) — wire the code to consume the planning contract. Generic, no backend names.
+## Earlier (wrong) attempt — corrected here
+A prior version added a `headIntegrationRoute` gate that **routed fused heads to config and SKIPPED
+optimization** (only a tune-hook). Too blunt — it gave up on the biggest lever (a 40–77% GPU fused MoE)
+instead of trying other backends. **Removed.**
 
-1. **`headIntegrationRoute(h)`** (e2e_workflow.js): returns `'config'` for a head whose only lever is a
-   config/tune-hook — `integration_lever ∈ {fused-op-tune-hook, dense-linear-env-overlay}`, or
-   `is_fused_kernel && integration_lever !== 'author-fused-replacement'`. Otherwise `'author'`. Keys ONLY
-   on the Architect's flags, never on a backend name. Absent fields → `'author'` (byte-identical to before).
+## Fix (this change) — op-identity guard. Generic, no backend names.
+1. **`_isFusedOp(c)`** (Strategize route-guard): a head is fused/monolithic if the Architect marked
+   `is_fused_kernel`, OR the profile class/backend/name matches a fused/grouped/expert/MoE/`fused_custom`
+   signature. For every such head:
+   - force `op_kind = 'moe'` → the grouped-GEMM branch (never the dense-GEMM ladder),
+   - set `_forbid_gemm_synth` → the extractor gets `GEMM_SYNTH=false` (no dense decomposition),
+   - preserve the live dispatcher seam as `target_callable`.
+   The head **stays in the optimization track** — nothing is skipped on editability grounds.
+2. **`gemmSynthFor(h)`** threads that per-head flag into all 3 head loops' `extract_op` calls.
+3. **Removed** the `headIntegrationRoute` skip-gates (3 loops) and the `editable=false` skip backstop — a
+   non-editable head is no longer skipped; it is optimized via backend-swap at the dispatcher seam.
+4. **Roles:**
+   - `kernel_extractor.md` — op-identity rule: a standalone LIBRARY op → STOP (config); a FUSED op →
+     extract the FUSED op, bind `target_callable` to `LIVE_CALL_SEAM` (the editable dispatcher), report
+     `editable=true` (rebindable). Never a dense-GEMM proxy for a fused op.
+   - `op_benchmarker.md` — for a fused op, **try other fused BACKENDS first** (aiter fused-MoE / live
+     Triton / flydsl fused), then author a fused replacement; match the candidate signature to the
+     dispatcher; a non-editable underlying kernel is a reason to prefer backend-swap, not to skip.
+   - `system_architect.md` — the seam-reachability contract (`is_fused_kernel`/`live_call_seam`/
+     `integration_lever`/`engagement_check`) that feeds `_isFusedOp` (from 858e1ea4).
+5. **Engagement pre-gate** (kept): the Integrator verifies `ENGAGEMENT_CHECK` on the candidate server BEFORE
+   the timed A/B, so any residual signature/seam mismatch dies in minutes, not hours.
 
-2. **Seam gate in all 3 head loops** (default serial, fast-parallel, deep): a `'config'`-routed head is
-   **flagged + recorded as a config direction and its source-author is skipped** (dominant heads are never
-   silently dropped). This removes the ~hours wasted on `no_rebind_seam`.
+## Effect
+- Fused MoE (Triton OR aiter/CK) → optimized AS a fused op: backend-swap / tune / author-fused-replacement,
+  all bound at the live dispatcher → integrable. No more dense-GEMM `no_rebind_seam` waste, and the fused
+  head is **no longer skipped**.
+- Real standalone dense GEMMs (qkv/o/lm_head) and attention kernels are unaffected (detection is precise).
 
-3. **Second backstop (default loop)**: honor the Extractor's own honest signal — if it reports
-   `editable=false` with no `target_callable`, route to config too (catches the case where the Architect
-   missed `is_fused_kernel`). Fires only on an EXPLICIT `editable===false`.
-
-4. **Engagement pre-gate**: `live_call_seam` + `engagement_check` are threaded into the integrate inputs;
-   `roles/e2e_integrator.md` now verifies the `ENGAGEMENT_CHECK` assertion **before** the timed A/B and
-   rejects `no_engagement`/`no_rebind_seam` in minutes if the overlay never bound — the catch-all for when
-   an authored candidate slips through the planning gate.
-
-5. **`author-fused-replacement` path**: `LIVE_CALL_SEAM`/`INTEGRATION_LEVER` are passed to the extractor;
-   `roles/kernel_extractor.md` now: (a) reports `editable=false, target_callable=""` for a fused/library op
-   instead of synthesizing a standalone-GEMM proxy, and (b) for `author-fused-replacement`, extracts the
-   FUSED op and binds `target_callable` to `LIVE_CALL_SEAM` so the authored kernel is integrable.
-
-## Defense in depth
-Architect flag (1) → Extractor honest signal (3) → Integrator engagement pre-gate (4). A fused/library
-head is caught at planning (no wasted author); if it slips through, it dies in minutes at the pre-gate,
-not hours at a full A/B.
-
-## Backward-compat
-Every gate is a no-op when the new fields are absent / `editable` is not explicitly false → a strategy
-that doesn't emit the planning contract behaves exactly as before. No `node` in this env; delimiter
-balance verified and `headIntegrationRoute` unit-checked — run `node --check e2e_workflow/e2e_workflow.js`
-before merge.
+## Backward-compat / safety
+Non-fused heads: byte-identical behavior. Delimiter balance verified; `_isFusedOp`/`gemmSynthFor`
+unit-checked. No `node` in this env — run `node --check e2e_workflow/e2e_workflow.js` before merge.
