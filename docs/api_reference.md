@@ -267,8 +267,8 @@ Stable **handoff.json** fields: `model_path`, `framework` (→ `backend`), `tp`,
 `workload{isl, osl, conc}`, `accepted_flags` / `env`, `exp_root`, `bench_client`, `bench_protocol`,
 `inferencex_path`, `raw_baseline_tput`.
 
-Env knobs: `PERFSKILLS_CLAUDE_MODEL` (`claude-opus-4-8`), `PERFSKILLS_CLAUDE_EFFORT` (`ultracode`),
-`PERFSKILLS_E2E_TIMEOUT_S` (`43200` = 12h), `PERFSKILLS_ROOT`, `PERFSKILLS_EVAL_DIR`, `INFERENCEX_PATH`.
+Env knobs: `GEAK_CLAUDE_MODEL` (`claude-opus-4-8`), `GEAK_CLAUDE_EFFORT` (`ultracode`),
+`GEAK_E2E_TIMEOUT_S` (`43200` = 12h), `GEAK_ROOT`, `GEAK_EVAL_DIR`, `INFERENCEX_PATH`.
 See [`interface/run_e2e.md`](../interface/run_e2e.md) for the full contract.
 
 ---
