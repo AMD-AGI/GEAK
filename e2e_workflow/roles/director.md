@@ -78,7 +78,7 @@ Steps:
    Every later e2e measurement (sweep, integrate, validate) MUST match this exact `TP=SERVING_TP
    GPU=SERVING_GPU` config, or deltas are meaningless.
    **Seed config**: if `INIT_FLAGS`/`INIT_ENV` are given (the caller's already-searched best config),
-   the baseline MUST be measured ON them (pass `EXTRA_SERVER_ARGS`/`EXTRA_ENV`), so PerfSkills' baseline
+   the baseline MUST be measured ON them (pass `EXTRA_SERVER_ARGS`/`EXTRA_ENV`), so GEAK's baseline
    == the caller's best config and later kernel gains compound on top of it. Use the copied bench script
    (substitute the actual SERVING_TP / SERVING_GPU values from your inputs):
    ```bash
@@ -136,7 +136,7 @@ TRUE baseline with the tight 2-block protocol and decide if the COMBINED result 
    overlay + flags), each `E2E_REPEATS` (default 7) timed repeats on ONE server:
    The TRUE-baseline block MUST reproduce the seed config the baseline was measured on (the caller's
    best config = the recorded `baseline` flags/env, i.e. the same `INIT_FLAGS`/`INIT_ENV`) — NOT
-   `FINAL_FLAGS` minus PerfSkills' kernel wins. Use the same `TP=SERVING_TP GPU=SERVING_GPU` as setup.
+   `FINAL_FLAGS` minus GEAK's kernel wins. Use the same `TP=SERVING_TP GPU=SERVING_GPU` as setup.
    ```bash
    # fresh TRUE-baseline block (baseline seed flags/env, NO kernel overlay) — re-measured NOW for drift.
    # Serving config MUST be the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).

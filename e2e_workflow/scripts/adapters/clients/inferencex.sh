@@ -6,7 +6,7 @@
 # benchmark is driven by the EXACT same client Hyperloom uses: InferenceX's
 # utils/bench_serving/benchmark_serving.py (OpenAI-compatible --backend vllm),
 # with the same dataset / warmups / percentile metrics. That removes the
-# "different bench client" residual when comparing PerfSkills numbers to a
+# "different bench client" residual when comparing GEAK numbers to a
 # Hyperloom Magpie baseline.
 #
 # Enable with:  BENCH_CLIENT=inferencex  (bench_e2e.sh sources this and preserves
