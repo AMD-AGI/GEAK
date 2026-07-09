@@ -23,7 +23,9 @@ Output (json):
             "block_size": [..]|null, "source": "flag|model_config|none"},
   "kv_cache_dtype": "fp8|bf16|auto",
   "compile": "torch_compile|eager",      # the baseline-relevant fusion state
-  "enforce_eager": true|false,           # --enforce-eager / --disable-cuda-graph: eager (strawman) baseline
+  "enforce_eager": true|false,           # --enforce-eager / --disable-cuda-graph: deployment runs EAGER
+                                         # (eager is the faithful baseline ONLY under this flag; otherwise
+                                         # decode replays under a CUDA/HIP graph — see deployment_graph_mode)
   "cuda_graph": true|false,
   "attention_backend": "<str>|''",
   "prefill_chunk": <int>|null,           # chunked-prefill token budget (chunked-prefill-size /
@@ -211,15 +213,18 @@ def parse_regime(server_args, model_config_path="", server_script="", backend=""
         kv = "auto"
         notes.append("kv-cache-dtype=auto -> follows model compute dtype (usually bf16); confirm if fp8 desired.")
 
-    # ---- enforce-eager: the STRAWMAN-baseline flag. vllm's --enforce-eager disables BOTH cuda graphs
-    # and compilation; sglang's equivalent is --disable-cuda-graph. When set, the online baseline runs
-    # every forward pass eagerly, so launch/dispatch overhead is unmasked and an e2e A/B over-credits
-    # launch-overhead kernels (isolated win, e2e loss). Computed BEFORE compile because it gates it. ----
+    # ---- enforce-eager: the flag that makes the DEPLOYMENT run eager. vllm's --enforce-eager disables
+    # BOTH cuda graphs and compilation; sglang's equivalent is --disable-cuda-graph. This is the ONLY
+    # condition under which eager is the faithful timing context — when set, the online server genuinely
+    # runs every forward pass eagerly, so an eager baseline matches deployment (deployment_graph_mode
+    # returns eager). When NOT set, decode replays under a CUDA/HIP graph, so an EAGER isolated baseline
+    # would be the strawman (isolated launch-overhead win, e2e loss) — which the harness prevents by
+    # timing both legs under the graph. Computed BEFORE compile because it gates it. ----
     enforce_eager = bool(flags.get("enforce-eager") or flags.get("enforce_eager")
                          or flags.get("disable-cuda-graph") or flags.get("disable_cuda_graph"))
     if enforce_eager:
-        notes.append("enforce-eager/disable-cuda-graph set: the online baseline runs eagerly (no "
-                     "graph replay); an e2e A/B on it is a strawman for launch-overhead kernels.")
+        notes.append("enforce-eager/disable-cuda-graph set: the deployment runs eagerly (no graph "
+                     "replay), so eager IS the faithful baseline for this regime — NOT a strawman.")
 
     # ---- compile / fusion state (the baseline-relevant axis) ----
     # Explicit opt-in flags always win. Otherwise vLLM V1 compiles the backbone BY DEFAULT (opt-OUT via

@@ -816,14 +816,13 @@ def _regime_warnings(regime, op_kind, entries, live_pct, live_pct_min, notes):
         warns.append("online kv-cache-dtype=fp8: the attention oracle + kernel MUST use the fp8 KV "
                      "layout/stride, else a bf16-stride read over fp8 bytes faults. Verify the captured "
                      "KV dtype matches.")
-    # (3) compile/graph baseline: if the online server fuses via torch.compile OR replays decode under a
-    #     CUDA/HIP graph, an unfused/eager perf baseline is a strawman — the speedup won't survive e2e.
-    #     enforce-eager is the explicit strawman flag; torch.compile fusion is the same trap for norm/
-    #     elementwise ops whose gain comes from fusion the compiled path already has.
-    if (regime or {}).get("enforce_eager"):
-        warns.append("online baseline is enforce-eager/disable-cuda-graph: launch-overhead savings look "
-                     "large here but vanish once decode replays under a graph. Any e2e speedup measured "
-                     "against this baseline is a strawman — re-baseline with graphs/compile enabled.")
+    # (3) compile-fusion baseline: if the online server fuses via torch.compile, an unfused/eager perf
+    #     baseline is a strawman — the candidate "wins" by adding fusion the compiled path already has and
+    #     the gain won't survive e2e (the trap for norm/elementwise ops whose gain comes from fusion).
+    #     NOTE the CUDA/HIP-GRAPH axis is NOT a strawman flag here: eager is the faithful baseline ONLY
+    #     when the regime is EXPLICITLY enforce-eager; otherwise decode replays under a graph and the
+    #     harness already times BOTH legs under it (deployment_graph_mode, see harness_lib). So an
+    #     enforce-eager regime must NOT be warned about — under it, eager IS the live deployment context.
     if (regime or {}).get("compile") == "torch_compile" and op_kind in ("norm", "reduction_norm", "elementwise", "rmsnorm", ""):
         warns.append("online uses torch.compile fusion: the perf baseline must be the COMPILED/fused "
                      "path, not unfused eager, or the speedup is a strawman.")

@@ -299,11 +299,17 @@ class TestQuantStamping(unittest.TestCase):
             {"quant": {"method": "fp8"}}, "gemm", [{"pct_gpu_time": 30.0}], 30.0, 2.0, [])
         self.assertNotIn("probably NOT the live kernel", w2)
 
-    def test_enforce_eager_strawman_flagged(self):
+    def test_enforce_eager_not_flagged_as_strawman(self):
+        # eager is used ONLY when the online regime is EXPLICITLY enforce-eager — and then eager IS the
+        # faithful deployment context, NOT a strawman. So an enforce-eager regime must produce no warning
+        # (consistent with deployment_graph_mode returning eager for it). The strawman is the OPPOSITE
+        # case (eager baseline while the deployment replays under a graph), which is structurally
+        # prevented by deployment_graph_mode, so there is nothing to warn about here.
         notes = []
         w = attribute_weights._regime_warnings(
             {"enforce_eager": True}, "gemm", [{"pct_gpu_time": 30.0}], 30.0, 2.0, notes)
-        self.assertIn("strawman", w)
+        self.assertNotIn("strawman", w)
+        self.assertEqual(w, "")
 
     def test_compile_strawman_flagged_for_norm(self):
         w = attribute_weights._regime_warnings(
