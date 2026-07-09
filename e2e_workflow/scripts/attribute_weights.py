@@ -62,6 +62,25 @@ def _field(name, key):
     return int(m.group(1)) if m else None
 
 
+def served_from_profile(entries):
+    """Serving phase(s) MEASURED from the trace, via parse_profile's per-kernel `served_regimes` /
+    per-case `regime` (populated from the trace's gpu_user_annotation step spans). Union across the
+    matched profile entries. Empty when the profile predates phase accounting (older trace / no
+    annotations) -> caller falls back to the extractor's --served-regimes. This makes the kernel->
+    regime gate DATA-DRIVEN (from the trace) instead of a hand-set flag; the extractor can still
+    override by passing --served-regimes explicitly."""
+    srv = set()
+    for k in entries or []:
+        for r in (k.get("served_regimes") or []):
+            if str(r).strip():
+                srv.add(str(r).strip().lower())
+        for c in (k.get("cases") or []):
+            r = str(c.get("regime") or "").strip().lower()
+            if r:
+                srv.add(r)
+    return srv
+
+
 # --------------------------------------------------------------------------- #
 # SERVING-LIFECYCLE CALL-COUNT MODEL (consumed by the unittest's self-weighting, NOT applied to `weight`)
 # --------------------------------------------------------------------------- #
@@ -72,25 +91,41 @@ def _field(name, key):
 # self-weight and mixed instruments), but to hand the immutable unittest the analytic per-regime call
 # count so it can compute weight_i = MEASURED baseline_ms_i × calls(regime_i) itself. This function
 # provides exactly that call model; it is surfaced in `serving_weight_model` and never mutates `weight`.
-def estimate_serving_regime_calls(isl, osl, prefill_chunk=None):
-    """Analytic per-request forward-pass counts per regime for a steady-state serving run — the
-    denominator the short profiling window cannot observe. Per request:
-      prefill: ceil(isl / chunk) forward passes (chunk = chunked-prefill token budget; default = isl,
-               i.e. a single prefill pass over the whole prompt).
-      decode : osl forward passes (one emitted token per step).
-    The batched GEMM/attn kernel fires once per forward pass, so these ARE the per-regime call counts.
-    Concurrency scales BOTH regimes equally, so it cancels in the decode:prefill ratio (not needed here).
-    Returns {'prefill': int, 'decode': int}, or {} when isl/osl are missing/non-numeric."""
+def estimate_serving_regime_calls(isl, osl, conc=1, prefill_chunk=None, served=None):
+    """Analytic per-*wave* forward-pass counts per regime for a steady-state serving run at concurrency
+    CONC — the denominator the short profiling window cannot observe (it under-samples decode). CONC
+    enters the two regimes through DIFFERENT channels, which is exactly why it does NOT cancel (the old
+    'concurrency cancels' assumption silently UNDER-COUNTED prefill by ~CONC):
+      prefill: each of the CONC concurrent requests is prefilled separately at M=chunk, ceil(isl/chunk)
+               passes each -> calls = CONC * ceil(isl / chunk). CONC is in the launch COUNT.
+      decode : one decode step batches all CONC requests into the SHAPE (M=CONC) and there are OSL
+               steps -> calls = OSL. CONC is in the launch SHAPE, not the count.
+    So calls_prefill scales with CONC while calls_decode carries CONC in M — they are on the SAME
+    per-wave basis only after this ×CONC on prefill. The batched GEMM/attn kernel fires once per
+    forward pass, so these ARE the per-regime call counts (a per-kernel firing factor — MoE per-layer,
+    MTP extra passes — is applied by the unittest self-weight, not here).
+
+    `served`, when given (a set/iterable of regime names this kernel actually runs in), ZEROES any
+    regime the kernel does not serve, so a stray decode case that leaked into a prefill-only kernel's
+    oracle cannot be weighted onto it (defense-in-depth for the --served-regimes gate).
+
+    Returns {'prefill': int, 'decode': int}, or {} when isl/osl are missing/non-numeric.
+    CONC defaults to 1 (per-request) so callers that omit it are byte-compatible with the old behavior."""
     try:
         isl = int(isl) if isl is not None else 0
         osl = int(osl) if osl is not None else 0
+        conc = max(1, int(conc) if conc is not None else 1)
     except (TypeError, ValueError):
         return {}
     if isl <= 0 and osl <= 0:
         return {}
     chunk = int(prefill_chunk) if prefill_chunk else isl
     chunk = max(1, chunk)
-    return {"prefill": math.ceil(isl / chunk) if isl > 0 else 0, "decode": max(0, osl)}
+    calls = {"prefill": conc * math.ceil(isl / chunk) if isl > 0 else 0, "decode": max(0, osl)}
+    if served is not None:
+        srv = {str(r).strip().lower() for r in served if str(r).strip()}
+        calls = {r: (c if r in srv else 0) for r, c in calls.items()}
+    return calls
 
 
 # --------------------------------------------------------------------------- #
@@ -262,23 +297,19 @@ def _norm_meta_cases(meta):
 
 
 def _members_split(members):
-    """Fractions to split a regime's MEASURED total time across its member cases. Returns
-    (fractions, used_count).
+    """Fractions to split a regime's MEASURED total time across its member cases, BY SIZE ONLY.
+    Returns (fractions, used_count=False).
 
-    Prefer observed capture CALL COUNT × size (time ~ count × per-call FLOPs) when the capture recorded
-    counts — a strictly better prior than size alone, which assumes every case was called exactly once.
-    A case present in meta but with count 0 (e.g. injected from config, not seen in the short capture
-    window) is floored to 1 so it still gets a size-proportional sliver rather than being zeroed by a
-    capture-window artifact. Falls back to size, then even. `used_count=True` lets the caller label the
-    resulting weights `count_prior` (counts ≠ time, so this is still a PRIOR that never overrides a
-    measured per-shape `trace`)."""
+    The profile-observed capture CALL COUNT is deliberately NOT used here anymore. The short /
+    graph-hidden profiling window systematically UNDER-SAMPLES decode steps (it does not capture all
+    OSL of them), so weighting buckets by observed counts re-introduces exactly the decode under-count
+    the analytic serving model exists to remove — and the agreed contract is that per-regime call
+    counts must be ESTIMATED (analytic, in the unittest self-weight), never read from the trace. This
+    function therefore only distributes a regime's MEASURED TIME across its buckets by a size prior;
+    it never lets `count` touch a weight. (`_count_time_crosscheck` still surfaces the count-vs-time
+    divergence as a note.) `used_count` is always False so the caller never labels a weight
+    `count_prior`."""
     sizes = [m["size"] for m in members]
-    counts = [int(m.get("count") or 0) for m in members]
-    if any(c > 0 for c in counts):
-        w = [max(c, 1) * s for c, s in zip(counts, sizes)]
-        wsum = sum(w)
-        if wsum > 0:
-            return [(m, wi / wsum) for m, wi in zip(members, w)], True
     ssum = sum(sizes)
     if ssum <= 0:
         return [(m, 1.0 / len(members)) for m in members], False
@@ -517,6 +548,19 @@ def main():
     ap.add_argument("--osl", type=int, default=None,
                     help="output seq len (tokens generated per request) = the true decode forward-pass "
                          "count. Feeds serving_weight_model (needs --isl to take effect).")
+    ap.add_argument("--conc", type=int, default=1,
+                    help="serving concurrency (max in-flight requests). Enters the analytic call model "
+                         "ASYMMETRICALLY: prefill calls = CONC*ceil(isl/chunk) (CONC in the launch "
+                         "COUNT — each concurrent request is prefilled separately), decode calls = osl "
+                         "(CONC is already in the decode SHAPE M=CONC). Omitting it (=1) reproduces the "
+                         "old per-request behavior that UNDER-COUNTED prefill by ~CONC.")
+    ap.add_argument("--ttft-ms", type=float, default=None,
+                    help="measured baseline TTFT (ms) from the serving bench. Surfaced in "
+                         "serving_weight_model for an e2e-level CROSS-CHECK only (prefill wall budget = "
+                         "TTFT vs decode wall budget = TPOT*OSL); NEVER used as a per-kernel weight.")
+    ap.add_argument("--tpot-ms", type=float, default=None,
+                    help="measured baseline TPOT (ms) from the serving bench. Cross-check only (see "
+                         "--ttft-ms); decode wall budget = TPOT*OSL. Not a per-kernel weight.")
     ap.add_argument("--prefill-chunk", type=int, default=None,
                     help="chunked-prefill token budget (chunked_prefill_size / max_num_batched_tokens). "
                          "Default: isl (one prefill pass over the whole prompt).")
@@ -566,6 +610,16 @@ def main():
     # MUST run BEFORE _apply_regime_floor so the floor cannot re-inject a dropped regime. Empty
     # --served-regimes = no gate = byte-identical to prior behavior.
     served = {r.strip().lower() for r in (args.served_regimes or "").split(",") if r.strip()}
+    # Trace-driven default: if the extractor did not pass --served-regimes explicitly, derive the gate
+    # from the profile's MEASURED per-kernel phase (parse_profile served_regimes/case regime). Explicit
+    # --served-regimes always wins. This replaces the old "empty = no gate + WARNING" default with a
+    # data-driven gate whenever the trace exposed serving-phase spans.
+    if not served:
+        _trace_served = served_from_profile(entries)
+        if _trace_served:
+            served = _trace_served
+            notes.append(f"served-regimes derived from trace phase (parse_profile): {sorted(served)} "
+                         f"— no explicit --served-regimes given; pass it to override.")
     if served:
         kept = [c for c in cases if (not c.get("regime")) or str(c.get("regime")).lower() in served]
         dropped = sorted({str(c.get("regime")) for c in cases
@@ -581,13 +635,29 @@ def main():
                              f"never runs, e.g. decode shapes on a prefill-only kernel).")
             cases = kept
 
+    # served-regimes NOT set on a regime-specific-looking kernel: loud advisory. A *_fwd/*_prefill
+    # kernel that has a separate *_decode kernel (or vice-versa) MUST be gated, else the missing regime's
+    # cases get synthesized/floored onto it (the "decode win on a prefill-only kernel -> e2e regression"
+    # class). The authoritative fix is the extractor populating --served-regimes per kernel; this note
+    # surfaces the omission so it is not silent.
+    if not served:
+        _nm = (meta.get("short_name", "") or "").lower()
+        _regs = {str(c.get("regime")).lower() for c in cases if c.get("regime")}
+        _split_named = any(t in _nm for t in ("_fwd", "prefill", "_decode", "paged", "mqa_decode"))
+        if _split_named and len(_regs) >= 2:
+            notes.append(f"WARNING: served-regimes NOT set but kernel name '{_nm}' looks regime-specific "
+                         f"and cases span {sorted(_regs)} — a decode/prefill regime may be weighted onto a "
+                         f"kernel that does not run it. The extractor MUST pass --served-regimes for split "
+                         f"prefill/decode kernels (see kernel_extractor.md).")
+
     # regime floor (serving decode-protection): redistribute so each regime present in meta gets >=
     # floor of the total. Applied BEFORE normalization, on raw weights. The explicit --min-regime-share
     # always applies; ADDITIONALLY, when the analytic serving model shows decode is non-trivial but the
     # (short / graph-hidden) profile window under-captured it, auto-floor decode so it is never silently
     # zeroed. The authoritative decode:prefill split is still the unittest self-weight (measured ms x
     # analytic_calls) -- this floor only protects the coarse static prior.
-    _analytic_calls = estimate_serving_regime_calls(args.isl, args.osl, prefill_chunk) if has_workload else {}
+    _analytic_calls = estimate_serving_regime_calls(
+        args.isl, args.osl, args.conc, prefill_chunk, served or None) if has_workload else {}
     eff_floor = max(args.min_regime_share,
                     _auto_decode_floor(cases, _analytic_calls, args.min_regime_share, notes))
     if eff_floor > 0:
@@ -614,13 +684,18 @@ def main():
         "kernel": meta.get("short_name", ""),
         "name_match": name_match,
         "regime": regime,                  # quant / kv_cache_dtype / compile / attention_backend
+        "served_regimes": sorted(served),  # effective serving-phase gate (trace-derived unless
+                                           # --served-regimes was explicit); the unittest reads this
+                                           # via harness_lib.served_regimes(meta) fallback.
         "quant": quant,                    # per-operand dtypes + scales for THIS kernel
         "live_pct_gpu": live_pct,          # this seam's share of GPU time under the online regime
         "regime_warning": regime_warning,  # non-empty => seam/regime mismatch; don't trust the weight
         "serving_weight_model": (          # None unless ISL/OSL given. Consumed by the unittest to
-            {"isl": args.isl, "osl": args.osl, "prefill_chunk": prefill_chunk,   # SELF-WEIGHT each case
-             "analytic_calls": estimate_serving_regime_calls(args.isl, args.osl, prefill_chunk)}  # (weight_i
-            if has_workload else None),    # = measured baseline_ms_i × analytic_calls[regime_i]); NOT applied to `weight` here.
+            {"isl": args.isl, "osl": args.osl, "conc": args.conc, "prefill_chunk": prefill_chunk,  # SELF-WEIGHT
+             "analytic_calls": estimate_serving_regime_calls(                       # each case (weight_i =
+                 args.isl, args.osl, args.conc, prefill_chunk, served or None),     # measured baseline_ms_i ×
+             "ttft_ms": args.ttft_ms, "tpot_ms": args.tpot_ms}                      # analytic_calls[regime_i]);
+            if has_workload else None),    # ttft/tpot are an e2e CROSS-CHECK only, never a per-kernel weight.
         "num_cases": len(cases),
         "weights_provenance": _provenance(cases),
         "cases": cases,

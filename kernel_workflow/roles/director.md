@@ -212,11 +212,29 @@ baseline latencies recorded at benchmark setup).
 4. Run FULL_BENCHMARK with `bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <full bench cmd>`. Parse the
    per-case latencies.
 5. Compute per-case speedup = `baseline_ms / optimized_ms` using `BASELINE_TIMING`. Compute geomean
-   = `exp(mean(log(speedups)))` and arithmetic mean. **If `BASELINE_TIMING` is workload-aligned
-   (`workload_aligned:true`, per-case `weight` present), ALSO compute the time-weighted ratio-of-sums
-   `Σ weight_i / Σ (weight_i / speedup_i)` and report it as `director_verified_speedup_weighted`
-   — that is the PRIMARY number arbitration uses below.**
-6. Arbitration vs the TechLead's claim (on the PRIMARY metric — weighted when workload-aligned, else geomean):
+   = `exp(mean(log(speedups)))` and arithmetic mean.
+   **PRIMARY metric — recompute the self-weight with the SAME audited function the unittest uses, on YOUR
+   measured latencies. Do NOT hand-roll `Σ weight_i / Σ (weight_i/speedup_i)` from `BASELINE_TIMING`'s
+   static `weight`/`count` (GEMM cases carry `count:None`, and the profile `weight` is a distrusted prior
+   — a hand-rolled number silently arbitrates on the wrong weights).** Build `per_case` and call it:
+   ```python
+   import harness_lib as h, json
+   meta = json.load(open("meta.json"))          # carries served_regimes + workload.serving_weight_model.analytic_calls
+   per_case = [{"sig": c["name"], "regime": c.get("regime",""), "m": c.get("m"),
+                "baseline_ms": BASELINE_MS[c["name"]],      # from BASELINE_TIMING (frozen baseline)
+                "optimized_ms": OPT_MS[c["name"]]}          # from THIS run's parsed FULL_BENCHMARK
+               for c in meta["workload"]["cases"]]
+   res = h.serving_weighted_speedup(per_case, meta)
+   director_verified_speedup_weighted = res["weighted"]     # = GEAK_WEIGHTED_SPEEDUP; None if untrusted
+   ```
+   `h.serving_weighted_speedup` applies the served-regimes gate, `weight_i = baseline_ms_i ×
+   analytic_calls[regime_i]` with the regime total on the largest-M bucket, and the pseudo-identity guard —
+   the counts come from the analytic model (`meta.workload.serving_weight_model.analytic_calls`), NEVER from
+   the profile window. If `res["weighted"] is None` (all buckets identity/untrusted) the measurement is not
+   trustworthy → re-measure per-bucket ms / regenerate; fall back to `geomean` only then. This is identical
+   to what the unittest computes, so Director and TechLead arbitrate on the same instrument.
+6. Arbitration vs the TechLead's claim (on the PRIMARY metric — `director_verified_speedup_weighted` from
+   `h.serving_weighted_speedup`; `geomean` only when it returns `None`):
    - Within 10%, or Director higher → `accepted`.
    - Director LOWER than claim by >10% → `flagged` (use Director's measured numbers as official).
    - Correctness fail / patch fails to apply → `flagged`.

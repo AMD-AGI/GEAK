@@ -370,6 +370,39 @@ done
 # sustained, saturated load and profile a WINDOW once it has reached the mixed steady state.
 if [ "$PROFILE" = "1" ]; then
   mkdir -p "$PROFILE_DIR"
+  # ---- workload-aware steady-state window sizing (don't rely ONLY on the reactive re-capture gate) ----
+  # Reaching batch≈CONC = clear the prefill ramp, then sample steady decode:
+  #   RAMP   = ceil(CONC*ISL / chunk)     forward passes to prefill all CONC in-flight requests
+  #   STEADY = max(30, 5*ceil(OSL/CONC))  decode steps for a stable, representative sample
+  # TARGET = RAMP + STEADY + margin. Why per-backend:
+  #   - sglang is STEP-controlled and its trace lacks the execute_* step annotations decode_steps.py
+  #     needs, so the reactive gate is only a COARSE proxy there — size PROFILE_NUM_STEPS to TARGET up
+  #     front (deterministic; the ISL/OSL/CONC/prompts math is the guarantee, not the gate).
+  #   - vLLM is TIME-controlled; with detailed_trace_annotation its trace DOES carry step spans, so the
+  #     gate converges — we still raise PROFILE_WINDOW_SEC from TPOT (when known) so the first window
+  #     usually lands steady without a re-capture.
+  # Assumes a saturated queue + KV headroom for CONC concurrent decodes (else batch can't reach CONC).
+  _CHUNK="${PREFILL_CHUNK:-$ISL}"
+  _RAMP=$(python3 -c "import math;print(math.ceil($CONC*$ISL/max($_CHUNK,1)))" 2>/dev/null || echo "$CONC")
+  _STEADYN=$(python3 -c "import math;print(max(30,5*math.ceil($OSL/max($CONC,1))))" 2>/dev/null || echo 30)
+  _TARGET_STEPS=$(( _RAMP + _STEADYN + 10 ))
+  if [ "${PROFILE_NUM_STEPS:-0}" -lt "$_TARGET_STEPS" ]; then
+    echo ">>> steady-state sizing: RAMP=${_RAMP}+STEADY=${_STEADYN}+10 -> PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${_TARGET_STEPS}"
+    PROFILE_NUM_STEPS=$_TARGET_STEPS
+  fi
+  _NEED_PROMPTS=$(python3 -c "import math;print($CONC + math.ceil($CONC*$PROFILE_NUM_STEPS/max($OSL,1)) + $CONC)" 2>/dev/null || echo "$PROFILE_NUM_PROMPTS")
+  if [ "${PROFILE_NUM_PROMPTS:-0}" -lt "$_NEED_PROMPTS" ]; then
+    echo ">>> steady-state sizing: PROFILE_NUM_PROMPTS ${PROFILE_NUM_PROMPTS}->${_NEED_PROMPTS} (keep the queue full through the window)"
+    PROFILE_NUM_PROMPTS=$_NEED_PROMPTS
+  fi
+  if [ -n "${TPOT_MS:-}" ]; then
+    _WSEC=$(python3 -c "import math;print(max(${PROFILE_WINDOW_SEC:-40}, math.ceil($_TARGET_STEPS*$TPOT_MS/1000.0*1.5)))" 2>/dev/null || echo "${PROFILE_WINDOW_SEC:-40}")
+    if [ "$_WSEC" -gt "${PROFILE_WINDOW_SEC:-40}" ]; then
+      echo ">>> steady-state sizing: PROFILE_WINDOW_SEC ${PROFILE_WINDOW_SEC}->${_WSEC}s (TPOT=${TPOT_MS}ms x ${_TARGET_STEPS} steps x1.5)"
+      PROFILE_WINDOW_SEC=$_WSEC
+    fi
+  fi
+  export PROFILE_NUM_STEPS PROFILE_NUM_PROMPTS PROFILE_WINDOW_SEC
   if declare -F adapter_profile_window >/dev/null; then
     echo ">>> Profiling steady-state mix: warm ${PROFILE_WARMUP_SEC}s on a saturated load " \
          "(${PROFILE_NUM_PROMPTS} prompts, conc ${CONC}${PROFILE_REQUEST_RATE:+, rate ${PROFILE_REQUEST_RATE}/s}), " \

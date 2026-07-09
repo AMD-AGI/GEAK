@@ -121,7 +121,11 @@ freeze an out-of-regime oracle nobody should trust.
    >   that decides KEEP/REVERT is the unittest self-weight `weight_i = MEASURED baseline_ms_i ×
    >   analytic_calls[regime_i]` (latency from the frozen-baseline microbench, per shape; counts from the
    >   analytic serving model `estimate_serving_regime_calls` — decode=`osl`, prefill=`ceil(isl/chunk)` —
-   >   cross-checked against capture `meta.shape_counts`). Profiler %GPU TIME is used for **head SELECTION**
+   >   cross-checked against capture `meta.shape_counts`). **Allocation across a regime's shapes: the
+   >   regime's TOTAL calls land on its LARGEST-M bucket (decode M=CONC, prefill M=chunk/ISL); smaller
+   >   transient buckets get `calls=1`** — do NOT multiply EVERY decode bucket by `osl` (a forward pass
+   >   runs ONE batch shape, not all buckets — that over-counts decode). See step 4 / `h.serving_weighted_speedup`.
+   >   Profiler %GPU TIME is used for **head SELECTION**
    >   and as the **pre-measurement / within-regime PRIOR** only (the static `attribute_weights.py` weight:
    >   `trace` > `regime` > prior > `--min-regime-share` floor), because the short / graph-hidden window
    >   under-counts decode — it is NOT the weight authority. `meta.shape_counts` is a COUNT, not a time — a
@@ -242,22 +246,52 @@ freeze an out-of-regime oracle nobody should trust.
      operands, in-regime — NOT bf16, random values; perf is value-independent). Print `per_case`
      `baseline_ms/optimized_ms/speedup`. If `meta.workload` is absent, fall back to timing the
      golden/captured cases (unweighted).
+     > **🔴 RE-MEASURE per-bucket ms in a FRESH SUBPROCESS, one bucket per process** (`python
+     > unittest.py --time-bucket <sig>` or an equivalent per-bucket driver), NOT all buckets in one
+     > warm interpreter. In-process timing shares JIT/autotune state across baseline and candidate, so a
+     > byte-identical or autotune-converged candidate reports a pseudo-`1.0×` (baseline_ms==optimized_ms)
+     > that is an ARTIFACT, not a measurement — `h.serving_weighted_speedup` will flag/exclude it and, if
+     > every bucket is identity, return `weighted=None` (untrusted → regenerate). Time under the true
+     > deployment context (`graph=h.deployment_graph_mode(regime)`, `h.compiled_op` when compiled).
+     > **Decode small-M buckets:** the op device time EXCLUDES the launch/graph fixed cost that DOMINATES
+     > a sub-ms decode step and is then ×OSL-amplified into the metric — for decode buckets prefer the
+     > launch-inclusive (wall) sample under graph replay so the fixed cost the live server pays is counted.
+     > **🔴 ATTENTION prefill ms — do NOT rely on chunk-linear cancellation.** For GEMM/MoE, `CONC×ceil(ISL/B)`
+     > passes at `M=chunk` and one full-ISL pass are interchangeable because compute is linear in tokens.
+     > Attention is CAUSAL/quadratic (chunk *i* attends to all `i×B` prior KV), so summing equal `ms(B)`
+     > over the chunks mis-estimates it. Either measure `ms` per prefill chunk at its ACCUMULATED-context
+     > shape and sum, or time ONE full-ISL prefill (unchunked) with `calls_prefill=CONC` so the quadratic
+     > cost lands in `ms`, not in an approximated chunk count. (This is the case for the gqa sparse-attn
+     > kernel — a sparse ATTENTION prefill.)
    - **🔴 Metric — SELF-WEIGHT from the latency you just measured; do NOT trust `meta.workload[].weight`.**
      The profile-derived `weight`/`weight_norm` in `meta.workload` is a shape-less capture-window PRIOR: a
      prefill-biased profiling window, or a kernel whose name/trace exposes no GRID_MN/shape (e.g.
      `triton_kernels.matmul_ogs`), makes the profiler unable to see the decode regime and zeroes it
      (then floors it) — inverting the weighting on a decode-critical serving run (see the
      `moe-mxfp4-gptoss-matmul-ogs-gfx942` card). Instead compute each case's weight FROM ITS MEASURED
-     BASELINE LATENCY × its analytic serving call count:
-     `weight_i = baseline_ms_i × calls(regime_i)`, where the calls come from
-     `meta.workload.serving_weight_model` — use `analytic_calls.{decode,prefill}` if present, else derive
-     from `isl`/`osl`: `decode = OSL` passes, `prefill = ceil(ISL/chunk)` passes. Assign the decode passes
-     to the LARGEST (== CONC) decode bucket; smaller decode buckets are transient → `calls=1` (kept
-     visible); split the prefill passes across prefill buckets proportional to M. Then the PRIMARY metric
-     `GEAK_WEIGHTED_SPEEDUP = Σ_i weight_i / Σ_i (weight_i / speedup_i)` is exactly
-     `total_baseline_lifecycle_time / total_optimized_lifecycle_time` — the true overall speedup, using
-     REAL per-shape latency instead of the profile prior. Keep the same `per_case`/geomean print shape so
-     the kernel-layer Director/verify math is unchanged; the weighted line is additive.
+     BASELINE LATENCY × its analytic serving call count. **🔴 Do NOT hand-roll the weighting — call the
+     ONE vendored function `h.serving_weighted_speedup(per_case, meta)`** (each `per_case` item =
+     `{sig, regime, m, baseline_ms, optimized_ms}`). It applies, in one audited place:
+       - **served-regimes gate** — drops any case whose `regime ∉ meta['served_regimes']`, so a decode
+         case that leaked into a prefill-only kernel's oracle can NEVER dominate (the gqa bug);
+       - **analytic call model** `weight_i = baseline_ms_i × calls(regime_i)` with calls from
+         `meta.workload.serving_weight_model.analytic_calls` — **prefill is already CONC-scaled**
+         (`CONC×ceil(ISL/chunk)`; CONC enters prefill through the launch COUNT) and **decode = OSL**
+         (CONC is in the decode SHAPE M=CONC). The regime's passes land on the LARGEST-M bucket, smaller
+         buckets stay visible at `calls=1`. **NEVER read decode call counts from the profile** (the window
+         under-samples decode steps) — calls are analytic only;
+       - **pseudo-identity guard** — a bucket with `baseline_ms == optimized_ms` (warm-JIT / autotune-
+         converged / byte-identical candidate, not a real null) is excluded; if the returned
+         `weighted is None` (every bucket identity/untrusted), the measurement is NOT trustworthy —
+         REGENERATE / re-measure per-bucket ms in a subprocess (see the Timing rule), do not report a
+         1.0×. The result `weighted` == `GEAK_WEIGHTED_SPEEDUP` = `Σ weight_i / Σ (weight_i/speedup_i)` =
+         `total_baseline_lifecycle_time / total_optimized_lifecycle_time`. Print the same `per_case`/geomean
+         shape (function returns both) so the Director/verify math is unchanged; the weighted line is additive.
+       - **e2e cross-check (optional, never a weight)**: `meta.workload.serving_weight_model.ttft_ms` /
+         `tpot_ms` give the measured regime WALL budget (prefill=TTFT, decode=TPOT×OSL). Compare your
+         `Σ(ms×calls)` prefill:decode split against `TTFT:(TPOT×OSL)`; a large gap flags a wrong M /
+         packing / served-regimes assumption — it is a SANITY note, NEVER a per-kernel weight (TTFT/TPOT
+         mix in attention/all-reduce/sampling).
      > **Why self-weight:** shape ← meta M-buckets, per-call latency ← measured HERE, call count ← serving
      > params (isl/osl). The profile's shape-less latency is only trustworthy for this kernel's GPU-time
      > SHARE vs OTHER kernels (kernel selection) — NEVER for the intra-kernel prefill/decode split, which
@@ -354,13 +388,27 @@ python3 "$SKILL_DIR/scripts/attribute_weights.py" \
   --meta "<task_dir>/meta.json" \
   --profile-weights "$PROFILE_WORKLOAD_JSON" \
   --name-match "<the kernel's base symbol, e.g. _gemm_a8w8_blockscale_kernel>" \
-  --isl "$ISL" --osl "$OSL" \
+  --isl "$ISL" --osl "$OSL" --conc "$CONC" \
   --min-regime-share 0.3 \
   --served-regimes "<the regimes THIS kernel actually runs in>" \
   --out "<task_dir>/workload.json"
 ```
+> **🔴 PASS `--conc "$CONC"`** (from `WORKLOAD`). CONC enters the two regimes ASYMMETRICALLY and does
+> NOT cancel: prefill calls = `CONC×ceil(ISL/chunk)` (CONC in the launch COUNT — each concurrent request
+> is prefilled separately), decode calls = `OSL` (CONC is already in the decode SHAPE, M=CONC). Omitting
+> `--conc` (=1) reproduces the old per-request model that UNDER-COUNTED prefill by ~CONC. Also pass
+> `--ttft-ms`/`--tpot-ms` (from the baseline serving bench) when available — they are surfaced for an
+> e2e cross-check only, never a per-kernel weight.
+> **🟢 TRACE-DRIVEN DEFAULT (new):** when `PROFILE_WORKLOAD_JSON` comes from a trace with serving-phase
+> spans, `parse_profile` already tags each kernel's MEASURED `served_regimes` (and per-case `regime`) from
+> the `gpu_user_annotation` step spans. If you OMIT `--served-regimes`, `attribute_weights` now derives the
+> gate from that measured phase (and writes it into `workload.json` as `served_regimes`, which
+> `h.served_regimes(meta)` reads as a fallback). So for a clean trace you can rely on the default. Still pass
+> `--served-regimes` EXPLICITLY (it always overrides) when the trace under-captured a regime or when you
+> know the split from source and want to be certain.
 > **🔴 SET `--served-regimes` = the serving regimes THIS kernel actually executes in — a kernel→regime
-> gate that runs BEFORE the floor.** Decide it from the call graph / source, NOT from the profile window:
+> gate that runs BEFORE the floor.** Decide it from the call graph / source (or trust the trace-driven
+> default above), NOT from a hand-guess about the window:
 > if the kernel is a prefill `*_fwd_kernel` (or prefill wrapper) and a SEPARATE `*_decode_kernel` exists,
 > this kernel serves **`prefill`** only — pass `--served-regimes prefill`. The decode kernel is its own
 > extraction task with `--served-regimes decode`. Only pass `prefill,decode` when the SAME kernel truly
@@ -371,6 +419,19 @@ python3 "$SKILL_DIR/scripts/attribute_weights.py" \
 > speedup, e2e regression. `--served-regimes`
 > drops those unserved-regime cases so this cannot happen. Leaving it empty preserves the old (buggy for
 > split prefill/decode kernels) behavior, so it MUST be set for any op that has separate prefill/decode kernels.
+> **🔴 served-regimes is a SINGLE gate that must reach ALL THREE consumers — not just `workload.json`:**
+> (1) **write it into `meta.json` as top-level `"served_regimes": ["prefill"|"decode"|...]`** so the
+> immutable `unittest.py` and `h.serving_weighted_speedup` honor it (the flag alone only filters
+> `workload.json`; the unittest times over the `reference_io.pt` oracle, which the flag does NOT touch);
+> (2) **do NOT synthesize an unserved regime's cases into `reference_io.pt` / `meta.cases` at all** — the
+> mandatory both-regimes floor (step 2) applies ONLY to regimes in `served_regimes`; a prefill-only
+> `*_fwd` kernel gets PREFILL cases only, never a decode `M≈CONC` oracle case (that decode case, self-
+> weighted ×OSL, is exactly what sank the gqa run); (3) `attribute_weights.py --served-regimes` +
+> `analytic_calls` zeroing. **FAIL-LOUD, never silent:** if a kernel has a separate `*_decode`/`*_fwd`
+> sibling (⇒ it is regime-specific) and you cannot set `served_regimes`, STOP and report a UT-generation
+> defect — do NOT default to "both" (re-creates the bug) and do NOT default to "neither" (zeros the
+> kernel). Derive it deterministically from the call graph/source (sibling kernel present), not the
+> profile window.
 > **Binding↔shape consistency:** the `meta.baseline_callable`/wrapper you bind (step 4) must be the one
 > that launches the kernel for the served regime(s) — never bind a prefill wrapper for decode-shaped cases.
 > **🔴 PASS `--isl`/`--osl` (from `WORKLOAD`) — they carry the ANALYTIC SERVING CALL MODEL the
@@ -378,10 +439,11 @@ python3 "$SKILL_DIR/scripts/attribute_weights.py" \
 > so at large OSL it sees only a sliver of decode while it catches the single prefill pass in full: the
 > window's decode:prefill split is biased, and for a shape-hidden kernel the profiler can't see the
 > intra-kernel split at all. So `attribute_weights.py` does **not** patch its `weight` with `--isl/--osl`
-> — instead it emits `serving_weight_model.analytic_calls` (prefill = `ceil(isl/chunk)`, decode = `osl`),
+> — instead it emits `serving_weight_model.analytic_calls` (prefill = `CONC×ceil(isl/chunk)`, decode = `osl`),
 > and the immutable unittest reconstructs the split by **self-weighting** each case with its OWN measured
-> baseline latency × these calls (`weight_i = baseline_ms_i × analytic_calls[regime_i]` — see the metric
-> rule in step 4). This is the fix for the split; the profile `weight` stays a cross-kernel-share prior +
+> baseline latency × these calls (`weight_i = baseline_ms_i × analytic_calls[regime_i]`, with the regime
+> total assigned to the LARGEST-M bucket and smaller buckets at `calls=1` — NOT every bucket ×osl — see the
+> metric rule in step 4). This is the fix for the split; the profile `weight` stays a cross-kernel-share prior +
 > fallback, never the split authority. Same-instrument weight-and-speedup is what makes the weighted
 > speedup equal the true lifecycle-time ratio — mixing the profile's window latency into it would not. The
 > chunked-prefill budget is taken from `regime.prefill_chunk` (parsed by `parse_regime.py` from the launch
@@ -517,7 +579,7 @@ report `editable:false`/drop rather than freeze an out-of-regime oracle nobody s
   unittest.py       # immutable correctness+timing harness (same shape as the kernel-layer one)
 ```
 Same rule as PHASE=extract: `cp "$SKILL_DIR/scripts/harness_lib.py" "$TASK/"` and have `unittest.py`
-use `h.time_op` (amortized) + `h.check_correct_multi` (fresh-output enforced). Record `pct_gpu_time`
+use `h.time_op` (device-event timed; `inner=1` default, no host-loop amortization) + `h.check_correct_multi` (fresh-output enforced). Record `pct_gpu_time`
 in `meta.json` (op_bench reads it to annotate the Amdahl ceiling on the isolated speedup).
 
 ### GEMM (preferred: synthesize — perf is value-independent)
@@ -532,7 +594,7 @@ in `meta.json` (op_bench reads it to annotate the Amdahl ceiling on the isolated
    capture overlay as PHASE=extract, save as `reference_io.pt` with keys `A,B,bias,output`.
 4. Write an immutable `unittest.py` that loads/synthesizes `A,B,bias`, computes `ref = A·Bᵀ(+bias)` with
    the default (in-regime) backend once, then — via the vendored `harness_lib` — times the current path
-   with `h.time_op` (amortized; no launch-overhead theatre) and checks a candidate against `ref` with
+   with `h.time_op` (device-event timed, `inner=1`; no launch-overhead theatre) and checks a candidate against `ref` with
    `h.check_correct_multi` (fresh-output enforced; a shared/static return buffer FAILS), bf16
    rtol=atol=2e-2. **ALSO run `h.check_random_vs_baseline(baseline_call, current_call, shapes, tol,
    draws=meta.get("random_draws", 3), graph=h.deployment_graph_mode(meta["regime"]))`** — each `shapes`

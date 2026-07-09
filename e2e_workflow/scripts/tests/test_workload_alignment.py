@@ -655,7 +655,9 @@ class TestRandomVsBaseline(unittest.TestCase):
 
     def _shapes(self, torch):
         def mk(rng):
-            return torch.randn(64, 128, generator=rng)
+            # build on the generator's device: check_random_vs_baseline seeds rng on the run device
+            # (cuda when available), and torch.randn requires the tensor and generator share a device.
+            return torch.randn(64, 128, generator=rng, device=rng.device)
         return [{"sig": "M=64", "make_inputs": mk}]
 
     def test_identical_all_correct(self):
@@ -677,17 +679,23 @@ class TestRandomVsBaseline(unittest.TestCase):
             import torch  # noqa: F401
         except Exception:
             self.skipTest("torch not available")
-        state = {"i": 0}
+        # Wrong on exactly ONE draw. Key on the INPUT tensor identity (each draw builds its args once
+        # and reuses the same object for the correctness check AND the timing calls), so the injected
+        # error is deterministic per draw and NOT perturbed by how many times time_op invokes cur.
+        seen = []
 
         def cur(a):
-            state["i"] += 1
-            return a * 2.0 + (5.0 if state["i"] == 2 else 0.0)
+            key = id(a)
+            if key not in seen:
+                seen.append(key)
+            return a * 2.0 + (5.0 if seen.index(key) == 1 else 0.0)   # diverge on the 2nd draw
 
         ok, pc = harness_lib.check_random_vs_baseline(
             lambda a: a * 2.0, cur, self._shapes(torch), tol=2e-2,
             draws=3, warmup=0, repeats=1)
         self.assertFalse(ok)
         self.assertFalse(all(p["correct"] for p in pc))
+        self.assertTrue(any(p["correct"] for p in pc))   # a single bad draw fails the whole gate
 
     def test_shared_buffer_baseline_snapshotted(self):
         """A baseline that returns a persistent buffer must still be compared against its SNAPSHOT, so a
@@ -706,6 +714,181 @@ class TestRandomVsBaseline(unittest.TestCase):
             base_static, lambda a: a * 3.0, self._shapes(torch), tol=2e-2,
             draws=1, warmup=0, repeats=1)
         self.assertFalse(ok)
+
+
+class TestConcAndServedCalls(unittest.TestCase):
+    """P1 fix: CONC enters prefill through the launch COUNT (×CONC) and decode through the SHAPE (M),
+    so it must NOT cancel; and the served-regimes gate zeroes a regime the kernel does not run in."""
+    def test_conc_scales_prefill_only(self):
+        est = attribute_weights.estimate_serving_regime_calls(8192, 1024, conc=32)
+        self.assertEqual(est, {"prefill": 32, "decode": 1024})   # prefill = 32*ceil(8192/8192)
+
+    def test_conc_with_chunked_prefill(self):
+        est = attribute_weights.estimate_serving_regime_calls(8192, 1024, conc=32, prefill_chunk=4096)
+        self.assertEqual(est, {"prefill": 64, "decode": 1024})   # 32 * ceil(8192/4096)=32*2
+
+    def test_conc_default_is_backward_compatible(self):
+        self.assertEqual(attribute_weights.estimate_serving_regime_calls(1000, 1000),
+                         {"prefill": 1, "decode": 1000})
+
+    def test_served_gate_zeroes_unserved_regime(self):
+        est = attribute_weights.estimate_serving_regime_calls(8192, 1024, conc=32, served=["prefill"])
+        self.assertEqual(est, {"prefill": 32, "decode": 0})      # decode never runs on this kernel
+        est2 = attribute_weights.estimate_serving_regime_calls(8192, 1024, conc=32, served=["decode"])
+        self.assertEqual(est2, {"prefill": 0, "decode": 1024})
+
+
+class TestServingWeightedSpeedup(unittest.TestCase):
+    """The centralized PRIMARY metric: served gate + analytic calls (never profile counts) + identity guard."""
+    def _meta(self, served=None, calls=None):
+        return {"served_regimes": served,
+                "workload": {"serving_weight_model": {"analytic_calls": calls or {"prefill": 32, "decode": 1024}}}}
+
+    def test_served_drops_decode_on_prefill_only_kernel(self):
+        # a decode bucket that leaked into a prefill-only kernel must NOT be weighted (the gqa bug).
+        per_case = [
+            {"sig": "prefill_m8192", "regime": "prefill", "m": 8192, "baseline_ms": 10.0, "optimized_ms": 9.0},
+            {"sig": "decode_m32", "regime": "decode", "m": 32, "baseline_ms": 2.0, "optimized_ms": 1.0},  # 2x
+        ]
+        r = harness_lib.serving_weighted_speedup(per_case, self._meta(served=["prefill"]))
+        self.assertIn("decode_m32", r["dropped_unserved"])
+        # only prefill survives -> weighted ~= prefill speedup (10/9), NOT dominated by the decode 2x.
+        self.assertAlmostEqual(r["weighted"], 10.0 / 9.0, places=6)
+        self.assertEqual(r["included"], 1)
+
+    def test_identity_bucket_excluded(self):
+        per_case = [
+            {"sig": "prefill_m8192", "regime": "prefill", "m": 8192, "baseline_ms": 10.0, "optimized_ms": 9.0},
+            {"sig": "decode_m32", "regime": "decode", "m": 32, "baseline_ms": 2.0, "optimized_ms": 2.0},  # identity
+        ]
+        r = harness_lib.serving_weighted_speedup(per_case, self._meta())
+        self.assertIn("decode_m32", r["suspect_identity"])
+        self.assertAlmostEqual(r["weighted"], 10.0 / 9.0, places=6)   # decode identity excluded
+
+    def test_all_identity_returns_none_untrusted(self):
+        per_case = [
+            {"sig": "prefill_m8192", "regime": "prefill", "m": 8192, "baseline_ms": 10.0, "optimized_ms": 10.0},
+            {"sig": "decode_m32", "regime": "decode", "m": 32, "baseline_ms": 2.0, "optimized_ms": 2.0},
+        ]
+        r = harness_lib.serving_weighted_speedup(per_case, self._meta())
+        self.assertIsNone(r["weighted"])
+        self.assertTrue(r["reason"])
+
+    def test_conc_dominant_bucket_carries_passes(self):
+        # decode passes (1024) land on the largest-M decode bucket; smaller decode bucket gets calls=1.
+        per_case = [
+            {"sig": "decode_m32", "regime": "decode", "m": 32, "baseline_ms": 2.0, "optimized_ms": 1.0},   # 2x, calls 1024
+            {"sig": "decode_m1", "regime": "decode", "m": 1, "baseline_ms": 0.5, "optimized_ms": 0.5},     # identity -> excluded
+        ]
+        r = harness_lib.serving_weighted_speedup(per_case, self._meta(calls={"decode": 1024}))
+        dom = [c for c in r["per_case"] if c["sig"] == "decode_m32"][0]
+        self.assertEqual(dom["calls"], 1024)
+
+
+# --------------------------------------------------------------------------- #
+# parse_profile.py — serving-phase (prefill/decode) accounting from the trace's
+# gpu_user_annotation step spans (skill kernel-phase-accounting integration).
+# --------------------------------------------------------------------------- #
+def _synthetic_trace():
+    """Tiny Kineto-style trace: 1 prefill(mixed) step (M=8192) + 2 pure-decode steps (batch 8).
+    fused_moe fires in all 3 (both), _gqa_sparse_fwd only in prefill, reduce only in decode."""
+    ev = [
+        # step spans on the GPU timeline (perfskills dialect)
+        {"cat": "gpu_user_annotation", "name": "execute_context_2(8192)_generation_0(0)",
+         "ph": "X", "ts": 0.0, "dur": 100.0},
+        {"cat": "gpu_user_annotation", "name": "execute_context_0(0)_generation_8(8)",
+         "ph": "X", "ts": 100.0, "dur": 10.0},
+        {"cat": "gpu_user_annotation", "name": "execute_context_0(0)_generation_8(8)",
+         "ph": "X", "ts": 110.0, "dur": 10.0},
+        # kernels
+        {"cat": "kernel", "ph": "X", "ts": 5.0, "dur": 40.0, "name": "fused_moe_kernel", "args": {}},
+        {"cat": "kernel", "ph": "X", "ts": 6.0, "dur": 30.0, "name": "_gqa_sparse_fwd_kernel", "args": {}},
+        {"cat": "kernel", "ph": "X", "ts": 101.0, "dur": 2.0, "name": "fused_moe_kernel", "args": {}},
+        {"cat": "kernel", "ph": "X", "ts": 102.0, "dur": 1.0, "name": "cross_device_reduce_1stage", "args": {}},
+        {"cat": "kernel", "ph": "X", "ts": 111.0, "dur": 2.0, "name": "fused_moe_kernel", "args": {}},
+        {"cat": "kernel", "ph": "X", "ts": 112.0, "dur": 1.0, "name": "cross_device_reduce_1stage", "args": {}},
+    ]
+    return {"traceEvents": ev}
+
+
+class TestPhaseAccounting(unittest.TestCase):
+    def setUp(self):
+        self.trace = _write_json(_synthetic_trace())
+        self.agg, self.total, self.launch, self.pmeta = parse_profile.parse_torch_trace(self.trace)
+
+    def tearDown(self):
+        os.unlink(self.trace)
+
+    def test_step_counts_and_phase_meta(self):
+        self.assertTrue(self.pmeta["has_annotations"])
+        self.assertEqual(self.pmeta["n_prefill_steps"], 1)
+        self.assertEqual(self.pmeta["n_decode_steps"], 2)
+        self.assertEqual(self.pmeta["prefill_tokens"], 8192)
+        self.assertEqual(self.pmeta["decode_batches"], [8, 8])
+
+    def test_kernel_phase_attribution(self):
+        self.assertEqual(self.agg["fused_moe_kernel"]["by_phase"]["prefill"]["count"], 1)
+        self.assertEqual(self.agg["fused_moe_kernel"]["by_phase"]["decode"]["count"], 2)
+        # prefill-only and decode-only kernels stay in their single phase
+        self.assertEqual(set(self.agg["_gqa_sparse_fwd_kernel"]["by_phase"]), {"prefill"})
+        self.assertEqual(set(self.agg["cross_device_reduce_1stage"]["by_phase"]), {"decode"})
+
+    def test_summary_steady_and_est_calls(self):
+        # conc==8 == captured decode batch -> steady; est_calls decode==OSL, prefill==CONC*ceil(ISL/chunk)
+        s = parse_profile.build_summary(self.agg, self.total, self.launch, "torch-trace", 10,
+                                        conc=8, isl=8192, osl=1024, chunk=8192,
+                                        capture_sizes=[8, 16, 32], phase_meta=self.pmeta)
+        self.assertTrue(s["serving"]["steady"])
+        self.assertEqual(s["serving"]["analytic_calls"], {"prefill": 8, "decode": 1024})
+        by = {k["short_name"]: k for k in s["top_kernels"]}
+        moe = by["fused_moe_kernel"]
+        self.assertEqual(moe["phase"], "both")
+        self.assertEqual(sorted(moe["served_regimes"]), ["decode", "prefill"])
+        self.assertEqual(moe["est_calls"], {"prefill": 8, "decode": 1024})
+        self.assertEqual(moe["est_shape"]["prefill"]["M"], 8192)
+        self.assertEqual(moe["est_shape"]["decode"]["M"], 8)           # conc snapped to capture size 8
+        self.assertEqual(by["_gqa_sparse_fwd_kernel"]["phase"], "prefill")
+        self.assertEqual(by["cross_device_reduce_1stage"]["phase"], "decode")
+
+    def test_summary_non_steady_warns(self):
+        # captured decode batch 8 << concurrency 32 -> not steady; counts still valid
+        s = parse_profile.build_summary(self.agg, self.total, self.launch, "torch-trace", 10,
+                                        conc=32, isl=8192, osl=1024, chunk=8192,
+                                        capture_sizes=[8, 16, 32], phase_meta=self.pmeta)
+        self.assertFalse(s["serving"]["steady"])
+        self.assertEqual(s["serving"]["decode_batch_captured"], 8)
+        self.assertEqual(s["serving"]["decode_batch_steady"], 32)
+        # decode est_shape M snaps concurrency 32 up to capture size 32
+        moe = {k["short_name"]: k for k in s["top_kernels"]}["fused_moe_kernel"]
+        self.assertEqual(moe["est_shape"]["decode"]["M"], 32)
+
+    def test_workload_case_regime_and_served_from_profile(self):
+        wl = parse_profile.build_workload(self.agg, self.total, 10)
+        by = {k["short_name"]: k for k in wl["kernels"]}
+        self.assertEqual(sorted(by["fused_moe_kernel"]["served_regimes"]), ["decode", "prefill"])
+        # attribute_weights derives the gate from the profile's measured phase
+        self.assertEqual(attribute_weights.served_from_profile([by["fused_moe_kernel"]]),
+                         {"prefill", "decode"})
+        self.assertEqual(attribute_weights.served_from_profile([by["_gqa_sparse_fwd_kernel"]]),
+                         {"prefill"})
+
+    def test_analytic_calls_matches_shared_impl(self):
+        self.assertEqual(parse_profile.analytic_regime_calls(8192, 1024, 32, 8192),
+                         attribute_weights.estimate_serving_regime_calls(8192, 1024, 32, prefill_chunk=8192))
+
+    def test_no_annotations_backward_compatible(self):
+        # a trace without execute_* spans yields no phase fields (old behavior preserved)
+        ev = {"traceEvents": [{"cat": "kernel", "ph": "X", "ts": 1.0, "dur": 5.0,
+                               "name": "fused_moe_kernel", "args": {}}]}
+        p = _write_json(ev)
+        try:
+            agg, tot, lau, pm = parse_profile.parse_torch_trace(p)
+            self.assertEqual(pm, {})
+            s = parse_profile.build_summary(agg, tot, lau, "torch-trace", 5)
+            self.assertNotIn("serving", s)
+            self.assertNotIn("phase", s["top_kernels"][0])
+        finally:
+            os.unlink(p)
 
 
 if __name__ == "__main__":

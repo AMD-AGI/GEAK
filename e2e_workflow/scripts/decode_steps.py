@@ -5,12 +5,17 @@ Used by bench_e2e.sh's representativeness gate: a profiling window that under-ca
 BOTH head selection (raw %GPU) and the decode weight-share. The gate needs a cheap decode-step count so
 it can enlarge the window and re-capture when the count is below N = max(30, 5*ceil(OSL/CONC)).
 
-Decode-step proxy = the launch count of the busiest COMPUTE kernel whose input shapes are HIDDEN.
-Shape-hidden launches are graph-replayed launches, i.e. the decode deployment context (prefill runs
-eager with real Input Dims; see attribute_weights.py / harness_lib.deployment_graph_mode). The busiest
-such compute kernel (MoE/attn/GEMM) fires ~once per decode forward step, so its hidden-launch count is a
-good lower-bound estimate of the decode steps in the window. Prints a single integer to stdout (0 on any
-error, so the caller degrades to "re-capture / low-confidence" rather than crashing the bench).
+PREFERRED source = the EXACT decode forward-step count measured from the trace's gpu_user_annotation
+step spans (vLLM detailed_trace_annotation): parse_torch_trace returns phase_meta.n_decode_steps, the
+true number of pure-decode steps — the unit the gate actually wants.
+
+FALLBACK (traces without step annotations) = the launch count of the busiest COMPUTE kernel whose input
+shapes are HIDDEN (graph-replayed decode launches; prefill runs eager with real Input Dims). NOTE this
+proxy is decode_steps × num_layers (a per-layer kernel fires once per layer per step), i.e. it
+OVER-counts steps by ~num_layers — it is NOT a decode-step count and must NOT be compared against a step
+floor as if it were. It survives only as a coarse "did we capture *any* decode?" signal when annotations
+are absent. Prints a single integer to stdout (0 on any error, so the caller degrades to
+"re-capture / low-confidence" rather than crashing the bench).
 """
 import glob
 import os
@@ -42,11 +47,20 @@ def main():
         print(0)
         return
     try:
-        agg, _total_us, _launches = parse_torch_trace(tr)
+        agg, _total_us, _launches, _pmeta = parse_torch_trace(tr)
     except Exception:
         print(0)
         return
-    # Rank compute kernels by GPU time; among the busiest few (the real per-forward compute heads, not a
+    # PREFERRED: exact decode-STEP count from the trace's gpu_user_annotation step spans. This is the
+    # unit the gate compares against (N = max(30, 5*ceil(OSL/CONC)) decode steps) — no launches->steps
+    # confusion. Only when the trace lacks step annotations do we fall back to the launch proxy below.
+    try:
+        if (_pmeta or {}).get("has_annotations"):
+            print(int(_pmeta.get("n_decode_steps", 0)))
+            return
+    except Exception:
+        pass
+    # FALLBACK (no step annotations): rank compute kernels by GPU time; among the busiest few (the real per-forward compute heads, not a
     # high-multiplicity pointwise), take the max shape-hidden launch count. This is decode LAUNCHES (>=
     # decode forward steps, since a per-layer kernel fires once per layer) — a conservative floor that
     # reliably catches the pathological under-capture (hidden ~= 0) and guarantees >= N decode latency

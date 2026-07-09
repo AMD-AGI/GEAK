@@ -458,15 +458,22 @@ def _time_graph(torch, g, warmup, repeats, flush):
 
 # --------------------------------------------------------------------------- (b) correctness
 def correct(out, ref, tol):
-    """allclose-style check with a scale-relative atol floor so near-zero output elements don't blow
-    up a pure relative metric. Returns (ok, max_rel_err)."""
+    """Per-element mixed-tolerance check `|out-ref| <= atol + tol*|ref|`, returns (ok, max_rel_err).
+
+    The absolute floor `atol` exists ONLY to keep near-zero reference elements from blowing up the pure
+    relative term — it is set to the computation's NOISE level `tol * RMS(ref)`, NOT `tol * max(|ref|)`.
+    A max-scaled floor lets a small element of a HIGH-DYNAMIC-RANGE output (attention scores, MoE routing
+    weights, index-decode top-k) drift by `tol*max` in absolute terms — i.e. an unbounded relative error
+    on the small elements the value-parity gate is meant to catch. RMS tracks the bulk magnitude, so for
+    a uniform-magnitude tensor RMS≈max (behavior unchanged) but for a spiky tensor RMS≪max (the floor
+    tightens and the small-element error is no longer masked)."""
     torch = _torch()
     try:
         if tuple(out.shape) != tuple(ref.shape):
             return False, float("inf")
         out = out.float()
         ref = ref.float()
-        atol = tol * ref.abs().max().clamp_min(1e-6)
+        atol = tol * ref.pow(2).mean().sqrt().clamp_min(1e-6)   # noise floor = tol * RMS(ref)
         diff = (out - ref).abs()
         ok = bool((diff <= (atol + tol * ref.abs())).all())
         err = diff.div(ref.abs() + atol).max().item()
@@ -712,6 +719,117 @@ def amdahl_check(e2e_delta_pct, pct_gpu, isolated_speedup, noise_band_pct=0.5, s
     return {"ceiling_pct": round(ceiling, 3), "allowed_pct": round(allowed, 3),
             "plausible": bool(plausible), "verdict": "ok" if plausible else "implausible",
             "note": note}
+
+
+# --------------------------------------------------------------------------- (c) serving-weighted PRIMARY metric
+def _analytic_calls_from_meta(meta):
+    swm = ((meta or {}).get("workload") or {}).get("serving_weight_model") or {}
+    return swm.get("analytic_calls") or {}
+
+
+def served_regimes(meta):
+    """Regimes this kernel actually runs in (lower-cased set); empty set = ungated. Preference:
+      1. meta['served_regimes'] (extractor override, if set), else
+      2. meta['workload']['served_regimes'] (trace-derived by attribute_weights from the profile's
+         MEASURED serving-phase spans — parse_profile served_regimes/case regime).
+    A *_fwd/prefill wrapper with a separate *_decode kernel is 'prefill'; the decode kernel is 'decode'."""
+    sr = (meta or {}).get("served_regimes")
+    if not sr:
+        sr = ((meta or {}).get("workload") or {}).get("served_regimes")
+    if not sr:
+        return set()
+    return {str(r).strip().lower() for r in sr if str(r).strip()}
+
+
+def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True):
+    """Centralized PRIMARY-metric weighting for the immutable unittests — replaces the per-kernel
+    hand-rolled `_serving_calls`/`weight` blocks so every UT applies the SAME audited rule. Enforces:
+
+      (1) served-regimes gate: drop any case whose regime is not in `served_regimes(meta)` (when set),
+          so a decode case that leaked into a prefill-only kernel's oracle cannot be weighted onto it.
+      (2) analytic call model (NEVER profiled counts): calls come from
+          meta.workload.serving_weight_model.analytic_calls (prefill already CONC-scaled by
+          attribute_weights: CONC*ceil(ISL/chunk); decode = OSL). Within each served regime the regime's
+          total passes go to the LARGEST-M bucket (decode M==CONC; prefill M==chunk/ISL); smaller/
+          transient buckets get calls=1 and stay visible. CONC enters decode via the SHAPE (M) and
+          prefill via the COUNT — one consistent per-wave basis.
+      (3) pseudo-identity guard: a bucket whose baseline_ms == optimized_ms to `identity_eps` (a warm-JIT
+          / autotune-converged / byte-identical-candidate artifact, NOT a real measured null) is flagged
+          and EXCLUDED. If EVERY surviving bucket is identity, `weighted` is None with a reason so the
+          caller does not trust an unmeasured 1.0x (re-measure per-bucket ms in a fresh subprocess under
+          the deployment graph/compile — see kernel_extractor.md).
+
+    `per_case`: list of {sig|name, regime, m?, baseline_ms, optimized_ms?|speedup?}. speedup is derived
+    from baseline_ms/optimized_ms when both present (preferred), else the passed `speedup` is used.
+    Returns {weighted, geomean, primary, included, dropped_unserved, suspect_identity, per_case, reason}."""
+    served = served_regimes(meta)
+    calls_model = _analytic_calls_from_meta(meta)
+
+    def _f(x):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+
+    rows, dropped_unserved = [], []
+    for c in per_case:
+        reg = str(c.get("regime") or "").lower()
+        if served and reg and reg not in served:
+            dropped_unserved.append(c.get("sig") or c.get("name") or reg)
+            continue
+        b, o, spd = _f(c.get("baseline_ms")), _f(c.get("optimized_ms")), _f(c.get("speedup"))
+        if b is not None and o is not None and o > 0:
+            spd = b / o
+        rows.append({"sig": c.get("sig") or c.get("name") or "", "regime": reg, "m": c.get("m"),
+                     "baseline_ms": b, "optimized_ms": o, "speedup": spd})
+
+    # assign analytic passes: the largest-M bucket in each regime carries that regime's calls, rest = 1.
+    by_reg = {}
+    for r in rows:
+        by_reg.setdefault(r["regime"], []).append(r)
+
+    def _m(x):
+        try:
+            return float(x["m"])
+        except (TypeError, ValueError):
+            return float(x["baseline_ms"] or 0.0)
+
+    for reg, members in by_reg.items():
+        total_calls = int(calls_model.get(reg, 1) or 0) if reg else 1
+        dom = max(members, key=_m) if members else None
+        for r in members:
+            r["calls"] = total_calls if (dom is not None and r is dom) else 1
+
+    suspect, included = [], []
+    for r in rows:
+        b, o, spd = r["baseline_ms"], r["optimized_ms"], r["speedup"]
+        is_identity = (b is not None and o is not None
+                       and abs(b - o) <= identity_eps * max(abs(b), 1e-12))
+        r["identity"] = bool(is_identity)
+        r["weight"] = (b or 0.0) * r.get("calls", 1)
+        if is_identity:
+            suspect.append(r["sig"]); r["included"] = False
+        elif spd and spd > 0 and r["weight"] > 0:
+            r["included"] = True; included.append(r)
+        else:
+            r["included"] = False
+
+    if not included:
+        return {"weighted": None, "geomean": None, "primary": None, "included": 0,
+                "dropped_unserved": dropped_unserved, "suspect_identity": suspect, "per_case": rows,
+                "reason": ("no measurable non-identity bucket survived (all identity/zero-weight or "
+                           "dropped by served-regimes) — weighted speedup is UNTRUSTED; re-measure "
+                           "per-bucket ms in a fresh subprocess under the deployment graph/compile.")}
+    W = sum(r["weight"] for r in included)
+    D = sum(r["weight"] / r["speedup"] for r in included)
+    weighted = (W / D) if D else None
+    gm = None
+    if geomean:
+        spds = [r["speedup"] for r in included]
+        gm = math.exp(sum(math.log(s) for s in spds) / len(spds)) if spds else None
+    return {"weighted": weighted, "geomean": gm, "primary": weighted, "included": len(included),
+            "dropped_unserved": dropped_unserved, "suspect_identity": suspect, "per_case": rows,
+            "reason": ""}
 
 
 class HarnessIncompleteError(Exception):
