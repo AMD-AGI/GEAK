@@ -1,15 +1,14 @@
-# Read the Docs configuration. Required by readthedocs.com — without it the
-
 version: 2
 
 sphinx:
   configuration: docs/conf.py
 
-# RTD by default builds html only
-# Additional formats available for extra build time: htmlzip, pdf, epub
 formats: [pdf]
 
-# Defines build environment
+python:
+  install:
+    - requirements: docs/sphinx/requirements.txt
+
 build:
   os: ubuntu-22.04
   tools:
