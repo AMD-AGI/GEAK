@@ -33,7 +33,7 @@ const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_workflow.js`;
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
 // ---- Upstream TraceLens / kernel-agent prior (OPTIONAL; forwarded by run_e2e.py as args.tracelens) ----
-// run_e2e.py resolves these paths beside the perfskills handoff and forwards ONLY the non-null ones.
+// run_e2e.py resolves these paths beside the geak handoff and forwards ONLY the non-null ones.
 // They are a PRIOR for the Profile/Strategize/Extract phases: if analysis_md exists the Profiler skips
 // its own trace collection and builds the Top-N from TraceLens (and runs an EXTRA parse_profile pass on
 // trace_file when present); the Architect uses kernel_candidates as a routing prior. ENTIRELY ADDITIVE:
@@ -68,7 +68,7 @@ const SERVING_TP = parseInt(A.tp != null ? A.tp : (A.serving_tp != null ? A.serv
 const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
   : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
 // ---- WALL-CLOCK BUDGET (opt-in; default OFF when absent => byte-identical) ---------------------------
-// time_budget_s is the EXTERNAL orchestrator's HARD kill budget (run_e2e.py PERFSKILLS_E2E_TIMEOUT_S),
+// time_budget_s is the EXTERNAL orchestrator's HARD kill budget (run_e2e.py GEAK_E2E_TIMEOUT_S),
 // forwarded so GEAK can self-pace and FINISH (Finalize/Report/Validate + workflow_return flush) BEFORE
 // the SIGKILL — instead of being torn down mid-flight (the deep 24h-budget-vs-12h-kill failure). This is
 // the SINGLE place the orchestrator budget is interpreted. When the arg is ABSENT (GEAK invoked directly,
@@ -250,7 +250,7 @@ const OSL = parseInt(A.osl != null ? A.osl : 1024, 10);
 const CONC = parseInt(A.conc != null ? A.conc : 64, 10);
 const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC };
 // Seed config: when an external orchestrator (e.g. Hyperloom) already did
-// config/param search, it passes its accepted best flags/env so the PerfSkills
+// config/param search, it passes its accepted best flags/env so the GEAK
 // baseline is measured ON that config (fair engagement start), not the stack
 // default. Serving TP/GPU are handled by SERVING_TP / SERVING_GPU above.
 const INIT_FLAGS = String(A.initial_extra_server_args || '');
@@ -2023,11 +2023,17 @@ if (want('final')) {
 
   phase('Validate');
   validation = await safeAgent(
-    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate.', {
+    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
       FINAL_FLAGS: { flags: curFlags, env: curEnv },
       CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL, E2E_REPEATS, SKILL_DIR: WORKFLOW_DIR,
+      // The Report phase already wrote these files with the Finalize-bundle bench (the Director had not
+      // run yet). After validation the Director MUST review + rewrite their headline throughput / speedup
+      // / TTFT / TPOT (and status/parity) to its authoritative same-session numbers, so report-vs-director
+      // can never disagree. Paths default to the standard EVAL_DIR names if the report result is absent.
+      ARCHITECT_REPORT: (report && report.report_path) || `${EVAL_DIR}/architect_report.md`,
+      FINAL_REPORT: `${EVAL_DIR}/final_report.md`,
     }),
     { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
   // A Validate that did NOT produce a usable number (e.g. its server crashed in

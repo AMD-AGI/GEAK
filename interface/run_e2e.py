@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PerfSkills/GEAK e2e runner — the ONLY entry point Hyperloom (or any external
+"""GEAK e2e runner — the ONLY entry point Hyperloom (or any external
 orchestrator) calls.
 
 Contract (stable, see interface/run_e2e.md):
@@ -42,14 +42,14 @@ SCHEMA_VERSION = 1
 
 # interface/ is a sibling of e2e_workflow/ under the repo root.
 INTERFACE_DIR = Path(__file__).resolve().parent
-PERFSKILLS_ROOT = INTERFACE_DIR.parent
-E2E_DIR = PERFSKILLS_ROOT / "e2e_workflow"
+GEAK_ROOT = INTERFACE_DIR.parent
+E2E_DIR = GEAK_ROOT / "e2e_workflow"
 E2E_SCRIPT = E2E_DIR / "e2e_workflow.js"
 BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
 
 # Workflow primitives are only available at this effort tier (see README).
-CLAUDE_EFFORT = os.environ.get("PERFSKILLS_CLAUDE_EFFORT", "ultracode")
-CLAUDE_MODEL = os.environ.get("PERFSKILLS_CLAUDE_MODEL", "claude-opus-4-8")
+CLAUDE_EFFORT = os.environ.get("GEAK_CLAUDE_EFFORT", "ultracode")
+CLAUDE_MODEL = os.environ.get("GEAK_CLAUDE_MODEL", "claude-opus-4-8")
 ALLOWED_TOOLS = ["Workflow", "Bash", "Read", "Write"]
 
 # Public claude builds (>=2.1.x) REJECT "--effort ultracode". The Workflow /
@@ -59,14 +59,14 @@ ALLOWED_TOOLS = ["Workflow", "Bash", "Read", "Write"]
 # executes the JS pipeline instead of the agent merely "backgrounding" it.
 VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 WORKFLOW_SETTINGS = os.environ.get(
-    "PERFSKILLS_CLAUDE_SETTINGS",
+    "GEAK_CLAUDE_SETTINGS",
     json.dumps({"enableWorkflows": True, "ultracode": True}),
 )
 # Override which claude binary the SDK drives. The claude_agent_sdk otherwise
 # prefers its OWN bundled CLI (claude_agent_sdk/_bundled/claude) over $PATH, so
 # swapping the system claude alone has no effect on the SDK path. Set
-# PERFSKILLS_CLAUDE_BIN to pin a specific build (e.g. an older native version).
-CLAUDE_BIN = os.environ.get("PERFSKILLS_CLAUDE_BIN", "").strip()
+# GEAK_CLAUDE_BIN to pin a specific build (e.g. an older native version).
+CLAUDE_BIN = os.environ.get("GEAK_CLAUDE_BIN", "").strip()
 
 # Background-task completion race (see _invoke_via_sdk completion gate):
 # when the SDK turn "looks done" (a background task notified terminal + the
@@ -78,8 +78,8 @@ CLAUDE_BIN = os.environ.get("PERFSKILLS_CLAUDE_BIN", "").strip()
 # backgrounded workflow alive) and poll the disk for the terminal marker for a
 # BOUNDED grace window. The outer anyio.fail_after(timeout_s) is the ultimate
 # backstop, so this can never exceed the run's hard budget.
-DONE_GRACE_S = float(os.environ.get("PERFSKILLS_DONE_GRACE_S", "1800"))
-DONE_POLL_S = float(os.environ.get("PERFSKILLS_DONE_POLL_S", "15"))
+DONE_GRACE_S = float(os.environ.get("GEAK_DONE_GRACE_S", "1800"))
+DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +268,7 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # scaffold beside the authoritative run. Honor an explicit handoff/env
     # override first (resume); otherwise mint a single fresh dir here so BOTH
     # the preflight smoke and the real baseline/profile/kernel land under it.
-    eval_dir = str(h.get("eval_dir") or os.environ.get("PERFSKILLS_EVAL_DIR", "")).strip()
+    eval_dir = str(h.get("eval_dir") or os.environ.get("GEAK_EVAL_DIR", "")).strip()
     if not eval_dir:
         model_name = Path(h["model_path"]).name
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -288,8 +288,8 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
 # ---------------------------------------------------------------------------
 # TraceLens / kernel-agent artifact discovery.
 # ---------------------------------------------------------------------------
-# The four artifacts live ABOVE the handoff's ``perfskills`` directory, under
-# the experiment root (the parent of ``perfskills``). ``**`` denotes one or
+# The four artifacts live ABOVE the handoff's ``geak`` directory, under
+# the experiment root (the parent of ``geak``). ``**`` denotes one or
 # more randomly-named nested directories, so the lookup is glob based
 # (recursive) and stays generic across runs.
 _TRACELENS_ARTIFACT_PATTERNS = {
@@ -301,13 +301,13 @@ _TRACELENS_ARTIFACT_PATTERNS = {
 
 
 def _experiment_root_from_exp_root(exp_root: str) -> str:
-    """Return the experiment root (the directory that CONTAINS ``perfskills``).
+    """Return the experiment root (the directory that CONTAINS ``geak``).
 
-    ``handoff.exp_root`` points at ``<experiment_root>/perfskills`` so the four
-    TraceLens artifacts live one level up, beside ``perfskills``.
+    ``handoff.exp_root`` points at ``<experiment_root>/geak`` so the four
+    TraceLens artifacts live one level up, beside ``geak``.
     """
     norm = str(exp_root or "").rstrip("/")
-    if os.path.basename(norm) == "perfskills":
+    if os.path.basename(norm) == "geak":
         return os.path.dirname(norm)
     return norm
 
@@ -323,7 +323,7 @@ def _find_latest_artifact(root: str, pattern: str) -> str | None:
 
 
 def resolve_tracelens_report(exp_root: str) -> dict:
-    """Resolve the four TraceLens artifacts beside the handoff's ``perfskills``.
+    """Resolve the four TraceLens artifacts beside the handoff's ``geak``.
 
     Returns a dict with ``search_root`` plus the four artifact paths
     (``analysis_md``, ``kernel_candidates_json``, ``tracelens_report_json``,
@@ -518,7 +518,7 @@ def apply_bench_protocol(h: dict) -> dict:
     agents make overrides its built-in default with the orchestrator's value.
 
     IMPORTANT: only keys actually present in the handoff are exported. When
-    ``bench_protocol`` is absent (e.g. PerfSkills run standalone, no external
+    ``bench_protocol`` is absent (e.g. GEAK run standalone, no external
     orchestrator), nothing is exported and ``bench_e2e.sh`` keeps its own
     defaults — so the standalone path is unchanged.
 
@@ -893,7 +893,7 @@ def _parse_last_json_line(raw: str) -> dict:
 def _classify_error(exc: BaseException) -> str:
     """Map an internal failure onto a stable ``error_class`` for Hyperloom.
 
-    Hyperloom's session-breakdown PerfSkills collector reads ``error_class`` to
+    Hyperloom's session-breakdown GEAK collector reads ``error_class`` to
     attribute *why* an e2e run missed. Keep these values stable; unknown
     failures fall back to ``runner_error``.
     """
@@ -1048,7 +1048,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
     else:
         result_source = "workflow_return"
 
-    # baseline measurement-protocol cross-check (PerfSkills-E2E vs Hyperloom-E2E divergence).
+    # baseline measurement-protocol cross-check (GEAK-E2E vs Hyperloom-E2E divergence).
     # GEAK's measured baseline is already seeded with Hyperloom's accepted config (map_args forwards
     # accepted_flags/accepted_env), so it should match Hyperloom's own baseline. Surface BOTH numbers
     # plus their divergence so the caller can tell a real win from a measurement mismatch (different
@@ -1268,11 +1268,11 @@ def _discover_eval_dir(exp_root: Path) -> Path | None:
     it. Pick the most-recently-modified ``e2e_*`` dir that carries one of those
     completion markers; fall back to the newest ``e2e_*`` dir.
 
-    A pinned ``PERFSKILLS_EVAL_DIR`` (set by main() from the single eval_dir
+    A pinned ``GEAK_EVAL_DIR`` (set by main() from the single eval_dir
     map_args minted for this run) short-circuits the glob/guess: recovery then
     targets EXACTLY the dir this run used, never a sibling from another run.
     """
-    pinned = os.environ.get("PERFSKILLS_EVAL_DIR", "").strip()
+    pinned = os.environ.get("GEAK_EVAL_DIR", "").strip()
     if pinned and Path(pinned).is_dir():
         return Path(pinned)
     if not exp_root.is_dir():
@@ -1417,7 +1417,7 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
     # Sound general attribution: when EXACTLY one kernel was accepted it is, by
     # definition, responsible for the whole measured e2e delta — credit it.
     # With >1 we cannot split, so leave per-kernel gain null (the headline gain
-    # still folds via the perfskills section + cumulative_gain).
+    # still folds via the geak section + cumulative_gain).
     if len(accepted_kernels) == 1 and overall_delta_pct is not None:
         accepted_kernels[0]["e2e_delta_pct"] = overall_delta_pct
 
@@ -1750,7 +1750,7 @@ def _journey_discovery_runs(eval_dir: Path, selected: set[str]) -> list[dict]:
         "source": "bypass",
         "status": "success",
         "duration_sec": None,
-        "scan": {"candidates_path": f"perfskills:{eval_dir}",
+        "scan": {"candidates_path": f"geak:{eval_dir}",
                  "profiler": prof.get("source") or "rocprofv3",
                  "num_distinct_kernels": prof.get("num_distinct_kernels")},
         "hot_kernel_count": len(hot),
@@ -1775,7 +1775,7 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
     ``display_name`` is the profiler's real kernel symbol (with its leading
     underscore intact) resolved from the discovery table; when given it is used
     as ``name`` so the kernels[] entry, the discovery hot_kernel, and the
-    perfskills accepted-kernel backfill all carry the SAME human-readable name.
+    geak accepted-kernel backfill all carry the SAME human-readable name.
     The overlay dir name (``short``, underscore-stripped for filesystem safety)
     is only a fallback when the kernel was not in the profiler table.
     """
@@ -1817,7 +1817,7 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
         entry["backend_result"] = {
             "kernel_id": kernel_id, "run_id": str(eval_dir),
             "attempts": [], "verification": {},
-            "metadata": {"root_dir": str(PERFSKILLS_ROOT), "version": geak_sha,
+            "metadata": {"root_dir": str(GEAK_ROOT), "version": geak_sha,
                          "note": "e2e A/B incomplete (cut off before result)"},
         }
         entry["dispatch"]["task_group"] = "ab_incomplete"
@@ -1842,7 +1842,7 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
         }],
         "verification": {"micro_speedup": micro, "best_attempt_id": attempt_id,
                          "best_backend": backend},
-        "metadata": {"root_dir": str(PERFSKILLS_ROOT), "version": geak_sha},
+        "metadata": {"root_dir": str(GEAK_ROOT), "version": geak_sha},
     }
     entry["e2e"] = {
         "kernel_id": kernel_id,
@@ -1888,7 +1888,7 @@ def _journey_return_entry(eval_dir: str, k: dict, idx: int, wf: dict,
             }],
             "verification": {"micro_speedup": isolated, "best_attempt_id": attempt_id,
                              "best_backend": backend},
-            "metadata": {"root_dir": str(PERFSKILLS_ROOT), "version": geak_sha},
+            "metadata": {"root_dir": str(GEAK_ROOT), "version": geak_sha},
         },
         "e2e": {
             "kernel_id": kid, "integrated": True, "e2e_gain_pct": k.get("e2e_delta_pct"),
@@ -1916,7 +1916,7 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
     """
     eval_dir_str = str(normalized.get("eval_dir") or wf.get("eval_dir") or "")
     eval_dir = Path(eval_dir_str) if eval_dir_str else None
-    geak_sha = _git_short_sha(PERFSKILLS_ROOT)
+    geak_sha = _git_short_sha(GEAK_ROOT)
     overall_parity = _parity_passed(wf.get("output_parity") or normalized.get("output_parity"))
 
     selected = _journey_selected_names(eval_dir) if eval_dir else set()
@@ -2010,7 +2010,7 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
     if not discovery_runs and synth_hot:
         discovery_runs = [{
             "source": "bypass", "status": "success", "duration_sec": None,
-            "scan": {"candidates_path": f"perfskills:{eval_dir_str}"},
+            "scan": {"candidates_path": f"geak:{eval_dir_str}"},
             "hot_kernel_count": len(synth_hot), "hot_kernels": synth_hot, "error": None,
         }]
 
@@ -2027,11 +2027,11 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
 def _geak_versions() -> dict:
     """The top-level ``versions`` section (schema §1) — GEAK's authoritative tool
     version, shared by the full and the empty-kernels journey shapes."""
-    geak_sha = _git_short_sha(PERFSKILLS_ROOT)
+    geak_sha = _git_short_sha(GEAK_ROOT)
     return {
         "geak": {
             "tool": "geak",
-            "root_dir": str(PERFSKILLS_ROOT),
+            "root_dir": str(GEAK_ROOT),
             "commit": geak_sha,
             "version": geak_sha,
         }
@@ -2096,7 +2096,7 @@ def main(argv: list[str]) -> int:
         )
         return 2
     handoff_path, result_path = Path(args[0]), Path(args[1])
-    timeout_s = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "43200"))  # 12h
+    timeout_s = int(os.environ.get("GEAK_E2E_TIMEOUT_S", "43200"))  # 12h
 
     h = _read_json(handoff_path)
     if not h:
@@ -2107,7 +2107,7 @@ def main(argv: list[str]) -> int:
     # Pin the single eval_dir into the environment so BOTH the live completion
     # check (_workflow_done_on_disk) and the scrape-independent disk recovery
     # (_discover_eval_dir) target EXACTLY this run's dir, deterministically.
-    os.environ["PERFSKILLS_EVAL_DIR"] = ps_args["eval_dir"]
+    os.environ["GEAK_EVAL_DIR"] = ps_args["eval_dir"]
     bench_client = apply_bench_client(h)
     bench_launcher = apply_bench_launcher(h)
     bench_protocol = apply_bench_protocol(h)
@@ -2128,7 +2128,7 @@ def main(argv: list[str]) -> int:
     eval_dir_hint = ps_args["eval_dir"]
 
     # ── Guaranteed interface-file emission ──────────────────────────────────
-    # CONTRACT: as long as PerfSkills produced ANY measured E2E effect on disk,
+    # CONTRACT: as long as GEAK produced ANY measured E2E effect on disk,
     # result.json (+ kernel_journey.json) MUST be written. No termination,
     # timeout, signal, or exception may leave the interface files missing.
     #   * idempotent (writes once), best-effort (never raises),
@@ -2227,7 +2227,7 @@ def main(argv: list[str]) -> int:
     # absent and this never trips — byte-identical to a first-time run.
     if _workflow_done_on_disk(eval_dir_hint):
         sys.stderr.write(
-            f"PerfSkills e2e: eval_dir already terminal on disk "
+            f"GEAK e2e: eval_dir already terminal on disk "
             f"({eval_dir_hint}); recovering without re-running the workflow.\n"
         )
         try:
@@ -2255,11 +2255,11 @@ def main(argv: list[str]) -> int:
             wf = None
         if wf is not None:
             sys.stderr.write(
-                f"PerfSkills e2e: workflow handoff failed [{err_class}]; "
+                f"GEAK e2e: workflow handoff failed [{err_class}]; "
                 f"recovered from disk artifacts ({wf.get('eval_dir')}).\n"
             )
         else:
-            sys.stderr.write(f"PerfSkills e2e failed [{err_class}]: {e}\n")
+            sys.stderr.write(f"GEAK e2e failed [{err_class}]: {e}\n")
     finally:
         out = _emit(wf=wf, error=err, error_class=err_class)
 
