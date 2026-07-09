@@ -4,7 +4,7 @@ flavor defines the site header display, select the flavor for the corresponding 
 flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-developer-hub, local, generic
 """
 
-version_number = "3.2.2"
+version_number = "4.0"
 
 html_theme = "rocm_docs_theme"
 html_theme_options = {

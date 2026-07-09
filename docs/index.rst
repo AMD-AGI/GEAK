@@ -1,12 +1,15 @@
 .. meta::
-   :description: GEAK is an AMD AI agent that optimizes GPU kernels for ROCm. It profiles, optimizes, and validates HIP, Triton, and FlyDSL kernels using LLM-guided multi-agent search.
-   :keywords: GEAK, ROCm, GPU kernel optimization, AMD, Triton, HIP, AMD Instinct, LLM agent, kernel tuning
+   :description: GEAK is an AMD multi-agent system that optimizes GPU kernels and whole-model serving throughput on ROCm, driven by Claude Code and deterministic JS Workflows.
+   :keywords: GEAK, ROCm, GPU kernel optimization, serving throughput, sglang, vLLM, AMD Instinct, Triton, HIP, CK, FlyDSL
 
 GEAK documentation
 ==================
 
-GEAK (Generating Efficient AI-Centric Kernels) is an agent-driven framework for end-to-end GPU kernel optimization in real codebases, producing reviewable patches backed by profiling, 
-testing, and LLM-guided iteration. Supports HIP, Triton, and FlyDSL kernels.
+GEAK (Generating Efficient AI-Centric Kernels) is a multi-agent GPU performance optimizer for
+AMD Instinct MI GPUs (CDNA). It ships two deterministic **Workflows**: ``e2e_workflow`` raises the
+end-to-end **sglang / vLLM serving throughput** of a whole model, and ``kernel_workflow`` optimizes a
+single AMD GPU kernel (Triton, HIP, CK, FlyDSL). Control flow is deterministic JS; LLM agents are called
+only for judgement.
 
 The GEAK public repository is located at `AMD-AGI/GEAK <https://github.com/AMD-AGI/GEAK>`_.
 
@@ -19,14 +22,15 @@ The GEAK public repository is located at `AMD-AGI/GEAK <https://github.com/AMD-A
 
    .. grid-item-card:: How to
 
-      * :doc:`Run the agent <how-to/run-agent>`
+      * :doc:`Run a workflow <how-to/run-agent>`
 
    .. grid-item-card:: Conceptual
 
-      * :doc:`GEAK agent loop <conceptual/geak-pipeline>`
+      * :doc:`GEAK pipeline <conceptual/geak-pipeline>`
 
    .. grid-item-card:: Reference
 
-      * :doc:`API reference <reference/api-reference>`
+      * :doc:`Reference <reference/api-reference>`
 
-For information on contributing to the GEAK code base, see `GEAK GitHub repository <https://github.com/AMD-AGI/GEAK/blob/rocm-docs-review/CONTRIBUTING.md>`_.
+For information on contributing to the GEAK code base, see the
+`CONTRIBUTING guide <https://github.com/AMD-AGI/GEAK/blob/GEAK_v4/CONTRIBUTING.md>`_.

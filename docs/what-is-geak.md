@@ -1,57 +1,65 @@
 ---
 myst:
   html_meta:
-    "description": "GEAK is an agent-driven framework for GPU kernel optimization on ROCm. It profiles, optimizes, and validates HIP, Triton, and FlyDSL kernels using LLM-guided multi-agent search."
-    "keywords": "GEAK, GPU kernel optimization, ROCm, HIP, Triton, FlyDSL, LLM agent, AMD Instinct, multi-agent, kernel profiling, MCP, RAG"
+    "description": "GEAK is a multi-agent GPU performance optimizer for AMD Instinct MI GPUs. It raises sglang/vLLM serving throughput and optimizes single kernels (Triton, HIP, CK, FlyDSL), driven by deterministic JS Workflows."
+    "keywords": "GEAK, GPU kernel optimization, serving throughput, ROCm, sglang, vLLM, Triton, HIP, CK, FlyDSL, AMD Instinct, multi-agent, Workflow"
 ---
 
 # What is GEAK?
 
-GEAK (Generating Efficient AI-Centric Kernels) is an agent-driven framework for end-to-end GPU kernel optimization in real codebases. Given a kernel and a test harness, GEAK runs a closed loop of profiling, LLM-guided optimization, and validation, then produces a reviewable patch. It supports HIP, Triton, and FlyDSL kernels and integrates directly with your repository, so no one-off scripts are required.
+GEAK (Generating Efficient AI-Centric Kernels) is a multi-agent GPU performance optimizer for **AMD
+Instinct MI GPUs** (CDNA; the on-box card is auto-detected). It ships two deterministic **Workflows**,
+driven by Claude Code:
 
-## Core capabilities
+| Workflow | Scope | What it optimizes |
+| --- | --- | --- |
+| **`e2e_workflow`** ⭐ | Whole-model serving | End-to-end **sglang / vLLM throughput** of a full LLM |
+| `kernel_workflow` | Single kernel | Latency / speedup of one AMD GPU kernel (Triton, HIP, CK, FlyDSL) |
 
-GEAK has three core capabilities: multi-agent search, repository-level workflows, and a curated knowledge base.
+`e2e_workflow` is the headline: it raises serving throughput by triaging hot kernels and pulling levers
+cheapest-first, then *recursively* calls `kernel_workflow` to author or optimize the kernels worth
+fixing. To speed up a single kernel, use `kernel_workflow` directly.
 
-### Multi-agent search
+## Core design: deterministic control plane, LLM judgement
 
-GEAK distributes optimization work across multiple agents, each running in an isolated Git worktree and bound to a dedicated GPU. This lets GEAK explore different optimization strategies in parallel rather than sequentially, improving both coverage and robustness.
+Control flow — the budget loop, parallel fan-out, verification, and stop conditions — is **deterministic
+JS** in `e2e_workflow.js` / `kernel_workflow.js`. LLM agents are invoked only for judgement (analysis,
+strategy, kernel authoring). This makes runs reliable and reproducible.
 
-Each agent runs the same closed loop independently:
+### e2e_workflow (whole-model serving)
 
-1. Profile the kernel to identify bottlenecks.
-2. Generate and apply an optimization patch.
-3. Validate correctness and measure performance against the baseline.
+A system layer that wraps — and recursively calls — the single-kernel layer. Specialized agents own each
+stage: an **e2e Director** (isolated environment + true baseline), a **System Architect** (Amdahl
+strategy), a **Profiler**, a **Config Tuner**, a **Kernel Extractor**, an **Op Benchmarker**, and an
+**e2e Integrator** (reversible overlay + throughput gate).
 
-Agents that produce a verified improvement are ranked, and the best patch is surfaced for review.
+### kernel_workflow (single kernel)
 
-GEAK also automatically discovers or generates the test harness it needs. If you provide a harness, GEAK uses it. If you don't, GEAK generates one before optimization begins.
+A hierarchical single-kernel optimizer: **Director → TechLead → specialist engineers** (algorithm,
+memory, compute, host-runtime), multi-round and budget-controlled. Each patch is independently verified
+against an immutable correctness oracle before it is accepted.
 
-### Repository-level workflows
+## Two things keep it honest
 
-GEAK works at the repository level, not just on individual files. It can analyze a full repository to understand dependencies, build systems, and surrounding context before optimizing a target kernel. This means optimizations stay consistent with the broader codebase. The evaluation pipeline — baseline capture, correctness checks, and benchmarking — runs the same way every time.
+- **Profiling** grounds every decision in measured data — nothing is optimized unless it is first shown
+  to matter (Amdahl: `pct_gpu_time × achievable_speedup`).
+- **A curated knowledge base** (`perf_knowledge/`) supplies operator × backend priors as *reference
+  only* — the on-box benchmark and end-to-end gate are always the judge.
 
-### Knowledge base and tools
+## How a run works
 
-GEAK includes a curated AMD knowledge base covering the ROCm software stack, hardware architecture, and established optimization patterns. This knowledge base is exposed to agents through a Model Context Protocol (MCP) based Retrieval-Augmented Generation (RAG) system, so agents can query it dynamically during a run rather than relying on static context.
-
-Additional capabilities include:
-
-- **Kernel profiler**: Integrated profiling via the ROCm toolchain to identify hotspots and memory bottlenecks before optimization begins.
-- **In-session memory**: Agents accumulate observations within a single run to avoid repeating failed strategies.
-- **Cross-session memory**: Insights from past runs are persisted and retrieved in future runs, so GEAK improves over time on similar kernels and workloads.
-
-## How GEAK works
-
-A GEAK run follows this sequence:
-
-1. **Preprocess**—GEAK resolves the kernel source, builds codebase context, generates or validates a test harness, captures a baseline, and profiles the kernel. The output is a `COMMANDMENT.md` contract that specifies the optimization target and evaluation rules for all agents.
-2. **Optimize** — One or more agents receive the contract and begin the profiling, patch, and validation loop. Agents run in parallel on isolated Git worktrees, each on its own GPU.
-3. **Select**—After each round, GEAK ranks agents by verified speedup, selects the best patch, and optionally runs additional rounds.
-4. **Output**—The winning patch is applied to the repository and committed. A `final_report.json` captures the result.
+1. **Preflight** the environment (GPU arch, serving backend, model).
+2. **Profile** a running server on your exact workload and rank hot kernels by Amdahl.
+3. **Pull levers cheapest-first** — config/backend sweep → head GEMM/attention bake-off (aiter per-shape
+   tune + a kernel *authored* via the recursive kernel layer) → editable-kernel milestone loop.
+4. **Overlay** each accepted change back **reversibly**, gated on a measured warm-server throughput delta
+   (interleaved A/B, output parity).
+5. **Report and validate** — every run writes a complete `final_report.md`, and the Director independently
+   re-measures the result.
 
 ## Related topics
 
-- [Install GEAK](install/install.md)—set up GEAK and configure a model backend.
-- [Run the agent](how-to/run-agent.md)—invoke `geak` from the command line with single-agent and parallel examples.
-- [API reference](reference/api-reference.md)—CLI flags, environment variables, and run artifact layout.
+- [Install GEAK](install/install.md) — set up the environment and Claude Code.
+- [Run a workflow](how-to/run-agent.md) — invoke a workflow from Claude Code or the `run_e2e.py` interface.
+- [GEAK pipeline](conceptual/geak-pipeline.md) — the phases of an end-to-end run.
+- [Reference](reference/api-reference.md) — Workflow arguments, the integration contract, and run artifacts.

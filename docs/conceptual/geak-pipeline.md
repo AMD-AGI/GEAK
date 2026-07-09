@@ -1,74 +1,88 @@
 ---
 myst:
   html_meta:
-    "description": "Learn how the GEAK agent loop works: inputs, parallel optimization, patch evaluation, MCP tools, and output artifacts for GPU kernel tuning on ROCm."
-    "keywords": "GEAK, agent loop, pipeline, GPU kernel optimization, ROCm, MCP tools, parallel scaling, patch evaluation, HIP, Triton"
+    "description": "How the GEAK end-to-end pipeline works: setup, profile, Amdahl strategy, config sweep, head-kernel bake-off, editable-kernel milestones, and independent validation."
+    "keywords": "GEAK, pipeline, serving throughput, Amdahl, config sweep, head kernel, profiling, e2e gate, sglang, vLLM, ROCm"
 ---
 
-# GEAK agent loop
+# GEAK pipeline
 
-The GEAK pipeline takes a kernel repository and a natural-language prompt as input, runs a parallel agent loop to find the best optimization, and produces a tested, reviewable patch. This topic explains each stage of that loop and the tools available to agents during a run.
+The `e2e_workflow` takes a running LLM server and a workload (ISL/OSL/concurrency) and raises its serving
+throughput. Control flow is deterministic; each phase is owned by a specialized agent, and every accepted
+change is gated on a measured end-to-end delta before it is kept. The single-kernel `kernel_workflow` runs
+the same closed loop on one kernel and is called recursively when a kernel needs to be authored or tuned.
 
-```{figure} ../images/GEAK_framework.png
-:alt: GEAK agent loop diagram showing inputs (kernel repo and prompt), the parallel agent loop (task plan, optimization, and patch evaluation), MCP tools (knowledge base and kernel profiler), local tools (bash and patch version management), and outputs (best kernel, strategy summary, and updated memory).
-:align: center
-
-GEAK agent loop
+```{mermaid}
+flowchart LR
+  A[Setup<br/>Director] --> B[Profile<br/>Profiler]
+  B --> C[Strategize<br/>Architect]
+  C --> D[ConfigSweep<br/>Config Tuner]
+  D --> E[HeadKernel<br/>Extractor / Op Benchmarker / ⟲ kernel layer / Integrator]
+  E --> F[Milestone<br/>⟲ kernel layer / Integrator]
+  F --> G[Finalize / Report / Validate<br/>Integrator / Architect / Director]
 ```
 
 ## Inputs
 
-Every GEAK run requires two inputs:
+- **Model + serving backend**: a model on disk served by `sglang` or `vllm` (selected per run).
+- **Workload**: input/output sequence length and concurrency (ISL/OSL/conc). Profiling and benchmarking
+  use the *same* workload so numbers are comparable.
 
-- **Kernel repo**: The Git repository containing the kernel to optimize. GEAK reads the repository structure, locates the target kernel, and builds a codebase context document before any optimization begins.
-- **Prompt**: A natural-language task description that tells GEAK what to optimize and what metric to improve (for example, latency, bandwidth, or throughput). The prompt can include the kernel URL, GPU IDs, and a test harness path, or GEAK can discover these automatically during preprocessing.
+## Phases
 
-## The agent loop
+### Setup
 
-Once preprocessing is complete, GEAK enters the agent loop. Multiple agents run in parallel, each in an isolated Git worktree on its own GPU, following the same three-stage cycle.
+The Director builds an isolated evaluation directory, launches a warm server, and records the **true
+baseline** throughput and its noise band. Model weights and installed packages stay read-only.
 
-### Task plan and update
+### Profile
 
-At the start of each cycle the agent reviews the current state: what optimizations have been tried, what the profiler reported, and what the knowledge base suggests. It produces a task plan—a concrete set of code changes to attempt in this iteration—and updates its working memory with observations from prior cycles.
+The Profiler traces the warm server under the real workload and produces one canonical, Amdahl-ranked
+hot-kernel list, separating the prefill and decode regimes.
 
-### Optimization
+### Strategize
 
-The agent applies its task plan to the kernel source. Optimization strategies vary by kernel type and workload, and include changes such as adjusting tile sizes and block dimensions, rewriting memory access patterns, exploiting hardware-specific instructions, and fusing or splitting operations. Agents consult the AMD knowledge base and kernel profiler during this stage to inform their decisions.
+The System Architect routes each hot kernel to a track by Amdahl leverage
+(`pct_gpu_time × achievable_speedup`): config, head kernel, editable kernel, or host overhead.
 
-### Evaluate patch
+### ConfigSweep
 
-After applying a change, the agent runs the test harness in correctness mode, then in benchmark mode. A patch that fails correctness is discarded. A patch that passes is scored against the baseline metrics captured during preprocessing. The score, along with the strategy used, is recorded in the agent's memory for the next iteration.
+The Config Tuner tries service-level switches one at a time — attention backend, cuda/HIP graph,
+scheduling and memory knobs, backend toggles, and (when enabled) lower precision — keeping only changes
+that measurably help. This is the cheapest, landscape-reshaping lever, so it runs first; the server is
+re-profiled afterward.
 
-### Parallel scaling
+### HeadKernel
 
-GEAK runs multiple agents simultaneously, each exploring a different strategy. This parallel search means a single run covers more of the optimization space than a sequential approach, and failed strategies on one agent don't block others. After each round, GEAK ranks all agents by verified speedup and selects the best patch to carry forward.
+For the heaviest GEMM/attention kernels: the Kernel Extractor builds a standalone, immutable unit test
+from the real workload; the Op Benchmarker bakes off backends and tunes them; and the recursive
+`kernel_workflow` authors/optimizes a kernel against that test. The e2e Integrator overlays the winner
+back and gates it end-to-end.
 
-## Tools available to agents
+### Milestone
 
-Agents have access to two categories of tools during a run.
+The remaining editable kernels above a threshold are swept the same way — extract, optimize via the
+kernel layer, integrate, re-profile — until the budget or the Amdahl stop rule ends the loop.
 
-### MCP tools
+### Finalize, Report, Validate
 
-MCP (Model Context Protocol) tools run as subprocess servers and are discovered automatically from the `mcp_tools/` directory.
+The Integrator assembles the deliverable (reversible overlay + patch + `final_launch.sh`); the Architect
+writes `final_report.md`; and the Director **independently re-measures** the combined result against the
+true baseline and arbitrates the official number.
 
-- **Knowledge base**: A curated collection of GPU optimization knowledge covering the ROCm software stack, AMD Instinct architecture, and established optimization patterns. Agents query this through a Retrieval-Augmented Generation (RAG) system, which returns dynamically ranked excerpts relevant to the current kernel and strategy.
-- **Kernel profiler**: Integrated ROCm profiling that surfaces hotspots, memory bandwidth utilization, and compute bottlenecks. Agents invoke the profiler to understand where time is being spent before and after applying a change.
-- **Cross-session memory**: Insights from past GEAK runs are stored and retrieved across sessions. When GEAK encounters a kernel or workload it has optimized before, relevant past strategies and outcomes are surfaced to agents automatically.
+## Integration and gating
 
-### Local tools
-
-- **Bash command**: Agents execute shell commands to build the kernel, run the harness, inspect files, and interact with the repository.
-- **Patch version management**: GEAK tracks every patch applied during a run, allowing agents to compare versions, roll back unsuccessful changes, and build on earlier improvements.
+Each accepted kernel is folded back into the live server through a **reversible overlay** (never editing
+installed packages). A change is accepted only when it **actually runs live** (engagement proof), clears
+the noise band under a tight back-to-back A/B, and preserves output quality (greedy parity, or a task
+accuracy gate for reduced-precision kernels).
 
 ## Outputs
 
-At the end of a run, GEAK produces:
-
-- **Best kernel and speedup**: The winning patch is applied to the repository and committed. The speedup relative to the baseline is reported in `final_report.json`.
-- **Strategy summary**: A record of which strategies were explored, which succeeded, and which were discarded. This feeds back into cross-session memory for future runs.
-- **Updated memory**: New insights are persisted to the knowledge base so subsequent runs on similar kernels benefit from the current run's findings.
+Everything lands under `exp/e2e_<model>_<timestamp>/`: `final_report.md`, `architect_report.md`, the
+`final/` bundle (overlay, `final_patch.diff`, `final_launch.sh`), and per-stage artifacts.
 
 ## Related topics
 
-- [What is GEAK?](../what-is-geak.md)—overview of GEAK's capabilities and design goals.
-- [Run the agent](../how-to/run-agent.md)—how to invoke `geak` from the command line.
+- [What is GEAK?](../what-is-geak.md) — overview and design.
+- [Run a workflow](../how-to/run-agent.md) — how to start a run.

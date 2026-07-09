@@ -1,152 +1,64 @@
 ---
 myst:
     html_meta:
-        "description": "Run the GEAK agent to optimize GPU kernels. Includes single-agent and parallel multi-GPU examples, end-to-end CLI invocations, output structure, and a full CLI flag reference."
-        "keywords": "GEAK, run agent, kernel optimization, GPU, CLI, parallel agents, geak CLI, Triton, HIP"
+        "description": "Run a GEAK workflow: optimize whole-model sglang/vLLM serving throughput or a single GPU kernel from Claude Code, or via the run_e2e.py integration interface."
+        "keywords": "GEAK, run workflow, serving throughput, single kernel, Claude Code, run_e2e, sglang, vLLM, ROCm"
 ---
 
-# Run the GEAK agent
+# Run a workflow
 
-The `geak` CLI accepts a kernel target and an optional test command, then runs one or more optimization agents against it. This topic shows common invocation patterns, explains parallel multi-GPU runs, and documents every CLI flag.
+GEAK exposes two workflows. Start a run by describing the task in natural language to
+[Claude Code](../install/install.md) — it resolves the paths and invokes the `Workflow` tool. For an
+external orchestrator, use the [`run_e2e.py` interface](#external-integration-run_e2epy) instead.
 
-## Examples
+## Optimize whole-model serving throughput (`e2e_workflow`)
 
-The following examples cover the most common invocation patterns, from a single natural-language prompt to parallel multi-GPU runs.
+Point at the repo's `e2e_workflow/`, the model, the serving backend, the workload, and the GPUs:
 
-### Typical kernel optimization (natural-language input)
+```
+use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
+```
 
-Pass the full task as a `-t` string. GEAK parses the kernel location, GPU IDs, and harness path from the text.
+Output lands under `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`,
+`architect_report.md`, a `final/` bundle (overlay + `final_patch.diff` + `final_launch.sh`), and
+per-stage artifacts.
+
+## Optimize a single kernel (`kernel_workflow`)
+
+Point at `kernel_workflow/` and a kernel task directory or source file:
+
+```
+use path_to_GEAK/kernel_workflow to optimize path_to_GEAK/examples/tasks/knn
+```
+
+```
+use path_to_GEAK/kernel_workflow to optimize /path/to/silu, budget 8, focus on wrapper overhead
+```
+
+To optimize many kernels at once, spawn one agent per kernel; GPU access is serialized via
+`scripts/gpu_lock.sh` (flock-based), so kernels can safely share GPUs.
+
+## External integration (`run_e2e.py`)
+
+`interface/run_e2e.py` is the single, version-stable surface for an external orchestrator. It hides the
+`Workflow` invocation and the `e2e_workflow.js` argument names behind one command and two JSON files:
 
 ```bash
-geak -t "Optimize the kernel from /path/to/aiter, specifically aiter/ops/triton/topk.py. Use the harness at /path/to/test_topk_harness.py. Use four GPUs with IDs 0-3 simultaneously."
+python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 ```
 
-### Typical kernel optimization (single agent)
+- `handoff.json` (caller → workflow): `model_path` and `exp_root` are required; everything else
+  (`framework`, `tp`, `gpu_ids`, `workload`, seed config, measurement protocol) has a default.
+- `result.json` (workflow → caller): `status` (`ok` / `no_gain` / `error`), baseline and final
+  throughput, speedup, output parity, and paths to the deliverable bundle.
+- `--dry-run` prints the mapped arguments and prompt without running any GPU work — use it to validate
+  the mapping in CI.
 
-Use explicit flags to specify the kernel and repository when you want precise control over inputs.
-
-```bash
-geak --kernel-url /path/to/kernel/file \
-  --repo /path/to/kernel/repo \
-  --task "Optimize the block_reduce kernel" 
-```
-
-### Parallel agents
-
-Pass `--gpu-ids` as a comma-separated list of device indices (`0,1,2,3`). Each parallel agent is bound to one GPU: agent `i` uses `gpu_ids[i]` (0-based). For full isolation, set `--num-parallel` to the same count as the IDs you list; if you supply fewer IDs than agents, some agents share a GPU, and the CLI prints a warning.
-
-```bash
-geak --num-parallel 4 \
-  --repo /path/to/kernel/repo \
-  --kernel-url /path/to/kernel/file \
-  --task "Optimize block_reduce. Metric: Extract Bandwidth in GB/s (higher is better)" \
-  --gpu-ids 0,1,2,3 
-```
-
-### End-to-end examples
-
-The four invocations below show every combination of natural-language (NL) task description versus explicit CLI flags, and with or without a pre-built test harness. All target the same kernel (`topk.py` in [aiter](https://github.com/ROCm/aiter)) on 8 GPUs.
-
-```{note}
-In the examples below, suppose `/workspace/GEAK_ARTIFACTS` is the folder where all GEAK-related outputs will be saved. The `test_topk_harness.py` referenced in some examples is a user-created harness file for testing the topk kernel.
-```
-
-Task 1 — Without NL, without harness: GEAK discovers the kernel structure, generates its own harness, and runs optimization from CLI flags.
-
-```bash
-geak --kernel-url 'https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/topk.py' \
-  --gpu-ids '0,1,2,3,4,5,6,7' --yolo \
-  --task 'Optimize the topk kernel.' --exit-immediately \
-  -o '/workspace/GEAK_ARTIFACTS/topk_wo_task_wo_harness' \
-  2>&1 | tee '/workspace/GEAK_ARTIFACTS/topk_wo_task_wo_harness.log'
-```
-
-Task 2 — Without NL, with harness: same CLI-flag style, but a pre-existing test harness is supplied via `--test-command`.
-
-```bash
-geak --kernel-url 'https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/topk.py' \
-  --test-command 'python3 /workspace/GEAK_ARTIFACTS/test_topk_harness.py --correctness && python3 /workspace/GEAK_ARTIFACTS/test_topk_harness.py --full-benchmark' \
-  --gpu-ids '0,1,2,3,4,5,6,7' --yolo \
-  --task 'Optimize the topk kernel.' --exit-immediately \
-  -o '/workspace/GEAK_ARTIFACTS/topk_wo_task_w_harness' \
-  2>&1 | tee '/workspace/GEAK_ARTIFACTS/topk_wo_task_w_harness.log'
-```
-
-Task 3 — With NL, without harness: everything is expressed in a single natural-language `-t` string. GEAK parses the kernel URL, GPU count, and mode from the text.
-
-```bash
-geak -t 'Optimize the topk kernel at https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/topk.py. Use GPUs 0-7.' \
-  --yolo --exit-immediately \
-  -o '/workspace/GEAK_ARTIFACTS/topk_w_task_wo_harness' \
-  2>&1 | tee '/workspace/GEAK_ARTIFACTS/topk_w_task_wo_harness.log'
-```
-
-Task 4 — With NL, with harness: natural-language task that also references an external test harness URL.
-
-```bash
-geak -t 'Optimize the topk kernel at https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/topk.py, using the harness at https://github.com/AMD-AGI/AIG-Eval/blob/sdubagun/fix-kernel-harness-parity/tasks/geak_eval/topk/test_topk_harness.py. Use GPUs 0-7.' \
-  --yolo --exit-immediately \
-  -o '/workspace/GEAK_ARTIFACTS/topk_w_task_w_harness' \
-  2>&1 | tee '/workspace/GEAK_ARTIFACTS/topk_w_task_w_harness.log'
-```
-
-### CLI reference
-
-Options match the Typer `Option` definitions in `main` (same names in `geak` / `mini`).
-
-| Option | Meaning |
-|--------|---------|
-| `-m`, `--model` | Model name. |
-| `--model-class` | For example, `litellm` and `amd_llm`. |
-| `-t`, `--task` | Task string. If it equals an existing file path, `geak` reads that file as the task body. |
-| `-y`, `--yolo` | Non-interactive / auto-confirm tool execution (sets `agent.mode` to `yolo`). Parallel runs already force `yolo` on each worker; this flag mainly affects single-agent `geak`. |
-| `-l`, `--cost-limit` | Agent cost limit (use `0` to disable). |
-| `-c`, `--config` | Path to the config file. Overrides the default config file `geak.yaml`. |
-| `-o`, `--output` | Trajectory file or output directory. Default is `./optimization_logs/kernel_name_timestamp`. |
-| `--exit-immediately` | Sets `agent.confirm_exit` to `False` in config. |
-| `--repo` | Repository root for kernel. Even if the kernel code is in a single file, it needs to be in a repository. |
-| `--kernel-url` | Kernel source file path or URL. Required unless `kernel target` is supplied another way (for example, parsed from `--task "kernel url is xxx"`). URLs are resolved by `run/preprocess/resolve_kernel_url.py` (clone/checkout under run output). |
-| `--num-parallel` | Number of parallel agent runs. |
-| `--gpu-ids` | Comma-separated GPU device indices. |
-| `--test-command`, `--test_command` | Test command used to verify correctness and performance of the kernel. |
-
-## Outputs
-
-GEAK saves patches and test logs so the optimization progress and results are transparent.
-
-- **Default output base**: `optimization_logs/`
-- **Auto-generated run directory**: `optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/`
-
-Typical structure (parallel run):
-
-```bash
-optimization_logs/<kernel>_<timestamp>/
-├── parallel_0/
-│   ├── patch_0.patch
-│   ├── patch_0_test.txt
-│   └── agent_0.log
-├── parallel_1/
-│   └── ...
-├── best_results.json
-└── select_agent.log
-```
-
-Structure for triton kernels:
-
-```bash
-optimization_logs/<kernel>_<timestamp>/
-├── results/round_1/<kernel>-<strategy_0>/
-│   ├── patch_0.patch
-│   ├── patch_0_test.txt
-│   └── task_0.log
-├── results/round_1/<kernel>-<strategy_1>/
-│   └── ...
-├── best_results.json
-└── select_agent.log
-```
+Exit codes: `0` = `ok`/`no_gain`, `1` = crash (`status: error`), `2` = bad usage. See
+[Reference](../reference/api-reference.md) for the full handoff/result schema.
 
 ## Related topics
 
-- [Install GEAK](../install/install.md)—set up GEAK and configure a model backend before running.
-- [API reference](../reference/api-reference.md)—complete CLI flag reference, environment variables, and artifact layout.
-- [GEAK agent loop](../conceptual/geak-pipeline.md)—understand how the optimization pipeline works.
+- [Install GEAK](../install/install.md) — set up the environment and Claude Code.
+- [GEAK pipeline](../conceptual/geak-pipeline.md) — the phases of an end-to-end run.
+- [Reference](../reference/api-reference.md) — Workflow arguments, the integration contract, and artifacts.
