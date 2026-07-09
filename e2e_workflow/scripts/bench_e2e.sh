@@ -80,6 +80,37 @@ if [ "$BENCH_CLIENT" != "native" ]; then
   fi
 fi
 
+# ---- optional server-LAUNCHER override (align the SERVER launch RECIPE with an
+# external harness, e.g. Hyperloom/Magpie, so the served stack is byte-identical:
+# same --mem-fraction-static / --disable-radix-cache / --trust-remote-code /
+# SGLANG_USE_AITER / firmware-gated envs). The serving STACK is STILL the BACKEND
+# above; this hook only changes WHO runs launch_server. Default 'native' keeps each
+# backend adapter's own adapter_launch (byte-identical to before). BENCH_LAUNCHER=
+# <name> sources adapters/launchers/<name>.sh which MUST redefine adapter_launch;
+# the native launch/health are preserved as adapter_launch_native / adapter_health_native
+# so a launcher adapter can DELEGATE or FALL BACK. The authored-kernel OVERLAY
+# (OVERLAY_PYTHONPATH) is applied BY the launcher (an external harness usually
+# cannot), so overlay + recipe-parity coexist. Only affects a FRESH launch
+# (REUSE_SERVER=0); nothing else in the measurement changes.
+BENCH_LAUNCHER=${BENCH_LAUNCHER:-native}
+if [ "$BENCH_LAUNCHER" != "native" ]; then
+  LAUNCHER_ADAPTER="${LAUNCHER_ADAPTER:-$HERE/adapters/launchers/${BENCH_LAUNCHER}.sh}"
+  if [ ! -f "$LAUNCHER_ADAPTER" ]; then
+    echo "!!! No server launcher '$BENCH_LAUNCHER' at $LAUNCHER_ADAPTER" >&2
+    echo "    Available: $(ls "$HERE/adapters/launchers" 2>/dev/null | sed 's/\.sh$//' | tr '\n' ' ')" >&2
+    exit 3
+  fi
+  # Preserve the backend's native launch/health so the launcher can delegate to
+  # them (e.g. fall back when the external recipe/script is unavailable).
+  copy_function adapter_launch adapter_launch_native
+  copy_function adapter_health adapter_health_native
+  # shellcheck disable=SC1090
+  source "$LAUNCHER_ADAPTER"   # MUST redefine adapter_launch (server lifecycle)
+  if ! declare -F adapter_launch >/dev/null; then
+    echo "!!! Launcher adapter $LAUNCHER_ADAPTER must define adapter_launch()" >&2; exit 3
+  fi
+fi
+
 # ---- model / server ----
 # MODEL is REQUIRED. No rig-specific default — a wrong-but-silent default benches the wrong target.
 MODEL=${MODEL:-}
@@ -159,19 +190,28 @@ CONC=${CONC:-64}
 # NUM_PROMPTS default.
 #  * native client (standalone GEAK default): keep the original CONC*5 default so
 #    standalone behaviour is byte-identical to before the inferencex integration.
-#  * inferencex client (Hyperloom measurement-protocol alignment): mirror Hyperloom's ADAPTIVE
-#    factor — the number of timed prompts scales DOWN as the per-request sequence
-#    cost (ISL+OSL) grows so each repeat stays bounded.
-#    factor = {<=1024:10, <=4096:5, <=16384:3, else 2}.
-# Override NUM_PROMPTS to pin a fixed count regardless of client.
+#  * inferencex client (Hyperloom/Magpie measurement-protocol alignment): default to
+#    Magpie's FIXED CONC*10 (its run_benchmark_serving default is
+#    `--num-prompts $((CONC*10))`), so a GEAK measurement matches the Magpie baseline
+#    prompt count exactly — a differing prompt count changes the saturation regime and
+#    hence the tok/s, so this is a real alignment knob, not cosmetic.
+#    Opt-out: NUM_PROMPTS_ADAPTIVE=1 restores the cost-bounded ADAPTIVE factor that
+#    scales DOWN as per-request seq cost (ISL+OSL) grows {<=1024:10,<=4096:5,<=16384:3,else 2},
+#    for long-sequence standalone runs where CONC*10 is too expensive.
+# An explicit NUM_PROMPTS (e.g. Hyperloom's apply_bench_protocol forwarding its own
+# measured count) ALWAYS wins over both defaults.
 if [ -z "${NUM_PROMPTS:-}" ]; then
   if [ "$BENCH_CLIENT" = "inferencex" ]; then
-    _seq_cost=$((ISL + OSL))
-    if   [ "$_seq_cost" -le 1024 ];  then _factor=10
-    elif [ "$_seq_cost" -le 4096 ];  then _factor=5
-    elif [ "$_seq_cost" -le 16384 ]; then _factor=3
-    else _factor=2; fi
-    NUM_PROMPTS=$(( CONC * _factor > CONC ? CONC * _factor : CONC ))
+    if [ "${NUM_PROMPTS_ADAPTIVE:-0}" = "1" ]; then
+      _seq_cost=$((ISL + OSL))
+      if   [ "$_seq_cost" -le 1024 ];  then _factor=10
+      elif [ "$_seq_cost" -le 4096 ];  then _factor=5
+      elif [ "$_seq_cost" -le 16384 ]; then _factor=3
+      else _factor=2; fi
+      NUM_PROMPTS=$(( CONC * _factor > CONC ? CONC * _factor : CONC ))
+    else
+      NUM_PROMPTS=$(( CONC * 10 ))   # Magpie parity (fixed)
+    fi
   else
     NUM_PROMPTS=$((CONC * 5))
   fi
@@ -232,6 +272,10 @@ PROFILE_DIR="$OUT_DIR/profile"
 BASE_URL="http://${HOST}:${PORT}"
 RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 : > "$RESULT_JSONL"
+# Separate sink for the optional COLD full-round (BENCH_COLD_FINAL=1); kept apart
+# from the timed(hot) repeats so it never pollutes the hot median.
+COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
+: > "$COLD_JSONL"
 
 # export everything the adapter reads
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
@@ -253,11 +297,29 @@ echo
 
 SERVER_PID=""
 cleanup() {
-  if [ -n "$SERVER_PID" ]; then
-    echo ">>> Shutting down server (pid $SERVER_PID) ..."
+  [ -n "${SERVER_PID:-}" ] || return 0
+  echo ">>> Shutting down server (pid $SERVER_PID) ..."
+  # A launcher that starts the server in its OWN process group / session (e.g.
+  # the Magpie launcher uses `setsid`) leaves the worker/child procs OUTSIDE
+  # $SERVER_PID, so a bare `kill $SERVER_PID` orphans them (leaked VRAM, ghost
+  # listeners on the port). When the server's process group differs from OURS,
+  # reap the WHOLE group (TERM, then KILL after a grace window). The own-group
+  # guard is critical: for a NATIVE launch the server shares our group, so we
+  # must NOT group-kill (that would kill bench_e2e.sh itself) — fall back to the
+  # single-pid kill, byte-identical to before.
+  local _pgid _self
+  _pgid="$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')"
+  _self="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+  if [ -n "$_pgid" ] && [ "$_pgid" != "$_self" ]; then
+    kill -TERM "-$_pgid" 2>/dev/null || kill -TERM "$SERVER_PID" 2>/dev/null || true
+    for _i in $(seq 1 "${SERVER_STOP_GRACE_S:-10}"); do
+      kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 1
+    done
+    kill -0 "$SERVER_PID" 2>/dev/null && kill -KILL "-$_pgid" 2>/dev/null || true
+  else
     kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
   fi
+  wait "$SERVER_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -336,6 +398,30 @@ except Exception:
   echo ">>> overlay memory-parity OK (free ${_free_mb:-?}MB >= floor ${MEM_HEADROOM_MIN_MB}MB)"
 fi
 
+# ---- optional COLD full-round (align with Hyperloom's COLD baseline_tput) ----
+# Hyperloom's leaderboard denominator baseline_tput is a COLD single fresh-server
+# round (first-token / JIT / cuda-graph capture costs INCLUDED, no prior warmup).
+# GEAK's own final is a HOT median (warmup discarded). Comparing GEAK's hot final
+# to Hyperloom's cold baseline mixes thermal states. When BENCH_COLD_FINAL=1 we
+# also measure ONE cold full round (NUM_PROMPTS, no preceding warmup) on the fresh
+# server BEFORE the warmup+timed(hot) rounds, and record it separately, so the
+# caller can compute a fair cold-to-cold speedup (and keep the hot median as a
+# double-check). Default ON (BENCH_COLD_FINAL=1) — set BENCH_COLD_FINAL=0 to skip
+# the cold round (e.g. to save the one extra full round per bench). Only meaningful
+# on a fresh launch (a reused warm server has no cold state to measure).
+if [ "${BENCH_COLD_FINAL:-1}" = "1" ] && [ "$REUSE_SERVER" != "1" ]; then
+  echo ">>> Cold full round (NUM_PROMPTS=$NUM_PROMPTS, no warmup; cold-baseline parity) ..."
+  # adapter_bench is a shell FUNCTION that reads $RESULT_JSONL — a prefix var
+  # assignment on a function has ambiguous persistence in bash, so point
+  # RESULT_JSONL at the cold sink explicitly and restore it afterwards. The
+  # warmup below re-clears the (restored) hot RESULT_JSONL, so the cold round
+  # never touches the timed(hot) results.
+  _saved_result_jsonl="$RESULT_JSONL"
+  RESULT_JSONL="$COLD_JSONL"; export RESULT_JSONL
+  adapter_bench "$NUM_PROMPTS" "$CONC" 0 || echo "!!! cold round failed (continuing)"
+  RESULT_JSONL="$_saved_result_jsonl"; export RESULT_JSONL
+fi
+
 # ---- warmup (one short round; never timed) ----
 echo ">>> Warmup round ..."
 adapter_bench "$CONC" "$CONC" 0 >/dev/null 2>&1 || true
@@ -385,13 +471,29 @@ if [ "$PROFILE" = "1" ]; then
 fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----
-python3 - "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" <<'PY'
+python3 - "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL" <<'PY'
 import json, sys, statistics
 runs_path, out_path = sys.argv[1], sys.argv[2]
+cold_path = sys.argv[3] if len(sys.argv) > 3 else None
 def pick(d, *keys):
     for k in keys:
         if k in d and isinstance(d[k], (int, float)): return float(d[k])
     return None
+def read_tps(path):
+    xs = []
+    if not path: return xs
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line: continue
+                try: d = json.loads(line)
+                except Exception: continue
+                v = pick(d, "output_throughput", "output_token_throughput", "output_throughput_tok_s")
+                if v is not None: xs.append(v)
+    except FileNotFoundError:
+        pass
+    return xs
 tps, ttft, tpot = [], [], []
 with open(runs_path) as fh:
     for line in fh:
@@ -403,6 +505,7 @@ with open(runs_path) as fh:
         if v is not None: tps.append(v)
         t = pick(d, "median_ttft_ms", "mean_ttft_ms");   ttft.append(t) if t is not None else None
         p = pick(d, "median_tpot_ms", "mean_tpot_ms");   tpot.append(p) if p is not None else None
+cold_tps = read_tps(cold_path)
 def med(xs): return statistics.median(xs) if xs else None
 def spread(xs):
     if len(xs) < 2: return 0.0
@@ -414,6 +517,12 @@ summ = {
     "tpot_ms_median": round(med(tpot), 3) if tpot else None,
     "runs": len(tps),
     "all_throughput": tps,
+    # Optional COLD full-round (BENCH_COLD_FINAL=1): a single fresh-server round with
+    # JIT/graph-capture costs included, for cold-to-cold parity vs Hyperloom's
+    # baseline_tput. None when the cold round was not run (default). The hot median
+    # above stays the primary metric so existing consumers are unaffected.
+    "cold_output_throughput_tok_s": round(med(cold_tps), 3) if cold_tps else None,
+    "cold_runs": len(cold_tps),
     # Aggregate output tok/s (NOT divided by TP) — matches Hyperloom/Magpie output_throughput protocol.
     "metric_basis": "aggregate_output_tok_s",
 }
