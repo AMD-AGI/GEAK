@@ -53,8 +53,7 @@ If the component does not need doxygen, delete this section for optimal build ti
 
 # Add more additional package accordingly
 extensions = [
-    "rocm_docs",
-    "sphinxcontrib.mermaid"
+    "rocm_docs"
 ]
 
 myst_fence_as_directive = ["mermaid"]
