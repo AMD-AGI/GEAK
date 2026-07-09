@@ -18,6 +18,12 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
    GEMM DB env: `grep -c 'is tuned on cu_num'` must be >0 (and "not found tuned config" must drop). For
    an authored/patched kernel: confirm the overlay module is imported / the rebind took (a load banner
    or an injected marker). **No engagement proof → REJECT (it's not really applied).**
+   **Verify engagement BEFORE the timed A/B — die in minutes, not hours.** If your inputs carry an
+   `ENGAGEMENT_CHECK` (a concrete live-server assertion the Architect attached to this head, e.g.
+   "`grep -c 'is tuned on cu_num' > 0`" or "overlay module injected in the cand server log"), start the
+   candidate server, assert it, and if it FAILS report `gate:"rejected"` with reason `no_engagement` /
+   `no_rebind_seam` immediately — do NOT run the (expensive) throughput legs for a candidate that never
+   bound on the live path. This is the cheap pre-gate that stops an un-reachable lever from wasting a full A/B.
 3. The measured e2e throughput delta **EXCEEDS `NOISE_BAND_PCT` (default 0.5%)** under the tight
    protocol below, AND the candidate and reference run distributions **do not overlap**
    (`cand_min > ref_max`). A 0.5% median gap with overlapping runs is noise → REJECT.
@@ -34,6 +40,23 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
      rate vs the true baseline) and accept ONLY if quality holds within tolerance; otherwise `rejected`
      with reason `needs_accuracy_gate`/`parity_regression`. Never let cumulative MXFP8 drift ride through
      as "parity pass vs the prior leg."
+
+5. **Report `parity_kind` on every ACCEPT** so the orchestrator can trust the win correctly:
+   `"byte_exact"` when acceptance rests on hard greedy byte-parity vs the TRUE baseline; `"accuracy"`
+   when it rests on the soft sampled task-accuracy probe (a quant kernel / `ACCURACY_GATE=gsm8k`, where
+   byte-parity is waived); `"none"` if no correctness check ran. This matters: the orchestrator only
+   distrusts a too-good-to-be-true speedup on an `accuracy` (soft) accept — a `byte_exact` accept is a
+   hard correctness guarantee and is trusted even above its Amdahl ceiling (the profile can under-count).
+6. **Implausible-speedup guard (a correctness signal, not a win) — for the SOFT gate.** The MOST e2e
+   speedup an op that is `pct_gpu_time`% of GPU time can yield at its isolated speedup S is the Amdahl
+   ceiling `1/(1 - (pct/100)(1 - 1/S))`. When you accept a QUANT / accuracy-gated kernel (byte-parity
+   waived) and the measured e2e delta BLOWS PAST that ceiling, the kernel is likely doing LESS / degenerate
+   work (corruption) that squeaked past a small accuracy sample — a fast-but-wrong server (truncated /
+   degenerate generations). Re-check accuracy on a LARGER sample vs the TRUE baseline; if it does not
+   genuinely hold, report `gate:"rejected"` with reason **`implausible_speedup`**. (A byte-exact accept is
+   NOT subject to this — trust it.) Use the reason vocabulary the orchestrator's auto-correct classifier
+   keys on — `parity_regression`, `accuracy_regression`, `implausible_speedup`, `output_corruption` — so a
+   fixable correctness reject is routed to a corrective re-author rather than dropped.
 
 If any fails, REJECT and record why (with the numbers) for the eval-dir timeline report — a real
 isolated speedup that doesn't show up e2e is an expected Amdahl outcome, not a bug.
@@ -266,6 +289,7 @@ Return JSON:
   "cand_med": 0.0,
   "ab_complete": true,
   "output_parity": "pass|fail",
+  "parity_kind": "byte_exact|accuracy|none",
   "gate": "accepted|stack|rejected|incomplete",
   "accepted_overlay": "<path to the overlay to carry forward>",
   "reason": "why accepted/rejected/incomplete (cite Amdahl + measured delta vs noise band)"

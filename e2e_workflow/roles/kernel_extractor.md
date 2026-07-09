@@ -34,9 +34,21 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
    grepping the `short_name`/`module:attr` target; never trust the hint blindly (it may point at a
    launcher/wrapper rather than the true defining file). If no hint, resolve as usual
    (`python3 -c "import sglang,os;print(os.path.dirname(sglang.__file__))"`, then grep the
-   `short_name` / the `module:attr` target). Confirm it's truly editable (Triton/custom/aiter) — if
-   it resolves to a library GEMM/attention, STOP and report `editable=false` (it belongs to the
-   Config Tuner, not here).
+   `short_name` / the `module:attr` target).
+   **OP-IDENTITY IS THE RULE: extract the op the LIVE kernel actually is, at the seam it is actually called
+   from — never a different op.** Two cases:
+   - **Standalone LIBRARY op** (a discrete hipBLASLt/rocBLAS `gemm(...)` / library attention whose only
+     call site is that library call, no editable body) → STOP, report `editable=false`, `target_callable=""`;
+     it belongs to the config/tune-hook track (per-shape DB tune / backend env), not a source rewrite. Do
+     NOT synthesize a standalone-GEMM proxy just to make it look extractable.
+   - **FUSED / monolithic op** (fused-MoE, grouped-expert GEMM, asm/CK fused kernel — `KERNEL` arrives with
+     `op_kind=moe` and `GEMM_SYNTH=false`): **extract the FUSED op** (capture its live I/O oracle), NOT its
+     constituent standalone GEMMs. Set `target_callable` to the **dispatcher** actually called at runtime —
+     use `KERNEL.target_callable`/`KERNEL.live_call_seam` if provided (e.g. the vLLM `fused_moe`/
+     `fused_experts` dispatcher), which is editable Python EVEN WHEN the underlying kernel is a non-editable
+     library/asm `.so`. That dispatcher seam is what lets a fused op be BACKEND-SWAPPED (aiter/flydsl/triton
+     fused) or AUTHOR-fused-replaced regardless of the underlying kernel's editability. Report
+     `editable=true` (the seam is rebindable). NEVER decompose it into a dense A·Bᵀ GEMM — no live call site.
 2. **Capture shapes + oracle** from a live server using `scripts/capture_shapes.py` via a temporary
    capture overlay, driven by the SAME workload as the profile so shapes match the regime:
    ```bash
@@ -67,6 +79,21 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
      buffer as input). Call the CURRENT kernel entry point (import by the meta `module:attr`, or the
      copied `kernel_src`), compare to the golden output with dtype-appropriate tolerance (bf16/fp16
      rtol=atol=2e-2; fp8 looser; fp32 tight). Print PASS/FAIL per case. This set is NEVER re-weighted.
+   - **Cross-call robustness (MANDATORY — closes the #1 isolated↔e2e correctness gap).** A single-snapshot
+     replay reuses the SAME tensors with the SAME contents, so any candidate that caches by
+     `tensor.data_ptr()`/`id()`, reuses a stale index/mask, or carries per-call state PASSES in isolation
+     yet CORRUPTS the live server (which calls the op every step with NEW contents in REUSED buffers —
+     changed routing / gather-scatter indices / masks). The unittest MUST additionally probe this,
+     generically (no op-specifics): (a) **interleaved / buffer-reuse replay** — when ≥2 golden cases of the
+     SAME shape exist, run case A, then WRITE case B's inputs into case A's buffers (`bufA.copy_(inB)` —
+     preserves data_ptr, changes contents) and assert B's output still matches B's golden; also run A→B→A
+     interleaved and re-check A. (b) **fresh-buffer repeat** — call the kernel twice on the same case with
+     freshly-allocated input buffers (new data_ptr) and assert identical results. Any data_ptr-keyed cache
+     or stale reuse then FAILS here. Degrade gracefully: if only ONE snapshot/shape exists, still do the
+     fresh-buffer repeat (a). To enable (a), the capture step SHOULD record ≥2 snapshots per shape bucket
+     when the live window provides them (same shape, different routing/contents) — set `CAPTURE_MAX` high
+     enough and keep distinct-content records; this is generic and additive (extra records only strengthen
+     the oracle). Print `CROSS_CALL PASS/FAIL`; a FAIL is a correctness FAIL (do not smoke-accept).
    - **Timing** on the WORKLOAD cases when `meta.workload` is present (see step 4b): build one timing
      case per `meta.workload.cases[]` entry, each input tensor with its OWN `dims`+`dtype` and the case's
      `quant` operands (fp8 + scales etc., in-regime — NOT bf16), random values (perf is value-
