@@ -13,12 +13,11 @@ Thank you for your interest in contributing to GEAK! This document provides guid
 1. **Create a branch** — use a descriptive name (e.g., `fix/kernel-race-condition`, `feat/triton-autotuner`).
 2. **Make your changes** — keep commits focused and atomic.
 3. **Test your changes** — ensure existing tests pass and add new tests where appropriate.
-4. **Submit a pull request** — target the `main` branch and fill in the PR template.
+4. **Submit a pull request** — target the `main` branch.
 
 ## Pull Request Process
 
 - PRs require **2 approving reviews** before merging.
-- Fill in the [PR template](.github/PULL_REQUEST_TEMPLATE.md) completely.
 - Link any related issues (e.g., `Fixes #123`).
 - Keep PRs focused — one logical change per PR.
 
@@ -30,12 +29,8 @@ Thank you for your interest in contributing to GEAK! This document provides guid
 
 ## Reporting Issues
 
-- Use the [issue templates](.github/ISSUE_TEMPLATE/) to report bugs or ask questions.
 - Search existing issues before creating a new one.
-
-## Code of Conduct
-
-This project follows our [Code of Conduct](.github/CODE_OF_CONDUCT.md). By participating, you agree to uphold this code.
+- When opening an issue, include enough detail to reproduce the problem (environment, steps, logs).
 
 ## License
 

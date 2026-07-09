@@ -15,6 +15,14 @@ e2e Integrator turns your winner into an overlay/config and runs the Amdahl gate
 > Extractor's `op_kind=moe` task already copied the editable source + real oracle), and report the
 > rebind seam as the **fused_moe/grouped_gemm dispatcher** (NOT `tuned_gemm:gemm_a16w16`). Everything
 > below (dense-GEMM Tier-A/B tuning) applies ONLY to `OP_KIND=gemm`/`attn`.
+> **Try OTHER fused BACKENDS first (cheapest, and works even if the live kernel is non-editable).** The
+> fused-MoE dispatcher seam is editable Python even when the current kernel is a library/asm `.so`, so you
+> can RE-ROUTE it to a different FUSED backend at no authoring cost: **Tier-A fused bake-off = aiter
+> fused-MoE (`VLLM_ROCM_USE_AITER*` / tuned_fmoe DB) vs the live Triton fused_moe vs flydsl fused-MoE**,
+> each measured on the real oracle. Only if no backend wins do you author a fused replacement (Tier-C).
+> Match the candidate's signature to the dispatcher's — never propose a standalone-`gemm(...)` candidate
+> for the fused seam (it cannot bind). A non-editable underlying kernel is NOT a reason to skip the head —
+> it is a reason to prefer the backend-swap / dispatcher-rebind lever.
 
 Read first, every time:
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder, per-backend tuning knobs,

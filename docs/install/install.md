@@ -1,50 +1,40 @@
 ---
 myst:
     html_meta:
-        "description": "Install GEAK: clone the repository, install the ROCm profiler and a serving backend, and launch Claude Code with the dynamic Workflow feature."
+        "description": "Install GEAK v4: get the repository, a recent Claude Code, and a working ROCm environment (plus a serving backend for E2E). No pip package, no CLI."
         "keywords": "GEAK, install, ROCm, Claude Code, Workflow, sglang, vLLM, AMD Instinct, setup"
 ---
 
 # Install GEAK
 
-GEAK is driven by **Claude Code** and runs its deterministic **Workflows** directly from the repository.
-There is no package to `pip install` — you clone the repo and point Claude Code at it.
+GEAK v4 is not a Python package. It is a set of **Workflows** (`e2e_workflow.js` / `kernel_workflow.js`)
+that run **inside Claude Code**. "Installing" means: get the repo, get a recent Claude Code, and have a
+working ROCm environment (plus a serving backend for E2E). For a first run, see
+[Run a workflow](../how-to/run-agent.md).
 
-## Prerequisites
+## 1. Prerequisites
 
-- An **AMD Instinct MI GPU** (CDNA — e.g. gfx942 / gfx950; auto-detected).
-- **ROCm 6+** with a working user-space (so `rocminfo` / `rocm-smi` work) and a profiler
-  (`rocprof-compute`, `rocprofv3`, or `rocprof`). For HIP C++ kernels you also need `hipcc`.
-- **Python 3.8+**.
-- **Claude Code ≥ 2.1.177** — the workflows use the dynamic **Workflow** (JS orchestration) feature,
-  available only from this version. Check with `claude --version`.
-- For end-to-end serving optimization: a running-capable backend (`sglang` or `vllm`) and the model
-  weights on disk.
+| Requirement | Detail |
+|---|---|
+| **AMD Instinct MI GPU** | CDNA, gfx942 (MI300X/MI308X) / gfx950 (MI350X/MI355X). Auto-detected. |
+| **ROCm 6+** | `rocminfo` / `rocm-smi` must work. |
+| **A profiler** | One of `rocprof-compute`, `rocprofv3`, `rocprof` (also `omniperf` / `metrix`). Auto-detected. |
+| **Python 3.8+** | Tested on 3.12. |
+| **Claude Code ≥ 2.1.177** | Required for the dynamic Workflow feature. Check `claude --version`. |
+| **Serving backend (E2E)** | A running-capable `sglang` or `vllm`, plus model weights on disk. |
 
-See the [compatibility matrix](../compatibility.md) for verified versions.
-
-## Get the repository
-
-```bash
-git clone https://github.com/AMD-AGI/GEAK.git
-cd GEAK
-git checkout GEAK_v4
-```
-
-## Launch Claude Code
-
-The workflows spawn many sub-agents and run profiling, benchmark, and build commands on the box, so run
-Claude Code with permissions auto-approved. Update first to ensure you have the Workflow feature:
+## 2. Set up
 
 ```bash
-claude update                                    # update Claude Code to the latest version
+claude update                          # Claude Code >= 2.1.177
+git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
 IS_SANDBOX=1 claude --dangerously-skip-permissions
 ```
 
-Then describe what you want in natural language — Claude Code resolves the paths and invokes the
-`Workflow` tool for you. See [Run a workflow](../how-to/run-agent.md).
+Nothing is compiled at clone time — the workflow `.js` files and their `roles/`, `knowledge/`, `scripts/`
+are used directly. Sandbox mode auto-approves the permissions the workflows need.
 
 ## Related topics
 
-- [Compatibility matrix](../compatibility.md) — verified GPUs, ROCm versions, backends, and dtypes.
 - [Run a workflow](../how-to/run-agent.md) — start a single-kernel or end-to-end run.
+- [Compatibility matrix](../compatibility.md) — verified GPUs, ROCm versions, backends, and dtypes.
