@@ -3,8 +3,8 @@ key: paged decode attention · gfx942 · vLLM (pow2 + non-pow2 KV block; incl. M
 type: routing
 confidence: ★★★
 effect: head ~8-21% GPU; decode-regime Triton/HIP rewrite → ~+1-4% e2e ceiling (modest, real); op-level backend bake-off is N/A (server-flag swap)
-confirms: 8
-last_seen: 2026-07-08
+confirms: 5
+last_seen: 2026-06-23
 ---
 # vLLM paged attention with a non-pow2 KV block → the live path is the editable in-tree Triton kernel
 - lever: when the KV `block_size` is non-pow2 (e.g. 784), `use_rocm_custom_paged_attention()` returns
@@ -47,16 +47,4 @@ last_seen: 2026-07-08
   e2e_moonshotai-Kimi-K2.6_20260622 (MLA decode stage1 TRITON_MLA, 17.23% head, baseline decode M1=0.219ms/M64=0.265ms, oracle rel=0;
   AND aiter `_ps` asm head h1 7.52%, baseline M1=0.062ms/M64=0.080ms/M64-long=0.312ms, oracle rel pass tol2e-2 → route=author triton);
   e2e_moonshotai-Kimi-K2.6_20260623 (re-confirm aiter `_ps` asm path, mla_a16w16_qh16..._ps.co loaded; 7.5% head, synth oracle PASS rel=0,
-  baseline M1=0.184ms/M64=0.438ms; no op-level env/flag win → author_plan triton FIRST then hip, gate=author_recommended);
-  e2e_Mixtral-8x7B-v0.1_20260708 (vLLM 0.24, MoE-dense-attn GQA 32/8 hd128 pow2 bk=16, ll4mi_QKV_mfma4 kernel non-editable CK/HIP,
-  11.85% head; oracle PASS rel≤0.16 tol2e-2, baseline decode b64/s2048=0.219ms b64/s1024=0.105ms b1/s2048=0.049ms;
-  config swaps already rejected [TRITON_ATTN -4.6%, ROCM_AITER_UNIFIED_ATTN +0.78% but TTFT +70%] → no op-level env/flag win,
-  author_plan triton FIRST then hip, gate=author_recommended, ~+0.6% e2e ceiling per rebind note);
-  e2e_Mixtral-8x7B-v0.1_20260708 re-run (21.81% head this trace; provenance sha256 OK, oracle PASS rel=0,
-  baseline decode M1=0.031ms M64=0.065ms M64_b=0.057ms M256=0.155ms, self-cmp geomean 1.0028=noise;
-  hipcc present/ck absent → author_plan triton route=author FIRST then hip; no op-level env/flag win, gate=author_recommended);
-  e2e_DeepSeek-R1-0528_20260708 (SGLANG, MLA-decode TRITON_MLA _fwd_grouped_kernel_stage1+_fwd_kernel_stage2, SGLANG_ROCM_FUSED_DECODE_MLA=0,
-  Lk576/Lv512/kv_group32/TP4, 17.45% head; seam=sglang.srt.layers.attention.triton_ops.decode_attention:decode_attention_fwd, editable in-tree → route=REWRITE;
-  provenance sha256 OK, oracle+cross_call PASS rel=0, op_bench validates-oracle-only harness_suspect=false as expected,
-  baseline decode b64/l2048=0.262ms b64/l1024=0.195ms b1/l1024=0.162ms, self-cmp geomean 1.0245=noise;
-  aiter/ck MLA swap = Config Tuner --attention-backend flag not op-level; hipcc present/ck absent → author_plan triton route=rewrite FIRST then hip, gate=author_recommended)
+  baseline M1=0.184ms/M64=0.438ms; no op-level env/flag win → author_plan triton FIRST then hip, gate=author_recommended)
