@@ -157,7 +157,7 @@ const HEAD_CORRECTIVE_MAX = parseInt(A.head_corrective_max != null ? A.head_corr
 // instead of returning; stop caching a per-call tensor by data_ptr) — minutes, not hours. Escalates to
 // the heavy re-author only when the surgical patch fails. surgical_fix=false => old heavy-only behavior.
 const SURGICAL_FIX = String(A.surgical_fix != null ? A.surgical_fix : 'true') === 'true';
-const FIXABLE_REJECT_RX = /cuda_graph_capture_unsafe|no[_ ]?binary|NO_BINARY_FOR_GPU|hipErrorNoBinaryForGpu|capture[_ ]?(unsafe|hang)|host[_ ]?sync|graph[_ ]?capture/i;
+const FIXABLE_REJECT_RX = /cuda_graph_capture_unsafe|no[_ ]?binary|NO_BINARY_FOR_GPU|hipErrorNoBinaryForGpu|capture[_ ]?(unsafe|hang)|host[_ ]?sync|graph[_ ]?capture|no[_ ]?rebind[_ ]?seam|no[_ ]?engagement|not[_ ]?engaged|signature[_ ]?mismatch|wrong[_ ]?seam/i;
 // ---- CORRECTNESS-class reject (auto-correct) --------------------------------------------------------
 // A SECOND fix-and-retryable class: the candidate ENGAGED and beat the isolated oracle but produces the
 // WRONG output on the LIVE path (parity/accuracy failure) — OR posts an IMPLAUSIBLE e2e speedup (faster
@@ -701,7 +701,12 @@ async function tryCorrectiveReauthor(spec) {
     `scales, buckets) hook the integrator calls once, pre-capture) so ALL TP workers load a prebuilt code object ` +
     `instead of lazily compiling in the multiproc warmup (the cause of NO_BINARY_FOR_GPU / capture hang). If the cause ` +
     `is a host-sync (.item()/.cpu()/.sum().item()) on the hot path, remove it and cache weight prep by data_ptr(). ` +
-    `Keep the steady-state hot path host-sync-free.`;
+    `Keep the steady-state hot path host-sync-free. ` +
+    `If the reject is no_rebind_seam / no_engagement (the overlay bound but never ran on the live path): FIND the ` +
+    `method the live server ACTUALLY dispatches (grep the cand server.log for which entry engaged — e.g. the ` +
+    `modular 'TritonExperts.apply'/'invoke_fused_moe_triton_kernel' path, NOT a dead legacy '*_impl'), then rebind ` +
+    `the overlay at THAT seam and MATCH its call signature so the kernel is invoked. Prove it re-engages ` +
+    `(engagement_check > 0) before returning.`;
   const CORRECTNESS_FIX_TASK =
     `The kernel is WRONG on the LIVE path (reject: "${reason}") even though it passed the isolated oracle — the ` +
     `classic single-snapshot OVER-FIT. Live serving calls this op every step with CHANGING contents (routing / ` +
