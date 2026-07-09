@@ -80,9 +80,21 @@ freeze an out-of-regime oracle nobody should trust.
    grepping the `short_name`/`module:attr` target; never trust the hint blindly (it may point at a
    launcher/wrapper rather than the true defining file). If no hint, resolve as usual
    (`python3 -c "import sglang,os;print(os.path.dirname(sglang.__file__))"`, then grep the
-   `short_name` / the `module:attr` target). Confirm it's truly editable (Triton/custom/aiter) — if
-   it resolves to a library GEMM/attention, STOP and report `editable=false` (it belongs to the
-   Config Tuner, not here).
+   `short_name` / the `module:attr` target).
+   **OP-IDENTITY IS THE RULE: extract the op the LIVE kernel actually is, at the seam it is actually called
+   from — never a different op.** Two cases:
+   - **Standalone LIBRARY op** (a discrete hipBLASLt/rocBLAS `gemm(...)` / library attention whose only
+     call site is that library call, no editable body) → STOP, report `editable=false`, `target_callable=""`;
+     it belongs to the config/tune-hook track (per-shape DB tune / backend env), not a source rewrite. Do
+     NOT synthesize a standalone-GEMM proxy just to make it look extractable.
+   - **FUSED / monolithic op** (fused-MoE, grouped-expert GEMM, asm/CK fused kernel — `KERNEL` arrives with
+     `op_kind=moe` and `GEMM_SYNTH=false`): **extract the FUSED op** (capture its live I/O oracle), NOT its
+     constituent standalone GEMMs. Set `target_callable` to the **dispatcher** actually called at runtime —
+     use `KERNEL.target_callable`/`KERNEL.live_call_seam` if provided (e.g. the vLLM `fused_moe`/
+     `fused_experts` dispatcher), which is editable Python EVEN WHEN the underlying kernel is a non-editable
+     library/asm `.so`. That dispatcher seam is what lets a fused op be BACKEND-SWAPPED (aiter/flydsl/triton
+     fused) or AUTHOR-fused-replaced regardless of the underlying kernel's editability. Report
+     `editable=true` (the seam is rebindable). NEVER decompose it into a dense A·Bᵀ GEMM — no live call site.
 2. **Capture shapes + oracle** from a live server using `scripts/capture_shapes.py` via a temporary
    capture overlay, driven by the SAME workload as the profile so shapes match the regime:
    ```bash

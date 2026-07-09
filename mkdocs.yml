@@ -1,0 +1,41 @@
+site_name: GEAK v4 documentation
+site_description: GEAK v4 — multi-agent GPU performance optimization for AMD Instinct MI GPUs
+repo_url: https://github.com/AMD-AGI/GEAK
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: deep orange
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: deep orange
+      media: "(prefers-color-scheme: dark)"
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - attr_list
+  - tables
+
+nav:
+  - Home: index.md
+  - Quick start: quick_start.md
+  - Installation: installation.md
+  - API reference: api_reference.md
+  - Compatibility matrix: compatibility.md
+
+plugins:
+  - search

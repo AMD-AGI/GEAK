@@ -19,8 +19,8 @@ python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 * `--dry-run` → print the mapped `e2e_workflow.js` args + the prompt and
   exit `0` (no GPU work). Use this to validate the mapping in CI.
 
-Discovery: the installer should export `PERFSKILLS_E2E_RUNNER` pointing at this
-file (`$PERFSKILLS_ROOT/interface/run_e2e.py`) so the caller has a single
+Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
+file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
 
 The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
@@ -41,7 +41,7 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "accepted_env": "SGLANG_USE_AITER=1",
   "launch_recipe": "/path/baseline_config.with_envs.yaml",  // optional launch script/recipe
   "raw_baseline_tput": 1485.4,           // caller's official raw baseline (carried for reference)
-  "exp_root": "/work/perfskills_exp",    // where the timestamped run dir is created
+  "exp_root": "/work/experiment/geak",   // basename MUST be `geak`; the timestamped run dir is created here
   "bench_client": "auto",                // auto|inferencex|native — see口径 alignment below
   "inferencex_path": "/opt/InferenceX",  // optional; else taken from $INFERENCEX_PATH
   "bench_protocol": {                    // optional; caller's measurement 口径 (see below)
@@ -56,7 +56,7 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 Required: `model_path`, `exp_root`. Everything else has a default.
 
 `bench_protocol` is optional and **partial-friendly**: only the keys present are
-applied. Omit it entirely (standalone PerfSkills, no external orchestrator) and
+applied. Omit it entirely (standalone GEAK, no external orchestrator) and
 `bench_e2e.sh` keeps its own defaults unchanged. When the caller (Hyperloom)
 supplies it, those values are the EXACT knobs the caller's official baseline was
 measured with — forwarding them is what makes the workflow's numbers
@@ -88,8 +88,8 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 ### TraceLens prior auto-discovery (owned by `run_e2e.py:resolve_tracelens_report`)
 
 An upstream orchestrator may have already profiled the SAME baseline workload with
-TraceLens and dropped its artifacts beside the handoff's `perfskills` dir (i.e.
-under the experiment root = the parent of `perfskills`). `map_args` resolves them
+TraceLens and dropped its artifacts beside the handoff's `geak` dir (i.e.
+under the experiment root = the parent of `geak`). `map_args` resolves them
 by glob (each `**` is a randomly-named nested dir) and forwards the **non-null**
 paths to the workflow as `args.tracelens`:
 
@@ -100,7 +100,7 @@ paths to the workflow as `args.tracelens`:
 | `tracelens_report_json` | `kernel-agent/**/tracelens/tracelens_report.json` | full TraceLens report (same `hot_kernels[]` shape) |
 | `trace_file` | `runs/roofline/**/torch_trace` | the roofline torch-trace **directory** (per-TP-rank `*.pt.trace.json.gz`) |
 
-Resolution prefers the parent of the `perfskills` segment in `exp_root`; if that
+Resolution prefers the parent of the `geak` segment in `exp_root`; if that
 path is not present on the box it falls back to the on-disk grandparent of the
 handoff file. The same four paths are also surfaced (with nulls) in the human
 `tracelens_report` block of the driver prompt.
@@ -123,7 +123,7 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
 {
   "schema_version": 1,
   "status": "ok | no_gain | error",
-  "eval_dir": "/work/perfskills_exp/e2e_<model>_<ts>",
+  "eval_dir": "/work/experiment/geak/e2e_<model>_<ts>",
   "baseline_throughput_tok_s": 1485.4,   // baseline (= caller best config)
   "final_throughput_tok_s": 1551.4,
   "throughput_speedup": 1.044,
