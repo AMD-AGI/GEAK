@@ -9,10 +9,6 @@ sphinx:
 # Additional formats available for extra build time: htmlzip, pdf, epub
 formats: [pdf]
 
-python:
-  install:
-    - requirements: docs/sphinx/requirements.txt
-
 # Defines build environment
 build:
   os: ubuntu-22.04
