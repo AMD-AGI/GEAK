@@ -26,6 +26,15 @@ unavailable backend on this image is a recorded "skipped", not a crash.
 """
 import argparse, hashlib, json, math, os, sys, time, traceback
 
+# Shared harness measurement library (single source of truth for timing + correctness + Amdahl).
+# op_bench.py lives in scripts/ so a plain import resolves; keep a guarded fallback so an old
+# checkout without harness_lib still runs (with the naive tight-loop timing).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import harness_lib as _hlib
+except Exception:
+    _hlib = None
+
 
 def _torch():
     import torch
@@ -38,8 +47,27 @@ def _sync(torch):
         torch.cuda.synchronize()
 
 
+# Deployment graph context for timing. When the task's meta carries a regime, main() sets this to
+# harness_lib.deployment_graph_mode(regime): the LIVE server replays decode under a CUDA/HIP graph
+# (default on; off only under --enforce-eager / --disable-cuda-graph). BOTH baseline and candidate are
+# timed through _time_call, so timing them under the SAME deployment graph mode is the fix for the
+# "eager baseline" strawman — a candidate can't be scored against a baseline the deployment never runs.
+# Left False (eager amortized) when meta has no regime, so regime-less tasks are byte-identical to before.
+_GRAPH_MODE = False
+
+
 def _time_call(fn, warmup, repeats):
-    """Return median ms over `repeats` timed calls (after `warmup`), or None if it raises."""
+    """Return (event_ms, wall_ms): the PRIMARY metric is CUDA-EVENT DEVICE time (GPU-timeline duration,
+    excludes host dispatch); wall-clock is a REFERENCE (host+device). Timed via harness_lib.time_op under
+    the deployment graph context (_GRAPH_MODE) and with the cache flushed cold each sample, so a candidate
+    cannot win by collapsing Python launch overhead (device time already excludes it) and a memory-bound
+    kernel is measured against real HBM traffic. Falls back to a naive wall-clock loop (event_ms==wall_ms)
+    only if harness_lib is absent. Returns (None, None) if `fn` raises."""
+    if _hlib is not None:
+        r = _hlib.time_op(fn, warmup=warmup, repeats=repeats, graph=_GRAPH_MODE, detail=True)
+        if not r:
+            return None, None
+        return r.get("ms"), r.get("wall_ms")
     torch = _torch()
     try:
         for _ in range(max(1, warmup)):
@@ -52,9 +80,10 @@ def _time_call(fn, warmup, repeats):
             _sync(torch)
             samples.append((time.perf_counter() - t0) * 1e3)
         samples.sort()
-        return samples[len(samples) // 2]
+        m = samples[len(samples) // 2]
+        return m, m
     except Exception:
-        return None
+        return None, None
 
 
 def _correct(torch, out, ref, tol):
@@ -76,6 +105,11 @@ def _correct(torch, out, ref, tol):
 
 # ----------------------------------------------------------------------------- GEMM bake-off
 def _dtype(torch, name):
+    # Prefer the shared, ARCH-DRIVEN resolver so a bare "fp8"/"fp8_e4m3" picks the running GPU's fp8
+    # variant (MI300 gfx942 -> fnuz; MI355 gfx950 -> OCP fn) instead of a hardcoded fnuz. Fall back to
+    # the local (fnuz-default) table only on an old checkout without harness_lib.
+    if _hlib is not None:
+        return _hlib.regime_dtype(name, torch)
     return {"bf16": torch.bfloat16, "bfloat16": torch.bfloat16, "fp16": torch.float16,
             "float16": torch.float16, "fp32": torch.float32, "float32": torch.float32,
             "fp8": getattr(torch, "float8_e4m3fnuz", torch.bfloat16),
@@ -225,10 +259,12 @@ def bench_blockscale_gemm(args, meta):
                             "note": f"call raised: {e!r}", "raised": True})
             return
         ok, err = _correct(torch, out, case["ref"], args.tol)
-        ms = _time_call(lambda: _call(fn), args.warmup, args.repeats)
+        ms, wall_ms = _time_call(lambda: _call(fn), args.warmup, args.repeats)
         results.append({"backend": name, "available": True, "correct": bool(ok),
                         "max_rel_err": round(err, 5) if math.isfinite(err) else None,
-                        "ms": round(ms, 4) if ms else None, "note": note, "raised": False})
+                        "ms": round(ms, 4) if ms else None,
+                        "wall_ms": round(wall_ms, 4) if wall_ms else None,
+                        "note": note, "raised": False})
 
     base_spec = meta.get("baseline_callable") or meta.get("target_callable")
     tgt_spec = meta.get("target_callable") or base_spec
@@ -370,10 +406,12 @@ def bench_gemm(args, meta):
                             "note": f"call failed: {e!r}", "artifact": artifact})
             return
         ok, err = _correct(torch, out, ref, args.tol)
-        ms = _time_call(fn, args.warmup, args.repeats)
+        ms, wall_ms = _time_call(fn, args.warmup, args.repeats)
         results.append({"backend": name, "available": True, "correct": bool(ok),
                         "max_rel_err": round(err, 5) if math.isfinite(err) else None,
-                        "ms": round(ms, 4) if ms else None, "note": note, "artifact": artifact})
+                        "ms": round(ms, 4) if ms else None,
+                        "wall_ms": round(wall_ms, 4) if wall_ms else None,
+                        "note": note, "artifact": artifact})
 
     base_fn = _gemm_fn(torch, A, B, bias, transpose_b)
 
@@ -493,9 +531,9 @@ def _flydsl_gemm(A, B, bias, transpose_b):
     records flydsl as a graceful "skipped" for fp8 — the live fp8-flydsl win is reached via the aiter
     per-shape DB tune (gradlib races `libtype=flydsl`; deploy `AITER_CONFIG_GEMM_BF16`) and/or the
     author route (`target_language=flydsl`, baseline = `flydsl_preshuffle_gemm_a8`)."""
-    if A.dtype in (getattr(__import__("torch"), "float8_e4m3fnuz", None),
-                   getattr(__import__("torch"), "float8_e5m2fnuz", None),
-                   getattr(__import__("torch"), "float8_e4m3fn", None)):
+    _t = __import__("torch")
+    if A.dtype in (getattr(_t, "float8_e4m3fnuz", None), getattr(_t, "float8_e5m2fnuz", None),
+                   getattr(_t, "float8_e4m3fn", None), getattr(_t, "float8_e5m2", None)):
         raise RuntimeError(
             "flydsl_hgemm is bf16/fp16 only; fp8 a8w8 GEMM uses flydsl_preshuffle_gemm_a8 (needs "
             "x_scale/w_scale). Reach flydsl-fp8 via the aiter DB tune (libtype=flydsl) or the "
@@ -647,6 +685,15 @@ def main():
         meta = json.load(fh)
     op_kind = str(meta.get("op_kind", "gemm")).lower()
 
+    # Time baseline+candidate under the deployment's graph context (from the parsed regime): the live
+    # server replays decode under a CUDA/HIP graph, so an EAGER baseline is a strawman. Honor the regime
+    # when present (default graphed; eager only under enforce-eager/disable-cuda-graph); stay eager when
+    # meta has no regime so regime-less tasks are unchanged. time_op(graph=True) falls back to eager if
+    # capture is unavailable on this image, so this never hard-fails.
+    global _GRAPH_MODE
+    if _hlib is not None and meta.get("regime"):
+        _GRAPH_MODE = _hlib.deployment_graph_mode(meta.get("regime"))
+
     try:
         results = bench_gemm(a, meta) if op_kind == "gemm" else bench_attn(a, meta)
     except Exception as e:
@@ -691,6 +738,18 @@ def main():
     elif wb == "hipblaslt":
         kind = "none"  # default already; no change to deploy
 
+    # Amdahl ceiling: the MAX e2e delta this isolated speedup can produce given the kernel's GPU-time
+    # share (from the Architect/meta). The e2e Integrator uses this to refuse crediting an e2e delta
+    # that exceeds the ceiling (box drift, not the kernel). Annotated here so the number travels with
+    # the bake-off result. pct_gpu_time absent -> ceiling omitted (None).
+    pct_gpu = meta.get("pct_gpu_time", meta.get("pct_gpu", None))
+    amdahl_ceiling_pct = None
+    if _hlib is not None and pct_gpu is not None and winner:
+        try:
+            amdahl_ceiling_pct = round(_hlib.amdahl_ceiling(float(pct_gpu), float(speedup)), 3)
+        except Exception:
+            amdahl_ceiling_pct = None
+
     summary = {
         "op_kind": op_kind,
         "task": a.task,
@@ -702,6 +761,8 @@ def main():
         "baseline_backend": baseline["backend"] if baseline else None,
         "baseline_ms": baseline["ms"] if baseline else None,
         "isolated_speedup": round(speedup, 4),
+        "pct_gpu_time": pct_gpu,
+        "amdahl_ceiling_e2e_pct": amdahl_ceiling_pct,
         "winner_editable": editable,
         "winner_kind": kind,
         "tuning_artifact": art,

@@ -18,7 +18,20 @@ classification semantics) and `SKILL_DIR/knowledge/sglang_internals.md` (profile
   runs under a CUDA/HIP graph, so its kernels may appear WITHOUT `Input Dims` (shape-hidden); that is
   expected — decode shapes are recovered downstream from config (decode batch = concurrency), not the
   trace. Tune the window via `PROFILE_NUM_STEPS` / `PROFILE_WARMUP_SEC` / `PROFILE_NUM_PROMPTS`.
-- Bounded window (`--profile-num-steps`, default 40) so the trace stays parseable but spans into decode.
+- **Steady state (batch ≈ CONC) is what makes the prefill/decode split valid — and it is sized/verified
+  differently per backend:**
+  - `bench_e2e.sh` auto-sizes the window from `ISL/OSL/CONC`: `TARGET_STEPS = ceil(CONC·ISL/chunk) [prefill
+    ramp] + max(30, 5·ceil(OSL/CONC)) [steady decode] + margin`, and bumps `PROFILE_NUM_PROMPTS` so the
+    queue stays saturated through it. Override with `PREFILL_CHUNK` (chunk budget), `TPOT_MS` (sizes the
+    vLLM time window), or set `PROFILE_NUM_STEPS`/`PROFILE_WINDOW_SEC` explicitly.
+  - **vLLM**: the adapter now sets `detailed_trace_annotation:true`, so the trace carries `gpu_user_annotation`
+    `execute_*` STEP SPANS → `parse_profile` MEASURES the decode batch and reports `serving.steady` +
+    per-kernel phase. Verify `serving.steady == true` (decode batch ≈ CONC) before trusting the split.
+  - **sglang**: its torch profiler does NOT emit those step spans → `parse_profile` can't measure the
+    decode batch or phase, and the decode-capture gate falls back to a COARSE launch proxy. So for sglang
+    the window is sized ANALYTICALLY up front (`PROFILE_NUM_STEPS = TARGET_STEPS`) to GUARANTEE steady
+    coverage — you cannot verify steadiness from the trace, so trust the sizing + saturated load.
+- Bounded window (`--profile-num-steps`, default 40; auto-raised to `TARGET_STEPS`) so the trace stays parseable but spans into decode.
 - `total_gpu_time_ms` is summed kernel duration in the window — use it for RELATIVE %gpu ranking, not
   as the throughput number (that's the Director's bench).
 - Prefer BOTH sources when available: rocprofv3 gives authoritative HW durations, the torch trace
@@ -76,7 +89,7 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   ```
   Then **reconcile**: the parser's per-launch `shapes`/`dtypes` are derived directly from the trace and
   are MORE RELIABLE than the `<br>` shapes in `analysis.md` — **prefer the parser shapes for any kernel
-  that matches** (this is the mandatory shape double-check, since `analysis.md` shapes "不一定准"). Keep
+  that matches** (this is the mandatory shape double-check, since `analysis.md` shapes may be inaccurate). Keep
   the TraceLens ranking/`%gpu` as the primary impact signal, but cross-check that the same heads top both
   views; note any disagreement in `notes`. Emit the final reconciled `profile_topN.json`/`.md` with
   `source:"tracelens+trace"`.
@@ -94,7 +107,7 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    # SERVING config MUST match the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs),
    # so the profiled shapes reflect the deployed tensor-parallel sharding.
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/profile/round_${ROUND}" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
-   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=1 PROFILE=1 PROFILE_NUM_STEPS=5 \
+   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=1 PROFILE=1 PROFILE_NUM_STEPS=40 \
    OVERLAY_PYTHONPATH="$OVERLAY_PYTHONPATH" EXTRA_SERVER_ARGS="<flags>" EXTRA_ENV="<env>" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/profile_r${ROUND}.log"
    ```
@@ -125,13 +138,27 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    ```bash
    PDIR="$EVAL_DIR/profile/round_${ROUND}/profile"
    TRACE=$(ls -t "$PDIR"/*.json.gz "$PDIR"/*.json 2>/dev/null | head -1)
+   # CAPTURE_SIZES: the server's cudagraph_capture_sizes (grep server.log "cudagraph_capture_sizes");
+   # CHUNK: max_num_batched_tokens (grep server.log "Chunked prefill is enabled with ...").
    python3 "$EVAL_DIR/parse_profile.py" --torch-trace "$TRACE" \
      ${ROCPROF_DIR:+--rocprof-dir "$ROCPROF_DIR"} \
+     --isl <isl> --osl <osl> --conc <conc> \
+     ${CHUNK:+--prefill-chunk "$CHUNK"} ${CAPTURE_SIZES:+--capture-sizes "$CAPTURE_SIZES"} \
      --top 25 --out "$EVAL_DIR/profile/round_${ROUND}/profile_topN" \
      --workload-out "$EVAL_DIR/profile/round_${ROUND}/profile_workload.json"
    ```
+   With `--isl/--osl/--conc` (pass the SAME values as the bench), each top kernel is annotated with its
+   MEASURED serving **phase** (`prefill`/`decode`/`both`, from the trace's gpu_user_annotation step
+   spans), per-phase `base_latency_ms`, `est_shape` (prefill M = token budget + remainders; decode M =
+   concurrency snapped to a capture size), and `est_calls` (== the analytic `serving_weight_model.
+   analytic_calls` the immutable unittest self-weights by). A top-level `serving` block reports the
+   prefill/decode step counts and a **steady-state gate**: if `decode_batch_captured` << `conc` the
+   decode `%gpu`/latency is biased low (COUNTS stay valid) — enlarge the window / re-capture past
+   warmup before trusting decode head selection. This is MEASURED from the trace (not a decided
+   regime), consistent with parse_profile's "only reports what the trace measured" contract.
    The extra `--workload-out` writes the per-(shape,dtype) WORKLOAD MODEL (each top kernel's real
-   shape/dtype case distribution with a time-proportional weight). The Kernel Extractor slices the
+   shape/dtype case distribution with a time-proportional weight, now also tagged with the measured
+   per-case `regime`). The Kernel Extractor slices the
    target kernel's cases out of this so kernel_workflow benchmarks the shapes the workload actually
    hits. It needs the torch trace's `Input Dims` (record_shapes); if shapes are absent the cases come
    out `weight_source:"regime_prior"` — note that in `notes`. Report its path as `profile_workload_json`.

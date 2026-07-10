@@ -1,4 +1,11 @@
-# Quick start
+---
+myst:
+    html_meta:
+        "description": "Run a GEAK v4 workflow from Claude Code: end-to-end sglang/vLLM serving-throughput optimization or single-kernel optimization, with depth modes and the accuracy gate."
+        "keywords": "GEAK, run workflow, serving throughput, single kernel, Claude Code, Workflow, sglang, vLLM, deep mode, gsm8k"
+---
+
+# Run a workflow
 
 GEAK v4 runs **inside Claude Code**, orchestrated by deterministic JS **Workflows**. There is no
 `pip install` and no CLI: launch Claude Code and describe the task; it invokes the `Workflow` tool.
@@ -35,7 +42,7 @@ levers cheapest-first (config/backend sweep → head GEMM/attention bake-off →
 loop), and overlays each accepted change back **reversibly**, gated on a measured throughput delta.
 
 Output: `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`, `architect_report.md`, `final/`
-(overlay + patch + `final_launch.sh`). See [`examples/e2e_workflow/`](../examples/e2e_workflow/).
+(overlay + patch + `final_launch.sh`). See [`examples/e2e_workflow/`](../../examples/e2e_workflow/).
 
 ### Single kernel (kernel_workflow)
 
@@ -77,4 +84,4 @@ The Integrator then runs sampled gsm8k (5-shot, greedy, fixed seed) and accepts 
 
 ## See also
 
-- [Installation](installation.md) · [API reference](api_reference.md) · [Compatibility matrix](compatibility.md)
+- [Install GEAK](../install/install.md) · [API reference](../reference/api-reference.md) · [Compatibility matrix](../compatibility.md)

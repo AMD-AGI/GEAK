@@ -15,6 +15,14 @@ e2e Integrator turns your winner into an overlay/config and runs the Amdahl gate
 > Extractor's `op_kind=moe` task already copied the editable source + real oracle), and report the
 > rebind seam as the **fused_moe/grouped_gemm dispatcher** (NOT `tuned_gemm:gemm_a16w16`). Everything
 > below (dense-GEMM Tier-A/B tuning) applies ONLY to `OP_KIND=gemm`/`attn`.
+> **Try OTHER fused BACKENDS first (cheapest, and works even if the live kernel is non-editable).** The
+> fused-MoE dispatcher seam is editable Python even when the current kernel is a library/asm `.so`, so you
+> can RE-ROUTE it to a different FUSED backend at no authoring cost: **Tier-A fused bake-off = aiter
+> fused-MoE (`VLLM_ROCM_USE_AITER*` / tuned_fmoe DB) vs the live Triton fused_moe vs flydsl fused-MoE**,
+> each measured on the real oracle. Only if no backend wins do you author a fused replacement (Tier-C).
+> Match the candidate's signature to the dispatcher's — never propose a standalone-`gemm(...)` candidate
+> for the fused seam (it cannot bind). A non-editable underlying kernel is NOT a reason to skip the head —
+> it is a reason to prefer the backend-swap / dispatcher-rebind lever.
 
 Read first, every time:
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder, per-backend tuning knobs,
@@ -95,14 +103,24 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
 - **Tier C — code (author or rewrite)** (editable languages: triton/**flydsl**/hip/ck): the **workflows route**.
   Two cases, both handed to the recursive `kernel_workflow` (it enforces the immutable unittest):
   - **rewrite** — an editable implementation already exists → optimize it (`mode=optimize`).
-  - **author (NEW)** — no existing editable implementation → write a fresh baseline in the target
-    language, then optimize it (`mode=author`, `target_language=<lang>`). This is the path that lets a
-    library GEMM/attention get a from-scratch Triton / **FlyDSL** (or HIP/CK) implementation that the
-    optimize loop then improves. **Triton is always a viable author target. For a dense / quantized GEMM
-    (esp. fp8 / A4W4 / mxfp4), FlyDSL is the preferred author target** — it's aiter's SOTA GEMM DSL, the
-    author baseline reuses aiter's production `flydsl_hgemm` / `flydsl_preshuffle_gemm_a8`, and the
+  - **author (NEW)** — no existing editable implementation → write a fresh from-scratch impl in the target
+    language as the optimize loop's CODE SEED, then optimize it (`mode=author`, `target_language=<lang>`).
+    This is the path that lets a library GEMM/attention get a from-scratch Triton / **FlyDSL** (or HIP/CK)
+    implementation that the optimize loop then improves. **Triton is always a viable author target. For a
+    dense / quantized GEMM (esp. fp8 / A4W4 / mxfp4), FlyDSL is the preferred author target** — it's aiter's
+    SOTA GEMM DSL, the seed reuses aiter's production `flydsl_hgemm` / `flydsl_preshuffle_gemm_a8`, and the
     optimize loop tunes its tile/split_k/preshuffle knobs (JIT, no build). HIP/CK only when
     requested/feasible.
+    > **🔴 The authored same-language impl is ONLY the optimizer's code seed — NEVER the speedup
+    > denominator.** Regardless of `target_language`, the reported speedup is ALWAYS measured by the
+    > immutable unittest against the FROZEN REAL ONLINE kernel (`meta.baseline_callable` / `baseline_src/` —
+    > e.g. the production Triton `_gqa_sparse_fwd_kernel`), never against the naive same-language scaffold
+    > you just wrote. Authoring a naive HIP impl and letting the optimize loop beat THAT (optimized-HIP vs
+    > naive-HIP = fake 15.7× isolated, ~0% e2e) is exactly the fake-win bug this harness exists to prevent.
+    > Your seed competes against the live online path, not against itself. Correctness is likewise judged
+    > vs the frozen online kernel: the immutable unittest ALSO runs a random-input parity check (candidate
+    > output vs the live baseline on several random in-regime value draws at the same online shapes), so a
+    > candidate correct only on the one recorded oracle draw is caught.
 
   **FlyDSL has TWO reachability paths — use both as candidates:**
   1. **env (cheapest, no author)** — FlyDSL is one of the backends aiter's per-shape DB tune races
@@ -174,8 +192,23 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
      --out "<OP_TASK_DIR>/opbench_result.json" \
      2>&1 | tee "$EVAL_DIR/logs/opbench_<short>.log"
    ```
-   Read `opbench_result.json`: per-backend {available, correct, ms, max_rel_err}, the winner, the
-   `isolated_speedup` vs the default (hipblaslt) backend, `winner_editable`, `winner_kind`.
+   Read `opbench_result.json`: per-backend {available, correct, ms, wall_ms, max_rel_err}, the winner, the
+   `isolated_speedup` vs the default (hipblaslt) backend, `winner_editable`, `winner_kind`, and
+   > **`ms` is CUDA-EVENT DEVICE time (GPU-timeline duration); `wall_ms` is host+device REFERENCE.** The
+   > winner and `isolated_speedup` are scored on `ms`, timed with the L2/Infinity cache flushed COLD before
+   > each sample. Consequence for what you optimize: (1) device time already EXCLUDES host launch/dispatch,
+   > so shaving Python/dispatch overhead earns ZERO here — real wins come from cutting HBM traffic (memory-
+   > bound decode) or MFMA/compute work (compute-bound prefill), NOT launch-overhead tricks (those only pay
+   > off in the server via its decode CUDA graph, which already collapses dispatch). (2) A large `wall_ms ≫
+   > ms` gap flags a host-bound op whose isolated device win won't transfer e2e — surface it. (3) Because
+   > caches are flushed cold, a candidate that only wins hot (back-to-back same-buffer reuse) will show its
+   > true cold cost here; do not optimize for cache residency the live server never gets.
+   `amdahl_ceiling_e2e_pct` (the MAX e2e delta this isolated speedup can produce at the kernel's
+   `pct_gpu_time` — op_bench computes it via `harness_lib.amdahl_ceiling`). Surface the ceiling in your
+   report: if it is at/below `NOISE_BAND_PCT` (e.g. a 1.1x win on a 3%-GPU kernel → ~0.3% ceiling), the
+   op cannot clear the e2e noise band alone — flag it as `stack`-only headroom so nobody chases an
+   isolated number the e2e gate can never bank. A large isolated speedup with a tiny ceiling means the
+   op's GPU-time share is small; do not over-invest authoring it.
    Set `best_known_ms` = fastest correct backend's ms — this is the BAR any authored kernel must beat.
    The default backend set now includes **flydsl** (aiter's `flydsl_hgemm` for bf16/fp16; gated by
    `is_flydsl_available()`). For an **fp8 (a8w8) GEMM**, op_bench records flydsl as a graceful skip (the
@@ -272,7 +305,7 @@ Return JSON:
   "apply_env": "<KEY=VAL ... for an env-kind direct_light winner>",
   "apply_flags": "<server flags for a flag-kind winner>",
   "code_patch": "<final_patch.diff path if a rewrite produced one, else ''>",
-  "per_backend": [{"backend":"...","ms":0.0,"correct":true,"max_rel_err":0.0}],
+  "per_backend": [{"backend":"...","ms":0.0,"wall_ms":0.0,"correct":true,"max_rel_err":0.0}],
   "parity_note": "expected_close|needs_accuracy_gate",
   "gate": "have_winner|author_recommended|no_win|harness_error|tamper",
   "harness_suspect": false,

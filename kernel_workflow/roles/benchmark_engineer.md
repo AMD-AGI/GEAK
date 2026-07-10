@@ -53,9 +53,14 @@ PASS/FAIL checks the verify step will enforce. Never let the addendum relax a co
 Look for, in order:
 - **Author mode**: if the workspace holds an IMMUTABLE `unittest.py` + `meta.json` (the op task dir's
   oracle, copied in read-only by the Director's author-mode setup), THAT is the runner — reuse it
-  verbatim. It already does correctness-vs-oracle + per-case timing in the canonical print shape. Do
+  verbatim. It already does correctness-vs-oracle + a random-input parity check vs the frozen online
+  baseline + per-case timing in the canonical print shape. Do
   NOT write a new harness and do NOT modify it; just point the COMMANDMENT's CORRECTNESS/BENCHMARK at
-  `python3 unittest.py` (via gpu_lock) and record the authored baseline from its output.
+  `python3 unittest.py` (via gpu_lock) and record its output. **The `baseline_ms` it prints is the FROZEN
+  REAL ONLINE kernel** (`meta.baseline_callable` / `baseline_src/`) — that is the speedup denominator,
+  regardless of `TARGET_LANGUAGE`. The authored impl's own timing is the SEED's `optimized_ms` (typically
+  slower than the online kernel, i.e. `seed_speedup < 1×`, which is fine); NEVER re-point the denominator
+  at the authored same-language scaffold.
 - `config.yaml` / `config.json` declaring `compile_command` / `correctness_command` /
   `performance_command` (common in GEAK kernels).
 - `scripts/task_runner.py` with `compile|correctness|performance` modes.
@@ -85,10 +90,13 @@ warmup), `--full-benchmark` (100 iters/10 warmup). Use CUDA events for timing. P
 
 **Baseline (perf reference) — use the ORIGINAL implementation, never an LLM naive reimplementation.**
 The speedup denominator must be the real workload code, otherwise "2× over naive torch" can be slower
-than production. In order of preference: (a) the pristine original in `EVAL_DIR/baseline` / the
-workspace's initial commit (optimize mode always has this); (b) for a library op with no editable
+than production. In order of preference: (a) **author mode: the frozen REAL ONLINE kernel in
+`baseline_src/` (via `meta.baseline_callable`)** — the authored from-scratch impl in the target language
+is the optimize loop's CODE SEED, NOT the denominator, so a naive-HIP seed is timed against the live
+online Triton kernel, never against itself; (b) the pristine original in `EVAL_DIR/baseline` / the
+workspace's initial commit (optimize mode always has this); (c) for a library op with no editable
 source, the actual default backend the workload uses (e.g. the default GEMM/attention call), as the
-extractor's GEMM oracle already does. Only if NEITHER exists, fall back to a naive PyTorch reference
+extractor's GEMM oracle already does. Only if NONE exists, fall back to a naive PyTorch reference
 and FLAG it in `notes` + the COMMANDMENT as a non-representative baseline.
 
 For `--correctness` in the no-runner case (no oracle at all), compare to a trusted reference

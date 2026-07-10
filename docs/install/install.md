@@ -1,8 +1,16 @@
-# Installation
+---
+myst:
+    html_meta:
+        "description": "Install GEAK v4: get the repository, a recent Claude Code, and a working ROCm environment (plus a serving backend for E2E). No pip package, no CLI."
+        "keywords": "GEAK, install, ROCm, Claude Code, Workflow, sglang, vLLM, AMD Instinct, setup"
+---
+
+# Install GEAK
 
 GEAK v4 is not a Python package. It is a set of **Workflows** (`e2e_workflow.js` / `kernel_workflow.js`)
 that run **inside Claude Code**. "Installing" means: get the repo, get a recent Claude Code, and have a
-working ROCm environment (plus a serving backend for E2E). For a first run, see [Quick start](quick_start.md).
+working ROCm environment (plus a serving backend for E2E). For a first run, see
+[Run a workflow](../how-to/run-agent.md).
 
 ## 1. Prerequisites
 
@@ -33,3 +41,8 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions
 
 Nothing is compiled at clone time — the workflow `.js` files and their `roles/`, `knowledge/`, `scripts/`
 are used directly. Sandbox mode auto-approves the permissions the workflows need.
+
+## Related topics
+
+- [Run a workflow](../how-to/run-agent.md) — start a single-kernel or end-to-end run.
+- [Compatibility matrix](../compatibility.md) — verified GPUs, ROCm versions, backends, and dtypes.

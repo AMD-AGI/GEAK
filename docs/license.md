@@ -1,3 +1,12 @@
+---
+myst:
+  html_meta:
+    "description": "GEAK is released under the MIT License. Read the full license text and copyright notice."
+    "keywords": "GEAK, license, MIT, open source, AMD"
+---
+
+# License
+
 MIT License
 
 Copyright (c) 2026 Advanced Micro Devices, Inc.

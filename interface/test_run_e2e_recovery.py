@@ -2,7 +2,7 @@
 """Tests for run_e2e's guaranteed interface-file emission + intermediate-win
 recovery.
 
-CONTRACT under test: as long as PerfSkills produced ANY measured E2E effect on
+CONTRACT under test: as long as GEAK produced ANY measured E2E effect on
 disk, result.json (+ kernel_journey.json) MUST be written — no termination,
 timeout, signal, or exception may leave the interface files missing.
 
