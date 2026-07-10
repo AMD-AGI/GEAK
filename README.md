@@ -18,6 +18,14 @@ Two workflows ship here:
 
 ---
 
+## Architecture
+
+<p align="center">
+  <img src="docs/assets/GEAK_v4_framework.png" alt="GEAK v4 Optimization Pipeline" width="900">
+</p>
+
+---
+
 ## Getting started
 
 ### 1. Prerequisites
