@@ -19,11 +19,11 @@ working ROCm environment (plus a serving backend for E2E). For a first run, see 
 
 ```bash
 git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
-./setup.sh
+bash setup.sh
 ```
 
 It leaves **PATH and API access** setting in Claude Code to you — follow its printed next-steps to add `~/.local/bin` to
-PATH (if the installer flags it) and to configure Anthropic API access. 
+PATH and to configure Anthropic API access. 
 
 ### Then launch
 

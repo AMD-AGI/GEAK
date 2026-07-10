@@ -34,16 +34,15 @@ Two workflows ship here:
   `rocprofv3` / `rocprof`), Python 3.8+.
 - For E2E: a running-capable serving backend (`sglang` or `vllm`) and the model weights on disk.
 
-### 2. Get the repo and run setup (recommended)
-
+### 2. Set up
 
 ```bash
 git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
-./setup.sh
+bash setup.sh
 ```
 
 It leaves **PATH and API access** setting in Claude Code to you — follow its printed next-steps to add `~/.local/bin` to
-PATH (if the installer flags it) and to configure Anthropic API access. 
+PATH and to configure Anthropic API access. 
 
 ### 3. Launch Claude Code in auto mode
 
