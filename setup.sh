@@ -24,6 +24,16 @@ GEAK_CLAUDE_LOCALBIN=0
 # Minimal Python libs the workflow scripts import at runtime.
 PY_DEPS=(pyyaml requests datasets)
 
+# Bold-green styling for the user-facing commands in the printed next-steps. Only
+# emit ANSI codes to a real terminal, so piping/logging stays free of escape junk.
+if [ -t 1 ]; then
+  C_CMD=$'\033[1;32m'
+  C_OFF=$'\033[0m'
+else
+  C_CMD=''
+  C_OFF=''
+fi
+
 log()  { echo "[geak-setup] $*"; }
 warn() { echo "[geak-setup WARN] $*" >&2; }
 die()  { echo "[geak-setup ERROR] $*" >&2; exit 1; }
@@ -192,7 +202,7 @@ print_next_steps() {
 
 [geak-setup] NOTE: Claude Code is installed at ${CLAUDE_BIN_DIR}, which is not on
 your PATH. Add it (official recommendation; use ~/.zshrc for zsh):
-    echo 'export PATH="${CLAUDE_BIN_DIR}:\$PATH"' >> ~/.bashrc && source ~/.bashrc
+    ${C_CMD}echo 'export PATH="${CLAUDE_BIN_DIR}:\$PATH"' >> ~/.bashrc && source ~/.bashrc${C_OFF}
 EOF
   fi
 
@@ -205,24 +215,20 @@ Next steps — configure Claude Code, then launch it:
 1) Give Claude Code API access (pick ONE):
 
    a. Anthropic API directly:
-        export ANTHROPIC_API_KEY=sk-ant-...
+        ${C_CMD}export ANTHROPIC_API_KEY=sk-ant-...${C_OFF}
 
    b. A gateway / proxy (OpenAI-compatible or Anthropic-compatible):
-        export ANTHROPIC_BASE_URL=https://your-gateway.example.com
-        export ANTHROPIC_AUTH_TOKEN=your-token
+        ${C_CMD}export ANTHROPIC_BASE_URL=https://your-gateway.example.com${C_OFF}
+        ${C_CMD}export ANTHROPIC_AUTH_TOKEN=your-token${C_OFF}
 
    c. Interactive login (Claude / Anthropic Console account):
-        claude            # then run: /login   and follow the browser flow
+        ${C_CMD}claude${C_OFF}            # then run: /login   and follow the browser flow
 
    (Persist your choice in ~/.bashrc so future shells inherit it.)
 
-2) Launch Claude Code in auto-approve mode from the repo root, then ask:
-     cd ${REPO_ROOT}
-     IS_SANDBOX=1 claude --dangerously-skip-permissions
-
-   Example prompts:
-     use ${REPO_ROOT}/kernel_workflow to optimize ${REPO_ROOT}/examples/tasks/knn
-     use ${REPO_ROOT}/e2e_workflow to optimize inference for /models/<model>, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
+2) Launch Claude Code in auto-approve mode from the repo root:
+     ${C_CMD}cd ${REPO_ROOT}${C_OFF}
+     ${C_CMD}IS_SANDBOX=1 claude --dangerously-skip-permissions${C_OFF}
 EOF
 }
 
