@@ -26,8 +26,16 @@ working ROCm environment (plus a serving backend for E2E). For a first run, see
 ## 2. Set up
 
 ```bash
-claude update                          # Claude Code >= 2.1.177
 git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
+bash setup.sh
+```
+
+It leaves **PATH and API access** setting in Claude Code to you — follow its printed next-steps to add `~/.local/bin` to
+PATH and to configure Anthropic API access. 
+
+### Then launch
+
+```bash
 IS_SANDBOX=1 claude --dangerously-skip-permissions
 ```
 
