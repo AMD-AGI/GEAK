@@ -60,4 +60,9 @@ last_seen: 2026-07-05
   e2e_moonshotai-Kimi-K2.6_20260622 (MLA decode stage1 TRITON_MLA, 17.23% head, baseline decode M1=0.219ms/M64=0.265ms, oracle rel=0;
   AND aiter `_ps` asm head h1 7.52%, baseline M1=0.062ms/M64=0.080ms/M64-long=0.312ms, oracle rel pass tol2e-2 → route=author triton);
   e2e_moonshotai-Kimi-K2.6_20260623 (re-confirm aiter `_ps` asm path, mla_a16w16_qh16..._ps.co loaded; 7.5% head, synth oracle PASS rel=0,
-  baseline M1=0.184ms/M64=0.438ms; no op-level env/flag win → author_plan triton FIRST then hip, gate=author_recommended)
+  baseline M1=0.184ms/M64=0.438ms; no op-level env/flag win → author_plan triton FIRST then hip, gate=author_recommended);
+  e2e_moonshotai-Kimi-K2.6_20260625 (NON-persistent aiter path this time: mla_dec_stage1_bf16_a16w16_subQ16_mqa16.co loaded,
+  work_meta_data=None; 5.67% head h1, synth oracle PASS rel≈3.9-4.9e-2 within tol2e-2 scale-rel, baseline M1=0.0914ms/M64=0.2186ms;
+  op_bench bench_attn skipped gracefully [needs reference_io.pt, none — synth oracle] → ran immutable unittest.py directly;
+  no op-level env/flag win [CONFIG_TUNE_ENABLED=false → --attention-backend swap unavailable], asm non-editable → author_plan triton, gate=author_recommended.
+  expert_skill mla_tilelang_to_triton matches op but validation_status=draft → advisory reference only, not auto-applied)

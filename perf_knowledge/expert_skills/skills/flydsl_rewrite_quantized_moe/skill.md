@@ -3,7 +3,7 @@ id: flydsl_rewrite_quantized_moe
 title: Rewrite quantized GEMM / fused-MoE kernels into FlyDSL (Triton->FlyDSL, int4 W4A16 / fp8 blockscale)
 kind: expert_skill
 authors:
-- hongtaom
+- geak
 scope: kernel
 match:
   operator: fused_moe_grouped_gemm
@@ -35,7 +35,7 @@ validation:
     isolated: 3.576
     e2e_pct: ''
     parity: pass
-  artifact: /wekafs/hongtaom/kimi_k01_fused_moe_flydsl
+  artifact: ''   # external validation artifact (machine-specific; not shipped in-repo)
 role: advisory_prior
 supersedes: []
 ---
@@ -107,7 +107,10 @@ correctness is judged identically.
 - The topk=1 generic-GEMM framing streams more weight bytes than `moe_align` → reported speedup is
   **conservative** vs a fully-fused MoE.
 - FlyDSL kernels need the **repo source** checkout (new `value_attrs` API), not just `pip install flydsl`;
-  a stale py3.10 build won't load under py3.12.
+  a stale py3.10 build won't load under py3.12. **To obtain/build it, run the single-source-of-truth
+  bootstrap `perf_knowledge/expert_skills/skills/ensure_flydsl/ensure_flydsl.sh`** (version-gated
+  reuse-or-build PIN into container-internal `/opt/flydsl`, flock + hip-cmake/patchelf fixes) then
+  `source "${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}/flydsl_env.sh"` — do NOT hand-roll clone/build here.
 - ABI/JIT-cache staleness: bump `module_name` on signature change or you'll silently run an old binary.
 
 ## Do-no-harm notes
@@ -132,7 +135,7 @@ correctness is judged identically.
   `${FLYDSL_EXAMPLES}/fp8_blockscale_moe/`; deep dive in sibling skill `rewrite-co-kernel-to-flydsl`.
 - Related GEAK skill: `flydsl_fp8_gemm_playbook` (e2e down-proj bare-core bind) — this skill is its
   kernel-scope, broader-operator counterpart.
-- Validation eval dir (artifact): `/wekafs/hongtaom/kimi_k01_fused_moe_flydsl/` — K1 `fused_moe_kernel_gptq_awq`
+- Validation eval dir (artifact): an external, machine-specific eval dir (not shipped in-repo) — K1 `fused_moe_kernel_gptq_awq`
   (int4 W4A16, Kimi-K2.6, MI300X gfx942). Deployment-env same-session A/B: **geomean 3.62×** (5 UT cases),
   5.15× prefill, 5/5 correctness PASS (cosine ≈ 0.999994) — `result_flydsl.json`, `DELIVERY_FLYDSL.md`,
   rocprof roofline (FlyDSL 60–65% HBM vs Triton 13–18%) in `roofline_hw/`.

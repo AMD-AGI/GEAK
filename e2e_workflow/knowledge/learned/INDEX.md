@@ -13,8 +13,10 @@ Confidence (a hint strength, not authority): ★ noise/unverified · ★★ sing
 
 ## MoE grouped GEMM
 - [gfx950 · vLLM MXFP8 E8M0] grouped `dot_scaled` STATIC tiles (GEMM1-decode BN64+BK256) ★★★ part of +12.1% e2e — (mxfp8-microscale-gemm-gfx950.md)
-- [gfx942 · vLLM int4 W4A16] per-shape fused-MoE Triton config tune via `VLLM_TUNED_CONFIG_FOLDER` (env, ZERO HBM; N=moe_int//TP) ★★★ +11-18% e2e (10 confirms, TP8 & TP4) — (moe-int4-w4a16-tune-gfx942.md)
+- [gfx942 · vLLM int4 W4A16] per-shape fused-MoE Triton config tune via `VLLM_TUNED_CONFIG_FOLDER` (env, ZERO HBM; N=moe_int//TP) ★★★ +11-18% e2e (13 confirms, TP8 & TP4) — (moe-int4-w4a16-tune-gfx942.md)
 - [gfx942 · vLLM bf16 MoE] SAME per-shape fused-MoE config-tune lever works for DENSE bf16 (dtype=None filename, gelu_tanh); no shipped E=128/N=704 config → default fallback ★★ iso 1.06-1.25×/bucket, ZERO HBM, e2e gate pending — (moe-bf16-tune-gfx942.md)
+- [gfx942 · vLLM int4 W4A16] **apply-back** a FlyDSL MoE rewrite into live vLLM (load-time in-place same-byte convert — re-home BOTH weight AND scale params, key by weight.data_ptr, graph mode; REVERSIBLE-OVERLAY variant = 0 site-packages mutation) ★★★ **+77% e2e at FULL fair config (mem 0.9, 262144, 257→455); re-confirmed via overlay +63.57% (329.6→539.1) & +66.02% (319.6→530.6), 4 Director-verified confirms, all non-overlap; fix scale-dup leak (THAT was KV OOM, not repeat_interleave); eager is a trap; pin FLYDSL_ROOT; sub-op GEMM1-only cand can't rebind at fused seam** — (flydsl-moe-applyback-gfx942.md)
+- [gfx942 · vLLM int4 W4A16] **GEMM2-leg levers** on the landed FlyDSL shim (after apply-back GEMM2 is new #1 head ~43-47% eff) ★★ — TWO distinct levers: (1) TILE-TUNE stage-2 prefill tile_m 32→64 via LIVE _pick_tiles (stage-aware, ZERO HBM) **+10.35% e2e (531.7→586.7, non-overlap, 12/12 byte-exact); iso entry does NOT auto-engage (patch _pick_tiles+live counter); same-tile re-tune EXHAUSTED (2 nulls)**; (2) FUSED-XROWS GEMM2 fused-SwiGLU+un-replicated-X (FLYDSL_MOE_FUSED_XROWS=1, the structurally-new angle) **+6.49% e2e STACK provisional (engaged x4, parity-safe, OVERLAPPING at 2 reps→verify more reps+gsm8k; splits MoE-GEMM into gemm1#1 31.5%+gemm2#2 14.9% eff, target gemm1 next)** — (flydsl-moe-gemm2-tiletune-gfx942.md)
 
 ## attention
 - [gfx942 · sglang hybrid prefill] `--attention-backend triton` cheap flag win ★★★ +~5% e2e — (attention-backend-triton-gfx942.md)
@@ -27,4 +29,4 @@ Confidence (a hint strength, not authority): ★ noise/unverified · ★★ sing
 ## method (cross-model, applies to any run)
 - engagement verification: one-shot stderr banner + log grep ★★★ — (method-verify-engagement.md)
 - e2e A/B: pinned port, interleaved, non-overlap gate ★★★ — (method-e2e-ab-harness.md)
-- cuda/HIP-graph-safe integration (the #1 e2e killer) ★★★ — (method-cudagraph-safe-integration.md)
+- cuda/HIP-graph-safe integration + load-time weight conversion (the #1 e2e killer: capture hang OR HIP-OOM-at-init → REJECTED; key cache by weight.data_ptr() not A's, convert once, drop --enforce-eager) ★★★ — (method-cudagraph-safe-integration.md)
