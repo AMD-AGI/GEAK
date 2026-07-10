@@ -1,0 +1,41 @@
+# Table of contents for the GEAK documentation site.
+# Processed by rocm-docs-core into sphinx/_toc.yml at build time.
+# https://rocm.docs.amd.com/projects/rocm-docs-core/en/latest/
+
+defaults:
+  numbered: false
+
+root: index
+
+subtrees:
+- entries:
+  - file: what-is-geak
+    title: What is GEAK?
+  - file: compatibility
+    title: Compatibility matrix
+
+- caption: Install
+  entries:
+    - file: install/install
+      title: Install GEAK
+
+- caption: How to
+  entries:
+    - file: how-to/run-agent
+      title: Run the agent
+
+- caption: Conceptual
+  entries:
+    - file: conceptual/geak-pipeline
+      title: GEAK agent loop
+
+- caption: Reference
+  entries:
+    - file: reference/api-reference
+      title: API reference
+
+- caption: About
+  entries:
+    - file: license
+      title: License
+

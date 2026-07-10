@@ -157,4 +157,4 @@ How the workflows in this repo relate to the GEAK_v3 baseline:
 
 ## License
 
-Apache License 2.0
+MIT License

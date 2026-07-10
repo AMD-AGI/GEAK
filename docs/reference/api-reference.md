@@ -1,11 +1,16 @@
+---
+myst:
+    html_meta:
+        "description": "GEAK v4 reference: the Workflow tool, e2e_workflow and kernel_workflow arguments, helper scripts, the external-orchestrator contract, and run artifacts."
+        "keywords": "GEAK, reference, Workflow, e2e_workflow, kernel_workflow, run_e2e, arguments, helper scripts, artifacts"
+---
+
 # API reference
 
 GEAK v4's public surface is not a CLI or a Python package. It is: the **Workflow** scripts
-(`e2e_workflow.js`, `kernel_workflow.js`), the helper **scripts** they call,
-and a stable **external-orchestrator contract** (`interface/run_e2e.py`). For walkthroughs see
-[Quick start](quick_start.md).
-
----
+(`e2e_workflow.js`, `kernel_workflow.js`), the helper **scripts** they call, and a stable
+**external-orchestrator contract** (`interface/run_e2e.py`). For walkthroughs see
+[Run a workflow](../how-to/run-agent.md).
 
 ## 1. The `Workflow` tool
 
@@ -22,8 +27,6 @@ are mapped onto `args`; there is no config file for workflow parameters.
 |---|---|---|
 | e2e | `e2e_workflow/e2e_workflow.js` | Whole-model sglang/vLLM serving-throughput optimization. |
 | single kernel | `kernel_workflow/kernel_workflow.js` | Optimize/author one AMD GPU kernel. |
-
----
 
 ## 2. `e2e_workflow.js`
 
@@ -115,8 +118,6 @@ Workflow({
 })
 ```
 
----
-
 ## 3. `kernel_workflow.js`
 
 `meta.name = "kernel-workflow"`. Phases:
@@ -159,8 +160,6 @@ Workflow({
   }
 })
 ```
-
----
 
 ## 4. Helper scripts
 
@@ -252,8 +251,6 @@ bash profile_kernel.sh <gpu_id> <benchmark_cmd> <output_dir>
 Env: `PROFILER_PRIORITY` (default `rocprof-compute omniperf rocprofv3 rocprof metrix`), `WARMUP_RUNS` (3),
 `RPC_PROFILE_ARGS`, `RPV3_TRACE_ARGS`, `RPROF_ARGS`, `METRIX_ARGS`.
 
----
-
 ## 5. External-orchestrator contract (`interface/run_e2e.py`)
 
 The only surface an external orchestrator (e.g. Hyperloom) touches — wraps `e2e_workflow.js` arg names
@@ -269,9 +266,7 @@ Stable **handoff.json** fields: `model_path`, `framework` (→ `backend`), `tp`,
 
 Env knobs: `GEAK_CLAUDE_MODEL` (`claude-opus-4-8`), `GEAK_CLAUDE_EFFORT` (`ultracode`),
 `GEAK_E2E_TIMEOUT_S` (`43200` = 12h), `GEAK_ROOT`, `GEAK_EVAL_DIR`, `INFERENCEX_PATH`.
-See [`interface/run_e2e.md`](../interface/run_e2e.md) for the full contract.
-
----
+See [`interface/run_e2e.md`](../../interface/run_e2e.md) for the full contract.
 
 ## 6. Output artifacts
 
@@ -308,10 +303,8 @@ optimized/                               # applied optimized source
 director_validation.json                 # independent re-measurement
 ```
 
----
-
 ## See also
 
-- [Quick start](quick_start.md) — install and first run.
-- [Installation](installation.md) — prerequisites and environment setup.
-- [Compatibility matrix](compatibility.md) — verified hardware/software combinations.
+- [Run a workflow](../how-to/run-agent.md) — install and first run.
+- [Install GEAK](../install/install.md) — prerequisites and environment setup.
+- [Compatibility matrix](../compatibility.md) — verified hardware/software combinations.

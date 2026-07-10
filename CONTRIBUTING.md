@@ -34,4 +34,4 @@ Thank you for your interest in contributing to GEAK! This document provides guid
 
 ## License
 
-By contributing to GEAK, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE).
+By contributing to GEAK, you agree that your contributions will be licensed under the [MIT License](LICENSE).
