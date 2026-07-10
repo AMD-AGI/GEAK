@@ -361,6 +361,13 @@ const E2E_REPEATS = parseInt(A.e2e_repeats != null ? A.e2e_repeats : 2, 10);
 // This is what guarantees "every A/B runs ref AND cand to completion regardless
 // of pass/fail" — general, not per-kernel. Bump via args.ab_finish_retries.
 const AB_FINISH_RETRIES = parseInt(A.ab_finish_retries != null ? A.ab_finish_retries : 3, 10);
+// A resolvable FROZEN baseline (baseline_src/ frozen OR importable meta.baseline_callable) is the
+// speedup DENOMINATOR and is MANDATORY. If an extraction smoke-passes but froze no baseline, the
+// unittest would silently time the candidate against its own naive same-language scaffold (the
+// "optimized-HIP vs naive-HIP = fake 15.7× isolated, ~0% e2e" bug). When that happens we RE-EXTRACT
+// up to this many times; if still missing, the extraction is treated as a FAILURE (flag dominant /
+// skip others) — never a fake speedup. Bump via args.baseline_extract_retries.
+const BASELINE_EXTRACT_RETRIES = parseInt(A.baseline_extract_retries != null ? A.baseline_extract_retries : 3, 10);
 const TASK = A.task || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
@@ -434,6 +441,8 @@ const EXTRACT_OP_SCHEMA = obj({
   dtype: { type: 'string' }, synthesized: { type: 'boolean' }, regimes_captured: arrStr,
   candidate_backends: arrStr, reference_io_sha256: { type: 'string' },
   target_callable: { type: 'string' }, // module:attr rebind seam for an authored kernel ('' if none)
+  baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
+  baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
   smoke: { type: 'string' }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
@@ -454,6 +463,8 @@ const EXTRACT_SCHEMA = obj({
   source_path_in_sglang: { type: 'string' }, target_callable: { type: 'string' },
   num_cases: { type: 'number' }, regimes_captured: arrStr, candidate_backends: arrStr,
   build: { type: 'boolean' }, unittest_smoke: { type: 'string' },
+  baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
+  baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
   reference_io_sha256: { type: 'string' }, notes: { type: 'string' },
 }, ['editable', 'task_dir', 'unittest_smoke']);
 
@@ -602,6 +613,48 @@ async function safeAgent(prompt, opts, tries = 3) {
   }
   log(`agent[${(opts && opts.label) || '?'}] DEGRADED to null after ${tries} tries (${String(lastErr).slice(0, 120)})`);
   return null;
+}
+
+// A FROZEN baseline is resolvable when the extractor either froze baseline_src/ (baseline_frozen)
+// OR set an importable meta.baseline_callable. That is the language-independent speedup denominator.
+const hasFrozenBaseline = (ext) =>
+  !!(ext && (ext.baseline_frozen === true ||
+             (typeof ext.baseline_callable === 'string' && ext.baseline_callable.trim() !== '')));
+
+// Run a kernel_extractor agent and GUARANTEE it froze a real baseline. safeAgent already retries
+// transient failures; this wraps it to ALSO re-extract when the extraction succeeds (smoke passed,
+// task dir present) but produced NO frozen baseline — re-invoking with a corrective instruction up
+// to BASELINE_EXTRACT_RETRIES times. If a baseline still can't be frozen, we force the caller's
+// existing extract-failure path (smoke/unittest_smoke -> 'fail' + a reason) so the head is flagged
+// (if dominant) or skipped, NEVER timed against its own scaffold. `role`/`phase`/`intro`/`inputs`
+// are the roleAgent args; `opts` is the safeAgent opts (phase/label/schema). Used by every extract
+// site (deep, opt-A, milestone/head extract_op, and the non-op milestone extract).
+async function extractWithBaseline(role, phase, intro, inputs, opts) {
+  const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
+  let ext = await safeAgent(roleAgent(role, phase, intro, inputs), opts);
+  let tries = 0;
+  while (smokeOk(ext) && !hasFrozenBaseline(ext) && tries < BASELINE_EXTRACT_RETRIES) {
+    tries++;
+    log(`  ${(opts && opts.label) || role}: extraction froze NO baseline ` +
+      `(baseline_src/ or meta.baseline_callable) — the speedup denominator would fall back to the ` +
+      `candidate's own scaffold (fake-win). RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
+    ext = await safeAgent(
+      roleAgent(role, phase,
+        intro + ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. You MUST freeze the real online kernel into ' +
+        'an immutable baseline_src/ and set meta.baseline_callable (the speedup denominator), bind the ' +
+        "unittest's baseline leg to it, then return baseline_frozen:true. An extraction with no frozen " +
+        'baseline is INVALID and will be discarded.',
+        inputs),
+      opts);
+  }
+  if (smokeOk(ext) && !hasFrozenBaseline(ext)) {
+    log(`  ${(opts && opts.label) || role}: STILL no frozen baseline after ${BASELINE_EXTRACT_RETRIES} ` +
+      `re-extractions — ABORTING this extraction (refusing a fake speedup vs the candidate's own scaffold).`);
+    return { ...ext, smoke: 'fail', unittest_smoke: 'fail',
+      notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
+        `(baseline_src/ / meta.baseline_callable required as the speedup denominator) — ${ext.notes || ''}` };
+  }
+  return ext;
 }
 
 // abDone == the integrator measured BOTH legs (ref + cand) and emitted a real
@@ -1096,14 +1149,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // ---- per-head prep: extract + bake-off + roofline + lane roster (cheap agents on GPU_LIST[0]) ----
     const GLOBAL_KB = `${EVAL_DIR}/deep_head/GLOBAL_KB.md`;
     const prepHead = async (h) => {
-      const ext = await safeAgent(
-        roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
+      const ext = await extractWithBaseline(
+        'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
           ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
           CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
           REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
           PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
-        }),
+        },
         { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
       if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
@@ -1456,14 +1509,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (FAST_DEADLINE_HIT) return { h, dead: 'deadline' };
       return ISO.with(1, async (g) => {
         const gpu = g[0];
-        const ext = await safeAgent(
-          roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
+        const ext = await extractWithBaseline(
+          'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
             ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
             CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
             REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
             PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
-          }),
+          },
           { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
         if (!ext || ext.smoke !== 'pass' || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
         const bake = await safeAgent(
@@ -1555,7 +1608,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (al.authored !== false && al.final_geomean > 1.0 && al.final_patch) {
         st.cands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
           final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: al.final_geomean });
-        log(`  ${j.short_name}: authored ${lang} ${al.final_geomean.toFixed(2)}x (vs its own baseline).`);
+        log(`  ${j.short_name}: authored ${lang} ${al.final_geomean.toFixed(2)}x (vs the frozen online kernel, not the seed).`);
       } else {
         log(`  ${j.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
         history.ledger.push({ direction: `${j.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
@@ -1651,8 +1704,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // (h1) Extract the op into a standalone immutable unittest. The op-identity guard already forced a
     // fused/monolithic head to op_kind=moe with GEMM_SYNTH off (gemmSynthFor) so it is extracted as the
     // fused op bound at its live seam — never decomposed into a standalone dense GEMM. Nothing is skipped.
-    const ext = await safeAgent(
-      roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
+    const ext = await extractWithBaseline(
+      'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
@@ -1663,7 +1716,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         REQUIRE_DECODE_BUCKET: true,
         DECODE_M_BUCKETS: [1, CONC],
         PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
-      }),
+      },
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
     const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
     if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
@@ -1756,7 +1809,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (al && al.authored !== false && al.final_geomean > 1.0 && al.final_patch) {
         headCands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
           final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: al.final_geomean });
-        log(`  ${h.short_name}: authored ${lang} ${al.final_geomean.toFixed(2)}x (vs its own baseline).`);
+        log(`  ${h.short_name}: authored ${lang} ${al.final_geomean.toFixed(2)}x (vs the frozen online kernel, not the seed).`);
       } else {
         log(`  ${h.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
         history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
@@ -1941,12 +1994,12 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   // stage MEASURES throughput and COMPOUNDS the overlay, so it must be serial: no two servers benched at
   // once (no timing conflict) and accepted overlays carry forward in order.
   const optimized = await parallel(cands.map((c) => async () => {
-    const ext = await safeAgent(
-      roleAgent('kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
+    const ext = await extractWithBaseline(
+      'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-      }),
+      },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
     if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
       return { c, skip: true, reason: `extraction failed/non-editable (${ext ? ext.notes || ext.unittest_smoke : 'none'})` };

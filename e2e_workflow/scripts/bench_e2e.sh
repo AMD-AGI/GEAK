@@ -21,16 +21,20 @@
 #                                      median_ttft_ms, median_tpot_ms). PROF=1 => also emit a trace
 #                                      into $PROFILE_DIR. Honors optional REQUEST_RATE (req/s; empty=inf)
 #                                      to stagger arrivals.
-#   adapter_profile_window          -> OPTIONAL. Capture a profiler window (PROFILE_NUM_STEPS steps,
-#                                      record_shapes) on the ALREADY-RUNNING, warm, mid-load server, so
-#                                      the trace is the real steady-state prefill+decode MIX rather than
-#                                      a cold prefill ramp. If undefined, the PROFILE step falls back to
-#                                      a (less faithful) saturated PROF=1 bench.
+#   adapter_profile_window          -> OPTIONAL. Capture a profiler window (record_shapes) on the
+#                                      ALREADY-RUNNING, warm, mid-load server, so the trace is the real
+#                                      steady-state prefill+decode MIX rather than a cold prefill ramp.
+#                                      The window is sized per-backend: sglang by PROFILE_NUM_STEPS (its
+#                                      /start_profile takes num_steps); vllm by PROFILE_WINDOW_SEC (its
+#                                      /start_profile has no step count, so start->sleep->stop). If
+#                                      undefined, the PROFILE step falls back to a (less faithful)
+#                                      saturated PROF=1 bench.
 #
 # KEY OUTPUTS (written to $OUT_DIR):
 #   bench_runs.jsonl       one bench result object per repeat
-#   bench_summary.json     {output_throughput_tok_s_median, ttft_ms_median, tpot_ms_median, spread, runs}
-#   SUMMARY line on stdout: "E2E_SUMMARY output_tok_s=<median> spread=<pct> ttft_ms=<med> tpot_ms=<med>"
+#   bench_summary.json     {throughput_tok_s_median (metric-neutral; see metric_basis), metric_basis,
+#                           ttft_ms_median, tpot_ms_median, spread, runs}  (E2E_METRIC=total default)
+#   SUMMARY line on stdout: "E2E_SUMMARY <metric_basis>=<median> spread=<pct> ttft_ms=<med> tpot_ms=<med>"
 #   profile/                trace (if PROFILE=1)
 set -uo pipefail
 
@@ -264,6 +268,17 @@ PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}  # >CONC so the queue 
 PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}            # optional req/s to stagger arrivals; empty
                                              # = inf (max_concurrency still caps in-flight at CONC).
 PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}     # max wait for the trace file to appear.
+PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-40}             # capture DURATION for time-windowed backends
+                                             # (vllm: /start_profile has no num_steps, so the window is
+                                             # controlled by start -> sleep this long -> /stop_profile).
+                                             # sglang ignores this (it uses PROFILE_NUM_STEPS instead).
+                                             # ~40s spans many decode steps + enough prefill events even
+                                             # at long OSL + low concurrency (prefills are sparse: rate
+                                             # ~ CONC/(OSL*step_time), e.g. only ~1 every few sec at low
+                                             # CONC). Longer is NOT free: a torch trace grows ~linearly
+                                             # with the window and flush time with it (must stay <
+                                             # PROFILE_WINDOW_TIMEOUT, and can OOM the profiler buffer) —
+                                             # lower it if flush fails / the trace is huge.
 OUT_DIR=${OUT_DIR:-$(pwd)/e2e_bench_out}
 LOG=${LOG:-$OUT_DIR/server.log}
 
@@ -280,7 +295,7 @@ COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
 # export everything the adapter reads
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
-export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT
+export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
 export BENCH_TRUST_REMOTE_CODE HF_HUB_TRUST_REMOTE_CODE
 
@@ -441,24 +456,91 @@ done
 # sustained, saturated load and profile a WINDOW once it has reached the mixed steady state.
 if [ "$PROFILE" = "1" ]; then
   mkdir -p "$PROFILE_DIR"
+  # ---- workload-aware steady-state window sizing (don't rely ONLY on the reactive re-capture gate) ----
+  # Reaching batch≈CONC = clear the prefill ramp, then sample steady decode:
+  #   RAMP   = ceil(CONC*ISL / chunk)     forward passes to prefill all CONC in-flight requests
+  #   STEADY = max(30, 5*ceil(OSL/CONC))  decode steps for a stable, representative sample
+  # TARGET = RAMP + STEADY + margin. Why per-backend:
+  #   - sglang is STEP-controlled and its trace lacks the execute_* step annotations decode_steps.py
+  #     needs, so the reactive gate is only a COARSE proxy there — size PROFILE_NUM_STEPS to TARGET up
+  #     front (deterministic; the ISL/OSL/CONC/prompts math is the guarantee, not the gate).
+  #   - vLLM is TIME-controlled; with detailed_trace_annotation its trace DOES carry step spans, so the
+  #     gate converges — we still raise PROFILE_WINDOW_SEC from TPOT (when known) so the first window
+  #     usually lands steady without a re-capture.
+  # Assumes a saturated queue + KV headroom for CONC concurrent decodes (else batch can't reach CONC).
+  _CHUNK="${PREFILL_CHUNK:-$ISL}"
+  _RAMP=$(python3 -c "import math;print(math.ceil($CONC*$ISL/max($_CHUNK,1)))" 2>/dev/null || echo "$CONC")
+  _STEADYN=$(python3 -c "import math;print(max(30,5*math.ceil($OSL/max($CONC,1))))" 2>/dev/null || echo 30)
+  _TARGET_STEPS=$(( _RAMP + _STEADYN + 10 ))
+  if [ "${PROFILE_NUM_STEPS:-0}" -lt "$_TARGET_STEPS" ]; then
+    echo ">>> steady-state sizing: RAMP=${_RAMP}+STEADY=${_STEADYN}+10 -> PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${_TARGET_STEPS}"
+    PROFILE_NUM_STEPS=$_TARGET_STEPS
+  fi
+  _NEED_PROMPTS=$(python3 -c "import math;print($CONC + math.ceil($CONC*$PROFILE_NUM_STEPS/max($OSL,1)) + $CONC)" 2>/dev/null || echo "$PROFILE_NUM_PROMPTS")
+  if [ "${PROFILE_NUM_PROMPTS:-0}" -lt "$_NEED_PROMPTS" ]; then
+    echo ">>> steady-state sizing: PROFILE_NUM_PROMPTS ${PROFILE_NUM_PROMPTS}->${_NEED_PROMPTS} (keep the queue full through the window)"
+    PROFILE_NUM_PROMPTS=$_NEED_PROMPTS
+  fi
+  if [ -n "${TPOT_MS:-}" ]; then
+    _WSEC=$(python3 -c "import math;print(max(${PROFILE_WINDOW_SEC:-40}, math.ceil($_TARGET_STEPS*$TPOT_MS/1000.0*1.5)))" 2>/dev/null || echo "${PROFILE_WINDOW_SEC:-40}")
+    if [ "$_WSEC" -gt "${PROFILE_WINDOW_SEC:-40}" ]; then
+      echo ">>> steady-state sizing: PROFILE_WINDOW_SEC ${PROFILE_WINDOW_SEC}->${_WSEC}s (TPOT=${TPOT_MS}ms x ${_TARGET_STEPS} steps x1.5)"
+      PROFILE_WINDOW_SEC=$_WSEC
+    fi
+  fi
+  export PROFILE_NUM_STEPS PROFILE_NUM_PROMPTS PROFILE_WINDOW_SEC
   if declare -F adapter_profile_window >/dev/null; then
     echo ">>> Profiling steady-state mix: warm ${PROFILE_WARMUP_SEC}s on a saturated load " \
          "(${PROFILE_NUM_PROMPTS} prompts, conc ${CONC}${PROFILE_REQUEST_RATE:+, rate ${PROFILE_REQUEST_RATE}/s}), " \
          "then capture ${PROFILE_NUM_STEPS} steps ..."
-    # Sustained background load (NOT timed, NOT profiled). Varied OSL (RANDOM_RANGE_RATIO>0) + more
-    # prompts than CONC means early finishers are replaced by fresh arrivals, so the in-flight
-    # sequences de-synchronize into a realistic prefill+decode mix.
-    REQUEST_RATE="${PROFILE_REQUEST_RATE}" \
-      adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 0 >/dev/null 2>&1 &
-    _bg_load=$!
-    sleep "$PROFILE_WARMUP_SEC"
-    if kill -0 "$_bg_load" 2>/dev/null; then
-      adapter_profile_window || echo "!!! profile window failed"
-    else
-      echo "!!! background load exited before the profile window (load too short?) — falling back"
-      adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"
-    fi
-    kill "$_bg_load" 2>/dev/null || true; wait "$_bg_load" 2>/dev/null || true
+    # Representativeness gate: the profiled window must capture >= N DECODE forward steps, else BOTH head
+    # selection (raw %GPU) and the decode weight-share are biased by an under-captured window (e.g. one
+    # that landed in the prefill ramp). N scales with the workload:
+    #   N = max(30, 5*ceil(OSL/CONC))  — a statistical floor (>=30 stable decode samples) PLUS ~5
+    #   prefill-admission cycles (a slot frees every ~OSL/CONC decode steps) so the phase ratio is
+    #   representative. If short, ENLARGE the window and re-capture, up to PROFILE_DECODE_TMAX seconds
+    #   total; if still short, proceed and FLAG low-confidence (never hang). Reaching N is cheap at steady
+    #   state (~N*TPOT), so a good first capture is a single pass — only pathological windows re-capture.
+    _N_DECODE=$(python3 -c "import math;print(max(30,5*math.ceil($OSL/max($CONC,1))))" 2>/dev/null || echo 30)
+    _PROF_TMAX="${PROFILE_DECODE_TMAX:-120}"
+    _prof_t0=$SECONDS; _dsteps=0; _attempt=0
+    while : ; do
+      _attempt=$((_attempt+1))
+      # (re)start the sustained, replenishing background load for THIS attempt (>CONC prompts, varied OSL
+      # -> realistic prefill+decode mix; NOT timed, NOT profiled). Restarted per attempt (finite prompts).
+      # The representativeness gate below guarantees the window still captures enough decode, so we keep
+      # the realistic mixed load (prefill shapes stay visible for head selection) rather than a decode-only
+      # load that would bias head selection toward decode-only kernels.
+      REQUEST_RATE="${PROFILE_REQUEST_RATE}" \
+        adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 0 >/dev/null 2>&1 &
+      _bg_load=$!
+      sleep "$PROFILE_WARMUP_SEC"
+      if kill -0 "$_bg_load" 2>/dev/null; then
+        adapter_profile_window || echo "!!! profile window failed"
+      else
+        echo "!!! background load exited before the profile window (load too short?) — falling back"
+        adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"
+      fi
+      kill "$_bg_load" 2>/dev/null || true; wait "$_bg_load" 2>/dev/null || true
+      # count decode (graph-replay / shape-hidden) forward steps in the newest trace
+      _dsteps=$(python3 "$HERE/decode_steps.py" "$PROFILE_DIR" 2>/dev/null || echo 0)
+      case "$_dsteps" in ''|*[!0-9]*) _dsteps=0 ;; esac
+      if [ "$_dsteps" -ge "$_N_DECODE" ]; then
+        echo ">>> decode-capture OK: ${_dsteps} >= ${_N_DECODE} decode steps (attempt ${_attempt})"
+        break
+      fi
+      if [ $((SECONDS - _prof_t0)) -ge "$_PROF_TMAX" ]; then
+        echo "!!! decode-capture LOW-CONFIDENCE: ${_dsteps} < ${_N_DECODE} decode steps after ${_PROF_TMAX}s — proceeding + flagging"
+        break
+      fi
+      PROFILE_WINDOW_SEC=$((PROFILE_WINDOW_SEC * 2)); PROFILE_NUM_STEPS=$((PROFILE_NUM_STEPS * 2))
+      echo ">>> decode-capture short (${_dsteps} < ${_N_DECODE}); enlarging window -> ${PROFILE_WINDOW_SEC}s / ${PROFILE_NUM_STEPS} steps; re-capturing ..."
+    done
+    python3 - "$PROFILE_DIR/decode_capture.json" "$_dsteps" "$_N_DECODE" "$_attempt" <<'PY' 2>/dev/null || true
+import json, sys
+p, ds, n, att = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+json.dump({"decode_steps": ds, "N": n, "attempts": att, "low_confidence": ds < n}, open(p, "w"))
+PY
   else
     # Backend without an HTTP profiler hook: can't profile a mid-stream window, but at least avoid the
     # pure cold burst — send more prompts so the queue stays full past the prefill ramp and the captured
@@ -472,13 +554,21 @@ fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----
 python3 - "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL" <<'PY'
-import json, sys, statistics
+import json, os, sys, statistics
 runs_path, out_path = sys.argv[1], sys.argv[2]
 cold_path = sys.argv[3] if len(sys.argv) > 3 else None
 def pick(d, *keys):
     for k in keys:
         if k in d and isinstance(d[k], (int, float)): return float(d[k])
     return None
+# metric selection: default = TOTAL token throughput ((input+output)/s); set E2E_METRIC=output for
+# output-only tok/s (Magpie-aligned). Same key is read for baseline+cand so the accept RATIO is
+# consistent; metric_basis records which was used.
+_metric = (os.environ.get("E2E_METRIC") or "total").strip().lower()
+_is_total = _metric in ("total", "total_token", "total_throughput")
+_TPUT_KEYS = (("total_token_throughput", "total_throughput", "total_token_throughput_tok_s")
+              if _is_total else
+              ("output_throughput", "output_token_throughput", "output_throughput_tok_s"))
 def read_tps(path):
     xs = []
     if not path: return xs
@@ -489,7 +579,7 @@ def read_tps(path):
                 if not line: continue
                 try: d = json.loads(line)
                 except Exception: continue
-                v = pick(d, "output_throughput", "output_token_throughput", "output_throughput_tok_s")
+                v = pick(d, *_TPUT_KEYS)
                 if v is not None: xs.append(v)
     except FileNotFoundError:
         pass
@@ -501,7 +591,7 @@ with open(runs_path) as fh:
         if not line: continue
         try: d = json.loads(line)
         except Exception: continue
-        v = pick(d, "output_throughput", "output_token_throughput", "output_throughput_tok_s")
+        v = pick(d, *_TPUT_KEYS)
         if v is not None: tps.append(v)
         t = pick(d, "median_ttft_ms", "mean_ttft_ms");   ttft.append(t) if t is not None else None
         p = pick(d, "median_tpot_ms", "mean_tpot_ms");   tpot.append(p) if p is not None else None
@@ -510,9 +600,17 @@ def med(xs): return statistics.median(xs) if xs else None
 def spread(xs):
     if len(xs) < 2: return 0.0
     m = med(xs); return round(100.0 * (max(xs)-min(xs)) / m, 2) if m else 0.0
+_tput_med = round(med(tps), 3) if tps else None
+_tput_spread = spread(tps)
 summ = {
-    "output_throughput_tok_s_median": round(med(tps), 3) if tps else None,
-    "output_throughput_tok_s_spread_pct": spread(tps),
+    # Canonical, metric-neutral throughput of the SELECTED basis (see metric_basis). Downstream should
+    # read this + metric_basis; the accept RATIO is basis-consistent (baseline+cand use the same metric).
+    "throughput_tok_s_median": _tput_med,
+    "throughput_tok_s_spread_pct": _tput_spread,
+    # Legacy output-named alias: populated ONLY in output mode (its literal meaning). In total mode it is
+    # None so nobody silently reads total throughput under an "output" name — read throughput_tok_s_median.
+    "output_throughput_tok_s_median": _tput_med if not _is_total else None,
+    "output_throughput_tok_s_spread_pct": _tput_spread if not _is_total else None,
     "ttft_ms_median": round(med(ttft), 3) if ttft else None,
     "tpot_ms_median": round(med(tpot), 3) if tpot else None,
     "runs": len(tps),
@@ -520,15 +618,17 @@ summ = {
     # Optional COLD full-round (BENCH_COLD_FINAL=1): a single fresh-server round with
     # JIT/graph-capture costs included, for cold-to-cold parity vs Hyperloom's
     # baseline_tput. None when the cold round was not run (default). The hot median
-    # above stays the primary metric so existing consumers are unaffected.
+    # above stays the primary metric so existing consumers are unaffected. Uses the
+    # SAME metric basis (E2E_METRIC) as the hot median for a consistent comparison.
     "cold_output_throughput_tok_s": round(med(cold_tps), 3) if cold_tps else None,
     "cold_runs": len(cold_tps),
-    # Aggregate output tok/s (NOT divided by TP) — matches Hyperloom/Magpie output_throughput protocol.
-    "metric_basis": "aggregate_output_tok_s",
+    # Aggregate tok/s (NOT divided by TP). Default matches Hyperloom/Magpie output_throughput protocol;
+    # E2E_METRIC=total switches to total (input+output) token throughput.
+    "metric_basis": ("aggregate_total_token_tok_s" if _is_total else "aggregate_output_tok_s"),
 }
 with open(out_path, "w") as fh: json.dump(summ, fh, indent=2)
-print(f"E2E_SUMMARY output_tok_s={summ['output_throughput_tok_s_median']} "
-      f"spread={summ['output_throughput_tok_s_spread_pct']}% "
+print(f"E2E_SUMMARY {summ['metric_basis']}={summ['throughput_tok_s_median']} "
+      f"spread={summ['throughput_tok_s_spread_pct']}% "
       f"ttft_ms={summ['ttft_ms_median']} tpot_ms={summ['tpot_ms_median']} runs={summ['runs']}")
 PY
 
