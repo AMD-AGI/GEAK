@@ -24,26 +24,25 @@ Two workflows ship here:
 
 - An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), **ROCm 6+**, a profiler (`rocprof-compute` /
   `rocprofv3` / `rocprof`), Python 3.8+.
-- **Claude Code ≥ 2.1.177** — the workflows use the **dynamic Workflow** (JS orchestration) feature, which
-  is only available from this version onward. Check with `claude --version`.
 - For E2E: a running-capable serving backend (`sglang` or `vllm`) and the model weights on disk.
 
-### 2. Launch Claude Code in auto mode
+### 2. Get the repo and run setup (recommended)
 
-The workflows spawn many sub-agents and run profiling / benchmark / build commands on the box, so run
-Claude Code with permissions auto-approved. Update Claude Code first to make sure you have the dynamic
-Workflow feature (≥ 2.1.177):
-
-```bash
-claude update                                    # update Claude Code to the latest version
-IS_SANDBOX=1 claude --dangerously-skip-permissions
-```
-
-### 3. Point it at this repo and ask
 
 ```bash
 git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
-git checkout GEAK_v4
+./setup.sh
+```
+
+It leaves **PATH and API access** setting in Claude Code to you — follow its printed next-steps to add `~/.local/bin` to
+PATH (if the installer flags it) and to configure Anthropic API access. 
+
+### 3. Launch Claude Code in auto mode
+
+The workflows spawn many sub-agents and run profiling / benchmark / build commands on the box, so run
+Claude Code with permissions auto-approved (≥ 2.1.177 for the dynamic Workflow feature):
+
+```bash
 IS_SANDBOX=1 claude --dangerously-skip-permissions
 ```
 
