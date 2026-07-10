@@ -78,8 +78,6 @@ install_claude_native() {
 
   if command -v curl >/dev/null 2>&1; then
     log "installing Claude Code (${CLAUDE_VERSION}) via the native installer"
-    log "  downloads a ~260MB standalone binary; on slow networks this can take"
-    log "  several minutes with no progress output. Please wait."
     if curl -fsSL --connect-timeout 20 https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}"; then
       ensure_claude_bindir_on_path
       hash -r 2>/dev/null || true
