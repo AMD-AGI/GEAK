@@ -5,8 +5,8 @@
 # kernel_workflow.js) run *inside Claude Code*. This script:
 #   1. Installs the Claude Code CLI (>= 2.1.177) via its native, standalone
 #      installer (curl https://claude.ai/install.sh | bash) — no Node.js.
-#   2. Installs the small pure-Python helper libs the workflow scripts import
-#      (pyyaml, requests, datasets).
+#   2. Installs the Python dependencies listed in requirements.txt (add new
+#      packages there — no need to edit this script).
 #   3. Detects — but never installs — the heavy, image-provided ROCm / profiler /
 #      serving-backend prerequisites, and warns if any are missing.
 #
@@ -21,8 +21,8 @@ CLAUDE_VERSION="${CLAUDE_VERSION:-latest}"
 # Where the native installer drops the binary.
 CLAUDE_BIN_DIR="${CLAUDE_BIN_DIR:-$HOME/.local/bin}"
 GEAK_CLAUDE_LOCALBIN=0
-# Minimal Python libs the workflow scripts import at runtime.
-PY_DEPS=(pyyaml requests datasets)
+# Python dependencies live in requirements.txt (edit that, not this script).
+REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-${REPO_ROOT}/requirements.txt}"
 
 # Bold-green styling for the user-facing commands in the printed next-steps. Only
 # emit ANSI codes to a real terminal, so piping/logging stays free of escape junk.
@@ -136,34 +136,63 @@ ensure_claude_code() {
 }
 
 # --- 2. Python helper libs ---
-# The workflow scripts only import three small pure-Python libs. On a system
-# (non-venv) interpreter, pip 23.0.1+ needs --break-system-packages (PEP 668).
-ensure_python_deps() {
-  log "ensuring Python helper libs: ${PY_DEPS[*]}"
-  local pip_extra=()
+
+# Make sure `$PYTHON -m pip` actually runs. A stale pip in site-packages can be
+# incompatible with a newer interpreter (e.g. pip's vendored pkg_resources calls
+# pkgutil.ImpImporter, removed in Python 3.12), so every pip invocation crashes.
+# When that happens we bootstrap a fresh pip via ensurepip and upgrade the build
+# stack. Fatal if pip still won't run afterwards — nothing downstream can install.
+ensure_pip_works() {
+  if "$PYTHON" -m pip --version >/dev/null 2>&1; then
+    log "pip OK ($("$PYTHON" -m pip --version 2>&1))"
+    return 0
+  fi
+  warn "pip is broken for ${PYTHON}; bootstrapping via ensurepip"
+  local boot_extra=()
+  local flag; flag="$(pip_break_system_flag)"
+  [ -n "$flag" ] && boot_extra=("$flag")
+  "$PYTHON" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  run "$PYTHON" -m pip install "${boot_extra[@]}" --upgrade pip setuptools wheel \
+    || die "could not repair pip (ensurepip + upgrade failed). Fix the Python install, then re-run."
+  "$PYTHON" -m pip --version >/dev/null 2>&1 \
+    || die "pip still not runnable after bootstrap. Fix the Python install, then re-run."
+  log "pip repaired ($("$PYTHON" -m pip --version 2>&1))"
+}
+
+# On a system (non-venv) interpreter, pip 23.0.1+ needs --break-system-packages
+# (PEP 668). Prints the flag on stdout when it applies, nothing otherwise.
+# Assumes pip runs; call after ensure_pip_works so a broken pip isn't mistaken
+# for "flag not supported".
+pip_break_system_flag() {
   if "$PYTHON" - <<'PY' 2>/dev/null
 import sys
 raise SystemExit(0 if sys.prefix == sys.base_prefix else 1)
 PY
   then
     if "$PYTHON" -m pip install --break-system-packages --help >/dev/null 2>&1; then
-      pip_extra=(--break-system-packages)
-      log "non-venv PYTHON; pip will use --break-system-packages"
+      echo "--break-system-packages"
     fi
   fi
+}
 
-  local missing=()
-  for pkg in "${PY_DEPS[@]}"; do
-    local import_name="$pkg"
-    [ "$pkg" = "pyyaml" ] && import_name="yaml"   # pip name -> import name
-    "$PYTHON" -c "import ${import_name}" >/dev/null 2>&1 || missing+=("$pkg")
-  done
-  if [ ${#missing[@]} -eq 0 ]; then
-    log "Python helper libs already satisfied"
-    return 0
+# Installs everything in requirements.txt. pip is idempotent — already-satisfied
+# packages are skipped — so re-running is cheap.
+ensure_python_deps() {
+  [ -f "$REQUIREMENTS_FILE" ] || die "requirements file not found: ${REQUIREMENTS_FILE}"
+  ensure_pip_works
+  # VCS (git+...) requirements need git; fail early with a clear message.
+  if grep -qiE '(^|[[:space:]@])git\+' "$REQUIREMENTS_FILE" \
+     && ! command -v git >/dev/null 2>&1; then
+    die "requirements.txt has a git+ dependency but git is not installed. Install git, then re-run."
   fi
-  log "missing: ${missing[*]}"
-  run "$PYTHON" -m pip install "${pip_extra[@]}" "${missing[@]}"
+  log "installing Python dependencies from ${REQUIREMENTS_FILE}"
+  local pip_extra=()
+  local flag; flag="$(pip_break_system_flag)"
+  if [ -n "$flag" ]; then
+    pip_extra=("$flag")
+    log "non-venv PYTHON; pip will use --break-system-packages"
+  fi
+  run "$PYTHON" -m pip install "${pip_extra[@]}" -r "$REQUIREMENTS_FILE"
 }
 
 # --- 3. Environment prerequisites (detect only) ---
@@ -177,13 +206,13 @@ check_environment() {
   fi
 
   local profiler=""
-  for p in rocprof-compute rocprofv3 rocprof omniperf metrix; do
+  for p in rocprof-compute rocprofv3 rocprof metrix; do
     if command -v "$p" >/dev/null 2>&1; then profiler="$p"; break; fi
   done
   if [ -n "$profiler" ]; then
     log "  profiler: ${profiler}"
   else
-    warn "  no profiler found (rocprof-compute/rocprofv3/rocprof). Profiling steps will be degraded."
+    warn "  no profiler found (rocprof-compute/rocprofv3/rocprof/metrix). Profiling steps will be degraded."
   fi
 
   local backend=""
