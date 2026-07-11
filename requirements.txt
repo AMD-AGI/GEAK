@@ -1,0 +1,11 @@
+# GEAK v4 Python dependencies.
+# Add new packages here — setup.sh installs everything in this file, so you
+# don't need to touch the installer script.
+
+# Pure-Python helper libs the workflow scripts import at runtime.
+pyyaml
+requests
+datasets
+
+# AMD GPU profiling helper (pinned git commit).
+metrix @ git+https://github.com/AMDResearch/intellikit.git@bcbfa0252df9d55f3aab68c95dd3ce45ccbe5b46#subdirectory=metrix
