@@ -206,13 +206,13 @@ check_environment() {
   fi
 
   local profiler=""
-  for p in rocprof-compute rocprofv3 rocprof omniperf metrix; do
+  for p in rocprof-compute rocprofv3 rocprof metrix; do
     if command -v "$p" >/dev/null 2>&1; then profiler="$p"; break; fi
   done
   if [ -n "$profiler" ]; then
     log "  profiler: ${profiler}"
   else
-    warn "  no profiler found (rocprof-compute/rocprofv3/rocprof/omniperf/metrix). Profiling steps will be degraded."
+    warn "  no profiler found (rocprof-compute/rocprofv3/rocprof/metrix). Profiling steps will be degraded."
   fi
 
   local backend=""
