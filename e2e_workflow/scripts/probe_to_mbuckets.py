@@ -67,8 +67,11 @@ def main():
     ap.add_argument("--kernel-match", default="", help="substring to pick the target GEMM kernel")
     ap.add_argument("--decode-max-mult", type=float, default=8.0,
                     help="M <= conc*this is decode; above is prefill (default 8, covers conc*topk)")
-    ap.add_argument("--min-count-share", type=float, default=0.001,
-                    help="drop M whose call-count share is below this (long-tail noise)")
+    ap.add_argument("--min-count-share", type=float, default=0.01,
+                    help="drop M whose call-count share is below this (long-tail noise). Default 1%%: "
+                         "keeps the traffic-dominant buckets (decode M and the few prefill chunk sizes) "
+                         "and drops the long tail of one-off prefill chunk shapes. On SMALL bench runs "
+                         "the tail's relative share rises, so 0.001 would over-keep — 0.01 is robust.")
     ap.add_argument("--out", default="", help="write JSON here; else stdout")
     args = ap.parse_args()
 
