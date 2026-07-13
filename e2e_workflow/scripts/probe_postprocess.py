@@ -46,10 +46,13 @@ def load_probe(probe_dir):
         m = merged.setdefault(tgt, {"total_calls": 0, "cases": {}})
         m["total_calls"] += d.get("total_calls", 0)
         for c in d.get("cases", []):
-            key = json.dumps(c["dims"], sort_keys=True) + "|" + json.dumps(sorted(c.get("dtypes", [])))
+            # dtypes are PER-TENSOR (parallel to dims), NOT deduped — keep order so dtype[i]
+            # corresponds to dims[i]. The dedup key must preserve that order too.
+            key = json.dumps(c["dims"], sort_keys=True) + "|" + json.dumps(c.get("dtypes", []))
             cc = m["cases"].get(key)
             if cc is None:
-                cc = {"dims": c["dims"], "dtypes": c.get("dtypes", []), "count": 0,
+                cc = {"dims": c["dims"], "dtypes": c.get("dtypes", []),
+                      "arg_labels": c.get("arg_labels", []), "count": 0,
                       "_gpu_us_weighted": 0.0, "_timed_count": 0}
                 m["cases"][key] = cc
             cc["count"] += c["count"]
@@ -106,7 +109,8 @@ def build(probe_dir, profile_topn):
         any_measured = False
         clean_cases = []
         for c in cases:
-            rec = {"dims": c["dims"], "dtypes": c["dtypes"], "count": c["count"],
+            rec = {"dims": c["dims"], "dtypes": c["dtypes"],
+                   "arg_labels": c.get("arg_labels", []), "count": c["count"],
                    "count_frac": round(c["count"] / tot, 6)}
             tc = c.get("_timed_count", 0)
             if tc:  # MEASURED per-shape GPU latency (cuda.Event, enforce-eager run)

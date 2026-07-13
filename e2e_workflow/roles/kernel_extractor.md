@@ -58,6 +58,36 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
    you MUST capture/synthesize BOTH a decode case (M ≈ `WORKLOAD.conc`) and a prefill case (large M) —
    see the mandatory both-regimes rule below. Decode M is often under-ranked by GPU-time in the capture
    window; add it explicitly from WORKLOAD if the capture missed it.
+
+   **2b. Graph-hidden kernels → MEASURE the M-buckets, don't guess (per-shape probe).**
+   When the target runs inside a CUDA/HIP graph (most GEMMs, decode-path kernels), the normal capture
+   above returns `dims=[]` for the decode calls — graph *replay* doesn't go through Python, so the
+   captured shapes are missing and you'd otherwise fall back to the **inferred** `M ≈ conc` guess (the
+   `regime_prior` path; historically this was hand-guessed, e.g. gpt-oss `M=64/256`, and only paid off
+   because the guess happened to be right). Instead, MEASURE the real per-shape distribution:
+   ```bash
+   # (a) enforce-eager run so decode steps go through Python and the probe sees real shapes/counts.
+   #     The probe engine is capture_shapes_probe.py (NOT capture_shapes.py): no max_cases cap, args+
+   #     kwargs both scanned, lazy hook (no handshake stall), periodic flush (survives SIGTERM),
+   #     JITFunction-guard. See knowledge/shape_capture.md for the hard pitfalls.
+   OVERLAY_PYTHONPATH="$SKILL_DIR/scripts/probe_overlay" \
+   EXTRA_ENV="PROBE_OUT=$TASK/_probe PROBE_TIME=1 PROBE_TARGETS=<module:attr>[,<module:attr>...]" \
+   EXTRA_SERVER_ARGS="--enforce-eager" \
+   BACKEND="<backend>" GPU="$GPU_ID" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
+   REPEATS=1 PROFILE=0 \
+     bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/probe_<short_name>.log"
+   python3 "$SKILL_DIR/scripts/probe_postprocess.py" --probe-dir "$TASK/_probe" \
+     --out "$TASK/_probe/per_shape_probe"
+   # (b) turn the measured shapes into m_buckets and MERGE into meta.json (replaces the M≈conc guess):
+   python3 "$SKILL_DIR/scripts/probe_to_mbuckets.py" \
+     --probe "$TASK/_probe/per_shape_probe.json" --conc <conc> --kernel-match "<base symbol>"
+   # -> {"decode_m_buckets":[...], "prefill_m_buckets":[...]} : merge both keys into meta.json.
+   ```
+   Only do this when the normal capture (step 2) left the decode shapes hidden. If the kernel is NOT
+   graph-hidden (capture already returned real decode dims), keep the captured shapes — no probe needed.
+   The inferred `M≈conc` guess remains the fallback ONLY if the probe is unavailable (e.g. the kernel
+   has no Python entry, or enforce-eager won't launch). Everything downstream (`attribute_weights`,
+   `unittest.py`) is UNCHANGED — only the m_bucket VALUES go from guessed to measured.
 3. **Copy the editable source** into `kernel_src/` (the minimal owning subtree), so the kernel layer
    and the later overlay can diff against it.
 4. **Write `unittest.py`** — backend-agnostic and IMMUTABLE. It is the SINGLE harness: it judges

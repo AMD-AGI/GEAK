@@ -109,13 +109,16 @@ def _make_wrapper(target):
             with _LOCK:
                 case = st["cases"].get(sig)
                 if case is None:
-                    dims, dtypes = [], []
+                    # dims / dtypes / labels are PARALLEL lists, one entry per tensor operand, in the
+                    # same order. dtypes is NOT deduplicated: downstream (e.g. random-input generation
+                    # for kernel opt verification) needs each tensor's own (shape, dtype) — a merged
+                    # dtype set would be ambiguous when operands differ (e.g. bf16 act + fp32 scale).
+                    dims, dtypes, labels = [], [], []
                     for _label, t in _iter_tensor_args(args, kwargs):
                         dims.append(list(t.shape))
-                        dt = str(t.dtype)
-                        if dt not in dtypes:
-                            dtypes.append(dt)
-                    case = {"dims": dims, "dtypes": dtypes, "count": 0,
+                        dtypes.append(str(t.dtype))
+                        labels.append(_label)
+                    case = {"dims": dims, "dtypes": dtypes, "arg_labels": labels, "count": 0,
                             "gpu_ms_sum": 0.0, "timed_count": 0, "_pending": []}
                     st["cases"][sig] = case
                 case["count"] += 1
@@ -170,7 +173,8 @@ def _flush_one(target):
     path = os.path.join(out_dir, f"probe_{os.getpid()}_{safe}.json")
     cases = []
     for c in sorted(st["cases"].values(), key=lambda c: c["count"], reverse=True):
-        rec = {"dims": c["dims"], "dtypes": c["dtypes"], "count": c["count"]}
+        rec = {"dims": c["dims"], "dtypes": c["dtypes"],
+               "arg_labels": c.get("arg_labels", []), "count": c["count"]}
         tc = c.get("timed_count", 0)
         if tc:
             rec["gpu_us_avg"] = round(c["gpu_ms_sum"] / tc * 1000.0, 3)  # measured per-call GPU time

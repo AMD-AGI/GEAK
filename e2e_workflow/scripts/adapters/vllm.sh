@@ -36,7 +36,12 @@ adapter_launch() {
   local -a _prof_env=()
   if [ -n "${PROFILE_DIR:-}" ]; then
     if python3 -c 'from vllm.config import ProfilerConfig' 2>/dev/null; then
-      _prof=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true}")
+      # PROFILE_ACTIVE_ITERS: widen the profiler capture window (default vllm=5 steps). Set large to
+      # cover the whole short bench so trace and probe span the SAME steps -> count 绝对值可直接比.
+      local _ai="${PROFILE_ACTIVE_ITERS:-}"
+      local _aij=""
+      [ -n "$_ai" ] && _aij=",\"active_iterations\":$_ai"
+      _prof=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true$_aij}")
     else
       _prof_env=(VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR")
     fi
