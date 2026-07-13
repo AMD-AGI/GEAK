@@ -36,13 +36,12 @@ adapter_launch() {
   local -a _prof_env=()
   if [ -n "${PROFILE_DIR:-}" ]; then
     if python3 -c 'from vllm.config import ProfilerConfig' 2>/dev/null; then
-      # detailed_trace_annotation=true emits the gpu_user_annotation execute_* STEP SPANS
-      # (context_<ctx>_generation_<batch>) that parse_profile.py needs to (a) split kernels into
-      # prefill/decode and (b) MEASURE the decode batch to gate steady state (serving.steady). Without
-      # it the trace has no step spans -> no phase accounting, no steady-state verification. record_shapes
-      # stays on so the workload model still gets Input Dims. Unknown keys are ignored by builds that
-      # predate the flag, so this is version-safe.
-      _prof=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true,\"detailed_trace_annotation\":true}")
+      # We deliberately DO NOT pass detailed_trace_annotation: current vllm's ProfilerConfig is a strict
+      # (pydantic extra=forbid) schema that ABORTS the server on that key. When a build DOES accept it, it
+      # emits the execute_context_*_generation_* step spans (gpu_user_annotation, torch record_function —
+      # they DO appear on ROCm) that parse_profile.py uses to split prefill/decode; without it the split
+      # falls back to the analytic est_calls / shape path. record_shapes stays on for Input Dims.
+      _prof=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true}")
     else
       _prof_env=(VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR")
     fi

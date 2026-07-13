@@ -10,28 +10,47 @@ classification semantics) and `SKILL_DIR/knowledge/sglang_internals.md` (profile
 
 ## Discipline (a bad trace misroutes the whole run)
 - Profile with the EXACT ISL/OSL/concurrency as the throughput bench, AFTER warmup.
-- **Capture the STEADY-STATE MIX, not a cold prefill burst.** `bench_e2e.sh` (PROFILE=1) now warms a
-  saturated load and captures a mid-stream window (`adapter_profile_window`), so the trace contains
-  prefill chunks AND decode steps interleaved as the scheduler really runs them. A cold burst profiled
-  from step 0 only sees the prefill ramp (TTFT) and misses decode — if your trace has ONLY large-M
-  prefill shapes and no decode-batch entries, it was captured wrong; re-profile. Note that decode often
-  runs under a CUDA/HIP graph, so its kernels may appear WITHOUT `Input Dims` (shape-hidden); that is
-  expected — decode shapes are recovered downstream from config (decode batch = concurrency), not the
-  trace. Tune the window via `PROFILE_NUM_STEPS` / `PROFILE_WARMUP_SEC` / `PROFILE_NUM_PROMPTS`.
-- **Steady state (batch ≈ CONC) is what makes the prefill/decode split valid — and it is sized/verified
-  differently per backend:**
+- **Capture BOTH phases in one window — prefill burst AND decode.** `bench_e2e.sh` (PROFILE=1) arms the
+  profiler AT load start (`PROFILE_WARMUP_SEC=0`) and takes a SINGLE window (`adapter_profile_window`)
+  sized to span the initial prefill burst AND the decode steady state, so the trace contains prefill
+  chunks AND decode steps. (The old behavior warmed PAST the prefill ramp first, so the window landed in
+  decode ONLY and prefill kernels were never captured.) If your trace has ONLY large-M prefill shapes and
+  no decode, OR only decode and no prefill, the window was mis-sized — raise `PROFILE_WINDOW_SEC` (vllm,
+  time) / `PROFILE_NUM_STEPS` (sglang, steps) and re-profile. Note that decode often runs under a CUDA/HIP
+  graph, so its kernels may appear WITHOUT `Input Dims` (shape-hidden); that is expected — decode shapes
+  are recovered downstream from config (decode batch = concurrency), not the trace. Tune the window via
+  `PROFILE_WINDOW_SEC` / `PROFILE_NUM_STEPS` / `PROFILE_NUM_PROMPTS`; `PROFILE_WARMUP_SEC` defaults to 0.
+- **Steady state (batch ≈ CONC) is what makes the prefill/decode split valid — it is now sized
+  ANALYTICALLY UP FRONT for BOTH backends (the reactive re-capture gate is DISABLED):**
   - `bench_e2e.sh` auto-sizes the window from `ISL/OSL/CONC`: `TARGET_STEPS = ceil(CONC·ISL/chunk) [prefill
     ramp] + max(30, 5·ceil(OSL/CONC)) [steady decode] + margin`, and bumps `PROFILE_NUM_PROMPTS` so the
-    queue stays saturated through it. Override with `PREFILL_CHUNK` (chunk budget), `TPOT_MS` (sizes the
-    vLLM time window), or set `PROFILE_NUM_STEPS`/`PROFILE_WINDOW_SEC` explicitly.
-  - **vLLM**: the adapter now sets `detailed_trace_annotation:true`, so the trace carries `gpu_user_annotation`
-    `execute_*` STEP SPANS → `parse_profile` MEASURES the decode batch and reports `serving.steady` +
-    per-kernel phase. Verify `serving.steady == true` (decode batch ≈ CONC) before trusting the split.
-  - **sglang**: its torch profiler does NOT emit those step spans → `parse_profile` can't measure the
-    decode batch or phase, and the decode-capture gate falls back to a COARSE launch proxy. So for sglang
-    the window is sized ANALYTICALLY up front (`PROFILE_NUM_STEPS = TARGET_STEPS`) to GUARANTEE steady
-    coverage — you cannot verify steadiness from the trace, so trust the sizing + saturated load.
-- Bounded window (`--profile-num-steps`, default 40; auto-raised to `TARGET_STEPS`) so the trace stays parseable but spans into decode.
+    queue stays saturated through it. **sglang** (step-controlled) records `PROFILE_NUM_STEPS = TARGET_STEPS`
+    forward steps. **vLLM** (time-controlled) auto-derives `TPOT_MS` from the timed bench that just ran and
+    sizes the window to `TARGET_STEPS·TPOT·1.5`, clamped to `[PROFILE_WINDOW_SEC(40), PROFILE_WINDOW_SEC_MAX(60)]`
+    — so it spans the prefill ramp + a steady decode sample while the cap bounds trace size (warmup=0 records
+    the whole ramp). Override with `PREFILL_CHUNK` (chunk budget; raises RAMP so sglang's step budget doesn't
+    get eaten by prefill at high CONC), `TPOT_MS`, `PROFILE_WINDOW_SEC_MAX`, or set
+    `PROFILE_NUM_STEPS`/`PROFILE_WINDOW_SEC` explicitly.
+  - **Step-span annotations are OFF here — but not for the reason you'd guess.** vLLM's
+    `execute_context_*_generation_*` step spans ARE real torch `record_function` ranges that DO appear as
+    `gpu_user_annotation` in the ROCm torch trace (verified in real AMD traces — a steady conc64 decode
+    trace shows `generation_64(64)`), and `parse_profile` CAN split prefill/decode + verify decode batch ≈
+    CONC from them. They are OFF only because THIS vLLM build's strict `ProfilerConfig` (pydantic
+    `extra=forbid`) ABORTS the server on `detailed_trace_annotation`, so the adapter stopped passing it →
+    the trace has no step spans. sglang uses a different profiler and does NOT emit that vLLM-specific
+    `execute_context_*` format. Two gotchas when annotations ARE present: (i) `parse_profile` reads them
+    only from the `gpu_user_annotation` category — some captures put `execute_*` in `user_annotation` (CPU)
+    only, and those are silently missed; (ii) parse the rank0 WORKER trace (`dp0_pp0_tp0..._rank0`), NOT
+    the `*.async_llm.*` engine-process trace (python_function only, no kernels).
+  - Consequence on the current build: `parse_profile` CANNOT measure the decode batch or a per-kernel
+    `phase` from the trace (no `serving` block, no per-kernel `phase`), and the decode-step count is only a
+    COARSE shape-visibility proxy. Do NOT expect to verify steadiness from the trace — trust the up-front
+    analytic sizing + the saturated load. The prefill/decode split is recovered downstream ANALYTICALLY
+    (parse_profile's `analytic_calls` / `est_shape`), not from the trace.
+  - The old adaptive "enlarge window + re-capture until N decode steps" gate is DISABLED — that proxy loop
+    used to double the window until the trace bloated / OOMed the profiler buffer. `bench_e2e.sh` now
+    captures ONCE with the up-front-sized window; trust the sizing.
+- Bounded window (`PROFILE_NUM_STEPS`, default 40; auto-raised to `TARGET_STEPS`) so the trace stays parseable but spans prefill + decode.
 - `total_gpu_time_ms` is summed kernel duration in the window — use it for RELATIVE %gpu ranking, not
   as the throughput number (that's the Director's bench).
 - Prefer BOTH sources when available: rocprofv3 gives authoritative HW durations, the torch trace
@@ -107,7 +126,7 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    # SERVING config MUST match the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs),
    # so the profiled shapes reflect the deployed tensor-parallel sharding.
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/profile/round_${ROUND}" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
-   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=1 PROFILE=1 PROFILE_NUM_STEPS=40 \
+   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=1 PROFILE=1 PROFILE_NUM_STEPS=80 \
    OVERLAY_PYTHONPATH="$OVERLAY_PYTHONPATH" EXTRA_SERVER_ARGS="<flags>" EXTRA_ENV="<env>" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/profile_r${ROUND}.log"
    ```
@@ -147,15 +166,16 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
      --top 25 --out "$EVAL_DIR/profile/round_${ROUND}/profile_topN" \
      --workload-out "$EVAL_DIR/profile/round_${ROUND}/profile_workload.json"
    ```
-   With `--isl/--osl/--conc` (pass the SAME values as the bench), each top kernel is annotated with its
-   MEASURED serving **phase** (`prefill`/`decode`/`both`, from the trace's gpu_user_annotation step
-   spans), per-phase `base_latency_ms`, `est_shape` (prefill M = token budget + remainders; decode M =
-   concurrency snapped to a capture size), and `est_calls` (== the analytic `serving_weight_model.
-   analytic_calls` the immutable unittest self-weights by). A top-level `serving` block reports the
-   prefill/decode step counts and a **steady-state gate**: if `decode_batch_captured` << `conc` the
-   decode `%gpu`/latency is biased low (COUNTS stay valid) — enlarge the window / re-capture past
-   warmup before trusting decode head selection. This is MEASURED from the trace (not a decided
-   regime), consistent with parse_profile's "only reports what the trace measured" contract.
+   Pass `--isl/--osl/--conc` (the SAME values as the bench). IF the trace carries `gpu_user_annotation`
+   `execute_*` step spans, each top kernel is annotated with its MEASURED serving **phase**
+   (`prefill`/`decode`/`both`), per-phase `base_latency_ms`, and a top-level `serving` block with the
+   prefill/decode step counts + steady-state gate. On current vllm/sglang builds those spans are ABSENT
+   (see the steady-state note above), so these MEASURED fields will typically be MISSING — that is
+   EXPECTED, not a capture error; do not re-profile chasing them. Regardless, the parser ALWAYS emits
+   `est_shape` (prefill M = token budget + remainders; decode M = concurrency snapped to a capture size)
+   and `est_calls` (== the analytic `serving_weight_model.analytic_calls` the immutable unittest
+   self-weights by), computed ANALYTICALLY from `--isl/--osl/--conc` — this is the prefill/decode split
+   downstream relies on when the trace has no step spans.
    The extra `--workload-out` writes the per-(shape,dtype) WORKLOAD MODEL (each top kernel's real
    shape/dtype case distribution with a time-proportional weight, now also tagged with the measured
    per-case `regime`). The Kernel Extractor slices the
