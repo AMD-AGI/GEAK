@@ -257,10 +257,15 @@ PROFILE=${PROFILE:-0}                 # 1 = also capture a profiler trace
 # Profiling is meant to capture the REAL continuous-batching steady state — prefill chunks and decode
 # steps interleaved as the scheduler actually runs them — NOT a cold prefill burst. So we profile a
 # WINDOW in the middle of a sustained, saturated load (see the PROFILE block below). Tunables:
-PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-40}   # forward steps to capture (sglang; step-controlled). Just a
-                                             # floor — auto-sizing below raises it to TARGET_STEPS
-                                             # (RAMP+STEADY+10, always > 40) from ISL/OSL/CONC, so it spans
-                                             # the prefill ramp (warmup=0) AND steady decode.
+PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-40}   # forward steps to capture (sglang; step-controlled). Floor;
+                                             # auto-sizing below raises it to TARGET_STEPS (RAMP+STEADY+10)
+                                             # from ISL/OSL/CONC, then CLAMPS to PROFILE_NUM_STEPS_MAX.
+PROFILE_NUM_STEPS_MAX=${PROFILE_NUM_STEPS_MAX:-64}  # CAP on captured steps (sglang). At low conc STEADY
+                                             # = 5*ceil(OSL/CONC) explodes (e.g. 172 at conc2/osl64), and
+                                             # the sglang/ROCm trace is ~MBs PER STEP -> a multi-hundred-MB
+                                             # trace whose roctracer flush takes minutes AND BLOCKS the
+                                             # server (health drops, requests time out). 64 steps still
+                                             # spans the prefill ramp + a decode sample. Raise if needed.
 PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-0}  # 0 = arm the profiler AT load start so the capture INCLUDES
                                              # the initial prefill burst. A non-zero warmup lets the load
                                              # pass the prefill ramp first, so the window lands in decode
@@ -501,6 +506,11 @@ PY
   if [ "${PROFILE_NUM_STEPS:-0}" -lt "$_TARGET_STEPS" ]; then
     echo ">>> steady-state sizing: RAMP=${_RAMP}+STEADY=${_STEADYN}+10 -> PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${_TARGET_STEPS}"
     PROFILE_NUM_STEPS=$_TARGET_STEPS
+  fi
+  # CLAMP steps (sglang: ~MBs/step -> avoid a huge trace + server-blocking flush at low conc).
+  if [ -n "${PROFILE_NUM_STEPS_MAX:-}" ] && [ "$PROFILE_NUM_STEPS" -gt "$PROFILE_NUM_STEPS_MAX" ]; then
+    echo ">>> steady-state sizing: PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${PROFILE_NUM_STEPS_MAX} (capped at PROFILE_NUM_STEPS_MAX)"
+    PROFILE_NUM_STEPS=$PROFILE_NUM_STEPS_MAX
   fi
   _NEED_PROMPTS=$(python3 -c "import math;print($CONC + math.ceil($CONC*$PROFILE_NUM_STEPS/max($OSL,1)) + $CONC)" 2>/dev/null || echo "$PROFILE_NUM_PROMPTS")
   if [ "${PROFILE_NUM_PROMPTS:-0}" -lt "$_NEED_PROMPTS" ]; then
