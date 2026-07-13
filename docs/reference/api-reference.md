@@ -123,7 +123,7 @@ Workflow({
 `meta.name = "kernel-workflow"`. Phases:
 `Setup → Author → Analyze → Benchmark → Profile → Optimize → Verify → Merge → Report → Validate`.
 
-Director → TechLead → specialist engineers (algorithm / memory / compute / host_runtime), multi-round,
+Director → TechLead → specialist engineers (algorithm, memory, compute, and host_runtime), multi-round,
 budget-controlled, each patch independently verified.
 
 | Arg | Default | Description |
@@ -165,7 +165,7 @@ Workflow({
 
 ### 4.1 `e2e_workflow/scripts/bench_e2e.sh`
 
-Backend-agnostic e2e serving-benchmark dispatcher: server lifecycle / health-wait / cleanup
+Backend-agnostic e2e serving-benchmark dispatcher: server lifecycle, health-wait, and cleanup
 (or `REUSE_SERVER=1`), warmup + N timed repeats + optional profiling trace, median throughput + spread.
 Env-driven; `MODEL` is **required** (no rig default).
 
@@ -175,7 +175,7 @@ Key env vars: `MODEL`, `TP`, `GPU`, `ISL`/`OSL`/`CONC`, `REPEATS` (default 3), `
 
 ### 4.2 `e2e_workflow/scripts/op_bench.py`
 
-Single-op multi-backend bake-off + autotune for head kernels (GEMM / attention). Isolated; never touches
+Single-op multi-backend bake-off and autotune for head kernels (GEMM and attention). Isolated; never touches
 a server. Reads `meta.json` (+ optional `reference_io.pt`).
 
 ```bash
@@ -227,7 +227,7 @@ python gsm8k_eval.py --base-url <url> --model <name> \
 
 Reversible-overlay tooling (never edits site-packages). `overlay_setup.py` builds a compounding
 `sitecustomize`/monkeypatch overlay — subcommands `add-module` and `add-rebind`. `capture_shapes.py`
-hooks a live server callable via the overlay to capture real serving shapes + a reference I/O oracle
+hooks a live server callable through the overlay to capture real serving shapes + a reference I/O oracle
 (`reference_io.pt` + `meta.json`); imported through the overlay, not a standalone CLI.
 
 ### 4.8 `kernel_workflow/scripts/gpu_lock.sh`
@@ -253,7 +253,7 @@ Env: `PROFILER_PRIORITY` (default `rocprof-compute omniperf rocprofv3 rocprof me
 
 ## 5. External-orchestrator contract (`interface/run_e2e.py`)
 
-The only surface an external orchestrator (e.g. Hyperloom) touches — wraps `e2e_workflow.js` arg names
+The only surface an external orchestrator (for example, Hyperloom) touches — wraps `e2e_workflow.js` arg names
 behind one command and two JSON files (`schema_version` 1).
 
 ```bash

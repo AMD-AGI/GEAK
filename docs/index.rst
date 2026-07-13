@@ -6,10 +6,10 @@ GEAK documentation
 ==================
 
 GEAK (Generating Efficient AI-Centric Kernels) is a multi-agent GPU performance optimizer for
-AMD Instinct MI GPUs (CDNA). It ships two deterministic **Workflows**: ``e2e_workflow`` raises the
-end-to-end **sglang / vLLM serving throughput** of a whole model, and ``kernel_workflow`` optimizes a
+AMD Instinct™ MI GPUs (CDNA). It ships two deterministic **Workflows**: ``e2e_workflow`` raises the
+end-to-end **sglang or vLLM serving throughput** of a whole model, and ``kernel_workflow`` optimizes a
 single AMD GPU kernel (Triton, HIP, CK, FlyDSL). Control flow is deterministic JS; LLM agents are called
-only for judgement.
+only for judgment.
 
 The GEAK public repository is located at `AMD-AGI/GEAK <https://github.com/AMD-AGI/GEAK>`_.
 
@@ -20,13 +20,13 @@ The GEAK public repository is located at `AMD-AGI/GEAK <https://github.com/AMD-A
 
       * :doc:`Install GEAK <install/install>`
 
-   .. grid-item-card:: How to
-
-      * :doc:`Run a workflow <how-to/run-agent>`
-
    .. grid-item-card:: Conceptual
 
       * :doc:`GEAK pipeline <conceptual/geak-pipeline>`
+
+   .. grid-item-card:: How to
+
+      * :doc:`Run a workflow <how-to/run-agent>`
 
    .. grid-item-card:: Reference
 

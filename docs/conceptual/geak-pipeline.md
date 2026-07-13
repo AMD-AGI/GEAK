@@ -30,6 +30,8 @@ flowchart LR
 
 ## Phases
 
+The following phases make up an end-to-end run.
+
 ### Setup
 
 The Director builds an isolated evaluation directory, launches a warm server, and records the **true
@@ -61,7 +63,7 @@ back and gates it end-to-end.
 
 ### Milestone
 
-The remaining editable kernels above a threshold are swept the same way — extract, optimize via the
+The remaining editable kernels above a threshold are swept the same way — extract, optimize using the
 kernel layer, integrate, re-profile — until the budget or the Amdahl stop rule ends the loop.
 
 ### Finalize, Report, Validate

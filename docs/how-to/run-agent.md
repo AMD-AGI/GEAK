@@ -12,7 +12,9 @@ GEAK v4 runs **inside Claude Code**, orchestrated by deterministic JS **Workflow
 
 ## Prerequisites
 
-- **AMD Instinct MI GPU** — CDNA (gfx942 / gfx950), auto-detected.
+Before running a workflow, ensure the following are in place.
+
+- **AMD Instinct™ MI GPU** — CDNA (gfx942 / gfx950), auto-detected.
 - **ROCm 6+** with `rocminfo` / `rocm-smi`, and a profiler (`rocprof-compute` / `rocprofv3` / `rocprof`).
 - **Python 3.8+**.
 - **Claude Code ≥ 2.1.177** (dynamic Workflow feature). Check `claude --version`.
@@ -20,13 +22,15 @@ GEAK v4 runs **inside Claude Code**, orchestrated by deterministic JS **Workflow
 
 ## 1. Get the repo and launch Claude Code
 
+Clone the GEAK repository and launch Claude Code in sandbox mode.
+
 ```bash
 claude update                          # ensure Claude Code >= 2.1.177
 git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
 IS_SANDBOX=1 claude --dangerously-skip-permissions
 ```
 
-Sandbox mode auto-approves permissions, which the workflows need to run profiling / benchmark / build
+Sandbox mode auto-approves permissions, which the workflows need to run profiling, benchmark, and build
 commands.
 
 ## 2. Run a workflow (natural language)
@@ -54,7 +58,7 @@ use path_to_GEAK/kernel_workflow to optimize /path/to/silu, budget 8, focus on w
 Director → TechLead → specialist engineers, multi-round and budget-controlled, each patch independently
 verified. Output: `kernel_workflow/exp/team_<kernel>_<timestamp>/`.
 
-**Batch:** spawn one agent per kernel; GPU access is serialized via `kernel_workflow/scripts/gpu_lock.sh`,
+**Batch:** spawn one agent per kernel; GPU access is serialized using `kernel_workflow/scripts/gpu_lock.sh`,
 so kernels can safely share GPUs.
 
 ## 3. Depth modes (e2e)

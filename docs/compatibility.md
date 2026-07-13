@@ -12,10 +12,10 @@ JS-Workflow GPU optimizer; no pip package, no CLI). Only tested configurations a
 
 ## Runtime — Claude Code
 
-| Component | Version / requirement | Status | Notes |
+| Component | Version or requirement | Status | Notes |
 |---|---|---|---|
 | Claude Code | **≥ 2.1.177** | Required | The workflows use the **dynamic Workflow** (JS orchestration) feature, available only from this version. Check with `claude --version`. |
-| Launch mode | `IS_SANDBOX=1 claude --dangerously-skip-permissions` | Required | Workflows spawn sub-agents and run profiling / benchmark / build commands on the box, so permissions must be auto-approved. |
+| Launch mode | `IS_SANDBOX=1 claude --dangerously-skip-permissions` | Required | Workflows spawn sub-agents and run profiling, benchmark, and build commands on the box, so permissions must be auto-approved. |
 | Default model | `claude-opus-4-8` | Verified | Default used by the external-orchestrator entry point (`interface/run_e2e.py`). |
 | Effort | `ultracode` | Verified | Default effort for `interface/run_e2e.py`. |
 
@@ -62,7 +62,7 @@ to the local `gfx` at build time.
 
 ## Profilers
 
-The profiler is auto-detected via a degrade ladder
+The profiler is auto-detected using a degrade ladder
 (`PROFILER_PRIORITY="rocprof-compute rocprofv3 rocprof"`).
 
 | Profiler | Status |
@@ -83,7 +83,7 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 | Bench client | Status | Notes |
 |---|---|---|
 | Backend-native (`bench_e2e.sh`) | Verified | Default dispatcher. |
-| inferencex | Verified | Opt-in via `BENCH_CLIENT=inferencex` (Hyperloom / Magpie parity); needs `$INFERENCEX_PATH`. |
+| inferencex | Verified | Opt-in using `BENCH_CLIENT=inferencex` (Hyperloom or Magpie parity); needs `$INFERENCEX_PATH`. |
 
 ## Kernel languages (kernel_workflow)
 
@@ -92,7 +92,7 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 | Kernel language | Status | Notes |
 |---|---|---|
 | Triton | Verified | Always a viable author target. |
-| FlyDSL | Verified | Preferred author target for dense / quantized GEMM (aiter's SOTA GEMM DSL, JIT, no build). Probed via `aiter.ops.flydsl.is_flydsl_available()`. |
+| FlyDSL | Verified | Preferred author target for dense / quantized GEMM (aiter's SOTA GEMM DSL, JIT, no build). Probed using `aiter.ops.flydsl.is_flydsl_available()`. |
 | HIP | Verified | Used when headroom justifies it. |
 | CK (Composable Kernel) | Verified | Used when headroom justifies it; FP8 GEMM tuning. |
 
@@ -101,11 +101,11 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 | Backend | Status |
 |---|---|
 | hipblaslt | Verified |
-| rocblas / TunableOp | Verified |
+| rocblas or TunableOp | Verified |
 | aiter | Verified |
 | triton (with `--triton-autotune`) | Verified |
 
-## Precision / data types
+## Precision and data types
 
 | Data type | Status | Notes |
 |---|---|---|
@@ -118,7 +118,7 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 | Gate | Requirement | Status |
 |---|---|---|
 | `none` (default) | Throughput delta + greedy output parity | Verified |
-| `gsm8k` | Sampled gsm8k (5-shot, greedy, fixed seed) via `scripts/gsm8k_eval.py` against an OpenAI-compatible `/v1` endpoint | Verified |
+| `gsm8k` | Sampled gsm8k (5-shot, greedy, fixed seed) using `scripts/gsm8k_eval.py` against an OpenAI-compatible `/v1` endpoint | Verified |
 
 ## Notes
 
