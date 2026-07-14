@@ -1605,10 +1605,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (!r || !r.al) continue;
       const j = r.j, al = r.al, lang = j.ap.language || 'triton';
       const st = headState.get(j.short_name); if (!st) continue;
-      if (al.authored !== false && al.final_geomean > 1.0 && al.final_patch) {
+      // Rank candidates on the WORKLOAD-WEIGHTED speedup (kernel layer's PRIMARY metric, = the env/
+      // direct_light candidate's bake.isolated_speedup), NOT the unweighted geomean. In a decode-bound
+      // serving regime the geomean is dominated by zero/low-weight prefill buckets and buries the decode
+      // bucket that governs throughput — ranking by geomean can drop the truly-best authored kernel.
+      const alIso = al.final_weighted != null ? al.final_weighted : al.final_geomean;
+      if (al.authored !== false && alIso > 1.0 && al.final_patch) {
         st.cands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
-          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: al.final_geomean });
-        log(`  ${j.short_name}: authored ${lang} ${al.final_geomean.toFixed(2)}x (vs the frozen online kernel, not the seed).`);
+          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
+        log(`  ${j.short_name}: authored ${lang} ${alIso.toFixed(2)}x weighted (vs the frozen online kernel, not the seed).`);
       } else {
         log(`  ${j.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
         history.ledger.push({ direction: `${j.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
@@ -1806,10 +1811,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (!transient || attempt === AUTHOR_TRIES) break;
         log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
       }
-      if (al && al.authored !== false && al.final_geomean > 1.0 && al.final_patch) {
+      // Rank on the WORKLOAD-WEIGHTED speedup (kernel layer's PRIMARY metric, same basis as the
+      // env/direct_light candidate's bake.isolated_speedup) — NOT the unweighted geomean, which in a
+      // decode-bound regime is dragged down by low/zero-weight prefill buckets and can bury the decode
+      // bucket that actually governs serving throughput. Fall back to geomean if no weighted number.
+      const alIso = al && (al.final_weighted != null ? al.final_weighted : al.final_geomean);
+      if (al && al.authored !== false && alIso > 1.0 && al.final_patch) {
         headCands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
-          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: al.final_geomean });
-        log(`  ${h.short_name}: authored ${lang} ${al.final_geomean.toFixed(2)}x (vs the frozen online kernel, not the seed).`);
+          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
+        log(`  ${h.short_name}: authored ${lang} ${alIso.toFixed(2)}x weighted (vs the frozen online kernel, not the seed).`);
       } else {
         log(`  ${h.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
         history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
