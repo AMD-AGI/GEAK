@@ -7,14 +7,14 @@ myst:
 
 # GEAK v4 compatibility matrix
 
-Verified hardware, software, runtime, and backend combinations for **GEAK v4** (a Claude Code +
+Verified hardware, software, runtime, and backend combinations for GEAK v4 (a Claude Code +
 JS-Workflow GPU optimizer; no pip package, no CLI). Only tested configurations are listed.
 
 ## Runtime — Claude Code
 
 | Component | Version or requirement | Status | Notes |
 |---|---|---|---|
-| Claude Code | **≥ 2.1.177** | Required | The workflows use the **dynamic Workflow** (JS orchestration) feature, available only from this version. Check with `claude --version`. |
+| Claude Code | ≥ 2.1.177 | Required | The workflows use the dynamic Workflow (JS orchestration) feature, available only from this version. Check with `claude --version`. |
 | Launch mode | `IS_SANDBOX=1 claude --dangerously-skip-permissions` | Required | Workflows spawn sub-agents and run profiling, benchmark, and build commands on the box, so permissions must be auto-approved. |
 | Default model | `claude-opus-4-8` | Verified | Default used by the external-orchestrator entry point (`interface/run_e2e.py`). |
 | Effort | `ultracode` | Verified | Default effort for `interface/run_e2e.py`. |
@@ -123,5 +123,5 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 ## Notes
 
 - The on-box GPU arch, backend, profiler, and op backends are re-checked at runtime by the Setup
-  **preflight**, which writes `env_report.{md,json}`.
+  preflight, which writes `env_report.{md,json}`.
 - Only tested configurations are listed. To report a verified configuration not listed here, open a pull request.

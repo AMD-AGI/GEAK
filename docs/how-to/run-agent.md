@@ -20,7 +20,7 @@ Before running a workflow, ensure the following are in place.
 - **Claude Code ≥ 2.1.177** (dynamic Workflow feature). Check `claude --version`.
 - **For E2E:** a running-capable `sglang` or `vllm` and the model weights on disk.
 
-## 1. Get the repo and launch Claude Code
+## Get the repo and launch Claude Code
 
 Clone the GEAK repository and launch Claude Code in sandbox mode.
 
@@ -33,17 +33,19 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions
 Sandbox mode auto-approves permissions, which the workflows need to run profiling, benchmark, and build
 commands.
 
-## 2. Run a workflow (natural language)
+## Run a workflow (natural language)
+
+The path you give Claude Code (for example, `path_to_GEAK/e2e_workflow`) is mapped to the `workflow_dir` argument that the workflow requires. Replace `path_to_GEAK` with the absolute path to your cloned GEAK repository.
 
 ### End-to-end serving throughput (e2e_workflow ⭐)
 
 ```
-use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
+use /absolute/path/to/GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
 ```
 
-Profiles a running server, triages hot kernels by **Amdahl** (`pct_gpu_time × achievable_speedup`), pulls
+Profiles a running server, triages hot kernels by Amdahl (`pct_gpu_time × achievable_speedup`), pulls
 levers cheapest-first (config/backend sweep → head GEMM/attention bake-off → editable-kernel milestone
-loop), and overlays each accepted change back **reversibly**, gated on a measured throughput delta.
+loop), and overlays each accepted change back reversibly, gated on a measured throughput delta.
 
 Output: `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`, `architect_report.md`, `final/`
 (overlay + patch + `final_launch.sh`). See [`examples/e2e_workflow/`](../../examples/e2e_workflow/).
@@ -51,17 +53,36 @@ Output: `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`, `arch
 ### Single kernel (kernel_workflow)
 
 ```
-use path_to_GEAK/kernel_workflow to optimize path_to_GEAK/examples/tasks/knn
-use path_to_GEAK/kernel_workflow to optimize /path/to/silu, budget 8, focus on wrapper overhead
+use /absolute/path/to/GEAK/kernel_workflow to optimize /absolute/path/to/GEAK/examples/tasks/knn
+use /absolute/path/to/GEAK/kernel_workflow to optimize /path/to/silu, budget 8, focus on wrapper overhead
 ```
 
 Director → TechLead → specialist engineers, multi-round and budget-controlled, each patch independently
 verified. Output: `kernel_workflow/exp/team_<kernel>_<timestamp>/`.
 
-**Batch:** spawn one agent per kernel; GPU access is serialized using `kernel_workflow/scripts/gpu_lock.sh`,
-so kernels can safely share GPUs.
+**Batch:** run multiple kernels in parallel by launching one non-interactive Claude Code process per
+kernel. GPU access is serialized internally using `kernel_workflow/scripts/gpu_lock.sh`, so all
+processes can safely share the same GPUs.
 
-## 3. Depth modes (e2e)
+```bash
+GEAK=/absolute/path/to/GEAK
+GPU_IDS="0,1,2,3"
+
+for KERNEL in /path/to/kernel_a /path/to/kernel_b /path/to/kernel_c; do
+  IS_SANDBOX=1 claude -p \
+    "use $GEAK/kernel_workflow to optimize $KERNEL, gpu_ids $GPU_IDS" \
+    --dangerously-skip-permissions \
+    > "$KERNEL/claude.log" 2>&1 &
+done
+
+wait
+```
+
+Each process writes its output to a per-kernel log. The `kernel_workflow` creates its experiment
+directory under `kernel_workflow/exp/team_<kernel>_<timestamp>/`. The `-p` flag runs Claude Code
+non-interactively (print mode); the process exits when the workflow completes.
+
+## Depth modes (e2e)
 
 Both default off = **default** mode; mutually exclusive, **deep wins**.
 
@@ -72,10 +93,10 @@ Both default off = **default** mode; mutually exclusive, **deep wins**.
 | **deep** | "deep mode" | ConfigSweep + HeadKernel, cross-kernel×backend lane pool, many rounds (`deep_head_budget_ms`, 24h). |
 
 ```
-use path_to_GEAK/e2e_workflow, deep mode, to optimize /models/Qwen3.5-27B-FP8 on gpus 0-7
+use /absolute/path/to/GEAK/e2e_workflow, deep mode, to optimize /models/Qwen3.5-27B-FP8 on gpus 0-7
 ```
 
-## 4. Accuracy gate (quantized kernels)
+## Accuracy gate (quantized kernels)
 
 For FP8 / MXFP4, byte-parity is too strict — switch the e2e gate to task accuracy:
 
@@ -88,4 +109,6 @@ The Integrator then runs sampled gsm8k (5-shot, greedy, fixed seed) and accepts 
 
 ## See also
 
-- [Install GEAK](../install/install.md) · [API reference](../reference/api-reference.md) · [Compatibility matrix](../compatibility.md)
+- [Install GEAK](../install/install.md) 
+- [API reference](../reference/api-reference.md) 
+- [Compatibility matrix](../compatibility.md)

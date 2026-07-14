@@ -35,7 +35,7 @@ The following phases make up an end-to-end run.
 ### Setup
 
 The Director builds an isolated evaluation directory, launches a warm server, and records the **true
-baseline** throughput and its noise band. Model weights and installed packages stay read-only.
+baseline throughput and its noise band. Model weights and installed packages stay read-only.
 
 ### Profile
 
@@ -69,13 +69,15 @@ kernel layer, integrate, re-profile — until the budget or the Amdahl stop rule
 ### Finalize, Report, Validate
 
 The Integrator assembles the deliverable (reversible overlay + patch + `final_launch.sh`); the Architect
-writes `final_report.md`; and the Director **independently re-measures** the combined result against the
-true baseline and arbitrates the official number.
+writes `final_report.md`; and the Director independently re-measures the combined result against the
+true baseline and arbitrates the official number. `final_launch.sh` is a self-contained script that
+launches the server with all accepted overlays and configuration changes applied — run it in place of
+your original launch command to use the optimized configuration.
 
 ## Integration and gating
 
-Each accepted kernel is folded back into the live server through a **reversible overlay** (never editing
-installed packages). A change is accepted only when it **actually runs live** (engagement proof), clears
+Each accepted kernel is folded back into the live server through a reversible overlay (never editing
+installed packages). A change is accepted only when it actually runs live (engagement proof), clears
 the noise band under a tight back-to-back A/B, and preserves output quality (greedy parity, or a task
 accuracy gate for reduced-precision kernels).
 

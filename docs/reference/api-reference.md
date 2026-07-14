@@ -7,12 +7,12 @@ myst:
 
 # API reference
 
-GEAK v4's public surface is not a CLI or a Python package. It is: the **Workflow** scripts
-(`e2e_workflow.js`, `kernel_workflow.js`), the helper **scripts** they call, and a stable
-**external-orchestrator contract** (`interface/run_e2e.py`). For walkthroughs see
+GEAK v4's public surface is not a CLI or a Python package. It is: the Workflow scripts
+(`e2e_workflow.js`, `kernel_workflow.js`), the helper scripts they call, and a stable
+external-orchestrator contract (`interface/run_e2e.py`). For walkthroughs see
 [Run a workflow](../how-to/run-agent.md).
 
-## 1. The `Workflow` tool
+## The `Workflow` tool
 
 Claude Code runs a workflow by calling:
 
@@ -20,7 +20,7 @@ Claude Code runs a workflow by calling:
 Workflow({ scriptPath: "<absolute path to *.js>", args: { /* see below */ } })
 ```
 
-`workflow_dir` is **always required** (a JS workflow can't read its own path). Natural-language prompts
+`workflow_dir` is always required (a JS workflow can't read its own path). Natural-language prompts
 are mapped onto `args`; there is no config file for workflow parameters.
 
 | Workflow | scriptPath | Purpose |
@@ -28,15 +28,15 @@ are mapped onto `args`; there is no config file for workflow parameters.
 | e2e | `e2e_workflow/e2e_workflow.js` | Whole-model sglang/vLLM serving-throughput optimization. |
 | single kernel | `kernel_workflow/kernel_workflow.js` | Optimize/author one AMD GPU kernel. |
 
-## 2. `e2e_workflow.js`
+## `e2e_workflow.js`
 
 `meta.name = "e2e-workflow"`. Phases:
 `Setup → Profile → Strategize → ConfigSweep → HeadKernel → Milestone → Finalize → Report → Validate`.
 
 Owns the server, throughput metric, profiling, Amdahl triage, config/backend tuning, hot-kernel
-extraction, and reversible reintegration; **recursively calls** `kernel_workflow.js` per kernel.
+extraction, and reversible reintegration; recursively calls `kernel_workflow.js` per kernel.
 
-### 2.1 Core args
+### Core args
 
 | Arg | Default | Description |
 |---|---|---|
@@ -52,15 +52,15 @@ extraction, and reversible reintegration; **recursively calls** `kernel_workflow
 | `serving_gpu` | first `tp` ids | Serving GPU set (distinct from `gpu_ids`). |
 | `isl`, `osl`, `conc` | `1024`, `1024`, `64` | Workload; profiling and benchmarking share these. |
 | `task` | `""` | Natural-language steer. |
-| `apply_to_original` | `false` | If `true`, emit an apply bundle (overlay + launch); **never** edits site-packages. |
+| `apply_to_original` | `false` | If `true`, emit an apply bundle (overlay + launch); never edits site-packages. |
 | `phases` | `all` | Run a subset: `{setup, config, head, kernel, final}`. `state` carries cross-phase state. |
 
-### 2.2 Budget & triage args
+### Budget and triage args
 
 | Arg | Default | Description |
 |---|---|---|
 | `budget` | `6` | Max kernel-optimization tasks (config sweep is free). |
-| `kernel_budget` | `6` (`3` in fast) | Budget passed **down** to each recursive single-kernel run. |
+| `kernel_budget` | `6` (`3` in fast) | Budget passed down to each recursive single-kernel run. |
 | `min_kernel_tasks` | `4` (capped by `budget`) | Milestone floor. |
 | `milestone_min_pct` | `5` | Skip editable kernels below this %GPU time (Amdahl). |
 | `config_tune` | `true` | Tier-0 flag/env/backend sweep on/off (runs FIRST). |
@@ -70,9 +70,9 @@ extraction, and reversible reintegration; **recursively calls** `kernel_workflow
 | `head_protect_pct` | `30` | A dominant head is never silently dropped. |
 | `head_corrective_max` | `2` | Corrective re-author retries. |
 
-### 2.3 Depth modes
+### Depth modes
 
-Both default `false` → **default** mode. Mutually exclusive; **deep takes precedence**. With both off,
+Both default `false` → default mode. Mutually exclusive; deep takes precedence. With both off,
 the run is byte-identical to an unmodified run (every mode knob is gated).
 
 | Mode | Arg | Phases | Default budget |
@@ -84,7 +84,7 @@ the run is byte-identical to an unmodified run (every mode knob is gated).
 Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `deep_wave_budget`,
 `deep_max_reseeds`, `deep_converge_streak`, `deep_agent_budget`, `deep_e2e_target`, `deep_backends`.
 
-### 2.4 Accuracy gate
+### Accuracy gate
 
 | Arg | Default | Description |
 |---|---|---|
@@ -92,7 +92,7 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 | `accuracy_limit` | `200` | Number of gsm8k questions. |
 | `accuracy_tol` | `0.01` | Allowed exact-match drop (`cand_em >= baseline_em - tol`). |
 
-### 2.5 Measurement & misc args
+### Measurement and misc args
 
 | Arg | Default | Description |
 |---|---|---|
@@ -103,7 +103,7 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 | `perf_knowledge_dir` | sibling `perf_knowledge/` | Authoring knowledge base. |
 | `time_budget_s`, `initial_extra_server_args`, `initial_extra_env`, `tracelens`, `agent_timeout_ms` | — | Forwarded from the external orchestrator. |
 
-### 2.6 Example
+### Example
 
 ```js
 Workflow({
@@ -118,7 +118,7 @@ Workflow({
 })
 ```
 
-## 3. `kernel_workflow.js`
+## `kernel_workflow.js`
 
 `meta.name = "kernel-workflow"`. Phases:
 `Setup → Author → Analyze → Benchmark → Profile → Optimize → Verify → Merge → Report → Validate`.
@@ -161,9 +161,9 @@ Workflow({
 })
 ```
 
-## 4. Helper scripts
+## Helper scripts
 
-### 4.1 `e2e_workflow/scripts/bench_e2e.sh`
+### `e2e_workflow/scripts/bench_e2e.sh`
 
 Backend-agnostic e2e serving-benchmark dispatcher: server lifecycle, health-wait, and cleanup
 (or `REUSE_SERVER=1`), warmup + N timed repeats + optional profiling trace, median throughput + spread.
@@ -173,7 +173,7 @@ Key env vars: `MODEL`, `TP`, `GPU`, `ISL`/`OSL`/`CONC`, `REPEATS` (default 3), `
 `EXTRA_SERVER_ARGS`, `EXTRA_ENV`, `OVERLAY_PYTHONPATH`, `PROFILE`, `BENCH_CLIENT`, `PORT_BASE`/`PORT_SPAN`,
 `NUM_PROMPTS`, `NUM_WARMUPS`, `SEED`, `PROFILE_NUM_STEPS`, `REUSE_SERVER`.
 
-### 4.2 `e2e_workflow/scripts/op_bench.py`
+### `e2e_workflow/scripts/op_bench.py`
 
 Single-op multi-backend bake-off and autotune for head kernels (GEMM and attention). Isolated; never touches
 a server. Reads `meta.json` (+ optional `reference_io.pt`).
@@ -184,7 +184,7 @@ python op_bench.py --task <op_task_dir> \
   [--repeats 50] [--warmup 10] [--tol 2e-2] [--triton-autotune] [--seed 0] [--out result.json]
 ```
 
-### 4.3 `e2e_workflow/scripts/parse_profile.py`
+### `e2e_workflow/scripts/parse_profile.py`
 
 Standardized profile → per-kernel Top-N (JSON + MD). Merges a torch trace (op names + shapes) with the
 rocprofv3 CSV (HW durations); also emits the workload-v1 spec.
@@ -194,16 +194,16 @@ python parse_profile.py --torch-trace <file.json[.gz]> --rocprof-dir <dir> \
   --top 25 --out <prefix> --workload-out <file> --target <name>
 ```
 
-### 4.4 `e2e_workflow/scripts/parse_regime.py`
+### `e2e_workflow/scripts/parse_regime.py`
 
-Parse the online serving **regime** from launch flags + model config; emits a
+Parse the online serving regime from launch flags + model config; emits a
 quant / kv_cache_dtype / compile / cuda_graph / attention_backend descriptor into `meta.json`.
 
 ```bash
 python parse_regime.py --server-args <...> --model-config <...> --out <file>
 ```
 
-### 4.5 `e2e_workflow/scripts/attribute_weights.py`
+### `e2e_workflow/scripts/attribute_weights.py`
 
 op_kind-aware weight attribution joining extractor `meta.json` shapes with profiled time; emits
 workload-v1 JSON with `weight_source` ∈ {trace, regime, prior}.
@@ -213,7 +213,7 @@ python attribute_weights.py --meta <...> --profile-weights <...> \
   --name-match <...> --min-regime-share 0.0 --out <file>
 ```
 
-### 4.6 `e2e_workflow/scripts/gsm8k_eval.py`
+### `e2e_workflow/scripts/gsm8k_eval.py`
 
 Lightweight gsm8k accuracy eval against an OpenAI-compatible `/v1` endpoint (5-shot greedy exact-match).
 Prints `GSM8K_EXACT_MATCH=<0..1>`.
@@ -223,14 +223,14 @@ python gsm8k_eval.py --base-url <url> --model <name> \
   [--limit 200] [--fewshot 5] [--max-tokens 1024] [--concurrency 32] [--seed 0] [--out <file>]
 ```
 
-### 4.7 `e2e_workflow/scripts/overlay_setup.py` / `capture_shapes.py`
+### `e2e_workflow/scripts/overlay_setup.py` and `capture_shapes.py`
 
 Reversible-overlay tooling (never edits site-packages). `overlay_setup.py` builds a compounding
 `sitecustomize`/monkeypatch overlay — subcommands `add-module` and `add-rebind`. `capture_shapes.py`
 hooks a live server callable through the overlay to capture real serving shapes + a reference I/O oracle
 (`reference_io.pt` + `meta.json`); imported through the overlay, not a standalone CLI.
 
-### 4.8 `kernel_workflow/scripts/gpu_lock.sh`
+### `kernel_workflow/scripts/gpu_lock.sh`
 
 GPU lock + per-workspace build isolation. `flock` per GPU id (safe GPU sharing), per-workspace
 `TORCH_EXTENSIONS_DIR`, pins `PYTORCH_ROCM_ARCH` to the local gfx, reaps orphaned enumerator processes.
@@ -239,7 +239,7 @@ GPU lock + per-workspace build isolation. `flock` per GPU id (safe GPU sharing),
 bash gpu_lock.sh <gpu_id> <command...>
 ```
 
-### 4.9 `kernel_workflow/scripts/profile_kernel.sh`
+### `kernel_workflow/scripts/profile_kernel.sh`
 
 Thin profiling wrapper: warmup + `gpu_lock` + auto-detect best profiler + run + dump RAW output.
 Output entry point: `<output_dir>/profile_report.txt`.
@@ -251,7 +251,7 @@ bash profile_kernel.sh <gpu_id> <benchmark_cmd> <output_dir>
 Env: `PROFILER_PRIORITY` (default `rocprof-compute omniperf rocprofv3 rocprof metrix`), `WARMUP_RUNS` (3),
 `RPC_PROFILE_ARGS`, `RPV3_TRACE_ARGS`, `RPROF_ARGS`, `METRIX_ARGS`.
 
-## 5. External-orchestrator contract (`interface/run_e2e.py`)
+## External-orchestrator contract (`interface/run_e2e.py`)
 
 The only surface an external orchestrator (for example, Hyperloom) touches — wraps `e2e_workflow.js` arg names
 behind one command and two JSON files (`schema_version` 1).
@@ -260,15 +260,15 @@ behind one command and two JSON files (`schema_version` 1).
 python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 ```
 
-Stable **handoff.json** fields: `model_path`, `framework` (→ `backend`), `tp`, `gpu_ids`,
+Stable `handoff.json` fields: `model_path`, `framework` (→ `backend`), `tp`, `gpu_ids`,
 `workload{isl, osl, conc}`, `accepted_flags` / `env`, `exp_root`, `bench_client`, `bench_protocol`,
 `inferencex_path`, `raw_baseline_tput`.
 
 Env knobs: `GEAK_CLAUDE_MODEL` (`claude-opus-4-8`), `GEAK_CLAUDE_EFFORT` (`ultracode`),
 `GEAK_E2E_TIMEOUT_S` (`43200` = 12h), `GEAK_ROOT`, `GEAK_EVAL_DIR`, `INFERENCEX_PATH`.
-See [`interface/run_e2e.md`](../../interface/run_e2e.md) for the full contract.
+See [External orchestrator contract](./run-e2e-contract.md) for the full contract.
 
-## 6. Output artifacts
+## Output artifacts
 
 ### e2e — `<exp_root>/e2e_<model>_<timestamp>/`
 
