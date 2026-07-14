@@ -251,6 +251,20 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    already built — bench it directly (do not rebuild it). This is how the orchestrator forces every
    incomplete A/B to completion; your job on resume is solely to produce the missing candidate
    measurement and emit the final `accepted`/`stack`/`rejected` with `ab_complete:true`.
+   **SHARED REFERENCE across one head's candidates (`REUSE_REF` + `SHARED_REF_MED` in your inputs):**
+   the orchestrator tests several candidates for the SAME head against the SAME current config, so the
+   reference leg is identical for all of them and must be measured only ONCE. When `REUSE_REF` is set, do
+   NOT launch the reference server — take `ref_med` (and `ref_max`) from `SHARED_REF_MED` (reusing the
+   on-disk `$CB/ref/bench_runs.jsonl` + ref parity outputs from the first candidate if present, since the
+   reference config/output is unchanged), bench ONLY the candidate leg, and gate against `SHARED_REF_MED`.
+   Echo `ref_med: SHARED_REF_MED` in your result. This roughly halves the server launches per extra
+   candidate. The very FIRST candidate of a head (no `REUSE_REF`) runs both legs normally and its `ref_med`
+   becomes the shared reference; any borderline winner is still re-validated same-session by the Director at
+   Finalize, so reusing one reference across a head's candidates is drift-safe.
+   **`CAND_TAG` (per-candidate isolation):** when `CAND_TAG` is set, write the candidate bench to
+   `$CB/cand_<CAND_TAG>` and build the candidate overlay under a `<CAND_TAG>`-suffixed dir so that testing
+   multiple candidates for one head does NOT clobber each other's artifacts or the shared `$CB/ref`. The
+   accepted_overlay you return must point at the winning candidate's own (tagged) overlay dir.
 4. **Parity / accuracy vs the TRUE no-overlay baseline** (greedy/temp=0 fixed seed; ≥10 prompts).
    Spin a FRESH baseline server (no overlay) for the parity reference — NOT the prior accepted overlay
    server. This is mandatory when overlays STACK (deep mode), or cumulative drift rides through: each leg
