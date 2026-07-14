@@ -1,39 +1,48 @@
 #!/usr/bin/env python3
-"""Merge per-pid probe outputs + join profile per-kernel avg_us -> per_shape_probe.{json,md}.
+"""Merge per-pid probe outputs + (optional) join profile per-kernel avg_us -> per_shape_probe.{json,md}.
+
+MODEL-AGNOSTIC: kernels are discovered from the probe output files themselves (their `target` field),
+not from a hard-coded map. Any kernel the probe captured shows up here — add a new model by pointing
+PROBE_TARGETS at its hot kernels; no code change to this script.
 
 Reads:
   --probe-dir     dir of probe_<pid>_<target>.json files (from capture_shapes_probe flush)
-  --profile-topn  profile/round_0/profile_topN.json (for %gpu, total calls, avg_us -> latency join)
+  --profile-topn  profile/round_0/profile_topN.json — STRONGLY RECOMMENDED (not required): supplies
+                  %GPU (the Amdahl basis for "which kernel is worth optimizing") + a fallback per-shape
+                  latency. If omitted, the script still emits shape+count(+measured latency) but warns
+                  loudly and marks %GPU as "unknown".
 
-For each hooked kernel: sum per-shape counts across all pids, then attach the profiled per-kernel
-avg_us as an APPROXIMATE per-shape latency (plan §4: CUDA graph replay can't be per-shape timed, so
-we spread the aggregate avg). Emits the schema from plan §6.4.
-
-Kernel name mapping (probe target -> profile short_name substring), so the join can find the matching
-profiled kernel. hipBLASLt #4 (Cijk) has no probe (no Python entry) and is reported as such.
+For each captured kernel: sum per-shape counts across all pids; latency is the probe's measured
+cuda.Event time when present (PROBE_TIME=1), else the profiled per-kernel avg_us spread across shapes
+(approximate; CUDA graph replay can't be per-shape timed).
 
 Stdlib only.
 """
 import argparse, glob, json, os, re, sys
 from collections import defaultdict
 
-# probe target "module:attr"  ->  (label, profile short_name match substrings)
-# #1/#2 are the SAME hook (matmul_ogs) but two profiled kernels (call sites); we report the hook's
-# aggregate and note both profiled call sites in the profile-join.
-TARGET_MAP = {
-    "triton_kernels.matmul_ogs:matmul_ogs": {
-        "label": "matmul_ogs (MoE GEMM #1/#2)",
-        "profile_match": ["_matmul_ogs"],
-    },
-    "aiter.ops.triton.unified_attention:unified_attention": {
-        "label": "unified_attention (#3)",
-        "profile_match": ["unified_attention", "kernel_unified_attention"],
-    },
-    "vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe:pack_bitmatrix": {
-        "label": "pack_bitmatrix (#5)",
-        "profile_match": ["pack_bitmatrix"],
-    },
-}
+# "unknown" sentinel for %GPU when no profile is provided (distinct from a real None/absent kernel).
+GPU_UNKNOWN = "unknown"
+
+
+def label_from_target(target):
+    """Derive a human label from a probe target string 'module.path:attr' -> 'attr'.
+    Falls back to the whole target if it has no ':'."""
+    return target.split(":")[-1] if ":" in target else target
+
+
+def match_substrs_from_target(target):
+    """Derive profile-name match substrings from a target with NO hard-coded map. Uses the attr name
+    and its leaf module component, so e.g. 'triton_kernels.matmul_ogs:matmul_ogs' matches a profiled
+    '_matmul_ogs' kernel. Deduped, lowercased-compare handled at match time."""
+    mod, _, attr = target.partition(":")
+    subs = []
+    if attr:
+        subs.append(attr)
+    leaf = mod.split(".")[-1] if mod else ""
+    if leaf and leaf not in subs:
+        subs.append(leaf)
+    return subs or [target]
 
 
 def load_probe(probe_dir):
@@ -80,29 +89,37 @@ def match_profile(top_kernels, substrs):
     return out
 
 
-def build(probe_dir, profile_topn):
+def build(probe_dir, profile_topn, workload=None):
     probe = load_probe(probe_dir)
-    top = load_profile(profile_topn) if profile_topn and os.path.exists(profile_topn) else []
+    have_profile = bool(profile_topn) and os.path.exists(profile_topn)
+    top = load_profile(profile_topn) if have_profile else []
+    if not have_profile:
+        sys.stderr.write(
+            "\n"
+            "############################################################################\n"
+            "# [probe_postprocess] WARNING: no --profile-topn provided (or file missing).\n"
+            "#   -> %GPU is UNKNOWN, so you CANNOT rank kernels by Amdahl importance.\n"
+            "#   -> shape+count(+measured latency) are still emitted, but for optimization\n"
+            "#      selection you should re-run with --profile-topn <profile_topN.json>.\n"
+            "############################################################################\n\n")
     kernels = []
-    for tgt, meta in TARGET_MAP.items():
-        pm = probe.get(tgt)
-        matched = match_profile(top, meta["profile_match"]) if top else []
+    # MODEL-AGNOSTIC: iterate the kernels the probe actually captured (discovered from probe_*.json),
+    # NOT a hard-coded map. Any target present in the probe dir is reported.
+    for tgt in sorted(probe.keys()):
+        pm = probe[tgt]
+        label = label_from_target(tgt)
+        substrs = match_substrs_from_target(tgt)
+        matched = match_profile(top, substrs) if top else []
         # weighted avg_us across matched profile call sites (by calls), as the per-shape latency basis
         if matched:
             tot_calls = sum(k.get("calls", 0) for k in matched) or 1
             avg_us = sum(k.get("avg_us", 0) * k.get("calls", 0) for k in matched) / tot_calls
             pct_gpu = sum(k.get("pct_gpu_time", 0) for k in matched)
             profile_calls = sum(k.get("calls", 0) for k in matched)
+        elif have_profile:
+            avg_us = None; pct_gpu = None; profile_calls = None  # profile given but no name match
         else:
-            avg_us = None; pct_gpu = None; profile_calls = None
-
-        if not pm:
-            kernels.append({
-                "target": tgt, "label": meta["label"], "probe_status": "not_captured",
-                "note": "no probe output for this target in this run",
-                "pct_gpu": pct_gpu, "profile_calls": profile_calls,
-            })
-            continue
+            avg_us = None; pct_gpu = GPU_UNKNOWN; profile_calls = None  # no profile at all
 
         cases = sorted(pm["cases"].values(), key=lambda c: c["count"], reverse=True)
         tot = sum(c["count"] for c in cases) or 1
@@ -125,7 +142,7 @@ def build(probe_dir, profile_topn):
                          "profile_per_kernel_avg (per-shape 为近似摊分; CUDA graph 无法 per-shape 计时)")
         kernels.append({
             "target": tgt,
-            "label": meta["label"],
+            "label": label,
             "probe_status": "captured",
             "pct_gpu": pct_gpu,
             "probe_total_calls": pm["total_calls"],
@@ -162,21 +179,32 @@ def build(probe_dir, profile_topn):
         }
     return {
         "schema": "per-shape-probe-v1",
-        "workload": {"isl": 1024, "osl": 1024, "conc": 64},
-        "profile_source": profile_topn,
+        "workload": workload if workload is not None else {"isl": None, "osl": None, "conc": None},
+        "profile_source": profile_topn if have_profile else None,
         "data_semantics": semantics,
         "kernels": kernels,
-        "note_hipblaslt": "#4 Cijk (hipBLASLt) 无 Python 入口, 未探针采集 (见 plan §6.2)",
+        "note_coverage": "探针只覆盖'热点 kernel 在 Python 层有 tensor 入参入口'的算子。无 Python 入口的 "
+                         "kernel(如 HIP C++ / hipBLASLt 等闭源库)探针无法采集,不出现在本报告中。",
     }
+
+
+def _fmt_pct_gpu(v):
+    """%GPU may be a float (from profile), the string 'unknown' (no profile), or None (profile given
+    but no name match). Render each without crashing on the non-numeric cases."""
+    if isinstance(v, (int, float)):
+        return f"{v:.2f}%"
+    if v == GPU_UNKNOWN:
+        return "unknown (no profile)"
+    return "n/a"
 
 
 def to_md(summ):
     ds = summ.get("data_semantics", {})
+    wl = summ.get("workload") or {}
     L = [f"# per-shape probe — {summ['schema']}",
-         f"- workload: ISL={summ['workload']['isl']} OSL={summ['workload']['osl']} "
-         f"conc={summ['workload']['conc']}",
-         f"- profile source: `{summ['profile_source']}`",
-         f"- {summ['note_hipblaslt']}\n",
+         f"- workload: ISL={wl.get('isl')} OSL={wl.get('osl')} conc={wl.get('conc')}",
+         f"- profile source: `{summ.get('profile_source')}`",
+         f"- {summ.get('note_coverage','')}\n",
          "## ⚠️ 数据语义与局限（务必先读）\n",
          f"- **采集模式**：{ds.get('mode','')}"]
     for _key in ("shapes", "count", "latency", "caveat", "count_vs_profile"):
@@ -188,7 +216,7 @@ def to_md(summ):
         if k["probe_status"] != "captured":
             L.append(f"- probe_status: **{k['probe_status']}** — {k.get('note','')}\n")
             continue
-        pg = f"{k['pct_gpu']:.2f}%" if k.get("pct_gpu") is not None else "n/a"
+        pg = _fmt_pct_gpu(k.get("pct_gpu"))
         L.append(f"- %GPU: {pg} · probe_calls: {k['probe_total_calls']} · "
                  f"profile_calls: {k.get('profile_calls')} · distinct shapes: {k['num_distinct_shapes']}")
         L.append(f"- latency basis: {k['latency_basis']}")
@@ -209,11 +237,19 @@ def to_md(summ):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--probe-dir", required=True)
-    ap.add_argument("--profile-topn", default="")
+    ap.add_argument("--profile-topn", default="",
+                    help="profile_topN.json — STRONGLY RECOMMENDED (supplies %GPU). If omitted, warns "
+                         "and marks %GPU unknown, but still emits shape+count.")
+    ap.add_argument("--isl", type=int, default=None, help="workload input seq len (metadata)")
+    ap.add_argument("--osl", type=int, default=None, help="workload output seq len (metadata)")
+    ap.add_argument("--conc", type=int, default=None, help="workload concurrency (metadata)")
     ap.add_argument("--out", required=True, help="path prefix; writes <out>.json and <out>.md")
     args = ap.parse_args()
 
-    summ = build(args.probe_dir, args.profile_topn)
+    workload = None
+    if any(v is not None for v in (args.isl, args.osl, args.conc)):
+        workload = {"isl": args.isl, "osl": args.osl, "conc": args.conc}
+    summ = build(args.probe_dir, args.profile_topn, workload=workload)
     with open(args.out + ".json", "w") as fh:
         json.dump(summ, fh, indent=2)
     with open(args.out + ".md", "w") as fh:

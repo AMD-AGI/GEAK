@@ -56,6 +56,26 @@ every decode step goes through Python, and use the per-shape probe engine `captu
 Use Step 1b ONLY for graph-hidden kernels (Step 1 returned empty decode dims). Non-graph kernels keep
 the Step-1 captured shapes. See `roles/kernel_extractor.md` step 2b for the exact commands.
 
+#### Deriving `PROBE_TARGETS` per model (MODEL-SPECIFIC — do NOT reuse gpt-oss values)
+The probe engine and postprocess are model-agnostic (targets come from `PROBE_TARGETS`; kernels are
+auto-discovered from the probe output). The one per-model step is finding WHICH `module:attr` to hook.
+Do this by reasoning, not by copying another model's list:
+1. **Read the hot-kernel list**: `exp/<model>/profile/round_0/profile_topN.json` → take the Top-N by
+   `pct_gpu_time` (these are the only kernels worth probing — Amdahl).
+2. **Locate the Python entry** for each hot kernel: from its profiled name, find the Python function
+   that launches it (grep the serving stack / read source / import-probe) → `module:attr`.
+3. **Screen for hookability** (the hard pitfalls below decide this):
+   - Triton `@jit` **JITFunction** (called `fn[grid](...)`) → cannot wrap; skip.
+   - **No Python entry** (HIP C++ / hipBLASLt closed-source) → probe can't see it; out of scope.
+   - Plain Python callable → hookable.
+4. **Confirm the tensor operands** are in args/kwargs (probe scans both) and not buried in a dataclass.
+5. **Produce the target list** → comma-separated `module:attr` for `PROBE_TARGETS`.
+6. **Run + self-check**: probe banner appears, shapes are non-empty, counts are conserved.
+
+> The gpt-oss targets (`triton_kernels.matmul_ogs:matmul_ogs`,
+> `aiter.ops.triton.unified_attention:unified_attention`) and its `M=64/256` result are ONE EXAMPLE.
+> A new model has different hot kernels, different `module:attr`, and different M — re-run steps 1–5.
+
 ## Step 2 — Emit an immutable, general unittest
 The unittest must be backend-agnostic: it loads `reference_io.pt`, calls whatever the CURRENT kernel
 entry point is on the recorded inputs, compares to the golden output (tolerance per dtype:

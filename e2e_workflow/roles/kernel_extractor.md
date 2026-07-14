@@ -70,18 +70,27 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
    #     The probe engine is capture_shapes_probe.py (NOT capture_shapes.py): no max_cases cap, args+
    #     kwargs both scanned, lazy hook (no handshake stall), periodic flush (survives SIGTERM),
    #     JITFunction-guard. See knowledge/shape_capture.md for the hard pitfalls.
+   #     PROBE_TARGETS is MODEL-SPECIFIC — derive it per model via the playbook in
+   #     knowledge/shape_capture.md (read profile_topN.json → find each hot kernel's Python entry
+   #     module:attr → skip JITFunction / no-Python-entry). Do NOT hard-code the gpt-oss targets.
    OVERLAY_PYTHONPATH="$SKILL_DIR/scripts/probe_overlay" \
    EXTRA_ENV="PROBE_OUT=$TASK/_probe PROBE_TIME=1 PROBE_TARGETS=<module:attr>[,<module:attr>...]" \
    EXTRA_SERVER_ARGS="--enforce-eager" \
    BACKEND="<backend>" GPU="$GPU_ID" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
    REPEATS=1 PROFILE=0 \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/probe_<short_name>.log"
+   # postprocess: --profile-topn is STRONGLY RECOMMENDED (adds %GPU, the Amdahl basis for kernel
+   # selection). --isl/--osl/--conc are recorded as workload metadata. Kernels are auto-discovered
+   # from the probe output — no need to name them here.
    python3 "$SKILL_DIR/scripts/probe_postprocess.py" --probe-dir "$TASK/_probe" \
+     --profile-topn "$TASK/profile/round_0/profile_topN.json" \
+     --isl <isl> --osl <osl> --conc <conc> \
      --out "$TASK/_probe/per_shape_probe"
    # (b) turn the measured shapes into m_buckets and MERGE into meta.json (replaces the M≈conc guess):
    python3 "$SKILL_DIR/scripts/probe_to_mbuckets.py" \
      --probe "$TASK/_probe/per_shape_probe.json" --conc <conc> --kernel-match "<base symbol>"
    # -> {"decode_m_buckets":[...], "prefill_m_buckets":[...]} : merge both keys into meta.json.
+   #    (gpt-oss EXAMPLE result: decode=[64,256], prefill=[8192,32768] — YOUR model will differ.)
    ```
    Only do this when the normal capture (step 2) left the decode shapes hidden. If the kernel is NOT
    graph-hidden (capture already returned real decode dims), keep the captured shapes — no probe needed.
