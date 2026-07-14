@@ -1,15 +1,16 @@
 ---
 myst:
     html_meta:
-        "description": "Install GEAK v4: get the repository, a recent Claude Code, and a working ROCm environment (plus a serving backend for E2E). No pip package, no CLI."
+        "description": "Install GEAK v4: pip install git+ downloads the repo, installs a recent Claude Code, and the Python deps (plus a serving backend for E2E, ROCm required)."
         "keywords": "GEAK, install, ROCm, Claude Code, Workflow, sglang, vLLM, AMD Instinct, setup"
 ---
 
 # Install GEAK
 
-GEAK v4 is not a Python package. It is a set of **Workflows** (`e2e_workflow.js` / `kernel_workflow.js`)
-that run **inside Claude Code**. "Installing" means: get the repo, get a recent Claude Code, and have a
-working ROCm environment (plus a serving backend for E2E). For a first run, see
+GEAK v4 is not a library you `import`. It is a set of **Workflows** (`e2e_workflow.js` / `kernel_workflow.js`)
+that run **inside Claude Code**. The `pip install git+...` below is a bootstrapper: it downloads the repo, installs
+a recent Claude Code, and installs the Python deps — leaving you a working checkout plus a ROCm environment
+(plus a serving backend for E2E). For a first run, see
 [Run a workflow](../how-to/run-agent.md).
 
 ## 1. Prerequisites
@@ -25,10 +26,19 @@ working ROCm environment (plus a serving backend for E2E). For a first run, see
 
 ## 2. Set up
 
+One command downloads the whole repo to `~/GEAK` (override with `GEAK_HOME`) and installs the Claude Code CLI plus
+the Python deps:
+
 ```bash
-git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
-bash setup.sh
+pip install "git+https://github.com/AMD-AGI/GEAK"
 ```
+
+The bootstrap is best-effort: if it is skipped (e.g. pip served a cached wheel) or a network step fails, re-run it
+any time with `geak-setup`. You can also clone manually and run the same bootstrap:
+`git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK && geak-setup`.
+
+Useful env knobs: `GEAK_HOME` (clone target), `GEAK_REF` (branch/tag), `CLAUDE_VERSION`, and
+`GEAK_SKIP_BOOTSTRAP=1` to install the Python package without the clone / Claude Code steps (CI, image builds).
 
 It leaves **PATH and API access** setting in Claude Code to you — follow its printed next-steps to add `~/.local/bin` to
 PATH and to configure Anthropic API access. 

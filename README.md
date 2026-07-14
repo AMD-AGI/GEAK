@@ -36,10 +36,15 @@ Two workflows ship here:
 
 ### 2. Set up
 
+One command downloads the whole repo to `~/GEAK` (override with `GEAK_HOME`) and installs the Claude Code CLI plus
+the Python deps:
+
 ```bash
-git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
-bash setup.sh
+pip install "git+https://github.com/AMD-AGI/GEAK"
 ```
+
+If the install-time step is skipped (e.g. pip served a cached wheel), finish it by running `geak-setup`.
+Prefer a manual clone? `git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK && geak-setup` works too.
 
 It leaves **PATH and API access** setting in Claude Code to you — follow its printed next-steps to add `~/.local/bin` to
 PATH and to configure Anthropic API access. 
