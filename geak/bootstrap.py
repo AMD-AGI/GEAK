@@ -12,7 +12,8 @@ Everything here is best-effort: a failure warns but never aborts the install.
 Re-run any time with:  geak-setup
 
 Env knobs:
-  GEAK_HOME        where to clone the repo         (default: ~/GEAK)
+  GEAK_HOME        where to clone the repo         (default: ./GEAK, under the
+                   directory you run pip install / geak-setup from)
   GEAK_REPO_URL    repo to clone                   (default: the AMD-AGI repo)
   GEAK_REF         branch/tag to clone             (default: repo default branch)
   CLAUDE_VERSION   native-installer target         (default: latest)
@@ -37,9 +38,27 @@ def _env(name: str, default: str) -> str:
     return val if val else default
 
 
+def _invocation_dir() -> str:
+    """The directory the user launched from — where GEAK gets cloned by default.
+
+    Plain os.getcwd() is wrong at wheel-build time: during `pip install git+...`
+    pip has chdir'd into a throwaway temp source tree, so cwd points at something
+    like /tmp/pip-req-build-xxxx. The shell still exports PWD pointing at the
+    user's real directory, so prefer that when it names a real dir; fall back to
+    cwd for the `geak-setup` command, where cwd IS the user's dir.
+    """
+    pwd = os.environ.get("PWD", "")
+    if pwd and os.path.isdir(pwd):
+        return os.path.abspath(pwd)
+    return os.getcwd()
+
+
 REPO_URL = _env("GEAK_REPO_URL", "https://github.com/AMD-AGI/GEAK.git")
 REPO_REF = _env("GEAK_REF", "")  # empty -> the repo's default branch
-GEAK_HOME = os.path.abspath(os.path.expanduser(_env("GEAK_HOME", os.path.join("~", "GEAK"))))
+# Default: ./GEAK under the directory you run pip install / geak-setup from.
+# Override with GEAK_HOME to clone anywhere else.
+GEAK_HOME = os.path.abspath(os.path.expanduser(
+    _env("GEAK_HOME", os.path.join(_invocation_dir(), "GEAK"))))
 CLAUDE_VERSION = _env("CLAUDE_VERSION", "latest")
 CLAUDE_BIN_DIR = os.path.abspath(os.path.expanduser(_env("CLAUDE_BIN_DIR", os.path.join("~", ".local", "bin"))))
 
