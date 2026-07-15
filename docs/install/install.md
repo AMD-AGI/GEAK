@@ -1,7 +1,7 @@
 ---
 myst:
     html_meta:
-        "description": "Install GEAK v4: get the repository, a recent Claude Code, and a working ROCm environment (plus a serving backend for E2E). No pip package, no CLI."
+        "description": "Install GEAK v4: pip install git+ downloads the repo, installs a recent Claude Code, and the Python deps (plus a serving backend for E2E, ROCm required)."
         "keywords": "GEAK, install, ROCm, Claude Code, Workflow, sglang, vLLM, AMD Instinct, setup"
 ---
 
@@ -30,9 +30,22 @@ GEAK v4 requires the following software and hardware.
 
 Clone the repository and run the setup script.
 
+Installing GEAK installs the `geak` Python package + deps, clones the GEAK repo, and installs the Claude Code CLI.
+By default the repo lands in `./GEAK` under the directory you run the command from (override with `GEAK_HOME`).
+Pick either method — both end up the same:
+
+**A. One-liner** — run it in the directory where you want GEAK to live:
+
 ```bash
-git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
-bash setup.sh
+pip install "git+https://github.com/AMD-AGI/GEAK"
+```
+
+**B. Clone first** — if you'd rather have the checkout up front (e.g. to work on a branch):
+
+```bash
+git clone https://github.com/AMD-AGI/GEAK.git
+cd GEAK
+pip install .
 ```
 
 It leaves PATH and API access configuration to you. Follow its printed next-steps to add `~/.local/bin` to PATH, then set your Anthropic API key:
