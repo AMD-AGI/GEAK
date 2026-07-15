@@ -5,7 +5,7 @@ myst:
         "keywords": "GEAK, reference, Workflow, e2e_workflow, kernel_workflow, run_e2e, arguments, helper scripts, artifacts"
 ---
 
-# API reference
+# GEAK API reference
 
 GEAK v4's public surface is not a CLI or a Python package. It is: the Workflow scripts
 (`e2e_workflow.js`, `kernel_workflow.js`), the helper scripts they call, and a stable

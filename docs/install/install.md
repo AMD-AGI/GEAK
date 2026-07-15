@@ -18,7 +18,7 @@ GEAK v4 requires the following software and hardware.
 
 | Requirement | Detail |
 |---|---|
-| **AMD Instinct™ MI GPU** | CDNA, gfx942 (MI300X/MI308X) / gfx950 (MI350X/MI355X). Auto-detected. |
+| **AMD Instinct™ MI GPU** | CDNA, gfx942 (MI300X) / gfx950 (MI350X/MI355X). Auto-detected. |
 | **ROCm 6+** | `rocminfo` / `rocm-smi` must work. |
 | **A profiler** | One of `rocprof-compute`, `rocprofv3`, `rocprof` (also `omniperf` or `metrix`). Auto-detected. |
 | **Python 3.8+** | Tested on 3.12. |

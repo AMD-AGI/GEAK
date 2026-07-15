@@ -5,7 +5,7 @@ myst:
         "keywords": "GEAK, run workflow, serving throughput, single kernel, Claude Code, Workflow, sglang, vLLM, deep mode, gsm8k"
 ---
 
-# Run a workflow
+# Run a GEAK workflow
 
 GEAK v4 runs **inside Claude Code**, orchestrated by deterministic JS **Workflows**. There is no
 `pip install` and no CLI: launch Claude Code and describe the task; it invokes the `Workflow` tool.

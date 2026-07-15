@@ -5,7 +5,7 @@ myst:
         "keywords": "GEAK, run_e2e, external orchestrator, Hyperloom, handoff.json, result.json, integration contract, kernel journey"
 ---
 
-# External orchestrator contract (`interface/run_e2e.py`)
+# GEAK external orchestrator contract (`interface/run_e2e.py`)
 
 `interface/` is the only surface an external orchestrator (for example, Hyperloom)
 touches. Everything volatile about the e2e workflow (the `e2e_workflow.js` arg
@@ -15,6 +15,8 @@ files. As long as `schema_version` stays `1`, the caller never changes when
 the workflow evolves internally.
 
 ## Command
+
+Run the external orchestrator entry point as follows.
 
 ```bash
 python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
@@ -34,6 +36,8 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 (`baseline/`, `validation/final/`, `final/` bundle, `director_e2e_validation.json`).
 
 ## `handoff.json` (caller → workflow)
+
+Pass the following fields in the handoff file.
 
 ```jsonc
 {
@@ -121,6 +125,8 @@ measured `%gpu`. A run without TraceLens artifacts is byte-identical to a run wi
 them: the feature is entirely additive.
 
 ## `result.json` (workflow → caller)
+
+The workflow writes the following fields to the result file.
 
 ```jsonc
 {
@@ -229,7 +235,7 @@ The workflow measures on the same calibration as the caller's official baseline 
 | workload | same `ISL/OSL/CONC`; `NUM_PROMPTS` from `bench_protocol.num_prompts`, else `max(CONC*factor, CONC)` |
 | warmups | `NUM_WARMUPS` from `bench_protocol.num_warmups`, else `min(CONC, 8)` |
 | seed | `SEED` from `bench_protocol.seed`, else fixed `0` |
-| TP | same tensor-parallel as the caller (no TP=1 lock) |
+| TP | same tensor-parallel (TP) size as the caller (no TP=1 lock) |
 | parity | greedy output diff vs baseline at temperature 0 with fixed seed |
 | bench client | `BENCH_CLIENT=inferencex` uses the same `benchmark_serving.py` as Hyperloom |
 
