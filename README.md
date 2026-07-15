@@ -36,15 +36,23 @@ Two workflows ship here:
 
 ### 2. Set up
 
-One command downloads the whole repo to `~/GEAK` (override with `GEAK_HOME`) and installs the Claude Code CLI plus
-the Python deps:
+Installing GEAK does three things: installs the `geak` Python package + deps, clones the GEAK repo, and installs
+the Claude Code CLI. By default the repo lands in `./GEAK` under the directory you run the command from (override
+the location with `GEAK_HOME`). Pick either method — both end up the same:
+
+**A. One-liner** — run it in the directory where you want GEAK to live:
 
 ```bash
 pip install "git+https://github.com/AMD-AGI/GEAK"
 ```
 
-If the install-time step is skipped (e.g. pip served a cached wheel), finish it by running `geak-setup`.
-Prefer a manual clone? `git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK && geak-setup` works too.
+**B. Clone first** — if you'd rather have the checkout up front (e.g. to work on a branch):
+
+```bash
+git clone https://github.com/AMD-AGI/GEAK.git
+cd GEAK
+pip install .
+```
 
 It leaves **PATH and API access** setting in Claude Code to you — follow its printed next-steps to add `~/.local/bin` to
 PATH and to configure Anthropic API access. 

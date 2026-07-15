@@ -26,16 +26,23 @@ a recent Claude Code, and installs the Python deps — leaving you a working che
 
 ## 2. Set up
 
-One command downloads the whole repo to `~/GEAK` (override with `GEAK_HOME`) and installs the Claude Code CLI plus
-the Python deps:
+Installing GEAK installs the `geak` Python package + deps, clones the GEAK repo, and installs the Claude Code CLI.
+By default the repo lands in `./GEAK` under the directory you run the command from (override with `GEAK_HOME`).
+Pick either method — both end up the same:
+
+**A. One-liner** — run it in the directory where you want GEAK to live:
 
 ```bash
 pip install "git+https://github.com/AMD-AGI/GEAK"
 ```
 
-The bootstrap is best-effort: if it is skipped (e.g. pip served a cached wheel) or a network step fails, re-run it
-any time with `geak-setup`. You can also clone manually and run the same bootstrap:
-`git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK && geak-setup`.
+**B. Clone first** — if you'd rather have the checkout up front (e.g. to work on a branch):
+
+```bash
+git clone https://github.com/AMD-AGI/GEAK.git
+cd GEAK
+pip install .
+```
 
 Useful env knobs: `GEAK_HOME` (clone target), `GEAK_REF` (branch/tag), `CLAUDE_VERSION`, and
 `GEAK_SKIP_BOOTSTRAP=1` to install the Python package without the clone / Claude Code steps (CI, image builds).

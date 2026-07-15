@@ -6,9 +6,11 @@ build-time hook, and GEAK needs one so that
     pip install git+https://github.com/AMD-AGI/GEAK
 
 runs a best-effort bootstrap during the wheel build (clone the full repo to
-$GEAK_HOME + install the Claude Code CLI). The logic lives in geak/bootstrap.py
-so the same code also backs the `geak-setup` command — the fallback to re-run if
-this install-time hook does not fire (e.g. pip served a cached wheel).
+$GEAK_HOME + install the Claude Code CLI). The logic lives in geak/bootstrap.py.
+
+The hook fires only on a real wheel build; if pip serves a cached wheel it is
+skipped, so force a rebuild with `pip install --no-cache-dir --force-reinstall`
+if the clone / Claude Code steps did not run.
 
 Set GEAK_SKIP_BOOTSTRAP=1 to build/install the package without side effects
 (CI, docker image builds, or using geak purely as a library dependency).
@@ -32,8 +34,9 @@ def run_bootstrap():
 
         bootstrap_main()
     except Exception as exc:
-        sys.stderr.write("[geak-setup WARN] bootstrap step failed: %r\n" % (exc,))
-        sys.stderr.write("[geak-setup WARN] finish it manually by running: geak-setup\n")
+        sys.stderr.write("[geak-bootstrap WARN] bootstrap step failed: %r\n" % (exc,))
+        sys.stderr.write("[geak-bootstrap WARN] see the install docs for manual setup: "
+                         "https://github.com/AMD-AGI/GEAK#install\n")
 
 
 class BuildPyWithBootstrap(build_py):

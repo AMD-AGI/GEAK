@@ -25,9 +25,6 @@ dev = ["pytest"]
 [project.urls]
 Homepage = "https://github.com/AMD-AGI/GEAK"
 
-[project.scripts]
-geak-setup = "geak.bootstrap:main"
-
 [tool.setuptools]
 packages = ["geak"]
 

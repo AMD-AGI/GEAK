@@ -9,11 +9,12 @@ three things:
   3. This bootstrap installs the Claude Code CLI (native installer; npm fallback).
 
 Everything here is best-effort: a failure warns but never aborts the install.
-Re-run any time with:  geak-setup
+It runs once, during the wheel build — there is no separate re-run command.
 
 Env knobs:
   GEAK_HOME        where to clone the repo         (default: ./GEAK, under the
-                   directory you run pip install / geak-setup from)
+                   directory you run pip install from — or the current checkout
+                   itself when run from inside one)
   GEAK_REPO_URL    repo to clone                   (default: the AMD-AGI repo)
   GEAK_REF         branch/tag to clone             (default: repo default branch)
   CLAUDE_VERSION   native-installer target         (default: latest)
@@ -45,7 +46,7 @@ def _invocation_dir() -> str:
     pip has chdir'd into a throwaway temp source tree, so cwd points at something
     like /tmp/pip-req-build-xxxx. The shell still exports PWD pointing at the
     user's real directory, so prefer that when it names a real dir; fall back to
-    cwd for the `geak-setup` command, where cwd IS the user's dir.
+    cwd when PWD is unset.
     """
     pwd = os.environ.get("PWD", "")
     if pwd and os.path.isdir(pwd):
@@ -53,12 +54,33 @@ def _invocation_dir() -> str:
     return os.getcwd()
 
 
+def _is_geak_checkout(path: str) -> bool:
+    """True when `path` is itself a GEAK repo checkout (not just any directory)."""
+    return (
+        os.path.isdir(os.path.join(path, ".git"))
+        and os.path.isfile(os.path.join(path, "geak", "bootstrap.py"))
+        and os.path.isdir(os.path.join(path, "kernel_workflow"))
+    )
+
+
+def _default_geak_home() -> str:
+    """Where to put the repo when GEAK_HOME is not set.
+
+    - Run from *inside* a manual clone (`git clone ... && cd GEAK && pip install .`):
+      use that checkout in place, so we don't nest a redundant ./GEAK/GEAK.
+    - Otherwise (`pip install git+...` from an arbitrary dir): clone into ./GEAK
+      under the invocation directory.
+    """
+    inv = _invocation_dir()
+    return inv if _is_geak_checkout(inv) else os.path.join(inv, "GEAK")
+
+
 REPO_URL = _env("GEAK_REPO_URL", "https://github.com/AMD-AGI/GEAK.git")
 REPO_REF = _env("GEAK_REF", "")  # empty -> the repo's default branch
-# Default: ./GEAK under the directory you run pip install / geak-setup from.
-# Override with GEAK_HOME to clone anywhere else.
+# Default: ./GEAK under the directory you run pip install from — or the current
+# checkout itself when run from inside one. Override with GEAK_HOME.
 GEAK_HOME = os.path.abspath(os.path.expanduser(
-    _env("GEAK_HOME", os.path.join(_invocation_dir(), "GEAK"))))
+    _env("GEAK_HOME", _default_geak_home())))
 CLAUDE_VERSION = _env("CLAUDE_VERSION", "latest")
 CLAUDE_BIN_DIR = os.path.abspath(os.path.expanduser(_env("CLAUDE_BIN_DIR", os.path.join("~", ".local", "bin"))))
 
@@ -71,11 +93,11 @@ else:
 
 
 def log(msg: str) -> None:
-    print("[geak-setup] %s" % msg, flush=True)
+    print("[geak-bootstrap] %s" % msg, flush=True)
 
 
 def warn(msg: str) -> None:
-    print("[geak-setup WARN] %s" % msg, file=sys.stderr, flush=True)
+    print("[geak-bootstrap WARN] %s" % msg, file=sys.stderr, flush=True)
 
 
 def _has(cmd: str) -> bool:
@@ -122,17 +144,19 @@ def claude_version() -> str:
 def clone_repo() -> None:
     if not _has("git"):
         warn("git not found; cannot download the GEAK repo to %s. "
-             "Install git, then re-run `geak-setup`." % GEAK_HOME)
+             "Install git first." % GEAK_HOME)
         return
 
-    if os.path.isdir(os.path.join(GEAK_HOME, ".git")):
-        log("GEAK checkout already at %s; pulling latest" % GEAK_HOME)
-        _run(["git", "-C", GEAK_HOME, "pull", "--ff-only"])
+    # Running from inside the checkout itself (manual `cd GEAK && pip install .`):
+    # use it in place, do not clone — respect the user's branch/worktree.
+    if GEAK_HOME == _invocation_dir() and _is_geak_checkout(GEAK_HOME):
+        log("already inside a GEAK checkout at %s; using it in place "
+            "(skipping clone)" % GEAK_HOME)
         return
 
     if os.path.isdir(GEAK_HOME) and os.listdir(GEAK_HOME):
-        warn("%s exists and is not a git checkout; leaving it untouched. "
-             "Set GEAK_HOME to another path and re-run `geak-setup`." % GEAK_HOME)
+        warn("%s already exists and is not empty; leaving it untouched. "
+             "Remove it or set GEAK_HOME to another path." % GEAK_HOME)
         return
 
     parent = os.path.dirname(GEAK_HOME) or "."
@@ -144,7 +168,7 @@ def clone_repo() -> None:
     if _run(cmd).returncode == 0:
         log("GEAK repo downloaded to %s" % GEAK_HOME)
     else:
-        warn("git clone failed; check network/credentials and re-run `geak-setup`.")
+        warn("git clone failed; check network/credentials.")
 
 
 # --- 2. Claude Code CLI (native installer; npm fallback) ------------------
@@ -238,14 +262,14 @@ def print_next_steps() -> None:
     on_path = any(os.path.abspath(p) == CLAUDE_BIN_DIR for p in os.environ.get("PATH", "").split(os.pathsep) if p)
     if not on_path and os.path.isfile(os.path.join(CLAUDE_BIN_DIR, "claude")):
         print(
-            "\n[geak-setup] NOTE: Claude Code is installed at %s, which is not on\n"
+            "\n[geak-bootstrap] NOTE: Claude Code is installed at %s, which is not on\n"
             "your PATH. Add it (use ~/.zshrc for zsh):\n"
             "    %secho 'export PATH=\"%s:$PATH\"' >> ~/.bashrc && source ~/.bashrc%s"
             % (CLAUDE_BIN_DIR, C_CMD, CLAUDE_BIN_DIR, C_OFF)
         )
 
     print(
-        "\n[geak-setup] setup complete.\n\n"
+        "\n[geak-bootstrap] setup complete.\n\n"
         "Next steps — configure Claude Code, then launch it:\n\n"
         "1) Give Claude Code API access (pick ONE):\n\n"
         "   a. Anthropic API directly:\n"
@@ -273,7 +297,3 @@ def main() -> None:
     ensure_claude_code()
     check_environment()
     print_next_steps()
-
-
-if __name__ == "__main__":
-    main()
