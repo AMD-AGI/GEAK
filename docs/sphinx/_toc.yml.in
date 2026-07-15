@@ -11,6 +11,8 @@ subtrees:
 - entries:
   - file: what-is-geak
     title: What is GEAK?
+  - file: release-notes
+    title: Release notes
   - file: compatibility
     title: Compatibility matrix
 
@@ -33,6 +35,8 @@ subtrees:
   entries:
     - file: reference/api-reference
       title: API reference
+    - file: reference/run-e2e-contract
+      title: External orchestrator contract
 
 - caption: About
   entries:
