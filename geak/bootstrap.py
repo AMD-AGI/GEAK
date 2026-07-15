@@ -161,7 +161,9 @@ def clone_repo() -> None:
 
     parent = os.path.dirname(GEAK_HOME) or "."
     os.makedirs(parent, exist_ok=True)
-    cmd = ["git", "clone"]
+    # Shallow clone: GEAK is used as a runtime checkout, not for history, and the
+    # repo is large (perf_knowledge + example artifacts). --depth 1 keeps it fast.
+    cmd = ["git", "clone", "--depth", "1"]
     if REPO_REF:
         cmd += ["--branch", REPO_REF]
     cmd += [REPO_URL, GEAK_HOME]
