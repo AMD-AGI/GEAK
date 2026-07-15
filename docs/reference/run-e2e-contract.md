@@ -5,7 +5,7 @@ myst:
         "keywords": "GEAK, run_e2e, external orchestrator, Hyperloom, handoff.json, result.json, integration contract, kernel journey"
 ---
 
-# External orchestrator contract (`interface/run_e2e.py`)
+# GEAK external orchestrator contract (`interface/run_e2e.py`)
 
 `interface/` is the only surface an external orchestrator (for example, Hyperloom)
 touches. Everything volatile about the e2e workflow (the `e2e_workflow.js` arg
