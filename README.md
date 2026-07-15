@@ -58,13 +58,17 @@ cd GEAK
 pip install .
 ```
 
-It leaves **PATH and API access** setting in Claude Code to you — follow its printed next-steps to add `~/.local/bin` to
-PATH and to configure API access:
+### 3. Launch Claude Code (auto mode)
+
+**Set up PATH and API access**
+
+You'll need to add `~/.local/bin` to your PATH and configure API access yourself — follow the installer's printed next-steps:
 
 ```bash
-# Anthropic API directly:
+# Option 1: Anthropic API directly
 export ANTHROPIC_API_KEY=sk-ant-...
-# Standard gateway (x-api-key / bearer):
+
+# Option 2: Standard gateway (x-api-key / bearer)
 export ANTHROPIC_BASE_URL=https://your-gateway
 export ANTHROPIC_AUTH_TOKEN=your-token
 ```
@@ -76,7 +80,7 @@ export ANTHROPIC_AUTH_TOKEN=your-token
 > export ANTHROPIC_CUSTOM_HEADERS="Your-Header-Name: <your-key>"
 > ```
 
-### 3. Launch Claude Code in auto mode
+**Launch Claude Code**
 
 The workflows spawn many sub-agents and run profiling / benchmark / build commands on the box, so run
 Claude Code with permissions auto-approved (≥ 2.1.177 for the dynamic Workflow feature):
