@@ -48,7 +48,7 @@ to the local `gfx` at build time.
 
 | Architecture | gfx target | Example cards | Status |
 |---|---|---|---|
-| CDNA3 | gfx942 | MI300X, MI308X | Verified |
+| CDNA3 | gfx942 | MI300X | Verified |
 | CDNA4 | gfx950 | MI355X | Verified |
 
 ## ROCm stack
