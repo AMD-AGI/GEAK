@@ -34,6 +34,10 @@ Two workflows ship here:
   `rocprofv3` / `rocprof`), Python 3.8+.
 - For E2E: a running-capable serving backend (`sglang` or `vllm`) and the model weights on disk.
 
+> **⚠️ Build your kernel environment first.** GEAK does **not** install the toolchains your kernels
+> need (e.g. PyTorch, Triton, FlyDSL, hipBLASLt) — these differ per kernel. Set up and verify the
+> baseline builds/runs before starting a workflow.
+
 ### 2. Set up
 
 Installing GEAK does three things: installs the `geak` Python package + deps, clones the GEAK repo, and installs
@@ -55,7 +59,20 @@ pip install .
 ```
 
 It leaves **PATH and API access** setting in Claude Code to you — follow its printed next-steps to add `~/.local/bin` to
-PATH and to configure Anthropic API access. 
+PATH and to configure API access:
+
+```bash
+# Anthropic API directly:
+export ANTHROPIC_API_KEY=sk-ant-...
+# Standard gateway (x-api-key / bearer):
+export ANTHROPIC_BASE_URL=https://your-gateway ANTHROPIC_AUTH_TOKEN=your-token
+```
+
+> **AMD Gateway** uses a custom `Ocp-Apim-Subscription-Key` header, not `x-api-key` / bearer, so set:
+> ```bash
+> export ANTHROPIC_BASE_URL=https://<amd-gateway-endpoint>
+> export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: <your-key>"
+> ```
 
 ### 3. Launch Claude Code in auto mode
 
