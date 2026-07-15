@@ -58,7 +58,7 @@ cd GEAK
 pip install .
 ```
 
-### 3. Launch Claude Code (auto mode)
+### 3. Launch Claude Code in auto mode
 
 **Set up PATH and API access**
 
