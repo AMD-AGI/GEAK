@@ -24,12 +24,12 @@ subtrees:
 - caption: How to
   entries:
     - file: how-to/run-agent
-      title: Run the agent
+      title: Run a workflow
 
 - caption: Conceptual
   entries:
     - file: conceptual/geak-pipeline
-      title: GEAK agent loop
+      title: GEAK pipeline
 
 - caption: Reference
   entries:
