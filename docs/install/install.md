@@ -48,8 +48,6 @@ cd GEAK
 pip install .
 ```
 
-It leaves **PATH and API access** setting in Claude Code to you — follow its printed next-steps to add `~/.local/bin` to
-PATH and to configure Anthropic API access. 
 It leaves PATH and API access configuration to you. Follow its printed next-steps to add `~/.local/bin` to PATH, then set your Anthropic API key:
 
 ```bash
