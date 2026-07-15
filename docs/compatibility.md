@@ -93,17 +93,8 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 |---|---|---|
 | Triton | Verified | Always a viable author target. |
 | FlyDSL | Verified | Preferred author target for dense / quantized GEMM (aiter's SOTA GEMM DSL, JIT, no build). Probed using `aiter.ops.flydsl.is_flydsl_available()`. |
-| HIP | Verified | Used when headroom justifies it. |
-| CK (Composable Kernel) | Verified | Used when headroom justifies it; FP8 GEMM tuning. |
-
-## Op-backend bake-off (`op_bench.py` head kernels)
-
-| Backend | Status |
-|---|---|
-| hipblaslt | Verified |
-| rocblas or TunableOp | Verified |
-| aiter | Verified |
-| triton (with `--triton-autotune`) | Verified |
+| HIP | Verified | GEAK chooses HIP based on its e2e experience. |
+| CK (Composable Kernel) | Verified | GEAK chooses CK based on its e2e experience; FP8 GEMM tuning. |
 
 ## Precision and data types
 
