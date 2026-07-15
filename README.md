@@ -65,13 +65,15 @@ PATH and to configure API access:
 # Anthropic API directly:
 export ANTHROPIC_API_KEY=sk-ant-...
 # Standard gateway (x-api-key / bearer):
-export ANTHROPIC_BASE_URL=https://your-gateway ANTHROPIC_AUTH_TOKEN=your-token
+export ANTHROPIC_BASE_URL=https://your-gateway
+export ANTHROPIC_AUTH_TOKEN=your-token
 ```
 
-> **AMD Gateway** uses a custom `Ocp-Apim-Subscription-Key` header, not `x-api-key` / bearer, so set:
+> If your gateway authenticates with a **custom header** instead of `x-api-key` / a bearer token
+> (e.g. `Ocp-Apim-Subscription-Key`), set it via `ANTHROPIC_CUSTOM_HEADERS`:
 > ```bash
-> export ANTHROPIC_BASE_URL=https://<amd-gateway-endpoint>
-> export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: <your-key>"
+> export ANTHROPIC_BASE_URL=https://your-gateway
+> export ANTHROPIC_CUSTOM_HEADERS="Your-Header-Name: <your-key>"
 > ```
 
 ### 3. Launch Claude Code in auto mode
