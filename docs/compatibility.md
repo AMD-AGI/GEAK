@@ -5,7 +5,7 @@ myst:
         "keywords": "GEAK, compatibility, ROCm, AMD Instinct, MI300X, MI355X, sglang, vLLM, Triton, HIP, CK, FlyDSL, Claude Code"
 ---
 
-# GEAK v4 compatibility matrix
+# GEAK compatibility matrix
 
 Verified hardware, software, runtime, and backend combinations for GEAK v4 (a Claude Code +
 JS-Workflow GPU optimizer; no pip package, no CLI). Only tested configurations are listed.
