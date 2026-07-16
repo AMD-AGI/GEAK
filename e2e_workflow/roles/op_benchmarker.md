@@ -82,6 +82,15 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
     `apply_env=AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<csv>` PLUS `code_patch=<fp8_utils CK-switch overlay diff>`
     and `tuning_artifact=<tuned.csv>`; the Integrator overlays it and gates on e2e. (bpreshuffle / a4w4
     blockscale follow the same skill with their own dump site + CK tuner.)
+    ⚙️ **The CK-switch mechanism is FRAMEWORK-SPECIFIC — do NOT assume the live seam already dispatches CK.**
+    The `fp8_utils.py` import overlay above is the *sglang* seam; on another framework (e.g. vLLM) the live
+    dense fp8 linear may default to a Triton/blockscale impl and route to CK only via that framework's
+    aiter-enable switch (a backend-select env) or the equivalent reversible overlay — in which case the
+    tuned CSV alone binds to nothing. **SELF-VERIFY engagement before returning**: warm-probe with the
+    deploy env+overlay and `grep -c 'is tuned on cu_num' <server.log>`; if it is 0, add the missing
+    backend-select switch to `apply_env` (or the routing overlay to `code_patch`) — that switch is a kernel
+    prerequisite, applied at integrate regardless of `CONFIG_TUNE_ENABLED` — and re-probe until engagement
+    > 0. Never return a known-0-engagement candidate.
     ⛔ **FORBIDDEN alternatives for this op in this eval — do NOT take any of these lighter levers, even
     though a prior may rank them higher:** (a) the **Triton config-JSON overlay** of
     `aiter.ops.triton.gemm_a8w8_blockscale` (dropping `gfx942-GEMM-A8W8_BLOCKSCALE-N=*-K=*.json` /

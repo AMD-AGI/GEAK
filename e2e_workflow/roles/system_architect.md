@@ -107,8 +107,16 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    `integration_lever` that reaches THAT seam. Match the candidate's signature to the seam's signature:
    - **Standalone GEMM** — the op is dispatched as a discrete `gemm(XQ,WQ,x_scale,w_scale,…)` call (e.g. a
      Linear layer: `Fp8LinearMethod.apply` → `aiter_w8a8_block_fp8_linear`). A per-shape tune or a
-     `GEMM_SYNTH` standalone swap IS reachable → route to the GEMM-synth head track (`integration_lever:
-     standalone-gemm-swap` or `dense-linear-env-overlay`).
+     `GEMM_SYNTH` standalone swap is reachable **only for the backend actually dispatched behind that seam**
+     → route to the GEMM-synth head track (`integration_lever: standalone-gemm-swap` or
+     `dense-linear-env-overlay`). **NEVER assume which impl is live**: a tuning artifact (per-shape DB / env
+     CSV / config JSON) binds ONLY to the backend that consumes it, so if the seam dispatches a different
+     impl by default (e.g. a Triton blockscale kernel instead of the tuned CK/aiter one) the artifact binds
+     to nothing → `no_engagement`. Verify the live dispatch; if the tuned backend is not the default, the
+     switch that selects it (a backend-select env, or a reversible routing overlay) is a
+     **kernel-engagement prerequisite** — carry it in the candidate (`apply_env` / `code_patch`) so it is
+     applied at integrate **regardless of `CONFIG_TUNE_ENABLED`** (that flag gates only the exploratory
+     config fast path, never a kernel's required backend selection), and attach an `engagement_check`.
    - **Fused / asm kernel** — the op is a monolithic kernel whose constituent GEMMs execute INSIDE it and
      are NEVER dispatched as standalone `gemm(...)` calls (e.g. aiter `fmoe_bf16_blockscaleFp8_g1u1_vs_silu`,
      dispatched via `asm_moe_tkw1(hidden_states, w1, w2, topk_weight, topk_ids, …, activation=Silu)`). A
@@ -150,7 +158,7 @@ Return JSON:
      "is_fused_kernel": false,
      "live_call_seam": "module:attr(sig) actually dispatched at runtime (e.g. 'sglang...Fp8LinearMethod.apply' for a standalone GEMM, or 'aiter.fused_moe_bf16_asm:asm_moe_tkw1(hidden_states,w1,w2,topk_weight,topk_ids,...)' for a fused MoE)",
      "integration_lever": "standalone-gemm-swap|dense-linear-env-overlay|fused-op-tune-hook|author-fused-replacement",
-     "engagement_check": "REQUIRED for fused heads: concrete live-server assertion the Integrator verifies before a full A/B (e.g. \"is tuned on cu_num > 0\"); '' for standalone heads",
+     "engagement_check": "concrete live-server assertion the Integrator verifies before a full A/B (e.g. \"is tuned on cu_num > 0\"). REQUIRED for every fused head AND for any standalone head whose win needs a backend-select switch (env/overlay) to bind; '' ONLY when the tuned backend is already the default live dispatch",
      "amdahl_priority": 0.0, "rationale": "why this is the head; what win to expect; if is_fused_kernel, WHY the chosen lever reaches live_call_seam (signature match)",
      "source_hint": "<TraceLens source_file/source_path if any, else ''>",
      "launcher_hint": "<TraceLens kernel_path/launcher_source_file if any, else ''>",

@@ -113,8 +113,13 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    extraction (anti-cheating). If tampered → REJECT. (For a synthesized-GEMM op task with no
    `reference_io.pt`, instead confirm `meta.json` shapes/dtype are unchanged.)
 2. **Build the candidate config/overlay** = current accepted + this ONE change, by `winner_kind`:
-   - **env** (TunableOp CSV, `HIPBLASLT_TUNING_FILE`, …): no overlay; candidate env = `CURRENT_ENV +
+   - **env** (TunableOp CSV, `HIPBLASLT_TUNING_FILE`, …): candidate env = `CURRENT_ENV +
      KERNEL_RESULT.apply_env`. Keep the tuning artifact under `$EVAL_DIR/config/` so it's reproducible.
+     **Backend-engagement prerequisite:** a tuning artifact only binds if the backend that consumes it is
+     the one dispatched at the live seam. If this env winner ALSO carries a non-empty
+     `KERNEL_RESULT.code_patch` (a reversible routing overlay that switches the live seam to the tuned
+     backend), it is part of this SAME ONE change — apply it too via `add-module` (per the **patch** branch
+     below), do NOT drop it. The `ENGAGEMENT_CHECK` gate then proves the artifact actually bound.
    - **flag** (`--quantization fp8`, `--attention-backend …`): candidate flags = `CURRENT_FLAGS +
      KERNEL_RESULT.apply_flags`.
    - **patch** (a triton/hip/ck `code_patch` that REWRITES an existing installed module): inject ONLY
