@@ -31,10 +31,19 @@ def label_from_target(target):
     return target.split(":")[-1] if ":" in target else target
 
 
+# Generic wrapper-verb + backend tokens that appear in a PYTHON LAUNCHER name but NOT in the profiled
+# GPU-kernel symbol. Stripped so e.g. 'invoke_fused_moe_triton_kernel' reduces to 'fused_moe_kernel'.
+_WRAPPER_TOKENS = {"invoke", "dispatch", "call", "launch", "run", "triton", "cuda", "hip", "rocm"}
+
+
 def match_substrs_from_target(target):
-    """Derive profile-name match substrings from a target with NO hard-coded map. Uses the attr name
-    and its leaf module component, so e.g. 'triton_kernels.matmul_ogs:matmul_ogs' matches a profiled
-    '_matmul_ogs' kernel. Deduped, lowercased-compare handled at match time."""
+    """Derive profile-name match substrings from a target with NO hard-coded map. Uses the attr name,
+    its leaf module component, AND a 'stripped' attr with generic wrapper/backend tokens removed, so
+    both patterns work:
+      - 'triton_kernels.matmul_ogs:matmul_ogs'                 -> matches profiled '_matmul_ogs'
+      - '...:invoke_fused_moe_triton_kernel'                   -> matches profiled 'fused_moe_kernel'
+    The stripped variant is what lets a Python LAUNCHER (invoke_/dispatch_ wrapper around a @jit
+    kernel) join to the GPU kernel's profiled %GPU. Deduped; lowercased-compare handled at match time."""
     mod, _, attr = target.partition(":")
     subs = []
     if attr:
@@ -42,6 +51,15 @@ def match_substrs_from_target(target):
     leaf = mod.split(".")[-1] if mod else ""
     if leaf and leaf not in subs:
         subs.append(leaf)
+    if attr:
+        toks = [t for t in attr.split("_") if t and t.lower() not in _WRAPPER_TOKENS]
+        stripped = "_".join(toks)                         # e.g. fused_moe_kernel
+        if stripped and stripped not in subs:
+            subs.append(stripped)
+        if toks and toks[-1].lower() == "kernel":         # e.g. fused_moe (looser, still specific)
+            base = "_".join(toks[:-1])
+            if base and base not in subs:
+                subs.append(base)
     return subs or [target]
 
 
