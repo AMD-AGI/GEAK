@@ -69,6 +69,13 @@ hgemm with **fp32 accumulate**; bias fused when dtype matches (else cast-then-ad
 **rejects scale tensors** (`assert scale_a is None and ...`) — scaled/A4W4 GEMM goes through the MoE/quant
 FlyDSL paths, gated on task accuracy ([../numerics.md](../numerics.md)). bf16 hgemm is parity-safe vs library.
 
+**fp8 a8w8 block-scale (per-`[128,128]`, arbitrary fp32) parity trap:** do **not** route it through the
+native block-scaled MFMA (`mfma_scale_*_f8f6f4`) — its scale is **E8M0 (power-of-two only)** and silently
+rounds CK's arbitrary fp32 block scale → parity fail (representational, not tunable;
+[../numerics.md](../numerics.md)). Use a **software fp32 post-MFMA scale** core: pin the HW E8M0 scale to
+`1.0`, promote+scale after the MFMA. The gfx950 CK→FlyDSL **per-shape** recipe (which software-scale core
+to pick + XCD / scheduling levers) is the gated expert skill `flydsl_gfx950_fp8_blockscale_gemm`.
+
 ## Integration (rebind seam)
 Reached through `aiter.tuned_gemm`: a CSV row with `libtype=flydsl` + a `kernelName` that
 `get_flydsl_splitk_hgemm_kernel_params` resolves AND `is_flydsl_available()` true. Deploy = same env path as
@@ -82,6 +89,9 @@ the dense aiter card (`AITER_CONFIG_GEMM_BF16=<csv>`). No standalone env-overlay
 - Instruction-level control = many more knobs than Triton; do **not** hand-tune — rely on aiter's per-shape
   DB / gradlib autotune to fill `kernelName`.
 - hgemm path can't take scales — passing `scale_a/scale_b` raises an assert; use the quant FlyDSL/MoE path.
+- **fp8 block-scale ≠ native scaled-MFMA.** Porting CK `gemm_a8w8_blockscale` onto the E8M0 block-scaled
+  MFMA fails parity (power-of-two rounding of an arbitrary fp32 scale). Pick a software-fp32-post-MFMA core;
+  detail [../numerics.md](../numerics.md), recipe = gated expert skill `flydsl_gfx950_fp8_blockscale_gemm`.
 
 ## How to verify (worked example)
 ```bash

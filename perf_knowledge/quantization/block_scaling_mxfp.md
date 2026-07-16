@@ -37,6 +37,17 @@ don't clip. This is the 4-bit analog of per-token/per-block FP8 ([[scaling_strat
 - Because the scale is power-of-2 only, scaling is an exponent add — no per-block multiply hardware
   needed for the scale itself.
 
+## E8M0 microscale vs arbitrary-fp32 block scale (don't conflate them)
+Two different things get called "block scale":
+- **MX / E8M0 microscale** (this page): **power-of-two**, group **32**, consumed *inside* the matrix core
+  by the block-scaled MFMA. The scale itself is free (an exponent add).
+- **fp8 a8w8 block-scale** (CK `gemm_a8w8_blockscale`, `[128,128]` tiles): **arbitrary fp32**, coarser
+  `[128,128]` groups. It **cannot** be fed to the E8M0 block-scaled MFMA — E8M0 would round it to the
+  nearest power of two and **silently lose precision**. It must be applied as a **software fp32 scale after
+  an unscaled MFMA** (two-level accumulate: promote fp8 partials → ×fp32 block scale → accumulate, one
+  promote per 128-K block). Parity detail + gate: [[operators/dense_gemm/numerics.md]]; the gfx950
+  CK→FlyDSL recipe is the gated expert skill `flydsl_gfx950_fp8_blockscale_gemm`.
+
 ## Scale selection: power-of-2 amax (strategy)
 Per block (detail in [[operators/quant_fp4_mxfp]], aiter `per_1x32_f4_quant`):
 1. `block_amax = max(|x|)` over the 32 elements.
@@ -85,6 +96,8 @@ crashes — no HW).
 - **Per-tensor FP4** — collapses; MX block scaling is mandatory.
 - **Choosing FP4 over FP6 "for speed"** — same rate; FP6 just adds accuracy.
 - **Assuming MX accelerates on CDNA3** — simulation only.
+- **Feeding an arbitrary fp32 block scale (CK a8w8) to the E8M0 MFMA** — power-of-two rounding → silent
+  precision loss. Use a software fp32 post-MFMA scale ([[operators/dense_gemm/numerics.md]]).
 
 ## Verify
 - Round-trip weights through MXFP4/6; per-block error + end-task accuracy vs FP16

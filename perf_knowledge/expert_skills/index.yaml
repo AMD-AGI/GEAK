@@ -65,6 +65,31 @@ skills:
     e2e_delta_min_pct: 1.0
     parity: required
   validation_status: validated
+- id: flydsl_gfx950_fp8_blockscale_gemm
+  file: skills/flydsl_gfx950_fp8_blockscale_gemm/skill.md
+  scope: kernel
+  match:
+    operator: dense_gemm
+    arch_class:
+    - '*'
+    gens:
+    - gfx950
+    dtypes:
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    from_backend: ck
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: kernel_gemm_xdl.*blockscale|gemm_a8w8_blockscale
+      min_pct_gpu: 0.0
+  expects:
+    isolated_speedup_min: 1.05
+    e2e_delta_min_pct: 1.0
+    parity: required
+  validation_status: draft
 - id: flydsl_rewrite_quantized_moe
   file: skills/flydsl_rewrite_quantized_moe/skill.md
   scope: kernel
