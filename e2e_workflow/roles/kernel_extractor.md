@@ -427,6 +427,17 @@ Return JSON:
   "reference_io_sha256": "<or '' if synthesized>",
   "target_callable": "<module:attr rebind seam if one exists, else ''>",
   "smoke": "pass|fail",
+  "decode_m_buckets": [64, 512],
+  "prefill_m_buckets": [8192, 65536],
+  "m_buckets_source": "measured",
   "notes": "transpose/bias inference, regime, whether oracle was synthesized vs captured"
 }
 ```
+
+> **RETURN the m_buckets you merged into `meta.json`.** For `op_kind=moe` and any graph-hidden head op
+> you MUST echo the probe-measured `decode_m_buckets` / `prefill_m_buckets` here, with
+> `m_buckets_source:"measured"`. The orchestrator has NO filesystem access — it reads these fields (not
+> `meta.json`) to confirm the probe actually ran. If the probe could not run and you fell back to the
+> passed `[1, CONC]` guess, return that with `m_buckets_source:"synthesized_fallback"` (the orchestrator
+> will log a warning but continue). Omit these fields only for a non-MoE op where decode is not
+> graph-hidden (rare).

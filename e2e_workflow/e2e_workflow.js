@@ -364,6 +364,11 @@ const EXTRACT_OP_SCHEMA = obj({
   candidate_backends: arrStr, reference_io_sha256: { type: 'string' },
   target_callable: { type: 'string' }, // module:attr rebind seam for an authored kernel ('' if none)
   smoke: { type: 'string' }, notes: { type: 'string' },
+  // Probe-measured decode/prefill M-buckets merged into meta.json (MoE / graph-hidden head ops).
+  // m_buckets_source: 'measured' (per-shape probe ran) | 'synthesized_fallback' (probe unavailable).
+  decode_m_buckets: { type: 'array', items: { type: 'number' } },
+  prefill_m_buckets: { type: 'array', items: { type: 'number' } },
+  m_buckets_source: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
 const OPBENCH_SCHEMA = obj({
@@ -481,6 +486,27 @@ ${cfg(inall)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
   return base + expertSkillsBlock(role);
+}
+
+// Probe verification: after extract_op, confirm the kernel's decode m_buckets are REAL
+// (probe-measured), not the synthesized [1, CONC] guess the workflow injects. Uses the AGENT-RETURNED
+// fields (this script is a sandboxed Workflow script with NO fs access — it cannot read meta.json).
+// Same rule as scripts/probe_mbuckets_guard.py: fallback iff decode buckets ⊆ {1, conc} (incl. empty).
+// Policy: WARN-but-continue (do NOT abort) — decode is graph-hidden so a probe miss falls back to the
+// synth guess, which is worse but not fatal. The warning is the signal to investigate.
+function verifyProbeMBuckets(ext, conc, log) {
+  const name = (ext && ext.short_name) || '?';
+  if (!ext) return 'missing';
+  const db = ext.decode_m_buckets;
+  if (db == null) { log(`[probe-guard] ${name}: extract_op returned no decode_m_buckets — cannot confirm probe ran (missing).`); return 'missing'; }
+  const synth = new Set([1, conc]);
+  const isFallback = db.length === 0 || db.every((m) => synth.has(m));
+  if (isFallback) {
+    log(`[probe-guard] ⚠️ ${name}: decode_m_buckets=${JSON.stringify(db)} looks SYNTHESIZED ([1,${conc}] guess), NOT probe-measured (source=${ext.m_buckets_source || 'unset'}). Probe likely did not run. Continuing with fallback (results use guessed M).`);
+    return 'synthesized_fallback';
+  }
+  log(`[probe-guard] ✓ ${name}: decode_m_buckets=${JSON.stringify(db)} probe-measured (source=${ext.m_buckets_source || 'unset'}).`);
+  return 'measured';
 }
 
 // Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
@@ -938,6 +964,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         history.ledger.push({ direction: h.short_name, verdict: isDominant ? 'flagged' : 'dead_end', lesson: `op extraction failed (${why})` });
         return null;
       }
+      const _mbSrc = verifyProbeMBuckets(ext, CONC, log);
+      history.ledger.push({ direction: (ext && ext.short_name) || h.short_name, verdict: 'probe_check', lesson: `decode m_buckets: ${_mbSrc}` });
       const bake = await safeAgent(
         roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
           EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
@@ -1290,6 +1318,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           }),
           { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
         if (!ext || ext.smoke !== 'pass' || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
+        const _mbSrc = verifyProbeMBuckets(ext, CONC, log);
+        history.ledger.push({ direction: (ext && ext.short_name) || h.short_name, verdict: 'probe_check', lesson: `decode m_buckets: ${_mbSrc}` });
         const bake = await safeAgent(
           roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
             EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
@@ -1492,6 +1522,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
       continue;
     }
+    const _mbSrc = verifyProbeMBuckets(ext, CONC, log);
+    history.ledger.push({ direction: (ext && ext.short_name) || h.short_name, verdict: 'probe_check', lesson: `decode m_buckets: ${_mbSrc}` });
 
     // (h2) DISCOVER existing impls + tune cheap levers + DECIDE an author_plan.
     const bake = await safeAgent(
