@@ -6,6 +6,13 @@
 
 adapter_default_port() { echo 30000; }
 
+# sglang is editable-installed in the ROCm images; its module finder can miss the `sglang.benchmark`
+# subpackage (or CWD=/sgl-workspace shadows the package), which breaks `python -m sglang.bench_serving`
+# (-> ModuleNotFoundError -> no load -> empty profile). Prepend the real source tree to PYTHONPATH to
+# bypass it. Auto-detected; override/disable with SGLANG_SRC_PYTHONPATH=... (empty to disable). Harmless
+# when the dir is absent (non-sglang images).
+_SGL_PP="${SGLANG_SRC_PYTHONPATH-/sgl-workspace/sglang/python}"; [ -d "$_SGL_PP" ] || _SGL_PP=""
+
 adapter_launch() {
   # Raise the scheduler watchdog by default: an authored/JIT kernel (FlyDSL/triton-author) overlaid on
   # the path JIT-compiles on first prefill, which can exceed sglang's default watchdog and kill the
@@ -26,7 +33,7 @@ adapter_launch() {
     ${_ga:+GPU_ARCHS=$_ga} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     SGLANG_TORCH_PROFILER_DIR="$PROFILE_DIR" \
-    PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
+    PYTHONPATH="${_SGL_PP:+$_SGL_PP:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     python -m sglang.launch_server \
       --model-path "$MODEL" \
       --host "$HOST" --port "$PORT" \
@@ -51,6 +58,7 @@ adapter_bench() {
   # Optional request-rate (req/s) to STAGGER arrivals so sequences sit at different prefill/decode
   # phases — used by the steady-state profiling path. Empty => inf (max_concurrency still caps).
   [ -n "${REQUEST_RATE:-}" ] && extra+=(--request-rate "$REQUEST_RATE")
+  PYTHONPATH="${_SGL_PP:+$_SGL_PP:}${PYTHONPATH:-}" \
   python -m sglang.bench_serving \
     --backend sglang --base-url "$BASE_URL" --model "$MODEL" \
     --dataset-name random --random-input-len "$ISL" --random-output-len "$OSL" --random-range-ratio 1.0 \
@@ -65,12 +73,20 @@ adapter_bench() {
 # sglang's HTTP profiler, so the trace reflects the real continuous-batching steady-state mix (prefill
 # chunks + decode interleaved) instead of a cold prefill ramp. record_shapes=true so the parser gets
 # Input Dims for shape attribution. Called by bench_e2e.sh AFTER a sustained background load is warm.
+#
+# with_stack=FALSE + activities=["CPU","GPU"]: sglang's profiler otherwise records Python call stacks
+# (with_stack) which produce hundreds of MB of python_function events -> a multi-hundred-MB trace whose
+# ROCm flush takes >10min AND BLOCKS the scheduler (health drops, requests time out). Dropping stacks
+# (and MEM/RPD activities) shrinks the trace ~an order of magnitude while KEEPING everything parse_profile
+# needs: the GPU kernel timeline, cpu_op Input Dims (record_shapes), and execute_* phase annotations.
+# Override via SGLANG_PROFILE_ACTIVITIES / SGLANG_PROFILE_WITH_STACK.
 adapter_profile_window() {
   local before after
   before=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
+  local _acts="${SGLANG_PROFILE_ACTIVITIES:-[\"CPU\",\"GPU\"]}" _stack="${SGLANG_PROFILE_WITH_STACK:-false}"
   # num_steps set => the server records that many forward steps then auto-saves (async; returns at once).
   if ! curl -sf -X POST "${BASE_URL}/start_profile" -H 'Content-Type: application/json' \
-        -d "{\"output_dir\":\"${PROFILE_DIR}\",\"num_steps\":${PROFILE_NUM_STEPS},\"record_shapes\":true}" \
+        -d "{\"output_dir\":\"${PROFILE_DIR}\",\"num_steps\":${PROFILE_NUM_STEPS},\"record_shapes\":true,\"with_stack\":${_stack},\"activities\":${_acts}}" \
         >/dev/null 2>&1; then
     echo "!!! /start_profile request failed (sglang HTTP profiler unavailable?)" >&2
     return 1
