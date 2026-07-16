@@ -5,6 +5,19 @@ UNCHANGED single-kernel `kernel_workflow` consumes — same contract as a hand-w
 critical property: the unittest must replay the kernel's REAL serving shapes and check correctness
 against a recorded I/O oracle, and it must be **immutable during optimization** (anti-cheating).
 
+> **BOTH extractor phases probe decode by default — not just the milestone track.** The per-shape probe
+> (Step 1b below) applies to `PHASE=extract` (the milestone/editable-kernel track) AND `PHASE=extract_op`
+> (the head track: dense GEMM / attention / fused-MoE). Historically only the milestone track measured
+> decode; the head track guessed `M ≈ conc`. That guess is now the FALLBACK only. For any head op whose
+> decode path is graph-hidden (fused-MoE and almost every serving GEMM), run the probe and merge the
+> measured `decode_m_buckets` into `meta.json`, returning `m_buckets_source:"measured"`.
+>
+> **capture and probe are two SEPARATE actions, both run — the probe does NOT replace capture.**
+> capture (`capture_shapes.py`) records the I/O oracle (`reference_io.pt`) + the prefill shapes it can
+> see; the probe (`capture_shapes_probe.py`, enforce-eager) measures the decode shapes+counts that
+> CUDA-graph replay hides from capture. You need the oracle for correctness AND the measured decode
+> M-buckets for the weighted timing — so run both.
+
 ## What the kernel layer expects (the task-dir contract)
 The single-kernel workflow takes `args.kernel_path` = a directory containing the kernel source +
 wrapper + a unittest that (1) optionally builds, (2) runs, (3) checks correctness, (4) reports
@@ -64,17 +77,35 @@ Do this by reasoning, not by copying another model's list:
    `pct_gpu_time` (these are the only kernels worth probing — Amdahl).
 2. **Locate the Python entry** for each hot kernel: from its profiled name, find the Python function
    that launches it (grep the serving stack / read source / import-probe) → `module:attr`.
+   - The profiled name is often the `@jit` kernel itself (e.g. `fused_moe_kernel`), which you CANNOT
+     hook. Hook its **launcher** instead — the plain Python function that does `kernel[grid](...)`.
+     Grep the launch site: `grep -n '<profiled_name>\[grid\]' <file>` → the enclosing `def` is your
+     target (e.g. `fused_moe_kernel` is launched by `invoke_fused_moe_triton_kernel`).
 3. **Screen for hookability** (the hard pitfalls below decide this):
-   - Triton `@jit` **JITFunction** (called `fn[grid](...)`) → cannot wrap; skip.
+   - Triton `@jit` **JITFunction** (called `fn[grid](...)`) → cannot wrap; skip — hook its launcher.
    - **No Python entry** (HIP C++ / hipBLASLt closed-source) → probe can't see it; out of scope.
    - Plain Python callable → hookable.
 4. **Confirm the tensor operands** are in args/kwargs (probe scans both) and not buried in a dataclass.
-5. **Produce the target list** → comma-separated `module:attr` for `PROBE_TARGETS`.
-6. **Run + self-check**: probe banner appears, shapes are non-empty, counts are conserved.
+   For a launcher, arg0 is usually the activation `A` of shape `(M, K)` — that M is what m_buckets need.
+5. **Prefer the DEFINITION module over a re-export.** A launcher may be importable from several paths
+   (e.g. `...experts.triton_moe:invoke_fused_moe_triton_kernel` re-exports the same function object
+   defined in `...fused_moe:invoke_fused_moe_triton_kernel`). Either works for hooking (same object),
+   but write the target at the module where the function is DEFINED (`inspect.getsourcefile`) so the
+   playbook stays stable across vLLM refactors. Verify: `python3 -c "import inspect;
+   from <mod> import <attr> as f; print(type(f).__name__, inspect.getsourcefile(f))"` → must print
+   `function` (NOT `JITFunction`).
+6. **Produce the target list** → comma-separated `module:attr` for `PROBE_TARGETS`.
+7. **Run + self-check**: probe banner appears (`[probe] hooked ...`), shapes are non-empty, counts are
+   conserved, and postprocess joins `%GPU` (`profile_calls` non-null in its summary line — see the
+   `%GPU-join` note below if it comes back `None`).
 
 > The gpt-oss targets (`triton_kernels.matmul_ogs:matmul_ogs`,
 > `aiter.ops.triton.unified_attention:unified_attention`) and its `M=64/256` result are ONE EXAMPLE.
-> A new model has different hot kernels, different `module:attr`, and different M — re-run steps 1–5.
+> Qwen3-235B (FP8 MoE) is a SECOND worked example: hot kernel `fused_moe_kernel` (69.8% GPU) → launcher
+> target `vllm.model_executor.layers.fused_moe.fused_moe:invoke_fused_moe_triton_kernel` →
+> measured `decode=[64,512]` (M=64 = conc for gate/up; M=512 = 64×top_k(8) for the down proj — TWO
+> decode buckets, the M≈conc guess would have missed the 512 half). A new model has different hot
+> kernels, different `module:attr`, and different M — re-run steps 1–6.
 
 ## Step 2 — Emit an immutable, general unittest
 The unittest must be backend-agnostic: it loads `reference_io.pt`, calls whatever the CURRENT kernel
@@ -131,3 +162,21 @@ workflow so the kernel layer's Director/verify_engineer math is unchanged.
   (it's usually a tiny op anyway). `capture_shapes_probe.py` guards this.
 - **enforce-eager is mandatory for the probe**: with CUDA graph ON the probe only sees the capture-pass
   calls (a handful per bucket), which is NOT the real serving count. Always probe with `--enforce-eager`.
+- **Multi-GPU (TP>1): list ALL logical GPU ids in `GPU`, not just one.** `bench_e2e.sh`/the vLLM
+  adapter set `HIP_VISIBLE_DEVICES=$GPU`, so `TP=4 GPU=0` exposes only 1 device and the workers crash
+  with `AssertionError: DP adjusted local rank N is out of bounds for 1 devices`. Pass `GPU=0,1,2,3`
+  (N comma-separated ids for `TP=N`). Big models (e.g. Qwen3-235B FP8) need TP≥4 to fit.
+- **Don't share the box during collection.** A concurrent vLLM on the same GPUs makes the probe run
+  hang at NCCL init and time out the health check (observed: 360s timeout, zero shapes). Confirm the
+  target GPUs are free (`rocm-smi --showmeminfo vram`) before launching; the serving-GPU lock only
+  guards same-`GPU`-key runs, not arbitrary neighbors.
+- **`%GPU` join can silently return `None`** if the launcher's attr name doesn't substring-match the
+  profiled kernel name. `probe_postprocess.py` now strips generic wrapper/backend tokens
+  (`invoke/dispatch/call/launch/run/triton/cuda/hip/rocm`) so `invoke_fused_moe_triton_kernel` reduces
+  to `fused_moe_kernel` and matches. If a future launcher still won't join (summary prints
+  `profile_calls=None`), the shape/count/**measured latency are still correct** (latency is cuda.Event,
+  not profile-derived) — only the Amdahl %GPU is missing; fix the token list or pass an explicit match.
+- **`probe_to_mbuckets.py` default `--min-count-share=0.01` can drop the prefill bucket** on
+  decode-dominated workloads (ISL≈OSL): prefill M appears in <1% of calls and is filtered out
+  (`prefill_m_buckets=[]`). If you need the prefill bucket, lower to `--min-count-share 0.001`. Qwen3
+  example: default keeps only `decode=[64,512]`; at 0.001 you also get `prefill=[8192,65536]`.
