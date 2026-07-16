@@ -73,24 +73,33 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
    #     PROBE_TARGETS is MODEL-SPECIFIC — derive it per model via the playbook in
    #     knowledge/shape_capture.md (read profile_topN.json → find each hot kernel's Python entry
    #     module:attr → skip JITFunction / no-Python-entry). Do NOT hard-code the gpt-oss targets.
+   # NOTE (TP>1): GPU must list ALL logical ids (adapter sets HIP_VISIBLE_DEVICES=$GPU). TP=4 GPU=0
+   #   crashes ("local rank N out of bounds for 1 devices"); use GPU=0,1,2,3. Ensure those GPUs are
+   #   FREE first (a concurrent vLLM makes this hang at NCCL init and time out the health check).
    OVERLAY_PYTHONPATH="$SKILL_DIR/scripts/probe_overlay" \
    EXTRA_ENV="PROBE_OUT=$TASK/_probe PROBE_TIME=1 PROBE_TARGETS=<module:attr>[,<module:attr>...]" \
    EXTRA_SERVER_ARGS="--enforce-eager" \
-   BACKEND="<backend>" GPU="$GPU_ID" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
-   REPEATS=1 PROFILE=0 \
+   BACKEND="<backend>" GPU="<id[,id...] — N ids for TP=N>" TP=<N> MODEL="$MODEL_PATH" \
+   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=1 PROFILE=0 \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/probe_<short_name>.log"
    # postprocess: --profile-topn is STRONGLY RECOMMENDED (adds %GPU, the Amdahl basis for kernel
    # selection). --isl/--osl/--conc are recorded as workload metadata. Kernels are auto-discovered
-   # from the probe output — no need to name them here.
+   # from the probe output — no need to name them here. Self-check the summary: it should print
+   # profile_calls=<n> (NOT None); None means the %GPU join missed (shape/count/latency still valid).
    python3 "$SKILL_DIR/scripts/probe_postprocess.py" --probe-dir "$TASK/_probe" \
      --profile-topn "$TASK/profile/round_0/profile_topN.json" \
      --isl <isl> --osl <osl> --conc <conc> \
      --out "$TASK/_probe/per_shape_probe"
-   # (b) turn the measured shapes into m_buckets and MERGE into meta.json (replaces the M≈conc guess):
+   # (b) turn the measured shapes into m_buckets and MERGE into meta.json (replaces the M≈conc guess).
+   #     On decode-dominated workloads (ISL≈OSL) prefill M is <1% of calls; add --min-count-share 0.001
+   #     to keep the prefill bucket (default 0.01 drops it -> prefill_m_buckets=[]).
    python3 "$SKILL_DIR/scripts/probe_to_mbuckets.py" \
-     --probe "$TASK/_probe/per_shape_probe.json" --conc <conc> --kernel-match "<base symbol>"
+     --probe "$TASK/_probe/per_shape_probe.json" --conc <conc> --kernel-match "<base symbol>" \
+     --min-count-share 0.001
    # -> {"decode_m_buckets":[...], "prefill_m_buckets":[...]} : merge both keys into meta.json.
-   #    (gpt-oss EXAMPLE result: decode=[64,256], prefill=[8192,32768] — YOUR model will differ.)
+   #    gpt-oss EXAMPLE: decode=[64,256], prefill=[8192,32768].
+   #    Qwen3-235B EXAMPLE: target invoke_fused_moe_triton_kernel -> decode=[64,512] (64=conc gate/up,
+   #    512=64*top_k(8) down proj), prefill=[8192,65536]. YOUR model will differ — never copy these.
    ```
    Only do this when the normal capture (step 2) left the decode shapes hidden. If the kernel is NOT
    graph-hidden (capture already returned real decode dims), keep the captured shapes — no probe needed.
@@ -198,13 +207,62 @@ needs an op task dir the **Op Benchmarker** can bake-off across backends. `edit=
 
 > **`op_kind=moe` (fused-MoE / grouped-expert GEMM) — DO NOT synthesize a dense GEMM.** A MoE head op
 > stays in the head track (it earns head priority by pct), but it is a grouped/ragged GEMM with token
-> routing, NOT a dense `A·Bᵀ`. For `op_kind=moe`, do **PHASE=extract instead** (copy the EDITABLE
-> fused_moe source subtree into `kernel_src/` + capture the REAL I/O oracle via the capture overlay),
-> and write `meta.json` with `op_kind:"moe"`, `math_contract:"grouped per-expert GEMM + routing"`, the
-> real `target_callable` = the **fused_moe/grouped_gemm dispatcher** seam (NOT `tuned_gemm:gemm_a16w16`),
-> and `build` per the kernel. Return `op_kind:"moe"`. The Op Benchmarker then optimizes it as
-> `fused_moe_grouped_gemm` via kernel_workflow — it must never be dense-GEMM baked off. The GEMM-synth
-> path below applies ONLY to `op_kind=gemm`.
+> routing, NOT a dense `A·Bᵀ`. For `op_kind=moe`, build the task dir HERE (in extract_op — do NOT bounce
+> to a different phase): copy the EDITABLE fused_moe source subtree into `kernel_src/`, capture the REAL
+> I/O oracle via the capture overlay, and write `meta.json` with `op_kind:"moe"`,
+> `math_contract:"grouped per-expert GEMM + routing"`, the real `target_callable` = the
+> **fused_moe/grouped_gemm dispatcher** seam (NOT `tuned_gemm:gemm_a16w16`), and `build` per the kernel.
+> Return `op_kind:"moe"`. The Op Benchmarker then optimizes it as `fused_moe_grouped_gemm` via
+> kernel_workflow — it must never be dense-GEMM baked off. The GEMM-synth path below applies ONLY to
+> `op_kind=gemm`.
+>
+> **🔴 decode M-buckets for a MoE / graph-hidden head op are MEASURED BY PROBE, not guessed.** The
+> `DECODE_M_BUCKETS=[1, CONC]` value passed to you is only a FALLBACK. For `op_kind=moe` (and any head
+> kernel whose decode path runs inside a CUDA/HIP graph), you MUST run the per-shape probe below (step
+> 2b-op) and MERGE its measured `decode_m_buckets`/`prefill_m_buckets` into `meta.json`, overwriting the
+> `[1, CONC]` guess. Then RETURN those measured lists + `m_buckets_source:"measured"` in your JSON. This
+> is default behavior — NOT conditional on "capture returned empty".
+
+#### 2b-op (DEFAULT for op_kind=moe / graph-hidden head ops). Per-shape probe — MEASURE decode M-buckets
+
+Capture (the I/O oracle) and probe (the decode M-buckets) are TWO SEPARATE actions, both required:
+capture records `reference_io.pt` + the prefill shapes it can see; the probe measures the decode
+shapes+counts that CUDA-graph replay hides from capture. Run BOTH — the probe does not replace capture.
+
+`PROBE_TARGETS` is MODEL-SPECIFIC — derive it yourself from `KERNEL.short_name`: import the serving
+package, grep the `short_name` / its `module:attr` Python entry (the launcher that calls the @jit
+kernel, e.g. `...triton_moe:invoke_fused_moe_triton_kernel`), and skip any JITFunction / no-Python-entry
+target. Do NOT hard-code the gpt-oss targets baked into `probe_overlay/sitecustomize.py`.
+
+```bash
+TASK="$EVAL_DIR/kernels/<short_name>_task"
+# (a) enforce-eager run so decode steps go through Python and the probe sees real shapes/counts.
+#     TP>1: GPU must list ALL logical ids (adapter sets HIP_VISIBLE_DEVICES=$GPU); ensure they are FREE
+#     (a concurrent vLLM makes NCCL init hang + time out the health check).
+OVERLAY_PYTHONPATH="$SKILL_DIR/scripts/probe_overlay" \
+EXTRA_ENV="PROBE_OUT=$TASK/_probe PROBE_TIME=1 PROBE_TARGETS=<module:attr>[,<module:attr>...]" \
+EXTRA_SERVER_ARGS="--enforce-eager" \
+BACKEND="<backend>" GPU="<id[,id...] — N ids for TP=N>" TP=<N> MODEL="$MODEL_PATH" \
+ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=1 PROFILE=0 \
+  bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/probe_<short_name>.log"
+# (b) postprocess: join profile %GPU (self-check the summary prints profile_calls=<n>, NOT None).
+python3 "$SKILL_DIR/scripts/probe_postprocess.py" --probe-dir "$TASK/_probe" \
+  --profile-topn "$TASK/profile/round_0/profile_topN.json" \
+  --isl <isl> --osl <osl> --conc <conc> \
+  --out "$TASK/_probe/per_shape_probe"
+# (c) turn measured shapes into m_buckets. Decode-dominated (ISL≈OSL) prefill is <1% of calls ->
+#     --min-count-share 0.001 to keep the prefill bucket (default 0.01 drops it).
+python3 "$SKILL_DIR/scripts/probe_to_mbuckets.py" \
+  --probe "$TASK/_probe/per_shape_probe.json" --conc <conc> --kernel-match "<base symbol>" \
+  --min-count-share 0.001
+# -> MERGE decode_m_buckets + prefill_m_buckets into meta.json (REPLACING the [1, CONC] guess).
+#    Qwen3-235B EXAMPLE: target invoke_fused_moe_triton_kernel -> decode=[64,512] (64=conc gate/up,
+#    512=64*top_k(8) down proj), prefill=[8192,65536]. YOUR model WILL differ — never copy these.
+```
+
+FALLBACK (only when the probe genuinely cannot run — kernel has no Python entry, or `--enforce-eager`
+won't launch): keep the passed `DECODE_M_BUCKETS=[1, CONC]`, set `m_buckets_source:"synthesized_fallback"`,
+and state the reason in `notes`. In EVERY other case use the measured values + `m_buckets_source:"measured"`.
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (Architect head candidate: short_name,
 op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for attn, and OPTIONAL
@@ -255,6 +313,14 @@ report `editable:false`/drop rather than freeze an out-of-regime oracle nobody s
 ```
 
 ### GEMM (preferred: synthesize — perf is value-independent)
+
+> **decode M-buckets for a dense GEMM are ALSO probe-measured when the decode path is graph-hidden**
+> (it almost always is under a serving graph). Synthesizing the prefill (N,K) from the profile is fine,
+> but the decode M MUST come from the per-shape probe (step 2b-op above), not the `[1, CONC]` guess —
+> run the probe, merge its `decode_m_buckets` into `meta.json`, and return `m_buckets_source:"measured"`.
+> Only fall back to `[1, CONC]` + `m_buckets_source:"synthesized_fallback"` when the probe cannot run.
+> capture (oracle) and probe (decode m_buckets) remain the two separate actions — see 2b-op.
+
 1. Parse the profiled `shapes` into `a_shape`, `b_shape`. Decide `transpose_b` from the math
    (sglang Linear = `F.linear(x,W)` → `transpose_b=true`; a raw `A@B` → false) and whether there is a
    fused `bias`/activation epilogue (from the kernel name / neighbor in the trace).
