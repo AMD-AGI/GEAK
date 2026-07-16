@@ -224,3 +224,6 @@ exp/
 .torch_ext/
 # bench_e2e.sh default output dir (OUT_DIR=$(pwd)/e2e_bench_out) — runtime measurements
 e2e_bench_out/
+# Personal dev notes / session transcripts — NOT for the shared remote
+work-docs/
+.specstory/
