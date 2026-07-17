@@ -19,7 +19,7 @@ GEAK 4.0.0 introduces three major capabilities.
 
 ### End-to-end LLM serving optimization
 
-GEAK v4 introduces e2e_workflow, a system-level optimizer for whole-model serving throughput. The workflow:
+GEAK 4.0.0 introduces e2e_workflow, a system-level optimizer for whole-model serving throughput. The workflow:
 
 - Preflights the GPU, backend, model, and profiler environment.
 - Profiles a warm sglang or vLLM server on the target workload.
@@ -50,7 +50,7 @@ Each patch is measured independently before it can become the new best candidate
 
 ### Performance knowledge and expert skills
 
-GEAK v4 adds a structured perf_knowledge layer for AMD GPU optimization. It organizes operator, backend, GPU-generation, dtype, and regime knowledge into a machine-queryable kernel matrix. Expert skills can seed high-value optimization directions, but they never replace measurement: every candidate must still pass on-box validation.
+GEAK 4.0.0 adds a structured perf_knowledge layer for AMD GPU optimization. It organizes operator, backend, GPU-generation, dtype, and regime knowledge into a machine-queryable kernel matrix. Expert skills can seed high-value optimization directions, but they never replace measurement: every candidate must still pass on-box validation.
 
 ## What’s New
 

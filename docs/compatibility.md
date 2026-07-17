@@ -12,9 +12,9 @@ JS-Workflow GPU optimizer; no pip package, no CLI). Only tested configurations a
 
 Use the following matrix to view the compatibility and system requirements:
 
-| AMD Instinct GPU | Architecture | GFX target | ROCm version | Python | OS |
-|---|---|---|---|---|---|
-| MI300X, MI355X| CDNA3, CDNA4 | gfx942, gfx950 | 6.4, 7.0, 7.1, 7.2 | 3.8, 3.12 (Compiled artifacts in the tree are cpython-312.) | Ubuntu | 
+| AMD Instinct GPU |  ROCm version | Python | OS |
+|---|---|---|---|
+| MI300X, MI355X| 6.4, 7.0, 7.1, 7.2 | 3.8, 3.12 (Compiled artifacts in the tree are cpython-312.) | Ubuntu | 
 
 The on-box card is auto-detected (`rocminfo` / `rocm_agent_enumerator`); `PYTORCH_ROCM_ARCH` is pinned
 to the local `gfx` at build time.
