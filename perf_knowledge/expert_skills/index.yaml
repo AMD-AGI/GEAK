@@ -89,7 +89,7 @@ skills:
     isolated_speedup_min: 1.05
     e2e_delta_min_pct: 1.0
     parity: required
-  validation_status: draft
+  validation_status: validated
 - id: flydsl_rewrite_quantized_moe
   file: skills/flydsl_rewrite_quantized_moe/skill.md
   scope: kernel

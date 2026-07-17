@@ -27,15 +27,16 @@ expects:
   e2e_delta_min_pct: 1.0
   parity: required
 validation:
-  status: draft
-  last_verified: ''
-  gpu: ''
-  model: ''
+  status: validated
+  last_verified: '2026-07-16'
+  gpu: 'MI355X / gfx950 (device 0x75a3)'
+  model: 'claude (kernel_workflow expert-skill verify run)'
   measured:
-    isolated: ''
+    isolated: '1.226-1.237x same-session interleaved A/B vs production CK (gemm_a8w8_blockscale_bpreshuffle), q_up_proj M=4096 N=65536 K=1536; xcd0 ablation 0.973x (loses to CK), confirming XCD lever'
     e2e_pct: ''
-    parity: ''
-  artifact: ''
+    parity: 'err=0 / cos=1.0 seeds 0-3 vs fp32 dequant oracle (rtol=atol=1e-2)'
+  artifact: '/sgl-workspace/GEAK_DSV4Pro_Out/geak_exp/verify_skill/q_up_proj/manual_verify/ (RESULT.md, verify_ab.py, fly_loader.py)'
+  notes: 'First cross-machine reproduction. Verified path = wide-N/4-wave+xcd8 (q_up_proj shape). FlyDSL API drift confirmed as documented (kernels.mma -> kernels.common.mma; xcd_swizzle compile-arg is an uncommitted patch on mainline -> used the byte-frozen snapshot core via a module-alias shim). Narrow-N/8-wave cluster path not re-verified in this run.'
 role: advisory_prior
 supersedes: []
 ---
