@@ -32,7 +32,8 @@ JS-Workflow GPU optimizer; no pip package, no CLI). Only tested configurations a
 
 | OS | Status |
 |---|---|
-| Ubuntu | Supported |
+| Ubuntu 22.04 | Supported |
+| Ubuntu 24.04 | Supported |
 
 ## Python
 
@@ -70,16 +71,16 @@ The profiler is auto-detected using a degrade ladder
 | `rocprof-compute` | Supported (preferred) |
 | `rocprofv3` | Supported |
 | `rocprof` | Supported |
-| `metrix` | Supported |
+| `metrix` 0.1.0 | Supported |
 
 ## Serving backends (e2e_workflow)
 
 The serving stack is not baked in; `args.backend` selects `scripts/adapters/<backend>.sh`.
 
-| Backend | Default port | Status |
-|---|---|---|
-| sglang | 30000 | Supported (default) |
-| vllm | 8000 | Supported |
+| Backend | Status |
+|---|---|
+| sglang | Supported (default) |
+| vllm | Supported |
 
 | Bench client | Status | Notes |
 |---|---|---|
