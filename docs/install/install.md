@@ -90,5 +90,5 @@ If `rocminfo` fails, your ROCm stack is not installed or not on PATH. If no prof
 
 ## Related topics
 
-- [Run a workflow](../how-to/run-agent.md) — start a single-kernel or end-to-end run.
-- [Compatibility matrix](../compatibility.md) — verified GPUs, ROCm versions, backends, and dtypes.
+- [Run a workflow](../how-to/run-agent.md): start a single-kernel or end-to-end run.
+- [Compatibility matrix](../compatibility.md): verified GPUs, ROCm versions, backends, and dtypes.

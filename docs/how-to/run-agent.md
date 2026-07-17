@@ -14,7 +14,7 @@ GEAK v4 runs inside Claude Code, orchestrated by deterministic JS Workflows. The
 
 Before running a workflow, ensure the following are in place.
 
-- **AMD Instinct™ MI GPU** — CDNA (gfx942 / gfx950), auto-detected.
+- **AMD Instinct™ MI GPU**: CDNA (gfx942 / gfx950), auto-detected.
 - **ROCm 6+** with `rocminfo` / `rocm-smi`, and a profiler (`rocprof-compute` / `rocprofv3` / `rocprof`).
 - **Python 3.8+**.
 - **Claude Code ≥ 2.1.177** (dynamic Workflow feature). Check `claude --version`.

@@ -59,7 +59,7 @@ against an immutable correctness oracle before it is accepted.
 
 ## Related topics
 
-- [Install GEAK](install/install.md) — set up the environment and Claude Code.
-- [Run a workflow](how-to/run-agent.md) — invoke a workflow from Claude Code or the `run_e2e.py` interface.
-- [GEAK pipeline](conceptual/geak-pipeline.md) — the phases of an end-to-end run.
-- [Reference](reference/api-reference.md) — Workflow arguments, the integration contract, and run artifacts.
+- [Install GEAK](install/install.md): set up the environment and Claude Code.
+- [Run a workflow](how-to/run-agent.md): invoke a workflow from Claude Code or the `run_e2e.py` interface.
+- [GEAK pipeline](conceptual/geak-pipeline.md): the phases of an end-to-end run.
+- [Reference](reference/api-reference.md): Workflow arguments, the integration contract, and run artifacts.
