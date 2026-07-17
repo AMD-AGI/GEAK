@@ -13,7 +13,7 @@ html_theme_options = {
     "header_link": False,
     "version_list_link": False,
     "nav_secondary_items": {
-        "Hyperloom": "https://advanced-micro-devices-demo--660.com.readthedocs.build/projects/hyperloom/en/660/",
+        "Hyperloom": "https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html",
         "GitHub": "https://github.com/AMD-AGI/GEAK",
         "Community": False,
         "Blogs": "https://rocm.blogs.amd.com/",
