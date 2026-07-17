@@ -79,7 +79,7 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 
 | Backend | Status |
 |---|---|
-| sglang | Supported (default) |
+| sglang | Supported |
 | vllm | Supported |
 
 | Bench client | Status | Notes |
