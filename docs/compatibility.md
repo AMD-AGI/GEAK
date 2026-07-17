@@ -1,13 +1,13 @@
 ---
 myst:
     html_meta:
-        "description": "Verified hardware, software, runtime, and backend combinations for GEAK v4: AMD Instinct GPUs, ROCm, Claude Code, serving backends, kernel languages, and data types."
+        "description": "Verified hardware, software, runtime, and backend combinations for GEAK 4.0.0, AMD Instinct GPUs, ROCm, Claude Code, serving backends, kernel languages, and data types."
         "keywords": "GEAK, compatibility, ROCm, AMD Instinct, MI300X, MI355X, sglang, vLLM, Triton, HIP, CK, FlyDSL, Claude Code"
 ---
 
-# GEAK v4 compatibility matrix
+# GEAK 4.0.0 compatibility matrix
 
-Verified hardware, software, runtime, and backend combinations for GEAK v4 (a Claude Code +
+Verified hardware, software, runtime, and backend combinations for GEAK 4.0.0 (a Claude Code +
 JS-Workflow GPU optimizer; no pip package, no CLI). Only tested configurations are listed.
 
 Use the following matrix to view the compatibility and system requirements:
