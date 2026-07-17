@@ -32,7 +32,7 @@ JS-Workflow GPU optimizer; no pip package, no CLI). Only tested configurations a
 
 | OS | Status |
 |---|---|
-| Ubuntu | Verified |
+| Ubuntu 22.04 | Verified |
 
 ## Python
 
