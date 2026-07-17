@@ -380,12 +380,16 @@ async function agentT(p, o) {
 // pointer telling the agent to Read the fragment + query the skills index (scripts have no fs access).
 function expertSkillsBlock(role) {
   if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role) || !EXPERT_SKILLS_DIR) return '';
-  return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
+  return `\n\n## Expert skills (opt-in, enabled this run)\n` +
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/expert_skills.md and follow it: query ` +
     `${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits this op (operator/dtype/regime, and ` +
     `from_backend->to_backend for migration skills) and whose validation_status is \`validated\`, and ` +
-    `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
-    `A/B vs the oracle, never reducing a result below the measured baseline.`;
+    `treat each as a HIGH-PRIOR candidate to reproduce — advisory, never overriding your isolated ` +
+    `A/B vs the oracle, never reducing a result below the measured baseline. ` +
+    `EXCEPTION — a matched skill with \`enforcement.mode: strict\` (e.g. \`flash_mla_tilelang_to_triton\` ` +
+    `for DeepSeek-V4 MLA-attention decode on gfx950, FP8 KV, tilelang->triton) is a MANDATE, not advisory: ` +
+    `you MUST reproduce its Procedure and mandatory_specs and cannot route around it — see the fragment's ` +
+    `"Strict-enforcement skills" section. Measurement still gates the final ship.`;
 }
 
 function roleAgent(role, phase, intro, inputs) {

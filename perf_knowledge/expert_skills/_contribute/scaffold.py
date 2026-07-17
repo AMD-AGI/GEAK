@@ -55,21 +55,29 @@ def reindex():
         op = (fm.get("match") or {}).get("operator")
         if ops is not None and op not in ops:
             print(f"  WARN: {sub}/skill.md: operator '{op}' not in capability_index.yaml", file=sys.stderr)
-        entries.append({
+        entry = {
             "id": fm["id"],
             "file": f"skills/{sub}/skill.md",
             "scope": fm.get("scope", "kernel"),
             "match": fm.get("match", {}),
             "expects": fm.get("expects", {}),
             "validation_status": (fm.get("validation") or {}).get("status", "draft"),
-        })
+        }
+        # Surface enforcement so the selector can flag STRICT (mandate) skills without opening every
+        # file. Only the mode is indexed; the full spec lives in the skill's frontmatter.
+        enf = fm.get("enforcement") or {}
+        if enf.get("mode"):
+            entry["enforcement"] = {"mode": enf["mode"]}
+        entries.append(entry)
     header = (
         "# index.yaml — expert_skills selector (AUTO-MAINTAINED by _contribute/scaffold.py + "
         "validate_skill.py).\n"
         "# Regenerate with:  python _contribute/scaffold.py --reindex\n"
         "# NOT a ranking. Filter by (operator, gen, arch_class, [from->to], status==validated) -> MEASURE.\n"
-        "# Only 'validated' skills are auto-applied by the workflows (advisory priors, never override A/B).\n\n"
-        "schema: {id, file, scope, match, expects, validation_status}\n\n"
+        "# Only 'validated' skills are auto-applied by the workflows (advisory priors, never override A/B).\n"
+        "# enforcement.mode==strict marks a MANDATE skill: when it matches, the recipe MUST be followed\n"
+        "# (see roles/_fragments/expert_skills.md 'Strict-enforcement skills'). Measurement still gates.\n\n"
+        "schema: {id, file, scope, match, expects, validation_status, enforcement?}\n\n"
     )
     with open(INDEX, "w") as f:
         f.write(header)

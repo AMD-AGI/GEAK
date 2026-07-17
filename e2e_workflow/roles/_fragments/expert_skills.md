@@ -4,8 +4,9 @@
 > is true (opt-in; default OFF)**. When OFF (the default), nothing is injected and behavior is
 > byte-identical to a run without this feature. It is consumed by routing/integration roles (System
 > Architect, Op Benchmarker, e2e
-> Integrator). It is **advisory**: a matched skill is a high-prior candidate to reproduce, never a
-> mandate, and never overrides your on-box A/B gate.
+> Integrator). It is **advisory** for ordinary skills: a matched skill is a high-prior candidate to
+> reproduce, and never overrides your on-box A/B gate. **Exception:** a matched skill with
+> `enforcement.mode: strict` is a MANDATE — see "Strict-enforcement skills" below.
 
 ## What expert skills are
 Human-authored, validated optimization recipes under `EXPERT_SKILLS_DIR` (one file per skill). Unlike
@@ -39,3 +40,25 @@ the measurement wins (note it so the skill is later marked `stale`).
    relevant card the skill id you used and its MEASURED result, so the skill's validation can be refreshed.
 
 If no skill matches, proceed exactly as you would without this fragment.
+
+## Strict-enforcement skills (MANDATE, not advisory)
+
+A matched skill whose index entry (or frontmatter) has `enforcement.mode: strict` is **not** an advisory
+prior — it is a **MANDATE**. The only such skill today is **`flash_mla_tilelang_to_triton`**: it fires
+whenever the live bottleneck is an **MLA-attention decode** op on a **DeepSeek-V4 / `deepseek_mla`** model
+served on **gfx950 (MI355X)** with an **FP8** KV cache and a **TileLang** source you are porting to
+**Triton**. When such a skill matches, you MUST:
+
+- **Follow its `Procedure` verbatim** — you may NOT re-route to a generic backend or a different recipe.
+  It is the required candidate, not one option among many.
+- **Honor its `enforcement` block** from the skill file: use its unit test as-is
+  (`unittest.cases_immutable` — do not re-derive the case set or loosen tolerances) and implement every
+  item in `optimization.mandatory_specs`. Skipping a mandatory spec is allowed ONLY with an explicit
+  on-box benchmark that justifies the skip (`skip_requires_benchmark`).
+- **Still gate the final decision on your on-box A/B.** Strict means the *recipe is mandatory*, NOT that
+  the result ships unmeasured: the skill can never force a result below your measured baseline. If, after
+  faithfully reproducing it, measurement contradicts the skill, the measurement wins — record it so the
+  skill can be marked `stale`.
+
+In short: for DeepSeek-V4 flash-MLA you cannot answer "no skill needed" or substitute your own plan —
+reproduce this skill, then let the numbers decide whether it ships.

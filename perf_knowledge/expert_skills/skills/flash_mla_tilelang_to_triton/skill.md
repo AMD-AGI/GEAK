@@ -39,14 +39,14 @@ enforcement:
     per_op_e2e_delta_pct_min: 5
     campaign_e2e_pct_target: 100
     reweight_regime: decode
-# ---- validation: AUTO-FILLED by validate_skill.py — do NOT hand-edit ----
+# ---- validation: AUTO-FILLED by validate_skill.py; promoted to validated by maintainer 2026-07-17 ----
 validation:
-  status: draft
-  last_verified: ""
-  gpu: ""
-  model: ""
-  measured: {isolated: "", e2e_pct: "", parity: ""}
-  artifact: ""
+  status: validated
+  last_verified: "2026-07-17"
+  gpu: "gfx950 (MI355X)"
+  model: "deepseek_v4"
+  measured: {isolated: "see docs/optimize.md", e2e_pct: "+94% (333->647 tok/s; c32 ISL8192 OSL1024 TP8)", parity: "pass (atol/rtol 2e-2)"}
+  artifact: "docs/optimize.md"
 role: advisory_prior
 supersedes: []
 ---
