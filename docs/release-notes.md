@@ -13,7 +13,7 @@ GEAK 4.0.0 is a major redesign of GEAK, upgrading it from a single-kernel optimi
 
 The headline change is e2e_workflow: GEAK can now optimize full LLM serving workloads on sglang or vLLM, not just isolated kernels. It profiles the real workload, ranks bottlenecks by Amdahl impact, pulls the cheapest high-leverage levers first, and recursively calls the single-kernel workflow only for kernels that can truly move model throughput.
 
-## Highlights
+## Release highlights
 
 GEAK 4.0.0 introduces three major capabilities.
 
