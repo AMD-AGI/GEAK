@@ -106,9 +106,9 @@ const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
 // Expert skills = human-authored, validated kernel recipes (perf_knowledge/expert_skills/). ADVISORY
 // priors only: a matched `validated` skill is a HIGH-PRIOR author/optimize candidate the planning/author
 // roles reproduce, then gate by the isolated A/B vs the oracle — it NEVER overrides measurement. Default
-// OFF (opt-in: pass use_expert_skills="true"). When OFF (the default) NOTHING is injected -> byte-identical
+// ON (pass use_expert_skills="false" to disable). When OFF NOTHING is injected -> byte-identical
 // to a build without this feature. When invoked by the e2e layer the flag + dir are passed down.
-const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'true') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only planning + authoring roles consult skills; every other role gets no injection.

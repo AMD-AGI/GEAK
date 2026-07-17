@@ -305,10 +305,10 @@ const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
 // Expert skills = human-authored, validated optimization recipes (perf_knowledge/expert_skills/). They
 // are ADVISORY priors: a matched `validated` skill is a HIGH-PRIOR candidate that routing/integration
 // roles reproduce, then gate by the usual on-box A/B — it NEVER overrides measurement and NEVER reduces
-// a result below the measured baseline. Default OFF (opt-in): pass use_expert_skills="true" to enable.
-// When OFF (the default) NOTHING is injected into any role prompt -> the prompt (and thus the whole run)
+// a result below the measured baseline. Default ON: pass use_expert_skills="false" to disable.
+// When OFF NOTHING is injected into any role prompt -> the prompt (and thus the whole run)
 // is byte-identical to a build without this feature. The flag + dir are passed DOWN to the kernel layer.
-const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'true') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR + '/expert_skills')).replace(/\/+$/, '');
 // Only routing/bake-off/integration roles consult skills; every other role gets no injection.
