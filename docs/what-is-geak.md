@@ -13,7 +13,7 @@ driven by Claude Code:
 
 | Workflow | Scope | What it optimizes |
 | --- | --- | --- |
-| **`e2e_workflow`** ⭐ | Whole-model serving | End-to-end sglang or vLLM throughput of a full LLM |
+| **`e2e_workflow`** (Recommended) | Whole-model serving | End-to-end sglang or vLLM throughput of a full LLM |
 | `kernel_workflow` | Single kernel | Latency or speedup of one AMD GPU kernel (Triton, HIP, CK, FlyDSL) |
 
 `e2e_workflow` is the headline: it raises serving throughput by triaging hot kernels and pulling levers
@@ -39,7 +39,7 @@ A hierarchical single-kernel optimizer: Director → TechLead → specialist eng
 memory, compute, host-runtime), multi-round and budget-controlled. Each patch is independently verified
 against an immutable correctness oracle before it is accepted.
 
-## Two things keep it honest
+## Accuracy and measurement
 
 - **Profiling** grounds every decision in measured data — nothing is optimized unless it is first shown
   to matter (Amdahl: `pct_gpu_time × achievable_speedup`).

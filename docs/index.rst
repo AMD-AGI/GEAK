@@ -36,4 +36,4 @@ The GEAK public repository is located at `AMD-AGI/GEAK <https://github.com/AMD-A
 For information on contributing to the GEAK code base, see the
 `CONTRIBUTING guide <https://github.com/AMD-AGI/GEAK/blob/GEAK_v4/CONTRIBUTING.md>`_.
 
-GEAK is released under the MIT license. For details, see the `License <license>` page.
+GEAK is released under the MIT license. For details, see the :doc:`License <license>` page.
