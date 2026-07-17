@@ -51,9 +51,15 @@ last_seen: 2026-06-28
   weight: `layer.w*_weight_scale.data = s*_flat`** (re-home scale param to the cached flat buffer; convert
   then truly memory-neutral, alloc delta 0). RESULT at the EQUAL/fair config (mem 0.9, full 262144): engine
   STARTS, Available KV 5.96 → **20.13 GiB** (307,566 tok), e2e **+77%** vs Triton (257→455 tok/s cc64),
-  cosine 0.99998 — no context cap needed. Secondary optional follow-ups (not required to start): remove the
-  A2 pre-gather via stage-1 `compile_moe_gemm1` compact-input/sorted-row in-kernel gather, and reuse
-  scratch + gemm2 `accumulate=True` (stage-2 out `[M,hidden]`) to recover the residual ~3 GiB vs Triton.
+  cosine 0.99998 — no context cap needed.
+  **MANDATORY (memory, NOT an optional follow-up): stage-2 output MUST be `[M,hidden]` via gemm2
+  `accumulate=True` / `compile_moe_gemm2_ex(mode=REDUCE)` (fold the top-k moe_sum into the in-kernel
+  atomic/reduce accumulate). Shipping the expanded `[M·top_k,hidden]` output (`accumulate=False` + host-side
+  moe_sum + `A2[m]=A[m//top_k]` pre-gather) materialises ~940 MiB at M=8192 (top_k=8, hidden=7168): the
+  +896 MiB stage-2 warmup transient does NOT fit at mem-frac 0.95 → e2e OOM REJECT even when the isolated
+  bench passes at 1.85× (Kimi-K2.6 int4 TP=4, 2026-07-16). Use `accumulate=False` ONLY as the decode-only
+  (M≤64) fast path.** Optional perf follow-up (not required to start): also remove the A2 pre-gather via
+  stage-1 `compile_moe_gemm1` compact-input/sorted-row in-kernel gather (recovers the residual ~3 GiB / a launch vs Triton).
 - apply (REVERSIBLE OVERLAY variant — preferred, 0 site-packages mutation): instead of editing the installed
   `compressed_tensors_moe.py` / `fused_moe.py` files, deploy the same two edits as an add-module loaded at
   import time that (1) wraps `CompressedTensorsWNA16MoEMethod.process_weights_after_loading` to do the

@@ -48,6 +48,23 @@ HBM, so body-only tuning caps at ~1.1×; a full **FlyDSL rewrite** of the candid
 decode and ~3.6–6.2× over the Triton golden (speedup grows with M). This is the lever when more
 config/body tuning won't move the needle and the win requires a code-level authored core.
 
+## Memory contract (MANDATORY — an isolated win that OOMs e2e is a REJECT, not a win)
+The isolated bench has **no KV cache competing for HBM**, so a large stage-2/activation buffer looks free
+there but starves the serving KV pool and OOMs at e2e — the single most common way a *verified* isolated
+FlyDSL MoE win fails to transfer. (Observed on Kimi-K2.6 int4 TP=4/mem-frac 0.95: a +896 MiB stage-2
+warmup transient did not fit → e2e **REJECT, 0 tok/s**, despite 1.85× isolated + parity PASS. The prior
++61.8% run at the SAME config succeeded only because its stage-2 output was `[M,hidden]`.)
+- **Stage-2 output MUST be `[M, hidden]`** — fold the top-k `moe_sum` into the stage-2 **in-kernel
+  atomic/`reduce` accumulate** (`compile_moe_gemm2(accumulate=True)` or `compile_moe_gemm2_ex(mode=REDUCE)`).
+- **DO NOT** ship the expanded `[M·top_k, hidden]` output — the `accumulate=False` + host-side `moe_sum` +
+  `A2[m]=A[m//top_k]` pre-gather path materialises ~`M·top_k·hidden·2 B` (~940 MiB at M=8192, top_k=8,
+  hidden=7168). **That transient IS the +896 MiB e2e OOM.** It is acceptable ONLY as a decode-only
+  (`M ≤ 64`) fast path, never for the prefill buckets that must serve at ISL≥2048.
+- This is a **hard requirement, NOT an optional follow-up**: any candidate that will be applied back to
+  live serving (`apply_flydsl_moe_to_vllm`, learned card `flydsl-moe-applyback-gfx942`) must have its peak
+  footprint verified to fit the accepted `mem-fraction` BEFORE it can be claimed a win. Isolated speedup
+  alone is necessary but NOT sufficient.
+
 ## Mechanism
 Triton's per-element int4 unpack + dequant loop streams weight bytes inefficiently and stalls latency-bound
 (~15–20% HBM), which is why body micro-opts cap ~1.1×. A FlyDSL kernel maps the same math onto a tuned
@@ -84,6 +101,9 @@ correctness is judged identically.
    - fp8 blockscale → `moe_blockscale_2stage.compile_moe_blockscale_gemm{1,2}`.
    - plain grouped GEMM (no SiLU/reduce) → reuse the MoE down-stage as a generic GEMM: `kernel_topk=1`,
      `kernel_tokens=M·top_k`, `doweight=True`, `accumulate=False`, pre-gather `A2[m]=A[m//top_k]`.
+     **⚠ For a real fused-MoE that will be applied back to serving, the `accumulate=False`+pre-gather
+     expansion violates the Memory contract above (→ +896 MiB e2e OOM). Use it only for the decode-only
+     (`M ≤ 64`) fast path; prefill MUST use the `accumulate=True`/`mode=REDUCE` `[M,hidden]` accumulate.**
    - `mixed_moe_gemm_2stage` is **mxfp4** (symmetric `val·2^scale`), NOT GPTQ — don't use it for W4A16+zp.
 5. **Wire layout + compile**: unpack packed int4 (even k = low nibble) → fold zp → int8 → `shuffle_weight`
    → `_pack_shuffled_int8_to_packed_int4_no_perm` (fp8: `shuffle_weight(w, layout=(16,16))`). Transpose

@@ -150,8 +150,15 @@ installed vLLM (off by default ⇒ byte-identical stock; back up the two files f
   the stage-1 `compile_moe_gemm1` compact-input/sorted-row in-kernel gather is a clean optional follow-up,
   not what unblocks startup). Capping `--max-model-len 32768` is now only a workaround for the
   *un-fixed* shim or for squeezing extra concurrency; it is NOT required once scales are re-homed.
-  Residual ~3 GiB vs Triton is convert-time allocator fragmentation (does not block startup); reuse
-  scratch + gemm2 `accumulate=True` (stage-2 out `[M,hidden]` not `[M*top_k,hidden]`) to recover it.
+  Residual ~3 GiB vs Triton is convert-time allocator fragmentation (does not block startup).
+- **Candidate memory acceptance (MANDATORY before integrate — scale re-home is necessary but NOT
+  sufficient):** the candidate kernel's stage-2 output MUST be `[M,hidden]` (gemm2 `accumulate=True` /
+  `compile_moe_gemm2_ex(mode=REDUCE)`, top-k moe_sum folded into the in-kernel accumulate). A candidate
+  that ships the expanded `[M·top_k,hidden]` output (`accumulate=False` + host moe_sum + A2 pre-gather)
+  allocates ~940 MiB at M=8192 (top_k=8, hidden=7168) as a **prefill-warmup transient** — even with scales
+  re-homed it does NOT fit at mem-frac 0.95 and the server never becomes healthy (observed 2026-07-16:
+  +896 MiB requested / 626 MiB free → e2e OOM REJECT, 0 tok/s, despite 1.85× isolated + parity PASS). Do
+  NOT accept an isolated-only win; reject `mem_footprint_starves_kv` unless the stage-2 output is `[M,hidden]`.
 - **Scales bf16 end-to-end** (`scale_is_bf16=True`, packed `(E,G//2,N,2)`); wrong layout → cosine ≈ 0.48.
 - In-place convert is **destructive to the Triton layout** → no Triton fallback once converted; gate
   correctness offline + GSM8K and verify **0 fallbacks**.
