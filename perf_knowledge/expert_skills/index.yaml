@@ -76,23 +76,3 @@ skills:
     e2e_delta_min_pct: 1.0
     parity: required
   validation_status: validated
-- id: mla_tilelang_to_triton
-  file: skills/mla_tilelang_to_triton/skill.md
-  scope: kernel
-  match:
-    operator: mla_attention
-    arch_class:
-    - deepseek_mla
-    gens:
-    - gfx942
-    dtypes:
-    - bf16
-    - fp8_e4m3_fnuz
-    regimes:
-    - decode
-    from_backend: tilelang
-    to_backend: triton
-  expects:
-    isolated_speedup_min: 1.15
-    parity: required
-  validation_status: draft
