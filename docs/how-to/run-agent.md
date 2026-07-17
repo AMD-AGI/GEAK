@@ -7,7 +7,7 @@ myst:
 
 # Run a GEAK workflow
 
-GEAK v4 runs **inside Claude Code**, orchestrated by deterministic JS **Workflows**. There is no
+GEAK v4 runs inside Claude Code, orchestrated by deterministic JS Workflows. There is no
 `pip install` and no CLI: launch Claude Code and describe the task; it invokes the `Workflow` tool.
 
 ## Prerequisites
@@ -37,7 +37,7 @@ commands.
 
 The path you give Claude Code (for example, `path_to_GEAK/e2e_workflow`) is mapped to the `workflow_dir` argument that the workflow requires. Replace `path_to_GEAK` with the absolute path to your cloned GEAK repository.
 
-### End-to-end serving throughput (e2e_workflow ⭐)
+### End-to-end serving throughput (e2e_workflow)
 
 ```
 use /absolute/path/to/GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
@@ -84,7 +84,7 @@ non-interactively (print mode); the process exits when the workflow completes.
 
 ## Depth modes (e2e)
 
-Both default off = **default** mode; mutually exclusive, **deep wins**.
+Both default off = **default** mode; mutually exclusive, deep wins.
 
 | Mode | Trigger | What runs |
 |---|---|---|
