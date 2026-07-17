@@ -1,20 +1,20 @@
 ---
 myst:
     html_meta:
-        "description": "Install GEAK v4: pip install git+ downloads the repo, installs a recent Claude Code, and the Python deps (plus a serving backend for E2E, ROCm required)."
+        "description": "Install GEAK 4.0.0: pip install git+ downloads the repo, installs a recent Claude Code, and the Python deps (plus a serving backend for E2E, ROCm required)."
         "keywords": "GEAK, install, ROCm, Claude Code, Workflow, sglang, vLLM, AMD Instinct, setup"
 ---
 
 # Install GEAK
 
-GEAK v4 is not a Python package. It is a set of Workflows (`e2e_workflow.js` / `kernel_workflow.js`)
+GEAK 4.0.0 is not a Python package. It is a set of Workflows (`e2e_workflow.js` / `kernel_workflow.js`)
 that run inside Claude Code. "Installing" means: get the repo, get a recent Claude Code, and have a
 working ROCm environment (plus a serving backend for E2E). For a first run, see
 [Run a workflow](../how-to/run-agent.md).
 
 ## Prerequisites
 
-GEAK v4 requires the following software and hardware.
+GEAK 4.0.0 requires the following software and hardware.
 
 | Requirement | Detail |
 |---|---|
