@@ -16,8 +16,13 @@ Use the following matrix to view the compatibility and system requirements:
 |---|---|---|---|
 | MI300X, MI355X| 6.4, 7.0, 7.1, 7.2 | 3.8, 3.12 (Compiled artifacts in the tree are cpython-312.) | Ubuntu | 
 
-The on-box card is auto-detected (`rocminfo` / `rocm_agent_enumerator`); `PYTORCH_ROCM_ARCH` is pinned
+```{note}
+- The on-box card is auto-detected (`rocminfo` / `rocm_agent_enumerator`); `PYTORCH_ROCM_ARCH` is pinned
 to the local `gfx` at build time.
+- The on-box GPU arch, backend, profiler, and op backends are re-checked at runtime by the Setup
+  preflight, which writes `env_report.{md,json}`.
+- Only tested configurations are listed. To report a verified configuration not listed here, open a pull request.
+```
 
 ## Runtime — Claude Code
 
@@ -93,8 +98,3 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 | `none` (default) | Throughput delta + greedy output parity. |
 | `gsm8k` | Sampled gsm8k (5-shot, greedy, fixed seed) using `scripts/gsm8k_eval.py` against an OpenAI-compatible `/v1` endpoint. | 
 
-## Notes
-
-- The on-box GPU arch, backend, profiler, and op backends are re-checked at runtime by the Setup
-  preflight, which writes `env_report.{md,json}`.
-- Only tested configurations are listed. To report a verified configuration not listed here, open a pull request.
