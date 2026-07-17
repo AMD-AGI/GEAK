@@ -107,7 +107,7 @@ For FP8 / MXFP4, byte-parity is too strict — switch the e2e gate to task accur
 The Integrator then runs sampled gsm8k (5-shot, greedy, fixed seed) and accepts iff
 `cand_em >= baseline_em - tol`.
 
-## See also
+## Related topics
 
 - [Install GEAK](../install/install.md) 
 - [API reference](../reference/api-reference.md) 

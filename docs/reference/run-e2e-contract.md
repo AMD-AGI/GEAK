@@ -254,7 +254,7 @@ an InferenceX checkout is discoverable using `INFERENCEX_PATH`, else `native`)
 and exports `BENCH_CLIENT` and `INFERENCEX_PATH` so every `bench_e2e.sh` the
 agents run inherits them.
 
-## See also
+## Related topics
 
 - [API reference](./api-reference.md): Workflow arguments and run artifacts.
 - [Run a workflow](../how-to/run-agent.md): natural-language invocation.
