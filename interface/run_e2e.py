@@ -198,8 +198,10 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         # baseline == Hyperloom best config (fair engagement start).
         "initial_extra_server_args": h.get("accepted_flags", "") or "",
         "initial_extra_env": h.get("accepted_env", "") or "",
-        # Hyperloom already did config/param search in EXPLORE; do not double-run.
-        "config_tune": "false",
+        # Force GEAK's Tier-0 config/flag/env/backend sweep ON (config_tuner runs
+        # first). Overrides the previous default that skipped it on the assumption
+        # Hyperloom already did config/param search in EXPLORE.
+        "config_tune": "true",
         # Produce the final/ bundle (final_launch.sh + overlay) so the caller can
         # reuse it for a workload sweep.
         "apply_to_original": "true",
