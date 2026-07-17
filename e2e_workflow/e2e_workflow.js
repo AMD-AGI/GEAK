@@ -531,7 +531,7 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // and query the skills index. (Workflow scripts have no fs access; the agent does the reading.)
 function expertSkillsBlock(role) {
   if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role)) return '';
-  return `\n\n## Expert skills (opt-in, enabled this run)\n` +
+  return `\n\n## Expert skills (enabled this run)\n` +
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/expert_skills.md and follow it: query ` +
     `${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits the current bottleneck/op and whose ` +
     `validation_status is \`validated\`, and treat each as a HIGH-PRIOR candidate to reproduce — advisory, ` +

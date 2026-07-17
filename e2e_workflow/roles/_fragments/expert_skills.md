@@ -1,7 +1,7 @@
-# Fragment: expert_skills (e2e layer) — ADVISORY, injected only when use_expert_skills is ON
+# Fragment: expert_skills (e2e layer) — injected when use_expert_skills is ON (default)
 
-> This fragment is appended to a role's prompt by `e2e_workflow.js` **only when `use_expert_skills`
-> is true (opt-in; default OFF)**. When OFF (the default), nothing is injected and behavior is
+> This fragment is appended to a role's prompt by `e2e_workflow.js` **when `use_expert_skills`
+> is true (default ON; opt out with `use_expert_skills=false`)**. When OFF, nothing is injected and behavior is
 > byte-identical to a run without this feature. It is consumed by routing/integration roles (System
 > Architect, Op Benchmarker, e2e
 > Integrator). It is **advisory** for ordinary skills: a matched skill is a high-prior candidate to

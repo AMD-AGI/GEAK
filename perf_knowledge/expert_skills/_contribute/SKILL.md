@@ -59,10 +59,11 @@ Branches `expert-skill/<slug>`, commits the skill + regenerated `index.yaml`, pu
 (via `gh` if present, else prints the compare URL).
 
 ## Notes
-- **Skills are opt-in.** The workflows ignore `expert_skills/` unless a run passes
-  `use_expert_skills=true` (default OFF). So: validation runs (`--emit-plan` above) already pass it,
-  and to benefit from a landed skill in a normal optimization run you must enable it explicitly. With
-  the flag OFF the workflow behaves byte-identically to a build without this feature.
+- **Skills are on by default (opt-out).** The workflows consult `expert_skills/` unless a run passes
+  `use_expert_skills=false`. So a landed skill benefits normal optimization runs automatically; pass
+  `use_expert_skills=false` to opt out, in which case the workflow behaves byte-identically to a build
+  without this feature. A skill with `enforcement.mode: strict` becomes a mandate when it matches
+  (recipe required; measurement still gates).
 - Maintain skills ONLY in the canonical `geak_v4/GEAK` tree; other snapshots sync from here.
 - A skill that later regresses (aiter/triton upgrade, box drift) should be re-validated; staleness
   demotes it to a plain reference until refreshed.

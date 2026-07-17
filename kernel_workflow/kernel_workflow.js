@@ -380,7 +380,7 @@ async function agentT(p, o) {
 // pointer telling the agent to Read the fragment + query the skills index (scripts have no fs access).
 function expertSkillsBlock(role) {
   if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role) || !EXPERT_SKILLS_DIR) return '';
-  return `\n\n## Expert skills (opt-in, enabled this run)\n` +
+  return `\n\n## Expert skills (enabled this run)\n` +
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/expert_skills.md and follow it: query ` +
     `${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits this op (operator/dtype/regime, and ` +
     `from_backend->to_backend for migration skills) and whose validation_status is \`validated\`, and ` +

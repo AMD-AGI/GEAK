@@ -1,12 +1,17 @@
 # expert_skills — human-authored, e2e-validated optimization recipes
 
-> **Contract (read this first).** An expert skill is an **advisory prior**, not a mandate. It packages a
+> **Contract (read this first).** An expert skill is normally an **advisory prior**. It packages a
 > human expert's *proven, reusable optimization recipe* (the regulated steps + knobs + pitfalls) for a
 > specific `operator × scenario`. A skill that has passed validation carries a high prior and a
 > reproducible procedure — but it **never overrides on-box measurement**. The consuming workflow
 > (`e2e_workflow` / `kernel_workflow`) treats a matched skill as a *candidate to reproduce first*, then
 > decides the winner by its own A/B gate. When a skill conflicts with the live measurement, the
 > measurement wins and the skill is flagged `stale` for re-review.
+>
+> **Strict exception.** A skill whose frontmatter sets `enforcement.mode: strict` is a **mandate**, not
+> advisory: when it matches, the workflow MUST follow its recipe (unit-test contract + mandatory
+> optimization specs) and may not route around it. Measurement still gates — strict makes the *recipe*
+> mandatory, never the *result*; a strict skill can never ship a regression below the measured baseline.
 >
 > This is the same discipline as the sibling `perf_knowledge/` base — *seed/locate candidates faster,
 > never reduce a result below its measured baseline* — just with stronger, validated, opinionated recipes.
@@ -38,9 +43,9 @@ kernel, tuned config JSONs, a custom validation manifest — can carry those fil
 
 ## How a skill is selected by the workflows
 
-Each skill's frontmatter has a `match:` block. Expert skills are **opt-in** — the workflows ignore this
-directory entirely unless the run passes `use_expert_skills=true` (default OFF; when OFF the workflow
-behaves byte-identically to a build without this feature). When enabled, the workflow filters
+Each skill's frontmatter has a `match:` block. Expert skills are **on by default** — pass
+`use_expert_skills=false` to opt out, in which case the workflow ignores this directory entirely and
+behaves byte-identically to a build without this feature. When enabled (the default), the workflow filters
 `index.yaml` by the current bottleneck:
 
 ```

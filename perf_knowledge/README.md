@@ -35,7 +35,7 @@ It has two jobs:
 | **Profile / triage a kernel** | [`profiling/`](profiling/) |
 | **Run an end-to-end optimization** | [`kernel_workflow/`](kernel_workflow/) |
 | **See a real war story with numbers** | [`case_studies/`](case_studies/) |
-| **Use / contribute a human expert recipe** | [`expert_skills/`](expert_skills/) — validated, advisory optimization skills the workflows consult when enabled (opt-in: `use_expert_skills=true`, default OFF); add one via [`expert_skills/_contribute/SKILL.md`](expert_skills/_contribute/SKILL.md) |
+| **Use / contribute a human expert recipe** | [`expert_skills/`](expert_skills/) — validated optimization skills the workflows consult by default (advisory priors; `enforcement.mode: strict` skills are a mandate). On by default; opt out with `use_expert_skills=false`. Add one via [`expert_skills/_contribute/SKILL.md`](expert_skills/_contribute/SKILL.md) |
 | **See what to borrow from the ecosystem** | [`landscape/`](landscape/) (multi-backend libs · DSLs · AI kernel agents · autotuning · AMD SOTA 2026 · serving registries) |
 | **Look up an env var / pinned repo** | [`reference/env_vars.md`](reference/env_vars.md) · [`reference/repo_index.md`](reference/repo_index.md) |
 

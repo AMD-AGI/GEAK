@@ -98,9 +98,9 @@ Workflow({
     milestone_min_pct: 5, // Milestone only optimizes editable kernels with pct_gpu_time >= this (default 5);
                           //   overrides min_kernel_tasks — sub-threshold kernels are skipped (Amdahl)
     config_tune: "true",  // Tier-0 sweep on/off (default ON)
-    use_expert_skills: "false", // consult perf_knowledge/expert_skills (advisory priors) on/off (default OFF, opt-in);
-                          //   set "true" to enable. When OFF (default) nothing is injected -> behavior is
-                          //   byte-identical to a run without the feature. Threaded down to the kernel layer too.
+    use_expert_skills: "true", // consult perf_knowledge/expert_skills (advisory priors; enforcement.mode:strict
+                          //   skills are a mandate) on/off (default ON; set "false" to disable). When OFF nothing
+                          //   is injected -> byte-identical to a run without the feature. Threaded down to the kernel layer too.
     gpu_ids: "0",         // comma-separated
     isl: 1024, osl: 1024, conc: 64,  // workload (profile + bench use the SAME)
     task: "focus on ...", // optional steer

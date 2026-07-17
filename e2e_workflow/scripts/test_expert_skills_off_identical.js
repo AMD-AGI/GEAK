@@ -47,11 +47,15 @@ for (const t of TARGETS) {
   ok(on(t.consumer) !== '', `ON -> non-empty for consumer role (${t.consumer})`);
   ok(on(t.nonConsumer) === '', `ON -> '' for NON-consumer role (${t.nonConsumer}) (no pollution)`);
   ok(on(t.consumer).includes('/x/expert_skills/index.yaml'), 'ON block points at the skills index');
-  ok(/ADVISORY/.test(on(t.consumer)), 'ON block is labelled ADVISORY');
+  // ON block frames ordinary skills as advisory AND documents the strict-enforcement MANDATE exception.
+  ok(/advisory/i.test(on(t.consumer)), 'ON block frames ordinary skills as advisory');
+  ok(/strict/i.test(on(t.consumer)) && /MANDATE/.test(on(t.consumer)),
+    'ON block documents the strict-enforcement MANDATE exception');
 
-  // 3) The default must be OFF (opt-in): use_expert_skills defaults to 'false'.
-  ok(/A\.use_expert_skills != null \? A\.use_expert_skills : 'false'/.test(src),
-    "use_expert_skills defaults to 'false' (opt-in)");
+  // 3) Default is ON (opt-out): use_expert_skills defaults to 'true'. OFF is still byte-identical
+  //    (asserted above) so it remains a clean opt-out.
+  ok(/A\.use_expert_skills != null \? A\.use_expert_skills : 'true'/.test(src),
+    "use_expert_skills defaults to 'true' (opt-out via use_expert_skills=false)");
 
   // 4) roleAgent must be purely additive: returns `base + expertSkillsBlock(role)`.
   ok(/return base \+ expertSkillsBlock\(role\);/.test(src),

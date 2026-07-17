@@ -99,7 +99,7 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 | `noise_band_pct` | `0.5` | e2e acceptance band (%). |
 | `e2e_repeats` | `2` | Repeats per timed measurement. |
 | `ab_finish_retries` | `3` | A/B leg completion retries. |
-| `use_expert_skills` | `false` | Consult `perf_knowledge/expert_skills` (advisory priors). OFF = byte-identical. |
+| `use_expert_skills` | `true` | Consult `perf_knowledge/expert_skills` (advisory priors; `enforcement.mode: strict` skills are a mandate). Set `false` to disable — OFF = byte-identical. |
 | `perf_knowledge_dir` | sibling `perf_knowledge/` | Authoring knowledge base. |
 | `time_budget_s`, `initial_extra_server_args`, `initial_extra_env`, `tracelens`, `agent_timeout_ms` | — | Forwarded from the external orchestrator. |
 

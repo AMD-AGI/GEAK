@@ -124,7 +124,7 @@ GEAK deliberately keeps several **distinct** knowledge sources rather than one p
 - **perf_knowledge — external reference, read-only.** A curated reference base of state-of-the-art implementations per operator×backend. GEAK reads it as a starting-point pointer ("which backend/algorithm is known-best for this op"), but **never writes to it and never treats it as ground truth** — the on-box A/B is always the judge.
 - **Skills / guides — judgment playbooks.** Human-written reasoning guides (preflight checks, profile parsing, backend selection, …) the agents follow: knowledge encoded as procedure, not rigid scripts.
 - **Run-scoped blackboards — ephemeral, within one run.** Live scratchpads (per-op and run-global) that let the many parallel lanes in a *single* run share what's working right now. They exist only inside that run's working directory and are discarded afterward.
-- **Expert skills — opt-in.** Human-authored backend-migration recipes; advisory only.
+- **Expert skills — on by default (opt-out).** Human-authored backend-migration recipes; advisory priors, except a matched skill with `enforcement.mode: strict` is a mandate (the recipe must be followed; on-box A/B still gates the ship).
 
 **Learned cards vs. run-scoped blackboards are not the same thing:** learned cards are *persistent, curated, evidence-cited* memory that survives across runs and is size-bounded; the blackboards are *ephemeral, mutable* scratchpads used only for live coordination within one run. The bridge between them: at run end, blackboard findings that meet the evidence bar get distilled into learned cards.
 

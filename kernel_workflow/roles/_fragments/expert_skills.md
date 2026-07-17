@@ -1,7 +1,7 @@
-# Fragment: expert_skills (kernel layer) — ADVISORY, injected only when use_expert_skills is ON
+# Fragment: expert_skills (kernel layer) — injected when use_expert_skills is ON (default)
 
-> Appended to a role's prompt by `kernel_workflow.js` **only when `use_expert_skills` is true
-> (opt-in; default OFF)**. When OFF (the default), nothing is injected and behavior is byte-identical.
+> Appended to a role's prompt by `kernel_workflow.js` **when `use_expert_skills` is true
+> (default ON; opt out with `use_expert_skills=false`)**. When OFF, nothing is injected and behavior is byte-identical.
 > Consumed by the
 > tech_lead (planning) and author/engineer roles. **Advisory** for ordinary skills: a matched skill is
 > a high-prior candidate to reproduce, and never overrides your isolated A/B vs the oracle. **Exception:**
