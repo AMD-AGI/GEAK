@@ -2,19 +2,24 @@
   <img src="examples/images/logo.png" alt="GEAK v4" width="300">
 </p>
 
-Multi-agent GPU performance optimization for **AMD Instinct MI GPUs** (CDNA, e.g. gfx942 / gfx950 — the
-on-box card is auto-detected). Driven by Claude Code, orchestrated by deterministic JS **Workflows**.
+GEAK is an autonomous optimization agent that makes AMD Instinct GPUs run faster, automatically. Built as a
+multi-agent system with an evolving knowledge base, it learns from every optimization run and continuously
+improves its strategies over time. Point it at a single kernel or a live model-serving stack such as vLLM or
+sglang, and GEAK runs the full optimization loop: it finds the bottlenecks, generates and tunes better kernels
+across paths such as Triton, FlyDSL, TileLang, and HIP, and validates the speedup on the real system. What
+normally takes weeks of expert kernel engineering becomes an automated, repeatable, and self-improving process.
 
-Two workflows ship here:
+GEAK targets AMD Instinct MI GPUs (CDNA, e.g. gfx942 / gfx950; the on-box card is auto-detected), driven by
+Claude Code and orchestrated by deterministic JS Workflows. It ships two workflows, each for a different scenario:
 
 | Workflow | Scope | What it optimizes |
 | --- | --- | --- |
-| **[e2e_workflow](e2e_workflow/)** ⭐ | Whole-model serving | End-to-end **sglang / vLLM throughput** of a full LLM |
+| [e2e_workflow](e2e_workflow/) | Whole-model serving | End-to-end sglang / vLLM throughput of a full LLM |
 | [kernel_workflow](kernel_workflow/) | Single kernel | Latency / speedup of a single AMD GPU kernel (Triton, HIP, CK, FlyDSL, …) |
 
-> **e2e_workflow is the headline.** It raises the serving throughput of a real model by triaging hot
-> kernels and pulling levers cheapest-first, then *recursively* calls the single-kernel kernel_workflow to
-> author/optimize the kernels worth fixing. If you only want to speed up one kernel, use kernel_workflow directly.
+Use e2e_workflow to raise a whole model's serving throughput: it triages hot kernels, pulls the cheapest levers
+first, and recursively calls kernel_workflow for the kernels worth fixing. Use kernel_workflow on its own to
+optimize a single kernel.
 
 ---
 
