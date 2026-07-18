@@ -15,7 +15,11 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-$WS/InferenceX}"
 HF_LOGS="${HF_LOGS:-$WS/geak_runtime}"
 CLAUDE_SETUP="${CLAUDE_SETUP:-$CI_DIR/preflight/claude_setup.sh}"
 MODELS_TSV="${MODELS_TSV:-$CI_DIR/models.tsv}"
-DOCKER_SELECT="${DOCKER_SELECT:-$HF_LOGS/docker_select.log}"
+# Repo-tracked image map (ci/docker_select.log). Falls back to the legacy
+# workspace copy ($HF_LOGS/docker_select.log) only if the repo file is missing.
+if [ -n "${DOCKER_SELECT:-}" ]; then :;
+elif [ -f "$CI_DIR/docker_select.log" ]; then DOCKER_SELECT="$CI_DIR/docker_select.log";
+else DOCKER_SELECT="$HF_LOGS/docker_select.log"; fi
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 die() { log "ERROR: $*"; exit "${2:-1}"; }
@@ -127,22 +131,43 @@ fmt_slurm_time() {
   printf '%d:%02d:%02d' $((s/3600)) $(((s%3600)/60)) $((s%60))
 }
 
+# Detect the GPU arch bucket used to pick a docker_select.log line.
+# Returns MI355 (gfx950 / MI35x) or MI300 (gfx942/gfx90a / MI30x). Honors a
+# GEAK_GPU_ARCH override; auto-detects via rocminfo when present; defaults to
+# MI355 (this SPUR cluster's nodes are gfx950). resolve_image runs on the
+# compute-node host, before the container starts.
+detect_gpu_arch() {
+  if [ -n "${GEAK_GPU_ARCH:-}" ]; then echo "$GEAK_GPU_ARCH"; return; fi
+  local rocminfo_bin gfx
+  rocminfo_bin="$(command -v rocminfo 2>/dev/null || true)"
+  [ -z "$rocminfo_bin" ] && [ -x /opt/rocm/bin/rocminfo ] && rocminfo_bin=/opt/rocm/bin/rocminfo
+  if [ -n "$rocminfo_bin" ]; then
+    gfx="$("$rocminfo_bin" 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | head -1)"
+  fi
+  case "$gfx" in
+    gfx950)          echo MI355 ;;
+    gfx942|gfx90a)   echo MI300 ;;
+    *)               echo "${GEAK_GPU_ARCH_DEFAULT:-MI355}" ;;   # this cluster = gfx950
+  esac
+}
+
 # --- pick container image for a framework (docker_select.log) ---
 # docker_select.log lines look like:  "<framework> (<arch...>): <image>"
-# We treat this box as MI300, so prefer the MI300 line; the vllm image serves both.
-# Override entirely with: IMAGE=<repo:tag> run_local.sh ...
+# Prefer the line whose arch list contains the detected GPU arch; else fall back
+# to the first line for the framework. Override entirely with: IMAGE=<repo:tag>.
 resolve_image() {
   local fw="$1"
   if [ -n "${IMAGE:-}" ]; then echo "$IMAGE"; return; fi
-  local img
-  img=$(awk -F': ' -v f="$fw" '
+  local arch img
+  arch="$(detect_gpu_arch)"
+  img=$(awk -F': ' -v f="$fw" -v a="$arch" '
     { name=$1; sub(/ *\(.*/,"",name) }
     name==f {
-      if (index($1,"MI300")) { print $2; exit }   # prefer MI300 line
-      if (!c) c=$2                                 # else remember first match
+      if (index($1,a)) { print $2; found=1; exit }  # prefer the detected-arch line
+      if (!c) c=$2                                   # else remember first match
     }
-    END { if (c) print c }
+    END { if (!found && c) print c }                 # exit falls through to END
   ' "$DOCKER_SELECT")
-  [ -n "$img" ] || die "no image for framework=$fw in $DOCKER_SELECT (or pass IMAGE=)"
+  [ -n "$img" ] || die "no image for framework=$fw (arch=$arch) in $DOCKER_SELECT (or pass IMAGE=)"
   echo "$img"
 }
