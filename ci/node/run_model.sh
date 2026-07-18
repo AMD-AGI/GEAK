@@ -4,7 +4,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
-source "$HERE/lib.sh"
+source "$HERE/../lib.sh"
 
 MODEL_KEY="${1:?usage: run_model.sh <model_key> [--dry-run]}"
 DRY="${2:-}"

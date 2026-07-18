@@ -1,1 +1,32 @@
-Qwen-Qwen3-8B	/home/ethany/models/Qwen3-8B	vllm
+# CI model enrollment registry.  TAB-separated.  '#' lines and blanks ignored.
+#
+# Columns:
+#   1  model_key   folder name under geak_runtime/ (also the handoff dir)
+#   2  hf_repo     HuggingFace repo id for auto-download of weights, or '-' if
+#                  weights must be pre-staged on the cluster (no auto-download)
+#   3  tier        'smoke' -> used by the l1-ci-smoke L1 smoke (single model)
+#                  'verify'-> used only by the l1-ci-full full matrix
+#                  (the smoke model is ALSO part of the full matrix)
+#
+# framework (vllm/sglang) and tp (GPU count) are NOT listed here — they are the
+# single source of truth in each model's handoff.json and read from there.
+#
+# Enrollment is intentionally limited to models with FULL GEAK input material
+# (handoff + launch_recipe + tracelens + torch_trace) per geak_ci_workspace/TABLE.md.
+# Add a row here only once a model's material is complete.
+#
+# model_key	hf_repo	tier
+# --- Currently enrolled: ONLY models whose weights are already staged locally
+#     (symlinked under $HF_MODELS_DIR -> /shared_nfs). CI never auto-downloads
+#     (stage_weights requires GEAK_ALLOW_DOWNLOAD=1), so keep this list to models
+#     with local weights or the job will fail fast at weight resolution.
+Qwen-Qwen3-8B	Qwen/Qwen3-8B	smoke
+mistralai-Mixtral-8x7B-Instruct-v0.1	mistralai/Mixtral-8x7B-Instruct-v0.1	verify
+openai-gpt-oss-120b	openai/gpt-oss-120b	verify
+#
+# --- Temporarily DISABLED: no local weights yet. Re-enable a row once its
+#     weights are staged under $HF_MODELS_DIR/<model_key> (and, for the '-' rows,
+#     once a source is available). Enabling as-is would try to download / fail.
+# NousResearch-Llama-2-7b-hf	NousResearch/Llama-2-7b-hf	verify
+# MiniMaxAI-MiniMax-M2.7	-	verify
+# Qwen-Qwen3-Next-80B-A3B-Instruct	-	verify

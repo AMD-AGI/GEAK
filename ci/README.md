@@ -4,7 +4,8 @@ Local/self-hosted CI for running the GEAK ("perfskills") end-to-end kernel
 optimization workflow on a ROCm GPU box, exactly the way Hyperloom's
 `KERNEL_AGENT` phase launches it (`interface/run_e2e.py`).
 
-Everything is driven from `ci/run_local.sh`. A run:
+A single per-node run is driven from `ci/node/run_local.sh` (on the cluster it is
+launched by `ci/dispatch/run_matrix.sh` → `ci/dispatch/slurm_job.sh`). A run:
 
 1. resolves the container image + model weights for a model key,
 2. **GPU health gate**: a host-side D-state scan (`gpu_dstate_check.sh`) bails if
@@ -43,19 +44,98 @@ e.g. `/home/ethany/models/Qwen3-8B`); that dir is same-path bind-mounted too.
 
 ## Files
 
+The tree is grouped by responsibility:
+
+```
+ci/
+  lib.sh  models.tsv  README.md   # shared config / registry / docs (root)
+  fixtures/                        # committed test fixtures (L0 dry-run)
+  dispatch/                        # jump box -> SPUR cluster orchestration
+  node/                            # what runs INSIDE a SPUR allocation (per node)
+  preflight/                       # gates/prep run before the real workflow
+  monitor/                         # host-side liveness watchdog
+```
+
+**Shared (root)**
+
 | file | role |
 |------|------|
-| `lib.sh` | shared config/helpers: path derivation, model registry, image resolver. Sourced by the others; not run directly. |
-| `models.tsv` | registry: `<model_key>\t<weights_dir>\t<framework>` |
-| `claude_setup.sh` | install + configure Claude Code (global AMD LiteLLM proxy). Re-run every container start (ephemeral fs). |
-| `setup_claude.sh` | Step D: install Claude into `$CLAUDE_HOME`, install `claude_agent_sdk`, probe `claude -p`. |
+| `lib.sh` | shared config/helpers: path derivation, model registry, image resolver, **SPUR config + weights staging + `tp`/framework from handoff**. Sourced by the others; not run directly. |
+| `models.tsv` | **enrollment registry**: `<model_key>\t<hf_repo>\t<tier>` (framework + `tp` come from each `handoff.json`, not here). |
+
+**`dispatch/` — jump box → cluster**
+
+| file | role |
+|------|------|
+| `run_matrix.sh` | **L1 orchestrator (jump box)**: submit one SPUR job per selected model (`smoke`/`verify`/`probe`/explicit), wait, judge, write a pass/fail matrix; red if any fail. `--print` shows the `sbatch` commands without submitting. `probe`/`--probe` = infra-only harness check that stops at the GEAK e2e doorstep. |
+| `slurm_submit.sh` | submit ONE model as a SPUR batch job (allocation derived from `handoff.tp`); prints `<job_id>\t<out_dir>`. |
+| `slurm_job.sh` | SPUR **job body** (runs on the compute node): stage weights, forward the granted GPUs, then `node/run_local.sh`. |
+
+**`node/` — per-node run pipeline (inside the allocation)**
+
+| file | role |
+|------|------|
+| `run_local.sh` | per-node launcher: GPU preflight, background docker GPU run + monitor, `--dry-run` host-only wiring check, or `--probe` (real docker/GPU/weights + Claude, stop before the e2e workflow). Invoked by `dispatch/slurm_job.sh` on the compute node (or directly for local dev). |
+| `run_model.sh` | Step E+F: run ONE model into a timestamped dir, then deterministically judge (status + measured baseline). |
+| `run_geak_e2e.sh` | mirror Hyperloom's `run_e2e.py` launch; patches `exp_root`/`model_path`/`launch_recipe`/`inferencex_path` in the handoff. |
+
+**`preflight/` — gates/prep before the workflow**
+
+| file | role |
+|------|------|
 | `gpu_dstate_check.sh` | host-side GPU-wedge pre-check: scans `/proc` (touches no GPU) for tasks stuck in uninterruptible **D-state** in the amdgpu/kfd path. Runs BEFORE the probe so a hung driver fails fast instead of hanging the probe itself. |
 | `gpu_healthcheck.sh` | GPU preflight probe run INSIDE the framework image: `rocminfo` + a tiny torch matmul on GPU 0. Fast, timeout-capped (`--kill-after` escalates to SIGKILL). |
-| `run_geak_e2e.sh` | mirror Hyperloom's `run_e2e.py` launch; patches `exp_root`/`model_path`/`launch_recipe`/`inferencex_path` in the handoff. |
-| `run_model.sh` | Step E+F: run ONE model into a timestamped dir, then deterministically judge (status + measured baseline). |
+| `setup_claude.sh` | Step D: install Claude into `$CLAUDE_HOME`, install `claude_agent_sdk`, probe `claude -p`. |
+| `claude_setup.sh` | install + configure Claude Code (global AMD LiteLLM proxy). Re-run every container start (ephemeral fs). |
+
+**`monitor/` — liveness watchdog**
+
+| file | role |
+|------|------|
 | `run_monitor.sh` | host-side liveness monitor: every 5 min feeds `run.log` tail to a `claude -p` arbiter; `docker kill`s a confirmed-stuck run. |
 | `monitor_prompt.md` | the monitor's instructions + `VERDICT: CONTINUE\|KILL` output contract. |
-| `run_local.sh` | top-level launcher: GPU preflight, background docker GPU run + monitor, or `--dry-run` host-only wiring check. |
+
+## SPUR / cluster topology
+
+The L1 CI no longer runs on a single GPU box wired to GitHub. Instead:
+
+```
+GitHub PR label (l1-ci-smoke | l1-ci-full)
+        │
+        ▼
+self-hosted runner on the JUMP/LOGIN box  (no GPU here)
+        │  ci/dispatch/run_matrix.sh smoke|verify|probe
+        ▼
+sbatch  ──►  SPUR compute node(s)   (partition amd-spur, MI300x)
+                 │  ci/dispatch/slurm_job.sh   (one model, tp GPUs, on 1 node)
+                 │    • resolve weights from /home/ethany/hf_models (-> /shared_nfs)
+                 │    • ci/node/run_local.sh  → docker → Claude → GEAK e2e → judge
+                 ▼
+        result.json under geak_runtime/<model>/ci_runs/<ts>/
+        │
+        ▼
+run_matrix waits on all jobs, aggregates a pass/fail matrix (red if any fail)
+```
+
+- **GPU count is per model**: `handoff.tp` → `sbatch -G <tp> -N 1` (one node, co-located).
+- **Account/partition/qos**: `amd-primus` / `amd-spur` / `amd-primus-qos` (override via
+  `SPUR_ACCOUNT` / `SPUR_PARTITION` / `SPUR_QOS`). NB the *partition* is `amd-spur`;
+  `amd-primus` is the account **and** the qos.
+- **Weights** come from a per-model_key catalog `$HF_MODELS_DIR` (`/home/ethany/hf_models`);
+  each entry is a dir OR a symlink into shared NFS, e.g.
+  `hf_models/Qwen-Qwen3-8B -> /shared_nfs/huggingface_models/Qwen/Qwen3-8B`. Because the
+  entries are symlinks, `node/run_local.sh` also bind-mounts `$WEIGHTS_EXTRA_MOUNTS`
+  (default `/shared_nfs`, read-only, same-path) so the links — and HF hub-cache blob
+  links (`snapshots/<h>/*.safetensors -> ../../blobs/<h>`) — resolve inside the container.
+  A model absent from the catalog is downloaded from its `models.tsv` `hf_repo` into
+  `$WEIGHTS_CACHE/<model_key>` (default = `$HF_MODELS_DIR`). Verified on a compute node:
+  the catalog symlinks + NFS targets are readable and resolve inside a docker bind-mount.
+- **Env propagation**: SPUR `sbatch --export=ALL` (default) carries the runner's env —
+  including `LITELLM_*` secrets and `WS`/`HF_LOGS`/`INFERENCEX_PATH` — into the job.
+- **Shared-FS requirement**: install the self-hosted runner under a shared path (e.g.
+  `/home/ethany/...`) so the GEAK checkout it produces is readable by the compute node.
+- **Enrollment**: only models with full GEAK material (see `geak_ci_workspace/TABLE.md`)
+  are listed in `models.tsv`; the `verify` matrix runs exactly those.
 
 ## Run topology
 
@@ -136,17 +216,53 @@ HOST (run_local.sh — orchestrator)
 
 ## Usage
 
+### On the SPUR cluster (via the jump box)
+
+```bash
+cd <workspace>/GEAK
+
+# show the sbatch commands WITHOUT submitting (validate wiring, no cluster use)
+bash ci/dispatch/run_matrix.sh smoke  --print
+bash ci/dispatch/run_matrix.sh verify --print
+bash ci/dispatch/run_matrix.sh probe  --print
+
+# L1 PROBE: fast end-to-end HARNESS check. Real SPUR allocation + docker + GPU
+# preflight + image pull + weights mount (+ Claude install), but STOPS at the
+# GEAK e2e doorstep — never runs the (hours-long) workflow. Judged on a probe_ok
+# marker. 'probe' auto-selects the local-weight models (currently the 3 with NFS
+# symlinks). Use this to verify SPUR/docker/weights before spending GPU-hours.
+bash ci/dispatch/run_matrix.sh probe
+# fastest infra-only probe (skip the Claude install step, too):
+GEAK_PROBE_SKIP_CLAUDE=1 bash ci/dispatch/run_matrix.sh probe
+# probe one model / an explicit set:
+bash ci/dispatch/run_matrix.sh Qwen-Qwen3-8B --probe
+
+# L1 smoke: one SPUR job for the tier==smoke model
+bash ci/dispatch/run_matrix.sh smoke  --budget 1800
+
+# L1 verify: one SPUR job per enrolled model, waited on + aggregated
+bash ci/dispatch/run_matrix.sh verify --budget 57600
+
+# a single model as one SPUR job (prints "<job_id>\t<out_dir>")
+bash ci/dispatch/slurm_submit.sh Qwen-Qwen3-8B --budget 1800
+```
+
+### Directly on a GPU node (no SLURM — local dev / debugging)
+
 ```bash
 cd <workspace>/GEAK
 
 # host-only wiring check (no docker/GPU/Claude): validates handoff -> args mapping
-bash ci/run_local.sh Qwen-Qwen3-8B --dry-run
+bash ci/node/run_local.sh Qwen-Qwen3-8B --dry-run
+
+# infra probe (real docker/GPU/weights + Claude, stop before the e2e workflow)
+bash ci/node/run_local.sh Qwen-Qwen3-8B --probe
 
 # real GPU smoke run (30-min budget)
-bash ci/run_local.sh Qwen-Qwen3-8B --budget 1800
+bash ci/node/run_local.sh Qwen-Qwen3-8B --budget 1800
 
 # pin a specific image instead of resolving from docker_select.log
-IMAGE=rocm/vllm-dev:some-gfx950-tag bash ci/run_local.sh Qwen-Qwen3-8B
+IMAGE=rocm/vllm-dev:some-gfx950-tag bash ci/node/run_local.sh Qwen-Qwen3-8B
 ```
 
 Outputs land in `geak_runtime/<model_key>/ci_runs/<timestamp>/`:
@@ -195,12 +311,31 @@ unwatched, protected by the workflow's wall-clock cap).
 | `WS` | `GEAK_ROOT/..` | workspace root |
 | `INFERENCEX_PATH` | `$WS/InferenceX` | bench client checkout (empty = native bench) |
 | `HF_LOGS` | `$WS/geak_runtime` | per-model dataset root |
-| `MODELS_TSV` | `ci/models.tsv` | model registry |
+| `MODELS_TSV` | `ci/models.tsv` | enrollment registry |
 | `DOCKER_SELECT` | `$HF_LOGS/docker_select.log` | image selection table |
 | `IMAGE` | resolved from `docker_select.log` | override the container image |
-| `MODEL_PATH` | from `models.tsv` | override weights dir |
+| `MODEL_PATH` | resolved on node (see below) | override weights dir |
 | `PERFSKILLS_E2E_TIMEOUT_S` | `1800` | workflow wall-clock budget (also via `--budget`) |
 | `LITELLM_API_KEY` / `LITELLM_BASE_URL` | baked defaults in `claude_setup.sh` | Claude auth via the global LiteLLM proxy |
+
+### SPUR / weights overrides
+
+| var | default | meaning |
+|-----|---------|---------|
+| `SPUR_ACCOUNT` | `amd-primus` | sbatch `-A` |
+| `SPUR_PARTITION` | `amd-spur` | sbatch `-p` |
+| `SPUR_QOS` | `amd-primus-qos` | sbatch `--qos`. The default is the reserved (non-preemptible) pool; set `SPUR_QOS=amd-burst-qos` to reach all 282 nodes when the reserved pool is congested — but burst jobs are **preemptible** (fine for short probes, risky for long full-verify runs). |
+| `SPUR_PEND_TIMEOUT_S` | `1800` | `run_matrix.sh`: a job stuck PENDING (never placed, e.g. `JobHoldMaxRequeue`) is auto-released once, then scancelled after this long and judged FAIL — so a congested pool can't hang the matrix forever. `0` disables. |
+| `SPUR_CPUS_PER_GPU` | `8` | cpus-per-task = `tp * this` |
+| `SPUR_TIME_HEADROOM_S` | `7200` | added to the GEAK budget for the sbatch `-t` wall clock |
+| `SPUR_PROBE_TIME` | `1:00:00` | fixed sbatch `-t` wall clock for `--probe` jobs (image pull + Claude, no e2e) |
+| `GEAK_PROBE_SKIP_CLAUDE` | `0` | `1` = skip the Claude install step in `--probe` (fastest infra-only check) |
+| `HF_MODELS_DIR` | `/home/ethany/hf_models` | per-model_key weights catalog (dirs or symlinks into NFS) |
+| `WEIGHTS_EXTRA_MOUNTS` | `/shared_nfs` | colon-separated NFS roots bind-mounted (ro, same-path) so catalog symlinks resolve in-container |
+| `WEIGHTS_CACHE` | `$HF_MODELS_DIR` | writable dir weights are downloaded into (keyed by model_key) |
+| `GEAK_ALLOW_DOWNLOAD` | `0` | `1` = allow `stage_weights` to auto-download from HF when local weights are absent. Default `0` = CI runs local-weight models only and fails fast otherwise (no silent multi-GB pulls). |
+| `GEAK_MATRIX_POLL_S` | `60` | `run_matrix.sh` queue poll interval |
+| `SPUR_DRYRUN` | `0` | `1` = print sbatch commands instead of submitting (same as `--print`) |
 
 ## Notes
 

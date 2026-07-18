@@ -36,11 +36,11 @@
 # =============================================================================
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"          # <ws>/GEAK/ci
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"          # <ws>/GEAK/ci/node
 MODEL_DIR="${1:?usage: run_geak_e2e.sh <model_dir> [--dry-run]}"
 DRY="${2:-}"
 
-GEAK_ROOT="${GEAK_ROOT:-$(dirname "$HERE")}"                   # <ws>/GEAK
+GEAK_ROOT="${GEAK_ROOT:-$(cd "$HERE/../.." && pwd)}"          # <ws>/GEAK
 RUNNER="$GEAK_ROOT/interface/run_e2e.py"
 [ -f "$RUNNER" ] || { echo "run_e2e.py not found at $RUNNER (set GEAK_ROOT)"; exit 2; }
 

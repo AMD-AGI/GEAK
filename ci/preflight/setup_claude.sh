@@ -5,7 +5,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
-source "$HERE/lib.sh"
+source "$HERE/../lib.sh"
 
 : "${CLAUDE_HOME:?set CLAUDE_HOME (e.g. <out_dir>/claude)}"
 mkdir -p "$CLAUDE_HOME"

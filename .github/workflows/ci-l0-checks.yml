@@ -5,13 +5,13 @@ name: CI L0 — checks
 # no secrets. The expensive GPU e2e lives in the self-hosted L1 workflow.
 
 on:
-  # v4 line only — never run on main (that's the separate GEAK v3 product line).
+  # The v4 line now lives on `main` (the default branch), so CI gates main.
   push:
-    branches: ["GEAK_v4", "ci/**"]
+    branches: ["main", "ci/**"]
   pull_request:
-    # NOTE: ci/** is TEMPORARY (self-test via a PR into ci/GEAK_v4). Revert to
-    # just ["GEAK_v4"] before real use.
-    branches: ["GEAK_v4", "ci/**"]
+    # NOTE: ci/** is TEMPORARY (self-test via a PR whose base is a ci/** branch).
+    # Revert to just ["main"] before real use.
+    branches: ["main", "ci/**"]
 
 # Supersede in-flight runs for the same ref (a new push cancels the old run).
 concurrency:
