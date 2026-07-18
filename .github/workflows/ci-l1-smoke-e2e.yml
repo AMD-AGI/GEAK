@@ -56,7 +56,9 @@ env:
   LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
   # run_matrix.sh records each submitted SPUR job id here; the cleanup step reads
   # it to scancel orphans if this GitHub job is cancelled or times out.
-  SPUR_JOBS_FILE: ${{ runner.temp }}/spur_jobs_${{ github.run_id }}.txt
+  # NB: use github.workspace (NOT runner.temp) — the `runner` context is not
+  # available in workflow-level env: and makes the whole workflow fail to compile.
+  SPUR_JOBS_FILE: ${{ github.workspace }}/.spur_jobs_${{ github.run_id }}.txt
 
 jobs:
   probe:

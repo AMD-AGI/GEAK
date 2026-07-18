@@ -316,7 +316,7 @@ unwatched, protected by the workflow's wall-clock cap).
 | `IMAGE` | resolved from `docker_select.log` | override the container image |
 | `MODEL_PATH` | resolved on node (see below) | override weights dir |
 | `PERFSKILLS_E2E_TIMEOUT_S` | `1800` | workflow wall-clock budget (also via `--budget`) |
-| `LITELLM_API_KEY` / `LITELLM_BASE_URL` | baked defaults in `claude_setup.sh` | Claude auth via the global LiteLLM proxy |
+| `LITELLM_API_KEY` / `LITELLM_BASE_URL` | **required** (no default; from CI secrets or local export) | Claude auth via the global LiteLLM proxy. `claude_setup.sh` errors if unset — nothing is hardcoded. |
 
 ### SPUR / weights overrides
 
