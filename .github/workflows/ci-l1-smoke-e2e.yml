@@ -93,9 +93,25 @@ jobs:
       (github.event_name == 'workflow_dispatch' && github.event.inputs.tier == 'smoke')
       || github.event.label.name == 'l1-ci-smoke'
     runs-on: self-hosted
-    # Cap = per-model budget + submit/queue/pull/install headroom. The real per-run
-    # wall clock is enforced by the SPUR job's -t and GEAK's own budget.
-    timeout-minutes: 240
+    # Smoke uses the SAME budget + wall as full verify (a single-model full run), so
+    # it isn't cut short mid-optimization.
+    #
+    # timeout-minutes is a BACKSTOP, not the real bound. The authoritative per-run
+    # limits live in the harness itself and always produce a verdict + clean teardown:
+    #   - queue wait  : SPUR_PEND_TIMEOUT_S   (run_matrix.sh, default 1800s = 30 min)
+    #                   -> scancel + FAIL if no node is acquired in time
+    #   - run wall    : SPUR -t = budget + SPUR_TIME_HEADROOM_S
+    #                   = 57600 + 7200 = 64800s = 1080 min
+    #                   -> run_local.sh watchdog docker-kills the container ~5 min
+    #                      before this and writes timeout.json (judged FAIL)
+    # This cap must sit safely ABOVE the worst-case wall-clock the harness can take:
+    #   worst case = pend wait (30) + run wall (1080) + submit/pull/judge (~30) = ~1140 min
+    # We set 1440 min (24h) to leave generous headroom so GitHub NEVER pre-empts a
+    # legitimate run (which would falsely fail it and need a re-trigger). It stays
+    # finite on purpose: if the harness itself ever hangs, this bounds the blast
+    # radius on the single self-hosted runner to ~1 day instead of forever.
+    # To resize: keep it >= SPUR_PEND_TIMEOUT_S/60 + (budget + SPUR_TIME_HEADROOM_S)/60 + ~30.
+    timeout-minutes: 1440
     steps:
       - name: Checkout code under test
         uses: actions/checkout@v4
@@ -107,7 +123,7 @@ jobs:
           test -d "$HF_LOGS" || { echo "::error::missing dataset dir $HF_LOGS"; exit 1; }
       - name: Submit + wait L1 smoke
         run: |
-          BUDGET="${{ github.event.inputs.budget_s || '1800' }}"
+          BUDGET="${{ github.event.inputs.budget_s || '57600' }}"
           bash ci/dispatch/run_matrix.sh smoke --budget "$BUDGET"
       # Backstop: run_matrix.sh scancels on graceful SIGTERM, but if it was
       # SIGKILLed (hard timeout) this cleans up any SPUR jobs it had submitted.
@@ -125,8 +141,23 @@ jobs:
       (github.event_name == 'workflow_dispatch' && github.event.inputs.tier == 'verify')
       || github.event.label.name == 'l1-ci-full'
     runs-on: self-hosted
-    # Full matrix fans out one SPUR job per model and waits on all of them.
-    timeout-minutes: 1080
+    # Full matrix fans out one SPUR job per model and waits on all of them. The jobs
+    # run CONCURRENTLY, so the wall clock ~= a single run (NOT the sum of models).
+    #
+    # timeout-minutes is a BACKSTOP, not the real bound (same rationale as `smoke`).
+    # The authoritative limits are enforced inside the harness and always yield a
+    # verdict + clean teardown:
+    #   - queue wait  : SPUR_PEND_TIMEOUT_S   (run_matrix.sh, default 1800s = 30 min,
+    #                   applied per model)    -> scancel + FAIL if no node in time
+    #   - run wall    : SPUR -t = budget + SPUR_TIME_HEADROOM_S
+    #                   = 57600 + 7200 = 64800s = 1080 min (per model, in parallel)
+    #                   -> run_local.sh watchdog docker-kills each container ~5 min
+    #                      before its -t and writes timeout.json (judged FAIL)
+    # Worst-case wall (parallel) = pend wait (30) + run wall (1080) + submit/judge (~30)
+    #   = ~1140 min; we set 1440 min (24h) so GitHub never pre-empts a valid run.
+    # Kept finite so a hung harness can't block the single self-hosted runner forever.
+    # To resize: keep it >= SPUR_PEND_TIMEOUT_S/60 + (budget + SPUR_TIME_HEADROOM_S)/60 + ~30.
+    timeout-minutes: 1440
     steps:
       - name: Checkout code under test
         uses: actions/checkout@v4
@@ -138,9 +169,7 @@ jobs:
           test -d "$HF_LOGS" || { echo "::error::missing dataset dir $HF_LOGS"; exit 1; }
       - name: Submit + wait L1 verify matrix
         run: |
-          # TEMPORARY: shortened to 1800s (30min) for first real end-to-end validation
-          # of the full 3-model matrix. RESTORE to '57600' for production full runs.
-          BUDGET="${{ github.event.inputs.budget_s || '1800' }}"
+          BUDGET="${{ github.event.inputs.budget_s || '57600' }}"
           bash ci/dispatch/run_matrix.sh verify --budget "$BUDGET"
       # Backstop: run_matrix.sh scancels on graceful SIGTERM, but if it was
       # SIGKILLed (hard timeout) this cleans up any SPUR jobs it had submitted.

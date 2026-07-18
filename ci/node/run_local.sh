@@ -202,6 +202,27 @@ docker run --rm --name "$CONTAINER_NAME" \
   "$IMAGE" -lc "$CONTAINER_CMD" &
 DOCKER_PID=$!
 
+# Hard-timeout watchdog (non-probe): proactively `docker kill` the container a bit
+# BEFORE SLURM's wall clock (-t). Rationale: SLURM sends SIGTERM then SIGKILL after
+# a short grace; SIGKILL can't be trapped, so relying on our signal trap alone can
+# still orphan the container (it's owned by the host dockerd, not the job cgroup).
+# Killing ourselves ~GEAK_KILL_BUFFER_S early guarantees a clean, supervised cut.
+# GEAK_HARD_TIMEOUT_S overrides; matches slurm_submit's WALL = budget + headroom.
+WATCHDOG_PID=""
+if [ "$PROBE" != "1" ]; then
+  KILL_BUFFER_S="${GEAK_KILL_BUFFER_S:-300}"
+  HARD_TIMEOUT_S="${GEAK_HARD_TIMEOUT_S:-$(( BUDGET + ${SPUR_TIME_HEADROOM_S:-7200} - KILL_BUFFER_S ))}"
+  [ "$HARD_TIMEOUT_S" -lt 60 ] && HARD_TIMEOUT_S=60
+  log "hard-timeout watchdog armed: ${HARD_TIMEOUT_S}s (then docker kill $CONTAINER_NAME)"
+  (
+    sleep "$HARD_TIMEOUT_S"
+    echo "::error::hard timeout (${HARD_TIMEOUT_S}s) reached — killing container $CONTAINER_NAME to avoid an orphaned GPU run" >&2
+    printf '{"status":"timeout","reason":"hard_timeout","hard_timeout_s":%s}\n' "$HARD_TIMEOUT_S" > "$OUT_DIR/timeout.json"
+    docker kill "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  ) &
+  WATCHDOG_PID=$!
+fi
+
 # Start the host-side liveness monitor (Claude arbiter, runs on the host, never
 # touches the GPU). Set GEAK_MONITOR=0 to disable. It self-exits when the
 # container stops; the EXIT trap tears it down on any early exit of this script.
@@ -211,13 +232,32 @@ if [ "${GEAK_MONITOR:-1}" != "0" ] && [ "$PROBE" != "1" ]; then
   MON_PID=$!
   log "monitor started (pid=$MON_PID, container=$CONTAINER_NAME)"
 fi
-cleanup() { [ -n "$MON_PID" ] && kill "$MON_PID" 2>/dev/null || true; }
+# IMPORTANT: also `docker kill` the container. Containers are owned by the host
+# dockerd, NOT this job's SLURM cgroup, so a wall-clock timeout / scancel SIGTERM
+# to this script would otherwise leave the container RUNNING (orphaned, holding
+# the GPU) long after the job "ended". `--rm` cleans it up once killed.
+cleanup() {
+  [ -n "$MON_PID" ] && kill "$MON_PID" 2>/dev/null || true
+  [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
+  docker kill "$CONTAINER_NAME" >/dev/null 2>&1 || true
+}
+# On SIGTERM/SIGINT (SLURM wall clock, scancel, or GitHub cancel) tear the
+# container down, then exit non-zero so the run is judged FAIL (not silently orphaned).
+on_signal() { trap - EXIT; log "signal received -> killing container $CONTAINER_NAME"; cleanup; exit 143; }
+trap on_signal TERM INT
 trap cleanup EXIT
 
 RC=0
 wait "$DOCKER_PID" || RC=$?
-trap - EXIT
+trap - EXIT TERM INT
 cleanup
+
+# A watchdog-fired hard timeout must read as FAIL even if docker's own rc looked ok.
+if [ -f "$OUT_DIR/timeout.json" ]; then
+  echo "::error::run hit hard timeout (see timeout.json) — container was killed" >&2
+  log "hard timeout marker present -> $OUT_DIR/timeout.json"
+  [ "$RC" -eq 0 ] && RC=124
+fi
 
 # Probe mode: drop a marker the dispatcher can judge on (no result.json is produced
 # because the e2e workflow never runs).

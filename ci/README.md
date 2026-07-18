@@ -329,6 +329,8 @@ unwatched, protected by the workflow's wall-clock cap).
 | `SPUR_CPUS_PER_GPU` | `8` | cpus-per-task = `tp * this` |
 | `SPUR_TIME_HEADROOM_S` | `7200` | added to the GEAK budget for the sbatch `-t` wall clock |
 | `SPUR_PROBE_TIME` | `1:00:00` | fixed sbatch `-t` wall clock for `--probe` jobs (image pull + Claude, no e2e) |
+| `GEAK_HARD_TIMEOUT_S` | `budget + SPUR_TIME_HEADROOM_S - GEAK_KILL_BUFFER_S` | `run_local.sh` watchdog `docker kill`s the container at this many seconds — a clean, supervised cut BEFORE SLURM's `-t` (writes `timeout.json`, judged FAIL). Prevents orphaned GPU containers on timeout. |
+| `GEAK_KILL_BUFFER_S` | `300` | how far ahead of the SPUR wall clock the watchdog fires (kill before SLURM's untrappable SIGKILL) |
 | `GEAK_PROBE_SKIP_CLAUDE` | `0` | `1` = skip the Claude install step in `--probe` (fastest infra-only check) |
 | `HF_MODELS_DIR` | `/home/ethany/hf_models` | per-model_key weights catalog (dirs or symlinks into NFS) |
 | `WEIGHTS_EXTRA_MOUNTS` | `/shared_nfs` | colon-separated NFS roots bind-mounted (ro, same-path) so catalog symlinks resolve in-container |
