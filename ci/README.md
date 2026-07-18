@@ -349,3 +349,12 @@ unwatched, protected by the workflow's wall-clock cap).
 - The container runs with `--rm`; it's destroyed after each run. The pulled
   image is cached. Everything worth keeping is written to the mounted
   `ci_runs/<timestamp>/` dir.
+- The container runs as **root** and executes GEAK Python from the runner's
+  checkout (bind-mounted). To stop root-owned `__pycache__/*.pyc` from landing in
+  the checkout — which the unprivileged runner then can't delete, failing the next
+  `actions/checkout` clean with `EACCES: permission denied, unlink ...pyc` — the
+  container is run with `PYTHONDONTWRITEBYTECODE=1` and `PYTHONPYCACHEPREFIX`
+  pointed at the run's tmp dir. If you ever hit that EACCES again (e.g. from an
+  older run), the offending dir is root-owned: rename it aside from a dir you own
+  (`mv .../scripts/__pycache__ ~/.ci_pycache_trash/`) or remove it with root via a
+  compute-node container; the jump box has neither docker nor passwordless sudo.

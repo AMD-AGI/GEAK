@@ -197,6 +197,7 @@ docker run --rm --name "$CONTAINER_NAME" \
   -e CLAUDE_HOME="$OUT_DIR/claude" \
   -e PERFSKILLS_E2E_TIMEOUT_S="$BUDGET" \
   -e TMPDIR="$DBG_TMP" \
+  -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPYCACHEPREFIX="$DBG_TMP/pycache" \
   "${GPU_ENV[@]}" \
   --entrypoint bash \
   "$IMAGE" -lc "$CONTAINER_CMD" &
