@@ -4,6 +4,11 @@ Local/self-hosted CI for running the GEAK ("perfskills") end-to-end kernel
 optimization workflow on a ROCm GPU box, exactly the way Hyperloom's
 `KERNEL_AGENT` phase launches it (`interface/run_e2e.py`).
 
+> **Adding a new model or docker image?** See the step-by-step
+> [`ONBOARDING.md`](./ONBOARDING.md) (weights staging, per-model `geak_runtime/`
+> layout incl. the TraceLens-prior/`exp_root` rule, `models.tsv` row, and the
+> `docker_default.json` image map).
+
 A single per-node run is driven from `ci/node/run_local.sh` (on the cluster it is
 launched by `ci/dispatch/run_matrix.sh` → `ci/dispatch/slurm_job.sh`). A run:
 
@@ -31,7 +36,6 @@ are baked in. The workspace just needs to look like this (siblings of the repo):
   GEAK/                 # this repo (contains ci/, interface/, e2e_workflow/)
   InferenceX/           # bench client (cloned separately)
   geak_runtime/         # per-model handoff.json / recipe / tracelens priors (data repo)
-    docker_default.json # fallback image map { framework: { arch: image } } (repo copy: ci/docker_default.json)
     Qwen-Qwen3-8B/
       handoff.json
       baseline_config.with_envs.yaml
@@ -61,7 +65,7 @@ ci/
 | file | role |
 |------|------|
 | `lib.sh` | shared config/helpers: path derivation, model registry, image resolver, **SPUR config + weights staging + `tp`/framework from handoff**. Sourced by the others; not run directly. |
-| `models.tsv` | **enrollment registry**: `<model_key>\t<hf_repo>\t<tier>` (framework + `tp` come from each `handoff.json`, not here). |
+| `models.tsv` | **enrollment registry**: `<model_key>\t<hf_repo>\t<tier>` (framework + `tp` come from each `handoff.json`, not here). See [`ONBOARDING.md`](./ONBOARDING.md) to add one. |
 
 **`dispatch/` — jump box → cluster**
 
@@ -336,7 +340,7 @@ All timeouts / caps / intervals / toggles have their defaults in **`ci/config.sh
 | `INFERENCEX_PATH` | `$WS/InferenceX` | bench client checkout (empty = native bench) |
 | `HF_LOGS` | `$WS/geak_runtime` | per-model dataset root |
 | `MODELS_TSV` | `ci/models.tsv` | enrollment registry |
-| `DOCKER_DEFAULT` | `ci/docker_default.json` (fallback `$HF_LOGS/docker_default.json`) | image selection map |
+| `DOCKER_DEFAULT` | `ci/docker_default.json` | image selection map (override with a path) |
 | `IMAGE` | resolved from `docker_default.json` | override the container image |
 | `MODEL_PATH` | resolved on node (see below) | override weights dir |
 | `PERFSKILLS_E2E_TIMEOUT_S` | `1800` | workflow wall-clock budget (also via `--budget`) |

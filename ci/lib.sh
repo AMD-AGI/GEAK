@@ -5,7 +5,7 @@
 # Paths are DERIVED from this file's location, so the tree just needs to look like:
 #   <workspace>/GEAK/ci/*.sh   (this repo)
 #   <workspace>/InferenceX     (cloned separately)
-#   <workspace>/geak_runtime   (per-model handoff/recipe/tracelens priors + docker_default.json)
+#   <workspace>/geak_runtime   (per-model handoff/recipe/tracelens priors)
 # Any of these can be overridden by exporting the matching env var.
 
 CI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"          # <ws>/GEAK/ci
@@ -18,11 +18,8 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-$WS/InferenceX}"
 HF_LOGS="${HF_LOGS:-$WS/geak_runtime}"
 CLAUDE_SETUP="${CLAUDE_SETUP:-$CI_DIR/preflight/claude_setup.sh}"
 MODELS_TSV="${MODELS_TSV:-$CI_DIR/models.tsv}"
-# Repo-tracked image map (ci/docker_default.json). Falls back to a workspace
-# copy ($HF_LOGS/docker_default.json) only if the repo file is missing.
-if [ -n "${DOCKER_DEFAULT:-}" ]; then :;
-elif [ -f "$CI_DIR/docker_default.json" ]; then DOCKER_DEFAULT="$CI_DIR/docker_default.json";
-else DOCKER_DEFAULT="$HF_LOGS/docker_default.json"; fi
+# Repo-tracked image map (ci/docker_default.json). Override with DOCKER_DEFAULT=<path>.
+DOCKER_DEFAULT="${DOCKER_DEFAULT:-$CI_DIR/docker_default.json}"
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 die() { log "ERROR: $*"; exit "${2:-1}"; }
