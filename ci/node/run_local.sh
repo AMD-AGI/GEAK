@@ -160,8 +160,9 @@ CONTAINER_NAME="geak_l1_${MODEL_KEY//[^A-Za-z0-9_.-]/_}_${RUN_TS}"
 # which is wrong when the code under test is a checkout outside $WS.
 #
 # Launched in the BACKGROUND so a host-side liveness monitor (ci/run_monitor.sh)
-# can watch $OUT_DIR/run.log and kill this container if the run wedges (dead GPU,
-# NFS stall, OOM loop) instead of hanging until the job's wall-clock timeout. We
+# can watch the run (freshest artifact mtime under $OUT_DIR + GPU/CPU idle) and
+# kill this container if the run wedges (dead GPU, NFS stall, OOM loop) instead of
+# hanging until the job's wall-clock timeout. We
 # then `wait` for the real exit code so the CI step reports pass/fail correctly.
 # In-container command. Normal: install Claude then run the GEAK e2e workflow.
 # Probe: verify weights are readable in-container, (optionally) install Claude,

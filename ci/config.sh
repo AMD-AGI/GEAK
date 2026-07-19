@@ -58,9 +58,12 @@ export GEAK_SKIP_DSTATE_CHECK="${GEAK_SKIP_DSTATE_CHECK:-0}"      # 1 = skip GPU
 # Host-side liveness monitor (run_monitor.sh) watches a live run and kills it
 # early if it WEDGES (vs limping to the wall clock). Two modes (GEAK_MONITOR_MODE):
 #   * stall  — deterministic, NO deps: kills only on POSITIVE evidence of a wedge
-#              (log flat AND GPUs idle AND container CPU idle, sustained). A long
-#              silent bench/build/profile keeps GPU or CPU busy, so it is NEVER
-#              killed; if GPU util can't be measured it degrades to warn-only.
+#              (NO run-dir artifact written AND GPUs idle AND container CPU idle,
+#              sustained). Activity = freshest mtime across OUT_DIR (server.log,
+#              bench, profile, claude session/cache), NOT the run.log startup
+#              banner. A long silent bench/build/profile still writes files and
+#              keeps GPU or CPU busy, so it is NEVER killed; if GPU util can't be
+#              measured it degrades to warn-only.
 #   * claude — LLM arbiter (needs the claude CLI): reads the log tail and votes.
 # Default OFF regardless of mode. Enable with GEAK_MONITOR=1 (stall mode needs no
 # claude; claude mode needs the CLI on the dispatched GPU host).
@@ -74,16 +77,17 @@ export GEAK_DSTATE_SAMPLE_GAP_S="${GEAK_DSTATE_SAMPLE_GAP_S:-3}"  # gap between 
 
 # ---- Host-side liveness monitor (run_monitor.sh) ----------------------------
 export GEAK_MONITOR_INTERVAL_S="${GEAK_MONITOR_INTERVAL_S:-300}"       # normal poll cadence
-export GEAK_MONITOR_RECHECK_S="${GEAK_MONITOR_RECHECK_S:-60}"          # faster re-poll while confirming a KILL
+export GEAK_MONITOR_RECHECK_S="${GEAK_MONITOR_RECHECK_S:-300}"         # re-poll gap while confirming a KILL (must span a normal between-phase idle gap, not just a blip)
 export GEAK_MONITOR_CONFIRM="${GEAK_MONITOR_CONFIRM:-2}"               # consecutive KILL votes required to act
 export GEAK_MONITOR_TAIL_LINES="${GEAK_MONITOR_TAIL_LINES:-300}"       # log tail lines fed to the arbiter
 export GEAK_MONITOR_CALL_TIMEOUT_S="${GEAK_MONITOR_CALL_TIMEOUT_S:-180}" # cap a single claude call (claude mode)
 export GEAK_MONITOR_STARTUP_GRACE_S="${GEAK_MONITOR_STARTUP_GRACE_S:-300}" # grace before the first judgement
 export GEAK_MONITOR_MODEL="${GEAK_MONITOR_MODEL:-claude-opus-4-8}"     # arbiter model (claude mode)
 # ---- Deterministic stall watchdog (run_monitor.sh MODE=stall) ---------------
-# A wedge is declared ONLY when the log has been flat AND both GPU and CPU idle
-# for GEAK_STALL_KILL_S, confirmed GEAK_MONITOR_CONFIRM times. Generous by design
-# so a long silent-but-working leg (bench/build/profile) is never killed.
-export GEAK_STALL_KILL_S="${GEAK_STALL_KILL_S:-3600}"                 # flat+idle duration before a kill is considered (60 min)
+# A wedge is declared ONLY when NO artifact under OUT_DIR has been written AND both
+# GPU and CPU are idle for GEAK_STALL_KILL_S, confirmed GEAK_MONITOR_CONFIRM times.
+# Generous by design so a long silent-but-working leg (bench/build/profile) — which
+# still writes files — is never killed.
+export GEAK_STALL_KILL_S="${GEAK_STALL_KILL_S:-3600}"                 # no-write + idle duration before a kill is considered (60 min)
 export GEAK_STALL_GPU_UTIL_PCT="${GEAK_STALL_GPU_UTIL_PCT:-5}"        # max GPU util% counted as "idle"
 export GEAK_STALL_CPU_PCT="${GEAK_STALL_CPU_PCT:-5}"                  # container CPU% counted as "idle"

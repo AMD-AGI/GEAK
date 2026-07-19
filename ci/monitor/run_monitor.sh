@@ -9,12 +9,16 @@
 #
 # TWO MODES (GEAK_MONITOR_MODE):
 #   * stall  — DETERMINISTIC, no deps. Declares a wedge ONLY on positive evidence
-#              of no work: the log is flat AND the GPUs are idle AND the container
-#              CPU is idle, sustained for GEAK_STALL_KILL_S and confirmed CONFIRM
-#              times. A long silent-but-working leg (bench/build/profile) keeps GPU
-#              or CPU busy, so it is NEVER killed. If GPU utilisation cannot be
-#              measured (no rocm-smi/amd-smi) it CANNOT prove "idle" and so
-#              degrades to warn-only — it will never kill on a guess.
+#              of no work: NO run artifact under $OUT_DIR has been written AND the
+#              GPUs are idle AND the container CPU is idle, sustained for
+#              GEAK_STALL_KILL_S and confirmed CONFIRM times. Activity is the
+#              freshest mtime across the whole run dir (server.log, bench_runs,
+#              profile/, ix_client/, claude session+cache) — NOT the run.log
+#              banner, which is written once at startup and then never again. A
+#              long silent-but-working leg (bench/build/profile) still writes files
+#              and keeps GPU or CPU busy, so it is NEVER killed. If GPU utilisation
+#              cannot be measured (no rocm-smi/amd-smi) it CANNOT prove "idle" and
+#              so degrades to warn-only — it will never kill on a guess.
 #   * claude — LLM arbiter. Every INTERVAL feeds the log tail + factual context to
 #              a tool-less `claude -p` session that votes CONTINUE/KILL.
 #
@@ -87,6 +91,19 @@ container_cpu_pct() {
   printf '%.0f\n' "$p" 2>/dev/null || echo ""
 }
 
+# Freshest activity: newest mtime (epoch, integer) among the run's REAL artifacts
+# under $OUT_DIR. The single run.log is only a pre-container startup banner — the
+# live progress is server.log, bench_runs*.jsonl, profile/, ix_client/, and the
+# claude session/cache tree. We EXCLUDE the monitor's own outputs (monitor.log,
+# monitor_verdict.json) and the host stdout (slurm.out, which carries our own
+# stderr) so the watchdog never mistakes its OWN heartbeat for run progress.
+# Echoes "" when nothing is found yet (treated as "no evidence" by the caller).
+freshest_activity_epoch() {
+  find "$OUT_DIR" -type f \
+    ! -name monitor.log ! -name monitor_verdict.json ! -name slurm.out \
+    -printf '%T@\n' 2>/dev/null | cut -d. -f1 | sort -n | tail -1
+}
+
 # ---- mode preflight --------------------------------------------------------
 if [ "$MODE" = claude ]; then
   CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
@@ -123,20 +140,26 @@ $tail_txt
   reason="$(printf '%s' "$resp" | grep -iE 'REASON:' | tail -n1 | sed -E 's/.*REASON:[[:space:]]*//')"
 }
 
-decide_stall() {  # args: delta age_s ; uses stall_start_epoch (global)
-  local delta="$1" age_s="$2" now gpu cpu stall_s
+decide_stall() {  # args: delta age_s (unused: activity is measured from OUT_DIR mtimes)
+  local now fresh idle_s gpu cpu
   now="$(date +%s)"
-  # Progress? any log growth resets the stall clock.
-  if [ "$delta" -gt 0 ]; then stall_start_epoch="$now"; fi
-  stall_s=$(( now - stall_start_epoch ))
-  verdict="CONTINUE"; reason="log active (Δ=${delta}B, idle ${stall_s}s < ${STALL_KILL_S}s)"
-  [ "$stall_s" -ge "$STALL_KILL_S" ] || return 0
+  # Idle = seconds since the freshest REAL artifact write anywhere under OUT_DIR.
+  # ANY write (server.log, bench, profile, ix_client, claude session/cache) resets
+  # the clock — so a between-phase GPU-idle gap (e.g. bench done -> Claude analysis)
+  # is correctly seen as "working", not a wedge. Falls back to run start if nothing
+  # has been written yet (still inside STARTUP_GRACE_S in practice).
+  fresh="$(freshest_activity_epoch)"
+  [ -n "$fresh" ] || fresh="$start_epoch"
+  idle_s=$(( now - fresh )); [ "$idle_s" -lt 0 ] && idle_s=0
+  verdict="CONTINUE"; reason="active (idle ${idle_s}s < ${STALL_KILL_S}s)"
+  [ "$idle_s" -ge "$STALL_KILL_S" ] || return 0
 
-  # Log has been flat long enough — now REQUIRE positive idle evidence before killing.
+  # No artifact has changed for STALL_KILL_S — now REQUIRE positive idle evidence
+  # (idle GPU AND idle CPU) before declaring a wedge.
   gpu="$(gpu_util_max)"; cpu="$(container_cpu_pct)"
   if [ -z "$gpu" ]; then
     verdict="CONTINUE"
-    reason="log flat ${stall_s}s but GPU util unmeasurable (no rocm-smi/amd-smi) -> cannot prove wedge; warn-only"
+    reason="no writes ${idle_s}s but GPU util unmeasurable (no rocm-smi/amd-smi) -> cannot prove wedge; warn-only"
     log "WARN: $reason"
     return 0
   fi
@@ -145,15 +168,15 @@ decide_stall() {  # args: delta age_s ; uses stall_start_epoch (global)
   { [ -n "$cpu" ] && [ "$cpu" -le "$STALL_CPU_PCT" ]; } && cpu_idle=1
   if [ "$gpu_idle" = 1 ] && [ "$cpu_idle" = 1 ]; then
     verdict="KILL"
-    reason="wedge: log flat ${stall_s}s, GPU ${gpu}%<=${STALL_GPU_PCT}% idle, CPU ${cpu:-?}%<=${STALL_CPU_PCT}% idle"
+    reason="wedge: no artifact writes for ${idle_s}s, GPU ${gpu}%<=${STALL_GPU_PCT}% idle, CPU ${cpu:-?}%<=${STALL_CPU_PCT}% idle"
   else
     verdict="CONTINUE"
-    reason="log flat ${stall_s}s but still working (GPU ${gpu}%, CPU ${cpu:-unknown}%)"
+    reason="no writes ${idle_s}s but still working (GPU ${gpu}%, CPU ${cpu:-unknown}%)"
   fi
 }
 
 log "started: mode=$MODE container=$CONTAINER interval=${INTERVAL}s confirm=${CONFIRM} log=$LOG${MODEL:+ model=$MODEL}"
-[ "$MODE" = stall ] && log "stall thresholds: kill after ${STALL_KILL_S}s flat AND GPU<=${STALL_GPU_PCT}% AND CPU<=${STALL_CPU_PCT}%"
+[ "$MODE" = stall ] && log "stall thresholds: kill after ${STALL_KILL_S}s with NO artifact writes under $OUT_DIR AND GPU<=${STALL_GPU_PCT}% AND CPU<=${STALL_CPU_PCT}%"
 
 # Wait for the container to come up before treating "not running" as "finished",
 # so we don't exit during the (healthcheck + image pull) startup window.
