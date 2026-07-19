@@ -29,6 +29,7 @@ source "$HERE/../lib.sh"
 SEL="${1:?usage: run_matrix.sh <smoke|verify|probe|MODEL...> [--budget N] [--poll N] [--probe] [--print]}"; shift || true
 BUDGET="$PERFSKILLS_E2E_TIMEOUT_S"   # defaults live in ci/config.sh
 POLL="$GEAK_MATRIX_POLL_S"
+LOG_S="$GEAK_MATRIX_LOG_S"
 PRINT="$SPUR_DRYRUN"
 PROBE=0
 MODELS=()
@@ -152,10 +153,18 @@ poll_jobs() {  # return 0 while ANY of our jobs is still in the queue
       status+=("$m=${state}($jid)")
     fi
   done
-  log "queue: ${status[*]}"
+  # Decouple log cadence from poll cadence: emit the status line only every
+  # GEAK_MATRIX_LOG_S, but ALWAYS emit immediately when the state string changes
+  # (so transitions are never missed) or on the first poll.
+  local now cur="${status[*]}"
+  now="$(date +%s)"
+  if [ "$cur" != "${LAST_STATUS:-}" ] || [ $(( now - ${LAST_LOG_TS:-0} )) -ge "$LOG_S" ]; then
+    log "queue: $cur"
+    LAST_STATUS="$cur"; LAST_LOG_TS="$now"
+  fi
   return $any
 }
-log "waiting for ${#J_ID[@]} job(s) to finish (poll ${POLL}s; PENDING jobs are waited on indefinitely — cancel by hand on the cluster if one pends too long) ..."
+log "waiting for ${#J_ID[@]} job(s) to finish (poll ${POLL}s, status log every ${LOG_S}s or on state change; PENDING jobs are waited on indefinitely — cancel by hand on the cluster if one pends too long) ..."
 while poll_jobs; do sleep "$POLL"; done
 DONE=1   # jobs are terminal now; the cleanup trap becomes a no-op
 log "no pending or running jobs left; judging results"

@@ -17,10 +17,11 @@
 export PERFSKILLS_E2E_TIMEOUT_S="${PERFSKILLS_E2E_TIMEOUT_S:-57600}"
 
 # ---- Matrix orchestrator (run_matrix.sh) ------------------------------------
-export GEAK_MATRIX_POLL_S="${GEAK_MATRIX_POLL_S:-60}"       # squeue poll cadence while waiting
 # NB: there is intentionally NO pending timeout — run_matrix.sh waits on PENDING
 # jobs indefinitely (only the GitHub timeout-minutes bounds it). Cancel a
 # long-pending job by hand on the cluster if needed.
+export GEAK_MATRIX_POLL_S="${GEAK_MATRIX_POLL_S:-60}"       # squeue poll cadence while waiting (job-completion detection latency)
+export GEAK_MATRIX_LOG_S="${GEAK_MATRIX_LOG_S:-1200}"      # 'queue:' status-line log cadence (20 min); also always logged on state change
 export SPUR_DRYRUN="${SPUR_DRYRUN:-0}"                      # 1 = print sbatch cmds, don't submit (also --print)
 
 # ---- SPUR / SLURM submission (slurm_submit.sh, lib.sh) ----------------------
