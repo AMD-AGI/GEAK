@@ -31,7 +31,7 @@ are baked in. The workspace just needs to look like this (siblings of the repo):
   GEAK/                 # this repo (contains ci/, interface/, e2e_workflow/)
   InferenceX/           # bench client (cloned separately)
   geak_runtime/         # per-model handoff.json / recipe / tracelens priors (data repo)
-    docker_select.log   # "<framework> (<arch>): <image>" lines used to pick the image
+    docker_default.json # fallback image map { framework: { arch: image } } (repo copy: ci/docker_default.json)
     Qwen-Qwen3-8B/
       handoff.json
       baseline_config.with_envs.yaml
@@ -159,7 +159,7 @@ log tails, judges liveness) — independent installs/sessions.
 ```
 HOST (run_local.sh — orchestrator)
 │
-├─ 0. lib.sh resolves: model → framework → IMAGE (docker_select.log), weights dir
+├─ 0. lib.sh resolves: model → framework → IMAGE (docker_default.json), weights dir
 │
 ├─ 1. GPU PREFLIGHT ── docker run (throwaway, ≤120s) ──────────────┐  same image +
 │       • pulls IMAGE if not cached  (this is the image pull)      │  --device flags
@@ -261,7 +261,7 @@ bash ci/node/run_local.sh Qwen-Qwen3-8B --probe
 # real GPU smoke run (30-min budget)
 bash ci/node/run_local.sh Qwen-Qwen3-8B --budget 1800
 
-# pin a specific image instead of resolving from docker_select.log
+# pin a specific image instead of resolving from docker_default.json
 IMAGE=rocm/vllm-dev:some-gfx950-tag bash ci/node/run_local.sh Qwen-Qwen3-8B
 ```
 
@@ -303,6 +303,10 @@ The host-side liveness monitor (`run_monitor.sh`) is on by default; tune via env
 The monitor no-ops gracefully if `claude` isn't on the host PATH (the run proceeds
 unwatched, protected by the workflow's wall-clock cap).
 
+## Tunables — one file
+
+All timeouts / caps / intervals / toggles have their defaults in **`ci/config.sh`** — the single place to change them. It's sourced by `ci/lib.sh` (which every script sources or inherits from) and only `export`s values, so edits there apply everywhere (jump box, SPUR job, and container). Every entry is `${VAR:-default}`, so a one-off env override (CI secret, `--budget`, `FOO=... ci/...`) still wins over the file. The tables below list the same variables with their `config.sh` defaults.
+
 ## Environment overrides
 
 | var | default | meaning |
@@ -312,8 +316,8 @@ unwatched, protected by the workflow's wall-clock cap).
 | `INFERENCEX_PATH` | `$WS/InferenceX` | bench client checkout (empty = native bench) |
 | `HF_LOGS` | `$WS/geak_runtime` | per-model dataset root |
 | `MODELS_TSV` | `ci/models.tsv` | enrollment registry |
-| `DOCKER_SELECT` | `$HF_LOGS/docker_select.log` | image selection table |
-| `IMAGE` | resolved from `docker_select.log` | override the container image |
+| `DOCKER_DEFAULT` | `ci/docker_default.json` (fallback `$HF_LOGS/docker_default.json`) | image selection map |
+| `IMAGE` | resolved from `docker_default.json` | override the container image |
 | `MODEL_PATH` | resolved on node (see below) | override weights dir |
 | `PERFSKILLS_E2E_TIMEOUT_S` | `1800` | workflow wall-clock budget (also via `--budget`) |
 | `LITELLM_API_KEY` / `LITELLM_BASE_URL` | **required** (no default; from CI secrets or local export) | Claude auth via the global LiteLLM proxy. `claude_setup.sh` errors if unset — nothing is hardcoded. |
@@ -322,9 +326,12 @@ unwatched, protected by the workflow's wall-clock cap).
 
 | var | default | meaning |
 |-----|---------|---------|
-| `SPUR_ACCOUNT` | `amd-primus` | sbatch `-A` |
-| `SPUR_PARTITION` | `amd-spur` | sbatch `-p` |
-| `SPUR_QOS` | `amd-primus-qos` | sbatch `--qos`. The default is the reserved (non-preemptible) pool; set `SPUR_QOS=amd-burst-qos` to reach all 282 nodes when the reserved pool is congested — but burst jobs are **preemptible** (fine for short probes, risky for long full-verify runs). |
+| `SPUR_PARTITION` | `amd-spur` | sbatch `-p` (the only partition on this cluster) |
+| `SPUR_ACCOUNT` / `SPUR_QOS` | derived from `SPUR_ACCOUNT_FALLBACK` (i.e. `amd-hyperloom` / `amd-hyperloom-qos`) | sbatch `-A` / `--qos`. Used **only** when auto-select is off (`SPUR_AUTOSELECT=0`) or for `--print` display; with auto-select on they're overwritten per job by `pick_account()`. Export both (with `SPUR_AUTOSELECT=0`) to force a specific pool. |
+| `SPUR_AUTOSELECT` | `1` | `slurm_submit.sh`: before submitting, probe `SPUR_ACCOUNT_CANDIDATES` in order and submit **this** job to the first account/QoS that can place its GPU footprint (`tp`) now — done **per model**, so a `tp=1` job can land on an account a `tp=8` job can't (the cluster has one partition + many idle nodes; the real limit is the per-QoS `QOSGrpNodeLimit`). `0` disables and uses `SPUR_ACCOUNT`/`SPUR_QOS` as-is. |
+| `SPUR_ACCOUNT_CANDIDATES` | `amd-hyperloom:amd-hyperloom-qos amd-general:amd-general-qos amd-primus:amd-primus-qos` | space-separated `account:qos` priority list; probed in order, first that can place the job **now** wins. |
+| `SPUR_ACCOUNT_FALLBACK` | `amd-hyperloom:amd-hyperloom-qos` | where to submit (and pend) when **no** candidate can place the job now. Independent of candidate order, so an account can be both first-choice and the pend-here fallback. |
+| `SPUR_PROBE_WAIT_S` / `SPUR_PROBE_POLL_S` | `24` / `3` | the auto-select probe is a 1-node/**tp-GPU** job (matches the heaviest model), submitted then scancelled; this is how long to watch it before deeming a QoS full, and the poll interval. |
 | `SPUR_PEND_TIMEOUT_S` | `1800` | `run_matrix.sh`: a job stuck PENDING (never placed, e.g. `JobHoldMaxRequeue`) is auto-released once, then scancelled after this long and judged FAIL — so a congested pool can't hang the matrix forever. `0` disables. |
 | `SPUR_CPUS_PER_GPU` | `8` | cpus-per-task = `tp * this` |
 | `SPUR_TIME_HEADROOM_S` | `7200` | added to the GEAK budget for the sbatch `-t` wall clock |

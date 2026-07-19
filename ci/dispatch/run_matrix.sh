@@ -13,8 +13,8 @@
 #   ci/run_matrix.sh <model> [<model> ...]   # explicit list
 #
 # Flags:
-#   --budget SECONDS   per-model GEAK wall-clock budget (default 1800)
-#   --poll SECONDS     poll interval while waiting (default 60)
+#   --budget SECONDS   per-model GEAK wall-clock budget (default: PERFSKILLS_E2E_TIMEOUT_S from ci/config.sh)
+#   --poll SECONDS     poll interval while waiting (default: GEAK_MATRIX_POLL_S from ci/config.sh)
 #   --probe            harness check: real SPUR alloc + docker + GPU + weights
 #                      (+Claude), but STOP at the GEAK e2e doorstep. Judges on a
 #                      probe_ok marker (no e2e/result.json). Implied by 'probe'.
@@ -27,9 +27,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../lib.sh"
 
 SEL="${1:?usage: run_matrix.sh <smoke|verify|probe|MODEL...> [--budget N] [--poll N] [--probe] [--print]}"; shift || true
-BUDGET="${PERFSKILLS_E2E_TIMEOUT_S:-1800}"
-POLL="${GEAK_MATRIX_POLL_S:-60}"
-PRINT="${SPUR_DRYRUN:-0}"
+BUDGET="$PERFSKILLS_E2E_TIMEOUT_S"   # defaults live in ci/config.sh
+POLL="$GEAK_MATRIX_POLL_S"
+PRINT="$SPUR_DRYRUN"
 PROBE=0
 MODELS=()
 case "$SEL" in
@@ -107,7 +107,7 @@ done
 # PENDING (never RUNNING) past SPUR_PEND_TIMEOUT_S — scancel it so it leaves the
 # queue and is judged FAIL, instead of blocking the whole matrix.
 me="$(whoami)"
-PEND_TIMEOUT="${SPUR_PEND_TIMEOUT_S:-1800}"
+PEND_TIMEOUT="$SPUR_PEND_TIMEOUT_S"
 declare -A RELEASED PEND_SINCE
 poll_jobs() {  # return 0 while any of our jobs is still in the queue
   local snap; snap="$(squeue -u "$me" -h -o '%i|%T|%r' 2>/dev/null || true)"

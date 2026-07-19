@@ -32,9 +32,9 @@ on:
         options: ["probe", "smoke", "verify"]
         default: "smoke"
       budget_s:
-        description: "Per-model GEAK wall-clock budget in seconds (PERFSKILLS_E2E_TIMEOUT_S)"
+        description: "Per-model GEAK budget in seconds (PERFSKILLS_E2E_TIMEOUT_S). Leave empty to use the workflow default (env.GEAK_E2E_BUDGET_S)."
         type: string
-        default: "1800"
+        default: ""
 
 # Serialize L1 on this repo — the matrix waits on its SPUR jobs, so we don't want
 # two overlapping label/dispatch events double-submitting to the shared cluster.
@@ -46,6 +46,12 @@ permissions:
   contents: read
 
 env:
+  # Single source of truth for the per-model GEAK budget (PERFSKILLS_E2E_TIMEOUT_S).
+  # Both jobs use `inputs.budget_s || env.GEAK_E2E_BUDGET_S`, so leaving the manual
+  # dispatch field empty (and every label-triggered run) uses this value. Change it
+  # here once. (Input defaults can't reference env, so the dispatch input default is
+  # empty and falls through to this.)
+  GEAK_E2E_BUDGET_S: "57600"
   # Data workspace on the jump box (siblings live here; NOT under the checkout).
   WS: /home/ethany/geak_ci_workspace
   HF_LOGS: /home/ethany/geak_ci_workspace/geak_runtime
@@ -123,7 +129,7 @@ jobs:
           test -d "$HF_LOGS" || { echo "::error::missing dataset dir $HF_LOGS"; exit 1; }
       - name: Submit + wait L1 smoke
         run: |
-          BUDGET="${{ github.event.inputs.budget_s || '57600' }}"
+          BUDGET="${{ github.event.inputs.budget_s || env.GEAK_E2E_BUDGET_S }}"
           bash ci/dispatch/run_matrix.sh smoke --budget "$BUDGET"
       # Backstop: run_matrix.sh scancels on graceful SIGTERM, but if it was
       # SIGKILLed (hard timeout) this cleans up any SPUR jobs it had submitted.
@@ -169,7 +175,7 @@ jobs:
           test -d "$HF_LOGS" || { echo "::error::missing dataset dir $HF_LOGS"; exit 1; }
       - name: Submit + wait L1 verify matrix
         run: |
-          BUDGET="${{ github.event.inputs.budget_s || '57600' }}"
+          BUDGET="${{ github.event.inputs.budget_s || env.GEAK_E2E_BUDGET_S }}"
           bash ci/dispatch/run_matrix.sh verify --budget "$BUDGET"
       # Backstop: run_matrix.sh scancels on graceful SIGTERM, but if it was
       # SIGKILLed (hard timeout) this cleans up any SPUR jobs it had submitted.

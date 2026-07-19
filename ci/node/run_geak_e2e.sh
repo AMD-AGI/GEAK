@@ -21,7 +21,7 @@
 #
 # Optional env overrides:
 #   GEAK_ROOT                 default: the GEAK repo two levels up from this script (ci/..)
-#   PERFSKILLS_E2E_TIMEOUT_S  geak's REAL wall-clock budget in seconds (default 17100 ≈ 4.75h)
+#   PERFSKILLS_E2E_TIMEOUT_S  geak's REAL wall-clock budget in seconds (default in ci/config.sh)
 #   EXP_ROOT                  writable run root; patches handoff.exp_root (default: <model_dir>/repro_out/exp)
 #   MODEL_PATH                real served model dir; patches handoff.model_path (default: keep handoff value)
 #   INFERENCEX_PATH           InferenceX checkout  -> bench_client=inferencex (else geak falls back to native)
@@ -37,6 +37,11 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"          # <ws>/GEAK/ci/node
+# Tunables (incl. PERFSKILLS_E2E_TIMEOUT_S) live in ci/config.sh; source it so
+# this script is self-sufficient even when run standalone (an already-set env
+# value, e.g. forwarded into the container, still wins).
+# shellcheck source=/dev/null
+[ -f "$HERE/../config.sh" ] && source "$HERE/../config.sh"
 MODEL_DIR="${1:?usage: run_geak_e2e.sh <model_dir> [--dry-run]}"
 DRY="${2:-}"
 
@@ -130,7 +135,7 @@ print(f"patched handoff -> {dst}\n  exp_root={h['exp_root']}\n  model_path={h.ge
 PY
 
 # ---- Budget: run_e2e reads PERFSKILLS_E2E_TIMEOUT_S (NOT the CLI flag). Export it. ----
-export PERFSKILLS_E2E_TIMEOUT_S="${PERFSKILLS_E2E_TIMEOUT_S:-17100}"
+export PERFSKILLS_E2E_TIMEOUT_S   # value/default from ci/config.sh
 
 # ---- Claude workflow knobs (defaults already match run_e2e.py) ----
 export PERFSKILLS_CLAUDE_MODEL="${PERFSKILLS_CLAUDE_MODEL:-claude-opus-4-8}"

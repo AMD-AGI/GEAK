@@ -5,21 +5,24 @@
 # Paths are DERIVED from this file's location, so the tree just needs to look like:
 #   <workspace>/GEAK/ci/*.sh   (this repo)
 #   <workspace>/InferenceX     (cloned separately)
-#   <workspace>/geak_runtime   (per-model handoff/recipe/tracelens priors + docker_select.log)
+#   <workspace>/geak_runtime   (per-model handoff/recipe/tracelens priors + docker_default.json)
 # Any of these can be overridden by exporting the matching env var.
 
 CI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"          # <ws>/GEAK/ci
+# All tunables (timeouts / caps / knobs) live in ONE file: ci/config.sh.
+# shellcheck source=/dev/null
+[ -f "$CI_DIR/config.sh" ] && source "$CI_DIR/config.sh"
 GEAK_ROOT="${GEAK_ROOT:-$(dirname "$CI_DIR")}"                   # <ws>/GEAK
 WS="${WS:-$(dirname "$GEAK_ROOT")}"                              # <ws>
 INFERENCEX_PATH="${INFERENCEX_PATH:-$WS/InferenceX}"
 HF_LOGS="${HF_LOGS:-$WS/geak_runtime}"
 CLAUDE_SETUP="${CLAUDE_SETUP:-$CI_DIR/preflight/claude_setup.sh}"
 MODELS_TSV="${MODELS_TSV:-$CI_DIR/models.tsv}"
-# Repo-tracked image map (ci/docker_select.log). Falls back to the legacy
-# workspace copy ($HF_LOGS/docker_select.log) only if the repo file is missing.
-if [ -n "${DOCKER_SELECT:-}" ]; then :;
-elif [ -f "$CI_DIR/docker_select.log" ]; then DOCKER_SELECT="$CI_DIR/docker_select.log";
-else DOCKER_SELECT="$HF_LOGS/docker_select.log"; fi
+# Repo-tracked image map (ci/docker_default.json). Falls back to a workspace
+# copy ($HF_LOGS/docker_default.json) only if the repo file is missing.
+if [ -n "${DOCKER_DEFAULT:-}" ]; then :;
+elif [ -f "$CI_DIR/docker_default.json" ]; then DOCKER_DEFAULT="$CI_DIR/docker_default.json";
+else DOCKER_DEFAULT="$HF_LOGS/docker_default.json"; fi
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 die() { log "ERROR: $*"; exit "${2:-1}"; }
@@ -114,16 +117,13 @@ stage_weights() {
 }
 
 # ---------------------------------------------------------------------------
-# SPUR / SLURM submission config (overridable via env)
+# SPUR / SLURM submission
 # ---------------------------------------------------------------------------
-# NB: on this cluster the PARTITION is 'amd-spur'; 'amd-primus' is the ACCOUNT
-# and the QOS (see /home/ethany/run_gpu_test.sh). GPUs are MI300x.
-SPUR_ACCOUNT="${SPUR_ACCOUNT:-amd-primus}"
-SPUR_PARTITION="${SPUR_PARTITION:-amd-spur}"
-SPUR_QOS="${SPUR_QOS:-amd-primus-qos}"
-SPUR_CPUS_PER_GPU="${SPUR_CPUS_PER_GPU:-8}"          # cpus-per-task = gpus * this
-SPUR_TIME_HEADROOM_S="${SPUR_TIME_HEADROOM_S:-7200}" # add to the GEAK budget for pull/install/bench
-SPUR_PROBE_TIME="${SPUR_PROBE_TIME:-1:00:00}"        # fixed wall time for --probe jobs (image pull + claude, no e2e)
+# NB: on this cluster there is ONE partition ('amd-spur'); the account/QoS is
+# what actually gates scheduling (GPUs are MI300x/MI355x). All the SPUR knobs
+# (partition, account candidates/fallback, headroom, probe timings, ...) live in
+# ci/config.sh — see there to change them. pick_account() below probes those
+# candidates per model and picks one that can place the job now.
 
 # seconds -> SLURM time "H:MM:SS"
 fmt_slurm_time() {
@@ -131,7 +131,49 @@ fmt_slurm_time() {
   printf '%d:%02d:%02d' $((s/3600)) $(((s%3600)/60)) $((s%60))
 }
 
-# Detect the GPU arch bucket used to pick a docker_select.log line.
+# Quick allocation test for one account/qos: submit a tiny 1-node/<gpus>-GPU
+# probe and watch it. The GPU count should match the heaviest real job (tp), so
+# the test reflects the actual requirement (a QoS may place a 1-GPU probe yet
+# reject an 8-GPU job). Echoes "up" if it reaches RUNNING (or finishes) within
+# SPUR_PROBE_WAIT_S -> the QoS can place that shape now; else "full". Cleans up.
+_probe_account() {
+  local acct="$1" qos="$2" gpus="${3:-1}" out jid state deadline now
+  command -v sbatch >/dev/null 2>&1 || { echo up; return; }   # no scheduler here -> don't block
+  out="$(sbatch --parsable -A "$acct" -p "$SPUR_PARTITION" --qos "$qos" \
+        -J "geak_probe_${acct}" -N1 -G"$gpus" -c1 -t 00:05:00 \
+        -o /dev/null -e /dev/null --wrap 'sleep 3' 2>/dev/null)" || { echo full; return; }
+  jid="$(grep -oE '[0-9]+' <<<"$out" | tail -1)"
+  [ -n "$jid" ] || { echo full; return; }
+  now="$(date +%s)"; deadline=$(( now + SPUR_PROBE_WAIT_S ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    state="$(squeue -j "$jid" -h -o '%T' 2>/dev/null | head -1)"
+    case "$state" in
+      ""|COMPLETED|COMPLETING|RUNNING) scancel "$jid" 2>/dev/null || true; echo up; return ;;
+    esac
+    sleep "$SPUR_PROBE_POLL_S"
+  done
+  scancel "$jid" 2>/dev/null || true
+  echo full
+}
+
+# Choose an account/qos that can place a 1-node/<gpus>-GPU job now. Echoes
+# "<account> <qos>". Tries each SPUR_ACCOUNT_CANDIDATES entry in order; if none
+# can place the job now, returns SPUR_ACCOUNT_FALLBACK (pend there). Pass the
+# heaviest model tp as $1 so the probe matches the real GPU footprint (default 1).
+pick_account() {
+  local gpus="${1:-1}" pair acct qos res
+  for pair in $SPUR_ACCOUNT_CANDIDATES; do
+    acct="${pair%%:*}"; qos="${pair##*:}"
+    res="$(_probe_account "$acct" "$qos" "$gpus")"
+    log "account probe: $acct/$qos (${gpus}xGPU) -> $res"
+    [ "$res" = up ] && { echo "$acct $qos"; return 0; }
+  done
+  pair="$SPUR_ACCOUNT_FALLBACK"; acct="${pair%%:*}"; qos="${pair##*:}"
+  log "no candidate can place ${gpus}xGPU now; falling back to $acct/$qos (jobs will pend)"
+  echo "$acct $qos"
+}
+
+# Detect the GPU arch bucket used to pick a docker_default.json entry.
 # Returns MI355 (gfx950 / MI35x) or MI300 (gfx942/gfx90a / MI30x). Honors a
 # GEAK_GPU_ARCH override; auto-detects via rocminfo when present; defaults to
 # MI355 (this SPUR cluster's nodes are gfx950). resolve_image runs on the
@@ -147,27 +189,35 @@ detect_gpu_arch() {
   case "$gfx" in
     gfx950)          echo MI355 ;;
     gfx942|gfx90a)   echo MI300 ;;
-    *)               echo "${GEAK_GPU_ARCH_DEFAULT:-MI355}" ;;   # this cluster = gfx950
+    *)               echo "$GEAK_GPU_ARCH_DEFAULT" ;;   # config.sh default (this cluster = gfx950)
   esac
 }
 
-# --- pick container image for a framework (docker_select.log) ---
-# docker_select.log lines look like:  "<framework> (<arch...>): <image>"
-# Prefer the line whose arch list contains the detected GPU arch; else fall back
-# to the first line for the framework. Override entirely with: IMAGE=<repo:tag>.
+# --- pick container image for a framework (docker_default.json) ---
+# docker_default.json is a nested dict:  { "<framework>": { "<arch>": "<image>" } }
+# Prefer image[framework][arch]; else image[framework].default; else the first
+# arch entry for the framework. Override entirely with: IMAGE=<repo:tag>.
 resolve_image() {
   local fw="$1"
   if [ -n "${IMAGE:-}" ]; then echo "$IMAGE"; return; fi
   local arch img
   arch="$(detect_gpu_arch)"
-  img=$(awk -F': ' -v f="$fw" -v a="$arch" '
-    { name=$1; sub(/ *\(.*/,"",name) }
-    name==f {
-      if (index($1,a)) { print $2; found=1; exit }  # prefer the detected-arch line
-      if (!c) c=$2                                   # else remember first match
-    }
-    END { if (!found && c) print c }                 # exit falls through to END
-  ' "$DOCKER_SELECT")
-  [ -n "$img" ] || die "no image for framework=$fw (arch=$arch) in $DOCKER_SELECT (or pass IMAGE=)"
+  img=$(python3 - "$DOCKER_DEFAULT" "$fw" "$arch" <<'PY'
+import json, sys
+path, fw, arch = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    d = json.load(open(path))
+except Exception:
+    sys.exit(0)
+m = d.get(fw)
+if not isinstance(m, dict):
+    sys.exit(0)
+img = m.get(arch) or m.get("default")
+if not img:  # last resort: first string image listed for this framework
+    img = next((v for v in m.values() if isinstance(v, str)), "")
+print(img or "")
+PY
+)
+  [ -n "$img" ] || die "no image for framework=$fw (arch=$arch) in $DOCKER_DEFAULT (or pass IMAGE=)"
   echo "$img"
 }

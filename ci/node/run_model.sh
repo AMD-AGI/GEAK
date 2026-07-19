@@ -37,7 +37,7 @@ if [ "$DRY" != "--dry-run" ]; then
 fi
 
 export EXP_ROOT OUT_DIR MODEL_PATH INFERENCEX_PATH GEAK_ROOT
-export PERFSKILLS_E2E_TIMEOUT_S="${PERFSKILLS_E2E_TIMEOUT_S:-1800}"
+export PERFSKILLS_E2E_TIMEOUT_S   # value/default from ci/config.sh (via lib.sh)
 
 log "model=$MODEL_KEY dry=${DRY:-no} out=$OUT_DIR exp_root=$EXP_ROOT budget=${PERFSKILLS_E2E_TIMEOUT_S}s"
 log "weights=$MODEL_PATH inferencex=$INFERENCEX_PATH"

@@ -1,0 +1,11 @@
+{
+  "_note": "Default container images for GEAK CI e2e runs (repo-tracked). resolve_image() in ci/lib.sh looks up [framework][arch]; arch is MI355 (gfx950/MI35x) or MI300 (gfx942/gfx90a/MI30x), auto-detected on the compute node (override with GEAK_GPU_ARCH). Override the whole choice with IMAGE=<repo:tag>. These are the primussafe 'profilerfix' images (ROCm 7.2.0); the vLLM image is built for both gfx942 and gfx950, fixing the stock vllm/vllm-openai-rocm:v0.21.0 torch eager SIGSEGV on gfx950.",
+  "vllm": {
+    "MI300": "docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix",
+    "MI355": "docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix"
+  },
+  "sglang": {
+    "MI300": "docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix",
+    "MI355": "docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix"
+  }
+}

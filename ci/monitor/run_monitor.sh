@@ -21,15 +21,19 @@ LOG="${2:?run.log path}"
 OUT_DIR="${3:?out dir}"
 DOCKER_PID="${4:-}"
 
-INTERVAL="${GEAK_MONITOR_INTERVAL_S:-300}"        # normal poll cadence (5 min)
-RECHECK_S="${GEAK_MONITOR_RECHECK_S:-60}"         # faster re-poll while confirming a KILL
-CONFIRM="${GEAK_MONITOR_CONFIRM:-2}"              # consecutive KILL votes required to act
-MODEL="${GEAK_MONITOR_MODEL:-claude-opus-4-8}"
-TAIL_LINES="${GEAK_MONITOR_TAIL_LINES:-300}"
-CALL_CAP="${GEAK_MONITOR_CALL_TIMEOUT_S:-180}"    # cap a single claude call
-STARTUP_GRACE_S="${GEAK_MONITOR_STARTUP_GRACE_S:-300}"
-
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Tunables live in ci/config.sh; source it so the monitor is self-sufficient
+# (it's normally launched by run_local.sh, which already exported these).
+# shellcheck source=/dev/null
+[ -f "$HERE/../config.sh" ] && source "$HERE/../config.sh"
+
+INTERVAL="$GEAK_MONITOR_INTERVAL_S"        # normal poll cadence
+RECHECK_S="$GEAK_MONITOR_RECHECK_S"        # faster re-poll while confirming a KILL
+CONFIRM="$GEAK_MONITOR_CONFIRM"            # consecutive KILL votes required to act
+MODEL="$GEAK_MONITOR_MODEL"
+TAIL_LINES="$GEAK_MONITOR_TAIL_LINES"
+CALL_CAP="$GEAK_MONITOR_CALL_TIMEOUT_S"    # cap a single claude call
+STARTUP_GRACE_S="$GEAK_MONITOR_STARTUP_GRACE_S"
 PROMPT_FILE="$HERE/monitor_prompt.md"
 VERDICT="$OUT_DIR/monitor_verdict.json"
 MON_LOG="$OUT_DIR/monitor.log"

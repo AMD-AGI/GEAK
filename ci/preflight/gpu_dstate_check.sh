@@ -17,7 +17,13 @@
 # Exit 0 = clear;  Exit 3 = wedged (offenders printed to stderr).  Never hangs.
 set -uo pipefail
 
-GAP_S="${GEAK_DSTATE_SAMPLE_GAP_S:-3}"
+# Tunables live in ci/config.sh; source it so this check is self-sufficient
+# (it's normally launched by run_local.sh, which already exported these).
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+[ -f "$HERE/../config.sh" ] && source "$HERE/../config.sh"
+
+GAP_S="$GEAK_DSTATE_SAMPLE_GAP_S"
 TOOLS_RE='^(rocminfo|rocm-smi|rocmsmi|amd-smi|amdsmi|rocm_smi)$'
 PATH_RE='amdgpu|kfd|dma_fence|fence_wait'
 

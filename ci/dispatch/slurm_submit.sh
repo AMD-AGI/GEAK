@@ -23,9 +23,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../lib.sh"
 
 MODEL_KEY="${1:?usage: slurm_submit.sh <model_key> [--budget N] [--run-ts TS] [--probe] [--print]}"; shift || true
-BUDGET="${PERFSKILLS_E2E_TIMEOUT_S:-1800}"
+BUDGET="$PERFSKILLS_E2E_TIMEOUT_S"   # defaults live in ci/config.sh
 RUN_TS="${RUN_TS:-$(new_ts)}"
-PRINT="${SPUR_DRYRUN:-0}"
+PRINT="$SPUR_DRYRUN"
 PROBE=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -47,6 +47,14 @@ case "$TP" in ''|*[!0-9]*) die "bad tp='$TP' for $MODEL_KEY (handoff.tp must be 
 
 GPUS="$TP"
 CPUS=$(( GPUS * SPUR_CPUS_PER_GPU ))
+
+# Auto-pick an account/QoS that can place THIS job's GPU footprint (GPUS) right
+# now; falls back to SPUR_ACCOUNT_FALLBACK to pend if none can (see pick_account
+# in lib.sh). Skipped on --print and when SPUR_AUTOSELECT=0 (then SPUR_ACCOUNT/
+# SPUR_QOS from lib.sh/env are used as-is).
+if [ "$SPUR_AUTOSELECT" = "1" ] && [ "$PRINT" != "1" ]; then
+  read -r SPUR_ACCOUNT SPUR_QOS < <(pick_account "$GPUS")
+fi
 # Probe: fixed short wall time (image pull + optional Claude, no e2e); else budget + headroom.
 if [ "$PROBE" = "1" ]; then
   TIME="$SPUR_PROBE_TIME"

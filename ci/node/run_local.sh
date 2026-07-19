@@ -20,7 +20,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../lib.sh"
 
 MODEL_KEY="${1:?usage: run_local.sh <model_key> [--dry-run|--probe] [--budget N]}"; shift || true
-DRY=""; PROBE=0; BUDGET="${PERFSKILLS_E2E_TIMEOUT_S:-1800}"
+DRY=""; PROBE=0; BUDGET="$PERFSKILLS_E2E_TIMEOUT_S"   # defaults live in ci/config.sh
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY="--dry-run" ;;
@@ -107,7 +107,7 @@ done
 # kill (not SIGKILL, not `timeout`). If we ran rocminfo/torch against that, our own
 # probe would hang forever too. So first cheaply scan /proc (touches no GPU) and
 # fail fast if the box is already wedged. Set GEAK_SKIP_DSTATE_CHECK=1 to skip.
-if [ "${GEAK_SKIP_DSTATE_CHECK:-0}" != "1" ]; then
+if [ "$GEAK_SKIP_DSTATE_CHECK" != "1" ]; then
   log "GPU wedge pre-check (D-state scan, no GPU access) ..."
   if ! bash "$HERE/../preflight/gpu_dstate_check.sh"; then
     echo "::error::GPU appears wedged at the driver level (process(es) stuck in D-state in the amdgpu/kfd path). Refusing to start — the box likely needs a GPU reset or reboot." >&2
@@ -120,10 +120,10 @@ fi
 # image, so the first-time pull of a multi-GB ROCm image can take minutes. The
 # GPU preflight cap below must bound only the rocminfo+torch probe, NOT this
 # network pull (otherwise a cold node always "fails" preflight on the pull).
-# Set GEAK_SKIP_PULL=1 to skip; IMAGE_PULL_CAP overrides the (generous) cap.
-if [ "${GEAK_SKIP_PULL:-0}" != "1" ]; then
-  log "ensuring image present: docker pull $IMAGE (cap ${IMAGE_PULL_CAP:-1800}s)"
-  timeout --kill-after=60 "${IMAGE_PULL_CAP:-1800}" docker pull "$IMAGE" >&2 \
+# Set GEAK_SKIP_PULL=1 to skip; IMAGE_PULL_CAP overrides the cap (see config.sh).
+if [ "$GEAK_SKIP_PULL" != "1" ]; then
+  log "ensuring image present: docker pull $IMAGE (cap ${IMAGE_PULL_CAP}s)"
+  timeout --kill-after=60 "$IMAGE_PULL_CAP" docker pull "$IMAGE" >&2 \
     || log "WARN: docker pull returned non-zero — will try any locally cached image"
 fi
 
@@ -132,7 +132,7 @@ fi
 # Catches a dead/wedged GPU (or a docker/device problem) in seconds instead of
 # discovering it hours into the workflow (which then limps to a false-green
 # no_gain). Set GPU_HEALTHCHECK_TIMEOUT_S=0 to skip (e.g. CPU-only debugging).
-HEALTHCHECK_CAP="${GPU_HEALTHCHECK_TIMEOUT_S:-120}"
+HEALTHCHECK_CAP="$GPU_HEALTHCHECK_TIMEOUT_S"
 PF_NAME="geak_pf_${MODEL_KEY//[^A-Za-z0-9_.-]/_}_${RUN_TS}"
 if [ "$HEALTHCHECK_CAP" != "0" ]; then
   log "GPU preflight: probing $IMAGE (rocminfo + torch matmul, ${HEALTHCHECK_CAP}s cap)"
@@ -209,10 +209,17 @@ DOCKER_PID=$!
 # still orphan the container (it's owned by the host dockerd, not the job cgroup).
 # Killing ourselves ~GEAK_KILL_BUFFER_S early guarantees a clean, supervised cut.
 # GEAK_HARD_TIMEOUT_S overrides; matches slurm_submit's WALL = budget + headroom.
+#
+# NB: subtract $SECONDS (time already spent in this script — D-state check, the
+# cold-node image pull up to IMAGE_PULL_CAP, GPU preflight) because SLURM's -t
+# counts from JOB start but this watchdog sleeps from HERE (post-preflight). Left
+# uncorrected, a slow cold pull (> KILL_BUFFER_S) would push the watchdog PAST the
+# SLURM wall clock, so it could never pre-empt SLURM's SIGKILL. $SECONDS ≈ elapsed
+# since job start (run_local is exec'd right after fast local weight staging).
 WATCHDOG_PID=""
 if [ "$PROBE" != "1" ]; then
-  KILL_BUFFER_S="${GEAK_KILL_BUFFER_S:-300}"
-  HARD_TIMEOUT_S="${GEAK_HARD_TIMEOUT_S:-$(( BUDGET + ${SPUR_TIME_HEADROOM_S:-7200} - KILL_BUFFER_S ))}"
+  KILL_BUFFER_S="$GEAK_KILL_BUFFER_S"
+  HARD_TIMEOUT_S="${GEAK_HARD_TIMEOUT_S:-$(( BUDGET + SPUR_TIME_HEADROOM_S - KILL_BUFFER_S - SECONDS ))}"
   [ "$HARD_TIMEOUT_S" -lt 60 ] && HARD_TIMEOUT_S=60
   log "hard-timeout watchdog armed: ${HARD_TIMEOUT_S}s (then docker kill $CONTAINER_NAME)"
   (
@@ -228,7 +235,7 @@ fi
 # touches the GPU). Set GEAK_MONITOR=0 to disable. It self-exits when the
 # container stops; the EXIT trap tears it down on any early exit of this script.
 MON_PID=""
-if [ "${GEAK_MONITOR:-1}" != "0" ] && [ "$PROBE" != "1" ]; then
+if [ "$GEAK_MONITOR" != "0" ] && [ "$PROBE" != "1" ]; then
   bash "$HERE/../monitor/run_monitor.sh" "$CONTAINER_NAME" "$OUT_DIR/run.log" "$OUT_DIR" "$DOCKER_PID" &
   MON_PID=$!
   log "monitor started (pid=$MON_PID, container=$CONTAINER_NAME)"
