@@ -99,48 +99,66 @@ for m in "${MODELS[@]}"; do
   fi
 done
 
-# ---- wait for all submitted jobs to leave the queue ----
-# Robust against SPUR's JobHoldMaxRequeue: when the reserved (e.g. amd-primus) pool
-# is momentarily full, a job can be requeued and *held* (PENDING, never placed),
-# which would otherwise hang this wait forever. So we: (1) auto-release a held job
-# ONCE (transient congestion usually clears), and (2) give up on a job stuck
-# PENDING (never RUNNING) past SPUR_PEND_TIMEOUT_S — scancel it so it leaves the
-# queue and is judged FAIL, instead of blocking the whole matrix.
+# ---- wait for ALL submitted jobs to leave the queue ----
+# Policy: NEVER give up on a job for pending too long. As long as ANY job is still
+# PENDING or RUNNING, keep waiting. A job that crashed or was cancelled (by us on a
+# GitHub-cancel, or by an operator on the cluster) simply leaves the queue; we log
+# that once and keep waiting on the rest — the real pass/fail is decided from each
+# result.json in the judging step below. The ONLY intervention here is a one-time
+# scontrol-release of a *held* requeue (SPUR's JobHoldMaxRequeue on transient
+# congestion); we never scancel on our own. If a job pends for a very long time
+# (>~36h), cancel it by hand on the cluster — it will then leave the queue and the
+# matrix proceeds. The GitHub job's timeout-minutes is the only outer backstop.
 me="$(whoami)"
-PEND_TIMEOUT="$SPUR_PEND_TIMEOUT_S"
-declare -A RELEASED PEND_SINCE
-poll_jobs() {  # return 0 while any of our jobs is still in the queue
+declare -A RELEASED LEFT
+
+# Best-effort terminal state for a job that has left squeue (COMPLETED/FAILED/
+# CANCELLED/TIMEOUT/...). Empty if sacct is unavailable on this cluster.
+sacct_state() {
+  command -v sacct >/dev/null 2>&1 || { echo ""; return; }
+  sacct -j "$1" -n -X -o State%25 2>/dev/null | head -1 | awk '{$1=$1};1'
+}
+
+poll_jobs() {  # return 0 while ANY of our jobs is still in the queue
   local snap; snap="$(squeue -u "$me" -h -o '%i|%T|%r' 2>/dev/null || true)"
-  local any=1 i jid line state reason now; now="$(date +%s)"
+  local any=1 i jid m line state reason fst
+  local -a status=()
   for i in "${!J_ID[@]}"; do
-    jid="${J_ID[$i]}"; [ -n "$jid" ] || continue
+    jid="${J_ID[$i]}"; m="${J_MODEL[$i]}"
+    if [ -z "$jid" ]; then status+=("$m=submit_failed"); continue; fi
     line="$(grep -E "^${jid}\|" <<<"$snap" || true)"
-    if [ -z "$line" ]; then unset 'PEND_SINCE[$jid]' 2>/dev/null || true; continue; fi
+    if [ -z "$line" ]; then
+      # Left the queue = terminal (finished / crashed / cancelled). Log ONCE and
+      # keep waiting on the others; do NOT stop the matrix on a single job leaving.
+      if [ -z "${LEFT[$jid]:-}" ]; then
+        LEFT[$jid]=1; fst="$(sacct_state "$jid")"
+        log "job $jid ($m) left the queue${fst:+ (state=$fst)} — still waiting on any pending/running jobs; judged from result.json later"
+      fi
+      status+=("$m=gone($jid)")
+      continue
+    fi
     any=0
     state="$(cut -d'|' -f2 <<<"$line")"; reason="$(cut -d'|' -f3 <<<"$line")"
-    case "$state" in
-      PENDING)
-        if [[ "$reason" == *Hold* || "$reason" == *held* ]] && [ -z "${RELEASED[$jid]:-}" ] \
-           && command -v scontrol >/dev/null 2>&1; then
-          log "job $jid held ($reason) -> scontrol release (once)"
-          scontrol release "$jid" 2>/dev/null || true
-          RELEASED[$jid]=1
-        fi
-        : "${PEND_SINCE[$jid]:=$now}"
-        if [ "$PEND_TIMEOUT" -gt 0 ] && [ $(( now - ${PEND_SINCE[$jid]} )) -ge "$PEND_TIMEOUT" ]; then
-          log "job $jid stuck PENDING ($reason) > ${PEND_TIMEOUT}s -> scancel (judged FAIL)"
-          scancel "$jid" 2>/dev/null || true
-        fi
-        ;;
-      *) unset 'PEND_SINCE[$jid]' 2>/dev/null || true ;;   # RUNNING/COMPLETING/etc.
-    esac
+    if [ "$state" = PENDING ]; then
+      # Auto-release a *held* requeue once; never cancel a plain pending job.
+      if [[ "$reason" == *Hold* || "$reason" == *held* ]] && [ -z "${RELEASED[$jid]:-}" ] \
+         && command -v scontrol >/dev/null 2>&1; then
+        log "job $jid ($m) held ($reason) -> scontrol release (once)"
+        scontrol release "$jid" 2>/dev/null || true
+        RELEASED[$jid]=1
+      fi
+      status+=("$m=PENDING:${reason// /_}($jid)")
+    else
+      status+=("$m=${state}($jid)")
+    fi
   done
+  log "queue: ${status[*]}"
   return $any
 }
-log "waiting for ${#J_ID[@]} job(s) (poll ${POLL}s, pend-timeout ${PEND_TIMEOUT}s) ..."
+log "waiting for ${#J_ID[@]} job(s) to finish (poll ${POLL}s; PENDING jobs are waited on indefinitely — cancel by hand on the cluster if one pends too long) ..."
 while poll_jobs; do sleep "$POLL"; done
 DONE=1   # jobs are terminal now; the cleanup trap becomes a no-op
-log "all jobs left the queue; judging results"
+log "no pending or running jobs left; judging results"
 
 # ---- judge each result.json (same criteria as run_model Step F) ----
 judge() {  # judge <out_dir> -> prints "VERDICT<TAB>status<TAB>baseline<TAB>final<TAB>speedup"

@@ -18,7 +18,9 @@ export PERFSKILLS_E2E_TIMEOUT_S="${PERFSKILLS_E2E_TIMEOUT_S:-57600}"
 
 # ---- Matrix orchestrator (run_matrix.sh) ------------------------------------
 export GEAK_MATRIX_POLL_S="${GEAK_MATRIX_POLL_S:-60}"       # squeue poll cadence while waiting
-export SPUR_PEND_TIMEOUT_S="${SPUR_PEND_TIMEOUT_S:-1800}"   # scancel a job stuck PENDING this long (0=never)
+# NB: there is intentionally NO pending timeout — run_matrix.sh waits on PENDING
+# jobs indefinitely (only the GitHub timeout-minutes bounds it). Cancel a
+# long-pending job by hand on the cluster if needed.
 export SPUR_DRYRUN="${SPUR_DRYRUN:-0}"                      # 1 = print sbatch cmds, don't submit (also --print)
 
 # ---- SPUR / SLURM submission (slurm_submit.sh, lib.sh) ----------------------

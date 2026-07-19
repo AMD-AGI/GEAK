@@ -102,22 +102,22 @@ jobs:
     # Smoke uses the SAME budget + wall as full verify (a single-model full run), so
     # it isn't cut short mid-optimization.
     #
-    # timeout-minutes is a BACKSTOP, not the real bound. The authoritative per-run
-    # limits live in the harness itself and always produce a verdict + clean teardown:
-    #   - queue wait  : SPUR_PEND_TIMEOUT_S   (run_matrix.sh, default 1800s = 30 min)
-    #                   -> scancel + FAIL if no node is acquired in time
+    # timeout-minutes is the ONLY outer backstop. By design run_matrix.sh waits on
+    # PENDING jobs INDEFINITELY (no pending-timeout) — a congested cluster just means
+    # a longer wait, not a failure. So this cap must cover: a long queue wait +
+    # the run wall + overhead.
+    #   - queue wait  : unbounded in code; operator cancels a job by hand if it pends
+    #                   too long (>~36h). Budget ~36h of pend here.
     #   - run wall    : SPUR -t = budget + SPUR_TIME_HEADROOM_S
-    #                   = 57600 + 7200 = 64800s = 1080 min
+    #                   = 57600 + 7200 = 64800s = 1080 min = 18h
     #                   -> run_local.sh watchdog docker-kills the container ~5 min
     #                      before this and writes timeout.json (judged FAIL)
-    # This cap must sit safely ABOVE the worst-case wall-clock the harness can take:
-    #   worst case = pend wait (30) + run wall (1080) + submit/pull/judge (~30) = ~1140 min
-    # We set 1440 min (24h) to leave generous headroom so GitHub NEVER pre-empts a
-    # legitimate run (which would falsely fail it and need a re-trigger). It stays
-    # finite on purpose: if the harness itself ever hangs, this bounds the blast
-    # radius on the single self-hosted runner to ~1 day instead of forever.
-    # To resize: keep it >= SPUR_PEND_TIMEOUT_S/60 + (budget + SPUR_TIME_HEADROOM_S)/60 + ~30.
-    timeout-minutes: 1440
+    # worst case ~= pend (36h=2160) + run wall (18h=1080) + submit/pull/judge (~60)
+    #            ~= 3300 min. We set 3600 min (60h) for headroom so GitHub never
+    # pre-empts a legitimate (even long-pending) run. Kept finite so a truly hung
+    # harness can't block the single self-hosted runner forever. On timeout, the
+    # cleanup step + run_matrix's SIGTERM trap scancel any jobs still submitted.
+    timeout-minutes: 3600
     steps:
       - name: Checkout code under test
         uses: actions/checkout@v4
@@ -148,22 +148,24 @@ jobs:
       || github.event.label.name == 'l1-ci-full'
     runs-on: self-hosted
     # Full matrix fans out one SPUR job per model and waits on all of them. The jobs
-    # run CONCURRENTLY, so the wall clock ~= a single run (NOT the sum of models).
+    # run CONCURRENTLY, so the wall clock ~= a single run (NOT the sum of models);
+    # different models may pend independently.
     #
-    # timeout-minutes is a BACKSTOP, not the real bound (same rationale as `smoke`).
-    # The authoritative limits are enforced inside the harness and always yield a
-    # verdict + clean teardown:
-    #   - queue wait  : SPUR_PEND_TIMEOUT_S   (run_matrix.sh, default 1800s = 30 min,
-    #                   applied per model)    -> scancel + FAIL if no node in time
+    # timeout-minutes is the ONLY outer backstop (same rationale as `smoke`).
+    # run_matrix.sh waits on PENDING jobs INDEFINITELY — it returns only once NO job
+    # is pending or running; a job that crashes/cancels is logged and the rest are
+    # still waited on. So this cap must cover a long queue wait + run wall + overhead:
+    #   - queue wait  : unbounded in code; operator cancels a job by hand if it pends
+    #                   too long (>~36h). Budget ~36h of pend here (per model, parallel).
     #   - run wall    : SPUR -t = budget + SPUR_TIME_HEADROOM_S
-    #                   = 57600 + 7200 = 64800s = 1080 min (per model, in parallel)
+    #                   = 57600 + 7200 = 64800s = 1080 min = 18h (per model, in parallel)
     #                   -> run_local.sh watchdog docker-kills each container ~5 min
     #                      before its -t and writes timeout.json (judged FAIL)
-    # Worst-case wall (parallel) = pend wait (30) + run wall (1080) + submit/judge (~30)
-    #   = ~1140 min; we set 1440 min (24h) so GitHub never pre-empts a valid run.
+    # worst case (parallel) ~= pend (36h=2160) + run wall (18h=1080) + submit/judge (~60)
+    #   ~= 3300 min; we set 3600 min (60h) so GitHub never pre-empts a valid run.
     # Kept finite so a hung harness can't block the single self-hosted runner forever.
-    # To resize: keep it >= SPUR_PEND_TIMEOUT_S/60 + (budget + SPUR_TIME_HEADROOM_S)/60 + ~30.
-    timeout-minutes: 1440
+    # On timeout, the cleanup step + run_matrix's SIGTERM trap scancel submitted jobs.
+    timeout-minutes: 3600
     steps:
       - name: Checkout code under test
         uses: actions/checkout@v4
