@@ -195,6 +195,7 @@ PY
 
 FAILS=0
 rows=""
+SCAN_RECORDS=""   # <model>\t<verdict>\t<status>\t<out_dir> per model, for scan_run.sh
 for i in "${!J_MODEL[@]}"; do
   m="${J_MODEL[$i]}"; jid="${J_ID[$i]:-?}"; out="${J_OUT[$i]}"; tp="$(model_tp "$m")"
   if [ -z "$out" ]; then
@@ -208,6 +209,7 @@ for i in "${!J_MODEL[@]}"; do
   fi
   [ "$v" = "PASS" ] || FAILS=$((FAILS+1))
   rows+="| \`$m\` | $tp | $jid | $v | ${st:-} | ${b:-} | ${f:-} | ${sp:-} |"$'\n'
+  SCAN_RECORDS+="$m"$'\x1f'"$v"$'\x1f'"${st:-}"$'\x1f'"$out"$'\n'
   log "$m: $v (status=${st:-} baseline=${b:-} job=$jid)"
 done
 
@@ -219,6 +221,16 @@ TABLE="## $TITLE (ts \`$RUN_TS\`, budget ${BUDGET}s)
 $rows"
 printf '%s\n' "$TABLE" >&2
 [ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '%s\n' "$TABLE" >> "$GITHUB_STEP_SUMMARY"
+
+# ---- post-run diagnostics: blockers vs benign warnings + where to look ----
+# Advisory only (never changes pass/fail). Skipped for probe runs (no e2e logs).
+if [ "$PROBE" != "1" ]; then
+  DIAG="$(printf '%s' "$SCAN_RECORDS" | bash "$HERE/../monitor/scan_run.sh" 2>/dev/null || true)"
+  if [ -n "$DIAG" ]; then
+    printf '\n%s\n' "$DIAG" >&2
+    [ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '\n%s\n' "$DIAG" >> "$GITHUB_STEP_SUMMARY"
+  fi
+fi
 
 if [ "$FAILS" -gt 0 ]; then
   die "$FAILS/${#J_MODEL[@]} model(s) failed" 1

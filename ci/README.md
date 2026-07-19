@@ -14,8 +14,8 @@ launched by `ci/dispatch/run_matrix.sh` → `ci/dispatch/slurm_job.sh`). A run:
 3. spins up the ROCm/vllm container with GPU passthrough (in the background),
 4. installs Claude Code + the Python `claude_agent_sdk` inside it,
 5. runs the GEAK e2e workflow for one model into a timestamped folder,
-6. while it runs, a **host-side liveness monitor** watches `run.log` and kills a
-   wedged/stalled run instead of letting it hang to the wall-clock cap,
+6. (optional, OFF by default) a **host-side liveness monitor** watches the run and
+   kills a wedged/stalled run instead of letting it hang to the wall-clock cap,
 7. hard-judges the result on exit code + `result.json` (status **and** a real
    measured baseline).
 
@@ -88,12 +88,13 @@ ci/
 | `setup_claude.sh` | Step D: install Claude into `$CLAUDE_HOME`, install `claude_agent_sdk`, probe `claude -p`. |
 | `claude_setup.sh` | install + configure Claude Code (global AMD LiteLLM proxy). Re-run every container start (ephemeral fs). |
 
-**`monitor/` — liveness watchdog**
+**`monitor/` — liveness watchdog + post-run diagnostics**
 
 | file | role |
 |------|------|
-| `run_monitor.sh` | host-side liveness monitor: every 5 min feeds `run.log` tail to a `claude -p` arbiter; `docker kill`s a confirmed-stuck run. |
-| `monitor_prompt.md` | the monitor's instructions + `VERDICT: CONTINUE\|KILL` output contract. |
+| `run_monitor.sh` | host-side **liveness** monitor (mid-run): every 5 min feeds `run.log` tail to a `claude -p` arbiter; `docker kill`s a confirmed-stuck run (dead GPU, NFS/OOM loop). Runs on the dispatched GPU host; OFF by default (needs `claude`). |
+| `monitor_prompt.md` | the liveness monitor's instructions + `VERDICT: CONTINUE\|KILL` output contract. |
+| `scan_run.sh` | **post-run** diagnostics (no claude, no deps): `run_matrix.sh` pipes one record per model here after the perf table; it scans each model's `run.log`/`slurm.out` and prints a "Run diagnostics" section — **blockers** (real failure causes: SIGKILL/OOM/GPU-HBM exhaustion, vLLM serve init failure, hard timeout, missing/errored `result.json`) vs benign **warnings** (self-recovered noise like `workflow_parse_error`) — each with the **absolute log paths** to look at. Advisory only; never changes pass/fail. |
 
 ## SPUR / cluster topology
 
@@ -210,8 +211,9 @@ HOST (run_local.sh — orchestrator)
 |------|-------|---------|
 | before probe | D-state pre-check (`gpu_dstate_check.sh`) | already-wedged driver (unkillable D-state tasks) — bail before our probe hangs too |
 | before run | GPU preflight (`gpu_healthcheck.sh`) | dead/wedged GPU, docker/device broken |
-| during run | Claude watchdog (`run_monitor.sh`) | mid-run stall, GPU wedge, NFS/OOM loop |
+| during run | liveness watchdog (`run_monitor.sh`, OFF by default; `stall`/`claude`) | mid-run stall, GPU wedge, NFS/OOM loop |
 | after run | deterministic judge (`run_model.sh` Step F) | false-green `no_gain`, unmeasured baseline, errors |
+| after run | post-run diagnostics (`monitor/scan_run.sh`) | reports blockers vs benign warnings + log paths (advisory) |
 | absolute | workflow `timeout-minutes` | everything above failing |
 
 ## Usage
@@ -286,22 +288,40 @@ real measured baseline (`baseline_throughput_tok_s > 0`). Anything else fails:
 
 ## Monitor knobs
 
-The host-side liveness monitor (`run_monitor.sh`) is on by default; tune via env:
+The host-side liveness monitor (`run_monitor.sh`) is **OFF by default** (`GEAK_MONITOR=0`);
+enable it with `GEAK_MONITOR=1`. It has two modes (`GEAK_MONITOR_MODE`):
+
+- **`stall`** (default, deterministic, no deps) — declares a wedge and kills the
+  container ONLY on positive evidence of no work: the log is flat **and** the GPUs
+  are idle **and** the container CPU is idle, sustained for `GEAK_STALL_KILL_S` and
+  confirmed `GEAK_MONITOR_CONFIRM` times. A long silent-but-working leg (bench/build/
+  profile) keeps GPU or CPU busy, so it is never killed. If GPU util can't be measured
+  (no `rocm-smi`/`amd-smi`) it can't prove "idle" and degrades to **warn-only**.
+- **`claude`** — LLM arbiter: feeds the `run.log` tail to a tool-less `claude -p`
+  session that votes CONTINUE/KILL (needs `claude` on the dispatched GPU host).
 
 | var | default | meaning |
 |-----|---------|---------|
-| `GEAK_MONITOR` | `1` | set `0` to disable the watchdog entirely |
+| `GEAK_MONITOR` | `0` | `1` starts the watchdog |
+| `GEAK_MONITOR_MODE` | `stall` | `stall` (deterministic) or `claude` (LLM arbiter) |
 | `GEAK_MONITOR_INTERVAL_S` | `300` | seconds between polls |
 | `GEAK_MONITOR_CONFIRM` | `2` | consecutive KILL votes required before acting (hysteresis) |
 | `GEAK_MONITOR_RECHECK_S` | `60` | faster re-poll while confirming a KILL |
-| `GEAK_MONITOR_MODEL` | `claude-opus-4-8` | model for the arbiter (host login) |
-| `GEAK_MONITOR_TAIL_LINES` | `300` | how much of `run.log` to feed each poll |
+| `GEAK_STALL_KILL_S` | `2700` | (stall) flat+idle duration before a kill is considered |
+| `GEAK_STALL_GPU_UTIL_PCT` | `5` | (stall) max GPU util% counted as idle |
+| `GEAK_STALL_CPU_PCT` | `5` | (stall) container CPU% counted as idle |
+| `GEAK_MONITOR_MODEL` | `claude-opus-4-8` | (claude) arbiter model |
+| `GEAK_MONITOR_TAIL_LINES` | `300` | (claude) how much of `run.log` to feed each poll |
 | `GPU_HEALTHCHECK_TIMEOUT_S` | `120` | preflight probe cap; `0` skips preflight (CPU-only debugging) |
 | `GEAK_SKIP_DSTATE_CHECK` | `0` | set `1` to skip the D-state wedge pre-check |
 | `GEAK_DSTATE_SAMPLE_GAP_S` | `3` | seconds between the two D-state samples (sustained-detection window) |
 
-The monitor no-ops gracefully if `claude` isn't on the host PATH (the run proceeds
-unwatched, protected by the workflow's wall-clock cap).
+In `claude` mode the monitor no-ops gracefully if `claude` isn't on the host PATH
+(the run proceeds unwatched, protected by the workflow's wall-clock cap). A
+`monitor_verdict.json` is written only when the watchdog actually kills a run.
+
+> Post-run diagnostics (`monitor/scan_run.sh`) is a separate, always-on reporter
+> — see the `monitor/` table above. It never kills anything.
 
 ## Tunables — one file
 

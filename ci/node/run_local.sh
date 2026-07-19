@@ -231,9 +231,10 @@ if [ "$PROBE" != "1" ]; then
   WATCHDOG_PID=$!
 fi
 
-# Start the host-side liveness monitor (Claude arbiter, runs on the host, never
-# touches the GPU). Set GEAK_MONITOR=0 to disable. It self-exits when the
-# container stops; the EXIT trap tears it down on any early exit of this script.
+# Start the host-side liveness monitor (runs on the host, never touches the GPU;
+# GEAK_MONITOR_MODE=stall deterministic watchdog by default, or claude arbiter).
+# Set GEAK_MONITOR=0 to disable. It self-exits when the container stops; the EXIT
+# trap tears it down on any early exit of this script.
 MON_PID=""
 if [ "$GEAK_MONITOR" != "0" ] && [ "$PROBE" != "1" ]; then
   bash "$HERE/../monitor/run_monitor.sh" "$CONTAINER_NAME" "$OUT_DIR/run.log" "$OUT_DIR" "$DOCKER_PID" &
