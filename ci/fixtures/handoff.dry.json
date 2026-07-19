@@ -13,7 +13,7 @@
   "accepted_env": "VLLM_USE_AITER=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1 VLLM_ROCM_USE_AITER_RMSNORM=1",
   "launch_recipe": "/tmp/geak-ci/baseline_config.with_envs.yaml",
   "raw_baseline_tput": 4458.59,
-  "exp_root": "/tmp/geak-ci/perfskills",
+  "exp_root": "/tmp/geak-ci/geak",
   "bench_client": "auto",
   "inferencex_path": "/tmp/geak-ci/InferenceX",
   "gpu_ids": "0",

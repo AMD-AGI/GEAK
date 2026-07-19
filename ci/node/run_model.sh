@@ -13,11 +13,13 @@ MODEL_DIR="$HF_LOGS/$MODEL_KEY"
 [ -d "$MODEL_DIR" ]              || die "no model dir: $MODEL_DIR"
 [ -f "$MODEL_DIR/handoff.json" ] || die "no handoff.json in $MODEL_DIR"
 
-# exp_root MUST stay <model>/perfskills: run_e2e.py discovers the TraceLens priors
-# relative to it (artifacts live one level up at <model>/kernel-agent, <model>/runs).
-# The workflow itself auto-timestamps its eval_dir (perfskills/e2e_<model>_<ts>), so
-# runs stay distinguishable even though exp_root is fixed.
-EXP_ROOT="${EXP_ROOT:-$MODEL_DIR/perfskills}"
+# exp_root basename MUST be "geak": run_e2e.py's resolve_tracelens_report() strips a
+# trailing "geak" to reach the model dir and discover the TraceLens priors there
+# (<model>/kernel-agent/**/tracelens/*, <model>/runs/roofline/**/torch_trace). Any
+# other basename (e.g. the old "perfskills") makes the resolver search the wrong dir
+# -> priors missed -> profiler silently falls back to torch-trace. The workflow
+# auto-timestamps its eval_dir (geak/e2e_<model>_<ts>), so runs stay distinguishable.
+EXP_ROOT="${EXP_ROOT:-$MODEL_DIR/geak}"
 # Timestamped run folder for CI-level outputs (result.json + logs + claude state).
 RUN_TS="${RUN_TS:-$(new_ts)}"
 OUT_DIR="${OUT_DIR:-$MODEL_DIR/ci_runs/$RUN_TS}"
