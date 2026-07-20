@@ -51,6 +51,7 @@ The profiler is auto-detected using a degrade ladder
 - `rocprof-compute`
 - `rocprofv3` 
 - `rocprof`
+- `metrix`
 
 ## Serving backends (e2e_workflow)
 
