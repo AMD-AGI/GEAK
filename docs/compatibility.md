@@ -45,7 +45,7 @@ to the local `gfx` at build time.
 ## Profilers
 
 The profiler is auto-detected using a degrade ladder
-(`PROFILER_PRIORITY="rocprof-compute rocprofv3 rocprof"`).
+(`PROFILER_PRIORITY="rocprof-compute rocprofv3 rocprof metrix"`).
 
 - `rocprof-compute`
 - `rocprofv3` 
