@@ -39,4 +39,4 @@ This project follows our [Code of Conduct](.github/CODE_OF_CONDUCT.md). By parti
 
 ## License
 
-By contributing to GEAK, you agree that your contributions will be licensed under the [MIT License](LICENSE).
+By contributing to GEAK V3, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE.md).

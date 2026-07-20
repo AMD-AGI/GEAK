@@ -1,6 +1,6 @@
-# GEAK
+# GEAK V3
 
-GEAK is an agent-driven framework for end-to-end GPU kernel optimization in real codebases, producing reviewable patches backed by profiling, testing, and LLM-guided iteration. Supports **HIP**, **Triton**, and **FlyDSL** kernels.
+GEAK V3 is an agent-driven framework for end-to-end GPU kernel optimization in real codebases, producing reviewable patches backed by profiling, testing, and LLM-guided iteration. Supports **HIP**, **Triton**, and **FlyDSL** kernels.
 
 ---
 
@@ -23,7 +23,7 @@ GEAK is an agent-driven framework for end-to-end GPU kernel optimization in real
 
 ## Architecture
 
-![GEAK Framework](docs/assets/GEAK_framework.png)
+![GEAK V3 Framework](docs/assets/geak-agent-loop.svg)
 
 
 ---
@@ -87,10 +87,10 @@ geak --repo /path/to/kernel/repo \
 
 #### Parallel optimization
 
-- GEAK preprocesses the target once, then runs a shared optimization loop
+- GEAK V3 preprocesses the target once, then runs a shared optimization loop
 - Each worker runs in an isolated git workspace
 - Patches and test results are saved separately per round
-- After each round, GEAK verifies the best candidate and carries the best patch forward
+- After each round, GEAK V3 verifies the best candidate and carries the best patch forward
 
 ```bash
 geak --repo /path/to/kernel/repo \
@@ -105,7 +105,7 @@ geak --repo /path/to/kernel/repo \
 - `--kernel-url`: optional; path to the target kernel file (local path or URL)
 - `--num-parallel`: optional; number of optimization agents
 - `--gpu-ids`: optional; comma-separated GPU IDs for agents
-- By default, after optimization completes GEAK **applies the best patch** to the repo (committed on the current branch) and **cleans up** intermediate artifacts, keeping only `final_report.json`, the winning `.diff`, `geak_agent.log`, and `COMMANDMENT.md`.
+- By default, after optimization completes GEAK V3 **applies the best patch** to the repo (committed on the current branch) and **cleans up** intermediate artifacts, keeping only `final_report.json`, the winning `.diff`, `geak_agent.log`, and `COMMANDMENT.md`.
 - `--debug`: disables both post-run patch apply and artifact cleanup, preserving the full run directory for inspection
 - `--mode quick` and `--mode full` are **absolute wall-clock caps**
   of 60 min and 120 min respectively. The hard-kill watchdog `os._exit(124)`s at
@@ -176,7 +176,7 @@ For more options and examples, see [Configuration](docs/configuration.md).
 
 ### Output & Artifacts
 
-GEAK saves patches and test logs so the optimization progress and results remain transparent.
+GEAK V3 saves patches and test logs so the optimization progress and results remain transparent.
 
 - **Default output base**: `optimization_logs/`
 - **Auto-generated run directory**: `optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/`
@@ -209,7 +209,7 @@ optimization_logs/<kernel>_<timestamp>/
 
 ### Preprocess and Harness Setup
 
-If `--test-command` is not provided, GEAK will:
+If `--test-command` is not provided, GEAK V3 will:
 
 - Discover existing tests, or
 - Create and verify a harness for the target kernel
@@ -252,7 +252,7 @@ Automatically selects the best result across rounds:
 
 ### Skills & Subagents
 
-GEAK uses **skills** (domain knowledge bases) and **subagents** (delegated specialist agents) to handle different kernel types and optimization tasks.
+GEAK V3 uses **skills** (domain knowledge bases) and **subagents** (delegated specialist agents) to handle different kernel types and optimization tasks.
 
 **Skills** (`src/minisweagent/skills/`):
 
@@ -305,7 +305,7 @@ For branching, pull requests, code standards, CI expectations, releases, and lic
 
 ## Acknowledgments
 
-GEAK extends [mini-SWE-agent](https://github.com/SWE-agent/mini-SWE-agent) — the agent loop, environment tooling, and SWE-style workflows. For upstream behavior and APIs, see the [mini-SWE-agent documentation](https://mini-swe-agent.com/latest/).
+GEAK V3 extends [mini-SWE-agent](https://github.com/SWE-agent/mini-SWE-agent) — the agent loop, environment tooling, and SWE-style workflows. For upstream behavior and APIs, see the [mini-SWE-agent documentation](https://mini-swe-agent.com/latest/).
 
 We also thank:
 
