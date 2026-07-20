@@ -88,5 +88,5 @@ Everything lands under `exp/e2e_<model>_<timestamp>/`: `final_report.md`, `archi
 
 ## Related topics
 
-- [What is GEAK?](../what-is-geak.md) — overview and design.
-- [Run a workflow](../how-to/run-agent.md) — how to start a run.
+- [What is GEAK?](../what-is-geak.md): overview and design.
+- [Run a workflow](../how-to/run-agent.md): how to start a run.

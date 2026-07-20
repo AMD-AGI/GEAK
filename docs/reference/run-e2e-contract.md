@@ -22,10 +22,10 @@ Run the external orchestrator entry point as follows.
 python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 ```
 
-- Exit code `0` — `result.json.status` is `ok` or `no_gain`.
-- Exit code `1` — a crash; `result.json.status == "error"` with an `error` field.
-- Exit code `2` — bad usage or unreadable handoff.
-- `--dry-run` — print the mapped `e2e_workflow.js` args and the prompt and
+- Exit code `0`: `result.json.status` is `ok` or `no_gain`.
+- Exit code `1`: a crash; `result.json.status == "error"` with an `error` field.
+- Exit code `2`: bad usage or unreadable handoff.
+- `--dry-run`: print the mapped `e2e_workflow.js` args and the prompt and
   exit `0` (no GPU work). Use this to validate the mapping in CI.
 
 Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
@@ -243,9 +243,9 @@ The serving stack is always launched by the backend adapter
 (`adapters/sglang.sh` or `vllm.sh`). The bench client is selected independently
 by `BENCH_CLIENT`:
 
-- `native` (default standalone) — each backend's built-in bench
+- `native` (default standalone): each backend's built-in bench
   (`sglang.bench_serving` or vLLM). A small cross-harness difference remains.
-- `inferencex` — `adapters/clients/inferencex.sh` redefines `adapter_bench` to
+- `inferencex`: `adapters/clients/inferencex.sh` redefines `adapter_bench` to
   call Hyperloom's own `benchmark_serving.py`, which is byte-for-byte the same
   client Hyperloom uses.
 
@@ -254,7 +254,7 @@ an InferenceX checkout is discoverable using `INFERENCEX_PATH`, else `native`)
 and exports `BENCH_CLIENT` and `INFERENCEX_PATH` so every `bench_e2e.sh` the
 agents run inherits them.
 
-## See also
+## Related topics
 
-- [API reference](./api-reference.md) — Workflow arguments and run artifacts.
-- [Run a workflow](../how-to/run-agent.md) — natural-language invocation.
+- [API reference](./api-reference.md): Workflow arguments and run artifacts.
+- [Run a workflow](../how-to/run-agent.md): natural-language invocation.

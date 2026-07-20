@@ -1,25 +1,27 @@
 ---
 myst:
   html_meta:
-    "description": "GEAK v4 release notes: end-to-end LLM serving optimization, workflow-based orchestration, and a stronger single-kernel optimizer for AMD Instinct GPUs."
-    "keywords": "GEAK, release notes, v4, GEAK 4.0, AMD Instinct, e2e_workflow, kernel_workflow, sglang, vLLM"
+    "description": "GEAK 4.0.0 release notes: end-to-end LLM serving optimization, workflow-based orchestration, and a stronger single-kernel optimizer for AMD Instinct GPUs."
+    "keywords": "GEAK, release notes, GEAK 4.0, AMD Instinct, e2e_workflow, kernel_workflow, sglang, vLLM"
 ---
 
 # GEAK release notes
 
+This topic summarizes the features available in each GEAK release. For the hardware and software versions validated for a release, see the [Compatibility matrix](compatibility.md).
+
 ## GEAK 4.0.0
 
-GEAK v4 is a major redesign of GEAK, upgrading it from a single-kernel optimization agent into an end-to-end GPU performance optimization system for AMD Instinct™ GPUs.
+GEAK 4.0.0 is a major redesign of GEAK, upgrading it from a single-kernel optimization agent into an end-to-end GPU performance optimization system for AMD Instinct™ GPUs.
 
 The headline change is e2e_workflow: GEAK can now optimize full LLM serving workloads on sglang or vLLM, not just isolated kernels. It profiles the real workload, ranks bottlenecks by Amdahl impact, pulls the cheapest high-leverage levers first, and recursively calls the single-kernel workflow only for kernels that can truly move model throughput.
 
-## Highlights
+### Release highlights
 
-GEAK v4 introduces three major capabilities.
+GEAK 4.0.0 introduces three major capabilities.
 
-### End-to-end LLM serving optimization
+#### End-to-end LLM serving optimization
 
-GEAK v4 introduces e2e_workflow, a system-level optimizer for whole-model serving throughput. The workflow:
+GEAK 4.0.0 introduces e2e_workflow, a system-level optimizer for whole-model serving throughput. The workflow:
 
 - Preflights the GPU, backend, model, and profiler environment.
 - Profiles a warm sglang or vLLM server on the target workload.
@@ -30,13 +32,13 @@ GEAK v4 introduces e2e_workflow, a system-level optimizer for whole-model servin
 - Overlays accepted changes back into the live server reversibly.
 - Validates gains with warm-server A/B, engagement proof, output parity, and throughput gating.
 
-### Workflow-based orchestration
+#### Workflow-based orchestration
 
-GEAK v4 moves the optimization control plane into deterministic JavaScript Workflows. Budget loops, parallel fan-out, verification, recursion, and stop conditions are handled in code, while LLM agents focus on judgment-heavy work such as analysis, strategy, kernel authoring, debugging, and integration.
+GEAK 4.0.0 moves the optimization control plane into deterministic JavaScript Workflows. Budget loops, parallel fan-out, verification, recursion, and stop conditions are handled in code, while LLM agents focus on judgment-heavy work such as analysis, strategy, kernel authoring, debugging, and integration.
 
-This makes GEAK v4 easier to run, easier to reproduce, and easier to debug than a fully prompt-driven optimization loop.
+This makes GEAK 4.0.0 easier to run, easier to reproduce, and easier to debug than a fully prompt-driven optimization loop.
 
-### Stronger single-kernel workflow
+#### Stronger single-kernel workflow
 
 The original kernel optimization capability remains first-class through kernel_workflow. It supports Triton, HIP, CK, FlyDSL, and other AMD GPU source paths through a hierarchical multi-agent design:
 
@@ -48,9 +50,9 @@ The original kernel optimization capability remains first-class through kernel_w
 
 Each patch is measured independently before it can become the new best candidate.
 
-### Performance knowledge and expert skills
+#### Performance knowledge and expert skills
 
-GEAK v4 adds a structured perf_knowledge layer for AMD GPU optimization. It organizes operator, backend, GPU-generation, dtype, and regime knowledge into a machine-queryable kernel matrix. Expert skills can seed high-value optimization directions, but they never replace measurement: every candidate must still pass on-box validation.
+GEAK 4.0.0 adds a structured perf_knowledge layer for AMD GPU optimization. It organizes operator, backend, GPU-generation, dtype, and regime knowledge into a machine-queryable kernel matrix. Expert skills can seed high-value optimization directions, but they never replace measurement: every candidate must still pass on-box validation.
 
 ## What’s New
 

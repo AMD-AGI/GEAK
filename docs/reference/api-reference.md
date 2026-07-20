@@ -303,8 +303,8 @@ optimized/                               # applied optimized source
 director_validation.json                 # independent re-measurement
 ```
 
-## See also
+## Related topics
 
-- [Run a workflow](../how-to/run-agent.md) — install and first run.
-- [Install GEAK](../install/install.md) — prerequisites and environment setup.
-- [Compatibility matrix](../compatibility.md) — verified hardware/software combinations.
+- [Run a workflow](../how-to/run-agent.md): install and first run.
+- [Install GEAK](../install/install.md): prerequisites and environment setup.
+- [Compatibility matrix](../compatibility.md): verified hardware/software combinations.
