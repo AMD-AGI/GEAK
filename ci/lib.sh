@@ -62,11 +62,15 @@ model_tp()        { _handoff_get "$1" tp 1; }        # tensor-parallel = GPUs to
 # ---------------------------------------------------------------------------
 # The handoff's model_path (/wekafs/...) is not mounted here. Weights are picked
 # up from a per-model_key CATALOG dir ($HF_MODELS_DIR): each entry is a directory
-# OR a symlink into shared NFS (e.g. /home/ethany/hf_models/Qwen-Qwen3-8B ->
+# OR a symlink into shared NFS (e.g. <ws>/hf_models/Qwen-Qwen3-8B ->
 # /shared_nfs/huggingface_models/Qwen/Qwen3-8B). Because entries may be symlinks
 # into NFS, run_local.sh also bind-mounts $WEIGHTS_EXTRA_MOUNTS so they resolve
 # inside the container. Missing models are downloaded here (keyed by model_key).
-HF_MODELS_DIR="${HF_MODELS_DIR:-/home/ethany/hf_models}"   # catalog: <model_key> -> weights
+# The weights catalog now lives INSIDE the workspace (<ws>/hf_models), so it is
+# DERIVED from $WS just like InferenceX/geak_runtime — no /home literal, no required
+# env var. quick_setup.sh populates it with per-model_key symlinks into shared NFS.
+# Override with HF_MODELS_DIR=... if your catalog lives elsewhere.
+HF_MODELS_DIR="${HF_MODELS_DIR:-$WS/hf_models}"            # catalog: <model_key> -> weights
 WEIGHTS_CACHE="${WEIGHTS_CACHE:-$HF_MODELS_DIR}"           # where downloads land
 
 # Pure resolver (no download): the catalog entry if populated, else the download target.

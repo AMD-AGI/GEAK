@@ -53,9 +53,18 @@ env:
   # empty and falls through to this.)
   GEAK_E2E_BUDGET_S: "57600"
   # Data workspace on the jump box (siblings live here; NOT under the checkout).
-  WS: /home/ethany/geak_ci_workspace
-  HF_LOGS: /home/ethany/geak_ci_workspace/geak_runtime
-  INFERENCEX_PATH: /home/ethany/geak_ci_workspace/InferenceX
+  # Base dir is a repo/org Actions VARIABLE (vars.GEAK_CI_PATH) so we can flip the
+  # whole workspace between hosts (e.g. /home/ethany or /shared_nfs/ethany) without
+  # editing this file. It must point at a dir that holds geak_ci_workspace/ (and the
+  # hf_models/ weights catalog) and be readable by the SPUR compute nodes. If the
+  # variable is unset the per-job "test -d $HF_LOGS" preflight fails loudly.
+  WS: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace
+  HF_LOGS: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace/geak_runtime
+  INFERENCEX_PATH: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace/InferenceX
+  # Per-model_key weights catalog (<model_key> -> weights dir/symlink). Now lives
+  # INSIDE the workspace (built by quick_setup.sh); i.e. $WS/hf_models. Set explicitly
+  # for determinism, but lib.sh derives the same path from $WS if this is omitted.
+  HF_MODELS_DIR: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace/hf_models
   # Claude auth for the in-container worker; propagated to the SPUR job via
   # sbatch --export=ALL. Falls back to ci/preflight/claude_setup.sh defaults if absent.
   LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
