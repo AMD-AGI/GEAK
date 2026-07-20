@@ -14,7 +14,7 @@ Use the following matrix to view the compatibility and system requirements:
 
 | AMD Instinct GPU | ROCm version | Python | OS |
 |---|---|---|---|
-| MI300X, MI325X, MI355X| 6.4, 7.0, 7.1, 7.2 | 3.8, 3.12 | Ubuntu 22.04, Ubuntu 24.04 | 
+| MI300X, MI325X, MI355X| 6.4x, 7.0x, 7.1x, 7.2x | 3.8, 3.12 | Ubuntu 22.04, Ubuntu 24.04 | 
 
 ```{note}
 - The on-box card is auto-detected (`rocminfo` / `rocm_agent_enumerator`); `PYTORCH_ROCM_ARCH` is pinned
