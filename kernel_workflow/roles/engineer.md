@@ -41,6 +41,12 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
 - `KERNEL_KNOWLEDGE_DIR/operators/<KK_OPERATOR>/backends/<KK_LANGUAGE>.md` — the card for your exact
   language (skeleton + knobs + pitfalls), plus `operators/<KK_OPERATOR>/{tuning,numerics,fusion}.md`.
 - `KERNEL_KNOWLEDGE_DIR/index/recipes.md` — durable how-to / knob dictionaries.
+- **Cross-backend port** (your `DIRECTION` rewrites into a language ≠ the current source — ANY
+  source→target, e.g. ck→flydsl, triton→tilelang, hip→ck): ALSO read the TARGET backend card
+  `operators/<KK_OPERATOR>/backends/<target>.md` and that language's authoring how-to under
+  `languages/<dir>/` (map: triton→`triton_amd`, hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`,
+  flydsl→`flydsl`, tilelang→`tilelang`; read `overview.md`/`patterns.md`/`knobs.md`, plus flydsl's
+  `authoring_*.md`) — the source card does not teach the target backend.
 
 **Contract (do not violate — this guarantees the base can only help, never hurt):**
 - *Facts/how-to, not decisions.* The base may be stale/incomplete/wrong. It only *adds candidates and
