@@ -33,7 +33,7 @@
 # KEY OUTPUTS (written to $OUT_DIR):
 #   bench_runs.jsonl       one bench result object per repeat
 #   bench_summary.json     {throughput_tok_s_median (metric-neutral; see metric_basis), metric_basis,
-#                           ttft_ms_median, tpot_ms_median, spread, runs}  (E2E_METRIC=total default)
+#                           ttft_ms_median, tpot_ms_median, spread, runs}  (E2E_METRIC=output default)
 #   SUMMARY line on stdout: "E2E_SUMMARY <metric_basis>=<median> spread=<pct> ttft_ms=<med> tpot_ms=<med>"
 #   profile/                trace (if PROFILE=1)
 set -uo pipefail
@@ -569,10 +569,11 @@ def pick(d, *keys):
     for k in keys:
         if k in d and isinstance(d[k], (int, float)): return float(d[k])
     return None
-# metric selection: default = TOTAL token throughput ((input+output)/s); set E2E_METRIC=output for
-# output-only tok/s (Magpie-aligned). Same key is read for baseline+cand so the accept RATIO is
-# consistent; metric_basis records which was used.
-_metric = (os.environ.get("E2E_METRIC") or "total").strip().lower()
+# metric selection: default = OUTPUT-only token throughput (output/s), to match the Hyperloom
+# orchestrator's baseline/explore basis (see collectors/_common.py + collectors/explore.py, both read
+# output_throughput). Set E2E_METRIC=total for total (input+output)/s. Same key is read for
+# baseline+cand so the accept RATIO is consistent; metric_basis records which was used.
+_metric = (os.environ.get("E2E_METRIC") or "output").strip().lower()
 _is_total = _metric in ("total", "total_token", "total_throughput")
 _TPUT_KEYS = (("total_token_throughput", "total_throughput", "total_token_throughput_tok_s")
               if _is_total else
