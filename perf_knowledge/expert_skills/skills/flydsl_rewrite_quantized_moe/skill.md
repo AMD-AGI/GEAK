@@ -35,7 +35,7 @@ validation:
     isolated: 3.576
     e2e_pct: ''
     parity: pass
-  artifact: /wekafs/hongtaom/kimi_k01_fused_moe_flydsl
+  artifact: ""                      # path to the validation eval dir (not shipped in-repo)
 role: advisory_prior
 supersedes: []
 ---
@@ -132,7 +132,7 @@ correctness is judged identically.
   `${FLYDSL_EXAMPLES}/fp8_blockscale_moe/`; deep dive in sibling skill `rewrite-co-kernel-to-flydsl`.
 - Related GEAK skill: `flydsl_fp8_gemm_playbook` (e2e down-proj bare-core bind) — this skill is its
   kernel-scope, broader-operator counterpart.
-- Validation eval dir (artifact): `/wekafs/hongtaom/kimi_k01_fused_moe_flydsl/` — K1 `fused_moe_kernel_gptq_awq`
+- Validation eval dir (artifact) — K1 `fused_moe_kernel_gptq_awq`
   (int4 W4A16, Kimi-K2.6, MI300X gfx942). Deployment-env same-session A/B: **geomean 3.62×** (5 UT cases),
   5.15× prefill, 5/5 correctness PASS (cosine ≈ 0.999994) — `result_flydsl.json`, `DELIVERY_FLYDSL.md`,
   rocprof roofline (FlyDSL 60–65% HBM vs Triton 13–18%) in `roofline_hw/`.
