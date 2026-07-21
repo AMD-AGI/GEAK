@@ -34,12 +34,19 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
    at the first token vs a deterministic baseline, while every per-leg check "passed"). So run the parity
    probe with the CAND overlay vs a FRESH no-overlay baseline server (both greedy/temp=0/fixed seed). 
    - If the baseline is deterministic (re-run it twice; byte-exact) and the CAND diverges on ANY prompt →
-     it is a REAL output change, NOT FP noise. For a NON-quant change → REJECT.
-   - For a QUANTIZED kernel (MXFP8/fp8 — byte-parity is expected to drift from rounding/argmax) → do NOT
-     accept on throughput alone: run a small TASK-ACCURACY gate (e.g. a fixed greedy eval set / agreement
-     rate vs the true baseline) and accept ONLY if quality holds within tolerance; otherwise `rejected`
-     with reason `needs_accuracy_gate`/`parity_regression`. Never let cumulative MXFP8 drift ride through
-     as "parity pass vs the prior leg."
+     it is a REAL output change, NOT FP noise.
+   - **PARITY FALLBACK (default; active when `PARITY_FALLBACK_GSM8K=true` or `ACCURACY_GATE` ∈
+     {`gsm8k`,`fallback`} is in your inputs).** A byte-divergent candidate is NOT auto-rejected when it is
+     a REAL throughput win (delta > NOISE_BAND_PCT AND `cand_min > ref_max`). Byte-exact drift of ~1e-4
+     (a tuned CK/aiter fp8 GEMM, an FP-accum-reordered attention) routinely flips a borderline greedy
+     argmax without hurting task quality — rejecting it on byte-parity alone throws away a genuine win
+     (observed: DeepSeek-R1 aiter-CK `gemm_a8w8_blockscale`, +17.8% e2e, task accuracy within noise). So
+     when byte-parity FAILS on a real win, FALL BACK to the TASK-ACCURACY gate below (do NOT reject on
+     byte-parity). This applies to ANY kernel, not just quant. Only if the fallback is OFF
+     (`PARITY_FALLBACK_GSM8K=false` and no `ACCURACY_GATE`) does a byte-divergent change → REJECT.
+   - For a QUANTIZED kernel (MXFP8/fp8 — byte-parity is expected to drift from rounding/argmax) → NEVER
+     accept on throughput alone; the TASK-ACCURACY gate below is the correct bar. Never let cumulative
+     MXFP8 drift ride through as "parity pass vs the prior leg."
 
 5. **Report `parity_kind` on every ACCEPT** so the orchestrator can trust the win correctly:
    `"byte_exact"` when acceptance rests on hard greedy byte-parity vs the TRUE baseline; `"accuracy"`
@@ -85,18 +92,25 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
 ∈ {env,flag,patch}, `apply_env`, `apply_flags`, `code_patch`, `tuning_artifact`, `parity_note`),
 `CURRENT_OVERLAY`, `CURRENT_FLAGS`/`CURRENT_ENV`, `CURRENT_THROUGHPUT`, `SKILL_DIR`.
 
-**ACCURACY GATE (only if `ACCURACY_GATE=gsm8k` is in your inputs; else use the normal parity gate).**
-For a QUANTIZED kernel, byte-exact greedy parity is the WRONG bar (a within-tolerance kernel rounds
-differently → flips borderline argmaxes → over-rejects valid kernels). Instead, score TASK ACCURACY:
-- Launch a FRESH TRUE-baseline server (no overlay) and the CAND server (with the candidate overlay), each
-  greedy/temp=0, and run `python3 $GSM8K_EVAL_SCRIPT --base-url http://127.0.0.1:<port>/v1 --model <MODEL_PATH>
-  --limit $ACCURACY_LIMIT --out <dir>/gsm8k_<tag>.json` against each (it prints `GSM8K_EXACT_MATCH=<s>`).
+**ACCURACY GATE (runs when `ACCURACY_GATE` ∈ {`gsm8k`,`fallback`} or `PARITY_FALLBACK_GSM8K=true` is in
+your inputs).** Two modes, SAME machinery:
+  - `gsm8k` (PRIMARY, opt-in) — for a QUANTIZED kernel byte-exact parity is the WRONG bar (a
+    within-tolerance kernel rounds differently → flips borderline argmaxes → over-rejects valid kernels),
+    so this REPLACES byte-parity for the quant gate from the start.
+  - `fallback` / `PARITY_FALLBACK_GSM8K=true` (DEFAULT) — byte-exact parity is still tried FIRST (it is
+    cheap and, on a pass, gives the strongest `parity_kind:"byte_exact"` guarantee). Run this accuracy
+    gate ONLY when byte-parity FAILS on a candidate that is already a REAL throughput win. Do NOT waste it
+    on a candidate that isn't a throughput win — reject those on the throughput gate as usual.
+Score TASK ACCURACY:
+- Reuse the SAME warm TRUE-baseline (no-overlay) and CAND servers you already stood up for the throughput
+  A/B — do NOT relaunch. Run `python3 $GSM8K_EVAL_SCRIPT --base-url http://127.0.0.1:<port>/v1
+  --model <MODEL_PATH> --limit $ACCURACY_LIMIT --out <dir>/gsm8k_<tag>.json` against each (it prints
+  `GSM8K_EXACT_MATCH=<s>`). `$ACCURACY_LIMIT` is a SUBSET (default 200) — a quick signal, NOT the full set.
   The script samples the SAME fixed gsm8k subset for both (seed-pinned), so the scores are comparable.
 - ACCEPT the candidate iff `cand_score >= baseline_score - $ACCURACY_TOL` (quality preserved); otherwise
-  `rejected` with reason `accuracy_regression` (record both scores). This REPLACES byte-parity for the
-  quant gate — a byte-divergent kernel that holds gsm8k accuracy is a LEGITIMATE win. Still apply the
-  throughput + engagement + memory gates as usual. (You can reuse the same two servers for the throughput
-  A/B to avoid extra launches.)
+  `rejected` with reason `accuracy_regression` (record both scores). A byte-divergent kernel that holds
+  gsm8k accuracy is a LEGITIMATE win. On an accuracy-based ACCEPT report `parity_kind:"accuracy"` and put
+  both scores in `parity_note`. Still apply the throughput + engagement + memory gates as usual.
 
 **DEEP-MODE feedback (only if `DEEP_FEEDBACK` is in your inputs; a normal/fast run omits it).** Besides
 the gate decision, the deep-mode scheduler needs the WHY so the next co-opt waves can fix the

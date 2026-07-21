@@ -191,7 +191,7 @@ function parityIsSoft(integ) {
   const pk = integ && integ.parity_kind;               // 'byte_exact' | 'accuracy' | 'none' (optional)
   if (pk === 'accuracy') return true;
   if (pk === 'byte_exact' || pk === 'none') return false;
-  return ACCURACY_GATE !== 'none';                      // unknown -> soft only when the run uses an accuracy gate
+  return GSM8K_GATE_ON;                                 // unknown -> soft only when a gsm8k gate (explicit OR parity-fallback) is live
 }
 function isImplausibleSpeedup(pct_gpu_time, isolated, integ) {
   if (!parityIsSoft(integ)) return false;              // hard byte-exact correctness -> trust the speedup
@@ -294,8 +294,25 @@ const DEEP_FINAL_ACCURACY_LIMIT = parseInt(A.deep_final_accuracy_limit != null ?
 const ACCURACY_GATE = String(A.accuracy_gate || 'none').trim();          // 'none' | 'gsm8k'
 const ACCURACY_LIMIT = parseInt(A.accuracy_limit != null ? A.accuracy_limit : 200, 10); // sampled gsm8k subset size
 const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01);        // allowed absolute exact_match drop vs baseline
-const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
-  ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
+// ---- PARITY FALLBACK (default ON) -------------------------------------------------------------------
+// The strict byte-exact parity gate over-rejects a whole class of REAL wins: a numerically-different but
+// task-correct kernel (a tuned CK/aiter fp8 GEMM, an FP-accum-reordered attention) beats the baseline
+// end-to-end yet is dropped for a ~1e-4 output drift. Observed: DeepSeek-R1 aiter-CK `gemm_a8w8_blockscale`
+// measured +17.8% e2e but was withheld for accuracy-only parity; an offline gsm8k check later showed the
+// task accuracy was within noise (0.906 -> 0.902 on the full set). So: when a candidate is a REAL e2e win
+// (delta>noise AND cand_min>ref_max) but FAILS byte-exact parity, the integrator no longer auto-rejects —
+// it FALLS BACK to the quick sampled gsm8k task-accuracy gate (same machinery as accuracy_gate=gsm8k,
+// SUBSET via ACCURACY_LIMIT, not the full set) and accepts iff cand_score >= baseline_score - accuracy_tol.
+// Set parity_fallback_gsm8k="false" to restore the old strict byte-only reject.
+const PARITY_FALLBACK_GSM8K = String(A.parity_fallback_gsm8k != null ? A.parity_fallback_gsm8k : 'true') === 'true';
+// The gsm8k gate is live either as the PRIMARY bar (accuracy_gate=gsm8k, replaces byte-parity for quant
+// kernels) or as the byte-parity FALLBACK (parity_fallback_gsm8k, default). Either way the integrator
+// needs the eval script + subset size + tolerance.
+const GSM8K_GATE_ON = ACCURACY_GATE === 'gsm8k' || PARITY_FALLBACK_GSM8K;
+const ACCURACY_INPUTS = GSM8K_GATE_ON
+  ? { ACCURACY_GATE: (ACCURACY_GATE === 'gsm8k' ? 'gsm8k' : 'fallback'),
+      PARITY_FALLBACK_GSM8K: PARITY_FALLBACK_GSM8K ? 'true' : 'false',
+      ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
   : {};
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
@@ -668,6 +685,10 @@ const abDone = (integ) => !!(integ && integ.gate !== 'incomplete' && integ.ab_co
 // (head, milestone, finalize-gate, disk-recovered): an A/B never ends after the
 // reference leg alone — it is driven to a complete ref+cand measurement.
 async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
+  // Central injection: every head/milestone/finalize-gate integrate goes through here, so the gsm8k
+  // gate inputs (explicit accuracy_gate OR the default byte-parity fallback) reach ALL of them. Caller
+  // keys win on conflict (spread last) — e.g. a per-site ACCURACY_LIMIT override is preserved.
+  inputs = { ...ACCURACY_INPUTS, ...inputs };
   let integ = await safeAgent(
     roleAgent('e2e_integrator', 'integrate', intro, inputs),
     { phase: phaseName, label, schema: INTEGRATE_SCHEMA });
@@ -1326,7 +1347,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
             CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
             ...ACCURACY_INPUTS,
-            ...(opts.final && ACCURACY_GATE !== 'none' ? { ACCURACY_LIMIT: DEEP_FINAL_ACCURACY_LIMIT } : {}),   // de-noise the finalize accuracy decision
+            ...(opts.final && GSM8K_GATE_ON ? { ACCURACY_LIMIT: DEEP_FINAL_ACCURACY_LIMIT } : {}),   // de-noise the finalize accuracy decision (explicit gate OR parity fallback)
           }),
           { phase: 'HeadKernel', label: `integrate ${c.uid} g${e2eGateCount}`, schema: INTEGRATE_SCHEMA });
         if (integ && integ.output_parity === 'fail') {

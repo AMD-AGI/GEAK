@@ -104,6 +104,10 @@ Workflow({
     gpu_ids: "0",         // comma-separated
     isl: 1024, osl: 1024, conc: 64,  // workload (profile + bench use the SAME)
     task: "focus on ...", // optional steer
+    parity_fallback_gsm8k: "true",   // default ON: a REAL e2e win that fails byte-exact parity is NOT
+                          //   auto-rejected — the Integrator falls back to the quick sampled gsm8k
+                          //   task-accuracy gate (accuracy_limit subset, accuracy_tol) and accepts iff
+                          //   quality holds. Set "false" to restore the old strict byte-only reject.
     apply_to_original: "false"       // if "true", emit an apply bundle (overlay + launch), never edits site-packages
   }
 })
@@ -135,20 +139,19 @@ achievable number (it is broader = more backends, deeper = more/faster rounds, p
 spare GPUs while the e2e gate runs on the serving slot, with matched in-window A/B so parallelism never
 corrupts a measurement).
 
-## Accuracy gate (gsm8k) — OFF by default
-By default the e2e gate accepts a kernel on **throughput delta + greedy output parity**
-(`accuracy_gate:"none"`). For QUANTIZED kernels (MXFP8/fp8) byte-parity is too strict — a within-tolerance
-kernel rounds differently and flips a few borderline greedy argmaxes — so you can switch the bar to
-**task accuracy**:
-```
-args: { ...same..., accuracy_gate:"gsm8k", accuracy_limit:200, accuracy_tol:0.01 }
-```
-- `accuracy_gate:"gsm8k"` → the Integrator serves a fresh TRUE baseline vs the candidate, runs sampled
-  gsm8k (5-shot, greedy, fixed seed), and accepts iff `cand_em >= baseline_em - accuracy_tol`.
-- `accuracy_limit` = #questions (default **200**; deep uses a larger sample at finalize to de-noise the
-  boundary). `accuracy_tol` = allowed exact-match drop (default **0.01**).
-- The eval client is `scripts/gsm8k_eval.py` (model-agnostic; queries the OpenAI-compatible endpoint).
-- Leaving it unset (`"none"`) changes nothing vs before — the gate stays throughput + parity only.
+## Accuracy gate (gsm8k)
+gsm8k task-accuracy can enter the e2e gate two ways, both using `scripts/gsm8k_eval.py` (5-shot, greedy,
+fixed seed, sampled `--limit` subset) with the `accuracy_limit` (default **200**) / `accuracy_tol`
+(default **0.01**) knobs. The Integrator scores a fresh TRUE baseline vs the candidate (reusing the
+throughput-A/B servers) and accepts iff `cand_em >= baseline_em - accuracy_tol` (`parity_kind:"accuracy"`).
+
+- **Parity fallback — ON by default (`parity_fallback_gsm8k:"true"`).** Byte-exact parity is still tried
+  first; only a candidate that is a real throughput win but fails byte-parity falls back to the gsm8k gate
+  instead of being rejected. This rescues numerically-different-but-task-correct kernels (a tuned CK/aiter
+  fp8 GEMM, an FP-accum-reordered attention). It only turns a would-be reject into an accept when quality
+  holds — never downgrades a byte-exact accept. Set `"false"` to restore the strict byte-only reject.
+- **Primary bar — opt-in (`accuracy_gate:"gsm8k"`).** For QUANTIZED kernels (MXFP8/fp8) byte-parity is the
+  wrong bar from the start, so this replaces it for the gate entirely.
 
 ## Output
 Everything lands under `<exp_root>/e2e_<model>_<timestamp>/`:
