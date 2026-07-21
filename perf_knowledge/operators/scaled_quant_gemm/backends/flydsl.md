@@ -108,6 +108,12 @@ pytest -q aiter/ops/flydsl/test_flydsl_moe_a4w4.py                              
 [[operators/gemm_epilogue_fused/backends/flydsl]] (C-shuffle epilogue) ·
 [[operators/grouped_gemm_moe/backends/aiter]] (FlyDSL MoE GEMM).
 
+**Authoring / optimizing a FlyDSL GEMM `@flyc.kernel`** (write from scratch OR port ck→flydsl):
+[[languages/flydsl/authoring_gemm_levers]] (tiling / LDS / XCD-swizzle / epilogue) ·
+[[languages/flydsl/authoring_optimization]] (structure-first workflow) ·
+[[languages/flydsl/authoring_tile_programming]] (CuTe tile model) ·
+[[languages/flydsl/debugging]] (correctness / NaN / hang triage).
+
 ## Sources
 - On-box: `/sgl-workspace/aiter/aiter/ops/flydsl/kernels/preshuffle_gemm.py`
   (`compile_preshuffle_gemm_a8`, `compile_preshuffle_gemm_w4`, `use_mfma_scale_128` /
