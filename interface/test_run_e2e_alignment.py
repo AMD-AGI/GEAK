@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-harness alignment / credibility tests for run_e2e.normalize_result.
 
-These guard the numbers Hyperloom reports for a PerfSkills(GEAK) e2e win against
+These guard the numbers Hyperloom reports for a GEAK e2e win against
 two failure modes that inflate the leaderboard:
 
   * conflating the explore/framework CONFIG gain (baked into GEAK's seeded
