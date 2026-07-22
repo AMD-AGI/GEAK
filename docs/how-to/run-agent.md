@@ -48,7 +48,7 @@ levers cheapest-first (config/backend sweep → head GEMM/attention bake-off →
 loop), and overlays each accepted change back reversibly, gated on a measured throughput delta.
 
 Output: `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`, `architect_report.md`, `final/`
-(overlay + patch + `final_launch.sh`). See [`examples/e2e_workflow/`](../../examples/e2e_workflow/).
+(overlay + patch + `final_launch.sh`).
 
 ### Single kernel (kernel_workflow)
 

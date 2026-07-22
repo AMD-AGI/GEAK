@@ -301,7 +301,7 @@ Every PR and issue must carry exactly one type label. This keeps each PR focused
 
 ## License
 
-All contributions must be compatible with the project's [LICENSE](https://github.com/AMD-AGI/GEAK/blob/main/LICENSE). By opening a pull request, you agree that your contribution is licensed under the same terms.
+All contributions must be compatible with the project's [Apache-2.0 license](https://github.com/AMD-AGI/GEAK/blob/main/LICENSE.md). By opening a pull request, you agree that your contribution is licensed under the same terms.
 
 Every new source file should include the SPDX header:
 

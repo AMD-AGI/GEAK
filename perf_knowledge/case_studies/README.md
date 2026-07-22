@@ -6,8 +6,6 @@ regimes: [prefill, decode, both]
 status: sota
 updated: 2026-06-08
 sources:
-  - GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md
-  - GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_gemm-tuning-win/final_report.md
   - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
   - GEAK/e2e_workflow/knowledge/gemm_attention_backends.md
 ---
@@ -56,7 +54,6 @@ standard: `delta% > 0.5% noise band AND cand_min > ref_max` on a tight same-sess
 - Optimization techniques: [`../optimization/`](../optimization/) · SOTA matrix: [`../index/sota_matrix.md`](../index/sota_matrix.md)
 
 ## Sources
-- Flagship measured numbers: the two `examples/e2e_workflow/qwen3.5-27b_sglang_*/final_report.md` iteration reports.
 - Provenance ledger for the GEMM/attention levers: `GEAK/e2e_workflow/knowledge/{gemm_tuning/aiter_gemm_tuning.md,gemm_attention_backends.md}`.
 
 <!-- MANIFEST: case_studies index — routes to by_model/{qwen3.5-27b_sglang_e2e,deepseek_mla_mi300x,llama_fp8_serving} and by_kernel/{gemm_aiter_db_tuning,gated_delta_backend_swap,fused_norm_quant_win,mfma_tile_selection}; every number labelled measured-by-us vs vendor-reported. -->

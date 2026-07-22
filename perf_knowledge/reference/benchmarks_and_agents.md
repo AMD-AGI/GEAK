@@ -5,7 +5,6 @@ updated: 2026-06-08
 sources:
   - /wekafs/zihao/2026/geak_cc/geak_v4/GEAK/e2e_workflow/README.md
   - /wekafs/zihao/2026/geak_cc/GEAK (https://github.com/AMD-AGI/GEAK)
-  - /wekafs/zihao/2026/geak_cc/geak_v4/GEAK/examples/e2e_workflow/
   - /wekafs/zihao/2026/geak_cc/geak_v4/GEAK/perf_knowledge/index/sota_registry.yaml
 ---
 
@@ -59,14 +58,6 @@ loop and an evaluator. perf_knowledge feeds GEAK target SOTA characteristics and
 the kernel layer when a hot op has no SOTA path. Authoring workflow:
 [`../kernel_workflow/authoring_a_kernel_with_geak.md`](../kernel_workflow/authoring_a_kernel_with_geak.md).
 
-## examples/ (recorded runs)
-[`/wekafs/zihao/2026/geak_cc/geak_v4/GEAK/examples/e2e_workflow/`](/wekafs/zihao/2026/geak_cc/geak_v4/GEAK/examples/e2e_workflow/):
-- `qwen3.5-27b_sglang_gemm-tuning-win/` — a GEMM-tuning e2e win (config track).
-- `qwen3.5-27b_sglang_isl1024_osl1024_conc64/` — fixed-ISL/OSL/concurrency throughput run.
-
-These are the ground-truth shape of a full run (baseline → triage → tune → validate) and back the
-case studies in [`../case_studies/`](../case_studies/).
-
 ## KernelBench / TritonBench (external eval harnesses)
 - **KernelBench** — https://github.com/ScalingIntelligence/KernelBench — task suite for LLM-generated
   GPU kernels (correctness + speedup vs. reference). Used as an external yardstick for GEAK-style
@@ -81,7 +72,6 @@ recorded in the [`../index/conventions.md`](../index/conventions.md) perf format
 ## Sources
 - e2e_workflow README + roles — [`/wekafs/zihao/2026/geak_cc/geak_v4/GEAK/e2e_workflow/README.md`](/wekafs/zihao/2026/geak_cc/geak_v4/GEAK/e2e_workflow/README.md), `roles/`.
 - GEAK — on-box [`/wekafs/zihao/2026/geak_cc/GEAK/`](/wekafs/zihao/2026/geak_cc/GEAK/) ; https://github.com/AMD-AGI/GEAK
-- examples — [`/wekafs/zihao/2026/geak_cc/geak_v4/GEAK/examples/e2e_workflow/`](/wekafs/zihao/2026/geak_cc/geak_v4/GEAK/examples/e2e_workflow/)
 - registry/query contract — [`../index/sota_registry.yaml`](../index/sota_registry.yaml), [`../index/conventions.md`](../index/conventions.md)
 - KernelBench — https://github.com/ScalingIntelligence/KernelBench ; TritonBench — https://github.com/pytorch-labs/tritonbench
 - Items marked **(verify exact name)** were not confirmed verbatim at write time.
