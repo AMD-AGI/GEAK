@@ -3,7 +3,7 @@ id: flydsl_rewrite_quantized_moe
 title: Rewrite quantized GEMM / fused-MoE kernels into FlyDSL (Triton->FlyDSL, int4 W4A16 / fp8 blockscale)
 kind: expert_skill
 authors:
-- hongtaom
+- GEAK Team
 scope: kernel
 match:
   operator: fused_moe_grouped_gemm
