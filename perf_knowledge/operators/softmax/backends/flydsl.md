@@ -17,7 +17,7 @@ sources:
 ## TL;DR
 The on-box FlyDSL source ships a softmax **reduce PRIMITIVE**, not a standalone tuned softmax op. Softmax
 needs a row **max** and a row **sum**; the building blocks in
-`kernels/reduce.py` are the per-lane vector
+`/sgl-workspace/aiter/aiter/ops/flydsl/kernels/reduce.py` are the per-lane vector
 reductions `reduce_vec_max` (`vector.reduction(..., "maxnumf", ...)`) and `reduce_vec_sum`
 (`vector.reduction(..., "add", ...)`) over `VEC_WIDTH`, plus the block-wide `make_block_reduce(val, "max"
 / "add")` which combines lanes across a wave64 block (intra-wave XOR shuffle → LDS → wave0 shuffle, with

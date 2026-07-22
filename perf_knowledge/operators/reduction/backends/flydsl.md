@@ -17,7 +17,7 @@ sources:
 ## TL;DR
 FlyDSL does **not** ship a standalone, separately-dispatched reduction op. What the on-box source
 provides is the **block-reduce PRIMITIVE** `make_block_reduce_add` / `make_block_reduce_add2` in
-`kernels/reduce.py` — a **wave64**
+`/sgl-workspace/aiter/aiter/ops/flydsl/kernels/reduce.py` — a **wave64**
 (`WARP_SIZE = 64`) intra-wave XOR-shuffle reduce, then an **LDS scratch** exchange across `RED_SLOTS`
 waves, finished by a second shuffle in wave0. It is the substrate that FlyDSL's fused norm/softmax
 kernels are built from (see [[operators/rmsnorm/backends/flydsl]]). Use it only when authoring a fused
