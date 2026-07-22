@@ -23,4 +23,4 @@ last_seen: 2026-06-22
 - harness: shared op_bench.py MIS-ROUTES this (is_blockscale_gemm True) to the dense a8w8 blockscale
   path -> TypeError + 41.8 rel-err garbage = harness_suspect, NOT a no-win. Repair: drive the immutable
   unittest's _build_case/_call directly (grouped scatter + E8M0). Driver: see source eval dir.
-- source: /shared/amdgpu/home/zihaoan2_qle/kernel_agent/v4/GEAK/worktree/deep/exp/e2e_MiniMax-M3-MXFP8_20260622_063601_1857462_27251 (opbench_result_corrected.json, probe_triton_knobs.py)
+- source: `<EVAL_DIR>/exp/e2e_MiniMax-M3-MXFP8_20260622_063601_1857462_27251` (opbench_result_corrected.json, probe_triton_knobs.py)

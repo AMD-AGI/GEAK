@@ -49,7 +49,7 @@ tuning path and JIT. Verified in `aiter/jit/core.py` and `aiter/tuned_gemm.py`.
 
 **GEMM tuning trio** = `AITER_TUNE_GEMM` (do the sweep) + `AITER_LOG_TUNED_CONFIG` (prove which row
 hit) + the BF16 config selector / `AITER_ONLINE_TUNE` (where the tuned rows come from / on-miss
-behavior). → workflow: [`../kernel_workflow/gemm_tuning_workflow.md`](../kernel_workflow/gemm_tuning_workflow.md).
+behavior). → workflow: [`../workflows/gemm_tuning_workflow.md`](../workflows/gemm_tuning_workflow.md).
 Engagement proof: [`../profiling/engagement_verification.md`](../profiling/engagement_verification.md).
 Dense-GEMM SOTA path: [`../operators/dense_gemm/`](../operators/dense_gemm/).
 
@@ -64,8 +64,8 @@ Dense-GEMM SOTA path: [`../operators/dense_gemm/`](../operators/dense_gemm/).
 | `SGLANG_DISABLE_AITER_GREEDY_SAMPLE` **(verify exact name)** | `0`/`1` | Disable the aiter greedy-sampling kernel (fall back to torch sampling) — A/B knob for the sampling path. Confirm spelling in installed sglang. | sglang (verify) |
 | `--mem-fraction-static` / `--context-length` | float / int (CLI) | Lower these when the aiter attention backend over-allocates KV cache → OOM (known issue). | sglang issues #18262 |
 
-Cross-link: [`../kernel_workflow/attention_backend_selection.md`](../kernel_workflow/attention_backend_selection.md),
-[`../kernel_workflow/choosing_a_backend.md`](../kernel_workflow/choosing_a_backend.md),
+Cross-link: [`../workflows/attention_backend_selection.md`](../workflows/attention_backend_selection.md),
+[`../workflows/choosing_a_backend.md`](../workflows/choosing_a_backend.md),
 [`../quantization/deployment_recipes.md`](../quantization/deployment_recipes.md).
 
 ---
@@ -92,7 +92,7 @@ are from the vLLM source / ROCm guide.
 | `--aiter-config` | (proposed CLI) | Upcoming single flag to replace the 13 env vars (RFC #33163). | vllm issues #33163 |
 
 Layout-shuffle operator: [`../operators/layout_shuffle/overview.md`](../operators/layout_shuffle/overview.md).
-Cross-link: [`../kernel_workflow/attention_backend_selection.md`](../kernel_workflow/attention_backend_selection.md),
+Cross-link: [`../workflows/attention_backend_selection.md`](../workflows/attention_backend_selection.md),
 [`../quantization/deployment_recipes.md`](../quantization/deployment_recipes.md).
 
 ---
@@ -133,7 +133,7 @@ Cross-link: [`../kernel_workflow/attention_backend_selection.md`](../kernel_work
 | `HIPBLASLT_TUNING_FILE` | path | hipBLASLt offline-tuning results file. **0 engagement on aiter dense path** (see caveat). | hipBLASLt env docs |
 | `HIPBLASLT_LOG_MASK` / `HIPBLASLT_LOG_FILE` | int / path | Log every hipBLASLt call (large files); use to confirm whether GEMMs even reach hipBLASLt. | hipBLASLt env docs |
 
-Cross-link: [`../kernel_workflow/gemm_tuning_workflow.md`](../kernel_workflow/gemm_tuning_workflow.md),
+Cross-link: [`../workflows/gemm_tuning_workflow.md`](../workflows/gemm_tuning_workflow.md),
 [`../operators/dense_gemm/`](../operators/dense_gemm/).
 
 ---
@@ -148,7 +148,7 @@ Cross-link: [`../kernel_workflow/gemm_tuning_workflow.md`](../kernel_workflow/ge
 | `MLIR_ENABLE_DUMP` | `0`/`1` | Dump MLIR through the AMD lowering pipeline. | triton |
 | `FLASH_ATTENTION_TRITON_AMD_AUTOTUNE` | `0`/`1` | Autotune the Triton-AMD flash-attention kernel. | aiter / flash-attn |
 
-Cross-link: [`../languages/`](../languages/), [`../kernel_workflow/authoring_a_kernel_with_geak.md`](../kernel_workflow/authoring_a_kernel_with_geak.md).
+Cross-link: [`../languages/`](../languages/), [`../workflows/authoring_a_kernel_with_geak.md`](../workflows/authoring_a_kernel_with_geak.md).
 
 ## MIOpen
 

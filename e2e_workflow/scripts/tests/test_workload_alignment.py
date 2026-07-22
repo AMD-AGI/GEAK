@@ -799,7 +799,7 @@ def _synthetic_trace():
     """Tiny Kineto-style trace: 1 prefill(mixed) step (M=8192) + 2 pure-decode steps (batch 8).
     fused_moe fires in all 3 (both), _gqa_sparse_fwd only in prefill, reduce only in decode."""
     ev = [
-        # step spans on the GPU timeline (perfskills dialect)
+        # step spans on the GPU timeline (GEAK dialect)
         {"cat": "gpu_user_annotation", "name": "execute_context_2(8192)_generation_0(0)",
          "ph": "X", "ts": 0.0, "dur": 100.0},
         {"cat": "gpu_user_annotation", "name": "execute_context_0(0)_generation_8(8)",

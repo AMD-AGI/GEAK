@@ -19,9 +19,9 @@ actually happened — **including the attempts that failed**. Every number here 
 extrapolated past its source. Where a figure differs between runs (box drift across sessions),
 both are shown with their provenance.
 
-The methodology these follow is in [`../kernel_workflow/optimize_e2e_model.md`](../kernel_workflow/optimize_e2e_model.md)
-(e2e flow), [`../kernel_workflow/optimize_single_kernel.md`](../kernel_workflow/optimize_single_kernel.md)
-(inner loop), and [`../kernel_workflow/gemm_tuning_workflow.md`](../kernel_workflow/gemm_tuning_workflow.md)
+The methodology these follow is in [`../workflows/optimize_e2e_model.md`](../workflows/optimize_e2e_model.md)
+(e2e flow), [`../workflows/optimize_single_kernel.md`](../workflows/optimize_single_kernel.md)
+(inner loop), and [`../workflows/gemm_tuning_workflow.md`](../workflows/gemm_tuning_workflow.md)
 (the GEMM recipe). Read those for the *how*; these case studies are the *what happened*.
 
 ## How to read a case study
@@ -29,7 +29,7 @@ Each file follows: **Context → Baseline → What we tried → What worked / wh
 → Final result (numbers) → Lessons → Sources**. The accept gate everywhere is the project
 standard: `delta% > 0.5% noise band AND cand_min > ref_max` on a tight same-session A/B, plus
 **engagement proof** on the live path and **output parity** (see
-[`../kernel_workflow/optimize_e2e_model.md`](../kernel_workflow/optimize_e2e_model.md)).
+[`../workflows/optimize_e2e_model.md`](../workflows/optimize_e2e_model.md)).
 
 ## by_model/  — full e2e serving runs
 
@@ -49,7 +49,7 @@ standard: `delta% > 0.5% noise band AND cand_min > ref_max` on a tight same-sess
 | [`by_kernel/mfma_tile_selection.md`](by_kernel/mfma_tile_selection.md) | 16×16 vs 32×32 MFMA tile | 16×16 default on MI300X (vendor) | tile choice |
 
 ## Cross-links
-- Workflows: [`../kernel_workflow/`](../kernel_workflow/) · Operators: [`../operators/`](../operators/)
+- Workflows: [`../workflows/`](../workflows/) · Operators: [`../operators/`](../operators/)
 - aiter backend: [`../backends/aiter/`](../backends/aiter/) · Quantization: [`../quantization/`](../quantization/)
 - Optimization techniques: [`../optimization/`](../optimization/) · SOTA matrix: [`../index/sota_matrix.md`](../index/sota_matrix.md)
 

@@ -68,7 +68,7 @@ python3 -m sglang.launch_server --model-path meta-llama/Meta-Llama-3.1-8B-Instru
 ### 3. Stack the GEMM tune on top (the bf16 lesson transfers)
 fp8 dense GEMM still flows through the aiter dispatch; reach the fp8 (a8w8) GEMM and FlyDSL-fp8
 path via the same DB tune (`libtype=flydsl`) — see
-[`../../kernel_workflow/gemm_tuning_workflow.md`](../../kernel_workflow/gemm_tuning_workflow.md) (the fp8/CDNA4
+[`../../workflows/gemm_tuning_workflow.md`](../../workflows/gemm_tuning_workflow.md) (the fp8/CDNA4
 note) and [`../by_kernel/gemm_aiter_db_tuning.md`](../by_kernel/gemm_aiter_db_tuning.md).
 
 ## What didn't / the traps (kept honestly)

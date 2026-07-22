@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-harness alignment / credibility tests for run_e2e.normalize_result.
 
-These guard the numbers Hyperloom reports for a PerfSkills(GEAK) e2e win against
+These guard the numbers Hyperloom reports for a GEAK e2e win against
 two failure modes that inflate the leaderboard:
 
   * conflating the explore/framework CONFIG gain (baked into GEAK's seeded
@@ -255,8 +255,8 @@ def test_cold_speedup_equals_hyperloom_provisional_ratio() -> None:
     final over the cold baseline (which would overstate the win).
     """
     fixture = Path(
-        "/wekafs/test_results/gemma-4-26B_20260705/gemma-4-26B-A4B-it"
-        "/20260705T151915Z/perfskills/result.json"
+        "test_results/gemma-4-26B_session/gemma-4-26B-A4B-it"
+        "/result.json"
     )
     if not fixture.exists():
         pytest.skip("session fixture not present")

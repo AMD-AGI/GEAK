@@ -3,7 +3,7 @@ id: flydsl_rewrite_quantized_moe
 title: Rewrite quantized GEMM / fused-MoE kernels into FlyDSL (Triton->FlyDSL, int4 W4A16 / fp8 blockscale)
 kind: expert_skill
 authors:
-- hongtaom
+- GEAK Team
 scope: kernel
 match:
   operator: fused_moe_grouped_gemm
@@ -35,7 +35,7 @@ validation:
     isolated: 3.576
     e2e_pct: ''
     parity: pass
-  artifact: /wekafs/hongtaom/kimi_k01_fused_moe_flydsl
+  artifact: ""                      # path to the validation eval dir (not shipped in-repo)
 role: advisory_prior
 supersedes: []
 ---
@@ -121,8 +121,8 @@ correctness is judged identically.
   skill is inert — the workflow falls back to the generic Triton path, no regression.
 
 ## Sources
-- Recipe (canonical author copy in PerfSkills): `workflows/knowledge/rewrite_kernel_to_flydsl.md`
-  (PerfSkills `flydsl-rewrite` branch, commit `d7e8df1`); role directions in
+- Recipe (canonical author copy, internal perf-knowledge repo): `workflows/knowledge/rewrite_kernel_to_flydsl.md`
+  (internal `flydsl-rewrite` branch, commit `d7e8df1`); role directions in
   `workflows/roles/engineer.md` (FlyDSL rewrite directions) and `workflows/roles/tech_lead.md`
   (FlyDSL full-rewrite direction).
 - Worked example — Triton→FlyDSL int4 **W4A16** GPTQ/AWQ fused-MoE (`fused_moe_kernel_gptq_awq`, Kimi-K2.6):
@@ -132,7 +132,7 @@ correctness is judged identically.
   `${FLYDSL_EXAMPLES}/fp8_blockscale_moe/`; deep dive in sibling skill `rewrite-co-kernel-to-flydsl`.
 - Related GEAK skill: `flydsl_fp8_gemm_playbook` (e2e down-proj bare-core bind) — this skill is its
   kernel-scope, broader-operator counterpart.
-- Validation eval dir (artifact): `/wekafs/hongtaom/kimi_k01_fused_moe_flydsl/` — K1 `fused_moe_kernel_gptq_awq`
+- Validation eval dir (artifact) — K1 `fused_moe_kernel_gptq_awq`
   (int4 W4A16, Kimi-K2.6, MI300X gfx942). Deployment-env same-session A/B: **geomean 3.62×** (5 UT cases),
   5.15× prefill, 5/5 correctness PASS (cosine ≈ 0.999994) — `result_flydsl.json`, `DELIVERY_FLYDSL.md`,
   rocprof roofline (FlyDSL 60–65% HBM vs Triton 13–18%) in `roofline_hw/`.

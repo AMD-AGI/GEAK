@@ -107,7 +107,7 @@ def short_name(name):
 # --------------------------------------------------------------------------- #
 def _seg(name, tag):
     """(lead, tokens, kv) for a 'context'/'generation' segment. Handles both annotation
-    dialects: perfskills  context_<nreq>(<ntok>)  and  ..._<batch>(sq<q>sk<kv>...)."""
+    dialects: GEAK  context_<nreq>(<ntok>)  and  ..._<batch>(sq<q>sk<kv>...)."""
     m = re.search(tag + r"_(\d+)\(([^)]*)\)", name)
     if not m:
         return (0, 0, 0)
