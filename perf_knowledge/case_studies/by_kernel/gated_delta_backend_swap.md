@@ -30,7 +30,7 @@ full-attention layers can run on different backends. `--attention-backend triton
 flag** — the cheapest possible e2e lever (no source change) — and on this model it both **wins
 e2e** and **opens an editable Triton surface** for downstream kernel work. Operator background:
 [`../../operators/linear_attention_gated_delta/`](../../operators/linear_attention_gated_delta/).
-Method: [`../../kernel_workflow/attention_backend_selection.md`](../../kernel_workflow/attention_backend_selection.md).
+Method: [`../../workflows/attention_backend_selection.md`](../../workflows/attention_backend_selection.md).
 
 ## Baseline
 - Default sglang attention path on this model = **CK paged-attention** (the full-attn layers),
@@ -87,11 +87,11 @@ hybrid GDN path (vendor).
    the true baseline.
 
 ## Cross-links
-- Backend-selection decision tree + per-gen ranking: [`../../kernel_workflow/attention_backend_selection.md`](../../kernel_workflow/attention_backend_selection.md)
+- Backend-selection decision tree + per-gen ranking: [`../../workflows/attention_backend_selection.md`](../../workflows/attention_backend_selection.md)
 - Operator: [`../../operators/linear_attention_gated_delta/`](../../operators/linear_attention_gated_delta/) · triton card: [`../../operators/linear_attention_gated_delta/backends/triton.md`](../../operators/linear_attention_gated_delta/backends/triton.md)
 - The GEMM lever it stacks with: [`gemm_aiter_db_tuning.md`](gemm_aiter_db_tuning.md)
 - The full run: [`../by_model/qwen3.5-27b_sglang_e2e.md`](../by_model/qwen3.5-27b_sglang_e2e.md)
-- e2e flow / gate: [`../../kernel_workflow/optimize_e2e_model.md`](../../kernel_workflow/optimize_e2e_model.md)
+- e2e flow / gate: [`../../workflows/optimize_e2e_model.md`](../../workflows/optimize_e2e_model.md)
 
 ## Sources
 - The +4.15% / +4.44% measured win, engagement, parity, the chunked-prefill reject: `GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md`.

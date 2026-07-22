@@ -31,7 +31,7 @@ sources:
   accounting and stable A/B).
 - **Hardware:** AMD Instinct MI300X (gfx942), noise band 0.5%.
 - **Workload:** ISL/OSL/conc = **1024/1024/64** — **prefill-dominated**.
-- **Method:** [`../../kernel_workflow/optimize_e2e_model.md`](../../kernel_workflow/optimize_e2e_model.md)
+- **Method:** [`../../workflows/optimize_e2e_model.md`](../../workflows/optimize_e2e_model.md)
   (the `e2e_workflow` flow): baseline → profile → config sweep → head-kernel → milestone
   cluster → combined gate.
 
@@ -149,8 +149,8 @@ accepted. Parity safe (same bf16 math; tuner gated every row at `err_ratio < 0.0
 ## Cross-links
 - The GEMM lever in depth: [`../by_kernel/gemm_aiter_db_tuning.md`](../by_kernel/gemm_aiter_db_tuning.md)
 - The attention flag in depth: [`../by_kernel/gated_delta_backend_swap.md`](../by_kernel/gated_delta_backend_swap.md)
-- GEMM recipe: [`../../kernel_workflow/gemm_tuning_workflow.md`](../../kernel_workflow/gemm_tuning_workflow.md) · e2e flow: [`../../kernel_workflow/optimize_e2e_model.md`](../../kernel_workflow/optimize_e2e_model.md)
-- Attention selection: [`../../kernel_workflow/attention_backend_selection.md`](../../kernel_workflow/attention_backend_selection.md)
+- GEMM recipe: [`../../workflows/gemm_tuning_workflow.md`](../../workflows/gemm_tuning_workflow.md) · e2e flow: [`../../workflows/optimize_e2e_model.md`](../../workflows/optimize_e2e_model.md)
+- Attention selection: [`../../workflows/attention_backend_selection.md`](../../workflows/attention_backend_selection.md)
 - Operators: [`../../operators/dense_gemm/`](../../operators/dense_gemm/) · [`../../operators/linear_attention_gated_delta/`](../../operators/linear_attention_gated_delta/)
 - Backend: [`../../backends/aiter/tuned_gemm.md`](../../backends/aiter/tuned_gemm.md)
 
