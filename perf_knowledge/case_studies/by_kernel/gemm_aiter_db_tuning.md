@@ -9,8 +9,6 @@ regimes: [prefill, decode]
 status: sota
 updated: 2026-06-08
 sources:
-  - GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_gemm-tuning-win/final_report.md
-  - GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md
   - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
   - GEAK/e2e_workflow/knowledge/gemm_attention_backends.md
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/tuned_gemm.py
@@ -119,8 +117,8 @@ bf16 math, `err_ratio=0.0` on every row.
 - e2e flow / gate: [`../../workflows/optimize_e2e_model.md`](../../workflows/optimize_e2e_model.md)
 
 ## Sources
-- The +2.23% win, 246 hits, the A/B table, the bias fix: `GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_gemm-tuning-win/final_report.md`.
-- The attempt-1 bias-mismatch reject (0 hits, 258 misses): `GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md`.
+- The +2.23% win, 246 hits, the A/B table, the bias fix.
+- The attempt-1 bias-mismatch reject (0 hits, 258 misses).
 - Recipe, both traps, FLOPs-DESC, capture-bias-from-server rule: `GEAK/e2e_workflow/knowledge/{gemm_tuning/aiter_gemm_tuning.md,gemm_attention_backends.md}`.
 - Dispatch + key: `ROCm/aiter@a6bb499:aiter/tuned_gemm.py`, `gradlib/gradlib/gemm_tuner.py`.
 

@@ -8,7 +8,7 @@ version = "4.0.0"
 description = "GEAK v4 — clones the repo locally and installs the Claude Code CLI its Workflows run inside."
 readme = "README.md"
 requires-python = ">=3.8"
-license = { file = "LICENSE" }
+license = { file = "LICENSE.md" }
 
 # Runtime deps. Add new packages here (this replaces the old requirements.txt).
 dependencies = [
