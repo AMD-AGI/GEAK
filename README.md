@@ -123,7 +123,6 @@ use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8,
 
 **Output** lands under `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`,
 `architect_report.md`, `final/` (overlay + patch + `final_launch.sh`), and per-stage artifacts.
-See a real run in [`examples/e2e_workflow/`](examples/e2e_workflow/).
 
 ---
 
@@ -165,11 +164,6 @@ optimization). This makes runs reliable and reproducible.
 | GEAK_v3 (baseline) | Opus 4.8 | 1.90x |
 | **kernel_workflow** | Opus 4.8 | **3.68x** |
 
-> kernel_workflow is measured with unified baselines (3 runs, median); GEAK_v3 uses each run's own
-> baseline. Per-kernel breakdowns:
-> [original](examples/result/hip2hip_comparison.md) ·
-> [reproducibility](examples/result/hip2hip_repro_comparison.md).
-
 ## Repository layout
 
 ```
@@ -205,4 +199,4 @@ How the workflows in this repo relate to the GEAK_v3 baseline:
 
 ## License
 
-MIT License
+GEAK is licensed under the Apache License 2.0 — see [LICENSE.md](LICENSE.md).
