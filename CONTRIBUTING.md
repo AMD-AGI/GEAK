@@ -307,7 +307,7 @@ Every new source file should include the SPDX header:
 
 ```python
 # Copyright (c) [2026] Advanced Micro Devices, Inc. All rights reserved.
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 ```
 
 ---
