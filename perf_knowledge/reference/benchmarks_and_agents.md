@@ -51,8 +51,8 @@ Always edit card frontmatter and regenerate the registry (`index/_gen_registry.p
 `sota_registry.yaml`.
 
 ## GEAK (AMD agentic kernel generator)
-In-repo: the repository root ([`../../`](../../)) — `examples/`,
-`mcp_tools/`, `docs/`. Upstream: https://github.com/AMD-AGI/GEAK.
+In-repo: the repository root (`examples/`, `mcp_tools/`, `docs/`).
+Upstream: https://github.com/AMD-AGI/GEAK.
 
 LLM agent that generates + iteratively refines Triton kernels for AMD GPUs, with a debugging/reflection
 loop and an evaluator. perf_knowledge feeds GEAK target SOTA characteristics and pitfalls; GEAK is invoked by
@@ -80,7 +80,7 @@ recorded in the [`../index/conventions.md`](../index/conventions.md) perf format
 
 ## Sources
 - e2e_workflow README + roles — [`e2e_workflow/README.md`](../../e2e_workflow/README.md), `roles/`.
-- GEAK — repo-relative [`../../`](../../) ; https://github.com/AMD-AGI/GEAK
+- GEAK — repo root ; https://github.com/AMD-AGI/GEAK
 - examples — [`examples/e2e_workflow/`](../../examples/e2e_workflow/)
 - registry/query contract — [`../index/sota_registry.yaml`](../index/sota_registry.yaml), [`../index/conventions.md`](../index/conventions.md)
 - KernelBench — https://github.com/ScalingIntelligence/KernelBench ; TritonBench — https://github.com/pytorch-labs/tritonbench
