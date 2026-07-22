@@ -2,7 +2,7 @@
 id: flydsl_fp8_gemm_playbook
 title: "FlyDSL fused fp8 a8w8 blockscale GEMM, capture-safe bare-core bind (down-proj head)"
 kind: expert_skill
-authors: [zihao]
+authors: [GEAK Team]
 scope: e2e
 match:
   operator: dense_gemm
