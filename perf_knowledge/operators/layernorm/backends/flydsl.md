@@ -18,7 +18,7 @@ sources:
 The on-box FlyDSL source provides a **reduce PRIMITIVE**, not a standalone tuned LayerNorm op — no
 `flydsl_layernorm` kernel is confirmed in the source. LayerNorm needs **two row statistics** (μ and σ²),
 and the relevant building block is `make_block_reduce_add2` in
-[`kernels/reduce.py`](/sgl-workspace/aiter/aiter/ops/flydsl/kernels/reduce.py): it reduces **two
+`kernels/reduce.py`: it reduces **two
 independent scalars** (e.g. `Σx` and `Σx²`) across a wave64 block while **paying the cross-wave barriers
 only once**. For an actual LayerNorm use [aiter.md](aiter.md) (CK/asm `layernorm2d_fwd`) /
 [triton.md](triton.md) / [hip.md](hip.md); reach for FlyDSL only when hand-authoring a fused FLIR kernel
