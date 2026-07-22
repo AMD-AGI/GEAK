@@ -359,6 +359,10 @@ def build_prompt(ps_args: dict) -> str:
         "Invoke the Workflow tool exactly once with:\n"
         f'  scriptPath: "{E2E_SCRIPT}"\n'
         f"  args: {json.dumps(ps_args)}\n"
+        "CRITICAL: pass `args` as a real JSON OBJECT (a mapping), NOT as a "
+        "JSON-encoded string. Do not wrap it in quotes or call json.dumps on it. "
+        "If args arrives as a string the workflow cannot read args.workflow_dir "
+        "and aborts immediately.\n"
         "Run the full e2e pipeline (Setup -> Profile -> Strategize -> "
         "HeadKernel -> Milestone -> Finalize -> Report -> Validate). The workflow "
         f'persists its full return value to "{eval_dir}/workflow_return.json" as '
