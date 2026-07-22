@@ -67,7 +67,7 @@ if [ "$DRY" = "--dry-run" ]; then
 fi
 
 # ---- real run: container ----
-IMAGE="$(resolve_image "$FW")"
+IMAGE="$(resolve_image "$FW" "$MODEL_KEY")"
 WEIGHTS="$(model_weights "$MODEL_KEY")"; MODELS_ROOT="$(dirname "$WEIGHTS")"
 [ -d "$WEIGHTS" ] || die "weights dir not found: $WEIGHTS"
 log "model=$MODEL_KEY fw=$FW image=$IMAGE weights=$WEIGHTS ts=$RUN_TS budget=${BUDGET}s"
@@ -91,16 +91,47 @@ case "$GEAK_ROOT/" in
   *) GEAK_MOUNT=(-v "$GEAK_ROOT:$GEAK_ROOT") ;;
 esac
 
-# Weights are picked up from the catalog ($MODELS_ROOT, e.g. /home/ethany/hf_models)
-# whose entries are usually SYMLINKS into shared NFS. Bind-mount the byte-holding
-# roots too (read-only, same-path) so those links — and HF hub-cache blob links
-# (snapshots/<h>/*.safetensors -> ../../blobs/<h>) — resolve INSIDE the container.
-# $WEIGHTS_EXTRA_MOUNTS is a colon-separated list of roots (default /shared_nfs).
-WEIGHTS_MOUNTS=()
-IFS=: read -r -a _wm <<< "${WEIGHTS_EXTRA_MOUNTS:-/shared_nfs}"
-for _d in "${_wm[@]}"; do
-  [ -n "$_d" ] && [ -d "$_d" ] && WEIGHTS_MOUNTS+=(-v "$_d:$_d:ro")
+# Weights are picked up from the catalog ($MODELS_ROOT, e.g. <ws>/hf_models) whose
+# entries are usually ABSOLUTE SYMLINKS into shared storage; those targets may in
+# turn hold RELATIVE symlinks (HF hub-cache: snapshots/<h>/*.safetensors ->
+# ../../blobs/<h>). $MODELS_ROOT is mounted already, but the container must also see
+# every byte-holding location the links resolve to, at the SAME path (an absolute
+# symlink stores a literal path, so the target must exist identically in-container).
+#
+# We DERIVE those roots from the actual symlink targets rather than hardcoding one:
+#   1. follow the catalog symlink chain, mounting each absolute hop target;
+#   2. mount the fully-resolved weights dir itself;
+#   3. mount the dir of any nested symlink whose target ESCAPES that dir (blob uplinks).
+# $WEIGHTS_EXTRA_MOUNTS (colon-separated) is still honored and mounted IN ADDITION
+# (manual override / extra roots); set it empty to add nothing beyond the derived set.
+declare -A _mset=()
+_mark_mount(){ local p="$1"; [ -n "$p" ] || return 0; [ -e "$p" ] || return 0
+               [ -d "$p" ] || p="$(dirname "$p")"; _mset["$p"]=1; }
+
+_p="$WEIGHTS"                                   # 1) walk the catalog symlink chain
+while [ -L "$_p" ]; do
+  _t="$(readlink "$_p")"
+  case "$_t" in
+    /*) : ;;                                    # absolute target: use as-is
+    *)  _t="$(cd "$(dirname "$_p")" && cd "$(dirname "$_t")" && pwd)/$(basename "$_t")" ;;
+  esac
+  _mark_mount "$_t"; _p="$_t"
 done
+_realw="$(readlink -f "$WEIGHTS")"; _mark_mount "$_realw"   # 2) resolved weights dir
+if [ -d "$_realw" ]; then                       # 3) nested links escaping the dir
+  while IFS= read -r -d '' _lnk; do
+    _tt="$(readlink -f "$_lnk")" || continue
+    case "$_tt/" in "$_realw"/*) : ;; *) _mark_mount "$_tt" ;; esac
+  done < <(find "$_realw/" -type l -print0 2>/dev/null)
+fi
+if [ -n "${WEIGHTS_EXTRA_MOUNTS:-}" ]; then     # 4) explicit extra/override roots
+  IFS=: read -r -a _wm <<< "$WEIGHTS_EXTRA_MOUNTS"
+  for _d in "${_wm[@]}"; do _mark_mount "$_d"; done
+fi
+
+WEIGHTS_MOUNTS=()
+for _d in "${!_mset[@]}"; do WEIGHTS_MOUNTS+=(-v "$_d:$_d:ro"); done
+log "weights bind-mounts (auto-derived): ${WEIGHTS_MOUNTS[*]:-<none>}"
 
 # ---- GPU wedge pre-check: bail BEFORE touching the GPU if the driver is hung ----
 # A driver-level wedge parks tasks in uninterruptible (D) state, which NOTHING can

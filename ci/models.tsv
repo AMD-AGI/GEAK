@@ -16,17 +16,19 @@
 # Add a row here only once a model's material is complete.
 #
 # model_key	hf_repo	tier
-# --- Currently enrolled: ONLY models whose weights are already staged locally
-#     (symlinked under $HF_MODELS_DIR -> /shared_nfs). CI never auto-downloads
-#     (stage_weights requires GEAK_ALLOW_DOWNLOAD=1), so keep this list to models
-#     with local weights or the job will fail fast at weight resolution.
-Qwen-Qwen3-8B	Qwen/Qwen3-8B	smoke
-mistralai-Mixtral-8x7B-Instruct-v0.1	mistralai/Mixtral-8x7B-Instruct-v0.1	verify
-openai-gpt-oss-120b	openai/gpt-oss-120b	verify
+# --- Currently enrolled: the 3 GEAK-v4 onboarded models with FULL material
+#     (handoff + launch_recipe + tracelens triad + torch_trace) and weights
+#     pre-staged as symlinks under $HF_MODELS_DIR. hf_repo is '-' (CI never
+#     auto-downloads: stage_weights requires GEAK_ALLOW_DOWNLOAD=1). framework +
+#     tp come from each handoff.json. The 'smoke' row is ALSO in the full matrix,
+#     so l1-ci-full runs all 3; l1-ci-smoke runs only the 'smoke' row.
+MiniMaxAI-MiniMax-M2.5	-	smoke
+moonshotai-Kimi-K2.6-int4	-	verify
+MiniMaxAI-MiniMax-M3-MXFP8	-	verify
+Qwen-Qwen3-14B-FP8	-	verify
+Qwen-Qwen3.5-27B-FP8	-	verify
 #
-# --- Temporarily DISABLED: no local weights yet. Re-enable a row once its
-#     weights are staged under $HF_MODELS_DIR/<model_key> (and, for the '-' rows,
-#     once a source is available). Enabling as-is would try to download / fail.
-# NousResearch-Llama-2-7b-hf	NousResearch/Llama-2-7b-hf	verify
-# MiniMaxAI-MiniMax-M2.7	-	verify
-# Qwen-Qwen3-Next-80B-A3B-Instruct	-	verify
+# --- Previously enrolled (reference models). Disabled while the matrix targets
+#     the GEAK-v4 onboarded set above. Re-enable a row to bring it back.
+# Qwen-Qwen3-8B	Qwen/Qwen3-8B	smoke
+

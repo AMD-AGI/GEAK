@@ -64,8 +64,10 @@ model_tp()        { _handoff_get "$1" tp 1; }        # tensor-parallel = GPUs to
 # up from a per-model_key CATALOG dir ($HF_MODELS_DIR): each entry is a directory
 # OR a symlink into shared NFS (e.g. <ws>/hf_models/Qwen-Qwen3-8B ->
 # /shared_nfs/huggingface_models/Qwen/Qwen3-8B). Because entries may be symlinks
-# into NFS, run_local.sh also bind-mounts $WEIGHTS_EXTRA_MOUNTS so they resolve
-# inside the container. Missing models are downloaded here (keyed by model_key).
+# into NFS, run_local.sh AUTO-DERIVES the byte-holding roots from each catalog
+# symlink's target(s) and bind-mounts them (same-path, ro) so the links resolve
+# inside the container ($WEIGHTS_EXTRA_MOUNTS adds extra roots on top, if set).
+# Missing models are downloaded here (keyed by model_key).
 # The weights catalog now lives INSIDE the workspace (<ws>/hf_models), so it is
 # DERIVED from $WS just like InferenceX/geak_runtime — no /home literal, no required
 # env var. quick_setup.sh populates it with per-model_key symlinks into shared NFS.
@@ -82,7 +84,7 @@ model_weights() {
 }
 
 # True if the catalog already has (non-empty) weights for a model_key — i.e. it can
-# run WITHOUT a HuggingFace download. Used to pick the "probe" set (currently the 3
+# run WITHOUT a HuggingFace download. Used to pick the "probe" set (the enrolled
 # models whose weights are symlinked in from NFS).
 weights_present() {
   local w; w="$(model_weights "$1")"
@@ -194,31 +196,44 @@ detect_gpu_arch() {
   esac
 }
 
-# --- pick container image for a framework (docker_default.json) ---
-# docker_default.json is a nested dict:  { "<framework>": { "<arch>": "<image>" } }
-# Prefer image[framework][arch]; else image[framework].default; else the first
-# arch entry for the framework. Override entirely with: IMAGE=<repo:tag>.
+# --- pick container image for a model/framework (docker_default.json) ---
+# docker_default.json holds:  { "models": { "<model_key>": <img> }, "<framework>":
+# { "<arch>": "<image>" } } where <img> is a string or an {arch:image} dict.
+# Precedence: IMAGE env > models[<model_key>] > [framework][arch] >
+# [framework].default > first image listed for the framework.
 resolve_image() {
-  local fw="$1"
+  local fw="$1" mk="${2:-}"
   if [ -n "${IMAGE:-}" ]; then echo "$IMAGE"; return; fi
   local arch img
   arch="$(detect_gpu_arch)"
-  img=$(python3 - "$DOCKER_DEFAULT" "$fw" "$arch" <<'PY'
+  img=$(python3 - "$DOCKER_DEFAULT" "$fw" "$arch" "$mk" <<'PY'
 import json, sys
-path, fw, arch = sys.argv[1], sys.argv[2], sys.argv[3]
+path, fw, arch, mk = (list(sys.argv[1:5]) + [""] * 4)[:4]
 try:
     d = json.load(open(path))
 except Exception:
     sys.exit(0)
-m = d.get(fw)
-if not isinstance(m, dict):
-    sys.exit(0)
-img = m.get(arch) or m.get("default")
-if not img:  # last resort: first string image listed for this framework
-    img = next((v for v in m.values() if isinstance(v, str)), "")
+
+def pick(node):
+    # node may be a plain image string or an {arch: image, "default": image} dict.
+    if isinstance(node, str):
+        return node
+    if isinstance(node, dict):
+        return (node.get(arch) or node.get("default")
+                or next((v for v in node.values() if isinstance(v, str)), ""))
+    return ""
+
+img = ""
+# 1) per-model pin (models[<model_key>]) wins over the framework default.
+models = d.get("models")
+if mk and isinstance(models, dict) and mk in models:
+    img = pick(models[mk])
+# 2) fall back to the framework[arch] default.
+if not img:
+    img = pick(d.get(fw))
 print(img or "")
 PY
 )
-  [ -n "$img" ] || die "no image for framework=$fw (arch=$arch) in $DOCKER_DEFAULT (or pass IMAGE=)"
+  [ -n "$img" ] || die "no image for model=${mk:-<none>} framework=$fw (arch=$arch) in $DOCKER_DEFAULT (or pass IMAGE=)"
   echo "$img"
 }

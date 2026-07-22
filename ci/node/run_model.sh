@@ -44,8 +44,48 @@ export PERFSKILLS_E2E_TIMEOUT_S   # value/default from ci/config.sh (via lib.sh)
 log "model=$MODEL_KEY dry=${DRY:-no} out=$OUT_DIR exp_root=$EXP_ROOT budget=${PERFSKILLS_E2E_TIMEOUT_S}s"
 log "weights=$MODEL_PATH inferencex=$INFERENCEX_PATH"
 
+# ---- Material audit (advisory table) ---------------------------------------
+# REQUIRED artifacts (handoff.json, launch recipe, weights) are hard-guarded
+# above / in run_geak_e2e.sh — a missing one already fails the run. The TraceLens
+# triad and torch_trace are OPTIONAL priors: run_e2e.py discovers them by glob
+# under exp_root and forwards only the non-null ones, so a tracelens-less run is
+# byte-identical and CI proceeds. This table just surfaces, per model, what is
+# present vs missing (missing OPTIONAL = WARN, never fatal). Discovery is relative
+# to the model dir (exp_root with a trailing "geak" stripped), so we scan $MODEL_DIR.
+material_audit() {
+  local d="$MODEL_DIR" miss_opt=0 name val
+  local analysis kc tlr trace
+  analysis="$(find "$d/kernel-agent" -name analysis.md          -path '*tracelens*' 2>/dev/null | head -1)"
+  kc="$(      find "$d/kernel-agent" -name kernel_candidates.json                    2>/dev/null | head -1)"
+  tlr="$(     find "$d/kernel-agent" -name tracelens_report.json -path '*tracelens*' 2>/dev/null | head -1)"
+  trace="$(   find "$d/runs/roofline" -name torch_trace -type d                      2>/dev/null | head -1)"
+  echo "-------------------- material audit: $MODEL_KEY --------------------"
+  printf '  %-8s %-30s %s\n' CLASS ARTIFACT STATUS
+  printf '  %-8s %-30s %s\n' REQUIRED handoff.json OK
+  printf '  %-8s %-30s %s\n' REQUIRED baseline_config.with_envs.yaml \
+    "$([ -f "$d/baseline_config.with_envs.yaml" ] && echo OK || echo MISSING)"
+  printf '  %-8s %-30s %s\n' REQUIRED weights \
+    "$([ "$DRY" = "--dry-run" ] && echo 'n/a(dry-run)' || { [ -d "$MODEL_PATH" ] && echo OK || echo MISSING; })"
+  for name in "analysis.md:$analysis" "kernel_candidates.json:$kc" \
+              "tracelens_report.json:$tlr" "torch_trace:$trace"; do
+    val="${name#*:}"; name="${name%%:*}"
+    if [ -n "$val" ]; then
+      printf '  %-8s %-30s %s\n' OPTIONAL "$name" OK
+    else
+      printf '  %-8s %-30s %s\n' OPTIONAL "$name" "MISSING (advisory)"
+      miss_opt=$((miss_opt + 1))
+    fi
+  done
+  echo "-------------------------------------------------------------------"
+  if [ "$miss_opt" -gt 0 ]; then
+    echo "WARN: $miss_opt optional TraceLens/trace prior(s) missing for $MODEL_KEY —"
+    echo "      run proceeds (priors are additive; a tracelens-less run is byte-identical)."
+  fi
+}
+material_audit 2>&1 | tee "$LOG"
+
 set +e
-bash "$HERE/run_geak_e2e.sh" "$MODEL_DIR" ${DRY:+$DRY} 2>&1 | tee "$LOG"
+bash "$HERE/run_geak_e2e.sh" "$MODEL_DIR" ${DRY:+$DRY} 2>&1 | tee -a "$LOG"
 RC=${PIPESTATUS[0]}
 set -e
 

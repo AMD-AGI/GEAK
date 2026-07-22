@@ -1,5 +1,12 @@
 {
-  "_note": "Default container images for GEAK CI e2e runs (repo-tracked). resolve_image() in ci/lib.sh looks up [framework][arch]; arch is MI355 (gfx950/MI35x) or MI300 (gfx942/gfx90a/MI30x), auto-detected on the compute node (override with GEAK_GPU_ARCH). Override the whole choice with IMAGE=<repo:tag>. These are the primussafe 'profilerfix' images (ROCm 7.2.0); the vLLM image is built for both gfx942 and gfx950, fixing the stock vllm/vllm-openai-rocm:v0.21.0 torch eager SIGSEGV on gfx950.",
+  "_note": "Container images for GEAK CI e2e runs (repo-tracked). resolve_image(framework, model_key) in ci/lib.sh picks in this precedence: (1) IMAGE=<repo:tag> env override; (2) models[<model_key>] — a per-model pin, either a plain string or an {arch: image} dict; (3) [framework][arch]; (4) [framework].default; (5) first image listed for the framework. arch is MI355 (gfx950/MI35x) or MI300 (gfx942/gfx90a/MI30x), auto-detected on the compute node (override with GEAK_GPU_ARCH). The primussafe 'profilerfix' images (ROCm 7.2.0) are built for both gfx942 and gfx950, fixing the stock vllm/vllm-openai-rocm:v0.21.0 torch eager SIGSEGV on gfx950.",
+  "models": {
+    "moonshotai-Kimi-K2.6-int4": "docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix",
+    "MiniMaxAI-MiniMax-M2.5": "docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix",
+    "MiniMaxAI-MiniMax-M3-MXFP8": "docker.io/vllm/vllm-openai-rocm:nightly",
+    "Qwen-Qwen3-14B-FP8": "docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix",
+    "Qwen-Qwen3.5-27B-FP8": "docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix"
+  },
   "vllm": {
     "MI300": "docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix",
     "MI355": "docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix"

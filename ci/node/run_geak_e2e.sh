@@ -79,12 +79,14 @@ src, dst, exp_root, model_path, local_recipe, ix, dry = (list(sys.argv[1:8]) + [
 is_dry = bool(dry)
 h = json.load(open(src))
 
-# ---- A. schema pin + required-key assert (fail fast, name the offender) ----
-KNOWN_SCHEMA = {1}
+# ---- A. required-key assert (run_e2e.py does a hard h[<key>] on these) ----
+# schema_version is advisory: run_e2e never reads it, so an unknown schema only
+# warns — we guard the parsed keys (below), not the version number.
+KNOWN_SCHEMA = {1, 2}
 sv = h.get("schema_version")
 if sv not in KNOWN_SCHEMA:
-    sys.exit(f"[handoff] unknown schema_version={sv!r} (this harness knows {sorted(KNOWN_SCHEMA)}). "
-             f"Handoff format changed — update run_geak_e2e.sh REWRITES/leak-scan before running.")
+    sys.stderr.write(f"[handoff] note: unrecognized schema_version={sv!r} (known {sorted(KNOWN_SCHEMA)}); "
+                     f"proceeding — verify REWRITES/leak-scan still cover its keys.\n")
 for req in ("model_path", "exp_root"):   # run_e2e.py does a hard h[<key>] on these
     if not h.get(req):
         sys.exit(f"[handoff] required key {req!r} missing/empty in {src} — cannot localize.")
@@ -93,11 +95,14 @@ for req in ("model_path", "exp_root"):   # run_e2e.py does a hard h[<key>] on th
 # Each entry returns (new_value_or_None, drop_if_none). Add a line here when a new path key appears.
 def _recipe(_):   return (os.path.abspath(local_recipe) if os.path.isfile(local_recipe) else None, False)
 def _ix(_):       return (os.path.abspath(ix) if (ix and os.path.isdir(ix)) else None, True)
+# eval_dir (schema 2) is a source-cluster path we never honor on this box: always
+# drop it so run_e2e.py mints a fresh <exp_root>/e2e_<model>_<ts> (like schema 1).
 REWRITES = {
     "exp_root":        lambda _: (exp_root, False),
     "model_path":      lambda _: (model_path or None, False),   # keep handoff value if MODEL_PATH unset
     "launch_recipe":   _recipe,
     "inferencex_path": _ix,                                     # drop -> $INFERENCEX_PATH / native applies
+    "eval_dir":        lambda _: (None, True),                  # schema 2 cluster path -> run_e2e mints fresh
 }
 for key, derive in REWRITES.items():
     new, drop_if_none = derive(h.get(key))
@@ -108,27 +113,38 @@ for key, derive in REWRITES.items():
 
 json.dump(h, open(dst, "w"), indent=2)
 
-# ---- B. reachability check: every absolute path in the patched handoff must EXIST on this box ----
-# Existence, not a source-prefix blacklist: a /wekafs path is fine if actually mounted; a stale/unpatched
-# one just won't exist. Hard-fail on real runs; warn in --dry-run (weights/etc. legitimately absent).
-leaks = []
+# ---- B. reachability check: absolute paths run_e2e.py OPENS as real local
+# files/dirs must EXIST; informational/metadata paths may legitimately be absent.
+# CRITICAL = the keys run_e2e dereferences as real local paths (a stale value here
+# breaks the run). Everything else — e.g. the schema-2 baseline_env_spec.* block,
+# which run_e2e never reads — is advisory: note it, don't block. Existence, not a
+# source-prefix blacklist. Hard-fail on real runs only for CRITICAL leaks; warn in
+# --dry-run (weights/etc. legitimately absent).
+CRITICAL = {"model_path", "exp_root", "launch_recipe", "inferencex_path"}
+def _top(path):   # top-level handoff key for a (possibly nested) scan path
+    return path.split(".", 1)[0].split("[", 1)[0]
+crit, info = [], []
 def _scan(node, path):
     if isinstance(node, str):
         if node.startswith("/") and not os.path.exists(node):
-            leaks.append((path, node))
+            (crit if _top(path) in CRITICAL else info).append((path, node))
     elif isinstance(node, dict):
         for k, v in node.items(): _scan(v, f"{path}.{k}" if path else k)
     elif isinstance(node, list):
         for i, v in enumerate(node): _scan(v, f"{path}[{i}]")
 _scan(h, "")
-if leaks:
-    msg = "\n".join(f"    {k} = {v}" for k, v in leaks)
+if info:
+    msg = "\n".join(f"    {k} = {v}" for k, v in info)
+    sys.stderr.write(f"[handoff] note: {len(info)} non-critical path(s) absent on this host "
+                     f"(metadata run_e2e.py does not open — ignored):\n{msg}\n")
+if crit:
+    msg = "\n".join(f"    {k} = {v}" for k, v in crit)
     if is_dry:
-        sys.stderr.write(f"[handoff] WARN: {len(leaks)} path(s) not present on this host — expected in "
+        sys.stderr.write(f"[handoff] WARN: {len(crit)} critical path(s) not present — expected in "
                          f"--dry-run wiring checks; a real run re-validates and fails:\n{msg}\n")
     else:
-        sys.exit(f"[handoff] {len(leaks)} path(s) do not exist on this box after localization — likely a "
-                 f"new/renamed handoff key not rewritten, or a missing local artifact:\n{msg}\n"
+        sys.exit(f"[handoff] {len(crit)} critical path(s) do not exist on this box after localization — "
+                 f"likely a new/renamed handoff key not rewritten, or a missing local artifact:\n{msg}\n"
                  f"  Fix: add the key to REWRITES in run_geak_e2e.sh, or provide the file/dir there.")
 
 print(f"patched handoff -> {dst}\n  exp_root={h['exp_root']}\n  model_path={h.get('model_path')}\n  launch_recipe={h.get('launch_recipe')}\n  inferencex_path={h.get('inferencex_path')}")
