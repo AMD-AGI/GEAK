@@ -57,7 +57,7 @@ Upstream: https://github.com/AMD-AGI/GEAK.
 LLM agent that generates + iteratively refines Triton kernels for AMD GPUs, with a debugging/reflection
 loop and an evaluator. perf_knowledge feeds GEAK target SOTA characteristics and pitfalls; GEAK is invoked by
 the kernel layer when a hot op has no SOTA path. Authoring workflow:
-[`../kernel_workflow/authoring_a_kernel_with_geak.md`](../kernel_workflow/authoring_a_kernel_with_geak.md).
+[`../workflows/authoring_a_kernel_with_geak.md`](../workflows/authoring_a_kernel_with_geak.md).
 
 ## examples/ (recorded runs)
 [`examples/e2e_workflow/`](../../examples/e2e_workflow/):
