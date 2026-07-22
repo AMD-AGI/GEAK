@@ -34,6 +34,6 @@ The GEAK public repository is located at `AMD-AGI/GEAK <https://github.com/AMD-A
       * :doc:`External orchestrator contract <reference/run-e2e-contract>`
 
 For information on contributing to the GEAK code base, see the
-`CONTRIBUTING guide <https://github.com/AMD-AGI/GEAK/blob/GEAK_v4/CONTRIBUTING.md>`_.
+`CONTRIBUTING guide <https://github.com/AMD-AGI/GEAK/blob/main/CONTRIBUTING.md>`_.
 
 GEAK is released under the MIT license. For details, see the :doc:`License <license>` page.
