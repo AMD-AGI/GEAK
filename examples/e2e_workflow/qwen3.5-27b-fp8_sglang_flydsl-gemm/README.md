@@ -8,7 +8,7 @@ example of the FlyDSL author path. Invocation:
 Workflow({
   scriptPath: "<…>/workflow_e2e_team/team_workflow_e2e.js",
   args: {
-    model_path: "/wekafs/models/Qwen-Qwen3.5-27B-FP8/",
+    model_path: "/models/Qwen-Qwen3.5-27B-FP8/",
     workflow_dir: "<…>/workflow_e2e_team",
     backend: "sglang", isl: 1024, osl: 1024, conc: 64,
     gpu_ids: "0,1,2,3",          // optimization-parallelism pool (serving stays TP=1, single GPU)

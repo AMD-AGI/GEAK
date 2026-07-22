@@ -22,7 +22,7 @@
 set -uo pipefail
 
 # --- locate the bundle / shared harness ----------------------------------
-EVAL_DIR="${EVAL_DIR:-/wekafs/zihao/2026/geak_cc/PerfSkills/exp/e2e_Qwen-Qwen3.5-27B-FP8_20260613_195618_371691_18852}"
+EVAL_DIR="${EVAL_DIR:-/path/to/eval_bundle}"   # internal eval dir (not shipped in-repo); override with EVAL_DIR=...
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH="${BENCH:-$EVAL_DIR/bench_e2e.sh}"        # backend-agnostic dispatcher + adapters/
 
@@ -33,7 +33,7 @@ ACCEPTED_FLAGS="--attention-backend triton"     # accepted Tier-0 config flag
 ACCEPTED_ENV=""                                 # no extra env this run
 
 # --- model / serving knobs (serving invariant: TP=1, single GPU) ---------
-MODEL_PATH="${MODEL:-/wekafs/models/Qwen-Qwen3.5-27B-FP8/}"
+MODEL_PATH="${MODEL:-/models/Qwen-Qwen3.5-27B-FP8/}"
 GPU="${GPU:-0}"
 TP=1
 MEM_FRACTION="${MEM_FRACTION:-0.85}"

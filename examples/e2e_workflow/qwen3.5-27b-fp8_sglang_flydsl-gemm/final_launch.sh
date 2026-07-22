@@ -15,7 +15,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EVAL_DIR="$(cd "$HERE/.." && pwd)"
 
 export BACKEND=sglang
-export MODEL="${MODEL:-/wekafs/models/Qwen-Qwen3.5-27B-FP8/}"
+export MODEL="${MODEL:-/models/Qwen-Qwen3.5-27B-FP8/}"
 export TP=1
 export GPU="${GPU:-0}"
 export MEM_FRACTION="${MEM_FRACTION:-0.78}"     # FlyDSL needs headroom for the preshuffled-weight cache

@@ -21,6 +21,6 @@
   "output_parity": "pass",
   "parity_detail": "Greedy temp=0 fixed-seed 12-prompt probe vs accepted server: 10/12 exact match; 2 diffs are coherent on-task free-form completions (Fibonacci impl style, planets listing) - same benign low-precision-divergence class as the already-accepted --attention-backend triton (which had 2/6 benign diffs). No garbage; factual/deterministic prompts all match. fp8 blockscale is inherently approximate (tol 0.06).",
   "gate": "accepted",
-  "accepted_overlay": "/wekafs/zihao/2026/geak_cc/PerfSkills/exp/e2e_Qwen-Qwen3.5-27B-FP8_20260613_195618_371691_18852/overlay/cand_flydsl_downproj_nocgraph",
+  "accepted_overlay": "<EVAL_DIR>/overlay/cand_flydsl_downproj_nocgraph",
   "reason": "Strong standalone win: engaged on the live decode CUDA-graph path, parity-safe, +60.09% e2e (cand_med 1525.857 > ref_med 953.139), non-overlapping (cand_min 1510.8 > ref_max 954.3), >> 0.5% noise band. Fused fp8 core (no bf16 re-materialization) fits at the accepted mem-fraction 0.85 with identical KV budget (do-no-harm on memory). Required stripping the kernel's illegal nested-graph graph_replay wrapper (capture-unsafe) and binding the bare fused core."
 }

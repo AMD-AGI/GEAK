@@ -66,4 +66,4 @@ The three runs are close in aggregate (3.32x–3.68x geomean), but show distinct
 - Each benchmark: 3 runs, median selected, with `gpu_lock.sh` for exclusive GPU access.
 - PyTorch JIT extension cache cleared per-kernel before each compile to prevent stale optimized `.so`.
 - Hipified `*_hip.*` files scrubbed from workspace for kernels that use torch JIT (regenerated during compile); kept for kernels with Makefile-based builds.
-- Result data: `/wekafs/zihao/2026/geak_cc/PerfSkills/exp/team_cc4.6_time/repro_results/*.json`
+- Result data: raw per-run JSON available on request (internal eval dir, not shipped in-repo).

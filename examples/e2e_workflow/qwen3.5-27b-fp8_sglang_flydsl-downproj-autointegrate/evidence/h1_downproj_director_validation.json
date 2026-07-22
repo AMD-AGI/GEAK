@@ -14,5 +14,5 @@
   ],
   "applied_to_original": "false",
   "arbitration_note": "Independently reproduced from a fresh validation_workspace built from KERNEL_PATH_ORIG (author-mode: meta.json+unittest.py only) with final_patch.diff applied cleanly. Stock baseline (no overlay) reproduced the recorded baseline_timing (M=16384 ~6.12ms). Overlay engaged via PYTHONPATH=kernel_src (sitecustomize.py auto-import); '[flydsl-overlay] bound' + graph-replay KEEP for decode confirmed. All 5 cases PASS correctness (rel_err 0.0 vs oracle; oracle confirmed vs independent fp32 dequant->matmul HP reference, oracle_vs_hp_err<=0.007). Candidate optimized_ms = per-case median of 3 overlay runs; speedup computed vs recorded stock baseline_timing.json. Director geomean 2.432x is within 0.24% of TechLead's 2.4378x (inside 10% band) -> accepted. Decode buckets non-regressing (6.76x/5.29x). APPLY_TO_ORIGINAL=false -> original left untouched.",
-  "final_patch": "/wekafs/zihao/2026/geak_cc/PerfSkills/exp/e2e_Qwen-Qwen3.5-27B-FP8_20260613_195618_371691_18852/kernels/_exp/team_h1_gemm_a8w8_blockscale_downproj_task_20260614_003016_3688330_24351/h1_gemm_a8w8_blockscale_downproj_task/final_patch.diff"
+  "final_patch": "<EVAL_DIR>/kernels/_exp/team_h1_gemm_a8w8_blockscale_downproj_task/h1_gemm_a8w8_blockscale_downproj_task/final_patch.diff"
 }

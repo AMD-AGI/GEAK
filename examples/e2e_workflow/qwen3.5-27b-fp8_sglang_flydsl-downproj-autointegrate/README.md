@@ -12,7 +12,7 @@ Invocation (exactly as run — autonomous, no per-head hints):
 Workflow({
   scriptPath: "<…>/workflow_e2e_team/team_workflow_e2e.js",
   args: {
-    model_path: "/wekafs/models/Qwen-Qwen3.5-27B-FP8/",
+    model_path: "/models/Qwen-Qwen3.5-27B-FP8/",
     workflow_dir: "<…>/workflow_e2e_team",
     backend: "sglang", isl: 1024, osl: 1024, conc: 64,
     gpu_ids: "0",
