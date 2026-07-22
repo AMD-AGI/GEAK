@@ -56,6 +56,10 @@ This is a Workflow, run via the `Workflow` tool with `scriptPath` and `args`. **
 hard-coded in the script** — it is portable to any install location. Set `scriptPath` to wherever
 this folder lives and pass that same folder as `args.workflow_dir`:
 
+> **IMPORTANT:** pass `args` as a real JSON **object** (a mapping), **not** as a JSON-encoded
+> string. Do not wrap it in quotes or `json.dumps()` it. If `args` arrives as a string the
+> workflow cannot read `args.workflow_dir` / `args.kernel_path` and aborts immediately.
+
 ```
 Workflow({
   scriptPath: "<WF_DIR>/kernel_workflow.js",   // <WF_DIR> = absolute path to THIS kernel_workflow/ folder
