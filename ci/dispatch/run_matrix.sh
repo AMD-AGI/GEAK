@@ -120,26 +120,54 @@ sacct_state() {
   sacct -j "$1" -n -X -o State%25 2>/dev/null | head -1 | awk '{$1=$1};1'
 }
 
+# Confirm a job's live state via scontrol when it is absent from a squeue snapshot.
+# A JobHoldMaxRequeue job briefly leaves squeue during its requeue->hold transition,
+# so absence alone is NOT proof of a terminal state. Echo 'STATE|REASON' and return 0
+# if the job is still active/held (keep waiting); return 1 if terminal or purged
+# (Invalid job id) so the caller treats it as genuinely gone.
+scontrol_active() {
+  local info st rs
+  info="$(scontrol show job "$1" 2>/dev/null)" || true
+  [ -z "$info" ] && return 1
+  st="$(sed -n 's/.*JobState=\([A-Z_]*\).*/\1/p' <<<"$info" | head -1)"
+  rs="$(sed -n 's/.*Reason=\([^ ]*\).*/\1/p'      <<<"$info" | head -1)"
+  case "$st" in
+    PENDING|RUNNING|SUSPENDED|COMPLETING|CONFIGURING|REQUEUED|RESIZING|SIGNALING|STAGE_OUT)
+      echo "${st}|${rs}"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 poll_jobs() {  # return 0 while ANY of our jobs is still in the queue
   local snap; snap="$(squeue -u "$me" -h -o '%i|%T|%r' 2>/dev/null || true)"
-  local any=1 i jid m line state reason fst
+  local any=1 i jid m line state reason fst sc
   local -a status=()
   for i in "${!J_ID[@]}"; do
     jid="${J_ID[$i]}"; m="${J_MODEL[$i]}"
     if [ -z "$jid" ]; then status+=("$m=submit_failed"); continue; fi
     line="$(grep -E "^${jid}\|" <<<"$snap" || true)"
     if [ -z "$line" ]; then
-      # Left the queue = terminal (finished / crashed / cancelled). Log ONCE and
-      # keep waiting on the others; do NOT stop the matrix on a single job leaving.
-      if [ -z "${LEFT[$jid]:-}" ]; then
-        LEFT[$jid]=1; fst="$(sacct_state "$jid")"
-        log "job $jid ($m) left the queue${fst:+ (state=$fst)} — still waiting on any pending/running jobs; judged from result.json later"
+      # Absent from THIS squeue snapshot. That can be a genuine terminal state OR a
+      # transient gap (a JobHoldMaxRequeue job briefly leaves squeue during its
+      # requeue->hold transition). Confirm with scontrol before concluding it is
+      # gone, so a flicker never triggers a false 'terminal' verdict + zombie hold.
+      if sc="$(scontrol_active "$jid")"; then
+        # still alive/held per scontrol -> treat as in-queue (fall through to below)
+        state="${sc%%|*}"; reason="${sc#*|}"
+      else
+        # Genuinely terminal (finished / crashed / cancelled / purged). Log ONCE and
+        # keep waiting on the others; do NOT stop the matrix on a single job leaving.
+        if [ -z "${LEFT[$jid]:-}" ]; then
+          LEFT[$jid]=1; fst="$(sacct_state "$jid")"
+          log "job $jid ($m) left the queue${fst:+ (state=$fst)} — still waiting on any pending/running jobs; judged from result.json later"
+        fi
+        status+=("$m=gone($jid)")
+        continue
       fi
-      status+=("$m=gone($jid)")
-      continue
+    else
+      state="$(cut -d'|' -f2 <<<"$line")"; reason="$(cut -d'|' -f3 <<<"$line")"
     fi
     any=0
-    state="$(cut -d'|' -f2 <<<"$line")"; reason="$(cut -d'|' -f3 <<<"$line")"
     if [ "$state" = PENDING ]; then
       # Auto-release a *held* requeue once; never cancel a plain pending job.
       if [[ "$reason" == *Hold* || "$reason" == *held* ]] && [ -z "${RELEASED[$jid]:-}" ] \
@@ -166,6 +194,22 @@ poll_jobs() {  # return 0 while ANY of our jobs is still in the queue
 }
 log "waiting for ${#J_ID[@]} job(s) to finish (poll ${POLL}s, status log every ${LOG_S}s or on state change; PENDING jobs are waited on indefinitely — cancel by hand on the cluster if one pends too long) ..."
 while poll_jobs; do sleep "$POLL"; done
+
+# Reconcile before we consider the matrix done: a job can re-hold (JobHoldMaxRequeue)
+# in the brief window between our last poll and here, re-appearing in the queue after
+# we judged it gone. scancel any of OUR submitted ids still present so we never orphan
+# a held leftover on the shared cluster. Strictly scoped to ids we launched; a no-op
+# on the normal path (nothing of ours is left in the queue).
+if command -v scancel >/dev/null 2>&1; then
+  for jid in "${J_ID[@]}"; do
+    [ -n "$jid" ] || continue
+    if squeue -h -j "$jid" -o '%i' 2>/dev/null | grep -q .; then
+      log "reap: job $jid still in queue after wait loop -> scancel (held/requeued leftover)"
+      scancel "$jid" 2>/dev/null || true
+    fi
+  done
+fi
+
 DONE=1   # jobs are terminal now; the cleanup trap becomes a no-op
 log "no pending or running jobs left; judging results"
 
