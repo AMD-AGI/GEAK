@@ -26,13 +26,15 @@ expects:
   parity: required
 validation:
   status: validated
-  last_verified: '2026-06-25'
+  last_verified: '2026-07-20'
   gpu: gfx942/MI300X
   model: Kimi-K2.6-int4-W4A16
   measured:
-    isolated: ''
-    e2e_pct: 32.6
+    isolated: '2.0-2.3x'
+    e2e_pct: 46.3
+    e2e_pct_equal_config: 77.0
     parity: pass
+    note: 'RUN5 (07-20) full-config accepted +46.3% same-session (1.63x), +77% equal-config; startup no-OOM re-verified 2026-07-23 at mem 0.9 / full 262144 (Available KV 25.25 GiB, capture 51/51+35/35, no hang). Older capped +32.6% was the pre-accumulate=True shim.'
   artifact: perf_knowledge/expert_skills/skills/apply_flydsl_moe_to_vllm
 role: advisory_prior
 supersedes: []
@@ -61,11 +63,27 @@ A FlyDSL grouped-GEMM that is fast in isolation fails its first e2e apply in two
 - **Eager A/B is slower (−22…−34%) despite isolated 3.6x** — the shim issues more launches/layer than
   Triton's single fused op; eager per-launch host latency dominates. Fix: run with HIP graphs (drop
   `--enforce-eager`); capture replays the sequence at zero launch cost and the faster GEMMs surface.
+- **Graph capture DEADLOCKS under TP>1 — server never becomes healthy (`e2e_delta=null`, hung on a capture
+  batch, 0 forwards served)** — this is the #1 reason a kernel wins isolated yet scores nothing e2e. The
+  shim JIT-compiles its FlyDSL exes lazily on first call, keyed by `(weight.data_ptr, stage, M)`. vLLM
+  captures the decode path into CUDA graphs over ~86 distinct M-bucket descriptors (PIECEWISE + FULL); ANY
+  `(layer, M)` not already compiled compiles **inside** the captured region → a blocking op under capture →
+  TP ranks desync → c10d collective timeout, capture frozen (observed hung at PIECEWISE 2/51 and at FULL
+  25/35 on Kimi-K2.6 TP4). The isolated unittest CANNOT catch this (single process, no capture) — only the
+  e2e gate does, so a shim can pass isolated at high speedup and still be undeployable. Fix: **precompile
+  EVERY capture M-bucket BEFORE capture** via the vendored `flydsl_capture_precompile.py` (Procedure step
+  2b) — an exhaustive eager warmup that JITs all exes OUTSIDE the capture stream, on all TP ranks in
+  lockstep. VERIFIED 2026-07-20 same-box controlled A/B: a 2.51x isolated shim WITHOUT the seam deadlocked
+  (FULL 25/35, never healthy); the SAME shim WITH the seam precompiled 86/86 outside capture, captured
+  51/51 + 35/35, reached `Application startup complete`, and served requests. The seam is env-gated
+  (`VLLM_USE_FLYDSL_MOE=1`) so it only affects THIS candidate's server — zero impact on any other kernel.
 
 The golden rule: **convert weights ONCE at load time; key all caches by the NEW weight `data_ptr()`, never
-the activation pointer.** The runtime shim then only LAUNCHES (capture-safe: routing `blocks =
-sorted_expert_ids.numel()` is a host shape read, aiter GPU sort + FlyDSL `cexe` are capturable, exes
-JIT-compiled at warmup before capture). **The graph/inductor path needs NO custom op.**
+the activation pointer; and PRECOMPILE every capture M-bucket BEFORE capture (never rely on lazy
+first-call JIT inside the captured region).** The runtime shim then only LAUNCHES (capture-safe: routing
+`blocks = sorted_expert_ids.numel()` is a host shape read, aiter GPU sort + FlyDSL `cexe` are capturable,
+all exes already compiled+cached by the step-2b warmup before capture). **The graph/inductor path needs NO
+custom op.**
 
 ## Procedure
 The integration shim is **vendored in this skill dir**: `flydsl_moe_shim.py` (functions
@@ -102,6 +120,25 @@ installed vLLM (off by default ⇒ byte-identical stock; back up the two files f
            global_num_experts=global_num_experts, expert_map=expert_map,
            w1_scale=w1_scale, w2_scale=w2_scale)   # shim absorbs extras via **_ignored
    ```
+2b. **Precompile-before-capture seam — MANDATORY for TP>1 graph capture (skip it and the server
+   deadlocks at capture; see Mechanism).** The vendored `flydsl_capture_precompile.py` (in THIS skill dir)
+   wraps `GPUModelRunner.capture_model` to run an exhaustive eager warmup over every capture descriptor
+   BEFORE the real capture, so all FlyDSL exes JIT+cache OUTSIDE the capture stream. Add ONE env-gated edit
+   at the END of `vllm/v1/worker/gpu_model_runner.py` (same `FLYDSL_SHIM_DIR` as steps 1–2):
+   ```python
+   import os as _os
+   if _os.environ.get("VLLM_USE_FLYDSL_MOE") == "1":
+       import sys as _sys
+       _d = _os.environ["FLYDSL_SHIM_DIR"]
+       if _d not in _sys.path:
+           _sys.path.insert(0, _d)
+       import flydsl_capture_precompile          # vendored in this skill dir
+       flydsl_capture_precompile.install_capture_precompile(_sys.modules[__name__])
+   ```
+   The seam is env-gated (`VLLM_USE_FLYDSL_MOE=1`) and self-disables otherwise, so it is scoped to THIS
+   candidate's server ONLY and cannot affect any other kernel/candidate. It skips FULL-mode descriptors on
+   purpose (the same M set is covered by PIECEWISE warmup; a raw FULL `_dummy_run` dirties vLLM's overlapped
+   shared-experts buffer) and resets those buffers before capture — do not remove that logic.
 3. **Launch (graph mode — NO `--enforce-eager`)**. Point `FLYDSL_SHIM_DIR` at THIS skill dir (the vendored
    shim) and `FLYDSL_ROOT` at a FlyDSL checkout whose kernels AND `build-fly` bindings are the SAME tree:
    ```bash
@@ -110,13 +147,20 @@ installed vLLM (off by default ⇒ byte-identical stock; back up the two files f
    export PYTHONPATH=$FLYDSL_ROOT:$FLYDSL_ROOT/build-fly/python_packages
    export VLLM_USE_FLYDSL_MOE=1
    export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4 VLLM_ROCM_USE_AITER_RMSNORM=0
-   vllm serve <model> -tp 4 --gpu-memory-utilization 0.95 --max-model-len 32768 \
+   # full config, NO --max-model-len cap (verified no-OOM 2026-07-23 at mem 0.9, full 262144):
+   #   scale re-home + stage-2 accumulate=True make the convert memory-neutral, so the old
+   #   `--max-model-len 32768` cap is NOT needed (see Knobs). Add it back only to squeeze concurrency.
+   vllm serve <model> -tp 4 --gpu-memory-utilization 0.9 \
      --trust-remote-code --tool-call-parser kimi_k2 --enable-auto-tool-choice \
      --reasoning-parser kimi_k2 --no-enable-prefix-caching --mm-encoder-tp-mode data
    ```
 4. **Verify startup (in order, no error)**: weight load → (silent in-place convert) → `Available KV cache`
-   (no OOM) → `torch.compile took ...` → `Capturing CUDA graphs ... finished` → `Application startup
-   complete`. Smoke a completion; confirm **0** `shim failed` / `weights not converted` lines.
+   (no OOM) → `[flydsl-precompile] BEGIN exhaustive eager warmup ...` → `[flydsl-precompile] DONE eager
+   warmup (N/N); all FlyDSL exes compiled+cached outside capture` (from step 2b — one per TP rank) →
+   `Capturing CUDA graphs ... 100%` (must reach 100%, not hang) → `Application startup complete`. Smoke a
+   completion; confirm **0** `shim failed` / `weights not converted` lines. If capture hangs (no `DONE
+   eager warmup` line, or the capture bar freezes with repeated `No available shared memory broadcast block
+   found in 60 seconds`), step 2b was not wired — do NOT report a number; fix the seam, do not reject.
 5. **Gate**: same-session A/B baseline (Triton, `VLLM_USE_FLYDSL_MOE` unset) vs FlyDSL, BOTH graph, identical
    `vllm bench serve` (ISL/OSL/conc), plus GSM8K within noise. Quote same-session ratios only.
 
@@ -175,14 +219,21 @@ installed vLLM (off by default ⇒ byte-identical stock; back up the two files f
 - Compare against a STOCK baseline at the SAME serving config; do not stack on an already-patched stack.
 
 ## Sources
-- Vendored implementation (this dir): `flydsl_moe_shim.py` — the exact validated shim
-  (`convert_layer_inplace` load-time in-place convert + `flydsl_fused_experts_impl` launch-only runtime).
-  This skill is self-contained: the two vLLM edits above + this shim + a FlyDSL checkout are all that's
-  needed; no external eval-dir is required to reproduce.
+- Vendored implementation (this dir — self-contained, no external files needed):
+  - `flydsl_moe_shim.py` — the exact validated shim (`convert_layer_inplace` load-time in-place convert +
+    `flydsl_fused_experts_impl` launch-only runtime).
+  - `flydsl_capture_precompile.py` — the capture-precompile seam (`install_capture_precompile`) that wraps
+    `GPUModelRunner.capture_model` with the pre-capture eager warmup (Procedure step 2b).
+  This skill is self-contained: the three env-gated vLLM edits above (steps 1, 2, 2b) + these two vendored
+  files + a FlyDSL checkout are all that is needed; no external eval-dir, learned card, or other skill dir
+  is required to reproduce.
 - Measured (2026-06-25, vLLM 0.19.0, Kimi-K2.6 int4-W4A16, MI300X TP4): same-session GRAPH A/B,
   ISL8192/OSL1024/conc64/192prompts — baseline (Triton) **300.51 tok/s** → FlyDSL **398.35 tok/s**
   (**+32.6%**), decode TPOT 168.6→61.3 ms (2.75x), 0 fallbacks, smoke coherent. Independently reproduced
   earlier at +32–34% (392 vs 297 tok/s) with GSM8K parity 0.915 and graph-replay cosine 1.0.
+- Capture-safety verified (2026-07-20, vLLM 0.21.0, Kimi-K2.6 int4-W4A16, MI300X TP4): controlled same-box
+  A/B on one 2.51x-isolated shim — WITHOUT step 2b the server deadlocked at CUDA-graph capture (FULL 25/35,
+  `Application startup complete` never reached); WITH step 2b it precompiled 86/86 descriptors outside
+  capture, captured 51/51 PIECEWISE + 35/35 FULL, reached `Application startup complete`, and served. Step
+  2b is the difference between "isolated win, undeployable" and "healthy server".
 - Sibling kernel-scope skill (produces the rewritten kernel this skill lands): `flydsl_rewrite_quantized_moe`.
-- Companion learned card: `e2e_workflow/knowledge/learned/flydsl-moe-applyback-gfx942.md` +
-  method `e2e_workflow/knowledge/learned/method-cudagraph-safe-integration.md`.

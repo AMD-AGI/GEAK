@@ -45,8 +45,16 @@ if FLYDSL_ROOT:
 
 import torch  # noqa: E402
 
+try:
+    import triton  # noqa: E402
+    import triton.language as tl  # noqa: E402
+    _HAS_TRITON = True
+except Exception:  # pragma: no cover
+    _HAS_TRITON = False
+
 _flyc = None
 _compile_moe_gemm2 = None
+_compile_moe_gemm1 = None
 _build_routing_buffers = None
 _shuffle_weight = None
 _shuffle_scale = None
@@ -57,21 +65,33 @@ _pack_int4 = None
 _WCACHE = {}
 # compiled exe keyed by (data_ptr, stage, M, top_k)
 _ECACHE = {}
+# per-device cached zero-size fp32 scale sentinel (W4A16 -> no activation scale).
+# Reused across every gemm call so we do not dispatch a fresh 0-elem alloc per stage.
+_EMPTY_SCALE = {}
+
+
+def _empty_scale(dev):
+    t = _EMPTY_SCALE.get(dev)
+    if t is None:
+        t = torch.empty((0,), device=dev, dtype=torch.float32)
+        _EMPTY_SCALE[dev] = t
+    return t
 
 
 def _lazy_init():
-    global _flyc, _compile_moe_gemm2, _build_routing_buffers
+    global _flyc, _compile_moe_gemm2, _compile_moe_gemm1, _build_routing_buffers
     global _shuffle_weight, _shuffle_scale, _pack_int4
     if _flyc is not None:
         return
     import flydsl.compiler as flyc
-    from kernels.moe_gemm_2stage import compile_moe_gemm2
+    from kernels.moe_gemm_2stage import compile_moe_gemm2, compile_moe_gemm1
     from tests.kernels.test_moe_gemm import (
         build_routing_buffers, _pack_shuffled_int8_to_packed_int4_no_perm,
     )
     from tests.utils import shuffle_weight, shuffle_scale_for_int4
     _flyc = flyc
     _compile_moe_gemm2 = compile_moe_gemm2
+    _compile_moe_gemm1 = compile_moe_gemm1
     _build_routing_buffers = build_routing_buffers
     _shuffle_weight = shuffle_weight
     _shuffle_scale = shuffle_scale_for_int4
@@ -178,29 +198,137 @@ def _pick_tiles(M, N, K):
     return tile_m, tile_n, tile_k
 
 
-def _get_exe(wptr, stage, M, N, K, E, top_k):
-    key = (wptr, stage, M, top_k)
+def _get_exe1(wptr, M, hidden, N1, inter, E, top_k):
+    """Stage-1 (gate_up) executable: compile_moe_gemm1 with COMPACT-input
+    in-kernel sorted-row gather (reads A[m] via sorted_ids//top_k -> no
+    repeat_interleave transient). Output is the expanded [M*top_k, 2*inter]."""
+    key = (wptr, 1, M, top_k)
     ent = _ECACHE.get(key)
     if ent is not None:
         return ent
-    tile_m, tile_n, tile_k = _pick_tiles(M, N, K)
-    exe = _compile_moe_gemm2(
-        model_dim=N, inter_dim=K, experts=E, topk=1,
+    # Keep the proven _pick_tiles heuristic; call it with the same (N1, hidden)
+    # the previous stage-1 path used so tile_m/tile_n/tile_k are unchanged.
+    tile_m, tile_n, tile_k = _pick_tiles(M, N1, hidden)
+    exe = _compile_moe_gemm1(
+        model_dim=hidden, inter_dim=inter, experts=E, topk=top_k,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        doweight_stage2=(stage == 2), in_dtype="int4_bf16", group_size=32,
-        out_dtype="bf16", accumulate=False, scale_is_bf16=True,
+        doweight_stage1=False, in_dtype="int4_bf16", group_size=32,
+        out_dtype="bf16", scale_is_bf16=True, use_cshuffle_epilog=False,
     )
     ent = dict(exe=exe, tile_m=tile_m, compiled=None)
     _ECACHE[key] = ent
     return ent
 
 
-_SORT_MODE = os.environ.get("FLYDSL_MOE_SORT_MODE", "aiter")
+def _get_exe2(wptr, M, hidden, inter, E, top_k):
+    """Stage-2 (down) executable: compile_moe_gemm2 with accumulate=True
+    (in-kernel atomic top-k reduce) so the output is written DIRECTLY as
+    [M, hidden] -- no expanded [M*top_k, hidden] buffer, no host moe_sum."""
+    key = (wptr, 2, M, top_k)
+    ent = _ECACHE.get(key)
+    if ent is not None:
+        return ent
+    tile_m, tile_n, tile_k = _pick_tiles(M, hidden, inter)
+    exe = _compile_moe_gemm2(
+        model_dim=hidden, inter_dim=inter, experts=E, topk=top_k,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        doweight_stage2=True, in_dtype="int4_bf16", group_size=32,
+        out_dtype="bf16", accumulate=True, scale_is_bf16=True,
+    )
+    ent = dict(exe=exe, tile_m=tile_m, compiled=None)
+    _ECACHE[key] = ent
+    return ent
+
+
+# "torch" is the portable moe-sorting fallback (aiter's ops.shuffle sort is not
+# importable in this FlyDSL checkout -> HAS_AITER False). It mirrors aiter's
+# moe_sorting semantics and is what the FlyDSL 2-stage tests use on this box.
+_SORT_MODE = os.environ.get("FLYDSL_MOE_SORT_MODE", "torch")
+
+_VLLM_ALIGN = None
+
+
+def _get_vllm_align():
+    """vLLM's fused GPU moe_align_block_size -- the fast, cudagraph-capture-safe
+    routing sort. The portable torch fallback (moe_sorting_torch_native) runs a
+    384-iteration host loop (~40-60 ms here) that would dominate every bucket;
+    aiter's GPU sort is unimportable in this checkout (FlyDSL ABI mismatch), so
+    we build the FlyDSL routing layout from vLLM's align kernel instead."""
+    global _VLLM_ALIGN
+    if _VLLM_ALIGN is None:
+        try:
+            from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+                moe_align_block_size,
+            )
+            _VLLM_ALIGN = moe_align_block_size
+        except Exception:
+            _VLLM_ALIGN = False
+    return _VLLM_ALIGN
+
+
+if _HAS_TRITON:
+    @triton.jit
+    def _routing_post_kernel(
+        flat_ptr,       # int32 [S]  vLLM sorted flat token indices (padding == numel)
+        twf_ptr,        # fp32  [M*tk] flattened topk_weights
+        fused_ptr,      # int32 [S]  OUT: (slot<<24)|token
+        sw_ptr,         # fp32  [S]  OUT: sorted routed weight
+        S, numel, tk, M,
+        BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < S
+        flat = tl.load(flat_ptr + offs, mask=mask, other=numel)
+        valid = flat < numel
+        flat_c = tl.where(valid, flat, 0)
+        tok = tl.where(valid, flat_c // tk, M)          # padding token == M (>= M -> skipped by kernel)
+        slot = tl.where(valid, flat_c % tk, tk)         # padding slot  == tk
+        fused = (slot << 24) | tok
+        w = tl.load(twf_ptr + flat_c, mask=(mask & valid), other=0.0)
+        w = tl.where(valid, w, 0.0)
+        tl.store(fused_ptr + offs, fused, mask=mask)
+        tl.store(sw_ptr + offs, w, mask=mask)
+
+
+def _routing_post_fused(flat, twf, numel, tk, M):
+    """Collapse the ~13-op torch post-processing of vLLM's moe_align output
+    (flat->token/slot decode, (slot<<24)|token fused encode, sorted-weight gather,
+    zero-fill of padding) into ONE capture-safe GPU kernel.  Returns
+    (fused_sorted_ids int32 [S], sorted_weight fp32 [S]).  No .item()/host sync,
+    fixed padded layout -> cudagraph-capture-safe."""
+    S = flat.numel()
+    fused = torch.empty(S, dtype=torch.int32, device=flat.device)
+    sw = torch.empty(S, dtype=torch.float32, device=flat.device)
+    BLOCK = 256
+    grid = ((S + BLOCK - 1) // BLOCK,)
+    _routing_post_kernel[grid](flat, twf, fused, sw, S, numel, tk, M, BLOCK=BLOCK)
+    return fused, sw
 
 
 def _build_routing(tk_ids, tk_w, E, N, tile_m):
     """Routing buffers. blocks/sorted_* depend only on routing+tile_m (not N),
-    so the result is reused across both stages of a layer."""
+    so the result is reused across both stages of a layer. tk_ids/tk_w are the
+    REAL [M, top_k] tensors; the kernel decodes token=(sorted_id & 0xFFFFFF) and
+    slot=(sorted_id >> 24) to gather compact A[token] / scatter out[token]."""
+    align = _get_vllm_align()
+    if align and _HAS_TRITON:
+        M, tk = tk_ids.shape
+        numel = M * tk
+        # vLLM: sorted_tok holds flat indices into [M*tk] (padding == numel);
+        # flat r -> token = r // tk, slot = r % tk. The ~13-op torch re-encode to
+        # FlyDSL's fused (slot<<24)|token layout + sorted-weight gather is FUSED
+        # into one GPU kernel (_routing_post_fused) so the decode routing floor is
+        # intrinsic (memo-independent) and stays cudagraph-capture-safe.
+        sorted_tok, expert_ids, num_pad = align(tk_ids, tile_m, E)
+        twf = tk_w.reshape(-1)
+        fused, sw = _routing_post_fused(sorted_tok, twf, numel, tk, M)
+        num_valid = num_pad.reshape(-1)[:1].to(torch.int32)
+        return dict(sorted_ids=fused,
+                    sorted_expert_ids=expert_ids,
+                    sw_1d=sw,
+                    num_valid_ids=num_valid, blocks=int(expert_ids.numel()))
+
     routing = _build_routing_buffers(
         topk_ids=tk_ids, topk_weights=tk_w, experts=E,
         model_dim=N, tile_m=tile_m, moe_sort_mode=_SORT_MODE,
@@ -211,17 +339,57 @@ def _build_routing(tk_ids, tk_w, E, N, tile_m):
                 num_valid_ids=num_valid_ids, blocks=int(blocks))
 
 
-def _grouped_gemm(a2, w_packed, scale_flat, N, K, E, exe_ent, rt):
+def _grouped_gemm1(a, w_packed, scale_flat, N1, hidden, inter, E, exe_ent, rt, M, top_k):
+    """Stage-1 gate_up + FUSED silu_and_mul: compact A[M,hidden] -> act[M*top_k, inter].
+
+    compile_moe_gemm1 gathers the compact activation row A[sorted_id//top_k]
+    in-kernel (so no [M*top_k, hidden] pre-gather ever materialises) AND fuses the
+    SiLU(gate)*up epilogue -- the output is already the [M*top_k, inter] activation,
+    so NO separate host silu_and_mul pass is needed.
+    """
     flyc = _flyc
-    kt = a2.shape[0]
-    DEV = a2.device
-    a2_scale_1d = torch.empty((0,), device=DEV, dtype=torch.float32)
-    out = torch.zeros(kt, N, device=DEV, dtype=torch.bfloat16)
+    DEV = a.device
+    a_scale_1d = _empty_scale(DEV)
+    out = torch.empty(M * top_k, inter, device=DEV, dtype=torch.bfloat16)
 
     def args(o):
-        return (o.view(-1), a2.reshape(-1), w_packed, a2_scale_1d, scale_flat,
+        # gemm1 launch order: (o, x, w, sx, sw, sorted_ids, expert_ids,
+        #   sorted_weights, num_valid_ids, tokens=M, inter_dim, model_dim, blocks, stream)
+        return (o.view(-1), a.reshape(-1), w_packed, a_scale_1d, scale_flat,
                 rt["sorted_ids"], rt["sorted_expert_ids"], rt["sw_1d"],
-                rt["num_valid_ids"], kt, N, K, rt["blocks"],
+                rt["num_valid_ids"], M, inter, hidden, rt["blocks"],
+                torch.cuda.current_stream())
+
+    cexe = exe_ent["compiled"]
+    if cexe is None:
+        cexe = flyc.compile(exe_ent["exe"], *args(out))
+        exe_ent["compiled"] = cexe
+    cexe(*args(out))
+    return out
+
+
+def _grouped_gemm2(act, w_packed, scale_flat, hidden, inter, E, exe_ent, rt, M, top_k):
+    """Stage-2 down + in-kernel top-k reduce (accumulate=True).
+
+    act[M*top_k, inter] -> out[M, hidden] directly. The kernel atomic-adds each
+    routed row into out[sorted_id//top_k] with the routed weight folded in
+    (doweight_stage2=True), so the peak allocation NO LONGER scales with top_k
+    and the host .sum(1) is gone.
+    """
+    flyc = _flyc
+    DEV = act.device
+    a_scale_1d = _empty_scale(DEV)
+    # atomic accumulate -> must start zeroed. Allocate with empty + a SINGLE zero_()
+    # (torch.zeros would memset here and the compile branch used to zero AGAIN -> two
+    # memsets/call; one memset is enough and saves a dispatch on the tiny decode path).
+    out = torch.empty(M, hidden, device=DEV, dtype=torch.bfloat16)
+
+    def args(o):
+        # gemm2 atomic launch order: (o, x, w, sx, sw, sorted_ids, expert_ids,
+        #   sorted_weights, num_valid_ids, tokens=M, model_dim=hidden, inter_dim=inter, blocks, stream)
+        return (o.view(-1), act.reshape(-1), w_packed, a_scale_1d, scale_flat,
+                rt["sorted_ids"], rt["sorted_expert_ids"], rt["sw_1d"],
+                rt["num_valid_ids"], M, hidden, inter, rt["blocks"],
                 torch.cuda.current_stream())
 
     cexe = exe_ent["compiled"]
@@ -233,45 +401,109 @@ def _grouped_gemm(a2, w_packed, scale_flat, N, K, E, exe_ent, rt):
     return out
 
 
+def _ensure_compact(w1, w2, w1_scale, w2_scale, E):
+    """Convert+cache raw vLLM-packed int4 weights (compact-operand harness path).
+
+    In the isolated unittest the candidate receives raw packed uint8 weights
+    each call (convert_layer_inplace is a live-server load-time hook that is NOT
+    invoked here), so convert once keyed by the ORIGINAL data_ptr and cache the
+    FlyDSL-layout weight + scale. Reuses the exact same _convert_* helpers as
+    convert_layer_inplace (which stays unchanged) -> identical numeric layout.
+    """
+    k1 = w1.data_ptr()
+    m1 = _WCACHE.get(k1)
+    if m1 is not None and "wflat" in m1:
+        return m1, _WCACHE[w2.data_ptr()]
+
+    E1, N1, hidden_half = w1.shape          # w1: [E, 2*inter, hidden//2]
+    hidden = hidden_half * 2
+    inter = N1 // 2
+    G1 = w1_scale.shape[2]
+    w1_flat = _convert_weight_flat(w1, N1, hidden)
+    s1_flat = _convert_scale_flat(w1_scale)
+    m1 = dict(role="w13", N=N1, K=hidden, E=E, G=G1, gs=hidden // G1,
+              scale=s1_flat, inter=inter, hidden=hidden, wflat=w1_flat)
+    _WCACHE[k1] = m1
+
+    Eh, Nh, inter_half = w2.shape           # w2: [E, hidden, inter//2]
+    G2 = w2_scale.shape[2]
+    w2_flat = _convert_weight_flat(w2, hidden, inter)
+    s2_flat = _convert_scale_flat(w2_scale)
+    m2 = dict(role="w2", N=hidden, K=inter, E=E, G=G2, gs=inter // G2,
+              scale=s2_flat, inter=inter, hidden=hidden, wflat=w2_flat)
+    _WCACHE[w2.data_ptr()] = m2
+    return m1, m2
+
+
+def _run_fused(a, w1flat, w2flat, m1, m2, tk_ids, tk_w, E, top_k):
+    """Shared fused MoE flow: compact gemm1 -> silu_and_mul -> gemm2 top-k reduce.
+
+    Stage-2 output is [M, hidden] (memory-contract compliant); no [M*top_k, *]
+    activation/pre-gather transient survives past the kernels.
+    """
+    M, hidden = a.shape
+    N1 = m1["N"]           # 2*inter
+    inter = N1 // 2
+
+    exe1 = _get_exe1(m1_ptr(m1, w1flat), M, hidden, N1, inter, E, top_k)
+    exe2 = _get_exe2(m1_ptr(m2, w2flat), M, hidden, inter, E, top_k)
+    # tile_m is identical for both stages (depends only on M); build routing once.
+    rt = _build_routing(tk_ids, tk_w, E, N1, exe1["tile_m"])
+
+    # stage 1: gate_up + FUSED silu_and_mul -- COMPACT input, in-kernel gather.
+    # Output is already the [M*top_k, inter] activation (SiLU(gate)*up folded in the epilogue).
+    act = _grouped_gemm1(a, w1flat, m1["scale"], N1, hidden, inter, E, exe1, rt, M, top_k)
+
+    # stage 2: down (routed weight applied) -- in-kernel top-k reduce -> [M, hidden]
+    out = _grouped_gemm2(act, w2flat, m2["scale"], hidden, inter, E, exe2, rt, M, top_k)
+    return out
+
+
+def m1_ptr(meta, w):
+    """Cache key for the executable: prefer the converted-weight data_ptr so the
+    compiled exe is stable across calls that reuse the same cached weight."""
+    return w.data_ptr()
+
+
 def flydsl_fused_experts_impl(
-    hidden_states, w1, w2, topk_weights, topk_ids, inplace,
+    hidden_states, w1=None, w2=None, topk_weights=None, topk_ids=None, inplace=False,
     activation="silu", apply_router_weight_on_input=False,
     global_num_experts=-1, expert_map=None,
     w1_scale=None, w2_scale=None, **_ignored,
 ):
+    """Fused int4-W4A16 MoE via FlyDSL. Accepts EITHER the compact-operand dict
+    (isolated unittest harness: cand(inp)) OR the vLLM positional signature
+    (live server, weights already converted in place)."""
     _lazy_init()
+
+    # ---- compact-operand dict path (isolated harness) ----
+    if isinstance(hidden_states, dict):
+        inp = hidden_states
+        A = inp["A"]
+        w1 = inp["w1"]; w2 = inp["w2"]
+        w1_scale = inp["w1_scale"]; w2_scale = inp["w2_scale"]
+        topk_ids = inp["topk_ids"]; topk_weights = inp["topk_weights"]
+        E = int(inp["E"])
+        top_k = int(inp["topk"])
+        m1, m2 = _ensure_compact(w1, w2, w1_scale, w2_scale, E)
+        a = A.to(torch.bfloat16)
+        tk_ids = topk_ids.to(torch.int32).contiguous()
+        tk_w = topk_weights.float().contiguous()
+        out = _run_fused(a, m1["wflat"], m2["wflat"], m1, m2, tk_ids, tk_w, E, top_k)
+        return out.to(A.dtype)
+
+    # ---- vLLM positional path (weights converted at load via convert_layer_inplace) ----
     m1 = _WCACHE.get(w1.data_ptr())
     m2 = _WCACHE.get(w2.data_ptr())
     if m1 is None or m2 is None:
         raise RuntimeError("FlyDSL: weights not converted (cache miss)")
-
-    M, hidden = hidden_states.shape
     E = m1["E"]
-    N1 = m1["N"]          # 2*inter (stage1 output)
-    inter = N1 // 2
     top_k = topk_ids.shape[1]
     a = hidden_states.to(torch.bfloat16)
-
-    tk_ids = topk_ids.reshape(-1, 1).contiguous().to(torch.int32)
-    tk_w = topk_weights.reshape(-1, 1).float().contiguous()
-
-    exe1 = _get_exe(w1.data_ptr(), 1, M, N1, hidden, E, top_k)
-    exe2 = _get_exe(w2.data_ptr(), 2, M, hidden, inter, E, top_k)
-    # tile_m is identical for both stages (same M); build routing once and reuse.
-    rt = _build_routing(tk_ids, tk_w, E, N1, exe1["tile_m"])
-
-    # stage 1: gate_up (no routed weight)
-    a2_1 = a.repeat_interleave(top_k, dim=0).contiguous()
-    out1 = _grouped_gemm(a2_1, w1, m1["scale"], N1, hidden, E, exe1, rt)
-
-    # silu_and_mul (bf16)
-    gate, up = out1[:, :inter], out1[:, inter:]
-    act = (torch.nn.functional.silu(gate) * up).contiguous()
-
-    # stage 2: down (routed weight applied)
-    out2 = _grouped_gemm(act, w2, m2["scale"], hidden, inter, E, exe2, rt)
-
-    out = out2.view(M, top_k, hidden).sum(dim=1).to(hidden_states.dtype)
+    tk_ids = topk_ids.to(torch.int32).contiguous()
+    tk_w = topk_weights.float().contiguous()
+    out = _run_fused(a, w1, w2, m1, m2, tk_ids, tk_w, E, top_k)
+    out = out.to(hidden_states.dtype)
     if inplace:
         hidden_states.copy_(out)
         return hidden_states
