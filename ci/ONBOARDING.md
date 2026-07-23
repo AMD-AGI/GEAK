@@ -4,8 +4,8 @@ Step-by-step for the two most common changes: **enrolling a new model** and
 **adding/updating a container image**. For the overall architecture and knobs
 see [`README.md`](./README.md).
 
-All paths below are relative to the workspace root (`$WS`, default
-`/home/ethany/geak_ci_workspace`), where the layout is:
+All paths below are relative to the workspace root (`$WS` — the parent dir of
+this repo checkout, derived automatically by `lib.sh`), where the layout is:
 
 ```
 $WS/
@@ -23,7 +23,7 @@ $WS/
 ```
 
 Model **weights** live in the catalog `$HF_MODELS_DIR` (default
-`/home/ethany/hf_models`), keyed by `<model_key>` — NOT under `geak_runtime/`.
+`$WS/hf_models`), keyed by `<model_key>` — NOT under `geak_runtime/`.
 
 ---
 
@@ -34,7 +34,7 @@ Put the weights at `$HF_MODELS_DIR/<model_key>` — either a real directory or a
 symlink into shared NFS, e.g.:
 
 ```bash
-ln -s /shared_nfs/huggingface_models/Qwen/Qwen3-8B /home/ethany/hf_models/Qwen-Qwen3-8B
+ln -s /shared_nfs/huggingface_models/Qwen/Qwen3-8B "$HF_MODELS_DIR/Qwen-Qwen3-8B"
 ```
 
 CI resolves weights by `<model_key>` and **refuses to download** by default (a

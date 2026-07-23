@@ -29,7 +29,7 @@ name: CI L1 — SPUR e2e (smoke + verify)
 # default branch, so the "Run" button appears).
 #
 # IMPORTANT: the self-hosted runners must be installed under a shared filesystem
-# path (e.g. /home/ethany/...) so the GEAK checkout they produce is readable by
+# path (e.g. /home/<user>/...) so the GEAK checkout they produce is readable by
 # the SPUR compute nodes that run the job body (ci/dispatch/slurm_job.sh).
 
 on:
@@ -74,7 +74,7 @@ env:
   GEAK_E2E_BUDGET_S: ${{ vars.GEAK_E2E_BUDGET_S || '57600' }}
   # Data workspace on the jump box (siblings live here; NOT under the checkout).
   # Base dir is a repo/org Actions VARIABLE (vars.GEAK_CI_PATH) so we can flip the
-  # whole workspace between hosts (e.g. /home/ethany or /shared_nfs/ethany) without
+  # whole workspace between hosts (e.g. /home/<user> or /shared_nfs/<user>) without
   # editing this file. It must point at a dir that holds geak_ci_workspace/ (and the
   # hf_models/ weights catalog) and be readable by the SPUR compute nodes.
   WS: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace

@@ -2,8 +2,8 @@
 # =============================================================================
 # scan_run.sh — post-run diagnostics summary for the L1 matrix.
 #
-# NOT the liveness monitor (that's run_monitor.sh, a mid-run claude arbiter that
-# runs on the dispatched GPU host and is OFF by default). This is a lightweight,
+# NOT the liveness monitor (that's run_monitor.sh, a mid-run watchdog that runs on
+# the dispatched GPU host, ON by default in stall mode). This is a lightweight,
 # dependency-free POST-mortem: after all jobs finish, run_matrix.sh pipes one
 # line per model here and we scan that model's on-disk logs, classifying:
 #   * BLOCKER  — a real failure cause (SIGKILL/OOM/GPU HBM exhaustion, vLLM

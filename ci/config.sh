@@ -36,7 +36,7 @@ export SPUR_PROBE_TIME="${SPUR_PROBE_TIME:-1:00:00}"        # wall time for --pr
 # footprint) and submits to the first that can place the job now; if none can,
 # it submits to SPUR_ACCOUNT_FALLBACK and lets it pend.
 export SPUR_AUTOSELECT="${SPUR_AUTOSELECT:-1}"             # 0 = disable; use SPUR_ACCOUNT/SPUR_QOS as-is
-export SPUR_ACCOUNT_CANDIDATES="${SPUR_ACCOUNT_CANDIDATES:-amd-hyperloom:amd-hyperloom-qos amd-general:amd-general-qos amd-primus:amd-primus-qos}"
+export SPUR_ACCOUNT_CANDIDATES="${SPUR_ACCOUNT_CANDIDATES:-amd-hyperloom:amd-hyperloom-qos amd-general:amd-general-qos}"
 export SPUR_ACCOUNT_FALLBACK="${SPUR_ACCOUNT_FALLBACK:-amd-hyperloom:amd-hyperloom-qos}"
 export SPUR_PROBE_WAIT_S="${SPUR_PROBE_WAIT_S:-24}"        # watch a probe this long before deeming a QoS full
 export SPUR_PROBE_POLL_S="${SPUR_PROBE_POLL_S:-3}"         # probe poll interval
@@ -65,8 +65,8 @@ export GEAK_SKIP_DSTATE_CHECK="${GEAK_SKIP_DSTATE_CHECK:-0}"      # 1 = skip GPU
 #              keeps GPU or CPU busy, so it is NEVER killed; if GPU util can't be
 #              measured it degrades to warn-only.
 #   * claude — LLM arbiter (needs the claude CLI): reads the log tail and votes.
-# Default OFF regardless of mode. Enable with GEAK_MONITOR=1 (stall mode needs no
-# claude; claude mode needs the CLI on the dispatched GPU host).
+# Default ON in stall mode (deterministic, no deps). Disable with GEAK_MONITOR=0;
+# claude mode additionally needs the CLI on the dispatched GPU host.
 export GEAK_MONITOR="${GEAK_MONITOR:-1}"                          # 1 = start host-side liveness monitor
 export GEAK_MONITOR_MODE="${GEAK_MONITOR_MODE:-stall}"           # stall (deterministic) | claude (LLM arbiter)
 # GEAK_HARD_TIMEOUT_S: leave UNSET to auto-derive (budget + headroom - kill buffer);
