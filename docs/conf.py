@@ -12,6 +12,8 @@ html_theme_options = {
     "header_title": f"GEAK {version_number}",
     "header_link": False,
     "version_list_link": False,
+    "use_repository_button": True,
+    "use_issues_button": True,
     "nav_secondary_items": {
         "Hyperloom": "https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html",
         "GitHub": "https://github.com/AMD-AGI/GEAK",
