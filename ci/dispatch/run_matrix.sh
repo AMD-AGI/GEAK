@@ -169,30 +169,7 @@ while poll_jobs; do sleep "$POLL"; done
 DONE=1   # jobs are terminal now; the cleanup trap becomes a no-op
 log "no pending or running jobs left; judging results"
 
-# ---- judge each result.json (same criteria as run_model Step F) ----
-judge() {  # judge <out_dir> -> prints "VERDICT<TAB>status<TAB>baseline<TAB>final<TAB>speedup"
-  python3 - "$1" <<'PY'
-import json, os, sys
-out = sys.argv[1]
-p = os.path.join(out, "result.json")
-def emit(v, s="", b="", f="", sp=""): print(f"{v}\t{s}\t{b}\t{f}\t{sp}")
-if not os.path.isfile(p):
-    emit("FAIL", "no_result"); raise SystemExit
-try:
-    d = json.load(open(p))
-except Exception:
-    emit("FAIL", "bad_result"); raise SystemExit
-st = d.get("status", "")
-b  = d.get("baseline_throughput_tok_s") or 0
-f  = d.get("final_throughput_tok_s") or ""
-sp = d.get("throughput_speedup") or ""
-try: ok_base = float(b) > 0
-except Exception: ok_base = False
-verdict = "PASS" if (st in ("ok", "no_gain") and ok_base) else "FAIL"
-emit(verdict, st, b, f, sp)
-PY
-}
-
+# ---- judge each result.json (judge_result from lib.sh; same criteria as run_model Step F) ----
 FAILS=0
 rows=""
 SCAN_RECORDS=""   # <model>\t<verdict>\t<status>\t<out_dir> per model, for scan_run.sh
@@ -205,7 +182,7 @@ for i in "${!J_MODEL[@]}"; do
     if [ -f "$out/probe_ok" ]; then v="PASS"; st="probe_ok"; else v="FAIL"; st="probe_incomplete"; fi
     b=""; f=""; sp=""
   else
-    IFS=$'\t' read -r v st b f sp < <(judge "$out")
+    IFS=$'\t' read -r v st b f sp < <(judge_result "$out")
   fi
   [ "$v" = "PASS" ] || FAILS=$((FAILS+1))
   rows+="| \`$m\` | $tp | $jid | $v | ${st:-} | ${b:-} | ${f:-} | ${sp:-} |"$'\n'

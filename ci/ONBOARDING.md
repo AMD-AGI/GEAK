@@ -120,10 +120,16 @@ run's `profile_topN.md` shows `source: tracelens` (or `tracelens+trace`).
 
 ## B. Adding or updating a container image
 
-Images are chosen from [`docker_default.json`](./docker_default.json), a nested map
-`{ "<framework>": { "<arch>": "<image>" } }`. `arch` is auto-detected on the
-compute node as **`MI300`** (gfx942/gfx90a) or **`MI355`** (gfx950), overridable
-with `GEAK_GPU_ARCH`.
+Images are chosen from a preset file under [`docker_setup/`](./docker_setup/) — the
+default is [`docker_setup/docker_default.json`](./docker_setup/docker_default.json),
+a nested map `{ "models": { "<model_key>": <image> }, "<framework>": { "<arch>":
+"<image>" } }`. `arch` is auto-detected on the compute node as **`MI300`**
+(gfx942/gfx90a) or **`MI355`** (gfx950), overridable with `GEAK_GPU_ARCH`.
+
+Which preset is active is selected per-run by the Actions variable
+`vars.DOCKER_DEFAULT_JSON` (a **bare filename** in `ci/docker_setup/`; unset →
+`docker_default.json`). Add more presets (e.g. `experimental.json`) alongside the
+default and flip the variable from the GitHub UI to switch images without a commit.
 
 ```json
 {
@@ -133,12 +139,14 @@ with `GEAK_GPU_ARCH`.
 ```
 
 To add/update an image:
-1. Edit `ci/docker_default.json` — add a new `<framework>` block, or update the
-   `MI300`/`MI355` tag for an existing one. (This repo file is authoritative; there
-   is no workspace fallback.)
-2. A model picks its image by its `handoff.json` `framework` + the node's arch.
+1. Edit `ci/docker_setup/docker_default.json` (or another preset) — add a new
+   `<framework>` block, update the `MI300`/`MI355` tag, or add a per-model pin under
+   `models`. (These repo files are authoritative; there is no workspace fallback.)
+2. A model picks its image by its `handoff.json` `framework` + the node's arch,
+   unless a `models[<model_key>]` pin overrides it.
 
 Overrides (no file edit needed):
+- `vars.DOCKER_DEFAULT_JSON=<name.json>` — select a different preset in `ci/docker_setup/` from the GitHub UI.
 - `IMAGE=<repo:tag>` — force one exact image for the run.
 - `DOCKER_DEFAULT=<path>` — point at an alternate map file.
 

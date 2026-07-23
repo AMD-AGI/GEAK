@@ -18,12 +18,56 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-$WS/InferenceX}"
 HF_LOGS="${HF_LOGS:-$WS/geak_runtime}"
 CLAUDE_SETUP="${CLAUDE_SETUP:-$CI_DIR/preflight/claude_setup.sh}"
 MODELS_TSV="${MODELS_TSV:-$CI_DIR/models.tsv}"
-# Repo-tracked image map (ci/docker_default.json). Override with DOCKER_DEFAULT=<path>.
-DOCKER_DEFAULT="${DOCKER_DEFAULT:-$CI_DIR/docker_default.json}"
+# Repo-tracked image map. Presets live in ci/docker_setup/*.json; the default is
+# ci/docker_setup/docker_default.json. Override with DOCKER_DEFAULT=<path> (the CI
+# workflow sets this to ci/docker_setup/<vars.DOCKER_DEFAULT_JSON> to switch presets
+# from the GitHub UI without a commit).
+DOCKER_DEFAULT="${DOCKER_DEFAULT:-$CI_DIR/docker_setup/docker_default.json}"
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 die() { log "ERROR: $*"; exit "${2:-1}"; }
 new_ts() { date -u +%Y%m%dT%H%M%SZ; }
+
+# ---------------------------------------------------------------------------
+# Result judging (single source of truth for run_matrix.sh + summarize.sh)
+# ---------------------------------------------------------------------------
+# judge_result <out_dir> -> prints "VERDICT\tstatus\tbaseline\tfinal\tspeedup".
+# Same criteria as run_model.sh Step F: PASS iff status in {ok,no_gain} AND a real
+# measured baseline (>0). Missing/broken result.json -> FAIL. Never exits.
+judge_result() {
+  python3 - "$1" <<'PY'
+import json, os, sys
+out = sys.argv[1]
+p = os.path.join(out, "result.json")
+def emit(v, s="", b="", f="", sp=""): print(f"{v}\t{s}\t{b}\t{f}\t{sp}")
+if not os.path.isfile(p):
+    emit("FAIL", "no_result"); raise SystemExit
+try:
+    d = json.load(open(p))
+except Exception:
+    emit("FAIL", "bad_result"); raise SystemExit
+st = d.get("status", "")
+b  = d.get("baseline_throughput_tok_s") or 0
+f  = d.get("final_throughput_tok_s") or ""
+sp = d.get("throughput_speedup") or ""
+try: ok_base = float(b) > 0
+except Exception: ok_base = False
+verdict = "PASS" if (st in ("ok", "no_gain") and ok_base) else "FAIL"
+emit(verdict, st, b, f, sp)
+PY
+}
+
+# models_json <smoke|verify|probe> -> a JSON array of model keys (for a GH matrix).
+models_json() {
+  local sel="$1" fn
+  case "$sel" in
+    smoke)  fn=smoke_models ;;
+    verify) fn=enrolled_models ;;
+    probe)  fn=probe_models ;;
+    *) die "models_json: unknown selector '$sel' (use smoke|verify|probe)" ;;
+  esac
+  "$fn" | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))'
+}
 
 # ---------------------------------------------------------------------------
 # Model enrollment registry (models.tsv) + handoff-derived properties

@@ -7,7 +7,7 @@ optimization workflow on a ROCm GPU box, exactly the way Hyperloom's
 > **Adding a new model or docker image?** See the step-by-step
 > [`ONBOARDING.md`](./ONBOARDING.md) (weights staging, per-model `geak_runtime/`
 > layout incl. the TraceLens-prior/`exp_root` rule, `models.tsv` row, and the
-> `docker_default.json` image map).
+> `docker_setup/` image presets).
 
 A single per-node run is driven from `ci/node/run_local.sh` (on the cluster it is
 launched by `ci/dispatch/run_matrix.sh` → `ci/dispatch/slurm_job.sh`). A run:
@@ -164,7 +164,7 @@ log tails, judges liveness) — independent installs/sessions.
 ```
 HOST (run_local.sh — orchestrator)
 │
-├─ 0. lib.sh resolves: model → framework → IMAGE (docker_default.json), weights dir
+├─ 0. lib.sh resolves: model → framework → IMAGE (docker_setup/ preset), weights dir
 │
 ├─ 1. GPU PREFLIGHT ── docker run (throwaway, ≤120s) ──────────────┐  same image +
 │       • pulls IMAGE if not cached  (this is the image pull)      │  --device flags
@@ -267,7 +267,7 @@ bash ci/node/run_local.sh Qwen-Qwen3-8B --probe
 # real GPU smoke run (30-min budget)
 bash ci/node/run_local.sh Qwen-Qwen3-8B --budget 1800
 
-# pin a specific image instead of resolving from docker_default.json
+# pin a specific image instead of resolving from the docker_setup/ preset
 IMAGE=rocm/vllm-dev:some-gfx950-tag bash ci/node/run_local.sh Qwen-Qwen3-8B
 ```
 
@@ -340,8 +340,8 @@ All timeouts / caps / intervals / toggles have their defaults in **`ci/config.sh
 | `INFERENCEX_PATH` | `$WS/InferenceX` | bench client checkout (empty = native bench) |
 | `HF_LOGS` | `$WS/geak_runtime` | per-model dataset root |
 | `MODELS_TSV` | `ci/models.tsv` | enrollment registry |
-| `DOCKER_DEFAULT` | `ci/docker_default.json` | image selection map (override with a path) |
-| `IMAGE` | resolved from `docker_default.json` | override the container image |
+| `DOCKER_DEFAULT` | `ci/docker_setup/docker_default.json` | image selection preset (override with a path; CI sets it from `vars.DOCKER_DEFAULT_JSON`) |
+| `IMAGE` | resolved from the docker preset | override the container image |
 | `MODEL_PATH` | resolved on node (see below) | override weights dir |
 | `PERFSKILLS_E2E_TIMEOUT_S` | `1800` | workflow wall-clock budget (also via `--budget`) |
 | `LITELLM_API_KEY` / `LITELLM_BASE_URL` | **required** (no default; from CI secrets or local export) | Claude auth via the global LiteLLM proxy. `claude_setup.sh` errors if unset — nothing is hardcoded. |
