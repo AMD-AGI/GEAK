@@ -16,12 +16,12 @@
 # Add a row here only once a model's material is complete.
 #
 # model_key	hf_repo	tier
-# --- Currently enrolled: the 3 GEAK-v4 onboarded models with FULL material
+# --- Currently enrolled: the 5 GEAK-v4 onboarded models with FULL material
 #     (handoff + launch_recipe + tracelens triad + torch_trace) and weights
 #     pre-staged as symlinks under $HF_MODELS_DIR. hf_repo is '-' (CI never
 #     auto-downloads: stage_weights requires GEAK_ALLOW_DOWNLOAD=1). framework +
 #     tp come from each handoff.json. The 'smoke' row is ALSO in the full matrix,
-#     so l1-ci-full runs all 3; l1-ci-smoke runs only the 'smoke' row.
+#     so l1-ci-full runs all 5; l1-ci-smoke runs only the 'smoke' row.
 MiniMaxAI-MiniMax-M2.5	-	smoke
 moonshotai-Kimi-K2.6-int4	-	verify
 MiniMaxAI-MiniMax-M3-MXFP8	-	verify
