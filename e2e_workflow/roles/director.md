@@ -78,7 +78,7 @@ Steps:
    Every later e2e measurement (sweep, integrate, validate) MUST match this exact `TP=SERVING_TP
    GPU=SERVING_GPU` config, or deltas are meaningless.
    **Seed config**: if `INIT_FLAGS`/`INIT_ENV` are given (the caller's already-searched best config),
-   the baseline MUST be measured ON them (pass `EXTRA_SERVER_ARGS`/`EXTRA_ENV`), so PerfSkills' baseline
+   the baseline MUST be measured ON them (pass `EXTRA_SERVER_ARGS`/`EXTRA_ENV`), so GEAK's baseline
    == the caller's best config and later kernel gains compound on top of it. Use the copied bench script
    (substitute the actual SERVING_TP / SERVING_GPU values from your inputs):
    ```bash
@@ -87,7 +87,10 @@ Steps:
    EXTRA_SERVER_ARGS="<INIT_FLAGS>" EXTRA_ENV="<INIT_ENV>" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/baseline_bench.log"
    ```
-   Parse `EVAL_DIR/baseline/bench_summary.json` for `output_throughput_tok_s_median` + spread.
+   Parse `EVAL_DIR/baseline/bench_summary.json` for `throughput_tok_s_median` + spread (the metric-neutral
+   key; `metric_basis` says whether it is output or total tok/s — falls back to
+   `output_throughput_tok_s_median` on older summaries). Baseline and candidate share the same basis, so
+   the accept ratio is consistent.
    **Prove engagement**: grep `EVAL_DIR/logs/baseline_bench.log` / `server.log` to confirm the seed
    flags/env actually took effect (e.g. the chosen attention backend / env var appears in the server
    banner). If a seed flag did not engage, record it loudly in `notes` — a baseline measured on a
@@ -136,7 +139,7 @@ TRUE baseline with the tight 2-block protocol and decide if the COMBINED result 
    overlay + flags), each `E2E_REPEATS` (default 7) timed repeats on ONE server:
    The TRUE-baseline block MUST reproduce the seed config the baseline was measured on (the caller's
    best config = the recorded `baseline` flags/env, i.e. the same `INIT_FLAGS`/`INIT_ENV`) — NOT
-   `FINAL_FLAGS` minus PerfSkills' kernel wins. Use the same `TP=SERVING_TP GPU=SERVING_GPU` as setup.
+   `FINAL_FLAGS` minus GEAK's kernel wins. Use the same `TP=SERVING_TP GPU=SERVING_GPU` as setup.
    ```bash
    # fresh TRUE-baseline block (baseline seed flags/env, NO kernel overlay) — re-measured NOW for drift.
    # Serving config MUST be the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).

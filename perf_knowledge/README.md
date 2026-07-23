@@ -33,7 +33,7 @@ It has two jobs:
 | **Learn the hardware / a language / a library** | [`hardware/`](hardware/) · [`languages/`](languages/) · [`backends/`](backends/) |
 | **Apply a cross-cutting technique** | [`optimization/`](optimization/) · [`quantization/`](quantization/) |
 | **Profile / triage a kernel** | [`profiling/`](profiling/) |
-| **Run an end-to-end optimization** | [`kernel_workflow/`](kernel_workflow/) |
+| **Run an end-to-end optimization** | [`workflows/`](workflows/) |
 | **See a real war story with numbers** | [`case_studies/`](case_studies/) |
 | **Use / contribute a human expert recipe** | [`expert_skills/`](expert_skills/) — validated, advisory optimization skills the workflows consult when enabled (opt-in: `use_expert_skills=true`, default OFF); add one via [`expert_skills/_contribute/SKILL.md`](expert_skills/_contribute/SKILL.md) |
 | **See what to borrow from the ecosystem** | [`landscape/`](landscape/) (multi-backend libs · DSLs · AI kernel agents · autotuning · AMD SOTA 2026 · serving registries) |
@@ -58,7 +58,7 @@ perf_knowledge/
 │                        · accuracy gates · HW support matrix · KV quant · deployment recipes
 ├── profiling/     (10)  rocprofv3 / rocprof-compute / rocprof-sys · counters · bottleneck triage
 │                        · roofline · traces · benchmarking · engagement verification · pitfalls
-├── kernel_workflow/      (9)  single-kernel ladder · e2e model flow · GEMM tuning recipe · backend selection
+├── workflows/      (9)  single-kernel ladder · e2e model flow · GEMM tuning recipe · backend selection
 │                        · kernel integration · GEAK authoring · backend choice · bring-up checklist
 ├── case_studies/   (8)  by_model (Qwen3.5-27B, DeepSeek-MLA, Llama-fp8) + by_kernel
 ├── landscape/      (7)  ecosystem survey + "what to borrow" (multi-backend libs, DSLs, AI agents,

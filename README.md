@@ -2,19 +2,32 @@
   <img src="examples/images/logo.png" alt="GEAK v4" width="300">
 </p>
 
-Multi-agent GPU performance optimization for **AMD Instinct MI GPUs** (CDNA, e.g. gfx942 / gfx950 — the
-on-box card is auto-detected). Driven by Claude Code, orchestrated by deterministic JS **Workflows**.
+GEAK is an autonomous optimization agent that makes AMD Instinct GPUs run faster, automatically. Built as a
+multi-agent system with an evolving knowledge base, it learns from every optimization run and continuously
+improves its strategies over time. Point it at a single kernel or a live model-serving stack such as vLLM or
+sglang, and GEAK runs the full optimization loop: it finds the bottlenecks, generates and tunes better kernels
+across paths such as Triton, FlyDSL, TileLang, and HIP, and validates the speedup on the real system. What
+normally takes weeks of expert kernel engineering becomes an automated, repeatable, and self-improving process.
 
-Two workflows ship here:
+GEAK targets AMD Instinct MI GPUs (CDNA, e.g. gfx942 / gfx950; the on-box card is auto-detected), driven by
+Claude Code and orchestrated by deterministic JS Workflows. It ships two workflows, each for a different scenario:
 
 | Workflow | Scope | What it optimizes |
 | --- | --- | --- |
-| **[e2e_workflow](e2e_workflow/)** ⭐ | Whole-model serving | End-to-end **sglang / vLLM throughput** of a full LLM |
+| [e2e_workflow](e2e_workflow/) | Whole-model serving | End-to-end sglang / vLLM throughput of a full LLM |
 | [kernel_workflow](kernel_workflow/) | Single kernel | Latency / speedup of a single AMD GPU kernel (Triton, HIP, CK, FlyDSL, …) |
 
-> **e2e_workflow is the headline.** It raises the serving throughput of a real model by triaging hot
-> kernels and pulling levers cheapest-first, then *recursively* calls the single-kernel kernel_workflow to
-> author/optimize the kernels worth fixing. If you only want to speed up one kernel, use kernel_workflow directly.
+Use e2e_workflow to raise a whole model's serving throughput: it triages hot kernels, pulls the cheapest levers
+first, and recursively calls kernel_workflow for the kernels worth fixing. Use kernel_workflow on its own to
+optimize a single kernel.
+
+---
+
+## Architecture
+
+<p align="center">
+  <img src="docs/assets/GEAK_v4_framework.png" alt="GEAK v4 Optimization Pipeline" width="900">
+</p>
 
 ---
 
@@ -24,26 +37,60 @@ Two workflows ship here:
 
 - An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), **ROCm 6+**, a profiler (`rocprof-compute` /
   `rocprofv3` / `rocprof`), Python 3.8+.
-- **Claude Code ≥ 2.1.177** — the workflows use the **dynamic Workflow** (JS orchestration) feature, which
-  is only available from this version onward. Check with `claude --version`.
 - For E2E: a running-capable serving backend (`sglang` or `vllm`) and the model weights on disk.
 
-### 2. Launch Claude Code in auto mode
+> **⚠️ Build your kernel environment first.** GEAK does **not** install the toolchains your kernels
+> need (e.g. PyTorch, Triton, FlyDSL, hipBLASLt) — these differ per kernel. Set up and verify the
+> baseline builds/runs before starting a workflow.
 
-The workflows spawn many sub-agents and run profiling / benchmark / build commands on the box, so run
-Claude Code with permissions auto-approved. Update Claude Code first to make sure you have the dynamic
-Workflow feature (≥ 2.1.177):
+### 2. Set up
+
+Installing GEAK does three things: installs the `geak` Python package + deps, clones the GEAK repo, and installs
+the Claude Code CLI. By default the repo lands in `./GEAK` under the directory you run the command from (override
+the location with `GEAK_HOME`). Pick either method — both end up the same:
+
+**A. One-liner** — run it in the directory where you want GEAK to live:
 
 ```bash
-claude update                                    # update Claude Code to the latest version
-IS_SANDBOX=1 claude --dangerously-skip-permissions
+pip install "git+https://github.com/AMD-AGI/GEAK"
 ```
 
-### 3. Point it at this repo and ask
+**B. Clone first** — if you'd rather have the checkout up front (e.g. to work on a branch):
 
 ```bash
-git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
-git checkout GEAK_v4
+git clone https://github.com/AMD-AGI/GEAK.git
+cd GEAK
+pip install .
+```
+
+### 3. Launch Claude Code in auto mode
+
+**Set up PATH and API access**
+
+You'll need to add `~/.local/bin` to your PATH and configure API access yourself — follow the installer's printed next-steps:
+
+```bash
+# Option 1: Anthropic API directly
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Option 2: Standard gateway (x-api-key / bearer)
+export ANTHROPIC_BASE_URL=https://your-gateway
+export ANTHROPIC_AUTH_TOKEN=your-token
+```
+
+> If your gateway authenticates with a **custom header** instead of `x-api-key` / a bearer token
+> (e.g. `Ocp-Apim-Subscription-Key`), set it via `ANTHROPIC_CUSTOM_HEADERS`:
+> ```bash
+> export ANTHROPIC_BASE_URL=https://your-gateway
+> export ANTHROPIC_CUSTOM_HEADERS="Your-Header-Name: <your-key>"
+> ```
+
+**Launch Claude Code**
+
+The workflows spawn many sub-agents and run profiling / benchmark / build commands on the box, so run
+Claude Code with permissions auto-approved (≥ 2.1.177 for the dynamic Workflow feature):
+
+```bash
 IS_SANDBOX=1 claude --dangerously-skip-permissions
 ```
 
@@ -76,7 +123,6 @@ use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8,
 
 **Output** lands under `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`,
 `architect_report.md`, `final/` (overlay + patch + `final_launch.sh`), and per-stage artifacts.
-See a real run in [`examples/e2e_workflow/`](examples/e2e_workflow/).
 
 ---
 
@@ -118,11 +164,6 @@ optimization). This makes runs reliable and reproducible.
 | GEAK_v3 (baseline) | Opus 4.8 | 1.90x |
 | **kernel_workflow** | Opus 4.8 | **3.68x** |
 
-> kernel_workflow is measured with unified baselines (3 runs, median); GEAK_v3 uses each run's own
-> baseline. Per-kernel breakdowns:
-> [original](examples/result/hip2hip_comparison.md) ·
-> [reproducibility](examples/result/hip2hip_repro_comparison.md).
-
 ## Repository layout
 
 ```
@@ -158,4 +199,4 @@ How the workflows in this repo relate to the GEAK_v3 baseline:
 
 ## License
 
-Apache License 2.0
+GEAK is licensed under the Apache License 2.0 — see [LICENSE.md](LICENSE.md).

@@ -209,7 +209,7 @@ HIP_VISIBLE_DEVICES=0 python3 "$EVAL_DIR/config/tune_moe_int4.py" \
   ship a magic constant.
 - **Isolate each bucket in a subprocess** — sweeping >300 configs in one process corrupts the Triton
   shared-memory JIT state and produces spurious LDS-overflow failures.
-- **Report the A/B ratio, not absolute tok/s** — it survives box/口径 drift (fixed vs variable
+- **Report the A/B ratio, not absolute tok/s** — it survives box/convention drift (fixed vs variable
   `random_range_ratio` shifts both legs together).
 
 ## Confirmed result

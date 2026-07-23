@@ -29,6 +29,7 @@ def _load(mod_name, filename):
 parse_regime = _load("parse_regime", "parse_regime.py")
 attribute_weights = _load("attribute_weights", "attribute_weights.py")
 parse_profile = _load("parse_profile", "parse_profile.py")
+harness_lib = _load("harness_lib", "harness_lib.py")
 
 
 def _write_json(obj):
@@ -49,6 +50,13 @@ class TestParseRegime(unittest.TestCase):
         self.assertEqual(r["kv_cache_dtype"], "auto")
         self.assertEqual(r["compile"], "eager")
         self.assertTrue(r["cuda_graph"])
+        self.assertFalse(r["enforce_eager"])   # default baseline keeps graph replay ON
+
+    def test_enforce_eager_flags(self):
+        for flag in ("--enforce-eager", "--disable-cuda-graph"):
+            r = parse_regime.parse_regime(flag)
+            self.assertTrue(r["enforce_eager"], flag)
+            self.assertFalse(r["cuda_graph"], flag)
 
     def test_fp8_quant_flag(self):
         r = parse_regime.parse_regime("--quantization fp8")
@@ -177,9 +185,92 @@ class TestAttributeGeneric(unittest.TestCase):
         self.assertEqual(by["q2"]["weight"], 0.0)
 
 
+class TestServingCallModel(unittest.TestCase):
+    """--isl/--osl EXPOSE the analytic serving call model (serving_weight_model.analytic_calls) for the
+    immutable unittest to SELF-WEIGHT with its own MEASURED latency (weight_i = baseline_ms_i ×
+    analytic_calls[regime_i]). They must NOT rescale the profile `weight` here — the intra-kernel
+    prefill/decode split is reconstructed from measured latency in the unittest, not patched onto the
+    biased short profiling window (that used to fight the self-weight)."""
+    def test_estimate_calls_basic(self):
+        est = attribute_weights.estimate_serving_regime_calls(1000, 1000)
+        self.assertEqual(est, {"prefill": 1, "decode": 1000})
+
+    def test_estimate_calls_chunked_prefill(self):
+        est = attribute_weights.estimate_serving_regime_calls(1000, 500, prefill_chunk=256)
+        self.assertEqual(est, {"prefill": 4, "decode": 500})   # ceil(1000/256)=4
+
+    def test_estimate_calls_missing_params_noop(self):
+        self.assertEqual(attribute_weights.estimate_serving_regime_calls(None, None), {})
+
+    def _meta(self):
+        return {"op_kind": "gemm", "short_name": "_gemm_a8w8",
+                "a_shape": ["M", 512], "b_shape": [1024, 512], "dtype": "fp8_e4m3",
+                "decode_m_buckets": [128], "prefill_m_buckets": [2048], "regime": {}}
+
+    def _prof(self):
+        # window weights: decode 1000us, prefill 5000us. The raw profiled TIME split, verbatim.
+        return {"schema": "workload-v1", "kernels": [
+            {"name": "_gemm_a8w8 GRID_MN_8 BLOCK_SIZE_N_128", "short_name": "_gemm_a8w8",
+             "pct_gpu_time": 5.0, "cases": [{"dims": [], "weight": 1000.0, "count": 40}]},
+            {"name": "_gemm_a8w8 GRID_MN_512 BLOCK_SIZE_N_128", "short_name": "_gemm_a8w8",
+             "pct_gpu_time": 20.0, "cases": [{"dims": [], "weight": 5000.0, "count": 1}]}]}
+
+    def test_attribute_gemm_takes_no_workload(self):
+        # the intra-kernel weight rescale is gone: attribute_gemm must NOT accept a workload kwarg.
+        import inspect
+        self.assertNotIn("workload", inspect.signature(attribute_weights.attribute_gemm).parameters)
+        self.assertFalse(hasattr(attribute_weights, "_apply_serving_scale"))
+        self.assertFalse(hasattr(attribute_weights, "serving_regime_scale"))
+
+    def _run_main(self, extra):
+        import sys
+        meta_p = _write_json(self._meta())
+        prof_p = _write_json(self._prof())
+        out_p = tempfile.mkstemp(suffix=".json")[1]
+        argv = sys.argv
+        sys.argv = ["attribute_weights.py", "--meta", meta_p, "--profile-weights", prof_p,
+                    "--name-match", "_gemm_a8w8", "--out", out_p] + extra
+        try:
+            attribute_weights.main()
+            with open(out_p) as fh:
+                return json.load(fh)
+        finally:
+            sys.argv = argv
+            for p in (meta_p, prof_p, out_p):
+                if os.path.exists(p):
+                    os.unlink(p)
+
+    def test_main_surfaces_self_weight_and_floors_graph_hidden_decode(self):
+        # The AUTHORITATIVE decode:prefill split is NOT the static `weight` — it is the unittest
+        # self-weight (measured ms x analytic_calls), surfaced verbatim under serving_weight_model for the
+        # UT to consume. --isl/--osl NEVER lifecycle-rescale the static `weight`; the ONLY way they touch
+        # it is the documented auto decode-floor, which protects a graph-hidden decode regime (profiled
+        # decode share here = 1000/6000 = 0.167 < 0.20) from being under-weighted in the coarse prior.
+        got = self._run_main(["--isl", "1000", "--osl", "1000"])
+        self.assertIsNotNone(got["serving_weight_model"])
+        self.assertEqual(got["serving_weight_model"]["analytic_calls"], {"prefill": 1, "decode": 1000})
+        w_with = {c["regime"]: c["weight"] for c in got["cases"]}
+        norm_with = {c["regime"]: c["weight_norm"] for c in got["cases"]}
+        # prefill still dominates; the floor only lifts decode to its 0.20 floor (does not invert the order).
+        self.assertGreater(w_with["prefill"], w_with["decode"])
+        self.assertIn("auto decode-floor", got["notes"])
+        self.assertAlmostEqual(norm_with["decode"], attribute_weights._DECODE_AUTOFLOOR, places=6)   # floored up to 0.20
+        self.assertAlmostEqual(norm_with["prefill"], 1.0 - attribute_weights._DECODE_AUTOFLOOR, places=6)
+
+        # without the flags: no serving model, NO analytic calls -> the auto decode-floor cannot fire, so
+        # the static `weight` is the RAW profiled TIME split (decode 1000/6000 = 0.167), NOT floored.
+        base = self._run_main([])
+        self.assertIsNone(base["serving_weight_model"])
+        self.assertNotIn("auto decode-floor", base["notes"])
+        norm_base = {c["regime"]: c["weight_norm"] for c in base["cases"]}
+        self.assertAlmostEqual(norm_base["decode"], 1000.0 / 6000.0, places=6)     # raw, unfloored
+        # the flags moved decode's prior share UP from the raw 0.167 to the 0.20 floor — and only that.
+        self.assertGreater(norm_with["decode"], norm_base["decode"])
+
+
 class TestQuantStamping(unittest.TestCase):
-    """The regime's job that REMAINS: stamp per-operand dtype/quant so the harness builds in-regime
-    operands (fp8 + scales, not bf16). The old _regime_warnings gate was removed by design."""
+    """The regime's job: stamp per-operand dtype/quant so the harness builds in-regime operands (fp8 +
+    scales, not bf16), AND the restored _regime_warnings live-seam guard (isolated-win/e2e-loss)."""
     def test_quant_block_fp8_blockscale(self):
         meta = {"dtype": "fp8_e4m3", "out_dtype": "bf16", "weight_block_size": [128, 128]}
         regime = {"quant": {"method": "fp8", "act_dtype": "fp8", "block_size": [128, 128]},
@@ -192,9 +283,38 @@ class TestQuantStamping(unittest.TestCase):
         self.assertEqual(q["scale_dtype"], "float32")
         self.assertEqual(q["kv_cache_dtype"], "fp8")
 
-    def test_no_regime_warnings_attr(self):
-        # the gate machinery must be gone
-        self.assertFalse(hasattr(attribute_weights, "_regime_warnings"))
+    def test_regime_warnings_present(self):
+        # the live-seam guard machinery must exist (restored after being wrongly deleted)
+        self.assertTrue(hasattr(attribute_weights, "_regime_warnings"))
+
+    def test_live_seam_guard_flags_low_pct(self):
+        # a seam carrying near-zero %GPU under the online regime is probably NOT the live kernel
+        notes = []
+        entries = [{"pct_gpu_time": 0.4}]
+        w = attribute_weights._regime_warnings(
+            {"quant": {"method": "fp8"}}, "gemm", entries, live_pct=0.4, live_pct_min=2.0, notes=notes)
+        self.assertIn("probably NOT the live kernel", w)
+        # a healthy seam (>= min) produces no live-seam warning
+        w2 = attribute_weights._regime_warnings(
+            {"quant": {"method": "fp8"}}, "gemm", [{"pct_gpu_time": 30.0}], 30.0, 2.0, [])
+        self.assertNotIn("probably NOT the live kernel", w2)
+
+    def test_enforce_eager_not_flagged_as_strawman(self):
+        # eager is used ONLY when the online regime is EXPLICITLY enforce-eager — and then eager IS the
+        # faithful deployment context, NOT a strawman. So an enforce-eager regime must produce no warning
+        # (consistent with deployment_graph_mode returning eager for it). The strawman is the OPPOSITE
+        # case (eager baseline while the deployment replays under a graph), which is structurally
+        # prevented by deployment_graph_mode, so there is nothing to warn about here.
+        notes = []
+        w = attribute_weights._regime_warnings(
+            {"enforce_eager": True}, "gemm", [{"pct_gpu_time": 30.0}], 30.0, 2.0, notes)
+        self.assertNotIn("strawman", w)
+        self.assertEqual(w, "")
+
+    def test_compile_strawman_flagged_for_norm(self):
+        w = attribute_weights._regime_warnings(
+            {"compile": "torch_compile"}, "norm", [{"pct_gpu_time": 30.0}], 30.0, 2.0, [])
+        self.assertIn("strawman", w)
 
 
 class TestAttributeWeightsEndToEnd(unittest.TestCase):
@@ -447,6 +567,334 @@ class TestAttributeMoe(unittest.TestCase):
         regimes = {c["regime"] for c in cases}
         self.assertEqual(regimes, {"decode", "prefill"})
         self.assertTrue(any("routing-dependent" in n for n in notes))
+
+
+class TestHarnessRegime(unittest.TestCase):
+    """harness_lib regime-driven synthesis derivations — pure (no torch): a unittest that synthesizes
+    inputs in the LIVE regime can never key the paged-KV `x`/dtype/scales off the wrong (compute) dtype.
+    These are GENERAL over dtype/quant — not an fp8 special-case (int8 -> x=16 too, fp32 -> x=4)."""
+
+    def test_deployment_graph_mode(self):
+        # default / graphed baseline -> time under a graph
+        self.assertTrue(harness_lib.deployment_graph_mode({}))
+        self.assertTrue(harness_lib.deployment_graph_mode({"cuda_graph": True}))
+        # enforce-eager / disabled graph -> eager timing (regime genuinely runs eager)
+        self.assertFalse(harness_lib.deployment_graph_mode({"enforce_eager": True}))
+        self.assertFalse(harness_lib.deployment_graph_mode({"cuda_graph": False}))
+
+    def test_pack_x_across_dtypes(self):
+        self.assertEqual(harness_lib.pack_x("fp8"), 16)
+        self.assertEqual(harness_lib.pack_x("fp8_e4m3fnuz"), 16)
+        self.assertEqual(harness_lib.pack_x("int8"), 16)
+        self.assertEqual(harness_lib.pack_x("fp16"), 8)
+        self.assertEqual(harness_lib.pack_x("bf16"), 8)
+        self.assertEqual(harness_lib.pack_x("fp32"), 4)
+
+    def test_regime_spec_fp8_kv(self):
+        spec = harness_lib.regime_spec({"kv_cache_dtype": "fp8", "quant": {"method": "none"}})
+        self.assertEqual(spec["kv_x"], 16)
+        self.assertTrue(spec["kv_quant"])
+        self.assertTrue(spec["needs_scales"])
+
+    def test_regime_spec_auto_kv(self):
+        spec = harness_lib.regime_spec({"kv_cache_dtype": "auto", "quant": {"method": "none"}})
+        self.assertEqual(spec["kv_dtype"], "bf16")
+        self.assertEqual(spec["kv_x"], 8)
+        self.assertFalse(spec["kv_quant"])
+        self.assertFalse(spec["needs_scales"])
+
+    def test_regime_spec_int8_kv(self):
+        spec = harness_lib.regime_spec({"kv_cache_dtype": "int8", "quant": {"method": "none"}})
+        self.assertEqual(spec["kv_x"], 16)
+        self.assertTrue(spec["needs_scales"])
+
+    def test_regime_spec_quant_needs_scales(self):
+        spec = harness_lib.regime_spec({"kv_cache_dtype": "auto",
+                                        "quant": {"method": "fp8", "weight_dtype": "fp8_e4m3"}})
+        self.assertEqual(spec["quant_method"], "fp8")
+        self.assertEqual(spec["operand_dtype"], "fp8_e4m3")
+        self.assertTrue(spec["needs_scales"])
+
+    def test_parser_to_spec_coherence(self):
+        """The missing seam: parse_regime output must plug straight into regime_spec with no glue."""
+        r = parse_regime.parse_regime("--quantization fp8 --kv-cache-dtype fp8")
+        spec = harness_lib.regime_spec(r)
+        self.assertEqual(spec["kv_x"], 16)
+        self.assertTrue(spec["needs_scales"])
+
+        r0 = parse_regime.parse_regime("")
+        spec0 = harness_lib.regime_spec(r0)
+        self.assertEqual(spec0["kv_x"], 8)
+        self.assertFalse(spec0["needs_scales"])
+
+    def test_fp8_is_fnuz_by_arch(self):
+        """The ONE hardware-specific axis: MI300 (gfx942/CDNA3) = fnuz fp8; MI355 (gfx950/CDNA4) = OCP fn."""
+        self.assertTrue(harness_lib.fp8_is_fnuz("gfx942"))
+        self.assertTrue(harness_lib.fp8_is_fnuz("gfx942:sramecc+:xnack-"))
+        self.assertTrue(harness_lib.fp8_is_fnuz("gfx90a"))
+        self.assertFalse(harness_lib.fp8_is_fnuz("gfx950"))
+        self.assertFalse(harness_lib.fp8_is_fnuz(""))
+
+    def test_pack_x_arch_independent(self):
+        """Layout math is arch-independent: every fp8 variant is 1 byte -> x=16 on MI300 AND MI355."""
+        for name in ("fp8", "fp8_e4m3", "fp8_e4m3fnuz", "fp8_e4m3fn", "fp8_e5m2"):
+            self.assertEqual(harness_lib.pack_x(name), 16, name)
+
+    def test_regime_dtype_arch_driven_fp8(self):
+        """A bare fp8 name resolves to the arch's variant; an explicit fnuz/fn wins. Guarded for no-torch."""
+        try:
+            import torch  # noqa: F401
+        except Exception:
+            self.skipTest("torch not available")
+        if not hasattr(torch, "float8_e4m3fnuz") or not hasattr(torch, "float8_e4m3fn"):
+            self.skipTest("torch build lacks both fp8 variants")
+        self.assertEqual(harness_lib.regime_dtype("fp8", arch="gfx942"), torch.float8_e4m3fnuz)
+        self.assertEqual(harness_lib.regime_dtype("fp8", arch="gfx950"), torch.float8_e4m3fn)
+        self.assertEqual(harness_lib.regime_dtype("fp8_e4m3", arch="gfx950"), torch.float8_e4m3fn)
+        # explicit checkpoint-declared format wins over arch:
+        self.assertEqual(harness_lib.regime_dtype("fp8_e4m3fnuz", arch="gfx950"), torch.float8_e4m3fnuz)
+
+
+class TestRandomVsBaseline(unittest.TestCase):
+    """harness_lib.check_random_vs_baseline — value-parity vs the live frozen baseline on random input
+    DRAWS at FIXED online shapes. Correctness is a hard gate; speedup is report-only. Torch-guarded."""
+
+    def _shapes(self, torch):
+        def mk(rng):
+            # build on the generator's device: check_random_vs_baseline seeds rng on the run device
+            # (cuda when available), and torch.randn requires the tensor and generator share a device.
+            return torch.randn(64, 128, generator=rng, device=rng.device)
+        return [{"sig": "M=64", "make_inputs": mk}]
+
+    def test_identical_all_correct(self):
+        try:
+            import torch  # noqa: F401
+        except Exception:
+            self.skipTest("torch not available")
+        ok, pc = harness_lib.check_random_vs_baseline(
+            lambda a: a * 2.0, lambda a: a * 2.0, self._shapes(torch), tol=2e-2,
+            draws=3, warmup=1, repeats=3)
+        self.assertTrue(ok)
+        self.assertEqual(len(pc), 3)
+        self.assertTrue(all(p["correct"] for p in pc))
+        # dims fixed per sig — NOT random shapes; only values vary across draws
+        self.assertEqual({p["case"].split(":", 1)[1] for p in pc}, {"M=64"})
+
+    def test_wrong_draw_fails_gate(self):
+        try:
+            import torch  # noqa: F401
+        except Exception:
+            self.skipTest("torch not available")
+        # Wrong on exactly ONE draw. Key on the INPUT tensor identity (each draw builds its args once
+        # and reuses the same object for the correctness check AND the timing calls), so the injected
+        # error is deterministic per draw and NOT perturbed by how many times time_op invokes cur.
+        seen = []
+
+        def cur(a):
+            key = id(a)
+            if key not in seen:
+                seen.append(key)
+            return a * 2.0 + (5.0 if seen.index(key) == 1 else 0.0)   # diverge on the 2nd draw
+
+        ok, pc = harness_lib.check_random_vs_baseline(
+            lambda a: a * 2.0, cur, self._shapes(torch), tol=2e-2,
+            draws=3, warmup=0, repeats=1)
+        self.assertFalse(ok)
+        self.assertFalse(all(p["correct"] for p in pc))
+        self.assertTrue(any(p["correct"] for p in pc))   # a single bad draw fails the whole gate
+
+    def test_shared_buffer_baseline_snapshotted(self):
+        """A baseline that returns a persistent buffer must still be compared against its SNAPSHOT, so a
+        divergent candidate is caught (not masked by aliasing)."""
+        try:
+            import torch  # noqa: F401
+        except Exception:
+            self.skipTest("torch not available")
+        static = torch.zeros(64, 128)
+
+        def base_static(a):
+            static.copy_(a * 2.0)
+            return static
+
+        ok, pc = harness_lib.check_random_vs_baseline(
+            base_static, lambda a: a * 3.0, self._shapes(torch), tol=2e-2,
+            draws=1, warmup=0, repeats=1)
+        self.assertFalse(ok)
+
+
+class TestConcAndServedCalls(unittest.TestCase):
+    """P1 fix: CONC enters prefill through the launch COUNT (×CONC) and decode through the SHAPE (M),
+    so it must NOT cancel; and the served-regimes gate zeroes a regime the kernel does not run in."""
+    def test_conc_scales_prefill_only(self):
+        est = attribute_weights.estimate_serving_regime_calls(8192, 1024, conc=32)
+        self.assertEqual(est, {"prefill": 32, "decode": 1024})   # prefill = 32*ceil(8192/8192)
+
+    def test_conc_with_chunked_prefill(self):
+        est = attribute_weights.estimate_serving_regime_calls(8192, 1024, conc=32, prefill_chunk=4096)
+        self.assertEqual(est, {"prefill": 64, "decode": 1024})   # 32 * ceil(8192/4096)=32*2
+
+    def test_conc_default_is_backward_compatible(self):
+        self.assertEqual(attribute_weights.estimate_serving_regime_calls(1000, 1000),
+                         {"prefill": 1, "decode": 1000})
+
+    def test_served_gate_zeroes_unserved_regime(self):
+        est = attribute_weights.estimate_serving_regime_calls(8192, 1024, conc=32, served=["prefill"])
+        self.assertEqual(est, {"prefill": 32, "decode": 0})      # decode never runs on this kernel
+        est2 = attribute_weights.estimate_serving_regime_calls(8192, 1024, conc=32, served=["decode"])
+        self.assertEqual(est2, {"prefill": 0, "decode": 1024})
+
+
+class TestServingWeightedSpeedup(unittest.TestCase):
+    """The centralized PRIMARY metric: served gate + analytic calls (never profile counts) + identity guard."""
+    def _meta(self, served=None, calls=None):
+        return {"served_regimes": served,
+                "workload": {"serving_weight_model": {"analytic_calls": calls or {"prefill": 32, "decode": 1024}}}}
+
+    def test_served_drops_decode_on_prefill_only_kernel(self):
+        # a decode bucket that leaked into a prefill-only kernel must NOT be weighted (the gqa bug).
+        per_case = [
+            {"sig": "prefill_m8192", "regime": "prefill", "m": 8192, "baseline_ms": 10.0, "optimized_ms": 9.0},
+            {"sig": "decode_m32", "regime": "decode", "m": 32, "baseline_ms": 2.0, "optimized_ms": 1.0},  # 2x
+        ]
+        r = harness_lib.serving_weighted_speedup(per_case, self._meta(served=["prefill"]))
+        self.assertIn("decode_m32", r["dropped_unserved"])
+        # only prefill survives -> weighted ~= prefill speedup (10/9), NOT dominated by the decode 2x.
+        self.assertAlmostEqual(r["weighted"], 10.0 / 9.0, places=6)
+        self.assertEqual(r["included"], 1)
+
+    def test_identity_bucket_excluded(self):
+        per_case = [
+            {"sig": "prefill_m8192", "regime": "prefill", "m": 8192, "baseline_ms": 10.0, "optimized_ms": 9.0},
+            {"sig": "decode_m32", "regime": "decode", "m": 32, "baseline_ms": 2.0, "optimized_ms": 2.0},  # identity
+        ]
+        r = harness_lib.serving_weighted_speedup(per_case, self._meta())
+        self.assertIn("decode_m32", r["suspect_identity"])
+        self.assertAlmostEqual(r["weighted"], 10.0 / 9.0, places=6)   # decode identity excluded
+
+    def test_all_identity_returns_none_untrusted(self):
+        per_case = [
+            {"sig": "prefill_m8192", "regime": "prefill", "m": 8192, "baseline_ms": 10.0, "optimized_ms": 10.0},
+            {"sig": "decode_m32", "regime": "decode", "m": 32, "baseline_ms": 2.0, "optimized_ms": 2.0},
+        ]
+        r = harness_lib.serving_weighted_speedup(per_case, self._meta())
+        self.assertIsNone(r["weighted"])
+        self.assertTrue(r["reason"])
+
+    def test_conc_dominant_bucket_carries_passes(self):
+        # decode passes (1024) land on the largest-M decode bucket; smaller decode bucket gets calls=1.
+        per_case = [
+            {"sig": "decode_m32", "regime": "decode", "m": 32, "baseline_ms": 2.0, "optimized_ms": 1.0},   # 2x, calls 1024
+            {"sig": "decode_m1", "regime": "decode", "m": 1, "baseline_ms": 0.5, "optimized_ms": 0.5},     # identity -> excluded
+        ]
+        r = harness_lib.serving_weighted_speedup(per_case, self._meta(calls={"decode": 1024}))
+        dom = [c for c in r["per_case"] if c["sig"] == "decode_m32"][0]
+        self.assertEqual(dom["calls"], 1024)
+
+
+# --------------------------------------------------------------------------- #
+# parse_profile.py — serving-phase (prefill/decode) accounting from the trace's
+# gpu_user_annotation step spans (skill kernel-phase-accounting integration).
+# --------------------------------------------------------------------------- #
+def _synthetic_trace():
+    """Tiny Kineto-style trace: 1 prefill(mixed) step (M=8192) + 2 pure-decode steps (batch 8).
+    fused_moe fires in all 3 (both), _gqa_sparse_fwd only in prefill, reduce only in decode."""
+    ev = [
+        # step spans on the GPU timeline (GEAK dialect)
+        {"cat": "gpu_user_annotation", "name": "execute_context_2(8192)_generation_0(0)",
+         "ph": "X", "ts": 0.0, "dur": 100.0},
+        {"cat": "gpu_user_annotation", "name": "execute_context_0(0)_generation_8(8)",
+         "ph": "X", "ts": 100.0, "dur": 10.0},
+        {"cat": "gpu_user_annotation", "name": "execute_context_0(0)_generation_8(8)",
+         "ph": "X", "ts": 110.0, "dur": 10.0},
+        # kernels
+        {"cat": "kernel", "ph": "X", "ts": 5.0, "dur": 40.0, "name": "fused_moe_kernel", "args": {}},
+        {"cat": "kernel", "ph": "X", "ts": 6.0, "dur": 30.0, "name": "_gqa_sparse_fwd_kernel", "args": {}},
+        {"cat": "kernel", "ph": "X", "ts": 101.0, "dur": 2.0, "name": "fused_moe_kernel", "args": {}},
+        {"cat": "kernel", "ph": "X", "ts": 102.0, "dur": 1.0, "name": "cross_device_reduce_1stage", "args": {}},
+        {"cat": "kernel", "ph": "X", "ts": 111.0, "dur": 2.0, "name": "fused_moe_kernel", "args": {}},
+        {"cat": "kernel", "ph": "X", "ts": 112.0, "dur": 1.0, "name": "cross_device_reduce_1stage", "args": {}},
+    ]
+    return {"traceEvents": ev}
+
+
+class TestPhaseAccounting(unittest.TestCase):
+    def setUp(self):
+        self.trace = _write_json(_synthetic_trace())
+        self.agg, self.total, self.launch, self.pmeta = parse_profile.parse_torch_trace(self.trace)
+
+    def tearDown(self):
+        os.unlink(self.trace)
+
+    def test_step_counts_and_phase_meta(self):
+        self.assertTrue(self.pmeta["has_annotations"])
+        self.assertEqual(self.pmeta["n_prefill_steps"], 1)
+        self.assertEqual(self.pmeta["n_decode_steps"], 2)
+        self.assertEqual(self.pmeta["prefill_tokens"], 8192)
+        self.assertEqual(self.pmeta["decode_batches"], [8, 8])
+
+    def test_kernel_phase_attribution(self):
+        self.assertEqual(self.agg["fused_moe_kernel"]["by_phase"]["prefill"]["count"], 1)
+        self.assertEqual(self.agg["fused_moe_kernel"]["by_phase"]["decode"]["count"], 2)
+        # prefill-only and decode-only kernels stay in their single phase
+        self.assertEqual(set(self.agg["_gqa_sparse_fwd_kernel"]["by_phase"]), {"prefill"})
+        self.assertEqual(set(self.agg["cross_device_reduce_1stage"]["by_phase"]), {"decode"})
+
+    def test_summary_steady_and_est_calls(self):
+        # conc==8 == captured decode batch -> steady; est_calls decode==OSL, prefill==CONC*ceil(ISL/chunk)
+        s = parse_profile.build_summary(self.agg, self.total, self.launch, "torch-trace", 10,
+                                        conc=8, isl=8192, osl=1024, chunk=8192,
+                                        capture_sizes=[8, 16, 32], phase_meta=self.pmeta)
+        self.assertTrue(s["serving"]["steady"])
+        self.assertEqual(s["serving"]["analytic_calls"], {"prefill": 8, "decode": 1024})
+        by = {k["short_name"]: k for k in s["top_kernels"]}
+        moe = by["fused_moe_kernel"]
+        self.assertEqual(moe["phase"], "both")
+        self.assertEqual(sorted(moe["served_regimes"]), ["decode", "prefill"])
+        self.assertEqual(moe["est_calls"], {"prefill": 8, "decode": 1024})
+        self.assertEqual(moe["est_shape"]["prefill"]["M"], 8192)
+        self.assertEqual(moe["est_shape"]["decode"]["M"], 8)           # conc snapped to capture size 8
+        self.assertEqual(by["_gqa_sparse_fwd_kernel"]["phase"], "prefill")
+        self.assertEqual(by["cross_device_reduce_1stage"]["phase"], "decode")
+
+    def test_summary_non_steady_warns(self):
+        # captured decode batch 8 << concurrency 32 -> not steady; counts still valid
+        s = parse_profile.build_summary(self.agg, self.total, self.launch, "torch-trace", 10,
+                                        conc=32, isl=8192, osl=1024, chunk=8192,
+                                        capture_sizes=[8, 16, 32], phase_meta=self.pmeta)
+        self.assertFalse(s["serving"]["steady"])
+        self.assertEqual(s["serving"]["decode_batch_captured"], 8)
+        self.assertEqual(s["serving"]["decode_batch_steady"], 32)
+        # decode est_shape M snaps concurrency 32 up to capture size 32
+        moe = {k["short_name"]: k for k in s["top_kernels"]}["fused_moe_kernel"]
+        self.assertEqual(moe["est_shape"]["decode"]["M"], 32)
+
+    def test_workload_case_regime_and_served_from_profile(self):
+        wl = parse_profile.build_workload(self.agg, self.total, 10)
+        by = {k["short_name"]: k for k in wl["kernels"]}
+        self.assertEqual(sorted(by["fused_moe_kernel"]["served_regimes"]), ["decode", "prefill"])
+        # attribute_weights derives the gate from the profile's measured phase
+        self.assertEqual(attribute_weights.served_from_profile([by["fused_moe_kernel"]]),
+                         {"prefill", "decode"})
+        self.assertEqual(attribute_weights.served_from_profile([by["_gqa_sparse_fwd_kernel"]]),
+                         {"prefill"})
+
+    def test_analytic_calls_matches_shared_impl(self):
+        self.assertEqual(parse_profile.analytic_regime_calls(8192, 1024, 32, 8192),
+                         attribute_weights.estimate_serving_regime_calls(8192, 1024, 32, prefill_chunk=8192))
+
+    def test_no_annotations_backward_compatible(self):
+        # a trace without execute_* spans yields no phase fields (old behavior preserved)
+        ev = {"traceEvents": [{"cat": "kernel", "ph": "X", "ts": 1.0, "dur": 5.0,
+                               "name": "fused_moe_kernel", "args": {}}]}
+        p = _write_json(ev)
+        try:
+            agg, tot, lau, pm = parse_profile.parse_torch_trace(p)
+            self.assertEqual(pm, {})
+            s = parse_profile.build_summary(agg, tot, lau, "torch-trace", 5)
+            self.assertNotIn("serving", s)
+            self.assertNotIn("phase", s["top_kernels"][0])
+        finally:
+            os.unlink(p)
 
 
 if __name__ == "__main__":

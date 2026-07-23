@@ -9,8 +9,6 @@ regimes: [prefill, decode]
 status: sota
 updated: 2026-06-08
 sources:
-  - GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_gemm-tuning-win/final_report.md
-  - GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md
   - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
   - GEAK/e2e_workflow/knowledge/gemm_attention_backends.md
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/tuned_gemm.py
@@ -27,7 +25,7 @@ by **`aiter.tuned_gemm.gemm_a16w16` / `tgemm.mm`**, which picks the fastest of
 hipBLASLt/asm/triton/skinny/flydsl **per shape from aiter's own per-shape DB**. The only GEMM
 lever that engages this live path is **tuning that DB** — *not* PyTorch TunableOp, *not*
 `HIPBLASLT_TUNING_FILE` (both sit under code paths sglang bypasses). Full recipe:
-[`../../kernel_workflow/gemm_tuning_workflow.md`](../../kernel_workflow/gemm_tuning_workflow.md). Dispatch
+[`../../workflows/gemm_tuning_workflow.md`](../../workflows/gemm_tuning_workflow.md). Dispatch
 internals: [`../../backends/aiter/tuned_gemm.md`](../../backends/aiter/tuned_gemm.md).
 
 The hot shapes: up/gate prefill **K=5120, N∈{14336,16384,34816}**; down/qkv **N=5120,
@@ -112,15 +110,15 @@ bf16 math, `err_ratio=0.0` on every row.
    regenerate on any upgrade; never ship a hand-copied CSV.
 
 ## Cross-links
-- The recipe (capture → tune → deploy → gate, both traps): [`../../kernel_workflow/gemm_tuning_workflow.md`](../../kernel_workflow/gemm_tuning_workflow.md)
+- The recipe (capture → tune → deploy → gate, both traps): [`../../workflows/gemm_tuning_workflow.md`](../../workflows/gemm_tuning_workflow.md)
 - Dispatch + key construction: [`../../backends/aiter/tuned_gemm.md`](../../backends/aiter/tuned_gemm.md) · DB: [`../../backends/aiter/configs_db.md`](../../backends/aiter/configs_db.md) · FlyDSL: [`../../backends/aiter/flydsl_path.md`](../../backends/aiter/flydsl_path.md)
 - GEMM operator: [`../../operators/dense_gemm/overview.md`](../../operators/dense_gemm/overview.md) · [`../../operators/dense_gemm/tuning.md`](../../operators/dense_gemm/tuning.md)
 - The full run this lives in: [`../by_model/qwen3.5-27b_sglang_e2e.md`](../by_model/qwen3.5-27b_sglang_e2e.md)
-- e2e flow / gate: [`../../kernel_workflow/optimize_e2e_model.md`](../../kernel_workflow/optimize_e2e_model.md)
+- e2e flow / gate: [`../../workflows/optimize_e2e_model.md`](../../workflows/optimize_e2e_model.md)
 
 ## Sources
-- The +2.23% win, 246 hits, the A/B table, the bias fix: `GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_gemm-tuning-win/final_report.md`.
-- The attempt-1 bias-mismatch reject (0 hits, 258 misses): `GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md`.
+- The +2.23% win, 246 hits, the A/B table, the bias fix.
+- The attempt-1 bias-mismatch reject (0 hits, 258 misses).
 - Recipe, both traps, FLOPs-DESC, capture-bias-from-server rule: `GEAK/e2e_workflow/knowledge/{gemm_tuning/aiter_gemm_tuning.md,gemm_attention_backends.md}`.
 - Dispatch + key: `ROCm/aiter@a6bb499:aiter/tuned_gemm.py`, `gradlib/gradlib/gemm_tuner.py`.
 
