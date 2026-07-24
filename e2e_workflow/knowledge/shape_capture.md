@@ -55,8 +55,9 @@ decode calls. The only Python-visible calls are the graph *capture* pass (a few 
 not the real serving frequency. Historically the extractor then fell back to an **inferred**
 `M ≈ conc` guess (e.g. gpt-oss `M=64/256`), which is a gamble.
 
-To get the REAL per-shape distribution, run the server with **CUDA graph OFF** (`--enforce-eager`) so
-every decode step goes through Python, and use the per-shape probe engine `capture_shapes_probe.py`
+To get the REAL per-shape distribution, run the server with **CUDA graph OFF** (vLLM: `--enforce-eager`;
+**sglang: `--disable-cuda-graph`**) so every decode step goes through Python, and use the per-shape probe
+engine `capture_shapes_probe.py`
 (a sibling of `capture_shapes.py`, purpose-built for this):
 - **No `max_cases` cap** — accumulates the FULL per-shape call-count distribution, not the first 5.
 - **Does NOT snapshot tensors** — records only `dims`/`dtype`/`count` (+ optional cuda.Event GPU
@@ -124,6 +125,19 @@ Do this by reasoning, not by copying another model's list:
 >   all layers, decode M=64 / prefill M=8192, N/K = config. **But dense GEMM is value-independent + analytic**
 >   (M=conc/chunk, N,K from config) → PREFER synthesis (`GEMM_SYNTH`); capture only to verify or for a
 >   value-dependent quant GEMM.
+>
+> **sglang backend** — mechanism is IDENTICAL (same overlay + `setattr` hooks; the sglang adapter already
+> propagates `OVERLAY_PYTHONPATH`/`EXTRA_ENV` and prepends the sglang source to `PYTHONPATH`, so NO code
+> change). Only two things differ:
+> 1. **enforce-eager = `--disable-cuda-graph`** (pass via `EXTRA_SERVER_ARGS`), NOT `--enforce-eager`.
+> 2. **sglang `module:attr` seams** (from sglang v0.5.12 source; probe-verify per step 7 — the same
+>    seam-selection rule applies):
+>    - **MoE**: `sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_kernels:invoke_fused_moe_kernel`
+>      (launches `fused_moe_kernel[grid]`; expect TWO decode M — conc for gate/up, conc×top_k for down proj).
+>    - **Attention** (TRITON backend; function-local import → hook the DEF module):
+>      `sglang.srt.layers.attention.triton_ops.decode_attention:decode_attention_fwd` (decode) and
+>      `...triton_ops.extend_attention:extend_attention_fwd` (prefill/extend).
+>    - **Dense GEMM**: same as vLLM (`torch.nn.functional:linear`) → prefer synthesis.
 
 ## Step 2 — Emit an immutable, general unittest
 The unittest must be backend-agnostic: it loads `reference_io.pt`, calls whatever the CURRENT kernel

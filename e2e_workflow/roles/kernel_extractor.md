@@ -84,7 +84,7 @@ Steps:
    #   (a concurrent server makes NCCL init hang + time out the health check).
    OVERLAY_PYTHONPATH="$SKILL_DIR/scripts/probe_overlay" \
    EXTRA_ENV="PROBE_OUT=$SHARED_PROBE_DIR PROBE_TIME=1 PROBE_TARGETS=<union module:attr,...>" \
-   EXTRA_SERVER_ARGS="--enforce-eager" \
+   EXTRA_SERVER_ARGS="--enforce-eager" \   # sglang: use "--disable-cuda-graph" instead
    BACKEND="<backend>" GPU="<id[,id...] — N ids for TP=N>" TP=<N> MODEL="$MODEL_PATH" \
    ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=1 PROFILE=0 \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/probe_all.log"
