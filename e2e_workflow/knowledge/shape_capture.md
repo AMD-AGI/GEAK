@@ -83,17 +83,25 @@ Do this by reasoning, not by copying another model's list:
      target (e.g. `fused_moe_kernel` is launched by `invoke_fused_moe_triton_kernel`).
 3. **Screen for hookability** (the hard pitfalls below decide this):
    - Triton `@jit` **JITFunction** (called `fn[grid](...)`) → cannot wrap; skip — hook its launcher.
-   - **No Python entry** (HIP C++ / hipBLASLt closed-source) → probe can't see it; out of scope.
-   - Plain Python callable → hookable.
+   - **C++/asm/CK kernel** (HIP / hipBLASLt / CK — e.g. ROCM_ATTN attn, hipBLASLt GEMM) → the KERNEL has
+     no Python entry, but the operands pass through a module-level Python **dispatcher above it** — hook
+     THAT (the backend `forward`'s dispatch call, or `torch.nn.functional:linear` above a BLAS GEMM).
+     Only truly out of scope if no Python frame touches the operands.
+   - **Class method** (`SomeMethod.apply`) → the probe wraps `module:attr` (module-level only), NOT
+     `module:Class.method`; pick a module-level function in the same call chain instead.
+   - Plain module-level Python callable → hookable.
 4. **Confirm the tensor operands** are in args/kwargs (probe scans both) and not buried in a dataclass.
    For a launcher, arg0 is usually the activation `A` of shape `(M, K)` — that M is what m_buckets need.
-5. **Prefer the DEFINITION module over a re-export.** A launcher may be importable from several paths
-   (e.g. `...experts.triton_moe:invoke_fused_moe_triton_kernel` re-exports the same function object
-   defined in `...fused_moe:invoke_fused_moe_triton_kernel`). Either works for hooking (same object),
-   but write the target at the module where the function is DEFINED (`inspect.getsourcefile`) so the
-   playbook stays stable across vLLM refactors. Verify: `python3 -c "import inspect;
-   from <mod> import <attr> as f; print(type(f).__name__, inspect.getsourcefile(f))"` → must print
-   `function` (NOT `JITFunction`).
+5. **Target the module the CALL SITE resolves at call time — it depends on HOW the caller imports.**
+   `setattr`-wrapping only intercepts a name looked up dynamically at call time:
+   - Caller does a **function-local** `from X import f` (inside the fn) → re-resolves `X.f` each call →
+     hook the DEFINITION module `X:f`. (gpt-oss `matmul_ogs`; `context_attention_fwd`.)
+   - Caller does a **module-level** `from X import f` (top of file) → it bound `caller.f` ONCE at import,
+     before the wrap → hooking `X:f` MISSES it; hook the CALLER module `caller:f`.
+     (ROCM_ATTN → `vllm.v1.attention.backends.rocm_attn:chunked_prefill_paged_decode`, NOT the def module.)
+   - **Self-check:** `[probe] hooked` printed but flush shows **0 calls** ⇒ wrong seam (early-bound
+     elsewhere) → switch to the caller module. Confirm it's a plain `function` (not `JITFunction`):
+     `python3 -c "from <mod> import <attr> as f; print(type(f).__name__)"`.
 6. **Produce the target list** → comma-separated `module:attr` for `PROBE_TARGETS`.
 7. **Run + self-check**: probe banner appears (`[probe] hooked ...`), shapes are non-empty, counts are
    conserved, and postprocess joins `%GPU` (`profile_calls` non-null in its summary line — see the
@@ -106,6 +114,16 @@ Do this by reasoning, not by copying another model's list:
 > measured `decode=[64,512]` (M=64 = conc for gate/up; M=512 = 64×top_k(8) for the down proj — TWO
 > decode buckets, the M≈conc guess would have missed the 512 half). A new model has different hot
 > kernels, different `module:attr`, and different M — re-run steps 1–6.
+>
+> **Seams by kernel type (verified MI300X / vLLM v0.25.1):**
+> - **MoE Triton launcher** (function-local import) → hook the def module: gpt-oss
+>   `triton_kernels.matmul_ogs:matmul_ogs` → decode `[64,256]`.
+> - **Attention on a C++ backend** (ROCM_ATTN) → hook the module-level dispatcher above the CK/asm kernel:
+>   `vllm.v1.attention.backends.rocm_attn:chunked_prefill_paged_decode` → decode M=64 (=conc) / prefill M=8192.
+> - **Dense GEMM on hipBLASLt** → hook the Python frame above BLAS: `torch.nn.functional:linear` → Llama-8B
+>   all layers, decode M=64 / prefill M=8192, N/K = config. **But dense GEMM is value-independent + analytic**
+>   (M=conc/chunk, N,K from config) → PREFER synthesis (`GEMM_SYNTH`); capture only to verify or for a
+>   value-dependent quant GEMM.
 
 ## Step 2 — Emit an immutable, general unittest
 The unittest must be backend-agnostic: it loads `reference_io.pt`, calls whatever the CURRENT kernel

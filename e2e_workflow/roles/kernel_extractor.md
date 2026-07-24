@@ -73,10 +73,11 @@ Steps:
    memoizes in-process and carries the path across phases; this on-disk check only catches the rare
    "phase driven without carried state" case.)
 2. **Derive `PROBE_TARGETS` = the UNION of Python entries across ALL `KERNELS`.** For each kernel map
-   its `short_name`/`launcher_source_file` to the launcher `module:attr` that calls the @jit kernel
-   (per the `shape_capture.md` playbook); DROP any target that is a bare `JITFunction` or has no Python
-   entry (graph-replayed with no launcher) — log which and why. De-dup the list. This is MODEL-SPECIFIC;
-   never hard-code the gpt-oss targets baked into `probe_overlay/sitecustomize.py`.
+   its `short_name`/`launcher_source_file` to the `module:attr` the CALL SITE resolves — the seam rule is
+   in `shape_capture.md` (function-local import → def module; module-level import → caller module; a
+   C++/CK kernel → the module-level dispatcher above it, e.g. `rocm_attn:chunked_prefill_paged_decode` or
+   `torch.nn.functional:linear`). DROP bare `JITFunction`/class-method/no-Python-entry targets — log which
+   and why. De-dup. MODEL-SPECIFIC; never hard-code the gpt-oss targets in `probe_overlay/sitecustomize.py`.
 3. **Run the probe ONCE** (`sitecustomize` installs ALL comma-separated targets in one server run):
    ```bash
    # TP>1: GPU must list ALL logical ids (adapter sets HIP_VISIBLE_DEVICES=$GPU); ensure they are FREE
