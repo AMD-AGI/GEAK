@@ -7,6 +7,7 @@ export const meta = {
     { title: 'Profile', detail: 'Profiler captures a warm trace -> standardized Top-N' },
     { title: 'Strategize', detail: 'System Architect routes kernels by Amdahl (config vs kernel vs host)' },
     { title: 'ConfigSweep', detail: 'Config Tuner sweeps flags/env/backends FIRST (default ON)' },
+    { title: 'Probe', detail: 'ONE global per-shape probe over the workload for all head+milestone candidate kernels (measured decode/prefill M-buckets, shared by both tracks)' },
     { title: 'HeadKernel', detail: 'highest-%GPU ops (GEMM/attn): extract_op -> backend bake-off (incl. FlyDSL) + aiter-DB/author tune -> e2e gate' },
     { title: 'Milestone', detail: 'loop over editable kernels ABOVE milestone_min_pct% GPU (default 5): plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
     { title: 'Finalize', detail: 'e2e Integrator assembles the overlay + patch + launch bundle' },
@@ -473,6 +474,18 @@ const EXTRACT_SCHEMA = obj({
   reference_io_sha256: { type: 'string' }, notes: { type: 'string' },
 }, ['editable', 'task_dir', 'unittest_smoke']);
 
+// GLOBAL per-shape probe (run ONCE over the workload for the union of head+milestone candidate
+// kernels). shared_probe_json is the ONE per_shape_probe.json both extract_op and extract slice
+// per-kernel (via probe_to_mbuckets --kernel-match) instead of each re-running an enforce-eager probe.
+const PROBE_ALL_SCHEMA = obj({
+  shared_probe_json: { type: 'string' }, // abs path to the single shared per_shape_probe.json ('' if unavailable)
+  probe_dir: { type: 'string' },         // $EVAL_DIR/_probe
+  targets: arrStr,                        // module:attr entries actually probed (union, JITFunction/no-entry skipped)
+  coverage: arrObj,                       // [{short_name, matched:bool}] which candidate kernels the probe captured
+  ran_server: { type: 'boolean' },        // true if it launched the probe server; false if it reused an on-disk artifact
+  notes: { type: 'string' },
+}, ['shared_probe_json']);
+
 const KERNEL_LAYER_SCHEMA = obj({
   ran: { type: 'boolean' }, kernel_eval_dir: { type: 'string' },
   final_patch: { type: 'string' }, final_geomean: { type: 'number' },
@@ -681,6 +694,48 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
         `(baseline_src/ / meta.baseline_callable required as the speedup denominator) — ${ext.notes || ''}` };
   }
   return ext;
+}
+
+// GLOBAL per-shape probe, produced ONCE and shared by BOTH the head (extract_op) and milestone
+// (extract) tracks. Instead of each extracted kernel re-running its own enforce-eager probe server
+// (the old per-kernel path: N+M workload passes), we run the probe a SINGLE time over the union of
+// head+milestone candidate kernels and hand every extractor the one shared per_shape_probe.json to
+// slice per-kernel (probe_to_mbuckets --kernel-match). Idempotency (this workflow has NO fs access):
+//   1) in-memory memo `sharedProbeJson` -> one probe_all agent call per process ('all' mode = 1 run);
+//   2) carryState.shared_probe_json -> a later phase-by-phase invocation reuses the path, no re-run;
+//   3) the probe_all AGENT itself skips the server when $EVAL_DIR/_probe/per_shape_probe.json already
+//      exists on disk (covers the rare "state not carried across processes" case) -> at most 1-2 runs.
+// A kernel the Architect nominates LATER (mid-run re-profile) that isn't in the union falls back to
+// the per-kernel probe documented in kernel_extractor.md (2b / 2b-op).
+let sharedProbeJson = ST.shared_probe_json || '';
+async function ensureSharedProbe() {
+  if (sharedProbeJson) return sharedProbeJson;                    // produced this run OR carried from a prior phase
+  const seen = new Set(); const targets = [];
+  for (const c of [...headQueue, ...kernelQueue]) {              // union of both stages' candidate kernels
+    const k = c && (c.short_name || c.name);
+    if (!k || seen.has(k)) continue;
+    seen.add(k); targets.push(c);
+  }
+  if (!targets.length) return '';                                // nothing to probe
+  phase('Probe');
+  const res = await safeAgent(
+    roleAgent('kernel_extractor', 'probe_all',
+      'Run ONE global per-shape probe over the workload for ALL candidate kernels below; REUSE the ' +
+      'on-disk artifact if it already exists (do NOT relaunch the server then).', {
+        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, CONC,
+        CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+        KERNELS: targets, PROFILE_TOPN: profile ? profile.profile_topN_json : '',
+        SHARED_PROBE_DIR: `${EVAL_DIR}/_probe`, SKILL_DIR: WORKFLOW_DIR,
+      }),
+    { phase: 'Probe', label: `probe_all (${targets.length} kernels)`, schema: PROBE_ALL_SCHEMA });
+  sharedProbeJson = (res && res.shared_probe_json) || '';
+  if (sharedProbeJson) {
+    const nCov = res && Array.isArray(res.coverage) ? res.coverage.filter(c => c && c.matched).length : '?';
+    log(`[probe] shared per-shape probe ready: ${sharedProbeJson} (${nCov}/${targets.length} kernels captured; ran_server=${res ? res.ran_server : '?'}).`);
+  } else {
+    log(`[probe] global probe unavailable (${res ? res.notes || 'no path returned' : 'null'}) — extractors fall back to per-kernel probing.`);
+  }
+  return sharedProbeJson;
 }
 
 // abDone == the integrator measured BOTH legs (ref + cand) and emitted a real
@@ -1139,6 +1194,9 @@ function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SY
 // ===========================================================================
 if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   phase('HeadKernel');
+  // GLOBAL per-shape probe (ONCE, shared by head + milestone). Runs AFTER ConfigSweep so it uses the
+  // post-config server state; m_buckets are workload-driven (ISL/OSL/conc) so they stay valid downstream.
+  await ensureSharedProbe();
   log(`Head-kernel track: ${headQueue.length} candidate op(s), head_budget=${HEAD_BUDGET}, threshold=${HEAD_THRESHOLD_PCT}%.`);
   // Head ops are taken in the Architect's Amdahl-ranked order — no forced GEMM-first reordering.
   const heads = headQueue.slice(0, HEAD_BUDGET).map((c, i) => ({
@@ -1179,6 +1237,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
           ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+          ...(sharedProbeJson ? { SHARED_PROBE_JSON: sharedProbeJson } : {}),
           CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
           REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
           PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
@@ -1541,6 +1600,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
             ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+            ...(sharedProbeJson ? { SHARED_PROBE_JSON: sharedProbeJson } : {}),
             CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
             REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
             PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
@@ -1743,6 +1803,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+        ...(sharedProbeJson ? { SHARED_PROBE_JSON: sharedProbeJson } : {}),
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
         // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
@@ -2020,6 +2081,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
 // Budget: when time_budget_s was passed, TIME_DEADLINE_HIT stops STARTING new milestones (even below the
 // floor) so the in-flight work + Finalize/Validate finish before the orchestrator's hard kill. The guard
 // is inert when time_budget_s is absent (TIME_DEADLINE_HIT never set) => byte-identical default behavior.
+// GLOBAL per-shape probe: idempotent — reuses the head-phase artifact (or the carried path); only runs
+// here when the kernel phase is driven WITHOUT a prior head phase in the same run.
+if (want('kernel')) await ensureSharedProbe();
 while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS || noImprove < 2)) {
   milestone++;
   const remaining = BUDGET - dispatched;
@@ -2070,6 +2134,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+        ...(sharedProbeJson ? { SHARED_PROBE_JSON: sharedProbeJson } : {}),
       },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
     if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
@@ -2369,6 +2434,7 @@ const carryState = {
   eval_dir: EVAL_DIR, model_name: MODEL_NAME, baseline_throughput_tok_s: BASELINE_TPUT,
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
+  shared_probe_json: sharedProbeJson,  // the ONE global per-shape probe artifact, reused by a later phase (no re-probe)
   config_directions: (strategy && strategy.config_directions) || [],
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
   // Carry pending (verified-isolated, A/B-incomplete) wins WITH their inputs so a

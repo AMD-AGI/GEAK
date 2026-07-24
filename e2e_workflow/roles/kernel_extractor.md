@@ -28,12 +28,66 @@ task self-contained + immutable (the validator sha-checks `harness_lib.py` along
 
 ---
 
+## PHASE=probe_all  (GLOBAL per-shape probe — run ONCE for BOTH tracks)
+
+This phase runs the per-shape probe **a single time over the workload for the UNION of head +
+milestone candidate kernels**, so neither `PHASE=extract_op` nor `PHASE=extract` has to re-launch an
+enforce-eager server per kernel. Its output is ONE shared `per_shape_probe.json` that every later
+extractor slices per-kernel with `probe_to_mbuckets.py --kernel-match` (no server). Read
+`SKILL_DIR/knowledge/shape_capture.md` (the probe playbook + PROBE_TARGETS derivation + hard pitfalls).
+
+Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD` (has ISL/OSL), `CONC`, `CURRENT_FLAGS`/`CURRENT_ENV`
+(the CONFIG-SWEPT server state — probe with these, not the bare defaults), `KERNELS` (the union list:
+each has `short_name`, optional `launcher_source_file`/`op_kind`/`target_callable`), `PROFILE_TOPN`
+(profile_topN.json for the %GPU join), `SHARED_PROBE_DIR` (= `$EVAL_DIR/_probe`), `SKILL_DIR`.
+
+Steps:
+1. **Idempotency FIRST.** If `$SHARED_PROBE_DIR/per_shape_probe.json` already exists (a prior run/phase
+   produced it), do NOT relaunch the server — return that path with `ran_server:false`. (The workflow
+   memoizes in-process and carries the path across phases; this on-disk check only catches the rare
+   "phase driven without carried state" case.)
+2. **Derive `PROBE_TARGETS` = the UNION of Python entries across ALL `KERNELS`.** For each kernel map
+   its `short_name`/`launcher_source_file` to the launcher `module:attr` that calls the @jit kernel
+   (per the `shape_capture.md` playbook); DROP any target that is a bare `JITFunction` or has no Python
+   entry (graph-replayed with no launcher) — log which and why. De-dup the list. This is MODEL-SPECIFIC;
+   never hard-code the gpt-oss targets baked into `probe_overlay/sitecustomize.py`.
+3. **Run the probe ONCE** (`sitecustomize` installs ALL comma-separated targets in one server run):
+   ```bash
+   # TP>1: GPU must list ALL logical ids (adapter sets HIP_VISIBLE_DEVICES=$GPU); ensure they are FREE
+   #   (a concurrent server makes NCCL init hang + time out the health check).
+   OVERLAY_PYTHONPATH="$SKILL_DIR/scripts/probe_overlay" \
+   EXTRA_ENV="PROBE_OUT=$SHARED_PROBE_DIR PROBE_TIME=1 PROBE_TARGETS=<union module:attr,...>" \
+   EXTRA_SERVER_ARGS="--enforce-eager" \
+   BACKEND="<backend>" GPU="<id[,id...] — N ids for TP=N>" TP=<N> MODEL="$MODEL_PATH" \
+   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=1 PROFILE=0 \
+     bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/probe_all.log"
+   # postprocess ONCE — kernels are auto-discovered from the probe_*.json files (no need to name them).
+   python3 "$SKILL_DIR/scripts/probe_postprocess.py" --probe-dir "$SHARED_PROBE_DIR" \
+     --profile-topn "$PROFILE_TOPN" --isl <isl> --osl <osl> --conc <conc> \
+     --out "$SHARED_PROBE_DIR/per_shape_probe"
+   ```
+4. **Self-check + return.** Confirm `$SHARED_PROBE_DIR/per_shape_probe.json` exists and its summary
+   prints `profile_calls=<n>` (NOT None; None means the %GPU join missed — shapes/counts still valid).
+   Return `{shared_probe_json, probe_dir:$SHARED_PROBE_DIR, targets:[union], coverage:[{short_name,
+   matched:bool} per input kernel], ran_server, notes}`. `matched` = the kernel's base symbol appears in
+   the probe output (checkable with `probe_to_mbuckets.py --kernel-match <symbol>` returning non-empty).
+   A kernel that did NOT match (no Python entry, or unseen this window) is expected to fall back to the
+   per-kernel probe in its own extract — say so in `notes`, do NOT fail the whole phase.
+
+If the probe genuinely cannot run at all (enforce-eager won't launch, server crashes), return
+`shared_probe_json:""` + the reason in `notes`; both extractor phases then fall back to per-kernel
+probing (or the `[1, CONC]` synthesized fallback when that too is impossible).
+
+---
+
 ## PHASE=extract
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (the Architect's candidate:
 short_name, classification, extract_hint = the `module:attr` callable to hook, candidate_backends,
 regime, and — when an upstream TraceLens prior was available — OPTIONAL `source_hint` (resolved source
-file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`.
+file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, and
+OPTIONAL `SHARED_PROBE_JSON` (the ONE global per-shape probe from `PHASE=probe_all` — slice your kernel's
+measured decode/prefill M-buckets from it, see step 2b).
 
 ### Resolve + HONOR the ONLINE REGIME first (same contract as PHASE=extract_op)
 The #1 cause of "isolated win, e2e loss/crash" is a unittest that SYNTHESIZES its inputs with OFFLINE
@@ -121,48 +175,47 @@ freeze an out-of-regime oracle nobody should trust.
    When the target runs inside a CUDA/HIP graph (most GEMMs, decode-path kernels), the normal capture
    above returns `dims=[]` for the decode calls — graph *replay* doesn't go through Python, so the
    captured shapes are missing and you'd otherwise fall back to the **inferred** `M ≈ conc` guess (the
-   `regime_prior` path; historically this was hand-guessed, e.g. gpt-oss `M=64/256`, and only paid off
-   because the guess happened to be right). Instead, MEASURE the real per-shape distribution:
+   `regime_prior` path; historically hand-guessed, e.g. gpt-oss `M=64/256`, and only paid off because the
+   guess happened to be right). Instead, use the **MEASURED** per-shape distribution.
+
+   **DEFAULT — slice the shared GLOBAL probe (no server).** The workflow runs the per-shape probe ONCE
+   up front (`PHASE=probe_all`, for the union of all head+milestone candidates) and hands you
+   `SHARED_PROBE_JSON`. Just slice YOUR kernel out of it — no enforce-eager server, no re-probe:
    ```bash
-   # (a) enforce-eager run so decode steps go through Python and the probe sees real shapes/counts.
-   #     The probe engine is capture_shapes_probe.py (NOT capture_shapes.py): no max_cases cap, args+
-   #     kwargs both scanned, lazy hook (no handshake stall), periodic flush (survives SIGTERM),
-   #     JITFunction-guard. See knowledge/shape_capture.md for the hard pitfalls.
-   #     PROBE_TARGETS is MODEL-SPECIFIC — derive it per model via the playbook in
-   #     knowledge/shape_capture.md (read profile_topN.json → find each hot kernel's Python entry
-   #     module:attr → skip JITFunction / no-Python-entry). Do NOT hard-code the gpt-oss targets.
-   # NOTE (TP>1): GPU must list ALL logical ids (adapter sets HIP_VISIBLE_DEVICES=$GPU). TP=4 GPU=0
-   #   crashes ("local rank N out of bounds for 1 devices"); use GPU=0,1,2,3. Ensure those GPUs are
-   #   FREE first (a concurrent vLLM makes this hang at NCCL init and time out the health check).
+   python3 "$SKILL_DIR/scripts/probe_to_mbuckets.py" \
+     --probe "$SHARED_PROBE_JSON" --conc <conc> --kernel-match "<base symbol>" \
+     --min-count-share 0.001   # decode-dominated ISL≈OSL: keeps the <1%-of-calls prefill bucket
+   # -> {"decode_m_buckets":[...], "prefill_m_buckets":[...]} : merge BOTH keys into meta.json and set
+   #    m_buckets_source:"measured".  (gpt-oss EXAMPLE decode=[64,256] prefill=[8192,32768] — never copy.)
+   ```
+
+   **FALLBACK — per-kernel probe** (ONLY when `SHARED_PROBE_JSON` is absent/empty OR `--kernel-match`
+   returns nothing for your kernel — e.g. a kernel the Architect nominated AFTER `probe_all` ran). Then
+   run the probe yourself for THIS kernel into its own task dir:
+   ```bash
+   # enforce-eager run so decode steps go through Python and the probe sees real shapes/counts. The probe
+   # engine is capture_shapes_probe.py (NOT capture_shapes.py): no max_cases cap, args+kwargs both scanned,
+   # lazy hook (no handshake stall), periodic flush (survives SIGTERM), JITFunction-guard. PROBE_TARGETS is
+   # MODEL-SPECIFIC — derive per model via knowledge/shape_capture.md (profile_topN.json → each hot kernel's
+   # Python entry module:attr → skip JITFunction / no-Python-entry). Do NOT hard-code the gpt-oss targets.
+   # TP>1: GPU must list ALL logical ids (adapter sets HIP_VISIBLE_DEVICES=$GPU); ensure they are FREE.
    OVERLAY_PYTHONPATH="$SKILL_DIR/scripts/probe_overlay" \
    EXTRA_ENV="PROBE_OUT=$TASK/_probe PROBE_TIME=1 PROBE_TARGETS=<module:attr>[,<module:attr>...]" \
    EXTRA_SERVER_ARGS="--enforce-eager" \
    BACKEND="<backend>" GPU="<id[,id...] — N ids for TP=N>" TP=<N> MODEL="$MODEL_PATH" \
    ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=1 PROFILE=0 \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/probe_<short_name>.log"
-   # postprocess: --profile-topn is STRONGLY RECOMMENDED (adds %GPU, the Amdahl basis for kernel
-   # selection). --isl/--osl/--conc are recorded as workload metadata. Kernels are auto-discovered
-   # from the probe output — no need to name them here. Self-check the summary: it should print
-   # profile_calls=<n> (NOT None); None means the %GPU join missed (shape/count/latency still valid).
    python3 "$SKILL_DIR/scripts/probe_postprocess.py" --probe-dir "$TASK/_probe" \
      --profile-topn "$TASK/profile/round_0/profile_topN.json" \
-     --isl <isl> --osl <osl> --conc <conc> \
-     --out "$TASK/_probe/per_shape_probe"
-   # (b) turn the measured shapes into m_buckets and MERGE into meta.json (replaces the M≈conc guess).
-   #     On decode-dominated workloads (ISL≈OSL) prefill M is <1% of calls; add --min-count-share 0.001
-   #     to keep the prefill bucket (default 0.01 drops it -> prefill_m_buckets=[]).
+     --isl <isl> --osl <osl> --conc <conc> --out "$TASK/_probe/per_shape_probe"
    python3 "$SKILL_DIR/scripts/probe_to_mbuckets.py" \
      --probe "$TASK/_probe/per_shape_probe.json" --conc <conc> --kernel-match "<base symbol>" \
      --min-count-share 0.001
-   # -> {"decode_m_buckets":[...], "prefill_m_buckets":[...]} : merge both keys into meta.json.
-   #    gpt-oss EXAMPLE: decode=[64,256], prefill=[8192,32768].
-   #    Qwen3-235B EXAMPLE: target invoke_fused_moe_triton_kernel -> decode=[64,512] (64=conc gate/up,
-   #    512=64*top_k(8) down proj), prefill=[8192,65536]. YOUR model will differ — never copy these.
    ```
-   Only do this when the normal capture (step 2) left the decode shapes hidden. If the kernel is NOT
+   Only probe at all when the normal capture (step 2) left the decode shapes hidden. If the kernel is NOT
    graph-hidden (capture already returned real decode dims), keep the captured shapes — no probe needed.
-   The inferred `M≈conc` guess remains the fallback ONLY if the probe is unavailable (e.g. the kernel
-   has no Python entry, or enforce-eager won't launch). Everything downstream (`attribute_weights`,
+   The inferred `M≈conc` guess (`m_buckets_source:"synthesized_fallback"`) is the LAST resort, only when
+   neither the shared probe nor a per-kernel probe is available. Everything downstream (`attribute_weights`,
    `unittest.py`) is UNCHANGED — only the m_bucket VALUES go from guessed to measured.
 
    > **🔴 SOURCE PRECEDENCE + FALLBACK (many sources emit shapes/counts — do NOT trust all equally).**
@@ -595,48 +648,56 @@ needs an op task dir the **Op Benchmarker** can bake-off across backends. `edit=
 
 Capture (the I/O oracle) and probe (the decode M-buckets) are TWO SEPARATE actions, both required:
 capture records `reference_io.pt` + the prefill shapes it can see; the probe measures the decode
-shapes+counts that CUDA-graph replay hides from capture. Run BOTH — the probe does not replace capture.
+shapes+counts that CUDA-graph replay hides from capture. The probe does not replace capture — you still
+run capture here. What changes is HOW you get the probe data: by default you SLICE it from the shared
+global probe, not by re-running an enforce-eager server.
 
-`PROBE_TARGETS` is MODEL-SPECIFIC — derive it yourself from `KERNEL.short_name`: import the serving
-package, grep the `short_name` / its `module:attr` Python entry (the launcher that calls the @jit
-kernel, e.g. `...triton_moe:invoke_fused_moe_triton_kernel`), and skip any JITFunction / no-Python-entry
-target. Do NOT hard-code the gpt-oss targets baked into `probe_overlay/sitecustomize.py`.
+**DEFAULT — slice the shared GLOBAL probe (no server).** The workflow ran `PHASE=probe_all` ONCE for the
+union of all head+milestone candidates and passed you `SHARED_PROBE_JSON`. Slice YOUR kernel out of it:
+```bash
+python3 "$SKILL_DIR/scripts/probe_to_mbuckets.py" \
+  --probe "$SHARED_PROBE_JSON" --conc <conc> --kernel-match "<base symbol>" \
+  --min-count-share 0.001   # decode-dominated ISL≈OSL: keeps the <1%-of-calls prefill bucket
+# -> MERGE decode_m_buckets + prefill_m_buckets into meta.json (REPLACING the [1, CONC] guess),
+#    set m_buckets_source:"measured".  (Qwen3-235B EXAMPLE decode=[64,512] prefill=[8192,65536] — never copy.)
+```
 
+**FALLBACK — per-kernel probe** (ONLY when `SHARED_PROBE_JSON` is absent/empty OR `--kernel-match`
+returns nothing for your kernel — e.g. a head candidate surfaced after `probe_all` ran). `PROBE_TARGETS`
+is MODEL-SPECIFIC — derive it from `KERNEL.short_name`: import the serving package, grep the
+`short_name` / its `module:attr` Python entry (the launcher that calls the @jit kernel, e.g.
+`...triton_moe:invoke_fused_moe_triton_kernel`), skip any JITFunction / no-Python-entry target. Do NOT
+hard-code the gpt-oss targets baked into `probe_overlay/sitecustomize.py`.
 ```bash
 TASK="$EVAL_DIR/kernels/<short_name>_task"
-# (a) enforce-eager run so decode steps go through Python and the probe sees real shapes/counts.
-#     TP>1: GPU must list ALL logical ids (adapter sets HIP_VISIBLE_DEVICES=$GPU); ensure they are FREE
-#     (a concurrent vLLM makes NCCL init hang + time out the health check).
+# enforce-eager run so decode steps go through Python and the probe sees real shapes/counts.
+# TP>1: GPU must list ALL logical ids (adapter sets HIP_VISIBLE_DEVICES=$GPU); ensure they are FREE.
 OVERLAY_PYTHONPATH="$SKILL_DIR/scripts/probe_overlay" \
 EXTRA_ENV="PROBE_OUT=$TASK/_probe PROBE_TIME=1 PROBE_TARGETS=<module:attr>[,<module:attr>...]" \
 EXTRA_SERVER_ARGS="--enforce-eager" \
 BACKEND="<backend>" GPU="<id[,id...] — N ids for TP=N>" TP=<N> MODEL="$MODEL_PATH" \
 ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=1 PROFILE=0 \
   bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/probe_<short_name>.log"
-# (b) postprocess: join profile %GPU (self-check the summary prints profile_calls=<n>, NOT None).
 python3 "$SKILL_DIR/scripts/probe_postprocess.py" --probe-dir "$TASK/_probe" \
   --profile-topn "$TASK/profile/round_0/profile_topN.json" \
-  --isl <isl> --osl <osl> --conc <conc> \
-  --out "$TASK/_probe/per_shape_probe"
-# (c) turn measured shapes into m_buckets. Decode-dominated (ISL≈OSL) prefill is <1% of calls ->
-#     --min-count-share 0.001 to keep the prefill bucket (default 0.01 drops it).
+  --isl <isl> --osl <osl> --conc <conc> --out "$TASK/_probe/per_shape_probe"
 python3 "$SKILL_DIR/scripts/probe_to_mbuckets.py" \
   --probe "$TASK/_probe/per_shape_probe.json" --conc <conc> --kernel-match "<base symbol>" \
   --min-count-share 0.001
-# -> MERGE decode_m_buckets + prefill_m_buckets into meta.json (REPLACING the [1, CONC] guess).
-#    Qwen3-235B EXAMPLE: target invoke_fused_moe_triton_kernel -> decode=[64,512] (64=conc gate/up,
-#    512=64*top_k(8) down proj), prefill=[8192,65536]. YOUR model WILL differ — never copy these.
 ```
 
-FALLBACK (only when the probe genuinely cannot run — kernel has no Python entry, or `--enforce-eager`
-won't launch): keep the passed `DECODE_M_BUCKETS=[1, CONC]`, set `m_buckets_source:"synthesized_fallback"`,
-and state the reason in `notes`. In EVERY other case use the measured values + `m_buckets_source:"measured"`.
+LAST-RESORT FALLBACK (only when NEITHER the shared probe NOR a per-kernel probe can run — kernel has no
+Python entry, or `--enforce-eager` won't launch): keep the passed `DECODE_M_BUCKETS=[1, CONC]`, set
+`m_buckets_source:"synthesized_fallback"`, and state the reason in `notes`. In EVERY other case use the
+measured values + `m_buckets_source:"measured"`.
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (Architect head candidate: short_name,
 op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for attn, and OPTIONAL
 TraceLens `source_hint`/`launcher_hint`/`bound_type`), `GEMM_SYNTH` (bool, default true),
-`CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, and OPTIONAL `PROFILE_WORKLOAD_JSON` (the profiler's
-per-(shape,dtype) weighted workload model — slice this kernel's cases into `workload_path`, see below).
+`CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, OPTIONAL `SHARED_PROBE_JSON` (the ONE global per-shape probe
+from `PHASE=probe_all` — slice your kernel's measured decode/prefill M-buckets from it, see 2b-op), and
+OPTIONAL `PROFILE_WORKLOAD_JSON` (the profiler's per-(shape,dtype) weighted workload model — slice this
+kernel's cases into `workload_path`, see below).
 
 > **TraceLens shape double-check (mandatory when the shapes came from TraceLens).** If `KERNEL.shapes`
 > originated from the upstream `analysis.md`/`kernel_candidates.json` prior, treat them ONLY as a
@@ -695,10 +756,11 @@ in `meta.json` (op_bench reads it to annotate the Amdahl ceiling on the isolated
 
 > **decode M-buckets for a dense GEMM are ALSO probe-measured when the decode path is graph-hidden**
 > (it almost always is under a serving graph). Synthesizing the prefill (N,K) from the profile is fine,
-> but the decode M MUST come from the per-shape probe (step 2b-op above), not the `[1, CONC]` guess —
-> run the probe, merge its `decode_m_buckets` into `meta.json`, and return `m_buckets_source:"measured"`.
-> Only fall back to `[1, CONC]` + `m_buckets_source:"synthesized_fallback"` when the probe cannot run.
-> capture (oracle) and probe (decode m_buckets) remain the two separate actions — see 2b-op.
+> but the decode M MUST come from the per-shape probe (step 2b-op above) — by DEFAULT sliced from the
+> shared `SHARED_PROBE_JSON`, not re-probed per kernel — not the `[1, CONC]` guess. Merge its
+> `decode_m_buckets` into `meta.json` and return `m_buckets_source:"measured"`. Only fall back to
+> `[1, CONC]` + `m_buckets_source:"synthesized_fallback"` when neither the shared nor a per-kernel probe
+> can run. capture (oracle) and probe (decode m_buckets) remain the two separate actions — see 2b-op.
 
 1. Parse the profiled `shapes` into `a_shape`, `b_shape`. Decide `transpose_b` from the math
    (sglang Linear = `F.linear(x,W)` → `transpose_b=true`; a raw `A@B` → false) and whether there is a
