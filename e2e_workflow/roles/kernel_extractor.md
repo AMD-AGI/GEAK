@@ -28,6 +28,32 @@ task self-contained + immutable (the validator sha-checks `harness_lib.py` along
 
 ---
 
+## Unittest contract — shapes / weight / baseline (IDENTICAL for BOTH `PHASE=extract` and `PHASE=extract_op`)
+
+The three things that make a unittest FAITHFUL to the live server are the same on both tracks — only the
+downstream optimization differs (head → op bake-off + optimize/author; milestone → optimize). Whenever a
+per-phase step below describes shapes, weighting, or the baseline, it is implementing THIS contract; keep
+them in sync with this section, do not drift.
+
+1. **SHAPES = MEASURED from the live serving run, never guessed.** Prefill shapes come from the profile /
+   live capture; the graph-hidden **decode M-buckets come from the per-shape probe** — by DEFAULT sliced
+   from the shared `SHARED_PROBE_JSON` (`PHASE=probe_all`, one workload pass for all kernels), else a
+   per-kernel probe, else — only if neither can run — the `[1, CONC]` synthesized fallback. Record
+   `decode_m_buckets`/`prefill_m_buckets` + `m_buckets_source` (`measured` | `synthesized_fallback`) in
+   `meta.json` and RETURN them (the workflow's `verifyProbeMBuckets` guard checks this on both tracks).
+2. **WEIGHT = self-weight, measured latency × analytic serving-call count per regime — NOT profiler %GPU.**
+   The unittest's per-shape weight is `weightᵢ = MEASURED baseline_msᵢ × analytic_calls[regimeᵢ]`
+   (`estimate_serving_regime_calls`: decode=`osl`, prefill=`ceil(isl/chunk)`; the regime's total calls land
+   on its LARGEST-M bucket, smaller transient buckets get `calls=1`). It reports the time-weighted
+   `GEAK_WEIGHTED_SPEEDUP` as PRIMARY. Profiler %GPU is head-SELECTION + a pre-measurement PRIOR only.
+3. **BASELINE = the FROZEN real online kernel.** Snapshot the live kernel into an immutable `baseline_src/`
+   AND record `meta.baseline_callable` (`module:attr` of the real online kernel); the unittest's baseline
+   leg + the speedup denominator bind to THIS, never to whatever the optimizer writes into `kernel_src/`.
+   Return `baseline_frozen:true`. An extraction with no frozen baseline is INVALID (times against its own
+   scaffold → fake win) and is discarded by the workflow.
+
+---
+
 ## PHASE=probe_all  (GLOBAL per-shape probe — run ONCE for BOTH tracks)
 
 This phase runs the per-shape probe **a single time over the workload for the UNION of head +
@@ -81,6 +107,9 @@ probing (or the `[1, CONC]` synthesized fallback when that too is impossible).
 ---
 
 ## PHASE=extract
+
+> Obey the **Unittest contract — shapes / weight / baseline** section above: shapes measured (probe,
+> default from `SHARED_PROBE_JSON`), self-weight by latency×analytic-calls, baseline = frozen online kernel.
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (the Architect's candidate:
 short_name, classification, extract_hint = the `module:attr` callable to hook, candidate_backends,
@@ -600,6 +629,10 @@ If extraction fails (can't hook the callable, no cases captured, or not editable
 ---
 
 ## PHASE=extract_op  (HEAD kernels: dense GEMM / attention / fused-MoE — even when `edit=N`)
+
+> The **Unittest contract — shapes / weight / baseline** section above applies here IDENTICALLY (shapes
+> measured via `SHARED_PROBE_JSON`, self-weight, frozen online baseline). Only the DOWNSTREAM differs:
+> the head track builds an op task dir for the Op Benchmarker's bake-off instead of an edit-track unittest.
 
 For the **head track** the contract is different: a head kernel is usually a LIBRARY op (hipBLASLt
 GEMM, CK attention) with a clean math contract, so it does NOT need a copy of editable source — it

@@ -472,6 +472,12 @@ const EXTRACT_SCHEMA = obj({
   baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
   baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
   reference_io_sha256: { type: 'string' }, notes: { type: 'string' },
+  // Probe-measured decode/prefill M-buckets (same contract as EXTRACT_OP_SCHEMA) — sliced from the shared
+  // global probe (SHARED_PROBE_JSON) or a per-kernel fallback; verifyProbeMBuckets checks these post-extract.
+  // m_buckets_source: 'measured' (probe ran) | 'synthesized_fallback' (probe unavailable).
+  decode_m_buckets: { type: 'array', items: { type: 'number' } },
+  prefill_m_buckets: { type: 'array', items: { type: 'number' } },
+  m_buckets_source: { type: 'string' },
 }, ['editable', 'task_dir', 'unittest_smoke']);
 
 // GLOBAL per-shape probe (run ONCE over the workload for the union of head+milestone candidate
@@ -2139,6 +2145,10 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
     if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
       return { c, skip: true, reason: `extraction failed/non-editable (${ext ? ext.notes || ext.unittest_smoke : 'none'})` };
+    }
+    { // same probe-guard as the head track: confirm decode m_buckets are probe-measured, not the [1,CONC] guess
+      const _mbSrc = verifyProbeMBuckets(ext, CONC, log);
+      history.ledger.push({ direction: (ext && ext.short_name) || c.short_name, verdict: 'probe_check', lesson: `decode m_buckets: ${_mbSrc}` });
     }
     // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
     let kl;
