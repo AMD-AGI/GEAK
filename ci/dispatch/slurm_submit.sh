@@ -80,15 +80,17 @@ WRAP+="bash '$GEAK_ROOT/ci/dispatch/slurm_job.sh' '$MODEL_KEY' '$BUDGET'"
 
 # Single node so a tp-way tensor-parallel run stays co-located on one box.
 #
-# NB: we intentionally do NOT pass --exclusive. The exit-137 kills first blamed on
-# co-tenancy (RUN_TS=20260723T232354Z, 3 jobs bin-packed on crsuse2-m2m-232) were
-# actually the node-cleanup prolog `docker kill`-ing our container because it was
-# >600s old and carried no `spur_job_id` label — it looked like an orphan. The real
-# fix is labeling the container (run_local.sh: --label spur_job_id="$SLURM_JOB_ID"),
-# not reserving a whole 8-GPU node for a 1-GPU model. Request only the GPUs we need.
+# --exclusive is REQUIRED: the node's job-start prolog reaps "foreign" docker
+# containers on the node, and it does NOT honor our `spur_job_id` label. Proven on
+# RUN_TS=20260724T083259Z: jobs 41087/41088/41089 (bin-packed on crsuse2-m2m-227)
+# were all `docker kill`ed (exit 137) at 08:47:53 — the EXACT second jobs 41091/41092
+# started on that same node. i.e. a new job landing on an occupied node triggers the
+# prolog, which kills the running co-tenants' containers despite the label. Reserving
+# the whole node per job means no second job ever lands on it, so nothing triggers the
+# reap. Costs idle GPUs for small-tp models, but that beats losing runs at ~13 min.
 SBATCH=(sbatch
   -A "$SPUR_ACCOUNT" -p "$SPUR_PARTITION" --qos "$SPUR_QOS"
-  -J "$JOB" -N 1 -G "$GPUS" -c "$CPUS" -t "$TIME"
+  -J "$JOB" -N 1 -G "$GPUS" -c "$CPUS" -t "$TIME" --exclusive
   --chdir "$WS" -o "$LOG" -e "$LOG"
   --wrap "$WRAP")
 
