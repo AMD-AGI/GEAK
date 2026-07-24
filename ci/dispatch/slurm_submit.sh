@@ -79,6 +79,13 @@ WRAP="RUN_TS='$RUN_TS' "
 WRAP+="bash '$GEAK_ROOT/ci/dispatch/slurm_job.sh' '$MODEL_KEY' '$BUDGET'"
 
 # Single node so a tp-way tensor-parallel run stays co-located on one box.
+#
+# NB: we intentionally do NOT pass --exclusive. The exit-137 kills first blamed on
+# co-tenancy (RUN_TS=20260723T232354Z, 3 jobs bin-packed on crsuse2-m2m-232) were
+# actually the node-cleanup prolog `docker kill`-ing our container because it was
+# >600s old and carried no `spur_job_id` label — it looked like an orphan. The real
+# fix is labeling the container (run_local.sh: --label spur_job_id="$SLURM_JOB_ID"),
+# not reserving a whole 8-GPU node for a 1-GPU model. Request only the GPUs we need.
 SBATCH=(sbatch
   -A "$SPUR_ACCOUNT" -p "$SPUR_PARTITION" --qos "$SPUR_QOS"
   -J "$JOB" -N 1 -G "$GPUS" -c "$CPUS" -t "$TIME"

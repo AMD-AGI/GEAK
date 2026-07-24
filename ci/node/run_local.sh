@@ -171,8 +171,10 @@ if [ "$HEALTHCHECK_CAP" != "0" ]; then
   # pre-check couldn't foresee) still can't hang the job past the cap; the probe
   # is NAMED so we can best-effort force-remove the (possibly orphaned) container.
   if ! timeout --kill-after=30 "$HEALTHCHECK_CAP" docker run --rm --name "$PF_NAME" \
+      --label spur_job_id="${SLURM_JOB_ID:-}" \
       --device /dev/kfd --device /dev/dri --group-add video \
       --security-opt seccomp=unconfined \
+      -e PYTHONDONTWRITEBYTECODE=1 \
       -v "$WS:$WS" "${GEAK_MOUNT[@]}" "${GPU_ENV[@]}" \
       --entrypoint bash "$IMAGE" "$HERE/../preflight/gpu_healthcheck.sh"; then
     # Best-effort reap of a wedged probe container (may itself refuse if D-state).
@@ -199,9 +201,19 @@ CONTAINER_NAME="geak_l1_${MODEL_KEY//[^A-Za-z0-9_.-]/_}_${RUN_TS}"
 # Probe: verify weights are readable in-container, (optionally) install Claude,
 # validate the GEAK arg mapping via run_model --dry-run, then STOP — never enter
 # the real e2e workflow. Set GEAK_PROBE_SKIP_CLAUDE=1 for the fastest infra-only probe.
+# Leave the bind-mounted checkout owned by the host user, not root. A container
+# process (running as root) that imports/byte-compiles python drops
+# __pycache__/*.pyc into $GEAK_ROOT; on NFS those become root-owned and break the
+# NEXT actions/checkout cleanup with EACCES. This in-container EXIT trap (fires on
+# normal completion and on a trappable SIGTERM) chowns the checkout back to the
+# host user and clears __pycache__. $(id -u)/$(id -g)/$GEAK_ROOT are expanded
+# host-side now so concrete values are baked into the container command string.
+GC_ONEXIT="trap 'chown -R $(id -u):$(id -g) \"$GEAK_ROOT\" 2>/dev/null || true; find \"$GEAK_ROOT\" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true' EXIT"
+
 if [ "$PROBE" = "1" ]; then
   CONTAINER_CMD="
     set -e
+    $GC_ONEXIT
     echo \"== PROBE: container up on \$(hostname) ==\"
     echo \"PROBE: MODEL_PATH=\$MODEL_PATH\"
     if [ -f \"\$MODEL_PATH/config.json\" ]; then echo 'PROBE: weights readable in container OK'; else echo 'PROBE FAIL: weights not readable in container'; exit 3; fi
@@ -212,12 +224,14 @@ if [ "$PROBE" = "1" ]; then
 else
   CONTAINER_CMD="
     set -e
+    $GC_ONEXIT
     bash '$GEAK_ROOT/ci/preflight/setup_claude.sh'
     bash '$GEAK_ROOT/ci/node/run_model.sh' '$MODEL_KEY'
   "
 fi
 
 docker run --rm --name "$CONTAINER_NAME" \
+  --label spur_job_id="${SLURM_JOB_ID:-}" \
   --device /dev/kfd --device /dev/dri --group-add video \
   --security-opt seccomp=unconfined --ipc=host --shm-size 32g \
   -v "$WS:$WS" -v "$MODELS_ROOT:$MODELS_ROOT" "${GEAK_MOUNT[@]}" "${WEIGHTS_MOUNTS[@]}" \
@@ -282,9 +296,20 @@ cleanup() {
   [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
   docker kill "$CONTAINER_NAME" >/dev/null 2>&1 || true
 }
+# Belt for the FORCE-kill path (SIGKILL/hard timeout / scancel) where the
+# in-container EXIT trap (GC_ONEXIT) could not run: bring the bind-mounted checkout
+# back to host ownership so the next actions/checkout can clean it. Only needed when
+# $GEAK_ROOT is a separate mount (CI checkout outside $WS). Best-effort + time-bounded
+# so teardown can never hang on a wedged node.
+reown_checkout() {
+  [ "${#GEAK_MOUNT[@]}" -gt 0 ] || return 0
+  timeout 60 docker run --rm --label spur_job_id="${SLURM_JOB_ID:-}" -v "$GEAK_ROOT:$GEAK_ROOT" --entrypoint bash "$IMAGE" \
+    -c "chown -R $(id -u):$(id -g) '$GEAK_ROOT' 2>/dev/null || true; find '$GEAK_ROOT' -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true" \
+    >/dev/null 2>&1 || true
+}
 # On SIGTERM/SIGINT (SLURM wall clock, scancel, or GitHub cancel) tear the
 # container down, then exit non-zero so the run is judged FAIL (not silently orphaned).
-on_signal() { trap - EXIT; log "signal received -> killing container $CONTAINER_NAME"; cleanup; exit 143; }
+on_signal() { trap - EXIT; log "signal received -> killing container $CONTAINER_NAME"; cleanup; reown_checkout; exit 143; }
 trap on_signal TERM INT
 trap cleanup EXIT
 
@@ -298,6 +323,8 @@ if [ -f "$OUT_DIR/timeout.json" ]; then
   echo "::error::run hit hard timeout (see timeout.json) — container was killed" >&2
   log "hard timeout marker present -> $OUT_DIR/timeout.json"
   [ "$RC" -eq 0 ] && RC=124
+  # Container was SIGKILLed by the watchdog, so GC_ONEXIT never ran — reown here.
+  reown_checkout
 fi
 
 # Probe mode: drop a marker the dispatcher can judge on (no result.json is produced
