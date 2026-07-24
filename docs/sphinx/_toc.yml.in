@@ -37,6 +37,8 @@ subtrees:
       title: API reference
     - file: reference/run-e2e-contract
       title: External orchestrator contract
+    - url: https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html
+      title: Hyperloom
 
 - caption: About
   entries:
