@@ -723,7 +723,7 @@ async function ensureSharedProbe() {
     seen.add(k); targets.push(c);
   }
   if (!targets.length) return '';                                // nothing to probe
-  phase('Probe');
+  // (no global phase() switch — the agent's opts.phase:'Probe' groups it without disturbing the caller's phase)
   const res = await safeAgent(
     roleAgent('kernel_extractor', 'probe_all',
       'Run ONE global per-shape probe over the workload for ALL candidate kernels below; REUSE the ' +
