@@ -318,13 +318,19 @@ wait "$DOCKER_PID" || RC=$?
 trap - EXIT TERM INT
 cleanup
 
+# Any non-zero container exit means the in-container EXIT trap (GC_ONEXIT) may not
+# have run: a hard-timeout `docker kill`, an OOM-kill, or a node-prolog reap all
+# SIGKILL the container (uncatchable), leaving root-owned __pycache__ in the
+# bind-mounted checkout that breaks the NEXT actions/checkout with EACCES. Reowning
+# on every RC!=0 covers those externally-killed paths (the signal path reowns in
+# on_signal; a clean RC=0 already ran GC_ONEXIT). Idempotent + time-bounded.
+[ "$RC" -ne 0 ] && reown_checkout
+
 # A watchdog-fired hard timeout must read as FAIL even if docker's own rc looked ok.
 if [ -f "$OUT_DIR/timeout.json" ]; then
   echo "::error::run hit hard timeout (see timeout.json) — container was killed" >&2
   log "hard timeout marker present -> $OUT_DIR/timeout.json"
   [ "$RC" -eq 0 ] && RC=124
-  # Container was SIGKILLed by the watchdog, so GC_ONEXIT never ran — reown here.
-  reown_checkout
 fi
 
 # Probe mode: drop a marker the dispatcher can judge on (no result.json is produced

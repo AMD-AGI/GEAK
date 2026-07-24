@@ -21,10 +21,22 @@ export PATH="$HOME/.local/bin:$PATH"
 # workflow down after baseline -> workflow_parse_error. Install it into the same
 # python3 that runs run_e2e.
 log "installing claude_agent_sdk (python) for run_e2e SDK path"
-python3 -m pip install --quiet --no-input --break-system-packages claude-agent-sdk \
-  || python3 -m pip install --quiet --no-input claude-agent-sdk \
-  || die "pip install claude-agent-sdk failed"
-python3 -c "import claude_agent_sdk" || die "claude_agent_sdk import failed after install"
+# Retry: a transient PyPI/network blip here is just as fatal as the claude install
+# (it runs before the e2e workflow), so don't let one flake sink a multi-hour job.
+_pip_sdk() {
+  python3 -m pip install --quiet --no-input --break-system-packages claude-agent-sdk \
+    || python3 -m pip install --quiet --no-input claude-agent-sdk
+}
+_delay=5
+for _try in 1 2 3 4 5; do
+  if _pip_sdk && python3 -c "import claude_agent_sdk" 2>/dev/null; then
+    log "claude_agent_sdk installed (attempt $_try)"
+    break
+  fi
+  [ "$_try" -eq 5 ] && die "pip install claude-agent-sdk failed after 5 attempts"
+  log "claude_agent_sdk install attempt $_try failed — retrying in ${_delay}s ..."
+  sleep "$_delay"; _delay=$(( _delay * 2 ))
+done
 
 log "probing claude (-p)"
 if claude -p "Reply with exactly: SETUP OK" \

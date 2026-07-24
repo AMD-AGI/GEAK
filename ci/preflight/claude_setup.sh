@@ -14,7 +14,25 @@ LITELLM_KEY="${LITELLM_API_KEY:?set LITELLM_API_KEY (LiteLLM virtual key; do NOT
 LITELLM_BASE="${LITELLM_BASE_URL:?set LITELLM_BASE_URL (LiteLLM proxy base URL; do NOT hardcode it)}"
 
 echo "[1/4] Installing Claude Code (native, latest)..."
-curl -fsSL https://claude.ai/install.sh | bash
+# Retry the network install: a single transient curl reset (e.g. errno 104
+# "Connection reset by peer") otherwise aborts the whole multi-hour job before the
+# e2e workflow ever starts (see moonshotai-Kimi-K2.6-int4 job 40794). Backoff
+# 5/10/20/40s; treat the install as done only once the claude binary is runnable.
+_claude_install_ok() { "$HOME/.local/bin/claude" --version >/dev/null 2>&1; }
+_delay=5
+for _try in 1 2 3 4 5; do
+  echo "  install attempt $_try/5 ..."
+  if curl -fsSL https://claude.ai/install.sh | bash && _claude_install_ok; then
+    echo "  claude install OK on attempt $_try"
+    break
+  fi
+  if [ "$_try" -eq 5 ]; then
+    echo "  ERROR: claude install failed after 5 attempts (network?)" >&2
+    exit 1
+  fi
+  echo "  install attempt $_try failed — retrying in ${_delay}s ..." >&2
+  sleep "$_delay"; _delay=$(( _delay * 2 ))
+done
 
 echo "[2/4] Writing ~/.claude/settings.json ..."
 mkdir -p "$HOME/.claude"
