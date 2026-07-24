@@ -87,6 +87,36 @@ Override env vars (defaults in `profile_kernel.sh`): `PROFILER_PRIORITY`, `WARMU
   **overhead-bound** (floor); a large-N case far above the floor ⇒ likely **compute-bound**. State that
   no profiler was available.
 
+## Structured per-case roofline evidence
+
+The kernel workflow optionally runs `scripts/roofline_kernel.py` after the normal profile, using the
+representative cases in `EVAL_DIR/profile_manifest.json`. This is a separate `rocprof-compute
+profile --roof-only` pass followed by `analyze -b 2 4 17`; the normal `profile_kernel.sh --no-roof`
+counter pass remains unchanged.
+
+Interpret the structured result in two independent dimensions:
+
+1. `theoretical_bound`: `AI HBM` versus the **empirical** ridge point. Below the ridge is
+   `memory_side`; at/above it is `compute_side`.
+2. `observed_limit`: measured compute, HBM, L1/L2, or LDS saturation. If compute and HBM are both low,
+   the point is `latency_occupancy`, even when its theoretical side is memory.
+
+The primary efficiency denominator is
+`min(empirical_compute_peak, AI_HBM * empirical_HBM_peak)`. Section 17/spec HBM peak is context only;
+never silently substitute it for the empirical peak. Do not average AI across shapes or prefill/decode.
+Use workload weight and headroom to prioritize cases, while retaining each case's raw evidence.
+
+Routing:
+
+- observed HBM/cache saturation → memory/coalescing/reuse/fusion work;
+- observed compute saturation → MFMA/tile/scheduling work;
+- LDS saturation → LDS layout/bank-conflict plus algorithm work;
+- neither compute nor HBM saturated → parallelism, occupancy, grid/split-K, dependency stalls;
+- overhead requires independent dispatch-count or launch-floor evidence → host/runtime work.
+
+Roofline is advisory. Correctness plus the unprofiled COMMANDMENT benchmark remains the keep/reject
+source of truth because profiling replay perturbs timing.
+
 ## rocprof-compute (formerly omniperf) Output Interpretation
 
 ### Section 2: System Speed-of-Light (SoL)

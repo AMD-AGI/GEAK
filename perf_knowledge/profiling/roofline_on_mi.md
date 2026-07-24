@@ -14,7 +14,9 @@ sources:
 ## TL;DR
 The roofline plots **achieved FLOP/s vs arithmetic intensity (FLOP/byte)**. Two ceilings: a sloped
 **BW roof** (HBM/L2/Infinity-Cache lines) and a flat **compute roof** (per-dtype peak FLOP/s). A
-kernel left of the **ridge point** is BW-bound; right of it, compute-bound. On Instinct, build it
+kernel left of the **ridge point** is on the memory side of the theoretical roof; right of it is on
+the compute side. This placement is not by itself an observed bottleneck verdict: a point far below
+both roofs can be latency/occupancy limited. On Instinct, build it
 **empirically** with `rocprof-compute --roof-only`
 ([`rocprof_compute_workflow.md`](rocprof_compute_workflow.md)) — the tool runs microbenchmarks to
 measure the *real* peaks of your box, not datasheet numbers.
@@ -63,6 +65,18 @@ compare against:
   ([`reading_a_kernel_bottleneck.md`](reading_a_kernel_bottleneck.md)).
 - **Improvement = point moves up/right toward a roof**, not merely lower wall time.
 
+Keep two labels in structured analysis:
+
+- `theoretical_bound`: AI versus the empirical ridge (`memory_side|compute_side|unknown`);
+- `observed_limit`: measured compute/HBM/cache/LDS saturation
+  (`hbm|compute|cache|lds|balanced|latency_occupancy|overhead|no_fp_work|unknown`).
+
+Use empirical section 4.1 compute and HBM rates for the primary ridge and efficiency denominator.
+Section 17/spec HBM bandwidth is a hardware reference only. Compare before/after only when device,
+case, shape, dtypes, matched kernel, empirical peak basis, and policy version are identical. GEAK
+allows at most 5% run-to-run noise in empirical microbenchmark peaks; a larger difference invalidates
+the comparison.
+
 ## Per-dtype caution
 Use the matching `--roofline-data-type`: an FP8 GEMM compared against the FP32 roof (the tool default)
 looks artificially terrible. Pick the roof for the kernel's actual MFMA dtype.
@@ -72,6 +86,9 @@ looks artificially terrible. Pick the roof for the kernel's actual MFMA dtype.
   and remember HBM achievable (~4.3 TB/s) < peak (5.325 TB/s).
 - Drawing the FP32 roof for a low-precision kernel.
 - Forgetting cache roofs: a "BW-bound" verdict against the HBM roof may actually be L2/L3-resident.
+- Calling every `AI < ridge` point HBM-bound even when achieved HBM utilization is low.
+- Averaging arithmetic intensity across different shapes or prefill/decode regimes.
+- Comparing before/after points collected with different empirical peaks or matched device kernels.
 
 ## Verify
 `roofline.csv` exists and the empirical compute roof is within a sane fraction (not above) the datasheet

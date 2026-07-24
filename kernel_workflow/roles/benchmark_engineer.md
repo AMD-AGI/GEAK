@@ -4,7 +4,8 @@ You build the immutable measurement infrastructure that EVERY other agent must u
 the whole workflow depends on this being correct and stable. Operate on the canonical `WORKSPACE`.
 
 ## Inputs
-`WORKSPACE`, `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, and `ANALYSIS` (kernel type, files, existing tests).
+`WORKSPACE`, `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, `ANALYSIS` (kernel type, files, existing tests), and
+`ROOFLINE_CONFIG` (`mode=off|auto|required`, max cases, timeout, and saturation threshold).
 
 **WORKLOAD ALIGNMENT.** The real-workload shape/dtype distribution is handled by the immutable
 `unittest.py` oracle itself — the Kernel Extractor bakes the weighted cases (`meta.workload.cases[]`)
@@ -35,6 +36,51 @@ and the time-weighted metric into it. So in the common (e2e-fed) path you do NOT
 **CORRECTNESS IS DECOUPLED AND UNCHANGED** in all cases: it runs against the IMMUTABLE frozen oracle
 (`unittest.py`/`reference_io.pt`) on its own recorded golden shapes — never re-weighted, replaced, or
 relaxed. Random-valued workload-shape inputs are for timing only.
+
+## Roofline profile manifest
+
+When `ROOFLINE_CONFIG.mode != "off"`, write `EVAL_DIR/profile_manifest.json`. This is diagnostic
+metadata only; it MUST NOT alter correctness, benchmark scoring, workload weights, or the immutable
+oracle. Select at most `ROOFLINE_CONFIG.max_cases` representative cases in this order, deduplicating:
+
+1. Highest workload-weight case.
+2. Highest baseline-latency case.
+3. One representative case from each missing serving regime (prefill/decode).
+
+Each case must carry `case_id`, argv-style `command`, `workdir`, `shape`, `dtypes`, `regime`, `weight`,
+and optional `kernel_patterns`. Patterns are regular expressions (not shell globs). The top-level
+`target` carries the logical kernel name, `gpu_id`, detected device/SKU when available, and all known
+device-symbol aliases/patterns. Prefer an existing runner's `--profile --case-id <id>` mode. If the
+immutable oracle cannot select one case, you MAY generate `EVAL_DIR/generated/roofline_driver.py` that
+imports/reuses the frozen `meta.json` / `harness_lib.py` case and invokes the same real kernel callable.
+This sidecar is a profiler driver, never a replacement performance harness. If isolation is impossible,
+use the existing profile command, set `mixed_case=true`, and note that roofline confidence is low.
+
+Manifest shape:
+
+```json
+{
+  "schema_version": 1,
+  "target": {
+    "logical_name": "kernel",
+    "gpu_id": "0",
+    "device": "MI300X / gfx942",
+    "kernel_patterns": ["^device_kernel.*$"]
+  },
+  "cases": [{
+    "case_id": "decode_m64",
+    "command": ["python3", "unittest.py", "--profile", "--case-id", "decode_m64"],
+    "workdir": "/absolute/workspace",
+    "shape": {"M": 64, "N": 4096, "K": 4096},
+    "dtypes": ["fp8", "fp8", "bf16"],
+    "regime": "decode",
+    "weight": 0.62
+  }]
+}
+```
+
+Validate every selected command once without rocprof-compute. If no reproducible command exists,
+still write the manifest with no cases and report `roofline_enabled=false`; do not invent inputs.
 
 **DEEP-MODE harness refinement (act ONLY if `HARNESS_ADDENDUM` is in your inputs; otherwise ignore —
 a normal run never passes it).** The IMMUTABLE oracle (`unittest.py`/`meta.json`/`reference_io.pt`:
@@ -103,8 +149,9 @@ For `--correctness` in the no-runner case (no oracle at all), compare to a trust
 (PyTorch/naive) with appropriate tolerance. When the oracle exists, `--correctness` just defers to it.
 
 ### 3. Validate every mode actually runs
-Run compile (if any), correctness, benchmark, profile once each (correctness/benchmark via
-`gpu_lock.sh $GPU_ID`). Fix anything that errors before continuing.
+Run compile (if any), correctness, benchmark, profile once each, plus every selected roofline manifest
+command once (correctness/benchmark via `gpu_lock.sh $GPU_ID`). Fix anything that errors before
+continuing.
 
 ### 4. Write the COMMANDMENT
 Write `EVAL_DIR/COMMANDMENT.md` — the immutable contract. Fill in the EXACT commands discovered/
@@ -168,6 +215,9 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
   "correctness_cmd": "<exact>",
   "benchmark_cmd": "<exact full-benchmark cmd, WITHOUT the gpu_lock wrapper>",
   "profile_cmd": "<exact profile inner cmd>",
+  "profile_manifest_path": "<EVAL_DIR>/profile_manifest.json",
+  "roofline_enabled": true,
+  "roofline_case_ids": ["decode_m64"],
   "parse_hint": "how to extract per-case latency + case ids (and count, when workload-aligned)",
   "baseline_per_case": [{"name": "...", "latency_ms": 0.0,
                          "dims": [[1,512],[512,512]], "dtypes": ["bf16","bf16"],

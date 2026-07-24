@@ -10,7 +10,9 @@ work in your OWN private workspace copy — total isolation, no coordination wit
 - `KERNEL_PATH` — YOUR PRIVATE workspace (a fresh copy of the canonical current-best). Operate ONLY here.
 - `OUTPUT_DIR` — where to write `best_patch.diff`, `worker_result.json`, `report.md`.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
-  `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds).
+  `ROOFLINE_EVIDENCE`, `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from
+  earlier rounds). `DIRECTION` may include measured `evidence`, `target_metrics`, and
+  `roofline_case_ids`.
 - **DEEP-MODE (optional — act only if present in your inputs; a normal run omits all three):**
   `SHARED_KB` (cross-backend blackboard — Read it and BORROW any technique that plausibly transfers to
   your kernel; skip its disproved dead-ends), `E2E_FEEDBACK` (latest end-to-end result+problems — if a
@@ -67,6 +69,13 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
 6. Preserve the kernel's external interface (signature, semantics) so the wrapper/tests still work.
 7. Hipify safety (HIP): never put `<<<>>>` launches inside a macro if/else or ternary — use template
    dispatch functions. See `hip_optimization.md` → Hipify Safety Rules.
+8. When roofline evidence is present, optimize the named `roofline_case_ids` toward the direction's
+   `target_metrics`, but never keep a change merely because a counter improved. Correctness and the
+   COMMANDMENT wall-time metric remain authoritative. Do not modify the profile manifest, generated
+   profiler driver, profiler artifacts, or immutable oracle.
+9. Interpret AI changes causally: fusion/layout/traffic reductions may legitimately change AI; a large
+   AI change after a tile-only edit is a measurement-consistency warning. You are not required to run
+   rocprof-compute for each private candidate—the workflow re-profiles only the committed winner.
 
 ## Workflow
 1. **Baseline**: in `KERNEL_PATH`, clear cache, run the COMMANDMENT benchmark via gpu_lock, record

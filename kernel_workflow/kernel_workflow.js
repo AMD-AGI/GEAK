@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Author', detail: 'author_engineer writes a fresh optimize-loop seed (only when mode=author); speedup denominator stays the frozen online kernel' },
     { title: 'Analyze', detail: 'tech_lead analyzes kernel + writes roadmap' },
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
-    { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
+    { title: 'Profile', detail: 'profile_engineer classifies the bottleneck and collects per-case roofline evidence' },
     { title: 'Optimize', detail: 'budget loop: tech_lead plans, specialist OR deep_explore engineers optimize, reprofile' },
     { title: 'Verify', detail: 'each candidate patch independently re-benchmarked' },
     { title: 'Merge', detail: 'integrator combines the round winners' },
@@ -91,6 +91,36 @@ const WORKLOAD_SPEC = (OP_SPEC && OP_SPEC.workload) || A.workload || null;
 const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||
   (Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length) ||
   (WORKLOAD_SPEC && Array.isArray(WORKLOAD_SPEC.kernels) && WORKLOAD_SPEC.kernels.length));
+// Optional empirical roofline enrichment for the isolated kernel workflow. The benchmark agent creates
+// a profile manifest and the profile agent invokes scripts/roofline_kernel.py for representative cases.
+// E2E model profiling stays unchanged and only supplies workload weights/shapes to this workflow.
+const ROOFLINE_MODE = String(A.roofline != null ? A.roofline : 'off').trim().toLowerCase();
+if (!['off', 'auto', 'required'].includes(ROOFLINE_MODE)) {
+  throw new Error('args.roofline must be one of: off, auto, required');
+}
+const ROOFLINE_MAX_CASES = Math.max(
+  1, parseInt(A.roofline_max_cases != null ? A.roofline_max_cases : 3, 10));
+const ROOFLINE_TIMEOUT_SEC = Math.max(
+  60, parseInt(A.roofline_timeout_sec != null ? A.roofline_timeout_sec : 1800, 10));
+const ROOFLINE_SATURATION_PCT = (() => {
+  const v = parseFloat(A.roofline_saturation_pct != null ? A.roofline_saturation_pct : 60);
+  return Number.isFinite(v) && v > 0 && v <= 100 ? v : 60;
+})();
+const ROOFLINE_INSTALL_MODE = String(
+  A.roofline_install != null ? A.roofline_install : 'off').trim().toLowerCase();
+if (!['off', 'auto', 'required'].includes(ROOFLINE_INSTALL_MODE)) {
+  throw new Error('args.roofline_install must be one of: off, auto, required');
+}
+const ROOFLINE_CONFIG = {
+  mode: ROOFLINE_MODE,
+  install_mode: ROOFLINE_INSTALL_MODE,
+  max_cases: ROOFLINE_MAX_CASES,
+  timeout_sec: ROOFLINE_TIMEOUT_SEC,
+  saturation_pct: ROOFLINE_SATURATION_PCT,
+};
+const rooflineMatched = (profile) => !!(profile && profile.roofline &&
+  Array.isArray(profile.roofline.cases) &&
+  profile.roofline.cases.some(c => c && c.status === 'matched'));
 // PRIMARY-metric selector: prefer the time-weighted number when a workload spec is in play and the
 // agent reported one; otherwise fall back to the geomean (unweighted runs => unchanged behavior).
 const primSpeedup = (o) => {
@@ -183,6 +213,89 @@ const perCase = {
   },
 };
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
+const nullableNumber = { type: ['number', 'null'] };
+const ROOFLINE_METRICS_SCHEMA = obj({
+  ai_hbm: nullableNumber, ai_l2: nullableNumber, ai_l1: nullableNumber,
+  ai_ridge_empirical: nullableNumber, performance_gflops: nullableNumber,
+  compute_metric: { type: ['string', 'null'] },
+  compute_actual_gflops: nullableNumber, compute_empirical_peak_gflops: nullableNumber,
+  compute_utilization_pct: nullableNumber,
+  hbm_actual_gbps: nullableNumber, hbm_empirical_peak_gbps: nullableNumber,
+  hbm_spec_peak_gbps: nullableNumber, hbm_utilization_pct: nullableNumber,
+  l2_utilization_pct: nullableNumber, l1_utilization_pct: nullableNumber,
+  lds_utilization_pct: nullableNumber, roofline_efficiency_pct: nullableNumber,
+  headroom_ratio: nullableNumber,
+}, []);
+const ROOFLINE_CLASSIFICATION_SCHEMA = obj({
+  theoretical_bound: { type: 'string', enum: ['memory_side', 'compute_side', 'unknown'] },
+  observed_limit: {
+    type: 'string',
+    enum: ['hbm', 'compute', 'cache', 'lds', 'balanced', 'latency_occupancy',
+      'overhead', 'no_fp_work', 'unknown'],
+  },
+  recommended_specialties: {
+    type: 'array',
+    items: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime'] },
+  },
+  recommended_levers: { type: 'array', items: { type: 'string' } },
+  confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+  evidence: { type: 'array', items: { type: 'string' } },
+}, ['theoretical_bound', 'observed_limit', 'confidence']);
+const ROOFLINE_CASE_SCHEMA = obj({
+  case_id: { type: 'string' },
+  status: { type: 'string', enum: ['matched', 'skipped', 'failed'] },
+  weight: nullableNumber, regime: { type: ['string', 'null'] },
+  shape: { type: ['object', 'array', 'null'], additionalProperties: true },
+  dtypes: { type: 'array', items: { type: 'string' } },
+  matched_kernel_name: { type: ['string', 'null'] },
+  metrics: ROOFLINE_METRICS_SCHEMA,
+  classification: ROOFLINE_CLASSIFICATION_SCHEMA,
+}, ['case_id', 'status']);
+const ROOFLINE_SUMMARY_SCHEMA = obj({
+  case_count: { type: 'number' },
+  status_counts: { type: 'object', additionalProperties: { type: 'number' } },
+  case_routes: {
+    type: 'array',
+    items: obj({
+      case_id: { type: 'string' },
+      status: { type: 'string', enum: ['matched', 'skipped', 'failed'] },
+      matched_kernel_name: { type: ['string', 'null'] },
+      recommended_specialties: {
+        type: 'array',
+        items: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime'] },
+      },
+    }, ['case_id', 'status']),
+  },
+  priority_order: {
+    type: 'array',
+    items: obj({
+      case_id: { type: 'string' }, priority: { type: 'number' }, score: { type: 'number' },
+      weight: { type: 'number' }, headroom_ratio: nullableNumber, reason: { type: 'string' },
+    }, ['case_id', 'priority', 'weight', 'reason']),
+  },
+  recommended_specialties: {
+    type: 'array',
+    items: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime'] },
+  },
+  dominant_case_id: { type: ['string', 'null'] },
+  dominant_classification: ROOFLINE_CLASSIFICATION_SCHEMA,
+  note: { type: 'string' },
+}, ['case_count', 'case_routes', 'priority_order', 'dominant_classification']);
+const ROOFLINE_RESULT_SCHEMA = obj({
+  status: { type: 'string', enum: ['ok', 'partial', 'skipped', 'failed'] },
+  reason: { type: 'string' },
+  tool: obj({
+    path: { type: ['string', 'null'] }, source: { type: ['string', 'null'] },
+    version: { type: ['object', 'null'], additionalProperties: true },
+  }, []),
+  tool_version: { type: 'string' },
+  policy: obj({ version: { type: 'number' }, saturation_pct: { type: 'number' } },
+    ['version', 'saturation_pct']),
+  policy_version: { type: 'number' }, json_path: { type: 'string' },
+  dominant_case_id: { type: ['string', 'null'] },
+  cases: { type: 'array', items: ROOFLINE_CASE_SCHEMA },
+  summary: ROOFLINE_SUMMARY_SCHEMA,
+}, ['status', 'cases']);
 
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
@@ -224,6 +337,8 @@ const ANALYZE_SCHEMA = obj({
 const BENCH_SCHEMA = obj({
   commandment_path: { type: 'string' }, correctness_cmd: { type: 'string' },
   benchmark_cmd: { type: 'string' }, profile_cmd: { type: 'string' }, parse_hint: { type: 'string' },
+  profile_manifest_path: { type: 'string' }, roofline_enabled: { type: 'boolean' },
+  roofline_case_ids: { type: 'array', items: { type: 'string' } },
   baseline_per_case: { type: 'array', items: { type: 'object', additionalProperties: true } },
   baseline_geomean_ms: { type: 'number' }, num_test_cases: { type: 'number' },
   // Workload-aligned outputs: present when a WORKLOAD_SPEC drove case selection + weights.
@@ -243,6 +358,7 @@ const PROFILE_SCHEMA = obj({
   key_metrics: { type: 'object', additionalProperties: true },
   top_kernels: { type: 'array', items: { type: 'object', additionalProperties: true } },
   top_opportunities: { type: 'array', items: { type: 'string' } },
+  roofline: ROOFLINE_RESULT_SCHEMA,
   summary_path: { type: 'string' }, shift_note: { type: 'string' },
 }, ['bottleneck', 'top_opportunities']);
 
@@ -255,6 +371,9 @@ const PLAN_SCHEMA = obj({
       specialty: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime', 'deep_explore'] },
       focus_files: { type: 'array', items: { type: 'string' } },
       expected_speedup: { type: 'number' }, prompt: { type: 'string' },
+      evidence: { type: 'array', items: { type: 'string' } },
+      target_metrics: { type: 'object', additionalProperties: true },
+      roofline_case_ids: { type: 'array', items: { type: 'string' } },
       kk_refs: { type: 'array', items: { type: 'string' } }, // optional: perf_knowledge card paths for THIS direction (REFERENCE ONLY)
     }, ['id', 'title', 'specialty', 'prompt']),
   },
@@ -499,6 +618,7 @@ const bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0],
     ANALYSIS: analysis,
+    ROOFLINE_CONFIG,
     ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
     ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
     ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
@@ -507,6 +627,7 @@ const bench = await agentT(
 if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
+const PROFILE_MANIFEST = bench.profile_manifest_path || '';
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);
 
 // ===========================================================================
@@ -516,10 +637,13 @@ phase('Profile');
 let profileSummary = await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: 0,
-    COMMANDMENT,
+    COMMANDMENT, PROFILE_MANIFEST, ROOFLINE_CONFIG,
     ...RESUME_INPUT,
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
+if (ROOFLINE_MODE === 'required' && !rooflineMatched(profileSummary)) {
+  throw new Error('Required baseline roofline collection produced no matched case');
+}
 log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
 
 // ===========================================================================
@@ -618,13 +742,19 @@ Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patc
 ## Inputs
 ${cfg({
         SPECIALTY: d.specialty,
-        DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [], expected_speedup: d.expected_speedup, prompt: d.prompt },
+        DIRECTION: {
+          id: d.id, title: d.title, focus_files: d.focus_files || [],
+          expected_speedup: d.expected_speedup, prompt: d.prompt,
+          evidence: d.evidence || [], target_metrics: d.target_metrics || {},
+          roofline_case_ids: d.roofline_case_ids || [],
+        },
         ...(isDeep ? { TARGET: d.expected_speedup ? `reach ${d.expected_speedup}x (or ~90% of the roofline ceiling), whichever is the harder bar` : 'reach ~90% of the roofline ceiling' } : {}),
         KERNEL_PATH: `${d.out_dir}/workspace`,
         OUTPUT_DIR: d.out_dir,
         CANONICAL, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT,
         codebase_context: `${EVAL_DIR}/codebase_context.md`,
         profiling_summary: profileSummary ? profileSummary.summary_path : '',
+        ROOFLINE_EVIDENCE: profileSummary && profileSummary.roofline ? profileSummary.roofline : null,
         baseline_per_case: BASELINE_PER_CASE,
         INSIGHTS: history.insights,
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
@@ -736,9 +866,12 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     profileSummary = await agentT(
       roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
         WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: round,
-        COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+        COMMANDMENT, PROFILE_MANIFEST, ROOFLINE_CONFIG, PREVIOUS_METRICS: profileSummary,
       }),
       { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+    if (ROOFLINE_MODE === 'required' && !rooflineMatched(profileSummary)) {
+      throw new Error(`Required round ${round} roofline collection produced no matched case`);
+    }
   } else {
     noImprove++;
   }

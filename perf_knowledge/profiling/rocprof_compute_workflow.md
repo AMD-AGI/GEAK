@@ -11,6 +11,25 @@ sources:
 
 # rocprof-compute: profile → analyze → roofline
 
+## Install for GEAK
+
+GEAK keeps system mutation explicit. Validate without changing the system:
+
+```bash
+bash kernel_workflow/scripts/install_rocprof_compute.sh --check
+```
+
+Install the ROCm package plus required Python dependencies:
+
+```bash
+bash kernel_workflow/scripts/install_rocprof_compute.sh --install --required
+```
+
+The installer detects an existing executable first, otherwise installs the apt package
+`rocprofiler-compute`, repairs the package-provided `requirements.txt`, and pins pandas below 3 when
+needed by rocprof-compute 3.4.x. It is fail-soft without `--required`. Apt installation needs root or
+`sudo`; use `GEAK_ROOFLINE_COMPUTE_PATH` for a preinstalled nonstandard location.
+
 ## TL;DR
 Three verbs: **`profile`** (collect counters into `workloads/<name>/<SoC>/`), **`analyze`** (render
 SoL / memory-chart / roofline from that dir), and optionally a GUI/standalone mode. For a fast
@@ -71,6 +90,21 @@ scriptable, reproducible path; GUI is for exploration.
    [`reading_a_kernel_bottleneck.md`](reading_a_kernel_bottleneck.md).
 4. Apply a lever (e.g. [`../operators/dense_gemm/tuning.md`](../operators/dense_gemm/tuning.md)),
    re-profile, A/B with two `-p` paths.
+
+In GEAK's kernel workflow, keep this pass separate from the regular `profile_kernel.sh --no-roof`
+counter pass. Enable it with `args.roofline="auto"` (rollout default is `off`):
+
+```bash
+python3 kernel_workflow/scripts/roofline_kernel.py collect \
+  --manifest <EVAL_DIR>/profile_manifest.json \
+  --phase baseline \
+  --out-dir <EVAL_DIR>/roofline/baseline
+```
+
+The manifest binds every point to one reproducible case, shape, dtype, regime, weight, and target
+kernel pattern. `auto` writes a structured skipped/failed result when the tool is unavailable;
+`required` is intended for lab validation. The e2e model trace supplies hot-kernel and workload
+weights but does not run a model-wide roofline.
 
 ## Pitfalls
 - Profiling time ≠ real time: dispatch replay re-runs the kernel many times. Time elsewhere.

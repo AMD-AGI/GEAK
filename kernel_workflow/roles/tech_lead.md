@@ -142,6 +142,33 @@ moves it a lot. Do NOT let a high-variance speedup on a low-weight case decide t
 Your job: decide this round's directions (or stop). Re-read `geomean_levers.md` and the relevant
 optimization knowledge first.
 
+### Measured roofline contract
+
+When `PROFILE_SUMMARY.roofline.status` is `ok` or `partial`, use its structured evidence in this order:
+
+1. Workload weight / `%GPU` selects **which case matters**.
+2. `classification.observed_limit` selects the primary optimization specialty.
+3. `classification.theoretical_bound` checks the algorithmic roof but does not override observed
+   saturation.
+4. SoL/cache/wavefront/VGPR/dispatch evidence selects the concrete implementation lever.
+5. Correctness plus the COMMANDMENT benchmark remains the only keep/reject verdict.
+
+Route `hbm/cache` to memory, `compute` to compute, `lds` to memory+algorithm,
+`latency_occupancy` to algorithm+compute, and `overhead` to host_runtime. A memory-side theoretical
+point with low HBM and low compute utilization is NOT observed HBM saturation; prioritize parallelism,
+occupancy, split-K/grid sizing, or dependency stalls. Treat `confidence=low` as supporting context only.
+If you reject/override the deterministic policy recommendation, explain the conflicting measured
+evidence in `reasoning`.
+
+Every direction materially driven by a matched roofline case must fill:
+
+- `roofline_case_ids`: exact representative cases it targets.
+- `evidence`: case weight plus measured AI/ridge/utilization/efficiency facts.
+- `target_metrics`: measurable intended movement (for example MFMA utilization 18%→35% or empirical
+  roofline efficiency 24%→40%).
+
+Do not average AI across prefill/decode. Issue separate directions when their observed limits conflict.
+
 Rules:
 1. **Default to USING the budget — stopping early is the exception, not the default.** Unspent
    budget is wasted optimization, and the biggest wins are often found in LATER rounds (after
@@ -227,6 +254,9 @@ Return JSON:
       "focus_files": ["<rel paths this direction may edit>"],
       "expected_speedup": 2.0,
       "prompt": "full, self-contained task description for the engineer",
+      "evidence": ["measured case-specific reason for this direction"],
+      "target_metrics": {"roofline_efficiency_pct": "24% -> 40%"},
+      "roofline_case_ids": ["decode_m64"],
       "kk_refs": ["<optional perf_knowledge card paths grounding THIS direction; omit/[] if none>"]
     }
   ]

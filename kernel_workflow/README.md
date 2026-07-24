@@ -27,6 +27,9 @@ by an agent returning **structured JSON**.
    conflicting ones into a coherent best implementation). Does not consume budget.
 7. **Director arbitration (H)** — independently validates the final patch against the TRUE original
    baseline and can flag / request a corrective round.
+8. **Measured per-case roofline evidence** — after the benchmark contract fixes representative
+   shapes/dtypes, rocprof-compute supplies empirical AI/ridge/efficiency and observed resource
+   saturation. The TechLead receives structured routing evidence; the normal benchmark still decides.
 
 ## Roles → workflow mapping
 - **Director** = the script's orchestration + a setup agent + a final validation/arbitration agent.
@@ -36,7 +39,7 @@ by an agent returning **structured JSON**.
   `verify_engineer`, and `integrator`.
 
 ## Pipeline
-`Setup → Analyze+Roadmap → Benchmark(COMMANDMENT+baseline) → Baseline Profile →`
+`Setup → Analyze+Roadmap → Benchmark(COMMANDMENT+baseline+profile manifest) → Baseline Profile+Roofline →`
 `LOOP[ Plan round → (Optimize ‖ Verify, pipelined) → Integrate → Commit winner → Re-profile → Update memory ] →`
 `Final Report → Director Validation`.
 
@@ -90,6 +93,12 @@ Workflow({
                                //   unweighted geomean is kept as a secondary diagnostic). Correctness is
                                //   unaffected (it stays on the frozen reference_io.pt oracle).
                                //   Also accepted as op_spec.workload_path, or op_spec.workload (inline).
+    // --- isolated per-kernel roofline (optional; model-level e2e profiling is unchanged) ---
+    roofline: "off",           // "off" (rollout default) | "auto" (best effort) | "required"
+    roofline_install: "off",   // "off" (default) | "auto" (fail-soft apt install) | "required"
+    roofline_max_cases: 3,     // max representative workload cases to profile
+    roofline_timeout_sec: 1800,// timeout per rocprof-compute subprocess
+    roofline_saturation_pct: 60,
   }
 })
 ```
@@ -105,6 +114,38 @@ optimization target becomes the **time-weighted ratio-of-sums**
 contribution); the unweighted geomean is still reported. The perf **baseline is the original/extracted
 implementation**, never an LLM naive reimplementation. When invoked from the e2e layer this is wired
 automatically (profiler → extractor → `op_spec.workload_path`).
+
+### Per-case roofline
+With `roofline="auto"`, the Benchmark phase writes `profile_manifest.json` for up to three
+representative cases, then the Profile phase runs `scripts/roofline_kernel.py` alongside the existing
+`profile_kernel.sh` counter pass. The structured result keeps theoretical AI-vs-ridge placement
+separate from observed compute/HBM/cache/LDS saturation and passes measured evidence into round
+planning. `roofline="required"` turns collection failures into profile failures for controlled lab
+runs; `off` is the rollout default and disables the enhancement. Missing rocprof-compute never blocks
+`auto`. Switch the default to `auto` only after validating the installed rocprof-compute versions on
+the target gfx942/gfx950 systems.
+
+The workflow profiles isolated kernel cases, not the whole serving model. E2E torch/rocprofv3 traces
+continue to identify hot kernels and workload weights; correctness and unprofiled COMMANDMENT timing
+remain authoritative.
+
+#### Installing rocprof-compute
+Installation is explicit and disabled by default. Set `roofline_install="auto"` to let the baseline
+Profile phase detect the tool and, when missing, install the ROCm `rocprofiler-compute` apt package,
+its Python requirements, and the pandas `<3` compatibility pin. Installation failures are recorded in
+`EVAL_DIR/roofline/install.json` and remain fail-soft. Use `roofline_install="required"` to fail the
+Profile phase when installation cannot produce a runnable tool.
+
+The installer can also be run before the workflow:
+
+```bash
+bash kernel_workflow/scripts/install_rocprof_compute.sh --install --required \
+  --json-out /tmp/geak-rocprof-compute-install.json
+```
+
+System apt installation requires root or `sudo`. Overrides:
+`GEAK_ROOFLINE_COMPUTE_PATH`, `GEAK_ROOFLINE_APT_BIN`, `GEAK_ROOFLINE_PYTHON`,
+`GEAK_ROOFLINE_REQUIREMENTS`, and `GEAK_ROOFLINE_SUDO_BIN`.
 
 ### Author mode (NEW)
 `mode="author"` is for when there is **no existing source to optimize** — a hot op (e.g. a library

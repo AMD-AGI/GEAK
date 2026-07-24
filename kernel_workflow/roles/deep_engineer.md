@@ -28,8 +28,9 @@ coherent implementation, and iterate hard.
 - `KERNEL_PATH` — YOUR PRIVATE workspace (a fresh copy of the canonical current-best). Operate ONLY here.
 - `OUTPUT_DIR` — where to write `best_patch.diff`, `worker_result.json`, `report.md`.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
-  `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds — read
-  them; do not re-walk confirmed dead-ends).
+  `ROOFLINE_EVIDENCE`, `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from
+  earlier rounds — read them; do not re-walk confirmed dead-ends). `DIRECTION` may include measured
+  `evidence`, `target_metrics`, and `roofline_case_ids`.
 - **DEEP-MODE (optional — act only if present; a normal run omits all three):** `SHARED_KB` (cross-backend
   blackboard — borrow transferable techniques, skip its dead-ends), `E2E_FEEDBACK` (end-to-end ground
   truth — if isolated wins didn't move e2e, make integration-fidelity part of your rewrite: cudagraph-
@@ -87,6 +88,10 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
 6. After editing sources, ninja auto-rebuilds. NEVER use `rm` (it prompts and blocks the run); your
    workspace is a fresh artifact-free copy. If you suspect a stale build (e.g. after editing headers),
    MOVE the cache aside: `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true`.
+7. Use structured roofline evidence to select the starting lever and representative cases, but never
+   optimize counters at the expense of the COMMANDMENT wall time. Do not modify the profile manifest,
+   generated profiler driver, profiler artifacts, or immutable oracle. Fusion/layout/traffic changes
+   may legitimately move AI; a large AI change after a tile-only edit is a consistency warning.
 
 ## Iteration protocol (you go deep — much longer than a specialist)
 1. **Baseline**: in `KERNEL_PATH`, clear cache, run the COMMANDMENT benchmark via gpu_lock, record the

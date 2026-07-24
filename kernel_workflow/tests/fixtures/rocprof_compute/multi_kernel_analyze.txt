@@ -1,0 +1,29 @@
+4. Roofline
+## (4.1) Per-Kernel Roofline Metrics and (4.2) AI Plot Points
+
+Kernel 0: fp8_gemm_kernel (75.0%)
+| Metric_ID | Metric | Value | Unit | Peak (Empirical) |
+| 4.1.0 | VALU FLOPs (F32) | 120.0 | Gflop/s | 60000.0 |
+| 4.1.5 | MFMA FLOPs (FP8) | 800000.0 | Gflop/s | 1600000.0 |
+| 4.1.7 | HBM Bandwidth | 2400.0 | Gb/s | 4000.0 |
+| 4.1.8 | L2 Cache Bandwidth | 5000.0 | Gb/s | 20000.0 |
+| 4.1.9 | L1 Cache Bandwidth | 6000.0 | Gb/s | 30000.0 |
+| 4.1.10 | LDS Bandwidth | 10000.0 | Gb/s | 50000.0 |
+| 4.2.0 | AI HBM | 250.0 | Flops/byte |
+| 4.2.1 | AI L2 | 100.0 | Flops/byte |
+| 4.2.2 | AI L1 | 50.0 | Flops/byte |
+| 4.2.3 | Performance (GFLOPs) | 800000.0 | Gflop/s |
+| 17.1.5 | Peak HBM Bandwidth | 5300.0 | GB/s |
+
+Kernel 1: mxfp4_and_int8_kernel (25.0%)
+| Metric_ID | Metric | Value | Unit | Peak (Empirical) |
+| 4.1.0 | VALU FLOPs | N/A | Gflop/s | 60000.0 |
+| 4.1.4 | MFMA FLOPs (MXFP4) | 900000.0 | Gflop/s | 4000000.0 |
+| 4.1.5 | MFMA FLOPs (MXFP6) | 0.0 | Gflop/s | 4000000.0 |
+| 4.1.6 | MFMA IOPs (Int8) | 100000.0 | Giop/s | 2000000.0 |
+| 4.1.7 | HBM Bandwidth | 1000.0 | Gb/s | 4000.0 |
+| 4.2.0 | AI HBM | 50.0 | Flops/byte |
+| 4.2.1 | AI L2 | N/A | Flops/byte |
+| 4.2.2 | AI L1 | N/A | Flops/byte |
+| 4.2.3 | Performance (GFLOPs) | 900000.0 | Gflop/s |
+| 17.1.5 | Theoretical HBM Peak | 5300.0 | GB/s |
