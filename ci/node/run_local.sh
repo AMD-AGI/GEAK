@@ -72,12 +72,16 @@ WEIGHTS="$(model_weights "$MODEL_KEY")"; MODELS_ROOT="$(dirname "$WEIGHTS")"
 [ -d "$WEIGHTS" ] || die "weights dir not found: $WEIGHTS"
 log "model=$MODEL_KEY fw=$FW image=$IMAGE weights=$WEIGHTS ts=$RUN_TS budget=${BUDGET}s"
 
-# Persist Claude Code's temp tree (incl. background-task transcripts) by redirecting
-# TMPDIR into the per-run bind-mounted output dir. Same-path so it's identical inside
-# and outside the container, and survives the (--rm) container for debugging.
-DBG_TMP="$OUT_DIR/claude_tmp"
+# Container TMPDIR MUST be on a NODE-LOCAL fs, NOT the NFS-backed OUT_DIR. HIP/comgr
+# unbundles GPU code objects into TMPDIR, and on NFS that unbundle SIGSEGVs (exit 139,
+# "Failed to unbundle code object") — which silently env_blocks GEAK's offline kernel
+# harness (all heads flagged, no kernel ever optimized). Proven on gfx950: identical
+# torch eager ops give RC=0 with TMPDIR=/tmp but RC=139 with TMPDIR on NFS.
+# A long NFS path also overflows the ZMQ IPC 107-char sun_path limit. We bind it
+# same-path so Claude's temp tree still survives the (--rm) container for on-node debug.
+DBG_TMP="/tmp/geak_ci/$MODEL_KEY/$RUN_TS"
 mkdir -p "$DBG_TMP"
-log "TMPDIR=$DBG_TMP (Claude task tree persisted here)"
+log "TMPDIR=$DBG_TMP (node-local scratch; Claude task tree persisted here)"
 
 # Same-path bind mounts so paths are identical inside and outside the container:
 #   $WS          — workspace (geak_runtime, InferenceX, ...)
@@ -234,7 +238,7 @@ docker run --rm --name "$CONTAINER_NAME" \
   --label spur_job_id="${SLURM_JOB_ID:-}" \
   --device /dev/kfd --device /dev/dri --group-add video \
   --security-opt seccomp=unconfined --ipc=host --shm-size 32g \
-  -v "$WS:$WS" -v "$MODELS_ROOT:$MODELS_ROOT" "${GEAK_MOUNT[@]}" "${WEIGHTS_MOUNTS[@]}" \
+  -v "$WS:$WS" -v "$MODELS_ROOT:$MODELS_ROOT" -v "$DBG_TMP:$DBG_TMP" "${GEAK_MOUNT[@]}" "${WEIGHTS_MOUNTS[@]}" \
   -e WS="$WS" -e HF_LOGS="$HF_LOGS" -e INFERENCEX_PATH="$INFERENCEX_PATH" \
   -e GEAK_ROOT="$GEAK_ROOT" -e MODELS_TSV="$MODELS_TSV" \
   -e MODEL_PATH="$WEIGHTS" -e GEAK_PROBE_SKIP_CLAUDE \
