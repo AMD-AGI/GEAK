@@ -36,8 +36,13 @@ export SPUR_PROBE_TIME="${SPUR_PROBE_TIME:-1:00:00}"        # wall time for --pr
 # footprint) and submits to the first that can place the job now; if none can,
 # it submits to SPUR_ACCOUNT_FALLBACK and lets it pend.
 export SPUR_AUTOSELECT="${SPUR_AUTOSELECT:-1}"             # 0 = disable; use SPUR_ACCOUNT/SPUR_QOS as-is
-export SPUR_ACCOUNT_CANDIDATES="${SPUR_ACCOUNT_CANDIDATES:-amd-hyperloom:amd-hyperloom-qos amd-general:amd-general-qos}"
-export SPUR_ACCOUNT_FALLBACK="${SPUR_ACCOUNT_FALLBACK:-amd-hyperloom:amd-hyperloom-qos}"
+# QoS: the cluster removed the named QoS entries (amd-hyperloom-qos / amd-general-qos);
+# sbatch now rejects them ("QOS ... does not exist"). Submitting with an empty QoS is
+# accepted (the scheduler assigns the default), so the candidate/fallback entries carry
+# an EMPTY qos (the "account:" trailing colon parses to acct=<account>, qos=""). If the
+# admins reintroduce a required QoS, set it here (or via SPUR_QOS / the *:<qos> entries).
+export SPUR_ACCOUNT_CANDIDATES="${SPUR_ACCOUNT_CANDIDATES:-amd-hyperloom: amd-general:}"
+export SPUR_ACCOUNT_FALLBACK="${SPUR_ACCOUNT_FALLBACK:-amd-hyperloom:}"
 export SPUR_PROBE_WAIT_S="${SPUR_PROBE_WAIT_S:-24}"        # watch a probe this long before deeming a QoS full
 export SPUR_PROBE_POLL_S="${SPUR_PROBE_POLL_S:-3}"         # probe poll interval
 # Effective account/QoS used ONLY when auto-select is off, or for --print
