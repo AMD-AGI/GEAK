@@ -16,7 +16,9 @@ const ROOT = path.resolve(__dirname, '..', '..'); // .../GEAK
 const TARGETS = [
   { file: path.join(ROOT, 'e2e_workflow', 'e2e_workflow.js'),
     consumer: 'system_architect', nonConsumer: 'director' },
-  { file: path.join(ROOT, 'kernel_workflow', 'kernel_workflow.js'),
+  // kernel_workflow.js is now a thin dispatcher; the expert-skills consumer roles (tech_lead etc.)
+  // live in the single-language WORKER, kernel_lane.js — that is where the byte-identity invariant holds.
+  { file: path.join(ROOT, 'kernel_workflow', 'kernel_lane.js'),
     consumer: 'tech_lead', nonConsumer: 'director' },
 ];
 

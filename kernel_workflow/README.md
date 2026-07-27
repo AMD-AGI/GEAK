@@ -77,9 +77,11 @@ Workflow({
     exp_root: "",              // optional, output root; default = sibling "exp/" next to workflow_dir
     eval_dir: "",              // optional, override the output dir for this single run
     apply_to_original: "false",// optional; if "true", write the validated patch back to kernel_path
-    // --- author mode (write a fresh implementation from scratch, then optimize it) ---
+    // --- mode dispatch (kernel_workflow.js is the single ENTRY POINT / dispatcher) ---
     mode: "optimize",          // optional: "optimize" (default, edit an existing kernel) | "author"
+                               //   | "bakeoff" (try several backend languages, keep the fastest)
     target_language: "triton", // author mode: triton (always) | flydsl | hip | ck — the language to write
+    backends: ["hip","triton","flydsl"], // bakeoff: which backend languages to race (empty = auto-discover)
     op_spec: {},               // author mode: {op_kind, shapes, dtype, math_contract, regime} for the op
     perf_knowledge_dir: "",  // optional: AMD authoring knowledge base the author_engineer reads
     // --- workload alignment (optional; aligns the PERF harness with the real workload) ---
@@ -115,6 +117,46 @@ oracle), commits it as the baseline, and then the **same optimize loop** improve
 `authored:false` / `validation_status:"author_failed"` if no correct baseline can be produced (the
 caller drops that language). `mode="optimize"` (default) is unchanged and fully backward compatible.
 
+### Bake-off mode (NEW) — one kernel, many backend languages, keep the fastest
+`kernel_workflow.js` is now the single **ENTRY POINT / dispatcher**; the single-language pipeline lives
+in the sibling **`kernel_lane.js` worker**:
+
+- `mode="optimize" | "author"` → the dispatcher **passes straight through** to one `kernel_lane` worker
+  (byte-compatible with the old behavior; the worker is `kernel_lane.js`, unchanged).
+- `mode="bakeoff"` → the dispatcher **is the bake-off orchestrator** (pass `backends`, or leave empty to auto-discover):
+  1. **Freeze** (`roles/oracle_freezer.md`): run the input kernel once to freeze ONE immutable oracle
+     (`reference_io.pt` + frozen `baseline_src/` + immutable `unittest.py`) — no server needed. The
+     golden output and the speedup denominator are BOTH the input kernel's own behavior.
+  2. **Discover**: reuse e2e's `op_benchmarker` role **in place and UNCHANGED** to probe per-language
+     existing impls, decide the `author_plan`, AND run the per-backend GEMM/quant tune. The role's Tier-B
+     tune is written for a live server; since a standalone run has none, the dispatcher's prompt redirects
+     it to run **offline** — the tune shapes come from the frozen oracle's `meta.json` (real M/N/K/`bias`/
+     dtype, so no server capture and no bias guessing), and engagement is verified in the **isolated**
+     `unittest`/`op_bench` (`AITER_LOG_TUNED_CONFIG`, not `server.log`). Only pure server-flag levers
+     (`--attention-backend` swap, serving-only playbook probes) are skipped. **The e2e `op_benchmarker.md`
+     file is never edited** — all standalone behavior is carried by the dispatcher prompt.
+  3. **Bake-off**: run one **unchanged `kernel_lane` worker per backend language** in parallel over the
+     GPU pool (1 GPU/lane; `gpu_ids` with >1 id runs lanes concurrently, a single id serializes them).
+  4. **Report**: rank **all candidates** on the **SAME frozen baseline** (the anti-cheating invariant)
+     and pick the fastest — three candidate classes: the input-language *optimize* lane, each *author*
+     lane, and the *tuned env backend* (aiter/CK) from Discover. Optional `apply_to_original` (a lane
+     winner applies its patch; an env winner records its `apply_env` + tuning artifact).
+
+Available backend languages: `triton` (always) · `flydsl` (SOTA GEMM DSL) · `hip` · `ck`, plus the
+skeletons under `../perf_knowledge/languages/` — a language absent on the image is dropped with an
+advisory, never a hard fail. Cost ≈ N languages × one single-lane run.
+
+**Nesting:** the dispatcher runs each lane via `workflow(kernel_lane.js)` at exactly ONE level
+(dispatcher=0 → worker=1). `e2e_workflow` and `kernel_workflow_bmk` therefore call the **worker
+(`kernel_lane.js`) directly**, never the dispatcher, so they never exceed one level.
+
+```
+Workflow({ scriptPath: "<WF_DIR>/kernel_workflow.js", args: {
+  kernel_path: "/abs/path/to/my_hip_kernel", workflow_dir: "<WF_DIR>",
+  mode: "bakeoff", backends: ["hip","triton","flydsl"], gpu_ids: "0,1,2", budget: 6,
+}})
+```
+
 `<WF_DIR>` is the only location-specific value and it is supplied at call time (it is just the
 dirname of `scriptPath`). Everything else is derived: `exp_root` defaults to `<parent of WF_DIR>/exp`.
 
@@ -142,11 +184,15 @@ Director/TechLead/Engineer orchestration is identical.
 
 ## Files
 ```
-kernel_workflow.js     orchestration (deterministic)
+kernel_workflow.js     ENTRY POINT / dispatcher (mode=optimize|author -> kernel_lane; mode=bakeoff -> multi-language bake-off)
+kernel_lane.js         single-language WORKER (the deterministic optimize/author pipeline; called per lane)
+kernel_workflow_bmk.js batch orchestrator (runs kernel_lane on a list of kernels, one batch per GPU)
 roles/               director, tech_lead, engineer, deep_engineer (deep_explore),
                      author_engineer, benchmark_engineer, profile_engineer,
-                     verify_engineer, integrator
+                     verify_engineer, integrator, oracle_freezer (bake-off freeze)
 knowledge/           optimization_strategies, hip/triton/wrapper, profiling_guide,
                      amd_instinct (multi-card: gfx942/gfx950), self_monitoring, geomean_levers
 scripts/             gpu_lock.sh, profile_kernel.sh
 ```
+The bake-off references e2e's `op_benchmarker` role + `harness_lib.py` **in place** at
+`../e2e_workflow/` (single source, no copy).
