@@ -92,14 +92,26 @@ container_cpu_pct() {
 }
 
 # Freshest activity: newest mtime (epoch, integer) among the run's REAL artifacts
-# under $OUT_DIR. The single run.log is only a pre-container startup banner — the
-# live progress is server.log, bench_runs*.jsonl, profile/, ix_client/, and the
-# claude session/cache tree. We EXCLUDE the monitor's own outputs (monitor.log,
-# monitor_verdict.json) and the host stdout (slurm.out, which carries our own
-# stderr) so the watchdog never mistakes its OWN heartbeat for run progress.
+# under $OUT_DIR *and* any extra dirs in GEAK_MONITOR_WATCH_DIRS. The single
+# run.log is only a pre-container startup banner — the live progress is
+# server.log, bench_runs*.jsonl, profile/, ix_client/, the claude session/cache
+# tree AND the geak exp_root (<model>/geak/e2e_*), where the long kernel-
+# optimization phase writes (round_*/engineer_*/workspace, patches, configs,
+# .git) while GPU/CPU are legitimately idle. exp_root lives OUTSIDE $OUT_DIR, so
+# it MUST be watched too or an active optimization leg is falsely killed as a
+# wedge. We EXCLUDE the monitor's own outputs (monitor.log, monitor_verdict.json)
+# and the host stdout (slurm.out, which carries our own stderr) so the watchdog
+# never mistakes its OWN heartbeat for run progress.
 # Echoes "" when nothing is found yet (treated as "no evidence" by the caller).
 freshest_activity_epoch() {
-  find "$OUT_DIR" -type f \
+  local dirs=("$OUT_DIR") d _ew
+  IFS=':' read -r -a _ew <<< "${GEAK_MONITOR_WATCH_DIRS:-}"
+  for d in "${_ew[@]}"; do
+    [ -n "$d" ] && [ -d "$d" ] || continue          # skip empty / not-yet-created
+    case "$d" in "$OUT_DIR"|"$OUT_DIR"/*) continue;; esac   # already covered by OUT_DIR
+    dirs+=("$d")
+  done
+  find "${dirs[@]}" -type f \
     ! -name monitor.log ! -name monitor_verdict.json ! -name slurm.out \
     -printf '%T@\n' 2>/dev/null | cut -d. -f1 | sort -n | tail -1
 }
@@ -176,7 +188,7 @@ decide_stall() {  # args: delta age_s (unused: activity is measured from OUT_DIR
 }
 
 log "started: mode=$MODE container=$CONTAINER interval=${INTERVAL}s confirm=${CONFIRM} log=$LOG${MODEL:+ model=$MODEL}"
-[ "$MODE" = stall ] && log "stall thresholds: kill after ${STALL_KILL_S}s with NO artifact writes under $OUT_DIR AND GPU<=${STALL_GPU_PCT}% AND CPU<=${STALL_CPU_PCT}%"
+[ "$MODE" = stall ] && log "stall thresholds: kill after ${STALL_KILL_S}s with NO artifact writes under {$OUT_DIR${GEAK_MONITOR_WATCH_DIRS:+ + $GEAK_MONITOR_WATCH_DIRS}} AND GPU<=${STALL_GPU_PCT}% AND CPU<=${STALL_CPU_PCT}%"
 
 # Wait for the container to come up before treating "not running" as "finished",
 # so we don't exit during the (healthcheck + image pull) startup window.

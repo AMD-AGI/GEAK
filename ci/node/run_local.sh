@@ -283,9 +283,16 @@ fi
 # trap tears it down on any early exit of this script.
 MON_PID=""
 if [ "$GEAK_MONITOR" != "0" ] && [ "$PROBE" != "1" ]; then
-  bash "$HERE/../monitor/run_monitor.sh" "$CONTAINER_NAME" "$OUT_DIR/run.log" "$OUT_DIR" "$DOCKER_PID" &
+  # The geak exp_root lives OUTSIDE $OUT_DIR (run_model.sh sets it to
+  # <model_dir>/geak, basename must be "geak"). The long kernel-optimization
+  # phase writes only there (round_*/engineer_*/workspace, patches, .git) while
+  # GPU/CPU are idle, so the monitor MUST watch it too or it false-kills an
+  # active run. Mirror run_model.sh's default and honor an explicit EXP_ROOT.
+  MON_WATCH="${EXP_ROOT:-$HF_LOGS/$MODEL_KEY/geak}"
+  GEAK_MONITOR_WATCH_DIRS="$MON_WATCH" \
+    bash "$HERE/../monitor/run_monitor.sh" "$CONTAINER_NAME" "$OUT_DIR/run.log" "$OUT_DIR" "$DOCKER_PID" &
   MON_PID=$!
-  log "monitor started (pid=$MON_PID, container=$CONTAINER_NAME)"
+  log "monitor started (pid=$MON_PID, container=$CONTAINER_NAME, watch=+$MON_WATCH)"
 fi
 # IMPORTANT: also `docker kill` the container. Containers are owned by the host
 # dockerd, NOT this job's SLURM cgroup, so a wall-clock timeout / scancel SIGTERM
