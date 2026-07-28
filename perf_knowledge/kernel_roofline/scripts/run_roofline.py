@@ -176,19 +176,76 @@ def parse_top_kernels(profile_path: Path) -> list[str]:
 _KERNEL_HEADER_RE = re.compile(r"^Kernel\s+\d+:\s*(.*?)\s*\(\d+(?:\.\d+)?%\)\s*$")
 
 
-def parse_kernel_header_names(content: str) -> list[str]:
-    """Ordered per-kernel names from the analyze block ``Kernel N: <name> (pct%)`` headers.
+def parse_kernel_blocks(content: str) -> list[tuple[str, dict, dict]]:
+    """Segment ``analyze -b 4`` output by kernel; parse each kernel's 4.1/4.2 blocks.
 
-    These headers are printed by rocprof-compute immediately before each kernel's
-    4.1/4.2 blocks, so they are inherently 1:1 and in-order with the parsed rate /
-    AI blocks — unlike ``pmc_kernel_top.csv`` whose row order need not match.
+    Returns one ``(name, rates, ai)`` per kernel, in order, where
+    ``rates`` maps metric -> ``(value, peak_or_None, unit)`` and
+    ``ai`` maps metric -> ``(value, unit)``.
+
+    Segmenting per kernel (using the ``Kernel N: <name> (pct%)`` headers as
+    delimiters) is what keeps names, rates and AI aligned. The previous design
+    parsed rates and AI in two independent global passes and zipped them by
+    position, which silently misaligns whenever any single 4.1 or 4.2 block is
+    empty (one list gets a shorter length than the other). It also relied on a
+    global ``break`` at the first ``4.3 Roofline Plot`` line, which dropped every
+    kernel after the first when 4.3 is emitted per-kernel. Both are avoided here:
+    each row is attributed to the current kernel/table, and 4.3 rows simply match
+    no active table state.
     """
-    names: list[str] = []
+    kernels: list[list] = []          # each entry: [name, rates, ai]
+    cur: list | None = None
+    state: str | None = None          # None | "rates" | "ai"
+
+    def _start(name: str) -> None:
+        nonlocal cur
+        cur = [name, {}, {}]
+        kernels.append(cur)
+
     for line in content.split("\n"):
         m = _KERNEL_HEADER_RE.match(line.strip())
         if m:
-            names.append(m.group(1).strip())
-    return names
+            _start(m.group(1).strip())
+            state = None
+            continue
+        if "4.1 Roofline Rate Metrics" in line:
+            if cur is None:                       # blocks before any header
+                _start(f"kernel_{len(kernels)}")
+            state = "rates"
+            continue
+        if "4.2 Roofline AI Plot Points" in line:
+            if cur is None:
+                _start(f"kernel_{len(kernels)}")
+            state = "ai"
+            continue
+        if "╘═" in line:                          # end of the current table
+            state = None
+            continue
+        if cur is None or state is None or "│" not in line:
+            continue
+        parts = [p.strip() for p in line.split("│")]
+        if state == "rates" and "4.1." in line and len(parts) >= 6:
+            # Keep the row whenever the achieved value parses; the peak may be
+            # "N/A" (e.g. F6F4/fp4 has no empirical peak on some rocprof
+            # versions) -> store peak as None instead of dropping the row.
+            val = _num(parts[3])
+            if val is not None:
+                cur[1][parts[2]] = (val, _num(parts[5]), parts[4])
+        elif state == "ai" and "4.2." in line and len(parts) >= 5:
+            metric_name, value, unit = parts[2], _num(parts[3]), parts[4]
+            if value is None or not ("AI" in metric_name or "Performance" in metric_name):
+                continue
+            if "Performance" in metric_name:
+                # Normalize achieved compute to a canonical TFLOP/s key regardless
+                # of the reported prefix (rocprof usually emits Gflop/s, but be
+                # robust to M/G/T/Pflop/s) so downstream can always read
+                # "Performance (TFLOPs)".
+                scale = {"m": 1e-6, "g": 1e-3, "t": 1.0, "p": 1e3}.get(
+                    unit.strip()[:1].lower(), 1e-3)
+                value, unit, metric_name = value * scale, "TFLOPS", "Performance (TFLOPs)"
+            cur[2][metric_name] = (value, unit)
+
+    return [(name, rates, ai) for name, rates, ai in kernels]
 
 
 def _recover_full_name(header_name: str, top_names: list[str]) -> str:
@@ -230,79 +287,15 @@ def parse_list_stats(content: str) -> list[tuple[int, str]]:
     return out
 
 
-def parse_roofline_rates(content: str) -> list[dict[str, tuple[float, float, str]]]:
-    """Parse every ``4.1 Roofline Rate Metrics`` block: metric -> (value, peak, unit)."""
-    kernel_rates: list[dict[str, tuple[float, float, str]]] = []
-    rates: dict[str, tuple[float, float, str]] = {}
-    in_section = False
-    for line in content.split("\n"):
-        if "4.1 Roofline Rate Metrics" in line:
-            in_section, rates = True, {}
-            continue
-        if in_section and "╘═" in line:
-            in_section = False
-            if rates:
-                kernel_rates.append(rates)
-            continue
-        if "4.3 Roofline Plot" in line:
-            break
-        if in_section and "│" in line and "4.1." in line:
-            parts = [p.strip() for p in line.split("│")]
-            if len(parts) >= 6:
-                # Keep the row whenever the achieved value parses; the peak may be
-                # "N/A" (e.g. F6F4/fp4 has no empirical peak on some rocprof
-                # versions) -> store peak as None instead of dropping the row,
-                # otherwise the kernel's dominant-dtype achieved FLOPs would be
-                # lost and peak selection would silently fall back to a wrong dtype.
-                val = _num(parts[3])
-                if val is None:
-                    continue
-                rates[parts[2]] = (val, _num(parts[5]), parts[4])
-    if in_section and rates:
-        kernel_rates.append(rates)
-    return kernel_rates
-
-
-def parse_roofline_ai(content: str) -> list[dict[str, tuple[float, str]]]:
-    """Parse every ``4.2 Roofline AI Plot Points`` block: metric -> (value, unit)."""
-    kernel_metrics: list[dict[str, tuple[float, str]]] = []
-    ai_metrics: dict[str, tuple[float, str]] = {}
-    in_section = False
-    for line in content.split("\n"):
-        if "4.2 Roofline AI Plot Points" in line:
-            in_section, ai_metrics = True, {}
-            continue
-        if in_section and "╘═" in line:
-            in_section = False
-            if ai_metrics:
-                kernel_metrics.append(ai_metrics)
-            continue
-        if "4.3 Roofline Plot" in line:
-            break
-        if in_section and "│" in line and "4.2." in line:
-            parts = [p.strip() for p in line.split("│")]
-            if len(parts) >= 5:
-                try:
-                    metric_name, value, unit = parts[2], float(parts[3]), parts[4]
-                except (ValueError, IndexError):
-                    continue
-                if "AI" in metric_name or "Performance" in metric_name:
-                    if "Performance" in metric_name:
-                        # Normalize achieved compute to a canonical TFLOP/s key
-                        # regardless of the reported prefix (rocprof usually emits
-                        # Gflop/s, but be robust to M/G/T/Pflop/s) so downstream
-                        # can always read "Performance (TFLOPs)".
-                        scale = {"m": 1e-6, "g": 1e-3, "t": 1.0, "p": 1e3}.get(
-                            unit.strip()[:1].lower(), 1e-3)
-                        value, unit, metric_name = value * scale, "TFLOPS", "Performance (TFLOPs)"
-                    ai_metrics[metric_name] = (value, unit)
-    if in_section and ai_metrics:
-        kernel_metrics.append(ai_metrics)
-    return kernel_metrics
-
-
 def skip_filtered_rows(profile_path: Path, content: str, skip_noise: bool = False):
-    """``zip(top_kernels, rates, ai)`` rows for every kernel.
+    """Per-kernel ``(names, rates, ai)`` lists, aligned by construction.
+
+    Kernel names come from ``parse_kernel_blocks`` (the analyze ``Kernel N: <name>
+    (pct%)`` headers, which own the 4.1/4.2 blocks below them);
+    ``pmc_kernel_top.csv`` is only an optional fallback to un-truncate a long
+    header name. Because the three lists are produced from the same per-kernel
+    segmentation they are always the same length and 1:1 — no kernel is silently
+    dropped, and none can shift onto another kernel's data.
 
     By default NO kernel is filtered by name (the tool must not silently drop a
     kernel the user actually wants to roofline — e.g. a rocBLAS ``Cijk_`` GEMM or
@@ -310,27 +303,15 @@ def skip_filtered_rows(profile_path: Path, content: str, skip_noise: bool = Fals
     set, only genuine input-generation / init noise (``NOISE_PATTERNS``) is
     dropped.
     """
-    rates = parse_roofline_rates(content)
-    ai = parse_roofline_ai(content)
-    # Names come from the analyze block headers (1:1, in-order with the 4.1/4.2
-    # blocks). pmc_kernel_top.csv is only an optional fallback to un-truncate a
-    # long header name. This guarantees one name per parsed block, so no kernel
-    # is ever silently dropped just because the CSV was unreadable or reordered.
-    header_names = parse_kernel_header_names(content)
     top = parse_top_kernels(profile_path)
-    aligned = [_recover_full_name(h, top) for h in header_names]
-    # Defensive: if headers were somehow fewer than the parsed blocks, pad so the
-    # zip below never truncates the block list (names never fewer than blocks).
-    while len(aligned) < len(rates):
-        aligned.append(f"kernel_{len(aligned)}")
-
     names, rates_out, ai_out = [], [], []
-    for k, r, a in zip(aligned, rates, ai):
-        if skip_noise and any(p in k for p in NOISE_PATTERNS):
+    for name, rates, ai in parse_kernel_blocks(content):
+        name = _recover_full_name(name, top)
+        if skip_noise and any(p in name for p in NOISE_PATTERNS):
             continue
-        names.append(k)
-        rates_out.append(r)
-        ai_out.append(a)
+        names.append(name)
+        rates_out.append(rates)
+        ai_out.append(ai)
     return names, rates_out, ai_out
 
 
@@ -369,6 +350,32 @@ def _f(x):
     return f"{x:.2f}" if isinstance(x, (int, float)) else "N/A"
 
 
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _rate_get(rates: dict, wanted: str):
+    """Tolerant metric lookup: exact -> whitespace/case-normalized -> substring.
+
+    rocprof-compute metric labels are matched by exact string elsewhere, which
+    breaks silently if a version tweaks the label (e.g. ``HBM Bandwidth`` vs
+    ``HBM Bandwidth (GB/s)``): the parsed summary uses substring matching and
+    still shows the row, while an exact ``dict.get`` in the efficiency path
+    returns None and reports "insufficient data". This normalizes the lookup so
+    both paths agree.
+    """
+    if wanted in rates:
+        return rates[wanted]
+    w = _norm(wanted)
+    for k, v in rates.items():
+        if _norm(k) == w:
+            return v
+    for k, v in rates.items():
+        if w in _norm(k):
+            return v
+    return None
+
+
 def dominant_dtype(rates: dict):
     """Return the dtype key (COMPUTE_METRICS) with the largest achieved value.
 
@@ -376,7 +383,7 @@ def dominant_dtype(rates: dict):
     """
     best_key, best_ach = None, 0.0
     for key, metric in COMPUTE_METRICS.items():
-        m = rates.get(metric)
+        m = _rate_get(rates, metric)
         if m and m[0] is not None and m[0] > best_ach:
             best_key, best_ach = key, m[0]
     return best_key
@@ -397,7 +404,7 @@ def select_compute_peak(rates: dict, compute_peak: str):
     An explicit ``--compute-peak <dtype>`` forces that dtype's empirical peak.
     """
     def peak_of(key):
-        m = rates.get(COMPUTE_METRICS[key])
+        m = _rate_get(rates, COMPUTE_METRICS[key])
         return m[1] if m else None
 
     if compute_peak != "auto":
@@ -458,7 +465,10 @@ def compute_roofline_efficiency(names, rates_list, ai_list, compute_peak: str,
       * ``datasheet``: fixed vendor peaks from DATASHEET_PEAKS[arch].
       * ``both``: print the empirical block AND a datasheet cross-check per kernel.
     """
-    out = ["", "=== Roofline efficiency (empirical, per-run peaks) ==="]
+    _hdr = {"empirical": "empirical, per-run peaks",
+            "datasheet": "datasheet vendor peaks",
+            "both": "empirical + datasheet cross-check"}.get(peaks, peaks)
+    out = ["", f"=== Roofline efficiency ({_hdr}) ==="]
     if not names:
         out.append("No kernel with a roofline block was found.")
         return "\n".join(out)
@@ -466,7 +476,7 @@ def compute_roofline_efficiency(names, rates_list, ai_list, compute_peak: str,
     for name, rates, ai in zip(names, rates_list, ai_list):
         out.append(f"\nkernel: {name}")
 
-        hbm = rates.get("HBM Bandwidth")
+        hbm = _rate_get(rates, "HBM Bandwidth")
         peak_bw = hbm[1] if hbm else None
         achieved_bw = hbm[0] if hbm else None
 
@@ -477,14 +487,21 @@ def compute_roofline_efficiency(names, rates_list, ai_list, compute_peak: str,
         else:
             peak_compute, kind = select_compute_peak(rates, compute_peak)
 
-        ai_hbm = ai.get("AI HBM", (None,))[0]
-        perf_t = ai.get("Performance (TFLOPs)", (None,))[0]
+        ai_hbm = (_rate_get(ai, "AI HBM") or (None,))[0]
+        perf_t = (_rate_get(ai, "Performance (TFLOPs)") or (None,))[0]
         perf = perf_t * 1000.0 if perf_t is not None else None
 
         out.append(f"  AI (HBM)            : {_f(ai_hbm)} FLOP/byte")
         out.append(f"  Perf (achieved)     : {_f(perf)} GFLOP/s")
         out.append(f"  Peak_BW_emp (HBM)   : {_f(peak_bw)} GB/s")
         out.append(f"  Peak_Compute [{kind}]: {_f(peak_compute)} GFLOP/s")
+
+        # int8 kernels do integer MFMA ops (MFMA IOPs); rocprof's FLOP-based
+        # Performance then reads ~0, so the derived Roofline Eff. is meaningless.
+        if dominant_dtype(rates) == "mfma_int8":
+            out.append("  NOTE: int8 (MFMA IOPs) kernel — Perf is FLOP-based (≈0), so "
+                       "Roofline Eff. below is NOT meaningful; read the achieved IOP "
+                       "rate / HBM BW instead.")
 
         if peaks in ("empirical", "both"):
             ridge, attainable, eff, bound = _eff_line(ai_hbm, perf, peak_bw, peak_compute)
@@ -523,8 +540,7 @@ def compute_roofline_efficiency(names, rates_list, ai_list, compute_peak: str,
 # --------------------------------------------------------------------------- #
 # Modes
 # --------------------------------------------------------------------------- #
-def _guard_arch() -> str | None:
-    arch = detect_gpu_arch()
+def _guard_arch(arch: str) -> str | None:
     if arch and is_rdna(arch):
         return (f"rocprof-compute roofline does not support RDNA ({arch}). "
                 "Use a CDNA / MI-series GPU.")
@@ -553,7 +569,8 @@ def resolve_kernel_ids(profile_path: Path, workdir, kernel: str) -> tuple[list[i
 def run_roofline_mode(workdir, cmd, out_dir, name, compute_peak, hbm_peak_const,
                       compute_peak_const=None, skip_noise=False, kernel=None,
                       peaks="both") -> int:
-    err = _guard_arch()
+    arch = detect_gpu_arch()
+    err = _guard_arch(arch)
     if err:
         print(f"[roofline] {err}")
         (out_dir / f"{name}_roofline_error.txt").write_text(err)
@@ -613,7 +630,7 @@ def run_roofline_mode(workdir, cmd, out_dir, name, compute_peak, hbm_peak_const,
         summary = roofline_summary(names, rates_list, ai_list)
         eff = compute_roofline_efficiency(names, rates_list, ai_list, compute_peak,
                                           hbm_peak_const, compute_peak_const,
-                                          peaks, detect_gpu_arch())
+                                          peaks, arch)
         report = summary + "\n" + eff
         (out_dir / f"{name}_roofline.txt").write_text(report)
         (out_dir / f"{name}_roofline_raw.txt").write_text(content)
@@ -631,7 +648,7 @@ def run_roofline_mode(workdir, cmd, out_dir, name, compute_peak, hbm_peak_const,
 
 def run_full_mode(workdir, cmd, out_dir, name) -> int:
     """Raw full profile + persistent txt report (every counter, all blocks)."""
-    err = _guard_arch()
+    err = _guard_arch(detect_gpu_arch())
     if err:
         print(f"[full] {err}")
         return 1
