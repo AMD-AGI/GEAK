@@ -660,6 +660,8 @@ async function ensureFlydslGate() {
     const n = stripFlydslFromQueues(headQueue, kernelQueue);
     log(`[flydsl-gate] ensure_flydsl FAILED (${(g && g.reason) || 'no result'}) -> stripped 'flydsl' from ${n} candidate backend list(s); those heads fall back to their other backends (no silent flydsl selection).`);
   }
+}
+
 // A FROZEN baseline is resolvable when the extractor either froze baseline_src/ (baseline_frozen)
 // OR set an importable meta.baseline_callable. That is the language-independent speedup denominator.
 const hasFrozenBaseline = (ext) =>
