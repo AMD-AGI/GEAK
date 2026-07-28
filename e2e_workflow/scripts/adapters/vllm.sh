@@ -36,6 +36,11 @@ adapter_launch() {
   local -a _prof_env=()
   if [ -n "${PROFILE_DIR:-}" ]; then
     if python3 -c 'from vllm.config import ProfilerConfig' 2>/dev/null; then
+      # We deliberately DO NOT pass detailed_trace_annotation: current vllm's ProfilerConfig is a strict
+      # (pydantic extra=forbid) schema that ABORTS the server on that key. When a build DOES accept it, it
+      # emits the execute_context_*_generation_* step spans (gpu_user_annotation, torch record_function —
+      # they DO appear on ROCm) that parse_profile.py uses to split prefill/decode; without it the split
+      # falls back to the analytic est_calls / shape path. record_shapes stays on for Input Dims.
       _prof=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true}")
     else
       _prof_env=(VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR")
@@ -84,4 +89,37 @@ adapter_bench() {
       >> "$RESULT_JSONL" 2>/dev/null || cat "$res_json" >> "$RESULT_JSONL"
     rm -f "$res_json"
   fi
+}
+
+# adapter_profile_window — capture a profiler window on the ALREADY-RUNNING, warm, mid-load server via
+# vllm's HTTP profiler, so the trace reflects the real continuous-batching steady-state mix (prefill
+# chunks + decode interleaved) instead of the cold prefill ramp `vllm bench serve --profile` would catch.
+# Requires the server to have been launched with the torch profiler enabled (adapter_launch does:
+# --profiler-config / VLLM_TORCH_PROFILER_DIR, with record_shapes=true so the parser gets Input Dims).
+#
+# DIFFERS FROM sglang: vllm's /start_profile takes NO num_steps — it runs until /stop_profile. So the
+# window is TIME-controlled: start, sleep PROFILE_WINDOW_SEC of steady-state load, then stop. The trace
+# is flushed on /stop_profile (the server blocks until the flush completes), so we allow a long curl
+# timeout and then confirm a new trace landed.
+adapter_profile_window() {
+  local before after
+  before=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
+  if ! curl -sf -X POST "${BASE_URL}/start_profile" >/dev/null 2>&1; then
+    echo "!!! /start_profile request failed (vllm torch profiler not enabled at launch?)" >&2
+    return 1
+  fi
+  # profile a steady-state window of this duration (no num_steps knob on vllm)
+  sleep "${PROFILE_WINDOW_SEC:-40}"
+  # /stop_profile flushes the trace; the server waits for the flush, so give curl a generous timeout.
+  curl -s --max-time "${PROFILE_WINDOW_TIMEOUT:-180}" -X POST "${BASE_URL}/stop_profile" \
+    >/dev/null 2>&1 || echo "!!! /stop_profile request errored (checking for a trace anyway)" >&2
+  # wait for a NEW trace to land (flush is async on some builds even after the stop returns)
+  local deadline=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
+    [ "$after" -gt "$before" ] && { sleep 2; return 0; }   # +2s for the write to flush
+    sleep 3
+  done
+  after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
+  [ "$after" -gt "$before" ]
 }

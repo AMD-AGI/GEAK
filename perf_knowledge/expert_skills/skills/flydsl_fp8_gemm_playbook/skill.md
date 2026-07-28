@@ -2,7 +2,7 @@
 id: flydsl_fp8_gemm_playbook
 title: "FlyDSL fused fp8 a8w8 blockscale GEMM, capture-safe bare-core bind (down-proj head)"
 kind: expert_skill
-authors: [zihao]
+authors: [GEAK Team]
 scope: e2e
 match:
   operator: dense_gemm
@@ -23,7 +23,6 @@ validation:
   gpu: gfx942/MI300X
   model: Qwen-Qwen3.5-27B-FP8
   measured: {isolated: "2.432x (down-proj h1)", e2e_pct: "+67.4", parity: "pass (greedy)"}
-  artifact: ../../../../examples/e2e_workflow/qwen3.5-27b-fp8_sglang_flydsl-downproj-autointegrate/
 role: advisory_prior
 supersedes: []
 ---
@@ -76,8 +75,8 @@ blockscale path so it runs inside the existing captured graph instead of creatin
 - When not triggered (non-fp8-blockscale model, or down-proj < min_pct_gpu), the skill is inert.
 
 ## Sources
-- `examples/e2e_workflow/qwen3.5-27b-fp8_sglang_flydsl-downproj-autointegrate/final_report.md` —
-  931.593 → 1559.934 tok/s = **1.674x (+67.4%)**, parity pass; h1 down-proj iso 2.432x, e2e +60.09%.
+- Flagship measured result: 931.593 → 1559.934 tok/s = **1.674x (+67.4%)**, parity pass;
+  h1 down-proj iso 2.432x, e2e +60.09%.
 - Live eval dir: `exp/e2e_Qwen-Qwen3.5-27B-FP8_20260613_195618_371691_18852/` (overlay
   `cand_flydsl_downproj_nocgraph/`).
 - Ledger lineage (config-tile precursor): `e2e_workflow/knowledge/gemm_attention_backends.md`

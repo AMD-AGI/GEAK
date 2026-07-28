@@ -21,16 +21,20 @@
 #                                      median_ttft_ms, median_tpot_ms). PROF=1 => also emit a trace
 #                                      into $PROFILE_DIR. Honors optional REQUEST_RATE (req/s; empty=inf)
 #                                      to stagger arrivals.
-#   adapter_profile_window          -> OPTIONAL. Capture a profiler window (PROFILE_NUM_STEPS steps,
-#                                      record_shapes) on the ALREADY-RUNNING, warm, mid-load server, so
-#                                      the trace is the real steady-state prefill+decode MIX rather than
-#                                      a cold prefill ramp. If undefined, the PROFILE step falls back to
-#                                      a (less faithful) saturated PROF=1 bench.
+#   adapter_profile_window          -> OPTIONAL. Capture a profiler window (record_shapes) on the
+#                                      ALREADY-RUNNING, warm, mid-load server, so the trace is the real
+#                                      steady-state prefill+decode MIX rather than a cold prefill ramp.
+#                                      The window is sized per-backend: sglang by PROFILE_NUM_STEPS (its
+#                                      /start_profile takes num_steps); vllm by PROFILE_WINDOW_SEC (its
+#                                      /start_profile has no step count, so start->sleep->stop). If
+#                                      undefined, the PROFILE step falls back to a (less faithful)
+#                                      saturated PROF=1 bench.
 #
 # KEY OUTPUTS (written to $OUT_DIR):
 #   bench_runs.jsonl       one bench result object per repeat
-#   bench_summary.json     {output_throughput_tok_s_median, ttft_ms_median, tpot_ms_median, spread, runs}
-#   SUMMARY line on stdout: "E2E_SUMMARY output_tok_s=<median> spread=<pct> ttft_ms=<med> tpot_ms=<med>"
+#   bench_summary.json     {throughput_tok_s_median (metric-neutral; see metric_basis), metric_basis,
+#                           ttft_ms_median, tpot_ms_median, spread, runs}  (E2E_METRIC=output default)
+#   SUMMARY line on stdout: "E2E_SUMMARY <metric_basis>=<median> spread=<pct> ttft_ms=<med> tpot_ms=<med>"
 #   profile/                trace (if PROFILE=1)
 set -uo pipefail
 
@@ -77,6 +81,37 @@ if [ "$BENCH_CLIENT" != "native" ]; then
   source "$CLIENT_ADAPTER"   # MUST redefine adapter_bench (the timed client)
   if ! declare -F adapter_bench >/dev/null; then
     echo "!!! Client adapter $CLIENT_ADAPTER must define adapter_bench()" >&2; exit 3
+  fi
+fi
+
+# ---- optional server-LAUNCHER override (align the SERVER launch RECIPE with an
+# external harness, e.g. Hyperloom/Magpie, so the served stack is byte-identical:
+# same --mem-fraction-static / --disable-radix-cache / --trust-remote-code /
+# SGLANG_USE_AITER / firmware-gated envs). The serving STACK is STILL the BACKEND
+# above; this hook only changes WHO runs launch_server. Default 'native' keeps each
+# backend adapter's own adapter_launch (byte-identical to before). BENCH_LAUNCHER=
+# <name> sources adapters/launchers/<name>.sh which MUST redefine adapter_launch;
+# the native launch/health are preserved as adapter_launch_native / adapter_health_native
+# so a launcher adapter can DELEGATE or FALL BACK. The authored-kernel OVERLAY
+# (OVERLAY_PYTHONPATH) is applied BY the launcher (an external harness usually
+# cannot), so overlay + recipe-parity coexist. Only affects a FRESH launch
+# (REUSE_SERVER=0); nothing else in the measurement changes.
+BENCH_LAUNCHER=${BENCH_LAUNCHER:-native}
+if [ "$BENCH_LAUNCHER" != "native" ]; then
+  LAUNCHER_ADAPTER="${LAUNCHER_ADAPTER:-$HERE/adapters/launchers/${BENCH_LAUNCHER}.sh}"
+  if [ ! -f "$LAUNCHER_ADAPTER" ]; then
+    echo "!!! No server launcher '$BENCH_LAUNCHER' at $LAUNCHER_ADAPTER" >&2
+    echo "    Available: $(ls "$HERE/adapters/launchers" 2>/dev/null | sed 's/\.sh$//' | tr '\n' ' ')" >&2
+    exit 3
+  fi
+  # Preserve the backend's native launch/health so the launcher can delegate to
+  # them (e.g. fall back when the external recipe/script is unavailable).
+  copy_function adapter_launch adapter_launch_native
+  copy_function adapter_health adapter_health_native
+  # shellcheck disable=SC1090
+  source "$LAUNCHER_ADAPTER"   # MUST redefine adapter_launch (server lifecycle)
+  if ! declare -F adapter_launch >/dev/null; then
+    echo "!!! Launcher adapter $LAUNCHER_ADAPTER must define adapter_launch()" >&2; exit 3
   fi
 fi
 
@@ -159,19 +194,28 @@ CONC=${CONC:-64}
 # NUM_PROMPTS default.
 #  * native client (standalone GEAK default): keep the original CONC*5 default so
 #    standalone behaviour is byte-identical to before the inferencex integration.
-#  * inferencex client (Hyperloom measurement-protocol alignment): mirror Hyperloom's ADAPTIVE
-#    factor — the number of timed prompts scales DOWN as the per-request sequence
-#    cost (ISL+OSL) grows so each repeat stays bounded.
-#    factor = {<=1024:10, <=4096:5, <=16384:3, else 2}.
-# Override NUM_PROMPTS to pin a fixed count regardless of client.
+#  * inferencex client (Hyperloom/Magpie measurement-protocol alignment): default to
+#    Magpie's FIXED CONC*10 (its run_benchmark_serving default is
+#    `--num-prompts $((CONC*10))`), so a GEAK measurement matches the Magpie baseline
+#    prompt count exactly — a differing prompt count changes the saturation regime and
+#    hence the tok/s, so this is a real alignment knob, not cosmetic.
+#    Opt-out: NUM_PROMPTS_ADAPTIVE=1 restores the cost-bounded ADAPTIVE factor that
+#    scales DOWN as per-request seq cost (ISL+OSL) grows {<=1024:10,<=4096:5,<=16384:3,else 2},
+#    for long-sequence standalone runs where CONC*10 is too expensive.
+# An explicit NUM_PROMPTS (e.g. Hyperloom's apply_bench_protocol forwarding its own
+# measured count) ALWAYS wins over both defaults.
 if [ -z "${NUM_PROMPTS:-}" ]; then
   if [ "$BENCH_CLIENT" = "inferencex" ]; then
-    _seq_cost=$((ISL + OSL))
-    if   [ "$_seq_cost" -le 1024 ];  then _factor=10
-    elif [ "$_seq_cost" -le 4096 ];  then _factor=5
-    elif [ "$_seq_cost" -le 16384 ]; then _factor=3
-    else _factor=2; fi
-    NUM_PROMPTS=$(( CONC * _factor > CONC ? CONC * _factor : CONC ))
+    if [ "${NUM_PROMPTS_ADAPTIVE:-0}" = "1" ]; then
+      _seq_cost=$((ISL + OSL))
+      if   [ "$_seq_cost" -le 1024 ];  then _factor=10
+      elif [ "$_seq_cost" -le 4096 ];  then _factor=5
+      elif [ "$_seq_cost" -le 16384 ]; then _factor=3
+      else _factor=2; fi
+      NUM_PROMPTS=$(( CONC * _factor > CONC ? CONC * _factor : CONC ))
+    else
+      NUM_PROMPTS=$(( CONC * 10 ))   # Magpie parity (fixed)
+    fi
   else
     NUM_PROMPTS=$((CONC * 5))
   fi
@@ -213,17 +257,40 @@ PROFILE=${PROFILE:-0}                 # 1 = also capture a profiler trace
 # Profiling is meant to capture the REAL continuous-batching steady state — prefill chunks and decode
 # steps interleaved as the scheduler actually runs them — NOT a cold prefill burst. So we profile a
 # WINDOW in the middle of a sustained, saturated load (see the PROFILE block below). Tunables:
-PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-40}   # forward steps to capture. 5 couldn't even clear prefill
-                                             # (prefill ~ceil(tot_in/chunk) steps); ~40 spans into the
-                                             # mixed decode steady state. Decode is steady so a few tens
-                                             # is plenty; >100 just bloats the trace.
-PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-15} # let the load pass the initial synchronized prefill ramp
-                                             # (≈TTFT) so the profiled window lands in the real mix.
+PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-40}   # forward steps to capture (sglang; step-controlled). Floor;
+                                             # auto-sizing below raises it to TARGET_STEPS (RAMP+STEADY+10)
+                                             # from ISL/OSL/CONC, then CLAMPS to PROFILE_NUM_STEPS_MAX.
+PROFILE_NUM_STEPS_MAX=${PROFILE_NUM_STEPS_MAX:-64}  # CAP on captured steps (sglang). At low conc STEADY
+                                             # = 5*ceil(OSL/CONC) explodes (e.g. 172 at conc2/osl64), and
+                                             # the sglang/ROCm trace is ~MBs PER STEP -> a multi-hundred-MB
+                                             # trace whose roctracer flush takes minutes AND BLOCKS the
+                                             # server (health drops, requests time out). 64 steps still
+                                             # spans the prefill ramp + a decode sample. Raise if needed.
+PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-0}  # 0 = arm the profiler AT load start so the capture INCLUDES
+                                             # the initial prefill burst. A non-zero warmup lets the load
+                                             # pass the prefill ramp first, so the window lands in decode
+                                             # only and prefill kernels are NEVER captured (Bug 1). The
+                                             # window is sized (below) to span the prefill ramp AND decode.
 PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}  # >CONC so the queue stays full and short
                                              # (range-ratio>0) requests get replaced -> phases de-sync.
 PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}            # optional req/s to stagger arrivals; empty
                                              # = inf (max_concurrency still caps in-flight at CONC).
 PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}     # max wait for the trace file to appear.
+PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-40}             # capture DURATION FLOOR for time-windowed
+                                             # backends (vllm: /start_profile has no num_steps, so the
+                                             # window is controlled by start -> sleep this long ->
+                                             # /stop_profile). sglang ignores this (uses PROFILE_NUM_STEPS).
+                                             # This is a FLOOR: when TPOT_MS is known (auto-derived from
+                                             # the timed bench below) the window auto-scales to
+                                             # TARGET_STEPS*TPOT*1.5 so it spans the prefill ramp (warmup=0)
+                                             # AND a steady decode sample, then is CLAMPED to
+                                             # [40, PROFILE_WINDOW_SEC_MAX]. Longer is NOT free: a torch
+                                             # trace grows ~linearly with the window (must stay <
+                                             # PROFILE_WINDOW_TIMEOUT, and can OOM the profiler buffer).
+PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-60}     # CAP for the auto-scaled vllm window. Bounds
+                                             # trace size: with warmup=0 the whole prefill ramp is recorded,
+                                             # so a heavy/low-TPOT workload could otherwise size a multi-GB
+                                             # trace that fails to flush. Raise if you need a longer window.
 OUT_DIR=${OUT_DIR:-$(pwd)/e2e_bench_out}
 LOG=${LOG:-$OUT_DIR/server.log}
 
@@ -232,11 +299,15 @@ PROFILE_DIR="$OUT_DIR/profile"
 BASE_URL="http://${HOST}:${PORT}"
 RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 : > "$RESULT_JSONL"
+# Separate sink for the optional COLD full-round (BENCH_COLD_FINAL=1); kept apart
+# from the timed(hot) repeats so it never pollutes the hot median.
+COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
+: > "$COLD_JSONL"
 
 # export everything the adapter reads
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
-export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT
+export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
 export BENCH_TRUST_REMOTE_CODE HF_HUB_TRUST_REMOTE_CODE
 
@@ -253,11 +324,29 @@ echo
 
 SERVER_PID=""
 cleanup() {
-  if [ -n "$SERVER_PID" ]; then
-    echo ">>> Shutting down server (pid $SERVER_PID) ..."
+  [ -n "${SERVER_PID:-}" ] || return 0
+  echo ">>> Shutting down server (pid $SERVER_PID) ..."
+  # A launcher that starts the server in its OWN process group / session (e.g.
+  # the Magpie launcher uses `setsid`) leaves the worker/child procs OUTSIDE
+  # $SERVER_PID, so a bare `kill $SERVER_PID` orphans them (leaked VRAM, ghost
+  # listeners on the port). When the server's process group differs from OURS,
+  # reap the WHOLE group (TERM, then KILL after a grace window). The own-group
+  # guard is critical: for a NATIVE launch the server shares our group, so we
+  # must NOT group-kill (that would kill bench_e2e.sh itself) — fall back to the
+  # single-pid kill, byte-identical to before.
+  local _pgid _self
+  _pgid="$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')"
+  _self="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+  if [ -n "$_pgid" ] && [ "$_pgid" != "$_self" ]; then
+    kill -TERM "-$_pgid" 2>/dev/null || kill -TERM "$SERVER_PID" 2>/dev/null || true
+    for _i in $(seq 1 "${SERVER_STOP_GRACE_S:-10}"); do
+      kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 1
+    done
+    kill -0 "$SERVER_PID" 2>/dev/null && kill -KILL "-$_pgid" 2>/dev/null || true
+  else
     kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
   fi
+  wait "$SERVER_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -336,6 +425,30 @@ except Exception:
   echo ">>> overlay memory-parity OK (free ${_free_mb:-?}MB >= floor ${MEM_HEADROOM_MIN_MB}MB)"
 fi
 
+# ---- optional COLD full-round (align with Hyperloom's COLD baseline_tput) ----
+# Hyperloom's leaderboard denominator baseline_tput is a COLD single fresh-server
+# round (first-token / JIT / cuda-graph capture costs INCLUDED, no prior warmup).
+# GEAK's own final is a HOT median (warmup discarded). Comparing GEAK's hot final
+# to Hyperloom's cold baseline mixes thermal states. When BENCH_COLD_FINAL=1 we
+# also measure ONE cold full round (NUM_PROMPTS, no preceding warmup) on the fresh
+# server BEFORE the warmup+timed(hot) rounds, and record it separately, so the
+# caller can compute a fair cold-to-cold speedup (and keep the hot median as a
+# double-check). Default ON (BENCH_COLD_FINAL=1) — set BENCH_COLD_FINAL=0 to skip
+# the cold round (e.g. to save the one extra full round per bench). Only meaningful
+# on a fresh launch (a reused warm server has no cold state to measure).
+if [ "${BENCH_COLD_FINAL:-1}" = "1" ] && [ "$REUSE_SERVER" != "1" ]; then
+  echo ">>> Cold full round (NUM_PROMPTS=$NUM_PROMPTS, no warmup; cold-baseline parity) ..."
+  # adapter_bench is a shell FUNCTION that reads $RESULT_JSONL — a prefix var
+  # assignment on a function has ambiguous persistence in bash, so point
+  # RESULT_JSONL at the cold sink explicitly and restore it afterwards. The
+  # warmup below re-clears the (restored) hot RESULT_JSONL, so the cold round
+  # never touches the timed(hot) results.
+  _saved_result_jsonl="$RESULT_JSONL"
+  RESULT_JSONL="$COLD_JSONL"; export RESULT_JSONL
+  adapter_bench "$NUM_PROMPTS" "$CONC" 0 || echo "!!! cold round failed (continuing)"
+  RESULT_JSONL="$_saved_result_jsonl"; export RESULT_JSONL
+fi
+
 # ---- warmup (one short round; never timed) ----
 echo ">>> Warmup round ..."
 adapter_bench "$CONC" "$CONC" 0 >/dev/null 2>&1 || true
@@ -355,13 +468,76 @@ done
 # sustained, saturated load and profile a WINDOW once it has reached the mixed steady state.
 if [ "$PROFILE" = "1" ]; then
   mkdir -p "$PROFILE_DIR"
+  # fix #1: if the caller didn't pin TPOT_MS, derive it from the timed bench we JUST ran (RESULT_JSONL
+  # holds one result object per repeat, each with median_tpot_ms). This lets the vLLM time-window auto-
+  # scale to the REAL per-decode-step time of THIS workload (below) instead of sitting at the flat floor.
+  if [ -z "${TPOT_MS:-}" ]; then
+    TPOT_MS=$(python3 - "$RESULT_JSONL" <<'PY' 2>/dev/null || true
+import json, sys, statistics
+vals=[]
+try:
+    for line in open(sys.argv[1]):
+        line=line.strip()
+        if not line: continue
+        try: d=json.loads(line)
+        except Exception: continue
+        for k in ("median_tpot_ms","mean_tpot_ms","p50_tpot_ms"):
+            if isinstance(d.get(k),(int,float)): vals.append(float(d[k])); break
+print(round(statistics.median(vals),3) if vals else "")
+PY
+)
+    case "${TPOT_MS:-}" in ''|*[!0-9.]*) TPOT_MS="" ;; esac   # keep only a clean number
+    [ -n "${TPOT_MS:-}" ] && echo ">>> steady-state sizing: derived TPOT_MS=${TPOT_MS}ms from timed bench (vllm window auto-scale)"
+  fi
+  # ---- workload-aware steady-state window sizing (this is the ONLY sizing; adaptive re-capture is off) ----
+  # Reaching batch≈CONC = clear the prefill ramp, then sample steady decode:
+  #   RAMP   = ceil(CONC*ISL / chunk)     forward passes to prefill all CONC in-flight requests
+  #   STEADY = max(30, 5*ceil(OSL/CONC))  decode steps for a stable, representative sample
+  # TARGET = RAMP + STEADY + margin. Sized deterministically UP FRONT for BOTH backends (the old reactive
+  # re-capture gate is DISABLED — no reliable per-step signal without annotations). The ISL/OSL/CONC/prompts
+  # math is the guarantee: PROFILE_NUM_STEPS -> TARGET (sglang, step-controlled), and PROFILE_WINDOW_SEC is
+  # auto-scaled from the derived TPOT and clamped to [40, PROFILE_WINDOW_SEC_MAX] (vllm, time-controlled),
+  # so the single window spans the prefill ramp (warmup=0) + a steady decode sample.
+  # Assumes a saturated queue + KV headroom for CONC concurrent decodes (else batch can't reach CONC).
+  _CHUNK="${PREFILL_CHUNK:-$ISL}"
+  _RAMP=$(python3 -c "import math;print(math.ceil($CONC*$ISL/max($_CHUNK,1)))" 2>/dev/null || echo "$CONC")
+  _STEADYN=$(python3 -c "import math;print(max(30,5*math.ceil($OSL/max($CONC,1))))" 2>/dev/null || echo 30)
+  _TARGET_STEPS=$(( _RAMP + _STEADYN + 10 ))
+  if [ "${PROFILE_NUM_STEPS:-0}" -lt "$_TARGET_STEPS" ]; then
+    echo ">>> steady-state sizing: RAMP=${_RAMP}+STEADY=${_STEADYN}+10 -> PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${_TARGET_STEPS}"
+    PROFILE_NUM_STEPS=$_TARGET_STEPS
+  fi
+  # CLAMP steps (sglang: ~MBs/step -> avoid a huge trace + server-blocking flush at low conc).
+  if [ -n "${PROFILE_NUM_STEPS_MAX:-}" ] && [ "$PROFILE_NUM_STEPS" -gt "$PROFILE_NUM_STEPS_MAX" ]; then
+    echo ">>> steady-state sizing: PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${PROFILE_NUM_STEPS_MAX} (capped at PROFILE_NUM_STEPS_MAX)"
+    PROFILE_NUM_STEPS=$PROFILE_NUM_STEPS_MAX
+  fi
+  _NEED_PROMPTS=$(python3 -c "import math;print($CONC + math.ceil($CONC*$PROFILE_NUM_STEPS/max($OSL,1)) + $CONC)" 2>/dev/null || echo "$PROFILE_NUM_PROMPTS")
+  if [ "${PROFILE_NUM_PROMPTS:-0}" -lt "$_NEED_PROMPTS" ]; then
+    echo ">>> steady-state sizing: PROFILE_NUM_PROMPTS ${PROFILE_NUM_PROMPTS}->${_NEED_PROMPTS} (keep the queue full through the window)"
+    PROFILE_NUM_PROMPTS=$_NEED_PROMPTS
+  fi
+  # vLLM time-window auto-scale (needs TPOT_MS, derived above): size the window to span the prefill ramp
+  # + a steady decode sample = TARGET_STEPS * per-step time, x1.5 margin, then CLAMP to
+  # [PROFILE_WINDOW_SEC floor, PROFILE_WINDOW_SEC_MAX cap]. The cap bounds trace size (warmup=0 records the
+  # whole ramp, so a heavy/low-TPOT workload could otherwise size a multi-GB trace that fails to flush).
+  if [ -n "${TPOT_MS:-}" ]; then
+    _WMAX="${PROFILE_WINDOW_SEC_MAX:-60}"
+    _WSEC=$(python3 -c "import math;print(min($_WMAX, max(${PROFILE_WINDOW_SEC:-40}, math.ceil($_TARGET_STEPS*$TPOT_MS/1000.0*1.5))))" 2>/dev/null || echo "${PROFILE_WINDOW_SEC:-40}")
+    if [ "$_WSEC" != "${PROFILE_WINDOW_SEC}" ]; then
+      echo ">>> steady-state sizing: PROFILE_WINDOW_SEC ${PROFILE_WINDOW_SEC}->${_WSEC}s (TPOT=${TPOT_MS}ms x ${_TARGET_STEPS} steps x1.5, clamped [${PROFILE_WINDOW_SEC:-40},${_WMAX}]s)"
+      PROFILE_WINDOW_SEC=$_WSEC
+    fi
+  fi
+  export PROFILE_NUM_STEPS PROFILE_NUM_PROMPTS PROFILE_WINDOW_SEC
   if declare -F adapter_profile_window >/dev/null; then
-    echo ">>> Profiling steady-state mix: warm ${PROFILE_WARMUP_SEC}s on a saturated load " \
-         "(${PROFILE_NUM_PROMPTS} prompts, conc ${CONC}${PROFILE_REQUEST_RATE:+, rate ${PROFILE_REQUEST_RATE}/s}), " \
-         "then capture ${PROFILE_NUM_STEPS} steps ..."
-    # Sustained background load (NOT timed, NOT profiled). Varied OSL (RANDOM_RANGE_RATIO>0) + more
-    # prompts than CONC means early finishers are replaced by fresh arrivals, so the in-flight
-    # sequences de-synchronize into a realistic prefill+decode mix.
+    echo ">>> Profiling from load start (warmup ${PROFILE_WARMUP_SEC}s) on a saturated load " \
+         "(${PROFILE_NUM_PROMPTS} prompts, conc ${CONC}${PROFILE_REQUEST_RATE:+, rate ${PROFILE_REQUEST_RATE}/s}); " \
+         "SINGLE capture of ${PROFILE_NUM_STEPS} steps / ${PROFILE_WINDOW_SEC}s (adaptive re-capture OFF) ..."
+    # SINGLE deterministic capture (adaptive re-capture is off — see the sizing note above). Start the
+    # sustained, replenishing background load (>CONC prompts, realistic prefill+decode mix; NOT timed, NOT
+    # profiled). With PROFILE_WARMUP_SEC=0 the profiler is armed at load start so the capture includes the
+    # initial prefill burst (prefill shapes stay visible for head selection).
     REQUEST_RATE="${PROFILE_REQUEST_RATE}" \
       adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 0 >/dev/null 2>&1 &
     _bg_load=$!
@@ -385,13 +561,38 @@ if [ "$PROFILE" = "1" ]; then
 fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----
-python3 - "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" <<'PY'
-import json, sys, statistics
+python3 - "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL" <<'PY'
+import json, os, sys, statistics
 runs_path, out_path = sys.argv[1], sys.argv[2]
+cold_path = sys.argv[3] if len(sys.argv) > 3 else None
 def pick(d, *keys):
     for k in keys:
         if k in d and isinstance(d[k], (int, float)): return float(d[k])
     return None
+# metric selection: default = OUTPUT-only token throughput (output/s), to match the Hyperloom
+# orchestrator's baseline/explore basis (see collectors/_common.py + collectors/explore.py, both read
+# output_throughput). Set E2E_METRIC=total for total (input+output)/s. Same key is read for
+# baseline+cand so the accept RATIO is consistent; metric_basis records which was used.
+_metric = (os.environ.get("E2E_METRIC") or "output").strip().lower()
+_is_total = _metric in ("total", "total_token", "total_throughput")
+_TPUT_KEYS = (("total_token_throughput", "total_throughput", "total_token_throughput_tok_s")
+              if _is_total else
+              ("output_throughput", "output_token_throughput", "output_throughput_tok_s"))
+def read_tps(path):
+    xs = []
+    if not path: return xs
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line: continue
+                try: d = json.loads(line)
+                except Exception: continue
+                v = pick(d, *_TPUT_KEYS)
+                if v is not None: xs.append(v)
+    except FileNotFoundError:
+        pass
+    return xs
 tps, ttft, tpot = [], [], []
 with open(runs_path) as fh:
     for line in fh:
@@ -399,27 +600,44 @@ with open(runs_path) as fh:
         if not line: continue
         try: d = json.loads(line)
         except Exception: continue
-        v = pick(d, "output_throughput", "output_token_throughput", "output_throughput_tok_s")
+        v = pick(d, *_TPUT_KEYS)
         if v is not None: tps.append(v)
         t = pick(d, "median_ttft_ms", "mean_ttft_ms");   ttft.append(t) if t is not None else None
         p = pick(d, "median_tpot_ms", "mean_tpot_ms");   tpot.append(p) if p is not None else None
+cold_tps = read_tps(cold_path)
 def med(xs): return statistics.median(xs) if xs else None
 def spread(xs):
     if len(xs) < 2: return 0.0
     m = med(xs); return round(100.0 * (max(xs)-min(xs)) / m, 2) if m else 0.0
+_tput_med = round(med(tps), 3) if tps else None
+_tput_spread = spread(tps)
 summ = {
-    "output_throughput_tok_s_median": round(med(tps), 3) if tps else None,
-    "output_throughput_tok_s_spread_pct": spread(tps),
+    # Canonical, metric-neutral throughput of the SELECTED basis (see metric_basis). Downstream should
+    # read this + metric_basis; the accept RATIO is basis-consistent (baseline+cand use the same metric).
+    "throughput_tok_s_median": _tput_med,
+    "throughput_tok_s_spread_pct": _tput_spread,
+    # Legacy output-named alias: populated ONLY in output mode (its literal meaning). In total mode it is
+    # None so nobody silently reads total throughput under an "output" name — read throughput_tok_s_median.
+    "output_throughput_tok_s_median": _tput_med if not _is_total else None,
+    "output_throughput_tok_s_spread_pct": _tput_spread if not _is_total else None,
     "ttft_ms_median": round(med(ttft), 3) if ttft else None,
     "tpot_ms_median": round(med(tpot), 3) if tpot else None,
     "runs": len(tps),
     "all_throughput": tps,
-    # Aggregate output tok/s (NOT divided by TP) — matches Hyperloom/Magpie output_throughput protocol.
-    "metric_basis": "aggregate_output_tok_s",
+    # Optional COLD full-round (BENCH_COLD_FINAL=1): a single fresh-server round with
+    # JIT/graph-capture costs included, for cold-to-cold parity vs Hyperloom's
+    # baseline_tput. None when the cold round was not run (default). The hot median
+    # above stays the primary metric so existing consumers are unaffected. Uses the
+    # SAME metric basis (E2E_METRIC) as the hot median for a consistent comparison.
+    "cold_output_throughput_tok_s": round(med(cold_tps), 3) if cold_tps else None,
+    "cold_runs": len(cold_tps),
+    # Aggregate tok/s (NOT divided by TP). Default matches Hyperloom/Magpie output_throughput protocol;
+    # E2E_METRIC=total switches to total (input+output) token throughput.
+    "metric_basis": ("aggregate_total_token_tok_s" if _is_total else "aggregate_output_tok_s"),
 }
 with open(out_path, "w") as fh: json.dump(summ, fh, indent=2)
-print(f"E2E_SUMMARY output_tok_s={summ['output_throughput_tok_s_median']} "
-      f"spread={summ['output_throughput_tok_s_spread_pct']}% "
+print(f"E2E_SUMMARY {summ['metric_basis']}={summ['throughput_tok_s_median']} "
+      f"spread={summ['throughput_tok_s_spread_pct']}% "
       f"ttft_ms={summ['ttft_ms_median']} tpot_ms={summ['tpot_ms_median']} runs={summ['runs']}")
 PY
 

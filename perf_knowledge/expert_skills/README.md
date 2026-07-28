@@ -82,8 +82,8 @@ bash   _contribute/make_pr.sh <slug>                                            
 
 ## Canonical copy
 
-This directory is maintained ONLY in the canonical `geak_v4/GEAK` tree. Other PerfSkills snapshots are
-downstream copies — do not edit skills there; they sync from here.
+This directory is maintained ONLY in this canonical GEAK repository. Other downstream snapshots are
+copies — do not edit skills there; they sync from here.
 
 ## Sources
 - Design discussion 2026-06-17 (this repo).

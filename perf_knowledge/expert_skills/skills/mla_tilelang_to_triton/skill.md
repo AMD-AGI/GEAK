@@ -2,7 +2,7 @@
 id: mla_tilelang_to_triton
 title: "MLA decode: port the TileLang core to Triton (gfx942)"
 kind: expert_skill
-authors: [zihao]
+authors: [GEAK Team]
 scope: kernel
 match:
   operator: mla_attention

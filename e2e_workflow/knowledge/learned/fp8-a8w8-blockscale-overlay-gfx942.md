@@ -3,10 +3,20 @@ key: fp8_a8w8_blockscale dense GEMM · gfx942 · sglang Triton live path
 type: lever
 confidence: ★★★
 effect: iso ~1.06–1.16× prefill (Triton-overlay, DEPRECATED); CK-tuned KERNEL ~1.78× vs untuned Triton on the M=13645 head (kernel-level)
-confirms: 16
-last_seen: 2026-06-25
+confirms: 17
+last_seen: 2026-07-06
 status: DEPRECATED-FOR-THIS-EVAL
 ---
+> ✅ **17th confirm (2026-07-06, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, e2e_cycle0).**
+> CK skill end to end on the 12 live (M,N,K) (4 NK families × {1,64,16384}), `--libtype both --mp 1`:
+> ALL 12 winners `libtype=ck`, errRatio 0.0. §9.1 scale-layout check (M=64, all 4 families): CK wants
+> `transpose_scale=False` (rel-err ~1e-5; True→~0.19 = the catastrophic layout bug). In-process CK-vs-untuned-Triton
+> A/B (correct non-transposed scale): **decode M=1 4.7–6.2×, M=64 1.37–6.0× FASTER** (up_gate weakest at
+> 1.37×/M64; qkv/o ~6×); **prefill M=16384 0.56× (SLOWER on every family)** → M-routed overlay (M≤256→CK)
+> is mandatory, reconfirmed. Share-weighted decode speedup ~1.87× (M64) / ~4.1× (M1). CK also FIXES the
+> known untuned-Triton small-M/large-K down-proj defect (CK rel_err ~true-math; Triton wrong at M=1,K=17408).
+> Engagement verified ("is tuned on cu_num = 304"). Shipped `winner_kind=env` (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE)
+> + M-routed fp8_utils CK overlay. e2e gate pending (Integrator).
 > ✅ **16th confirm (2026-06-25, Qwen3-14B-FP8 TP=2, gfx942/MI300X cu_num=304, e2e_qwen3_14b_fp8_..._3515_8954).**
 > Re-ran the CK skill end to end on the exact 16 live (M,N,K) (4 NK families × {1,16,2048,13645}), `--libtype
 > both --mp 2`: ALL 16 winners `libtype=ck`, errRatio 0.0. Dominant head M=13645,N=5120,K=8704 CK

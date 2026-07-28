@@ -78,7 +78,7 @@ Steps:
    Every later e2e measurement (sweep, integrate, validate) MUST match this exact `TP=SERVING_TP
    GPU=SERVING_GPU` config, or deltas are meaningless.
    **Seed config**: if `INIT_FLAGS`/`INIT_ENV` are given (the caller's already-searched best config),
-   the baseline MUST be measured ON them (pass `EXTRA_SERVER_ARGS`/`EXTRA_ENV`), so PerfSkills' baseline
+   the baseline MUST be measured ON them (pass `EXTRA_SERVER_ARGS`/`EXTRA_ENV`), so GEAK's baseline
    == the caller's best config and later kernel gains compound on top of it. Use the copied bench script
    (substitute the actual SERVING_TP / SERVING_GPU values from your inputs):
    ```bash
@@ -87,7 +87,10 @@ Steps:
    EXTRA_SERVER_ARGS="<INIT_FLAGS>" EXTRA_ENV="<INIT_ENV>" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/baseline_bench.log"
    ```
-   Parse `EVAL_DIR/baseline/bench_summary.json` for `output_throughput_tok_s_median` + spread.
+   Parse `EVAL_DIR/baseline/bench_summary.json` for `throughput_tok_s_median` + spread (the metric-neutral
+   key; `metric_basis` says whether it is output or total tok/s — falls back to
+   `output_throughput_tok_s_median` on older summaries). Baseline and candidate share the same basis, so
+   the accept ratio is consistent.
    **Prove engagement**: grep `EVAL_DIR/logs/baseline_bench.log` / `server.log` to confirm the seed
    flags/env actually took effect (e.g. the chosen attention backend / env var appears in the server
    banner). If a seed flag did not engage, record it loudly in `notes` — a baseline measured on a
@@ -122,7 +125,8 @@ Return JSON:
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `SKILL_DIR`, `GPU_ID`, `BASELINE_THROUGHPUT`, `NOISE_BAND_PCT`,
 `E2E_REPEATS` (default 7), the candidate final overlay `FINAL_OVERLAY` (dir) + `FINAL_FLAGS` (json),
-the Architect/Integrator's claimed throughput, and `APPLY_TO_ORIGINAL`.
+the Architect/Integrator's claimed throughput, `APPLY_TO_ORIGINAL`, and the already-written report files
+`ARCHITECT_REPORT` (`architect_report.md`) + `FINAL_REPORT` (`final_report.md`) to reconcile in step 7.
 
 **Do NOT trust the claimed throughput — reproduce it from a clean warm server with the overlay.**
 
@@ -135,7 +139,7 @@ TRUE baseline with the tight 2-block protocol and decide if the COMBINED result 
    overlay + flags), each `E2E_REPEATS` (default 7) timed repeats on ONE server:
    The TRUE-baseline block MUST reproduce the seed config the baseline was measured on (the caller's
    best config = the recorded `baseline` flags/env, i.e. the same `INIT_FLAGS`/`INIT_ENV`) — NOT
-   `FINAL_FLAGS` minus PerfSkills' kernel wins. Use the same `TP=SERVING_TP GPU=SERVING_GPU` as setup.
+   `FINAL_FLAGS` minus GEAK's kernel wins. Use the same `TP=SERVING_TP GPU=SERVING_GPU` as setup.
    ```bash
    # fresh TRUE-baseline block (baseline seed flags/env, NO kernel overlay) — re-measured NOW for drift.
    # Serving config MUST be the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
@@ -159,17 +163,45 @@ TRUE baseline with the tight 2-block protocol and decide if the COMBINED result 
    vs the provided baseline for reference. The COMBINED stack counts as a real win only if
    `delta% > NOISE_BAND_PCT` AND non-overlapping; otherwise report it honestly as within-noise (the
    stacked kernels are real isolated speedups whose combined e2e effect is below the band).
-4. Arbitrate vs the claim:
-   - Final speedup within `NOISE_BAND_PCT` of claim, or Director higher → `accepted`.
-   - Director lower than claim by more than the noise band → `flagged` (use Director's measured
-     number as official).
-   - Parity fail / server fails to launch with overlay → `flagged`.
-5. Only if `APPLY_TO_ORIGINAL=true` AND `accepted`: write a clear "apply" bundle — the final overlay
+4. Arbitrate — set `validation_status` to one of THREE values. The status describes whether your
+   independent measurement is TRUSTWORTHY and whether it is a WIN; it does NOT mean "an optimization was
+   accepted" (a no-win run with an empty overlay is still a successful, trustworthy validation). Do NOT use
+   the word `accepted` for this field.
+   - **`validated_win`** — the final stack is a real, reproduced win: `delta% > NOISE_BAND_PCT` AND
+     non-overlapping ranges AND parity ok, and your number is within the noise band of the claim (or higher).
+   - **`validated_no_win`** — your measurement is trustworthy and shows **no regression and no win**: final
+     ≈ baseline within `NOISE_BAND_PCT` (overlapping ranges). This is the correct status for an empty overlay
+     / no-accepted-kernel run — the run is validated, it simply did not improve throughput.
+   - **`flagged`** — needs attention: a real regression (Director lower than baseline beyond the band), OR
+     Director lower than the claim by more than the band, OR parity fail, OR the server fails to launch with
+     the overlay. Use the Director's measured number as official and say what to re-task.
+5. Only if `APPLY_TO_ORIGINAL=true` AND status is `validated_win`: write a clear "apply" bundle — the final overlay
    dir + a `final_launch.sh` that sets `PYTHONPATH`/flags — into `EVAL_DIR/final/`. **Do not edit
    site-packages even here**; the deliverable is the overlay + launch script (per spec: "complete
    patch + launch/benchmark script"). Assemble `EVAL_DIR/final/final_patch.diff` (concatenated kernel patches)
    for the record.
 6. Write `EVAL_DIR/director_e2e_validation.json` with the full result.
+7. **Reconcile the report with your validated numbers (do this LAST, after 1–6).** The Architect's
+   `report` phase runs BEFORE this `validate` phase, so `ARCHITECT_REPORT` (`architect_report.md`) and
+   `FINAL_REPORT` (`final_report.md`) were already written using the **Finalize-bundle** bench — those
+   headline numbers can differ from your authoritative same-session A/B (the reported issue: e.g. report
+   says `640.4 → 709.0` while your Director A/B is `621.365 → 698.373`). Fix it:
+   - Read both report files. Wherever a headline metric was taken from the finalize bench, **overwrite it
+     with your Director same-session number**: **throughput** (baseline→final median + spread),
+     **speedup** (`×` and `%`), **TTFT**, **TPOT**, plus **validation_status** and **output_parity**.
+     Sources = `EVAL_DIR/director_e2e_validation.json` + `EVAL_DIR/validation/base/bench_summary.json` +
+     `EVAL_DIR/validation/final/bench_summary.json` (the exact files you just measured — never invent).
+   - Edit ONLY those numbers; preserve every other line, table, and the phase/artifacts trees. Keep the
+     already-correct convention that the Director value is OFFICIAL and, if the finalize bench differed,
+     leave a one-line parenthetical noting the finalize number.
+   - Make the headline **read the outcome honestly**: use `validated_win` / `validated_no_win` / `flagged`
+     (never the bare word `accepted`), and word the conclusion so a `validated_no_win` (e.g. `0.9997×`) is
+     plainly "no win — validated, no regression", NOT a success. The `Validate` node in the phase tree must
+     show the same status.
+   - If validation produced **no usable number** (server crashed / degenerate), do NOT rewrite — leave the
+     finalize fallback in place and add one line stating validation produced no number.
+   - Confirm consistency: after the edit, the report's headline throughput/speedup/TTFT/TPOT MUST equal
+     `director_e2e_validation.json`.
 
 Return JSON:
 ```json
@@ -179,11 +211,11 @@ Return JSON:
   "director_verified_throughput_tok_s": 0.0,
   "throughput_speedup": 1.0,
   "claimed_throughput_tok_s": 0.0,
-  "validation_status": "accepted|flagged",
+  "validation_status": "validated_win|validated_no_win|flagged",
   "output_parity": "pass|fail|n/a",
   "applied_to_original": "true|false",
   "final_overlay": "<EVAL_DIR>/final",
   "final_launch_script": "<EVAL_DIR>/final/final_launch.sh",
-  "arbitration_note": "accept reason or what to re-task if flagged"
+  "arbitration_note": "win/no-win/flag reason: state the measured delta%, whether it cleared the noise band, and (if flagged) what to re-task"
 }
 ```

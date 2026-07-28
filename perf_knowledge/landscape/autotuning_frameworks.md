@@ -44,7 +44,7 @@ dispatch** (vLLM's `E=…,N=…,device_name=…` filename = lookup key); and (4)
 gates it, where does it live?" without grepping site-packages.
 
 See [`../optimization/autotuning_methodology.md`](../optimization/autotuning_methodology.md) and
-[`../kernel_workflow/gemm_tuning_workflow.md`](../kernel_workflow/gemm_tuning_workflow.md) for our validated recipe.
+[`../workflows/gemm_tuning_workflow.md`](../workflows/gemm_tuning_workflow.md) for our validated recipe.
 
 ---
 
@@ -136,7 +136,7 @@ Search = exhaustive race; **partial tunes never regress** (uncovered shapes fall
 native. **License:** MIT. **Offline-capture + offline-tune + static-deploy.** Validated **+2.23% e2e**
 on Qwen3.5-27B (and our earlier +2.23% baseline note).
 - https://github.com/ROCm/aiter  (`aiter/tuned_gemm.py`, `gradlib/gradlib/gemm_tuner.py`, `aiter/configs/`)
-- [`../kernel_workflow/gemm_tuning_workflow.md`](../kernel_workflow/gemm_tuning_workflow.md)
+- [`../workflows/gemm_tuning_workflow.md`](../workflows/gemm_tuning_workflow.md)
 
 ## NVIDIA cuBLASLt — heuristic + autotune
 `cublasLtMatmulAlgoGetHeuristic` returns a **ranked list** of algo variants; index 0 is the
@@ -274,7 +274,7 @@ idea is the direction for cutting our race time. **AMD:** mostly NVIDIA-evaluate
 
 ## What we borrow
 
-### (a) For `tuning/` and `kernel_workflow/gemm_tuning_workflow.md`
+### (a) For `tuning/` and `workflows/gemm_tuning_workflow.md`
 - **Version-validator header on every tuned artifact** (TunableOp `Validator,ROCM_VERSION,…` +
   Triton-dejavu's identity tuple). Our CSV already encodes `gfx`/`cu_num`; add an explicit
   `# rocm=…,hipblaslt=…,aiter=…` header line so a stale CSV **self-rejects** instead of silently
@@ -325,7 +325,7 @@ idea is the direction for cutting our race time. **AMD:** mostly NVIDIA-evaluate
 - PyTorch TunableOp: https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/cuda/tunable/README.md · https://rocm.blogs.amd.com/artificial-intelligence/pytorch-tunableop-offline/README.html
 - hipBLASLt / TensileLite: https://rocm.blogs.amd.com/artificial-intelligence/hipblaslt-tensilelite-tuning/README.html · https://rocm.blogs.amd.com/software-tools-optimization/hipblaslt-offline-tuning-part1/README.html · https://rocm.docs.amd.com/projects/hipBLASLt/en/develop/how-to/how-to-use-hipblaslt-offline-tuning.html
 - Composable Kernel ckProfiler: https://github.com/ROCm/composable_kernel/blob/develop/profiler/README.md · https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
-- aiter / gradlib: https://github.com/ROCm/aiter · [`../kernel_workflow/gemm_tuning_workflow.md`](../kernel_workflow/gemm_tuning_workflow.md) · [`../optimization/autotuning_methodology.md`](../optimization/autotuning_methodology.md)
+- aiter / gradlib: https://github.com/ROCm/aiter · [`../workflows/gemm_tuning_workflow.md`](../workflows/gemm_tuning_workflow.md) · [`../optimization/autotuning_methodology.md`](../optimization/autotuning_methodology.md)
 - cuBLASLt / CUDA-L2: https://github.com/NVIDIA/CUDALibrarySamples/tree/master/cuBLASLt/LtSgemmSimpleAutoTuning · https://docs.nvidia.com/cuda/cublas/ · https://arxiv.org/abs/2512.02551
 - cuDNN frontend: https://docs.nvidia.com/deeplearning/cudnn/frontend/latest/developer/overview.html · https://deepwiki.com/NVIDIA/cudnn-frontend/2.5-heuristics-and-engine-configuration
 - TVM Ansor / MetaSchedule: https://tvm.apache.org/docs/deep_dive/tensor_ir/tutorials/meta_schedule.html · https://arxiv.org/pdf/2006.06762

@@ -4,7 +4,7 @@ type: routing
 confidence: ★★★
 effect: head ~8-21% GPU; decode-regime Triton/HIP rewrite → ~+1-4% e2e ceiling (modest, real); op-level backend bake-off is N/A (server-flag swap)
 confirms: 6
-last_seen: 2026-06-25
+last_seen: 2026-07-05
 ---
 # vLLM paged attention with a non-pow2 KV block → the live path is the editable in-tree Triton kernel
 - lever: when the KV `block_size` is non-pow2 (e.g. 784), `use_rocm_custom_paged_attention()` returns
@@ -43,13 +43,21 @@ last_seen: 2026-06-25
   reference_io_sha256 empty by design). The author kernel must accept the same paged-KV +
   get_mla_metadata_v1 work/reduce metadata signature (or build its own), stay UNIFORM_BATCH cudagraph-safe
   (no host sync), in-place into o, no persistent HBM. Amdahl is modest here (7.52% head → ~+0.7% e2e at 1.1x).
+- caution (vLLM 0.21 UNIFIED_ATTENTION triton_attn backend, VLLM_ROCM_USE_AITER=0): live seam =
+  editable in-tree Triton `vllm.v1.attention.ops.triton_unified_attention:unified_attention` (the
+  @triton.jit `kernel_unified_attention` 2D/3D + `reduce_segments`). aiter's copy
+  `aiter.ops.triton.attention.unified_attention` is NOT the live path — do not bench/rebind it. No
+  op-level env/flag win: aiter↔triton is a `--attention-backend` server flag (Config Tuner). op_bench
+  bench_attn only validates the oracle (harness_suspect=false expected, rel=0) → run immutable
+  unittest.py directly; baseline vs current is ~1.0x self (identity, no overlay). Tier-C = Triton
+  route=**rewrite** (mode=optimize): autotune BLOCK_M/BLOCK_Q/BLOCK_SIZE/TILE_SIZE, num_warps,
+  num_stages, waves_per_eu; serves BOTH configs (sliding head_dim=256 GQA16/8 + full head_dim=512
+  GQA16/2) across prefill+decode — MUST not regress decode M-buckets {1,64} and stay HIP-graph-safe.
+  Integrator also rebinds the consumers' imported ref in vllm.v1.attention.backends.triton_attn /
+  rocm_aiter_unified_attn. CK attention candidate here needs ckProfiler (absent on this image → advisory,
+  fall back to triton/hip).
 - source: exp/e2e_*Qwen3.5-27B-FP8*/ 2026-06-15 (non-pow2); e2e_Qwen-Qwen3-14B_20260622 (pow2 bk=16, 21% head);
   e2e_moonshotai-Kimi-K2.6_20260622 (MLA decode stage1 TRITON_MLA, 17.23% head, baseline decode M1=0.219ms/M64=0.265ms, oracle rel=0;
   AND aiter `_ps` asm head h1 7.52%, baseline M1=0.062ms/M64=0.080ms/M64-long=0.312ms, oracle rel pass tol2e-2 → route=author triton);
   e2e_moonshotai-Kimi-K2.6_20260623 (re-confirm aiter `_ps` asm path, mla_a16w16_qh16..._ps.co loaded; 7.5% head, synth oracle PASS rel=0,
-  baseline M1=0.184ms/M64=0.438ms; no op-level env/flag win → author_plan triton FIRST then hip, gate=author_recommended);
-  e2e_moonshotai-Kimi-K2.6_20260625 (NON-persistent aiter path this time: mla_dec_stage1_bf16_a16w16_subQ16_mqa16.co loaded,
-  work_meta_data=None; 5.67% head h1, synth oracle PASS rel≈3.9-4.9e-2 within tol2e-2 scale-rel, baseline M1=0.0914ms/M64=0.2186ms;
-  op_bench bench_attn skipped gracefully [needs reference_io.pt, none — synth oracle] → ran immutable unittest.py directly;
-  no op-level env/flag win [CONFIG_TUNE_ENABLED=false → --attention-backend swap unavailable], asm non-editable → author_plan triton, gate=author_recommended.
-  expert_skill mla_tilelang_to_triton matches op but validation_status=draft → advisory reference only, not auto-applied)
+  baseline M1=0.184ms/M64=0.438ms; no op-level env/flag win → author_plan triton FIRST then hip, gate=author_recommended)

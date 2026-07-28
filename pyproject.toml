@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geak"
+version = "4.0.0"
+description = "GEAK v4 — clones the repo locally and installs the Claude Code CLI its Workflows run inside."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE.md" }
+
+# Runtime deps. Add new packages here (this replaces the old requirements.txt).
+dependencies = [
+    "pyyaml",
+    "requests",
+    "datasets",
+    # AMD GPU profiling helper (pinned git commit).
+    "metrix @ git+https://github.com/AMDResearch/intellikit.git@bcbfa0252df9d55f3aab68c95dd3ce45ccbe5b46#subdirectory=metrix",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/AMD-AGI/GEAK"
+
+[tool.setuptools]
+packages = ["geak"]
+
+# NOTE: metadata + deps live here (PEP 621). setup.py stays only because a
+# [project] table can't express the build-time bootstrap hook (clone repo +
+# install Claude Code) that runs during `pip install git+...`.
