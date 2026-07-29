@@ -192,7 +192,9 @@ roles/               director, tech_lead, engineer, deep_engineer (deep_explore)
                      verify_engineer, integrator, oracle_freezer (bake-off freeze)
 knowledge/           optimization_strategies, hip/triton/wrapper, profiling_guide,
                      amd_instinct (multi-card: gfx942/gfx950), self_monitoring, geomean_levers
-scripts/             gpu_lock.sh, profile_kernel.sh
+scripts/             gpu_lock.sh, profile_kernel.sh,
+                     test_mode_dispatch.js (regression guard: mode dispatch + bake-off lane
+                     routing; stubs the runtime, no GPU/agent — `node scripts/test_mode_dispatch.js`)
 ```
 The bake-off references e2e's `op_benchmarker` role + `harness_lib.py` **in place** at
 `../e2e_workflow/` (single source, no copy).

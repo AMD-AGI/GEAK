@@ -28,7 +28,7 @@ if (!WORKFLOW_DIR) {
 const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kernel_workflow')).replace(/\/+$/, '');
 // The single-language WORKER lane. kernel_workflow.js is now a dispatcher (mode=optimize/author ->
-// this worker; mode=bakeoff/auto -> multi-language fan-out), so e2e MUST call the worker DIRECTLY
+// this worker; mode=bakeoff -> multi-language fan-out), so e2e MUST call the worker DIRECTLY
 // (kernel_lane.js) — routing through the dispatcher would add a nesting level (e2e -> dispatcher ->
 // worker = 3 levels) and the runtime forbids it. The worker's behavior/args are unchanged.
 const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
