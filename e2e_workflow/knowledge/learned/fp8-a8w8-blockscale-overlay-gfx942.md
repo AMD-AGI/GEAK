@@ -3,10 +3,208 @@ key: fp8_a8w8_blockscale dense GEMM · gfx942 · sglang Triton live path
 type: lever
 confidence: ★★★
 effect: iso ~1.06–1.16× prefill (Triton-overlay, DEPRECATED); CK-tuned KERNEL ~1.78× vs untuned Triton on the M=13645 head (kernel-level)
-confirms: 17
-last_seen: 2026-07-06
+confirms: 32
+last_seen: 2026-07-25
 status: DEPRECATED-FOR-THIS-EVAL
 ---
+> ✅ **32nd confirm (2026-07-25, Qwen3_14B_20260729 / Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64,
+> isl=osl=1024, o_proj head 11.44% GPU — square N=K=5120, M={1,64,1024}, fresh immutable-unittest eval,
+> synthesized oracle sha="").** Re-confirm of the 21st/23rd/29th o_proj. aiter CK tuner `--libtype both --mp 1`
+> (23.4s, 3 shapes): all winners `libtype=ck`, errRatio 0.0. Engagement CONFIRMED 3/3 "is tuned on cu_num=304"
+> (AITER_LOG_TUNED_CONFIG=1, tuned CSV loaded at runtime — no rebuild needed this run). Cold CUDA-event A/B
+> (tuned CK vs frozen untuned Triton, §9.1 transpose_scale=False, relerr 0.0/2e-5/2e-5 at M=1/64/1024):
+> **decode M=1 4.37×, M=64 4.46×; prefill M=1024 1.31× — CK WINS at ALL M** (square K=5120 family; can route
+> ALL M→CK, unlike gate_up/down prefill loss). Weighted iso ≈2.58× (M-routed decode-only ≈2.19× under shared
+> MAX_M=64 overlay). op_bench single-bucket M=1024 probe reports untuned-CK 0.2323 vs Triton 0.1661 =1.0× (untuned
+> CK prefill sample; bpreshuffle WRONG rel_err 41.5) — NOT a no-win. Shipped `winner_kind=env`
+> (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<o_proj tuned csv>) + shared fp8_utils Triton→CK M-routed overlay;
+> recommend Integrator merge o_proj rows into combined CSV + raise MAX_M for this family to bank prefill 1.31×.
+> e2e gate pending (Integrator; §10.1 greedy parity on engaged CK server + HIP-graph decode capture).
+> ✅ **31st confirm (2026-07-25, Qwen3_14B_20260729 / Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64,
+> isl=osl=1024, gate_up_proj head 15.23% GPU — N=34816,K=5120, M={1,64,1024}, fresh immutable-unittest eval,
+> synthesized oracle sha="", aiter HEAD a6bb49937).** CK skill end to end. op_bench: Triton baseline 0.805ms,
+> untuned CK target 0.504ms (**1.60×**), bpreshuffle WRONG rel_err 46.5. aiter CK tuner `--libtype both --mp 1`
+> (26s): all 3 winners `libtype=ck`, errRatio 0.0. **RUNTIME CSV engagement CONFIRMED on aiter HEAD
+> a6bb49937** — `AITER_LOG_TUNED_CONFIG=1` printed "is tuned on cu_num=304" 3/3 with the tuned kernelName
+> loaded from the CSV; **NO module rebuild was needed here** (contrast the 28th confirm's rebuild-gotcha on
+> the same HEAD — the plain CK `gemm_a8w8_blockscale` runtime lookup DID pick up the CSV this run; still
+> self-verify engagement at integrate). Real warm A/B (tuned CSV engaged, relerr 0.0000 vs Triton at all M →
+> §9.1 `transpose_scale=False` drop-in reconfirmed): **decode M=1 3.38×, M=64 2.67×; prefill M=1024 1.87× —
+> CK WINS at ALL M including prefill** (matches the 28th's tuned-lookup finding; unlike the 20th/24th UNTUNED
+> gate_up prefill 0.60-0.65× loss). ⇒ shipped **UNCONDITIONAL CK overlay** (SGLANG_USE_CK_BLOCKSCALE=1, reversible,
+> not M-routed — CK wins every bucket here) + `winner_kind=env` (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned csv>).
+> amdahl_ceiling @15.23% GPU = 6.04% (op_bench 1.60×; per-bucket decode wins push higher). e2e gate pending
+> (Integrator; §10.1 greedy parity on engaged CK server + HIP-graph decode capture).
+> ✅ **30th confirm (2026-07-25, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64, isl=osl=1024,
+> down_proj head 36.27% GPU — N=5120,K=17408, M={1,64,1024}, fresh immutable-unittest eval, synthesized
+> oracle sha="", aiter HEAD a6bb49937).** Re-confirm of the 19th/22nd/27th down_proj. op_bench blockscale
+> path: Triton baseline 0.528ms, untuned CK target 0.752ms (0.70×), bpreshuffle WRONG rel_err 41.68 — the
+> single-bucket M=1024 probe = 1.0× is prefill-only, NOT a no-win. Real per-bucket cold CUDA-event A/B
+> (CK `aiter.gemm_a8w8_blockscale` vs frozen Triton, relerr 0.0/5e-5/7e-5 at M=1/64/1024 → §9.1
+> `transpose_scale=False` drop-in reconfirmed): **decode M=1 4.16×, M=64 4.36× FASTER; prefill M=1024 0.86×
+> SLOWER → routed to Triton**. aiter CK tuner `--libtype both --mp 1` (single GPU on box): all 3 winners
+> `libtype=ck`, errRatio 0.0; `get_CKGEMM_config` resolves all 3 shapes from the tuned CSV (config-lookup
+> engagement confirmed). Tuned CSV ≈ CK default for the decode buckets (default already optimal at small M),
+> so the M-routed overlay banks the decode win without needing the 28th-confirm module rebuild (rebuild only
+> matters if you route prefill→CK). Shipped M-routed fp8_utils overlay (M≤SGLANG_CK_BLOCKSCALE_MAX_M=64→CK,
+> else Triton, clean `git apply`) + `winner_kind=env` (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned.csv>). e2e
+> gate pending (Integrator; §10.1 greedy parity on engaged CK server + HIP-graph decode capture).
+> ✅ **29th confirm (2026-07-25, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64, isl=osl=1024,
+> o_proj head 12.17% GPU — square N=K=5120, M={1,64,1024}; aiter HEAD a6bb49937).** CK skill on o_proj,
+> aiter CK tuner `--libtype both --mp 1` (35.9s, 7 shapes M={1,16,32,64,128,256,1024}): ALL winners
+> `libtype=ck`, errRatio 0.0. Runtime CSV engagement CONFIRMED (contra the 28th gotcha on this same aiter
+> build): `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned_o_proj.csv>` + AITER_LOG_TUNED_CONFIG=1 printed
+> "is tuned on cu_num=304" 3/3 AND real cold CUDA-event A/B vs untuned Triton: **decode M=1 5.09×, M=64
+> 5.14×; prefill M=1024 1.32× — CK WINS at ALL M** (square K=5120 family, matching the 23rd confirm's o_proj
+> prefill 1.35×; unlike down_proj/gate_up prefill 0.6–0.8× loss). §9.1: CK correct at `transpose_scale=False`
+> (relerr 0.0/1e-5/2e-5 at M=1/64/1024 vs Triton — the live gfx942 use_triton=True seam already produces
+> non-transposed → drop-in). Merged o_proj rows into `ck_tune/combined_blockscale_tuned_gemm.csv` (now 3 NK
+> families: down N=5120/K=17408, gate_up N=34816/K=5120, o N=K=5120). Reused the shared M-routed fp8_utils
+> overlay; SINCE o_proj wins prefill too, recommend the Integrator raise SGLANG_FP8_CK_M_MAX (or per-(N,K)
+> route) to also bank o_proj prefill 1.32×. Shipped `winner_kind=env` (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=
+> combined csv) + fp8_utils Triton→CK overlay. op_bench "ck"→bpreshuffle still WRONG (rel_err 41.5) → shared
+> bake-off shows 1.0×, NOT a no-win. e2e gate pending (Integrator; verify HIP-graph decode capture + §10.1
+> greedy parity on the engaged CK server).
+> 🔧 **28th confirm + NEW GOTCHA (2026-07-25, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64,
+> isl=osl=1024, gate_up_proj head 16.44% GPU — N=34816,K=5120, M={1,64,1024}; aiter HEAD a6bb49937,
+> a DESCENDANT of the skill's pinned 303a583c).** ⚠️ **On this aiter build the CK blockscale instance is
+> selected by a COMPILE-TIME lookup table (`gemm_a8w8_blockscale.cu` → `GENERATE_LOOKUP_TABLE` from
+> `gemm_a8w8_blockscale_lookup.h`), NOT read from the tuned CSV at runtime.** The Python wrapper's
+> `get_CKGEMM_config` only picks libtype (ck vs cktile); for libtype=ck it calls the SAME
+> `gemm_a8w8_blockscale_ck` whether tuned or not. Consequence: `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<csv>`
+> ALONE = **0 engagement** (verified: tuned==untuned==1.49ms @ M=1024; the lookup is empty so it falls to
+> the slow legacy `256x16x128x256_v1` default → CK is a REGRESSION vs Triton, 0.59×). **To engage you MUST
+> rebuild the module with the CSV baked into the lookup:** the build recipe
+> (`optCompilerConfig.json:module_gemm_a8w8_blockscale`) runs `gen_instances.py --tune_file
+> {AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE}`, so `rm aiter/jit/module_gemm_a8w8_blockscale.so` with the env
+> set → next `import aiter` rebuilds (166s, compiles only the tuned instances) with the tuned lookup. AFTER
+> rebuild, engagement confirmed and immutable UT **PASSES: decode M=1 1.10×, M=64 1.16×, prefill M=1024
+> **1.73×** FASTER → GEAK_WEIGHTED_SPEEDUP=1.28× (geomean 1.30), rel-err <1e-4 all M, graph-replay + 3-draw
+> random-parity PASS. NOTE: unlike the 20th/24th confirms (which saw gate_up prefill 0.60-0.65× SLOWER on
+> the UNTUNED default and M-routed prefill→Triton), with the tuned lookup BAKED IN, CK wins at ALL M
+> including prefill — so the overlay should route ALL M to CK here, not just M≤64. §9.1: CK correct at
+> `transpose_scale=False` (the live gfx942 `use_triton=True` seam already produces non-transposed → drop-in
+> swap, no scale change). op_bench blockscale path still maps "ck"→bpreshuffle (WRONG rel_err 46.5) so the
+> shared bake-off shows 1.0× — measure real CK via `aiter:gemm_a8w8_blockscale` + the rebuilt lookup.
+> Shipped `winner_kind=env` (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<merged csv>) + fp8_utils Triton→CK overlay
+> + **mandatory module-rebuild prerequisite**; tuning_artifact = merged tuned csv. e2e gate pending.
+> ✅ **27th confirm (2026-07-25, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64, isl=osl=1024,
+> down_proj head 40.32% GPU — N=5120,K=17408, M={1,64,1024}, fresh immutable-unittest eval, synthesized
+> oracle sha="").** op_bench mapped "ck"→bpreshuffle (WRONG, rel_err 41.68 — §9.1 transposed-scale bug) so
+> the shared bake-off shows 1.0×; the REAL CK is plain `aiter.gemm_a8w8_blockscale`. Ran it via the immutable
+> UT (CURRENT_GEMM_CALLABLE): PASS (eager+3-draw random-parity+graph-replay), **decode M=1 2.56×, M=64 2.90×
+> FASTER; prefill M=1024 0.71× SLOWER → GEAK_WEIGHTED_SPEEDUP=2.23× (geomean 1.74)**. aiter CK tuner
+> `--libtype both --mp 1` (38s, 7 shapes M={1,16,32,64,128,256,1024}): ALL winners `libtype=ck`, errRatio 0.0;
+> engagement verified 3/3 "is tuned on cu_num=304" (AITER_LOG_TUNED_CONFIG=1). Tuned CSV ≈ CK default in the
+> UT (prefill still 0.71× cold/graph — tuner's 324us/M1024 is hot-cache; trust the UT graph A/B). §9.1: plain
+> CK correct at NON-transposed scale (use_triton=True branch already produces it). Shipped M-routed fp8_utils
+> overlay (M≤SGLANG_FP8_CK_M_MAX=64→CK, else Triton) + `winner_kind=env`
+> (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned.csv>). ckProfiler ABSENT in env_report but IRRELEVANT — the aiter
+> CK tuner needs no ckProfiler; CK lever fully feasible. e2e gate pending (Integrator).
+> ✅ **26th confirm (2026-07-25, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, FULL 4-family head 73.18%
+> GPU — down/gate_up/qkv/o × M={1,64,1024}, fresh immutable-unittest eval, synthesized oracle sha="").**
+> CK skill end to end: aiter CK tuner `--libtype both --mp 1` (52s), ALL 12 winners `libtype=ck`,
+> errRatio 0.0; engagement verified 12/12 "is tuned on cu_num=304" (AITER_LOG_TUNED_CONFIG=1). §9.1: CK
+> correct at `transpose_scale=False` (relerr 4e-5 at M=16; transposed → 0.193 garbage). Warm CUDA-event A/B
+> (tuned CSV engaged, parity relerr ~0 all buckets): **decode M=1/M=64 — down 4.30/4.53×, gate_up 3.80/2.24×,
+> qkv 4.61/4.95×, o 4.69/4.95× FASTER; prefill M=1024 — down 0.94×, gate_up 0.65× (SLOWER→Triton), qkv 1.07×,
+> o 1.31×** → REGIME-SPLIT reconfirmed (decode geomean ≈4.15×). op_bench single-bucket M=1024 probe = 1.0×
+> (untuned CK target 0.759 vs Triton 0.528ms, prefill-only) — NOT a no-win. Shipped M-routed fp8_utils CK
+> overlay (M≤SGLANG_CK_BLOCKSCALE_MAX_M=64→CK, else Triton) + `winner_kind=env`
+> (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned.csv>). e2e gate pending (Integrator).
+> ✅ **25th confirm (2026-07-25, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64, isl=osl=1024,
+> FULL 4-family head 76.17% GPU — down/gate_up/qkv/o × M={1,64,1024}, fresh immutable-unittest eval).**
+> CK skill end to end: aiter CK tuner `--libtype both --mp 1` (52s), ALL 12 winners `libtype=ck`,
+> errRatio 0.0; engagement verified 12/12 "is tuned on cu_num=304" (AITER_LOG_TUNED_CONFIG=1). §9.1: CK
+> correct at `transpose_scale=False` (relerr 1.4–1.9e-5 at M=64 all 4 families; transposed → 0.19 garbage).
+> Per-bucket cold CUDA-event A/B (tuned CSV engaged): **decode M=1/M=64 — down 4.45/4.64×, gate_up
+> 3.95/2.27×, qkv 4.99/5.08×, o 4.80/5.05× FASTER; prefill M=1024 — down 0.93×, gate_up 0.65× (SLOWER,
+> routed to Triton), qkv 1.05×/o 1.30×** → REGIME-SPLIT reconfirmed; share-weighted decode ≈4.4×.
+> op_bench single-bucket M=1024 probe = 1.0× (CK target 0.757 vs Triton 0.531ms, prefill-only) — NOT a
+> no-win. Shipped M-routed fp8_utils CK overlay (M≤SGLANG_CK_BLOCKSCALE_MAX_M=64→CK, else Triton) +
+> `winner_kind=env` (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned.csv>). e2e gate pending (Integrator).
+> ✅ **24th confirm (2026-07-25, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64, isl=osl=1024,
+> gate_up_proj head 15.41% GPU — N=34816,K=5120, RE-CONFIRM of the 20th, fresh eval, immutable-unittest task).**
+> CK skill on gate_up (M={1,64,1024}), aiter CK tuner `--libtype both --mp 1` (24s): all 3 winners
+> `libtype=ck`, errRatio 0.0; engagement verified ("is tuned on cu_num=304" M=1/64/1024 via
+> AITER_LOG_TUNED_CONFIG=1). §9.1: CK correct at `transpose_scale=False` (relerr 1.8e-5 at M=16; transposed →
+> 0.18 garbage; bpreshuffle drop-in WRONG relerr 46.5). Per-bucket cold CUDA-event A/B (tuned CSV engaged,
+> parity relerr ~1e-5 all M): **decode M=1 4.01×, M=64 2.27× FASTER; prefill M=1024 0.64× (SLOWER→routed to
+> Triton)** → REGIME-SPLIT reconfirmed; NOTE gate_up M=64 came in at 2.27× this eval (vs the 20th's weak
+> 1.38×) — still the weakest-decode of the four families but healthier here. Reused the global M-routed
+> fp8_utils overlay (M≤64→CK) + `winner_kind=env` (`AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<combined tuned csv>`;
+> gate_up rows merged in, now covering all 4 NK families). op_bench single-bucket M=1024 probe = 1.0× (untuned
+> CK target 1.50ms vs Triton 0.81ms, prefill-only sample) — NOT a no-win. e2e gate pending (Integrator).
+> ✅ **23rd confirm (2026-07-25, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64, isl=osl=1024,
+> MERGED qkv+o_proj head 22.9% GPU — qkv N=7168,K=5120 + o_proj N=5120,K=5120, M={1,64,1024}).** CK skill,
+> aiter CK tuner `--libtype both --mp 1` (30s): all 6 winners `libtype=ck`, errRatio 0.0; engagement
+> verified ("is tuned on cu_num=304" both families via AITER_LOG_TUNED_CONFIG=1). §9.1: CK correct at
+> `transpose_scale=False` (relerr 2e-5 at M=64; transposed → 0.19/0.20 garbage). Per-bucket cold CUDA-event
+> A/B (tuned CSV engaged): **decode M=1 qkv 5.09× / o_proj 4.88×; M=64 qkv 5.19× / o_proj 5.17×; prefill
+> M=1024 qkv 1.08× / o_proj 1.35× — CK WINS at prefill too here** (unlike down_proj's 0.70× prefill loss;
+> these square-ish/wide-N K=5120 families are strong across ALL M). Serving-weighted (M-routed overlay,
+> decode→CK, prefill→Triton to protect down_proj) ≈2.29×. op_bench single-bucket M=1024 probe = 1.0×
+> (prefill sample routed to Triton) — NOT a no-win. Reused the M-routed fp8_utils overlay (global, M≤64→CK)
+> + `winner_kind=env` (`AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<combined tuned csv>` covering all 3 NK families).
+> e2e gate pending (Integrator). Amdahl ceiling @22.9% GPU (live_pct 75.4%): decode-weighted ~5× → large.
+> ✅ **22nd confirm (2026-07-25, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64, isl=osl=1024,
+> down_proj head 37.07% GPU — RE-CONFIRM of the 19th, fresh eval).** Immutable-unittest serving-weighted
+> A/B (CUDA-graph replay), CK target vs frozen Triton baseline: **decode M=1 2.60×, M=64 2.92× FASTER;
+> prefill M=1024 0.70× SLOWER → GEAK_WEIGHTED_SPEEDUP=2.23× (geomean 1.74)**, CORRECTNESS PASS (eager +
+> 3-draw random-parity + graph-replay; relerr 2e-4..8e-3). aiter CK tuner `--libtype both --mp 1` (24s):
+> all winners `libtype=ck`, errRatio 0.0; tune ENGAGES cleanly ("is tuned on cu_num=304" for M=1/64/1024
+> via AITER_LOG_TUNED_CONFIG=1) but is ≈CK-default (no extra gain — CK default heuristic already optimal).
+> §9.1 `transpose_scale=False` correct (bpreshuffle drop-in WRONG relerr 41.7). Shipped **M-routed overlay**
+> (`input_2d.shape[0] ≤ SGLANG_CK_BLOCKSCALE_MAX_M`, default 64) to bank decode win + dodge the prefill
+> regression, + `winner_kind=env` (`AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned csv>`). op_bench single-bucket
+> M=1024 probe = 1.0×/0.70× (prefill-only sample) — NOT a no-win; the decode-weighted metric is the truth.
+> e2e gate pending (Integrator). Amdahl ceiling @37.07% GPU, 2.23× iso ≈ +25.7% e2e (live_pct 75.4% → more).
+> ✅ **21st confirm (2026-07-25, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64, isl=osl=1024,
+> o_proj head 11.31% GPU — square N=K=5120, sibling of the down_proj/gate_up_proj confirms).** CK skill on
+> o_proj (N=5120,K=5120 × M={1..1024}), aiter CK tuner `--libtype both --mp 1`: all winners `libtype=ck`,
+> errRatio 0.0, engagement verified ("is tuned on cu_num=304" for every M via `AITER_LOG_TUNED_CONFIG=1`).
+> ckProfiler ABSENT (env_report) but the aiter CK tuner (`csrc/ck_gemm_a8w8_blockscale/`) does NOT need it —
+> CK env+overlay lever fully feasible; ckProfiler only gates the CK *author* lane. §9.1: CK correct at
+> `transpose_scale=False` (relerr 3e-3..7e-3 at M≥2; bpreshuffle drop-in WRONG relerr 41.5). Per-bucket cold
+> CUDA-event A/B (tuned CSV engaged): **decode M=1..64 3.6–3.9× FASTER; M=128 2.66×, M=256 2.01×; prefill
+> M=1024 1.04× (≈tie, routed to Triton)** → REGIME-SPLIT reconfirmed; square o_proj is a STRONG-decode family
+> (~3.9× at M64, vs gate_up_proj's weak 1.38×). Tuned CSV ≈ CK default (default already optimal). Shipped
+> M-ROUTED overlay (`input_2d.shape[0] ≤ SGLANG_CK_BLOCKSCALE_MAX_M`, default 64; patch applies clean to live
+> sglang tree) + `winner_kind=env` (`AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned combined csv>`). op_bench
+> single-bucket M=1024 probe = 1.0× (prefill-only sample) — NOT a no-win. e2e gate pending (Integrator).
+> ✅ **20th confirm (2026-07-25, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64, isl=osl=1024,
+> gate_up_proj head 15.22% GPU — sibling of the down_proj 19th confirm).** CK skill on gate_up_proj
+> (N=34816,K=5120 × M={1,16,32,48,64}), aiter CK tuner `--libtype both --mp 1`: all winners `libtype=ck`,
+> errRatio 0.0, engagement verified ("is tuned on cu_num=304" for M=1 & M=64; M=1024 → "use default" =
+> routes to Triton). §9.1: CK correct at `transpose_scale=False` (relerr ~2e-5 at M≥2; transposed → 0.19
+> garbage; bpreshuffle drop-in WRONG relerr 46.5). Per-bucket cold CUDA-event A/B: **decode M=1 3.41×,
+> M=64 1.38× FASTER; prefill M=1024 0.60× (SLOWER)** → REGIME-SPLIT reconfirmed (gate_up_proj is the
+> weakest-decode family, matching meta's ~1.37×/M64 prior). Tuned CSV ≈ CK default (default already
+> optimal for these shapes). Shipped M-ROUTED overlay (`input_2d.shape[0] ≤ _CK_M_MAX`, default 64) +
+> `winner_kind=env` (`AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned.csv>`) + `code_patch=<fp8_utils M-routed CK
+> overlay>`. op_bench single-bucket M=1024 probe = 1.0× (prefill-only sample) — NOT a no-win. e2e gate pending.
+> ✅ **19th confirm (2026-07-25, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64, isl=osl=1024,
+> down_proj head 36.7% GPU).** CK skill on down_proj (N=5120,K=17408 × M={1,64,1024}), aiter CK tuner
+> `--libtype both --mp 1`: all winners `libtype=ck`, errRatio 0.0, engagement verified ("is tuned on
+> cu_num=304"). ckProfiler ABSENT but the aiter CK tuner (`csrc/ck_gemm_a8w8_blockscale/`) does NOT need
+> it — the CK env+overlay lever is fully feasible (ckProfiler only gates the CK *author* lane). §9.1: CK
+> correct at `transpose_scale=False` (relerr 4e-4..6e-3 at M≥2; bpreshuffle drop-in WRONG relerr 41.7).
+> Per-bucket production A/B (op_bench cold-cache CUDA events): **decode M=1 3.19×, M=64 3.49× FASTER;
+> prefill M=1024 0.82× (SLOWER)** → REGIME-SPLIT reconfirmed. Tuned CSV ≈ CK default here (default already
+> optimal). Shipped M-ROUTED overlay (`input_2d.shape[0] ≤ SGLANG_CK_BLOCKSCALE_MAX_M`, default 64) +
+> `winner_kind=env` (`AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned.csv>`). op_bench single-bucket M=1024 probe
+> shows 1.0× (prefill-only sample) — NOT a no-win. e2e gate pending (Integrator).
+> ✅ **18th confirm (2026-07-24, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, conc=64, isl=osl=1024).**
+> CK skill end to end on the 12 live (M,N,K) (4 NK families × {1,64,1024}), `--libtype ck --mp 1` (single
+> GPU on box): ALL 12 winners `libtype=ck`, errRatio 0.0, engagement verified ("is tuned on cu_num=304" ×12).
+> §9.1 layout reconfirmed: CK wants `transpose_scale=False` (CK-vs-Triton rel-err ~1e-5 at M≥2). Production-op
+> A/B (deployed CSV, CUDA-event device time): **decode M=1 3.3–5.2×, M=64 1.42–5.3× FASTER; prefill M=1024
+> 0.60–0.73× (SLOWER on every family)** → REGIME-SPLIT reconfirmed. Share-weighted decode speedup ~3.9× (M=1) /
+> ~3.3× (M=64). Shipped M-ROUTED overlay (this box: `input_2d.shape[0] ≤ AITER_CK_BLOCKSCALE_MAX_M`, default
+> **64** = the decode ceiling at conc=64; larger M→stock Triton) + `winner_kind=env`
+> (`AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned.csv>`). op_bench's single-bucket M=1024 probe reports 1.0× (it
+> only sees the prefill regime) — do NOT read that as "no win"; the win is the decode regime it doesn't sample.
+> e2e gate pending (Integrator; verify HIP-graph decode capture keeps the small-M CK path live).
 > ✅ **17th confirm (2026-07-06, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, e2e_cycle0).**
 > CK skill end to end on the 12 live (M,N,K) (4 NK families × {1,64,16384}), `--libtype both --mp 1`:
 > ALL 12 winners `libtype=ck`, errRatio 0.0. §9.1 scale-layout check (M=64, all 4 families): CK wants

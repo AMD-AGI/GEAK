@@ -147,13 +147,19 @@ class SelectionAndExecutionContractTests(unittest.TestCase):
         }
         return manifest, case
 
-    def test_pattern_mismatch_never_falls_back(self):
+    def test_pattern_mismatch_falls_back_to_dominant_target(self):
+        # When no supplied pattern matches (e.g. the config swapped the GEMM
+        # backend so the executed kernel name differs from the pattern),
+        # selection falls back to the dominant target kernel with valid metrics
+        # instead of reporting failure. Helper/runtime kernels stay excluded.
         kernels = roofline_kernel.parse_rocprof_compute(_fixture_text())
-        self.assertIsNone(
-            roofline_kernel._select_kernel(kernels, ["definitely_not_present"])
-        )
-        self.assertIs(
-            roofline_kernel._select_kernel(kernels, []), kernels[0]
+        fallback = roofline_kernel._select_kernel(kernels, ["definitely_not_present"])
+        self.assertIsNotNone(fallback)
+        self.assertTrue(roofline_kernel._is_target_kernel(fallback["kernel_name"]))
+        self.assertFalse(
+            roofline_kernel._kernel_matches_patterns(
+                fallback, ["definitely_not_present"]
+            )
         )
 
         manifest, case = self._manifest_case("^definitely_not_present$")
@@ -170,15 +176,32 @@ class SelectionAndExecutionContractTests(unittest.TestCase):
                 result = roofline_kernel._case_result(
                     manifest, case, "/fake/tool", "baseline", directory
                 )
-        self.assertEqual(result["status"], "failed")
-        self.assertIsNone(result["matched_kernel_name"])
-        self.assertTrue(any("kernel_patterns" in item for item in result["warnings"]))
+        self.assertEqual(result["status"], "matched")
+        self.assertIsNotNone(result["matched_kernel_name"])
+        self.assertEqual(result["selection_mode"], "fallback")
+        self.assertTrue(
+            roofline_kernel._is_target_kernel(result["matched_kernel_name"])
+        )
+        self.assertTrue(any("fallback" in item for item in result["warnings"]))
         profile_arguments = run.call_args_list[1].args[0]
         self.assertIn("--output-directory", profile_arguments)
         self.assertNotIn("-k", profile_arguments)
         profile_environment = run.call_args_list[1].kwargs["env"]
         self.assertEqual(profile_environment["ROCR_VISIBLE_DEVICES"], "2")
         self.assertEqual(profile_environment["HIP_VISIBLE_DEVICES"], "2")
+
+    def test_helper_only_output_still_fails(self):
+        # If every kernel in the analyze output is a helper/runtime kernel, there
+        # is no legitimate target to fall back to and the case fails cleanly.
+        helper_only = (
+            "Top Kernels\n"
+            "0 | void at::native::vectorized_elementwise_kernel<4> | 100.0\n"
+            "1 | __amd_rocclr_copyBuffer | 50.0\n"
+        )
+        kernels = roofline_kernel.parse_rocprof_compute(helper_only)
+        self.assertIsNone(
+            roofline_kernel._select_kernel(kernels, ["definitely_not_present"])
+        )
 
     def test_nonzero_commands_with_valid_target_still_match(self):
         manifest, case = self._manifest_case("^fp8_gemm")
@@ -287,7 +310,7 @@ class SelectionAndExecutionContractTests(unittest.TestCase):
                 "out",
             ]
         )
-        self.assertEqual(defaults.timeout_sec, 1800.0)
+        self.assertEqual(defaults.timeout_sec, 3600.0)
         self.assertEqual(defaults.saturation_pct, 60.0)
         custom = roofline_kernel._parser().parse_args(
             [

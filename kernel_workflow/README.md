@@ -94,8 +94,8 @@ Workflow({
                                //   unaffected (it stays on the frozen reference_io.pt oracle).
                                //   Also accepted as op_spec.workload_path, or op_spec.workload (inline).
     // --- isolated per-kernel roofline (optional; model-level e2e profiling is unchanged) ---
-    roofline: "off",           // "off" (rollout default) | "auto" (best effort) | "required"
-    roofline_install: "off",   // "off" (default) | "auto" (fail-soft apt install) | "required"
+    roofline: "auto",          // "auto" (default, best effort) | "off" (disable) | "required"
+    roofline_install: "auto",  // "auto" (default, fail-soft apt install) | "off" | "required"
     roofline_max_cases: 3,     // max representative workload cases to profile
     roofline_timeout_sec: 1800,// timeout per rocprof-compute subprocess
     roofline_saturation_pct: 60,
@@ -121,20 +121,22 @@ representative cases, then the Profile phase runs `scripts/roofline_kernel.py` a
 `profile_kernel.sh` counter pass. The structured result keeps theoretical AI-vs-ridge placement
 separate from observed compute/HBM/cache/LDS saturation and passes measured evidence into round
 planning. `roofline="required"` turns collection failures into profile failures for controlled lab
-runs; `off` is the rollout default and disables the enhancement. Missing rocprof-compute never blocks
-`auto`. Switch the default to `auto` only after validating the installed rocprof-compute versions on
-the target gfx942/gfx950 systems.
+runs; `roofline="off"` disables the enhancement. `auto` is the default: collection runs at baseline
+and every reprofile round once the COMMANDMENT/harness exists, and missing rocprof-compute never blocks
+it (it degrades to a tagged `skipped` result). The e2e layer forwards these knobs into every nested
+kernel_workflow run, so a whole e2e run can be tuned/disabled with the same `roofline*` args.
 
 The workflow profiles isolated kernel cases, not the whole serving model. E2E torch/rocprofv3 traces
 continue to identify hot kernels and workload weights; correctness and unprofiled COMMANDMENT timing
 remain authoritative.
 
 #### Installing rocprof-compute
-Installation is explicit and disabled by default. Set `roofline_install="auto"` to let the baseline
-Profile phase detect the tool and, when missing, install the ROCm `rocprofiler-compute` apt package,
-its Python requirements, and the pandas `<3` compatibility pin. Installation failures are recorded in
-`EVAL_DIR/roofline/install.json` and remain fail-soft. Use `roofline_install="required"` to fail the
-Profile phase when installation cannot produce a runnable tool.
+Installation defaults to `auto`: the baseline Profile phase detects the tool and, when missing, installs
+the ROCm `rocprofiler-compute` apt package, its Python requirements, and the pandas `<3` compatibility
+pin (system apt needs root/`sudo`). Installation failures are recorded in `EVAL_DIR/roofline/install.json`
+and remain fail-soft. Set `roofline_install="off"` to never touch system packages (collection still runs
+if the tool is already present), or `roofline_install="required"` to fail the Profile phase when
+installation cannot produce a runnable tool.
 
 The installer can also be run before the workflow:
 

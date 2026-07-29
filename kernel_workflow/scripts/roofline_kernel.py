@@ -30,9 +30,17 @@ import roofline_policy
 SCHEMA_VERSION = "roofline-v1"
 TOP_LEVEL_STATUSES = ("ok", "partial", "skipped", "failed")
 CASE_STATUSES = ("matched", "skipped", "failed")
-DEFAULT_TIMEOUT_SEC = 1800.0
+# A full profile (no --roof-only) replays the kernel once per counter set, so it needs more headroom
+# than the old roofline-only capture. The -k kernel filter keeps replays scoped to the target kernel.
+# Callers (kernel_workflow.js: roofline_timeout_sec) may still override per run.
+DEFAULT_TIMEOUT_SEC = 3600.0
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-METRIC_ID_RE = re.compile(r"(?<![\d.])((?:2|4|17)\.\d+(?:\.\d+)?)\b")
+# Section-scoped so prose lines with "1." etc. are never mistaken for metric rows.
+# 2 = System Speed-of-Light, 4 = Roofline, 7 = Wavefront (launch + runtime stats),
+# 10 = Instruction Mix, 11 = Compute Pipeline, 16 = Vector L1, 17 = L2 Cache.
+# 7/10/11/16 were added so latency dep/issue split and the raw-counter red-flag
+# checks have data; existing 2/4/17 derivations are unaffected (they key off exact IDs).
+METRIC_ID_RE = re.compile(r"(?<![\d.])((?:2|4|7|10|11|16|17)\.\d+(?:\.\d+)?)\b")
 KERNEL_HEADER_RES = (
     re.compile(r"^\s*(?:[|+├└─\s]*)Kernel\s+(\d+)\s*:\s*(.+?)\s*$", re.I),
     re.compile(r"^\s*(?:[|+├└─\s]*)Kernel(?:\s+Name)?\s*:\s*(.+?)\s*$", re.I),
@@ -249,6 +257,122 @@ def _utilization(actual, peak):
     return 100.0 * actual / peak
 
 
+def _row_value(rows, metric_id):
+    """Avg-column value for an exact metric id, or None. ID match only (no name search)."""
+    for row in rows:
+        if row["metric_id"] == metric_id:
+            return row["value"]
+    return None
+
+
+def _row_peak(rows, metric_id):
+    for row in rows:
+        if row["metric_id"] == metric_id:
+            return row["peak"]
+    return None
+
+
+def _ratio_pct(numerator, denominator):
+    """100 * num / den, guarding None and non-positive denominators."""
+    if numerator is None or denominator is None or denominator <= 0:
+        return None
+    return 100.0 * numerator / denominator
+
+
+def derive_diagnostics(rows):
+    """Derive raw-counter diagnostics from blocks 7/10/11/16 (+ block 2 speed-of-light).
+
+    Every field is nullable: a signal is None when its counter set was not collected
+    (e.g. an old --roof-only capture) or the row is absent. The keys map directly onto
+    the optimization playbook's Step-0 latency dep/issue split and six-check red flags;
+    roofline_policy consumes them without any I/O. gfx942 section IDs are documented inline.
+    """
+    # Block 7.2 Wavefront Runtime Stats -- cycle accounting. Each wait bucket is divided by
+    # Wave Cycles (never subtracted); dep-wait and issue-wait imply OPPOSITE fixes downstream.
+    wave_cycles = _row_value(rows, "7.2.3")
+    dep_wait = _row_value(rows, "7.2.4")
+    issue_wait = _row_value(rows, "7.2.5")
+    active_cycles = _row_value(rows, "7.2.6")
+
+    # Block 7.1 Wavefront Launch Stats -- occupancy / register / spill inputs.
+    grid_size = _row_value(rows, "7.1.0")
+    workgroup_size = _row_value(rows, "7.1.1")
+    vgprs = _row_value(rows, "7.1.5")
+    agprs = _row_value(rows, "7.1.6")
+    sgprs = _row_value(rows, "7.1.7")
+    scratch_per_workitem = _row_value(rows, "7.1.9")  # Bytes/workitem; >0 => register spill
+
+    ctas = None
+    if grid_size is not None and workgroup_size not in (None, 0):
+        ctas = grid_size / workgroup_size
+
+    # Block 2 Speed-of-Light -- achieved occupancy, active CUs (peak = total CUs), LDS conflicts.
+    num_cus = _row_peak(rows, "2.1.8")  # Active CUs peak column == hardware CU count
+    occ_value = _row_value(rows, "2.1.16")
+    occ_peak = _row_peak(rows, "2.1.16")
+    wavefront_occupancy = occ_value if occ_value is not None else _row_value(rows, "7.2.7")
+    lds_bank_conflicts_per_access = _row_value(rows, "2.1.18")
+    lds_bank_conflict_peak = _row_peak(rows, "2.1.18")
+
+    # Block 11.2 Pipeline Statistics -- engine utilization and issue efficiency.
+    mfma_util_pct = _row_value(rows, "11.2.7")
+    valu_util_pct = _row_value(rows, "11.2.3")
+    ipc = _row_value(rows, "11.2.0")
+    ipc_issued = _row_value(rows, "11.2.1")
+
+    # Block 16.1 vL1D Speed-of-Light -- memory access quality.
+    coalescing_pct = _row_value(rows, "16.1.3")
+    l1_hit_rate_pct = _row_value(rows, "16.1.0")
+
+    gpu_fill_ratio = None
+    if ctas is not None and num_cus not in (None, 0):
+        gpu_fill_ratio = ctas / num_cus
+
+    # Register-occupancy ceiling: waves/SIMD = min(8, 512 / (Arch_VGPR + Accum_VGPR)).
+    # This is how many waves *could* reside given the register footprint, independent of
+    # how many the launch actually filled -- the playbook's check #2.
+    waves_per_simd_ceiling = None
+    total_vgpr = None
+    if vgprs is not None or agprs is not None:
+        total_vgpr = (vgprs or 0) + (agprs or 0)
+    if total_vgpr and total_vgpr > 0:
+        waves_per_simd_ceiling = min(
+            roofline_policy.MAX_WAVES_PER_SIMD,
+            roofline_policy.VGPR_FILE_PER_SIMD / total_vgpr,
+        )
+
+    return {
+        # latency dep/issue split (fractions of Wave Cycles)
+        "wave_cycles": wave_cycles,
+        "dependency_wait_pct": _ratio_pct(dep_wait, wave_cycles),
+        "issue_wait_pct": _ratio_pct(issue_wait, wave_cycles),
+        "active_pct": _ratio_pct(active_cycles, wave_cycles),
+        # occupancy / registers / spill
+        "vgprs": vgprs,
+        "agprs": agprs,
+        "sgprs": sgprs,
+        "scratch_per_workitem": scratch_per_workitem,
+        "ctas": ctas,
+        "num_cus": num_cus,
+        "gpu_fill_ratio": gpu_fill_ratio,
+        "wavefront_occupancy": wavefront_occupancy,
+        "achieved_occupancy_pct": _ratio_pct(occ_value, occ_peak),
+        "waves_per_simd_ceiling": waves_per_simd_ceiling,
+        # pipeline utilization
+        "mfma_util_pct": mfma_util_pct,
+        "valu_util_pct": valu_util_pct,
+        "ipc": ipc,
+        "ipc_issued": ipc_issued,
+        # memory access quality
+        "coalescing_pct": coalescing_pct,
+        "l1_hit_rate_pct": l1_hit_rate_pct,
+        "lds_bank_conflicts_per_access": lds_bank_conflicts_per_access,
+        "lds_bank_conflict_pct": _ratio_pct(
+            lds_bank_conflicts_per_access, lds_bank_conflict_peak
+        ),
+    }
+
+
 def derive_metrics(rows, dtypes=None):
     """Derive normalized roofline metrics from parsed report rows."""
     rate_rows = [
@@ -350,6 +474,9 @@ def derive_metrics(rows, dtypes=None):
     )
     no_values = [rate["value"] for rate in compute_rates if rate["value"] is not None]
     metrics["no_fp_work"] = bool(no_values) and max(no_values) == 0
+    # Raw-counter diagnostics (blocks 7/10/11/16) feed the policy's dep/issue split and
+    # red-flag checks. All keys are nullable, so pre-full-profile captures degrade cleanly.
+    metrics["diagnostics"] = derive_diagnostics(rows)
     return metrics, compute_rates
 
 
@@ -589,6 +716,131 @@ def _command_arguments(command):
     raise ValueError("case command must be a non-empty list or string")
 
 
+# --- Manifest command path resolution (layout-agnostic) --------------------------------
+# A manifest `command` may reference a script (e.g. a generated roofline driver) by a path
+# that is relative to the TASK/EVAL root rather than to the case `workdir` the profiler
+# runs it from -- or `workdir` may point at a sibling subdir. rocprof-compute then launches
+# the command from the wrong CWD and the interpreter reports "No such file or directory",
+# so NO counters are collected and roofline silently degrades to "unknown".
+#
+# This resolver repairs that generically, WITHOUT assuming any project-specific directory
+# names (no hard-coded "workspace"/"generated") or any machine-specific absolute prefix: it
+# only ever walks UP from the case `workdir` and the roofline `out_dir` (plus os.getcwd()),
+# so it behaves identically for any GEAK checkout on any host. It relocates a file argument
+# ONLY to a path that actually exists; if nothing is found the command is returned unchanged
+# with an explanatory note (roofline is diagnostic-only -- never fabricate an input).
+_INTERPRETER_BASENAMES = {
+    "python", "python3", "python2", "bash", "sh", "node", "pytest",
+    "ruby", "perl", "env",
+}
+_SCRIPT_EXTENSIONS = (".py", ".sh", ".js", ".mjs", ".cjs", ".pyc")
+
+
+def _candidate_bases(workdir, out_dir):
+    """Directories to relocate a manifest-referenced file against: the case workdir, the
+    roofline out_dir and os.getcwd(), each plus a bounded chain of ancestors. Pure upward
+    walk -> no assumption about the repo layout or absolute path prefix."""
+    bases = []
+    seen = set()
+
+    def _add(path):
+        if not path:
+            return
+        absolute = os.path.abspath(path)
+        if absolute not in seen and os.path.isdir(absolute):
+            seen.add(absolute)
+            bases.append(absolute)
+
+    for start in (workdir or os.getcwd(), out_dir, os.getcwd()):
+        if not start:
+            continue
+        current = os.path.abspath(start)
+        for _ in range(6):  # the dir itself + up to 5 ancestors
+            _add(current)
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+    return bases
+
+
+def _looks_like_path_token(command, index):
+    """True if command[index] is meant to be a filesystem path we execute/read (a script),
+    not a flag or an opaque value. Heuristic + argv position (arg right after an interpreter)."""
+    token = command[index]
+    if not token or token.startswith("-"):
+        return False
+    if os.sep in token or token.endswith(_SCRIPT_EXTENSIONS):
+        return True
+    if index > 0 and os.path.basename(command[index - 1]) in _INTERPRETER_BASENAMES:
+        return True
+    return False
+
+
+def _locate_file(token, bases):
+    """Absolute path to `token` found under one of `bases`, or None. Exact suffix join first
+    (cheap, unambiguous); then a depth- and count-bounded basename search that only returns a
+    UNIQUE match. Never invents a path -- the returned path always exists on disk."""
+    for base in bases:
+        candidate = os.path.join(base, token)
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    basename = os.path.basename(token)
+    if not basename:
+        return None
+    matches = set()
+    budget = 20000  # cap on directory entries scanned -> stays cheap and safe on any tree
+    for base in bases:
+        base_depth = base.rstrip(os.sep).count(os.sep)
+        for root, dirs, files in os.walk(base):
+            budget -= len(files) + len(dirs)
+            if budget <= 0:
+                break
+            if root.count(os.sep) - base_depth > 3:  # bounded depth
+                dirs[:] = []
+                continue
+            if basename in files:
+                matches.add(os.path.abspath(os.path.join(root, basename)))
+        if budget <= 0:
+            break
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def _resolve_command_paths(command, workdir, out_dir):
+    """Rewrite mislocated file arguments in an argv-form `command` to absolute paths so the
+    profiler finds them regardless of the manifest's `workdir`. Returns (resolved_command,
+    notes). A token already resolvable (absolute-and-exists, or exists relative to workdir)
+    is left untouched -> when the manifest is already correct this is a no-op."""
+    cwd = os.path.abspath(workdir) if workdir else os.getcwd()
+    resolved = list(command)
+    notes = []
+    bases = None
+    for index, token in enumerate(command):
+        if index == 0 or not _looks_like_path_token(command, index):
+            continue
+        if os.path.isabs(token):
+            if os.path.isfile(token):
+                continue
+        elif os.path.isfile(os.path.join(cwd, token)):
+            continue
+        if bases is None:
+            bases = _candidate_bases(workdir, out_dir)
+        found = _locate_file(token, bases)
+        if found and found != os.path.abspath(os.path.join(cwd, token)):
+            resolved[index] = found
+            notes.append(
+                "relocated command argument %r -> %r (not found relative to workdir %r)"
+                % (token, found, cwd)
+            )
+        elif not found:
+            notes.append(
+                "command argument %r not found relative to workdir %r and not locatable "
+                "under any ancestor of workdir/out_dir; profiling will likely fail"
+                % (token, cwd)
+            )
+    return resolved, notes
+
+
 def _validate_manifest(manifest):
     if not isinstance(manifest, dict):
         raise ValueError("manifest must be a JSON object")
@@ -617,18 +869,127 @@ def _patterns(manifest, case):
     return [str(item) for item in value or [] if str(item)]
 
 
-def _select_kernel(kernels, patterns):
+def _exclude_patterns(manifest, case):
+    """Kernel-name regexes to keep OUT of the dominant-kernel fallback.
+
+    Used when a config/backend swap deploys a DIFFERENT callable than the frozen
+    baseline: `_build_correctness` still runs the baseline (Triton) kernel during
+    setup, so it leaks into the trace and -- being one big kernel vs the swapped
+    backend's many smaller kernels -- would win the duration-ranked fallback. The
+    e2e driver passes the baseline's matched kernel symbol here so the DEPLOYED
+    kernel is selected instead. An explicit positive `kernel_patterns` still wins;
+    exclusion only filters the fallback (and never strands a case with no reading:
+    if every candidate is excluded, the exclusion is ignored)."""
+    value = case.get("exclude_patterns")
+    if value is None:
+        value = manifest.get("target", {}).get("exclude_patterns", [])
+    if isinstance(value, str):
+        value = [value]
+    return [str(item) for item in value or [] if str(item)]
+
+
+# Kernel-name fragments that never represent the compute kernel under study.
+# rocprof-compute reports many runtime/helper kernels (elementwise casts, buffer
+# fills/copies, RNG, reductions, generic at::native launches) alongside the
+# target GEMM. They are filtered out of the persisted `kernels` list AND excluded
+# from pattern selection and the dominant-kernel fallback, so a helper kernel can
+# neither leak into the report nor be attributed as the roofline result.
+#
+# Mirrors the `skip_patterns` in /wekafs/test_roofline.py (vectorized_elementwise,
+# distribution_, reduce_kernel, fillBuffer, copyBuffer, at::native). Matched
+# case-insensitively as substrings, so it stays layout- and backend-agnostic.
+# NOTE: the reference also skips "Cijk_", but that is a real Tensile/hipBLASLt
+# GEMM kernel -- excluding it globally would drop a legitimate compute target in
+# configs where it is the dominant GEMM, so it is intentionally NOT skipped here.
+_EXCLUDED_KERNEL_FRAGMENTS = (
+    "vectorized_elementwise",
+    "distribution_",
+    "reduce_kernel",
+    "fillbuffer",
+    "copybuffer",
+    "at::native",
+)
+
+
+def _is_target_kernel(name):
+    lowered = (name or "").lower()
+    return not any(fragment in lowered for fragment in _EXCLUDED_KERNEL_FRAGMENTS)
+
+
+def _kernel_rank_key(kernel):
+    metrics = kernel.get("metrics", {})
+    duration = None
+    for name in (
+        "total_duration_ns",
+        "duration_ns",
+        "avg_duration_ns",
+        "total_duration_us",
+        "duration_us",
+    ):
+        duration = _finite_number(metrics.get(name))
+        if duration is not None:
+            break
+    gflops = _finite_number(metrics.get("performance_gflops")) or 0.0
+    return (duration if duration is not None else 0.0, gflops)
+
+
+def _compile_pattern(pattern):
+    try:
+        return re.compile(pattern)
+    except re.error:
+        return re.compile(re.escape(pattern))
+
+
+def _kernel_matches_patterns(kernel, patterns):
+    if not kernel or not patterns:
+        return False
+    name = kernel.get("kernel_name", "")
+    return any(_compile_pattern(pattern).search(name) for pattern in patterns)
+
+
+def _select_kernel(kernels, patterns, exclude_patterns=()):
+    """Select the roofline kernel for a case.
+
+    A requested pattern matching a *target* kernel wins. Otherwise -- e.g. the
+    config swapped the GEMM backend so the executed kernel name (CK ``Cijk_*`` /
+    ``ck::kernel_gemm_*``) differs from the pattern (Triton
+    ``gemm_a8w8_blockscale``) -- fall back to the dominant target kernel that
+    carries valid roofline metrics. Helper/runtime kernels (see
+    ``_EXCLUDED_KERNEL_FRAGMENTS``) are never selected under either path.
+
+    ``exclude_patterns`` (see ``_exclude_patterns``) are dropped from the fallback
+    only -- an explicit positive ``patterns`` match still wins even if it also
+    matches an exclude -- and the exclusion is ignored rather than returning None
+    when it would strand a case with no candidate.
+    """
     if not kernels:
         return None
+    targets = [
+        kernel
+        for kernel in kernels
+        if _is_target_kernel(kernel.get("kernel_name", ""))
+    ]
     for pattern in patterns:
-        try:
-            expression = re.compile(pattern)
-        except re.error:
-            expression = re.compile(re.escape(pattern))
-        for kernel in kernels:
+        expression = _compile_pattern(pattern)
+        for kernel in targets:
             if expression.search(kernel["kernel_name"]):
                 return kernel
-    return None if patterns else kernels[0]
+    candidates = [
+        kernel for kernel in targets if _has_valid_kernel_metrics(kernel)
+    ]
+    if candidates and exclude_patterns:
+        exclude = [_compile_pattern(p) for p in exclude_patterns]
+        kept = [
+            kernel
+            for kernel in candidates
+            if not any(e.search(kernel["kernel_name"]) for e in exclude)
+        ]
+        if kept:  # never strand a case: keep the full set if exclusion empties it
+            candidates = kept
+    if candidates:
+        candidates.sort(key=_kernel_rank_key, reverse=True)
+        return candidates[0]
+    return None
 
 
 def _tool_version(tool, timeout_sec):
@@ -656,6 +1017,42 @@ def _has_valid_kernel_metrics(kernel):
     return any(_finite_number(metrics.get(name)) is not None for name in observed)
 
 
+# Per-kernel fields kept in the persisted report. The raw analyze-table `rows`
+# and the intermediate `compute_rates` table are dropped -- they are only used to
+# derive `metrics`, they dominate the file size (~27 KB/kernel), and the raw
+# table is already saved to disk per case as `cases/<id>/analyze.txt`, so nothing
+# recoverable is lost. Per-kernel `classification` is omitted too: the selected
+# kernel's classification is carried at the case level. Set the environment
+# variable ROOFLINE_KEEP_RAW_KERNELS=1 to retain the full per-kernel records.
+_SLIM_KERNEL_FIELDS = ("kernel_index", "kernel_name", "metrics")
+
+
+def _slim_kernels(kernels):
+    """Return a compact per-kernel record list for the persisted report."""
+    if os.environ.get("ROOFLINE_KEEP_RAW_KERNELS") == "1":
+        return kernels
+    return [
+        {field: kernel.get(field) for field in _SLIM_KERNEL_FIELDS}
+        for kernel in kernels
+    ]
+
+
+def _report_kernels(kernels):
+    """Kernels persisted in the report.
+
+    Helper/runtime kernels (see ``_EXCLUDED_KERNEL_FRAGMENTS``) are filtered out
+    so they never leak into the output -- matching the selection filter and the
+    reference ``skip_patterns`` behavior. Each surviving kernel is then slimmed
+    (unless ``ROOFLINE_KEEP_RAW_KERNELS=1``).
+    """
+    targets = [
+        kernel
+        for kernel in kernels
+        if _is_target_kernel(kernel.get("kernel_name", ""))
+    ]
+    return _slim_kernels(targets)
+
+
 def _case_result(
     manifest,
     case,
@@ -669,12 +1066,28 @@ def _case_result(
     case_dir = os.path.join(out_dir, "cases", case_id)
     os.makedirs(case_dir, exist_ok=True)
     command, wrapped = _command_arguments(case["command"])
+    # Repair mislocated file args (layout-agnostic) so the profiler runs the command from the
+    # right file regardless of the manifest's workdir. Only argv form -- a bash -lc string is
+    # left to the shell. No-op when the manifest is already correct.
+    path_notes = []
+    if not wrapped:
+        command, path_notes = _resolve_command_paths(
+            command, case.get("workdir"), out_dir
+        )
     patterns = _patterns(manifest, case)
+    exclude_patterns = _exclude_patterns(manifest, case)
     profile_environment = _gpu_environment(manifest, case)
     profile_output = _unused_path(os.path.join(case_dir, "profile_data"))
     output_option, option_warning = _profile_output_option(tool, timeout_sec)
+    # Full profile (NOT --roof-only). --roof-only collects roofline counters only, so the wavefront
+    # runtime stats (dependency/issue/active waits), compute-pipeline (MFMA/VALU), occupancy/VGPR/AGPR,
+    # LDS bank conflicts and coalescing counters are never captured -- exactly the Step-0 signals the
+    # optimizer needs to tell a dependency-wait from an issue-wait latency stall. A default profile
+    # collects those AND still emits roofline (only --no-roof would drop roofline). Cost: more counter
+    # passes; the -k kernel filter below keeps replays scoped to the target kernel. Fail-soft: if the
+    # heavier profile times out or a section is absent, downstream parsing/classification degrade to null.
     profile_args = [
-        tool, "profile", "--roof-only", "-n", case_id,
+        tool, "profile", "-n", case_id,
     ]
     literal_filters = _literal_kernel_filters(patterns)
     if literal_filters:
@@ -691,7 +1104,15 @@ def _case_result(
     _write_text(profile_log, profile_text)
 
     analysis_path = _analysis_data_path(profile_output)
-    analyze_args = [tool, "analyze", "-p", analysis_path, "-b", "2", "4", "17"]
+    # Sections (gfx942 IDs): 0 Top Stats, 1 System Info, 2 System Speed-of-Light, 4 Roofline,
+    # 7 Wavefront (dependency/issue/active runtime stats -> C1 vs C2 latency split), 10 Instruction Mix,
+    # 11 Compute Pipeline (MFMA/VALU utilization), 16 Vector L1, 17 L2. Superset of the previous 2/4/17,
+    # so roofline/SoL/L2 parsing is unchanged; the added sections feed the Step-0 latency sub-classing
+    # and the six raw-counter red-flag checks.
+    analyze_args = [
+        tool, "analyze", "-p", analysis_path,
+        "-b", "0", "1", "2", "4", "7", "10", "11", "16", "17",
+    ]
     analyze_code, analyze_text, analyze_warning = _run(
         analyze_args,
         cwd=case.get("workdir"),
@@ -705,10 +1126,16 @@ def _case_result(
         dtypes=case.get("dtypes"),
         saturation_pct=saturation_pct,
     )
-    selected = _select_kernel(kernels, patterns)
+    selected = _select_kernel(kernels, patterns, exclude_patterns)
     if not _has_valid_kernel_metrics(selected):
         selected = None
+    selection_mode = None
+    if selected is not None:
+        selection_mode = (
+            "pattern" if _kernel_matches_patterns(selected, patterns) else "fallback"
+        )
     warnings = []
+    warnings.extend(path_notes)
     if option_warning:
         warnings.append(option_warning)
     if patterns and not literal_filters:
@@ -727,9 +1154,18 @@ def _case_result(
         warnings.append("analyze exited %d" % analyze_code)
     if analyze_warning:
         warnings.append(analyze_warning)
+    if selection_mode == "fallback":
+        warnings.append(
+            "no kernel_pattern matched; selected dominant kernel %r by roofline "
+            "metrics as fallback" % selected["kernel_name"]
+        )
     if not selected:
         if patterns and kernels:
-            warnings.append("no analyzed kernel matched the requested kernel_patterns")
+            warnings.append(
+                "no target kernel matched the requested kernel_patterns and no "
+                "kernel with valid roofline metrics remained after excluding "
+                "helper/runtime kernels"
+            )
         else:
             warnings.append("analyze output contained no valid kernel roofline metrics")
 
@@ -754,15 +1190,17 @@ def _case_result(
         "weight": case.get("weight", 1.0),
         "workdir": case.get("workdir"),
         "command": case.get("command"),
+        "resolved_command": command,
         "command_wrapped_with_bash_lc": wrapped,
         "kernel_patterns": patterns,
         "kernel": selected["kernel_name"] if selected else None,
         "matched_kernel_name": selected["kernel_name"] if selected else None,
+        "selection_mode": selection_mode,
         "peak_basis": metrics.get("peak_basis"),
         "compute_metric": metrics.get("compute_metric"),
         "metrics": metrics,
         "classification": classification,
-        "kernels": kernels,
+        "kernels": _report_kernels(kernels),
         "profile_exit_code": profile_code,
         "analyze_exit_code": analyze_code,
         "profile_timed_out": profile_code == 124,
@@ -939,6 +1377,7 @@ def collect_manifest(
         base["summary"] = build_summary(
             [], saturation_pct=saturation_value
         )
+        base["guidance"] = roofline_policy.assess_guidance(base)
         _atomic_json(json_path, base)
         return base
 
@@ -954,6 +1393,7 @@ def collect_manifest(
         base["summary"] = build_summary(
             [], saturation_pct=saturation_value
         )
+        base["guidance"] = roofline_policy.assess_guidance(base)
         _atomic_json(json_path, base)
         return base
 
@@ -992,6 +1432,7 @@ def collect_manifest(
         base["status"] = "skipped"
     else:
         base["status"] = "failed"
+    base["guidance"] = roofline_policy.assess_guidance(base)
     _atomic_json(json_path, base)
     return base
 
@@ -1096,6 +1537,9 @@ def compare_reports(before_path, after_path):
         "target_identity": before_target,
         "cases": comparisons,
         "improved_case_count": sum(item["improved"] is True for item in comparisons),
+        "within_noise_case_count": sum(
+            item.get("within_noise") is True for item in comparisons
+        ),
     }
 
 

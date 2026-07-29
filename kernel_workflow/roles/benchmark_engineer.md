@@ -48,7 +48,12 @@ oracle. Select at most `ROOFLINE_CONFIG.max_cases` representative cases in this 
 3. One representative case from each missing serving regime (prefill/decode).
 
 Each case must carry `case_id`, argv-style `command`, `workdir`, `shape`, `dtypes`, `regime`, `weight`,
-and optional `kernel_patterns`. Patterns are regular expressions (not shell globs). The top-level
+and optional `kernel_patterns`. Patterns are regular expressions (not shell globs). **Path rule: give
+every file argument in `command` as an ABSOLUTE path (or a path that resolves from `workdir`), and set
+`workdir` to the directory those paths are relative to. Do NOT mix a `command` whose paths are relative
+to the task root with a `workdir` pointing at a sibling subdir — the profiler runs the command from
+`workdir`, so a mismatch makes the interpreter fail with "No such file or directory" and collects no
+counters. When in doubt, use absolute paths; `workdir` then only affects the process CWD.** The top-level
 `target` carries the logical kernel name, `gpu_id`, detected device/SKU when available, and all known
 device-symbol aliases/patterns. Prefer an existing runner's `--profile --case-id <id>` mode. If the
 immutable oracle cannot select one case, you MAY generate `EVAL_DIR/generated/roofline_driver.py` that
@@ -69,8 +74,8 @@ Manifest shape:
   },
   "cases": [{
     "case_id": "decode_m64",
-    "command": ["python3", "unittest.py", "--profile", "--case-id", "decode_m64"],
-    "workdir": "/absolute/workspace",
+    "command": ["python3", "<EVAL_DIR>/generated/roofline_driver.py", "--case-id", "decode_m64", "--leg", "candidate"],
+    "workdir": "<EVAL_DIR>",
     "shape": {"M": 64, "N": 4096, "K": 4096},
     "dtypes": ["fp8", "fp8", "bf16"],
     "regime": "decode",

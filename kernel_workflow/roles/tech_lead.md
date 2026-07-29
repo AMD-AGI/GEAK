@@ -144,7 +144,21 @@ optimization knowledge first.
 
 ### Measured roofline contract
 
-When `PROFILE_SUMMARY.roofline.status` is `ok` or `partial`, use its structured evidence in this order:
+**First check the validity gate.** `ROOFLINE_GUIDANCE` is the deterministic verdict on whether the
+roofline evidence is trustworthy enough to steer this round (data was measured, the limit is known,
+confidence is not low, and a dispatchable specialty exists):
+
+0. If `ROOFLINE_GUIDANCE` is absent/null **or** `ROOFLINE_GUIDANCE.valid` is `false`, do NOT let the
+   roofline recommendations drive the plan — fall back to `%GPU` weight + `PROFILE_SUMMARY` + `HISTORY`,
+   and note the fallback reason (`ROOFLINE_GUIDANCE.reason`, e.g. `no_measured_signal`, `low_confidence`)
+   in `reasoning`. Cases listed in `invalid_case_ids` are not actionable roofline steering.
+   When `ROOFLINE_GUIDANCE.valid` is `true`, default your direction(s) to
+   `ROOFLINE_GUIDANCE.recommended_specialties` / `recommended_levers` for its valid cases, lead with
+   `ROOFLINE_GUIDANCE.dominant_case_id`, and deprioritize any case flagged `low_headroom` (measured room
+   ≤ ~1.05× — little to win there). You MAY override with explained conflicting measured evidence.
+
+When `PROFILE_SUMMARY.roofline.status` is `ok` or `partial` AND the gate above passed, use its structured
+evidence in this order:
 
 1. Workload weight / `%GPU` selects **which case matters**.
 2. `classification.observed_limit` selects the primary optimization specialty.
@@ -159,6 +173,49 @@ point with low HBM and low compute utilization is NOT observed HBM saturation; p
 occupancy, split-K/grid sizing, or dependency stalls. Treat `confidence=low` as supporting context only.
 If you reject/override the deterministic policy recommendation, explain the conflicting measured
 evidence in `reasoning`.
+
+**Latency split — opposite fixes, do not conflate.** When `observed_limit` is `latency_dep` vs
+`latency_issue` (refined from block 7.2 dependency-wait vs issue-wait cycles), the register/occupancy
+lever points in OPPOSITE directions:
+- `latency_dep` (waves stall on their own result chains): shorten/break dependency chains, unroll for
+  ILP, and allow **more** registers per thread to overlap independent work.
+- `latency_issue` (too few resident waves to cover issue latency): raise occupancy with **more** waves
+  per SIMD and **fewer** registers per thread.
+Issuing the wrong one makes the stall worse. If the split stayed generic `latency_occupancy`, the two
+buckets were comparable — pursue occupancy and ILP together without betting on registers.
+
+**Red flags.** `classification.red_flags` / `ROOFLINE_GUIDANCE.red_flags` list raw-counter problems
+that are orthogonal to `observed_limit` — a compute-bound kernel can still spill. Fold any present flag
+into the direction's concrete lever and cite it in `evidence`: `gpu_underfilled` (grid too small — raise
+CTAs / split-K), `register_spill` (cut register pressure / retile), `register_occupancy_ceiling` (achieved
+occupancy is PINNED at a low VGPR+AGPR ceiling of ≤2 waves/SIMD — cutting registers or tile size is what
+raises occupancy), `occupancy_not_register_limited` (occupancy is low but sits WELL BELOW the register
+ceiling — registers are not the limiter, so cutting VGPR will NOT help; the limiter is LDS/barriers/launch
+shape, do not waste a round on register tuning),
+`low_occupancy` (occupancy low, ceiling unknown — raise waves per SIMD), `poor_coalescing` (fix access
+pattern / vectorize loads), `lds_bank_conflicts` (pad/swizzle LDS), `efficiency_artifact` (empirical peak
+miscalibrated — this case's limit/headroom are NOT trustworthy; the gate already invalidates it, so do
+not steer on its numbers).
+
+**Worthiness (Amdahl) — do not chase isolated wins.** Each guidance case carries `amdahl_ceiling_pct`
+(= its e2e `time_share` × (1 − 1/headroom)): the MOST end-to-end time a full kernel win can reclaim.
+A case flagged `below_amdahl_floor` (ceiling < 1%) stays `valid` but the policy will never make it
+`dominant_case_id` — a huge kernel headroom on a tiny-share op still moves the wall clock ~0%. This is
+the isolated-win-didn't-move-e2e lesson made numeric: weight every direction by `amdahl_ceiling_pct ×
+shippability (kk_language is editable) × regime (E2E_FEEDBACK says this kernel actually runs e2e)`, and
+do not spend a round on a below-floor case unless it is a stepping stone to a dominant one.
+
+**Noise floor.** A roofline performance move smaller than ±3.4% is inside run-to-run variance
+(`compare_cases.within_noise` / `within_noise_case_count`). Do not claim it as a win, and beware
+`utilization_moved_perf_did_not` — efficiency rose while performance stayed inside the floor usually
+means the empirical PEAK moved, not the kernel. Wall time (COMMANDMENT) remains the authoritative keep
+verdict; the roofline delta is a consistency signal only.
+
+**Data-trust caveats (roofline reads that lie).** Before steering on a headline number, sanity-check:
+multi-XCD kernels can UNDER-report HBM traffic (per-XCD counters not summed → AI looks too high, memory
+headroom looks larger than it is); MoE / padded-batch kernels inflate AI because padding tokens count as
+FLOPs but not useful work. When a case looks compute-bound with suspiciously high AI, treat the limit as
+provisional and prefer a wall-time confirmation over a roofline-only bet.
 
 Every direction materially driven by a matched roofline case must fill:
 

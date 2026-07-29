@@ -73,6 +73,20 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    `target_metrics`, but never keep a change merely because a counter improved. Correctness and the
    COMMANDMENT wall-time metric remain authoritative. Do not modify the profile manifest, generated
    profiler driver, profiler artifacts, or immutable oracle.
+   Use `ROOFLINE_GUIDANCE` as the validity gate on that evidence: only when `ROOFLINE_GUIDANCE.valid` is
+   `true` and your case is NOT in `invalid_case_ids` should you start from its `recommended_levers`; if it
+   is absent/null, `valid=false`, or your case is invalid/`low_headroom`, rely on the direction `prompt` +
+   profiling summary instead and do not chase the roofline recommendation. When `observed_limit` is
+   `latency_dep` (stall on result chains) raise ILP and allow **more** registers; when it is
+   `latency_issue` (too few waves) raise occupancy with **more** waves and **fewer** registers — these
+   are opposite, so follow the exact subtype. Honor any `red_flags` (e.g. `register_spill`,
+   `poor_coalescing`, `gpu_underfilled`, `lds_bank_conflicts`, `low_occupancy`) as concrete fixes even
+   when they are orthogonal to the primary limit. Two occupancy flags are opposite bets: on
+   `register_occupancy_ceiling` (occupancy pinned at a ≤2 waves/SIMD register ceiling) cut registers or tile
+   size to free occupancy; on `occupancy_not_register_limited` (occupancy sits well below the ceiling) do
+   NOT touch registers (it won't help) — attack LDS/barriers/launch shape. If a `split-K when K>=4096` lever is present, fuse the reduction into a
+   dedicated kernel — do NOT use `tl.atomic_add`.
+   Treat a roofline performance delta under ±3.4% as noise (not a win); wall time is the real verdict.
 9. Interpret AI changes causally: fusion/layout/traffic reductions may legitimately change AI; a large
    AI change after a tile-only edit is a measurement-consistency warning. You are not required to run
    rocprof-compute for each private candidate—the workflow re-profiles only the committed winner.

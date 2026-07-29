@@ -38,6 +38,7 @@ It exists to close two systematic "isolated win / e2e loss" holes that a naive p
 """
 import math
 import os
+import sys
 import time
 
 
@@ -853,6 +854,43 @@ UT_HARNESS_INCOMPLETE_SENTINEL = "UT_HARNESS_INCOMPLETE"
 # the h2 paged_attention failure. `run_correctness` closes both holes: the trigger is the AUTHORITATIVE
 # deployment fact `deployment_graph_mode(regime)` (regime.cuda_graph, from the launch flags), and a
 # graph-deploy kernel that supplies no >=2-shape replay bundle FAILS CLOSED instead of silently passing.
+def _run_roofline_hook(eager_cases, current_call):
+    """Candidate-only, single-case tight loop for rocprof-compute --roof-only attribution.
+
+    Anchored on the shared harness (not on any unittest's private glue): given the SAME
+    `eager_cases` + `current_call` every conforming unittest already passes to run_correctness,
+    it selects the case whose 'sig' matches GEAK_ROOFLINE_SIG (or the first case when the env is
+    empty), warms up, then runs GEAK_ROOFLINE_ITERS candidate launches under a device sync so the
+    profile is dominated by the deployed kernel. It NEVER returns — it sys.exit()s so the
+    unittest's downstream baseline/correctness/timing work never runs under the profiler."""
+    sig = os.environ.get("GEAK_ROOFLINE_SIG", "") or ""
+    try:
+        warmup = int(os.environ.get("GEAK_ROOFLINE_WARMUP", "8") or "8")
+    except ValueError:
+        warmup = 8
+    try:
+        iters = int(os.environ.get("GEAK_ROOFLINE_ITERS", "40") or "40")
+    except ValueError:
+        iters = 40
+    cases = list(eager_cases or [])
+    case = next((c for c in cases if c.get("sig") == sig), None)
+    if case is None and not sig.strip() and cases:
+        case = cases[0]
+    if case is None:
+        print("ROOFLINE_HOOK: unknown case %r (have %r)"
+              % (sig, [c.get("sig") for c in cases]), file=sys.stderr)
+        sys.exit(2)
+    call_args = case.get("args")
+    for _ in range(max(1, warmup)):
+        current_call(call_args)
+    sync()
+    for _ in range(max(1, iters)):
+        current_call(call_args)
+    sync()
+    print("ROOFLINE_HOOK: ran case=%s iters=%d" % (sig or "<first>", iters))
+    sys.exit(0)
+
+
 def run_correctness(regime, *, eager_cases, baseline_call, current_call, random_shapes, tol,
                     replay=None, draws=3):
     """The SINGLE correctness entrypoint every generated unittest must call. Runs, in order:
@@ -871,6 +909,17 @@ def run_correctness(regime, *, eager_cases, baseline_call, current_call, random_
     }
     Returns (all_ok, report) where report has keys eager / random / graph_replay.
     """
+    # ---- Roofline profiling hook (rides THIS mandated entrypoint) -------------------------
+    # roofline_task.py profiles a candidate by launching the unittest's OWN main() with
+    # GEAK_ROOFLINE_SIG set. Because EVERY conforming unittest is required to route through
+    # run_correctness (kernel_extractor contract), this hook makes candidate-only, single-case
+    # roofline runs work for GEMM and attention alike WITHOUT any consumer depending on the
+    # agent-authored glue names (no _build_correctness / _current_call / _eager_cases). When the
+    # env is unset (a normal correctness run) it is a no-op. It fires here — before any baseline
+    # or oracle work — so the rocprof trace is dominated by the deployed candidate kernel.
+    if os.environ.get("GEAK_ROOFLINE_SIG") is not None:
+        _run_roofline_hook(eager_cases, current_call)   # tight loop, then sys.exit — never returns
+
     report = {}
     ok = True
 

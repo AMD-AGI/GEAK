@@ -197,6 +197,20 @@ class ComparisonTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             roofline_policy.compare_cases(before, after)
 
+    def test_kernel_change_is_allowed_and_recorded(self):
+        # A backend swap (Triton -> CK) renames the selected device kernel. That is the
+        # measured delta, not an incompatibility: compare must succeed and flag the change.
+        before = self._case(500.0)
+        after = self._case(750.0)
+        before["kernel"] = "_gemm_a8w8_blockscale_kernel_GROUP_K_128"   # Triton baseline
+        after["kernel"] = "void ck::kernel_gemm_xdl_cshuffle_v3<...>"    # CK post
+        result = roofline_policy.compare_cases(before, after)
+        self.assertTrue(result["compatible"])
+        self.assertTrue(result["kernel_changed"])
+        self.assertEqual(result["before_kernel"], "_gemm_a8w8_blockscale_kernel_GROUP_K_128")
+        self.assertEqual(result["after_kernel"], "void ck::kernel_gemm_xdl_cshuffle_v3<...>")
+        self.assertAlmostEqual(result["performance_ratio"], 1.5)
+
     def test_empirical_peak_allows_normal_microbenchmark_noise(self):
         before = self._case(500.0)
         after = self._case(750.0)

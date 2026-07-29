@@ -9,6 +9,7 @@ export const meta = {
     { title: 'ConfigSweep', detail: 'Config Tuner sweeps flags/env/backends FIRST (default ON)' },
     { title: 'HeadKernel', detail: 'highest-%GPU ops (GEMM/attn): extract_op -> backend bake-off (incl. FlyDSL) + aiter-DB/author tune -> e2e gate' },
     { title: 'Milestone', detail: 'loop over editable kernels ABOVE milestone_min_pct% GPU (default 5): plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
+    { title: 'Roofline', detail: 'per-extracted-task baseline roofline + post-optimization roofline (reuses kernel-layer roofline_kernel.py via scripts/roofline_task.py)' },
     { title: 'Finalize', detail: 'e2e Integrator assembles the overlay + patch + launch bundle' },
     { title: 'Report', detail: 'System Architect writes the throughput report + grows the playbook' },
     { title: 'Validate', detail: 'e2e Director independently re-measures throughput + arbitrates' },
@@ -31,6 +32,19 @@ const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_workflow.js`;
 
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
+
+// ---- Per-kernel empirical roofline (forwarded into EVERY kernel_workflow run; default ON) ----
+// The single-kernel workflow collects rocprof-compute roofline evidence at baseline + each reprofile
+// once its COMMANDMENT/harness (unittest oracle) exists. E2E forwards these knobs so a run can tune or
+// disable it globally (roofline="off"). Only explicitly-provided knobs are forwarded; the rest fall to
+// the kernel_workflow defaults (roofline="auto", roofline_install="auto").
+const ROOFLINE_ARGS = {
+  roofline: String(A.roofline != null ? A.roofline : 'auto').trim().toLowerCase(),
+  roofline_install: String(A.roofline_install != null ? A.roofline_install : 'auto').trim().toLowerCase(),
+  ...(A.roofline_max_cases != null ? { roofline_max_cases: A.roofline_max_cases } : {}),
+  ...(A.roofline_timeout_sec != null ? { roofline_timeout_sec: A.roofline_timeout_sec } : {}),
+  ...(A.roofline_saturation_pct != null ? { roofline_saturation_pct: A.roofline_saturation_pct } : {}),
+};
 
 // ---- Upstream TraceLens / kernel-agent prior (OPTIONAL; forwarded by run_e2e.py as args.tracelens) ----
 // run_e2e.py resolves these paths beside the geak handoff and forwards ONLY the non-null ones.
@@ -491,6 +505,14 @@ const INTEGRATE_SCHEMA = obj({
   parity_kind: { type: 'string' },
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
   accepted_overlay: { type: 'string' }, reason: { type: 'string' },
+  // Deployment provenance for the POST-optimization roofline (Hook B / roofline_probe post_all). A
+  // backend-swap/config win (e.g. Triton->CK a8w8_blockscale) applies its win via a DIFFERENT deployed
+  // callable + env than the frozen baseline, and its cand short_name need not match the task-bundle dir
+  // name. Record these so post_all can (1) resolve the standalone task bundle path-agnostically,
+  // (2) profile the DEPLOYED kernel (target_callable => --candidate-spec) under the (3) accepted env
+  // (accepted_env => --env, carries the tuned CSV). All optional/best-effort; absent => post_all falls
+  // back to scanning kernels/*/meta.json and the frozen callable.
+  task_dir: { type: 'string' }, target_callable: { type: 'string' }, accepted_env: { type: 'string' },
 }, ['gate', 'e2e_throughput_tok_s']);
 
 const FINALIZE_SCHEMA = obj({
@@ -621,6 +643,64 @@ const hasFrozenBaseline = (ext) =>
   !!(ext && (ext.baseline_frozen === true ||
              (typeof ext.baseline_callable === 'string' && ext.baseline_callable.trim() !== '')));
 
+// The extractor's smoke verdict is a FREE-FORM string (EXTRACT_OP_SCHEMA.smoke /
+// EXTRACT_SCHEMA.unittest_smoke have no enum), so agents legitimately return EITHER a bare "pass" OR a
+// VERBOSE verdict like "PASS: baseline-vs-baseline CORRECTNESS PASS, GEAK_WEIGHTED_SPEEDUP=1.0005 ...
+// exit=0". A strict `=== 'pass'` accepted only the bare form and FALSE-FLAGGED a correct extraction as
+// extract_failed (the 76%-GPU fp8 a8w8 blockscale GEMM head: correctness PASS, baseline_frozen:true,
+// exit 0 — rejected purely because smoke was "PASS: ..." not "pass"; non-deterministic run-to-run).
+// Normalize: a verdict PASSES iff, lowercased+trimmed, it STARTS WITH "pass" (so "pass"/"PASS: ..."/
+// "passed" pass; "fail..."/"" do not). The role's FAIL/exit contract always prefixes a real failure with
+// FAIL, so a prefix test is aligned with the contract and robust to LLM phrasing.
+const smokePassed = (v) => typeof v === 'string' && /^pass/i.test(v.trim());
+
+// ---- Per-task empirical roofline (e2e layer) ---------------------------------------------------------
+// Requirement: EVERY extracted task gets a BASELINE roofline, and EVERY kernel that is optimized AND
+// accepted gets a POST-optimization roofline + before/after compare. This closes the gap where a
+// head/config win (backend switch, e.g. Triton->CK, + gemm autotuning) is applied via the
+// env-lever/source-overlay track and NEVER enters the recursive kernel_workflow (kernels/_exp) — the
+// ONLY place the kernel-layer roofline was wired. We REUSE the kernel-layer collector
+// (kernel_workflow/scripts/roofline_kernel.py) through a thin e2e driver (scripts/roofline_task.py):
+// it builds a manifest from the task's frozen meta/workload + a candidate-only single-shape driver that
+// loads the IMMUTABLE unittest.py, runs `roofline_kernel.py collect`, and on 'post' also `compare`.
+// Fail-soft in every dimension: gated by ROOFLINE_ARGS.roofline (off => skip); the collector self-skips
+// when rocprof-compute is absent; and a probe failure is swallowed so it NEVER affects extraction or the
+// accept gate (roofline is diagnostic evidence, never a gate). Common inputs forwarded to the role:
+const ROOFLINE_ON = ROOFLINE_ARGS.roofline !== 'off';
+const ROOFLINE_ROLE_INPUTS = () => ({
+  ROOFLINE_TASK_SCRIPT: `${WORKFLOW_DIR}/scripts/roofline_task.py`,
+  ROOFLINE_KERNEL_SCRIPT: `${KERNEL_WF_DIR}/scripts/roofline_kernel.py`,
+  ROOFLINE_INSTALL_SCRIPT: `${KERNEL_WF_DIR}/scripts/install_rocprof_compute.sh`,
+  ROOFLINE_MODE: ROOFLINE_ARGS.roofline,
+  ROOFLINE_INSTALL_MODE: ROOFLINE_ARGS.roofline_install,
+  ...(ROOFLINE_ARGS.roofline_max_cases != null ? { ROOFLINE_MAX_CASES: ROOFLINE_ARGS.roofline_max_cases } : {}),
+  ...(ROOFLINE_ARGS.roofline_timeout_sec != null ? { ROOFLINE_TIMEOUT_SEC: ROOFLINE_ARGS.roofline_timeout_sec } : {}),
+  ...(ROOFLINE_ARGS.roofline_saturation_pct != null ? { ROOFLINE_SATURATION_PCT: ROOFLINE_ARGS.roofline_saturation_pct } : {}),
+  SKILL_DIR: WORKFLOW_DIR,
+});
+const ROOFLINE_PROBE_SCHEMA = obj({
+  status: { type: 'string' }, phase: { type: 'string' }, task_dir: { type: 'string' },
+  report_path: { type: 'string' }, compare_path: { type: 'string' },
+  dominant_classification: { type: 'string' }, pct_of_peak: { type: 'number' },
+  install_status: { type: 'string' }, install_reason: { type: 'string' }, note: { type: 'string' },
+}, ['status']);
+const ROOFLINE_POSTALL_SCHEMA = obj({ results: arrObj, note: { type: 'string' } }, ['results']);
+
+// Best-effort BASELINE roofline for one freshly-extracted task. Never throws; returns null on any issue.
+async function rooflineBaseline(taskDir, gpuId) {
+  if (!ROOFLINE_ON || !taskDir) return null;
+  try {
+    return await safeAgent(
+      roleAgent('roofline_probe', 'roofline',
+        `Collect the BASELINE empirical roofline for the extracted task at ${taskDir}.`,
+        { TASK_DIR: taskDir, GPU_ID: gpuId || GPU_LIST[0], ...ROOFLINE_ROLE_INPUTS() }),
+      { phase: 'Roofline', label: `roofline:baseline:${String(taskDir).split('/').pop()}`, schema: ROOFLINE_PROBE_SCHEMA });
+  } catch (e) {
+    log(`  roofline(baseline) probe failed for ${taskDir} — continuing (diagnostic only).`);
+    return null;
+  }
+}
+
 // Run a kernel_extractor agent and GUARANTEE it froze a real baseline. safeAgent already retries
 // transient failures; this wraps it to ALSO re-extract when the extraction succeeds (smoke passed,
 // task dir present) but produced NO frozen baseline — re-invoking with a corrective instruction up
@@ -630,7 +710,7 @@ const hasFrozenBaseline = (ext) =>
 // are the roleAgent args; `opts` is the safeAgent opts (phase/label/schema). Used by every extract
 // site (deep, opt-A, milestone/head extract_op, and the non-op milestone extract).
 async function extractWithBaseline(role, phase, intro, inputs, opts) {
-  const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
+  const smokeOk = (e) => !!(e && e.task_dir && (smokePassed(e.smoke) || smokePassed(e.unittest_smoke)));
   let ext = await safeAgent(roleAgent(role, phase, intro, inputs), opts);
   let tries = 0;
   while (smokeOk(ext) && !hasFrozenBaseline(ext) && tries < BASELINE_EXTRACT_RETRIES) {
@@ -653,6 +733,11 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
     return { ...ext, smoke: 'fail', unittest_smoke: 'fail',
       notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
         `(baseline_src/ / meta.baseline_callable required as the speedup denominator) — ${ext.notes || ''}` };
+  }
+  // Hook A: EVERY successful extraction gets a baseline roofline (this is the single choke point for all
+  // extract sites — head/milestone/deep/opt-A). Best-effort + serial; never blocks/fails the extraction.
+  if (ROOFLINE_ON && smokeOk(ext) && ext.task_dir) {
+    await rooflineBaseline(ext.task_dir, (inputs && inputs.GPU_ID) || GPU_LIST[0]);
   }
   return ext;
 }
@@ -950,7 +1035,7 @@ if (!MODEL_PATH && KERNEL_PATH) {
       kernel_path: KERNEL_PATH, workflow_dir: KERNEL_WF_DIR,
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       budget: KERNEL_BUDGET, gpu_ids: GPU_IDS, task: TASK, exp_root: EXP_ROOT,
-      apply_to_original: APPLY_TO_ORIGINAL,
+      apply_to_original: APPLY_TO_ORIGINAL, ...ROOFLINE_ARGS,
     });
     passthru = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
       final_geomean: r.final_geomean, validation_status: r.validation_status,
@@ -1159,7 +1244,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         },
         { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
-      if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
+      if (!ext || !smokePassed(ext.smoke) || !ext.task_dir) {
         const why = ext ? ext.notes || ext.smoke : 'none';
         log(`  [deep] ${h.short_name}: op extraction failed (${why})${isDominant ? ' [DOMINANT — flagged]' : ''}; skipping.`);
         if (isDominant) flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract', gate: 'extract_failed', reason: why });
@@ -1461,6 +1546,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           incremental_analyze: l.ran > 1 ? 'true' : 'false',   // P2: 2nd+ burst of a lane = continuation -> skip cold re-analysis
           ...(gateFeedbackPath ? { e2e_feedback: gateFeedbackPath } : {}),
           ...(gateHarnessPath ? { harness_addendum: gateHarnessPath } : {}),
+          ...ROOFLINE_ARGS,
           exp_root: `${l.deepDir}/runs/${l.key}`, apply_to_original: 'false',
           task: `deep lane '${l.key}' of ${l.head.short_name} (${l.ext.op_kind}), backend=${l.lang}, mode=${l.mode}.${l.steer} Build STRICTLY beyond this lane's cumulative best (vs-live ${l.best.toFixed(3)}x); roofline SOTA ~${(l.rooflineTarget || 0).toFixed(2)}x. Beat the LIVE kernel, not just your own first port. Read SHARED_KB + GLOBAL_KB and BORROW transferable techniques (incl. from OTHER kernels); write findings back.` + GRAPH_REQ + (TASK || ''),
         }, l.uid);
@@ -1518,7 +1604,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
           },
           { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
-        if (!ext || ext.smoke !== 'pass' || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
+        if (!ext || !smokePassed(ext.smoke) || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
         const bake = await safeAgent(
           roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
             EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
@@ -1586,7 +1672,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             op_spec: { op_kind: j.ext.op_kind, shapes: j.ext.shapes || {}, dtype: j.ext.dtype || 'bf16', regime: j.h.regime || '', cuda_graph_safe: true, ...(j.ext.workload_path ? { workload_path: j.ext.workload_path } : {}) },
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
             use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
-            budget: KERNEL_BUDGET, gpu_ids: g[0], exp_root: `${EVAL_DIR}/kernels/_exp`,
+            budget: KERNEL_BUDGET, gpu_ids: g[0], exp_root: `${EVAL_DIR}/kernels/_exp`, ...ROOFLINE_ARGS,
             task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${j.best_known_ms || '?'} ms). ` +
               `This kernel will be overlaid onto the LIVE decode path (CUDA-graph captured): its STEADY-STATE hot path MUST be ` +
               `host-sync-free (NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize(), no Python branch on a GPU scalar). ` +
@@ -1724,7 +1810,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       },
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
     const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
-    if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
+    if (!ext || !smokePassed(ext.smoke) || !ext.task_dir) {
       const why = ext ? ext.notes || ext.smoke : 'none';
       if (isDominant) {
         log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU) op extraction FAILED (${why}) — flagged, NOT silently skipped.`);
@@ -1792,7 +1878,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '', cuda_graph_safe: true, ...(ext.workload_path ? { workload_path: ext.workload_path } : {}) },
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
             use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
-            budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
+            budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`, ...ROOFLINE_ARGS,
             task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${bake.best_known_ms || '?'} ms). ` +
               `This kernel will be overlaid onto the LIVE sglang decode path, which is CUDA-graph captured: its STEADY-STATE hot ` +
               `path (2nd call onward) MUST be host-sync-free — NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize() ` +
@@ -2039,7 +2125,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
       },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
-    if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
+    if (!ext || ext.editable === false || !smokePassed(ext.unittest_smoke) || !ext.task_dir) {
       return { c, skip: true, reason: `extraction failed/non-editable (${ext ? ext.notes || ext.unittest_smoke : 'none'})` };
     }
     // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
@@ -2051,7 +2137,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
-        apply_to_original: 'false',
+        apply_to_original: 'false', ...ROOFLINE_ARGS,
       });
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
         final_geomean: r.final_geomean, validation_status: r.validation_status,
@@ -2280,6 +2366,23 @@ if (want('final')) {
   if (stillIncomplete.length) log(`Finalize-gate: ${stillIncomplete.length} A/B(s) could not complete both legs even after retries: ${stillIncomplete.join(', ')}.`);
 }
 allAccepted = acceptedHeads.concat(acceptedKernels);   // refresh after Fix C may have banked a pending win
+
+// Hook B: POST-optimization roofline for EVERY accepted (optimized-and-successful) kernel. Disk-driven
+// (like the incomplete-A/B reconstruction above) so head/milestone/deep/opt-A accepts AND wins recovered
+// from a prior crashed/resumed run are all covered uniformly: the roofline_probe role enumerates
+// EVAL_DIR/overlay/cand_* with gate accepted/stack, resolves each task + its accepted env/candidate
+// callable, runs `roofline_task.py --phase post`, and compares against the baseline_roofline.json each
+// task already got at extract. Best-effort/diagnostic — never gates. Runs before Finalize so the report
+// can reference the roofline artifacts.
+if (want('final') && ROOFLINE_ON && allAccepted.length) {
+  phase('Roofline');
+  await safeAgent(
+    roleAgent('roofline_probe', 'post_all',
+      'Collect a POST-optimization roofline + before/after compare for every accepted kernel.',
+      { EVAL_DIR, GPU_ID: GPU_LIST[0], ACCEPTED_KERNELS: allAccepted, ...ROOFLINE_ROLE_INPUTS() }),
+    { phase: 'Roofline', label: 'roofline:post-all', schema: ROOFLINE_POSTALL_SCHEMA });
+}
+
 if (want('final')) {
   phase('Finalize');
   finalize = await safeAgent(
@@ -2292,8 +2395,9 @@ if (want('final')) {
 
   phase('Report');
   report = await safeAgent(
-    roleAgent('system_architect', 'report', 'Write architect_report.md AND the full final_report.md in English (with the Phases tree + artifacts tree modules).', {
+    roleAgent('system_architect', 'report', 'Write architect_report.md AND the full final_report.md in English (with the Phases tree + artifacts tree modules + the 📊 Empirical roofline section from kernels/*/roofline/).', {
       EVAL_DIR, HISTORY: history, BASELINE_THROUGHPUT: BASELINE_TPUT, FINAL_THROUGHPUT: finalTput,
+      ROOFLINE_GLOB: `${EVAL_DIR}/kernels/*/roofline/`, ROOFLINE_ENABLED: ROOFLINE_ON,
       ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,

@@ -264,7 +264,9 @@ Return JSON:
 
 Inputs: `EVAL_DIR`, full `HISTORY`, `BASELINE_THROUGHPUT`, `FINAL_THROUGHPUT`, accepted config +
 kernel changes, `MILESTONES`, `BUDGET_USED`, `BUDGET`, `MIN_KERNEL_TASKS`, `PROFILE_TOPN`, `WORKLOAD`,
-`MODEL_NAME`, `SKILL_DIR`.
+`MODEL_NAME`, `SKILL_DIR`, `ROOFLINE_GLOB` (the `kernels/*/roofline/` path to enumerate for the 📊
+Empirical roofline section), `ROOFLINE_ENABLED` (false => roofline was disabled for this run; omit the
+section).
 
 Write TWO files:
 
@@ -286,7 +288,9 @@ Write TWO files:
 / speedup / `output_parity` written **provisionally** from the Finalize bench (tag it `(provisional —
 pending Director validation)`); the Director's `validate` phase overwrites these with the OFFICIAL
 same-session numbers. Then list the accepted stack (config + each kernel with its per-item e2e %), and the
-remaining headroom. Keep it short.
+remaining headroom. When `kernels/*/roofline/` exists, add ONE line per dominant head with its post
+roofline `% of peak` + bound (memory/compute) so the headroom is quantified, not just asserted (full table
+goes in `final_report.md`). Keep it short.
 
 **(b) `EVAL_DIR/final_report.md`** — the COMPLETE timeline report (the headline deliverable). Keep EVERY
 attempt, win or not. REQUIRED sections, in order:
@@ -382,7 +386,29 @@ attempt, win or not. REQUIRED sections, in order:
    - For the **accepted** op: the e2e integrate numbers (REF→CAND tok/s, delta%, non-overlap proof, engagement
      hits, parity) from `overlay/cand_*/integrate_result.json`.
 
+3b. **📊 Empirical roofline (baseline vs post-optimization)** — MANDATORY whenever any
+   `EVAL_DIR/kernels/*/roofline/` dir exists. Every extracted task gets a **baseline** roofline at extract
+   (`kernels/<task>/roofline/baseline_roofline.json`), and every accepted kernel also gets a
+   **post-optimization** roofline + before/after compare (`post_roofline.json`, `compare.json`) — these are
+   collected by the e2e layer reusing the kernel-layer `roofline_kernel.py`, so a head/config win applied via
+   the backend-switch + gemm-tuning track (which never enters the recursive `kernels/_exp` layer) STILL has a
+   roofline reading. Enumerate `kernels/*/roofline/` and write:
+   - A **roofline table**, one row per extracted task: `task (%GPU) | dtype | dominant case | baseline: bound
+     / achieved GFLOP/s / % of peak / AI | post: bound / achieved / % of peak | Δ% of peak`. Pull `baseline`
+     numbers from `baseline_roofline.json` (`summary.dominant_*` + the dominant case metrics) and `post`
+     numbers from `post_roofline.json` when present (blank for tasks that were extracted but not accepted).
+     Use `compare.json` for the before/after delta (`improved_case_count`, per-case improvement).
+   - A one-line **headroom read** per dominant head: whether the accepted kernel is memory- or compute-bound
+     and how close it sits to the empirical ceiling (e.g. `down_proj: memory-bound, post 71% of HBM peak →
+     ~1.4× headroom remains`), so the report says whether a source rewrite (Tier-C author) is still worth it
+     or the kernel is already near-ceiling. If a roofline is `status:"skipped"` (rocprof-compute absent),
+     say so plainly — it is a provisioning gap, NOT a measured result — and quote the tool it needs.
+
 4. **Artifacts tree**: `tree -L 2 -I "__pycache__|*.pyc|.git|*.so"` of the eval dir, annotating `[P#]` per path.
+   **Explicitly surface the roofline artifacts**: under each `kernels/<task>/` node, name the
+   `roofline/{baseline_roofline.json, post_roofline.json, compare.json}` files (they sit at depth 3, below the
+   `tree -L 2` cutoff, so add them by hand) and annotate them `[Roofline]`, so the tree shows the per-task
+   baseline/post roofline evidence rather than hiding it under a bare `roofline/` dir.
 
 5. **Summary table** of all attempts (lever | what changed | isolated | e2e | verdict | root cause).
    For every attempt record **WHAT optimization was applied and exactly WHICH params changed** (e.g.
@@ -414,6 +440,9 @@ attempt, win or not. REQUIRED sections, in order:
 Data sources (read the ACTUAL files, never invent): `director_e2e_validation.json`,
 `final/bench/bench_summary.json`, `config/sweep_results.json`, `overlay/cand_*/integrate_result.json`,
 `kernels/_exp/*/*/director_validation.json`, `kernels/*/opbench_result.json` (incl. its `backend_absent[]`),
+`kernels/*/roofline/{baseline_roofline.json,post_roofline.json,compare.json}` (→ the 📊 Empirical roofline
+section; read `summary.dominant_classification` / `dominant_*` + per-case metrics; `status:"skipped"` means
+rocprof-compute was absent — a provisioning gap, not a no-win),
 `env_report.json` (`absent_backends` → the BACKEND ABSENT section),
 `profile/round_*/profile_topN.{md,json}`, and artifact mtimes for the timeline.
 Read the actual files under `EVAL_DIR` for real numbers; do not invent. Return JSON (report_path points

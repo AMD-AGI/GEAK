@@ -91,10 +91,12 @@ const WORKLOAD_SPEC = (OP_SPEC && OP_SPEC.workload) || A.workload || null;
 const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||
   (Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length) ||
   (WORKLOAD_SPEC && Array.isArray(WORKLOAD_SPEC.kernels) && WORKLOAD_SPEC.kernels.length));
-// Optional empirical roofline enrichment for the isolated kernel workflow. The benchmark agent creates
-// a profile manifest and the profile agent invokes scripts/roofline_kernel.py for representative cases.
-// E2E model profiling stays unchanged and only supplies workload weights/shapes to this workflow.
-const ROOFLINE_MODE = String(A.roofline != null ? A.roofline : 'off').trim().toLowerCase();
+// Empirical roofline enrichment for the isolated kernel workflow (default ON). The benchmark agent
+// creates a profile manifest AFTER the COMMANDMENT/harness exists, and the profile agent invokes
+// scripts/roofline_kernel.py for representative cases at baseline and every reprofile round. E2E model
+// profiling stays unchanged and only supplies workload weights/shapes to this workflow. Pass
+// roofline="off" to disable; the collector is fail-soft in "auto" (missing rocprof-compute => skipped).
+const ROOFLINE_MODE = String(A.roofline != null ? A.roofline : 'auto').trim().toLowerCase();
 if (!['off', 'auto', 'required'].includes(ROOFLINE_MODE)) {
   throw new Error('args.roofline must be one of: off, auto, required');
 }
@@ -107,7 +109,7 @@ const ROOFLINE_SATURATION_PCT = (() => {
   return Number.isFinite(v) && v > 0 && v <= 100 ? v : 60;
 })();
 const ROOFLINE_INSTALL_MODE = String(
-  A.roofline_install != null ? A.roofline_install : 'off').trim().toLowerCase();
+  A.roofline_install != null ? A.roofline_install : 'auto').trim().toLowerCase();
 if (!['off', 'auto', 'required'].includes(ROOFLINE_INSTALL_MODE)) {
   throw new Error('args.roofline_install must be one of: off, auto, required');
 }
@@ -121,6 +123,11 @@ const ROOFLINE_CONFIG = {
 const rooflineMatched = (profile) => !!(profile && profile.roofline &&
   Array.isArray(profile.roofline.cases) &&
   profile.roofline.cases.some(c => c && c.status === 'matched'));
+// Gated roofline steering: the collector's assess_guidance verdict, or null when unavailable (older
+// vendored collector / roofline off). Passed to BOTH the planner and every engineer in BOTH default and
+// deep mode (this is the shared plan->optimize path), so the validity gate governs every kernel run.
+const rooflineGuidance = (profile) =>
+  (profile && profile.roofline && profile.roofline.guidance) ? profile.roofline.guidance : null;
 // PRIMARY-metric selector: prefer the time-weighted number when a workload spec is in play and the
 // agent reported one; otherwise fall back to the geomean (unweighted runs => unchanged behavior).
 const primSpeedup = (o) => {
@@ -230,8 +237,10 @@ const ROOFLINE_CLASSIFICATION_SCHEMA = obj({
   theoretical_bound: { type: 'string', enum: ['memory_side', 'compute_side', 'unknown'] },
   observed_limit: {
     type: 'string',
+    // latency_dep vs latency_issue are refinements of latency_occupancy (block 7.2
+    // dependency-wait vs issue-wait); they carry OPPOSITE register/occupancy fixes.
     enum: ['hbm', 'compute', 'cache', 'lds', 'balanced', 'latency_occupancy',
-      'overhead', 'no_fp_work', 'unknown'],
+      'latency_dep', 'latency_issue', 'overhead', 'no_fp_work', 'unknown'],
   },
   recommended_specialties: {
     type: 'array',
@@ -240,6 +249,13 @@ const ROOFLINE_CLASSIFICATION_SCHEMA = obj({
   recommended_levers: { type: 'array', items: { type: 'string' } },
   confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
   evidence: { type: 'array', items: { type: 'string' } },
+  // Raw-counter red flags (blocks 7/11/16 + efficiency artifact); orthogonal to observed_limit.
+  red_flags: {
+    type: 'array',
+    items: obj({
+      flag: { type: 'string' }, detail: { type: 'string' }, evidence: { type: 'string' },
+    }, ['flag']),
+  },
 }, ['theoretical_bound', 'observed_limit', 'confidence']);
 const ROOFLINE_CASE_SCHEMA = obj({
   case_id: { type: 'string' },
@@ -281,8 +297,45 @@ const ROOFLINE_SUMMARY_SCHEMA = obj({
   dominant_classification: ROOFLINE_CLASSIFICATION_SCHEMA,
   note: { type: 'string' },
 }, ['case_count', 'case_routes', 'priority_order', 'dominant_classification']);
+// Deterministic validity gate (scripts/roofline_policy.assess_guidance): judges whether the roofline
+// DATA (matched, measured, known limit, non-low confidence) and DIRECTION (a dispatchable specialty)
+// are trustworthy BEFORE they steer the optimizer. `valid=false` => roles ignore the recommendations
+// and fall back to %GPU + profile + history. Present only when the collector produced it (fail-soft).
+const ROOFLINE_GUIDANCE_CASE_SCHEMA = obj({
+  case_id: { type: ['string', 'null'] }, valid: { type: 'boolean' }, reason: { type: 'string' },
+  low_headroom: { type: 'boolean' }, observed_limit: { type: 'string' }, confidence: { type: 'string' },
+  recommended_specialties: { type: 'array', items: { type: 'string' } },
+  recommended_levers: { type: 'array', items: { type: 'string' } },
+  headroom_ratio: nullableNumber, weight: nullableNumber,
+  // Amdahl worthiness: e2e time share and the max e2e % reclaimable by fully optimizing
+  // this case; below_amdahl_floor cases stay valid but never become dominant.
+  time_share: nullableNumber, amdahl_ceiling_pct: nullableNumber,
+  below_amdahl_floor: { type: 'boolean' },
+  red_flags: {
+    type: 'array',
+    items: obj({
+      flag: { type: 'string' }, detail: { type: 'string' }, evidence: { type: 'string' },
+    }, ['flag']),
+  },
+}, ['valid']);
+const ROOFLINE_GUIDANCE_SCHEMA = obj({
+  valid: { type: 'boolean' }, reason: { type: 'string' }, policy_version: { type: 'number' },
+  cases: { type: 'array', items: ROOFLINE_GUIDANCE_CASE_SCHEMA },
+  recommended_specialties: { type: 'array', items: { type: 'string' } },
+  recommended_levers: { type: 'array', items: { type: 'string' } },
+  // Deduped raw-counter red flags across all assessed cases (an efficiency artifact IS a flag).
+  red_flags: {
+    type: 'array',
+    items: obj({
+      flag: { type: 'string' }, detail: { type: 'string' }, evidence: { type: 'string' },
+    }, ['flag']),
+  },
+  dominant_case_id: { type: ['string', 'null'] },
+  invalid_case_ids: { type: 'array', items: { type: ['string', 'null'] } },
+}, ['valid']);
 const ROOFLINE_RESULT_SCHEMA = obj({
   status: { type: 'string', enum: ['ok', 'partial', 'skipped', 'failed'] },
+  guidance: ROOFLINE_GUIDANCE_SCHEMA,
   reason: { type: 'string' },
   tool: obj({
     path: { type: ['string', 'null'] }, source: { type: ['string', 'null'] },
@@ -680,6 +733,7 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).', {
       EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
       BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
+      ROOFLINE_GUIDANCE: rooflineGuidance(profileSummary),
       CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
       KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
       ...KB_INPUTS,
@@ -755,6 +809,7 @@ ${cfg({
         codebase_context: `${EVAL_DIR}/codebase_context.md`,
         profiling_summary: profileSummary ? profileSummary.summary_path : '',
         ROOFLINE_EVIDENCE: profileSummary && profileSummary.roofline ? profileSummary.roofline : null,
+        ROOFLINE_GUIDANCE: rooflineGuidance(profileSummary),
         baseline_per_case: BASELINE_PER_CASE,
         INSIGHTS: history.insights,
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,

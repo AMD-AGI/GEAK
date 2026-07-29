@@ -89,9 +89,24 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    workspace is a fresh artifact-free copy. If you suspect a stale build (e.g. after editing headers),
    MOVE the cache aside: `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true`.
 7. Use structured roofline evidence to select the starting lever and representative cases, but never
-   optimize counters at the expense of the COMMANDMENT wall time. Do not modify the profile manifest,
-   generated profiler driver, profiler artifacts, or immutable oracle. Fusion/layout/traffic changes
-   may legitimately move AI; a large AI change after a tile-only edit is a consistency warning.
+   optimize counters at the expense of the COMMANDMENT wall time. Gate that evidence on
+   `ROOFLINE_GUIDANCE`: only when `ROOFLINE_GUIDANCE.valid` is `true` should you seed levers from its
+   `recommended_levers`/`recommended_specialties` (lead with `dominant_case_id`, skip `invalid_case_ids`
+   and `low_headroom` cases); when it is absent/null or `valid=false`, derive your stack from the profiling
+   summary + TARGET instead — do not follow an ungated roofline recommendation. Respect the latency
+   subtype: `latency_dep` wants shorter chains + more ILP + **more** registers, `latency_issue` wants
+   higher occupancy + **more** waves + **fewer** registers (opposite bets — do not average them). Fold any
+   `red_flags` (`register_spill`, `poor_coalescing`, `gpu_underfilled`, `lds_bank_conflicts`,
+   `low_occupancy`) into your stack even when orthogonal to the primary limit. The two occupancy flags are
+   opposite bets: `register_occupancy_ceiling` (occupancy pinned at a ≤2 waves/SIMD register ceiling) → cut
+   registers/tile to raise occupancy; `occupancy_not_register_limited` (occupancy well below the ceiling) →
+   registers are NOT the constraint, so cutting VGPR wastes a round — attack LDS/barriers/launch shape. On a `split-K when K>=4096` lever, fuse the reduction into a
+   dedicated kernel (never `tl.atomic_add`). Weigh effort by `amdahl_ceiling_pct`: a `below_amdahl_floor`
+   case cannot move e2e no matter how deep you go. Ignore roofline perf deltas under ±3.4% (noise); wall
+   time is authoritative. Be wary of multi-XCD HBM under-reporting and MoE/padding-inflated AI — confirm a
+   suspicious compute-bound read against wall time before committing. Do not modify the profile
+   manifest, generated profiler driver, profiler artifacts, or immutable oracle. Fusion/layout/traffic
+   changes may legitimately move AI; a large AI change after a tile-only edit is a consistency warning.
 
 ## Iteration protocol (you go deep — much longer than a specialist)
 1. **Baseline**: in `KERNEL_PATH`, clear cache, run the COMMANDMENT benchmark via gpu_lock, record the

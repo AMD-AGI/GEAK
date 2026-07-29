@@ -311,9 +311,25 @@ Return JSON:
   "parity_kind": "byte_exact|accuracy|none",
   "gate": "accepted|stack|rejected|incomplete",
   "accepted_overlay": "<path to the overlay to carry forward>",
-  "reason": "why accepted/rejected/incomplete (cite Amdahl + measured delta vs noise band)"
+  "reason": "why accepted/rejected/incomplete (cite Amdahl + measured delta vs noise band)",
+  "task_dir": "<abs path to the standalone task bundle this win maps to (meta.json+unittest.py); '' if none>",
+  "target_callable": "<the DEPLOYED callable this win runs, mod:attr — e.g. aiter:gemm_a8w8_blockscale for a Triton->CK swap; '' if the deployed kernel is the frozen baseline callable>",
+  "accepted_env": "<space-separated K=V env the accept deploys with, e.g. AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=/abs/tuned.csv AITER_LOG_TUNED_CONFIG=1; '' if none>"
 }
 ```
+
+**Deployment provenance (drives the POST-optimization roofline).** On any ACCEPT/STACK, also populate
+`task_dir`, `target_callable`, and `accepted_env` — both in the returned JSON AND in the on-disk
+`$CB/integrate_result.json` you already write. These let the roofline_probe `post_all` phase profile the
+kernel you actually DEPLOYED (not the frozen baseline) under the env you accepted. This matters most for a
+**backend-swap / config win** (e.g. Triton→CK a8w8_blockscale + gemm autotuning): there the deployed
+callable and env DIFFER from the frozen baseline, and the cand `short_name` need not match the task-bundle
+dir name, so without these fields the post roofline cannot find or profile the real winner. Read
+`target_callable` from `KERNEL_RESULT.target_callable` (or the rebound overlay target); read `accepted_env`
+from the env you passed to the winning candidate leg (`CURRENT_ENV` + any tuning env you added); set
+`task_dir` to `KERNEL_RESULT.task_dir` (or the standalone bundle you benched). Leave a field `""` when it
+genuinely equals the baseline (pure same-callable kernel rewrite) — post_all then profiles the frozen
+callable, still a valid reading.
 
 ---
 
