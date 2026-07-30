@@ -6,6 +6,13 @@ Peaks are **dense, no-sparsity, sustained-achievable-ceiling** figures. HBM band
 *theoretical pin* rate — real streaming kernels top out near 0.85–0.92 of it, which is exactly what
 `target_eff` in `SKILL.md` encodes. Do not pre-derate the numbers here.
 
+**Compute peaks need validation; the memory axis is the trustworthy one.** BF16 and FP16 MFMA run at
+the same rate on these parts, so the two `flops` entries below must be **equal** — they are, and that
+equality is the check to keep. Empirical MFMA microbenchmarks (e.g. from rocprof-compute) frequently
+report a BF16 peak ~2× low, which inflates any BF16 compute-axis `roofline_pct` (sometimes above 100%,
+where `SKILL.md` §6 L3 flags it `suspect`). At decode, prefer `hbm_util` and only rank on a
+compute-axis number once its dtype peak has been validated against this equality.
+
 ## gfx950 — CDNA4, MI350X / MI355X class
 ```yaml
 gfx: gfx950

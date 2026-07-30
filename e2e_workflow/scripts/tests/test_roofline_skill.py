@@ -126,6 +126,46 @@ class TestCalibrationAttention(unittest.TestCase):
         self.assertGreaterEqual(_attn_metrics()["attainable_speedup"], 1.56)
 
 
+class TestBoundTypeByUtilization(unittest.TestCase):
+    """bound_type is decided by measured utilization on BOTH axes, not by AI-vs-ridge alone."""
+
+    def test_attention_is_latency_bound_but_keeps_its_verdict(self):
+        """Small AI + low HBM util is NOT memory-bound — it is latency/occupancy-bound. The load-bearing
+        part: the verdict is KEPT (real headroom), so a low-utilization head still ranks by headroom
+        rather than falling back to raw %GPU. Only the *lever class* changes (occupancy/fusion)."""
+        a = _attn_metrics()
+        self.assertEqual(a["bound_type"], "latency")           # was mislabeled "memory" pre-fix
+        self.assertLess(a["hbm_util"], 0.60)
+        self.assertLess(a["compute_util"], 0.60)
+        self.assertEqual(a["headroom_class"], "underperforming")  # verdict survives
+        self.assertGreater(a["attainable_speedup"], 1.4)
+
+    def test_saturated_memory_head_stays_memory_bound(self):
+        """A genuinely bandwidth-bound head (high hbm_util) keeps bound_type='memory' so it routes to
+        the byte-reduction track, not the occupancy track."""
+        m = _moe_metrics()
+        self.assertEqual(m["bound_type"], "memory")
+        self.assertGreaterEqual(m["hbm_util"], 0.60)
+        self.assertEqual(m["headroom_class"], "saturated")
+
+    def test_latency_verdict_kept_is_distinct_from_dispatch_no_verdict(self):
+        """Two latency kinds must not collapse: a real-work low-util launch keeps a verdict; a launch
+        timed by the dispatch floor does not."""
+        p = _peaks()
+        # low util, but well above the ~5us dispatch floor -> latency WITH a verdict
+        real = rt.roofline_metrics(2e8, 1e8, 100e-6, p["hbm_bw_bytes_s"],
+                                   rt.peak_flops_for(p, "bf16"), 0.90, pct_gpu_time=10.0)
+        self.assertEqual(real["bound_type"], "latency")
+        self.assertNotEqual(real["headroom_class"], "unknown")
+        self.assertGreater(real["expected_e2e_gain_pct"], 0.0)
+        # same shape, timed at the dispatch floor -> latency with NO verdict
+        floor = rt.roofline_metrics(2e8, 1e8, 2e-6, p["hbm_bw_bytes_s"],
+                                    rt.peak_flops_for(p, "bf16"), 0.90, pct_gpu_time=10.0)
+        self.assertEqual(floor["bound_type"], "latency")
+        self.assertEqual(floor["headroom_class"], "unknown")
+        self.assertEqual(floor["expected_e2e_gain_pct"], 0.0)
+
+
 class TestRankingInversion(unittest.TestCase):
     def test_rankings_disagree(self):
         """THE point of the skill: %GPU says MoE, headroom says attention — and reality agreed

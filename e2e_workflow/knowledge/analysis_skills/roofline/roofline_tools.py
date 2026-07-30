@@ -51,6 +51,12 @@ DEFAULT_TOP_N = 8
 LAUNCH_OVERHEAD_S = 5e-6
 LATENCY_BOUND_FACTOR = 2.0
 
+#: A roof (memory or compute) counts as the binding limiter only when the kernel actually gets near
+#: it. Below this utilization on BOTH axes -- and above the dispatch floor -- the kernel is
+#: latency/occupancy-bound, NOT bandwidth- or compute-bound. This is the single most common mislabel:
+#: a small arithmetic intensity does not by itself make a kernel memory-bound.
+UTIL_BOUND_THRESHOLD = 0.60
+
 #: The only bound types this skill may emit. Anything else is a modelling escape and must degrade
 #: to "unknown" rather than inventing a category the consumer has no routing rule for.
 BOUND_TYPES = ("memory", "compute", "latency", "unknown")
@@ -214,21 +220,25 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
     ai = (f / b) if b > 0 else float("inf")
     ridge = (pfl / pbw) if (pfl > 0 and pbw > 0) else None
 
+    # AI picks which roof the kernel is walking TOWARD (the ceiling it would hit if it stopped
+    # stalling); utilization tells whether it is actually near that roof. Both are needed -- a small
+    # AI does NOT by itself mean memory-bound. roofline_pct is measured on the AI-selected roof.
     compute_bound = bool(ridge is not None and pfl > 0 and ai > ridge)
-    if compute_bound:
-        raw_pct, bound = achieved_flops / pfl, "compute"
-    else:
-        raw_pct, bound = achieved_bw / pbw, "memory"
+    hbm_util = achieved_bw / pbw
+    compute_util = (achieved_flops / pfl) if pfl > 0 else 0.0
+    raw_pct = compute_util if compute_bound else hbm_util
+    roof_axis = "compute" if compute_bound else "memory"
 
     out = {
         "bytes_est": b, "flops_est": f, "t_ms": t * 1e3,
         "achieved_bw_bytes_s": achieved_bw, "achieved_flops": achieved_flops,
+        "hbm_util": hbm_util, "compute_util": compute_util,
         "arithmetic_intensity": ai, "ridge_point": ridge,
         "roofline_pct_raw": raw_pct, "target_eff": tgt, "suspect": False,
     }
 
-    # A launch timed by dispatch rather than by its own transfer/math: a roofline ratio says nothing
-    # about it. Report it as such instead of a bogus efficiency; the lever is fusion, not tuning.
+    # (1) Dispatch-bound by time: the launch is timed by scheduling overhead, not by its own transfer
+    # or math, so no roofline ratio applies. No verdict; the lever is fusion / graph capture.
     if t <= float(launch_overhead_s or 0) * LATENCY_BOUND_FACTOR:
         out.update(bound_type="latency", roofline_pct=min(max(raw_pct, 0.0), 1.0),
                    attainable_speedup=1.0, expected_e2e_gain_pct=0.0,
@@ -237,11 +247,12 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
                         "roofline not applicable, lever is fusion / graph capture")
         return out
 
-    # L3 sanity band. An impossible ratio means the byte/FLOP model is wrong, NOT that the kernel is
-    # at the wall -- so it must not yield a verdict. Clamp for display, refuse to classify, and hand
-    # back the feasibility bound that the model violated so stage C knows what to measure.
+    # (2) Infeasible: raw_pct outside (0,1] means the byte/FLOP model is wrong, NOT that the kernel is
+    # at the wall -- so it must not yield a verdict. (A compute-axis >100% is usually an unvalidated
+    # peak, e.g. the BF16 MFMA microbench reading ~2x low.) Clamp for display, refuse to classify, and
+    # hand back the feasibility bound the model violated so stage C knows what to measure.
     if not (0.001 <= raw_pct <= 1.0):
-        out.update(bound_type=bound, roofline_pct=min(max(raw_pct, 0.0), 1.0),
+        out.update(bound_type=roof_axis, roofline_pct=min(max(raw_pct, 0.0), 1.0),
                    attainable_speedup=1.0, expected_e2e_gain_pct=0.0,
                    headroom_class="unknown", suspect=True,
                    bytes_upper_bound=pbw * t, flops_upper_bound=(pfl * t) if pfl > 0 else None,
@@ -249,6 +260,16 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
                         "re-estimate with a tighter model or measure with counters (stage C)"
                         % raw_pct)
         return out
+
+    # (3) True limiter by utilization. If NEITHER roof is near its ceiling (and we already ruled out
+    # the dispatch floor), the kernel is latency/occupancy-bound. It still has recoverable headroom --
+    # keep the verdict, so a low-utilization head like paged attention still ranks by its headroom --
+    # but the lever is occupancy / shorter dependency chains / fusion, NOT byte reduction (which only
+    # helps a genuinely bandwidth-bound, high-util head).
+    if compute_util < UTIL_BOUND_THRESHOLD and hbm_util < UTIL_BOUND_THRESHOLD:
+        bound = "latency"
+    else:
+        bound = roof_axis
 
     attainable = max(1.0, tgt / raw_pct)
     out.update(bound_type=bound, roofline_pct=raw_pct, attainable_speedup=attainable,
@@ -373,10 +394,14 @@ def _selftest():
                             2 * B * 16 * S * hd * 2, 141.112e-6,
                             peaks["hbm_bw_bytes_s"], peak_flops_for(peaks, "bf16"),
                             TARGET_EFF["attn"], pct_gpu_time=8.86)
-    print("Attn  : %.0f%% of roofline, %s, %.2fx, +%.2f%% e2e (%s)"
-          % (100 * attn["roofline_pct"], attn["bound_type"], attn["attainable_speedup"],
-             attn["expected_e2e_gain_pct"], attn["headroom_class"]))
-    ok &= (attn["headroom_class"] == "underperforming" and attn["attainable_speedup"] > 1.4
+    print("Attn  : %.0f%% of roofline (hbm_util %.0f%%, compute_util %.1f%%), %s, %.2fx, +%.2f%% e2e (%s)"
+          % (100 * attn["roofline_pct"], 100 * attn["hbm_util"], 100 * attn["compute_util"],
+             attn["bound_type"], attn["attainable_speedup"], attn["expected_e2e_gain_pct"],
+             attn["headroom_class"]))
+    # low util on both axes above the dispatch floor -> latency/occupancy-bound, but the verdict is
+    # KEPT (real headroom) so the ranking inversion below survives.
+    ok &= (attn["bound_type"] == "latency" and attn["headroom_class"] == "underperforming"
+           and attn["attainable_speedup"] > 1.4
            and attn["expected_e2e_gain_pct"] > moe["expected_e2e_gain_pct"])
 
     # the whole point: the two rankings disagree, and roofline is the one that matched reality

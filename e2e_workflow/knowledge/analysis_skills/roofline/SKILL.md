@@ -54,9 +54,10 @@ Write `profile/round_<R>/profile_roofline.json` and a human-readable `profile_ro
     "launches_per_step": 80,
     "bytes_est": 0, "flops_est": 0,
     "achieved_bw_bytes_s": 0, "achieved_flops": 0,
+    "hbm_util": 0.88, "compute_util": 0.01,   // achieved/peak on each axis; the pair decides bound_type
     "arithmetic_intensity": 4.6, "ridge_point": 625.0,
-    "bound_type": "memory|compute",
-    "roofline_pct": 0.88,               // achieved / peak on the binding axis
+    "bound_type": "memory|compute|latency|unknown",  // latency = neither roof near its ceiling
+    "roofline_pct": 0.88,               // achieved / peak on the AI-selected roof
     "target_eff": 0.90,
     "attainable_speedup": 1.023,
     "expected_e2e_gain_pct": 0.59,
@@ -94,13 +95,30 @@ see the disagreement rather than a single blended number that hides it.
    ```
    achieved_bw    = bytes_est / t
    achieved_flops = flops_est / t
+   hbm_util       = achieved_bw    / peak_bw
+   compute_util   = achieved_flops / peak_flops
    AI             = flops_est / bytes_est
    ridge_point    = peak_flops / peak_bw
-   bound_type     = "compute" if AI > ridge_point else "memory"
-   roofline_pct   = achieved_bw/peak_bw   (memory)   |   achieved_flops/peak_flops (compute)
+
+   # AI picks which roof the kernel walks TOWARD; roofline_pct is measured on that roof.
+   roof_axis    = "compute" if AI > ridge_point else "memory"
+   roofline_pct = compute_util if roof_axis == "compute" else hbm_util
+
+   # But which roof actually BINDS is decided by utilization, not by AI alone. A small AI does NOT
+   # by itself mean memory-bound — that is the most common mislabel. If neither roof is near its
+   # ceiling (both utils < 0.60) and the launch is above the dispatch floor, the kernel is
+   # LATENCY / occupancy-bound, not bandwidth- or compute-bound.
+   bound_type   = "latency" if (hbm_util < 0.60 and compute_util < 0.60) else roof_axis
+
    attainable_speedup    = max(1.0, target_eff / roofline_pct)
    expected_e2e_gain_pct = pct_gpu_time × (1 − 1/attainable_speedup)
    ```
+   A latency-bound kernel **still gets a headroom verdict** (its `roofline_pct` on the AI-selected
+   roof is real, and `target_eff` already prices in the occupancy penalty for irregular classes like
+   paged attention) — so a low-utilization head still ranks by its headroom. What changes is the
+   **lever**: latency-bound underperformance is fixed by occupancy / shorter dependency chains /
+   fusion, **not** by byte reduction (§7.1). Byte reduction only helps a genuinely bandwidth-bound
+   (high-`hbm_util`) head.
 6. Classify headroom, banded against `target_eff` (**not** against the raw roofline — what matters is
    the distance to what a good implementation of this class can realistically reach):
    `roofline_pct ≥ 0.9×target_eff` → **saturated**; `≥ 0.6×target_eff` → **moderate**; else →
@@ -111,10 +129,14 @@ see the disagreement rather than a single blended number that hides it.
    is not evidence about the kernel:
    - **Dispatch-bound** — the per-launch time is within launch-overhead scale (~5 µs), so the launch is
      timed by dispatch, not by its transfer or its math. Emit `bound_type: "latency"`; the lever is
-     fusion / graph capture, not kernel tuning. Typical of tiny high-call-count kernels.
+     fusion / graph capture, not kernel tuning. Typical of tiny high-call-count kernels. *This is the
+     no-verdict sub-case of latency-bound* — distinct from the general latency-bound kernel in step 5
+     (low utilization but well above the dispatch floor), which **keeps its verdict** because it is
+     doing real work and has recoverable occupancy/dependency headroom.
    - **Infeasible** — `roofline_pct` outside `(0,1]`. That is the byte/FLOP model being wrong, not the
      kernel being at the wall. **A clamped 100% must NEVER be reported as `saturated`** — that turns a
-     modelling failure into a routing decision. See §6 L3.
+     modelling failure into a routing decision. A compute-axis ratio above 1.0 is most often an
+     **unvalidated peak** (the BF16 MFMA microbench commonly reads ~2× low; see §4). See §6 L3.
 
    `bound_type` is a CLOSED set: `memory | compute | latency | unknown`. If none fits, emit `unknown`
    — never invent a category the consumer has no routing rule for.
@@ -131,6 +153,14 @@ which unit you used.
 Weight bytes use the **weight** dtype (fp8 = 1 B/elem, bf16 = 2 B). Activation bytes use the activation
 dtype. Only count HBM traffic — a tensor re-read within one launch and small enough to sit in L2
 (`l2_bytes`) counts once.
+
+**Trust the memory axis over the compute axis, especially at decode.** The compute peaks in `peaks.md`
+are validated for fp8, but empirical MFMA peaks are not always right — the BF16 microbench commonly
+reads ~2× low, which makes a BF16 `compute_util` read ~2× high (and can push `roofline_pct` above 1.0,
+where §6 L3 catches it as `suspect`). A decode workload is memory-bound anyway, so prefer `hbm_util`;
+only rank on a compute-axis `roofline_pct` after the peak for that dtype has been validated (§8 rule:
+BF16 and FP16 MFMA run at the same rate, so those two peaks must be equal — if they are not, the peak
+is mis-calibrated and the compute-axis number is not usable).
 
 ### dense GEMM `[M,K]×[K,N]`
 ```
@@ -229,12 +259,21 @@ These are **priors, not constants** — §8 corrects them from observed outcomes
 
 ### Routing table (the actual point of this skill)
 
-| `headroom_class` | `pct_gpu_time` | route |
-|---|---|---|
-| underperforming | high | **kernel track, top priority** — real micro-optimization headroom |
-| **saturated** | **high** | **byte-reduction / algorithmic track — NOT dropped** (§7.1) |
-| any | low | low priority (ordinary Amdahl) |
-| unknown, or `confidence: low` | any | **fall back entirely to `pct_gpu_time` ordering** |
+| `headroom_class` | `bound_type` | `pct_gpu_time` | route |
+|---|---|---|---|
+| underperforming | memory / compute | high | **kernel track, top priority** — real micro-optimization headroom |
+| underperforming | latency | high | kernel track — but the lever is **occupancy / dependency-chain / fusion / split-K**, not byte reduction |
+| **saturated** | memory | **high** | **byte-reduction / algorithmic track — NOT dropped** (§7.1) |
+| saturated | latency | high | occupancy/access-pattern is the ceiling — fewer bytes (e.g. fp8 KV) or fusion; not more tuning |
+| any | any | low | low priority (ordinary Amdahl) |
+| unknown, or `confidence: low` | any | any | **fall back entirely to `pct_gpu_time` ordering** |
+
+**Shippability gate (applies before any of the above).** A head kernel with no editable call site —
+a monolithic hand-written assembly `.co` or a precompiled CK `.so` — cannot take an in-kernel rewrite
+no matter how much headroom it shows. Its only levers are **host-side**: dispatch/path selection, the
+tuning DB (`tuned_fmoe`, `AITER_CONFIG_*`), or a backend swap. When the profiler marks an entry
+non-editable, route it to the host-side track and say so; do not dispatch a rewrite that cannot be
+integrated. (The `editable` flag comes from the profiler's Top-N, not from this skill.)
 
 ### 7.1 Saturated + high `pct_gpu_time` → byte-reduction levers
 
@@ -261,13 +300,22 @@ make the kernel move **fewer bytes for the same work**:
 ## 8. Guarding against being wrong
 
 1. **Sanity band** — §6 L3.
-2. **Contradiction check.** If a kernel squad measures an isolated speedup **larger** than this skill's
+2. **Validate the peak before believing a `roofline_pct`.** The peaks are empirical microbench
+   results, not spec figures. The load-bearing cross-check: BF16 and FP16 MFMA run at the same rate on
+   these parts, so their peaks must be equal — when they are not, the compute-axis number is inflated
+   (a "kernel at 85%" may really be at 43%). Trivial streaming also tops out near ~0.85 of the HBM pin
+   rate, which is why the memory `target_eff` is 0.90, not 1.0.
+3. **Two noise bands, not one.** An **isolated-kernel** speedup is real only if it clears the
+   isolated repeat band (**~3.4%** on identical reruns here — much wider than people assume), while an
+   **e2e serving** delta uses the serving band (~0.5%). Do not judge an isolated kernel win against the
+   e2e band, and never call a sub-3.4% isolated speedup real.
+4. **Contradiction check.** If a kernel squad measures an isolated speedup **larger** than this skill's
    `attainable_speedup`, the model was wrong. Flag it, and prefer the measurement — always.
-3. **Self-correction across runs.** Record `predicted vs actual` (predicted `attainable_speedup` and
+5. **Self-correction across runs.** Record `predicted vs actual` (predicted `attainable_speedup` and
    `expected_e2e_gain_pct` vs measured isolated speedup and measured e2e delta) into
    `knowledge/backend_playbook.md`, which already grows every run. Systematic error in a class's
    `target_eff` or byte model shows up there and is corrected in the next run.
-4. **Never sole authority.** No candidate is ever pruned because of this skill; no result is ever
+6. **Never sole authority.** No candidate is ever pruned because of this skill; no result is ever
    accepted because of it. The e2e gate decides.
 
 ## 9. Worked example (real data — Qwen3.5-35B-A3B-FP8, gfx950, vLLM, TP1, isl/osl 1k, conc 64)

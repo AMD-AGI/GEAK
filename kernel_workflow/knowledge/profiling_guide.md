@@ -119,15 +119,44 @@ Shows how wavefronts spend their time.
 | Issue Wait | Stalled on instruction issue |
 | Total Wave Cycles | Total cycles alive |
 
-**Key ratios:**
+**Key ratios** (each row is an independent accumulator over the SAME `Total Wave Cycles` — divide each
+by Total, **never subtract them from one another**; subtracting produces negative "active" values,
+which is a mis-read, not a finding):
 - `Active / Total` = Kernel efficiency (< 20% = CRITICAL inefficiency)
-- `Dependency Wait / Total` = Memory stall fraction
-- `Issue Wait / Total` = Instruction scheduling stall
+- `Dependency Wait / Total` = fraction stalled on a data dependency feeding the math units
+- `Issue Wait / Total` = fraction stalled because too few waves are resident to issue from
 
-**Diagnosis:**
-- High Dependency Wait → memory-bound or cache miss
-- High Issue Wait → instruction-level parallelism needed
-- Low Active + Low Wait → occupancy too low
+These are **averages over every wave in the dispatch** (and every dispatch, if you aggregated). A
+kernel whose waves diverge — an MoE expert with uneven token counts, attention with ragged sequence
+lengths — can average into a near-even split that describes none of its waves. If the split comes out
+ambiguous, re-profile a single representative launch before trusting it.
+
+**Diagnosis — and do NOT collapse dependency-wait into "memory-bound".** A high dependency wait means
+the math units are waiting on a *serial data-dependency chain*; the fix is to shorten that chain, which
+is not the same as a bandwidth problem. See "Splitting latency-bound" below — the two latency sub-cases
+have **opposite** fixes, so resolve the sub-case before touching code.
+- High Dependency Wait → serial dependency chain (latency-bound **C1**) — shorten the chain
+- High Issue Wait → not enough resident waves (latency-bound **C2**) — raise occupancy / fill the GPU
+- Low Active + Low Wait → occupancy too low, or the launch is dominated by dispatch overhead
+
+### Splitting latency-bound before choosing a fix (the two remedies pull opposite directions)
+
+"Latency-bound" on its own does not select a fix. It covers two situations whose remedies conflict:
+C1 wants **shorter dependency chains** (often more registers per wave); C2 wants **more resident
+waves** (fewer registers per wave). Guess wrong and the kernel gets slower.
+
+**The split is a property of the configuration, not of the source.** Tile size in particular moves a
+kernel between the two, in opposite directions:
+- **Small tiles** → little math per wave, so a serial preamble (dequant, scale, address math) dominates
+  the wave lifetime → reads as **dependency wait (C1)**.
+- **Large tiles** → bigger accumulator → more registers → fewer waves fit → too few to cover latency →
+  reads as **issue wait (C2)**.
+
+We measured one kernel cross this line under nothing but a tile-size change: 72% dependency wait at the
+small tile, 42% issue wait at the large one — same source, opposite fix. Two consequences: **re-read
+the split after every change to tile size / `num_stages` / `num_warps`** instead of carrying the prior
+diagnosis forward; and recognize that an autotuner sweeping tiles is implicitly sweeping both branches
+— the winning config usually *balances* the two stalls rather than minimizing either alone.
 
 ### Section 11: Compute Pipeline
 
@@ -175,14 +204,48 @@ Shows how wavefronts spend their time.
    └─ LDS > 50% → LDS-BOUND
 
 2. Check Wavefront stats (Active / Total ratio)
-   ├─ < 20% → LATENCY-BOUND (critical inefficiency)
-   ├─ 20-50% → check Dependency vs Issue wait
-   │   ├─ Dependency dominant → MEMORY-BOUND (cache miss stalls)
-   │   └─ Issue dominant → LATENCY-BOUND (ILP needed)
+   ├─ < 20% → LATENCY-BOUND (critical inefficiency) → split C1/C2 below
+   ├─ 20-50% → check Dependency vs Issue wait (both are latency sub-cases, NOT memory-bound)
+   │   ├─ Dependency dominant → LATENCY-BOUND C1 (serial dep chain) → shorten the chain
+   │   └─ Issue dominant      → LATENCY-BOUND C2 (too few waves) → raise occupancy / GPU fill
    └─ > 50% → check cache hit rates
        ├─ L1 < 60% → MEMORY-BOUND (poor locality)
        └─ L1 > 60% → BALANCED (likely small kernel, launch overhead)
+
+   Note: a low VMEM/VALU SoL with a dependency-wait-dominant wavefront is latency-bound (C1), not
+   memory-bandwidth-bound. Only classify MEMORY-BOUND when HBM/VMEM utilization is actually high
+   (≥60% SoL, or L1 locality is the demonstrated problem) — a small arithmetic intensity alone does
+   not make a kernel memory-bound.
 ```
+
+## Cheap checks to run from the raw counters BEFORE trusting a label
+
+The report does not surface these, but each is a few counters already collected, and each has caught a
+real mislabel. Run them before forming a hypothesis.
+
+**Validate the peaks first (a wrong denominator invents or hides a bottleneck).**
+- **BF16 compute peak reads ~2× low.** BF16 and FP16 MFMA run at the same rate on these parts, so the
+  two reported peaks must be equal — the empirical BF16 peak often is not, which makes BF16 compute
+  efficiency read ~2× high (we saw 185%, 396%). Any roofline efficiency **> 100%** is a mis-calibrated
+  peak (or SFU ops folded into the perf counter on rmsnorm/rope), not a record. Prefer HBM% and F32
+  MFMA%; pass `--roofline-data-type` if the tool supports it.
+- **HBM can under-report on multi-XCD.** If SoL HBM% looks implausibly low, cross-check with
+  `TCC_EA*_RDREQ_DRAM × 64B`, or bytes/time by hand.
+- **MoE padding inflates AI.** Recompute arithmetic intensity from *effective* FLOPs (not padded rows)
+  and confirmed bytes before believing an "AI far right of ridge → compute-bound" call.
+
+**Check the GPU is actually filled (this was the real limiter in a large fraction of kernels).**
+- **Fill:** `CTAs = Grid_Size / Workgroup_Size`. If `CTAs < CU count`, the kernel physically cannot
+  occupy the GPU — no tile or register tuning helps; you must partition more (split-K, finer tiles,
+  more blocks). This is separate from occupancy: a kernel can hit its per-wave occupancy ceiling and
+  still leave most of the GPU idle because it never launched enough work.
+- **Occupancy ceiling:** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved.
+- **Spill:** any nonzero `Scratch_Per_Workitem` comes first, before other register work.
+- **LDS bank conflict:** `SQ_LDS_BANK_CONFLICT / SQ_LDS_IDX_ACTIVE > 20%` → pad the row stride / swizzle.
+- **Coalescing:** `TD_COALESCABLE_WAVEFRONT_sum / TD_LOAD_WAVEFRONT_sum < 50%` → fix access pattern.
+
+Only tune registers/occupancy when achieved occupancy actually sits at the register ceiling; if it is
+far below the ceiling, the register footprint is not what constrains you and cutting VGPRs does nothing.
 
 ## Bottleneck Shift Analysis (for re-profiling after optimization)
 
