@@ -78,9 +78,14 @@ see the disagreement rather than a single blended number that hides it.
 
 ## 3. Procedure
 
+0. **Scope to the head.** Analyse ONLY entries with `pct_gpu_time >= HEAD_THRESHOLD_PCT` (default 5),
+   biggest first, capped at ~8. Below that bar the Amdahl ceiling is under the noise band no matter
+   what the roofline says, so a headroom estimate cannot change a decision — modelling those kernels
+   only adds failure modes. Skipped entries are **absent** from the artifact; they are NOT `degraded[]`
+   (a kernel too small to matter is not a modelling failure and must not read as one).
 1. Resolve peaks for `gfx` from `peaks.md`. Not found → derive from device props, set
    `peaks.confidence="low"` (§6 L1).
-2. For each Top-N entry, pick the **e2e-critical regime** — the one carrying the launches
+2. For each selected entry, pick the **e2e-critical regime** — the one carrying the launches
    (`serving.n_decode_steps` vs `n_prefill_steps`; a decode-dominated run means decode). Use that
    regime's `base_latency_ms` as `t_ms`.
 3. Classify `op_class` from `name`/`classification`/shapes.
@@ -101,6 +106,18 @@ see the disagreement rather than a single blended number that hides it.
    `roofline_pct ≥ 0.9×target_eff` → **saturated**; `≥ 0.6×target_eff` → **moderate**; else →
    **underperforming**; unmodelled or low-confidence → **unknown**.
    *88% against a 0.90 target is **saturated**, not "nearly there" — tuning has nothing left to give.*
+
+   **Two outcomes must produce NO verdict** (`headroom_class: "unknown"`), because in each the ratio
+   is not evidence about the kernel:
+   - **Dispatch-bound** — the per-launch time is within launch-overhead scale (~5 µs), so the launch is
+     timed by dispatch, not by its transfer or its math. Emit `bound_type: "latency"`; the lever is
+     fusion / graph capture, not kernel tuning. Typical of tiny high-call-count kernels.
+   - **Infeasible** — `roofline_pct` outside `(0,1]`. That is the byte/FLOP model being wrong, not the
+     kernel being at the wall. **A clamped 100% must NEVER be reported as `saturated`** — that turns a
+     modelling failure into a routing decision. See §6 L3.
+
+   `bound_type` is a CLOSED set: `memory | compute | latency | unknown`. If none fits, emit `unknown`
+   — never invent a category the consumer has no routing rule for.
 7. Sanity-check (§6 L3), emit both rankings, write the artifact.
 
 **Per-launch, not aggregate.** Compare bytes for ONE launch against ONE launch's `base_latency_ms`. If
@@ -133,6 +150,12 @@ If the implementation streams **all** `E` experts regardless of routing, use `E`
 `experts_hit` — and note that the difference between the two IS a byte-reduction lever (§7). When
 unsure which the kernel does, compute both, report the `experts_hit` figure, and put the all-expert
 figure in `notes`.
+
+**Feasibility rule (general, applies to every op class with more than one plausible byte model).**
+A byte estimate implying a rate above peak is refuted by the measurement itself. When you have
+several candidate models, pick the **largest one that stays feasible** (`bytes ≤ peak_bw × t`) and say
+which you used. If *every* candidate is infeasible, the class model is wrong: emit no verdict (§6 L3)
+rather than clamping to 100% and calling it saturated.
 
 ### attention (paged decode)
 KV traffic dominates; Q and the output are negligible at decode.
@@ -182,7 +205,7 @@ counter degrades to stage A/B (§6 L4), it does not fail the skill.
 | **L0** | `analysis_skill=none`, skill dir missing/unreadable | Emit nothing. Caller behaves exactly as before this feature existed. |
 | **L1** | `gfx` absent from `peaks.md` | Derive peaks from device props; `peaks.confidence="low"` → every entry is `confidence: low` → display-only. |
 | **L2** | an op class cannot be modelled | Degrade **that entry only**: `modeled:false`, `headroom_class:"unknown"`, add to `degraded[]`. Other entries are unaffected and the consumer falls back to the pre-skill prior for this one. |
-| **L3** | result is impossible: `roofline_pct > 1.0`, or `< 0.001`, or a negative/zero byte count | Clamp to `[0,1]`, set `suspect:true`, downgrade to display-only, and flag the entry as a **stage-C counter-measurement candidate**. Record the raw value in `notes`. |
+| **L3** | result is impossible: `roofline_pct > 1.0`, or `< 0.001`, or a negative/zero byte count | Clamp for display, set `suspect:true`, **force `headroom_class:"unknown"`** (an infeasible ratio is not a verdict), keep `roofline_pct_raw`, emit `bytes_upper_bound = peak_bw × t` (what the model violated), and flag the entry as a **stage-C counter-measurement candidate**. |
 | **L4** | counters unavailable / unstable | Keep the stage-A/B analytic result; do not raise confidence. |
 | **L5** | anything else raises | Catch it, append to `skill_errors[]`, write whatever entries succeeded, and continue. **The run never fails because of this skill.** |
 

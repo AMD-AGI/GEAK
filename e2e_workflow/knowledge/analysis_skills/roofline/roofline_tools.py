@@ -38,6 +38,37 @@ TARGET_EFF = {
     "attn": 0.50,
 }
 
+#: Only kernels big enough for a headroom estimate to change a decision are worth analysing.
+#: Below this the Amdahl ceiling is under the noise band anyway, so modelling them adds failure
+#: modes without adding information. Callers should pass the run's HEAD_THRESHOLD_PCT.
+DEFAULT_MIN_PCT_GPU = 5.0
+DEFAULT_TOP_N = 8
+
+#: Kernel launch + scheduling overhead. A launch whose duration is within a small multiple of this
+#: is timed by dispatch, not by its transfer or its math, so a roofline ratio is meaningless for it
+#: (its lever is fusion / graph capture, not kernel tuning). Order-of-magnitude runtime constant,
+#: not a per-model tuning knob -- override per box if measured.
+LAUNCH_OVERHEAD_S = 5e-6
+LATENCY_BOUND_FACTOR = 2.0
+
+#: The only bound types this skill may emit. Anything else is a modelling escape and must degrade
+#: to "unknown" rather than inventing a category the consumer has no routing rule for.
+BOUND_TYPES = ("memory", "compute", "latency", "unknown")
+
+
+def select_entries(entries, min_pct_gpu=DEFAULT_MIN_PCT_GPU, top_n=DEFAULT_TOP_N):
+    """Head-scoped selection: the entries worth a roofline estimate, biggest first.
+
+    Everything below the bar is SKIPPED (absent from the artifact), not "degraded" -- a kernel too
+    small to matter is not a modelling failure and should not read as one.
+    """
+    try:
+        sel = [e for e in (entries or []) if float(e.get("pct_gpu_time") or 0) >= float(min_pct_gpu)]
+    except (TypeError, ValueError, AttributeError):
+        return []
+    sel.sort(key=lambda e: -float(e.get("pct_gpu_time") or 0))
+    return sel[:int(top_n)] if top_n else sel
+
 
 def dtype_bytes(name, default=2):
     """Element size in bytes for a dtype spelling. Unknown -> `default` (never raises)."""
@@ -161,11 +192,14 @@ def experts_hit(num_experts, pairs):
 # ---------------------------------------------------------------- the metric
 
 def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_eff,
-                     pct_gpu_time=0.0):
+                     pct_gpu_time=0.0, launch_overhead_s=LAUNCH_OVERHEAD_S):
     """Core arithmetic of SKILL.md section 3 step 5. Returns a dict, or None on unusable input.
 
-    Applies the L3 sanity band: an impossible roofline_pct is clamped and flagged `suspect`
-    (with the raw value preserved) rather than discarded.
+    Two outcomes deliberately produce NO verdict (`headroom_class="unknown"`), because in both the
+    ratio is not evidence about the kernel:
+      * dispatch-bound -- the launch is timed by overhead, not by its transfer or its math;
+      * infeasible (`raw_pct` outside (0,1]) -- the byte/FLOP model is wrong. A clamped 100% must
+        never be read as "saturated"; that would turn a modelling failure into a routing decision.
     """
     try:
         b, f, t = float(bytes_moved or 0), float(flops or 0), float(t_seconds or 0)
@@ -186,20 +220,41 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
     else:
         raw_pct, bound = achieved_bw / pbw, "memory"
 
-    suspect = not (0.001 <= raw_pct <= 1.0)
-    pct = min(max(raw_pct, 0.0), 1.0)
-    attainable = max(1.0, tgt / pct) if pct > 0 else 1.0
-
-    return {
+    out = {
         "bytes_est": b, "flops_est": f, "t_ms": t * 1e3,
         "achieved_bw_bytes_s": achieved_bw, "achieved_flops": achieved_flops,
-        "arithmetic_intensity": ai, "ridge_point": ridge, "bound_type": bound,
-        "roofline_pct": pct, "roofline_pct_raw": raw_pct, "target_eff": tgt,
-        "attainable_speedup": attainable,
-        "expected_e2e_gain_pct": float(pct_gpu_time or 0.0) * (1.0 - 1.0 / attainable),
-        "headroom_class": classify_headroom(pct, tgt),
-        "suspect": suspect,
+        "arithmetic_intensity": ai, "ridge_point": ridge,
+        "roofline_pct_raw": raw_pct, "target_eff": tgt, "suspect": False,
     }
+
+    # A launch timed by dispatch rather than by its own transfer/math: a roofline ratio says nothing
+    # about it. Report it as such instead of a bogus efficiency; the lever is fusion, not tuning.
+    if t <= float(launch_overhead_s or 0) * LATENCY_BOUND_FACTOR:
+        out.update(bound_type="latency", roofline_pct=min(max(raw_pct, 0.0), 1.0),
+                   attainable_speedup=1.0, expected_e2e_gain_pct=0.0,
+                   headroom_class="unknown",
+                   note="per-launch time is within launch-overhead scale -> dispatch-bound; "
+                        "roofline not applicable, lever is fusion / graph capture")
+        return out
+
+    # L3 sanity band. An impossible ratio means the byte/FLOP model is wrong, NOT that the kernel is
+    # at the wall -- so it must not yield a verdict. Clamp for display, refuse to classify, and hand
+    # back the feasibility bound that the model violated so stage C knows what to measure.
+    if not (0.001 <= raw_pct <= 1.0):
+        out.update(bound_type=bound, roofline_pct=min(max(raw_pct, 0.0), 1.0),
+                   attainable_speedup=1.0, expected_e2e_gain_pct=0.0,
+                   headroom_class="unknown", suspect=True,
+                   bytes_upper_bound=pbw * t, flops_upper_bound=(pfl * t) if pfl > 0 else None,
+                   note="model infeasible (raw %.3f outside (0,1]) -> NOT a saturation verdict; "
+                        "re-estimate with a tighter model or measure with counters (stage C)"
+                        % raw_pct)
+        return out
+
+    attainable = max(1.0, tgt / raw_pct)
+    out.update(bound_type=bound, roofline_pct=raw_pct, attainable_speedup=attainable,
+               expected_e2e_gain_pct=float(pct_gpu_time or 0.0) * (1.0 - 1.0 / attainable),
+               headroom_class=classify_headroom(raw_pct, tgt))
+    return out
 
 
 def classify_headroom(roofline_pct, target_eff):

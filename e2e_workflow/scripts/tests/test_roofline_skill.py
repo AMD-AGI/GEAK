@@ -145,6 +145,61 @@ class TestDegradation(unittest.TestCase):
         self.assertGreater(m["roofline_pct_raw"], 1.0)
         self.assertLessEqual(m["roofline_pct"], 1.0)
 
+    def test_L3_infeasible_never_yields_a_saturation_verdict(self):
+        """Regression: a clamped 100% is a MODELLING FAILURE, not evidence the kernel is at the wall.
+
+        Reading it as `saturated` would let a wrong byte model silently make a routing decision —
+        observed in a real run, where fused_moe came back roofline_pct=1.00 + suspect and would
+        otherwise have been classified saturated on the strength of the clamp alone.
+        """
+        m = _moe_metrics(all_experts=True)
+        self.assertEqual(m["headroom_class"], "unknown")
+        self.assertEqual(m["attainable_speedup"], 1.0)
+        self.assertEqual(m["expected_e2e_gain_pct"], 0.0)
+        self.assertIn("bytes_upper_bound", m)          # what the model violated, for stage C
+        self.assertLess(m["bytes_upper_bound"], m["bytes_est"])
+
+    def test_dispatch_bound_launch_gets_no_verdict(self):
+        """A launch timed by dispatch overhead (tiny, high call count) is not evidence about
+        bandwidth or math. Emit bound_type='latency' and no verdict — the lever is fusion."""
+        p = _peaks()
+        m = rt.roofline_metrics(1e5, 1e5, 2e-6, p["hbm_bw_bytes_s"],
+                                rt.peak_flops_for(p, "bf16"), 0.875, pct_gpu_time=4.9)
+        self.assertEqual(m["bound_type"], "latency")
+        self.assertEqual(m["headroom_class"], "unknown")
+        self.assertEqual(m["expected_e2e_gain_pct"], 0.0)
+        self.assertIn("fusion", m["note"])
+
+    def test_bound_type_is_a_closed_set(self):
+        """Regression: a real run emitted an invented 'dispatch' bound_type the consumer had no
+        routing rule for. Every path must land inside BOUND_TYPES."""
+        p = _peaks()
+        cases = [_moe_metrics(), _attn_metrics(), _moe_metrics(all_experts=True),
+                 rt.roofline_metrics(1e5, 1e5, 2e-6, p["hbm_bw_bytes_s"],
+                                     rt.peak_flops_for(p, "bf16"), 0.875)]
+        for m in cases:
+            self.assertIn(m["bound_type"], rt.BOUND_TYPES, m.get("note", ""))
+
+
+class TestHeadScoping(unittest.TestCase):
+    """Only kernels big enough to change a decision are analysed at all."""
+
+    ENTRIES = [{"short_name": "big", "pct_gpu_time": 26.4}, {"short_name": "mid", "pct_gpu_time": 8.9},
+               {"short_name": "bar", "pct_gpu_time": 5.0}, {"short_name": "small", "pct_gpu_time": 1.7},
+               {"short_name": "tiny", "pct_gpu_time": 0.2}]
+
+    def test_below_bar_is_skipped_not_degraded(self):
+        sel = [e["short_name"] for e in rt.select_entries(self.ENTRIES, min_pct_gpu=5.0)]
+        self.assertEqual(sel, ["big", "mid", "bar"])   # sorted desc, sub-bar absent entirely
+
+    def test_top_n_cap(self):
+        self.assertEqual(len(rt.select_entries(self.ENTRIES, min_pct_gpu=0.0, top_n=2)), 2)
+
+    def test_malformed_input_is_safe(self):
+        self.assertEqual(rt.select_entries(None), [])
+        self.assertEqual(rt.select_entries([]), [])
+        self.assertEqual(rt.select_entries([{"short_name": "no-pct"}], min_pct_gpu=5.0), [])
+
     def test_L2_unusable_input_returns_none(self):
         for bad in [(0, 0, 1e-6, 1e12, 1e15, 0.9),      # no bytes and no flops
                     (1e6, 1e6, 0, 1e12, 1e15, 0.9),     # no time
