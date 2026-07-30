@@ -1,22 +1,7 @@
 export const meta = {
   name: 'kernel-workflow',
-  description: 'Single ENTRY POINT for kernel optimization on AMD Instinct MI-series GPUs (CDNA gfx942/gfx950, ' +
-    'auto-detected on-box). Dispatches on args.mode: optimize/author -> delegate one unchanged single-language ' +
-    'lane to the kernel_lane worker (backward compatible); bakeoff -> freeze the input kernel into ONE ' +
-    'immutable oracle + frozen baseline, discover per-language existing impls + offline-tune env backends ' +
-    '(aiter/CK), then run one worker lane per backend language (HIP/Triton/FlyDSL/CK/...) in parallel over ' +
-    'the GPU pool and pick the fastest verified result across ALL candidates (author/optimize lanes AND the ' +
-    'tuned env backend) — every one scored against the SAME frozen original baseline (anti-cheating). Wraps ' +
-    'the unchanged kernel_lane worker (one workflow() nesting level; the dispatcher is the bake-off orchestrator).',
-  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode ' +
-    'detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves ' +
-    'exactly like the old single-language workflow; mode=author writes a fresh implementation from ' +
-    'scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to ' +
-    'another language (pass args.target_language); mode=bakeoff tries several backend languages in ' +
-    'parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover — leaving it ' +
-    'empty also lets Discover decide per-language whether to optimize an existing impl or author a new ' +
-    'one). Anything else throws. Pass args.kernel_path ' +
-    '(required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids.',
+  description: 'Single ENTRY POINT for kernel optimization on AMD Instinct MI-series GPUs (CDNA gfx942/gfx950, auto-detected on-box). Dispatches on args.mode: optimize/author -> delegate one unchanged single-language lane to the kernel_lane worker (backward compatible); bakeoff -> freeze the input kernel into ONE immutable oracle + frozen baseline, discover per-language existing impls + offline-tune env backends (aiter/CK), then run one worker lane per backend language (HIP/Triton/FlyDSL/CK/...) in parallel over the GPU pool and pick the fastest verified result across ALL candidates (author/optimize lanes AND the tuned env backend) — every one scored against the SAME frozen original baseline (anti-cheating). Wraps the unchanged kernel_lane worker (one workflow() nesting level; the dispatcher is the bake-off orchestrator).',
+  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover — leaving it empty also lets Discover decide per-language whether to optimize an existing impl or author a new one). Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids.',
   phases: [
     { title: 'Freeze',   detail: 'oracle_freezer: freeze the input kernel -> immutable oracle + baseline_src/ (the ONE denominator) [bakeoff only]' },
     { title: 'Discover', detail: 'op_benchmarker: per-language existing-impl probe + measure + OFFLINE env tune (aiter/CK, shapes from the frozen oracle) -> author_plan, best_known_ms [bakeoff only]' },
