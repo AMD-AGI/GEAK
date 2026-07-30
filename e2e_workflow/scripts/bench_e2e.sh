@@ -143,6 +143,9 @@ EXTRA_SERVER_ARGS=${EXTRA_SERVER_ARGS:-}    # e.g. "--attention-backend triton"
 EXTRA_ENV=${EXTRA_ENV:-}
 # OVERLAY_PYTHONPATH: prepend an overlay dir so a patched subtree / monkeypatch loads first.
 OVERLAY_PYTHONPATH=${OVERLAY_PYTHONPATH:-}
+# OVERLAY_KIND: candidate|capture — selects the health-wait budget below.
+OVERLAY_KIND=${OVERLAY_KIND:-candidate}
+SERVER_STARTUP_TIMEOUT_SEC=${SERVER_STARTUP_TIMEOUT_SEC:-}
 
 # ---- port: auto-allocate a free one if not pinned (avoids 30000 collisions on shared boxes) ----
 # Constrained auto-allocation: pick a free port inside [PORT_BASE, PORT_BASE+PORT_SPAN) so a run can be
@@ -305,7 +308,7 @@ COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
 : > "$COLD_JSONL"
 
 # export everything the adapter reads
-export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
+export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH OVERLAY_KIND
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
 export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
@@ -376,12 +379,17 @@ if [ "$REUSE_SERVER" != "1" ]; then
   if [ -z "${SERVER_PID:-}" ]; then echo "!!! adapter_launch did not set SERVER_PID"; exit 2; fi
 
   echo ">>> Waiting for server health ..."
-  # An overlaid candidate can wedge: process stays alive but /health 503s forever (JIT deadlock /
-  # cuda-graph capture failure). Don't burn the whole window while holding the serving-GPU lock —
-  # fail fast on a fatal server-log marker, and use a TIGHTER budget when an overlay is active so a
-  # broken candidate is rejected quickly instead of starving the box. Non-overlay runs keep 180*5s.
+  # Budget covers server cold start only (launch -> /health 200), not the bench. An overlaid
+  # CANDIDATE can wedge (alive but /health 503s forever), so it stays tight and is rejected
+  # instead of starving the box; CAPTURE only hooks an unmodified baseline, so it gets room.
   HEALTH_TRIES=${HEALTH_TRIES:-180}
-  [ -n "$OVERLAY_PYTHONPATH" ] && HEALTH_TRIES=${OVERLAY_HEALTH_TRIES:-72}   # ~6min for overlays
+  if [ -n "$OVERLAY_PYTHONPATH" ]; then
+    case "$OVERLAY_KIND" in
+      capture) HEALTH_TRIES=${CAPTURE_HEALTH_TRIES:-360} ;;
+      *)       HEALTH_TRIES=${OVERLAY_HEALTH_TRIES:-72} ;;
+    esac
+  fi
+  case "$SERVER_STARTUP_TIMEOUT_SEC" in ''|*[!0-9]*) ;; *) HEALTH_TRIES=$((SERVER_STARTUP_TIMEOUT_SEC/5));; esac
   _up=0
   for i in $(seq 1 "$HEALTH_TRIES"); do
     if adapter_health >/dev/null 2>&1; then echo ">>> Server up after ~$((i*5))s."; _up=1; break; fi
@@ -391,7 +399,7 @@ if [ "$REUSE_SERVER" != "1" ]; then
     fi
     sleep 5
   done
-  [ "$_up" = "1" ] || { echo "!!! Server not healthy within $((HEALTH_TRIES*5))s."; tail -n 60 "$LOG"; exit 2; }
+  [ "$_up" = "1" ] || { echo "!!! Server not healthy within $((HEALTH_TRIES*5))s (OVERLAY_KIND=$OVERLAY_KIND; raise with SERVER_STARTUP_TIMEOUT_SEC)."; tail -n 60 "$LOG"; exit 2; }
 else
   echo ">>> Reusing warm server at $BASE_URL"
   adapter_health >/dev/null 2>&1 || { echo "!!! No healthy server at $BASE_URL"; exit 2; }

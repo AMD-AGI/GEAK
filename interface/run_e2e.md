@@ -82,6 +82,7 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 | (derived from `exp_root`) | `tracelens` | auto-discovered upstream TraceLens / kernel-agent artifacts (see below); only non-null paths forwarded; key omitted entirely when none found |
 | `bench_client` / `inferencex_path` | env `BENCH_CLIENT` + `INFERENCEX_PATH` | exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
 | `bench_protocol.{random_range_ratio,num_prompts,num_warmups,seed}` | env `RANDOM_RANGE_RATIO` / `NUM_PROMPTS` / `NUM_WARMUPS` / `SEED` | `run_e2e.py:apply_bench_protocol` exports ONLY the provided keys, overriding `bench_e2e.sh` standalone defaults; absent ⇒ defaults kept (not a JS arg) |
+| `server_startup_timeout_sec` | env `SERVER_STARTUP_TIMEOUT_SEC` | optional; overrides the `/health` wait budget (default 900s, or 360s under a candidate overlay). Absent/non-positive ⇒ not exported (not a JS arg) |
 | — | `config_tune="false"` | caller already did config search; never double-run |
 | — | `apply_to_original="true"` | so `final/final_launch.sh` + overlay are emitted for sweep reuse |
 

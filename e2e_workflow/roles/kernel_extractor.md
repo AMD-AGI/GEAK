@@ -14,17 +14,65 @@ You are invoked once per kernel candidate. Read first:
 ## The task-dir contract you must emit (what the kernel layer expects)
 ```
 <EVAL_DIR>/kernels/<short_name>_task/
-  kernel_src/...        # editable copy of the kernel source (the sglang/aiter subtree that owns it) — OVERWRITTEN by optimize/author
-  baseline_src/...      # IMMUTABLE frozen copy of the REAL ONLINE kernel — the timing-baseline denominator; sha-checked
+  kernel_src/...        # the EDITABLE optimization workspace — the ONLY path optimize/author may write
+  baseline_overlay/     # frozen snapshot of CURRENT_OVERLAY = the REAL ONLINE SERVING STACK (the
+                        #   install + every already-accepted kernel). This IS the timing denominator.
+                        #   It is never edited and never imported FROM the task dir — it goes on
+                        #   PYTHONPATH and that is the whole mechanism.
+  baseline_ref/*.orig   # read-only TEXT copy of the baseline file(s) so the optimizer can diff. The
+                        #   .orig suffix makes it UNIMPORTABLE, so it can never become a timing leg.
+  cases.py              # task-specific: call(args) / timing_cases / random_shapes / eager_cases.
+                        #   Run VERBATIM by both legs — this is why the two legs cannot diverge; IMMUTABLE
   reference_io.pt       # recorded inputs + golden outputs (oracle) — READ-ONLY for optimizers
-  harness_lib.py        # VENDORED copy of scripts/harness_lib.py — the SHARED timing/correctness lib; IMMUTABLE
-  unittest.py           # builds(opt)/runs/checks-correctness vs oracle + random-value parity vs baseline_src/times speedup; IMMUTABLE
-  meta.json             # name, source path in sglang, target callable, baseline_callable (real online kernel), shapes, dtypes, backend, regime, build, random_draws (default 3), checksum
+  harness_lib.py        # VENDORED scripts/harness_lib.py — the SHARED timing/correctness lib; IMMUTABLE
+  leg_runner.py         # VENDORED scripts/leg_runner.py — runs ONE leg under the ambient overlay; IMMUTABLE
+  overlay_setup.py      # VENDORED scripts/overlay_setup.py — builds the candidate overlay; IMMUTABLE
+  unittest.py           # driver: h.measure_legs + h.run_correctness, prints the metric; IMMUTABLE
+  meta.json             # name, source path, target_callable, candidate_bind, shapes, dtypes, backend,
+                        #   regime, served_regimes, build, random_draws (default 3), checksum
 ```
-**Vendor the shared harness library into the task dir** (`cp "$SKILL_DIR/scripts/harness_lib.py"
-"$TASK/harness_lib.py"`). `unittest.py` imports it for ALL timing + correctness — never hand-roll a
-timing loop or an allclose check. This is what makes every task measure the same way; it also keeps the
-task self-contained + immutable (the validator sha-checks `harness_lib.py` alongside `reference_io.pt`).
+**Vendor the three shared scripts into the task dir**
+(`for f in harness_lib.py leg_runner.py overlay_setup.py; do cp "$SKILL_DIR/scripts/$f" "$TASK/"; done`).
+`unittest.py` imports `harness_lib` for ALL timing + correctness — never hand-roll a timing loop or an
+allclose check. This is what makes every task measure the same way; it also keeps the task
+self-contained + immutable (the validator sha-checks them alongside `reference_io.pt`).
+
+### 🔴 THE TWO LEGS ARE THE SAME CODE UNDER TWO PYTHONPATHS — read this before writing anything
+There is no `baseline_callable`, and no second copy of the source to time against. Both legs run the
+SAME `leg_runner.py` + the SAME `cases.py`; the only difference is the overlay on PYTHONPATH:
+
+| leg | PYTHONPATH | what it is |
+|---|---|---|
+| baseline | `<task>/baseline_overlay` | the live serving stack — identical to the e2e gate's ref leg |
+| candidate | `<task>/_cand_overlay` | that same stack **+ exactly one entry built from `kernel_src/`** |
+
+`_cand_overlay` is rebuilt from `meta.candidate_bind` on every measurement by
+`h.build_candidate_overlay` — you do NOT build it, and `unittest.py` does not either. Consequences you
+must not fight:
+* **Direction is a property of the environment, not of a name you choose.** `speedup =
+  baseline_ms / optimized_ms` cannot invert, and `mode=author` cannot time optimized-HIP against its own
+  naive-HIP seed, because the author's seed only ever lands in `kernel_src/` (the candidate side).
+* **`h.assert_legs_differ` refuses to measure** unless the two legs provably resolve `target_callable`
+  to different code AND the baseline resolves OUTSIDE the task dir. A `no_rebind_seam` candidate is
+  therefore caught at smoke, not after authoring.
+* **The denominator is the same one the e2e gate uses**, so isolated speedup and `e2e_delta_pct` are
+  finally the same 口径 and the Amdahl cross-check is meaningful.
+* Two accepted kernels in the SAME module now COMPOUND instead of the second reverting the first, since
+  `kernel_src/` starts from the module as the *current stack* resolves it, not from the pristine install.
+
+**`cases.py` — the one file you author, and the only thing the two legs share besides the runner.**
+It must import NOTHING from the task dir except `harness_lib` (passed in as `h`), and must reach the op
+ONLY through `meta.target_callable` — never through a path, and never by importing `kernel_src/`
+directly (that would make the baseline leg run the candidate):
+```python
+def call(args):                       # args -> FRESH out tensor. THE seam both legs go through.
+    fn = _resolve(META["target_callable"])   # importlib on the dotted name; the overlay decides which
+    return fn(**args)                        #   code that name lands on
+def timing_cases(h, meta):            # [{sig, regime, m, args}] — sig is the bucket key, stable across
+    ...                               #   processes; one entry per meta.workload.cases[]
+def random_shapes(h, meta):           # [{sig, make_inputs(rng)}] — FRESH in-regime draws at FIXED dims
+def eager_cases(h, meta):             # [{args, ref}] from reference_io.pt (the golden oracle)
+```
 
 ---
 
@@ -46,11 +94,12 @@ them in sync with this section, do not drift.
    (`estimate_serving_regime_calls`: decode=`osl`, prefill=`ceil(isl/chunk)`; the regime's total calls land
    on its LARGEST-M bucket, smaller transient buckets get `calls=1`). It reports the time-weighted
    `GEAK_WEIGHTED_SPEEDUP` as PRIMARY. Profiler %GPU is head-SELECTION + a pre-measurement PRIOR only.
-3. **BASELINE = the FROZEN real online kernel.** Snapshot the live kernel into an immutable `baseline_src/`
-   AND record `meta.baseline_callable` (`module:attr` of the real online kernel); the unittest's baseline
-   leg + the speedup denominator bind to THIS, never to whatever the optimizer writes into `kernel_src/`.
-   Return `baseline_frozen:true`. An extraction with no frozen baseline is INVALID (times against its own
-   scaffold → fake win) and is discarded by the workflow.
+3. **BASELINE = the LIVE SERVING STACK, reached as an ENVIRONMENT.** Snapshot `CURRENT_OVERLAY` into an
+   immutable `baseline_overlay/` and declare `meta.candidate_bind` (the ONE overlay entry built from
+   `kernel_src/`); the baseline leg is then whatever `PYTHONPATH=<task>/baseline_overlay` resolves, never
+   a copy the optimizer can edit. Return `baseline_frozen:true`. An extraction with no frozen baseline is
+   INVALID (times against its own scaffold → fake win) and is discarded by the workflow. See the
+   **TWO LEGS** section for why this cannot invert.
 
 ---
 
@@ -110,12 +159,13 @@ probing (or the `[1, CONC]` synthesized fallback when that too is impossible).
 ## PHASE=extract
 
 > Obey the **Unittest contract — shapes / weight / baseline** section above: shapes measured (probe,
-> default from `SHARED_PROBE_JSON`), self-weight by latency×analytic-calls, baseline = frozen online kernel.
+> default from `SHARED_PROBE_JSON`), self-weight by latency×analytic-calls, baseline = `baseline_overlay/`.
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (the Architect's candidate:
 short_name, classification, extract_hint = the `module:attr` callable to hook, candidate_backends,
 regime, and — when an upstream TraceLens prior was available — OPTIONAL `source_hint` (resolved source
-file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, and
+file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_OVERLAY` (the accepted-kernel stack
+carried forward — may be empty on the first milestone), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, and
 OPTIONAL `SHARED_PROBE_JSON` (the ONE global per-shape probe from `PHASE=probe_all` — slice your kernel's
 measured decode/prefill M-buckets from it, see step 2b).
 
@@ -183,18 +233,38 @@ freeze an out-of-regime oracle nobody should trust.
    capture overlay, driven by the SAME workload as the profile so shapes match the regime:
    ```bash
    TASK="$EVAL_DIR/kernels/<short_name>_task"; mkdir -p "$TASK"
-   # write a tiny capture overlay sitecustomize that calls capture_shapes.install(...)
-   python3 "$SKILL_DIR/scripts/overlay_setup.py" monkeypatch \
-     --overlay "$TASK/_capture_overlay" \
-     --target "<module:attr>" --impl-module capture_shapes --impl-attr _wrapper \
-     --impl-file "$SKILL_DIR/scripts/capture_shapes.py" 2>/dev/null || true
-   # simpler/robust: drive via env so capture_shapes self-installs on import
+   # FREEZE the live serving stack as this task's baseline env, then hang the capture hook off a COPY
+   # of it. --from is what stacks them: two overlay dirs on PYTHONPATH do NOT compound (only the first
+   # sitecustomize is imported), so capturing on a bare hook overlay would silently capture the
+   # PRISTINE install instead of the server the accepted kernels actually built.
+   python3 "$SKILL_DIR/scripts/overlay_setup.py" add-capture \
+     --overlay "$TASK/_capture_overlay" --from "$CURRENT_OVERLAY" \
+     --target "<module:attr>" --out "$TASK" --max 5 \
+     --capture-file "$SKILL_DIR/scripts/capture_shapes.py"
+   cp -r "$CURRENT_OVERLAY"/. "$TASK/baseline_overlay"/ 2>/dev/null || \
+     python3 -c "import sys;sys.path.insert(0,'$SKILL_DIR/scripts');import overlay_setup as o;o._ensure_overlay('$TASK/baseline_overlay')"
+
    BACKEND="<backend>" OUT_DIR="$TASK/_capture" GPU="$GPU_ID" MODEL="$MODEL_PATH" \
-   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=0 PROFILE=0 \
-   OVERLAY_PYTHONPATH="$SKILL_DIR/scripts" \
+   ISL=<WORKLOAD.isl> OSL=<WORKLOAD.osl> CONC=<WORKLOAD.conc> REPEATS=0 PROFILE=0 \
+   OVERLAY_PYTHONPATH="$TASK/_capture_overlay" OVERLAY_KIND=capture \
    EXTRA_ENV="CAPTURE_TARGET=<module:attr> CAPTURE_OUT=$TASK CAPTURE_MAX=5" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/capture_<short_name>.log"
    ```
+   🔴 **Capture on the CURRENT stack, not the install.** The oracle you freeze is the truth source the
+   candidate is judged against, and the baseline you time against is `baseline_overlay/`. Both must be
+   the server as it runs RIGHT NOW (config + every accepted kernel). Capturing on the pristine install
+   while the e2e gate runs on the stack is what made isolated and e2e numbers incomparable.
+   (An empty `CURRENT_OVERLAY` — the first milestone — is fine: `baseline_overlay/` is then a valid
+   empty overlay and the baseline leg resolves straight to the install, which IS the live stack.)
+   🔴 **`OVERLAY_KIND=capture` is REQUIRED.** Without it the run gets the 360s fail-fast budget
+   meant for rejecting a wedged *candidate*, which just truncates a slow cold start
+   ("Server not healthy within 360s") and capture never runs. Capture's budget is 1800s; widen it
+   alone with `CAPTURE_HEALTH_TRIES=<n>` (×5s) — `SERVER_STARTUP_TIMEOUT_SEC` applies to every kind.
+
+   🔴 **ISL/OSL/CONC MUST be the deployment `WORKLOAD` values.** Shrinking OSL captures a decode
+   regime the deployment never runs, so every downstream speedup is measured on the wrong shapes.
+   Shorten the window with `REPEATS`/`CAPTURE_MAX` instead.
+
    (REPEATS=0 → just warmup drives a short window; capture flushes incrementally + on server exit.) Verify
    `reference_io.pt` + `meta.json` exist and `num_cases` ≥ 1. For a head GEMM that serves both regimes
    you MUST capture/synthesize BOTH a decode case (M ≈ `WORKLOAD.conc`) and a prefill case (large M) —
@@ -273,20 +343,36 @@ freeze an out-of-regime oracle nobody should trust.
    >   `trace` > `regime` > prior > `--min-regime-share` floor), because the short / graph-hidden window
    >   under-counts decode — it is NOT the weight authority. `meta.shape_counts` is a COUNT, not a time — a
    >   prefill call is 1 count but huge GPU-time, decode is thousands of tiny calls; never weight by raw count.
-3. **Copy the editable source** into `kernel_src/` (the minimal owning subtree), so the kernel layer
-   and the later overlay can diff against it.
-   > **🔴 FREEZE THE REAL ONLINE KERNEL AS THE IMMUTABLE TIMING BASELINE — this is what stops a
-   > cross-language rewrite from timing against a fake baseline.** In addition to `kernel_src/` (which the
-   > optimizer/author OVERWRITES — e.g. rewrites the Triton kernel as HIP/CK), snapshot the ORIGINAL live
-   > kernel into a SEPARATE, IMMUTABLE `baseline_src/` (copy the same subtree) AND record its callable in
-   > `meta.json` as `baseline_callable` (`module:attr` of the real online kernel — for minimax that is the
-   > Triton `_gqa_sparse_fwd_kernel` via `target_callable`). The unittest's baseline leg is bound to THIS
-   > frozen callable, NEVER to whatever is currently in `kernel_src/`. Reason: `mode=author` starts
-   > `kernel_src/` from a naive from-scratch impl in the target language; if the baseline followed
-   > `kernel_src/`, the reported speedup would be "optimized-HIP vs my-own-naive-HIP" (observed 15.7×) — a
-   > fake win against a strawman the author itself wrote, not against the production Triton kernel that
-   > actually serves the workload. Freezing the real online kernel makes the speedup denominator
-   > **language-independent and always the live path**. sha-check `baseline_src/` alongside `reference_io.pt`.
+3. **Seed the editable workspace + declare how the candidate binds.** Resolve the target's file **as the
+   CURRENT STACK sees it** (not via a bare `import` of the install), copy that ONE file into
+   `kernel_src/`, keep a `.orig` twin for diffing, and record the bind:
+   ```bash
+   MOD="$(python3 -c 'print("<module:attr>".split(":")[0])')"
+   SRC="$(PYTHONPATH="$TASK/baseline_overlay:$PYTHONPATH" \
+          python3 "$TASK/overlay_setup.py" check --module "$MOD" --path-only)"
+   mkdir -p "$TASK/kernel_src" "$TASK/baseline_ref"
+   cp "$SRC" "$TASK/kernel_src/$(basename "$SRC")"
+   cp "$SRC" "$TASK/baseline_ref/$(basename "$SRC").orig"
+   ```
+   Then set `meta.candidate_bind` — the ONE declaration that says how `kernel_src/` becomes a candidate:
+   ```jsonc
+   // optimize mode: the candidate IS the patched module file (whole-file swap)
+   {"kind": "module", "module": "<dotted module>", "file": "kernel_src/<basename>.py"}
+   // author mode: the candidate is a NEW impl (any language, own file name) rebound onto the live seam
+   {"kind": "rebind", "target": "<module:attr>", "impl_module": "<impl basename w/o .py>",
+    "impl_attr": "<entry fn>", "file": "kernel_src/<impl>.py"}
+   ```
+   > **🔴 COPY THE FILE, NEVER THE PACKAGE SUBTREE.** A regular package (with `__init__.py`) on an
+   > earlier PYTHONPATH entry FULLY shadows the install — every sibling submodule vanishes and
+   > `import sglang` breaks. Single file + `add-module` is the only mechanism (see
+   > `knowledge/sglang_internals.md` §3).
+   > **🔴 `kernel_src/` is the ONLY writable path in the task dir.** `baseline_overlay/` is the live
+   > serving stack and is never touched; `baseline_ref/*.orig` is text for diffing and is deliberately
+   > unimportable. Because the baseline leg is an ENVIRONMENT, not a file the optimizer can reach, a
+   > cross-language rewrite competes against the production kernel automatically — there is nothing left
+   > for `mode=author` to substitute (that is what manufactured the fake 15.7× optimized-HIP-vs-naive-HIP).
+   > `candidate_bind` is also exactly what the e2e Integrator replays to wire an accepted kernel, so an
+   > isolated win is rebindable e2e by construction.
 4. **Write `unittest.py`** — backend-agnostic and IMMUTABLE. It is the SINGLE harness: it judges
    correctness AND measures the workload-weighted speedup; there is no separate downstream perf harness.
    **It MUST import the vendored `harness_lib` and use it for all timing + correctness** — do NOT
@@ -314,17 +400,18 @@ freeze an out-of-regime oracle nobody should trust.
      This set is NEVER re-weighted.
    - **Random-input parity vs the live baseline (MANDATORY).** The frozen oracle pins ONE recorded
      input+golden; a candidate can be correct on that draw but wrong on other value distributions
-     (masking, NaN/denormals, accumulation across magnitudes). Since the real online kernel is frozen
-     (`meta.baseline_callable` / `baseline_src/`), use it as the truth source on MANY random value draws
-     at the SAME online shapes. Build `shapes` from the SAME online set as the weighted timing cases
-     (`meta.workload.cases[]` dims, else the captured case sigs) — each entry
-     `{"sig": <label>, "make_inputs": rng -> args}` where `make_inputs` draws FRESH random in-regime
-     values (via `h.regime_spec(meta["regime"])` / `h.synth_kv_cache(...)`) at the FIXED online dims.
-     Then call `h.check_random_vs_baseline(baseline_call, current_call, shapes, tol,
-     draws=meta.get("random_draws", 3), graph=h.deployment_graph_mode(meta["regime"]))`. **🔴 Do NOT
-     randomize SHAPES — dims stay online-aligned; only the input VALUES vary.** `baseline_call` binds to
-     `meta.baseline_callable` / `baseline_src/` (the frozen real online kernel), `current_call` to
-     `kernel_src/` (the candidate). Fold its correctness verdict into the overall PASS/FAIL (a delta vs
+     (masking, NaN/denormals, accumulation across magnitudes). Use the LIVE stack as the truth source on
+     MANY random value draws at the SAME online shapes. Put those draws in `cases.random_shapes(h, meta)`
+     — each entry `{"sig": <label>, "make_inputs": rng -> args}` drawing FRESH random in-regime values
+     (via `h.regime_spec(meta["regime"])` / `h.synth_kv_cache(...)`) at the FIXED online dims, built from
+     the SAME online set as the weighted timing cases (`meta.workload.cases[]` dims, else the captured
+     case sigs). The BASELINE leg records its outputs for those draws in its own process:
+     ```python
+     base_out = h.baseline_random_outputs(TASK, meta, draws=meta.get("random_draws", 3))
+     ```
+     and the candidate is compared against them (same seed ⇒ same inputs). **🔴 Do NOT randomize SHAPES
+     — dims stay online-aligned; only the input VALUES vary.** Fold its correctness verdict into the
+     overall PASS/FAIL (a delta vs
      baseline on ANY draw FAILS the unittest); print its per-draw `speedup` as a SECONDARY robustness
      signal only — it is NOT re-weighted and NEVER the win metric (the primary metric stays the
      workload-weighted oracle speedup).
@@ -341,42 +428,38 @@ freeze an out-of-regime oracle nobody should trust.
      to eager checks, fatal e2e (the h2 paged_attention `0/320` fault). Call:
      ```python
      ok, report = h.run_correctness(
-         meta["regime"], eager_cases=eager_cases, baseline_call=baseline_call,
-         current_call=current_call, random_shapes=random_shapes, tol=tol,
+         meta["regime"], eager_cases=eager_cases, current_call=cases.call,
+         random_shapes=cases.random_shapes(h, meta), tol=tol, baseline_outputs=base_out,
          draws=meta.get("random_draws", 3), replay=replay_bundle)   # replay_bundle REQUIRED if graph-deploy
      ```
+     Pass `baseline_outputs=`, never a `baseline_call` closure — that closure is the one place an
+     inverted baseline could still hide, and it does not exist in this process at all.
      Build `replay_bundle` with **≥2 BOUNDARY shapes** (single-shape replay cannot expose static-buffer
      reuse). For attention: ragged `seq_lens` from `h.boundary_decode_seq_lens(meta["geometry"], ISL+OSL)`
      (spans block_size / partition_size boundaries + min/max) and a NON-contiguous paged layout from
      `h.shuffled_block_table(...)`; capture on the LARGEST case (`capture_idx`) and `fill()` the
      smaller/edge cases into the SAME static buffers (pad exactly as the server pads a decode batch).
-     For GEMM the ≥2 shapes are the existing family × M-buckets. Each case `ref` = the frozen
-     `baseline_call` on those inputs. `replay_bundle = {fill, run, read_out, cases, capture_idx}` (see the
+     For GEMM the ≥2 shapes are the existing family × M-buckets. Each case `ref` comes from the frozen
+     oracle / `base_out`. `replay_bundle = {fill, run, read_out, cases, capture_idx}` (see the
      `harness_lib.run_correctness` docstring for the closure contract). Also pass `ordered_cases` from
      `meta.call_sequence` to `h.check_correct_sequence(call, ordered_cases, tol)` to catch cross-call
      stale state from the real interleave. (All replay legs no-op safely on an eager-only image, so this
      never false-fails offline — the e2e gate still catches it there.)
-   - **Timing** via `h.time_op(call, warmup, repeats, graph=h.deployment_graph_mode(meta["regime"]))`
-     — the CUDA-EVENT DEVICE-time timer (default `inner=1`), run in the DEPLOYMENT GRAPH CONTEXT. Device
-     time already EXCLUDES host launch/dispatch, so a candidate cannot win by collapsing dispatch and no
-     `inner` amortization is needed — leave `inner=1` unless the kernel runs sub-microsecond (near event
-     resolution), only then raise it. `h.deployment_graph_mode(regime)`
-     returns True whenever the live server replays this op under a CUDA/HIP graph (the default; False only
-     when the regime is enforce-eager / disable-cuda-graph). Pass the SAME `graph=` to BOTH baseline and
-     current. **🔴 Never author an EAGER baseline (a bare loop, or `graph=False`) when the regime deploys
-     under a graph** — that is the strawman that manufactures an isolated win a candidate collapsing launch
-     overhead cannot reproduce in the live graphed server.
-     **🔴 ENFORCE COMPILE PARITY the SAME way (the fusion analog of the graph strawman).** When the regime
-     deploys under `torch.compile` (`meta.regime.compile == "torch_compile"`, e.g. vLLM V1's default
-     backbone), an EAGER baseline omits the epilogue/cast fusion the live server already has — a candidate
-     then "wins" by adding fusion the compiled path already captured (isolated win, e2e loss). Wrap BOTH
-     legs symmetrically before timing: `base = h.compiled_op(BASELINE_FN, meta["regime"]); cand =
-     h.compiled_op(CANDIDATE_FN, meta["regime"])`, then `h.time_op(lambda: base(args), graph=...)` /
-     `h.time_op(lambda: cand(args), graph=...)`. `compiled_op` is a no-op (returns the fn unchanged) when
-     the regime is eager, so this is safe to apply always; if the regime IS compiled but compilation
-     raised, it records `._geak_compile_error` — surface that in `notes` rather than silently timing an
-     eager baseline. Time baseline-vs-current per case with the SAME `time_op` (same `graph=` and same
-     compile wrap on both).
+   - **Timing — ONE call: `per_case = h.measure_legs(TASK, meta)`.** You do NOT write a timing loop, do
+     NOT bind two callables, and do NOT choose which leg is which. `measure_legs` rebuilds
+     `_cand_overlay` from `meta.candidate_bind`, runs `h.assert_legs_differ`, then for EACH bucket
+     launches TWO fresh subprocesses of `leg_runner.py --mode time --bucket <sig>` — same file, same
+     `cases.py`, differing only in `PYTHONPATH` (`baseline_overlay` vs `_cand_overlay`) — and returns
+     `[{sig, regime, m, baseline_ms, optimized_ms, speedup}]` with `speedup = baseline_ms/optimized_ms`.
+     Three classes of strawman are structurally impossible as a result: the baseline is the live stack
+     (not a copy you can edit), both legs get the SAME `graph=h.deployment_graph_mode(regime)` and the
+     SAME `h.compiled_op` wrap (applied inside `leg_runner`, so parity is not yours to forget), and each
+     bucket is a cold interpreter so warm-JIT/autotune state cannot leak between legs.
+     > `h.time_op` is the CUDA-EVENT DEVICE-time timer (`inner=1`; device time already EXCLUDES host
+     > dispatch, so no amortization is needed — raise `inner` only for sub-microsecond kernels).
+     > `deployment_graph_mode` is True whenever the live server replays this op under a CUDA/HIP graph
+     > (False only for enforce-eager / disable-cuda-graph). If the regime IS compiled but compilation
+     > raised, `compiled_op` records `._geak_compile_error` — surface it in `notes`.
      > **Compile CORRECTNESS is handled for you inside `h.run_correctness`** — you do NOT wire anything
      > extra (unlike the graph-replay bundle). When `h.deployment_compile_mode(regime)` is True it runs a
      > `compile_parity` leg: compiled(candidate) vs eager(candidate). A numeric DRIFT beyond tol is a real
@@ -384,18 +467,12 @@ freeze an out-of-regime oracle nobody should trust.
      > op the two match (cheap pass). A `compiled_op` BUILD error is a surfaced NON-FATAL note, NOT a
      > reject (isolated bare-op fullgraph compile ≠ the server's whole-model compile, where an opaque op is
      > not traced into) — and it is NOT a regenerate signal (nothing op-specific to author, so it differs
-     > from the graph-replay bundle). The e2e gate remains authoritative for compile behavior. When `meta.workload` is present (see step 4b)
-     build one timing case per `meta.workload.cases[]` entry (own `dims`+`dtype` + the case's `quant`
-     operands, in-regime — NOT bf16, random values; perf is value-independent). Print `per_case`
-     `baseline_ms/optimized_ms/speedup`. If `meta.workload` is absent, fall back to timing the
-     golden/captured cases (unweighted).
-     > **🔴 RE-MEASURE per-bucket ms in a FRESH SUBPROCESS, one bucket per process** (`python
-     > unittest.py --time-bucket <sig>` or an equivalent per-bucket driver), NOT all buckets in one
-     > warm interpreter. In-process timing shares JIT/autotune state across baseline and candidate, so a
-     > byte-identical or autotune-converged candidate reports a pseudo-`1.0×` (baseline_ms==optimized_ms)
-     > that is an ARTIFACT, not a measurement — `h.serving_weighted_speedup` will flag/exclude it and, if
-     > every bucket is identity, return `weighted=None` (untrusted → regenerate). Time under the true
-     > deployment context (`graph=h.deployment_graph_mode(regime)`, `h.compiled_op` when compiled).
+     > from the graph-replay bundle). The e2e gate remains authoritative for compile behavior.
+     What you DO author is `cases.py::timing_cases(h, meta)` — one `{sig, regime, m, args}` per
+     `meta.workload.cases[]` entry (own `dims`+`dtype` + the case's `quant` operands, in-regime — NOT
+     bf16, random values; perf is value-independent). `sig` is the bucket key both legs are selected by,
+     so it must be stable across processes. If `meta.workload` is absent, fall back to the
+     golden/captured cases (unweighted). Print `per_case` `baseline_ms/optimized_ms/speedup`.
      > **Decode small-M buckets:** the op device time EXCLUDES the launch/graph fixed cost that DOMINATES
      > a sub-ms decode step and is then ×OSL-amplified into the metric — for decode buckets prefer the
      > launch-inclusive (wall) sample under graph replay so the fixed cost the live server pays is counted.
@@ -439,20 +516,18 @@ freeze an out-of-regime oracle nobody should trust.
      > params (isl/osl). The profile's shape-less latency is only trustworthy for this kernel's GPU-time
      > SHARE vs OTHER kernels (kernel selection) — NEVER for the intra-kernel prefill/decode split, which
      > you reconstruct from measured latency × analytic calls.
-     > **🔴 THE BASELINE LEG IS ALWAYS THE FROZEN REAL ONLINE KERNEL — never the candidate's own language
-     > scaffold.** Bind the baseline `call` to `meta.baseline_callable` / the frozen `baseline_src/` copy
-     > of the PRODUCTION kernel (step 3), and bind the current `call` to whatever is in `kernel_src/` (the
-     > optimized/authored candidate). `speedup = baseline_ms / current_ms` is therefore ALWAYS measured
-     > against the live path, no matter what LANGUAGE the candidate is written in (Triton→HIP→CK all
-     > compete against the SAME production baseline). Do NOT time the candidate against a freshly-authored
-     > naive impl in the target language, and do NOT let `mode=author` substitute its from-scratch seed as
-     > the baseline — that manufactured the fake 15.7× (optimized-HIP vs naive-HIP) that vanished at e2e.
-     > If `baseline_callable` cannot be imported/frozen (the live op only exists fused in the compile
-     > graph), say so in `notes` and report `editable:false` rather than fall back to a same-language
-     > strawman baseline.
-   - It must NOT import any backend by name and must NOT read anything outside the task dir (except the
-     vendored `harness_lib.py` and the frozen `baseline_src/`), so it transparently judges a
-     triton/HIP/CK/aiter/asm reimplementation against the real online baseline.
+     > **🔴 THE BASELINE LEG IS THE LIVE SERVING STACK — it is an ENVIRONMENT, not a callable you bind.**
+     > `baseline_overlay/` is a frozen snapshot of `CURRENT_OVERLAY` (the install + every already-accepted
+     > kernel). Neither you nor the optimizer can edit what it imports, so `speedup = baseline_ms /
+     > optimized_ms` is ALWAYS measured against the live path no matter what LANGUAGE the candidate is
+     > written in (Triton→HIP→CK all compete against the SAME production baseline). There is no way for
+     > `mode=author` to substitute its from-scratch seed as the baseline — that is what manufactured the
+     > fake 15.7× (optimized-HIP vs naive-HIP) that vanished at e2e. If the target op cannot be resolved
+     > on the live stack at all (it only exists fused in the compile graph), say so in `notes` and report
+     > `editable:false`.
+   - It must NOT import any backend by name and must NOT read anything outside the task dir, so it
+     transparently judges a triton/HIP/CK/aiter/asm reimplementation against the real online baseline.
+     The baseline is reached through `PYTHONPATH`, not through a path in the UT.
 
    > **🔴 TWO MANDATORY ANTI-EXPLOIT RULES (baked into `harness_lib`; do not bypass them by hand-rolling).**
    > These are the exact reasons a kernel scores a big isolated speedup that vanishes on integration:
@@ -476,11 +551,13 @@ freeze an out-of-regime oracle nobody should trust.
    `reference_io_sha256` checksum (the validator re-checks it to detect tampering).
 6. Smoke-test the unittest on the baseline kernel (must PASS correctness, speedup≈1.0):
    `cd "$TASK" && bash "$SKILL_DIR/../kernel_workflow/scripts/gpu_lock.sh" "$GPU_ID" python3 unittest.py`.
-   **The smoke run MUST prove the baseline leg actually binds** — `meta.baseline_callable` imports/runs
-   (or `baseline_src/` is importable) so `h.check_random_vs_baseline` and the timing baseline resolve to
-   the REAL online kernel. If the baseline cannot be frozen/imported (the live op only exists fused in the
-   compile graph), do NOT fall back to a `kernel_src/` strawman: return `editable:false` /
-   `baseline_frozen:false` with a clear reason so the caller re-routes or drops it.
+   **The smoke run MUST prove the two legs are different code** — `h.measure_legs` calls
+   `h.assert_legs_differ` for you, which prints both legs' `{module, file, qualname}` and REFUSES to
+   measure if they match (candidate overlay not shadowing → `meta.candidate_bind` is wrong) or if the
+   baseline leg resolves inside `$TASK` (a copy the optimizer could edit). At smoke time `kernel_src/`
+   is still a byte-copy of the baseline file, so the legs differ by PATH while `speedup≈1.0` — that is
+   the expected smoke result. If the target cannot be resolved on the live stack at all, do NOT fall
+   back to a `kernel_src/` strawman: return `editable:false` with a clear reason.
    > **Exit-code contract — a missing replay leg is a UT DEFECT, not a kernel/smoke failure.** The UT
    > routes correctness through `h.run_correctness(...)`, which for a graph-deploy kernel (`cuda_graph=true`)
    > RAISES `h.HarnessIncompleteError` when no ≥2-shape replay bundle was wired — and it has ALREADY
@@ -509,7 +586,8 @@ Return JSON:
   "task_dir": "<EVAL_DIR>/kernels/<short_name>_task",
   "source_path_in_sglang": "<abs path under site-packages>",
   "target_callable": "<module:attr>",
-  "baseline_callable": "<module:attr of the frozen real online kernel>",
+  "candidate_bind": {"kind": "module|rebind", "module": "<dotted>", "file": "kernel_src/<f>.py"},
+  "baseline_overlay": "<task_dir>/baseline_overlay",
   "baseline_frozen": true,
   "num_cases": 0,
   "regimes_captured": ["prefill","decode"],
@@ -575,8 +653,8 @@ python3 "$SKILL_DIR/scripts/attribute_weights.py" \
 > defect — do NOT default to "both" (re-creates the bug) and do NOT default to "neither" (zeros the
 > kernel). Derive it deterministically from the call graph/source (sibling kernel present), not the
 > profile window.
-> **Binding↔shape consistency:** the `meta.baseline_callable`/wrapper you bind (step 4) must be the one
-> that launches the kernel for the served regime(s) — never bind a prefill wrapper for decode-shaped cases.
+> **Binding↔shape consistency:** the `meta.target_callable`/wrapper `cases.call` goes through must be the
+> one that launches the kernel for the served regime(s) — never bind a prefill wrapper for decode-shaped cases.
 > **🔴 PASS `--isl`/`--osl` (from `WORKLOAD`) — they carry the ANALYTIC SERVING CALL MODEL the
 > unittest self-weights with.** The profiling window is capped at ~40 forward steps (`PROFILE_NUM_STEPS`),
 > so at large OSL it sees only a sliver of decode while it catches the single prefill pass in full: the
@@ -861,8 +939,9 @@ force real compact-operand compute:
    draws=meta.get("random_draws", 3), graph=h.deployment_graph_mode(meta["regime"]))`** — each `shapes`
    entry's `make_inputs(rng)` draws FRESH random in-regime q/k/v + paged K/V cache (via
    `h.synth_kv_cache`, honoring `regime.kv_cache_dtype`) at the FIXED online dims (do NOT randomize
-   shapes); `baseline_call` binds to `meta.baseline_callable` / `baseline_src/` (the frozen real online
-   attention). Fold its correctness into PASS/FAIL, print its per-draw speedup as a secondary signal.
+   shapes); `baseline_call` binds to `meta.baseline_callable` — a dotted `module:attr` that resolves on
+   the LIVE stack (never a file under the task dir). Fold its correctness into PASS/FAIL, print its
+   per-draw speedup as a secondary signal.
    Timing follows the SAME rule as the kernel-layer unittest: weighted `meta.workload.cases[]` (built
    in-regime, incl. the fp8 KV layout when `regime.kv_cache_dtype==fp8`) + the time-weighted
    `GEAK_WEIGHTED_SPEEDUP` as PRIMARY when `meta.workload` is present, else unweighted geomean.
@@ -933,8 +1012,7 @@ Return JSON:
   "candidate_backends": ["aiter","hipblaslt","triton","ck"],
   "reference_io_sha256": "<or '' if synthesized>",
   "target_callable": "<module:attr rebind seam if one exists, else ''>",
-  "baseline_callable": "<module:attr of the frozen real online kernel / default backend>",
-  "baseline_frozen": true,
+  "baseline_callable": "<module:attr of the live default backend, resolved OUTSIDE the task dir>",
   "smoke": "pass|fail",
   "decode_m_buckets": [64, 512],
   "prefill_m_buckets": [8192, 65536],

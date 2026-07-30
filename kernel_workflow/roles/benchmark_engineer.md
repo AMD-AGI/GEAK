@@ -57,7 +57,7 @@ Look for, in order:
   baseline + per-case timing in the canonical print shape. Do
   NOT write a new harness and do NOT modify it; just point the COMMANDMENT's CORRECTNESS/BENCHMARK at
   `python3 unittest.py` (via gpu_lock) and record its output. **The `baseline_ms` it prints is the FROZEN
-  REAL ONLINE kernel** (`meta.baseline_callable` / `baseline_src/`) — that is the speedup denominator,
+  REAL ONLINE stack** (`baseline_overlay/` / `meta.baseline_callable`) — that is the speedup denominator,
   regardless of `TARGET_LANGUAGE`. The authored impl's own timing is the SEED's `optimized_ms` (typically
   slower than the online kernel, i.e. `seed_speedup < 1×`, which is fine); NEVER re-point the denominator
   at the authored same-language scaffold.
@@ -91,7 +91,7 @@ warmup), `--full-benchmark` (100 iters/10 warmup). Use CUDA events for timing. P
 **Baseline (perf reference) — use the ORIGINAL implementation, never an LLM naive reimplementation.**
 The speedup denominator must be the real workload code, otherwise "2× over naive torch" can be slower
 than production. In order of preference: (a) **author mode: the frozen REAL ONLINE kernel in
-`baseline_src/` (via `meta.baseline_callable`)** — the authored from-scratch impl in the target language
+`baseline_overlay/` (the live stack on PYTHONPATH)** — the authored from-scratch impl in the target language
 is the optimize loop's CODE SEED, NOT the denominator, so a naive-HIP seed is timed against the live
 online Triton kernel, never against itself; (b) the pristine original in `EVAL_DIR/baseline` / the
 workspace's initial commit (optimize mode always has this); (c) for a library op with no editable

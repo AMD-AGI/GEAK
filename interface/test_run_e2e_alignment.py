@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,52 @@ def test_measurement_divergence_none_when_same_config_absent(tmp_path: Path) -> 
     bb = rx.normalize_result(h, wf)["baseline_basis"]
     assert bb["measurement_divergence_pct"] is None
     assert bb["baseline_divergence_pct"] is not None  # raw still computable
+
+
+def _bb(tmp_path: Path, **extra) -> dict:
+    eval_dir = tmp_path / "e2e"
+    eval_dir.mkdir(exist_ok=True)
+    h = {"workload": {"isl": 1024, "osl": 1024, "conc": 64},
+         "raw_baseline_tput": 2844.209, **extra}
+    wf = _wf(eval_dir, base=2974.662, final=3236.489, speedup=1.088)
+    return rx.normalize_result(h, wf)["baseline_basis"]
+
+
+def test_divergence_aliases_mirror_legacy_fields(tmp_path: Path) -> None:
+    """Aliases name WHICH baseline is compared; legacy keys stay (Hyperloom reads them)."""
+    bb = _bb(tmp_path, orchestrator_best_tput_same_config=2960.0)
+    assert bb["raw_session_baseline_divergence_pct"] == bb["baseline_divergence_pct"]
+    assert bb["same_config_measurement_divergence_pct"] == bb["measurement_divergence_pct"]
+    assert bb["primary_divergence_metric"] == "same_config_measurement_divergence_pct"
+    assert bb["primary_divergence_pct"] == bb["measurement_divergence_pct"]
+    assert bb["same_config_baseline_available"] is True
+    assert "identical accepted config" in bb["divergence_note"]
+
+
+def test_missing_same_config_baseline_is_loud_not_silent(tmp_path: Path) -> None:
+    """Null primary must announce itself, not leave the conflated number standing alone."""
+    bb = _bb(tmp_path)
+    assert bb["same_config_baseline_available"] is False
+    assert bb["primary_divergence_pct"] is None
+    assert "CONFLATES" in bb["divergence_note"]
+    assert "raw_session_baseline_divergence_pct" in bb["divergence_note"]
+
+
+@pytest.mark.parametrize("val,want", [(1800, "1800"), ("900", "900")])
+def test_apply_server_timeouts_exports_ceiling(val, want, monkeypatch) -> None:
+    monkeypatch.delenv("SERVER_STARTUP_TIMEOUT_SEC", raising=False)
+    assert rx.apply_server_timeouts({"server_startup_timeout_sec": val}) == {
+        "SERVER_STARTUP_TIMEOUT_SEC": want
+    }
+
+
+@pytest.mark.parametrize("bad", [None, "", "abc", 0, -5])
+def test_apply_server_timeouts_noop_on_absent_or_bad(bad, monkeypatch) -> None:
+    """Absent/garbage => nothing exported, so bench_e2e.sh keeps its own default."""
+    monkeypatch.delenv("SERVER_STARTUP_TIMEOUT_SEC", raising=False)
+    h = {} if bad is None else {"server_startup_timeout_sec": bad}
+    assert rx.apply_server_timeouts(h) == {}
+    assert "SERVER_STARTUP_TIMEOUT_SEC" not in os.environ
 
 
 def test_map_args_forwards_serving_fidelity_when_present(tmp_path: Path) -> None:

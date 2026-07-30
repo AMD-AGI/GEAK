@@ -53,6 +53,12 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
 
 ## Rules (NON-NEGOTIABLE)
 1. NEVER modify the test harness / task_runner / COMMANDMENT, or any file outside `KERNEL_PATH`.
+   **On an EXTRACTED task dir, `kernel_src/` is the ONLY writable path.** `unittest.py`, `cases.py`,
+   `harness_lib.py`, `leg_runner.py`, `meta.json`, `reference_io.pt`, `baseline_overlay/` and
+   `baseline_ref/` are the measuring instrument and the speedup DENOMINATOR — `baseline_overlay/` is the
+   live serving stack you are being timed against, so editing it does not make you faster, it makes the
+   number meaningless and the win is discarded at the e2e gate. Your patch is diffed with a
+   `-- kernel_src` pathspec; anything you change elsewhere is dropped anyway.
 2. Only edit files within your `DIRECTION.focus_files` (plus the wrapper/binding if `host_runtime`).
    Staying in your lane keeps your patch orthogonal and mergeable.
 3. NEVER set `HIP_VISIBLE_DEVICES` directly — run correctness AND benchmark via

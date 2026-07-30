@@ -62,7 +62,7 @@ const KERNEL_NAME_HINT = KERNEL_PATH_ORIG.replace(/\/+$/, '').split('/').pop();
 
 // --- author mode: when there is NO existing source, write a fresh from-scratch SEED first, then optimize it.
 // mode=optimize (default) keeps the exact original behavior (backward compatible). mode=author seeds
-// the workspace from an op task dir (immutable oracle + frozen online kernel in baseline_src/), the
+// the workspace from an op task dir (immutable oracle + the frozen live stack in baseline_overlay/), the
 // author_engineer writes a passing seed, then the SAME optimize loop runs — always timing against the
 // frozen online kernel, never against the seed's own language. KERNEL_KNOWLEDGE_DIR is the AMD authoring
 // knowledge base — REFERENCE ONLY (facts/how-to, never decisions; the author always measures regardless). Default:
@@ -188,9 +188,9 @@ const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
   kernel_name: { type: 'string' }, source_files: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
   // Frozen-baseline verdict (BOTH modes). The unittest's timing + random-value parity baseline MUST be
-  // the real online kernel — the immutable baseline_src/ dir OR an importable meta.baseline_callable —
-  // never kernel_src/ (the candidate's own scaffold). The director sets baseline_frozen=true after it
-  // copies baseline_src/ + confirms meta.baseline_callable; the script aborts the run if neither holds.
+  // the real online kernel — the immutable baseline_overlay/ (the live stack) OR an importable
+  // meta.baseline_callable — never kernel_src/ (the candidate's own scaffold). The director sets
+  // baseline_frozen=true after copying it in; the script aborts the run if neither holds.
   baseline_frozen: { type: 'boolean' }, baseline_callable: { type: 'string' },
   // DEEP-MODE resume only: populated by the director ONLY when STATE_DIR was provided AND a prior best
   // exists there. Lets a continued wave restore its cumulative speedup + insight/ledger history so it
@@ -422,16 +422,16 @@ log(`Setup done. EVAL_DIR=${EVAL_DIR}`);
 // ---------------------------------------------------------------------------
 // Enforce a FROZEN REAL-ONLINE BASELINE in BOTH modes (author AND same-language
 // optimize). The immutable unittest times + parity-checks the candidate against
-// baseline_src/ / meta.baseline_callable (the live online kernel); if neither
+// baseline_overlay/ / meta.baseline_callable (the live online stack); if neither
 // exists it would silently fall back to timing kernel_src/ against itself — the
 // "optimized-HIP vs naive-HIP = fake 15.7×" bug this harness exists to prevent.
 // The script has no FS access, so we trust the director's structured verdict
-// (it copied baseline_src/ + confirmed the callable). Missing -> abort/re-extract.
+// (it copied baseline_overlay/ + confirmed the callable). Missing -> abort/re-extract.
 // ---------------------------------------------------------------------------
 const hasBaseline = setup.baseline_frozen === true ||
   (typeof setup.baseline_callable === 'string' && setup.baseline_callable.trim().length > 0);
 if (!hasBaseline) {
-  const reason = `no frozen baseline (baseline_src/ or meta.baseline_callable) for ${KERNEL_NAME} — ` +
+  const reason = `no frozen baseline (baseline_overlay/ or meta.baseline_callable) for ${KERNEL_NAME} — ` +
     `re-extract; refusing to time the candidate against kernel_src/ (fake-win risk)`;
   log(`Setup ABORT: ${reason}`);
   return {
@@ -446,8 +446,8 @@ if (!hasBaseline) {
 // optimize loop's CODE SEED. On success, HEAD of CANONICAL becomes that seed
 // (what the optimize loop diffs its edits against) and the rest of the pipeline
 // (Analyze/Benchmark/Profile/optimize loop) runs UNCHANGED on it. The SPEEDUP
-// denominator is NEVER the seed — it is the frozen REAL ONLINE kernel in
-// baseline_src/ (meta.baseline_callable), regardless of TARGET_LANGUAGE.
+// denominator is NEVER the seed — it is the frozen live serving stack reached
+// through baseline_overlay/ on PYTHONPATH, regardless of TARGET_LANGUAGE.
 // On failure (no correct seed), abort early with a structured result so the
 // e2e caller drops this language.
 // ===========================================================================
@@ -613,7 +613,10 @@ mkdir -p ${d.out_dir}/workspace
 ${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
 (facts/how-to only; measure everything; never go below baseline).
-Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patch.diff\` when geomean>1.0.
+Save best_patch.diff via \`cd <KERNEL_PATH> && git diff -- "\$([ -d kernel_src ] && echo kernel_src || echo .)" > ${d.out_dir}/best_patch.diff\`
+when geomean>1.0. The pathspec is what keeps the diff to the OPTIMIZATION WORKSPACE: on an extracted
+task dir only kernel_src/ is yours, and a diff that also carried unittest.py/meta.json/baseline_* would
+propagate a tampered harness into the winner merge.
 
 ## Inputs
 ${cfg({

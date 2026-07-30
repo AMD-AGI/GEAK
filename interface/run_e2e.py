@@ -543,6 +543,23 @@ def apply_bench_protocol(h: dict) -> dict:
     return exported
 
 
+def apply_server_timeouts(h: dict) -> dict:
+    """Export ``handoff.server_startup_timeout_sec`` so bench_e2e.sh inherits it.
+
+    Overrides the overlay-kind health-wait budget. Absent/invalid => nothing exported.
+    Returns the exported {env_var: value} (for --dry-run / logging).
+    """
+    exported: dict[str, str] = {}
+    try:
+        secs = int(float(h.get("server_startup_timeout_sec") or 0))
+    except (TypeError, ValueError):
+        return exported
+    if secs > 0:
+        os.environ["SERVER_STARTUP_TIMEOUT_SEC"] = str(secs)
+        exported["SERVER_STARTUP_TIMEOUT_SEC"] = str(secs)
+    return exported
+
+
 # ---------------------------------------------------------------------------
 # Invocation: SDK preferred, CLI fallback.
 # ---------------------------------------------------------------------------
@@ -1156,28 +1173,48 @@ def normalize_result(h: dict, wf: dict) -> dict:
         orch_same_cfg = float(h.get("orchestrator_best_tput_same_config") or 0.0)
     except (TypeError, ValueError):
         orch_same_cfg = 0.0
+    # Conflates the accepted-config gain with measurement residue — not a clean signal.
+    raw_div = (
+        round(100.0 * (geak_baseline - orch_baseline) / orch_baseline, 2)
+        if (geak_baseline > 0 and orch_baseline > 0) else None
+    )
+    # Pure measurement residue: identical config both sides. Promote-side gating uses this.
+    same_cfg_div = (
+        round(100.0 * (geak_baseline - orch_same_cfg) / orch_same_cfg, 2)
+        if (geak_baseline > 0 and orch_same_cfg > 0) else None
+    )
+    if same_cfg_div is not None:
+        divergence_note = (
+            f"primary = same_config_measurement_divergence_pct ({same_cfg_div:+.2f}%): "
+            "identical accepted config both sides, so it isolates measurement residue."
+        )
+        if raw_div is not None:
+            divergence_note += (
+                f" raw_session_baseline_divergence_pct ({raw_div:+.2f}%) is vs the RAW "
+                "pre-explore baseline and also contains the config gain."
+            )
+    else:
+        divergence_note = (
+            "handoff.orchestrator_best_tput_same_config absent => clean measurement "
+            "residue UNDEFINED. raw_session_baseline_divergence_pct CONFLATES the "
+            "config gain with measurement residue; do not gate on it or quote it as a "
+            "measurement mismatch."
+        )
+
     baseline_basis = {
         # GEAK's own measured baseline (Hyperloom-accepted config = fair engagement baseline; gating uses this).
         "geak_measured_baseline_tok_s": geak_baseline or None,
         # Hyperloom's own measured baseline forwarded in the handoff (the orchestrator reference).
         "orchestrator_baseline_tok_s": orch_baseline or None,
-        # How far GEAK's baseline drifted from Hyperloom's RAW baseline. NOTE:
-        # this conflates the explore/framework CONFIG gain (GEAK seeds with the
-        # accepted config, raw baseline does not) with measurement residue, so it
-        # is NOT a clean measurement-mismatch signal. Kept for continuity.
-        "baseline_divergence_pct": (
-            round(100.0 * (geak_baseline - orch_baseline) / orch_baseline, 2)
-            if (geak_baseline > 0 and orch_baseline > 0) else None
-        ),
-        # PURE cross-harness measurement residue: GEAK baseline vs the
-        # orchestrator's throughput on the SAME (accepted) config. Both sides
-        # run the identical config, so this isolates client/protocol/warm-cold
-        # differences from the config gain. This is the value promote-side gating
-        # should use. None when the same-config baseline was not forwarded.
-        "measurement_divergence_pct": (
-            round(100.0 * (geak_baseline - orch_same_cfg) / orch_same_cfg, 2)
-            if (geak_baseline > 0 and orch_same_cfg > 0) else None
-        ),
+        # Legacy names — Hyperloom's kernel phase reads measurement_divergence_pct by name.
+        "baseline_divergence_pct": raw_div,
+        "measurement_divergence_pct": same_cfg_div,
+        "raw_session_baseline_divergence_pct": raw_div,
+        "same_config_measurement_divergence_pct": same_cfg_div,
+        "primary_divergence_metric": "same_config_measurement_divergence_pct",
+        "primary_divergence_pct": same_cfg_div,
+        "same_config_baseline_available": same_cfg_div is not None,
+        "divergence_note": divergence_note,
         "orchestrator_best_tput_same_config": orch_same_cfg or None,
         # Gain measured against the ORCHESTRATOR baseline (what Hyperloom sees end-to-end).
         "gain_vs_orchestrator_baseline": (
@@ -2197,6 +2234,7 @@ def main(argv: list[str]) -> int:
     bench_client = apply_bench_client(h)
     bench_launcher = apply_bench_launcher(h)
     bench_protocol = apply_bench_protocol(h)
+    server_timeouts = apply_server_timeouts(h)
     alignment_flags = apply_alignment_flags(h)
     prompt = build_prompt(ps_args)
 
@@ -2205,6 +2243,7 @@ def main(argv: list[str]) -> int:
                           "bench_launcher": bench_launcher,
                           "magpie_launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
                           "bench_protocol": bench_protocol,
+                          "server_timeouts": server_timeouts,
                           "alignment_flags": alignment_flags,
                           "inferencex_path": os.environ.get("INFERENCEX_PATH", ""),
                           "prompt": prompt, "e2e_script": str(E2E_SCRIPT)}, indent=2))

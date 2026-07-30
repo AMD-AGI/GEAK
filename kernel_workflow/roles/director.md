@@ -56,16 +56,20 @@ Do this instead of the optimize-mode steps below:
    mkdir -p "$EVAL_DIR/workspace/kernel_src" "$EVAL_DIR/baseline"
    echo "$KERNEL_PATH_ORIG" > "$EVAL_DIR/original_kernel_path.txt"
    # Copy the IMMUTABLE oracle in read-only (the Author/optimize loop judge against it, never edit it).
-   # This INCLUDES baseline_src/ + harness_lib.py: the frozen REAL ONLINE kernel is the timing-baseline
-   # denominator regardless of TARGET_LANGUAGE — it must ride along, immutable, so the unittest can time
-   # the authored seed against the live online path (never against the seed's own language scaffold).
-   for f in meta.json unittest.py reference_io.pt harness_lib.py; do
+   # baseline_overlay/ rides along too: it IS the timing denominator (the live serving stack), so it must
+   # be present and unwritable regardless of TARGET_LANGUAGE — otherwise the unittest has nothing to time
+   # the authored seed against except the seed's own language scaffold.
+   for f in meta.json unittest.py cases.py reference_io.pt harness_lib.py leg_runner.py overlay_setup.py; do
      [ -e "$KERNEL_PATH_ORIG/$f" ] && cp "$KERNEL_PATH_ORIG/$f" "$EVAL_DIR/workspace/$f"
    done
-   [ -d "$KERNEL_PATH_ORIG/baseline_src" ] && cp -r "$KERNEL_PATH_ORIG/baseline_src" "$EVAL_DIR/workspace/baseline_src"
+   for d in baseline_overlay baseline_ref; do
+     [ -d "$KERNEL_PATH_ORIG/$d" ] && cp -r "$KERNEL_PATH_ORIG/$d" "$EVAL_DIR/workspace/$d"
+   done
    chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
    [ -e "$EVAL_DIR/workspace/reference_io.pt" ] && chmod -w "$EVAL_DIR/workspace/reference_io.pt" 2>/dev/null || true
-   [ -d "$EVAL_DIR/workspace/baseline_src" ] && chmod -R -w "$EVAL_DIR/workspace/baseline_src" 2>/dev/null || true
+   for d in baseline_overlay baseline_ref; do
+     [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
+   done
    cd "$EVAL_DIR/workspace"
    printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
@@ -75,16 +79,16 @@ Do this instead of the optimize-mode steps below:
    ```
    `kernel_src/` is the empty dir the Author Engineer will write its fresh implementation into. HEAD is
    the empty seed; the Author's first commit becomes the optimize loop's **CODE starting point** (what it
-   diffs its edits against) — NOT the speedup denominator. The speedup denominator is ALWAYS the frozen
-   REAL ONLINE kernel in `baseline_src/` (via `meta.baseline_callable`), regardless of `TARGET_LANGUAGE`.
+   diffs its edits against) — NOT the speedup denominator. The speedup denominator is ALWAYS the live
+   serving stack reached through `baseline_overlay/` on `PYTHONPATH`, regardless of `TARGET_LANGUAGE`.
    Authoring a naive same-language impl and letting the optimize loop beat THAT (optimized-HIP vs naive-HIP)
    is the fake-win bug this harness exists to prevent; the seed competes against the live online path.
 3. Return the same JSON shape as below, with `kernel_name` = `OP_SPEC.op_kind` (+ language), and
    `source_files` listing the oracle files present. Note in `notes` that this is an author-mode seed.
    > **🔴 REPORT THE FROZEN-BASELINE VERDICT (the script aborts the run without it).** Set
    > `baseline_frozen: true` and `baseline_callable: "<module:attr>"` ONLY when the frozen real online
-   > kernel is actually available — i.e. `baseline_src/` was copied in (the `[ -d ... ] && cp -r` above
-   > succeeded) OR `meta.json` carries a resolvable `baseline_callable`. If NEITHER holds (the live op
+   > kernel is actually available — i.e. `baseline_overlay/` was copied in (the loop above succeeded)
+   > OR `meta.json` carries a resolvable `baseline_callable`. If NEITHER holds (the live op
    > only exists fused in the compile graph, so the extractor could not freeze it), set
    > `baseline_frozen: false` and explain in `notes`: the orchestrator will ABORT rather than let the
    > unittest time the seed against `kernel_src/` (the fake-win bug). Do NOT fabricate a baseline.
@@ -135,15 +139,18 @@ Steps:
 3a. **Freeze the real-online baseline (MANDATORY — same rule as author mode).** The immutable unittest
    times + random-value-parity-checks the candidate against the frozen online kernel, NEVER against the
    mutating `kernel_src/`. Resolve it in this order and record the verdict for the return JSON:
-   - If `KERNEL_PATH_ORIG` is an EXTRACTED task dir that already carries `baseline_src/` and/or
+   - If `KERNEL_PATH_ORIG` is an EXTRACTED task dir that already carries `baseline_overlay/` and/or
      `meta.json:baseline_callable`, the tar-pipe already copied them into `workspace/`. Make them
-     immutable and read the callable:
+     immutable:
      ```bash
-     [ -d "$EVAL_DIR/workspace/baseline_src" ] && chmod -R -w "$EVAL_DIR/workspace/baseline_src" 2>/dev/null || true
+     for d in baseline_overlay baseline_ref; do
+       [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
+     done
      [ -e "$EVAL_DIR/workspace/meta.json" ] && chmod -w "$EVAL_DIR/workspace/meta.json" 2>/dev/null || true
      ```
-     Set `baseline_frozen: true` + `baseline_callable` from `meta.json`.
-   - Else (a plain hand-written kernel dir with no `baseline_src/`/`baseline_callable`): the frozen
+     Set `baseline_frozen: true` + `baseline_callable` from `meta.json` (empty on the kernel track —
+     there the denominator is `baseline_overlay/`, not a callable name).
+   - Else (a plain hand-written kernel dir with no `baseline_overlay/`/`baseline_callable`): the frozen
      baseline IS the pristine `EVAL_DIR/baseline` copy + the initial git commit (same-language original =
      the real path). That always exists, so set `baseline_frozen: true` and note the baseline source is
      the pristine original (set `baseline_callable` from `meta.json:target_callable` if present, else "").
