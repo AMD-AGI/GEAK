@@ -2,8 +2,8 @@
 key: int4_w4a16 fused-MoE grouped GEMM · gfx942/MI300X · vLLM
 type: lever
 confidence: ★★★
-effect: per-shape Triton config tune (winner_kind=env, ZERO HBM) → +11-18% e2e VERIFIED (iso ~1.25-1.7×); 14 re-confirms on Kimi-K2.6 (TP=8 N=256 and TP=4 N=512; isl/osl/conc=8192/1024/64)
-last_seen: 2026-06-29
+effect: per-shape Triton config tune (winner_kind=env, ZERO HBM) → +11-18% e2e VERIFIED (iso ~1.25-1.6×); 10 re-confirms on Kimi-K2.6 (TP=8 N=256 and TP=4 N=512; isl/osl/conc=8192/1024/64)
+last_seen: 2026-06-23
 ---
 # int4 W4A16 fused-MoE grouped GEMM head → the memory-free vLLM config-tune lever
 - lever (try FIRST on an int4 MoE model): vLLM ships NO tuned Triton config for an unseen
@@ -22,13 +22,6 @@ last_seen: 2026-06-29
   copy and, at memory parity, OOMs at KV-cache init (op-level ~1.5× but e2e-undeployable — the Integrator
   rejects it `mem_footprint_starves_kv`). Only pursue fp8 author route when `ENABLE_FP8=true` AND it
   passes the memory-footprint gate.
-- caution: **the FlyDSL int4 author route has the SAME OOM trap.** If the authored kernel keys its setup
-  cache by `A.data_ptr()` or re-unpacks the int4 weight to `[E,N,K]` per forward, it re-materializes
-  multi-GiB every call → HIP OOM at `determine_available_memory` → "Engine core init failed" → rejected
-  (`mem_footprint_starves_kv` + cuda_graph_capture_unsafe). FIX: convert weights ONCE at load time
-  (in-place, same-byte, chunked over experts) in `process_weights_after_loading`, key by the NEW weight
-  ptr only, then drop `--enforce-eager`. Also verify e2e at equal mem-fraction. See
-  [[method-cudagraph-safe-integration]] + the apply-flydsl-moe-to-vllm skill.
 - caution: **measure each bucket in its OWN subprocess (matches the live server) — the in-process
   immutable unittest under-reports.** Running all M-buckets in one process lets Triton's JIT cache make
   the default-tile `run(None)` baseline warm/fast (the unittest reported geomean ~1.01× iso, M=8192/16384
@@ -67,33 +60,3 @@ last_seen: 2026-06-29
   already-tuned config. op_bench grouped probe: flydsl correct rel_err 0.0037, ck correct, aiter grouped
   entrypoint signature-failed (per-backend no-win, harness OK). Confirms the 'verify baseline didn't already
   bank the config' caution as a real, recurring gate.
-- source: 2026-06-25 re-derive on Kimi-K2.6 TP=4 (eval e2e_..._20260625T111041Z; N=512, E=384, K=7168,
-  gs32, topk8). Baseline server.log shows 'Using default MoE config' (Config file not found
-  E=384,N=512,...,int4_w4a16.json) → lever UNCONSUMED. Fresh per-bucket subprocess sweep iso M=16384
-  1.713× / M=8192 1.656× / M=4096 1.584× / M=2048 1.080×, decode no-regress M=1 1.099× / M=64 1.094× /
-  M=32 1.250×, all buckets rel_err<1e-2. Geomean over unittest buckets {1,64,4096}=1.2395×. Returned as
-  winner_kind=env (VLLM_TUNED_CONFIG_FOLDER) + recommend --max-num-batched-tokens 16384. 11th confirm
-  (e2e gate pending Integrator). Tracks the 2026-06-22/9th TP=4 data point near-exactly.
-- source: 2026-06-26 re-derive on Kimi-K2.6 TP=4 (eval e2e_..._20260626T103907Z; N=512, E=384, K=7168,
-  gs32, topk8; pct_gpu_time=70.76). Baseline server.log 'Using default MoE config' (E=384,N=512,...,
-  int4_w4a16.json not found) → lever UNCONSUMED. Fresh per-bucket subprocess sweep iso M=16384 1.700× /
-  M=8192 1.668× / M=4096 1.585× / M=2048 1.082× / M=32 1.259×, decode no-regress M=1 1.112× / M=64 1.095×,
-  all buckets rel_err<1e-2. Returned winner_kind=env + recommend --max-num-batched-tokens 16384. 12th
-  confirm (e2e gate pending Integrator); reproduces the TP=4/N=512 prefill 1.6-1.7× signature exactly.
-- source: 2026-06-28 re-derive on Kimi-K2.6 TP=4 (eval e2e_..._20260628T122336Z; N=512, E=384, K=7168,
-  gs32, topk8; pct_gpu_time=68.45). Baseline_flags.json had NO VLLM_TUNED_CONFIG_FOLDER and the immutable
-  unittest + sweep both logged 'Using default MoE config' (E=384,N=512,...,int4_w4a16.json not found) →
-  lever UNCONSUMED. Fresh per-bucket subprocess sweep iso M=16384 1.702× / M=8192 1.658× / M=4096 1.592× /
-  M=2048 1.080×, decode no-regress M=1 1.104× / M=64 1.097×, all 13 buckets rel_err<1e-2 (parity by
-  construction). Geomean over unittest buckets {1,64,2048,8192,16384}=1.2986× (prefill geomean 1.450×).
-  Returned winner_kind=env (VLLM_TUNED_CONFIG_FOLDER) + recommend --max-num-batched-tokens 16384. 13th
-  confirm (e2e gate pending Integrator). NOTE: in-process unittest under-reported (geomean ~1.006×, M=8192/
-  15362 ~1.0× — Triton JIT warms the default-tile baseline) — trust the per-bucket subprocess sweep, exactly
-  the documented caution. Also emitted FlyDSL author_plan FIRST (apply_flydsl_moe_to_vllm skill validated
-  +63-77% e2e) as the bigger-headroom Tier-C candidate alongside this env win.
-- source: 2026-06-29 re-derive on Kimi-K2.6 at **TP=4** (eval e2e_..._20260629T100727Z; lookup N=512). Per-bucket
-  subprocess sweep iso M=16384 1.713× / M=8192 1.658× / M=4096 1.580×, M=32 1.254×, decode no-regress M=1 1.105× /
-  M=64 1.091×, all buckets rel_err≤1e-2 (default kept where no win). 13/13 buckets written; engagement self-verified
-  (get_moe_configs loads 13 M-keys from VLLM_TUNED_CONFIG_FOLDER). 14th confirm (e2e gate pending Integrator).
-  best_known_ms (M8192 tuned)=8.23ms. flydsl absent on image → flydsl skills inert; triton route=rewrite of live
-  invoke_fused_moe_wna16_triton_kernel.
