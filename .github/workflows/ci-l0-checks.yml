@@ -54,6 +54,27 @@ jobs:
             interface/test_run_e2e_recovery.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py
 
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Scans the WORKING TREE, not git history: actions/checkout fetches a single
+      # commit by default, so a history scan here would be meaningless. This is the
+      # gate that stops a NEW secret from landing. Known false positives are
+      # allowlisted in .gitleaks.toml.
+      # The upstream binary is used directly rather than gitleaks-action, which
+      # requires a paid license key for organization-owned repos.
+      - name: gitleaks (working tree)
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks dir . --no-banner --redact --config .gitleaks.toml
+
   node-regression:
     name: Node regression (expert_skills)
     runs-on: ubuntu-latest
