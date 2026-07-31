@@ -6,20 +6,6 @@
 schema: {id, file, scope, match, expects, validation_status}
 
 skills:
-- id: ensure_flydsl
-  file: skills/ensure_flydsl/skill.md
-  scope: dependency          # build/dependency skill: makes flydsl importable; invoked BY the flydsl skills, not profile-matched
-  match:
-    needs: flydsl
-    arch_class:
-    - '*'
-    gens:
-    - gfx942
-    - gfx950
-    dtypes:
-    - int4_w4a16
-    - fp8_e4m3_fnuz
-  validation_status: n/a
 - id: apply_flydsl_moe_to_vllm
   file: skills/apply_flydsl_moe_to_vllm/skill.md
   scope: e2e
@@ -40,6 +26,50 @@ skills:
       op_name_regex: fused_moe_kernel_gptq_awq|invoke_fused_moe_wna16
       min_pct_gpu: 10.0
   expects:
+    e2e_delta_min_pct: 1.0
+    parity: required
+  validation_status: validated
+- id: ensure_flydsl
+  file: skills/ensure_flydsl/skill.md
+  scope: dependency          # build/dependency skill: makes flydsl importable; invoked BY the flydsl skills, not profile-matched
+  match:
+    needs: flydsl
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - int4_w4a16
+    - fp8_e4m3_fnuz
+  validation_status: n/a
+- id: flydsl_decode_moe_stage1_blkmap
+  file: skills/flydsl_decode_moe_stage1_blkmap/skill.md
+  scope: kernel
+  match:
+    operator: grouped_gemm_moe
+    arch_class:
+    - '*'
+    gens:
+    - gfx950
+    dtypes:
+    - mxfp4
+    - fp4_e2m1
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - decode
+    from_backend: ''
+    to_backend: ''
+    profile_signature:
+      op_name_regex: ''
+      min_pct_gpu: 0.0
+  expects:
+    isolated_speedup_min: 1.05
+    isolated_scope: stage-1 ISOLATED SEGMENT = the gate+up GEMM kernel PLUS the descriptor-producer kernel
+      this recipe adds. Do not include pre-existing sort/align/quant helpers in this isolated gate; report
+      the full stage-1 window separately. The producer has an unrelated name, so a GEMM-only filter drops
+      it and overstates the win by ~1.9pp (1.103x GEMM-only vs 1.080x with producer).
     e2e_delta_min_pct: 1.0
     parity: required
   validation_status: validated
@@ -89,6 +119,37 @@ skills:
     isolated_speedup_min: 1.05
     e2e_delta_min_pct: 1.0
     parity: required
+  validation_status: validated
+- id: flydsl_prefill_moe_stage2_fp8partial
+  file: skills/flydsl_prefill_moe_stage2_fp8partial/skill.md
+  scope: kernel
+  match:
+    operator: grouped_gemm_moe
+    arch_class:
+    - '*'
+    gens:
+    - gfx950
+    dtypes:
+    - mxfp4
+    - fp4_e2m1
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    from_backend: ''
+    to_backend: ''
+    profile_signature:
+      op_name_regex: ''
+      min_pct_gpu: 0.0
+  expects:
+    isolated_speedup_min: 1.15
+    isolated_scope: 'stage-2 SEGMENT = the down-proj GEMM kernel PLUS the separate top-k reduce kernel,
+      summed. Do NOT score the GEMM kernel alone: ~75% of the win is the halved partial READ, which happens
+      in the reduce kernel, so a GEMM-only measurement tops out at a measured 1.053x and fails this gate
+      even when the recipe is correctly reproduced. A per-kernel timing filter matched on the GEMM name
+      will not match the reduce kernel name -- verify your filter catches both.'
+    e2e_delta_min_pct: 1.0
+    parity: relaxed
   validation_status: validated
 - id: flydsl_rewrite_quantized_moe
   file: skills/flydsl_rewrite_quantized_moe/skill.md
