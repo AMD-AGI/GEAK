@@ -22,6 +22,7 @@ export PERFSKILLS_E2E_TIMEOUT_S="${PERFSKILLS_E2E_TIMEOUT_S:-57600}"
 # long-pending job by hand on the cluster if needed.
 export GEAK_MATRIX_POLL_S="${GEAK_MATRIX_POLL_S:-60}"       # squeue poll cadence while waiting (job-completion detection latency)
 export GEAK_MATRIX_LOG_S="${GEAK_MATRIX_LOG_S:-1200}"      # 'queue:' status-line log cadence (20 min); also always logged on state change
+export GEAK_MATRIX_GONE_CONFIRM="${GEAK_MATRIX_GONE_CONFIRM:-3}"  # consecutive polls a job must be confirmed absent (squeue miss AND scontrol non-active) before it's declared gone; guards a flaky SLURM control plane from failing a live run
 export SPUR_DRYRUN="${SPUR_DRYRUN:-0}"                      # 1 = print sbatch cmds, don't submit (also --print)
 
 # ---- SPUR / SLURM submission (slurm_submit.sh, lib.sh) ----------------------

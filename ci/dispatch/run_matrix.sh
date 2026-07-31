@@ -111,7 +111,11 @@ done
 # (>~36h), cancel it by hand on the cluster — it will then leave the queue and the
 # matrix proceeds. The GitHub job's timeout-minutes is the only outer backstop.
 me="$(whoami)"
-declare -A RELEASED LEFT
+declare -A RELEASED LEFT GONE_STREAK
+# A job must be confirmed absent (squeue miss AND scontrol non-active) this many
+# CONSECUTIVE polls before it is declared gone — belt-and-suspenders against a flaky
+# SLURM control plane (stale sacct / dropped squeue rows) falsely failing a live run.
+GONE_CONFIRM="${GEAK_MATRIX_GONE_CONFIRM:-3}"
 
 # Best-effort terminal state for a job that has left squeue (COMPLETED/FAILED/
 # CANCELLED/TIMEOUT/...). Empty if sacct is unavailable on this cluster.
@@ -123,14 +127,22 @@ sacct_state() {
 # Confirm a job's live state via scontrol when it is absent from a squeue snapshot.
 # A JobHoldMaxRequeue job briefly leaves squeue during its requeue->hold transition,
 # so absence alone is NOT proof of a terminal state. Echo 'STATE|REASON' and return 0
-# if the job is still active/held (keep waiting); return 1 if terminal or purged
-# (Invalid job id) so the caller treats it as genuinely gone.
+# if the job is still active/held OR if SLURM itself couldn't be reached (conservative:
+# keep waiting); return 1 ONLY on positive proof the job is gone — a terminal JobState
+# or an explicit "Invalid job id" (purged). This distinction matters: an empty scontrol
+# reply from a transient controller-unreachable/timeout MUST NOT be read as "terminal",
+# or a single control-plane blip (which also drops the job from squeue) falsely declares
+# the run failed while it is in fact still RUNNING. Proven on job 50633 (2026-07-27):
+# squeue+scontrol flickered together -> false no_result FAIL on a live job.
 scontrol_active() {
-  local info st rs
-  info="$(scontrol show job "$1" 2>/dev/null)" || true
-  [ -z "$info" ] && return 1
-  st="$(sed -n 's/.*JobState=\([A-Z_]*\).*/\1/p' <<<"$info" | head -1)"
-  rs="$(sed -n 's/.*Reason=\([^ ]*\).*/\1/p'      <<<"$info" | head -1)"
+  local out rc st rs
+  out="$(scontrol show job "$1" 2>&1)"; rc=$?
+  # Genuinely purged: SLURM explicitly says the id is invalid -> gone.
+  grep -qiE 'Invalid job id' <<<"$out" && return 1
+  # Any other failure/empty reply = controller unreachable/timeout, NOT proof of death.
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then echo "UNKNOWN|controller_unreachable"; return 0; fi
+  st="$(sed -n 's/.*JobState=\([A-Z_]*\).*/\1/p' <<<"$out" | head -1)"
+  rs="$(sed -n 's/.*Reason=\([^ ]*\).*/\1/p'      <<<"$out" | head -1)"
   case "$st" in
     PENDING|RUNNING|SUSPENDED|COMPLETING|CONFIGURING|REQUEUED|RESIZING|SIGNALING|STAGE_OUT)
       echo "${st}|${rs}"; return 0 ;;
@@ -152,19 +164,29 @@ poll_jobs() {  # return 0 while ANY of our jobs is still in the queue
       # requeue->hold transition). Confirm with scontrol before concluding it is
       # gone, so a flicker never triggers a false 'terminal' verdict + zombie hold.
       if sc="$(scontrol_active "$jid")"; then
-        # still alive/held per scontrol -> treat as in-queue (fall through to below)
+        # still alive/held (or SLURM unreachable) per scontrol -> keep waiting.
+        GONE_STREAK[$jid]=0
         state="${sc%%|*}"; reason="${sc#*|}"
       else
+        # Positive evidence of terminal/purged this poll. Require GONE_CONFIRM
+        # CONSECUTIVE such polls before finalizing, so a transient control-plane flap
+        # (which drops the job from BOTH squeue and scontrol) can never fail a live run.
+        GONE_STREAK[$jid]=$(( ${GONE_STREAK[$jid]:-0} + 1 ))
+        if [ "${GONE_STREAK[$jid]}" -lt "$GONE_CONFIRM" ]; then
+          status+=("$m=absent?${GONE_STREAK[$jid]}/${GONE_CONFIRM}($jid)")
+          any=0; continue    # not yet confirmed -> keep the matrix waiting
+        fi
         # Genuinely terminal (finished / crashed / cancelled / purged). Log ONCE and
         # keep waiting on the others; do NOT stop the matrix on a single job leaving.
         if [ -z "${LEFT[$jid]:-}" ]; then
           LEFT[$jid]=1; fst="$(sacct_state "$jid")"
-          log "job $jid ($m) left the queue${fst:+ (state=$fst)} — still waiting on any pending/running jobs; judged from result.json later"
+          log "job $jid ($m) left the queue${fst:+ (state=$fst)} after ${GONE_CONFIRM} confirmations — still waiting on any pending/running jobs; judged from result.json later"
         fi
         status+=("$m=gone($jid)")
         continue
       fi
     else
+      GONE_STREAK[$jid]=0
       state="$(cut -d'|' -f2 <<<"$line")"; reason="$(cut -d'|' -f3 <<<"$line")"
     fi
     any=0
