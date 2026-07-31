@@ -49,7 +49,7 @@ docs: [[languages/flydsl/authoring_gemm_levers]] (tiling / LDS / XCD-swizzle / e
 [[languages/flydsl/authoring_optimization]] (structure-first optimization workflow),
 [[languages/flydsl/authoring_tile_programming]] (`@flyc.kernel` CuTe tile model), and
 [[languages/flydsl/debugging]] (NaN / mismatch / compile / hang triage). Validated ck→flydsl recipe:
-expert_skill `flydsl_gfx950_fp8_blockscale_gemm` (enable with `use_expert_skills=true`).
+expert_skill `flydsl_fp8_blockscale_gemm` (enable with `use_expert_skills=true`).
 
 ## Alternatives / cross-links
 [triton.md](triton.md) · [aiter.md](aiter.md) · [hip.md](hip.md) · [asm.md](asm.md) · [hipblaslt.md](hipblaslt.md) · [../overview.md](../overview.md) · FlyDSL authoring: [[languages/flydsl/authoring_gemm_levers]] · [[languages/flydsl/authoring_optimization]] · [[languages/flydsl/authoring_tile_programming]] · [[languages/flydsl/debugging]]

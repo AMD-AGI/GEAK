@@ -74,7 +74,7 @@ native block-scaled MFMA (`mfma_scale_*_f8f6f4`) — its scale is **E8M0 (power-
 rounds CK's arbitrary fp32 block scale → parity fail (representational, not tunable;
 [../numerics.md](../numerics.md)). Use a **software fp32 post-MFMA scale** core: pin the HW E8M0 scale to
 `1.0`, promote+scale after the MFMA. The gfx950 CK→FlyDSL **per-shape** recipe (which software-scale core
-to pick + XCD / scheduling levers) is the gated expert skill `flydsl_gfx950_fp8_blockscale_gemm`.
+to pick + XCD / scheduling levers) is the gated expert skill `flydsl_fp8_blockscale_gemm`.
 
 ## Integration (rebind seam)
 Reached through `aiter.tuned_gemm`: a CSV row with `libtype=flydsl` + a `kernelName` that
@@ -91,7 +91,7 @@ the dense aiter card (`AITER_CONFIG_GEMM_BF16=<csv>`). No standalone env-overlay
 - hgemm path can't take scales — passing `scale_a/scale_b` raises an assert; use the quant FlyDSL/MoE path.
 - **fp8 block-scale ≠ native scaled-MFMA.** Porting CK `gemm_a8w8_blockscale` onto the E8M0 block-scaled
   MFMA fails parity (power-of-two rounding of an arbitrary fp32 scale). Pick a software-fp32-post-MFMA core;
-  detail [../numerics.md](../numerics.md), recipe = gated expert skill `flydsl_gfx950_fp8_blockscale_gemm`.
+  detail [../numerics.md](../numerics.md), recipe = gated expert skill `flydsl_fp8_blockscale_gemm`.
 
 ## How to verify (worked example)
 ```bash

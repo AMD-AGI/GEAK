@@ -1,9 +1,9 @@
 ---
-id: flydsl_gfx950_fp8_blockscale_gemm
+id: flydsl_fp8_blockscale_gemm
 title: Rewrite CK fp8 a8w8 blockscale GEMM to FlyDSL on gfx950 (software fp32 post-MFMA scale, NOT E8M0; shape-dependent perf lever — XCD swizzle on wide-N, 8-wave cluster on narrow-N)
 kind: expert_skill
 authors:
-- yz
+- zhengy
 scope: kernel
 match:
   operator: dense_gemm
@@ -35,8 +35,8 @@ validation:
     isolated: 'wide-N q_up_proj M=4096 N=65536 K=1536 (4-wave preshuffle + xcd8): 1.226-1.237x same-session interleaved A/B vs production CK (gemm_a8w8_blockscale_bpreshuffle), xcd0 ablation 0.973x (loses to CK) confirming the XCD lever. narrow-N qkv_proj M=4096 N=2048 K=7168 (8-wave ping-pong cluster, BLOCK_M=128/BLOCK_N=256): director-verified 1.05x, accepted (interleaved A/B 1.0513/1.0500/1.0462, all >1.0); xcd_swizzle no-op and 4-wave -19% both confirmed for this shape'
     e2e_pct: ''
     parity: 'wide-N: err=0 / cos=1.0 seeds 0-3 vs fp32 dequant oracle (rtol=atol=1e-2). narrow-N: cos=1.0, maxabs_err=0.03125 (identical to CK), checkAllclose pass, 0 elements out of tol'
-  artifact: 'wide-N: /sgl-workspace/GEAK_DSV4Pro_Out/geak_exp/verify_skill/q_up_proj/manual_verify/ (RESULT.md, verify_ab.py, fly_loader.py). narrow-N: /sgl-workspace/GEAK_DSV4Pro_Out/geak_exp/verify_skill/qkv_proj/team_ck_gemm_a8w8_blockscale_20260717_041854_1474934_29166/ck_gemm_a8w8_blockscale/ (director_validation.json, tech_lead_report.md, final_patch.diff)'
-  notes: 'Cross-machine reproduction, BOTH regimes now verified. wide-N/4-wave+xcd8 (q_up) and narrow-N/8-wave cluster (qkv) are both parity-clean and beat production CK. FlyDSL API drift confirmed as documented (kernels.mma -> kernels.common.mma; xcd_swizzle compile-arg is an uncommitted patch on mainline -> used the byte-frozen snapshot core via a module-alias shim). IMPORTANT install note: the blockscale software-promote cores live in the STANDALONE /sgl-workspace/FlyDSL build (kernels/gemm/fp8_gemm_8wave_blockscale.py::compile_fp8_gemm_8w_blockscale), NOT the aiter-embedded flydsl (aiter/aiter/ops/flydsl = rowscale/epilogue only: cos~0.999 but ~78% elements out of tol, a dead-end, not a blockscale drop-in). Point ports at the standalone build.'
+  artifact: 'external validation artifacts for wide-N q_up manual verification and narrow-N qkv GEAK director verification (provenance only; exact local paths omitted)'
+  notes: 'Cross-machine reproduction, BOTH regimes now verified. wide-N/4-wave+xcd8 (q_up) and narrow-N/8-wave cluster (qkv) are both parity-clean and beat production CK. FlyDSL API drift confirmed as documented (kernels.mma -> kernels.common.mma; xcd_swizzle compile-arg is an uncommitted patch on mainline -> used the byte-frozen snapshot core via a module-alias shim). IMPORTANT install note: the blockscale software-promote cores live in a standalone FlyDSL checkout/build, NOT the aiter-embedded flydsl (aiter/aiter/ops/flydsl = rowscale/epilogue only: cos~0.999 but ~78% elements out of tol, a dead-end, not a blockscale drop-in). Point ports at a standalone build with software blockscale support.'
 role: advisory_prior
 supersedes: []
 ---

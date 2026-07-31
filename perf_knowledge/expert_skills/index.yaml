@@ -73,30 +73,8 @@ skills:
     e2e_delta_min_pct: 1.0
     parity: required
   validation_status: validated
-- id: flydsl_fp8_gemm_playbook
-  file: skills/flydsl_fp8_gemm_playbook/skill.md
-  scope: e2e
-  match:
-    operator: dense_gemm
-    arch_class:
-    - '*'
-    gens:
-    - gfx942
-    dtypes:
-    - fp8_e4m3_fnuz
-    regimes:
-    - prefill
-    - decode
-    to_backend: flydsl
-    profile_signature:
-      op_name_regex: gemm_a8w8_blockscale|down_proj
-      min_pct_gpu: 10.0
-  expects:
-    e2e_delta_min_pct: 1.0
-    parity: required
-  validation_status: validated
-- id: flydsl_gfx950_fp8_blockscale_gemm
-  file: skills/flydsl_gfx950_fp8_blockscale_gemm/skill.md
+- id: flydsl_fp8_blockscale_gemm
+  file: skills/flydsl_fp8_blockscale_gemm/skill.md
   scope: kernel
   match:
     operator: dense_gemm
@@ -117,6 +95,28 @@ skills:
       min_pct_gpu: 0.0
   expects:
     isolated_speedup_min: 1.05
+    e2e_delta_min_pct: 1.0
+    parity: required
+  validation_status: validated
+- id: flydsl_fp8_gemm_playbook
+  file: skills/flydsl_fp8_gemm_playbook/skill.md
+  scope: e2e
+  match:
+    operator: dense_gemm
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: gemm_a8w8_blockscale|down_proj
+      min_pct_gpu: 10.0
+  expects:
     e2e_delta_min_pct: 1.0
     parity: required
   validation_status: validated

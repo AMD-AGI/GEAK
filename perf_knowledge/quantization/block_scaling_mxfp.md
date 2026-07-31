@@ -46,7 +46,7 @@ Two different things get called "block scale":
   nearest power of two and **silently lose precision**. It must be applied as a **software fp32 scale after
   an unscaled MFMA** (two-level accumulate: promote fp8 partials → ×fp32 block scale → accumulate, one
   promote per 128-K block). Parity detail + gate: [[operators/dense_gemm/numerics.md]]; the gfx950
-  CK→FlyDSL recipe is the gated expert skill `flydsl_gfx950_fp8_blockscale_gemm`.
+  CK→FlyDSL recipe is the gated expert skill `flydsl_fp8_blockscale_gemm`.
 
 ## Scale selection: power-of-2 amax (strategy)
 Per block (detail in [[operators/quant_fp4_mxfp]], aiter `per_1x32_f4_quant`):

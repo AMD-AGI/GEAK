@@ -49,7 +49,7 @@ gfx950 hits a *representational* trap:
 - **Gate** vs an fp32 `dequant→matmul→bf16` oracle at `rtol=atol=1e-2`; an E8M0-rounded path fails it.
   This card is the arch/backend-agnostic *why*; the gfx950 **CK→FlyDSL kernel-selection recipe** that
   applies it (which software-scale core per shape + XCD / scheduling perf levers) is the gated expert skill
-  `flydsl_gfx950_fp8_blockscale_gemm` (opt-in via `use_expert_skills=true`).
+  `flydsl_fp8_blockscale_gemm` (opt-in via `use_expert_skills=true`).
 
 ## Tie-break / determinism
 - Plain dense GEMM has no argmax/tie-break; output order is deterministic per solution. Split-K /
@@ -70,4 +70,4 @@ gfx950 hits a *representational* trap:
 - fp8 a8w8 block-scale (arbitrary fp32) vs E8M0 HW scale + the software fp32 post-MFMA fix: E8M0 =
   power-of-two ([[quantization/block_scaling_mxfp.md]], matrix-cores-cdna blog); CK oracle
   `gemm_a8w8_blockscale` (`ROCm/aiter:csrc/ck_gemm_a8w8`). Applied recipe: gated expert skill
-  `flydsl_gfx950_fp8_blockscale_gemm`.
+  `flydsl_fp8_blockscale_gemm`.
