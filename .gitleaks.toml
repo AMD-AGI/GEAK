@@ -1,0 +1,16 @@
+# Gitleaks config for the L0 secret scan (see .github/workflows/ci-l0-checks.yml).
+# Starts from the upstream default ruleset and allowlists a known false positive.
+
+[extend]
+useDefault = true
+
+# The `generic-api-key` rule fires on the literal word "API" followed by a
+# high-entropy-looking token. Line 75 of the file below is a citation — "... 3-level
+# API, MI300X-vs-Hopper ..." — not a credential.
+#
+# Scoped to that single file. Rule-level scoping (`targetRules`) is NOT honored by
+# gitleaks 8.28, so this exempts that one markdown doc from ALL rules; every other
+# file in the repo, including the rest of perf_knowledge/, stays fully armed.
+[[allowlists]]
+description = "Citation prose in tilelang overview trips generic-api-key"
+paths = ['''perf_knowledge/languages/tilelang/overview\.md''']

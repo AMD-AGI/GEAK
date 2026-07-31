@@ -1,0 +1,252 @@
+name: CI L1 — SPUR e2e (smoke + verify)
+
+# L1: real GEAK e2e on the SPUR (SLURM) cluster. The self-hosted runners live on
+# the JUMP/LOGIN box; they do NOT touch a GPU themselves — each submits ONE SPUR
+# batch job that allocates GPUs (tp from that model's handoff.json) on a compute
+# node, stages weights, and runs the container workflow. See ci/README.md.
+#
+# LAYOUT (fan-out matrix — one GitHub job per model):
+#   setup      -> resolves the tier, computes the shared RUN_TS + budget, and emits
+#                 the model list as a JSON matrix (ci/lib.sh: models_json).
+#   run (matrix)-> one job PER model, each on its own self-hosted runner. It submits
+#                 that model's SPUR job and waits/judges it (ci/dispatch/run_matrix.sh
+#                 <model>). Each model therefore gets its OWN green/red check + its
+#                 own step summary. fail-fast:false so one model can't cancel others.
+#   summarize  -> runs AFTER all model jobs (needs: run, if: always()), re-judges
+#                 every result.json into ONE final table + overall verdict
+#                 (ci/dispatch/summarize.sh). Turns red if ANY model failed.
+#
+# Because each model runs as a separate job, true parallelism needs one free
+# self-hosted runner slot per model (register extra runner instances on the jump
+# box). With fewer slots the jobs simply queue and run as slots free up — still
+# one check + report each. All model jobs share setup's RUN_TS so their results
+# land at $HF_LOGS/<model>/ci_runs/<RUN_TS>/ and summarize can find them.
+#
+# Two label-gated tiers (a human applying the label is the GPU-cost gate):
+#   - `l1-ci-smoke` -> smoke : the tier==smoke model(s).
+#   - `l1-ci-full`  -> verify: ALL enrolled models.
+# workflow_dispatch offers probe/smoke/verify on demand (once this file is on the
+# default branch, so the "Run" button appears).
+#
+# IMPORTANT: the self-hosted runners must be installed under a shared filesystem
+# path (e.g. /home/<user>/...) so the GEAK checkout they produce is readable by
+# the SPUR compute nodes that run the job body (ci/dispatch/slurm_job.sh).
+
+on:
+  pull_request:
+    types: [labeled]
+    # NOTE: ci/** is TEMPORARY (self-test via a PR whose base is a ci/** branch).
+    # Revert to just ["main"] before real use.
+    branches: ["main", "ci/**"]
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Which tier to run"
+        type: choice
+        # probe = infra-only harness check (real SPUR/docker/GPU/weights, stops at
+        # the GEAK e2e doorstep) over the local-weight models. Fast, no e2e run.
+        options: ["probe", "smoke", "verify"]
+        default: "smoke"
+      budget_s:
+        description: "Per-model GEAK budget in seconds (PERFSKILLS_E2E_TIMEOUT_S). Leave empty to use the repo Actions variable vars.GEAK_E2E_BUDGET_S (fallback 57600)."
+        type: string
+        default: ""
+
+# Serialize L1 on this repo — each model job waits on its SPUR job, so we don't
+# want two overlapping label/dispatch events double-submitting to the shared
+# cluster. cancel-in-progress:false lets an in-flight matrix finish.
+concurrency:
+  group: l1-spur-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Per-model GEAK optimization budget in seconds -> PERFSKILLS_E2E_TIMEOUT_S, which
+  # is GEAK's REAL optimization wall-clock limit (run_geak_e2e.sh runs the e2e runner
+  # with `--timeout-s "$PERFSKILLS_E2E_TIMEOUT_S"`). It ALSO sizes the SPUR -t wall
+  # (budget + SPUR_TIME_HEADROOM_S) and the run_local.sh hard-timeout watchdog.
+  # Sourced from a repo/org Actions VARIABLE so it's editable from the GitHub UI
+  # (Settings -> Secrets and variables -> Actions -> Variables: GEAK_E2E_BUDGET_S)
+  # WITHOUT editing this file. Falls back to 57600 (16h) if the variable is unset.
+  # Precedence: workflow_dispatch input `budget_s` > vars.GEAK_E2E_BUDGET_S > 57600.
+  GEAK_E2E_BUDGET_S: ${{ vars.GEAK_E2E_BUDGET_S || '57600' }}
+  # Data workspace on the jump box (siblings live here; NOT under the checkout).
+  # Base dir is a repo/org Actions VARIABLE (vars.GEAK_CI_PATH) so we can flip the
+  # whole workspace between hosts (e.g. /home/<user> or /shared_nfs/<user>) without
+  # editing this file. It must point at a dir that holds geak_ci_workspace/ (and the
+  # hf_models/ weights catalog) and be readable by the SPUR compute nodes.
+  WS: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace
+  HF_LOGS: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace/geak_runtime
+  INFERENCEX_PATH: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace/InferenceX
+  # Per-model_key weights catalog (<model_key> -> weights dir/symlink), inside the
+  # workspace (built by quick_setup.sh). lib.sh derives the same path from $WS if omitted.
+  HF_MODELS_DIR: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace/hf_models
+  # Claude auth for the in-container worker; propagated to the SPUR job via
+  # sbatch --export=ALL. Falls back to ci/preflight/claude_setup.sh defaults if absent.
+  LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+  LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # setup: resolve tier -> selector, compute the SHARED RUN_TS + budget, and emit
+  # the model list as a JSON matrix. Runs quickly on any self-hosted slot.
+  # ---------------------------------------------------------------------------
+  setup:
+    name: L1 setup (resolve tier + matrix)
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.event.label.name == 'l1-ci-smoke'
+      || github.event.label.name == 'l1-ci-full'
+    runs-on: self-hosted
+    timeout-minutes: 120
+    outputs:
+      selector: ${{ steps.plan.outputs.selector }}
+      models: ${{ steps.plan.outputs.models }}
+      run_ts: ${{ steps.plan.outputs.run_ts }}
+      budget: ${{ steps.plan.outputs.budget }}
+      probe: ${{ steps.plan.outputs.probe }}
+      docker_json: ${{ steps.plan.outputs.docker_json }}
+    steps:
+      - name: Checkout code under test
+        uses: actions/checkout@v4
+      - name: Resolve tier + compute matrix / run params
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_TIER: ${{ github.event.inputs.tier }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          BUDGET_IN: ${{ github.event.inputs.budget_s }}
+          # Docker preset selector (bare filename in ci/docker_setup/). Unset -> default.
+          DOCKER_JSON_IN: ${{ vars.DOCKER_DEFAULT_JSON }}
+        run: |
+          set -e
+          # shellcheck source=/dev/null
+          source ci/lib.sh
+          # Map the trigger to a selector understood by run_matrix.sh/summarize.sh.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            SEL="$DISPATCH_TIER"
+          elif [ "$LABEL_NAME" = "l1-ci-smoke" ]; then
+            SEL="smoke"
+          elif [ "$LABEL_NAME" = "l1-ci-full" ]; then
+            SEL="verify"
+          else
+            echo "::error::no matching trigger (event=$EVENT_NAME label=$LABEL_NAME)"; exit 1
+          fi
+          BUDGET="${BUDGET_IN:-$GEAK_E2E_BUDGET_S}"
+          MODELS="$(models_json "$SEL")"
+          RUN_TS="$(new_ts)"
+          PROBE=0; [ "$SEL" = "probe" ] && PROBE=1
+          # Guard: a non-empty matrix (empty -> GitHub errors on the matrix expansion).
+          case "$MODELS" in ""|"[]") echo "::error::no models for selector '$SEL' (check ci/models.tsv)"; exit 1 ;; esac
+          # ---- Resolve + validate the docker image preset (ci/docker_setup/<name>) ----
+          # vars.DOCKER_DEFAULT_JSON is a BARE filename in ci/docker_setup/. Unset ->
+          # docker_default.json. Reject path traversal, require the file to exist and be
+          # valid JSON here (before we burn a GPU allocation on a broken preset).
+          DOCKER_JSON="${DOCKER_JSON_IN:-docker_default.json}"
+          case "$DOCKER_JSON" in
+            */*|*..*) echo "::error::vars.DOCKER_DEFAULT_JSON must be a bare filename in ci/docker_setup/ (got '$DOCKER_JSON')"; exit 1 ;;
+          esac
+          PRESET="ci/docker_setup/$DOCKER_JSON"
+          [ -f "$PRESET" ] || { echo "::error::docker preset not found: $PRESET (available: $(ls ci/docker_setup/ 2>/dev/null | tr '\n' ' '))"; exit 1; }
+          python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$PRESET" \
+            || { echo "::error::docker preset is not valid JSON: $PRESET"; exit 1; }
+          echo "selector=$SEL"          >> "$GITHUB_OUTPUT"
+          echo "models=$MODELS"         >> "$GITHUB_OUTPUT"
+          echo "run_ts=$RUN_TS"         >> "$GITHUB_OUTPUT"
+          echo "budget=$BUDGET"         >> "$GITHUB_OUTPUT"
+          echo "probe=$PROBE"           >> "$GITHUB_OUTPUT"
+          echo "docker_json=$DOCKER_JSON" >> "$GITHUB_OUTPUT"
+          {
+            echo "## L1 setup"
+            echo ""
+            echo "- selector: \`$SEL\`  (probe=$PROBE)"
+            echo "- run_ts: \`$RUN_TS\`"
+            echo "- budget: ${BUDGET}s"
+            echo "- docker preset: \`$DOCKER_JSON\`$([ "$DOCKER_JSON" = docker_default.json ] && echo ' (default)')"
+            echo "- models: \`$MODELS\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # run: one job PER model (strategy.matrix). Each submits that model's SPUR job
+  # and waits/judges it. fail-fast:false so a failing model doesn't cancel the
+  # others; every model gets its own green/red check + step summary.
+  # ---------------------------------------------------------------------------
+  run:
+    name: "L1 ${{ needs.setup.outputs.selector }} — ${{ matrix.model }}"
+    needs: setup
+    runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      # No max-parallel: use every free self-hosted slot. With fewer slots than
+      # models the extras simply queue and run as slots free up.
+      matrix:
+        model: ${{ fromJson(needs.setup.outputs.models) }}
+    # timeout-minutes is the ONLY outer backstop. By design run_matrix.sh waits on
+    # PENDING jobs INDEFINITELY (a congested cluster means a longer wait, not a
+    # failure), so this cap must cover: queue wait + run wall + overhead.
+    #   - queue wait : unbounded in code; an operator scancels a job that pends too
+    #                  long (>~36h). Budget ~36h of pend here.
+    #   - run wall   : SPUR -t = budget + SPUR_TIME_HEADROOM_S = 57600 + 7200
+    #                  = 64800s = 18h -> run_local.sh watchdog docker-kills the
+    #                  container ~5 min before this and writes timeout.json (FAIL).
+    # worst case ~= pend (36h) + run wall (18h) + submit/pull/judge (~1h) ~= 55h;
+    # we set 60h so GitHub never pre-empts a legitimate (even long-pending) run.
+    timeout-minutes: 3600
+    env:
+      # All model jobs share setup's RUN_TS so results land at a path summarize
+      # can find: $HF_LOGS/<model>/ci_runs/<RUN_TS>/.
+      RUN_TS: ${{ needs.setup.outputs.run_ts }}
+      # Per-model job-id file for the scancel backstop (keyed by run_id AND model so
+      # two model jobs that happen to reuse one runner's workspace can't clobber it).
+      SPUR_JOBS_FILE: ${{ github.workspace }}/.spur_jobs_${{ github.run_id }}_${{ matrix.model }}.txt
+      # Docker image preset chosen in setup (ci/docker_setup/<name>). Points at THIS
+      # job's own checkout (each runner has its own _work) so a runner reused mid-run
+      # can't swap the file underneath us. lib.sh's resolve_image honors DOCKER_DEFAULT,
+      # and sbatch --export=ALL propagates it to the SPUR compute node (shared FS path).
+      DOCKER_DEFAULT: ${{ github.workspace }}/ci/docker_setup/${{ needs.setup.outputs.docker_json }}
+    steps:
+      - name: Checkout code under test
+        uses: actions/checkout@v4
+      - name: Preflight (SPUR reachable + dataset present)
+        run: |
+          set -e
+          command -v sbatch >/dev/null || { echo "::error::sbatch not on PATH (SPUR jump box?)"; exit 1; }
+          sinfo -p amd-spur -h >/dev/null || { echo "::error::cannot reach SPUR controller"; exit 1; }
+          test -d "$HF_LOGS" || { echo "::error::missing dataset dir $HF_LOGS"; exit 1; }
+      - name: Submit + wait (single model)
+        run: |
+          set -e
+          MODEL="${{ matrix.model }}"
+          args=("$MODEL" --budget "${{ needs.setup.outputs.budget }}")
+          [ "${{ needs.setup.outputs.probe }}" = "1" ] && args+=(--probe)
+          bash ci/dispatch/run_matrix.sh "${args[@]}"
+      # Backstop: run_matrix.sh scancels on graceful SIGTERM, but if it was
+      # SIGKILLed (hard timeout) this cleans up the SPUR job it had submitted.
+      - name: Cancel SPUR job if cancelled/timed out
+        if: cancelled()
+        run: |
+          f="$SPUR_JOBS_FILE"
+          [ -f "$f" ] || { echo "no SPUR job file ($f) — nothing to cancel"; exit 0; }
+          ids="$(tr '\n' ' ' < "$f")"
+          if [ -n "${ids// /}" ]; then echo "scancel $ids"; scancel $ids || true; else echo "no job ids recorded"; fi
+
+  # ---------------------------------------------------------------------------
+  # summarize: runs AFTER every model job (if: always()) and re-judges each
+  # result.json into ONE final table + overall verdict. Reads only what the
+  # matrix produced — never submits/waits on SPUR. Red if any model failed.
+  # ---------------------------------------------------------------------------
+  summarize:
+    name: L1 summary (final table + overall verdict)
+    needs: [setup, run]
+    if: always() && needs.setup.result == 'success'
+    runs-on: self-hosted
+    timeout-minutes: 3600
+    steps:
+      - name: Checkout code under test
+        uses: actions/checkout@v4
+      - name: Aggregate all model results
+        run: |
+          set -e
+          bash ci/dispatch/summarize.sh "${{ needs.setup.outputs.run_ts }}" "${{ needs.setup.outputs.selector }}"
