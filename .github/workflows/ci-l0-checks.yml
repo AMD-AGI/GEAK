@@ -47,12 +47,19 @@ jobs:
           python-version: "3.11"
       - run: pip install pytest
       # Stdlib-only tests (import run_e2e via importlib; no claude_agent_sdk / GPU).
-      # The examples/ task tests need torch/triton+GPU, so they are excluded here.
+      # Files are listed explicitly rather than discovered, so that adding a test
+      # under examples/ (torch/triton + GPU) can never silently break this job.
+      #
+      # torch is deliberately NOT installed here: it is optional in these tests and
+      # only the CUDA-dependent assertions need it, which belong on L1's GPU runner.
+      # Installing it would add minutes to a job that currently finishes in seconds.
       - name: unit tests (no GPU)
         run: |
           python -m pytest -q \
             interface/test_run_e2e_recovery.py \
-            e2e_workflow/scripts/tests/test_workload_alignment.py
+            interface/test_run_e2e_alignment.py \
+            e2e_workflow/scripts/tests/test_workload_alignment.py \
+            e2e_workflow/scripts/tests/test_run_correctness_gate.py
 
   secrets:
     name: Secret scan (gitleaks)
