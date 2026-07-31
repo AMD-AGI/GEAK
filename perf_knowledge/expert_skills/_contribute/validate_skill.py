@@ -87,11 +87,27 @@ def emit_plan(skill_id, fm, args):
         print("# DO-NO-HARM (control model that does NOT match the selector must stay within noise band):")
         print(f"  model_path=<CONTROL_MODEL> use_expert_skills=true  # expect |e2e delta| < noise band")
     else:
+        match = fm.get("match") or {}
+        dst = match.get("to_backend") or "triton"
+        srcs = match.get("from_backend") or []
+        srcs = [srcs] if isinstance(srcs, str) else list(srcs)
         print("# EFFICACY (kernel_workflow, isolated A/B vs the immutable oracle):")
         print(f"Workflow scriptPath={GEAK}/kernel_workflow/kernel_workflow.js args:")
         print(f"  kernel_path=<OP_TASK_DIR> workflow_dir={GEAK}/kernel_workflow use_expert_skills=true")
-        print(f"  target_language={(fm.get('match') or {}).get('to_backend') or 'triton'}")
+        # kernel_workflow reads target_language ONLY on the mode=author branch, so a port has to ask for
+        # that branch or the run silently measures the untouched source language instead of the migration.
+        if [s for s in srcs if s != dst]:
+            print(f"  mode=author target_language={dst}"
+                  f"   # port from {'|'.join(s for s in srcs if s != dst)};"
+                  f" target_language is inert without mode=author")
+        else:
+            print(f"  target_language={dst}")
         print(f"  task='reproduce expert_skill:{skill_id}; beat oracle, hold parity'")
+        if dst in srcs:
+            print(f"# The selector also matches an existing {dst} source ({dst}->{dst}); measure that entry")
+            print(f"# state separately in the default mode=optimize (no mode/target_language args).")
+        print("# DO-NO-HARM (control op that does NOT match the selector must stay within noise band):")
+        print(f"  kernel_path=<CONTROL_OP_TASK_DIR> use_expert_skills=true  # expect no regression")
     print("\nThen stamp the result with:  validate_skill.py", skill_id,
           "--record --artifact <eval_dir> ...")
 

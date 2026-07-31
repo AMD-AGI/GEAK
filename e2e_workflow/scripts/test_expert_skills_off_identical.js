@@ -13,13 +13,21 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..'); // .../GEAK
+// `inlineSites` covers consumer roles whose prompt is assembled inline instead of through roleAgent();
+// those need their own `+ expertSkillsBlock(...)` or they silently never see the skills index.
 const TARGETS = [
   { file: path.join(ROOT, 'e2e_workflow', 'e2e_workflow.js'),
     consumer: 'system_architect', nonConsumer: 'director' },
   // kernel_workflow.js is now a thin dispatcher; the expert-skills consumer roles (tech_lead etc.)
-  // live in the single-language WORKER, kernel_lane.js — that is where the byte-identity invariant holds.
+  // live in the single-language WORKER, kernel_lane.js — that is where the byte-identity invariant holds,
+  // and that is also where the inline Optimize-phase engineer prompt lives.
   { file: path.join(ROOT, 'kernel_workflow', 'kernel_lane.js'),
-    consumer: 'tech_lead', nonConsumer: 'director' },
+    consumer: 'tech_lead', nonConsumer: 'director',
+    inlineSites: [
+      { roles: ['engineer', 'deep_engineer'],
+        desc: 'Optimize-phase engineer prompt appends the block',
+        re: /\+\s*(?:\/\/[^\n]*\n\s*)*expertSkillsBlock\(isDeep \? 'deep_engineer' : 'engineer'\)/ },
+    ] },
 ];
 
 let failures = 0;
@@ -60,6 +68,16 @@ for (const t of TARGETS) {
     'roleAgent returns base + expertSkillsBlock(role) (additive)');
   ok(/const base = `You are the \$\{role\}\. PHASE=\$\{phase\}\./.test(src),
     'roleAgent base template preserved (original anchor intact)');
+
+  // 5) Consumer roles with an inline (non-roleAgent) prompt must append the block themselves, and must
+  //    actually be listed in the real EXPERT_SKILL_ROLES or the appended block would always be ''.
+  const declared = (src.match(/const EXPERT_SKILL_ROLES = new Set\(\[([^\]]*)\]\)/) || [, ''])[1];
+  for (const site of t.inlineSites || []) {
+    ok(site.re.test(src), `${site.desc} (additive)`);
+    for (const r of site.roles) {
+      ok(new RegExp(`'${r}'`).test(declared), `EXPERT_SKILL_ROLES includes '${r}' (inline site is live)`);
+    }
+  }
 }
 
 console.log(failures === 0
