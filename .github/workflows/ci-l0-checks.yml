@@ -59,7 +59,9 @@ jobs:
             interface/test_run_e2e_recovery.py \
             interface/test_run_e2e_alignment.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py \
-            e2e_workflow/scripts/tests/test_run_correctness_gate.py
+            e2e_workflow/scripts/tests/test_run_correctness_gate.py \
+            e2e_workflow/scripts/tests/test_parse_regime_sources.py \
+            e2e_workflow/scripts/tests/test_gsm8k_eval.py
 
   secrets:
     name: Secret scan (gitleaks)
