@@ -112,7 +112,8 @@ automatically (profiler → extractor → `op_spec.workload_path`).
 `mode="author"` is for when there is **no existing source to optimize** — a hot op (e.g. a library
 GEMM/attention) needs a fresh implementation. Here `kernel_path` is an **op task dir** holding the
 IMMUTABLE oracle (`meta.json` + `unittest.py` + frozen `baseline_src/`, plus a `reference_io.pt` only if
-the dir came from e2e's `kernel_extractor`). The `author_engineer`
+the dir came from e2e's `kernel_extractor` — that golden is ~1 GB and immutable, so every workspace
+shares the single original via a read-only symlink rather than copying it). The `author_engineer`
 writes the simplest correct implementation in `target_language` (correctness-judged against the
 oracle), commits it as the baseline, and then the **same optimize loop** improves it. Returns
 `authored:false` / `validation_status:"author_failed"` if no correct baseline can be produced (the

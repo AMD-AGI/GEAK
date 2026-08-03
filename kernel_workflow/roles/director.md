@@ -35,7 +35,9 @@ continued wave build on the cumulative best instead of restarting. Handle it as 
   workspace — it contains the optimized `kernel_src/` AND the immutable oracle `unittest.py`/`meta.json`/
   `reference_io.pt`): create `EVAL_DIR` as usual, but **seed `baseline/` and `workspace/` by copying from
   `$STATE_DIR/best/`** (same tar-pipe excludes as the optimize-mode copy) instead of from
-  `KERNEL_PATH_ORIG`. Re-apply `chmod -w` to the oracle files. `git init` + commit this seeded state as
+  `KERNEL_PATH_ORIG`. (The golden rides in `best/` as an absolute symlink → `KERNEL_PATH_ORIG/reference_io.pt`;
+  the tar-pipe carries it verbatim — do NOT add `-h/--dereference`, and do NOT re-copy it.) Re-apply
+  `chmod -w` to the oracle files. `git init` + commit this seeded state as
   HEAD (so this wave's patches diff from the cumulative best). Then read `$STATE_DIR/STATE.json` if present
   and return `resumed: true` plus `prior_state` (its `cumulative`, `insights`, `ledger`, `bottleneck_now`,
   `best_per_case`). Verify the oracle is intact: `reference_io.pt` sha256 must still match `meta.json`'s
@@ -63,12 +65,16 @@ Do this instead of the optimize-mode steps below:
    # captures unsynthesizable real routing / paged-KV metadata off a live server). An oracle_freezer dir
    # has no golden — it re-derives operands from meta.cases[] seeds and checks parity against
    # baseline_src/ live. The [ -e ] guards below already handle both; do not "fix" a missing file.
-   for f in meta.json unittest.py reference_io.pt harness_lib.py; do
+   for f in meta.json unittest.py harness_lib.py; do
      [ -e "$KERNEL_PATH_ORIG/$f" ] && cp "$KERNEL_PATH_ORIG/$f" "$EVAL_DIR/workspace/$f"
    done
+   # golden is BIG (~1 GB) and IMMUTABLE — SHARE the single original via an ABSOLUTE symlink instead of
+   # copying it into every workspace. unittest loads it with os.path.join(HERE, "reference_io.pt") and the
+   # sha check hashes the file bytes, both transparent through a symlink. Downstream tars (engineer/verify)
+   # carry the symlink verbatim (no -h/--dereference anywhere), so the whole lane shares one physical file.
+   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    [ -d "$KERNEL_PATH_ORIG/baseline_src" ] && cp -r "$KERNEL_PATH_ORIG/baseline_src" "$EVAL_DIR/workspace/baseline_src"
    chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
-   [ -e "$EVAL_DIR/workspace/reference_io.pt" ] && chmod -w "$EVAL_DIR/workspace/reference_io.pt" 2>/dev/null || true
    [ -d "$EVAL_DIR/workspace/baseline_src" ] && chmod -R -w "$EVAL_DIR/workspace/baseline_src" 2>/dev/null || true
    cd "$EVAL_DIR/workspace"
    printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
@@ -112,7 +118,10 @@ Steps:
    # friction) AND the source .git — which may carry prior/optimized history — can never leak into a
    # workspace where an engineer could `git show` it. IMPORTANT: also dropping any `.torch_ext` —
    # torch's build.ninja stores ABSOLUTE source paths, so an inherited cache would rebuild the wrong
-   # location; each workspace must build its own fresh.
+   # location; each workspace must build its own fresh. ALSO exclude reference_io.pt: the golden is BIG
+   # (~1 GB) and IMMUTABLE, so we SHARE the single original via an absolute symlink (below) instead of
+   # copying it into every workspace. Only `workspace/` needs it (CANONICAL = workspace; the unittest
+   # loads it there and baseline/ never reads a golden).
    for d in baseline workspace; do
      ( cd "$KERNEL_PATH_ORIG" && tar \
          --exclude='./.git' --exclude='*/.git' \
@@ -120,9 +129,13 @@ Steps:
          --exclude='./__pycache__' --exclude='*/__pycache__' \
          --exclude='./.torch_ext' --exclude='*/.torch_ext' \
          --exclude='./.rocprofv3' --exclude='*/.rocprofv3' \
+         --exclude='./reference_io.pt' --exclude='*/reference_io.pt' \
          --exclude='*.so' --exclude='*.o' \
          -cf - . ) | ( cd "$EVAL_DIR/$d" && tar -xf - )
    done
+   # Share the immutable golden by absolute symlink (sha check + torch.load are transparent through it;
+   # downstream engineer/verify tars carry the symlink verbatim — never add -h/--dereference).
+   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
    printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
@@ -195,15 +208,18 @@ baseline latencies recorded at benchmark setup).
    [ -e "$VWS" ] && mv "$VWS" "${VWS}.old_$(date +%s)_$$" 2>/dev/null || true
    mkdir -p "$VWS"
    # Copy from the ORIGINAL excluding .git + build artifacts (tar-pipe), so the source history can't
-   # leak into validation and no build cache is inherited.
+   # leak into validation and no build cache is inherited. Exclude the big immutable golden too — it is
+   # shared via an absolute symlink below (validation runs correctness, so it must resolve).
    ( cd "$KERNEL_PATH_ORIG" && tar \
        --exclude='./.git' --exclude='*/.git' \
        --exclude='./build' --exclude='*/build' \
        --exclude='./__pycache__' --exclude='*/__pycache__' \
        --exclude='./.torch_ext' --exclude='*/.torch_ext' \
        --exclude='./.rocprofv3' --exclude='*/.rocprofv3' \
+       --exclude='./reference_io.pt' --exclude='*/reference_io.pt' \
        --exclude='*.so' --exclude='*.o' \
        -cf - . ) | ( cd "$EVAL_DIR/validation_workspace" && tar -xf - )
+   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/validation_workspace/reference_io.pt"
    cd "$EVAL_DIR/validation_workspace"
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A

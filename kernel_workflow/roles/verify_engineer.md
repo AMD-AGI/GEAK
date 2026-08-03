@@ -24,7 +24,9 @@ absolute per-case latencies. The script trusts only your numbers.
 1. Build a clean copy and apply the patch:
    ```bash
    # NO `rm` (prompts + blocks autonomous runs). Unique ws each time; tar-copy EXCLUDING build artifacts
-   # (.torch_ext build.ninja has absolute paths to CANONICAL), so nothing stale is inherited.
+   # (.torch_ext build.ninja has absolute paths to CANONICAL), so nothing stale is inherited. The big
+   # immutable golden (reference_io.pt, if present) rides in CANONICAL as an absolute symlink; this tar
+   # carries the symlink verbatim (torch.load + the sha check read through it) — never add -h/--dereference.
    WS="$VERIFY_DIR/ws_$(date +%s)_$$"; mkdir -p "$WS"
    ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/.git' --exclude=./build --exclude='*/build' \
        --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \

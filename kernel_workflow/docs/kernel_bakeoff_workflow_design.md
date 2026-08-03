@@ -114,7 +114,10 @@ all** — storing a golden there would be redundant (the frozen baseline is alre
 must exist anyway as the timing denominator), would cost hundreds of MB–GB that every lane and every
 engineer workspace then tar-copies, and would add a failure mode of its own (a recorded golden is only
 valid while the operands reproduce bit-for-bit). Downstream roles must therefore treat `reference_io.pt`
-as **optional**.
+as **optional**. When it IS present (e2e dirs), it is never copied per workspace: the director places it
+as an absolute read-only **symlink** to the single immutable original, and every downstream tar
+(engineer, verify, STATE_DIR/best resume) carries the symlink verbatim — so the whole run shares one
+physical ~1 GB file instead of duplicating it dozens of times.
 
 Sequence in both cases: **create oracle → `op_benchmarker` bake-off (on `task_dir`) → fan out lanes.**
 

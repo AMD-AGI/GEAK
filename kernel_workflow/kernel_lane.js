@@ -605,7 +605,9 @@ First create YOUR private workspace, then optimize.
 # Fresh, ISOLATED workspace via tar-copy that EXCLUDES build artifacts (.git/build/__pycache__/.torch_ext/
 # *.so/*.o) — no 'rm' anywhere. Each engineer's out_dir is unique per (round,engineer), so the workspace
 # is clean on creation; the tar excludes mean no stale build cache is ever inherited (torch .torch_ext
-# stores ABSOLUTE paths, so excluding it forces each workspace to build its own fresh).
+# stores ABSOLUTE paths, so excluding it forces each workspace to build its own fresh). The big immutable
+# golden (reference_io.pt, when present) lives in CANONICAL as an absolute symlink; this tar carries the
+# symlink verbatim, so every workspace shares the one physical file — NEVER add -h/--dereference here.
 mkdir -p ${d.out_dir}/workspace
 ( cd ${CANONICAL} && tar --exclude=./.git --exclude='*/.git' --exclude=./build --exclude='*/build' \\
     --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \\
