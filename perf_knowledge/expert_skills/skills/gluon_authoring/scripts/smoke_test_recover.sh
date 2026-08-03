@@ -23,6 +23,11 @@ V3NO="$DUMPS/v3_lds/ir_dump_K4096_fp16/no_swizzling/v3_lds_swizzling.ttgir"
 echo "== 1. parser self-test =="
 python3 "$SCRIPT_DIR/ttgir_to_gluon.py" --selftest
 
+echo "== 1b. layout-equivalence self-test =="
+# Runs even without the tutorials checkout, which is what makes it the guard for the
+# unroll-skew regression: same layouts, different occurrence counts, must still PASS.
+python3 "$SCRIPT_DIR/recover_gluon.py" --selftest
+
 if [ -f "$V5" ] && [ -f "$V3SW" ] && [ -f "$V3NO" ]; then
   echo "== 2. recover anchor (--with-pipeline) from a real plain .ttgir =="
   python3 "$SCRIPT_DIR/recover_gluon.py" --ttgir "$V5" --with-pipeline --out /tmp/smoke_anchor.py >/dev/null

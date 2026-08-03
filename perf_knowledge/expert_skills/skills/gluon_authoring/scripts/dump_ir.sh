@@ -17,10 +17,26 @@
 
 set -euo pipefail
 
+usage() {
+  cat <<'EOF'
+Usage:
+  bash dump_ir.sh <compile_cmd ...> --variant <name> --out <ir_dir>
+      [--knobs "LLIR_SCHED AMDGCN_AS RA_HINTS"] [--emit-gluon layouts|anchor|pipeline]
+      [--kernel module.path:object] [--arch gfx950]
+
+Any token that is not one of the flags above is part of <compile_cmd>, so the
+compile command may appear before, after or around the flags.
+
+  bash dump_ir.sh python bench.py --version plain --variant plain --out ir/
+  bash dump_ir.sh python bench.py --version plain --variant plain --out ir/ --emit-gluon layouts
+EOF
+}
+
 VARIANT="variant"; OUT_DIR="ir"; KNOBS=""; EMIT_GLUON=""; KERNEL=""; ARCH=""
 CMD=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    -h|--help)     usage; exit 0;;
     --variant)     VARIANT="$2"; shift 2;;
     --out)         OUT_DIR="$2"; shift 2;;
     --knobs)       KNOBS="$2"; shift 2;;

@@ -36,26 +36,75 @@ import ttgir_to_gluon as t2g
 # --------------------------------------------------------------------------- #
 
 
+def _unwrapped_jit_source(kernel_spec: str, target) -> str | None:
+    """Translate ``module.path:object`` after peeling @triton.heuristics / @triton.autotune.
+
+    Upstream's entry point resolves the spec with a bare ``getattr`` and hands
+    whatever it finds to the AST rewriter. A wrapped kernel is a ``Heuristics`` /
+    ``Autotuner`` instance whose own source contains no kernel body, so the
+    translation comes back *empty* -- and successfully, which is the trap.
+    Peeling to the ``JITFunction`` while keeping the defining module as the global
+    scope reproduces the upstream path byte-for-byte on an unwrapped kernel and
+    recovers the body on a wrapped one.
+
+    Returns None if this Triton does not expose the internals needed to do it,
+    which leaves the caller on the stock path.
+    """
+    try:
+        from triton.tools.triton_to_gluon_translator.slice_kernel import GlobalValue
+        from triton.tools.triton_to_gluon_translator.translator import translate_kernels
+    except Exception:  # noqa: BLE001 - internals moved; the stock path still works
+        return None
+    import importlib
+
+    from triton.runtime.jit import JITFunction
+    mod_name, _, obj_name = kernel_spec.partition(":")
+    if not obj_name:
+        return None
+    module = importlib.import_module(mod_name)
+    obj = getattr(module, obj_name)
+    fn = obj
+    while not isinstance(fn, JITFunction) and hasattr(fn, "fn"):
+        fn = fn.fn
+    if not isinstance(fn, JITFunction):
+        return None
+    if fn is not obj:
+        print(f"[recover_gluon] {obj_name} is wrapped in {type(obj).__name__}; "
+              f"translating the JITFunction underneath it.", file=sys.stderr)
+    return translate_kernels([GlobalValue.wrap(fn, obj_name, lambda: module)], target=target)
+
+
 def run_translator(kernel_spec: str, arch: str) -> str | None:
     """Run the upstream triton_to_gluon_translator on ``module.path:object``.
 
-    Returns the translated Gluon source, or None if the translator is not present
-    in the installed Triton (older builds) -- the caller then falls back to a
-    layouts-only anchor.
+    Returns the translated Gluon source, or None -- for one of three reasons, kept
+    distinct on stderr because they call for different responses: the translator is
+    not in this Triton (older build), it raised, or it returned nothing to
+    translate. The caller falls back to a layouts-only anchor in all three.
     """
     try:
-        from triton.tools.triton_to_gluon_translator.translator import translate_paths
         from triton.tools.triton_to_gluon_translator.target import TranslatorTarget
+        from triton.tools.triton_to_gluon_translator.translator import translate_paths
     except Exception as e:  # noqa: BLE001 - any import failure -> graceful fallback
-        print(f"[recover_gluon] translator unavailable ({e!r}); falling back to "
-              f"layouts-only.", file=sys.stderr)
+        print(f"[recover_gluon] translator not in this Triton ({e!r}); falling back "
+              f"to layouts-only.", file=sys.stderr)
         return None
+    target = TranslatorTarget(arch)
     try:
-        return translate_paths([kernel_spec], target=TranslatorTarget(arch))
+        src = _unwrapped_jit_source(kernel_spec, target)
+        if src is None:
+            src = translate_paths([kernel_spec], target=target)
     except Exception as e:  # noqa: BLE001
         print(f"[recover_gluon] translator failed on {kernel_spec!r} ({e!r}); "
               f"falling back to layouts-only.", file=sys.stderr)
         return None
+    if not src.strip():
+        print(f"[recover_gluon] translator returned an empty skeleton for "
+              f"{kernel_spec!r}. It is installed and it did not raise, so this is "
+              f"the kernel and not the build -- check that the spec names the "
+              f"kernel itself. Falling back to layouts-only.", file=sys.stderr)
+        return None
+    return src
 
 
 # --------------------------------------------------------------------------- #
@@ -98,8 +147,8 @@ def assemble_anchor(ttgir_text: str, *, kernel_spec: str | None, arch: str,
                 parts.append("# ---- (1) algorithm skeleton (official translator) ----")
                 parts.append(skeleton.rstrip() + "\n")
             else:
-                parts.append("# ---- (1) translator unavailable: hand-write the kernel "
-                             "body and use the layouts below ----\n")
+                parts.append("# ---- (1) no skeleton (reason on stderr): hand-write the "
+                             "kernel body and use the layouts below ----\n")
 
     parts.append("# ---- (2) recovered concrete layouts (authoritative) ----")
     parts.append(t2g.emit_layout_factory(layouts, source))
@@ -117,11 +166,16 @@ def assemble_anchor(ttgir_text: str, *, kernel_spec: str | None, arch: str,
 
 
 def canonical_layout_attrs(ttgir_text: str) -> Counter:
-    """Multiset of canonical layout attributes, name-independent.
+    """Canonical layout attributes with occurrence counts, name-independent.
 
     Named preamble defs are reduced to ``#ttg.<kind><...>`` (whitespace collapsed,
     leading ``#name =`` dropped) and inline dot_op signatures are included, so two
-    TTGIRs are layout-equivalent iff these multisets match.
+    TTGIRs are layout-equivalent iff the attribute *sets* match.
+
+    The counts are returned too, but they are not part of the equivalence
+    predicate: they track how many times a layout is mentioned, which loop
+    unrolling and CSE change without changing a single layout. See
+    ``verify_equivalence``.
     """
     import re
     canon: Counter = Counter()
@@ -138,21 +192,35 @@ def canonical_layout_attrs(ttgir_text: str) -> Counter:
 
 
 def verify_equivalence(plain_ttgir: str, anchor_ttgir: str) -> tuple[bool, str]:
-    """Compare layout attributes between the plain and recovered-anchor TTGIRs."""
+    """Compare layout attributes between the plain and recovered-anchor TTGIRs.
+
+    The predicate is *set* equality. Occurrence counts are reported when they
+    differ but never fail the check: an auto-pipelined plain kernel leaves
+    ``add_pipeline`` with its loop unrolled, so each layout in its body is
+    mentioned N times against the un-unrolled anchor's once. That difference is
+    the pipeline layer talking, not the layout layer, and failing on it would
+    make this gate unpassable on precisely the kernels step 2 exists for.
+    """
     plain = canonical_layout_attrs(plain_ttgir)
     anchor = canonical_layout_attrs(anchor_ttgir)
-    missing = plain - anchor   # in plain, not reproduced by the anchor
-    extra = anchor - plain     # introduced by the anchor, absent in plain
+    missing = sorted(set(plain) - set(anchor))  # in plain, never used by the anchor
+    extra = sorted(set(anchor) - set(plain))    # introduced by the anchor, absent in plain
     ok = not missing and not extra
     lines = ["LAYOUT EQUIVALENCE: " + ("PASS" if ok else "FAIL")]
     if missing:
         lines.append("  missing (in plain, not in anchor):")
-        lines += [f"    - {a}  x{n}" for a, n in missing.items()]
+        lines += [f"    - {a}  x{plain[a]}" for a in missing]
     if extra:
         lines.append("  extra (in anchor, not in plain):")
-        lines += [f"    + {a}  x{n}" for a, n in extra.items()]
+        lines += [f"    + {a}  x{anchor[a]}" for a in extra]
     if ok:
-        lines.append(f"  {sum(plain.values())} layout attributes matched.")
+        lines.append(f"  {len(plain)} distinct layout attributes matched.")
+        skew = [a for a in sorted(plain) if plain[a] != anchor[a]]
+        if skew:
+            lines.append(f"  note: {len(skew)} of them are mentioned a different number of "
+                         "times (plain's loop is unrolled, the anchor's is not). "
+                         "Informational — not a layout difference:")
+            lines += [f"      {a}  plain x{plain[a]}, anchor x{anchor[a]}" for a in skew]
     return ok, "\n".join(lines)
 
 
@@ -186,6 +254,56 @@ def emit_transcribe_record(layouts, *, layout_equiv: str = "not-checked",
         "gluon_anchor_metrics.json: <write after re-profile>",
     ]
     return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------- #
+# self-test (offline, no GPU and no triton import)
+# --------------------------------------------------------------------------- #
+
+_SELFTEST_PREAMBLE = """\
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
+#mma = #ttg.amd_mfma<{version = 4, warpsPerCTA = [2, 2], instrShape = [16, 16, 32], isTransposed = true}>
+#shared = #ttg.swizzled_shared<{vec = 8, perPhase = 2, maxPhase = 8, order = [1, 0]}>
+"""
+_SELFTEST_DOT = ("    %acc = tt.dot %a, %b, %acc : "
+                 "tensor<128x64xf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 8}>> * "
+                 "tensor<64x128xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 8}>>\n")
+
+
+def _selftest() -> int:
+    failures = 0
+
+    # An auto-pipelined plain kernel comes out of add_pipeline with its loop unrolled,
+    # so every layout in the body is mentioned N times against the un-unrolled anchor's
+    # once. Same layouts, different occurrence counts -- this must PASS, or the gate is
+    # unpassable on exactly the kernels the round-2 relaxation exists for.
+    plain = _SELFTEST_PREAMBLE + _SELFTEST_DOT * 5
+    anchor = _SELFTEST_PREAMBLE + _SELFTEST_DOT
+    ok, report = verify_equivalence(plain, anchor)
+    if not ok:
+        print(f"SELFTEST FAIL (unroll-skew): same layouts rejected on occurrence "
+              f"counts alone\n{report}")
+        failures += 1
+    elif "plain x5, anchor x1" not in report:
+        print(f"SELFTEST FAIL (unroll-skew): count skew not reported\n{report}")
+        failures += 1
+
+    # A layout that genuinely differs must still be caught, counts or no counts.
+    swapped = anchor.replace("perPhase = 2, maxPhase = 8", "perPhase = 1, maxPhase = 16")
+    ok, report = verify_equivalence(plain, swapped)
+    if ok or "missing" not in report or "extra" not in report:
+        print(f"SELFTEST FAIL (swizzle-differs): mismatch not detected\n{report}")
+        failures += 1
+
+    # So must a layout the anchor introduced and plain never had.
+    extra = anchor + "#blocked1 = #ttg.blocked<{sizePerThread = [8, 1], threadsPerWarp = [8, 8], warpsPerCTA = [1, 4], order = [0, 1]}>\n"
+    ok, report = verify_equivalence(plain, extra)
+    if ok or "extra" not in report:
+        print(f"SELFTEST FAIL (anchor-extra): spurious layout not detected\n{report}")
+        failures += 1
+
+    print("SELFTEST PASS" if not failures else f"SELFTEST FAILURES: {failures}")
+    return 1 if failures else 0
 
 
 def _run_harness_correctness(harness_cmd: str) -> str:
@@ -226,7 +344,12 @@ def main() -> None:
     ap.add_argument("--record", action="store_true",
                     help="emit the auto-filled experiment-records transcribe record")
     ap.add_argument("--harness", help="correctness harness command to run (looks for CORRECTNESS PASS)")
+    ap.add_argument("--selftest", action="store_true",
+                    help="run the bundled layout-equivalence self-tests (offline)")
     a = ap.parse_args()
+
+    if a.selftest:
+        raise SystemExit(_selftest())
 
     if a.verify:
         if not (a.ttgir and a.anchor_ttgir):
@@ -253,7 +376,7 @@ def main() -> None:
         return
 
     if not a.ttgir:
-        ap.error("provide --ttgir (or use --verify)")
+        ap.error("provide --ttgir (or use --verify / --selftest)")
     anchor = assemble_anchor(open(a.ttgir).read(), kernel_spec=a.kernel, arch=a.arch,
                              with_skeleton=a.with_skeleton, with_pipeline=a.with_pipeline,
                              source=a.ttgir)

@@ -81,10 +81,20 @@ is a diff you converge on over several passes, it just converges to one answer.
 **Why the port also has to re-inject the pipeline to land.** `gluon_to_ttgir` does not run plain's
 `add_schedule_loops` + `add_pipeline`, so a transcription alone loses plain's cross-iteration overlap and
 reads as a regression for a reason that has nothing to do with your layouts. Those two passes are
-**re-injectable**: at the TTGIR level an explicit Gluon loop is just a non-pipelined `scf.for`, exactly
-the object the AMD pipeliner consumes. Splicing them back is a Python-only `compiler.py` edit — **no
-`libtriton.so` rebuild**, the passes are already in the `.so`. Transcription plus re-injection is what
-makes near-parity with plain the expected outcome of the port rather than a hoped-for one.
+**re-injectable**: at the TTGIR level an explicit Gluon loop is a non-pipelined `scf.for`, the kind of
+loop the AMD pipeliner is written to consume, and nothing about the Gluon path makes them inapplicable.
+Splicing them back is a Python-only `compiler.py` edit — **no `libtriton.so` rebuild**, the passes are
+already in the `.so`.
+
+**Re-injectable is not the same as certain to bite, and the two steps pull against each other.** The
+pipeliner's job is to *create* the LDS staging and the overlap around it, so what it needs is a loop that
+still has that work left in it. A transcription that hand-authors `allocate_shared_memory` +
+`local_store` + `local_load` — which is how you most directly express a recovered `#shared` / `#dot_op`
+pair — has already done that work by hand, and the pass will run over it and change nothing. So step 1
+can walk you straight into the shape step 2 cannot act on. Step 2 says how to keep room for it and how to
+tell the difference between a pass that is absent and a pass that fired and did nothing. Near-parity is
+what the two steps together are *aiming* at — it is what the ≥95% gate encodes, not a property the port
+arrives with.
 
 ## Procedure
 
@@ -92,6 +102,14 @@ The port **from plain Triton**, from the GEAK repo root with
 `SKILL=perf_knowledge/expert_skills/skills/gluon_authoring`. Steps 1 and 2 fit in round 1 when the
 transcription converges quickly, and may span two rounds when it does not — step 3 says which gate is due
 when. Coming in with a kernel that is already Gluon, start at step 2 and treat step 3 as not applicable.
+
+**Before step 1, settle the comparator, and then stop moving it.** The kernel you pin must be the plain
+champion at *its own best config*, and the `.ttgir` you dump must come from that config: every number
+below is relative to it, and the layouts you recover are the ones that config produced. Two consequences
+worth knowing up front. A port measured against a shipped default is not a port that landed, however good
+the ratio looks. And the anchor is **bound to the config it was dumped at** — the recovered layouts carry
+literal `warps_per_cta` and tile extents, so if the champion's best config differs per shape bucket you
+dump and transcribe per bucket rather than expecting one anchor to follow it.
 
 **1. Transcribe, and drive it to layout equivalence.** Pin the tuned plain kernel, dump its IR, recover
 the layouts, and iterate until `--verify` passes:
@@ -110,6 +128,14 @@ attributable to your kernel rather than to the tool. Do not proceed to step 2 on
 hand-wave a near-match: `--verify` is the only check that catches a transcription which **passes the
 numeric oracle while having recovered the layout wrong** (wrong `order`, wrong `kWidth`), and a
 numerically-correct wrong-layout anchor poisons every delta you measure afterwards.
+
+**The recovered layouts arrive as a preamble; applying them is yours.** `recover_gluon.py` emits a
+`gl.constexpr` block holding the layouts plain's compiler inferred, and — under `--with-skeleton` — a
+kernel body beside it that still carries the translator's own default MMA layout and `AutoLayout`.
+Nothing connects the two. Wiring each recovered layout onto the operand it belongs to is the manual step
+that turns the file into an anchor, and it is not optional: a layout the body never mentions never
+reaches the TTGIR, so `--verify` will report exactly those layouts missing. Read a `missing` list that
+matches your preamble as "declared but not applied" rather than as "recovered wrong".
 
 The converter covers `#blocked`, `#amd_mfma`, `#swizzled_shared`, `#padded_shared`, `#linear`,
 `ttg.dot_op` and `ttg.slice`. Two gaps that are **not** tool bugs, so do not spend verify cycles on them:
@@ -142,17 +168,36 @@ variant of this patch already:
 | 3.6 | `add_combine_tensor_select_and_if`, which ends the function | gate on `knobs.amd.use_async_copy`; drop `add_convert_to_tensor_ops`; `add_reorder_instructions` in place of `move_up_prologue_loads` |
 | 3.7, 3.8 | same, but **before** `add_warp_pipeline` | the list above as written |
 
-Give the pass room or it silently does nothing: stream the operands **in-body with no hand
-register-prefetch** (the pipeliner *is* the prefetcher — a manual one consumes the slot), and **split a
-causal mask into two loops**, since a loop-variant `scf.if` blocks both this pass and `BlockPingpong`.
-Launch `num_stages=2`. Recipe and the hand-built cross-iteration double buffer for later rounds:
-`references/tile-programming/pipeline.md`.
+Give the pass room or it silently does nothing. Three ways to starve it, the first of which step 1 walks
+you straight into:
+
+- **Hand-authored LDS staging.** `allocate_shared_memory` + `local_store` + `local_load` in the loop body
+  *is* the pass's output, written by you — it wants to create that staging and finds it already there, so
+  it rewrites nothing. On a plain GEMM this is the likeliest reason the counts do not move — and the
+  other two below do not apply there, so satisfying both of them still leaves you here. The fix is to
+  un-write part of the transcription: let the operands arrive as in-body loads and reach their
+  dot-operand layout through `convert_layout`, and the pass has something to stage. Keep the
+  explicit-smem version — it is where you start the hand-built double buffer if the pass still will not
+  bite.
+- **A hand register-prefetch.** The pipeliner *is* the prefetcher; a manual one consumes the slot.
+- **A loop-variant `scf.if`.** Split a causal mask into two loops; it blocks both this pass and
+  `BlockPingpong`.
+
+Launch `num_stages=2`. The recipe, and the hand-built cross-iteration double buffer that is the remaining
+route once the pass is established as inert on hand-authored smem, are in
+`references/tile-programming/pipeline.md` (it calls that one "Route 2"). Its vetted skeleton indexes the
+buffer as `s.index(i % 2)` — see the first entry in `## Knobs & pitfalls` before you copy that.
 
 **Confirm it fired before you time anything**, and expect to go round this loop more than once too: dump
 the Gluon TTGIR again and compare its `local_alloc` / `local_store` / `local_load` counts against plain's,
 and check that the full-drain `s_waitcnt lgkmcnt(0)` has become a relaxed `lgkmcnt(N>0)`. Those counts
 moving toward plain's is the signal the pass landed; a throughput number is not, because a pass that
 silently did nothing and a pass that fired but did not help look identical on the clock.
+
+**Dump once with the splice gated off as well.** Counts identical on and off means the pass ran and
+transformed nothing — a different failure from the passes being absent, and the one `probe_levers.py`
+cannot see: `available: true` reports that the symbols are in this `libtriton.so`, not that they will
+bite on your IR. Separating those two is the whole point of reading the IR back.
 
 **3. Close on two gates — and know which round each one belongs to.**
 
@@ -171,14 +216,20 @@ not auto-pipelined there is nothing to reproduce and both gates are due in round
 confirmed to fire? Then it is no longer a transcription problem — hand it back to GEAK's ordinary loop as
 a normal optimization target rather than spending a third round here.
 
-Below 95%, do not start optimizing layouts — the cause is almost always one of these, in order of how
-often it is the answer:
+Below 95%, do not start optimizing layouts. The cause is almost always one of these — check them in this
+order, cheapest first. Note that the first two share a symptom (`local_alloc` / `local_store` /
+`local_load` counts in the Gluon TTGIR did not move toward plain's, and the full-drain
+`s_waitcnt lgkmcnt(0)` never relaxed), which is why the on/off dump is what separates them:
 
-1. the pipeliner did not fire (`local_alloc` / `local_store` / `local_load` counts in the Gluon TTGIR did
-   not move toward plain's; full-drain `s_waitcnt lgkmcnt(0)` never became relaxed `lgkmcnt(N>0)`),
-2. a hand prefetch left in place, or the mask still in one loop, so there was no room for it,
-3. a layout recovered wrong — re-run `--verify` rather than eyeballing it,
-4. `num_stages` left at 1, so the re-injected passes stayed gated off.
+1. **the pass never ran** — `num_stages` left at 1 so the gate stayed off, or the splice went in at the
+   wrong point for this version (re-read the table above). Counts differ between splice-on and
+   splice-off only if it ran at all,
+2. **it ran and rewrote nothing**, because the body left it no work: counts identical on and off.
+   Hand-authored LDS staging is the usual reason on a GEMM, a hand prefetch or a loop-variant mask on
+   everything else,
+3. **a layout recovered wrong, or recovered and never wired onto an operand** — re-run `--verify` rather
+   than eyeballing it, and check its `missing` list against your own preamble before concluding the
+   recovery itself was wrong.
 
 The port ends at parity, not at a win. **Once both gates are met it is GEAK's ordinary loop** — the layout
 levers plain cannot express are the reason you came here, and which one to spend a direction on is the
@@ -190,7 +241,9 @@ Do-not-write list, i.e. what compiles and then costs you:
 
 - **Runtime buffer indices.** `smem.index(k % nBuffers)` is an anti-pattern: the scheduler cannot prove
   overwrite-safety and refuses to interleave. Buffer indices must be compile-time constant, and
-  `wait_group(N)` must be recomputed whenever the prologue, region or unroll factor changes.
+  `wait_group(N)` must be recomputed whenever the prologue, region or unroll factor changes. **The vetted
+  double-buffer skeleton in `references/tile-programming/pipeline.md` writes exactly this** (`cur = i % 2`)
+  — it is upstream text and this list overrides it. Unroll the loop by 2 so each index is a literal.
 - **A hand register-prefetch next to a re-injected pipeliner.** Not additive — it consumes the slot the
   pass wanted.
 - **The LLIR scheduler toggle on anything with VALU between the matmuls** (softmax, scale, dequant). It
@@ -278,10 +331,12 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
   own schedule. A method file that hard-codes yesterday's numbers ages badly and invites reasoning from
   them instead of from measurement.
 - The **≥95%** parity bar is a **target**, not a measured result: transcription is layout-only and
-  re-injection restores plain's own overlap, so near-parity is the structurally expected outcome of the
-  port and the bar exists to trigger the diagnostic list above rather than to record an achievement. The
-  same reasoning sets its deadline — one round when there is no pipeline to reproduce, two when there is,
-  because the second step's cost is adjust-and-recheck cycles rather than search. Nothing here has been
+  re-injection is what restores plain's own overlap, so near-parity is what the two steps are aiming at —
+  reachable when the re-injected pass actually bites, which is why step 2 makes you confirm that from the
+  IR instead of assuming it. The bar exists to trigger the diagnostic list above rather than to record an
+  achievement. The same reasoning sets its deadline — one round when there is no pipeline to reproduce,
+  two when there is, because the second step's cost is adjust-and-recheck cycles rather than search.
+  Nothing here has been
   measured on-box in GEAK — hence `validation.status: draft` and no auto-application.
   `expects.isolated_speedup_min: 1.10` is the template floor for the skill's eventual win, not the parity
   bar.
