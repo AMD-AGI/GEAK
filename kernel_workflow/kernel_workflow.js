@@ -53,8 +53,32 @@ const DEEP_COST = (() => {
   const v = parseInt(A.deep_cost != null ? A.deep_cost : 2, 10);
   return Number.isFinite(v) && v >= 1 ? v : 2;
 })();
+// Force N optimization directions per round, overriding the TechLead's own "pace, don't dump"
+// judgement (~2-3). Default null = unchanged behavior. Measured across 31 real plan_round returns
+// the planner never issued more than 3, so widening the round fan-out is not reachable by prompt
+// alone -- it needs both this cap AND the DIRECTIONS_REQUIRED input below, because the cap alone
+// would only truncate a short plan and the prompt alone gets ignored.
+const DIRS_PER_ROUND = (() => {
+  if (A.directions_per_round == null) return null;
+  const v = parseInt(A.directions_per_round, 10);
+  return Number.isFinite(v) && v >= 1 ? v : null;
+})();
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
+// Every GPU consumer gets the WHOLE pool rather than a pinned lane. gpu_lock.sh
+// resolves a comma spec by flocking whichever lane is free AND idle at acquire
+// time, so placement follows what work actually costs instead of an index fixed
+// before the cost is known. Measured task costs span 23x on campaign20, and a
+// pinned round ends with the slowest LANE, not the slowest task -- at 4-way that
+// idles ~43% of lane time. Pinning is also fragile on a shared box: GPU_LIST[0]
+// has no fallback when lane 0 has a foreign tenant.
+// gpu_mode='pin' restores the pre-scheduler behavior (direction i pinned to GPU_LIST[i % n]).
+// It exists ONLY so the scheduler can be A/B'd as a single-variable change against the arm it
+// replaced; leaving it out would make the "before" arm unreachable and force the comparison to be
+// made across two different scripts, where any other drift would be indistinguishable from the
+// scheduler's effect. Default 'pool'.
+const GPU_MODE = String(A.gpu_mode || 'pool') === 'pin' ? 'pin' : 'pool';
+const GPU_POOL = GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(',');
 const TASK = A.task || '';
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
@@ -456,7 +480,7 @@ if (MODE === 'author') {
   const authored = await agentT(
     roleAgent('author_engineer', 'author', 'Write the simplest correct baseline in the target language.', {
       TARGET_LANGUAGE, OP_SPEC, WORKSPACE: CANONICAL, TASK_DIR: KERNEL_PATH_ORIG,
-      GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, KERNEL_KNOWLEDGE_DIR,
+      GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, KERNEL_KNOWLEDGE_DIR,
     }),
     { phase: 'Author', label: `author:${TARGET_LANGUAGE}`, schema: AUTHOR_SCHEMA });
   if (!authored || !authored.authored || authored.correctness !== 'pass') {
@@ -497,7 +521,7 @@ const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs
 phase('Benchmark');
 const bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
-    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0],
+    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     ANALYSIS: analysis,
     ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
     ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
@@ -515,7 +539,7 @@ log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, 
 phase('Profile');
 let profileSummary = await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
-    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: 0,
+    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
     COMMANDMENT,
     ...RESUME_INPUT,
   }),
@@ -555,6 +579,7 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   const plan = await agentT(
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).', {
       EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
+      ...(DIRS_PER_ROUND != null ? { DIRECTIONS_REQUIRED: Math.min(remaining, DIRS_PER_ROUND) } : {}),
       BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
       CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
       KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
@@ -567,11 +592,37 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     break;
   }
 
-  let directions = plan.directions.slice(0, remaining).map((d, i) => ({
+  // Rule 2 (orthogonality): measured across 31 real plan_round returns, 24 (77%) issued directions
+  // sharing an identical focus_files set and 3 also duplicated specialty. Colliding directions
+  // produce patches the integrator cannot stack, so unique work should go FIRST.
+  //
+  // Directions are therefore REORDERED, never deleted: unique (specialty, focus_files) pairs first,
+  // collided ones after, then the round cap truncates. Deleting instead would silently shrink the
+  // round -- the key degenerates to `specialty` alone whenever a task exposes exactly one editable
+  // file (every direction carries focus_files=[kernel.py]), so a 4-value enum becomes a hard ceiling.
+  // Measured: with DIRECTIONS_REQUIRED=8 on single-file triton kernels the planner returned 8
+  // genuinely distinct directions (HIP-graph capture, autotune removal, persistent grid-stride,
+  // torch.compile ...) and a delete-based filter removed 4-7 of them. Reordering keeps the
+  // orthogonality preference where it pays -- which directions run first -- without letting a
+  // heuristic that cannot express "two different host_runtime attacks on one file" cut the budget.
+  const seenDir = new Set();
+  const unique = [], collided = [];
+  for (const d of plan.directions) {
+    const key = `${d.specialty}|${(d.focus_files || []).slice().sort().join(',')}`;
+    if (seenDir.has(key)) {
+      log(`  [dup-direction] demoting "${d.title || d.id}" — duplicate (specialty, focus_files) = ${key}`);
+      collided.push(d);
+    } else {
+      seenDir.add(key); unique.push(d);
+    }
+  }
+
+  const roundCap = DIRS_PER_ROUND != null ? Math.min(remaining, DIRS_PER_ROUND) : remaining;
+  let directions = [...unique, ...collided].slice(0, roundCap).map((d, i) => ({
     ...d,
     idx: i,
     id: d.id || `r${round}_d${i}`,
-    gpu_id: GPU_LIST[i % GPU_LIST.length],
+    gpu_id: GPU_MODE === 'pin' ? GPU_LIST[i % GPU_LIST.length] : GPU_POOL,
     out_dir: `${EVAL_DIR}/round_${round}/engineer_${i}`,
   }));
   // deep_explore is a DEDICATED-ROUND, heavyweight mandate: if the plan includes one, run ONLY it this
@@ -677,7 +728,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
     integrate = await agentT(
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
         CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
-        GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+        GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
@@ -735,7 +786,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     // --- (f) Re-profile the new best ------------------------------------
     profileSummary = await agentT(
       roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
-        WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: round,
+        WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
         COMMANDMENT, PREVIOUS_METRICS: profileSummary,
       }),
       { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
@@ -794,7 +845,7 @@ const report = await agentT(
 phase('Validate');
 const validation = await agentT(
   roleAgent('director', 'validate', 'Independently validate the final patch vs the TRUE baseline.', {
-    KERNEL_PATH_ORIG, EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0],
+    KERNEL_PATH_ORIG, EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     APPLY_TO_ORIGINAL, COMMANDMENT,
     FINAL_PATCH: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
     TECH_LEAD_REPORTED_GEOMEAN: report ? report.final_speedup_geomean : cumulative,

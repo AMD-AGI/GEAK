@@ -146,7 +146,14 @@ Rules:
 1. **Default to USING the budget — stopping early is the exception, not the default.** Unspent
    budget is wasted optimization, and the biggest wins are often found in LATER rounds (after
    integration shifts the bottleneck). Two rules:
-   - **Pace, don't dump.** Issue ~2–3 directions THIS round (≤ `BUDGET_REMAINING`), not all of it at
+   - **`DIRECTIONS_REQUIRED` overrides the pacing rule.** If that input is present, issue EXACTLY
+     that many orthogonal directions this round — the run is deliberately widening its fan-out and
+     the driver hard-caps at the same number. "Pace, don't dump" below does NOT apply in that case;
+     it is still your job to make every one of them genuinely distinct (rule 2). If you cannot find
+     that many orthogonal directions, say so in `reasoning` and issue the most you can defend rather
+     than padding with near-duplicates — the driver dispatches duplicates LAST, so padding only
+     pushes your own best ideas past the cap.
+   - **Pace, don't dump.** Absent `DIRECTIONS_REQUIRED`, issue ~2–3 directions THIS round (≤ `BUDGET_REMAINING`), not all of it at
      once. Each round re-profiles and builds on the committed winner, so reserving budget lets you
      attack the NEW dominant bottleneck that appears after this round's winner is integrated — that
      post-integration bottleneck is frequently where the decisive lever lives (e.g. the launch-floor
