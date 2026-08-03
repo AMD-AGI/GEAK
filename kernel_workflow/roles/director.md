@@ -59,6 +59,10 @@ Do this instead of the optimize-mode steps below:
    # This INCLUDES baseline_src/ + harness_lib.py: the frozen REAL ONLINE kernel is the timing-baseline
    # denominator regardless of TARGET_LANGUAGE — it must ride along, immutable, so the unittest can time
    # the authored seed against the live online path (never against the seed's own language scaffold).
+   # reference_io.pt is OPTIONAL and usually ABSENT: only e2e's kernel_extractor records a golden (it
+   # captures unsynthesizable real routing / paged-KV metadata off a live server). An oracle_freezer dir
+   # has no golden — it re-derives operands from meta.cases[] seeds and checks parity against
+   # baseline_src/ live. The [ -e ] guards below already handle both; do not "fix" a missing file.
    for f in meta.json unittest.py reference_io.pt harness_lib.py; do
      [ -e "$KERNEL_PATH_ORIG/$f" ] && cp "$KERNEL_PATH_ORIG/$f" "$EVAL_DIR/workspace/$f"
    done

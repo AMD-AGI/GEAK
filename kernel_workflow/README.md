@@ -90,7 +90,7 @@ Workflow({
                                //   workload hits, weighted by each case's total-time contribution, and
                                //   the PRIMARY metric becomes the time-weighted ratio-of-sums (the
                                //   unweighted geomean is kept as a secondary diagnostic). Correctness is
-                               //   unaffected (it stays on the frozen reference_io.pt oracle).
+                               //   unaffected (it stays on the frozen immutable oracle).
                                //   Also accepted as op_spec.workload_path, or op_spec.workload (inline).
   }
 })
@@ -111,7 +111,8 @@ automatically (profiler → extractor → `op_spec.workload_path`).
 ### Author mode (NEW)
 `mode="author"` is for when there is **no existing source to optimize** — a hot op (e.g. a library
 GEMM/attention) needs a fresh implementation. Here `kernel_path` is an **op task dir** holding the
-IMMUTABLE oracle (`meta.json` + `unittest.py` + optional `reference_io.pt`). The `author_engineer`
+IMMUTABLE oracle (`meta.json` + `unittest.py` + frozen `baseline_src/`, plus a `reference_io.pt` only if
+the dir came from e2e's `kernel_extractor`). The `author_engineer`
 writes the simplest correct implementation in `target_language` (correctness-judged against the
 oracle), commits it as the baseline, and then the **same optimize loop** improves it. Returns
 `authored:false` / `validation_status:"author_failed"` if no correct baseline can be produced (the
@@ -124,9 +125,11 @@ in the sibling **`kernel_lane.js` worker**:
 - `mode="optimize" | "author"` → the dispatcher **passes straight through** to one `kernel_lane` worker
   (byte-compatible with the old behavior; the worker is `kernel_lane.js`, unchanged).
 - `mode="bakeoff"` → the dispatcher **is the bake-off orchestrator** (pass `backends`, or leave empty to auto-discover):
-  1. **Freeze** (`roles/oracle_freezer.md`): run the input kernel once to freeze ONE immutable oracle
-     (`reference_io.pt` + frozen `baseline_src/` + immutable `unittest.py`) — no server needed. The
-     golden output and the speedup denominator are BOTH the input kernel's own behavior.
+  1. **Freeze** (`roles/oracle_freezer.md`): freeze ONE immutable oracle — frozen `baseline_src/` +
+     immutable `unittest.py` + a `meta.cases[]` shape/seed manifest — no server and **no recorded golden
+     tensors** (the task dir stays a few MB, and every lane tar-copies it). The correctness truth source
+     and the speedup denominator are BOTH the input kernel's own behavior, and both are the same artifact:
+     `baseline_src/`, re-run live on every parity draw.
   2. **Discover**: reuse e2e's `op_benchmarker` role **in place and UNCHANGED** to probe per-language
      existing impls, decide the `author_plan`, AND run the per-backend GEMM/quant tune. The role's Tier-B
      tune is written for a live server; since a standalone run has none, the dispatcher's prompt redirects

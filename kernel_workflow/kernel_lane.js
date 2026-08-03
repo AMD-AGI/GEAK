@@ -85,7 +85,8 @@ const REQUIRE_GRAPH_CAPTURE = !!(OP_SPEC && OP_SPEC.cuda_graph_safe === true);
 //   op_spec.workload   : inline cases, same shape as a workload-v1 "kernels[].cases" list (or the
 //                        full object). Takes precedence; weight_source becomes "caller".
 // Both unset => unweighted behavior, byte-identical to before. Correctness ALWAYS stays on the
-// frozen reference_io.pt oracle; this only shapes the PERFORMANCE measurement.
+// frozen immutable oracle (parity vs baseline_src/, + a recorded reference_io.pt where the task dir
+// came from e2e's kernel_extractor); this only shapes the PERFORMANCE measurement.
 const WORKLOAD_SPEC_PATH = String(A.workload_spec_path || (OP_SPEC && OP_SPEC.workload_path) || '').trim();
 const WORKLOAD_SPEC = (OP_SPEC && OP_SPEC.workload) || A.workload || null;
 const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||
@@ -640,9 +641,25 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
     (prev) => {
       const { d, eng } = prev;
       const patch = `${d.out_dir}/best_patch.diff`;
-      if (!eng || eng.status === 'failed' || !(primSpeedup(eng) > 1.0)) {
+      // Harvest is MEASUREMENT-anchored, not return-value-anchored. An engineer only writes
+      // best_patch.diff when it beat baseline (the Optimize prompt: "Save best_patch.diff ... when
+      // geomean>1.0"), so a lost/failed StructuredOutput does NOT imply there is no winning patch: an
+      // engineer that died, timed out, or mis-returned can still have left an applies-clean >1.0x diff
+      // on disk (observed in a bake-off: a 1.56x Triton patch was silently dropped because its
+      // worker_result.json/StructuredOutput never came back). The only return we can TRUST to suppress
+      // a patch is a clean below-baseline one — the engineer ran, measured, honestly reported <=1.0, and
+      // therefore wrote no patch. In every other case (null/failed return, OR a claimed >1.0) a patch
+      // MIGHT be on disk, so we hand the path to verify and let the oracle be the source of truth. We
+      // cannot stat the file from the workflow sandbox, so the "is there actually a patch" decision is
+      // delegated to verify, which returns apply_failed on an absent/empty patch — dropped by the
+      // `verified` filter below, i.e. the same outcome as skipping, but with no false loss.
+      const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > 1.0);
+      if (trustworthyBelowBaseline) {
         return { d, eng, ver: null };
       }
+      const recovered = !eng || eng.status === 'failed';
+      if (recovered) log(`Round ${round} dir ${d.id}: engineer return ${eng ? 'failed' : 'missing'} — ` +
+        `sending best_patch.diff to verify anyway (oracle decides).`);
       return agentT(
         roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
           CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
@@ -650,7 +667,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
           ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
-        { phase: 'Verify', label: `verify ${d.id}`, schema: VERIFY_SCHEMA }
+        { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
       ).then((ver) => ({ d, eng, ver, patch }));
     }
   );

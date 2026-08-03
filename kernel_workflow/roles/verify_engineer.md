@@ -8,6 +8,10 @@ absolute per-case latencies. The script trusts only your numbers.
 ## Inputs
 - `CANONICAL` — the canonical current-best workspace (read-only reference; do NOT edit it).
 - `PATCH` — path to the candidate's `best_patch.diff` (generated relative to `CANONICAL`'s git HEAD).
+  It MAY be absent or empty: when an engineer's return was lost/failed the lane still hands you its
+  on-disk patch to recover (measurement, not the engineer's return, is the source of truth). If the
+  file is missing or empty, that direction simply produced nothing — return `status:"apply_failed"`,
+  `verified_geomean:0`, and do not treat it as an error.
 - `VERIFY_DIR` — your private scratch dir.
 - `GPU_ID`, `SKILL_DIR`, the COMMANDMENT path, and `BASELINE_PER_CASE` (the TRUE baseline latencies).
 - **DEEP-MODE (optional — only if `HARNESS_ADDENDUM` is present; a normal run omits it):** in addition to
