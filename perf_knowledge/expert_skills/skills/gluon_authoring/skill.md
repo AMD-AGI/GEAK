@@ -124,13 +124,23 @@ auto-pipelined, you may take a second round for this step alone** rather than co
 default-OFF:
 
 ```bash
-python3 "$SKILL/scripts/probe_levers.py" reinject_ttgir_pipeliner   # are the passes in THIS libtriton.so?
+# read the reinject_ttgir_pipeliner entry: are the passes in THIS libtriton.so?
+python3 "$SKILL/scripts/probe_levers.py" --all --arch gfx950
 ```
 ```python
 add_optimize_dot_operands; add_schedule_loops(ns); add_pipeline(use_async_copy, use_block_pingpong)
 ; add_convert_to_tensor_ops; canonicalizer; remove_layout_conversions; reduce_data_duplication
 ; (in_thread_transpose if enabled); move_up_prologue_loads; canonicalizer; cse
 ```
+
+**The splice point moves with the version** — read the installed
+`third_party/amd/backend/compiler.py` before editing, and expect a vendor fork to possibly carry its own
+variant of this patch already:
+
+| installed version | splice after | adjust |
+| --- | --- | --- |
+| 3.6 | `add_combine_tensor_select_and_if`, which ends the function | gate on `knobs.amd.use_async_copy`; drop `add_convert_to_tensor_ops`; `add_reorder_instructions` in place of `move_up_prologue_loads` |
+| 3.7, 3.8 | same, but **before** `add_warp_pipeline` | the list above as written |
 
 Give the pass room or it silently does nothing: stream the operands **in-body with no hand
 register-prefetch** (the pipeliner *is* the prefetcher — a manual one consumes the slot), and **split a
@@ -185,7 +195,11 @@ Do-not-write list, i.e. what compiles and then costs you:
   pass wanted.
 - **The LLIR scheduler toggle on anything with VALU between the matmuls** (softmax, scale, dequant). It
   assumes a pure MFMA→MFMA accumulator chain and emits **invalid IR**, not a slowdown. Default-skip on
-  attention shapes.
+  attention shapes. **Fork-only**: `TRITON_ENABLE_LLIR_SCHED`, `TRITON_ENABLE_AMDGCN_AS` and
+  `TRITON_ENABLE_AMDGPU_RA_HINTS` (`dump_ir.sh --knobs LLIR_SCHED|AMDGCN_AS|RA_HINTS`, and the
+  `gemm_compiler_stack` probe's `llir`/`ra` rungs) exist in no upstream Triton — 3.6, 3.7 and 3.8 alike.
+  On a stock build they export an env var nobody reads, so the knob is a silent no-op rather than an
+  error. Confirm with `probe_levers.py --all` before attributing any delta to them.
 - **`disableSched`** — costs occupancy outright. Never on this path.
 - **Deep pipelines by reflex.** Software prefetch regresses once waves are already VGPR- or LDS-capped,
   and aggressive unrolling can raise `s_nop` count rather than lower it. `num_stages=2` is the start;
@@ -194,6 +208,11 @@ Do-not-write list, i.e. what compiles and then costs you:
   analysis and fails silently.
 - **`amd_rotating_shared`** — has no `gluon.language` constructor; do not hand-roll a basis for it.
 - **RDNA WMMA formulas.** Not vendored and not applicable; `match.gens` is CDNA.
+- **Sweeping `num_warps` on a transcribed kernel.** `ttgir_to_gluon.py` emits the IR's *literal*
+  `warps_per_cta`, so any other warp count disagrees with the layouts — a correctness bug, not a slow
+  config. `triton.autotune` itself works on `gluon.jit` and upstream's own Gluon examples use it, but they
+  sweep tile shapes and stage counts with `num_warps` pinned. Tile-shape autotuning is GEAK's to do after
+  the port lands; only the warp count is off the table.
 
 `num_stages` itself is not a Gluon dead knob — it is a buffer-count budget on the default lowering and the
 pipelining trigger again after re-injection, so carry the plain winner's value over as a starting depth.
@@ -227,8 +246,13 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
 - Vendored from `AMD-AGI/TileProgrammingAgentSkills@c14a583`
   (`.cursor/skills/tile-programming-triton-gluon/`), **pruned to the API surface, the do-not-write lists
   and the two mechanics above**: 14 of 72 reference files (~2 k of ~11 k lines) and 6 of 41 scripts.
-  Upstream remains the SSOT; this is a one-way snapshot. The vendored `references/` and `scripts/` are
-  unmodified.
+  Upstream remains the SSOT; this is a one-way snapshot. `references/` is unmodified. `scripts/` carries
+  **one correction**, which should go back upstream: `ttgir_to_gluon.py` dropped `tilesPerWarp` and
+  `elementBitWidth` when emitting `gl.amd.AMDMFMALayout`, so a chained-dot (gfx950, 16×16 mfma) or
+  scaled-MFMA kernel — both of which make `AccelerateAMDMatmul` choose non-default values — transcribed
+  to a silently different layout. `--verify` caught it as a text mismatch but named no cause. Both are
+  optional `AMDMFMALayout` fields in 3.6 through `main`; they are now emitted when, and only when, the
+  TTGIR prints them, with a self-test on both directions.
 - **Deliberately not vendored — the whole process layer**: round loop, hardware budget / roofline models,
   profiling (rocprof / ATT / PMC), the lever-card catalogue, bound-class signals, the escalation gate,
   orchestration, experiment records, benchmark hygiene, the transcription *protocol* page, and the

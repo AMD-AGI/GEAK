@@ -18,7 +18,7 @@ pipeline afterwards**. Run from the GEAK repo root with
 
 | tool | what it does |
 | --- | --- |
-| `probe_levers.py` | Per-build capability probe. `reinject_ttgir_pipeliner` answers whether plain's `add_schedule_loops` / `add_pipeline` are present in *this* `libtriton.so` before you edit `compiler.py`. That is the probe this skill uses; the other five it exposes belong to lever cards that are not part of this package. |
+| `probe_levers.py` | Per-build capability probe. Run it as `--all [--arch <gfx>]` — there is **no** positional probe-name argument — and read the `reinject_ttgir_pipeliner` entry: it answers whether plain's `add_schedule_loops` / `add_pipeline` are present in *this* `libtriton.so` before you edit `compiler.py`. That is the probe this skill uses; the other five it exposes belong to lever cards that are not part of this package. |
 
 Both `--selftest` entry points run with no GPU and no ROCm:
 
@@ -27,9 +27,28 @@ python3 "$SKILL/scripts/ttgir_to_gluon.py" --selftest
 python3 "$SKILL/scripts/probe_levers.py"   --selftest
 ```
 
+## Triton-version notes
+
+Checked against upstream `triton-lang/triton` at `v3.6.0`, `v3.7.1`, `release/3.8.x` and `main`. The
+transcription path (`--emit-gluon layouts` → `ttgir_to_gluon.py` → `--verify`) works on all of them: every
+TTGIR attribute the parser reads and every Gluon constructor it emits is spelled identically across the
+four. Two things are not portable:
+
+- **`--with-skeleton` (and `--emit-gluon anchor|pipeline`) needs 3.8+.** It imports `translate_paths` and
+  `TranslatorTarget` from `triton.tools.triton_to_gluon_translator`; on 3.6/3.7 the package is spelled
+  `triton_to_gluon_translater` and exposes only `convert_triton_to_gluon(src)` with no `target` argument.
+  The import failure is caught and the run degrades to layouts-only with a note on stderr, so the anchor
+  is still produced — just without the algorithm skeleton.
+- **`dump_ir.sh --knobs LLIR_SCHED|AMDGCN_AS|RA_HINTS` is fork-only.** `TRITON_ENABLE_LLIR_SCHED`,
+  `TRITON_ENABLE_AMDGCN_AS` and `TRITON_ENABLE_AMDGPU_RA_HINTS` appear in no upstream version, and neither
+  does `triton.tools.amdgcnas` (which `probe_levers.py`'s `gemm_compiler_stack` calls "decoupled / stock
+  Triton"). On a stock build these export env vars nobody reads: a silent no-op, not an error. Do not
+  attribute a delta to them without `probe_levers.py --all` first.
+
 ## Two things the emitted text gets wrong here
 
-The scripts are an unmodified upstream snapshot, so two strings they print do not match this skill:
+The scripts are an upstream snapshot with one correction (see `skill.md ## Sources`), so two strings they
+print do not match this skill:
 
 - `recover_gluon.py --record` / `--verify` prints `perf_delta_vs_plain: <fill> # regression expected,
   NOT a reject`. That is upstream's transcribe-only step, where the pipeline layer came later. **Here the

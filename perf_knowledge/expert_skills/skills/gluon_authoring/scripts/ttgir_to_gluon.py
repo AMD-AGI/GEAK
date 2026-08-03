@@ -115,10 +115,19 @@ class Layout:
                     f"{_pylist(a['threadsPerWarp'])}, {_pylist(a['warpsPerCTA'])}, "
                     f"{_pylist(a['order'])})")
         if self.kind == "amd_mfma":
+            # AMDMfmaEncodingAttr::print only emits tilesPerWarp when it is non-unit and
+            # elementBitWidth when it is not 32, so their presence here means the compiler
+            # chose a non-default -- reachable via chained dot (gfx950 16x16) and scaled MFMA.
+            # Both are optional AMDMFMALayout fields; dropping them silently changes the layout.
+            opt = ""
+            if "tilesPerWarp" in a:
+                opt += f", tiles_per_warp={_pylist(a['tilesPerWarp'])}"
+            if "elementBitWidth" in a:
+                opt += f", element_bitwidth={a['elementBitWidth']}"
             return (f"gl.amd.AMDMFMALayout(version={a['version']}, "
                     f"instr_shape={_pylist(a['instrShape'])}, "
                     f"transposed={_pylist(a.get('isTransposed', False))}, "
-                    f"warps_per_cta={_pylist(a['warpsPerCTA'])})")
+                    f"warps_per_cta={_pylist(a['warpsPerCTA'])}{opt})")
         if self.kind == "swizzled_shared":
             return (f"gl.SwizzledSharedLayout({a['vec']}, {a['perPhase']}, "
                     f"{a['maxPhase']}, order={_pylist(a['order'])})")
@@ -452,6 +461,11 @@ _SAMPLE_SWIZZLE = """\
   %b = ttg.local_load %2 : !ttg.memdesc<64x256xf16, #shared, #smem, mutable> -> tensor<64x256xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 8}>>
 """
 
+_SAMPLE_MFMA_NONDEFAULT = """\
+#mma = #ttg.amd_mfma<{version = 4, warpsPerCTA = [2, 2], instrShape = [16, 16, 32], isTransposed = true, tilesPerWarp = [2, 1], elementBitWidth = 64}>
+#smem = #ttg.shared_memory
+"""
+
 _SAMPLE_PADDED = """\
 #linear = #ttg.linear<{register = [[0, 1], [0, 2], [0, 4], [4, 0], [8, 0], [128, 0]], lane = [[0, 8], [0, 16], [0, 32], [16, 0], [32, 0], [64, 0]], warp = [[1, 0], [2, 0]], block = []}>
 #mma = #ttg.amd_mfma<{version = 4, warpsPerCTA = [2, 2], instrShape = [16, 16, 32], isTransposed = true}>
@@ -497,6 +511,17 @@ def _selftest() -> int:
         if needle not in out:
             print(f"SELFTEST FAIL (swizzle): missing {needle!r}")
             failures += 1
+
+    # A chained-dot / scaled-MFMA kernel prints the non-default mfma fields; dropping them
+    # yields a numerically-plausible but WRONG layout, so both must survive the round trip.
+    out = emit_layout_factory(parse_layouts(_SAMPLE_MFMA_NONDEFAULT), "mfma-nondefault-sample")
+    if "tiles_per_warp=[2, 1]" not in out or "element_bitwidth=64" not in out:
+        print(f"SELFTEST FAIL (mfma-nondefault): dropped tilesPerWarp/elementBitWidth in {out!r}")
+        failures += 1
+    # ... and must NOT be invented when the TTGIR omits them (i.e. they were at their default).
+    if "tiles_per_warp" in emit_layout_factory(parse_layouts(_SAMPLE_SWIZZLE)):
+        print("SELFTEST FAIL (mfma-default): emitted tiles_per_warp for a default-valued mfma")
+        failures += 1
 
     out = emit_layout_factory(parse_layouts(_SAMPLE_PADDED), "padded-sample")
     for needle in [
