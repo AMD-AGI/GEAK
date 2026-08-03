@@ -142,9 +142,11 @@ in the sibling **`kernel_lane.js` worker**:
   3. **Bake-off**: run one **unchanged `kernel_lane` worker per backend language** in parallel over the
      GPU pool (1 GPU/lane; `gpu_ids` with >1 id runs lanes concurrently, a single id serializes them).
   4. **Report**: rank **all candidates** on the **SAME frozen baseline** (the anti-cheating invariant)
-     and pick the fastest — three candidate classes: the input-language *optimize* lane, each *author*
-     lane, and the *tuned env backend* (aiter/CK) from Discover. Optional `apply_to_original` (a lane
-     winner applies its patch; an env winner records its `apply_env` + tuning artifact).
+     and pick the fastest — three candidate classes: the input-language *optimize* lane (always present),
+     each *author* lane, and the *tuned env backend* (aiter/CK) from Discover. A candidate only wins if it
+     actually beat the frozen baseline (speedup > 1.0x); if none did, `winner=null` and the ORIGINAL kernel
+     is kept. Optional `apply_to_original` (a lane winner applies its patch; an env winner records its
+     `apply_env` + tuning artifact).
 
 Available backend languages: `triton` (always) · `flydsl` (SOTA GEMM DSL) · `hip` · `ck`, plus the
 skeletons under `../perf_knowledge/languages/` — a language absent on the image is dropped with an

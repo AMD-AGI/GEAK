@@ -226,6 +226,23 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     ok(w && w.mode === 'author', 'winner.mode = author', JSON.stringify(w));
   }
 
+  // -------------------------------------------------------------------------
+  console.log('\n# K. no candidate beats the frozen baseline (all <= 1.0x) -> winner:null / no_winner');
+  {
+    // Every lane is slower-than-or-equal-to the frozen baseline. A lane that merely "did not fail" must
+    // NOT win by default — the winner filter is `speedup > 1.0`, mirroring the env-tune guard. This is the
+    // wvSplitK case: the only non-failed lane came in at ~0.17x and the original HIP kernel is kept.
+    const { run } = build({ ...BASE, mode: 'bakeoff', gpu_ids: '0,1,2' }, {
+      agent: healthy('triton', [{ language: 'hip', route: 'author' }, { language: 'ck', route: 'author' }]),
+      lane: { triton: 0.17, hip: 1.0, ck: 0.93 },
+    });
+    const r = await run();
+    ok(r && r.winner == null, 'winner is null when no candidate > 1.0x', JSON.stringify(r && r.winner));
+    ok(r && r.validation_status === 'no_winner', 'validation_status=no_winner', r && r.validation_status);
+    ok(Array.isArray(r && r.candidates) && r.candidates.length === 3,
+      'all 3 candidates still reported for transparency', JSON.stringify(r && (r.candidates || []).length));
+  }
+
   console.log(failures === 0
     ? '\nPASS: mode dispatch + bake-off lane routing behave as specified.'
     : `\nFAILED: ${failures} assertion(s).`);

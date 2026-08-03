@@ -339,9 +339,15 @@ if (Number.isFinite(tunedSpeedup) && tunedSpeedup > 1.0 && bake.winner_backend &
   });
   log(`tuned env backend ${bake.winner_backend} -> ${tunedSpeedup.toFixed(2)}x (vs frozen baseline)`);
 }
-const ranked = cands.filter(c => c.speedup > 0).sort((a, b) => b.speedup - a.speedup);
+// A candidate only WINS if it actually BEAT the frozen baseline (speedup > 1.0) — the SAME guard the
+// tuned env candidate uses above. Slower-than-baseline lanes remain in the table (laneRows) for full
+// transparency but must never win "by default"; winner=null => validation_status 'no_winner' => keep
+// the original kernel. Without this, a lane that is SLOWER than baseline (e.g. the only non-failed lane
+// at 0.17x) would be mislabeled the winner and mislead downstream automation reading .winner.
+const ranked = cands.filter(c => c.speedup > 1.0).sort((a, b) => b.speedup - a.speedup);
 const winner = ranked[0] || null;
 const laneRows = cands;
+const bestSpeedup = cands.reduce((m, c) => Math.max(m, Number(c.speedup) || 0), 0);
 
 // Apply instruction depends on the winner class: a lane winner is a source patch (git apply); an
 // env-tune winner is a config/env deploy (no source change — record apply_env + tuning_artifact).
@@ -368,6 +374,10 @@ const rep = await agentT(
    - The WINNER (fastest verified) and a one-paragraph rationale. All speedups are directly comparable
      because every candidate — the input-language optimize lane, each authored language, AND the tuned
      env backend — was scored against the SAME frozen input kernel.
+     NOTE: WINNER may be null — this means NO candidate beat the frozen baseline (every speedup <= 1.0x,
+     e.g. all lanes failed or were slower than the original). In that case state clearly that no
+     candidate beat the baseline and the ORIGINAL kernel is RETAINED (do not present a slower-than-1.0x
+     candidate as a "winner by default"); still list every candidate in the table for transparency.
 2. ${applyStep}
 
 ## Inputs
@@ -383,7 +393,9 @@ ${cfg({
 Return ONLY {report_path, applied_to_original, note} as StructuredOutput.`,
   { phase: 'Report', label: 'bakeoff:report', schema: REPORT_SCHEMA });
 
-log(`Bake-off COMPLETE. winner=${winner ? winner.lang + ':' + winner.mode + ' ' + winner.speedup.toFixed(2) + 'x' : 'none'}. Results in ${EVAL_DIR}`);
+log(winner
+  ? `Bake-off COMPLETE. winner=${winner.lang}:${winner.mode} ${winner.speedup.toFixed(2)}x. Results in ${EVAL_DIR}`
+  : `Bake-off COMPLETE. NO candidate beat the frozen baseline (best ${bestSpeedup.toFixed(2)}x <= 1.0x across ${cands.length} candidate(s)) — keeping the ORIGINAL kernel. Results in ${EVAL_DIR}`);
 
 return {
   mode: MODE,
