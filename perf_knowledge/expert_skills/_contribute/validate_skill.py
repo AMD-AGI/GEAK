@@ -99,15 +99,15 @@ def emit_plan(skill_id, fm, args):
         if [s for s in srcs if s != dst]:
             print(f"  mode=author target_language={dst}"
                   f"   # port from {'|'.join(s for s in srcs if s != dst)};"
-                  f" target_language is inert without mode=author")
+                  " target_language is inert without mode=author")
         else:
             print(f"  target_language={dst}")
         print(f"  task='reproduce expert_skill:{skill_id}; beat oracle, hold parity'")
         if dst in srcs:
             print(f"# The selector also matches an existing {dst} source ({dst}->{dst}); measure that entry")
-            print(f"# state separately in the default mode=optimize (no mode/target_language args).")
+            print("# state separately in the default mode=optimize (no mode/target_language args).")
         print("# DO-NO-HARM (control op that does NOT match the selector must stay within noise band):")
-        print(f"  kernel_path=<CONTROL_OP_TASK_DIR> use_expert_skills=true  # expect no regression")
+        print("  kernel_path=<CONTROL_OP_TASK_DIR> use_expert_skills=true  # expect no regression")
     print("\nThen stamp the result with:  validate_skill.py", skill_id,
           "--record --artifact <eval_dir> ...")
 
