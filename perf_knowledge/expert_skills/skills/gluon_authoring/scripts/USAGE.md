@@ -60,7 +60,8 @@ four. Two things are not portable — plus one failure below that reads like a v
 ## Where the vendored text contradicts this skill
 
 The scripts and `references/` are an upstream snapshot with one correction (see `skill.md ## Sources`),
-so a few strings they print or teach do not match this skill. This skill wins:
+so three things they print or teach disagree with this skill — this skill wins — and a fourth points at
+files the package does not carry:
 
 - `recover_gluon.py --record` / `--verify` prints `perf_delta_vs_plain: <fill> # regression expected,
   NOT a reject`. That is upstream's transcribe-only step, where the pipeline layer came later. **Here the
