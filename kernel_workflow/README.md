@@ -81,7 +81,9 @@ Workflow({
     mode: "optimize",          // optional: "optimize" (default, edit an existing kernel) | "author"
                                //   | "bakeoff" (try several backend languages, keep the fastest)
     target_language: "triton", // author mode: triton (always) | flydsl | hip | ck — the language to write
-    backends: ["hip","triton","flydsl"], // bakeoff: which backend languages to race (empty = auto-discover)
+    backends: ["hip","triton","flydsl"], // bakeoff: EXTRA rewrite languages to race (empty = auto-discover).
+                               //   ADDITIVE only: the incumbent (input kernel's own) language ALWAYS
+                               //   competes as an in-place optimize lane and cannot be dropped here.
     op_spec: {},               // author mode: {op_kind, shapes, dtype, math_contract, regime} for the op
     perf_knowledge_dir: "",  // optional: AMD authoring knowledge base the author_engineer reads
     // --- workload alignment (optional; aligns the PERF harness with the real workload) ---
@@ -141,6 +143,9 @@ in the sibling **`kernel_lane.js` worker**:
      file is never edited** — all standalone behavior is carried by the dispatcher prompt.
   3. **Bake-off**: run one **unchanged `kernel_lane` worker per backend language** in parallel over the
      GPU pool (1 GPU/lane; `gpu_ids` with >1 id runs lanes concurrently, a single id serializes them).
+     The **incumbent (input) language ALWAYS runs as an in-place `optimize` lane** — it is force-included
+     even when `backends` lists only other languages, so a bake-off can always win by simply optimizing
+     the original, not just by rewriting. `backends` is additive (extra rewrites), never a replacement.
   4. **Report**: rank **all candidates** on the **SAME frozen baseline** (the anti-cheating invariant)
      and pick the fastest — three candidate classes: the input-language *optimize* lane (always present),
      each *author* lane, and the *tuned env backend* (aiter/CK) from Discover. A candidate only wins if it

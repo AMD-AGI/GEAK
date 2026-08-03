@@ -162,13 +162,27 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
   }
 
   // -------------------------------------------------------------------------
-  console.log('\n# F. explicit args.backends overrides auto-discovery');
+  console.log('\n# F. explicit args.backends ADD rewrites but can NEVER drop the incumbent language');
   {
-    const { run, trace } = build({ ...BASE, mode: 'bakeoff', backends: ['hip', 'triton'] }, {
-      agent: healthy('triton', [{ language: 'ck', route: 'author' }]), // ck is planned but not requested
+    // input is triton; user asks ONLY for hip+ck rewrites. The incumbent triton:optimize lane MUST still
+    // run — a bake-off must always be able to win by simply optimizing what we already have, not only by
+    // rewriting into another language. args.backends is additive over the incumbent, not a replacement.
+    const { run, trace } = build({ ...BASE, mode: 'bakeoff', backends: ['hip', 'ck'] }, {
+      agent: healthy('triton', [{ language: 'ck', route: 'author' }]),
     });
     await run();
-    ok(trace.lanes.length === 2, 'only the 2 requested lanes (ck excluded)', lanesOf(trace));
+    ok(trace.lanes.some((l) => l.lang === 'triton' && l.mode === 'optimize'),
+      'incumbent triton:optimize force-included even though backends omitted it', lanesOf(trace));
+    ok(lanesOf(trace) === 'ck:author, hip:author, triton:optimize',
+      'lanes = incumbent optimize + the 2 requested rewrites', lanesOf(trace));
+  }
+  {
+    // when the incumbent IS listed in backends it collapses to a single optimize lane (no duplicate).
+    const { run, trace } = build({ ...BASE, mode: 'bakeoff', backends: ['hip', 'triton'] }, {
+      agent: healthy('triton', [{ language: 'ck', route: 'author' }]), // ck planned but not requested
+    });
+    await run();
+    ok(trace.lanes.length === 2, 'listed incumbent does not duplicate (hip + triton only)', lanesOf(trace));
     ok(trace.lanes.some((l) => l.lang === 'triton' && l.mode === 'optimize'), 'triton stays optimize (= live)', lanesOf(trace));
   }
 

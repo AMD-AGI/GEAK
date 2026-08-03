@@ -266,14 +266,27 @@ const bake = await agentT(
   }),
   { phase: 'Discover', label: 'op_benchmarker:discover', schema: OPBENCH_SCHEMA }) || {};
 
-// Resolve lanes: the input language optimizes its existing impl; other languages author (or rewrite if an
-// editable impl already exists). Explicit args.backends wins; else auto-discover from live + author_plan.
+// Resolve lanes. The INCUMBENT (original input) language ALWAYS competes as an in-place `optimize` lane:
+// it is the floor every rewrite must beat, and the entire premise of a bake-off is "keep the fastest,
+// INCLUDING simply optimizing what we already have". args.backends only ADDS rewrite candidates on top —
+// it can never drop the incumbent (otherwise a rewrite could "win" while being slower than the un-tried
+// in-place optimization of the original). Other languages author (or rewrite->optimize if an editable impl
+// already exists on the box).
 const planByLang = Object.fromEntries((bake.author_plan || [])
   .map(a => [String(a.language).toLowerCase(), a.route === 'rewrite' ? 'optimize' : 'author']));
 const liveLang = String(oracle.live_backend || '').toLowerCase();
-const wanted = (BACKENDS.length ? BACKENDS
-  : [...new Set([liveLang, ...(bake.author_plan || []).map(a => String(a.language).toLowerCase())])])
-  .filter(Boolean);
+const requested = (BACKENDS.length ? BACKENDS
+  : (bake.author_plan || []).map(a => String(a.language).toLowerCase())).filter(Boolean);
+// Incumbent FIRST (force-included regardless of args.backends / discovery), then the requested/discovered
+// rewrites, deduped. When liveLang is already in `requested` the Set collapses it to a single optimize lane.
+const wanted = [...new Set([liveLang, ...requested])].filter(Boolean);
+if (!liveLang) {
+  // The freezer could not identify the input language, so the incumbent optimize lane cannot be guaranteed.
+  // Do NOT silently proceed with rewrites only — that would let a slower rewrite "win" over a baseline we
+  // never tried to optimize in-place. Surface it loudly so it is caught, then continue with what we have.
+  log('WARNING: oracle.live_backend is empty — cannot guarantee the incumbent-language optimize lane; ' +
+      'rewrites will still run but the original language is under-represented. Check oracle_freezer.');
+}
 const lanes = wanted.map(lang => ({
   lang, key: lang,
   mode: lang === liveLang ? 'optimize' : (planByLang[lang] || 'author'),
