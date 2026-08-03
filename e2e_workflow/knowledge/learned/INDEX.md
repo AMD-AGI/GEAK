@@ -24,7 +24,14 @@ Confidence (a hint strength, not authority): ★ noise/unverified · ★★ sing
 ## linear-attention / FLA / mamba (editable Triton)
 - [gfx942 · prefill-dominated hybrid] stack-and-compound cluster; Amdahl pre-dispatch screen ★★★ — (editable-triton-cluster-amdahl.md)
 
+## routing (cross-model, applies to any run)
+- [aten library copy/cat/index ops · any gfx] hot small copy/cast/cat/index_put Top-N entries are ATen library kernels (no editable body/seam, near-noise ceiling) → DROP or config/cuda-graph, NOT kernel extraction ★★★ **6 drops this run** — (aten-library-copy-ops-not-editable.md)
+
+## activation / quant fusion
+- [gfx942 · sglang fp8 decode-bound] fuse SiLU act_and_mul WITH per-group fp8 activation-quant into the MLP down_proj producer (one authored kernel) ★★ **+0.9076% e2e (verified, non-overlap, gsm8k-clean); banks the fusion headroom — a 2nd author of the same fusion is sub-noise (+0.17% overlap) → stack only** — (fused-act-fp8-quant-gfx942.md)
+
 ## method (cross-model, applies to any run)
-- engagement verification: one-shot stderr banner + log grep ★★★ — (method-verify-engagement.md)
+- [non-quant bf16 rewrite · greedy-parity serving] gate on BYTE-EXACT greedy vs a deterministic true-baseline (not maxabs-vs-fp32); a correct bf16 kernel's reduction order flips argmaxes → REJECT ★★ **3 fails (rope/rmsnorm/silu) this run** — (method-nonquant-parity-gate.md)
+- engagement verification: one-shot stderr banner + log grep; empty-patch/byte-identical cand → cheap pre-gate reject; setattr-OK-but-dead-branch → marker-file probe (0 live hits despite clean overlay) ★★★ — (method-verify-engagement.md)
 - e2e A/B: pinned port, interleaved, non-overlap gate ★★★ — (method-e2e-ab-harness.md)
 - cuda/HIP-graph-safe integration (the #1 e2e killer) ★★★ — (method-cudagraph-safe-integration.md)

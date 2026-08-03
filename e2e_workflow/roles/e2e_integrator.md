@@ -57,6 +57,33 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
    NOT subject to this — trust it.) Use the reason vocabulary the orchestrator's auto-correct classifier
    keys on — `parity_regression`, `accuracy_regression`, `implausible_speedup`, `output_corruption` — so a
    fixable correctness reject is routed to a corrective re-author rather than dropped.
+7. **`REVALIDATE` mode (measurement-based re-check — set when `REVALIDATE:true` is in your inputs).** The
+   orchestrator no longer rejects a suspected-too-good win on the Amdahl ceiling ALONE — instead it hands
+   you the same candidate with `REVALIDATE:true` to RE-MEASURE it, and the reject (or the accept) rests on
+   THIS measurement, not on theory. When `REVALIDATE` is set:
+   - **Spin a FRESH TRUE baseline for the REFERENCE leg only** — the baseline/reference server must be
+     clean (no overlay) and freshly measured: ignore `REUSE_REF` / `SHARED_REF_MED` / `RESUME_AB` (they are
+     cleared for you) so you do NOT reuse any cached reference median. This "no overlay / fresh" rule applies
+     to the REFERENCE leg ONLY. The **CANDIDATE leg is built EXACTLY as in a normal gate** — apply the full
+     accumulated `CURRENT_OVERLAY` PLUS this candidate's `KERNEL_RESULT` (its `code_patch`, `apply_env`,
+     `apply_flags`, `tuning_artifact`/csv, `authored_kernel_eval_dir`) on top of `CURRENT_FLAGS` /
+     `CURRENT_ENV`. Re-validation must measure the SAME optimized candidate configuration the original A/B
+     did — only the reference leg is re-measured from scratch. Run an INDEPENDENT interleaved A/B at the
+     given `E2E_REPEATS` (bumped for a tighter boundary verdict).
+   - **Assert OUTPUT-TOKEN-VOLUME integrity** in addition to the usual parity/accuracy gate: the candidate
+     must emit ~the same total generated tokens as the baseline for the same requests (same
+     `max_tokens`/stop settings). A degenerate / truncated / fast-but-wrong server produces FEWER real
+     output tokens while posting a higher tok/s — so a throughput "win" with a materially lower output-token
+     volume (or an EOS/length-finish-reason mismatch) is `gate:"rejected"` with reason `output_corruption`,
+     even though the raw tok/s looks better. This is exactly the case the Amdahl ceiling was flagging; here
+     you CONFIRM or REFUTE it by measurement.
+   - **Accept iff the win REPRODUCES with intact output** (throughput gain holds AND parity/accuracy holds
+     AND output-token volume matches) → return your normal `accepted`/`stack` with `parity_kind` and set
+     `revalidated:true`. Otherwise `gate:"rejected"` with the MEASURED reason
+     (`output_corruption` / `parity_regression` / `accuracy_regression` / `revalidation_no_reproduce` when
+     the throughput gain simply did not reappear) and `revalidated:true`.
+   - This is the ONLY correctness verdict that matters for a suspect win — never echo back a theoretical
+     `implausible_speedup` string in `REVALIDATE` mode; report what you measured.
 
 If any fails, REJECT and record why (with the numbers) for the eval-dir timeline report — a real
 isolated speedup that doesn't show up e2e is an expected Amdahl outcome, not a bug.

@@ -186,6 +186,14 @@ const CORRECTNESS_REJECT_RX = /parit|corrupt|mismatch|diverge|garbage|degener|\b
 // 1/(1 - (pct/100)(1 - 1/S)). A measured e2e delta far above this ceiling can be the fingerprint of a
 // kernel doing degenerate/less work (corruption). Uses ONLY the profile pct + isolated speedup.
 const IMPLAUSIBLE_SPEEDUP_MARGIN = parseFloat(A.implausible_speedup_margin != null ? A.implausible_speedup_margin : 1.0); // headroom over the theoretical ceiling before flagging (1.0 = must exceed 2x the ceiling)
+// MEASUREMENT-BASED reject (default ON): the Amdahl-ceiling math NEVER rejects a win on its own — it only
+// FLAGS a measured accept as "suspect" and TRIGGERS a fresh, independent, stricter e2e A/B (revalidateWin
+// / gateDecision below). The candidate is rejected ONLY if that RE-MEASUREMENT fails to reproduce an
+// integrity-clean win. Set revalidate_implausible:"false" to restore the old theory-only reject (escape
+// hatch for audits). revalidate_repeats bumps the per-leg repeats of the re-validation A/B for a tighter
+// verdict at the boundary.
+const REVALIDATE_IMPLAUSIBLE = String(A.revalidate_implausible != null ? A.revalidate_implausible : 'true').toLowerCase() !== 'false';
+const REVALIDATE_REPEATS = parseInt(A.revalidate_repeats != null ? A.revalidate_repeats : 3, 10);
 function amdahlCeilingPct(pct_gpu_time, isolated) {
   const p = Math.max(0, Math.min(1, (pct_gpu_time || 0) / 100));
   const s = (isolated && isolated > 1) ? isolated : 1;
@@ -220,20 +228,22 @@ function rejectClass(reason) {
   if (FIXABLE_REJECT_RX.test(r)) return 'integration';
   return '';
 }
-// A gate 'accept'/'stack' only counts as a REAL win if the measured e2e delta is not an implausible
-// (corruption) speedup. Centralizes the guard so every integrate site treats a too-good-to-be-true
-// delta as a reject instead of banking it. GENERIC (uses only pct_gpu_time + isolated speedup).
-function integAccepted(integ, pct_gpu_time, isolated) {
-  return !!(integ && (integ.gate === 'accepted' || integ.gate === 'stack')
-    && !isImplausibleSpeedup(pct_gpu_time, isolated, integ));
+// PURE measured accept: did the integrator's e2e A/B gate pass? The implausible-speedup guard is NO
+// LONGER folded in here — theory must not silently flip a MEASURED accept into a reject (that discarded
+// real GEMM wins). The suspicion + re-validation now live in gateDecision(); call sites route a measured
+// accept through it so a suspect win is RE-MEASURED (not theory-rejected) before banking.
+function integAccepted(integ) {
+  return !!(integ && (integ.gate === 'accepted' || integ.gate === 'stack'));
 }
-// The reason string to feed the corrective loop: if the gate "passed" but the delta is impossible, emit
-// an implausible_speedup verdict (routes to the correctness corrective); else the integrator's own reason.
-function gateRejectReason(integ, pct_gpu_time, isolated) {
-  if (integ && (integ.gate === 'accepted' || integ.gate === 'stack')
-      && isImplausibleSpeedup(pct_gpu_time, isolated, integ))
-    return `implausible_speedup (+${(integ.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pct_gpu_time, isolated).toFixed(1)}% on a soft/accuracy-gated accept — likely corruption/degenerate work)`;
+// Plain measured reject reason (no theoretical string). Kept as a safe fallback for any site not routed
+// through gateDecision; the implausible verdict is now produced only AFTER a failed re-measurement.
+function gateRejectReason(integ) {
   return integ ? (integ.reason || integ.gate || '') : '';
+}
+// The theoretical reason string — used ONLY by the escape hatch (revalidate_implausible:"false"), never
+// on the default measurement-based path.
+function theoreticalRejectReason(integ, pct_gpu_time, isolated) {
+  return `implausible_speedup (+${(integ && integ.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pct_gpu_time, isolated).toFixed(1)}% on a soft/accuracy-gated accept — theory-only reject, re-validation disabled)`;
 }
 // ---- DEEP MODE (opt-in, default OFF) ----------------------------------------------------------------
 // A long, thorough HeadKernel mode that pursues SOTA per head op via CROSS-BACKEND CO-OPTIMIZATION:
@@ -774,6 +784,53 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
   return integ;
 }
 
+// MEASUREMENT-BASED gate decision. Given an integrator result + the op's Amdahl inputs + the SAME
+// integrator inputs the site used, decide accept/reject WITHOUT ever rejecting on theory alone:
+//  - not a measured accept (gate!=accepted/stack, or no throughput gain) -> reject with the integrator's
+//    own measured reason.
+//  - measured accept the Amdahl ceiling does NOT flag -> accept as-is (common path, no extra A/B).
+//  - measured accept the ceiling FLAGS as suspect -> re-run a FRESH, independent, stricter A/B (fresh
+//    TRUE baseline, no ref reuse, more repeats, hard output-token-volume integrity via REVALIDATE) and
+//    accept iff the win REPRODUCES with intact output; else reject with the MEASURED failure reason.
+// Escape hatch: revalidate_implausible:"false" restores the old theory-only reject.
+// Returns { accept, integ, reason, revalidated } — integ is the FRESH measurement when re-validated, so
+// callers should bank/report from the returned integ (do `integ = rv.integ`).
+async function gateDecision(integ, pct, isolated, revalInputs, label, phase, curTput) {
+  const measuredAccept = !!(integ && (integ.gate === 'accepted' || integ.gate === 'stack')
+    && integ.e2e_throughput_tok_s > curTput);
+  if (!measuredAccept) return { accept: false, integ, reason: integ ? (integ.reason || integ.gate || '') : '' };
+  if (!isImplausibleSpeedup(pct, isolated, integ)) return { accept: true, integ };
+  if (!REVALIDATE_IMPLAUSIBLE)   // escape hatch: theory-only reject (re-validation disabled)
+    return { accept: false, integ, reason: theoreticalRejectReason(integ, pct, isolated) };
+  log(`  ${label}: e2e delta +${(integ.e2e_delta_pct || 0).toFixed(1)}% exceeds the Amdahl ceiling ` +
+    `+${amdahlCeilingPct(pct, isolated).toFixed(1)}% on a soft-parity accept — theory flags it SUSPECT; ` +
+    `RE-VALIDATING with a fresh independent strict A/B before deciding (NOT rejecting on theory).`);
+  const integ2 = await runIntegrateBothLegs(
+    'RE-VALIDATE a suspected-too-good e2e win. Re-measure the REFERENCE leg from scratch (fresh clean TRUE ' +
+    'baseline, no cached ref median) but build the CANDIDATE leg EXACTLY as a normal gate — apply the full ' +
+    'CURRENT_OVERLAY + this KERNEL_RESULT (code_patch, apply_env/apply_flags, tuning_artifact/csv) on top of ' +
+    'CURRENT_FLAGS/CURRENT_ENV so the SAME optimized candidate config is measured. Run an INDEPENDENT A/B, ' +
+    'and IN ADDITION to output parity assert OUTPUT-TOKEN-VOLUME ' +
+    'integrity — the candidate must emit ~the same total generated tokens as the baseline for the same ' +
+    'requests — so a degenerate / truncated / fast-but-wrong server cannot pass as a win. Return ' +
+    'accepted/stack ONLY if the throughput win REPRODUCES with intact output; otherwise reject with a ' +
+    'MEASURED reason (output_corruption / parity_regression / revalidation_no_reproduce).',
+    { ...revalInputs, REVALIDATE: true, RESUME_AB: false, REUSE_REF: '', SHARED_REF_MED: '',
+      E2E_REPEATS: Math.max(E2E_REPEATS, REVALIDATE_REPEATS) },
+    `${label} revalidate`, phase);
+  const reproduced = !!(integ2 && (integ2.gate === 'accepted' || integ2.gate === 'stack')
+    && integ2.e2e_throughput_tok_s > curTput && integ2.output_parity !== 'fail');
+  if (reproduced) {
+    log(`  ${label}: RE-VALIDATED — win reproduced (+${(integ2.e2e_delta_pct || 0).toFixed(1)}%) with intact ` +
+      `output; ACCEPTING on measurement (theory over-ruled by a real A/B).`);
+    return { accept: true, integ: integ2, revalidated: true };
+  }
+  const reason = (integ2 && (integ2.reason || integ2.gate))
+    ? `revalidation_failed: ${integ2.reason || integ2.gate}` : 'revalidation_no_reproduce';
+  log(`  ${label}: RE-VALIDATION REJECTED (${reason}) — measured, not theoretical.`);
+  return { accept: false, integ: integ2 || integ, reason, revalidated: true };
+}
+
 // Lightweight SURGICAL FIX (Tier 1 of the corrective). One focused kernel_surgeon agent reads the reject
 // diagnosis + the failing kernel + the live call seam (from the task's meta.json), makes the SMALLEST
 // edit that fixes the defect WITHOUT giving up the isolated win, self-verifies on the IMMUTABLE unittest
@@ -901,32 +958,33 @@ async function tryCorrectiveReauthor(spec) {
       fixInputs.CURRENT_OVERLAY = spec.cur.overlay; fixInputs.CURRENT_FLAGS = spec.cur.flags;
       fixInputs.CURRENT_ENV = spec.cur.env; fixInputs.CURRENT_THROUGHPUT = spec.cur.tput;
     }
-    const integ2 = await runIntegrateBothLegs(
+    let integ2 = await runIntegrateBothLegs(
       'Apply the CORRECTIVELY-FIXED kernel winner; gate on e2e throughput.', fixInputs,
       `integrate ${spec.short_name} corrective`, spec.phase_name || 'HeadKernel');
-    const ab2 = !!(integ2 && integ2.gate !== 'incomplete' && integ2.ab_complete !== false);
     const pctForGuard = spec.pct_gpu_time || (spec.base_inputs && spec.base_inputs.KERNEL_RESULT && spec.base_inputs.KERNEL_RESULT.pct_gpu_time) || 0;
-    // Implausible-speedup guard: a "win" whose e2e delta blows past the op's Amdahl ceiling is corruption
-    // masquerading as a win (does less/degenerate work) — never bank it; treat as a correctness reject and
-    // let the next corrective attempt fix it. GENERIC (uses only pct_gpu_time + isolated).
-    const implausible2 = ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack')
-      && isImplausibleSpeedup(pctForGuard, fix.final_geomean, integ2);
-    if (ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack') && integ2.e2e_throughput_tok_s > curTput && !implausible2) {
+    const curT = (spec.cur && spec.cur.tput) || fixInputs.CURRENT_THROUGHPUT || 0;
+    // MEASUREMENT-BASED gate: a "win" whose e2e delta blows past the op's Amdahl ceiling is only SUSPECT,
+    // not rejected on theory — gateDecision re-measures it with a fresh strict A/B and rejects only if the
+    // re-measurement fails to reproduce an integrity-clean win. On success the FRESH integ2 is returned.
+    const rv = await gateDecision(integ2, pctForGuard, fix.final_geomean, fixInputs,
+      `${spec.short_name} corrective`, spec.phase_name || 'HeadKernel', curT);
+    integ2 = rv.integ;
+    const ab2 = !!(integ2 && integ2.gate !== 'incomplete' && integ2.ab_complete !== false);
+    if (rv.accept) {
       return { banked: true, integ: integ2, isolated: fix.final_geomean };
     }
-    reason = implausible2
-      ? `implausible_speedup (+${(integ2.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pctForGuard, fix.final_geomean).toFixed(1)}% — corruption)`
-      : ((integ2 && (integ2.reason || integ2.gate)) || reason);
+    reason = rv.reason || (integ2 && (integ2.reason || integ2.gate)) || reason;
     // STRUCTURED stop (do NOT re-classify from the prose reason — it may MENTION "corruption" while saying
     // it was RESOLVED, which would loop wastefully). If this attempt made the kernel CORRECT (parity no
-    // longer failing) and it was not an implausible speedup, the ONLY remaining problem is throughput/
-    // do-no-harm — more re-authoring cannot create Amdahl headroom that isn't there, so STOP now.
-    if (ab2 && integ2.output_parity !== 'fail' && !implausible2) {
+    // longer failing) and the reject was NOT a measured corruption/parity failure, the ONLY remaining
+    // problem is throughput/do-no-harm — more re-authoring cannot create Amdahl headroom that isn't there.
+    const corruption = CORRECTNESS_REJECT_RX.test(reason);
+    if (ab2 && integ2.output_parity !== 'fail' && !corruption) {
       log(`  ${spec.short_name}: corrective produced a CORRECT kernel with no e2e win (do-no-harm: ${reason}) — stopping; throughput headroom for this op is exhausted.`);
       break;
     }
     log(`  ${spec.short_name}: corrective still rejected (${reason}).`);
-    fixClass = implausible2 ? 'correctness' : rejectClass(reason);
+    fixClass = corruption ? 'correctness' : rejectClass(reason);
     if (fixClass === '') break;   // new failure not auto-correctable -> stop retrying
     // Progressive: the NEXT attempt builds on this attempt's (partially) fixed kernel, not the original.
     spec.kernel_eval_dir = fix.eval_dir || spec.kernel_eval_dir;
@@ -1397,8 +1455,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       log(`[deep] E2E GATE #${e2eGateCount} on serving {${SERVING_GPU}} TP=${SERVING_TP}: [${cands.map(c => c.uid + ' ' + c.best.toFixed(3) + 'x').join(', ')}] (overlapping co-opt on dedicated cards).`);
       for (const c of cands) {
         if (opts.final && bankedHeads.has(c.head.short_name)) { log(`  [deep] FINALIZE: skip ${c.uid} -- head ${c.head.short_name} already banked (same module, cannot stack).`); continue; }
-        const integ = await safeAgent(
-          roleAgent('e2e_integrator', 'integrate', 'Apply a deep head candidate; gate on e2e throughput; report engagement/cudagraph/mem/decode for feedback.', {
+        const deepIntegIn = {
             EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
             KERNEL_RESULT: {
               short_name: c.head.short_name, task_dir: c.ext.task_dir, op_kind: c.ext.op_kind, lane: c.key,
@@ -1412,20 +1469,26 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
             ...ACCURACY_INPUTS,
             ...(opts.final && ACCURACY_GATE !== 'none' ? { ACCURACY_LIMIT: DEEP_FINAL_ACCURACY_LIMIT } : {}),   // de-noise the finalize accuracy decision
-          }),
+          };
+        let integ = await safeAgent(
+          roleAgent('e2e_integrator', 'integrate', 'Apply a deep head candidate; gate on e2e throughput; report engagement/cudagraph/mem/decode for feedback.', deepIntegIn),
           { phase: 'HeadKernel', label: `integrate ${c.uid} g${e2eGateCount}`, schema: INTEGRATE_SCHEMA });
         if (integ && integ.output_parity === 'fail') {
           log(`  [deep] ${c.uid}: REJECTED — output_parity=fail vs true baseline.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
-        } else if (integAccepted(integ, c.head.pct_gpu_time, c.best) && integ.e2e_throughput_tok_s > curTput) {
+          continue;
+        }
+        // MEASUREMENT-BASED gate: a suspect (over-ceiling soft-parity) accept is RE-MEASURED, not theory-rejected.
+        const rvDeep = await gateDecision(integ, c.head.pct_gpu_time, c.best, deepIntegIn, `integrate ${c.uid} g${e2eGateCount}`, 'HeadKernel', curTput);
+        integ = rvDeep.integ;
+        if (rvDeep.accept) {
           curOverlay = integ.accepted_overlay || curOverlay; curTput = integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
           acceptedHeads.push({ short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', e2e_delta_pct: integ.e2e_delta_pct, isolated: c.best });
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
         } else {
-          // gateRejectReason converts an implausible "pass" into a corruption reject so it routes to the
-          // correctness corrective (the deep site already calls the corrective helper for every reject).
-          const dreason = gateRejectReason(integ, c.head.pct_gpu_time, c.best);
+          // The reject reason is now MEASURED (integrator reason, or a failed re-validation) — never theory-only.
+          const dreason = rvDeep.reason;
           const dcorr = await tryCorrectiveReauthor({
             short_name: c.head.short_name, op_kind: c.ext.op_kind, shapes: c.ext.shapes, dtype: c.ext.dtype, regime: c.head.regime,
             gpu_id: SERVING_GPU, kernel_eval_dir: c.lastEval, task_dir: c.ext.task_dir, language: c.lang,
@@ -1720,8 +1783,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       st.cands.sort((a, b) => (b.isolated || 0) - (a.isolated || 0));
       const cand = st.cands[0];
       log(`  ${h.short_name}: best candidate=${cand.source} (${(cand.isolated || 0).toFixed(2)}x, ${cand.kind}). Integrating to e2e (serial, slot {${SERVING_GPU}}).`);
-      const integ = await runIntegrateBothLegs(
-        'Apply the head-op winner; gate on e2e throughput.', {
+      const headIntegIn = {
           EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
           KERNEL_RESULT: { short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
             winner_kind: cand.winner_kind, winner_backend: cand.source,
@@ -1738,9 +1800,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
           CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
           ENGAGEMENT_CHECK: h.engagement_check || '',
-        },
+        };
+      let integ = await runIntegrateBothLegs(
+        'Apply the head-op winner; gate on e2e throughput.', headIntegIn,
         `integrate ${h.short_name}`, 'HeadKernel');
-      if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput) {
+      // MEASUREMENT-BASED gate: a suspect (over-ceiling soft-parity) accept is RE-MEASURED, not theory-rejected.
+      const rvHead = await gateDecision(integ, h.pct_gpu_time, cand.isolated, headIntegIn, `integrate ${h.short_name}`, 'HeadKernel', curTput);
+      integ = rvHead.integ;
+      if (rvHead.accept) {
         curOverlay = integ.accepted_overlay || curOverlay;
         if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
         if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
@@ -1749,9 +1816,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
         history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
       } else {
-        // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
-        // impossible (corruption) — so a fake win routes to the correctness corrective instead of banking.
-        const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
+        // The reject reason is now MEASURED (integrator reason, or a failed re-validation) — never theory-only.
+        const reason = rvHead.reason;
         const corr = (cand.kind === 'authored' && rejectClass(reason) !== '')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: st.ext.op_kind, shapes: st.ext.shapes, dtype: st.ext.dtype, regime: h.regime,
@@ -1964,7 +2030,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const abc = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
       if (sharedRefMed == null && abc && integ.ref_med) sharedRefMed = integ.ref_med;   // lock the shared ref
       if (ci === 0) top = { cand, inputs, integ, abc };
-      const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput;
+      const passed = abc && integAccepted(integ) && integ.e2e_throughput_tok_s > curTput;
       // Persist EVERY candidate's MEASURED e2e (one ledger row per backend, keyed short_name:backend) so the
       // report + experience library keep the full per-backend picture — not just the winning backend.
       history.ledger.push({ direction: `${h.short_name}:${cand.source}`, isolated_speedup: cand.isolated || 0,
@@ -1975,10 +2041,19 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (!bestPick || integ.e2e_throughput_tok_s > bestPick.integ.e2e_throughput_tok_s) bestPick = { cand, integ };
         log(`  ${h.short_name}: candidate ${cand.source} PASSED e2e gate (${integ.e2e_throughput_tok_s} tok/s, +${integ.e2e_delta_pct}%).`);
       } else {
-        log(`  ${h.short_name}: candidate ${cand.source} ${abc ? `rejected (${gateRejectReason(integ, h.pct_gpu_time, cand.isolated)})` : `A/B incomplete (${integ ? integ.reason || integ.gate : 'null/timeout'})`}.`);
+        log(`  ${h.short_name}: candidate ${cand.source} ${abc ? `rejected (${gateRejectReason(integ)})` : `A/B incomplete (${integ ? integ.reason || integ.gate : 'null/timeout'})`}.`);
       }
     }
 
+    if (bestPick) {
+      // MEASUREMENT-BASED gate: if the Amdahl ceiling flags the chosen best as suspect (a too-good soft-parity
+      // win), RE-MEASURE it with a fresh independent strict A/B before banking. A failed re-validation drops it
+      // back to the no-winner corrective/reject path (never a theory-only reject).
+      const rvSel = await gateDecision(bestPick.integ, h.pct_gpu_time, bestPick.cand.isolated,
+        mkIntegrateInputs(bestPick.cand, 'rv', null), `integrate ${h.short_name}:${bestPick.cand.source}`, 'HeadKernel', curTput);
+      if (rvSel.accept) bestPick.integ = rvSel.integ;
+      else { log(`  ${h.short_name}: best candidate ${bestPick.cand.source} FAILED re-validation (${rvSel.reason}); routing to corrective/reject.`); bestPick = null; }
+    }
     if (bestPick) {
       // Best MEASURED e2e among all candidates that cleared the gate. A head winner may be carried as an
       // overlay (authored/patch) AND/OR config (env/flag) — capture both.
@@ -2023,10 +2098,10 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
         }
       } else {
-        // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
-        // impossible (corruption); rejectClass then routes parity/accuracy/implausible rejects to the
-        // correctness corrective and JIT/capture/host-sync rejects to the integration corrective.
-        const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
+        // MEASURED reject reason (no theory string); rejectClass routes parity/accuracy rejects to the
+        // correctness corrective and JIT/capture/host-sync rejects to the integration corrective. A suspect
+        // over-ceiling win was already RE-MEASURED at the bestPick re-validation above before reaching here.
+        const reason = gateRejectReason(integ);
         const corr = (cand.kind === 'authored')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
@@ -2174,7 +2249,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
     };
-    const integ = await runIntegrateBothLegs(
+    let integ = await runIntegrateBothLegs(
       'Overlay the optimized kernel back; gate on e2e throughput.', mileIntegrateInputs,
       `integrate ${c.short_name}`, 'Milestone');
 
@@ -2182,7 +2257,12 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // Backward-compatible: null (timeout/hang/degrade) or an explicit incomplete
     // flag => not done; a legacy return without ab_complete behaves as before.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
-    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.final_geomean) && integ.e2e_throughput_tok_s > curTput) {
+    // MEASUREMENT-BASED gate: a suspect (over-ceiling soft-parity) accept is RE-MEASURED, not theory-rejected.
+    const rvMile = abDone
+      ? await gateDecision(integ, c.pct_gpu_time, kl.final_geomean, mileIntegrateInputs, `integrate ${c.short_name}`, 'Milestone', curTput)
+      : { accept: false, integ, reason: integ ? (integ.reason || integ.gate || '') : '' };
+    integ = rvMile.integ;
+    if (abDone && rvMile.accept) {
       curOverlay = integ.accepted_overlay || curOverlay;
       curTput = integ.e2e_throughput_tok_s;
       acceptedKernels.push({ short_name: c.short_name, backend: kl.note || '', e2e_delta_pct: integ.e2e_delta_pct, isolated: kl.final_geomean });
@@ -2194,7 +2274,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       // crash-during-warmup (ab_complete=false) of an iso-verified editable kernel earns a corrective
       // re-author (re-optimize the EXISTING kernel; NOT charged to HEAD_BUDGET); only keep PENDING if the
       // A/B was merely incomplete for a NON-fixable reason (real transient timeout/hang). See tryCorrectiveReauthor.
-      const reason = gateRejectReason(integ, c.pct_gpu_time, kl.final_geomean);
+      const reason = abDone ? rvMile.reason : gateRejectReason(integ);
       const corr = (rejectClass(reason) !== '')
         ? await tryCorrectiveReauthor({
             short_name: c.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: c.regime,
@@ -2333,14 +2413,18 @@ if (want('final')) {
     const p = pendingIntegrations.shift();   // pop one per iteration => guaranteed termination
     log(`Finalize-gate: finishing pending A/B (${p.short_name}, ${(p.isolated || 0).toFixed(2)}x isolated); ` +
       `${pendingIntegrations.length} more queued.`);
-    const integ = await runIntegrateBothLegs(
+    // Pin the CURRENT carried overlay/flags/env/throughput so the A/B is measured against the latest baseline.
+    const finIntegIn = { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput };
+    let integ = await runIntegrateBothLegs(
       'Finish the e2e A/B for this verified-isolated win. Run BOTH legs (reference + candidate) to ' +
       'completion, then return accepted/stack/rejected with ab_complete:true.',
-      // Pin the CURRENT carried overlay/flags/env/throughput so the A/B is
-      // measured against the latest accepted baseline.
-      { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
-      `finish-integrate ${p.short_name}`, 'Finalize');
-    if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
+      finIntegIn, `finish-integrate ${p.short_name}`, 'Finalize');
+    // MEASUREMENT-BASED gate: a suspect (over-ceiling soft-parity) accept is RE-MEASURED, not theory-rejected.
+    const rvFin = abDone(integ)
+      ? await gateDecision(integ, p.pct_gpu_time, p.isolated, finIntegIn, `finish-integrate ${p.short_name}`, 'Finalize', curTput)
+      : { accept: false, integ };
+    integ = rvFin.integ;
+    if (abDone(integ) && rvFin.accept) {
       curOverlay = integ.accepted_overlay || curOverlay;
       if (p.track === 'head') {
         if (p.winner_kind === 'env' && p.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + p.apply_env;

@@ -9,6 +9,7 @@ standard library.  The CLI adds two subcommands:
 """
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -682,14 +683,78 @@ def _analysis_data_path(output_root):
 
 
 def _literal_kernel_filters(patterns):
-    """Return only patterns safe for rocprof-compute's substring filter."""
+    """Return the patterns safe for rocprof-compute's substring `-k` filter.
+
+    rocprof-compute's ``-k`` does a plain substring match at collection time, so a
+    pattern containing a regex metacharacter (``.``, ``*``, ``[`` ...) would not match
+    literally. Such patterns are dropped INDIVIDUALLY and the literal ones are still
+    returned -- so a single regex pattern in a mixed list no longer disables
+    collection-time isolation for its literal siblings (kernel_patterns are alternative
+    spellings of the SAME target, so a literal spelling still isolates it). If every
+    pattern is regex the result is empty and the caller falls back to analyze-time
+    index isolation, exactly as before."""
     regex_metacharacters = set(r".^$*+?{}[]\|()")
-    if any(
-        any(character in regex_metacharacters for character in pattern)
+    return [
+        pattern
         for pattern in patterns
-    ):
+        if pattern
+        and not any(character in regex_metacharacters for character in pattern)
+    ]
+
+
+def _roofline_filter_failed(profile_text):
+    """True when a `profile -k` run collected the target's dispatches but rocprof-compute's
+    ROOFLINE stage rejected the substring filter, leaving the roofline result unusable.
+
+    rocprof-compute's roofline kernel filter (roofline.py:apply_profile_kernel_filter) matches
+    the kernel's *canonical* name EXACTLY (``name.split("(")[0] in args.kernel``) and requires
+    ``unique_kernels == len(args.kernel)``. For most kernels the canonical name equals our
+    substring pattern, so the substring works. But a paren-less autotuned name (e.g. Triton
+    ``_gemm_a8w8_blockscale_kernel_GROUP_K_128_..._GRID_MN_40_cache_modifier_CG``) cannot be
+    shortened to the pattern, so the substring is rejected -> "missing from profiling data".
+    Enumerating every variant instead overflows the empirical-roofline PDF filename
+    (``empirRoof_gpu-0_FP32_<name1><name2>.pdf``) -> OSError "File name too long". Either symptom
+    means the substring roofline is untrustworthy and an exact-name re-profile is required."""
+    if not profile_text:
+        return False
+    return (
+        "missing from profiling data" in profile_text
+        or "File name too long" in profile_text
+        or "Errno 36" in profile_text
+    )
+
+
+# empirRoof PDF filename is "empirRoof_gpu-<id>_<dtype>_<kernelname>.pdf". Keep a single exact
+# kernel name short enough that the whole filename stays under the common 255-byte limit.
+_MAX_EXACT_KERNEL_NAME_LEN = 200
+
+
+def _exact_kernel_names_from_pmc(analysis_path, patterns):
+    """Return canonical kernel names (``Kernel_Name.split("(")[0]``) from a profile's pmc_perf.csv
+    that match any of ``patterns`` (substring), ordered by dispatch count DESC (dominant first).
+
+    This recovers the EXACT name rocprof-compute's roofline stage compares against, so an
+    exact-name re-profile passes ``apply_profile_kernel_filter`` where the substring did not.
+    Only names short enough to keep the empirical-roofline PDF filename valid are returned."""
+    pmc = os.path.join(analysis_path, "pmc_perf.csv")
+    if not os.path.isfile(pmc):
         return []
-    return [pattern for pattern in patterns if pattern]
+    counts = {}
+    try:
+        with open(pmc, newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                name = (row.get("Kernel_Name") or "").strip()
+                if not name:
+                    continue
+                base = name.split("(")[0]
+                if len(base) > _MAX_EXACT_KERNEL_NAME_LEN:
+                    continue
+                if any(pattern and pattern in base for pattern in patterns):
+                    counts[base] = counts.get(base, 0) + 1
+    except (OSError, csv.Error):
+        return []
+    return [name for name, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)]
 
 
 def _gpu_environment(manifest, case):
@@ -969,11 +1034,26 @@ def _select_kernel(kernels, patterns, exclude_patterns=()):
         for kernel in kernels
         if _is_target_kernel(kernel.get("kernel_name", ""))
     ]
+    # An explicit requested pattern wins. Prefer a non-helper target match (the common
+    # case, unchanged behaviour).
     for pattern in patterns:
         expression = _compile_pattern(pattern)
         for kernel in targets:
-            if expression.search(kernel["kernel_name"]):
+            if expression.search(kernel.get("kernel_name", "")):
                 return kernel
+    # If the ONLY kernels the caller's pattern names are on the helper-exclusion list,
+    # honour them anyway: _EXCLUDED_KERNEL_FRAGMENTS guards the dominant-kernel *fallback*
+    # from attributing a runtime/helper kernel, it must never veto a kernel the caller
+    # explicitly requested by name (e.g. a task whose target literally IS `reduce_kernel`).
+    # Among such matches prefer valid metrics, then the dispatch-dominant one, so a
+    # zero-metric stub can't win.
+    explicit_hits = [
+        kernel for kernel in kernels if _kernel_matches_patterns(kernel, patterns)
+    ]
+    if explicit_hits:
+        pool = [k for k in explicit_hits if _has_valid_kernel_metrics(k)] or explicit_hits
+        pool.sort(key=_kernel_rank_key, reverse=True)
+        return pool[0]
     candidates = [
         kernel for kernel in targets if _has_valid_kernel_metrics(kernel)
     ]
@@ -1083,52 +1163,173 @@ def _case_result(
     # runtime stats (dependency/issue/active waits), compute-pipeline (MFMA/VALU), occupancy/VGPR/AGPR,
     # LDS bank conflicts and coalescing counters are never captured -- exactly the Step-0 signals the
     # optimizer needs to tell a dependency-wait from an issue-wait latency stall. A default profile
-    # collects those AND still emits roofline (only --no-roof would drop roofline). Cost: more counter
-    # passes; the -k kernel filter below keeps replays scoped to the target kernel. Fail-soft: if the
+    # collects those AND still emits roofline (only --no-roof would drop roofline). Fail-soft: if the
     # heavier profile times out or a section is absent, downstream parsing/classification degrade to null.
-    profile_args = [
-        tool, "profile", "-n", case_id,
-    ]
-    literal_filters = _literal_kernel_filters(patterns)
-    if literal_filters:
-        profile_args.extend(["-k"] + literal_filters)
-    profile_args.extend([output_option, profile_output, "--"])
-    profile_args.extend(command)
-    profile_code, profile_text, profile_warning = _run(
-        profile_args,
-        cwd=case.get("workdir"),
-        timeout_sec=timeout_sec,
-        env=profile_environment,
-    )
+    #
+    # PER-KERNEL ISOLATION IS DONE AT COLLECTION TIME via `profile -k <name-substring>`. This is the ONLY
+    # way to actually change the measured data: rocprof-compute reports SoL/roofline per dispatch, so
+    # `analyze -k` (an INDEX filter over ALREADY-collected counters) returns byte-identical SoL/roofline
+    # numbers -- verified empirically (24.80% blended == 24.80% analyze -k). `profile -k` instead makes
+    # rocprof-compute collect counters for ONLY the target kernel's dispatches (verified: 50 target
+    # dispatches collected, all sibling kernels excluded from pmc_perf), which is the correct isolation and
+    # also sharpens the aggregate wavefront/occupancy stat that drives the latency sub-classification.
+    # The target substring is already known up front from the task's kernel_patterns (meta.json), so no
+    # discovery profile is needed for the common (literal-pattern) case -- ONE profile suffices. When the
+    # pattern is a REGEX (cannot be a substring filter) we fall back to a full profile + analyze-time index
+    # isolation, then to a blended analyze. Every branch is fail-soft.
+    analyze_sections = ["0", "1", "2", "4", "7", "10", "11", "16", "17"]
     profile_log = os.path.join(case_dir, "profile.log")
-    _write_text(profile_log, profile_text)
 
-    analysis_path = _analysis_data_path(profile_output)
-    # Sections (gfx942 IDs): 0 Top Stats, 1 System Info, 2 System Speed-of-Light, 4 Roofline,
-    # 7 Wavefront (dependency/issue/active runtime stats -> C1 vs C2 latency split), 10 Instruction Mix,
-    # 11 Compute Pipeline (MFMA/VALU utilization), 16 Vector L1, 17 L2. Superset of the previous 2/4/17,
-    # so roofline/SoL/L2 parsing is unchanged; the added sections feed the Step-0 latency sub-classing
-    # and the six raw-counter red-flag checks.
-    analyze_args = [
-        tool, "analyze", "-p", analysis_path,
-        "-b", "0", "1", "2", "4", "7", "10", "11", "16", "17",
-    ]
-    analyze_code, analyze_text, analyze_warning = _run(
-        analyze_args,
-        cwd=case.get("workdir"),
-        timeout_sec=timeout_sec,
-        env=profile_environment,
+    def _run_profile(output_path, kernel_filters=None):
+        args = [tool, "profile", "-n", case_id]
+        if kernel_filters:
+            args.extend(["-k"] + list(kernel_filters))   # COLLECTION-TIME kernel isolation (name substring)
+        args.extend([output_option, output_path, "--"])
+        args.extend(command)
+        return _run(args, cwd=case.get("workdir"), timeout_sec=timeout_sec, env=profile_environment)
+
+    def _run_analyze(analysis_dir, kernel_index=None, sections=None):
+        # -k (index) BEFORE -b so argparse never folds the kernel index into the greedy -b block list.
+        args = [tool, "analyze", "-p", analysis_dir]
+        if kernel_index is not None:
+            args.extend(["-k", str(kernel_index)])
+        args.append("-b")
+        args.extend(sections if sections is not None else analyze_sections)
+        return _run(args, cwd=case.get("workdir"), timeout_sec=timeout_sec, env=profile_environment)
+
+    literal_filters = _literal_kernel_filters(patterns)
+    profile_code, profile_text, profile_warning = _run_profile(
+        profile_output, kernel_filters=literal_filters or None
     )
+    _write_text(profile_log, profile_text)
+    analysis_path = _analysis_data_path(profile_output)
+    collection_isolated = bool(literal_filters)
+
+    # Defaults so the warnings/return blocks are always well-defined.
+    profile_args = ["profile", "-n", case_id, output_option]
+    analyze_args = ["analyze", "-b"] + analyze_sections
+    roofline_isolated = False
+    isolation_mode = None          # "collection" | "analyze_index" | "aggregate"
+    target_index = None
+    selected = None
+    kernels = []
+    analyze_text = ""
+    analyze_code = 0
+    analyze_warning = None
+    scan_text = ""
+    scan_warning = None
+
+    # A substring `profile -k` that collected the target's dispatches but whose ROOFLINE stage
+    # rejected the substring (or overflowed the PDF filename) yields untrustworthy roofline metrics
+    # even though analyze still emits a (wrong) number -- so do NOT trust that analyze; recover the
+    # EXACT canonical name(s) from the just-written pmc_perf.csv and re-profile with the single
+    # dominant exact name, which passes rocprof-compute's exact-match roofline filter.
+    substring_roofline_broken = collection_isolated and _roofline_filter_failed(profile_text)
+
+    if collection_isolated and not substring_roofline_broken:
+        # The profile already collected ONLY the target kernel's dispatches -> analyze all sections directly.
+        analyze_code, analyze_text, analyze_warning = _run_analyze(analysis_path)
+        kernels = parse_rocprof_compute(
+            analyze_text, dtypes=case.get("dtypes"), saturation_pct=saturation_pct
+        )
+        selected = _select_kernel(kernels, patterns, exclude_patterns)
+        if not _has_valid_kernel_metrics(selected):
+            selected = None
+        if selected is not None:
+            roofline_isolated = True
+            isolation_mode = "collection"
+            target_index = selected.get("kernel_index")
+
+    if (not roofline_isolated) and substring_roofline_broken:
+        # EXACT-NAME re-profile: recover the dominant variant's canonical name from the failed
+        # substring profile's pmc_perf.csv and re-profile with just that name. One name keeps the
+        # empirical-roofline PDF filename under the filesystem limit while satisfying the tool's
+        # exact-match filter (unique_kernels == len(args.kernel) == 1).
+        exact_names = _exact_kernel_names_from_pmc(analysis_path, patterns)
+        if exact_names:
+            dominant = exact_names[0]
+            profile_output = _unused_path(os.path.join(case_dir, "profile_data"))
+            ex_code, ex_text, ex_warning = _run_profile(
+                profile_output, kernel_filters=[dominant]
+            )
+            _write_text(
+                profile_log,
+                (profile_text or "")
+                + "\n\n=== EXACT-NAME RE-PROFILE (substring roofline filter rejected; "
+                + "-k %r) ===\n" % dominant
+                + (ex_text or ""),
+            )
+            analysis_path = _analysis_data_path(profile_output)
+            analyze_code, analyze_text, analyze_warning = _run_analyze(analysis_path)
+            kernels = parse_rocprof_compute(
+                analyze_text, dtypes=case.get("dtypes"), saturation_pct=saturation_pct
+            )
+            selected = _select_kernel(kernels, patterns, exclude_patterns)
+            if not _has_valid_kernel_metrics(selected):
+                selected = None
+            if selected is not None:
+                # The exact-name re-profile is now the authoritative artifact: adopt its exit
+                # code so the earlier substring crash (exit 1) does not surface a spurious warning.
+                profile_code = ex_code
+                profile_warning = ex_warning or profile_warning
+                roofline_isolated = True
+                isolation_mode = "collection_exact"
+                target_index = selected.get("kernel_index")
+        # If the exact-name retry did not yield valid metrics, roofline_isolated stays False and
+        # collection_isolated stays True, so the block below RE-PROFILES in full (fresh output dir)
+        # and falls back to analyze-index / blended -- the exact-name profile_output is discarded.
+
+    if not roofline_isolated:
+        # Either the pattern was a REGEX (no collection-time -k applied) or the isolated collection was
+        # unusable. If we DID attempt collection isolation, RE-PROFILE in full (no -k) so every kernel is
+        # present for ranking + analyze-time index isolation. Otherwise the current profile already has all.
+        if collection_isolated:
+            profile_output = _unused_path(os.path.join(case_dir, "profile_data"))
+            rp_code, rp_text, rp_warning = _run_profile(profile_output, kernel_filters=None)
+            _write_text(
+                profile_log,
+                (profile_text or "")
+                + "\n\n=== FULL RE-PROFILE (collection-time -k yielded no usable target) ===\n"
+                + (rp_text or ""),
+            )
+            profile_code = rp_code if rp_code != 0 else profile_code
+            profile_warning = rp_warning or profile_warning
+            analysis_path = _analysis_data_path(profile_output)
+            collection_isolated = False
+        # Scan (Top Stats only) to rank kernels and read the target's numeric index.
+        scan_code, scan_text, scan_warning = _run_analyze(analysis_path, sections=["0"])
+        _write_text(os.path.join(case_dir, "analyze_scan.txt"), scan_text)
+        scan_kernels = parse_rocprof_compute(
+            scan_text, dtypes=case.get("dtypes"), saturation_pct=saturation_pct
+        )
+        scan_selected = _select_kernel(scan_kernels, patterns, exclude_patterns)
+        target_index = scan_selected.get("kernel_index") if scan_selected else None
+        if target_index is not None:
+            # analyze-time INDEX isolation (fallback: filters the view of already-collected counters).
+            analyze_code, analyze_text, analyze_warning = _run_analyze(
+                analysis_path, kernel_index=target_index
+            )
+            kernels = parse_rocprof_compute(
+                analyze_text, dtypes=case.get("dtypes"), saturation_pct=saturation_pct
+            )
+            selected = _select_kernel(kernels, patterns, exclude_patterns)
+            if not _has_valid_kernel_metrics(selected):
+                selected = None
+            if selected is not None:
+                roofline_isolated = True
+                isolation_mode = "analyze_index"
+        if selected is None:
+            # Final fallback: the ORIGINAL blended aggregate analyze (metrics may be blended -> warned).
+            analyze_code, analyze_text, analyze_warning = _run_analyze(analysis_path)
+            kernels = parse_rocprof_compute(
+                analyze_text, dtypes=case.get("dtypes"), saturation_pct=saturation_pct
+            )
+            selected = _select_kernel(kernels, patterns, exclude_patterns)
+            if not _has_valid_kernel_metrics(selected):
+                selected = None
+            isolation_mode = "aggregate"
     analyze_log = os.path.join(case_dir, "analyze.txt")
     _write_text(analyze_log, analyze_text)
-    kernels = parse_rocprof_compute(
-        analyze_text,
-        dtypes=case.get("dtypes"),
-        saturation_pct=saturation_pct,
-    )
-    selected = _select_kernel(kernels, patterns, exclude_patterns)
-    if not _has_valid_kernel_metrics(selected):
-        selected = None
     selection_mode = None
     if selected is not None:
         selection_mode = (
@@ -1138,10 +1339,28 @@ def _case_result(
     warnings.extend(path_notes)
     if option_warning:
         warnings.append(option_warning)
-    if patterns and not literal_filters:
+    if scan_warning:
+        warnings.append(scan_warning)
+    if isolation_mode == "collection":
         warnings.append(
-            "regex kernel_patterns were applied after collection because profile -k "
-            "uses substring matching"
+            "roofline isolated at COLLECTION time via `profile -k` (counters collected for the target "
+            "kernel only)"
+        )
+    elif isolation_mode == "collection_exact":
+        warnings.append(
+            "roofline isolated at COLLECTION time via `profile -k <exact dominant kernel name>` "
+            "(substring filter was rejected by rocprof-compute's exact-match roofline stage; "
+            "re-profiled with the dominant autotune variant's full name)"
+        )
+    elif isolation_mode == "analyze_index":
+        warnings.append(
+            "roofline isolated at ANALYZE time via `-k %s` (index filter over already-collected counters; "
+            "collection-time `profile -k` was unavailable for a regex pattern)" % target_index
+        )
+    elif isolation_mode == "aggregate" and patterns:
+        warnings.append(
+            "roofline NOT isolated: target kernel index not found; metrics may be blended across all "
+            "profiled kernels"
         )
     if profile_code != 0:
         warnings.append(
@@ -1196,6 +1415,9 @@ def _case_result(
         "kernel": selected["kernel_name"] if selected else None,
         "matched_kernel_name": selected["kernel_name"] if selected else None,
         "selection_mode": selection_mode,
+        "roofline_isolated": roofline_isolated,
+        "isolation_mode": isolation_mode,
+        "target_kernel_index": target_index,
         "peak_basis": metrics.get("peak_basis"),
         "compute_metric": metrics.get("compute_metric"),
         "metrics": metrics,

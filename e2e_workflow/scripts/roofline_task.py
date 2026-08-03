@@ -105,6 +105,9 @@ def main():
     # Run the unittest's real main(): its module setup unshadows stdlib `unittest` and resolves the
     # (now-bridged) candidate; run_correctness sees GEAK_ROOFLINE_SIG and sys.exit()s after the tight
     # loop, BEFORE any baseline/correctness/timing work -- so the profile is candidate-only.
+    # Reset sys.argv so the unittest's OWN argparse sees a clean invocation (just its path); otherwise
+    # our --unittest/--sig flags leak in and the unittest's argparse rejects them.
+    sys.argv = [args.unittest]
     runpy.run_path(args.unittest, run_name="__main__")
     return 0
 

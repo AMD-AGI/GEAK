@@ -874,6 +874,22 @@ def _run_roofline_hook(eager_cases, current_call):
         iters = 40
     cases = list(eager_cases or [])
     case = next((c for c in cases if c.get("sig") == sig), None)
+    # Family tasks (e.g. the dense fp8 GEMM head serving down/gate_up/qkv/o) key their eager cases
+    # by "<family>:<regime>_M<M>" (down_proj:decode_M64), but the manifest/driver may pass the BARE
+    # regime bucket ("decode_M64") derived from meta.json's collapsed workload cases. When the exact
+    # sig is not found, resolve the bare bucket to a concrete namespaced case deterministically (first
+    # by unittest order) so a representative dispatch of the SHARED kernel is profiled -- instead of
+    # failing the whole roofline case (the "unknown case" hard-exit). Exact match still wins; a truly
+    # unknown sig (no bucket/substring match) still falls through to the exit-2 below.
+    if case is None and sig.strip():
+        bucket = sig.strip()
+        matches = [c for c in cases if str(c.get("sig") or "").split(":", 1)[-1] == bucket]
+        if not matches:
+            matches = [c for c in cases if bucket in str(c.get("sig") or "")]
+        if matches:
+            case = matches[0]
+            print("ROOFLINE_HOOK: resolved bare case %r -> %r (family-namespaced)"
+                  % (sig, case.get("sig")), file=sys.stderr)
     if case is None and not sig.strip() and cases:
         case = cases[0]
     if case is None:
