@@ -489,6 +489,14 @@ attempt, win or not. REQUIRED sections, in order:
    phase reconciles this section to `EVAL_DIR/validation/{base,final}/bench_summary.json` (its authoritative
    same-session TTFT/TPOT/throughput).
 
+   The external interface deterministically injects a **Baseline alignment**
+   section after the workflow returns. Do not invent cross-harness baseline
+   values. If existing artifacts expose them, treat the upstream current-best
+   throughput measured on the same accepted configuration as the primary
+   alignment reference. Treat the upstream raw-session baseline as audit-only:
+   it may predate accepted configuration changes, so its divergence includes
+   configuration gain and must never be described as pure measurement drift.
+
 Data sources (read the ACTUAL files, never invent): `director_e2e_validation.json`,
 `final/bench/bench_summary.json`, `config/sweep_results.json`, `overlay/cand_*/integrate_result.json`,
 `kernels/_exp/*/*/director_validation.json`, `kernels/*/opbench_result.json` (incl. its `backend_absent[]`),

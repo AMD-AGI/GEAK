@@ -13,7 +13,7 @@ $WS/
   InferenceX/           # bench client (cloned separately)
   geak_runtime/         # per-model data root ($HF_LOGS)
     <model_key>/
-      handoff.json                     # REQUIRED — properties + task (schema_version 1)
+      handoff.json                     # REQUIRED — properties + task (schema_version 2)
       baseline_config.with_envs.yaml   # REQUIRED — launch recipe
       kernel-agent/**/tracelens/analysis.md            # TraceLens priors (optional but recommended)
       kernel-agent/**/kernel_candidates.json
@@ -43,14 +43,14 @@ one-off HF download instead of pre-staging, set `GEAK_ALLOW_DOWNLOAD=1` and give
 real `hf_repo` in `models.tsv` (see step 3).
 
 ### 2. Drop the per-model GEAK material under `geak_runtime/<model_key>/`
-- **`handoff.json`** (required, `schema_version: 1`) — the single source of truth
+- **`handoff.json`** (required, `schema_version: 2`) — the single source of truth
   for `framework` and `tp` (they are NOT in `models.tsv`). Required non-empty keys:
   `model_path` and `exp_root` (both are hard-asserted; `exp_root` is rewritten at
   run time so any non-empty placeholder is fine). Functional fields used by the run:
 
   ```json
   {
-    "schema_version": 1,
+    "schema_version": 2,
     "model_path": "<placeholder or real path; overridden by staged weights>",
     "framework": "vllm",                 // vllm | sglang  -> picks the image
     "gpu_type": "mi300x",
@@ -60,6 +60,7 @@ real `hf_repo` in `models.tsv` (see step 3).
     "accepted_env": "VLLM_USE_AITER=1 ...",
     "launch_recipe": "<overridden to the local baseline_config.with_envs.yaml>",
     "raw_baseline_tput": 0,
+    "orchestrator_best_tput_same_config": 0,
     "exp_root": "<placeholder; overridden to geak_runtime/<model_key>/geak>",
     "bench_client": "auto",
     "inferencex_path": "<overridden to $WS/InferenceX>",
