@@ -141,6 +141,11 @@ const HEAD_AUTHOR_MAX = parseInt(A.head_author_max != null ? A.head_author_max :
 // hits a harness fault / no-win / extraction failure, the orchestrator LOUDLY flags it (and still tries
 // the author route when a plan exists) instead of dropping the biggest lever on the floor. Default 30%.
 const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_pct : 30);
+// Reachability gate: after extract, capture_shapes reports live_engagement_calls (seam invocations during
+// the capture bench). 0 => the live serving path never routes through this seam -> authoring can't engage,
+// so skip BEFORE the multi-hour author lane (dominant heads are FLAGGED, not silently dropped). Default on;
+// set probe_engagement=false to restore the old author-then-reject behavior.
+const PROBE_ENGAGEMENT = String(A.probe_engagement != null ? A.probe_engagement : 'true') === 'true';
 // Corrective re-author: when a verified-isolated head winner is REJECTED at the e2e gate for a FIXABLE
 // integration reason (it ENGAGED live + beat the isolated oracle, only the integration POSTURE is wrong —
 // e.g. a JIT/DSL kernel lazily compiling in the TP>1 warmup -> NO_BINARY_FOR_GPU / cuda_graph_capture_unsafe,
@@ -440,6 +445,9 @@ const EXTRACT_OP_SCHEMA = obj({
   workload_path: { type: 'string' }, // per-(shape,dtype) weighted workload model for this kernel (optional)
   dtype: { type: 'string' }, synthesized: { type: 'boolean' }, regimes_captured: arrStr,
   candidate_backends: arrStr, reference_io_sha256: { type: 'string' },
+  // Reachability: live invocations of the seam during capture (meta.json live_engagement_calls, eager +
+  // in-graph). 0 => the live serving path never routes through this seam -> gate flags/skips before author.
+  live_engagement_calls: { type: 'number' },
   target_callable: { type: 'string' }, // module:attr rebind seam for an authored kernel ('' if none)
   baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
   baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
@@ -462,6 +470,7 @@ const EXTRACT_SCHEMA = obj({
   short_name: { type: 'string' }, editable: { type: 'boolean' }, task_dir: { type: 'string' },
   source_path_in_sglang: { type: 'string' }, target_callable: { type: 'string' },
   num_cases: { type: 'number' }, regimes_captured: arrStr, candidate_backends: arrStr,
+  live_engagement_calls: { type: 'number' }, // seam invocations during capture (0 => dead/wrong seam)
   build: { type: 'boolean' }, unittest_smoke: { type: 'string' },
   baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
   baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
@@ -1103,6 +1112,33 @@ const history = ST.history || { insights: [], ledger: [], milestones: [], bottle
 // never decomposed into a standalone dense GEMM — so dense-GEMM synth is off for it.
 function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
 
+// Reachability gate (Fix 3A). Returns true (and records a flag/ledger entry) when the extracted head's
+// seam was NEVER invoked on the live path during capture (live_engagement_calls === 0), so the caller
+// should `continue` and NOT enter the author lane. The signal is a byproduct of extract's own capture
+// bench (capture_shapes total eager+in-graph calls) — no extra server launch. Guards:
+//  - only when PROBE_ENGAGEMENT is on AND the extractor reported a numeric count (undefined => can't judge,
+//    proceed as before — never skip on a missing field);
+//  - a count of exactly 0 is the dead-seam signal (decode-under-graph is counted via in_graph_calls, so a
+//    legitimately-reached decode kernel reports >0 and is NOT skipped);
+//  - DOMINANT heads (>= HEAD_PROTECT_PCT) are FLAGGED, never silently skipped (still surfaced as the top
+//    remaining lever). Non-dominant heads are skipped with a ledger note.
+function deadSeamSkip(h, ext, isDominant) {
+  if (!PROBE_ENGAGEMENT) return false;
+  const calls = ext && ext.live_engagement_calls;
+  if (typeof calls !== 'number') return false;   // extractor didn't report it -> don't judge, proceed
+  if (calls > 0) return false;                    // seam is live-reachable -> proceed
+  const why = 'seam not reached on live path during capture (live_engagement_calls=0) — dead/wrong seam or overlay not bound in workers';
+  if (isDominant) {
+    log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU) NOT REACHED on the live path (0 engagement at extract) — flagged, NOT authored (would never engage).`);
+    if (!flaggedHeads.some((f) => f.short_name === h.short_name)) flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'reachability', gate: 'no_engagement', reason: why });
+    history.ledger.push({ direction: h.short_name, verdict: 'flagged', lesson: `DOMINANT head not reached on live path (0 engagement) — verify the seam / vLLM worker overlay before authoring` });
+  } else {
+    log(`  ${h.short_name}: seam not reached on live path (0 engagement at extract); skipping before author lane.`);
+    history.ledger.push({ direction: h.short_name, verdict: 'dead_end', lesson: 'seam not reached on live path (0 engagement)' });
+  }
+  return true;
+}
+
 // ===========================================================================
 // PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized
 // regardless of edit flag, via the bake-off ladder. This is the lever the old
@@ -1547,6 +1583,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         history.ledger.push({ direction: h.short_name, verdict: isDominant ? 'flagged' : 'dead_end', lesson: `op extraction failed (${why})` });
         continue;
       }
+      // Reachability gate (Fix 3A) — skip/flag a head whose seam was never reached on the live path.
+      if (deadSeamSkip(h, p.ext, isDominant)) continue;
       const ext = p.ext, bake = p.bake;
       const harness = !!(bake && (bake.gate === 'harness_error' || bake.harness_suspect));
       const hasPlan = !!(bake && Array.isArray(bake.author_plan) && bake.author_plan.length);
@@ -1736,6 +1774,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
       continue;
     }
+    // (h1b) REACHABILITY GATE — fail fast BEFORE the multi-hour author lane. capture_shapes counted the
+    // live invocations of the seam during extract; 0 means the live serving path never routed through it
+    // (dead/wrong seam, or — on vLLM pre worker-ext — the overlay never bound in the TP workers). Skipping
+    // here avoids authoring a kernel that could never engage. See DEAD_SEAM_SKIP.
+    if (deadSeamSkip(h, ext, isDominant)) continue;
     // (h2) DISCOVER existing impls + tune cheap levers + DECIDE an author_plan.
     const bake = await safeAgent(
       roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {

@@ -49,7 +49,7 @@ from collections import defaultdict
 RULES = [
     (r"triton|_kernel_0d1d|tt\.|fused_.*kernel", "triton", "triton", True,
      "Triton kernel — extractable; try Triton tuning, or a CK/HIP rewrite if memory/compute bound."),
-    (r"Cijk|Tensile|hipblaslt|_gemm|GemmEx|gemm_|hgemm|sgemm|f16_gemm|igemm",
+    (r"Cijk|Tensile|hipblaslt|hipBLASLt|GemmEx|rocblas|\bhgemm\b|\bsgemm\b|\bf16_gemm\b|\bigemm\b",
      "library_gemm", "hipblaslt", False,
      "Library GEMM (hipBLASLt/Tensile). Tune via heuristics/env or swap to aiter/CK GEMM; rarely source-editable."),
     (r"aiter|ater::", "fused_custom", "aiter", True,
@@ -76,14 +76,19 @@ RULES = [
 
 
 def classify(name):
+    # Snake_case JIT-kernel guard (runs BEFORE the RULES scan). A name whose body up to `_kernel` is pure
+    # lowercase snake_case is a Triton/custom @jit kernel and is source-editable — even if that body
+    # contains substrings like `_gemm` that would otherwise match the library_gemm rule. An uppercase
+    # autotune suffix (e.g. `_GROUP_K_128`) after `_kernel` is ignored; a mangled C++ symbol (`..._Kernel`,
+    # `Cijk_...`) fails the lowercase test and falls through to RULES. This is the fix for editable Triton
+    # GEMMs like `_gemm_a8w8_blockscale_kernel_...` being mislabeled library_gemm/non-editable.
+    m = re.search(r"_kernel", name, re.IGNORECASE)
+    if (m and re.match(r"^[a-z0-9_]+$", name[:m.end()])) or re.search(r"_fwd_kernel|_bwd_kernel", name, re.IGNORECASE):
+        return ("triton", "triton", True,
+                "Snake_case JIT kernel (likely Triton). Extractable; tune or compare backends.")
     for rx, cls, backend, editable, hint in RULES:
         if re.search(rx, name, re.IGNORECASE):
             return cls, backend, editable, hint
-    # Fallback: a snake_case symbol ending in 'kernel' (and not a mangled C++ symbol) is almost
-    # always a Triton/custom JIT kernel in sglang -> editable.
-    if re.search(r"^[a-z0-9_]+kernel[a-z0-9_]*$", name) or re.search(r"_fwd_kernel|_bwd_kernel", name):
-        return ("triton", "triton", True,
-                "Snake_case JIT kernel (likely Triton). Extractable; tune or compare backends.")
     return "other", "unknown", True, "Unclassified — inspect source to route."
 
 

@@ -88,7 +88,10 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   parser emits): `short_name`←name, `pct_gpu_time`←gpu_pct, `calls`←call_count,
   `total_ms`←duration_us/1000, `avg_us`←duration_us/call_count, `shapes`/`dtypes`←parsed from the
   `<br>` args, `classification`←map from `kernel_category`/`bound_type` (MoE/grouped-GEMM→library_gemm
-  or triton per `kernel_kind`; attention→library_attn; etc.), `editable`←`op_to_source_patchable`. Carry
+  or triton per `kernel_kind`; attention→library_attn; etc.), `editable`←`op_to_source_patchable` **when
+  it is non-null; if `op_to_source_patchable` is null/absent, fall back to the name-based rule
+  `parse_profile.classify()` uses (a snake_case `..._kernel` body → editable Triton) rather than
+  defaulting to false**. Carry
   `source_file`/`kernel_path` into each entry's `notes` (the Architect/Extractor reuse them). Write
   `profile_topN.json` + `.md` via your own Write (you may shell out to `parse_profile.py` only if you
   also have a trace; otherwise assemble the JSON yourself) and set `source:"tracelens"`.
@@ -112,6 +115,18 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   the TraceLens ranking/`%gpu` as the primary impact signal, but cross-check that the same heads top both
   views; note any disagreement in `notes`. Emit the final reconciled `profile_topN.json`/`.md` with
   `source:"tracelens+trace"`.
+  - **`editable` reconciliation (MANDATORY — source-derived beats name-guess).** The parser's `editable`
+    is a NAME-REGEX guess (`parse_profile.classify()`) and is a KNOWN failure mode: an editable Triton
+    kernel whose name contains a library substring (e.g. `_gemm_a8w8_blockscale_kernel...`) can be
+    mislabeled `library_gemm`/`editable:false` and then silently dropped from the kernel track. TraceLens
+    carries a SOURCE-derived truth: `op_to_source_patchable`. **For any kernel whose TraceLens entry has a
+    NON-null `op_to_source_patchable`, OVERRIDE the parser `editable` with that value** (True→editable,
+    False→not), and set `classification` accordingly (a patchable op with a `@triton.jit`/snake_case
+    `..._kernel` name → `triton`; keep `library_gemm`/`library_attn` only for genuinely non-patchable
+    vendor calls). Record the override in the entry's `notes` (e.g. "editable corrected library_gemm→triton
+    per TraceLens op_to_source_patchable + source_file"). **When `op_to_source_patchable` is null/absent,
+    KEEP the parser `editable`** — TraceLens has no opinion, so do not flip it. This makes the correction
+    deterministic instead of relying on you to spot the mislabel by eye.
 - **If `TRACELENS_ANALYSIS_MD` is empty/missing (or the file does not exist) → ignore TraceLens entirely
   and run the normal collection (steps 1–5) unchanged.** Likewise, for ANY reprofile round the TraceLens
   prior is stale (it reflects the baseline config) — ignore it and re-collect.

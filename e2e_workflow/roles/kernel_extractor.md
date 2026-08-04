@@ -386,10 +386,19 @@ Return JSON:
   "build": false,
   "unittest_smoke": "pass|fail",
   "reference_io_sha256": "...",
+  "live_engagement_calls": 0,
   "workload_path": "<task_dir>/workload.json",
   "notes": "granularity choice, hidden state captured, anything unusual"
 }
 ```
+**MANDATORY: surface `live_engagement_calls`** — copy it verbatim from the capture `meta.json`
+(`meta.live_engagement_calls`, = eager + in-graph invocations of the hooked seam during the capture bench).
+This is the REACHABILITY signal the e2e orchestrator gates on: **`0` means the live serving path never
+routed through this seam** (dead/wrong seam, or the overlay didn't bind in the serving workers) — the
+orchestrator then flags/skips the head BEFORE the multi-hour author lane instead of authoring a kernel that
+can never engage. Always report the real number (it may legitimately be >0 with `num_cases==0` when decode
+runs shape-hidden under a CUDA graph — those are counted via `in_graph_calls`, so do NOT report 0 in that
+case). If capture could not run at all, report `0`.
 **4b. Workload weighting (fold into `meta.json`, performance alignment).** If `PROFILE_WORKLOAD_JSON`
 is in your inputs (the profiler's per-kernel weight-PRIOR signal from `parse_profile.py --workload-out` —
 a PRE-MEASUREMENT prior; the immutable unittest self-weights by measured latency × analytic calls at
@@ -735,6 +744,17 @@ Return JSON:
   "baseline_callable": "<module:attr of the frozen real online kernel / default backend>",
   "baseline_frozen": true,
   "smoke": "pass|fail",
+  "live_engagement_calls": 0,
   "notes": "transpose/bias inference, regime, whether oracle was synthesized vs captured"
 }
 ```
+**`live_engagement_calls` (reachability signal — report carefully for head ops).** This is the count of
+live invocations of the seam during a capture bench (eager + in-graph). The orchestrator gates on it: `0`
+⇒ the live path never reached this seam ⇒ flag/skip BEFORE the author lane.
+- If you ran a live capture to build the oracle (`synthesized:false`), copy `meta.live_engagement_calls`
+  verbatim — a genuine `0` here is exactly the dead-seam signal we want to surface.
+- **If you SYNTHESIZED the oracle offline WITHOUT a live capture, do a cheap seam-reachability check
+  anyway** (rebind `target_callable` with a call counter, run a short warm bench window, read the count) and
+  report it. If you truly cannot run any live check, **OMIT this field entirely** (do not report `0`) — a
+  missing value tells the orchestrator "not measured, don't judge" so it will NOT false-skip a head whose
+  reachability was never tested. Only report `0` when a live check actually observed zero calls.

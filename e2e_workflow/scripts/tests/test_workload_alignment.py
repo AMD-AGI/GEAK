@@ -897,5 +897,48 @@ class TestPhaseAccounting(unittest.TestCase):
             os.unlink(p)
 
 
+class TestClassify(unittest.TestCase):
+    """parse_profile.classify() — editability/classification from the kernel name.
+
+    Regression guard for the bug where an editable Triton GEMM whose name contains a library substring
+    (`_gemm_a8w8_blockscale_kernel_...`) was mislabeled library_gemm/non-editable and silently dropped
+    from the kernel track. The snake_case `..._kernel` guard must win over the library_gemm rule, while
+    genuine vendor/mangled symbols (Cijk_*, hipBLASLt, Tensile_*) stay non-editable.
+    """
+
+    def _c(self, name):
+        cls, backend, editable, hint = parse_profile.classify(name)
+        return cls, editable
+
+    def test_triton_gemm_kernel_is_editable(self):
+        # The headline regression: a Triton block-scale GEMM with a `_gemm` substring + autotune suffix.
+        self.assertEqual(self._c("_gemm_a8w8_blockscale_kernel_GROUP_K_128_GROUP_N_128"), ("triton", True))
+        self.assertEqual(self._c("_gemm_a8w8_blockscale_kernel"), ("triton", True))
+
+    def test_snake_case_kernels_editable(self):
+        for n in ("_fwd_kernel", "_attn_fwd_kernel", "fmoe_fused_kernel", "rms_norm_kernel",
+                  "_bwd_kernel", "_gemm_a8w8_blockscale_kernel_GROUP_K_128_cache_modifier_CG"):
+            with self.subTest(n=n):
+                cls, editable = self._c(n)
+                self.assertTrue(editable, f"{n} should be editable")
+                self.assertEqual(cls, "triton", f"{n} should be triton")
+
+    def test_library_symbols_not_editable(self):
+        # Mangled/vendor symbols: uppercase body fails the snake_case guard -> library_gemm/non-editable.
+        for n in ("Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV", "Tensile_foo_gemm", "hipblasLtMatmul",
+                  "GemmEx_something", "rocblas_hgemm"):
+            with self.subTest(n=n):
+                cls, editable = self._c(n)
+                self.assertEqual(cls, "library_gemm", f"{n} should be library_gemm")
+                self.assertFalse(editable, f"{n} should be non-editable")
+
+    def test_aiter_and_other(self):
+        # aiter mangled symbol ending in `_kernelI...` is NOT pure snake_case up to `_kernel` (uppercase
+        # `ZN5aiter`) -> falls through to the aiter RULES entry (fused_custom, editable).
+        self.assertEqual(self._c("_ZN5aiter24add_rmsnorm_quant_kernelIDF16b"), ("fused_custom", True))
+        # A non-kernel op with no rule match -> other/editable (inspect-source default).
+        self.assertEqual(self._c("aten::addmm"), ("other", True))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

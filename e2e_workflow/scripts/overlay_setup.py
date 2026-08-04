@@ -10,11 +10,20 @@ or (b) imports the real module and REBINDS one attribute (monkeypatch), or (c) i
 hook. All three are driven by a manifest so multiple overlays COMPOUND (each accepted kernel appends).
 
 Layout produced:
-    <overlay>/sitecustomize.py          # generic, manifest-driven (idempotent)
+    <overlay>/_overlay_apply.py         # the shared apply() logic (manifest-driven, idempotent)
+    <overlay>/sitecustomize.py          # thin: import _overlay_apply; _overlay_apply.apply()
+    <overlay>/_overlay_worker_ext.py    # vLLM --worker-extension-cls hook (applies in each TP worker)
     <overlay>/_overlay_manifest.json    # {"modules":[...], "rebinds":[...], "captures":[...]}
     <overlay>/_patched/<dotted>.py      # patched submodule sources (for module-inject entries)
     <overlay>/<impl files>              # copied impl modules (for rebind/capture entries)
 Launch with:  PYTHONPATH=<overlay>:$PYTHONPATH
+
+vLLM note: vLLM v1 SPAWNS its TP worker subprocesses (fresh interpreters), which do NOT inherit the
+parent's already-applied in-memory rebind and may not re-run sitecustomize reliably. So the overlay must
+be re-applied INSIDE each worker. `_overlay_worker_ext.py` exposes an `OverlayWorkerExtension` class whose
+module import calls `apply()`; the vLLM adapter passes it via `--worker-extension-cls` (behind a
+capability probe). sglang FORKS its workers, so they inherit the applied rebind and need nothing extra.
+`apply()` is idempotent (a process-global guard) so sitecustomize + worker-ext can't double-apply.
 
 Commands:
   add-module    inject a patched submodule file in place of the installed one (whole-file source swap)
@@ -33,54 +42,97 @@ Stdlib only.
 """
 import argparse, importlib, json, os, shutil, subprocess, sys
 
-SITECUSTOMIZE = r'''# Auto-generated reversible overlay (e2e_workflow). Drop this dir from PYTHONPATH to revert.
+# The shared apply() logic lives in _overlay_apply.py so BOTH sitecustomize.py (parent + forked workers)
+# and _overlay_worker_ext.py (vLLM spawned workers via --worker-extension-cls) run the exact same code.
+OVERLAY_APPLY = r'''# Auto-generated reversible overlay (e2e_workflow). Drop this dir from PYTHONPATH to revert.
+# Shared, idempotent apply() driven by _overlay_manifest.json. Imported by sitecustomize.py AND by the
+# vLLM worker-extension so spawned TP workers get the same rebinds the parent process has.
 import json, os, sys, importlib, importlib.util
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_MAN = os.path.join(_HERE, "_overlay_manifest.json")
+
+def apply():
+    # Idempotent: sitecustomize + a vLLM worker-extension can both fire in the same interpreter; apply once.
+    if getattr(sys, "_geak_overlay_applied", False):
+        return
+    sys._geak_overlay_applied = True
+
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+    _MAN = os.path.join(_HERE, "_overlay_manifest.json")
+    try:
+        with open(_MAN) as _fh:
+            _m = json.load(_fh)
+    except Exception:
+        _m = {"modules": [], "rebinds": [], "captures": []}
+
+    # (a) inject patched submodules under their dotted names BEFORE anything imports them.
+    for _e in _m.get("modules", []):
+        try:
+            _dotted, _file = _e["module"], os.path.join(_HERE, _e["file"])
+            _spec = importlib.util.spec_from_file_location(_dotted, _file)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_dotted] = _mod
+            _spec.loader.exec_module(_mod)
+            # bind as attribute on the parent so both `from a.b import c` and `import a.b; a.b.c` see the patch.
+            if "." in _dotted:
+                _parent, _child = _dotted.rsplit(".", 1)
+                try:
+                    setattr(importlib.import_module(_parent), _child, _mod)
+                except Exception:
+                    pass
+            sys.stderr.write("[overlay] injected module %s <- %s (pid %d)\n" % (_dotted, _file, os.getpid()))
+        except Exception as _ex:
+            sys.stderr.write("[overlay] module inject FAILED %r: %r\n" % (_e, _ex))
+
+    # (b) rebind single attributes (monkeypatch).
+    for _e in _m.get("rebinds", []):
+        try:
+            _modname, _attr = _e["target"].split(":")
+            _t = importlib.import_module(_modname)
+            _impl = importlib.import_module(_e["impl_module"])
+            setattr(_t, _attr, getattr(_impl, _e["impl_attr"]))
+            sys.stderr.write("[overlay] rebound %s -> %s.%s (pid %d)\n" % (_e["target"], _e["impl_module"], _e["impl_attr"], os.getpid()))
+        except Exception as _ex:
+            sys.stderr.write("[overlay] rebind FAILED %r: %r\n" % (_e, _ex))
+
+    # (c) capture hooks (shape/IO oracle recording).
+    for _e in _m.get("captures", []):
+        try:
+            import capture_shapes
+            capture_shapes.install(_e["target"], _e["out"], int(_e.get("max", 5)))
+        except Exception as _ex:
+            sys.stderr.write("[overlay] capture install FAILED %r: %r\n" % (_e, _ex))
+
+
+# Allow `python -m _overlay_apply` / direct import to self-apply.
+apply()
+'''
+
+# sitecustomize.py is auto-run by Python at interpreter startup (parent proc + forked sglang workers).
+# Kept thin so the real logic lives in one place (_overlay_apply.apply()).
+SITECUSTOMIZE = r'''# Auto-generated reversible overlay (e2e_workflow). Drop this dir from PYTHONPATH to revert.
 try:
-    with open(_MAN) as _fh:
-        _m = json.load(_fh)
-except Exception as _e:
-    _m = {"modules": [], "rebinds": [], "captures": []}
+    import _overlay_apply  # apply() runs on import (idempotent)
+except Exception as _ex:
+    import sys
+    sys.stderr.write("[overlay] sitecustomize could not import _overlay_apply: %r\n" % (_ex,))
+'''
 
-# (a) inject patched submodules under their dotted names BEFORE anything imports them.
-for _e in _m.get("modules", []):
-    try:
-        _dotted, _file = _e["module"], os.path.join(_HERE, _e["file"])
-        _spec = importlib.util.spec_from_file_location(_dotted, _file)
-        _mod = importlib.util.module_from_spec(_spec)
-        sys.modules[_dotted] = _mod
-        _spec.loader.exec_module(_mod)
-        # bind as attribute on the parent so both `from a.b import c` and `import a.b; a.b.c` see the patch.
-        if "." in _dotted:
-            _parent, _child = _dotted.rsplit(".", 1)
-            try:
-                setattr(importlib.import_module(_parent), _child, _mod)
-            except Exception:
-                pass
-        sys.stderr.write("[overlay] injected module %s <- %s\n" % (_dotted, _file))
-    except Exception as _ex:
-        sys.stderr.write("[overlay] module inject FAILED %r: %r\n" % (_e, _ex))
+# vLLM v1 spawns TP worker subprocesses that don't reliably re-run sitecustomize; the adapter passes this
+# class via `--worker-extension-cls _overlay_worker_ext.OverlayWorkerExtension`. Merely importing the module
+# (which vLLM does in every worker to resolve the class) applies the overlay in that worker process.
+OVERLAY_WORKER_EXT = r'''# Auto-generated vLLM worker-extension overlay hook (e2e_workflow).
+# vLLM imports this module in every TP worker to resolve OverlayWorkerExtension; the import applies the
+# overlay in-process (idempotent). The class itself needs no methods — the import side-effect is the point.
+try:
+    import _overlay_apply  # apply() runs on import (idempotent)
+except Exception as _ex:
+    import sys
+    sys.stderr.write("[overlay] worker-ext could not import _overlay_apply: %r\n" % (_ex,))
 
-# (b) rebind single attributes (monkeypatch).
-for _e in _m.get("rebinds", []):
-    try:
-        _modname, _attr = _e["target"].split(":")
-        _t = importlib.import_module(_modname)
-        _impl = importlib.import_module(_e["impl_module"])
-        setattr(_t, _attr, getattr(_impl, _e["impl_attr"]))
-        sys.stderr.write("[overlay] rebound %s -> %s.%s\n" % (_e["target"], _e["impl_module"], _e["impl_attr"]))
-    except Exception as _ex:
-        sys.stderr.write("[overlay] rebind FAILED %r: %r\n" % (_e, _ex))
 
-# (c) capture hooks (shape/IO oracle recording).
-for _e in _m.get("captures", []):
-    try:
-        import capture_shapes
-        capture_shapes.install(_e["target"], _e["out"], int(_e.get("max", 5)))
-    except Exception as _ex:
-        sys.stderr.write("[overlay] capture install FAILED %r: %r\n" % (_e, _ex))
+class OverlayWorkerExtension:
+    """No-op extension; its module import re-applies the e2e_workflow overlay inside each vLLM TP worker."""
+    pass
 '''
 
 
@@ -105,10 +157,13 @@ def module_file(dotted):
 
 def _ensure_overlay(overlay):
     os.makedirs(overlay, exist_ok=True)
-    sc = os.path.join(overlay, "sitecustomize.py")
-    if not os.path.exists(sc):
-        with open(sc, "w") as fh:
-            fh.write(SITECUSTOMIZE)
+    # Always (re)write the code files so an upgraded overlay_setup.py refreshes them in an existing overlay
+    # dir; they are content-fixed templates so overwriting is safe and reversible (drop the dir to revert).
+    for fname, body in (("_overlay_apply.py", OVERLAY_APPLY),
+                        ("sitecustomize.py", SITECUSTOMIZE),
+                        ("_overlay_worker_ext.py", OVERLAY_WORKER_EXT)):
+        with open(os.path.join(overlay, fname), "w") as fh:
+            fh.write(body)
     man = os.path.join(overlay, "_overlay_manifest.json")
     if not os.path.exists(man):
         with open(man, "w") as fh:

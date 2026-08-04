@@ -18,6 +18,16 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
    GEMM DB env: `grep -c 'is tuned on cu_num'` must be >0 (and "not found tuned config" must drop). For
    an authored/patched kernel: confirm the overlay module is imported / the rebind took (a load banner
    or an injected marker). **No engagement proof → REJECT (it's not really applied).**
+   **⚠️ On vLLM at TP>1, verify engagement PER RANK, not once.** vLLM SPAWNS its TP worker subprocesses;
+   the GEMM runs in the WORKERS, not the API/engine process. The overlay's rebind banner
+   (`[overlay] rebound … (pid …)` from `_overlay_apply.apply()`) must appear **once per TP rank** (N
+   distinct worker pids on TP=N), OR the engagement counter (`is tuned on cu_num` / a live forward count)
+   must be >0 from a worker. A single banner from ONLY the engine process means the overlay bound in the
+   wrong process and the kernel is NOT live (the historical 0-engagement / no-speedup failure) — REJECT.
+   The vLLM adapter now passes `--worker-extension-cls _overlay_worker_ext.OverlayWorkerExtension` +
+   `VLLM_WORKER_MULTIPROC_METHOD=spawn` so the overlay re-applies inside each worker; N per-rank banners
+   are the proof it worked. (sglang FORKS workers, so its single inherited banner already covers all
+   ranks — the per-rank count applies to vLLM.)
    **Verify engagement BEFORE the timed A/B — die in minutes, not hours.** If your inputs carry an
    `ENGAGEMENT_CHECK` (a concrete live-server assertion the Architect attached to this head, e.g.
    "`grep -c 'is tuned on cu_num' > 0`" or "overlay module injected in the cand server log"), start the

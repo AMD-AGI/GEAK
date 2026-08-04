@@ -46,17 +46,41 @@ adapter_launch() {
       _prof_env=(VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR")
     fi
   fi
+  # OVERLAY REACHES TP WORKERS: vLLM v1 SPAWNS its TP worker subprocesses (fresh interpreters) that do NOT
+  # reliably re-run the overlay's sitecustomize.py -> the kernel rebind lands only in the API/engine proc
+  # and never engages on the GPU (observed: 0 engagement, no speedup). Fix: (1) force the spawn start
+  # method explicitly, and (2) pass overlay_setup.py's worker-extension class so vLLM re-applies the
+  # overlay INSIDE each worker (importing the module runs _overlay_apply.apply()). Both are gated on
+  # OVERLAY_PYTHONPATH so stock (no-overlay) runs are byte-identical. The flag is passed only when the
+  # running vLLM SUPPORTS it (capability probe, mirroring the ProfilerConfig probe above) — older builds'
+  # argparse would abort the launch on an unknown flag, so on an unsupported build we fall back to
+  # PYTHONPATH+spawn only (today's behavior). sglang FORKS its workers and needs none of this.
+  local -a _wext=()
+  local -a _wext_env=()
+  if [ -n "${OVERLAY_PYTHONPATH:-}" ]; then
+    _wext_env=(VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}")
+    # Capability probe by IMPORT (device-independent, cheap) rather than `vllm serve --help` — the latter
+    # inits config/device and can CRASH on a driver-less host + is slow (same reasoning as ProfilerConfig).
+    # worker_extension_cls is a ParallelConfig field on builds that support --worker-extension-cls.
+    if python3 -c 'from vllm.config import ParallelConfig; import sys; sys.exit(0 if "worker_extension_cls" in getattr(ParallelConfig, "model_fields", {}) else 1)' 2>/dev/null; then
+      _wext=(--worker-extension-cls _overlay_worker_ext.OverlayWorkerExtension)
+    else
+      echo "[overlay] vllm build lacks worker_extension_cls; TP-worker overlay relies on PYTHONPATH+spawn inheritance only" >&2
+    fi
+  fi
   # shellcheck disable=SC2086
   env $EXTRA_ENV \
     ${_ga:+GPU_ARCHS=$_ga} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     "${_prof_env[@]}" \
+    "${_wext_env[@]}" \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     vllm serve "$MODEL" \
       --host "$HOST" --port "$PORT" \
       --tensor-parallel-size "$TP" \
       --gpu-memory-utilization "$MEM_FRACTION" \
       "${_prof[@]}" \
+      "${_wext[@]}" \
       $EXTRA_SERVER_ARGS \
       > "$LOG" 2>&1 &
   SERVER_PID=$!
