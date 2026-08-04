@@ -65,7 +65,7 @@ const GPU_LIST = String(A.gpu_ids != null ? A.gpu_ids : '0').split(',').map(s =>
 // Explicit backend list (empty => auto-discover from the freeze + op_benchmarker probe).
 const BACKENDS = (Array.isArray(A.backends) ? A.backends
   : (typeof A.backends === 'string' ? A.backends.split(',') : []))
-  .map(s => String(s).trim().toLowerCase()).filter(Boolean);
+  .map(s => String(s == null ? '' : s).trim().toLowerCase()).filter(Boolean);
 // Expert-skills passthrough (advisory; OFF by default -> nothing injected).
 const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
@@ -206,6 +206,11 @@ const primSpeedup = (r) => {
   return Number.isFinite(g) ? g : 0;
 };
 
+// Gate fields like `smoke` are free strings in the schemas, so an agent legitimately answers
+// "PASS - 15/15 parity draws, geomean 0.994" and a `=== 'pass'` test throws the whole run away.
+// Match the leading word instead: "PASS - ..." / "passed" gate open, "FAIL"/"did not pass" stay shut.
+const says = (v, w) => String(v == null ? '' : v).trim().toLowerCase().startsWith(w);
+
 // ===========================================================================
 // PHASE: Freeze — establish the ONE immutable oracle + frozen baseline (denominator)
 // ===========================================================================
@@ -220,7 +225,7 @@ const oracle = await agentT(
       GPU_LOCK: `${WORKFLOW_DIR}/scripts/gpu_lock.sh`,
     }),
   { phase: 'Freeze', label: 'oracle_freezer', schema: FREEZE_SCHEMA });
-if (!oracle || oracle.smoke !== 'pass' || !oracle.task_dir || oracle.baseline_frozen === false) {
+if (!oracle || !says(oracle.smoke, 'pass') || !oracle.task_dir || oracle.baseline_frozen === false) {
   log(`Freeze FAILED (${oracle ? oracle.notes || oracle.smoke : 'no result'}); aborting — no comparable baseline.`);
   return { mode: MODE, validation_status: 'freeze_failed', winner: null,
     reason: oracle ? oracle.notes || 'freeze smoke did not pass' : 'oracle_freezer returned nothing' };
@@ -272,14 +277,20 @@ const bake = await agentT(
 // it can never drop the incumbent (otherwise a rewrite could "win" while being slower than the un-tried
 // in-place optimization of the original). Other languages author (or rewrite->optimize if an editable impl
 // already exists on the box).
-const planByLang = Object.fromEntries((bake.author_plan || [])
-  .map(a => [String(a.language).toLowerCase(), a.route === 'rewrite' ? 'optimize' : 'author']));
+// `author_plan` is a free-form array of objects in the schema, so the agent may name the language under
+// any of a few obvious keys. Naive `String(a.language)` turned a missing key into the *string* "undefined",
+// which is truthy — it survived .filter(Boolean) and became a real lane literally named `undefined` (lane
+// dir `bakeoff/undefined/`, winner row `lang: "undefined"`). Read the aliases; an entry that still has no
+// name is an entry about THIS op, so attribute it to the incumbent language rather than inventing one.
 const liveLang = String(oracle.live_backend || '').toLowerCase();
-const requested = (BACKENDS.length ? BACKENDS
-  : (bake.author_plan || []).map(a => String(a.language).toLowerCase())).filter(Boolean);
-// Incumbent FIRST (force-included regardless of args.backends / discovery), then the requested/discovered
-// rewrites, deduped. When liveLang is already in `requested` the Set collapses it to a single optimize lane.
-const wanted = [...new Set([liveLang, ...requested])].filter(Boolean);
+const rawLang = (a) => String((a && (a.language || a.lang || a.backend || a.target_language)) || '').trim();
+const langOf = (a) => rawLang(a).toLowerCase() || liveLang;
+const unnamed = (bake.author_plan || []).filter(a => !rawLang(a)).length;
+if (unnamed) log(`WARNING: ${unnamed} author_plan entr(y|ies) carried no language field; ` +
+                 `attributed to the incumbent language '${liveLang || '(unknown)'}'. Check Discover output.`);
+const modeOf = (a) => (a && a.route === 'rewrite') ? 'optimize' : 'author';
+// route per language, for the explicit-`backends` path (an existing editable impl => optimize, not author).
+const planByLang = Object.fromEntries((bake.author_plan || []).map(a => [langOf(a), modeOf(a)]));
 if (!liveLang) {
   // The freezer could not identify the input language, so the incumbent optimize lane cannot be guaranteed.
   // Do NOT silently proceed with rewrites only — that would let a slower rewrite "win" over a baseline we
@@ -287,9 +298,27 @@ if (!liveLang) {
   log('WARNING: oracle.live_backend is empty — cannot guarantee the incumbent-language optimize lane; ' +
       'rewrites will still run but the original language is under-represented. Check oracle_freezer.');
 }
-const lanes = wanted.map(lang => ({
-  lang, key: lang,
-  mode: lang === liveLang ? 'optimize' : (planByLang[lang] || 'author'),
+// Incumbent FIRST (force-included regardless of args.backends / discovery), then the requested/discovered
+// rewrites. Deduped on lang+mode, NOT on lang alone: "optimize the existing Triton in place" and "author a
+// fresh Triton from scratch" are two genuinely different candidates and both deserve a lane.
+const wanted = [];
+const seen = new Set();
+const want = (lang, mode) => {
+  if (!lang) return;
+  const k = `${lang}:${mode}`;
+  if (seen.has(k)) return;
+  seen.add(k);
+  wanted.push({ lang, mode });
+};
+want(liveLang, 'optimize');
+if (BACKENDS.length) BACKENDS.forEach(l => want(l, l === liveLang ? 'optimize' : (planByLang[l] || 'author')));
+else (bake.author_plan || []).forEach(a => want(langOf(a), modeOf(a)));
+// Lane dir/log key: plain language when that language has a single lane, `<lang>_<mode>` when it has two.
+const laneCount = {};
+wanted.forEach(w => { laneCount[w.lang] = (laneCount[w.lang] || 0) + 1; });
+const lanes = wanted.map(w => ({
+  lang: w.lang, mode: w.mode,
+  key: laneCount[w.lang] > 1 ? `${w.lang}_${w.mode}` : w.lang,
 }));
 if (!lanes.length) {
   log('Discover produced no viable lanes; aborting.');

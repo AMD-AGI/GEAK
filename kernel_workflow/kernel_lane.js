@@ -102,6 +102,10 @@ const primSpeedup = (o) => {
   const g = o.verified_geomean != null ? o.verified_geomean : o.speedup_geomean;
   return Number.isFinite(g) ? g : 0;
 };
+// Gate fields like `correctness` / `status` are free strings in the schemas, so an agent legitimately
+// answers "PASS - 15/15 draws" and a `=== 'pass'` test silently drops a genuinely verified candidate.
+// Match the leading word instead: "PASS - ..." / "passed" gate open, "FAIL"/"did not pass" stay shut.
+const says = (v, w) => String(v == null ? '' : v).trim().toLowerCase().startsWith(w);
 const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR ? WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge' : '')).replace(/\/+$/, '');
 // Expert skills = human-authored, validated kernel recipes (perf_knowledge/expert_skills/). ADVISORY
@@ -460,7 +464,7 @@ if (MODE === 'author') {
       GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, KERNEL_KNOWLEDGE_DIR,
     }),
     { phase: 'Author', label: `author:${TARGET_LANGUAGE}`, schema: AUTHOR_SCHEMA });
-  if (!authored || !authored.authored || authored.correctness !== 'pass') {
+  if (!authored || !authored.authored || !says(authored.correctness, 'pass')) {
     log(`Author mode FAILED for ${TARGET_LANGUAGE}: ${authored ? authored.notes || authored.correctness : 'no result'}. Aborting (no seed to optimize).`);
     return {
       mode: 'author', authored: false, target_language: TARGET_LANGUAGE,
@@ -675,8 +679,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
   );
 
   const clean = results.filter(Boolean);
-  const verified = clean.filter(r => r.ver && r.ver.status === 'verified' &&
-    r.ver.correctness === 'pass' && primSpeedup(r.ver) > 1.0);
+  const verified = clean.filter(r => r.ver && says(r.ver.status, 'verified') &&
+    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > 1.0);
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
   // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
