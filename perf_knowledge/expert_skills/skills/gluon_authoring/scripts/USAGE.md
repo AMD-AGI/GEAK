@@ -65,8 +65,11 @@ files the package does not carry:
 
 - `recover_gluon.py --record` / `--verify` prints `perf_delta_vs_plain: <fill> # regression expected,
   NOT a reject`. That is upstream's transcribe-only step, where the pipeline layer came later. **Here the
-  port is transcribe *plus* re-injection and closes at ≥95% of tuned plain** — due in round 1, or round 2
-  when plain is auto-pipelined. Take the gate from `skill.md ## Procedure` step 3, not from this line.
+  port is transcribe *plus* re-injection and closes at ≥95% of tuned plain**, as the exit condition of
+  step 2 rather than on any round boundary. Take the gate from `skill.md ## Procedure` step 3, not from
+  this line — and note that "regression expected" is upstream's expectation for half the procedure, so do
+  not carry it over as this skill's: a port that clears the bar rather than approaching it from below is
+  a normal outcome here, and step 4 is written on the assumption that the track continues past it.
 - `references/tile-programming/pipeline.md` tells you to run
   `scripts/probe_levers.py reinject_ttgir_pipeliner`. The CLI takes no positional probe name and exits 2;
   use `--all` as above. Its **vetted double-buffer skeleton also indexes with `s.index(i % 2)`**, which

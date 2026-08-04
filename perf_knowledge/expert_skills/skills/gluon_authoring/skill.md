@@ -1,6 +1,6 @@
 ---
 id: gluon_authoring
-title: "Author Gluon on CDNA: the language surface, the do-not-write list, and a deterministic TTGIR→Gluon first round"
+title: "Author Gluon on CDNA: the language surface, the do-not-write list, and a TTGIR→Gluon port that goes past parity"
 kind: expert_skill
 authors: [qiongz]
 scope: kernel
@@ -15,6 +15,10 @@ match:
   from_backend: [triton, gluon]
   to_backend: gluon
 # ---- expected effect: the validation gate's pass criteria ----
+# Measure this over the WHOLE track the skill defines — the port AND the continuation past it
+# (`## Procedure` step 4) — because the port on its own is built to land near parity, not above it.
+# A validation run that stops when step 3's checkpoints close has measured the transcription rather than
+# the skill, and will under-report it against the floor below. See `## Sources`.
 expects:
   isolated_speedup_min: 1.10
   parity: required
@@ -36,22 +40,43 @@ The workflow is working a **Gluon** kernel on gfx942/gfx950 and needs two things
 **Gluon API surface**, and the **do-not-write list** — the constructs and instruction choices that compile
 and then silently cost you.
 
-**Two entry states, and they do not share a round 1:**
+**Two entry states, and they do not open the same way:**
 
 - **Porting from plain Triton** (`from_backend: triton`). A tuned plain kernel exists, so the opening move
   is the fixed transcribe-then-re-inject pair in `## Procedure`, closing against that kernel at **≥95%**.
-  Round 1 carries the transcription to layout equivalence; the re-injection may take round 2 when plain is
-  auto-pipelined. Two rounds is the ceiling.
+  That bar is a checkpoint the track passes *through*; step 4 is what the port was for.
 - **Already Gluon** (`from_backend: gluon`). Nothing to transcribe and no plain anchor to hold parity
-  with, so skip step 1 and step 3's gates; keep step 2 only if the loop is not already pipelined, and go
-  straight to GEAK's ordinary loop with the API pages and the do-not-write list as reference.
+  with, so skip step 1 and step 3's checkpoints; keep step 2 only if the loop is not already pipelined, and go
+  straight to step 4 with the API pages and the do-not-write list as reference.
 
-**Everything about process stays with GEAK.** This skill carries no round loop, no budget model, no
-profiling pipeline, no lever catalogue and no escalation gate. Run your normal `kernel_workflow` /
-`e2e_workflow` loop; the one difference is that **a port needs no direction fan-out while it is landing**,
-because those moves are deterministic rather than hypotheses worth exploring several ways (see
-`## Procedure`). Once the port is at parity it is your ordinary loop, and what to try next is your call,
-not this file's.
+**Run steps 1–4 as one continuous track held by one agent, not as a fan-out.** Two reasons, and they
+are different. The porting moves are *deterministic*: any two agents transcribing the same pinned
+`.ttgir` land on the same layouts, so parallel arms do not explore alternatives — they all measure the
+same transcription, and a shared bug in it identically. And the continuation in step 4 is *stateful*:
+what to try next is chosen from the IR and profile of the anchor you just built, which the agent that
+built it is holding and a fresh agent would have to rebuild. Splitting the track at the gates throws
+that away at the moment it becomes useful.
+
+In `kernel_workflow` terms this is the **`deep_explore` track**, not a set of specialist directions: it
+runs alone in its own round, carries its own long measure→self-profile→rewrite loop, and has authority
+over kernel plus wrapper — which is the shape steps 1–4 need. One mismatch to steer around: that track
+is documented as a minimally-steered ground-up rewrite, and here the first half is the opposite. **Steps
+1–3 are tightly specified and must be followed as written; step 4 is where the open-ended half begins.**
+Do not let a ground-up rewrite replace the transcription — the transcription *is* the anchor every later
+number is attributed against.
+
+Two directions not to spend while the port is landing: a second arm on the transcription (above), and
+**anything that re-tunes the plain comparator** — that moves the denominator underneath a port whose
+whole definition is a ratio to it. Re-tune plain before the track starts or after it ends, never during.
+
+**Process stays with GEAK, with three exceptions this skill does own.** It still carries no round loop,
+no budget model, no bound-class model and no escalation gate — run your normal `kernel_workflow` /
+`e2e_workflow` loop, and note that step 4's list is not a lever catalogue either: it is scoped to what
+*this port* newly made expressible, and it ranks rather than decides. What this file does own, because
+getting them wrong silently invalidates the port: the **track shape** just above; **what must and must
+not be measured before step 1** (`## Procedure` preamble); and the **duty to re-verify a positive**
+(`## Do-no-harm notes`), which matters most in exactly the single-track setup above, because that is
+where the workflow's own independent re-benchmark may not be there to do it for you.
 
 Do not use it to decide *whether* Gluon is the right direction. Short version: Gluon pays only when the
 residual is layout-shaped, because LDS swizzle/padding choice and LDS dedup are the two things plain
@@ -99,9 +124,9 @@ arrives with.
 ## Procedure
 
 The port **from plain Triton**, from the GEAK repo root with
-`SKILL=perf_knowledge/expert_skills/skills/gluon_authoring`. Steps 1 and 2 fit in round 1 when the
-transcription converges quickly, and may span two rounds when it does not — step 3 says which gate is due
-when. Coming in with a kernel that is already Gluon, start at step 2 and treat step 3 as not applicable.
+`SKILL=perf_knowledge/expert_skills/skills/gluon_authoring`. Steps 1–3 are a sequence, not a schedule:
+each one's exit condition is the next one's precondition, and step 3 names the two you have to hold.
+Coming in with a kernel that is already Gluon, start at step 2 and treat step 3 as not applicable.
 
 **Before step 1, settle the comparator, and then stop moving it.** The kernel you pin must be the plain
 champion at *its own best config*, and the `.ttgir` you dump must come from that config: every number
@@ -110,6 +135,15 @@ worth knowing up front. A port measured against a shipped default is not a port 
 the ratio looks. And the anchor is **bound to the config it was dumped at** — the recovered layouts carry
 literal `warps_per_cta` and tile extents, so if the champion's best config differs per shape bucket you
 dump and transcribe per bucket rather than expecting one anchor to follow it.
+
+**Those two things gate step 1, and nothing else does** — reproduce that comparator's number on your
+harness, dump its `.ttgir`, begin. That is the whole entry cost, and in particular **do not put a full
+profiling pass in front of step 1.** A profile taken before the port describes the *comparator*, and the
+question it would answer — is a layout-shaped direction the right one — is decided upstream of this file,
+not by it (see `## When to use`). Step 2 makes you read the Gluon IR back anyway, so the state step 4
+selects its next move from arrives as a by-product of landing the port. Profile once the port has landed,
+when the profile is about the kernel you are optimizing. On a short budget this ordering is the
+difference between reaching step 4 and not: the port is cheap and front-loaded analysis is not.
 
 **1. Transcribe, and drive it to layout equivalence.** Pin the tuned plain kernel, dump its IR, recover
 the layouts, and iterate until `--verify` passes:
@@ -121,7 +155,7 @@ python3 "$SKILL/scripts/recover_gluon.py" ...            # calls ttgir_to_gluon.
 python3 "$SKILL/scripts/recover_gluon.py" ... --verify   # layout equivalence — do not skip
 ```
 
-**Budget several passes here, not one.** `--verify` is a diff, and the expected shape of round 1 is
+**Budget several passes here, not one.** `--verify` is a diff, and the expected shape of this step is
 verify → read the missing/extra layout attributes it names → fix that one layout → recompile the anchor →
 verify again, until it reports PASS. Run the converter's `--selftest` first so that a failure is
 attributable to your kernel rather than to the tool. Do not proceed to step 2 on a FAIL and do not
@@ -143,9 +177,10 @@ The converter covers `#blocked`, `#amd_mfma`, `#swizzled_shared`, `#padded_share
 `references/tile-programming/layout-recipes.md`; and `amd_rotating_shared` has no `gluon.language`
 constructor at all.
 
-**2. Re-inject the pipeline.** Do it in round 1 if step 1 converged quickly; **if the plain kernel is
-auto-pipelined, you may take a second round for this step alone** rather than compressing both into one
-(see the gate in step 3). Check the build first, then splice into `gluon_to_ttgir` after
+**2. Re-inject the pipeline.** Start it as soon as step 1 reports PASS. **If the plain kernel is
+auto-pipelined, budget this step several adjust-and-recheck cycles of its own** rather than treating one
+recompile as a verdict (see the gate in step 3). Check the build first, then splice into `gluon_to_ttgir`
+after
 `add_combine_tensor_select_and_if`, gated on `options.num_stages > 1` so it stays cache-key-safe and
 default-OFF:
 
@@ -199,22 +234,23 @@ transformed nothing — a different failure from the passes being absent, and th
 cannot see: `available: true` reports that the symbols are in this `libtriton.so`, not that they will
 bite on your IR. Separating those two is the whole point of reading the IR back.
 
-**3. Close on two gates — and know which round each one belongs to.**
+**3. Pass through two checkpoints — neither of them is where the track stops.**
 
-| gate | what it is | due |
+| checkpoint | what it is | when |
 | --- | --- | --- |
-| Layout equivalence + bit-parity | `--verify` PASS, and no numeric delta vs the plain anchor (transcription is layout-only, so any delta is a bug, not a Gluon property) | **end of round 1, always** |
-| **≥95% of the tuned plain kernel's throughput** | the port has actually landed | end of round 1 — **or end of round 2 if the plain kernel is auto-pipelined** |
+| Layout equivalence + bit-parity | `--verify` PASS, and no numeric delta vs the plain anchor (transcription is layout-only, so any delta is a bug, not a Gluon property) | **exit condition of step 1 — always, never deferred** |
+| **≥95% of the tuned plain kernel's throughput** | the port has actually landed | exit condition of step 2, once the pass is confirmed fired |
 
-The relaxation exists because the two steps fail differently. Step 1 converges on a diff you can read, so
-it belongs in one round. Step 2 is an edit to `compiler.py` whose effect you can only confirm by
-recompiling and reading the IR back, and on an auto-pipelined kernel that is normally a few
-adjust-and-recheck cycles — **spend round 2 on it rather than declaring round 1 a failure**. If plain was
-not auto-pipelined there is nothing to reproduce and both gates are due in round 1.
+They are ordered, not scheduled: the first is what makes the anchor trustworthy, so nothing downstream
+means anything until it passes, and it is never the one allowed to slip. The second is only readable
+after step 2's on/off dump says the pass fired — a throughput number taken before that is uninterpretable
+either way.
 
-**Two rounds is the ceiling for the port itself.** Still short of 95% after re-injection has been
-confirmed to fire? Then it is no longer a transcription problem — hand it back to GEAK's ordinary loop as
-a normal optimization target rather than spending a third round here.
+The two fail differently, which is why the second one gets cycles rather than a single attempt. Step 1
+converges on a diff you can read. Step 2 is an edit to `compiler.py` whose effect you can only confirm by
+recompiling and reading the IR back, so on an auto-pipelined kernel expect several adjust-and-recheck
+cycles — **spend them rather than reading the first recompile as a failure.** If plain was not
+auto-pipelined there is nothing to reproduce and both checkpoints close together.
 
 Below 95%, do not start optimizing layouts. The cause is almost always one of these — check them in this
 order, cheapest first. Note that the first two share a symptom (`local_alloc` / `local_store` /
@@ -231,9 +267,51 @@ order, cheapest first. Note that the first two share a symptom (`local_alloc` / 
    than eyeballing it, and check its `missing` list against your own preamble before concluding the
    recovery itself was wrong.
 
-The port ends at parity, not at a win. **Once both gates are met it is GEAK's ordinary loop** — the layout
-levers plain cannot express are the reason you came here, and which one to spend a direction on is the
-workflow's decision, informed by its own profile.
+**Bound the port by convergence, not by ambition.** Once that list is exhausted, re-injection is
+confirmed to fire, and you are *still* short of 95%, stop treating it as a transcription problem: it is
+now an ordinary optimization target, so carry the anchor into step 4 and say plainly that the port closed
+below parity. Continuing to re-transcribe past that point is the one way to spend a whole budget and land
+nothing.
+
+**Passing is not arriving.** Both checkpoints can close on a transcription that reproduces the comparator
+and stops there — that is a port which landed, and it is the *floor* of this track, not its result. Read
+a closed checkpoint as permission to start step 4, and note the asymmetry it hides: the two ways of
+writing the loop that step 2 discusses can both clear 95% while being different schedules, so clearing
+the bar does not tell you the body you shipped is the better of the two. Step 4 settles that first.
+
+**4. Continue past the port — this is what the port was for.** The anchor now reproduces the comparator
+in a language where the allocation and the schedule are yours, so the levers below became expressible the
+moment step 3 closed. Ranking and stopping stay GEAK's; what this file owes you is the list of what is
+*newly available* and the order that wastes fewest cycles, because a generic loop cannot know that.
+
+Profile the anchor first — now the profile is about your kernel — then work down:
+
+1. **Which of step 2's two loop bodies you actually want.** You have both: the transcription that stages
+   operands in LDS by hand, and the version that leaves that to the re-injected pass. They are not the
+   same schedule and either can be ahead. Cheapest possible experiment, already built, so settle it
+   before authoring anything new.
+2. **Per-operand buffering.** `num_stages` multi-buffers every operand *uniformly*, which is why a tile
+   whose uniform footprint exceeds the LDS budget cannot be double-buffered in plain at all. Explicit
+   allocation lets operands differ — buffer one and not the other. This is the lever with no plain
+   equivalent whenever uniform depth does not fit.
+3. **The `#shared` footprint itself** — swizzled versus padded, and LDS dedup. The two things plain has
+   no syntax for, so they are the reason `## When to use` sends layout-shaped residuals here.
+4. **Declining to stage an operand at all**, i.e. global straight into the dot-operand layout. Note the
+   coupling: the LDS round trip is often what was making the global load wide, so re-check the resulting
+   load width instead of assuming it survived.
+5. **Pipeline depth and the re-injected pass's own switches**, now that the loop is yours — after 1–4,
+   not before, because against a body the pass cannot act on they measure nothing.
+6. **Tile shape**, which is GEAK's ordinary autotuning, with `num_warps` still pinned for the reason in
+   `## Knobs & pitfalls`.
+
+Two disciplines carry over from step 2 and are what keep this half honest. **Fix a structural success
+signal before you read a clock** — buffer count, barrier count, the `lgkmcnt` shape — so that an
+unchanged IR is diagnosed as such instead of being mistaken for a lever that did not pay. And **be
+willing to be wrong about the cap**: a residual can be correctly diagnosed as layout-shaped and still
+not move when you fix it, because a second, non-layout resource binds at the same point. Occupancy is
+the usual place this happens, since LDS footprint and register pressure can each pin it independently —
+freeing the one you diagnosed then buys nothing on its own. Read that as the ranking being wrong, not
+the diagnosis.
 
 ## Knobs & pitfalls
 
@@ -276,18 +354,28 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
 - **Advisory only.** This file supplies API surface and mechanics, never a verdict. The workflow's
   isolated A/B against the immutable oracle decides, and a result below the measured baseline is a
   negative whatever this says.
-- **It does not narrow the workflow's search.** Only the port is fixed — at most two rounds, and only
-  because those moves are mechanical; every round after it is GEAK's own loop and every matched skill
-  enters the candidate set rather than pre-empting it.
+- **It does not narrow the workflow's search.** Only steps 1–3 are fixed, and only because those moves
+  are mechanical; step 4 ranks but does not decide, and every matched skill enters the candidate set
+  rather than pre-empting it.
 - **A Gluon result slower than its comparator is a revert.** A Gluon wall does not prove the comparator
   was at its ceiling.
+- **Disbelieve a fast number as hard as a slow one, and own that check yourself.** The bullet above tells
+  you what to do with a regression; nothing about a *win* is self-evident either, and the single-track
+  shape in `## When to use` is precisely the setup where the workflow's independent re-benchmark may not
+  be running alongside you to catch it. Before a Gluon number is reported: re-measure it in a clean
+  workspace, interleaved with the comparator on the same device rather than in separate batches; treat
+  anything inside the run-to-run spread as no result; and **confirm the Gluon kernel actually executed.**
+  That last one is not paranoia — a dispatcher that falls back to the plain kernel when some capability
+  or shape condition is unmet yields a "Gluon" measurement that is the plain kernel's, and because the
+  fallback is numerically perfect by construction, correctness checks endorse it. Check the launched
+  kernel name, or make the fallback path fail loudly instead of silently.
 - **On a port, the comparator must be the plain kernel tuned to its own best config.** A win over a
   default strawman is invalid, and so is a 95% measured against one. Starting from an existing Gluon
   kernel there is no plain comparator at all — the workflow's own frozen baseline is the floor, and the
   ≥95% bar does not apply.
-- **Correctness gates before timing**, and round 1 additionally gates on layout equivalence — a
-  numerically-correct wrong-layout anchor poisons every later delta, which is why that gate is never the
-  one allowed to slip into round 2.
+- **Correctness gates before timing**, and step 1 additionally gates on layout equivalence — a
+  numerically-correct wrong-layout anchor poisons every later delta, which is why that checkpoint is
+  never the one allowed to slip.
 - **Do not read a missing pipeline as a ceiling.** It is the auto-pipeliner that `gluon_to_ttgir` skips by
   default. An older note that re-injection "regresses" was a specific misfire — a hand-async loop with no
   in-body `tt.load` to anchor on, plus the `disableSched` cliff — not the passes.
@@ -330,15 +418,18 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
   the language docs, which are versioned against a specific SKU, container and date and go stale on their
   own schedule. A method file that hard-codes yesterday's numbers ages badly and invites reasoning from
   them instead of from measurement.
-- The **≥95%** parity bar is a **target**, not a measured result: transcription is layout-only and
-  re-injection is what restores plain's own overlap, so near-parity is what the two steps are aiming at —
-  reachable when the re-injected pass actually bites, which is why step 2 makes you confirm that from the
-  IR instead of assuming it. The bar exists to trigger the diagnostic list above rather than to record an
-  achievement. The same reasoning sets its deadline — one round when there is no pipeline to reproduce,
-  two when there is, because the second step's cost is adjust-and-recheck cycles rather than search.
-  Nothing here has been
-  measured on-box in GEAK — hence `validation.status: draft` and no auto-application.
-  `expects.isolated_speedup_min: 1.10` is the template floor for the skill's eventual win, not the parity
-  bar.
+- The **≥95%** bar is a **target and a floor**, not a measured result and not a finish line:
+  transcription is layout-only and re-injection is what restores plain's own overlap, so near-parity is
+  what those two steps are aiming at — reachable when the re-injected pass actually bites, which is why
+  step 2 makes you confirm that from the IR instead of assuming it. The bar exists to trigger step 3's
+  diagnostic list, and to mark where step 4 may begin. It is deliberately *not* an expectation about the
+  ceiling: a port can close above it, and a body that merely reaches it is the weakest outcome step 3
+  still calls landed — so the bar must never be read as the value of doing this at all.
+- **The two numbers in the frontmatter measure different things**, and conflating them under-reports the
+  skill. `≥95%` scopes steps 1–3, where near-parity *is* success. `expects.isolated_speedup_min` scopes
+  the whole track including step 4, and it is the template floor for a win rather than anything derived
+  from this file's own results — so an isolated A/B that stops when step 3 closes is not a valid
+  datapoint against it, whatever it reads. `validation.status` stays `draft`, with no auto-application,
+  until a `--record` run stamps it.
 - **Vendored files under `references/` are unmodified and do contain upstream's own measured claims.**
   Treat those as upstream's evidence, dated to upstream, and not as a GEAK measurement.

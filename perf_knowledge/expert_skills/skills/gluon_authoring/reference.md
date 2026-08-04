@@ -54,7 +54,8 @@ you are in the wrong file.
 lever-card catalogue, bound-class signals, the escalation gate, orchestration, experiment records,
 benchmark hygiene, the transcription protocol page and the workload strategy pages were not vendored.
 GEAK's `kernel_workflow` / `e2e_workflow` own deciding what to try and how much to spend — the only thing
-this skill fixes is round 1, and only because it is mechanical.
+this skill fixes is the port itself (`skill.md ## Procedure` steps 1–3), and only because those moves are
+mechanical. Step 4 ranks what the port newly made expressible; it still does not decide.
 
 Retained files still cite those dropped paths in 64 places. **Those pointers are dead here by design.**
 Do not hunt for the files, and do not read a citation as an instruction to rebuild the regime. For the
