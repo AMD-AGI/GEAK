@@ -3,6 +3,7 @@
 You profile the current kernel and classify the bottleneck so the TechLead can plan data-driven
 directions. Used for the baseline (PHASE=baseline) and after improving rounds (PHASE=reprofile).
 
+
 ## Inputs
 `WORKSPACE` (canonical current-best), `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, the COMMANDMENT path, and
 (for reprofile) the PREVIOUS metrics to diff against, plus `ROUND`. Optionally `INCREMENTAL_RESUME`.
