@@ -149,11 +149,25 @@ difference between reaching step 4 and not: the port is cheap and front-loaded a
 the layouts, and iterate until `--verify` passes:
 
 ```bash
-python3 "$SKILL/scripts/ttgir_to_gluon.py" --selftest    # 10 s, offline: is the converter itself sane?
-bash    "$SKILL/scripts/dump_ir.sh" <compile cmd> --variant plain --out ir/ --emit-gluon layouts
-python3 "$SKILL/scripts/recover_gluon.py" ...            # calls ttgir_to_gluon.py underneath
-python3 "$SKILL/scripts/recover_gluon.py" ... --verify   # layout equivalence — do not skip
+python3 "$SKILL/scripts/ttgir_bridge.py" --selftest      # 10 s, offline: is the recovery itself sane?
+bash    "$SKILL/scripts/dump_ir.sh" <compile cmd> --variant plain --out ir/ \
+        [--kernel-name <substr>]                         # PIN the body on a multi-kernel op
+python3 "$SKILL/scripts/ttgir_bridge.py" recover --ttgir ir/plain/plain.ttgir --arch gfx942 \
+        --out anchor_layouts.py                          # layouts, via the compiler's layoutToGluon
+python3 "$SKILL/scripts/ttgir_bridge.py" verify --plain ir/plain/plain.ttgir \
+        --anchor ir/anchor/anchor.ttgir --arch gfx942    # layout equivalence — do not skip
 ```
+
+`ttgir_bridge.py` gets the layouts from upstream's own `layoutToGluon()` rather than from a mapping
+table in this package, so an unsupported kind surfaces as a named `UNRECOVERABLE` row instead of a
+plausible wrong constructor, and every layout carries a round-trip proof. Use `recover_gluon.py`
+alongside it for anchor assembly and `--with-skeleton`, and fall back to it entirely only where
+`import triton` is unavailable — `scripts/USAGE.md` has the division of labour and the reasons.
+
+Two `verify` states pass: `PASS`, and `RECONCILED` (also exit 0) where every difference has a named
+structural cause — a disclosed substitution, a pipelined-plain shape the anchor never produces, or a
+layout produced by an op Gluon has no builtin for. Read the causes; each is a real fact about your
+anchor. `FAIL` is reserved for a difference with none.
 
 **Budget several passes here, not one.** `--verify` is a diff, and the expected shape of this step is
 verify → read the missing/extra layout attributes it names → fix that one layout → recompile the anchor →
@@ -175,7 +189,20 @@ The converter covers `#blocked`, `#amd_mfma`, `#swizzled_shared`, `#padded_share
 `ttg.dot_op` and `ttg.slice`. Two gaps that are **not** tool bugs, so do not spend verify cycles on them:
 `ttg.convert_layout` placement is manual — take it from the recovery map in
 `references/tile-programming/layout-recipes.md`; and `amd_rotating_shared` has no `gluon.language`
-constructor at all.
+constructor at all. It is not a `num_stages` artefact either — one measured kernel still carries it at
+`num_stages=1` — so re-dump at `ns=1` and re-recover before concluding a body is untranscribable.
+
+**Recovery audits layouts, not ops**, so a report reading 100% recovered does not mean the body is
+transcribable: `amdg.in_thread_transpose` has no Gluon builtin and appeared as a *successful* row until
+`ttgir_bridge.py` began naming it. And layout equivalence is blind to two things that decide real ports
+— read them off `recover` rather than discovering them at the clock:
+
+- **the `other` operand.** `tl.load(..., other=0.0)` compiles to a buffer_load with a mask and *no*
+  `other` (buffer OOB returns zero on CDNA); passing `other=` in Gluon emits it and costs a `v_cndmask`
+  per register, measured at 1.2–2% on two kernels. Transcribe the **dump**, not the source.
+- **LDS allocation size.** One kernel's entire 1.69× residual was its shared total crossing the
+  64 KiB/CU divisor — 2 workgroups per CU became 1 — with every layout verifying. Compare `recover`'s
+  `LDS:` line against plain's.
 
 **2. Re-inject the pipeline.** Start it as soon as step 1 reports PASS. **If the plain kernel is
 auto-pipelined, budget this step several adjust-and-recheck cycles of its own** rather than treating one

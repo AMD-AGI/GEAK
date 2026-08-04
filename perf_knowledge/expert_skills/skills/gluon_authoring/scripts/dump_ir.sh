@@ -9,7 +9,8 @@
 #
 # Usage:
 #   bash dump_ir.sh <compile_cmd ...> --variant <name> --out <ir_dir> [--knobs "LLIR_SCHED AMDGCN_AS RA_HINTS"]
-#       [--emit-gluon layouts|anchor|pipeline] [--kernel module.path:object] [--arch gfx950]
+#       [--emit-gluon layouts|anchor|pipeline] [--kernel module.path:object]
+#       [--kernel-name <substring>] [--arch gfx950]
 # Example:
 #   bash dump_ir.sh python bench.py --version plain --variant plain --out ir/
 #   # auto-recover the inferred layouts into Gluon (closes the transcribe loop):
@@ -22,7 +23,7 @@ usage() {
 Usage:
   bash dump_ir.sh <compile_cmd ...> --variant <name> --out <ir_dir>
       [--knobs "LLIR_SCHED AMDGCN_AS RA_HINTS"] [--emit-gluon layouts|anchor|pipeline]
-      [--kernel module.path:object] [--arch gfx950]
+      [--kernel module.path:object] [--kernel-name <substring>] [--arch gfx950]
 
 Any token that is not one of the flags above is part of <compile_cmd>, so the
 compile command may appear before, after or around the flags.
@@ -33,6 +34,7 @@ EOF
 }
 
 VARIANT="variant"; OUT_DIR="ir"; KNOBS=""; EMIT_GLUON=""; KERNEL=""; ARCH=""
+KERNEL_NAME=""
 CMD=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,6 +44,7 @@ while [ $# -gt 0 ]; do
     --knobs)       KNOBS="$2"; shift 2;;
     --emit-gluon)  EMIT_GLUON="$2"; shift 2;;
     --kernel)      KERNEL="$2"; shift 2;;
+    --kernel-name) KERNEL_NAME="$2"; shift 2;;
     --arch)        ARCH="$2"; shift 2;;
     *)             CMD+=("$1"); shift;;
   esac
@@ -97,10 +100,37 @@ echo "=== dump_ir variant=$VARIANT knobs='${KNOBS:-none}' cache=$CACHE ==="
 # populate TRITON_CACHE_DIR, but the cache nesting depth can differ (gluon.jit may nest
 # deeper than one level) -> try the one-level glob first, then a recursive fallback so a
 # gluon.jit kernel is not silently missed (feedback: dump was Triton-biased).
+#
+# "Freshest" is only safe when the op compiles ONE kernel. A multi-kernel op -- e.g. an
+# attention decode that compiles the attention body AND a split-K reduce, or an MLA op
+# whose reduce kernel compiles LAST -- has the last-compiled kernel win, and every layout,
+# warp count and tile extent recovered from it is then confidently wrong for the body that
+# was meant. Silently: the dump looks fine. `--kernel-name` pins the selection (distinct
+# from `--kernel`, which is `module.path:object` for the translator), and when more than
+# one kernel is present and nothing was pinned this says so with the candidate list.
 for ext in ttgir llir amdgcn; do
-  f="$(ls -t "$CACHE"/*/*."$ext" 2>/dev/null | head -1 || true)"
-  [ -n "$f" ] || f="$(find "$CACHE" -name "*.$ext" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)"
-  [ -n "$f" ] && cp "$f" "$DEST/$VARIANT.$ext" && echo "  + $DEST/$VARIANT.$ext"
+  _cands="$(find "$CACHE" -name "*.$ext" -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)"
+  [ -n "$_cands" ] || continue
+  if [ -n "$KERNEL_NAME" ]; then
+    _hit="$(printf '%s\n' "$_cands" | grep -F "$KERNEL_NAME" | head -1 || true)"
+    if [ -z "$_hit" ]; then
+      echo "  ! --kernel-name '$KERNEL_NAME' matched none of the .$ext in the cache:" >&2
+      printf '      %s\n' $(printf '%s\n' "$_cands" | xargs -r -n1 basename) >&2
+      continue
+    fi
+    f="$_hit"
+  else
+    f="$(printf '%s\n' "$_cands" | head -1)"
+    _n="$(printf '%s\n' "$_cands" | xargs -r -n1 basename | sort -u | wc -l)"
+    if [ "$_n" -gt 1 ]; then
+      echo "  ! $_n DISTINCT kernels compiled; took the FRESHEST: $(basename "$f")" >&2
+      echo "    This op is multi-kernel. If that is not the body you meant, every layout" >&2
+      echo "    recovered from it is wrong for your body -- and it will still look fine." >&2
+      echo "    Re-run with --kernel-name <substring>. Candidates:" >&2
+      printf '      %s\n' $(printf '%s\n' "$_cands" | xargs -r -n1 basename | sort -u) >&2
+    fi
+  fi
+  cp "$f" "$DEST/$VARIANT.$ext" && echo "  + $DEST/$VARIANT.$ext ($(basename "$f"))"
 done
 if ! ls "$DEST/$VARIANT".{ttgir,llir,amdgcn} >/dev/null 2>&1; then
   echo "  ! no ttgir/llir/amdgcn in the cache for variant=$VARIANT. For a @gluon.jit kernel make sure it actually compiled (not a cache hit from a prior run); TRITON_ALWAYS_COMPILE=1 forces a fresh compile." >&2
