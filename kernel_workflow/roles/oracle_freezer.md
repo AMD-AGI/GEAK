@@ -62,7 +62,8 @@ The freeze is only trustworthy if the input kernel RUNS — it has to serve as t
 in order:
 - a shipped driver/test in `KERNEL_PATH` (`config.yaml`/`config.json` with `compile/correctness/performance`
   commands, `scripts/task_runner.py`, `test_*.py` / `*_test.py` / `bench*.py`) — reuse it to learn the
-  entry point + input construction;
+  entry point + input construction, **and note which case file it loads — that set is step 2's
+  top-priority manifest source, not just driver plumbing**;
 - else **reuse `benchmark_engineer`'s COMMANDMENT-building capability for the DRIVER PLUMBING ONLY** (how
   to import + call the kernel, build inputs, time it). Read `SKILL_DIR/roles/benchmark_engineer.md`.
   > ⚠️ Use `benchmark_engineer` for the *driver* only — **never** as the correctness source. Do NOT invoke
@@ -77,12 +78,24 @@ Resolve the input kernel's entry point (`module:attr` or the copied `kernel_src`
 Pin down *what* gets run, and write it into `meta.cases[]`. Nothing is executed for the record and nothing
 is saved to disk here — the shapes are what must stay fixed across rounds so results are comparable; the
 values are regenerated from the recorded seed on every run.
-- **Shapes/dtype:** if `WORKLOAD_SPEC_PATH` is given, use its `cases[]` (each tensor's own `dims`+`dtype`
-  +`quant`); else use `OP_SPEC.shapes`/`dtype`; else synthesize **small / medium / large** cases from the
-  kernel's signature. Honor the regime (`OP_SPEC.regime`) for dtype/layout — do NOT hardcode bf16 when the
+- **Shapes/dtype — take the FIRST source that exists:** (1) **the case set the shipped driver actually
+  loads** — read the driver to see which file that is, a dir can ship two disagreeing sets (`wvSplitK`:
+  `test_cases.json` 14 cases vs `canonical/regime_test_cases.json` 3, and its `task_runner.py` prefers the
+  latter); (2) `WORKLOAD_SPEC_PATH`'s `cases[]`; (3) `OP_SPEC.shapes`/`dtype`; (4) last resort, synthesize
+  **small / medium / large** from the signature. If (1) and (2) disagree, `cases[]` follows (1) — so the
+  number stays comparable to the user's own `performance_command` — and (2) merges under `meta.workload`
+  for weighting only. Also carry the driver's pinned launch constants (block sizes,
+  `num_warps`/`num_stages`/`waves_per_eu`, grid formula, eps, fp8 min/max) into the `baseline_src/`
+  launcher: a baseline launched with a different config is a different baseline.
+  Honor the regime (`OP_SPEC.regime`) for dtype/layout — do NOT hardcode bf16 when the
   kernel is quantized. A symbolic/dynamic dim (e.g. `"M"`) MUST be resolved to concrete ints (from
   `OP_SPEC.m_buckets` / the workload) before it reaches the manifest — never leave a string where a tensor
   dim is expected.
+- **If the shipped test splits PERF from CORRECTNESS cases:** `cases[]` drives BOTH legs, so it must equal
+  the shipped **perf** set exactly — extra shapes would dilute the reported speedup. The correctness-only
+  shapes therefore fall out of coverage; list each one's dims in `meta.notes`. (`fused_moe_int4_w4a16`: 3
+  `PERF_CASES` vs 8 `CORRECTNESS_CASES` — the extras cover `gemm2` down-proj and the `has_zp=True` path.)
+  Step 5 gates on this.
 - **Shape of the manifest** (one entry per case; carry whatever dims that op needs):
   ```json
   "cases": [{"sig": "c2_M2048", "M": 2048, "N": 4096, "K": 3072, "seed": 42, "regime": "prefill"}]
@@ -92,6 +105,12 @@ values are regenerated from the recorded seed on every run.
   inputs — it is not a cross-machine reproducibility claim, and nothing is checked against a stored artifact.
 - Operand synthesis lives in `unittest.py` (step 4), driven by these entries. Give each tensor its own
   derived generator seed so values depend only on (seed, shape), never on draw order.
+- **VALUE distribution matters as much as dims for a value-dependent op.** Copy the driver's synthesis on
+  the timing leg (`randn * 0.1` before an fp8 cast, `arange`/`randperm` index bookkeeping, mask density,
+  routing assignment) instead of reinventing it. Parity draws SHOULD be harder than the driver — that is
+  the anti-overfit gate — but then record both distributions in `meta.notes`, so "faithful to the unit
+  test" is never read as "faithful to production". (`fused_moe_kernel`: the driver's round-robin routing
+  times ~1.77×, the parity leg's random routing ~0.66–0.75× — same candidate, both true.)
 
 ### 3. Freeze the input source as the IMMUTABLE baseline
 - Copy the input kernel source subtree into BOTH `kernel_src/` (editable; each lane overwrites it) and
@@ -109,6 +128,10 @@ values are regenerated from the recorded seed on every run.
 ### 4. Vendor the harness + write the immutable `unittest.py` + `meta.json`
 - `cp "$HARNESS_LIB" "$TASK/harness_lib.py"` — the SHARED timing/correctness lib. `unittest.py` imports it
   for ALL timing + correctness (never hand-roll a timing loop or an allclose check).
+  > 🔴 ALWAYS copy from `$HARNESS_LIB`, even when you are re-freezing a kernel you froze before and are
+  > reusing its `baseline_src/`. Reusing the previous freeze's `harness_lib.py` silently pins a STALE
+  > timer, so the whole run measures with a library the user has since fixed. Assert
+  > `sha256($TASK/harness_lib.py) == sha256($HARNESS_LIB)` and put both shas in `meta.notes`.
 - Write an IMMUTABLE `unittest.py` that (using the vendored `harness_lib` `h`):
   - **verifies integrity first** — recompute `baseline_src_sha256` / `harness_lib_sha256` /
     `unittest_sha256` and HARD-FAIL on any mismatch, before running anything;
@@ -158,9 +181,24 @@ cd "$TASK" && bash "$GPU_LOCK" "$GPU_ID" python3 unittest.py 2>&1 | tee "$EVAL_D
 ```
 The smoke run MUST prove the baseline leg binds (`meta.baseline_callable` imports/runs, or `baseline_src/`
 is importable) so parity + timing resolve to the REAL input kernel and `current == baseline` gives ≈1.0×.
+**HARNESS FRESHNESS GATE.** `sha256 "$TASK/harness_lib.py"` MUST equal `sha256 "$HARNESS_LIB"` — a
+mismatch means you reused a stale vendored copy and every number in this run is measured with the wrong
+timer → `smoke:"fail"`. Report both shas in the returned `notes`.
+
 Also sanity-check the dir you just built: **no `*.pt` tensor dump**, and `du -sh "$TASK"` in the low MB
 (it is source + JSON, nothing else). A task dir in the hundreds of MB means a golden crept back in — every
 lane and every engineer workspace tar-copies this dir, so the cost multiplies by the whole fleet.
+
+**COVERAGE GATE.** If step 1 found a shipped driver, diff its case set against `meta.cases[]` by **dims,
+not by name** (a matching `sig` at different dims is exactly what this catches):
+- a shipped **perf** case missing or altered → `smoke:"fail"`;
+- a shipped **correctness-only** case not listed in `meta.notes` → `smoke:"fail"`;
+- put the verdict in the returned `notes` (`"3/3 perf cases at matching dims; 5 correctness-only shapes
+  uncovered, listed in meta.notes"`) so the bake-off report inherits it.
+
+Two shipped cases resolving to the same dims (`wvSplitK` c32/c64, both capped to 4 tokens) is fine — just
+say so, since the manifest then has fewer distinct shapes than entries.
+
 If the input kernel cannot be run/frozen (no usable driver even after reusing `benchmark_engineer`, or a
 value/layout-dependent op whose inputs cannot be reconstructed), set `smoke:"fail"` /
 `baseline_frozen:false` with a clear reason — do NOT fabricate an oracle or fall back to a naive reference.
@@ -179,7 +217,7 @@ value/layout-dependent op whose inputs cannot be reconstructed), set `smoke:"fai
   "op_spec": { "op_kind": "...", "shapes": {}, "dtype": "bf16", "regime": "both" },
   "workload_path": "<task_dir>/workload.json or ''",
   "smoke": "pass|fail",
-  "notes": "driver source (shipped vs synthesized), regime, any symbolic dims resolved, anything unusual"
+  "notes": "driver source (which case file it resolved to), step-5 coverage verdict, timing vs parity value distributions, regime, any symbolic dims resolved, anything unusual"
 }
 ```
 `reference_io_sha256` stays in the schema for e2e-produced task dirs; from THIS role it is always `""` —
