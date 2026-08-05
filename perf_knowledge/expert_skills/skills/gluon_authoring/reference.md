@@ -18,6 +18,17 @@ The division of labour: **that layer teaches Gluon; this skill is the API-page d
 two mechanics for migrating an existing Triton kernel.** If you find yourself explaining what a layout is,
 you are in the wrong file.
 
+## The transcription runbook (`references/phases/`)
+
+| you need | read |
+| --- | --- |
+| the executable form of step 1 — recover, **apply**, compile, verify, record, attribute | `phases/transcribe-runbook.md` |
+
+Load this one **before writing the anchor**, not after it fails. Two of its stages carry decisions no
+other file states: *Apply* (a body left on `AutoLayout` compiles, passes the oracle, and is several
+times slower than the champion) and the classification of each `ttg.local_alloc` (a pass-through round
+trip transcribed as a user buffer costs LDS and registers that `--verify` cannot see).
+
 ## Gluon API surface (`references/gluon/`)
 
 | you need | read |

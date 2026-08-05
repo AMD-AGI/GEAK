@@ -94,7 +94,7 @@ skills:
   file: skills/gluon_authoring/skill.md
   scope: kernel
   match:
-    operator: dense_gemm
+    operator: '*'
     arch_class:
     - '*'
     gens:
@@ -105,8 +105,7 @@ skills:
     - fp16
     - fp8_e4m3_fnuz
     regimes:
-    - prefill
-    - training
+    - '*'
     from_backend:
     - triton
     - gluon

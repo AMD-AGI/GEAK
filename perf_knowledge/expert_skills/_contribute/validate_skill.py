@@ -53,8 +53,13 @@ def static_check(fm, body):
     op = (fm.get("match") or {}).get("operator")
     if os.path.exists(CAP_INDEX):
         ops = {c["operator"] for c in (yaml.safe_load(open(CAP_INDEX)).get("candidates") or [])}
-        if op not in ops:
-            errs.append(f"match.operator '{op}' not in capability_index.yaml")
+        # `*` is the wildcard the schema already uses for arch_class: a skill whose applicability
+        # is decided by the STATE of the source rather than by what the kernel computes cannot name
+        # one operator, and forcing it to pick one makes the selector decline the matches it should
+        # take. A list is accepted for the middle ground.
+        for one in ([op] if isinstance(op, str) else list(op or [])):
+            if one != "*" and one not in ops:
+                errs.append(f"match.operator '{one}' not in capability_index.yaml")
     exp = fm.get("expects") or {}
     if fm.get("scope") == "kernel" and "isolated_speedup_min" not in exp:
         errs.append("kernel scope needs expects.isolated_speedup_min")

@@ -6,14 +6,29 @@ authors: [qiongz]
 scope: kernel
 # ---- selector: the workflow matches these against the live bottleneck ----
 match:
-  operator: dense_gemm
+  # Not operator-gated. What decides whether this skill pays is the STATE OF THE SOURCE
+  # (see `requires` below), not what the kernel computes: the same kernel and the same
+  # starting point can yield a clear win or a clear loss depending on how the transcription
+  # is done, so an operator filter selects the wrong thing in both directions.
+  operator: '*'
   arch_class: ['*']
   gens: [gfx942, gfx950]
   dtypes: [bf16, fp16, fp8_e4m3_fnuz]
-  regimes: [prefill, training]
+  regimes: ['*']   # decode included -- see the entry-gate note in Do-no-harm
   # triton = port a tuned plain kernel; gluon = the source is already Gluon, optimize it in place
   from_backend: [triton, gluon]
   to_backend: gluon
+# ---- entry precondition: the one gate that IS predictive ----
+# A port measured against an unoptimized plain kernel measures the config sweep, not Gluon.
+requires:
+  from_backend_triton:
+    # all three must hold before step 1; if any fails, tune plain FIRST and re-enter
+    - "the plain source is at its own best config (a config sweep has run and its winner is pinned)"
+    - "`plain@ns=1` has been measured alongside it, so a mistuned `num_stages` cannot be
+       mistaken for a Gluon win"
+    - "the comparator recorded for every later number is that tuned kernel, never the shipped default"
+  from_backend_gluon:
+    - "the workflow's own frozen baseline is the floor; the >=95%-of-tuned-plain bar does not apply"
 # ---- expected effect: the validation gate's pass criteria ----
 # Measure this over the WHOLE track the skill defines — the port AND the continuation past it
 # (`## Procedure` step 4) — because the port on its own is built to land near parity, not above it.
@@ -100,8 +115,8 @@ attribute anything); and **the comparator staying frozen** for the duration. Eve
 order the residual's owners are worked in, whether the pipeline layer is entered at all, which of two
 loop bodies ships — is a **route chosen from measurement**, and step 2a exists precisely to choose it.
 Read the numbered steps as the order that wastes fewest cycles on a typical port, not as a checklist to
-satisfy: on the measured set only 5 of 12 kernels owed a pipeline debt at all, so for most kernels the
-correct action at step 2 is to establish that and move on.
+satisfy: plenty of kernels owe no pipeline debt at all, so for those the correct action at step 2 is to
+establish that and move on.
 
 Two directions not to spend while the port is landing: a second arm on the transcription (above), and
 **anything that re-tunes the plain comparator** — that moves the denominator underneath a port whose
@@ -201,7 +216,16 @@ when the profile is about the kernel you are optimizing. On a short budget this 
 difference between reaching step 4 and not: the port is cheap and front-loaded analysis is not.
 
 **1. Transcribe, and drive it to layout equivalence.** Pin the tuned plain kernel, dump its IR, recover
-the layouts, and iterate until `--verify` passes:
+the layouts, and iterate until `--verify` passes.
+
+> **Follow [`references/phases/transcribe-runbook.md`](references/phases/transcribe-runbook.md) for this
+> step.** It is the executable form — six numbered stages, one command and one decision each — and it
+> carries two things this summary cannot: the **Apply** checklist (declaring a layout is not applying it;
+> a body left on `AutoLayout` compiles, passes the oracle, and is several times slower), and the rule for
+> **classifying each `ttg.local_alloc` before transcribing it**. That second one decides `shared` bytes
+> per workgroup and therefore waves/SIMD, and neither `--verify` nor the numeric oracle can see it.
+> Check the result with `scripts/probe.py measure` — compile-only, seconds, no GPU — as soon as the
+> anchor builds, not after the first timing.
 
 ```bash
 python3 "$SKILL/scripts/ttgir_bridge.py" --selftest      # 10 s, offline: is the recovery itself sane?
@@ -244,12 +268,12 @@ The converter covers `#blocked`, `#amd_mfma`, `#swizzled_shared`, `#padded_share
 `ttg.dot_op` and `ttg.slice`. Two gaps that are **not** tool bugs, so do not spend verify cycles on them:
 `ttg.convert_layout` placement is manual — take it from the recovery map in
 `references/tile-programming/layout-recipes.md`; and `amd_rotating_shared` has no `gluon.language`
-constructor on the builds measured here. Three things about that one, in the order they save time:
+constructor on the builds checked so far. Three things about that one, in the order they save time:
 
 - **Probe your own build before concluding it is a language gap.** An `UNRECOVERABLE` row is a prompt to
   check, not proof — the Gluon surface moves, and `amd_wmma` sat behind identical wording while being
   constructible as `AMDWMMALayout` all along.
-- It is **not** a `num_stages` artefact — one measured kernel still carries it at `num_stages=1` — so
+- It is **not** necessarily a `num_stages` artefact — a body can still carry it at `num_stages=1` — so
   re-dump at `ns=1` and re-recover before concluding a body is untranscribable.
 - If it really is absent, **a Python-side workaround does not exist**, and the cost is worse than a
   missing constructor. `builder.to_linear_layout(attr, shape)` wants an `ir.attribute`, and on 3.7.1 /
@@ -285,8 +309,8 @@ transcribable: `amdg.in_thread_transpose` has no Gluon builtin and appeared as a
 
 **2. Attribute the residual, then close the suspect that owns it.** Start as soon as step 1 reports PASS.
 A faithful anchor is normally *below* the comparator, and **the pipeline is only one of the reasons** —
-on the measured set only 5 of 12 kernels owed a pipeline debt at all. Naming the owner before acting is
-what stops a round being spent injecting into a kernel whose gap was somewhere else entirely:
+a pipeline debt is common but far from universal. Naming the owner before acting is what stops a round
+being spent injecting into a kernel whose gap was somewhere else entirely:
 
 | suspect | how it shows | owner |
 | --- | --- | --- |
@@ -413,7 +437,10 @@ of the same kernel also had `s_setprio == 0`, because `add_block_pingpong` does 
 shape at all. Two other signals said the injection had fired. Confirm a tell would have appeared on the
 comparator before treating its absence as a verdict.
 
-> **The cache trap has two halves, and each on its own gives a false negative.** *In process*, Triton's
+> **The cache trap has two halves, and each on its own gives a false negative. It is stated here because
+> the injection is where it was first hit, but it is NOT specific to step 2 — it applies to every A/B in
+> this file, including the step-4 layout sweep, where variants differ by a `constexpr` the cache key does
+> not distinguish and a real win reads as zero.** *In process*, Triton's
 > JIT cache is keyed on `(function, signature, constexprs)` and **knows nothing about the injection**, so
 > two arms differing only by the wrapper hit the same compiled artifact and the second silently reuses
 > the first's code. `TRITON_ALWAYS_COMPILE=1` does **not** fix it. *On disk*, a per-arm
@@ -482,7 +509,15 @@ a closed checkpoint as permission to start step 4, and note the asymmetry it hid
 writing the loop that step 2 discusses can both clear 95% while being different schedules, so clearing
 the bar does not tell you the body you shipped is the better of the two. Step 4 settles that first.
 
-**4. Climb — in a language where the allocation and the schedule are yours.** For a port this is what
+**4. Climb — in a language where the allocation and the schedule are yours.**
+
+> Before the first A/B in this step, re-read the **cache trap** stated under step 2. It is not specific
+> to the injection: a layout sweep produces variants that differ only by a `constexpr`, which is exactly
+> what the in-process cache key cannot tell apart, so a real win here is reported as **zero** unless each
+> arm gets its own kernel object and a cache dir keyed on the arming. A sweep that returns "no effect"
+> across a range of layouts has usually hit this rather than found a flat space.
+
+For a port this is what
 the port was for: the levers below became expressible the moment step 3 closed. **Coming in already
 Gluon, this step is the whole procedure** — the list holds, minus the two items marked *port-only*
 below, which need the two loop bodies a port produces. Ranking and stopping stay GEAK's; what this file
@@ -526,23 +561,27 @@ Do-not-write list, i.e. what compiles and then costs you:
 - **Runtime buffer indices — but measure before paying for the unroll.** The rule is that
   `smem.index(k % nBuffers)` prevents the scheduler from proving overwrite-safety, so buffer indices
   should be compile-time constant and `wait_group(N)` recomputed whenever the prologue, region or unroll
-  factor changes. It is **narrower than it reads**: over *sync* staging on gfx942 both index forms emit
-  **identical ISA and identical VGPR counts**, and aiter's shipped block-scaled GEMM indexes its async
-  main loop with a runtime modulo, unrolling only its wind-down and citing register allocation for that.
-  The async form could not be probed here. So unroll when the ISA says it bought something, not by rule.
+  factor changes. It is **narrower than it reads**: over *sync* staging the two index forms can emit
+  identical ISA and identical register counts, and shipped production Gluon exists that indexes an
+  async main loop with a runtime modulo, unrolling only its wind-down and citing register allocation
+  rather than scheduling for that. So unroll when the ISA says it bought something, not by rule.
 - **A hand register-prefetch next to a re-injected pipeliner.** Not additive — it consumes the slot the
   pass wanted.
-- **Anything asynchronous, on CDNA3.** `gl.amd.cdna4.async_copy` **imports on gfx942 and does not
-  lower there** — `buffer_load_to_shared` fails LLVM translation and `global_load_to_shared` fails the
-  pass manager, at every vector width on 3.6.0 and 3.8.0, while `load_shared_relaxed` from the *same
-  module* runs correctly, so it is the op and not the call site. **An import is not availability**, and
-  an earlier revision of this file argued gfx942 support from exactly that. On CDNA3 the authored
-  overlap path is **sync staging** (`allocate_shared_memory` + `.store()`/`.load()` + barrier);
-  everything asynchronous belongs to CDNA4 and later.
+- **Async copy on CDNA3 — available, but narrow, and easy to misdiagnose.**
+  `gl.amd.cdna4.async_copy` does lower on gfx942, at the **32-bit** per-thread direct-to-LDS width
+  that generation supports; the wider chunks are CDNA4-only
+  (`supportsDirectToLdsLoadBitWidth`). The trap is that a request violating the layout contract —
+  threads that do not tile the contiguous dimension, or a per-thread chunk under the granularity
+  floor — fails with the same `unrealized_conversion_cast` / LLVM-translation wording as a missing
+  op, so a width sweep alone cannot tell "unsupported here" from "asked for it wrongly". Hold the
+  op, arch and width fixed and vary only the tiling before recording an arch ceiling
+  (`references/gluon/memory-reference.md ## Async Copy To Shared` states the contract). At the
+  narrow width it moves a fraction of what CDNA4 does per instruction and tends to become
+  `s_waitcnt`-bound, so measure it against sync staging rather than assuming either way.
 - **`sched_barrier` / `sched_group_barrier` / `set_prio`.** Absent from `gl.amd.cdna3` *and* `.cdna4` on
-  all four versions. aiter's `pa_decode_gluon` imports them inside a `try/except` and defines **no-op
-  stubs**, so on these builds that production kernel's iglp hints are dead code. Do not copy the pattern
-  expecting scheduling control.
+  all four versions. Production Gluon exists that imports them inside a `try/except` and defines
+  **no-op stubs** on `ImportError`, so on these builds those iglp hints are dead code while still
+  reading like scheduling control. Do not copy the pattern expecting it to do anything.
 - **`gl.warp_specialize`.** Present in core `gl` on every version and still fails the pass manager on
   CDNA3. `gl.amd.warp_pipeline_stage` *does* work on gfx942 and emits `s_setprio` — but it is a
   scheduling **hint**, not a data movement mechanism, so whether it pays is a measurement.
@@ -614,14 +653,36 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
 - **A number measured under injection is not an upstream number.** No upstream version calls these passes
   from `gluon_to_ttgir`, so every measurement taken with `gluon_swp` armed or `patch_reinject` applied has
   to say so, and a reverted tree has to be confirmed reverted before anything else is measured in it.
-- **Keep it off decode / skinny-M shapes.** Memory-latency-bound with no tile structure worth
-  re-laying-out; authoring cost cannot be repaid there.
+- **The entry gate is the state of the plain source, not the operator or the regime.** A shape-class
+  exclusion here — decode, skinny-M, anything "memory-latency-bound with no tile structure worth
+  re-laying-out" — is the wrong filter: the same kernel from the same starting point can clear the
+  bar or fall well below its own anchor depending only on how the transcription is done. Check
+  these instead, before spending the authoring cost:
+  - **Is the plain side actually finished?** If a config sweep has not run and its winner is not
+    pinned, the first "Gluon win" is the sweep's. Where the shipped `num_stages` is itself a
+    pessimisation that can be most of the headline, so measure `plain@ns=1` too and quote both.
+  - **Is there a layout-shaped residual left?** Step 2a answers it from the TTGIR: if the champion
+    stages nothing through LDS, the two Gluon-only levers — swizzle/padding choice and LDS dedup —
+    have no operand to apply to, and the port has to pay for itself some other way.
+  - **What does the transcription do with the operand staging?** Two faithful transcriptions of one
+    kernel can differ here and the gap is not small. Materialising each conversion as a user
+    `allocate_shared_memory` keeps it live for the whole function and the allocator charges every
+    buffer separately; leaving the same conversions as `ttg.convert_layout` lets the backend
+    decompose them against one shared conversion scratch. The second form can cost less LDS and
+    fewer registers for identical arithmetic, sometimes enough to change waves/SIMD at no extra
+    instructions. Neither is always right — read the resulting `shared` bytes/WG and register count
+    off the artifacts rather than assuming.
+- **Writing a batch of variants without timing them is not a search.** Variants that differ only in
+  ways the backend folds away measure the same, and without an A/B between them that is invisible,
+  so a run can spend its whole budget producing them. Time each variant against the comparator as
+  it lands and dispose of it; rejecting fast is where a round budget's value comes from.
 
 ## Sources
 
 - Vendored from `AMD-AGI/TileProgrammingAgentSkills@541a180`
   (`.cursor/skills/tile-programming-gluon/`), **pruned to the API surface, the do-not-write lists and the
-  two mechanics above**: 14 of 70 reference files (~2.7 k of ~11 k lines) and 11 of 51 scripts. Upstream
+  two mechanics above**, plus the transcription runbook and the compile-only occupancy probe that step 1
+  and step 4 depend on: 15 of 70 reference files and 11 of 51 scripts. Upstream
   remains the SSOT; this is a one-way snapshot. `references/` is unmodified. `scripts/` carries **six
   corrections**, all of which should go back upstream:
   - `ttgir_to_gluon.py` dropped `tilesPerWarp` and `elementBitWidth` when emitting

@@ -198,9 +198,9 @@ scheduling**. Conflating them is how a hint gets budgeted as a prefetch.
 
 | # | mechanism | CDNA3 gfx942 | CDNA4 gfx950 | CDNA5 gfx1250 | RDNA3/4 |
 | --- | --- | --- | --- | --- | --- |
-| A1 | async global→LDS multi-buffer (`commit_group` / `wait_group`) | **does not lower** ✗ | `cdna4.async_copy` | different API, see below | **absent** |
-| A2 | per-tensor pipeline depth | **✓ over A5** | over A1 or A5 | ✓ | over A5 |
-| A3 | several independent chains at staggered depths | over A5 | over A1 | ✓ | over A5 |
+| A1 | async global→LDS multi-buffer (`commit_group` / `wait_group`) | **✓ at 32-bit/thread, clean tiling, shared `order=[1,0]`** — all three, and measured slower than sync staging | `cdna4.async_copy`, up to 128-bit | different API, see below | **absent** |
+| A2 | per-tensor pipeline depth | **✓ over A5 or A1** | over A1 or A5 | ✓ | over A5 |
+| A3 | several independent chains at staggered depths | over A5 or A1 | over A1 | ✓ | over A5 |
 | A4 | sub-buffer splitting (`.index(i)` / `.slice(...)`) | **✓ over A5** | ✓ | ✓ | over A5 |
 | A5 | sync staging: `allocate_shared_memory` + `.store()` / `.load()` + barrier | **✓** | ✓ | ✓ | **✓ — the only option** |
 
@@ -213,8 +213,12 @@ scheduling**. Conflating them is how a hint gets budgeted as a prefetch.
 | B3 | `warp_specialize` producer/consumer partitioning | **✗** `PassManager::run failed` | symbol present in core `gl` on all four |
 
 Every gfx942 cell above is from a compile-and-run probe on this box, not from whether the
-symbol imports. Three of them are worth stating plainly because the import would mislead you:
+symbol imports. Three are worth stating plainly:
 
+- **A1 is available on CDNA3 but only 32 bits wide** (see the width table further down). An
+  earlier revision of this file recorded it as "does not lower" from a probe whose layout was at
+  fault; the correction and the controlled comparison are in that section. Read a lowering
+  failure here as a layout-contract question first.
 - **B2 does not exist here at all.** aiter's `pa_decode_gluon` imports `sched_barrier` /
   `sched_group_barrier` / `set_prio` from `gl.amd.cdna3` inside a `try/except` and defines
   **no-op stubs** on `ImportError`. Those symbols are absent on 3.6.0 / 3.7.0 / 3.7.1 / 3.8.0,
@@ -227,17 +231,19 @@ symbol imports. Three of them are worth stating plainly because the import would
   performance-negative, and `../hardware/capability-matrix.md` adds that scheduling hints are
   not inherently profitable. It compiles and it reorders; whether it pays is a measurement.
 
-**So on gfx942 the authored-overlap surface is exactly two mechanisms: A5 sync staging, and
-B1 as a hint on top.** A2 / A3 / A4 are things you build *out of* A5 there, not separate
-features. Everything asynchronous belongs to CDNA4 and later.
+**So on gfx942 the authored-overlap surface is A5 sync staging, A1 async copy at 32 bits per
+thread, and B1 as a hint on top.** A2 / A3 / A4 are things you build *out of* A5 or A1 there,
+not separate features. What CDNA4 adds is async *width* (128-bit), not the async path itself.
 
 ### Worked examples — every one compiled and numerics-checked on gfx942
 
 Copy these as starting points. They are deliberately the CDNA3 set, because that is the target
 whose surface is smallest and most often mis-documented; the `ds_read` / `ds_write` /
 `s_setprio` counts after each are what the probe measured, so you can tell immediately whether
-your own build reproduces them. All four are runnable as
-`scripts/pipeline_examples_cdna3.py` — run it rather than trusting the numbers below.
+your own build behaves the same way. All four are runnable as
+`scripts/pipeline_examples_cdna3.py`, which prints each one's `ds_read` / `ds_write` /
+`s_setprio` census next to a numerics check — **run it and read your own counts** rather than
+carrying figures measured on someone else's box.
 
 **A5 — the base. Two LDS buffers, alternate, barrier between phases.** On CDNA3 this is the
 staging path; there is no async variant to fall back to.
@@ -264,9 +270,9 @@ def a5_sync_double_buffer(out, inp, M: gl.constexpr, N: gl.constexpr, ITERS: gl.
     gl.store(out + o, acc)
 ```
 
-`ds_write=8 ds_read=8` at `ITERS=4`, M=N=32. Note `i % 2` — a runtime index, and it cost
-nothing here (`../tile-programming/pipeline.md ### Hand-built buffering rules` has the
-measurement and the scope of the compile-time-index rule).
+Note `i % 2` — a runtime buffer index, which one rule elsewhere calls an anti-pattern; whether it
+costs anything is target-dependent and measurable
+(`../tile-programming/pipeline.md ### Hand-built buffering rules` has the scope of that rule).
 
 **A2 — two tensors at different lead distances in one loop.** This is the one the
 auto-pipeliner structurally cannot do: it assigns a single stage schedule to the whole loop,
@@ -293,7 +299,7 @@ def a2_per_tensor_depth(out, big, small, M: gl.constexpr, N: gl.constexpr, ITERS
     gl.store(out + o, acc)
 ```
 
-`ds_write=16 ds_read=16`. aiter's block-scaled GEMM is the production form of this shape,
+aiter's block-scaled GEMM is the production form of this shape,
 leading its operands by two K-iterations and its scales by one, and its docstring names that
 split as the main win over the Triton version: keeping the scales in the operands' stage both
 puts scale-load latency on the critical path and spends `ds_read` bandwidth on a tiny tensor.
@@ -318,8 +324,8 @@ def a4_subbuffer_slice(out, inp, M: gl.constexpr, N: gl.constexpr, ITERS: gl.con
         bot = s.slice(M // 2, M // 2, 0).load(HALF)     # rows [M/2, M)
 ```
 
-`ds_write=8 ds_read=8`. The slice takes `(offset, length, dim)`; the consuming layout must
-match the sliced shape, not the parent's — that mismatch is the usual first failure.
+The slice takes `(offset, length, dim)`; the consuming layout must match the sliced shape, not
+the parent's — that mismatch is the usual first failure.
 
 **B1 — cluster markers. A hint: it reorders, it stages nothing.**
 
@@ -335,8 +341,9 @@ def b1_warp_pipeline_stage(out, inp, M: gl.constexpr, N: gl.constexpr, ITERS: gl
     gl.store(out + o, acc)
 ```
 
-`s_setprio=10`, and `ds_read`/`ds_write` stay **0** — which is the point: no LDS traffic
-appears because no staging happened. Pair it with A5 when you want both.
+The census on this one shows `s_setprio` appearing while `ds_read` / `ds_write` stay at **zero** —
+which is the point: no LDS traffic appears because no staging happened. It reorders; it moves
+nothing. Pair it with A5 when you want both.
 
 ### Getting `wait_group` right
 
@@ -412,28 +419,45 @@ rather than probe-gated:**
 
 On 3.6 there is no marker path at all — re-injection is the only pipelining available.
 
-**`cdna4.async_copy` imports on gfx942 but does not lower there. Importing is not lowering,
-and this row used to claim otherwise.** The module and all five entry points import fine on
-every version including 3.6, which is what the old claim rested on — but a compiled probe on
-gfx942 fails at the backend, identically on 3.6.0 and 3.8.0:
+**`cdna4.async_copy` DOES lower on gfx942 — at 32-bit per thread, and only there.** An earlier
+revision of this section claimed it did not lower at all, on the strength of a probe that used a
+`BlockedLayout` whose threads did not tile the contiguous dimension. That is the layout-contract
+failure `memory-reference.md ## Async Copy To Shared` warns about, wearing the same
+`unrealized_conversion_cast` costume as a real ceiling. Re-probed on gfx942, bf16, sweeping the
+per-thread chunk with a clean tiling:
 
-| entry, called on gfx942 | result |
-| --- | --- |
-| `buffer_load_to_shared` | `failed to translate module to LLVM IR` (`builtin.unrealized_conversion_cast` on the pointer) |
-| `global_load_to_shared` | `PassManager::run failed` |
-| `load_shared_relaxed` | **OK** — it is only a shared-read hint, no async copy |
-| `gl.allocate_shared_memory` + `.store()` / `.load()` (sync staging) | **OK** |
+| bytes/thread | gfx942 | why |
+| --- | --- | --- |
+| **4 (32-bit)** | **lowers, runs, bit-exact** | `supportsDirectToLdsLoadBitWidth`: CDNA3 = {32} |
+| 8 / 16 / 32 | `failed to translate module to LLVM IR` | 64/128-bit direct-to-LDS is CDNA4-only |
 
-Three things make this the op and not the call site: `load_shared_relaxed` from the *same*
-module compiles and runs correctly, so the import and the surrounding scaffolding are sound;
-the two async entries fail with two *different* backend errors, both past the frontend; and
-every per-thread vector width (32 / 64 / 128-bit) fails identically, so it is not the
-width-gated behaviour a `supportsBufferLoadToLocal()` reading would predict. aiter's own
-async-copy Gluon kernels agree — they are CDNA4-targeted and recorded as unreachable on gfx942.
+The control that settles it: the *same* 32-bit chunk fails with a ragged tiling
+(`4 threads x 1 elem` over a 64-wide dim) and succeeds with a clean one (`64 x 1`). Same arch,
+same width, same op — only the layout contract differs.
 
-**So on CDNA3 the authored-overlap path is sync staging, not async copy.** The async table
-below applies to CDNA4. Not re-checked on CDNA4 hardware here (none available), so treat the
-gfx950 column as inherited from those production kernels rather than probed.
+**A third constraint the width table cannot show: the destination shared layout's `order` must be
+`[1, 0]`.** With everything else pinned at the configuration above, flipping only the `order`
+turns a bit-exact lowering into `failed to translate module to LLVM IR` — and it does so both at
+a trivial swizzle (`vec=1, max_phase=1`) and at a real one (`vec=4, max_phase=16`), so `order`
+gates this on its own rather than through the swizzle. Satisfying the width and the tiling is
+therefore not enough; a reader who checks only those two still hits the same error message.
+This one only surfaces on a real kernel: an attention decode stages V in `order=[0, 1]` because
+that is what plain's `amdg.in_thread_transpose` semantics require, which collides head-on. The
+way out is a second shared layout for the async destination that differs *only* in `order` —
+writer and reader reference the same `memdesc`, so the round trip stays bit-exact either way.
+
+So on CDNA3 the async path is **available but narrow**: 4 B/thread moves a quarter of what CDNA4
+does per instruction, which tends to make it `s_waitcnt`-bound. What is genuinely absent on CDNA3
+is the *width*, not the op.
+
+**Measured on a real kernel, narrow lost.** Converting one sync-staged KV buffer of an attention
+decode to `async_copy` compiled and stayed **bit-exact on all four minors** (plus a repeated
+same-input launch test for determinism, which a shared-memory synchronization change needs), and
+was **slower than the sync staging it replaced on every one of them** — from roughly break-even
+on the oldest minor to tens of percent on the newest. Read that trend carefully: the async arm
+was flat across minors and the *sync* arm got faster, so this is the baseline improving, not
+async regressing. Treat CDNA3 async copy as a correctness-preserving option to measure, not as
+an upgrade; the trial report has the per-minor numbers.
 
 ## vs CuTeDSL (concept filter)
 
