@@ -1,6 +1,6 @@
 # gluon_authoring — reference router
 
-14 files, ~2.4 k lines, all **lazy**: load one only when [`skill.md`](skill.md) cites it, or when you
+14 files, ~2.7 k lines, all **lazy**: load one only when [`skill.md`](skill.md) cites it, or when you
 reach for the construct it documents. Two groups only — the API, and what not to write.
 
 ## Start above this skill, not in it

@@ -338,7 +338,8 @@ def _pipeline_facts(text: str) -> dict:
 
     This is the single most useful thing the tool can say before anyone authors, and it
     used to say nothing. The residual of a faithful transcription is dominated by the lost
-    software pipeline -- Gluon has no auto pipeliner -- so whether plain was pipelined
+    software pipeline -- `gluon_to_ttgir` does not run one by default -- so whether plain
+    was pipelined
     decides what ratio to EXPECT, and therefore whether a measured shortfall is a debt or
     a defect.
 
@@ -461,7 +462,7 @@ def _cdna_ns(arch: str | None) -> str:
 
     The buffer/MFMA builtins live under a per-generation namespace, so advice that names one
     generation is wrong guidance on another -- it would have a CDNA4 author write `cdna3`
-    calls. Returns a generic placeholder rather than guessing when the generation is unknown.
+    calls. Returns a placeholder rather than guessing when the generation is unknown.
     """
     a = (arch or "").strip().lower()
     if a.startswith("gfx95"):
@@ -478,7 +479,7 @@ def _buffer_facts(text: str) -> dict:
 
     Two transcriptions lost 1.2% and ~2% to the same thing: `tl.load(..., other=0.0)` in
     the source compiles to a buffer_load with a mask and NO `other` operand, because buffer
-    OOB returns zero on CDNA -- but the faithful-looking `gl.amd.cdna3.buffer_load(...,
+    OOB returns zero on CDNA -- but the faithful-looking `gl.amd.cdna<N>.buffer_load(...,
     other=0.0)` emits the third operand and pays a v_cndmask per register. Transcribing the
     SOURCE faithfully is what produces the regression; transcribing the DUMP does not. The
     dump says which, and nothing was reporting it.
@@ -1185,11 +1186,14 @@ def report(rec: Recovery, verbose: bool = False) -> str:
                      f"tt.num_stages={pf.get('num_stages') or 'absent'}, "
                      f"{pf['loops']} scf.for, max iter_args={mia}")
         if (mns or 1) > 1 or mia >= 2:
-            lines.append("  => plain IS software-pipelined. Gluon has no auto pipeliner, so a")
-            lines.append("     FAITHFUL anchor sits below plain BY CONSTRUCTION -- that gap is a")
-            lines.append("     debt you knowingly take on, not a defect. Measure `plain at")
-            lines.append("     num_stages=1` as the control: if the anchor lands there, the whole")
-            lines.append("     residual is the pipeline and no layout work will move it.")
+            lines.append("  => plain IS software-pipelined. `gluon_to_ttgir` does not run the")
+            lines.append("     pipeliner by default, so a FAITHFUL anchor sits below plain BY")
+            lines.append("     CONSTRUCTION -- that gap is a debt you knowingly take on, not a")
+            lines.append("     defect. Measure `plain at num_stages=1` as the control: if the")
+            lines.append("     anchor lands there, the whole residual is the pipeline and no")
+            lines.append("     layout work will move it. Those passes are absent from the default")
+            lines.append("     lowering, NOT from libtriton -- re-inject them before hand-building")
+            lines.append("     (references/tile-programming/pipeline.md).")
         else:
             lines.append("  => plain is NOT pipelined (num_stages=1, no loop carries). There is no")
             lines.append("     pipeline to lose, so a faithful anchor should land at ~1.00 and")

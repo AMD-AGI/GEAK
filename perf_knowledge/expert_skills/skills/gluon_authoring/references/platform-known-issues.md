@@ -63,6 +63,51 @@ boundaries:
   assumptions. Re-test AOT/prebuilt paths after Triton minor-version changes.
 - Triton `<3.6` CDNA `AMDMFMALayout.instr_shape` examples may use 2D `[M, N]`;
   `>=3.6` uses 3D `[M, N, K]`. Check local `triton_version.py` before copying.
+- **A transcription result does not carry across CDNA generations, and the parts that break
+  are not the ones a version sweep exercises.** Before quoting a same-generation result on
+  another one, re-check at least: (a) the per-generation Gluon namespace on every buffer and
+  MFMA builtin, plus the MFMA layout's version field — the newer namespace generally exists on
+  older Tritons too, so this looks like a rename, but the accepted `instr_shape` sets differ
+  and a changed K dimension pulls the tile and loop structure with it; (b) any arm that failed
+  on an LDS/shared-memory limit, since the per-CU budget can differ by more than 2x and such an
+  arm may simply start fitting; (c) the depth of any `num_stages`-style sweep, for the same
+  reason; (d) counts of constructs that exist to dodge bank conflicts, since the bank count can
+  change. When re-validating layout recovery itself, assert that recovery still succeeds and
+  round-trips **within** the new generation and stays stable across its Triton minors — *not*
+  that layout digests match the other generation. MFMA layout digests **should** differ across
+  generations, so asserting equality manufactures a false "the tool broke here".
+- **A namespace importing is not the op lowering, and the gap is silent.** A per-generation
+  module can import cleanly on a target it does not support: probed on gfx942, the whole
+  `cdna4.async_copy` surface imports, `load_shared_relaxed` from it even compiles and runs, yet
+  `buffer_load_to_shared` fails LLVM translation and `global_load_to_shared` fails the pass
+  manager, at every vector width and on every Triton minor tested. Availability claims of the
+  form "the symbol is there" are therefore not evidence; compile a one-op probe on the actual
+  target. The same trap caught `warp_specialize`, which is present in core `gl` on every
+  version and still aborts the pass manager on CDNA3.
+- **The barrier builtin was renamed, and the rename is either-or.** Some minors expose only
+  `gl.thread_barrier`, later ones only `gl.barrier`; neither keeps an alias for the other, so
+  an anchor authored on one minor fails to *compile* on the other with a bare `AttributeError`.
+  A one-directional shim is therefore useless half the time — install **both** aliases, each
+  only when the target name is missing, so the shim is additive and a no-op on a minor that
+  already has it. Dropping that into a `sitecustomize.py` on `PYTHONPATH` applies it at
+  interpreter startup, which lets one anchor source sweep every minor without editing the
+  anchor or touching site-packages.
+- **On the oldest supported minor, a module-scope layout stops being a constexpr once it crosses
+  a call boundary.** It gets materialized as an IR value instead, and the failure surfaces as
+  `AttributeError: '<SomeLayout>' object has no attribute '_flatten_ir'` — an internal-looking
+  message that names no missing capability and points at the call site rather than the layout.
+  Two crossings trigger it, both measured: passing the global into a helper that is **not** a
+  real builtin (one whose signature has no `_semantic`, e.g. the `zeros` spelling, which carries
+  no `layout` parameter on any minor), and **forwarding** the global into a nested `@gluon.jit`
+  helper. Neither is exotic — two independent anchors hit one each.
+  **Fixes:** thread the layout in as the kernel's own `gl.constexpr` parameter (the body needs no
+  other change), or use a genuine builtin such as the `full` spelling. Annotating the global
+  itself as `: gl.constexpr` does **not** help — measured, both spellings still fail.
+  Later minors accept both crossings, so this only bites when sweeping an anchor authored on a
+  newer minor back onto the oldest one. Do not conclude a *language* limit from it: three
+  narrower hypotheses (layout-as-constexpr-arg, parented Slice/MFMA layout kinds, interleaved
+  constexpr/runtime signatures) were each isolated and all work on the old minor, so probes that
+  pass the layout as a parameter will all come back green and hide the real trigger.
 - **Async-copy offset layouts are version-gated.** Whether `buffer_load_to_shared`
   accepts a given offset layout depends on the Triton minor: an older minor may
   lower only `Blocked` / `Slice` offset layouts and **fail to compile** a

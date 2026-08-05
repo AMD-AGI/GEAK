@@ -184,15 +184,198 @@ the right choice. Check the trip count before reading the debt.
 
 ## Authored overlap (no compiler patch)
 
-The upstream-only path. Still the right choice when a patched `compiler.py` is unacceptable,
-and the only option on 3.6 for warp-level pipelining:
+The upstream-only path. Reach it when the loop has **no `tt.dot`** for the re-injected
+pipeliner to anchor on, or when you want something the auto-pipeliner cannot express at all.
+It does **not** compose with re-injection in the same loop — hand-written staging is exactly
+what starves that pass (`../tile-programming/pipeline.md ## Route 2`).
 
-```text
-buffer_load_to_shared / cdna4.async_copy / gfx1250 TDM
-  → commit_group (producer)
-  → wait_group   (consumer)
-  → mfma / wmma
+### What is actually on offer, and which architecture has it
+
+Two categories: mechanisms that **move data**, and mechanisms that only **influence
+scheduling**. Conflating them is how a hint gets budgeted as a prefetch.
+
+**A — data movement**
+
+| # | mechanism | CDNA3 gfx942 | CDNA4 gfx950 | CDNA5 gfx1250 | RDNA3/4 |
+| --- | --- | --- | --- | --- | --- |
+| A1 | async global→LDS multi-buffer (`commit_group` / `wait_group`) | **does not lower** ✗ | `cdna4.async_copy` | different API, see below | **absent** |
+| A2 | per-tensor pipeline depth | **✓ over A5** | over A1 or A5 | ✓ | over A5 |
+| A3 | several independent chains at staggered depths | over A5 | over A1 | ✓ | over A5 |
+| A4 | sub-buffer splitting (`.index(i)` / `.slice(...)`) | **✓ over A5** | ✓ | ✓ | over A5 |
+| A5 | sync staging: `allocate_shared_memory` + `.store()` / `.load()` + barrier | **✓** | ✓ | ✓ | **✓ — the only option** |
+
+**B — scheduling hints (move no data; must be measured, never assumed)**
+
+| # | mechanism | on gfx942 | availability |
+| --- | --- | --- | --- |
+| B1 | `warp_pipeline_stage` cluster markers | **✓** — emits `s_setprio` | 3.7.0+ (absent on 3.6.0) |
+| B2 | `sched_barrier` / `sched_group_barrier` / `set_prio` (iglp) | **✗ symbol absent** | absent from `gl.amd.cdna3` and `.cdna4` on **all four** versions |
+| B3 | `warp_specialize` producer/consumer partitioning | **✗** `PassManager::run failed` | symbol present in core `gl` on all four |
+
+Every gfx942 cell above is from a compile-and-run probe on this box, not from whether the
+symbol imports. Three of them are worth stating plainly because the import would mislead you:
+
+- **B2 does not exist here at all.** aiter's `pa_decode_gluon` imports `sched_barrier` /
+  `sched_group_barrier` / `set_prio` from `gl.amd.cdna3` inside a `try/except` and defines
+  **no-op stubs** on `ImportError`. Those symbols are absent on 3.6.0 / 3.7.0 / 3.7.1 / 3.8.0,
+  so on these builds that production kernel is running the stubs and its iglp hints are dead
+  code. Do not copy the pattern expecting scheduling control.
+- **B3 imports but does not lower on CDNA3.** `gl.warp_specialize` is in core `gl` on every
+  version; a minimal two-partition kernel still fails in the pass manager on gfx942.
+- **B1 does work on gfx942**, which the version-only table below does not tell you — but it is
+  still a hint. `../platform-known-issues.md` records it as source-available yet
+  performance-negative, and `../hardware/capability-matrix.md` adds that scheduling hints are
+  not inherently profitable. It compiles and it reorders; whether it pays is a measurement.
+
+**So on gfx942 the authored-overlap surface is exactly two mechanisms: A5 sync staging, and
+B1 as a hint on top.** A2 / A3 / A4 are things you build *out of* A5 there, not separate
+features. Everything asynchronous belongs to CDNA4 and later.
+
+### Worked examples — every one compiled and numerics-checked on gfx942
+
+Copy these as starting points. They are deliberately the CDNA3 set, because that is the target
+whose surface is smallest and most often mis-documented; the `ds_read` / `ds_write` /
+`s_setprio` counts after each are what the probe measured, so you can tell immediately whether
+your own build reproduces them. All four are runnable as
+`scripts/pipeline_examples_cdna3.py` — run it rather than trusting the numbers below.
+
+**A5 — the base. Two LDS buffers, alternate, barrier between phases.** On CDNA3 this is the
+staging path; there is no async variant to fall back to.
+
+```python
+BLK: gl.constexpr = gl.BlockedLayout([1, 4], [16, 4], [4, 1], [1, 0], [])
+SH: gl.constexpr = gl.SwizzledSharedLayout(1, 1, 1, order=[1, 0])
+
+@gluon.jit
+def a5_sync_double_buffer(out, inp, M: gl.constexpr, N: gl.constexpr, ITERS: gl.constexpr):
+    s = gl.allocate_shared_memory(gl.float32, [2, M, N], SH)
+    o = (gl.arange(0, M, layout=gl.SliceLayout(1, BLK))[:, None] * N
+         + gl.arange(0, N, layout=gl.SliceLayout(0, BLK))[None, :])
+    acc = gl.zeros([M, N], gl.float32, layout=BLK)
+    s.index(0).store(gl.load(inp + o))                 # prologue fills buffer 0
+    for i in range(ITERS):
+        cur = i % 2
+        nxt = (i + 1) % 2
+        gl.barrier()
+        if i + 1 < ITERS:
+            s.index(nxt).store(gl.load(inp + o))       # stage i+1 while consuming i
+        acc += s.index(cur).load(BLK)
+        gl.barrier()
+    gl.store(out + o, acc)
 ```
+
+`ds_write=8 ds_read=8` at `ITERS=4`, M=N=32. Note `i % 2` — a runtime index, and it cost
+nothing here (`../tile-programming/pipeline.md ### Hand-built buffering rules` has the
+measurement and the scope of the compile-time-index rule).
+
+**A2 — two tensors at different lead distances in one loop.** This is the one the
+auto-pipeliner structurally cannot do: it assigns a single stage schedule to the whole loop,
+so a small tensor rides in the big one's stage whether that helps or not.
+
+```python
+@gluon.jit
+def a2_per_tensor_depth(out, big, small, M: gl.constexpr, N: gl.constexpr, ITERS: gl.constexpr):
+    sb = gl.allocate_shared_memory(gl.float32, [2, M, N], SH)   # double-buffered
+    ss = gl.allocate_shared_memory(gl.float32, [1, M, N], SH)   # single, no lead
+    o = (gl.arange(0, M, layout=gl.SliceLayout(1, BLK))[:, None] * N
+         + gl.arange(0, N, layout=gl.SliceLayout(0, BLK))[None, :])
+    acc = gl.zeros([M, N], gl.float32, layout=BLK)
+    sb.index(0).store(gl.load(big + o))                # big leads by one iteration
+    for i in range(ITERS):
+        cur = i % 2
+        nxt = (i + 1) % 2
+        gl.barrier()
+        if i + 1 < ITERS:
+            sb.index(nxt).store(gl.load(big + o))
+        ss.index(0).store(gl.load(small + o))          # small has no lead at all
+        gl.barrier()
+        acc += sb.index(cur).load(BLK) * ss.index(0).load(BLK)
+    gl.store(out + o, acc)
+```
+
+`ds_write=16 ds_read=16`. aiter's block-scaled GEMM is the production form of this shape,
+leading its operands by two K-iterations and its scales by one, and its docstring names that
+split as the main win over the Triton version: keeping the scales in the operands' stage both
+puts scale-load latency on the critical path and spends `ds_read` bandwidth on a tiny tensor.
+A3 (several chains at staggered depths) is the same freedom applied more than twice —
+`mla_gluon` runs a page-index chain alongside a KV chain and drains them separately.
+
+**A4 — one buffer consumed as independent half-slices.** Each slice is a descriptor in its own
+right, so the halves can be filled or drained on different schedules.
+
+```python
+HALF: gl.constexpr = gl.BlockedLayout([1, 4], [8, 8], [4, 1], [1, 0], [])
+
+@gluon.jit
+def a4_subbuffer_slice(out, inp, M: gl.constexpr, N: gl.constexpr, ITERS: gl.constexpr):
+    s = gl.allocate_shared_memory(gl.float32, [M, N], SH)
+    ...
+    for _i in range(ITERS):
+        gl.barrier()
+        s.store(gl.load(inp + o))
+        gl.barrier()
+        top = s.slice(0, M // 2, 0).load(HALF)          # rows [0, M/2)
+        bot = s.slice(M // 2, M // 2, 0).load(HALF)     # rows [M/2, M)
+```
+
+`ds_write=8 ds_read=8`. The slice takes `(offset, length, dim)`; the consuming layout must
+match the sliced shape, not the parent's — that mismatch is the usual first failure.
+
+**B1 — cluster markers. A hint: it reorders, it stages nothing.**
+
+```python
+@gluon.jit
+def b1_warp_pipeline_stage(out, inp, M: gl.constexpr, N: gl.constexpr, ITERS: gl.constexpr):
+    ...
+    for _i in range(ITERS):
+        with gl.amd.warp_pipeline_stage("load", priority=1):
+            v = gl.load(inp + o)
+        with gl.amd.warp_pipeline_stage("compute", priority=3):
+            acc += v * 2.0
+    gl.store(out + o, acc)
+```
+
+`s_setprio=10`, and `ds_read`/`ds_write` stay **0** — which is the point: no LDS traffic
+appears because no staging happened. Pair it with A5 when you want both.
+
+### Getting `wait_group` right
+
+Copy the semantics from the API, do not reason from the name:
+
+- `wait_group(num_outstanding)` blocks until the number of outstanding commit groups is
+  **less than or equal to** `num_outstanding`. **Uncommitted async operations are waited on
+  even when `num_outstanding` is 0**, so a missing `commit_group` does not merely delay a
+  wait — it silently converts an async copy into a blocking one.
+- `buffer_load_to_shared` vs `global_load_to_shared` is a trade, not a preference: the buffer
+  form takes a scalar base plus a 32-bit offset tensor and gets **hardware out-of-bounds
+  masking**; the global form takes a pointer tensor and gets the **64-bit indexing range**.
+  Production code picks per call site by whether a mask is needed.
+- `load_shared_relaxed` is **not** a faster `.load()`. It deliberately omits the cross-warp
+  `ds_read` fence, and that is only sound because the caller already paired the copy with a
+  `wait_group` that synchronised the wave. Used without that pairing it is a race.
+
+> **The trap that is not in any rule list: do not interleave async copies with ordinary
+> loads/stores in the same loop.** Both entry points document that an async copy still
+> completes **in order** with `ttgl.load`/`store` and `buffer_load`/`store`, so a stray
+> ordinary load in the body serialises the copies you built the pipeline for. This is the
+> easiest way to author a pipeline that measures like no pipeline at all.
+
+### CDNA5 (gfx1250) is a different model — do not port the CDNA3/4 shape
+
+Only `commit_group` / `wait_group` carry over. The copy entries are renamed and re-shaped
+(`global_to_shared`, `shared_to_global`, `mbarrier_arrive`), there is an `mbarrier` object
+model and a `cluster` scope, and the descriptor path is a separate `tdm` module
+(`make_tensor_descriptor`, `async_load` / `async_store` / `async_gather` / `async_scatter`,
+`async_wait`, `prefetch`). The matrix op is `wmma`, not `mfma`. Treat it as its own target.
+
+### RDNA3 / RDNA4 have no async surface at all
+
+`gl.amd.rdna3` and `gl.amd.rdna4` expose exactly one thing: `wmma`. No buffer ops, no async
+copy, no TDM. Authored overlap there is A5 only — core `gl.allocate_shared_memory` staging with
+an explicit barrier, hand LDS ping-pong (`rdna-wmma-reference.md ## Pipeline`).
+
+**Re-injection has not been tested on CDNA5 or RDNA.** All four-version evidence for it comes
+from gfx942; do not extrapolate the route table there.
 
 LLVM passes (`LLIR_SCHED`, `RA_HINTS`, `AMDGCN_AS`) interleave the hot loop — toggle +
 IR-verify (`../tile-programming/compiler-contract.md`).
@@ -228,9 +411,29 @@ rather than probe-gated:**
 | `gl.amd.cdna4.async_copy` (all 5 entry points) | ✓ | ✓ | ✓ | ✓ |
 
 On 3.6 there is no marker path at all — re-injection is the only pipelining available.
-`cdna4.async_copy` imports on every version including 3.6; the `cdna4` naming is a module
-name, not a hardware gate — `TargetFeatures::supportsBufferLoadToLocal()` covers CDNA3 and
-CDNA4, so direct-to-LDS exists on gfx942 at 32-bit vector width (128-bit needs CDNA4).
+
+**`cdna4.async_copy` imports on gfx942 but does not lower there. Importing is not lowering,
+and this row used to claim otherwise.** The module and all five entry points import fine on
+every version including 3.6, which is what the old claim rested on — but a compiled probe on
+gfx942 fails at the backend, identically on 3.6.0 and 3.8.0:
+
+| entry, called on gfx942 | result |
+| --- | --- |
+| `buffer_load_to_shared` | `failed to translate module to LLVM IR` (`builtin.unrealized_conversion_cast` on the pointer) |
+| `global_load_to_shared` | `PassManager::run failed` |
+| `load_shared_relaxed` | **OK** — it is only a shared-read hint, no async copy |
+| `gl.allocate_shared_memory` + `.store()` / `.load()` (sync staging) | **OK** |
+
+Three things make this the op and not the call site: `load_shared_relaxed` from the *same*
+module compiles and runs correctly, so the import and the surrounding scaffolding are sound;
+the two async entries fail with two *different* backend errors, both past the frontend; and
+every per-thread vector width (32 / 64 / 128-bit) fails identically, so it is not the
+width-gated behaviour a `supportsBufferLoadToLocal()` reading would predict. aiter's own
+async-copy Gluon kernels agree — they are CDNA4-targeted and recorded as unreachable on gfx942.
+
+**So on CDNA3 the authored-overlap path is sync staging, not async copy.** The async table
+below applies to CDNA4. Not re-checked on CDNA4 hardware here (none available), so treat the
+gfx950 column as inherited from those production kernels rather than probed.
 
 ## vs CuTeDSL (concept filter)
 

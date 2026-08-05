@@ -482,14 +482,29 @@ the diagnosis.
 
 Do-not-write list, i.e. what compiles and then costs you:
 
-- **Runtime buffer indices.** `smem.index(k % nBuffers)` is an anti-pattern: the scheduler cannot prove
-  overwrite-safety and refuses to interleave. Buffer indices must be compile-time constant, and
-  `wait_group(N)` must be recomputed whenever the prologue, region or unroll factor changes. The vetted
-  double-buffer skeleton in `references/tile-programming/pipeline.md` writes `cur = i % 2` and now says
-  why: that form is the readable *correctness* template, and the literal-index unroll is the
-  scheduling-optimal one. Unroll by 2 so each index is a literal.
+- **Runtime buffer indices — but measure before paying for the unroll.** The rule is that
+  `smem.index(k % nBuffers)` prevents the scheduler from proving overwrite-safety, so buffer indices
+  should be compile-time constant and `wait_group(N)` recomputed whenever the prologue, region or unroll
+  factor changes. It is **narrower than it reads**: over *sync* staging on gfx942 both index forms emit
+  **identical ISA and identical VGPR counts**, and aiter's shipped block-scaled GEMM indexes its async
+  main loop with a runtime modulo, unrolling only its wind-down and citing register allocation for that.
+  The async form could not be probed here. So unroll when the ISA says it bought something, not by rule.
 - **A hand register-prefetch next to a re-injected pipeliner.** Not additive — it consumes the slot the
   pass wanted.
+- **Anything asynchronous, on CDNA3.** `gl.amd.cdna4.async_copy` **imports on gfx942 and does not
+  lower there** — `buffer_load_to_shared` fails LLVM translation and `global_load_to_shared` fails the
+  pass manager, at every vector width on 3.6.0 and 3.8.0, while `load_shared_relaxed` from the *same
+  module* runs correctly, so it is the op and not the call site. **An import is not availability**, and
+  an earlier revision of this file argued gfx942 support from exactly that. On CDNA3 the authored
+  overlap path is **sync staging** (`allocate_shared_memory` + `.store()`/`.load()` + barrier);
+  everything asynchronous belongs to CDNA4 and later.
+- **`sched_barrier` / `sched_group_barrier` / `set_prio`.** Absent from `gl.amd.cdna3` *and* `.cdna4` on
+  all four versions. aiter's `pa_decode_gluon` imports them inside a `try/except` and defines **no-op
+  stubs**, so on these builds that production kernel's iglp hints are dead code. Do not copy the pattern
+  expecting scheduling control.
+- **`gl.warp_specialize`.** Present in core `gl` on every version and still fails the pass manager on
+  CDNA3. `gl.amd.warp_pipeline_stage` *does* work on gfx942 and emits `s_setprio` — but it is a
+  scheduling **hint**, not a data movement mechanism, so whether it pays is a measurement.
 - **`TRITON_GLUON_SWP_PIPELINE`, `TRITON_GLUON_COOP_LDS`, `TRITON_GLUON_PINGPONG`.** Vendor-fork
   additions to `GetEnv.h`; no upstream version reads any of them, and on a clean build they are
   *tolerated and inert* rather than an error. Use `scripts/gluon_swp.py` for the first and read
@@ -563,9 +578,9 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
 
 ## Sources
 
-- Vendored from `AMD-AGI/TileProgrammingAgentSkills@2b1d42a`
+- Vendored from `AMD-AGI/TileProgrammingAgentSkills@541a180`
   (`.cursor/skills/tile-programming-gluon/`), **pruned to the API surface, the do-not-write lists and the
-  two mechanics above**: 14 of 70 reference files (~2.4 k of ~11 k lines) and 10 of 50 scripts. Upstream
+  two mechanics above**: 14 of 70 reference files (~2.7 k of ~11 k lines) and 11 of 51 scripts. Upstream
   remains the SSOT; this is a one-way snapshot. `references/` is unmodified. `scripts/` carries **six
   corrections**, all of which should go back upstream:
   - `ttgir_to_gluon.py` dropped `tilesPerWarp` and `elementBitWidth` when emitting
