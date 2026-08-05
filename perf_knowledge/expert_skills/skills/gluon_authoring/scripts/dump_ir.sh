@@ -51,6 +51,19 @@ while [ $# -gt 0 ]; do
 done
 [ ${#CMD[@]} -gt 0 ] || { echo "ERROR: no compile command given" >&2; exit 1; }
 
+# `--kernel` is `module.path:object` for the translator; `--kernel-name` is the substring that PINS
+# which compiled kernel gets copied. Passing a bare name to `--kernel` is the one mistake that
+# defeats the multi-kernel guard below WITHOUT any symptom: nothing pins, the freshest artifact
+# wins, and every layout recovered from it is confidently wrong for the body you meant. Refuse it
+# here rather than let it through -- a doc that says "pass --kernel <substring> to pin it" has
+# already sent one run into exactly that.
+case "$KERNEL" in
+  ""|*:*) ;;
+  *) echo "ERROR: --kernel takes module.path:object (for --emit-gluon). To PIN which compiled" >&2
+     echo "       kernel is dumped, you want:  --kernel-name $KERNEL" >&2
+     exit 1;;
+esac
+
 # Strip CORRECTNESS/BENCH-only flags from the compile CMD: the IR dump only needs the kernel to
 # COMPILE, not to run its oracle. A stray `--check` (a correctness flag) that a kernel's driver does
 # not recognize used to CRASH the dump (v6: `prof_driver.py: error: unrecognized arguments: --check`)

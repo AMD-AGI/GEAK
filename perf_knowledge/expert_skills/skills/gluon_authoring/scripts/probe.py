@@ -85,6 +85,28 @@ def lds_per_cu(arch, default=65536):
     return default
 
 
+def simds_per_cu(arch, default=4):
+    """SIMDs per CU for `arch`, from the same per-arch reference the divisor comes from.
+
+    Needed because waves/SIMD is not an answer on its own: the register limit becomes a
+    WORKGROUP limit only after multiplying by the SIMDs and dividing by the waves a workgroup
+    occupies, and on a wave64 kernel with num_warps=8 that arithmetic can pin occupancy at
+    1 WG/CU while the LDS figure still reports twenty. 4 on every CDNA/RDNA part shipped so far.
+    """
+    if _OCC is not None and hasattr(_OCC, "_find_hw_constants"):
+        path = _OCC._find_hw_constants()
+        if path:
+            try:
+                with open(path) as f:
+                    table = json.load(f).get("arch", {})
+            except (OSError, ValueError):
+                return default
+            for name in sorted(table, key=len, reverse=True):
+                if str(arch).startswith(name):
+                    return table[name].get("simds_per_cu") or default
+    return default
+
+
     for k, v in LDS_PER_CU_BY_ARCH.items():
         if arch.startswith(k):
             return v
@@ -162,10 +184,15 @@ def _from_asm(path: str) -> dict | None:
             "waves_source": "llvm-comment" if llvm_occ is not None else "model"}
 
 
-def _lds_from_meta(d: str) -> dict[str, int]:
-    """LDS bytes/WG from the Triton cache metadata `shared`. The KD's group_segment_fixed_size
-    and rocprof-compute 7.1.8 are structurally 0 for Triton (shared memory is sized dynamically
-    at launch), so neither may be substituted -- a 0 from those is not evidence of 'no LDS'."""
+def _meta_from_dir(d: str) -> dict[str, dict]:
+    """Per-kernel Triton cache metadata: `shared` bytes/WG plus the launch geometry.
+
+    `shared` is the ONLY correct LDS source for a Triton kernel -- the KD's
+    group_segment_fixed_size and rocprof-compute 7.1.8 are structurally 0 (shared memory is
+    sized dynamically at launch), so neither may be substituted and a 0 from those is not
+    evidence of 'no LDS'. `num_warps` comes along because the register limit cannot be turned
+    into a workgroup limit without it.
+    """
     out = {}
     for root, _dirs, files in os.walk(d):
         for f in files:
@@ -176,7 +203,12 @@ def _lds_from_meta(d: str) -> dict[str, int]:
             except (OSError, ValueError):
                 continue
             if isinstance(j, dict) and isinstance(j.get("shared"), int):
-                out[str(j.get("name") or f)[:44]] = j["shared"]
+                tgt = j.get("target") or {}
+                out[str(j.get("name") or f)[:44]] = {
+                    "shared": j["shared"],
+                    "num_warps": j.get("num_warps"),
+                    "arch": tgt.get("arch") if isinstance(tgt, dict) else None,
+                }
     return out
 
 
@@ -186,7 +218,8 @@ def cmd_measure(a):
         asms += [os.path.join(root, f) for f in files
                  if f.endswith((".amdgcn", ".s")) or f.endswith("_final_isa.s")]
     kernels = [r for r in (_from_asm(p) for p in sorted(asms)) if r]
-    lds = _lds_from_meta(a.dir)
+    meta = _meta_from_dir(a.dir)
+    lds = {n: m["shared"] for n, m in meta.items()}
 
     print(f"=== probe measure: {a.dir} ===")
     if not kernels:
@@ -201,8 +234,36 @@ def cmd_measure(a):
               f"waves/SIMD={k['waves_per_simd']}{src}  spill={spill}{warn}")
     print()
     if lds:
+        # The divisor is per-arch (64 KiB on CDNA3, 160 KiB on CDNA4), so it has to come from
+        # the arch the artifact was actually built for. Taking the module fallback here reads a
+        # gfx950 kernel against the CDNA3 figure and overstates its LDS pressure by 2.5x --
+        # which lands as "0 WGs/CU" on a kernel that runs, i.e. as a blocker that is not real.
+        asm_arch = next((k["arch"] for k in kernels if k["arch"]), None)
+        arch = asm_arch or next((m["arch"] for m in meta.values() if m["arch"]), None) or DEFAULT_ARCH
+        cap = lds_per_cu(arch)
+        simds = simds_per_cu(arch)
+        basis = f"{arch}" if (asm_arch or arch != DEFAULT_ARCH) else f"{arch}-assumed"
+        # Registers and LDS both cap WORKGROUPS per CU, and reporting only the LDS side invites the
+        # error this tool exists to prevent: on one measured kernel the arm with the most LDS
+        # headroom (20 WGs/CU) was the SLOWEST, because 2 waves/SIMD x 4 SIMDs = 8 waves/CU against
+        # a num_warps=8 workgroup already pinned it to 1. So print both and name which one binds.
+        wps = {k["waves_per_simd"] for k in kernels if k["waves_per_simd"]}
+        waves = wps.pop() if len(wps) == 1 else None
+        print(f"  LDS/CU basis: {cap} B [{basis}]  SIMDs/CU={simds}"
+              + ("" if waves else "   (waves/SIMD differs across kernels -- register side per-kernel)"))
         for n, b in sorted(lds.items(), key=lambda kv: -kv[1]):
-            print(f"  {n:46s} lds/WG={b:6d} B  WGs/CU by LDS<={LDS_PER_CU // b if b else '-'}")
+            nw = meta[n]["num_warps"]
+            by_lds = cap // b if b else None
+            by_reg = (waves * simds) // nw if (waves and nw) else None
+            row = f"  {n:46s} lds/WG={b:6d} B  LDS<={by_lds if by_lds is not None else '-'}"
+            if by_reg is not None:
+                binder = ("REGISTERS" if by_reg < by_lds else
+                          "LDS" if by_lds < by_reg else "both")
+                row += (f"  regs<={by_reg} (waves/SIMD={waves} x{simds} / nw={nw})"
+                        f"  -> {min(by_lds, by_reg)} WGs/CU, {binder} bind")
+            else:
+                row += "  regs<=? -- no num_warps in metadata, register side not computable"
+            print(row)
     else:
         print("  lds/WG UNAVAILABLE -- no Triton cache metadata under this dir. Do NOT read LDS "
               "from the KD or rocprof-compute: both are structurally 0 for Triton kernels.")
@@ -287,7 +348,8 @@ def cmd_plan(a):
                   "LOWER bound and\n  a real kernel's non-resident pressure is routinely larger "
                   "than the resident set itself.\n  Confirm with `probe.py measure` on the first "
                   "compile before betting a round on this tile.")
-    print(f"\n  (LDS is a SECOND, independent limiter -- check it too: {LDS_PER_CU} B/CU.)")
+    print(f"\n  (LDS is a SECOND, independent limiter -- check it too: "
+          f"{lds_per_cu(a.arch)} B/CU on {a.arch}.)")
     return 0
 
 

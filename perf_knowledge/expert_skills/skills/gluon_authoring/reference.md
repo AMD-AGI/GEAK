@@ -1,7 +1,16 @@
 # gluon_authoring — reference router
 
-14 files, ~2.7 k lines, all **lazy**: load one only when [`skill.md`](skill.md) cites it, or when you
+16 files, ~3.6 k lines, all **lazy**: load one only when [`skill.md`](skill.md) cites it, or when you
 reach for the construct it documents. Two groups only — the API, and what not to write.
+
+## First, check which generation you are on
+
+`match.gens` claims gfx942 **and** gfx950. The mechanics transfer; several *verdicts* do not — the LDS/CU
+divisor, the bank-conflict stride, the MFMA shape set, whether async copy lowers, and whether one shipped
+limitation announces itself or degrades silently. All of it is one table:
+[`skill.md ## Arch dispatch`](skill.md#arch-dispatch-gfx942-cdna3-vs-gfx950-cdna4). **Read it before
+trusting a figure or asserting a digest across generations**, and take the values from
+`hardware/hw_constants.json` below rather than from prose.
 
 ## Start above this skill, not in it
 
@@ -26,8 +35,27 @@ you are in the wrong file.
 
 Load this one **before writing the anchor**, not after it fails. Two of its stages carry decisions no
 other file states: *Apply* (a body left on `AutoLayout` compiles, passes the oracle, and is several
-times slower than the champion) and the classification of each `ttg.local_alloc` (a pass-through round
-trip transcribed as a user buffer costs LDS and registers that `--verify` cannot see).
+times slower than the champion) and the classification of each `ttg.local_alloc` (staged vs pass-through).
+
+Two corrections to that classification, both measured after the runbook was written and both owed
+upstream: it is a property of **the dump's `num_stages`**, not of the kernel — at the shipped depth the
+staging you are looking at is often the *pipeliner's*, which a faithful un-pipelined anchor has nothing to
+transcribe, so classify against a **`ns=1` dump**. And `--verify` is **not** blind to the choice: getting it
+wrong shows up as a hard FAIL with the missing `swizzled_shared` named. What `verify` cannot see is
+allocation *size*, which is the narrower claim.
+
+## Per-arch constants (`references/hardware/`)
+
+| you need | read |
+| --- | --- |
+| the machine-readable per-arch table the occupancy probe reads — LDS/CU and banking, VGPR file and the wave-step table, MFMA cadence and layout family, `ds_read_tr` / `scaled_mfma` / direct-to-LDS widths | `hardware/hw_constants.json` |
+
+Prefer it over a figure quoted in prose, and **pass the arch rather than defaulting it**: the LDS/CU
+divisor differs by 2.5× across the two generations this skill claims, and one applied to the other is a
+confidently wrong occupancy verdict rather than a rounding error. `scripts/probe.py` shipped with exactly
+that bug. Occupancy is capped **jointly** by LDS and by registers, so read both sides of the probe's
+report and act on whichever binds — a generous LDS figure is not headroom if registers are the limit, and
+the more LDS the generation gives you the more likely that is the case.
 
 ## Gluon API surface (`references/gluon/`)
 

@@ -106,6 +106,8 @@ them, so this is a reachability problem, not a rebuild.
 | `patch_reinject.py apply\|revert\|status` | The on-disk form, kept for when you want the pass list itself visible in `compiler.py` while reading. Env-armed (`TRITON_GLUON_SWP=N`, plus `TRITON_GLUON_SWP_BUF=1` for the buffer half) so splice-ON and splice-OFF are the **same binary**, which is the only way an IR diff between them means anything. The splice point is version-dependent and measured, not assumed: before `add_warp_pipeline` on 3.7/3.8; after the last `add_*` call on 3.6, which has no warp pipeline at all. Writes a `.orig_swp` backup; `revert` restores it and clears the `__pycache__`. |
 | `pipeline_survey.py <root> [...]` | Inventories a plain-Triton source tree by which pipeline **form** each kernel can exercise: A = cross-iteration software pipeline (the one re-injectable here), B = block ping-pong, C = async copy / direct-to-LDS. Classification is from source text, which is a **screen and not a verdict** — a source saying `num_stages=2` can dispatch a branch compiled at 1, and only a dump settles it. Use it to rank what to measure. |
 | `pipeline_examples_cdna3.py` | The four authored-overlap examples from `references/gluon/pipeline-reference.md`, kept **runnable and numerics-checked** so the op counts quoted there can be re-derived on your own box instead of trusted. Needs a GPU. The async multi-buffer path is deliberately absent from the examples, but not because it is unavailable: `cdna4.async_copy` **does lower on gfx942 at the 32-bit per-thread direct-to-LDS width** that generation supports, and fails above it. A failure at the narrow width is a layout-contract problem — threads must tile the contiguous dimension — and it reports itself with the same wording as a missing op, so vary the tiling before concluding the arch lacks the path |
+| `pipeline_examples_cdna4.py` | The CDNA4 counterpart, and the **only** one of the two that runs on 3.6.0 — see the version-drift box below. Same five-case shape (one sync-staging control plus the async forms) with numerics checked, and it is the runnable answer to "does async copy lower on this box": each case reports the per-lane access width, whether it compiled, `ds_write` count and a numeric verdict, so a failure separates an unsupported width from a layout that does not cover the tile exactly. Needs a GPU. |
+| `patch_async_reinject.py apply\|revert\|status` | Splices `add_coalesce_async_copy` for the case where an async pattern is **not** on a native per-lane width, since the pass is what makes such an access legal by adding a bounce. It is **not** what enables async copy — on a native width both entry points lower from the stock pass list — so reach for it only after `pipeline_examples_cdna4.py` has shown the width is the problem, and price the bounce it adds — prefer fixing the layout to match a native width. Same shape as `patch_reinject.py`: env-armed (`TRITON_GLUON_ASYNC=1`, so unarmed is byte-identical to stock) with a `.orig_async` backup that `revert` restores. |
 | `probe_levers.py --all [--arch <gfx>]` | Per-build capability probe — there is **no** positional probe-name argument. Its `reinject_ttgir_pipeliner` entry answers whether the passes are present in *this* `libtriton.so`. Read `available: true` for exactly that and nothing more: the symbols existing is not the pass biting on your IR, and those two hypotheses come apart in practice. `gluon_swp.capabilities()` answers the same question plus whether the tree already pipelines; `skill.md` step 2d has the read-the-IR-back check that answers the second. |
 
 **Two conditions the anchor must meet, or injection changes nothing at all**: the loop must be a
@@ -138,10 +140,33 @@ visible peeled prologue.
 > manager on CDNA3. `gl.amd.warp_pipeline_stage` is the one that *does* work on gfx942 — and it is a
 > scheduling hint, not data movement. `pipeline_examples_cdna3.py` is what re-checks this on your box.
 
-> **`buffer_ops=True` is opt-in because it fails two different ways.** On an anchor whose **loads** are
+> **The Gluon source surface drifts across the versions this package spans, and it will bite the examples
+> before it bites your kernel.** Two renames matter: `gl.thread_barrier` became `gl.barrier`, and
+> `gl.zeros(..., layout=)` is **unusable on 3.6.0** — it is a `GluonJITFunction`, so the layout has to
+> survive `_flatten_ir` and no layout class implements that; use the `gl.full` builtin instead.
+> Consequence: **`pipeline_examples_cdna3.py` does not run on 3.6.0 at all**, failing on both of those
+> before it reaches any arch question, so a "CDNA3 examples all fail" report on a 3.6 box is a version
+> result rather than an arch one. `pipeline_examples_cdna4.py` is written against 3.6 and runs there.
+> Version-gated additions to be aware of when reading a lever as absent: `gl.amd.warp_pipeline_stage` /
+> `warp_pipeline` arrive in 3.7, as do `compute_efficient_padded_shared_layout` and `scaled_upcast`.
+
+> **`buffer_ops=True` is opt-in because it fails three different ways.** On an anchor whose **loads** are
 > already `buffer_load` it aborts loudly (`PassManager::run failed`). On one whose **stores** are buffer
 > ops it does not raise at all — `LLVM ERROR: Fatal pipeliner error` kills the interpreter. Arm it only
 > on an anchor written throughout with `gl.load` / `gl.store`.
+>
+> **"Throughout" means the whole function, not the loop** — that is the third way, and it looks like
+> neither of the first two. A single `gl.amd.cdna4.buffer_load` left *outside* the loop (a prologue tile,
+> an epilogue bias, a scalar guard) is enough: the rejection comes from
+> `TritonAMDGPUCanonicalizePointers`, which runs over the function rather than the pipelined region, so a
+> loop body that is clean on its own still fails. Grep the anchor source for `buffer_` before arming,
+> rather than reading the loop.
+
+> **`recover`'s `LDS:` line sums *declared* allocations and does not model liveness**, so it
+> over-reports on a non-pipelined dump where the backend allocator would have reused one buffer across
+> disjoint live ranges. Read it as an upper bound and a comparator against plain's own line — not as the
+> `shared` bytes/WG the kernel will be charged. `probe.py measure` reads the compiled artifact and is the
+> figure to quote once an anchor exists.
 
 > **If you are on a copy of `gluon_swp.py` older than this one, check `disable()` first.** It used to
 > capture `gluon_to_ttgir` as a *resolved* attribute, which loses the `staticmethod` descriptor, so
@@ -212,7 +237,10 @@ Two things are not portable — plus one failure below that reads like a version
   algorithm skeleton. **Decide this from the import, never from `triton.__version__`:** the rewrite
   landed on `main` and never on the `release/3.7.x` line, so a main or vendor-fork checkout can still
   report `3.7.0` and carry the 3.8-era `translator` package with its `target.py`. The import is what the
-  script actually tests; the version string is not evidence either way.
+  script actually tests; the version string is not evidence either way. In practice, on an **official**
+  pip-installed build the translator package is simply not there — it has been found only in the
+  gfx950 tutorial *fork* — so plan for the loop being **recover, then hand-author the anchor**, and treat
+  any claim about the automatic translator as a fork claim until the import succeeds on your box.
 - **`dump_ir.sh --knobs LLIR_SCHED|AMDGCN_AS|RA_HINTS` is fork-only.** `TRITON_ENABLE_LLIR_SCHED`,
   `TRITON_ENABLE_AMDGCN_AS` and `TRITON_ENABLE_AMDGPU_RA_HINTS` appear in no upstream version, and neither
   does `triton.tools.amdgcnas` (which `probe_levers.py`'s `gemm_compiler_stack` calls "decoupled / stock

@@ -13,7 +13,10 @@ match:
   operator: '*'
   arch_class: ['*']
   gens: [gfx942, gfx950]
-  dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+  # fp8 is spelled per generation, not once: CDNA3 is FNUZ and CDNA4 is OCP, and
+  # `index/capability_index.yaml` uses both names — so claiming only the FNUZ spelling while
+  # claiming gfx950 makes this skill silently unselectable on a CDNA4 fp8 bottleneck.
+  dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3]
   regimes: ['*']   # decode included -- see the entry-gate note in Do-no-harm
   # triton = port a tuned plain kernel; gluon = the source is already Gluon, optimize it in place
   from_backend: [triton, gluon]
@@ -136,8 +139,48 @@ residual is layout-shaped, because LDS swizzle/padding choice and LDS dedup are 
 Triton has no syntax for.
 
 **Lazy-loading contract.** Read this file plus [`reference.md`](reference.md). Everything under
-[`references/`](references/) is lazy — 14 files, ~2 k lines, load one only when you reach for the
+[`references/`](references/) is lazy — 16 files, ~3.6 k lines, load one only when you reach for the
 construct it documents.
+
+## Arch dispatch: gfx942 (CDNA3) vs gfx950 (CDNA4)
+
+`match.gens` claims both, and the *mechanics* below are shared: the passes, the three re-injection
+conditions, the landing tells, the recover→apply→verify order. What is **not** shared is this table, and
+every row of it can change a verdict rather than a magnitude. Read it once, here, before trusting a figure
+or asserting a digest across generations — the rest of this file assumes you have.
+
+**Numbers live in [`references/hardware/hw_constants.json`](references/hardware/hw_constants.json), not
+in prose.** It is the per-arch SSOT the occupancy probe already reads, so take the value from the named key
+and pass `--arch` everywhere rather than carrying a figure across a generation. A divisor that is right for
+one gen is a *confidently wrong* verdict on the other, not a rounding error.
+
+| what differs | key / how to read it | why it changes a conclusion |
+| --- | --- | --- |
+| **LDS per CU** — the occupancy divisor | `lds_per_cu_kib` (CDNA4 is 2.5× CDNA3) | a depth or tile CDNA3 reasoning treats as unavailable may simply fit. `scripts/probe.py measure` applies it per artifact and prints the basis |
+| **LDS banking** — conflict stride | `lds_banks`, `ds_read_b128_full_conflict_stride_bytes`, and a CDNA4-only `ds_read_b128_2way_stride_bytes` | a recovered swizzle that was conflict-free is **not known to still be**, and the sign can invert: a `per_phase` choice that costs a conflict on one gen can be free on the other. Re-derive from the keys; do not carry the rule of thumb |
+| **MFMA family and shape set** | `matrix_layout_family` (`version=3` vs `4`), `mfma_cadence_cyc` | layout digests **should** differ across gens. Assert four-version consistency *within* one arch plus a passing round-trip — never cross-gen equality |
+| **Block-scaled MFMA** | `scaled_mfma` | CDNA4-only. A layout family with no CDNA3 counterpart, so it is a new-capability question rather than a regression check |
+| **fp8 spelling** | `fp8_dtype` | FNUZ on CDNA3, OCP on CDNA4, and the selector must claim the right name or it never matches. **The CDNA4 key is absent upstream** — do not fall back to the sibling arch's value: the CDNA3 spelling is the one dtype CDNA4 lacks, and Triton silently upcasts it to fp16 with only a warning |
+| **Direct-to-LDS width** — whether FORM C async copy lowers at all | `direct_to_lds_bit_widths` (CDNA4 adds the 128-bit form) | each lane must make **one** access of a listed width. Both async entry points then lower on stock `gluon_to_ttgir`; a width off the list, or a native width **split across layout repetitions**, does not — and fails with wording that reads like a missing op. See `## Knobs & pitfalls` |
+| **Read-with-transpose LDS** | `ds_read_tr` | where it exists the compiler emits it instead of `amdg.in_thread_transpose`, so the "Gluon cannot express `in_thread_transpose`" gap **has no subject** there and a faithful anchor inherits the instruction for free. No Gluon source API either way |
+| **Ping-pong reachability** | probe the ISA for `s_setprio` | the enabling predicate is not arch-symmetric *and* is read only inside `make_ttgir`, so on the Gluon path satisfying it buys nothing on either gen. Judge from the ISA, never from a source config |
+| **The omitted post-pipeline tail** | — | the same defect announces itself as `OutOfResources` on CDNA3 and, because the larger ceiling absorbs it, becomes a **silent slowdown** on CDNA4. Check the pass list, not the exception (`## Procedure` step 2c) |
+
+**Three gfx950 keys are missing where gfx942 has them, and the first two are traps rather than gaps** —
+`references/` is a one-way snapshot, so these are to report upstream rather than patch here.
+`fp8_dtype` is covered above. `lds_min_alloc_bytes` is what tells a reported `lds/WG` apart from an
+allocator round-up, and gfx950's `lds_align_bytes` is **not** that granularity despite looking like it — a
+measured allocation need not be a multiple of it, so do not substitute one for the other.
+`cvt_off_f32_i4` is a binding-availability record rather than a silicon fact (see its note in the JSON) and
+does not bear on transcription. The key that *is* read on the hot path, `lds_per_cu_kib`, is present and
+correct on both.
+
+**Two gaps this table cannot close, because they are Gluon-side rather than arch-side** and survive the
+generation change unchanged: `amd_rotating_shared` has no `gluon.language` constructor on any arch; and a
+user `allocate_shared_memory` is totalled **by scope** where plain's allocator peaks **by liveness**, so a
+faithful transcription can report a larger shared figure than the kernel it is copying and land on the wrong
+side of the divisor above while every layout still verifies. Read `shared` bytes off the artifact rather
+than reasoning about them.
 
 ## Mechanism
 
@@ -222,10 +265,14 @@ the layouts, and iterate until `--verify` passes.
 > step.** It is the executable form — six numbered stages, one command and one decision each — and it
 > carries two things this summary cannot: the **Apply** checklist (declaring a layout is not applying it;
 > a body left on `AutoLayout` compiles, passes the oracle, and is several times slower), and the rule for
-> **classifying each `ttg.local_alloc` before transcribing it**. That second one decides `shared` bytes
-> per workgroup and therefore waves/SIMD, and neither `--verify` nor the numeric oracle can see it.
-> Check the result with `scripts/probe.py measure` — compile-only, seconds, no GPU — as soon as the
-> anchor builds, not after the first timing.
+> **classifying each `ttg.local_alloc` before transcribing it** — with two corrections the vendored copy
+> predates: classify against a **`ns=1` dump**, because at the shipped depth the staging is usually the
+> pipeliner's rather than the author's; and `--verify` *does* fail on a wrong choice (naming the missing
+> `swizzled_shared`), so what it cannot see is allocation **size**, not the classification.
+> Check the size with `scripts/probe.py measure` — compile-only, seconds, no GPU — as soon as the
+> anchor builds, not after the first timing. Read **both** limiters it prints: registers and LDS each cap
+> workgroups per CU, and quoting the LDS side alone will hand you generous headroom on a kernel that is
+> register-bound, which is how an arm with the most apparent LDS slack ends up the slowest of a set.
 
 ```bash
 python3 "$SKILL/scripts/ttgir_bridge.py" --selftest      # 10 s, offline: is the recovery itself sane?
@@ -247,6 +294,14 @@ Two `verify` states pass: `PASS`, and `RECONCILED` (also exit 0) where every dif
 structural cause — a disclosed substitution, a pipelined-plain shape the anchor never produces, or a
 layout produced by an op Gluon has no builtin for. Read the causes; each is a real fact about your
 anchor. `FAIL` is reserved for a difference with none.
+
+**A fourth structural cause exists and `verify` reports it as `FAIL`, correctly**, because it is a genuine
+expressibility wall rather than a reconcilable difference: a `tt.dot` on fp8 can be lowered by plain to an
+**unscaled `tt.dot_scaled`**, and Gluon has no spelling for that — the plain mfma builtin rejects the
+element type, while the scaled one always materialises a default scale operand, so the anchor is forced onto
+a *different instruction* than plain's. This is instruction-level, not encoding-level: every layout
+multiplicity can match exactly and the port still cannot be made faithful. If you see it, the finding is the
+wall itself; report it upstream rather than reconciling it away.
 
 **Budget several passes here, not one.** `--verify` is a diff, and the expected shape of this step is
 verify → read the missing/extra layout attributes it names → fix that one layout → recompile the anchor →
@@ -284,8 +339,9 @@ constructor on the builds checked so far. Three things about that one, in the or
 
 **Recovery audits layouts, not ops**, so a report reading 100% recovered does not mean the body is
 transcribable: `amdg.in_thread_transpose` has no Gluon builtin and appeared as a *successful* row until
-`ttgir_bridge.py` began naming it. And layout equivalence is blind to two things that decide real ports
-— read them off `recover` rather than discovering them at the clock:
+`ttgir_bridge.py` began naming it — though whether it appears at all is **arch-dependent** (`ds_read_tr` in
+`## Arch dispatch`), so re-dump before treating it as your blocker. And layout equivalence is blind to two
+things that decide real ports — read them off `recover` rather than discovering them at the clock:
 
 - **which operands each `buffer_load` actually carries.** `recover` buckets every site as bare /
   mask-only / mask+`other`, and you transcribe the bucket rather than the source: `tl.load(...,
@@ -296,8 +352,8 @@ transcribable: `amdg.in_thread_transpose` has no Gluon builtin and appeared as a
   latter shows up only on the pipeliner's peeled prologue loads, which a non-pipelined anchor does not
   have and the injection puts back itself.
 - **LDS allocation size**, which `verify` cannot see by construction. A shared total that crosses the
-  LDS/CU divisor (**64 KiB on CDNA3/gfx942, 160 KiB on CDNA4/gfx950**) halves workgroups per CU while
-  every layout still verifies. Compare `recover`'s `LDS:` line against plain's — it names the divisor for
+  LDS/CU divisor (per-arch — `## Arch dispatch`) halves workgroups per CU while every layout still
+  verifies. Compare `recover`'s `LDS:` line against plain's — it names the divisor for
   the `--arch` you passed, and **declines to name one** for an arch this skill has no figure for rather
   than silently applying gfx942's.
 - **the `constants-digest`**, when more than one person or version is transcribing the same body. The
@@ -333,11 +389,17 @@ champion with its pipeline turned off, at its own config, and compare three numb
 | `plain@ns=1` **faster** than `plain` | the shipped `num_stages` is a *pessimisation* | **do not recover it** — recovering it recovers a negative. Not a rare case: a library kernel whose wrapper passes no `num_stages` inherits the AMD default of 2, which nobody chose for that body. Report it to the kernel's owner |
 | your anchor ≈ `plain@ns=1` **<** `plain` | the entire gap is the missing pipeline, and no layout work will move it | this is the real debt — continue to 2b |
 
-**Read plain's `num_stages` off the LOOP, not the launch.** A launch-level `num_stages=` does nothing at
+**Read plain's `num_stages` off the LOOP, not the launch — the annotation *overrides* the launch value, and
+getting this backwards manufactures a "no debt" verdict.** A launch-level `num_stages=` does nothing at
 all to a bare-`range` dot-free loop — measured, plain's TTGIR was byte-identical at launch 1/2/3 — while
-a `tl.range(..., num_stages=2)` annotation on the same loop went 2 → 4 → 6 loads. So a champion whose
-launch passes nothing may still be fully pipelined, and the `plain@ns=1` control has to flip whichever
-knob that kernel actually uses. `scripts/pipeline_survey.py <tree>` classifies a source tree by which
+a `tl.range(..., num_stages=2)` annotation on the same loop went 2 → 4 → 6 loads. Worse, where the loop
+carries an explicit annotation it wins outright: a kernel that hard-codes `tl.range(num_stages=1)` compiles
+**byte-identically** at every launch depth, so the three arms above come back equal and read as "no
+pipeline to lose" — while the real depth, reachable only by editing that one token in the kernel source, is
+a genuine win. A champion whose launch passes nothing may still be fully pipelined, and one that passes
+`num_stages=2` may never reach the pipeliner at all. The `plain@ns=1` control has to flip whichever
+knob that kernel actually uses, and a frozen annotation is itself a library bug worth reporting.
+`scripts/pipeline_survey.py <tree>` classifies a source tree by which
 pipeline form each kernel can exercise; treat it as a **screen for what to measure**, not a verdict —
 only a dump settles whether a given dispatch compiled pipelined.
 
@@ -358,10 +420,12 @@ On condition 3, the failure has a misleading error: `'ttg.local_alloc' op pipeli
 predicate this op` is the **symptom of staging not removed**, not a language wall — the first
 investigation to hit it concluded that Gluon's `allocate_shared_memory` was fundamentally incompatible
 with the pipeliner, and that was wrong.
-`buffer_ops=True` is **opt-in** because it fails two ways: on an anchor whose **loads** are already
-`buffer_load` it aborts the pass manager loudly, and on one whose **stores** are buffer ops it does not
-raise at all — `LLVM ERROR: Fatal pipeliner error` kills the interpreter. Arm it only on a body written
-throughout with `gl.load` / `gl.store`.
+`buffer_ops=True` is **opt-in** because it fails three ways: on an anchor whose **loads** are already
+`buffer_load` it aborts the pass manager loudly; on one whose **stores** are buffer ops it does not
+raise at all — `LLVM ERROR: Fatal pipeliner error` kills the interpreter; and a single buffer op left
+**outside** the loop is enough, because the rejecting pass (`TritonAMDGPUCanonicalizePointers`) runs over
+the whole function rather than the pipelined region. Arm it only on a body written throughout — the whole
+function, not the loop — with `gl.load` / `gl.store`.
 
 **Un-staging and injecting are one step, and the pair is only *conditionally* worth it.** Un-staging
 alone removes a multi-buffer that was doing real work and puts nothing back, so it is a regression, not a
@@ -399,7 +463,16 @@ on a fork that already splices the passes in, because running them twice is a di
 > consequence is not "less gain". The pipeliner's `local_load` lands in a blocked layout with a separate
 > `convert_layout` to the dot operand, so **each operand takes an extra LDS round trip** on top of the
 > multi-buffered staging. On a tile whose staging already fills the budget that surfaces as
-> `OutOfResources: Required <n>, Hardware limit 65536` — the injection succeeded and looks broken.
+> `OutOfResources: Required <n>, Hardware limit <the arch divisor>` — the injection succeeded and looks
+> broken.
+>
+> **Where the ceiling is roomy enough to absorb it, the exception disappears and the cost does not** —
+> injecting without the tail can be *worse than not injecting at all*, by a multiple rather than a
+> margin, while compiling cleanly. Do not read the LDS growth as the cause: the tell is **register
+> spill**, because pipelining without the buffer conversion leaves 64-bit pointer *tensors* live across
+> the peeled stages. Occupancy can look untouched — only the `spill=` field moves — so **check the pass
+> list, not the exception**, and check `spill=` rather than `shared`.
+>
 > `add_remove_layout_conversions` is the pass that folds the double trip. If you hit it, splice plain's
 > own order after `add_pipeline`: `add_convert_to_tensor_ops` → canonicalizer →
 > **`add_remove_layout_conversions`** → `add_reduce_data_duplication` → `add_move_up_prologue_loads` →
@@ -448,13 +521,19 @@ comparator before treating its absence as a verdict.
 > served the `ns=2` binary and reads as "depth does nothing". Give each arm its own kernel object, key
 > the cache dir with `gluon_swp.cache_tag()`, and confirm each arm's own `.ttgir` carries the tell above.
 
-**Depth is a knob, not a monotone, and the mechanism is legible before you measure.** Deepening is not
-free and not uniform: a depth can build a *single*-buffered rotating stage that leaves LDS at the
-champion's footprint while peeling the prologue, and the next depth up genuinely double-buffers — which
-doubles the shared footprint and can cross the LDS/CU divisor (**64 KiB on CDNA3/gfx942, 160 KiB on
-CDNA4/gfx950**), halving workgroups per CU. `recover`'s `LDS:` line predicts that before a clock is read.
-A depth plain itself cannot compile is not available to you either. Start at 2 and sweep. Full mechanism,
-the per-shape behaviour, the ping-pong window and why async copy is not reachable from plain on gfx942:
+**Depth is a knob, not a monotone, and the LDS cost is arithmetic you can do before you measure.** The
+pipeliner builds a rotating stage of **`num_stages − 1`** buffers, readable straight off the TTGIR as the
+leading dimension of the staged `memdesc` (`memdesc<Nx…>` at depth `N+1`, absent at depth 1). So each depth
+past the first costs one more copy of the staged tiles, `ns=2` is single-buffered with a peeled prologue
+rather than double-buffered, and any tile's whole depth series is predictable from one dump rather than
+swept blind. Two ceilings then apply and they are **different limits with different symptoms**: the
+per-workgroup **allocation** ceiling refuses the launch outright, while the **LDS/CU divisor** silently
+halves workgroups per CU — both per-arch, `## Arch dispatch`. A depth can therefore compile and still be
+the wrong depth, and the curve commonly turns at the divisor rather than at the refusal. `recover`'s `LDS:`
+line predicts this before a clock is read, as an **upper bound** — it sums declared allocations without
+modelling liveness reuse, so quote `probe.py measure` off the artifact once one exists. A depth plain itself
+cannot compile is not available to you either. Start at 2 and sweep. Full mechanism, the per-shape
+behaviour, the ping-pong window and why async copy is not reachable from plain on gfx942:
 `references/gluon/pipeline-reference.md`.
 
 **3. Pass through two checkpoints — neither of them is where the track stops.**
@@ -567,17 +646,28 @@ Do-not-write list, i.e. what compiles and then costs you:
   rather than scheduling for that. So unroll when the ISA says it bought something, not by rule.
 - **A hand register-prefetch next to a re-injected pipeliner.** Not additive — it consumes the slot the
   pass wanted.
-- **Async copy on CDNA3 — available, but narrow, and easy to misdiagnose.**
-  `gl.amd.cdna4.async_copy` does lower on gfx942, at the **32-bit** per-thread direct-to-LDS width
-  that generation supports; the wider chunks are CDNA4-only
-  (`supportsDirectToLdsLoadBitWidth`). The trap is that a request violating the layout contract —
-  threads that do not tile the contiguous dimension, or a per-thread chunk under the granularity
-  floor — fails with the same `unrealized_conversion_cast` / LLVM-translation wording as a missing
-  op, so a width sweep alone cannot tell "unsupported here" from "asked for it wrongly". Hold the
-  op, arch and width fixed and vary only the tiling before recording an arch ceiling
-  (`references/gluon/memory-reference.md ## Async Copy To Shared` states the contract). At the
-  narrow width it moves a fraction of what CDNA4 does per instruction and tends to become
-  `s_waitcnt`-bound, so measure it against sync staging rather than assuming either way.
+- **Async copy — available on both gens, and easy to misdiagnose as unavailable.** `gl.amd.cdna4.async_copy`
+  lowers from **stock** `gluon_to_ttgir` on both entry points (`global_load_to_shared`,
+  `buffer_load_to_shared`) at the direct-to-LDS widths the generation supports — `direct_to_lds_bit_widths`
+  in `## Arch dispatch`. Three traps, in the order they bite:
+  - **Each lane must make exactly one access of a listed width.** A layout whose per-lane contribution is
+    the right size but **split across repetitions** — a blocked layout that covers more than the tile, so it
+    repeats and every lane accesses twice — fails, and fails with the same `PassManager::run failed` /
+    LLVM-translation wording as a missing op. So a width sweep alone cannot separate "unsupported here" from
+    "asked for it wrongly", and a sweep that pins one `(blocked, shared)` pair will conclude the arch lacks
+    the feature. Hold op, arch and width fixed and vary only the **tiling** before recording an arch
+    ceiling; check the layout covers the tile exactly. The shared layout's `vec` is not the gate.
+  - **`add_coalesce_async_copy` rescues non-native patterns; it is not what enables async copy.** Splicing it
+    makes an off-width or repeated access legal by adding a bounce — which is a cost, and one easily
+    mistaken for an intrinsic cost of the async path.
+  - **A padded shared layout on an async arm can be a silent miscompile.** It removes the residual bounce
+    and can be the fastest arm measured while returning NaN across nearly every element, with the identical
+    sync kernel exact. Check numerics on any padded-shared async arm before believing its clock.
+
+  The falsifiable signature that async actually replaced staging is `ds_write == 0` with a matching count of
+  direct-to-LDS loads; sync staging pays a non-zero `ds_write`. Availability is not the same as value —
+  the bypass can still lose to sync staging — so A/B it (`references/gluon/memory-reference.md ## Async Copy
+  To Shared` states the layout contract; `scripts/pipeline_examples_cdna4.py` is the runnable check).
 - **`sched_barrier` / `sched_group_barrier` / `set_prio`.** Absent from `gl.amd.cdna3` *and* `.cdna4` on
   all four versions. Production Gluon exists that imports them inside a `try/except` and defines
   **no-op stubs** on `ImportError`, so on these builds those iglp hints are dead code while still
@@ -592,7 +682,11 @@ Do-not-write list, i.e. what compiles and then costs you:
   (measured: 256×256×64 at `num_warps=8`, `ns=2` → 8 `s_setprio`; the same tile at `nw=4`, and
   128×128×64 at `nw=8`, both → 0), and it never fires on hand-authored staging at all, because it
   collects `local_load`s sourced from a loop-carried `BlockArgument` and a hand-written one comes from
-  `memdesc_index`. **Judge it from the ISA, never from a source config.**
+  `memdesc_index`. **Judge it from the ISA, never from a source config** — and do not try to earn it by
+  satisfying `is_pingpong_schedule_enabled`. That predicate is not arch-symmetric, but the decisive point is
+  that it is consulted **only inside `make_ttgir`**, which the Gluon entry point does not go through: meeting
+  its condition from Gluon source buys nothing on either generation. Ping-pong on this path needs the
+  schedule decision spliced, not the predicate satisfied.
 - **The LLIR scheduler toggle on anything with VALU between the matmuls** (softmax, scale, dequant). It
   assumes a pure MFMA→MFMA accumulator chain and emits **invalid IR**, not a slowdown. Default-skip on
   attention shapes. **Fork-only**: `TRITON_ENABLE_LLIR_SCHED`, `TRITON_ENABLE_AMDGCN_AS` and
@@ -668,29 +762,44 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
     kernel can differ here and the gap is not small. Materialising each conversion as a user
     `allocate_shared_memory` keeps it live for the whole function and the allocator charges every
     buffer separately; leaving the same conversions as `ttg.convert_layout` lets the backend
-    decompose them against one shared conversion scratch. The second form can cost less LDS and
-    fewer registers for identical arithmetic, sometimes enough to change waves/SIMD at no extra
-    instructions. Neither is always right — read the resulting `shared` bytes/WG and register count
-    off the artifacts rather than assuming.
+    decompose them against one shared conversion scratch. The second form can cost far less LDS for
+    identical arithmetic — but **cheaper LDS is not the same as faster**, and the direction is not the
+    one the saving suggests: letting the backend reuse one small scratch many times per iteration buys a
+    full-drain `s_barrier` on each reuse, and a transcription that cut its shared footprint by most of an
+    order of magnitude can run slower for that reason alone, with an *identical* instruction multiset
+    otherwise. Compare `s_barrier` and `lgkmcnt(0)` counts, not just `shared` bytes; and check whether
+    LDS was ever the binding limiter, because a saving under a register-bound ceiling buys nothing at all.
+    Neither form is always right — read it off the artifacts rather than assuming.
 - **Writing a batch of variants without timing them is not a search.** Variants that differ only in
   ways the backend folds away measure the same, and without an A/B between them that is invisible,
   so a run can spend its whole budget producing them. Time each variant against the comparator as
   it lands and dispose of it; rejecting fast is where a round budget's value comes from.
+- **Re-check the generation before you trust a figure or a digest.** `match.gens` claims both, the
+  mechanics transfer, and several verdicts do not — including one where the *diagnostic itself* changes
+  character, so the failure you were taught to wait for never arrives. Do not carry a divisor, a
+  conflict-free swizzle or a layout digest across generations; the rows that can flip, and the
+  `hw_constants.json` key for each, are in `## Arch dispatch` above.
 
 ## Sources
 
 - Vendored from `AMD-AGI/TileProgrammingAgentSkills@541a180`
   (`.cursor/skills/tile-programming-gluon/`), **pruned to the API surface, the do-not-write lists and the
   two mechanics above**, plus the transcription runbook and the compile-only occupancy probe that step 1
-  and step 4 depend on: 15 of 70 reference files and 11 of 51 scripts. Upstream
-  remains the SSOT; this is a one-way snapshot. `references/` is unmodified. `scripts/` carries **six
+  and step 4 depend on: 16 of 70 reference files and 11 of 51 scripts. Upstream
+  remains the SSOT; this is a one-way snapshot. `references/` is unmodified. `scripts/` carries **eight
   corrections**, all of which should go back upstream:
   - `ttgir_to_gluon.py` dropped `tilesPerWarp` and `elementBitWidth` when emitting
     `gl.amd.AMDMFMALayout`, so a chained-dot (gfx950, 16×16 mfma) or scaled-MFMA kernel — both of which
     make `AccelerateAMDMatmul` choose non-default values — transcribed to a silently different layout.
     `--verify` caught it as a text mismatch but named no cause. Both are optional `AMDMFMALayout` fields
     in 3.6 through `main`; they are now emitted when, and only when, the TTGIR prints them, with a
-    self-test on both directions.
+    self-test on both directions. **The witness is still synthetic**, and not for lack of trying: config
+    sweeps of a blockscale GEMM and of a minimal `tl.dot_scaled` MXFP4 kernel both failed to make either
+    field print. The reason is mechanical rather than a search problem — `libtriton` exports
+    `deduceTilesPerWarpForScale`, so the only route is a genuine `tt.dot_scaled` body: a kernel that
+    upcasts to bf16 and issues a plain `tt.dot` cannot reach it, and neither can a chained dot on its own.
+    Note also that `AMDMFMALayout` accepts **every** `(version, instr_shape)` pair at construction time and
+    validates only at lowering, so constructibility is not an availability signal for a new shape.
   - `patch_reinject.py` raised a bare `ImportError` traceback where `triton` is absent, which is the
     normal state of the offline check every other script in this package survives. It now says what it
     needs and exits 2, and it gained a `--selftest` that pins the **version-dependent splice point** on
@@ -724,8 +833,38 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
   - `ttgir_bridge.py` hard-coded `gl.amd.cdna3.*` in three pieces of advice text, which is wrong guidance
     on `gfx950` — the other generation in this skill's own `match.gens`. Now derived from `rec.arch`,
     with a placeholder rather than a guess for an unknown one.
+  - `probe.py` printed its `WGs/CU by LDS<=` line from the module-level `LDS_PER_CU = 65536` — the
+    constant its own comment labels "fallback only; prefer `lds_per_cu(<arch>)`" — instead of the
+    arch-dispatched helper defined immediately above it, and `plan`'s closing LDS note did the same. This
+    is the fourth correction's bug in the newly vendored file, and it lands hardest on the generation the
+    probe **defaults** to: `measure` already resolves the arch per kernel and prints it, so on CDNA4 it read
+    every kernel above the *CDNA3* divisor as `WGs/CU by LDS<=0` — unschedulable — while naming the right
+    arch on the line above. That is the whole class the larger CDNA4 ceiling exists to admit, so the probe
+    named a blocker that does not exist, in the one step the runbook says to treat as the whole result
+    *before* any timing. Both paths now take the arch (`measure` from the artifact,
+    `plan` from `--arch`) and `measure` prints the divisor and its basis so the figure is auditable.
+    `probe.py` and `amd_occupancy.py` both still carry the same unreachable-after-`return` remnant
+    referencing a `LDS_PER_CU_BY_ARCH` that does not exist; left as found, since reaching it is what
+    would turn it into a `NameError`.
+    The same file also reported the LDS side as if it were *the* occupancy answer, which is the
+    other half of the same mistake: registers and LDS both cap workgroups per CU, and on a kernel
+    where they disagree the LDS figure alone points the wrong way. On a gfx950 kernel whose arms were
+    uniformly register-bound at 1 WG/CU, the LDS line advertised an order of magnitude more headroom —
+    and the arm holding the most of it, having traded a large LDS saving for extra barriers, was the
+    **slowest** of the set. `measure` now prints both sides and names which one binds,
+    turning the register limit into a workgroup limit the way the hardware does
+    (`waves/SIMD x simds_per_cu / num_warps`); `num_warps` was already in the metadata it reads,
+    and `simds_per_cu` comes from the same per-arch reference as the divisor.
+  - `dump_ir.sh` accepted `--kernel <bare-name>` and silently did nothing with it. The two flags are
+    not interchangeable — `--kernel` is `module.path:object` for the translator, `--kernel-name` is
+    the substring that **pins** which compiled kernel gets copied — and `references/phases/transcribe-runbook.md`
+    tells you to "pass `--kernel <substring>` to pin it" in the very sidebar that warns a multi-kernel
+    op will otherwise hand you the wrong body's layouts *silently*. Verified: `--kernel NOPE` exits 0
+    and copies the freshest artifact anyway. So following that line leaves you unpinned inside the
+    hazard it is describing. `--kernel` without a colon is now a hard error naming the flag you meant.
+    The runbook line itself needs the upstream fix; this is the guard that makes the mistake loud here.
 
-  `ttgir_bridge.py` and the three added scripts are `ruff --no-cache` clean; the 20 pre-existing findings
+  `ttgir_bridge.py` and the added scripts are `ruff --no-cache` clean; the 20 pre-existing findings
   in the four older scripts are untouched. All three offline `--selftest` entry points also run from
   `scripts/smoke_test_recover.sh`, so the two rules above are guarded without a GPU.
 - **Deliberately not vendored — the whole process layer**: round loop, hardware budget / roofline models,
