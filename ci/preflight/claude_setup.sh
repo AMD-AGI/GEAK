@@ -12,6 +12,9 @@ set -euo pipefail
 # environment (CI secrets / local export). Nothing sensitive lives in this file.
 LITELLM_KEY="${LITELLM_API_KEY:?set LITELLM_API_KEY (LiteLLM virtual key; do NOT hardcode it)}"
 LITELLM_BASE="${LITELLM_BASE_URL:?set LITELLM_BASE_URL (LiteLLM proxy base URL; do NOT hardcode it)}"
+# Agent model, shared with run_geak_e2e.sh / setup_claude.sh via the same env var so
+# one override switches the settings.json aliases AND the run_e2e invocation together.
+CLAUDE_MODEL="${PERFSKILLS_CLAUDE_MODEL:-claude-opus-4-8}"
 
 echo "[1/4] Installing Claude Code (native, latest)..."
 # Retry the network install: a single transient curl reset (e.g. errno 104
@@ -40,7 +43,7 @@ mkdir -p "$HOME/.claude"
 # base container image does not trust; NODE_TLS_REJECT_UNAUTHORIZED=0 is a stopgap.
 # Preferred long-term fix: bake the corporate CA bundle into the image and drop it.
 # Only the claude-opus family is served by this proxy, so the haiku/sonnet defaults
-# also point at claude-opus-4-8 (nonessential traffic is disabled regardless).
+# also point at $CLAUDE_MODEL (nonessential traffic is disabled regardless).
 cat > "$HOME/.claude/settings.json" <<EOF
 {
   "\$schema": "https://json.schemastore.org/claude-code-settings.json",
@@ -48,9 +51,9 @@ cat > "$HOME/.claude/settings.json" <<EOF
     "ANTHROPIC_BASE_URL": "${LITELLM_BASE}",
     "ANTHROPIC_API_KEY": "${LITELLM_KEY}",
     "NODE_TLS_REJECT_UNAUTHORIZED": "0",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-opus-4-8",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-4-8",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "${CLAUDE_MODEL}",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "${CLAUDE_MODEL}",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "${CLAUDE_MODEL}",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
     "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
@@ -90,6 +93,6 @@ export PATH="$HOME/.local/bin:$PATH"
 echo
 echo "Done. Version: $("$HOME/.local/bin/claude" --version)"
 echo "Quick test:"
-"$HOME/.local/bin/claude" -p "Reply with exactly: SETUP OK" --model claude-opus-4-8 </dev/null || true
+"$HOME/.local/bin/claude" -p "Reply with exactly: SETUP OK" --model "$CLAUDE_MODEL" </dev/null || true
 echo
-echo "Run it with:  IS_SANDBOX=1 claude --dangerously-skip-permissions --model claude-opus-4-8"
+echo "Run it with:  IS_SANDBOX=1 claude --dangerously-skip-permissions --model $CLAUDE_MODEL"
