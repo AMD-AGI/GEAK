@@ -27,20 +27,43 @@ changes, a read-only or system-wide install is fine, and the effect ends with th
     with gluon_swp.pipelined(2):            # or gluon_swp.enable(2) / .disable()
         out = my_gluon_kernel[grid](...)
 
-TWO CONDITIONS THE KERNEL MUST MEET, or this changes nothing at all:
+THREE CONDITIONS THE KERNEL MUST MEET, or this changes nothing at all:
 
-  1. the loop must be a `tl.range(...)`. Gluon has no `range` of its own -- only
-     `static_range`, which unrolls -- and a `for` over the builtin lowers to an `scf.for`
-     with no `tt.num_stages` for `add_schedule_loops` to read. `tl.range(num_stages=None)`
-     inherits the launch value, so `None` is fine; a bare `range` is not.
-  2. the loads must be `gl.load`, not `gl.amd.cdna3.buffer_load`. Plain's own `make_ttgir`
+  1. THE ANCHOR IS THE `tt.dot` IN THE LOOP, NOT THE LOOP SYNTAX. `add_schedule_loops(pm, ns)`
+     takes the depth as a PASS ARGUMENT and does not read an attribute off the loop -- plain's
+     own `scf.for` carries no `tt.num_stages` either and pipelines regardless. So a loop that
+     contains a dot pipelines on a BARE `range`, measured. `tl.range(..., num_stages=N)` is
+     required only for a DOT-FREE loop, which has no anchor otherwise; there `None` inherits
+     the launch value and a bare `range` does nothing.
+     (An earlier revision of this docstring stated the reverse as a general rule. It had been
+     measured on a dot-free kernel and generalised. Two authors rewrote working bare-`range`
+     dot loops into `tl.range` for no effect before it was caught.)
+  2. the loads must be `gl.load`, not `gl.amd.cdna<N>.buffer_load`. Plain's own `make_ttgir`
      runs the pipeliner at pass #15/#16 and `add_convert_to_buffer_ops` at #28, so plain's
      pipeliner only ever sees `tt.load`. Pass `buffer_ops=True` to restore that conversion
-     after the pipeliner and get both.
+     after the pipeliner and get both -- but only when the body has NO residual `amdg.buffer_*`
+     on either side: it aborts loudly on buffer loads and kills the interpreter on buffer
+     STORES (`LLVM ERROR: Fatal pipeliner error`, no exception).
+  3. the staging must be the pipeliner's own. A hand-written `allocate_shared_memory` +
+     `gl.barrier()` body starves it, and the error it then raises
+     (`'ttg.local_alloc' op pipeliner doesn't know how to predicate this op`) is the SYMPTOM
+     of staging not removed, not a language wall. Remove it ENTIRELY -- one `ttg.barrier` left
+     in the loop makes the pass skip it wholesale.
 
-And on a dot kernel, do NOT hand-write the staging: building the LDS path is what the
-pipeliner is for, and an explicit `allocate_shared_memory` + `gl.barrier()` body starves it.
-`references/gluon/pipeline-reference.md` has the measured 2x2 and the per-shape numbers.
+KNOWN LIMITATION -- THIS MODULE STOPS AT `add_pipeline` AND OMITS PLAIN'S POST-PIPELINE TAIL.
+The consequence is not "less gain": the pipeliner's `local_load` lands in a blocked layout
+with a separate `convert_layout` to the dot operand, so each operand takes an EXTRA LDS round
+trip on top of the multi-buffered staging. On a tile whose staging already fills the budget
+that surfaces as `OutOfResources: Required <n>, Hardware limit 65536` -- i.e. the injection
+succeeded and looks broken. `add_remove_layout_conversions` is the pass that folds the double
+trip. If you hit this, splice plain's own order after `add_pipeline`:
+`add_convert_to_tensor_ops` -> canonicalizer -> `add_remove_layout_conversions` ->
+`add_reduce_data_duplication` -> `add_move_up_prologue_loads` -> `add_block_pingpong(ns)`,
+recording any pass absent on this build as `-name` rather than skipping it silently (3.6.0
+lacks the first and the fifth, and still reaches the same op census with the other four).
+
+`references/gluon/pipeline-reference.md` has the 2x2 -- note it was measured on a dot-free
+loop, so read condition 1 above before generalising it -- and the per-shape behaviour.
 """
 from __future__ import annotations
 

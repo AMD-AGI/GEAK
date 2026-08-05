@@ -455,6 +455,21 @@ def _lds_per_cu(arch: str | None) -> int | None:
             return v
     return None
 
+
+def _cdna_ns(arch: str | None) -> str:
+    """Gluon AMD sub-namespace for `arch` (`gl.amd.<ns>.buffer_load`, ...).
+
+    The buffer/MFMA builtins live under a per-generation namespace, so advice that names one
+    generation is wrong guidance on another -- it would have a CDNA4 author write `cdna3`
+    calls. Returns a generic placeholder rather than guessing when the generation is unknown.
+    """
+    a = (arch or "").strip().lower()
+    if a.startswith("gfx95"):
+        return "cdna4"
+    if a.startswith("gfx94"):
+        return "cdna3"
+    return "<cdna3|cdna4 for your arch>"
+
 _BUF_LOAD = re.compile(r"amdg\.buffer_load\s+([^:{\n]*)([^\n]*)")
 
 
@@ -1330,7 +1345,8 @@ def report(rec: Recovery, verbose: bool = False) -> str:
         lines.append("  `add_convert_to_buffer_ops` (that pass is gated inside make_ttgir), so a")
         lines.append("  plain `gl.load(ptr_tensor)` lowers to `tt.load` on 64-bit pointer tensors")
         lines.append("  instead -- more registers, lower occupancy, narrower loads. Write these")
-        lines.append("  accesses as explicit `gl.amd.cdna3.buffer_load/buffer_store` with i32")
+        lines.append(f"  accesses as explicit `gl.amd.{_cdna_ns(rec.arch)}."
+                     f"buffer_load/buffer_store` with i32")
         lines.append("  offsets to reproduce what plain lowered to.")
         bf = rec.buffer_facts or {}
         if bf.get("loads"):
@@ -1361,8 +1377,9 @@ def report(rec: Recovery, verbose: bool = False) -> str:
                 unreachable.append(f"`stride = %x` on {bf['with_stride']} site(s) "
                                    f"(the pipeliner's peeled prologue loads carry it)")
             if unreachable:
-                lines.append("  NOT reachable from gl.amd.cdna3.buffer_load, which has no "
-                             "parameter for either: " + "; ".join(unreachable) + ".")
+                lines.append(f"  NOT reachable from gl.amd.{_cdna_ns(rec.arch)}.buffer_load, "
+                             f"which has no parameter for either: "
+                             + "; ".join(unreachable) + ".")
     return "\n".join(lines)
 
 

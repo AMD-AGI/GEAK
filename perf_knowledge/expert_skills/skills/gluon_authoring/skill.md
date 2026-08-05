@@ -269,38 +269,41 @@ knob that kernel actually uses. `scripts/pipeline_survey.py <tree>` classifies a
 pipeline form each kernel can exercise; treat it as a **screen for what to measure**, not a verdict —
 only a dump settles whether a given dispatch compiled pipelined.
 
-**2b. Two conditions, both required — neither alone does anything.** From a 2×2, all four cells
-bit-exact, "pipelined" read off the IR (peeled prologue loads plus a loop-carried `iter_arg`):
+**2b. Three conditions, all required — none of them alone does anything.**
 
-| loads written as | loop | pipelined |
+| # | condition | why |
 | --- | --- | --- |
-| `gl.amd.cdna3.buffer_load` | bare `range(...)` | ✗ |
-| `gl.amd.cdna3.buffer_load` | `tl.range(..., num_stages=2)` | ✗ |
-| `gl.load` | bare `range(...)` | ✗ |
-| **`gl.load`** | **`tl.range(..., num_stages=2)`** | **✓** loads 2→4, `iter_args` 0→1 |
+| 1 | **the loop needs an anchor, and the anchor is a `tt.dot` — not the loop syntax** | `add_schedule_loops(pm, ns)` takes the depth as a **pass argument** and reads no attribute off the loop. So a loop **containing a dot pipelines on a bare `range`**; a **dot-free** loop has no anchor and is the *only* case that needs `tl.range(..., num_stages=N)`, where `None` inherits the launch value |
+| 2 | **the loads must still be `tt.load` when the pipeliner runs** | plain orders the pipeliner at #15/#16 and `add_convert_to_buffer_ops` at **#28**, so plain's own pipeliner only ever sees `tt.load`. Write `gl.load` and arm `buffer_ops=True` to restore that order |
+| 3 | **the staging must be the pipeliner's own** | a hand-written `allocate_shared_memory` + `gl.barrier()` body starves it, and it must be removed **entirely** — one `ttg.barrier` left in the loop makes the pass skip the loop wholesale |
 
-1. **The loop must be a pipelining candidate, and whether it is turns on the DOT.**
-   `add_schedule_loops` uses the launch `num_stages` as the default for a loop it already considers a
-   candidate, and it decides that from the loop's contents: a loop **containing a `tl.dot` is a candidate
-   on a bare `range`** and needs no annotation, while a **dot-free loop needs `tl.range(...,
-   num_stages=N)`** or nothing happens. Gluon exposes no `range` of its own (`static_range` unrolls), but
-   `tl.range` is usable from a `gluon.jit` body, and `tl.range(..., num_stages=None)` **inherits** the
-   launch value — so `None` on the loop is not "unset".
-2. **The loads must still be `tt.load` when the pipeliner runs.** Plain orders `add_schedule_loops` #15,
-   `add_pipeline` #16 and `add_convert_to_buffer_ops` **#28**, so plain's own pipeliner only ever sees
-   `tt.load`. Write the loop with `gl.load` and arm `buffer_ops=True`, which restores plain's order and
-   ends with buffer ops *and* a pipelined loop. That half is **opt-in**, and for a reason worth knowing
-   before you arm it: on an anchor whose **loads** are already `buffer_load` it aborts the pass manager
-   loudly, but on one whose **stores** are buffer ops it does not raise at all — `LLVM ERROR: Fatal
-   pipeliner error` kills the interpreter. Arm it only on an anchor written throughout with `gl.load` /
-   `gl.store`.
+> **Do not generalise the 2×2 in `references/gluon/pipeline-reference.md`.** It reports
+> `gl.load` + bare `range` as not pipelining, which is true **on the dot-free kernel it was measured on**
+> and false with a dot in the loop. Two authors rewrote working bare-`range` dot loops into `tl.range`
+> for no effect before that was caught. Condition 1 above is the rule; the table is one row of it.
 
-**On a dot kernel, un-write the hand staging as well — and do both halves in the same step.** Un-staging
-alone removes a multi-buffer that was really doing work and puts nothing back, so it is a *regression*,
-not a neutral intermediate; the injection is what rebuilds the LDS path. Keep the explicit-smem version —
-it is where the hand-built double buffer starts if the pass still will not bite. Two other ways to starve
-it: a hand register-prefetch (the pipeliner *is* the prefetcher, and a manual one consumes the slot) and
-a loop-variant `scf.if` (split a causal mask into two loops; it blocks `BlockPingpong` too).
+On condition 3, the failure has a misleading error: `'ttg.local_alloc' op pipeliner doesn't know how to
+predicate this op` is the **symptom of staging not removed**, not a language wall — the first
+investigation to hit it concluded that Gluon's `allocate_shared_memory` was fundamentally incompatible
+with the pipeliner, and that was wrong.
+`buffer_ops=True` is **opt-in** because it fails two ways: on an anchor whose **loads** are already
+`buffer_load` it aborts the pass manager loudly, and on one whose **stores** are buffer ops it does not
+raise at all — `LLVM ERROR: Fatal pipeliner error` kills the interpreter. Arm it only on a body written
+throughout with `gl.load` / `gl.store`.
+
+**Un-staging and injecting are one step, and the pair is only *conditionally* worth it.** Un-staging
+alone removes a multi-buffer that was doing real work and puts nothing back, so it is a regression, not a
+neutral intermediate. But the injection does not always cover that cost: measured across four versions on
+one kernel it lost three times and won once. **Judge it on the same-window per-rep ratio `L+P ÷ L`** —
+subtracting two percentages against a drifting plain arm cannot resolve a 3% verdict. Keep the
+explicit-smem version either way; it is where the hand-built double buffer starts. Two other ways to
+starve the pass: a hand register-prefetch (the pipeliner *is* the prefetcher, and a manual one consumes
+the slot) and a loop-variant `scf.if` (split a causal mask into two loops; it blocks `BlockPingpong` too).
+
+**The cheap pre-check that predicts the verdict:** compare **plain's own `ns=1` against its `ns=2`**. On
+a version where plain itself gets no pipeline benefit, recovering the pipeline for it is not worth it
+either — that held on all four versions of the kernel above, with the one version that showed plain a
+real gain being the one version where the recovery paid.
 
 **2c. Inject, without editing anything.** `scripts/gluon_swp.py` wraps `HIPBackend.gluon_to_ttgir`
 in-process and runs the two passes as a second pass manager over the module the stock function returns:
@@ -319,6 +322,18 @@ It produces **byte-identical TTGIR to the on-disk splice on all four versions**,
 nothing is given up by not touching site-packages — while a read-only or shared install, a later
 `pip install --force-reinstall`, and a crash mid-experiment all stop being hazards. It refuses to install
 on a fork that already splices the passes in, because running them twice is a different experiment.
+
+> **Known limitation: it stops at `add_pipeline` and omits plain's post-pipeline tail**, and the
+> consequence is not "less gain". The pipeliner's `local_load` lands in a blocked layout with a separate
+> `convert_layout` to the dot operand, so **each operand takes an extra LDS round trip** on top of the
+> multi-buffered staging. On a tile whose staging already fills the budget that surfaces as
+> `OutOfResources: Required <n>, Hardware limit 65536` — the injection succeeded and looks broken.
+> `add_remove_layout_conversions` is the pass that folds the double trip. If you hit it, splice plain's
+> own order after `add_pipeline`: `add_convert_to_tensor_ops` → canonicalizer →
+> **`add_remove_layout_conversions`** → `add_reduce_data_duplication` → `add_move_up_prologue_loads` →
+> `add_block_pingpong(ns)`. Record a pass absent on this build as `-name` rather than skipping it
+> silently, or a cross-version regression becomes invisible; 3.6.0 lacks the first and the fifth and
+> still reaches the same op census with the other four.
 `scripts/patch_reinject.py apply|revert|status` is the on-disk form, kept for when you want the pass list
 visible in `compiler.py` while reading; it is env-armed (`TRITON_GLUON_SWP=N`) so armed and unarmed are
 the same binary, and its splice point is version-dependent (before `add_warp_pipeline` on 3.7+; after the
@@ -343,6 +358,12 @@ Either way the full-drain `s_waitcnt lgkmcnt(0)` should relax to `lgkmcnt(N>0)`.
 and unarmed means the pass ran and rewrote nothing — a different failure from the passes being absent,
 and one no availability probe can see: `probe_levers.py --all` reports that the symbols are in this
 `libtriton.so`, not that they will bite on your IR.
+
+**A missing signal is not counter-evidence until you have seen it on the reference arm.** `s_setprio`
+staying 0 after injection was once read as "the mechanism never started" — but plain's own `ns=2` build
+of the same kernel also had `s_setprio == 0`, because `add_block_pingpong` does not accept that loop
+shape at all. Two other signals said the injection had fired. Confirm a tell would have appeared on the
+comparator before treating its absence as a verdict.
 
 > **The cache trap has two halves, and each on its own gives a false negative.** *In process*, Triton's
 > JIT cache is keyed on `(function, signature, constexprs)` and **knows nothing about the injection**, so
@@ -535,7 +556,7 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
 - Vendored from `AMD-AGI/TileProgrammingAgentSkills@2b1d42a`
   (`.cursor/skills/tile-programming-gluon/`), **pruned to the API surface, the do-not-write lists and the
   two mechanics above**: 14 of 70 reference files (~2.4 k of ~11 k lines) and 10 of 50 scripts. Upstream
-  remains the SSOT; this is a one-way snapshot. `references/` is unmodified. `scripts/` carries **four
+  remains the SSOT; this is a one-way snapshot. `references/` is unmodified. `scripts/` carries **six
   corrections**, all of which should go back upstream:
   - `ttgir_to_gluon.py` dropped `tilesPerWarp` and `elementBitWidth` when emitting
     `gl.amd.AMDMFMALayout`, so a chained-dot (gfx950, 16×16 mfma) or scaled-MFMA kernel — both of which
@@ -565,6 +586,17 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
     divisor right for one generation is a confidently wrong occupancy verdict on another. The same
     function annotated `arch` with `Optional` without importing it — invisible at runtime only because
     `from __future__ import annotations` defers evaluation — now spelled `str | None`.
+
+  - `gluon_swp.py`'s docstring stated the pipelining condition as "the loop must be a `tl.range`". The
+    anchor is the **`tt.dot` in the loop**, not the loop syntax — `add_schedule_loops(pm, ns)` takes the
+    depth as a pass argument and reads no loop attribute, and plain's own `scf.for` carries none either.
+    The original was measured on a dot-free kernel, where `tl.range` genuinely is the only route, and
+    generalised. Two authors rewrote working bare-`range` dot loops for no effect before it was caught.
+    Corrected to three conditions, with the vendored 2×2 in `references/gluon/pipeline-reference.md`
+    flagged as the dot-free row of the rule rather than the rule.
+  - `ttgir_bridge.py` hard-coded `gl.amd.cdna3.*` in three pieces of advice text, which is wrong guidance
+    on `gfx950` — the other generation in this skill's own `match.gens`. Now derived from `rec.arch`,
+    with a placeholder rather than a guess for an unknown one.
 
   `ttgir_bridge.py` and the three added scripts are `ruff --no-cache` clean; the 20 pre-existing findings
   in the four older scripts are untouched. All three offline `--selftest` entry points also run from
