@@ -37,7 +37,26 @@ except Exception:
 
 
 def _torch():
-    import torch
+    """Import torch with the CWD SHADOW removed, then put sys.path back exactly as it was.
+
+    A frozen task dir contains generated modules whose names collide with the stdlib — notably
+    `unittest.py`. Python puts the CWD first on sys.path, so with the task dir as CWD that file wins over
+    the stdlib `unittest` PACKAGE, and `torch/_guards.py`'s `import unittest.mock` dies with
+    "No module named 'unittest.mock'; 'unittest' is not a package". op_bench then can't bench anything.
+
+    The shield is scoped to this import and REVERTED in `finally`: `_resolve_callable` imports entry
+    points by dotted module name (e.g. `csrc.cpp_itfs.pa.pa_ragged:paged_attention_ragged`) that resolve
+    through the CWD, and it swallows ImportError into a `None` return — so permanently dropping the CWD
+    would silently downgrade real backends to "unavailable" instead of failing loudly. Restore, don't strip.
+    """
+    saved = list(sys.path)
+    cwd = os.getcwd()
+    sys.path[:] = [p for p in sys.path
+                   if p not in ("", ".") and os.path.abspath(p) != cwd]
+    try:
+        import torch
+    finally:
+        sys.path[:] = saved
     return torch
 
 
@@ -531,7 +550,7 @@ def _flydsl_gemm(A, B, bias, transpose_b):
     records flydsl as a graceful "skipped" for fp8 — the live fp8-flydsl win is reached via the aiter
     per-shape DB tune (gradlib races `libtype=flydsl`; deploy `AITER_CONFIG_GEMM_BF16`) and/or the
     author route (`target_language=flydsl`, baseline = `flydsl_preshuffle_gemm_a8`)."""
-    _t = __import__("torch")
+    _t = _torch()
     if A.dtype in (getattr(_t, "float8_e4m3fnuz", None), getattr(_t, "float8_e5m2fnuz", None),
                    getattr(_t, "float8_e4m3fn", None), getattr(_t, "float8_e5m2", None)):
         raise RuntimeError(
