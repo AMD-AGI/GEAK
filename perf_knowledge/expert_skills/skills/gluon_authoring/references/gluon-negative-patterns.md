@@ -49,11 +49,14 @@ Reject or downgrade a Gluon probe (stay plain) when most of these are true:
 - plain Triton already lowers the hot dot to the desired `tt.dot/#mma` path and
   the remaining bottleneck is config, wrapper, dispatch, or memory traffic;
 - the plain backend stages an operand feed in `#ttg.amd_rotating_shared` (visible
-  in the dumped TTGIR): **`gluon.language` has no rotating-shared layout
-  constructor**, so a faithful transcription is not expressible — `ttgir_to_gluon.py`
-  emits `None  # UNSUPPORTED: ... no gluon.language constructor`. This is a
-  LANGUAGE-SURFACE gap, not an unfinished tool: do not try to "finish" the
-  converter. `PaddedSharedLayout`/`SharedLinearLayout` can approximate the M-major
+  in the dumped TTGIR) **and the `gluon.language` build in front of you exposes no
+  rotating-shared constructor** — check before concluding it, the surface moves:
+  `ttgir_to_gluon.py` emits `None  # NOT EMITTED: amd_rotating_shared ...` for it
+  either way, and that message is a prompt to probe, not proof of a language gap.
+  (`amd_wmma` sat behind the same wording and turned out to be constructible as
+  `AMDWMMALayout` all along — see `gluon/rdna-wmma-reference.md`.) If the
+  constructor really is absent, a faithful transcription is not expressible;
+  `PaddedSharedLayout`/`SharedLinearLayout` can approximate the M-major
   staging but only to parity, so a Gluon arm gated on this layout stays plain
   (record it `deferred`, bounded, not a proven wall).
 

@@ -67,7 +67,15 @@ def capabilities() -> dict:
         "add_convert_to_buffer_ops", "add_canonicalize_pointers", "add_warp_pipeline",
         "add_block_pingpong")}
     import inspect
-    stock = inspect.getsource(C.HIPBackend.gluon_to_ttgir)
+    # Inspect the ORIGINAL, never whatever is currently installed. Once enable() has swapped
+    # in the wrapper, its source contains add_schedule_loops/add_pipeline, so inspecting the
+    # live attribute made the tree look like a fork that already splices them -- and a second
+    # enable() at a different depth was refused outright. Re-arming to sweep num_stages is
+    # exactly what a depth probe does, so that bug would have hit every one of them.
+    _o = _ORIGINAL
+    if isinstance(_o, staticmethod):
+        _o = _o.__func__
+    stock = inspect.getsource(_o or C.HIPBackend.gluon_to_ttgir)
     try:
         import triton
         ver = triton.__version__
@@ -83,6 +91,27 @@ def capabilities() -> dict:
         "can_restore_buffer_ops": have["add_convert_to_buffer_ops"],
         "installed": _ORIGINAL is not None,
     }
+
+
+def cache_tag() -> str:
+    """A string encoding the CURRENT arming, for keying your `TRITON_CACHE_DIR` on.
+
+    Per-arm cache dirs are not enough on their own. Triton's cache key -- in process AND on
+    disk -- knows nothing about this wrapper, so two arms that differ only by the injection,
+    or by its DEPTH, collide on one artefact and the second silently gets the first one's
+    code. A trial hit the disk-side version of this while probing num_stages=3: reusing the
+    ns=2 arm's directory served the ns=2 binary back and read as "depth does nothing".
+
+        triton.knobs.cache.dir = f"/tmp/run_{arm}_{gluon_swp.cache_tag()}"
+
+    Distinct kernel objects fix the in-process collision; this fixes the on-disk one. Use
+    both, and confirm `ttg.memdesc_index` in the arm's own dumped IR.
+    """
+    if _ORIGINAL is None:
+        return "swp_off"
+    return (f"swp{_STATE.get('num_stages')}"
+            f"_buf{int(bool(_STATE.get('buffer_ops')))}"
+            f"_pp{_STATE.get('pingpong')}_ac{_STATE.get('async_copy')}")
 
 
 def enable(num_stages: int, *, buffer_ops: bool = False, pingpong: bool | None = None,
@@ -110,10 +139,18 @@ def enable(num_stages: int, *, buffer_ops: bool = False, pingpong: bool | None =
 
     C = _backend()
     if _ORIGINAL is None:
-        _ORIGINAL = C.HIPBackend.gluon_to_ttgir
+        # Capture the DESCRIPTOR from the class __dict__, not the resolved attribute.
+        # `C.HIPBackend.gluon_to_ttgir` resolves a staticmethod to a plain function, so
+        # assigning that back in disable() turned it into an instance method and every
+        # subsequent Gluon compile in the process died with "gluon_to_ttgir() takes 3
+        # positional arguments but 4 were given". That breaks the one-process interleaved-arms
+        # protocol this module exists to serve -- a trial lost three arms to it -- and the old
+        # selftest could not see it, because it compared the RESOLVED attribute, which is the
+        # same function object whether or not the descriptor survived.
+        _ORIGINAL = C.HIPBackend.__dict__["gluon_to_ttgir"]
     _STATE.update(num_stages=num_stages, buffer_ops=buffer_ops, pingpong=pingpong,
                   async_copy=async_copy, verbose=verbose)
-    orig = _ORIGINAL
+    orig = _ORIGINAL.__func__ if isinstance(_ORIGINAL, staticmethod) else _ORIGINAL
 
     def wrapped(src, metadata, options):
         mod = orig(src, metadata, options)
@@ -146,8 +183,13 @@ def enable(num_stages: int, *, buffer_ops: bool = False, pingpong: bool | None =
                 _kn.amd.buffer_ops_analyze_small_tensor_range)
         pm.run(mod, "gluon_swp_reinject")
         if _STATE["verbose"]:
-            print(f"[gluon_swp] ns={ns} async_copy={ac} pingpong={pp} "
-                  f"buffer_ops={_STATE['buffer_ops']} arch={arch}", file=sys.stderr)
+            # "requested", not "enabled": add_block_pingpong has its own constraints and
+            # refuses far more often than it accepts. A reader took pingpong=True for
+            # "ping-pong is on" while s_setprio in the resulting .amdgcn was still 0.
+            print(f"[gluon_swp] ns={ns} buffer_ops={_STATE['buffer_ops']} arch={arch} "
+                  f"| REQUESTED async_copy={ac} pingpong={pp} -- whether either fired is "
+                  f"only readable from the artefacts (s_setprio / async_copy in the ISA/IR), "
+                  f"not from this line", file=sys.stderr)
         return mod
 
     C.HIPBackend.gluon_to_ttgir = staticmethod(wrapped)
@@ -157,6 +199,7 @@ def disable() -> None:
     global _ORIGINAL
     if _ORIGINAL is None:
         return
+    # Assign the descriptor back verbatim, preserving staticmethod-ness.
     _backend().HIPBackend.gluon_to_ttgir = _ORIGINAL
     _ORIGINAL = None
     _STATE.clear()
@@ -199,15 +242,47 @@ if __name__ == "__main__":
         # install / uninstall must restore the exact original object
         C = _backend()
         before = C.HIPBackend.gluon_to_ttgir
+        before_desc = C.HIPBackend.__dict__["gluon_to_ttgir"]
+        before_kind = type(before_desc).__name__
         enable(2)
         ck("enable() replaces gluon_to_ttgir", C.HIPBackend.gluon_to_ttgir is not before)
         disable()
         ck("disable() restores the ORIGINAL object, not a copy",
            C.HIPBackend.gluon_to_ttgir is before)
+        # The check that matters, and the one the previous version could not make: the
+        # DESCRIPTOR has to come back as a staticmethod. Restoring the resolved function
+        # leaves an instance method, and then every later compile fails with an arity error
+        # while this comparison still passes.
+        ck(f"disable() preserves the descriptor kind ({before_kind})",
+           type(C.HIPBackend.__dict__["gluon_to_ttgir"]).__name__ == before_kind,
+           f"became {type(C.HIPBackend.__dict__['gluon_to_ttgir']).__name__}")
+        # and it must still be CALLABLE with the 3-arg signature after a round trip
+        enable(2); disable()
+        import inspect as _i
+        _sig = _i.signature(C.HIPBackend.gluon_to_ttgir)
+        ck("gluon_to_ttgir still takes (src, metadata, options) after enable/disable",
+           len(_sig.parameters) == 3, str(_sig))
         with pipelined(2):
             ck("pipelined() installs inside the block",
                C.HIPBackend.gluon_to_ttgir is not before)
         ck("pipelined() restores on exit", C.HIPBackend.gluon_to_ttgir is before)
+        # Re-arming at a different depth must work: a depth sweep does exactly that, and it
+        # was broken because capabilities() inspected the installed wrapper instead of the
+        # original and concluded the tree was an already-spliced fork.
+        try:
+            enable(2)
+            enable(3)
+            ck("re-arming at a new depth works (depth sweeps need it)",
+               _STATE["num_stages"] == 3, str(_STATE.get("num_stages")))
+            tags = set()
+            for _ns in (2, 3, 4):
+                enable(_ns)
+                tags.add(cache_tag())
+            ck("cache_tag() distinguishes depths (the on-disk cache key does not)",
+               len(tags) == 3, str(sorted(tags)))
+        finally:
+            disable()
+        ck("cache_tag() says off when nothing is installed", cache_tag() == "swp_off")
         try:
             enable(1)
             ck("enable(1) is refused rather than silently doing nothing", False)

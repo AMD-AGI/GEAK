@@ -31,9 +31,9 @@ the on-disk form, kept for when you want the pass list visible in `compiler.py` 
 Measured on clean 3.7.1 and 3.8.0 they are *tolerated and inert* — as is a knob invented on the
 spot — so the failure is silent and reads as "the technique does not work here".
 
-**Two conditions are required and neither alone does anything.** From a 2×2 on aiter's
-rmsnorm, all four cells bit-exact, `PIPELINED` read off the IR (peeled prologue loads +
-a loop-carried `iter_arg`):
+**Two conditions are required and neither alone does anything.** From a 2×2 on a dot-free
+kernel, all four cells numerically identical, `PIPELINED` read off the IR (peeled prologue
+loads + a loop-carried `iter_arg`):
 
 | loads written as | loop | pipelined |
 | --- | --- | --- |
@@ -51,20 +51,21 @@ a loop-carried `iter_arg`):
    | contains a `tl.dot` | **no** — a bare `range` pipelines from `num_stages` alone |
    | dot-free | **yes** — `tl.range(..., num_stages=N)`, or nothing happens |
 
-   Measured both ways on plain, same launch `num_stages` 1/2/3: a bare-`range` **GEMM** went
-   2 → 4 → 6 loads with `memdesc_index` 0 → 4 → 6 and **no `tt.num_stages` in the IR at all**,
-   while a bare-`range` **dot-free reduction** stayed byte-identical. Confirmed on the Gluon
-   side under injection: an un-staged GEMM with a bare `range` pipelines (`memdesc_index 4`,
-   1.087× vs hand-staged) exactly like the `tl.range` version (1.100×).
+   Measured both ways on plain at the same launch `num_stages`: a bare-`range` **GEMM** scaled
+   its load count with the depth and gained `ttg.memdesc_index`, with **no `tt.num_stages` in
+   the IR at all**, while a bare-`range` **dot-free reduction** stayed byte-identical. Same on
+   the Gluon side under injection: an un-staged GEMM with a bare `range` pipelines
+   indistinguishably from the `tl.range` version.
 
-   That is why aiter's `moe_op` is pipelined while writing plain `for k in range(...)`, and
-   why `rmsnorm` — dot-free — has to write `tl.range(num_stages=2)` and does.
+   This is why a real GEMM can be pipelined while its source writes plain
+   `for k in range(...)`, and why a dot-free kernel has to carry the annotation.
 
    Gluon exposes no `range` of its own (only `static_range`, which unrolls), but `tl.range`
    **is** usable from a `gluon_jit` body when you need the dot-free case. And
-   `tl.range(..., num_stages=None)` **inherits** the launch value, which is how aiter's
-   `_attn_fwd` works: `num_stages = None if ENABLE_PIPELINING else 1` on the inner loop with
-   the number coming from the autotune config. So `None` on the loop is not "unset".
+   `tl.range(..., num_stages=None)` **inherits** the launch value. Real tuned kernels use this
+   deliberately — a `num_stages = None if ENABLE_PIPELINING else 1` constexpr on the inner loop,
+   with the number arriving from the autotune config — so `None` on the loop is not "unset", and
+   reading the source alone will not tell you the depth.
 2. **The loads must still be `tt.load` when the pipeliner runs.** Plain's own `make_ttgir`
    orders `add_schedule_loops` #15, `add_pipeline` #16, `add_convert_to_buffer_ops` **#28** —
    twelve passes later. So plain's pipeliner only ever sees `tt.load`. An anchor written the
@@ -83,86 +84,92 @@ a loop-carried `iter_arg`):
 
 The faithful anchor shape — `allocate_shared_memory` + `gl.barrier()` +
 `smem.load(A_DOT_OPERAND)` — carries every blocker at once, and building the LDS path is
-exactly what the pipeliner exists to do. So hand the loop back to it. Measured on a 2048³
-fp16 GEMM, all arms numerically identical:
+exactly what the pipeliner exists to do. So hand the loop back to it: drop the explicit
+staging and let the pass create it.
 
-| arm | LDS ops (alloc/store/load) | memdesc_index | vs hand-staged |
-| --- | --- | --- | --- |
-| hand-staged, no pipeline | 2 / 2 / 2, 2 barriers | 0 | 1.000 |
-| un-staged, splice **off** | 0 / 0 / 0 | 0 | **0.811** |
-| un-staged, splice **on** `ns=2` | **2 / 4 / 4**, 0 barriers | **4** | **1.088** |
+**Measure three arms, not two.** The middle one is the trap:
 
-The pipeliner built the staging *and* multi-buffered it (`memdesc_index 4`) with no explicit
-barrier. Note the middle row: **un-staging without the splice is a 19% regression** — the
-two halves go together or not at all.
+| arm | what it tells you |
+| --- | --- |
+| hand-staged, no injection | the faithful baseline |
+| **un-staged, injection OFF** | **a REGRESSION vs the hand-staged arm** — you removed the staging and nothing rebuilt it |
+| un-staged, injection ON | the recovery |
+
+Reporting only the first and third makes the injection look like it did all the work, and
+reporting only the second makes un-staging look like a mistake. The two halves go together or
+not at all. Landed correctly, the pass creates the allocations, writes and reads that the
+hand-staged arm had, plus a peeled prologue, plus `ttg.memdesc_index` for the multi-buffering —
+and needs no authored barrier.
 
 ### And on attention — two dots chained through a softmax
 
 The shape worth checking separately, because the second dot's A operand is the first dot's
-output and `acc` / `m` / `l` are all loop-carried, so a pipeliner that prefetches a GEMM's
-operands might still refuse it. It does not. Minimal FA-forward body (BM=128, BN=32, D=128,
-layouts recovered from a tuned `_attn_fwd` champion), un-staged, all arms numerically
-identical at `max_rel 2.2e-3`:
+output and the accumulators are loop-carried, so a pipeliner that prefetches a GEMM's operands
+might refuse it. On a minimal FA-forward body it does not refuse: same signature as the GEMM —
+prologue peeled, K/V staging created by the pass, multi-buffered, no barrier authored, numerics
+unchanged.
 
-| arm | loads | LDS alloc/store/load | memdesc_index | barriers | vs un-pipelined |
-| --- | --- | --- | --- | --- | --- |
-| splice off | 3 | 0 / 0 / 0 | 0 | 0 | 1.000 |
-| `ns=2` | 5 | 2 / 4 / 4 | 4 | 0 | **1.121** |
-| `ns=3` | 7 | 2 / 6 / 6 | 6 | 0 | **1.126** |
+> **A minimal body does NOT settle attention.** On a real sparse-paged attention kernel the
+> same recipe was a **large regression** while the injection was demonstrably firing — op
+> census identical to plain's, and the best wait profile of any arm. The mechanism is the
+> language gap, not the pipeline: the injected pass builds
+> the V staging on `swizzled_shared<vec=1, perPhase=1, maxPhase=1>` — no vectorisation, no
+> swizzle — where plain gets `amd_rotating_shared<vec=4, perPhase=4, maxPhase=4>`, which
+> Gluon cannot express — narrow scalar LDS reads where plain gets wide vectorised ones. So on
+> a body whose staging plain puts on a rotating-shared layout, the
+> pipeliner can fire perfectly and still lose, because the layout it has to fall back to is
+> the one that blocks the faithful anchor too.
 
-Same signature as the GEMM: prologue peeled, K/V staging created by the pass, multi-buffered,
-no barrier authored. So all three shapes this pack cares about — dot-free reduction, GEMM,
-attention — pipeline under the same two conditions.
+> **`buffer_ops=True` is not free either.** On that same kernel it was a further penalty on
+> top — the opposite of "restore plain's order and get both". Pass-by-pass attribution put the
+> base cost on `add_pipeline` itself, not on `optimize_dot_operands`. Measure the flag on your
+> body; do not assume it pays.
 
-**But size the prize before spending the round.** On that champion the pipeline is worth much
-less than on rmsnorm, and it is not monotone in shape: at its own tile, `num_stages` 2 vs 1
-measured 1.083 at S=2048, **0.980** at S=4096 (a small pessimisation) and 1.040 at S=8192.
-Its patch notes' "~1.5–1.7×" is the *combined* effect of `BLOCK_N=32` + `num_stages=2` against
-the shipped `BLOCK_N=64` + `num_stages=1`, not the pipeline alone. Measure `plain@ns=1` at the
-champion's own tile, which is the only control that separates the two.
+> **`buffer_ops=True` also conflicts with buffer STORES**, not just loads: a loop that stores
+> through `gl.amd.cdna3.buffer_store` dies with `LLVM ERROR: Fatal pipeliner error`, which
+> **kills the interpreter** rather than raising. Write both sides as `gl.load`/`gl.store` on an
+> arm you intend to arm with it.
 
-### Recovery measured, per version
+**Size the prize before spending the round, and size it at the champion's own tile.** On one
+tuned attention champion the pipeline's own contribution was small and **changed sign across
+sequence lengths** — a gain at some, a small pessimisation at others. Its own tuning notes
+advertised a much larger win, but that number was the *combined* effect of a smaller `BLOCK_N`
+**and** `num_stages=2` against the shipped tile. Only `plain@ns=1` **at the champion's tile**
+separates the two, and a debt that flips sign with shape cannot be reported as one number.
 
-aiter's rmsnorm, ratio vs the **shipped** plain kernel (which pipelines its row loop at
-`tl.range(num_stages=2)`), interleaved arms in one process, all bit-exact:
+### What to expect, and what to measure yourself
 
-| | 3.6.0 | 3.7.0 | 3.7.1 | 3.8.0 |
-| --- | --- | --- | --- | --- |
-| faithful anchor (`buffer_load`, bare `range`) | 0.769 | 0.749 | 0.748 | 0.758 |
-| **re-injected** (`gl.load` + `tl.range(2)` + splice) | **1.062** | **1.039** | **1.030** | **1.026** |
-| re-injected at `ns=3` | 1.006 | 0.991 | 0.986 | 0.994 |
+Across the kernels this was validated on — dot-free reductions, GEMMs, attention, on
+3.6.0 / 3.7.0 / 3.7.1 / 3.8.0 — the pattern that held was:
 
-So the gap closes on every version and the recovered anchor slightly **exceeds** shipped
-plain. `ns=2` beat `ns=3` on all four — depth is a knob, not a monotone. 3.6.0 works even
-though it has no `add_warp_pipeline` at all, which confirms the win is `schedule_loops` +
-`pipeline` and not the warp pipeliner.
+- **the injection fires on every shape and every version**, with the numerics unchanged;
+- **where the debt was real, it closed** — the recovered arm reached or slightly exceeded the
+  shipped plain kernel;
+- **the magnitude did not transfer.** It varied by kernel, by shape, and by Triton version, in
+  both directions. A ratio you measured on one version is not evidence about another.
 
-### The other two AMD pipeline mechanisms, measured on gfx942
+So the only number worth carrying between kernels is the one you measure: **`plain@ns=1` at the
+champion's own config**. That control is what tells you the size of the debt before you spend a
+round, and comparing your anchor against it is what says whether the residual is the pipeline
+or something else.
 
-They are **not** the same lever and only one of them is reachable from plain here.
+**Depth is a knob, not a monotone.** `num_stages=3` was worse than 2 on every kernel measured
+here, and on one it refused to launch at all. Two mechanisms, both readable in advance:
 
-**Block ping-pong (`add_block_pingpong`) does fire on gfx942, in a narrow window.** It runs
-only after the pipeliner and adds its own constraints. Measured on a plain fp16 GEMM,
-`s_setprio` / `sched_barrier` counted in the `.amdgcn`:
+- a deeper schedule genuinely double-buffers, so LDS grows — and if two workgroups' worth
+  crosses **the LDS capacity of your CU**, occupancy halves. That divisor is **arch-specific**:
+  CDNA3 (gfx942) has 64 KiB/CU, CDNA4 (gfx950) has **160 KiB/CU**, so the same allocation is
+  2.5× less pressure there and a gfx942 occupancy verdict must not be carried to gfx950.
+  `recover`'s `LDS:` line reports the total and divides by the figure for the `--arch` you
+  passed. (At depth 2 the pass may build a *single*-buffered rotating stage instead: prologue
+  peeled so the global load overlaps the MFMA, LDS unchanged. That is why 2 often wins.)
+- a depth plain itself cannot compile is not available to you either — the LDS requirement is
+  byte-identical, because it is the same pass.
 
-| tile | `num_warps` | `num_stages` | `s_setprio` |
-| --- | --- | --- | --- |
-| 256×256×64 | **8** | **2** | **8** ✓ fired |
-| 128×128×64 | 8 | 2 | 0 — tile below `mediumTile` |
-| 256×256×64 | 4 | 2 | 0 — different window for `nw4` |
-
-So **read `s_setprio` out of the ISA; never infer ping-pong from a source config.** And on a
-Gluon anchor it is unreachable while the staging is hand-written: it collects only
-`local_load`s whose source is a loop-carried `BlockArgument`, and a hand-written one is
-sourced from `memdesc_index`. Un-writing the staging is what puts it back in reach.
-
-**Async copy / direct-to-LDS is NOT reachable from plain on gfx942, even forced.** Setting
-`triton.knobs.amd.use_async_copy = True` changed nothing: `async_copy` / `buffer_load_to_local`
-count stayed **0** in the TTGIR, identical to the knob off. The hardware supports it
-(`supportsBufferLoadToLocal()` covers CDNA3 at 32-bit vector width) and the Gluon surface
-imports on every version including 3.6 — but plain's lowering will not emit it here, so on
-gfx942 this form has to be **authored explicitly** in Gluon
-(`gl.amd.cdna4.async_copy.*`), not recovered from a plain champion. Untested by this pack.
+**A kernel whose loop has no trip count has nothing to pipeline.** If the dispatched config
+makes the loop run once, arming the injection only pays for a peeled prologue and an epilogue
+that never overlap anything — a clear regression, on a body where the shipped `num_stages=1` was
+the right choice. Check the trip count before reading the debt.
 
 ### What this does not do
 

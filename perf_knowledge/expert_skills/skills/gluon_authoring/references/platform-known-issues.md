@@ -133,7 +133,7 @@ Decision rule: on gfx1201 attention kernels served under a CUDA graph, keep
 Full capability page: `hardware/cdna3-gfx942.md`. The ones that break a **sweep/harness**
 (not just a single kernel):
 
-- **Process-level LDS abort (non-catchable).** Allocating more LDS than the 64 KiB/CU cap
+- **Process-level LDS abort (non-catchable).** Allocating more LDS than the LDS/CU cap (**64 KiB on CDNA3/gfx942, 160 KiB on CDNA4/gfx950** — the cap is arch-specific, so a config that aborts on one may be legal on the other)
   (e.g. a cshuffle epilogue's `2·tile_m·tile_n`, or `NUM_STAGES` whole large tiles) aborts
   with `local memory exceeds limit` at the **process** level — a `try/except` will **not**
   catch it, so one bad config takes down the whole sweep. Pre-screen
@@ -185,7 +185,7 @@ failing loudly.
   does not exist host-side (now handled: the probe prints the tail inline or says the log is
   container-side). **Workaround:** a PATH shim that re-execs host-side `rocprof-compute` into the
   container. **Root fix:** run `analyze` through the SAME `locus.sh` as `profile`. Until then SOL is
-  optional (`skill.md` §3.2) — ATT + static are the required pair and both run through `rocprofv3`
+  optional (`SKILL.md` §3.2) — ATT + static are the required pair and both run through `rocprofv3`
   alone.
 
 ## How to use this file

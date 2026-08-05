@@ -421,6 +421,40 @@ _ROLE_RANK = {
 
 _MMA_KINDS = ("amd_mfma", "amd_wmma", "nvidia_mma")
 
+# LDS/CU is the OCCUPANCY divisor for shared memory and it is ARCH-SPECIFIC: CDNA3 has
+# 64 KiB/CU, CDNA4 has 160 KiB. The figure lives in the shared vendor/amd occupancy model
+# rather than being copied here, because three copies of one hardware table drift.
+#
+# GEAK carries only the two CDNA generations this skill claims (`match.gens`), sourced from
+# perf_knowledge/hardware/: cdna3_mi300/arch.md "64 KiB/CU, 32 banks" and
+# cdna4_mi350/memory.md "160 KiB/CU, 64 banks". Upstream delegates to its own
+# `amd_occupancy.lds_per_cu()`, which belongs to the occupancy/roofline regime this package
+# deliberately does not vendor -- so that module is preferred when present and this table is
+# the fallback, rather than the other way round.
+_LDS_PER_CU = {"gfx942": 65536, "gfx950": 163840}
+
+
+def _lds_per_cu(arch: str | None) -> int | None:
+    """LDS bytes per CU for `arch`, or None when no figure is available.
+
+    None is a real answer: a divisor that is right for one generation and silently applied to
+    another produces a confident wrong occupancy verdict, which is worse than declining. An
+    arch this skill does not claim therefore declines rather than inheriting gfx942's number.
+    """
+    if not arch:
+        return None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import amd_occupancy as _occ
+    except ImportError:
+        pass
+    else:
+        return _occ.lds_per_cu(arch)
+    for k, v in _LDS_PER_CU.items():
+        if arch.startswith(k):
+            return v
+    return None
+
 _BUF_LOAD = re.compile(r"amdg\.buffer_load\s+([^:{\n]*)([^\n]*)")
 
 
@@ -434,16 +468,31 @@ def _buffer_facts(text: str) -> dict:
     SOURCE faithfully is what produces the regression; transcribing the DUMP does not. The
     dump says which, and nothing was reporting it.
     """
-    n_load = n_other = n_contig = 0
+    n_load = n_bare = n_mask = n_other = n_contig = n_stride = 0
     for m in _BUF_LOAD.finditer(text):
         n_load += 1
-        # `%base[%offsets], %mask` is two top-level operands after the base; a third
-        # (`, %cst`) is the `other` value.
-        if len(re.findall(r"%[\w$.]+", m.group(1))) >= 4:
+        args, tail = m.group(1), m.group(2)
+        # `stride = %x` is an OPTIONAL operand and it is NOT `other`. Counting `%` tokens
+        # without removing it reported "2 of 8 carry other" on a dump where none do, and the
+        # harm ran the wrong way: the advice below is to REMOVE other=, so the author would
+        # have ADDED it at exactly those sites. `stride` shows up on peeled prologue loads.
+        if " stride = %" in args:
+            n_stride += 1
+            args = re.sub(r"\s*stride\s*=\s*%[\w$.]+", "", args)
+        # Operand shape: `%base[%offsets]` = 2, `, %mask` = 3, `, %other` = 4. Attributes
+        # like `cacheModifier = cg` carry no `%` and do not count.
+        n_ops = len(re.findall(r"%[\w$.]+", args))
+        if n_ops >= 4:
+            n_mask += 1
             n_other += 1
-        if "contiguity" in m.group(2):
+        elif n_ops == 3:
+            n_mask += 1
+        else:
+            n_bare += 1
+        if "contiguity" in tail or "contiguity" in args:
             n_contig += 1
-    return {"loads": n_load, "with_other": n_other, "with_contiguity": n_contig}
+    return {"loads": n_load, "bare": n_bare, "with_mask": n_mask, "with_other": n_other,
+            "with_contiguity": n_contig, "with_stride": n_stride}
 
 
 _LOC_NAME = re.compile(r'"([^"]+)"\(')
@@ -1054,6 +1103,29 @@ _INTERESTING_OPS = frozenset(_DOT_OPS + _GLOBAL_LOAD_OPS + _GLOBAL_STORE_OPS
                              + _SMEM_OPS + _CVT_OPS + _INDEX_OPS)
 
 
+def constants_digest(src: str) -> str:
+    """A digest of the LAYOUT CONSTANTS ALONE, stable across dumps and Triton builds.
+
+    The md5 of the whole emitted file is NOT usable for the cross-check it invites. The
+    header carries the dump's absolute path and the recovering Triton's version -- the
+    version stamp is a deliberate addition, and it is exactly what makes two byte-identical
+    constant sets hash differently. A trial designed around "both agents must report the
+    same md5" found that out the hard way.
+
+    Role NAMES are also excluded, because they drift between dumps of the same kernel: the
+    blocked global-load layout came out `A_LOAD`/`B_LOAD` on a num_stages=2 dump and
+    `FROM_SMEM` on the num_stages=1 dump of the same body, with all 13 layout VALUES
+    identical. What is compared here is the set of constructor expressions, sorted -- the
+    thing that is actually a property of the compiler's inference.
+    """
+    import hashlib
+    vals = sorted(m.group(1).strip()
+                  for m in re.finditer(r":\s*gl\.constexpr\s*=\s*(gl\.[^\n]+)", src))
+    nw = re.search(r"^NUM_WARPS\s*=\s*(\d+)", src, re.MULTILINE)
+    payload = "\n".join(vals) + f"\nNUM_WARPS={nw.group(1) if nw else '?'}"
+    return hashlib.md5(payload.encode()).hexdigest()
+
+
 def _provenance(sites: list, limit: int = 8) -> list:
     """Distinct (op, position, shape) rows with a count, most informative first.
 
@@ -1218,9 +1290,10 @@ def report(rec: Recovery, verbose: bool = False) -> str:
         for o in hit_ops:
             lines.append(f"    {o}: {NO_GLUON_OP[o]}")
 
-    # LDS footprint. One trial kernel's entire 1.69x residual was the anchor's shared
-    # allocation crossing the 64 KiB/CU divisor (40960 vs plain's 32768 -> 2 WG/CU became 1)
-    # while every layout verified. Every number needed for that is already parsed here.
+    # LDS footprint. A whole anchor-vs-plain residual can be the anchor's shared allocation
+    # crossing the 64 KiB/CU divisor -- halving the workgroups per CU -- while every layout
+    # verifies, because `verify` cannot see allocation size. Every number needed to spot it
+    # ahead of the clock is already parsed here.
     smem = {}
     for s in rec.sites:
         if s.space == "smem" and s.op == "ttg.local_alloc" and s.kind == "result":
@@ -1234,9 +1307,21 @@ def report(rec: Recovery, verbose: bool = False) -> str:
         lines.append("")
         lines.append(f"  LDS: {len(smem)} allocation(s), {tot} element(s) total across them "
                      f"(x element size = bytes).")
-        lines.append("  Compare the ANCHOR's total against this one: an anchor that crosses the")
-        lines.append("  65536 B/CU divisor loses a workgroup per CU with every layout still")
-        lines.append("  verifying, and `verify` cannot see allocation size.")
+        _cap = _lds_per_cu(rec.arch)
+        if _cap:
+            lines.append(f"  Compare the ANCHOR's total against this one. On {rec.arch} the "
+                         f"occupancy divisor is")
+            lines.append(f"  {_cap} B/CU, so an anchor that crosses it loses a workgroup per CU "
+                         f"with every")
+            lines.append("  layout still verifying -- `verify` cannot see allocation size.")
+        else:
+            lines.append("  Compare the ANCHOR's total against this one. This pack has no "
+                         "LDS/CU figure for")
+            lines.append(f"  arch={rec.arch!r}, so no occupancy divisor is asserted here: look it "
+                         f"up before")
+            lines.append("  reading a workgroups-per-CU verdict off these bytes. Note CDNA4 "
+                         "(160 KiB/CU) is")
+            lines.append("  2.5x CDNA3 (64 KiB/CU), so the divisor is not a constant.")
 
     buf = sorted({s.op for s in rec.sites if s.op.startswith("amdg.buffer")})
     if buf:
@@ -1249,19 +1334,35 @@ def report(rec: Recovery, verbose: bool = False) -> str:
         lines.append("  offsets to reproduce what plain lowered to.")
         bf = rec.buffer_facts or {}
         if bf.get("loads"):
-            bare = bf["loads"] - bf["with_other"]
+            # Each bucket is DETECTED, not inferred from another. The first version printed
+            # `loads - with_other` as "carry a mask" without ever looking for a mask operand,
+            # so a dump whose loads are bare (`%ptr[%offs] cacheModifier = cg`, no mask, no
+            # other) was reported as "2 carry a mask" -- and an author following that adds a
+            # mask plain never issued, paying the per-register v_cndmask this very NOTE warns
+            # about. Two independent transcriptions hit it.
             lines.append(f"  COMPILED FORM of the {bf['loads']} buffer_load site(s): "
-                         f"{bare} carry a mask and NO `other`,")
-            lines.append(f"  {bf['with_other']} carry `other`, {bf['with_contiguity']} carry a "
-                         f"`contiguity` attribute.")
-            if bare:
+                         f"{bf['bare']} BARE (no mask, no `other`), "
+                         f"{bf['with_mask'] - bf['with_other']} with a mask only, "
+                         f"{bf['with_other']} with mask + `other`.")
+            lines.append(f"  {bf['with_contiguity']} carry a `contiguity` attribute.")
+            lines.append("  Reproduce the form each site actually has: a mask you add where "
+                         "plain issued")
+            lines.append("  none costs a v_cndmask per register just as surely as an `other` "
+                         "does.")
+            if bf["with_mask"] - bf["with_other"] or bf["bare"]:
                 lines.append("  Copy that. `tl.load(..., other=0.0)` in the SOURCE compiles to no")
                 lines.append("  `other` operand (buffer OOB returns zero on CDNA), but passing")
                 lines.append("  other= in Gluon emits it and costs a v_cndmask per register --")
                 lines.append("  measured at 1.2-2% on two kernels. Transcribe the DUMP, not the source.")
+            unreachable = []
             if bf["with_contiguity"]:
-                lines.append("  `contiguity` is NOT reachable from gl.amd.cdna3.buffer_load "
-                             "(no parameter for it).")
+                unreachable.append(f"`contiguity` on {bf['with_contiguity']} site(s)")
+            if bf.get("with_stride"):
+                unreachable.append(f"`stride = %x` on {bf['with_stride']} site(s) "
+                                   f"(the pipeliner's peeled prologue loads carry it)")
+            if unreachable:
+                lines.append("  NOT reachable from gl.amd.cdna3.buffer_load, which has no "
+                             "parameter for either: " + "; ".join(unreachable) + ".")
     return "\n".join(lines)
 
 
@@ -1876,6 +1977,29 @@ def _selftest() -> int:
     ck("_buffer_facts separates the `other` form from the mask-only form",
        _bf["with_other"] == 1, str(_bf))
     ck("_buffer_facts sees the contiguity attribute", _bf["with_contiguity"] == 1, str(_bf))
+    # `stride = %x` is an optional operand, not `other`. Counting % tokens without removing
+    # it called a prologue load "has other" on a dump where none do, and the NOTE's advice is
+    # to REMOVE other= -- so the author would have added it at exactly the wrong sites.
+    _bs = _buffer_facts(
+        "x = amdg.buffer_load %A[%p], %mask stride = %stride_am {contiguity = 16 : i32}\n"
+        "y = amdg.buffer_load %B[%q], %m2, %cst : tensor<64xf16>\n")
+    ck("_buffer_facts does not mistake `stride` for `other`",
+       _bs["with_other"] == 1 and _bs["with_stride"] == 1, str(_bs))
+    # A BARE load has neither. The report used to print `loads - with_other` as "carry a
+    # mask" without ever looking for one, so a dump of bare loads read as "2 carry a mask" --
+    # and following that adds a mask plain never issued.
+    _bb = _buffer_facts("a = amdg.buffer_load %x_ptr[%a_48] cacheModifier = cg\n"
+                        "b = amdg.buffer_load %y[%o], %mask : tensor<64xf16>\n")
+    # The occupancy divisor is arch-specific: CDNA4 is 2.5x CDNA3. Hardcoding 64 KiB made the
+    # LDS note assert a wrong workgroups-per-CU verdict on gfx950, and asserting nothing is
+    # better than asserting a constant that is only true for one arch.
+    ck("_lds_per_cu knows CDNA3 and CDNA4 apart",
+       _lds_per_cu("gfx942") == 65536 and _lds_per_cu("gfx950") == 163840,
+       f'{_lds_per_cu("gfx942")} / {_lds_per_cu("gfx950")}')
+    ck("_lds_per_cu returns None rather than guessing an unknown arch",
+       _lds_per_cu("gfx1201") is None and _lds_per_cu(None) is None)
+    ck("_buffer_facts detects a BARE load instead of inferring a mask",
+       _bb["bare"] == 1 and _bb["with_mask"] == 1 and _bb["with_other"] == 0, str(_bb))
 
     # Source name + line from an MLIR location. This is what replaced guessing which of
     # Q/K/V a layout named GLOBAL_LOAD belonged to.
@@ -2334,9 +2458,13 @@ def main() -> None:
                         f" writing them to one path leaves only the last, and the survivor then"
                         f" reads as if it described every rung. Use a per-rung --out, or --force"
                         f" if you really mean to replace it.")
+            _src = emit_layouts(rec)
             with open(a.out, "w") as f:
-                f.write(emit_layouts(rec))
+                f.write(_src)
             print(f"\nwrote layout module -> {a.out}")
+            print(f"  constants-digest: {constants_digest(_src)}"
+                  f"   <- compare THIS across dumps/versions/agents, not the file md5"
+                  f" (the header carries the dump path and the Triton version)")
         if a.json_out:
             with open(a.json_out, "w") as f:
                 json.dump({"source": rec.path, "arch": rec.arch,

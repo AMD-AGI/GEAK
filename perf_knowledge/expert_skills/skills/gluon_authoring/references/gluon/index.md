@@ -1,6 +1,6 @@
 # Gluon API (gfx950 / gfx942) — mechanism index
 
-Owned, self-contained Gluon API reference for tile-programming-triton-gluon. **Start at
+Owned, self-contained Gluon API reference for tile-programming-gluon. **Start at
 `../hardware/atlas.md`** (phase read order + backbone layer map). Organized by the
 **tile-programming mechanism / backbone layer** you are working on, not as an
 alphabetical API dump. gfx950 (CDNA4) is the default; gfx942 (CDNA3) is the

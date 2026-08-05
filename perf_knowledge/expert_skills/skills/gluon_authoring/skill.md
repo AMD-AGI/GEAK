@@ -116,11 +116,12 @@ already in `libtriton` on all four versions. Only the Python pass list omits the
 **no `libtriton.so` rebuild** and — via `scripts/gluon_swp.py`, which wraps `gluon_to_ttgir` in-process —
 **no edit to any installed file** either.
 
-**But the debt is often zero, and paying a zero debt is how a round gets spent for nothing.** Across
-eight measured kernels only **two** had a real one. Four had a plain champion that compiled at
-`num_stages=1`, so there was no overlap to lose; two shipped `num_stages=2` that was itself a
-*pessimisation* (2.14× and 3.42×), where recovering the pipeline recovers a negative. That is why step 2
-opens with a measurement — `plain@ns=1` — rather than with an injection. Size the debt, then decide.
+**But the debt is often zero, and paying a zero debt is how a round gets spent for nothing.** Two ways it
+comes out zero, and both are common enough that assuming a debt is the wrong default: a champion that
+compiled at `num_stages=1` has no overlap to lose at all, and a champion whose shipped `num_stages` is
+itself a *pessimisation* would have the loss recovered along with the pipeline. That is why step 2 opens
+with a measurement — `plain@ns=1` at the champion's own config — rather than with an injection. Size the
+debt, then decide.
 
 **Where there is a debt, injection alone still changes nothing: the kernel has to be a candidate.** Two
 conditions, both required, and the faithful-transcription rules happen to violate the second. The
@@ -136,8 +137,9 @@ restores the order.
 transcription that hand-authors `allocate_shared_memory` + `local_store` + `local_load` — the most direct
 way to express a recovered `#shared` / `#dot_op` pair — has already done it, and the pass runs over the
 loop and changes nothing. Handing the staging back is what makes it act, with one trap worth stating
-before you get there: **un-writing the staging without arming the injection is a 19% net loss**, so the
-two halves go together or not at all.
+before you get there: **un-writing the staging without arming the injection is a regression, not a
+neutral intermediate** — you have removed a multi-buffer that was doing real work and put nothing in its
+place. The two halves go together or not at all.
 
 ## Procedure
 
@@ -207,20 +209,44 @@ The converter covers `#blocked`, `#amd_mfma`, `#swizzled_shared`, `#padded_share
 `ttg.dot_op` and `ttg.slice`. Two gaps that are **not** tool bugs, so do not spend verify cycles on them:
 `ttg.convert_layout` placement is manual — take it from the recovery map in
 `references/tile-programming/layout-recipes.md`; and `amd_rotating_shared` has no `gluon.language`
-constructor at all. It is not a `num_stages` artefact either — one measured kernel still carries it at
-`num_stages=1` — so re-dump at `ns=1` and re-recover before concluding a body is untranscribable.
+constructor on the builds measured here. Three things about that one, in the order they save time:
+
+- **Probe your own build before concluding it is a language gap.** An `UNRECOVERABLE` row is a prompt to
+  check, not proof — the Gluon surface moves, and `amd_wmma` sat behind identical wording while being
+  constructible as `AMDWMMALayout` all along.
+- It is **not** a `num_stages` artefact — one measured kernel still carries it at `num_stages=1` — so
+  re-dump at `ns=1` and re-recover before concluding a body is untranscribable.
+- If it really is absent, **a Python-side workaround does not exist**, and the cost is worse than a
+  missing constructor. `builder.to_linear_layout(attr, shape)` wants an `ir.attribute`, and on 3.7.1 /
+  3.8.0 no binding obtains an encoding attribute from a Value or a Type — so the layout's normal form is
+  unreachable from Python and **a substitution for it cannot be verified against the original even in
+  principle**. Closing this needs a C++ binding; an earlier claim that one Python binding
+  (`to_linear_layout_from_memdesc`) would do it was tried and is **retracted**.
 
 **Recovery audits layouts, not ops**, so a report reading 100% recovered does not mean the body is
 transcribable: `amdg.in_thread_transpose` has no Gluon builtin and appeared as a *successful* row until
 `ttgir_bridge.py` began naming it. And layout equivalence is blind to two things that decide real ports
 — read them off `recover` rather than discovering them at the clock:
 
-- **the `other` operand.** `tl.load(..., other=0.0)` compiles to a buffer_load with a mask and *no*
-  `other` (buffer OOB returns zero on CDNA); passing `other=` in Gluon emits it and costs a `v_cndmask`
-  per register, measured at 1.2–2% on two kernels. Transcribe the **dump**, not the source.
-- **LDS allocation size.** One kernel's entire 1.69× residual was its shared total crossing the
-  64 KiB/CU divisor — 2 workgroups per CU became 1 — with every layout verifying. Compare `recover`'s
-  `LDS:` line against plain's.
+- **which operands each `buffer_load` actually carries.** `recover` buckets every site as bare /
+  mask-only / mask+`other`, and you transcribe the bucket rather than the source: `tl.load(...,
+  other=0.0)` frequently compiles to a load with **neither** — buffer OOB returns zero on CDNA — and
+  passing `other=` in Gluon emits it and costs a `v_cndmask` per register. Adding a *mask* the compiled
+  form never issued costs the same, which is why the buckets are detected rather than inferred. Two
+  operands are **not reachable from `gl.amd.cdna3.buffer_load` at all**, `contiguity` and `stride`; the
+  latter shows up only on the pipeliner's peeled prologue loads, which a non-pipelined anchor does not
+  have and the injection puts back itself.
+- **LDS allocation size**, which `verify` cannot see by construction. A shared total that crosses the
+  LDS/CU divisor (**64 KiB on CDNA3/gfx942, 160 KiB on CDNA4/gfx950**) halves workgroups per CU while
+  every layout still verifies. Compare `recover`'s `LDS:` line against plain's — it names the divisor for
+  the `--arch` you passed, and **declines to name one** for an arch this skill has no figure for rather
+  than silently applying gfx942's.
+- **the `constants-digest`**, when more than one person or version is transcribing the same body. The
+  emitted header carries the dump path and the recovering Triton's version, and role names legitimately
+  drift with the dump (the blocked global-load layout is `A_LOAD`/`B_LOAD` on a `num_stages=2` dump and
+  `FROM_SMEM` on the `ns=1` dump of the same body, with identical values), so two correct recoveries do
+  not compare byte-for-byte. The digest is taken over the sorted constructor expressions with role names
+  dropped, and is what to compare instead.
 
 **2. Size the pipeline debt, and pay it only if there is one.** Start as soon as step 1 reports PASS.
 This step is **conditional and optional** — most kernels owe nothing, and the measurement that tells you
@@ -232,7 +258,7 @@ champion with its pipeline turned off, at its own config, and compare three numb
 | reading | what it means | do |
 | --- | --- | --- |
 | `plain@ns=1` ≈ `plain` | the champion was never pipelined; there is no overlap to lose | **skip to step 3.** A faithful anchor should land ≈1.00 here, and anything well below that is a transcription defect, not a debt |
-| `plain@ns=1` **faster** than `plain` | the shipped `num_stages` is a *pessimisation* | **do not recover it.** Two of eight measured kernels were this, at 2.14× and 3.42×. Report it to the kernel's owner; recovering it would recover a negative |
+| `plain@ns=1` **faster** than `plain` | the shipped `num_stages` is a *pessimisation* | **do not recover it** — recovering it recovers a negative. Not a rare case: a library kernel whose wrapper passes no `num_stages` inherits the AMD default of 2, which nobody chose for that body. Report it to the kernel's owner |
 | your anchor ≈ `plain@ns=1` **<** `plain` | the entire gap is the missing pipeline, and no layout work will move it | this is the real debt — continue to 2b |
 
 **Read plain's `num_stages` off the LOOP, not the launch.** A launch-level `num_stages=` does nothing at
@@ -263,15 +289,18 @@ bit-exact, "pipelined" read off the IR (peeled prologue loads plus a loop-carrie
 2. **The loads must still be `tt.load` when the pipeliner runs.** Plain orders `add_schedule_loops` #15,
    `add_pipeline` #16 and `add_convert_to_buffer_ops` **#28**, so plain's own pipeliner only ever sees
    `tt.load`. Write the loop with `gl.load` and arm `buffer_ops=True`, which restores plain's order and
-   ends with buffer ops *and* a pipelined loop (measured: 4 `amdg.buffer_load`, 0 `tt.load`). That half
-   is **opt-in** — arming it on an anchor whose loads are already `buffer_load` aborts the pass manager.
+   ends with buffer ops *and* a pipelined loop. That half is **opt-in**, and for a reason worth knowing
+   before you arm it: on an anchor whose **loads** are already `buffer_load` it aborts the pass manager
+   loudly, but on one whose **stores** are buffer ops it does not raise at all — `LLVM ERROR: Fatal
+   pipeliner error` kills the interpreter. Arm it only on an anchor written throughout with `gl.load` /
+   `gl.store`.
 
-**On a dot kernel, un-write the hand staging as well**, and do both halves at once: measured on a 2048³
-fp16 GEMM, hand-staged = 1.000, un-staged with injection **off** = **0.811**, un-staged with injection on
-= **1.088**. Keep the explicit-smem version — it is where the hand-built double buffer starts if the pass
-still will not bite. Two other ways to starve it: a hand register-prefetch (the pipeliner *is* the
-prefetcher, and a manual one consumes the slot) and a loop-variant `scf.if` (split a causal mask into two
-loops; it blocks `BlockPingpong` too).
+**On a dot kernel, un-write the hand staging as well — and do both halves in the same step.** Un-staging
+alone removes a multi-buffer that was really doing work and puts nothing back, so it is a *regression*,
+not a neutral intermediate; the injection is what rebuilds the LDS path. Keep the explicit-smem version —
+it is where the hand-built double buffer starts if the pass still will not bite. Two other ways to starve
+it: a hand register-prefetch (the pipeliner *is* the prefetcher, and a manual one consumes the slot) and
+a loop-variant `scf.if` (split a causal mask into two loops; it blocks `BlockPingpong` too).
 
 **2c. Inject, without editing anything.** `scripts/gluon_swp.py` wraps `HIPBackend.gluon_to_ttgir`
 in-process and runs the two passes as a second pass manager over the module the stock function returns:
@@ -301,24 +330,36 @@ last `add_*` call on 3.6, which has no warp pipeline at all). `--selftest` pins 
 > on the spot — which is the worst of the three available outcomes: nothing errors, nothing changes, and
 > the null result reads as "this technique does not work here".
 
-**2d. Confirm it fired from the IR, before you time anything.** Dump the Gluon TTGIR armed and unarmed
-and compare: prologue loads should rise, `ttg.memdesc_index` should appear (the multi-buffer tell, and
-the cheapest single signal), and the full-drain `s_waitcnt lgkmcnt(0)` should relax to `lgkmcnt(N>0)`. IR
-**identical** armed and unarmed means the pass ran and rewrote nothing — a different failure from the
-passes being absent, and one no availability probe can see: `probe_levers.py --all` reports that the
-symbols are in this `libtriton.so`, not that they will bite on your IR.
+**2d. Confirm it fired from the IR, before you time anything — and read the right tell for your shape.**
+Dump the Gluon TTGIR armed and unarmed and compare. **The tell differs by whether the loop has a dot**,
+and using the wrong one produces a confident false negative on a loop that did pipeline:
 
-> **The measurement trap that gives a false negative.** Triton's in-process JIT cache is keyed on
-> `(function, signature, constexprs)` and **knows nothing about the injection**, so two arms that differ
-> only by the wrapper hit the same compiled artifact and the second silently reuses the first's code —
-> reading as "injection does nothing" (measured once as 1.0004). `TRITON_ALWAYS_COMPILE=1` does **not**
-> fix it. Give each arm its own kernel object and its own `TRITON_CACHE_DIR`, and confirm each arm's
-> `.ttgir` really contains `ttg.memdesc_index`.
+| loop | landing tell |
+| --- | --- |
+| **contains a dot** | `ttg.memdesc_index` appears — the multi-buffered-LDS signature, and the cheapest single signal |
+| **dot-free** | **not** `memdesc_index`, which stays 0 because a dot-free loop prefetches into *registers* and never touches LDS. Read `iter_args` 0→1 and the load count scaling with depth (2→4→6), plus `tt.num_stages` on the `scf.for` and a visible peeled prologue |
 
-**Depth is a knob, not a monotone.** `num_stages=3` lost to `2` on all four versions on the one kernel
-carried end to end. Start at 2 and sweep rather than deepening on principle. Full mechanism, the
-per-shape numbers (dot-free reduction / GEMM / attention), the ping-pong window and why async copy is not
-reachable from plain on gfx942: `references/gluon/pipeline-reference.md`.
+Either way the full-drain `s_waitcnt lgkmcnt(0)` should relax to `lgkmcnt(N>0)`. IR **identical** armed
+and unarmed means the pass ran and rewrote nothing — a different failure from the passes being absent,
+and one no availability probe can see: `probe_levers.py --all` reports that the symbols are in this
+`libtriton.so`, not that they will bite on your IR.
+
+> **The cache trap has two halves, and each on its own gives a false negative.** *In process*, Triton's
+> JIT cache is keyed on `(function, signature, constexprs)` and **knows nothing about the injection**, so
+> two arms differing only by the wrapper hit the same compiled artifact and the second silently reuses
+> the first's code. `TRITON_ALWAYS_COMPILE=1` does **not** fix it. *On disk*, a per-arm
+> `TRITON_CACHE_DIR` does not encode the **depth**, so an `ns=3` probe pointed at the `ns=2` directory is
+> served the `ns=2` binary and reads as "depth does nothing". Give each arm its own kernel object, key
+> the cache dir with `gluon_swp.cache_tag()`, and confirm each arm's own `.ttgir` carries the tell above.
+
+**Depth is a knob, not a monotone, and the mechanism is legible before you measure.** Deepening is not
+free and not uniform: a depth can build a *single*-buffered rotating stage that leaves LDS at the
+champion's footprint while peeling the prologue, and the next depth up genuinely double-buffers — which
+doubles the shared footprint and can cross the LDS/CU divisor (**64 KiB on CDNA3/gfx942, 160 KiB on
+CDNA4/gfx950**), halving workgroups per CU. `recover`'s `LDS:` line predicts that before a clock is read.
+A depth plain itself cannot compile is not available to you either. Start at 2 and sweep. Full mechanism,
+the per-shape behaviour, the ping-pong window and why async copy is not reachable from plain on gfx942:
+`references/gluon/pipeline-reference.md`.
 
 **3. Pass through two checkpoints — neither of them is where the track stops.**
 
@@ -491,10 +532,10 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
 
 ## Sources
 
-- Vendored from `AMD-AGI/TileProgrammingAgentSkills@907eaae`
+- Vendored from `AMD-AGI/TileProgrammingAgentSkills@2b1d42a`
   (`.cursor/skills/tile-programming-gluon/`), **pruned to the API surface, the do-not-write lists and the
   two mechanics above**: 14 of 70 reference files (~2.4 k of ~11 k lines) and 10 of 50 scripts. Upstream
-  remains the SSOT; this is a one-way snapshot. `references/` is unmodified. `scripts/` carries **three
+  remains the SSOT; this is a one-way snapshot. `references/` is unmodified. `scripts/` carries **four
   corrections**, all of which should go back upstream:
   - `ttgir_to_gluon.py` dropped `tilesPerWarp` and `elementBitWidth` when emitting
     `gl.amd.AMDMFMALayout`, so a chained-dot (gfx950, 16×16 mfma) or scaled-MFMA kernel — both of which
@@ -513,8 +554,20 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
     bare `range` is a candidate; the same loop dot-free is not until annotated) — the rule upstream got
     wrong twice before it was measured.
 
-  The three added scripts are `ruff --no-cache` clean; the 20 pre-existing findings in the four older
-  scripts are untouched. All three offline `--selftest` entry points also run from
+  - `ttgir_bridge.py`'s LDS/CU divisor delegates to upstream's `amd_occupancy.lds_per_cu()`, a module in
+    the occupancy/roofline regime this package deliberately does not vendor — so in this tree the lookup
+    returned `None` for every arch and the `LDS:` line silently lost the divisor that decided a whole
+    kernel's residual. Upstream had left the intended fallback in place but **unreachable, after the
+    `return`**, and referencing a `_LDS_PER_CU` table that no longer exists (a `NameError` waiting on
+    anyone who made it reachable). The fallback is now live and sourced from GEAK's own
+    `perf_knowledge/hardware/` — `cdna3_mi300/arch.md` 64 KiB/CU, `cdna4_mi350/memory.md` 160 KiB/CU —
+    covering exactly the two `match.gens` this skill claims and declining for anything else, since a
+    divisor right for one generation is a confidently wrong occupancy verdict on another. The same
+    function annotated `arch` with `Optional` without importing it — invisible at runtime only because
+    `from __future__ import annotations` defers evaluation — now spelled `str | None`.
+
+  `ttgir_bridge.py` and the three added scripts are `ruff --no-cache` clean; the 20 pre-existing findings
+  in the four older scripts are untouched. All three offline `--selftest` entry points also run from
   `scripts/smoke_test_recover.sh`, so the two rules above are guarded without a GPU.
 - **Deliberately not vendored — the whole process layer**: round loop, hardware budget / roofline models,
   profiling (rocprof / ATT / PMC), the lever-card catalogue, bound-class signals, the escalation gate,

@@ -101,8 +101,9 @@ transposed_operand = smem.permute((1, 0)).load(dot_layout)
 ## TTGIR -> Gluon recovery map (for transcription)
 
 This table is **automated** by `scripts/ttgir_to_gluon.py` (driven by
-`scripts/recover_gluon.py` / `dump_ir.sh --emit-gluon`); the table is the spec it
-implements -- read it to review the emitted layouts, not to hand-map them.
+`scripts/recover_gluon.py` / `dump_ir.sh --emit-gluon`) — both gluon pack; the table is the spec
+they implement -- read it to review the emitted layouts, not to hand-map them. From the triton
+pack the table is still the spec, but the automation runs after the champion handoff.
 
 > **Version note.** The attribute/class spellings below are this build's instance of a
 > version-stable rule (1:1 transcription of the lowered IR's compiler-chosen

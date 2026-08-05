@@ -27,12 +27,18 @@ Four things it prints that decide the port, in the order they matter:
 - **`num_warps cross-check`** must be `PASS`. A `FAIL` means the dump contradicts itself and nothing in
   it is trustworthy — **exit 4**, deliberately distinct from the exit 1 that an `UNRECOVERABLE` layout
   gives, because that one means "part of this kernel is not expressible, the rest is sound".
-- **`UNRECOVERABLE: N`** must be 0. The one seen in practice is `amd_rotating_shared`, a genuine
-  `gluon.language` gap and not a tool gap: `AMDRotatingSharedEncodingAttr` has the C++ traits for a
-  `toLinearLayout`, but Python can only obtain a layout through a `builder.get_*_layout` constructor and
-  `get_gluon_layout_from_memdesc` is precisely the one that throws. It is **not** a `num_stages`
-  artefact — one kernel still shows it at `num_stages=1` — so re-dump at `ns=1` and re-recover before
-  concluding the body is untranscribable.
+- **`UNRECOVERABLE: N`** must be 0. The one seen in practice is `amd_rotating_shared`. Treat the row as a
+  **prompt to probe your own build, not as proof of a language gap** — the Gluon surface moves, and
+  `amd_wmma` sat behind identical wording while being constructible as `AMDWMMALayout` all along. It is
+  also **not** a `num_stages` artefact — one kernel still shows it at `num_stages=1` — so re-dump at
+  `ns=1` and re-recover before concluding the body is untranscribable. Where the constructor really is
+  absent, the consequence is worse than a missing constructor and there is **no Python-side workaround**:
+  `builder.to_linear_layout(attr, shape)` wants an `ir.attribute`, and on 3.7.1 / 3.8.0 no binding
+  obtains an encoding attribute from a Value or a Type (`ir.value` exposes get_type/get_shape/get_loc,
+  `ir.type` exposes is_fp16/is_integer, `ir.make_attr` builds dense integer arrays). So that layout's
+  normal form is unreachable from Python and **a substitution for it cannot be verified against the
+  original even in principle.** Closing it needs a C++ binding; the earlier claim that one Python binding
+  (`to_linear_layout_from_memdesc`) would suffice was tried and is **retracted**.
 - **`round-trip: EXACT=N`** must cover every layout. This is the proof the Python object kept every
   field the attribute had, and it is the check a hand-written mapping cannot offer.
 - **the source names, not the role names.** Roles rank by op kind, so on attention three global loads
@@ -49,13 +55,27 @@ tt.dot operand[1]         shape=[128, 64] f16 (reg)  <- kT @ fwd_decode.py:652
 
 Three more of its outputs are worth acting on directly:
 
-- **`COMPILED FORM of the N buffer_load site(s)`** — transcribe the **dump**, not the source.
-  `tl.load(..., other=0.0)` compiles to a buffer_load with a mask and *no* `other` operand (buffer OOB
-  returns zero on CDNA), but passing `other=` in Gluon emits it and costs a `v_cndmask` per register.
-  Measured at 1.2–2% on two kernels. `contiguity` is not reachable from `gl.amd.cdna3.buffer_load` at all.
-- **`LDS: N allocation(s)`** — compare against the anchor's. One kernel's entire 1.69× residual was its
-  shared total crossing the 64 KiB/CU divisor (2 workgroups per CU became 1) while every layout verified.
-  Layout equivalence is blind to allocation size by construction, in this tool and in `recover_gluon.py`.
+- **`COMPILED FORM of the N buffer_load site(s)`** — transcribe the **dump**, not the source, and
+  transcribe the *bucket*: each site is reported as bare / mask-only / mask+`other`, **detected rather
+  than inferred**. Both directions of getting this wrong cost the same thing. `tl.load(..., other=0.0)`
+  frequently compiles to a load carrying **neither** operand (buffer OOB returns zero on CDNA), so
+  passing `other=` in Gluon adds a `v_cndmask` per register that plain never paid; and adding a *mask* to
+  a site whose compiled form is bare costs the same. Two operands are not reachable from
+  `gl.amd.cdna3.buffer_load` at all: `contiguity`, and `stride` — the latter appears only on the
+  pipeliner's peeled prologue loads, which a non-pipelined anchor does not have and the injection puts
+  back itself.
+- **`LDS: N allocation(s)`** — compare against the anchor's, because layout equivalence is blind to
+  allocation size by construction, in this tool and in `recover_gluon.py`. A shared total that crosses
+  the LDS/CU divisor halves workgroups per CU while every layout still verifies. The divisor is
+  **arch-specific — 64 KiB on CDNA3/gfx942, 160 KiB on CDNA4/gfx950** — so `recover` derives it from the
+  `--arch` you passed and **declines to name one** for an arch this skill has no figure for, rather than
+  applying gfx942's number to a generation with 2.5× the budget.
+- **`constants-digest`** (with `--out`) — a digest over the sorted constructor expressions with role
+  names dropped. Use it, not a file hash, to compare two recoveries of the same body: the emitted header
+  carries the dump path *and* the recovering Triton's version, and role names legitimately drift with the
+  dump — the blocked global-load layout is `A_LOAD`/`B_LOAD` on a `num_stages=2` dump and `FROM_SMEM` on
+  the `ns=1` dump of the same body, values identical. Two correct recoveries therefore do not compare
+  byte-for-byte, and hand-rolled normalisations are not comparable to each other either.
 - **the unsupported-op table** — `recover` audits *layouts*, not *ops*, so 100% layout recovery does not
   mean transcribable. `amdg.in_thread_transpose` has no Gluon builtin and used to appear as a
   *successful* row; it is now named.
@@ -81,7 +101,7 @@ them, so this is a reachability problem, not a rebuild.
 
 | tool | what it does |
 | --- | --- |
-| **`gluon_swp.py`** | **Prefer this.** Wraps `HIPBackend.gluon_to_ttgir` in-process and runs the two passes as a second pass manager over the module the stock function returns, so **nothing on disk changes**: a read-only or shared site-packages, a later `pip install --force-reinstall`, and a crash mid-experiment all stop being hazards, and the effect ends with the process. Produces **byte-identical TTGIR to the on-disk splice on all four versions**, armed and unarmed, so nothing is given up for that. `gluon_swp.capabilities()` (also the bare CLI) reports what this build has, **probed rather than inferred from the version**, and `enable()` refuses on a fork that already splices the passes in — running them twice is a different experiment — and refuses `num_stages < 2`, where the pipeliner is a no-op and installing the wrapper would only add confusion. `buffer_ops=True` restores plain's ORDER (pipeline first, buffer conversion after), which is what lets an anchor be written with `gl.load` and still end on buffer ops. |
+| **`gluon_swp.py`** | **Prefer this.** Wraps `HIPBackend.gluon_to_ttgir` in-process and runs the two passes as a second pass manager over the module the stock function returns, so **nothing on disk changes**: a read-only or shared site-packages, a later `pip install --force-reinstall`, and a crash mid-experiment all stop being hazards, and the effect ends with the process. Produces **byte-identical TTGIR to the on-disk splice on all four versions**, armed and unarmed, so nothing is given up for that. `capabilities()` (also the bare CLI) reports what this build has, **probed rather than inferred from the version**, and inspects the *original* rather than whatever is currently installed — without which a second `enable()` at a new depth is refused as "this tree already splices the passes", i.e. every depth sweep breaks. `enable()` refuses that genuine fork case, and refuses `num_stages < 2` where the pipeliner is a no-op. `cache_tag()` keys a cache dir on the arming (see the two-sided cache trap below). `buffer_ops=True` restores plain's ORDER — pipeline first, buffer conversion after — which is what lets an anchor be written with `gl.load` and still end on buffer ops. |
 | `patch_reinject.py apply\|revert\|status` | The on-disk form, kept for when you want the pass list itself visible in `compiler.py` while reading. Env-armed (`TRITON_GLUON_SWP=N`, plus `TRITON_GLUON_SWP_BUF=1` for the buffer half) so splice-ON and splice-OFF are the **same binary**, which is the only way an IR diff between them means anything. The splice point is version-dependent and measured, not assumed: before `add_warp_pipeline` on 3.7/3.8; after the last `add_*` call on 3.6, which has no warp pipeline at all. Writes a `.orig_swp` backup; `revert` restores it and clears the `__pycache__`. |
 | `pipeline_survey.py <root> [...]` | Inventories a plain-Triton source tree by which pipeline **form** each kernel can exercise: A = cross-iteration software pipeline (the one re-injectable here), B = block ping-pong, C = async copy / direct-to-LDS. Classification is from source text, which is a **screen and not a verdict** — a source saying `num_stages=2` can dispatch a branch compiled at 1, and only a dump settles it. Use it to rank what to measure. |
 | `probe_levers.py --all [--arch <gfx>]` | Per-build capability probe — there is **no** positional probe-name argument. Its `reinject_ttgir_pipeliner` entry answers whether the passes are present in *this* `libtriton.so`. Read `available: true` for exactly that and nothing more: the symbols existing is not the pass biting on your IR, and those two hypotheses come apart in practice. `gluon_swp.capabilities()` answers the same question plus whether the tree already pipelines; `skill.md` step 2d has the read-the-IR-back check that answers the second. |
@@ -91,8 +111,35 @@ pipelining candidate (a loop **containing a dot** is one on a bare `range`; a **
 `tl.range(..., num_stages=N)`, where `None` inherits the launch value), and the loads must still be
 `tt.load` when the pipeliner runs, i.e. `gl.load` rather than `gl.amd.cdna3.buffer_load`. On a dot kernel
 the hand-written LDS staging has to come out as well — and **un-staging without arming the injection is a
-19% net loss**, so the two halves go together. The measured 2×2, the per-shape and per-version numbers
-are in `references/gluon/pipeline-reference.md`.
+regression, not a neutral intermediate**, so the two halves go together. The 2×2 and the per-shape
+behaviour are in `references/gluon/pipeline-reference.md`.
+
+**Read the landing tell that matches your shape.** `ttg.memdesc_index` is the multi-buffered-*LDS*
+signature, so it is the right tell **only where the loop has a dot**; a dot-free loop prefetches into
+registers, never touches LDS, and reads `memdesc_index == 0` on an arm that demonstrably pipelined.
+There, read `iter_args` 0→1, the load count scaling with depth, `tt.num_stages` on the `scf.for`, and a
+visible peeled prologue.
+
+> **The cache trap has two sides and each gives a false negative on its own.** *In process*, Triton's JIT
+> cache is keyed on `(function, signature, constexprs)` and knows nothing about the arming, so two arms
+> differing only by the wrapper hit the same artifact; `TRITON_ALWAYS_COMPILE=1` does not fix it. *On
+> disk*, a per-arm `TRITON_CACHE_DIR` does not encode the **depth**, so an `ns=3` probe pointed at the
+> `ns=2` directory is served the `ns=2` binary and reads as "depth does nothing". Give each arm its own
+> kernel object, key the directory with `gluon_swp.cache_tag()`, and verify the tell in each arm's own
+> `.ttgir`.
+
+> **`buffer_ops=True` is opt-in because it fails two different ways.** On an anchor whose **loads** are
+> already `buffer_load` it aborts loudly (`PassManager::run failed`). On one whose **stores** are buffer
+> ops it does not raise at all — `LLVM ERROR: Fatal pipeliner error` kills the interpreter. Arm it only
+> on an anchor written throughout with `gl.load` / `gl.store`.
+
+> **If you are on a copy of `gluon_swp.py` older than this one, check `disable()` first.** It used to
+> capture `gluon_to_ttgir` as a *resolved* attribute, which loses the `staticmethod` descriptor, so
+> restoring it left an instance method and every subsequent Gluon compile in that process died with
+> `gluon_to_ttgir() takes 3 positional arguments but 4 were given`. That breaks precisely the
+> one-process interleaved-arms protocol this module exists to serve. The version here captures from
+> `__dict__` and its selftest asserts the descriptor **kind** survives a round trip, not just the
+> resolved function.
 
 > **`TRITON_GLUON_SWP_PIPELINE` is not the knob**, and neither are `TRITON_GLUON_COOP_LDS` /
 > `TRITON_GLUON_PINGPONG`. All three are additions to a **vendor fork's** `GetEnv.h`; no upstream version
