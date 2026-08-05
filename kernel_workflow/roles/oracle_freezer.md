@@ -159,12 +159,43 @@ values are regenerated from the recorded seed on every run.
     do NOT gate on operand drift — there is no recorded artifact for them to drift from, and re-deriving
     both legs from the same seed in the same process makes byte-identity a property of the code, not a
     check. (An `ORACLE_INPUT_DRIFT`-style gate here would only fire spuriously.)
-  - times via `h.time_op(call, warmup, repeats)` (CUDA-event device time; no launch-overhead theatre).
+  - times via `h.time_op(call, warmup, repeats, detail=True)` — **always `detail=True`, never the scalar
+    form.** The scalar drops the receipt that says whether the number is a kernel time at all (next bullet),
+    and a dropped receipt is exactly how a host-bound measurement gets scored as if it were device time.
+    ```python
+    d = h.time_op(call, warmup, repeats, detail=True)   # None if `call` RAISED — that is a fail, not a 0.0
+    ms      = d["ms"]
+    primed  = d.get("primed")                           # True | False | absent — three states, see below
+    host_ms = d.get("host_ms")
+    ```
     **The baseline leg is ALWAYS `meta.baseline_callable` / `baseline_src/`** — `speedup = baseline_ms /
     current_ms`, so a Triton/HIP/CK/FlyDSL port always competes against the real input kernel, never its
     own scaffold. When `meta.workload` is present, build one timing case per `meta.workload.cases[]` and
     print the time-weighted `GEAK_WEIGHTED_SPEEDUP` as PRIMARY (geomean secondary); else time the recorded
     cases unweighted.
+  - **🔴 RECORD THE PRIMING RECEIPT — the device-time guarantee is CONDITIONAL, not automatic.** A CUDA
+    event stamps the GPU timeline only when the GPU *reaches* it, so an event window excludes host dispatch
+    ONLY IF the launches were already queued when it got there. `time_op` dispatch-primes the batch to make
+    that true and then reports whether it actually held. Throw the receipt away and you are back to
+    asserting a guarantee you never checked — which is the hole a candidate exploits by collapsing dispatch
+    instead of shortening the kernel. Read `primed` as THREE states, never as a bool:
+    - `True` → every event window brackets kernel time only. Score normally.
+    - `False` → this op dispatches slower than it computes even at full run-ahead. `ms` is a HOST-BOUND
+      latency, not a kernel time. Still print it, but mark that case `host_bound`.
+    - **absent** → the vendored `harness_lib.py` predates priming, so every number in this run carries a
+      dispatch bubble whose SIGN is not knowable from the number alone (it inflates whichever leg is
+      relatively smaller). Mark that case `timer_unprimed`.
+    Do NOT collapse absent into `False`: "this op is host-bound" and "this timer cannot tell" call for
+    different fixes — accept the label vs. re-freeze against a current `$HARNESS_LIB`.
+  - Print ONE machine-readable receipt line after the score lines, covering BOTH legs of EVERY case:
+    ```
+    GEAK_TIMING_RECEIPT: {"all_primed": <bool>, "timer_unprimed": <bool>,
+                          "cases": {"<case>": {"baseline": {"primed": ..., "host_ms": ...},
+                                               "current":  {"primed": ..., "host_ms": ...}}}}
+    ```
+    `all_primed` is the AND over both legs of every case. When it is false the printed speedup is NOT a
+    clean device-time ratio, and every downstream consumer has to say so rather than quote it bare — see
+    `director.md` step 6.
   - It must NOT import any backend by name and must NOT read outside the task dir (except vendored
     `harness_lib.py` + frozen `baseline_src/`) — so it transparently judges any-language reimplementation.
 - Write `meta.json`: `op_kind` (gemm|attn|elementwise|moe|other — from OP_SPEC or inferred), `dtype`,

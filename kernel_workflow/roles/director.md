@@ -258,6 +258,24 @@ baseline latencies recorded at benchmark setup).
    - Within 10%, or Director higher → `accepted`.
    - Director LOWER than claim by >10% → `flagged` (use Director's measured numbers as official).
    - Correctness fail / patch fails to apply → `flagged`.
+   **TIMING RECEIPT GATE — run this BEFORE the comparisons above.** Parse `GEAK_TIMING_RECEIPT` out of the
+   FULL_BENCHMARK output (see `oracle_freezer.md` step 4) and copy it verbatim into
+   `director_validation.json` as `timing_receipt`. A speedup is a claim about DEVICE time; the receipt is
+   the only evidence that it is one. Then:
+   - `all_primed: true` → proceed normally.
+   - `all_primed: false` with `timer_unprimed: false` → at least one leg is HOST-BOUND at these dims. The
+     ratio is a dispatch-latency ratio, not a kernel speedup. Still report the number, but set
+     `timing_basis: "host_bound"` and name the affected cases in `arbitration_note` — a host-bound win does
+     NOT survive integration into a server that already replays this op inside its own graph.
+   - `timer_unprimed: true` → the task was frozen against a `harness_lib.py` that predates dispatch priming,
+     so BOTH legs carry a bubble of unknown sign. Set `timing_basis: "unprimed"` and `status: "flagged"`.
+     Do not attempt a correction factor: the bubble is a constant that inflates whichever leg is relatively
+     smaller, so it moves different cases in different directions. Re-freeze against a current
+     `$HARNESS_LIB` is the only fix.
+   - Receipt ABSENT entirely → the unittest is older than this contract. `timing_basis: "unknown"`,
+     `status: "flagged"`. Absence is not evidence of priming.
+   Whatever the outcome, `timing_basis` is REQUIRED in `director_validation.json`, and any campaign summary
+   that quotes the speedup must carry it — an unlabelled number is read as a clean device-time win.
 7. If `APPLY_TO_ORIGINAL=true` AND status is `accepted`:
    ```bash
    cd "$KERNEL_PATH_ORIG"
