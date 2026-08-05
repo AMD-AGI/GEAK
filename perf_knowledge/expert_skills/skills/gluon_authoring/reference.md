@@ -40,13 +40,17 @@ you are in the wrong file.
 | ROCm / driver / toolchain constraints and broken paths | `platform-known-issues.md` |
 | the condensed list | `skill.md ## Knobs & pitfalls` |
 
-## The two port mechanics
+## Layout and overlap — the two mechanics, by entry state
 
 | you need | read / run |
 | --- | --- |
-| TTGIR → Gluon layout recovery map (incl. the manual `convert_layout` step) | `tile-programming/layout-recipes.md` |
-| **whether this kernel owes a pipeline at all**, then the two conditions and the measured recipe | `gluon/pipeline-reference.md`, and `skill.md ## Procedure` step 2a for the `plain@ns=1` control |
-| the pass list, proof-it-landed signals, and the hand-built cross-iteration double buffer for where the pass will not bite | `tile-programming/pipeline.md` |
+| TTGIR → Gluon layout recovery map (incl. the manual `convert_layout` step) | `tile-programming/layout-recipes.md` — **port only**; there is nothing to recover from when the source is already Gluon |
+| **porting: does this kernel owe a pipeline at all** | `skill.md ## Procedure` step 2a — the `plain@ns=1` control |
+| **already Gluon: does this loop overlap at all** | `skill.md ## Procedure` step 2d — read the tell **that matches the loop's shape**; `ttg.memdesc_index` is a false negative on a dot-free loop |
+| adding overlap where the loop **has a dot** — the three conditions and the measured recipe | `gluon/pipeline-reference.md` (re-injection), `scripts/USAGE.md` for `gluon_swp.py` |
+| adding overlap where the loop is **dot-free**, so the pipeliner has nothing to anchor on | `gluon/pipeline-reference.md ## Authored overlap` — on CDNA3 that is sync staging plus the `warp_pipeline_stage` hint, **not** async copy |
+| what is unavailable on this arch despite importing | `skill.md ## Knobs & pitfalls`, and `gluon/pipeline-reference.md`'s per-arch A/B tables |
+| the pass list, proof-it-landed signals, and the hand-built cross-iteration double buffer | `tile-programming/pipeline.md` |
 | the tools | `scripts/USAGE.md` |
 
 ## Not here, on purpose

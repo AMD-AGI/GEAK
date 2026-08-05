@@ -46,11 +46,22 @@ and then silently cost you.
   is the fixed transcribe-then-re-inject pair in `## Procedure`, closing against that kernel at **≥95%**.
   That bar is a checkpoint the track passes *through*; step 4 is what the port was for.
 - **Already Gluon** (`from_backend: gluon`). Nothing to transcribe and no plain comparator to hold parity
-  with, so skip step 1 and step 3's checkpoints. Step 2a's `plain@ns=1` control does not apply either —
-  there is no plain side to turn off — so the question "does this loop overlap at all" has to be answered
-  from the IR instead: if the Gluon body carries no `ttg.memdesc_index`, step 2b–2d are available as an
-  ordinary lever rather than as a debt to repay. Otherwise go straight to step 4 with the API pages and
-  the do-not-write list as reference.
+  with, so **skip step 1 and step 3's checkpoints**, and read step 4 as the whole procedure rather than
+  as a continuation (its preamble says which of its items are port-only). Step 2 is still available, but
+  as an **ordinary lever rather than a debt to repay**, and it is entered differently:
+  - **Step 2a does not apply** — there is no plain side to turn off, so there is no `plain@ns=1`. Ask
+    the IR instead whether this loop already overlaps, using **the tell that matches its shape** (step
+    2d): `ttg.memdesc_index` only where the loop has a dot; `iter_args` 0→1 plus load-count scaling
+    where it does not, because `memdesc_index` is 0 on a dot-free loop by construction.
+  - **If it does not overlap and the loop has a dot**, steps 2b–2d apply unchanged: the re-injected
+    pipeliner is the cheapest way to add it, and it will build the LDS staging itself.
+  - **If it does not overlap and the loop is dot-free**, the pipeliner has nothing to anchor on. That is
+    the **authored-overlap** case, and on CDNA3 the surface is sync staging
+    (`allocate_shared_memory` + `.store()`/`.load()` + barrier) plus the `warp_pipeline_stage` hint —
+    *not* async copy, which does not lower on gfx942 at all. See
+    [`references/gluon/pipeline-reference.md`](references/gluon/pipeline-reference.md)
+    `## Authored overlap`, and `## Knobs & pitfalls` here for what is unavailable despite importing.
+  - **If it already overlaps**, the pipeline layer is closed; go to step 4.
 
 **Run steps 1–4 as one continuous track held by one agent, not as a fan-out.** Two reasons, and they
 are different. The porting moves are *deterministic*: any two agents transcribing the same pinned
@@ -73,10 +84,20 @@ commit gate is unchanged either way — nothing sub-baseline is ever banked.
 In `kernel_workflow` terms this is the **`deep_explore` track**, not a set of specialist directions: it
 runs alone in its own round, carries its own long measure→self-profile→rewrite loop, and has authority
 over kernel plus wrapper — which is the shape steps 1–4 need. One mismatch to steer around: that track
-is documented as a minimally-steered ground-up rewrite, and here the first half is the opposite. **Steps
-1–3 are tightly specified and must be followed as written; step 4 is where the open-ended half begins.**
-Do not let a ground-up rewrite replace the transcription — the transcription *is* the anchor every later
+is documented as a minimally-steered ground-up rewrite, and here the opening is the opposite. **Do not
+let a ground-up rewrite replace the transcription** — the transcription *is* the anchor every later
 number is attributed against.
+
+**What is actually invariant, and what is only the default route.** Three things are not negotiable,
+because each one makes the run's numbers unfalsifiable rather than merely worse: the **layout
+equivalence gate** at the end of step 1 (a numerically-correct wrong-layout anchor poisons every later
+delta); **not mixing transcription with optimization** in the same edit (it destroys the ability to
+attribute anything); and **the comparator staying frozen** for the duration. Everything else — the
+order the residual's owners are worked in, whether the pipeline layer is entered at all, which of two
+loop bodies ships — is a **route chosen from measurement**, and step 2a exists precisely to choose it.
+Read the numbered steps as the order that wastes fewest cycles on a typical port, not as a checklist to
+satisfy: on the measured set only 5 of 12 kernels owed a pipeline debt at all, so for most kernels the
+correct action at step 2 is to establish that and move on.
 
 Two directions not to spend while the port is landing: a second arm on the transcription (above), and
 **anything that re-tunes the plain comparator** — that moves the denominator underneath a port whose
@@ -258,9 +279,22 @@ transcribable: `amdg.in_thread_transpose` has no Gluon builtin and appeared as a
   not compare byte-for-byte. The digest is taken over the sorted constructor expressions with role names
   dropped, and is what to compare instead.
 
-**2. Size the pipeline debt, and pay it only if there is one.** Start as soon as step 1 reports PASS.
-This step is **conditional and optional** — most kernels owe nothing, and the measurement that tells you
-which kind you have is cheaper than the injection.
+**2. Attribute the residual, then close the suspect that owns it.** Start as soon as step 1 reports PASS.
+A faithful anchor is normally *below* the comparator, and **the pipeline is only one of the reasons** —
+on the measured set only 5 of 12 kernels owed a pipeline debt at all. Naming the owner before acting is
+what stops a round being spent injecting into a kernel whose gap was somewhere else entirely:
+
+| suspect | how it shows | owner |
+| --- | --- | --- |
+| **lost pipeline** | the anchor lands on `plain@ns=1` (2a below) | the rest of this step — re-injection first, hand-authored overlap only where the loop has no dot |
+| **lost vectorization** | anchor ≈ 0.5× or worse, and the asm load-width histogram shifted (`dwordx4` → `ushort`) | a `convert_layout` folded backwards into the load; pin the staging with an explicit `allocate_shared_memory` |
+| **lost layout** | step 1 is `FAIL`, or `verify` reports `MISSING` with no structural cause | back to step 1 — re-recover, never hand-derive a basis |
+| **lost schedule** | the instruction *multiset* matches plain but the waits do not | reorder toward plain's program order; not a layout, pipeline or selection problem |
+| **LDS budget** | every layout verifies and it is still slower; the shared total crosses the LDS/CU divisor | `recover`'s `LDS:` line against plain's — `verify` is blind to allocation size |
+
+The rest of step 2 is the **lost-pipeline** owner. If the residual is one of the other rows, close it
+there and carry the anchor into step 4 — nothing below applies. Full residual table with the measured
+signatures: [`references/gluon/pipeline-reference.md`](references/gluon/pipeline-reference.md).
 
 **2a. Measure `plain@ns=1` — this is the control that decides the whole step.** Re-run the *plain*
 champion with its pipeline turned off, at its own config, and compare three numbers:
@@ -444,17 +478,19 @@ a closed checkpoint as permission to start step 4, and note the asymmetry it hid
 writing the loop that step 2 discusses can both clear 95% while being different schedules, so clearing
 the bar does not tell you the body you shipped is the better of the two. Step 4 settles that first.
 
-**4. Continue past the port — this is what the port was for.** The anchor now reproduces the comparator
-in a language where the allocation and the schedule are yours, so the levers below became expressible the
-moment step 3 closed. Ranking and stopping stay GEAK's; what this file owes you is the list of what is
-*newly available* and the order that wastes fewest cycles, because a generic loop cannot know that.
+**4. Climb — in a language where the allocation and the schedule are yours.** For a port this is what
+the port was for: the levers below became expressible the moment step 3 closed. **Coming in already
+Gluon, this step is the whole procedure** — the list holds, minus the two items marked *port-only*
+below, which need the two loop bodies a port produces. Ranking and stopping stay GEAK's; what this file
+owes you is what is *available in this language and not in plain*, and the order that wastes fewest
+cycles, because a generic loop cannot know that.
 
-Profile the anchor first — now the profile is about your kernel — then work down:
+Profile first — the profile is about your kernel now, not about a comparator — then work down:
 
-1. **Which of step 2's two loop bodies you actually want.** You have both: the transcription that stages
-   operands in LDS by hand, and the version that leaves that to the re-injected pass. They are not the
-   same schedule and either can be ahead. Cheapest possible experiment, already built, so settle it
-   before authoring anything new.
+1. ***(port-only)* Which of step 2's two loop bodies you actually want.** A port leaves you holding
+   both: the transcription that stages operands in LDS by hand, and the version that leaves that to the
+   re-injected pass. They are not the same schedule and either can be ahead. Cheapest possible
+   experiment, already built, so settle it before authoring anything new.
 2. **Per-operand buffering.** `num_stages` multi-buffers every operand *uniformly*, which is why a tile
    whose uniform footprint exceeds the LDS budget cannot be double-buffered in plain at all. Explicit
    allocation lets operands differ — buffer one and not the other. This is the lever with no plain
@@ -464,8 +500,9 @@ Profile the anchor first — now the profile is about your kernel — then work 
 4. **Declining to stage an operand at all**, i.e. global straight into the dot-operand layout. Note the
    coupling: the LDS round trip is often what was making the global load wide, so re-check the resulting
    load width instead of assuming it survived.
-5. **Pipeline depth and the re-injected pass's own switches**, now that the loop is yours — after 1–4,
-   not before, because against a body the pass cannot act on they measure nothing.
+5. **Pipeline depth and, *(port-only)* the re-injected pass's own switches**, now that the loop is
+   yours — after 1–4, not before, because against a body the pass cannot act on they measure nothing.
+   Coming in already Gluon this is depth on whatever overlap the body has, authored or injected.
 6. **Tile shape**, which is GEAK's ordinary autotuning, with `num_warps` still pinned for the reason in
    `## Knobs & pitfalls`.
 
