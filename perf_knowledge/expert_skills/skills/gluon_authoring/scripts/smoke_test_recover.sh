@@ -28,6 +28,14 @@ echo "== 1b. layout-equivalence self-test =="
 # unroll-skew regression: same layouts, different occurrence counts, must still PASS.
 python3 "$SCRIPT_DIR/recover_gluon.py" --selftest
 
+echo "== 1c. pipeline-recovery self-tests =="
+# Also offline. The candidacy rule and the version-dependent splice point are the two
+# things here that can be wrong without failing loudly, so they are pinned rather than
+# left to the on-box run. gluon_swp reports itself skipped where no AMD backend imports.
+python3 "$SCRIPT_DIR/pipeline_survey.py" --selftest
+python3 "$SCRIPT_DIR/patch_reinject.py" --selftest
+python3 "$SCRIPT_DIR/gluon_swp.py" --selftest
+
 if [ -f "$V5" ] && [ -f "$V3SW" ] && [ -f "$V3NO" ]; then
   echo "== 2. recover anchor (--with-pipeline) from a real plain .ttgir =="
   python3 "$SCRIPT_DIR/recover_gluon.py" --ttgir "$V5" --with-pipeline --out /tmp/smoke_anchor.py >/dev/null

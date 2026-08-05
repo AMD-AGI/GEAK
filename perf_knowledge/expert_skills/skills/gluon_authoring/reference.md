@@ -1,7 +1,7 @@
 # gluon_authoring — reference router
 
-14 files, ~2 k lines, all **lazy**: load one only when [`skill.md`](skill.md) cites it, or when you reach
-for the construct it documents. Two groups only — the API, and what not to write.
+14 files, ~2.4 k lines, all **lazy**: load one only when [`skill.md`](skill.md) cites it, or when you
+reach for the construct it documents. Two groups only — the API, and what not to write.
 
 ## Start above this skill, not in it
 
@@ -27,7 +27,7 @@ you are in the wrong file.
 | MFMA intrinsics, operand layouts, `kWidth` | `gluon/matrix-reference.md` |
 | global access, `buffer_load`, async copy to shared | `gluon/memory-reference.md` |
 | shared allocation, LDS sizing | `gluon/smem-lds-reference.md`, `gluon/shared-aot-reference.md` |
-| barriers, `commit_group` / `wait_group`, `warp_pipeline_stage` | `gluon/pipeline-reference.md` |
+| barriers, `commit_group` / `wait_group`, `warp_pipeline_stage`, **and the measured re-injection recipe** — the two conditions, the dot-candidacy rule, per-shape and per-version numbers, the ping-pong window, why async copy is unreachable from plain on gfx942 | `gluon/pipeline-reference.md` |
 | reductions, scans, elementwise atoms | `gluon/atoms-reference.md` |
 | imports, launch, AOT | `gluon/imports-and-launching.md` |
 | a runnable skeleton to copy | `gluon/gfx950-minimal-examples.md` |
@@ -40,12 +40,13 @@ you are in the wrong file.
 | ROCm / driver / toolchain constraints and broken paths | `platform-known-issues.md` |
 | the condensed list | `skill.md ## Knobs & pitfalls` |
 
-## The two round-1 mechanics
+## The two port mechanics
 
 | you need | read / run |
 | --- | --- |
 | TTGIR → Gluon layout recovery map (incl. the manual `convert_layout` step) | `tile-programming/layout-recipes.md` |
-| re-inject plain's pipeliner: pass list, kernel-side conditions, proof-it-landed signals, and the hand-built cross-iteration double buffer for later rounds | `tile-programming/pipeline.md` |
+| **whether this kernel owes a pipeline at all**, then the two conditions and the measured recipe | `gluon/pipeline-reference.md`, and `skill.md ## Procedure` step 2a for the `plain@ns=1` control |
+| the pass list, proof-it-landed signals, and the hand-built cross-iteration double buffer for where the pass will not bite | `tile-programming/pipeline.md` |
 | the tools | `scripts/USAGE.md` |
 
 ## Not here, on purpose

@@ -194,25 +194,81 @@ ping-pong (`add_block_pingpong(num_stages)`). The **Gluon** lowering
 
 > **CORRECTION (verified FA-fwd gfx942):** the second bullet ("`num_stages` is not the
 > pipelining trigger in Gluon") is only true for the *default* lowering. Those two passes
-> **are re-injectable** into `gluon_to_ttgir`, and once spliced in (Python-only `compiler.py`
-> edit, no rebuild) **launch `num_stages>1` becomes the trigger** and reproduces plain's
-> multi-buffer loop — see the next section. So prefer **Route 1** before hand-building or
-> recording a schedule ceiling.
+> **are re-injectable** into `gluon_to_ttgir` and reproduce plain's multi-buffer loop — see
+> the next section, which also names the two conditions the KERNEL must meet, because the
+> injection alone changes nothing. Prefer **Route 1** before hand-building or recording a
+> schedule ceiling.
 
 ## Reproduce plain's software pipeline on the Gluon path (Route 1 — default, no rebuild)
 
 The auto-pipeliner overlap **is re-injectable** into an explicit Gluon loop — run plain's own
 TTGIR passes on the Gluon IR. Plain's overlap = `add_schedule_loops(num_stages)` +
-`add_pipeline(...)` in `make_ttgir`; `gluon_to_ttgir` skips them. Re-inject them (default-OFF,
-gated by launch `num_stages>1` so it is cache-key-safe; **NO `libtriton.so` rebuild** — the
-passes already exist in the `.so`):
+`add_pipeline(...)` in `make_ttgir`. **No upstream `gluon_to_ttgir` calls them** — verified on
+3.6.0 / 3.7.0 / 3.7.1 / 3.8.0 — while the passes themselves are present in `libtriton` on all
+four, so no `libtriton.so` rebuild is needed anywhere.
+
+### Reach them WITHOUT editing an installed file
+
+These live in the **tile-programming-gluon** pack, not this one: they wrap
+`gluon_to_ttgir`, which plain Triton never goes through.
 
 ```python
-# in gluon_to_ttgir, after add_combine_tensor_select_and_if, when options.num_stages>1:
-add_optimize_dot_operands; add_schedule_loops(ns); add_pipeline(use_async_copy, use_block_pingpong)
-; add_convert_to_tensor_ops; canonicalizer; remove_layout_conversions; reduce_data_duplication
-; (in_thread_transpose if enabled); move_up_prologue_loads; canonicalizer; cse
+import gluon_swp                       # tile-programming-gluon: scripts/gluon_swp.py
+with gluon_swp.pipelined(2, buffer_ops=True):
+    out = my_gluon_kernel[grid](...)   # compile INSIDE the block; Triton caches
 ```
+
+`gluon_swp.py` wraps `HIPBackend.gluon_to_ttgir` in-process and runs the passes as a second
+pass manager over the module the stock function returns. Verified **byte-identical TTGIR to
+the `compiler.py` splice on all four versions** — same md5 armed and unarmed — so nothing is
+given up by not editing the file, while a read-only or shared site-packages, a later
+`pip install --force-reinstall`, and a crash mid-experiment all stop mattering.
+`gluon_swp.capabilities()` reports what the build has and refuses to install on a fork that
+already splices the passes in (running them twice is not the same experiment).
+
+`scripts/patch_reinject.py apply|revert` (also tile-programming-gluon) is the on-disk
+alternative, kept for when you want the pass list itself visible in `compiler.py` while reading. It is env-armed
+(`TRITON_GLUON_SWP=N`) and verified byte-identical to stock when unarmed.
+
+> **Do NOT reach for `TRITON_GLUON_SWP_PIPELINE`.** That name, and
+> `TRITON_GLUON_COOP_LDS` / `TRITON_GLUON_PINGPONG`, are additions to a **vendor fork's**
+> `GetEnv.h`; no upstream version reads any of them. Measured on clean 3.7.1 and 3.8.0: they
+> are **tolerated and inert** — so is a knob invented on the spot — which is the worst of the
+> three possible outcomes. Nothing errors, nothing changes, and the null result reads as "the
+> technique does not work here" rather than "that variable does not exist in this build".
+
+The pass sequence either mechanism installs, which is plain's own order:
+
+```python
+add_optimize_dot_operands; add_schedule_loops(ns); add_pipeline(use_async_copy, use_block_pingpong)
+# then, to get buffer ops back (plain runs convert_to_buffer_ops twelve passes LATER, at #28):
+canonicalizer; canonicalize_pointers; canonicalizer; convert_to_buffer_ops
+```
+
+### The two conditions the kernel must meet
+
+Measured as a 2×2 on a real gap kernel, all four cells bit-exact. **Neither alone does
+anything**, and the launch-level claim above needs the first one to be true:
+
+| loads written as | loop | pipelined |
+| --- | --- | --- |
+| `gl.amd.cdna3.buffer_load` | `range(...)` | ✗ |
+| `gl.amd.cdna3.buffer_load` | `tl.range(..., num_stages=2)` | ✗ |
+| `gl.load` | `range(...)` | ✗ |
+| **`gl.load`** | **`tl.range(..., num_stages=2)`** | **✓** |
+
+1. **The loop must be a `tl.range`.** Gluon has no `range` of its own — only `static_range`,
+   which unrolls — so a `for` over the builtin lowers to an `scf.for` with no `tt.num_stages`
+   for `add_schedule_loops` to read, and a launch-level `num_stages` never reaches it
+   (measured: plain's TTGIR byte-identical at launch 1/2/3 on a bare `range`).
+   `tl.range(num_stages=None)` **inherits** the launch value, which is how aiter's `_attn_fwd`
+   works, so `None` on the loop is fine — a bare `range` is not.
+2. **The loads must still be `tt.load` when the pipeliner runs.** It anchors on global
+   `tt.load`s whose forward slice reaches a `tt.dot`; an anchor written with explicit
+   `gl.amd.cdna3.buffer_load` — which the transcription runbook asks for, because
+   `gluon_to_ttgir` runs no buffer conversion — hands it ops it cannot see. Those two pieces
+   of guidance genuinely pull against each other; `buffer_ops=True` resolves it by restoring
+   plain's order rather than making you choose.
 
 At the TTGIR level an explicit Gluon loop is just a NON-pipelined `scf.for` — the exact object
 the AMD pipeliner is built to consume. `add_schedule_loops` anchors on the loop's global
@@ -224,14 +280,25 @@ at the bottom, buffers carried as `iter_args`. Downstream `UpdateAsyncWaitCount`
 `MfmaUtil↑ / cadence↓ / waitcnt-relax` win at unchanged registers and occupancy.
 
 **Kernel side (give the pipeliner room):** load K/V **in-body** with **NO hand register-prefetch**
-(the pipeliner *is* the prefetcher — a manual prefetch uses up the slot), and **split the causal
-mask into TWO loops** (a clean branch-free full-region loop; a single loop with a loop-variant
-`scf.if` blocks the pass and `BlockPingpong`). Launch `num_stages=2` (ns3 worse; ns4 chained-dot
+(the pipeliner *is* the prefetcher — a manual prefetch uses up the slot), and **do not hand-write
+the LDS staging at all** — no `allocate_shared_memory` / `local_store` / `local_load`, no
+`gl.barrier()`. Building that path is what the pass exists to do, and the faithful-anchor shape
+starves it. Measured on a 2048³ fp16 GEMM: hand-staged 2/2/2 LDS ops with 2 barriers and no
+multi-buffering = 1.000; un-staged with the injection = **2/4/4, `memdesc_index 4`, zero
+barriers, 1.088**. Note the trap in between — un-staged with the injection OFF is **0.811**, a
+19% regression, so the two halves go together or not at all. Also **split the causal mask into
+TWO loops** (a clean branch-free full-region loop; a single loop with a loop-variant `scf.if`
+blocks the pass and `BlockPingpong`). `num_stages=2` (ns3 usually worse; ns4 chained-dot
 regresses). Composes on top of LPT causal remap + XCD (`../workloads/attention.md`).
 
 **Proof it landed (all must move; TFLOPS alone is not proof):** TTGIR `local_alloc`/`local_store`/
-`local_load` counts jump toward plain (`scripts/probe_levers.py reinject_ttgir_pipeliner`, or run
-the two passes on a dumped `.ttgir`); `asm_loop_audit.py` shows `ds_read`/full-drain `lgkmcnt(0)`
+`local_load` counts jump toward plain and `ttg.memdesc_index` appears — that last one is the
+multi-buffer tell and it is the cheapest single signal. Read it off the dumped `.ttgir`, or off
+`gluon_swp` armed vs unarmed. (`probe_levers.py` answers a **different** question — whether the
+symbols exist in this `.so` — and it takes **no positional argument**: `--all` is the whole CLI,
+so the `probe_levers.py reinject_ttgir_pipeliner` form some notes still carry exits non-zero.
+Symbols existing is not the pass biting; those are two hypotheses and they come apart here.)
+Then: `asm_loop_audit.py` shows `ds_read`/full-drain `lgkmcnt(0)`
 down + relaxed `lgkmcnt(N>0)` appearing; `mfma_efficiency.py` cadence down; rocprofv3 `MfmaUtil`
 up with occupancy unchanged; correctness rel < 2e-2 + determinism maxdiff == 0. Machine lever:
 `references/hardware/lever-cards.json` group `pipeline` → `reinject_ttgir_pipeliner` (Route 1).
@@ -248,7 +315,7 @@ it**:
 1. **Reproduce.** The post-pipeliner plain `.ttgir` physically contains the double
    buffer (`ttg.local_alloc` multi-buffer + `async_copy`/`commit`/`wait`), and Gluon
    can express all of it, so `scripts/recover_gluon.py --with-pipeline` (or `dump_ir.sh
-   --emit-gluon pipeline`) emits a prologue/loop/epilogue scaffold with the recovered
+   --emit-gluon pipeline`) — gluon pack — emits a prologue/loop/epilogue scaffold with the recovered
    `nBuffers` / `wait_group(N)` / mask shape and the recovered layouts wired in.
    Kernel-specific addressing (base ptrs / offsets / mask guard) is left as a `TODO`
    skeleton placeholder (intentional — you fill it from the algorithm skeleton, not the

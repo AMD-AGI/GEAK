@@ -1,8 +1,9 @@
 # scripts — usage
 
-Seven tools for one job: **transcribing a tuned plain-Triton kernel into Gluon, and re-injecting the
-pipeline afterwards**. Run from the GEAK repo root with
-`SKILL=perf_knowledge/expert_skills/skills/gluon_authoring`.
+Ten tools for two jobs: **transcribing a tuned plain-Triton kernel's layouts into Gluon**, and
+**recovering the software pipeline that a faithful transcription drops** — where the champion had one
+worth recovering, which is a question this package makes you measure rather than assume. Run from the
+GEAK repo root with `SKILL=perf_knowledge/expert_skills/skills/gluon_authoring`.
 
 ## Transcription
 
@@ -74,17 +75,41 @@ In none of these cases can `verify` tell you the substitution was **free** — o
 
 ## Pipeline re-injection
 
+No upstream `gluon_to_ttgir` calls `add_schedule_loops` / `add_pipeline` — checked on 3.6.0, 3.7.0,
+3.7.1 and 3.8.0 — while both passes ship in `libtriton` on all four. Only the Python pass list omits
+them, so this is a reachability problem, not a rebuild.
+
 | tool | what it does |
 | --- | --- |
-| `probe_levers.py` | Per-build capability probe. Run it as `--all [--arch <gfx>]` — there is **no** positional probe-name argument — and read the `reinject_ttgir_pipeliner` entry: it answers whether plain's `add_schedule_loops` / `add_pipeline` are present in *this* `libtriton.so` before you edit `compiler.py`. Read `available: true` for exactly that and nothing more — it says the symbols exist, not that the pass will transform *your* IR. Those are two different hypotheses and they come apart in practice; `skill.md` step 2 has the read-the-IR-back check that answers the second. That is the probe this skill uses; the other five it exposes belong to lever cards that are not part of this package. |
+| **`gluon_swp.py`** | **Prefer this.** Wraps `HIPBackend.gluon_to_ttgir` in-process and runs the two passes as a second pass manager over the module the stock function returns, so **nothing on disk changes**: a read-only or shared site-packages, a later `pip install --force-reinstall`, and a crash mid-experiment all stop being hazards, and the effect ends with the process. Produces **byte-identical TTGIR to the on-disk splice on all four versions**, armed and unarmed, so nothing is given up for that. `gluon_swp.capabilities()` (also the bare CLI) reports what this build has, **probed rather than inferred from the version**, and `enable()` refuses on a fork that already splices the passes in — running them twice is a different experiment — and refuses `num_stages < 2`, where the pipeliner is a no-op and installing the wrapper would only add confusion. `buffer_ops=True` restores plain's ORDER (pipeline first, buffer conversion after), which is what lets an anchor be written with `gl.load` and still end on buffer ops. |
+| `patch_reinject.py apply\|revert\|status` | The on-disk form, kept for when you want the pass list itself visible in `compiler.py` while reading. Env-armed (`TRITON_GLUON_SWP=N`, plus `TRITON_GLUON_SWP_BUF=1` for the buffer half) so splice-ON and splice-OFF are the **same binary**, which is the only way an IR diff between them means anything. The splice point is version-dependent and measured, not assumed: before `add_warp_pipeline` on 3.7/3.8; after the last `add_*` call on 3.6, which has no warp pipeline at all. Writes a `.orig_swp` backup; `revert` restores it and clears the `__pycache__`. |
+| `pipeline_survey.py <root> [...]` | Inventories a plain-Triton source tree by which pipeline **form** each kernel can exercise: A = cross-iteration software pipeline (the one re-injectable here), B = block ping-pong, C = async copy / direct-to-LDS. Classification is from source text, which is a **screen and not a verdict** — a source saying `num_stages=2` can dispatch a branch compiled at 1, and only a dump settles it. Use it to rank what to measure. |
+| `probe_levers.py --all [--arch <gfx>]` | Per-build capability probe — there is **no** positional probe-name argument. Its `reinject_ttgir_pipeliner` entry answers whether the passes are present in *this* `libtriton.so`. Read `available: true` for exactly that and nothing more: the symbols existing is not the pass biting on your IR, and those two hypotheses come apart in practice. `gluon_swp.capabilities()` answers the same question plus whether the tree already pipelines; `skill.md` step 2d has the read-the-IR-back check that answers the second. |
 
-All four `--selftest` entry points run with no GPU and no ROCm:
+**Two conditions the anchor must meet, or injection changes nothing at all**: the loop must be a
+pipelining candidate (a loop **containing a dot** is one on a bare `range`; a **dot-free** loop needs
+`tl.range(..., num_stages=N)`, where `None` inherits the launch value), and the loads must still be
+`tt.load` when the pipeliner runs, i.e. `gl.load` rather than `gl.amd.cdna3.buffer_load`. On a dot kernel
+the hand-written LDS staging has to come out as well — and **un-staging without arming the injection is a
+19% net loss**, so the two halves go together. The measured 2×2, the per-shape and per-version numbers
+are in `references/gluon/pipeline-reference.md`.
+
+> **`TRITON_GLUON_SWP_PIPELINE` is not the knob**, and neither are `TRITON_GLUON_COOP_LDS` /
+> `TRITON_GLUON_PINGPONG`. All three are additions to a **vendor fork's** `GetEnv.h`; no upstream version
+> reads any of them. Measured on clean 3.7.1 and 3.8.0 they are *tolerated and inert* — so is a knob
+> invented on the spot — which is the worst of the three possible outcomes: nothing errors, nothing
+> changes, and the null result reads as "this technique does not work here".
+
+All seven `--selftest` entry points run with no GPU and no ROCm:
 
 ```bash
-python3 "$SKILL/scripts/ttgir_bridge.py"   --selftest   # recovery + equivalence (see note)
-python3 "$SKILL/scripts/ttgir_to_gluon.py" --selftest   # parser / emitter
-python3 "$SKILL/scripts/recover_gluon.py"  --selftest   # layout equivalence
-python3 "$SKILL/scripts/probe_levers.py"   --selftest   # probe plumbing
+python3 "$SKILL/scripts/ttgir_bridge.py"     --selftest   # recovery + equivalence (see note)
+python3 "$SKILL/scripts/ttgir_to_gluon.py"   --selftest   # parser / emitter
+python3 "$SKILL/scripts/recover_gluon.py"    --selftest   # layout equivalence
+python3 "$SKILL/scripts/probe_levers.py"     --selftest   # probe plumbing
+python3 "$SKILL/scripts/gluon_swp.py"        --selftest   # wrapper install/restore; skips with no backend
+python3 "$SKILL/scripts/pipeline_survey.py"  --selftest   # the dot-candidacy rule, both directions
+python3 "$SKILL/scripts/patch_reinject.py"   --selftest   # the version-dependent splice point
 ```
 
 `ttgir_bridge.py --selftest` has two layers. The pure layers (type splitting, role ranking, operand
@@ -146,22 +171,26 @@ Two things are not portable — plus one failure below that reads like a version
 
 ## Where the vendored text contradicts this skill
 
-The scripts and `references/` are an upstream snapshot with one correction (see `skill.md ## Sources`),
-so three things they print or teach disagree with this skill — this skill wins — and a fourth points at
-files the package does not carry:
+The scripts and `references/` are an upstream snapshot with three corrections (see
+`skill.md ## Sources`). One thing they teach disagrees with this skill — this skill wins — and a second
+points at files the package does not carry:
 
 - `recover_gluon.py --record` / `--verify` prints `perf_delta_vs_plain: <fill> # regression expected,
   NOT a reject`. That is upstream's transcribe-only step, where the pipeline layer came later. **Here the
-  port is transcribe *plus* re-injection and closes at ≥95% of tuned plain**, as the exit condition of
-  step 2 rather than on any round boundary. Take the gate from `skill.md ## Procedure` step 3, not from
-  this line — and note that "regression expected" is upstream's expectation for half the procedure, so do
-  not carry it over as this skill's: a port that clears the bar rather than approaching it from below is
-  a normal outcome here, and step 4 is written on the assumption that the track continues past it.
-- `references/tile-programming/pipeline.md` tells you to run
-  `scripts/probe_levers.py reinject_ttgir_pipeliner`. The CLI takes no positional probe name and exits 2;
-  use `--all` as above. Its **vetted double-buffer skeleton also indexes with `s.index(i % 2)`**, which
-  is the runtime buffer index `skill.md ## Knobs & pitfalls` bans outright — unroll by 2 so each index is
-  a literal.
+  port is transcribe plus a conditional pipeline recovery and closes at ≥95% of tuned plain**, as the
+  exit condition of step 2 rather than on any round boundary. Take the gate from
+  `skill.md ## Procedure` step 3, not from this line — and note that "regression expected" is upstream's
+  expectation for half the procedure, so do not carry it over as this skill's: a port that clears the bar
+  rather than approaching it from below is a normal outcome here, and step 4 is written on the assumption
+  that the track continues past it.
 - Several docstrings and `cmd` fields cite files this package does not carry (`compiler-contract.md`,
   `transcribe.md`, `experiment-records.md`, `lever-cards.json`, `opt_swp_test.py`, `bench.py`,
-  `prof_driver.py`). Dead by design — do not go looking for them.
+  `prof_driver.py`, `asm_loop_audit.py`, `mfma_efficiency.py`, `champion_gate.py`). Dead by design — do
+  not go looking for them.
+
+**Two previously-flagged conflicts are resolved upstream and no longer apply.**
+`references/tile-programming/pipeline.md` used to send you to
+`scripts/probe_levers.py reinject_ttgir_pipeliner`, a form the CLI exits 2 on; it now names that form as
+wrong and says `--all` is the whole CLI. Its vetted double-buffer skeleton still writes `cur = i % 2`,
+but it now explains that this is the readable *correctness* template and that the literal-index unroll is
+the scheduling-optimal one — which is what `skill.md ## Knobs & pitfalls` asks for, so the two agree.
