@@ -56,10 +56,23 @@ relative_files = true
 # which inflates the total by ~14 points and lets a brand-new untested script
 # land without moving the number. Naming the dirs forces them in.
 #
-# Deliberately NOT measured, and why: setup.py + geak/bootstrap.py's build hook
-# run at `pip install` time, docs/conf.py is Sphinx config, examples/ needs a
-# GPU, and perf_knowledge/ holds contributor scaffolds/generators rather than
-# runtime code.
+# SCOPE OF THE HEADLINE NUMBER. The reported percentage is over these three trees
+# only, so state it as such rather than as a repo-wide figure. 913 statements of
+# tracked Python sit outside this denominator, all of them untested; counted
+# repo-wide the number would be ~78%. Deliberately excluded, with counts so the
+# choice stays auditable:
+#
+#   e2e_workflow/knowledge/  (389)  roofline_tools.py + the flydsl overlay
+#                                   sitecustomize template. THE WEAKEST of these
+#                                   exclusions -- closer to runtime code than the
+#                                   others, and the first candidate to fold in.
+#   perf_knowledge/          (358)  contributor scaffolds and registry generators
+#   examples/                (129)  needs a GPU to execute
+#   setup.py + docs/conf.py   (37)  install-time and Sphinx config
+#
+# geak/bootstrap.py IS measured (it is in the `geak` tree below) even though its
+# hook fires at `pip install` time -- its logic is unit-testable without running
+# an install, and it sits at 100%.
 source = [
     "e2e_workflow/scripts",
     "interface",
@@ -90,8 +103,14 @@ ignore_errors = true
 # closed, and every PR that adds tests should bump it. Lowering this value is
 # the one change that should never be approved.
 #
-# Measured 45.39% locally on 3.12; CI runs 3.11 and coverage's statement count
-# is mildly version-dependent, so this sits a point low rather than 0.4 low.
-# Tighten it to the real floor once the first green CI run reports the 3.11
-# number in the Job Summary.
-fail_under = 44
+# Measured 99.67% locally on 3.12 (11 uncovered statements). CI runs 3.11 and
+# coverage's statement count is mildly version-dependent, so this sits ~2.7
+# points low rather than hard against the measurement: a gate that goes red on
+# an interpreter difference instead of a real regression trains people to
+# ignore it. Tighten toward the measured value once a green 3.11 run has
+# reported the real number in the Job Summary.
+#
+# Every measured file is now 98-100%. The 11 remaining statements are documented
+# as unreachable-by-construction or untestable-without-filesystem-litter in the
+# tests that cover their neighbours.
+fail_under = 97

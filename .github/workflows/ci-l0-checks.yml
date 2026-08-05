@@ -62,10 +62,18 @@ jobs:
           python -m pytest -q --cov --cov-report=term --cov-fail-under=0 \
             interface/test_run_e2e_recovery.py \
             interface/test_run_e2e_alignment.py \
+            interface/test_run_e2e_dispatch.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py \
             e2e_workflow/scripts/tests/test_run_correctness_gate.py \
             e2e_workflow/scripts/tests/test_parse_regime_sources.py \
-            e2e_workflow/scripts/tests/test_gsm8k_eval.py
+            e2e_workflow/scripts/tests/test_gsm8k_eval.py \
+            e2e_workflow/scripts/tests/test_parse_profile.py \
+            e2e_workflow/scripts/tests/test_capture_shapes.py \
+            e2e_workflow/scripts/tests/test_overlay_setup.py \
+            e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
+            e2e_workflow/scripts/tests/test_op_bench.py \
+            e2e_workflow/scripts/tests/test_harness_lib.py \
+            geak/test_bootstrap.py
 
       # Renders the per-file table + total into the run's Job Summary, which is
       # where the coverage percentage is read from the GitHub web UI. Runs even
