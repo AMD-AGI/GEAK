@@ -392,13 +392,17 @@ Return JSON:
 }
 ```
 **MANDATORY: surface `live_engagement_calls`** — copy it verbatim from the capture `meta.json`
-(`meta.live_engagement_calls`, = eager + in-graph invocations of the hooked seam during the capture bench).
-This is the REACHABILITY signal the e2e orchestrator gates on: **`0` means the live serving path never
-routed through this seam** (dead/wrong seam, or the overlay didn't bind in the serving workers) — the
-orchestrator then flags/skips the head BEFORE the multi-hour author lane instead of authoring a kernel that
-can never engage. Always report the real number (it may legitimately be >0 with `num_cases==0` when decode
-runs shape-hidden under a CUDA graph — those are counted via `in_graph_calls`, so do NOT report 0 in that
-case). If capture could not run at all, report `0`.
+(`meta.live_engagement_calls` = total invocations of the hooked seam during the capture bench; it already
+counts BOTH eager and in-graph calls, so decode kernels that run shape-hidden under a replayed CUDA graph
+are included and legitimately report >0 even when `num_cases==0`). This is the REACHABILITY signal the e2e
+orchestrator gates on: **`0` means the live serving path never routed through this seam** (dead/wrong seam,
+or the overlay didn't bind in the serving workers) — the orchestrator then flags/skips the head BEFORE the
+multi-hour author lane instead of authoring a kernel that can never engage.
+**Report `0` ONLY when a live capture actually ran and observed zero calls.** If the capture could NOT run
+(server didn't boot, hook errored, OOM — any harness failure, not a real dead seam), **OMIT this field
+entirely** — do NOT report `0`. A missing value tells the orchestrator "not measured, don't judge" so it
+will not false-skip a reachable head on a capture crash; reporting a spurious `0` would let a
+non-dominant head be silently dropped as dead.
 **4b. Workload weighting (fold into `meta.json`, performance alignment).** If `PROFILE_WORKLOAD_JSON`
 is in your inputs (the profiler's per-kernel weight-PRIOR signal from `parse_profile.py --workload-out` —
 a PRE-MEASUREMENT prior; the immutable unittest self-weights by measured latency × analytic calls at
@@ -748,9 +752,9 @@ Return JSON:
   "notes": "transpose/bias inference, regime, whether oracle was synthesized vs captured"
 }
 ```
-**`live_engagement_calls` (reachability signal — report carefully for head ops).** This is the count of
-live invocations of the seam during a capture bench (eager + in-graph). The orchestrator gates on it: `0`
-⇒ the live path never reached this seam ⇒ flag/skip BEFORE the author lane.
+**`live_engagement_calls` (reachability signal — report carefully for head ops).** This is the total count
+of live invocations of the seam during a capture bench (already includes both eager and in-graph calls).
+The orchestrator gates on it: `0` ⇒ the live path never reached this seam ⇒ flag/skip BEFORE the author lane.
 - If you ran a live capture to build the oracle (`synthesized:false`), copy `meta.live_engagement_calls`
   verbatim — a genuine `0` here is exactly the dead-seam signal we want to surface.
 - **If you SYNTHESIZED the oracle offline WITHOUT a live capture, do a cheap seam-reachability check

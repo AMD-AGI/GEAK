@@ -278,11 +278,12 @@ def _flush(write_oracle=True):
         "attr": s["attr"],
         "num_cases": len(records),
         "total_calls_observed": s["calls"],
-        # Reachability signal: total live invocations of the hooked seam during capture, EAGER + in-graph.
-        # 0 => the live serving path never routed through this seam (dead/wrong seam) -> the e2e workflow's
-        # extract-time gate flags/skips the head BEFORE the multi-hour author lane. Must include in_graph
-        # calls: a decode-only kernel runs under the replayed CUDA graph (eager `calls` alone would read 0).
-        "live_engagement_calls": s["calls"] + s["in_graph_calls"],
+        # Reachability signal: total live invocations of the hooked seam during capture. `s["calls"]` is
+        # incremented on EVERY wrapped call (eager AND in-graph — see _wrapper), so it is already the full
+        # count; `in_graph_calls` is a subset of it (reported separately below), NOT an addend. 0 here means
+        # the live serving path never routed through this seam (dead/wrong seam) -> the e2e workflow's
+        # extract-time gate flags/skips the head BEFORE the multi-hour author lane.
+        "live_engagement_calls": s["calls"],
         "regimes_covered": sorted(s["regime_seen"]),
         "cases": cases,
         "shape_counts": shape_hist,

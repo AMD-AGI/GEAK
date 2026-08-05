@@ -49,9 +49,9 @@ from collections import defaultdict
 RULES = [
     (r"triton|_kernel_0d1d|tt\.|fused_.*kernel", "triton", "triton", True,
      "Triton kernel — extractable; try Triton tuning, or a CK/HIP rewrite if memory/compute bound."),
-    (r"Cijk|Tensile|hipblaslt|hipBLASLt|GemmEx|rocblas|\bhgemm\b|\bsgemm\b|\bf16_gemm\b|\bigemm\b",
+    (r"Cijk|Tensile|hipblaslt|hipBLASLt|rocblas|miopen|cublas|cutlass|GemmEx|\bhgemm\b|\bsgemm\b|\bf16_gemm\b|\bigemm\b",
      "library_gemm", "hipblaslt", False,
-     "Library GEMM (hipBLASLt/Tensile). Tune via heuristics/env or swap to aiter/CK GEMM; rarely source-editable."),
+     "Library GEMM (hipBLASLt/Tensile/rocBLAS/…). Tune via heuristics/env or swap to aiter/CK GEMM; rarely source-editable."),
     (r"aiter|ater::", "fused_custom", "aiter", True,
      "AITER kernel. Has source; compare aiter vs triton vs CK for this shape."),
     (r"flash|fmha|attention|attn|_mha_|paged|kv_cache|decode_attention|prefill",
@@ -75,15 +75,25 @@ RULES = [
 ]
 
 
+# Lowercase vendor-library prefixes that ship a `..._kernel`-named symbol which is NOT source-editable
+# (a compiled library entry, tuned via env/heuristics, not a @jit body). These must NOT be caught by the
+# snake_case-`_kernel` guard below — they belong to the library_gemm rule. NOTE: `ck`/`aiter`/triton names
+# are deliberately absent (those ARE editable via their own RULES entries).
+_LIB_KERNEL_PREFIX = re.compile(r"^(rocblas|hipblaslt|tensile|miopen|cublas|cutlass)_", re.IGNORECASE)
+
+
 def classify(name):
     # Snake_case JIT-kernel guard (runs BEFORE the RULES scan). A name whose body up to `_kernel` is pure
     # lowercase snake_case is a Triton/custom @jit kernel and is source-editable — even if that body
     # contains substrings like `_gemm` that would otherwise match the library_gemm rule. An uppercase
     # autotune suffix (e.g. `_GROUP_K_128`) after `_kernel` is ignored; a mangled C++ symbol (`..._Kernel`,
     # `Cijk_...`) fails the lowercase test and falls through to RULES. This is the fix for editable Triton
-    # GEMMs like `_gemm_a8w8_blockscale_kernel_...` being mislabeled library_gemm/non-editable.
+    # GEMMs like `_gemm_a8w8_blockscale_kernel_...` being mislabeled library_gemm/non-editable. Exception:
+    # a lowercase VENDOR-library symbol (e.g. `rocblas_gemm_kernel`) is NOT editable — exempt it so it falls
+    # through to the library_gemm rule rather than being pulled into the author lane.
     m = re.search(r"_kernel", name, re.IGNORECASE)
-    if (m and re.match(r"^[a-z0-9_]+$", name[:m.end()])) or re.search(r"_fwd_kernel|_bwd_kernel", name, re.IGNORECASE):
+    if not _LIB_KERNEL_PREFIX.match(name) and (
+            (m and re.match(r"^[a-z0-9_]+$", name[:m.end()])) or re.search(r"_fwd_kernel|_bwd_kernel", name, re.IGNORECASE)):
         return ("triton", "triton", True,
                 "Snake_case JIT kernel (likely Triton). Extractable; tune or compare backends.")
     for rx, cls, backend, editable, hint in RULES:

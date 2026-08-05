@@ -932,6 +932,24 @@ class TestClassify(unittest.TestCase):
                 self.assertEqual(cls, "library_gemm", f"{n} should be library_gemm")
                 self.assertFalse(editable, f"{n} should be non-editable")
 
+    def test_lowercase_vendor_kernel_not_editable(self):
+        # A LOWERCASE vendor-library symbol that happens to end in `_kernel` must NOT be pulled into the
+        # editable-Triton net by the snake_case guard. The core guarantee is editable==False (the vendor
+        # prefix exempts it); its exact class is library_gemm when the name is gemm-shaped, else `other`
+        # (still non-editable) — either way it does NOT enter the author lane.
+        for n in ("rocblas_gemm_kernel", "hipblaslt_gemm_kernel", "tensile_gemm_kernel_128",
+                  "miopen_conv_kernel", "cublas_gemm_kernel", "cutlass_gemm_kernel"):
+            with self.subTest(n=n):
+                cls, editable = self._c(n)
+                self.assertFalse(editable, f"{n} should be non-editable, got {cls}/editable")
+
+    def test_editable_gemm_kernels_still_editable(self):
+        # The exemption must NOT over-reach: genuinely editable Triton/CK `..._kernel` names stay editable.
+        for n in ("_gemm_a8w8_blockscale_kernel", "_gemm_a8w8_blockscale_kernel_GROUP_K_128", "ck_gemm_kernel"):
+            with self.subTest(n=n):
+                cls, editable = self._c(n)
+                self.assertTrue(editable, f"{n} should stay editable")
+
     def test_aiter_and_other(self):
         # aiter mangled symbol ending in `_kernelI...` is NOT pure snake_case up to `_kernel` (uppercase
         # `ZN5aiter`) -> falls through to the aiter RULES entry (fused_custom, editable).
