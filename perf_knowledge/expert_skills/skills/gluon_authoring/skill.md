@@ -1,6 +1,6 @@
 ---
 id: gluon_authoring
-title: "Author Gluon on CDNA: the language surface, the do-not-write list, and a TTGIR→Gluon port whose layouts are recovered through the compiler and whose pipeline is recovered only where one is owed"
+title: "Author Gluon on CDNA: the plain-Triton → Gluon port with faithful layout and pipeline recovery (and the Gluon → Gluon entry), plus the language surface and the do-not-write list"
 kind: expert_skill
 authors: [qiongz]
 scope: kernel
