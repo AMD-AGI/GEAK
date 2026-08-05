@@ -16,9 +16,12 @@ config.json -- plus the backend-resolution ladder that reads them:
 These matter because a mis-read launch script silently produces the wrong regime, which is the #1
 cause of an "isolated win, e2e loss" (see the parse_regime module docstring).
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 
@@ -254,6 +257,75 @@ class TestParseRegimeFromSources(_TmpFileMixin, unittest.TestCase):
 
     def test_unresolved_backend_is_noted(self):
         self.assertIn("backend UNRESOLVED", pr.parse_regime("--port 8000")["notes"])
+
+
+# --------------------------------------------------------------------------- #
+# main -- the CLI the harness actually shells out to
+# --------------------------------------------------------------------------- #
+class TestMain(_TmpFileMixin, unittest.TestCase):
+    """The regime descriptor is consumed as JSON on stdout / on disk, so the CLI contract
+    (valid JSON, --out written, flags forwarded to parse_regime) is what callers depend on."""
+
+    def setUp(self):
+        super().setUp()
+        self._argv = sys.argv
+
+    def tearDown(self):
+        super().tearDown()
+        sys.argv = self._argv
+
+    def _run(self, *argv):
+        sys.argv = ["parse_regime.py", *argv]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            pr.main()
+        return out.getvalue(), err.getvalue()
+
+    def test_prints_the_regime_as_json(self):
+        out, _ = self._run("--server-args=--enforce-eager", "--backend", "vllm")
+        regime = json.loads(out)
+        self.assertEqual(regime["backend"], "vllm")
+        self.assertTrue(regime["enforce_eager"])
+
+    def test_server_args_must_use_the_equals_form(self):
+        # The flag string always starts with "-", which argparse reads as the next option
+        # rather than as this option's value -- so `--server-args "--enforce-eager"` fails
+        # even though the shell passes it as a single argument. Callers must write
+        # `--server-args=--enforce-eager`. Pinned because the failure is a hard exit.
+        with self.assertRaises(SystemExit):
+            self._run("--server-args", "--enforce-eager")
+
+    def test_defaults_produce_a_complete_descriptor(self):
+        # Every consumer reads these keys unconditionally; a missing one is an AttributeError
+        # three steps later, in the harness rather than here.
+        regime = json.loads(self._run()[0])
+        self.assertEqual(
+            set(regime),
+            {"backend", "quant", "kv_cache_dtype", "compile", "enforce_eager",
+             "cuda_graph", "attention_backend", "prefill_chunk", "notes"},
+        )
+
+    def test_out_file_matches_stdout(self):
+        path = self._write("", suffix=".json")
+        out, err = self._run("--server-args=--backend sglang", "--out", path)
+        with open(path) as fh:
+            self.assertEqual(json.loads(fh.read()), json.loads(out))
+        self.assertIn(path, err)
+
+    def test_server_script_is_read(self):
+        script = self._write("python -m vllm.entrypoints.openai.api_server --enforce-eager\n")
+        regime = json.loads(self._run("--server-script", script)[0])
+        self.assertEqual(regime["backend"], "vllm")
+        self.assertTrue(regime["enforce_eager"])
+
+    def test_model_config_supplies_the_quant(self):
+        cfg = self._write(json.dumps({"quantization_config": {"quant_method": "fp8"}}), suffix=".json")
+        regime = json.loads(self._run("--model-config", cfg)[0])
+        self.assertIn("fp8", str(regime["quant"]).lower())
+
+    def test_explicit_backend_flag_wins_over_detection(self):
+        regime = json.loads(self._run("--server-args=--port 8000", "--backend", "atom")[0])
+        self.assertEqual(regime["backend"], "atom")
 
 
 if __name__ == "__main__":

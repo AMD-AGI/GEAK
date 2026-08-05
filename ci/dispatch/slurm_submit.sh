@@ -91,15 +91,33 @@ WRAP+="bash '$GEAK_ROOT/ci/dispatch/slurm_job.sh' '$MODEL_KEY' '$BUDGET'"
 SBATCH=(sbatch
   -A "$SPUR_ACCOUNT" -p "$SPUR_PARTITION" --qos "$SPUR_QOS"
   -J "$JOB" -N 1 -G "$GPUS" -c "$CPUS" -t "$TIME" --exclusive
-  --chdir "$WS" -o "$LOG" -e "$LOG"
-  --wrap "$WRAP")
+  --chdir "$WS" -o "$LOG" -e "$LOG")
+
+# Route around known-bad nodes: SPUR_EXCLUDE="node1,node2". A node can be `idle` to
+# the scheduler (so it gets picked first) while being unusable to the job — e.g.
+# crsuse2-m2m-149 has a /tmp we cannot write, killing the job in 2s before any log.
+[ -n "${SPUR_EXCLUDE:-}" ] && SBATCH+=(--exclude "$SPUR_EXCLUDE")
+
+SBATCH+=(--wrap "$WRAP")
 
 if [ "$PRINT" = "1" ]; then
   { printf 'DRY-RUN sbatch for %s:\n  ' "$MODEL_KEY"; printf '%q ' "${SBATCH[@]}"; printf '\n'; } >&2
   exit 0
 fi
 
-OUT="$("${SBATCH[@]}")" || die "sbatch failed for $MODEL_KEY"
+# Retry the submit: spurctld can refuse connections for a few seconds during a
+# restart/blip, and a single refusal otherwise marks the model submit_failed and
+# sinks the whole matrix (RUN_TS=20260804T155756Z lost all 5 models to a ~1s
+# outage; the controller was back UP moments later). Backoff 15/30/60/120s.
+OUT=""
+_delay=15
+for _try in 1 2 3 4 5; do
+  if OUT="$("${SBATCH[@]}")"; then break; fi
+  OUT=""
+  [ "$_try" -eq 5 ] && die "sbatch failed for $MODEL_KEY after 5 attempts (controller down?)"
+  log "  sbatch attempt $_try/5 failed for $MODEL_KEY — retrying in ${_delay}s ..."
+  sleep "$_delay"; _delay=$(( _delay * 2 ))
+done
 log "  $OUT"
 JID="$(grep -oE '[0-9]+' <<<"$OUT" | tail -1)"
 [ -n "$JID" ] || die "could not parse job id from sbatch output: $OUT"

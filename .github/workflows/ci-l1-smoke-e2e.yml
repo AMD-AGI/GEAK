@@ -87,6 +87,11 @@ env:
   # sbatch --export=ALL. Falls back to ci/preflight/claude_setup.sh defaults if absent.
   LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
   LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+  # Agent model served by the LiteLLM proxy, read by ci/preflight/claude_setup.sh and
+  # run_geak_e2e.sh. Editable from the GitHub UI (Settings -> Secrets and variables ->
+  # Actions -> Variables: PERFSKILLS_CLAUDE_MODEL) WITHOUT editing this file; the value
+  # must be a proxy model id (e.g. claude-opus-5). Unset -> claude-opus-4-8.
+  PERFSKILLS_CLAUDE_MODEL: ${{ vars.PERFSKILLS_CLAUDE_MODEL || 'claude-opus-4-8' }}
 
 jobs:
   # ---------------------------------------------------------------------------
