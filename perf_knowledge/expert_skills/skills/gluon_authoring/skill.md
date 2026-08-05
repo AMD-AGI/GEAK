@@ -72,14 +72,18 @@ built it is holding and a fresh agent would have to rebuild. Splitting the track
 that away at the moment it becomes useful.
 
 **What the track needs from the caller.** This skill owns no budget model, but the port has a shape the
-round loop has to be told about, and `kernel_workflow` keys that off **`mode=author`** — which is what
-`validate_skill.py --emit-plan` emits for a migration skill and what `e2e_workflow`'s cross-language
-lanes dispatch. On that branch the loop already defaults to a port-sized budget, a candidate floor below
-1.0 (so the transcription round is a tracked candidate rather than nothing at all), and a **negative**
-progress band (so a round that gives ground while exploring does not end the run). Run a port under
-`mode=optimize` and those revert to the optimize-tuned values, which delete the recovery phase: the
-transcription lands below the comparator, produces no candidate, and the loop stops two rounds in. The
-commit gate is unchanged either way — nothing sub-baseline is ever banked.
+round loop has to be told about: a transcription lands **below** the comparator and climbs back, and at
+the optimize-tuned defaults that phase is not representable at all — the transcription round produces
+no candidate, so no patch is saved, no verify runs, and the loop stops two rounds in. `kernel_workflow`
+therefore carries port-shape defaults (a port-sized budget, a candidate floor below 1.0, and a
+**negative** progress band so a round that gives ground while exploring does not end the run).
+
+**Run this port at `mode=optimize`, and say so.** Author mode writes a fresh seed that *replaces* the
+source — which would overwrite the very kernel being transcribed, since the port needs that kernel's
+own `.ttgir`. So the run that needs these defaults is an *optimize* run, and it declares itself by
+passing **`target_language=gluon`** (inert on the optimize branch otherwise, so it means exactly "this
+run ends in a different language than it started in") or an explicit **`port=true`**. A plain optimize
+run with neither is unchanged. The commit gate is untouched either way — nothing sub-baseline is banked.
 
 In `kernel_workflow` terms this is the **`deep_explore` track**, not a set of specialist directions: it
 runs alone in its own round, carries its own long measure→self-profile→rewrite loop, and has authority
