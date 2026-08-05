@@ -21,11 +21,19 @@ faster but can never reduce a result below your measured baseline.
    - migration skills: `from_backend`→`to_backend` fits this run's `mode`/`target_language`
      (e.g. authoring Triton from a TileLang source → a `tilelang→triton` skill applies)
    - `validation_status == validated` (ignore draft/failed; `stale` = plain reference only)
-3. For each match, Read the skill file and treat its `Procedure` as a **high-prior author/optimize
+3. If a matched index entry has a non-empty `runtime` contract, gate it before dispatching an author:
+   ```bash
+   python3 <EXPERT_SKILLS_DIR>/_contribute/runtime_compat.py <skill-id> --json
+   ```
+   The probe is read-only and must not install or upgrade the toolchain. `compatible=false` means skip
+   the recipe and record `backend_incompatible` with the probe errors. A compatible profile marked
+   `revalidation_required` or `stale` may be ported and measured only as an untrusted reference;
+   historical validation numbers do not transfer. Require fresh compile, parity, and isolated A/B evidence.
+4. For each runtime-compatible match, Read the skill file and treat its `Procedure` as a **high-prior author/optimize
    candidate**: follow its kernel structure and the named lever, honor `Knobs & pitfalls` and
    `Do-no-harm notes`, then measure against the immutable oracle as usual. The skill's
    `expects.isolated_speedup_min` is a sanity reference, not an acceptance shortcut.
-4. Always write your own measured baseline first; the skill seeds the optimization direction, it does
+5. Always write your own measured baseline first; the skill seeds the optimization direction, it does
    not replace the COMMANDMENT / oracle. The isolated A/B picks the winner.
 
 If no skill matches, proceed exactly as without this fragment.

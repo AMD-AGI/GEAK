@@ -24,6 +24,11 @@ import argparse, os, re, sys
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+from runtime_compat import validate_runtime_contract
+
 ROOT = os.path.dirname(HERE)
 SKILLS_DIR = os.path.join(ROOT, "skills")
 CAP_INDEX = os.path.normpath(os.path.join(ROOT, "..", "index", "capability_index.yaml"))
@@ -65,6 +70,8 @@ def static_check(fm, body):
         errs.append("kernel scope needs expects.isolated_speedup_min")
     if fm.get("scope") == "e2e" and "e2e_delta_min_pct" not in exp:
         errs.append("e2e scope needs expects.e2e_delta_min_pct")
+    if fm.get("runtime"):
+        errs.extend(validate_runtime_contract(fm["runtime"]))
     for sec in REQUIRED_SECTIONS:
         if f"## {sec}" not in body:
             errs.append(f"missing body section: ## {sec}")
@@ -83,6 +90,9 @@ def _section_filled(body, sec):
 
 def emit_plan(skill_id, fm, args):
     scope = fm.get("scope")
+    if fm.get("runtime"):
+        print("# RUNTIME COMPATIBILITY (read-only; must pass before authoring):")
+        print(f"python3 {os.path.join(HERE, 'runtime_compat.py')} {skill_id} --json")
     if scope == "e2e":
         model = args.model or "<MODEL_PATH>"
         print("# EFFICACY (e2e_workflow, Director same-session A/B):")

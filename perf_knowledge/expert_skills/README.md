@@ -54,6 +54,31 @@ AND validation.status == validated        (stale/draft/failed are NOT auto-appli
 There is **no ranking** here (same as `capability_index.yaml`). Every match enters the candidate set;
 the on-box A/B picks the winner.
 
+## Runtime compatibility contracts
+
+Version-sensitive skills may add a machine-readable `runtime:` block. It separates the implementation
+language from the provider that supplies it and lists bounded PEP 440 version profiles, required imports,
+required symbols, and whether evidence transfers to that profile. In particular:
+
+- `aiter_vendored_flydsl` means FlyDSL is consumed through `aiter.ops.flydsl` and AITER's vendored
+  kernels. It must not be rejected merely because the unrelated standalone `kernels.*` package is absent.
+- `standalone_source_flydsl` means a source checkout supplies top-level `kernels.*` modules and is a
+  different provider, even though both providers use the FlyDSL language.
+
+Before applying a matched skill with a runtime contract, run:
+
+```bash
+python3 perf_knowledge/expert_skills/_contribute/runtime_compat.py <skill-id> --json
+```
+
+The probe uses `packaging`'s PEP 440 semantics, reports module origins and missing capabilities, and
+**does not install**, upgrade, or overwrite the active environment. An incompatible profile is recorded
+as `backend_incompatible`. A profile marked `revalidation_required` may be explored, but its historical
+performance/parity numbers cannot be reused; fresh on-box validation is mandatory. Version ranges must
+have an upper bound so an unknown future major API cannot inherit validation accidentally.
+Prerelease/dev builds do not match stable profiles; add and validate a dedicated profile instead of
+implicitly inheriting stable-release evidence.
+
 ## scope: kernel vs e2e
 
 A skill declares `scope: kernel | e2e`. It controls which harness validates it and which workflow layer

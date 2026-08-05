@@ -23,33 +23,47 @@ match:
   profile_signature:
     op_name_regex: ''
     min_pct_gpu: 0.0
+runtime:
+  language: flydsl
+  provider: aiter_vendored_flydsl
+  required_imports:
+  - flydsl
+  - aiter.ops.flydsl
+  - aiter.ops.flydsl.kernels.mixed_moe_gemm_2stage
+  required_symbols:
+  - flydsl.expr.buffer_ops:create_buffer_resource_from_addr
+  profiles:
+  - name: validated-0.2.2
+    specifier: ==0.2.2
+    validation_status: validated
+    required_symbols:
+    - flydsl.expr.typing:as_ir_value
+  - name: future-0.2
+    specifier: '>0.2.2,<0.3'
+    validation_status: revalidation_required
+    required_symbols:
+    - flydsl.expr.typing:as_ir_value
+  provisioning:
+    policy: reuse_only
 expects:
   isolated_speedup_min: 1.05
   isolated_scope: 'stage-1 ISOLATED SEGMENT = the gate+up GEMM kernel PLUS the descriptor-producer
     kernel this recipe adds. Do not include pre-existing sort/align/quant helpers in this isolated
     gate; report the full stage-1 window separately. The producer has an unrelated name, so a GEMM-only
-    filter drops it and overstates the win by ~1.9pp (1.103x GEMM-only vs 1.080x with producer).'
+    filter drops it and overstates the win (1.124x GEMM-only vs 1.104x with producer on FlyDSL 0.2.2).'
   e2e_delta_min_pct: 1.0
   parity: required
 validation:
   status: validated
-  last_verified: '2026-07-27'
+  last_verified: '2026-08-05'
   gpu: 'gfx950 / MI355X'
-  model: 'fp8-act / fp4-wt grouped-MoE decode (provenance only; selection is by shape/bottleneck, not model)'
+  model: 'fp8-act / fp4-wt grouped-MoE decode (selection is by shape/bottleneck, not model)'
   measured:
-    isolated: 'stage-1 gate+up GEMM 185.7 -> 168.4 us = 1.103x (-9.3%) on a base tile_m=64 kernel with 86
-      disjoint pairs among 347 blocks (172 participating blocks); 3-trial average 179.5+-0.3 -> 162.5+-0.5
-      us (-9.5%), independent repeat -9.1%. Counting the +3.62us descriptor producer the segment is
-      185.7 -> 172.0 us = 1.080x (-7.4%).
-      Weight-HBM read units 347 -> 261 (analytic count over the real routing distribution, floor 259 --
-      NOT a hardware counter). Device-time sum over the whole fused decode path 313.9 -> 301.3 us (-4.0%).
-      INDEPENDENT REPRODUCTION on a second tree, 4 interleaved trials, selection driven purely by the
-      tuner config (no env override): stage-1 segment 192.69 -> 174.59 us = 1.1037x (-9.4%), arm ranges
-      191.38-195.32 vs 173.20-174.76 (non-overlapping); GEMM-only 192.69 -> 170.92 = 1.1274x; descriptor
-      producer 3.68 us; whole fused decode path 352.10 -> 333.25 us = 1.0566x.'
+    isolated: 'FlyDSL 0.2.2, 3 paired full-benchmark runs, 30 samples/run: honest stage-1 segment
+      (mfma_moe1 + descriptor producer) median 192.706 -> 174.498 us = 1.104x (-9.45%).'
     e2e_pct: ''
-    parity: 'pass - numerically equivalent to the unpaired tile (logits_diff delta <4e-6 vs baseline, cos_sim 0.99893); differs only by reduction order'
-  artifact: ''
+    parity: 'pass - median logits_diff 0.00106816 -> 0.00106673 and cos_sim 0.998933 -> 0.998935'
+  artifact: skills/flydsl_decode_moe_stage1_blkmap/validation_flydsl_0_2_2.yaml
 role: advisory_prior
 supersedes: []
 ---
@@ -85,10 +99,36 @@ treat this skill as not applicable and let the normal workflow exploration class
    A/B decide; a profiler label with null bandwidth/cache counters is not evidence. After pairing, separately
    check whether the doubled tile shifts the winner to VGPR/LDS residency or MFMA throughput.
 
-A prior re-verification that reported **1.0000x / out-of-applicability** was itself an invalid diagnosis:
-its local tuning CSV had been hand-edited, uncommitted, from the committed `tile_m=64` baseline to `tile_m=128`.
-Restoring the committed `tile_m=64` row reproduced `1.1037x` on the isolated segment. Treat baseline config
-provenance and a clean worktree as hard preflight; do not relabel a valid shape from a contaminated local row.
+Treat baseline config provenance and a clean worktree as hard preflight. The FlyDSL 0.2.2 validation used
+the committed `tile_m=64` baseline and measured the honest stage-1 segment at `192.706 -> 174.498 us`
+(`1.104x`); a locally edited `tile_m=128` row is a different baseline and invalidates this comparison.
+
+## FlyDSL runtime compatibility
+This recipe targets the **AITER-vendored** FlyDSL provider, not a standalone source tree. Before changing
+the kernel, run:
+
+```bash
+python3 <EXPERT_SKILLS_DIR>/_contribute/runtime_compat.py flydsl_decode_moe_stage1_blkmap --json
+```
+
+GEAK requires FlyDSL `>=0.2.2,<0.3`. Exact `0.2.2` is validated here; newer `0.2.x` releases remain
+`revalidation_required` until their capability probe and strict A/B pass. For the typed-coordinate API,
+audit the whole vendored `mixed_moe_gemm_2stage.py` module before applying AM2:
+
+- Audit every direct dynamic argument passed to `idx2crd`/`crd2idx`; direct FlyDSL calls need
+  `fx.Int32` wrappers for `tx`, `lane_id`, dynamic rows, and coordinate elements. If the target AITER
+  already routes these calls through a local layout helper that performs the conversion, retain that
+  helper and do not mechanically double-wrap values.
+- Import `as_ir_value` from `flydsl.expr.typing` and use it at raw-MLIR boundaries instead of adding a
+  global `ArithValue.ir_value` monkey patch to site-packages.
+- Keep `create_buffer_resource_from_addr`, `buffer_load` and `buffer_store` on the AITER-vendored path;
+  the absence of top-level `kernels.moe_gemm_2stage` is not an incompatibility for this provider.
+
+Compile both the unpaired and paired stage-1 variants in a clean cache, then require the paired runtime
+signature (`_am2_bmap` plus one `_blkmap_kernel`) before parity or timing. The **0.2.2 compatibility smoke**
+and strict validation on gfx950 used an isolated FlyDSL 0.2.2 wheel. Across three paired full-benchmark
+runs (30 samples/run), the stage-1 segment median was `192.706 -> 174.498 us = 1.104x`; median
+`logits_diff` was `0.00106816 -> 0.00106673` and cosine was `0.998933 -> 0.998935`.
 
 ## Mechanism
 Why the redundancy exists: MoE align/sort rounds each expert's token count **up** to the sort-block `B` so the
@@ -149,23 +189,17 @@ so the result is numerically equivalent modulo reduction order (not a new numeri
 - **Keep the base sort-block granularity as the baseline uses it.** Forcing the paired (double-height) path on
   top of an already-large base compute tile exceeds the compile-time LDS/register budget and fails to build
   (measured: a 128-row base tile would need ~263 KB LDS against a ~160 KB limit).
-- **The descriptor producer must be ONE kernel.** The reference first built it with eager tensor ops: ~13 tiny
-  dispatches, **~47 us/iter**, which turned the whole optimization into a net **loss**. A single fused
-  producer costs **~3.6 us**. An in-kernel parity scan instead of a producer measured *worse than baseline*
-  (202 us vs 162 us). Budget the producer explicitly against the GEMM saving (~17 us) before starting.
+- **The descriptor producer must be ONE kernel.** Multiple eager tensor-op dispatches can erase the win.
+  The validated fused producer median is **3.158 us**; budget it explicitly against the GEMM saving.
 - **Time the producer together with the GEMM.** The producer is a separate dispatch with an unrelated kernel
-  name, so a GEMM-name timing filter silently drops it and reports 1.103x where the honest segment number is
-  1.080x. See `expects.isolated_scope`.
+  name, so a GEMM-name timing filter silently drops it. On the validated 0.2.2 run that would report
+  `1.124x` GEMM-only instead of the honest `1.104x` segment. See `expects.isolated_scope`.
 - **The win scales with the fraction of `>=2`-block experts.** Synthetic / uniform routing overstates it vs
   skewed real decode routing — report real-routing numbers.
-- **A `tile_m = 128` tuning entry, where one exists, beats this recipe — compare against it before claiming a
-  win.** Pairing reaches a `2B`-row compute tile from `B`-row sort blocks; a config that simply *sorts* at
-  `2B` reaches the same tile with no descriptor kernel and fewer weight reads (measured on the reference
-  shape: paired-`t64` segment 174.6 us vs `t128` 168.6 us, because only 89 of 379 leaders actually pair, so
-  290 solo leaders still read a weight tile for just `B` rows). This recipe's value is therefore confined to
-  baselines that are **pinned** to `tile_m = B` — precondition 1 is about buildability, this is about
-  profitability. State which baseline the speedup is measured against, and never compare a paired arm to a
-  differently-tuned arm.
+- **Compare against a tuned `tile_m = 128` entry when one exists.** Pairing reaches a `2B`-row compute tile
+  from `B`-row sort blocks, while a config that directly sorts at `2B` avoids the descriptor kernel. This
+  recipe's value is confined to baselines pinned to `tile_m = B`; never compare a paired arm to a
+  differently-tuned denominator.
 - **Make the merge factor selectable from the tuner's config, never from an environment variable alone.** In
   the reference the config tag was parsed but then dropped on the way to the kernel, so the tuner could not
   actually select pairing and the path silently never activated — a config-driven arm and an env-forced arm
@@ -187,32 +221,9 @@ so the result is numerically equivalent modulo reduction order (not a new numeri
   a non-matching shape regresses nothing.
 
 ## Sources
-Evidence is external and cited for **provenance only** — GEAK does not depend on any tree, and exact
-commits / file paths are intentionally omitted. The portable knowledge is the signature, mechanism, and
-measured numbers below.
-
-- **Reference measurement** (same-session interleaved A/B; decode shape with **86 disjoint pairs among 347
-  blocks (172 participating blocks)** on a **base `tile_m=64`** kernel; fp8 activations / fp4 weights on
-  gfx950 / MI355X):
-  - stage-1 gate+up GEMM **185.7 -> 168.4 us = 1.103x (-9.3%)**; 3-trial average **179.5 -> 162.5 us (-9.5%)**,
-    independent repeat **-9.1%**;
-  - **counting the +3.62us descriptor producer: 185.7 -> 172.0 us = 1.080x (-7.4%)** — this is the honest
-    segment number;
-  - sorting / align kernels unchanged (18.30 -> 18.26 us, i.e. noise), confirming the sort-block granularity
-    was untouched;
-  - weight-HBM read units **347 -> 261** (floor 259), an **analytic count over the real routing
-    distribution — not a hardware counter reading**;
-  - **parity numerically equivalent** (logits_diff delta `<4e-6` vs the unpaired baseline, cos_sim `0.99893`)
-    — the output differs only by reduction order.
-- **Autonomous-reproduction evidence** (same shape/signature): packaged-run audit confirmed the skill matched,
-  emitted `_blkmap_kernel` plus an `_am2_bmap` GEMM, preserved sort64, and passed full fused-MoE parity
-  (`logits_diff` about `0.001061-0.001070`, `cos_sim` about `0.99893`). The honest isolated segment was
-  `191.060 -> 177.267 us = 1.0778x` (`173.292 us` GEMM + `3.975 us` descriptor). This clears the
-  conservative `1.05x` skill gate and is a valid skill reproduction, but it is below a stricter prompt goal of
-  `1.094x`; report that as **target_missed**, not as "skill did not inject". Future attempts must prove arm
-  identity and jointly measure scheduling/cache choices using the runtime-signature, joint-sweep,
-  cache-identity, and grid-size guardrails above.
-- Implemented as an optional double-height-tile mode in a FlyDSL grouped-MoE stage-1 core with a device-side
-  leader-block descriptor producer; the default (unpaired) path is unchanged. Any staged-rollout gating is an
-  implementation detail of the reference, **not** part of this recipe — the transferable content is the
-  pair-fuse-and-reuse technique above.
+- `validation_flydsl_0_2_2.yaml` records the FlyDSL 0.2.2 gfx950 validation: three paired
+  full-benchmark runs, 30 samples/run, honest segment median `192.706 -> 174.498 us = 1.104x`.
+- Runtime evidence emitted `_am2`/`_am2_bmap` stage-1 work plus one `_blkmap_kernel`, preserved the
+  original sort-block granularity, and passed full fused-MoE parity.
+- The implementation remains an optional double-height-tile mode; when not selected, the generic path
+  is unchanged.

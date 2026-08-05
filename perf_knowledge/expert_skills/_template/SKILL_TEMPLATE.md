@@ -16,6 +16,9 @@ match:
   profile_signature:                # optional extra trigger gate
     op_name_regex: ""
     min_pct_gpu: 0.0
+# Optional for version-sensitive implementation languages. A non-empty contract is indexed and
+# checked before a matched skill may be applied; see expert_skills/README.md.
+runtime: {}
 # ---- expected effect: the validation gate's pass criteria ----
 expects:
   isolated_speedup_min: 1.10        # kernel scope: isolated A/B vs the immutable oracle

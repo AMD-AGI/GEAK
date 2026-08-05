@@ -42,6 +42,20 @@ def known_operators():
     return {c["operator"] for c in (data.get("candidates") or []) if "operator" in c}
 
 
+def skill_index_entry(sub, fm):
+    entry = {
+        "id": fm["id"],
+        "file": f"skills/{sub}/skill.md",
+        "scope": fm.get("scope", "kernel"),
+        "match": fm.get("match", {}),
+        "expects": fm.get("expects", {}),
+        "validation_status": (fm.get("validation") or {}).get("status", "draft"),
+    }
+    if fm.get("runtime"):
+        entry["runtime"] = fm["runtime"]
+    return entry
+
+
 def reindex():
     ops = known_operators()
     entries = []
@@ -57,21 +71,14 @@ def reindex():
             if ops is not None and one != "*" and one not in ops:
                 print(f"  WARN: {sub}/skill.md: operator '{one}' not in capability_index.yaml",
                       file=sys.stderr)
-        entries.append({
-            "id": fm["id"],
-            "file": f"skills/{sub}/skill.md",
-            "scope": fm.get("scope", "kernel"),
-            "match": fm.get("match", {}),
-            "expects": fm.get("expects", {}),
-            "validation_status": (fm.get("validation") or {}).get("status", "draft"),
-        })
+        entries.append(skill_index_entry(sub, fm))
     header = (
         "# index.yaml — expert_skills selector (AUTO-MAINTAINED by _contribute/scaffold.py + "
         "validate_skill.py).\n"
         "# Regenerate with:  python _contribute/scaffold.py --reindex\n"
         "# NOT a ranking. Filter by (operator, gen, arch_class, [from->to], status==validated) -> MEASURE.\n"
         "# Only 'validated' skills are auto-applied by the workflows (advisory priors, never override A/B).\n\n"
-        "schema: {id, file, scope, match, expects, validation_status}\n\n"
+        "schema: {id, file, scope, match, expects, runtime, validation_status}\n\n"
     )
     with open(INDEX, "w") as f:
         f.write(header)

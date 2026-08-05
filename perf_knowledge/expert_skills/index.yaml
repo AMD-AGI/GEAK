@@ -3,7 +3,7 @@
 # NOT a ranking. Filter by (operator, gen, arch_class, [from->to], status==validated) -> MEASURE.
 # Only 'validated' skills are auto-applied by the workflows (advisory priors, never override A/B).
 
-schema: {id, file, scope, match, expects, validation_status}
+schema: {id, file, scope, match, expects, runtime, validation_status}
 
 skills:
 - id: apply_flydsl_moe_to_vllm
@@ -69,10 +69,32 @@ skills:
     isolated_scope: stage-1 ISOLATED SEGMENT = the gate+up GEMM kernel PLUS the descriptor-producer kernel
       this recipe adds. Do not include pre-existing sort/align/quant helpers in this isolated gate; report
       the full stage-1 window separately. The producer has an unrelated name, so a GEMM-only filter drops
-      it and overstates the win by ~1.9pp (1.103x GEMM-only vs 1.080x with producer).
+      it and overstates the win (1.124x GEMM-only vs 1.104x with producer on FlyDSL 0.2.2).
     e2e_delta_min_pct: 1.0
     parity: required
   validation_status: validated
+  runtime:
+    language: flydsl
+    provider: aiter_vendored_flydsl
+    required_imports:
+    - flydsl
+    - aiter.ops.flydsl
+    - aiter.ops.flydsl.kernels.mixed_moe_gemm_2stage
+    required_symbols:
+    - flydsl.expr.buffer_ops:create_buffer_resource_from_addr
+    profiles:
+    - name: validated-0.2.2
+      specifier: ==0.2.2
+      validation_status: validated
+      required_symbols:
+      - flydsl.expr.typing:as_ir_value
+    - name: future-0.2
+      specifier: '>0.2.2,<0.3'
+      validation_status: revalidation_required
+      required_symbols:
+      - flydsl.expr.typing:as_ir_value
+    provisioning:
+      policy: reuse_only
 - id: flydsl_fp8_blockscale_gemm
   file: skills/flydsl_fp8_blockscale_gemm/skill.md
   scope: kernel
@@ -151,6 +173,28 @@ skills:
     e2e_delta_min_pct: 1.0
     parity: relaxed
   validation_status: validated
+  runtime:
+    language: flydsl
+    provider: aiter_vendored_flydsl
+    required_imports:
+    - flydsl
+    - aiter.ops.flydsl
+    - aiter.ops.flydsl.kernels.mixed_moe_gemm_2stage
+    required_symbols:
+    - flydsl.expr.buffer_ops:create_buffer_resource_from_addr
+    profiles:
+    - name: validated-0.2.2
+      specifier: ==0.2.2
+      validation_status: validated
+      required_symbols:
+      - flydsl.expr.typing:as_ir_value
+    - name: future-0.2
+      specifier: '>0.2.2,<0.3'
+      validation_status: revalidation_required
+      required_symbols:
+      - flydsl.expr.typing:as_ir_value
+    provisioning:
+      policy: reuse_only
 - id: flydsl_rewrite_quantized_moe
   file: skills/flydsl_rewrite_quantized_moe/skill.md
   scope: kernel

@@ -24,6 +24,28 @@ match:
   profile_signature:
     op_name_regex: ''
     min_pct_gpu: 0.0
+runtime:
+  language: flydsl
+  provider: aiter_vendored_flydsl
+  required_imports:
+  - flydsl
+  - aiter.ops.flydsl
+  - aiter.ops.flydsl.kernels.mixed_moe_gemm_2stage
+  required_symbols:
+  - flydsl.expr.buffer_ops:create_buffer_resource_from_addr
+  profiles:
+  - name: validated-0.2.2
+    specifier: ==0.2.2
+    validation_status: validated
+    required_symbols:
+    - flydsl.expr.typing:as_ir_value
+  - name: future-0.2
+    specifier: '>0.2.2,<0.3'
+    validation_status: revalidation_required
+    required_symbols:
+    - flydsl.expr.typing:as_ir_value
+  provisioning:
+    policy: reuse_only
 expects:
   isolated_speedup_min: 1.15
   isolated_scope: 'stage-2 SEGMENT = the down-proj GEMM kernel PLUS the separate top-k reduce kernel,
@@ -35,35 +57,23 @@ expects:
   parity: relaxed
 validation:
   status: validated
-  last_verified: '2026-07-27'
+  last_verified: '2026-08-05'
   gpu: gfx950 / MI355X
   model: a8w4 (fp8-act / fp4-wt per_1x32) grouped-MoE prefill M=16384, real routing imbalance 3.44x
   measured:
-    isolated: 1.1793
+    isolated: 1.2099041
     e2e_pct: ''
     parity: pass
   measured_detail:
-    scope: 'stage-2 segment = down GEMM + separate reduce kernel, summed; 3 interleaved trials,
-      segment spread 1.5-2.1%; rocprofv3 kernel-trace medians; only variable between arms is the
-      fp8-partial toggle (same tree, same tuned CSV row, same tile geometry)'
-    segment: '1161.61 -> 985.03 us = 1.1793x'
-    reduce_kernel: '287.48 -> 154.58 us = 1.8598x (132.90 of the 176.58 us saved, i.e. 75%)'
-    down_gemm: '872.77 -> 828.61 us = 1.0533x (the halved partial WRITE only -- this is the ceiling
-      for anyone who scores the GEMM alone)'
-    parity: 'logits_diff 0.00141778 (cos_sim 0.998584) vs 0.00106563 (0.998936) on the bf16-partial
-      baseline; aiter real-routing gate threshold 0.01'
-    whole_pipeline_wall: '2840.61 -> 2641.60 us = 1.0753x'
-    bundling_check: 'both arms emit bs1024_vw16; kernel names differ only inbf16 vs infp8, so the
-      reduce speedup is NOT inflated by the separate always-on block/vec bump'
-    provenance_caveat: 'the prod lineage already ships fp8 partials (its reduce is ..._infp8_...);
-      this number is a controlled win on the dev tree, whose stage-2 is ~22% behind prod for an
-      unrelated pipelining reason. Against the prod lineage it is roughly parity, so treat this as
-      closing a regression rather than beating the best known configuration.'
-    portable_recheck: 'packaged-run audit on an independent environment reproduced the recipe: baseline
-      stage-2 segment 1.20684 ms, optimized 1.00412 ms = 1.2019x; a later optimized rerun was 0.97832 ms,
-      about 1.2336x versus that baseline. The run emitted fp8 partial store/load behavior and passed relaxed
-      full-logits parity around logits_diff 0.001418 / cos_sim 0.998583.'
-  artifact: external packaged-run validation artifact (provenance only; exact local path omitted)
+    scope: 'FlyDSL 0.2.2 stage-2 segment = down GEMM + separate reduce kernel, summed;
+      rocprofv3 medians over 3 paired runs with 8 calls/run'
+    segment: '1.206495 -> 0.997182 ms = 1.209904x (-17.35%)'
+    reduce_kernel: '0.320969 -> 0.156617 ms = 2.049388x'
+    down_gemm: '0.885526 -> 0.840565 ms = 1.053489x'
+    parity: 'median logits_diff 0.00106758 -> 0.00141795 and cos_sim 0.998934 -> 0.998583;
+      within the aiter real-routing gate threshold 0.01'
+    bundling_check: 'optimized arm emitted cshuffle_pf8 plus infp8 reducer; baseline emitted bf16 partials'
+  artifact: skills/flydsl_prefill_moe_stage2_fp8partial/validation_flydsl_0_2_2.yaml
 role: advisory_prior
 supersedes: []
 ---
@@ -81,6 +91,38 @@ stage-2 GEMM (`mfma_moe2` / down-proj naming), materialized top-k partial buffer
 in the scored segment. If the evidence instead points at decode stage-1 gate/up (`mfma_moe1`, sorted-block
 leader mapping, no top-k reduce), use the stage-1 blkmap recipe instead. If phase or stage remains ambiguous,
 treat this skill as not applicable and let the normal workflow exploration classify the bottleneck first.
+
+## FlyDSL runtime compatibility
+This recipe uses AITER's vendored `mixed_moe_gemm_2stage.py`; it does not require the standalone
+`kernels.moe_gemm_2stage` module. Before authoring or applying it, run:
+
+```bash
+python3 <EXPERT_SKILLS_DIR>/_contribute/runtime_compat.py flydsl_prefill_moe_stage2_fp8partial --json
+```
+
+GEAK requires FlyDSL `>=0.2.2,<0.3`. Exact `0.2.2` is validated here; newer `0.2.x` releases remain
+`revalidation_required` until their capability probe and strict A/B pass. Audit the complete vendored
+module against the typed-coordinate API:
+
+- Audit direct `idx2crd`/`crd2idx` calls and convert dynamic inputs/elements to `fx.Int32`. If the target
+  AITER already uses a local layout helper that performs this conversion, preserve the helper rather than
+  double-wrapping its outputs.
+- Use `flydsl.expr.typing.as_ir_value` at raw-MLIR boundaries rather than globally monkey-patching
+  `ArithValue.ir_value`.
+- Keep the AITER-vendored raw buffer-resource path and verify that fp8 packing/unpacking still lowers to
+  the expected gfx950 OCP-E4M3 ROCDL conversions.
+
+The partial scale is part of the generated program ABI. Pass one scale as an explicit **compile argument**
+to both producer and reducer, derive the reciprocal from that same value, and include the scale in both
+JIT **cache identity** tuples/module names. A fixed producer constant combined with a reducer-only
+environment override is a silent correctness bug. After porting, compile with a clean cache and require
+both producer and reducer signatures (`cshuffle_pf8` and `infp8`) before full-logits parity or timing.
+
+The **0.2.2 compatibility smoke** and strict rocprof validation on gfx950 used an isolated FlyDSL 0.2.2
+wheel. Across three paired runs, the stage-2 segment median was
+`1.206495 -> 0.997182 ms = 1.210x`; the GEMM was `0.885526 -> 0.840565 ms = 1.053x` and the reducer
+was `0.320969 -> 0.156617 ms = 2.049x`. Median `logits_diff` was
+`0.00106758 -> 0.00141795` and cosine was `0.998934 -> 0.998583`, within the relaxed gate.
 
 ## Mechanism
 With `top_k` experts per token, stage-2 materializes `top_k` partial rows per token and then reduces them. At
@@ -139,7 +181,7 @@ store/load epilogue-prologue variant.
 - **Measure the whole segment, or you will measure ~nothing.** The write-side saving lands in the down GEMM
   but the read-side saving — the larger share — lands in the *separate* reduce kernel, which has a different
   kernel name. A per-kernel timing filter matched on the GEMM's name silently drops the reduce and reports
-  only the GEMM's ~1.045x, making a correctly reproduced recipe look like a failure. Time both kernels.
+  only the GEMM's `1.053x`, making a correctly reproduced recipe look like a failure. Time both kernels.
 - **Reject arm identity ambiguity.** The optimized arm must have a positive runtime signature on both sides:
   fp8 partial output from the GEMM and `infp8` input in the reducer. Missing either signature means the skill
   did not actually run, regardless of reported speed.
@@ -154,21 +196,9 @@ store/load epilogue-prologue variant.
 - The default path stores bf16 partials and is byte-identical to baseline -> no regression when not triggered.
 
 ## Sources
-Evidence is external and cited for **provenance only** — GEAK does not depend on any tree, and exact
-commits / file paths are intentionally omitted. The portable knowledge is the signature, mechanism, and
-measured numbers below.
-
-- **Reference measurement** (same-session; prefill large-M `~16k`, top-k reduce; fp8 activations / fp4 weights on
-  gfx950 / MI355X). Scored on the **segment** (down GEMM + separate reduce): **1149.1 -> 979.8 us = 1.17x
-  (-14.7%)**. Split, so the scope is unambiguous:
-  - reduce kernel **288.1 -> 155.9 us = 1.85x** — 132.2 us, i.e. **78% of the 169.3 us saved**;
-  - down GEMM **861.0 -> 823.8 us = 1.045x** (only the halved partial *write* lands here).
-  An isolated micro-bench of the same GEMM+reduce segment gives **1182 -> 986 us = 1.20x (-16.6%)**.
-  **parity within relaxed tol** (logits_diff `0.00142` vs `~0.00106` bf16-partial baseline, cos_sim `0.9986`).
-- **Independent packaged-run validation** reproduced the same mechanism and target: stage-2 segment
-  **1.20684 -> 1.00412 ms = 1.2019x**, with a repeat optimized run at **0.97832 ms** (~`1.2336x` versus that
-  baseline). Runtime evidence showed fp8 partials and `infp8` reduction; relaxed parity was stable around
-  `logits_diff=0.001418`, `cos_sim=0.998583`.
-- Implemented as an opt-in fp8-partial store/load variant of a FlyDSL grouped-MoE stage-2 GEMM+reduce; the
-  default (bf16-partial) path is unchanged. Any rollout gating is an implementation detail of the reference,
-  **not** part of this recipe — the transferable content is the store-fp8 / unscale-on-reduce technique above.
+- `validation_flydsl_0_2_2.yaml` records the FlyDSL 0.2.2 gfx950 validation: three paired rocprofv3 runs,
+  stage-2 segment median `1.206495 -> 0.997182 ms = 1.210x`.
+- Runtime evidence showed `cshuffle_pf8` partial stores and an `infp8` reducer; relaxed full-logits parity
+  stayed at `logits_diff ~0.001418`, `cos_sim ~0.998583`.
+- The implementation remains an opt-in fp8-partial store/load variant; the default bf16-partial path is
+  unchanged.
