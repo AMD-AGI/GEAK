@@ -295,6 +295,13 @@ const DEEP_REPROFILE_GAIN = parseFloat(A.deep_reprofile_gain != null ? A.deep_re
 //   (b) RUN UNTIL THE BUDGET — when all lanes plateau, RE-SEED them with FRESH authoring directions
 //       (concentrated on the dominant-Amdahl head) instead of exiting, so depth keeps compounding.
 const DEEP_WAVE_BUDGET = parseInt(A.deep_wave_budget != null ? A.deep_wave_budget : 3, 10); // kernel_workflow rounds per burst. Was 6 but deeper-per-burst SLOWED exploration and underperformed; 3 = faster bursts + more waves (depth now comes from run-until-budget + reseed, not bigger bursts).
+// Same, for an `author` (PORT) lane. A port spends its first round transcribing -- which lands BELOW
+// the live kernel by construction -- and the next recovering, so at 3 the burst ends exactly where the
+// optimization would start, and the next wave re-pays the landing instead of building on it. Double it
+// so a burst covers transcribe + recover + at least one round of actual optimization. Depth still comes
+// from waves x state_dir continuation, not from one large burst.
+const DEEP_WAVE_BUDGET_PORT = parseInt(
+  A.deep_wave_budget_port != null ? A.deep_wave_budget_port : DEEP_WAVE_BUDGET * 2, 10);
 const DEEP_MAX_RESEEDS = parseInt(A.deep_max_reseeds != null ? A.deep_max_reseeds : 12, 10); // max fresh-direction re-seeds per lane before it is truly exhausted (budget usually stops first)
 // P1: convergence-stop + agent-budget backstop. The wave loop re-seeds for depth, but once optimization
 // has demonstrably CONVERGED (K consecutive waves with no new isolated OR e2e gain) it STOPS and finalizes
@@ -1529,7 +1536,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         await deepBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
           kernel_path: l.ext.task_dir, workflow_dir: KERNEL_WF_DIR, mode: l.mode, target_language: l.lang, op_spec: l.opSpec,
           perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR, use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
-          budget: DEEP_WAVE_BUDGET, max_no_improve: DEEP_WAVE_BUDGET, gpu_ids: g[0],
+          // An `author` lane is a PORT: its first round transcribes and lands below the live kernel,
+          // and only the round after that recovers. At the optimize-tuned wave budget those two
+          // consume the whole burst, so the lane never reaches a round of actual optimization and
+          // every wave re-pays the same landing. Author lanes therefore get the port wave budget.
+          // `max_no_improve` is deliberately NOT passed on that branch: kernel_workflow's own
+          // port-shape default (and its negative progress band) is what lets a recovery round count.
+          budget: l.mode === 'author' ? DEEP_WAVE_BUDGET_PORT : DEEP_WAVE_BUDGET,
+          ...(l.mode === 'author' ? {} : { max_no_improve: DEEP_WAVE_BUDGET }),
+          gpu_ids: g[0],
           state_dir: l.state_dir, shared_kb: l.sharedKb, global_kb: GLOBAL_KB,
           incremental_analyze: l.ran > 1 ? 'true' : 'false',   // P2: 2nd+ burst of a lane = continuation -> skip cold re-analysis
           ...(gateFeedbackPath ? { e2e_feedback: gateFeedbackPath } : {}),

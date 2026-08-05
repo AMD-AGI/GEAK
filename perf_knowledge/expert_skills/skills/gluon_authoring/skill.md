@@ -60,6 +60,16 @@ what to try next is chosen from the IR and profile of the anchor you just built,
 built it is holding and a fresh agent would have to rebuild. Splitting the track at the gates throws
 that away at the moment it becomes useful.
 
+**What the track needs from the caller.** This skill owns no budget model, but the port has a shape the
+round loop has to be told about, and `kernel_workflow` keys that off **`mode=author`** — which is what
+`validate_skill.py --emit-plan` emits for a migration skill and what `e2e_workflow`'s cross-language
+lanes dispatch. On that branch the loop already defaults to a port-sized budget, a candidate floor below
+1.0 (so the transcription round is a tracked candidate rather than nothing at all), and a **negative**
+progress band (so a round that gives ground while exploring does not end the run). Run a port under
+`mode=optimize` and those revert to the optimize-tuned values, which delete the recovery phase: the
+transcription lands below the comparator, produces no candidate, and the loop stops two rounds in. The
+commit gate is unchanged either way — nothing sub-baseline is ever banked.
+
 In `kernel_workflow` terms this is the **`deep_explore` track**, not a set of specialist directions: it
 runs alone in its own round, carries its own long measure→self-profile→rewrite loop, and has authority
 over kernel plus wrapper — which is the shape steps 1–4 need. One mismatch to steer around: that track
