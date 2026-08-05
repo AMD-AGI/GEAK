@@ -349,8 +349,15 @@ def _pipeline_facts(text: str) -> dict:
     in-file 1 belonged to a branch that never runs.
 
     Signals, both literal in the TTGIR: the `tt.num_stages` attribute, and the count of
-    `scf.for` loop-carried `iter_args` (the pipeliner adds carries for its in-flight
-    buffers, so 0 vs several is a second, independent read).
+    `scf.for` loop-carried `iter_args`.
+
+    **They are not of equal standing, and treating them as such produced a false positive.**
+    The attribute is decisive. The carry count is not: the pipeliner does add carries for
+    its in-flight buffers, but an algorithmic loop carries accumulators for its own reasons
+    -- every online-softmax attention loop carries m/l/acc and usually an offset, so it
+    reads >= 2 while un-pipelined. One dump cannot separate the pipeliner's carries from
+    the algorithm's. So the caller must let the attribute decide when it is present, and
+    report INCONCLUSIVE rather than assert when it is absent.
     """
     ns = [int(m.group(1)) for m in _NS_ATTR_RE.finditer(text)]
     carries = [len([x for x in m.group(1).split(",") if x.strip()])
@@ -1185,7 +1192,13 @@ def report(rec: Recovery, verbose: bool = False) -> str:
         lines.append(f"  PIPELINE (read from THIS dump, not from the source): "
                      f"tt.num_stages={pf.get('num_stages') or 'absent'}, "
                      f"{pf['loops']} scf.for, max iter_args={mia}")
-        if (mns or 1) > 1 or mia >= 2:
+        # `iter_args >= 2` is NOT on its own evidence of pipelining, and treating it as
+        # such misreported an attention kernel whose dump said tt.num_stages=1: every
+        # online-softmax loop carries m/l/acc (plus an offset), so the count is >= 2 for
+        # algorithmic reasons. The pipeliner's own carries cannot be told apart from the
+        # algorithm's in a single dump, so the attribute decides when it is present and the
+        # carry count is only ever a hint when it is absent.
+        if (mns or 0) > 1:
             lines.append("  => plain IS software-pipelined. `gluon_to_ttgir` does not run the")
             lines.append("     pipeliner by default, so a FAITHFUL anchor sits below plain BY")
             lines.append("     CONSTRUCTION -- that gap is a debt you knowingly take on, not a")
@@ -1194,11 +1207,24 @@ def report(rec: Recovery, verbose: bool = False) -> str:
             lines.append("     layout work will move it. Those passes are absent from the default")
             lines.append("     lowering, NOT from libtriton -- re-inject them before hand-building")
             lines.append("     (references/tile-programming/pipeline.md).")
-        else:
-            lines.append("  => plain is NOT pipelined (num_stages=1, no loop carries). There is no")
+        elif mns == 1:
+            lines.append("  => plain is NOT pipelined: this dump says tt.num_stages=1. There is no")
             lines.append("     pipeline to lose, so a faithful anchor should land at ~1.00 and")
             lines.append("     anything materially below that is a transcription DEFECT, not a debt.")
             lines.append("     Check the ASM load-width histogram before believing any clock.")
+            if mia >= 2:
+                lines.append(f"     ({mia} loop carries, which is NOT a counter-signal: an")
+                lines.append("     online-softmax or reduction loop carries accumulators for")
+                lines.append("     algorithmic reasons. The attribute decides.)")
+            lines.append("     If the depth is pinned by a `tl.range(num_stages=1)` in the source,")
+            lines.append("     a deeper arm may still be REACHABLE -- flip the annotation, not the")
+            lines.append("     launch argument, and re-dump before concluding there is no debt.")
+        else:
+            lines.append("  => INCONCLUSIVE: no tt.num_stages attribute in this dump.")
+            lines.append(f"     max iter_args={mia} is a hint at best -- the pipeliner adds carries,")
+            lines.append("     but so does any accumulator loop, and one dump cannot separate them.")
+            lines.append("     Settle it with the load count and a peeled prologue across a depth")
+            lines.append("     sweep, or measure `plain at num_stages=1` directly.")
         lines.append("     Do not infer num_stages from the source: a file containing 1 can")
         lines.append("     dispatch a branch compiled at 2.")
     lines.append("")
@@ -2147,6 +2173,31 @@ def _selftest() -> int:
        pf1["max_num_stages"] == 1 and pf1["max_iter_args"] == 0, str(pf1))
     ck("_pipeline_facts on a loop-free module is empty",
        _pipeline_facts("tt.func @k() { tt.return }")["loops"] == 0)
+
+    # An online-softmax loop carries m/l/acc/offset for ALGORITHMIC reasons, so a carry
+    # count >= 2 must not by itself produce a "plain IS pipelined" verdict. Pinned in both
+    # directions, and on the rendered text rather than the facts dict, because the bug was
+    # in the verdict rather than in the parse.
+    def _verdict(text):
+        r = Recovery(path="<selftest>", arch="gfx950", num_warps=None,
+                     threads_per_warp=None, pipeline=_pipeline_facts(text))
+        return report(r)
+
+    attn = ('scf.for %i = %c0 to %n step %c1 iter_args(%m = %a, %l = %b, %acc = %c, '
+            '%off = %d) { } {tt.num_stages = 1 : i32}')
+    v_attn = _verdict(attn)
+    ck("attention-shaped ns=1 loop is NOT called pipelined",
+       "is NOT pipelined" in v_attn and "IS software-pipelined" not in v_attn,
+       v_attn)
+    ck("...and it says the depth may still be reachable via the annotation",
+       "REACHABLE" in v_attn, v_attn)
+    v_deep = _verdict('scf.for %i = %c0 to %n step %c1 iter_args(%a = %x) '
+                      '{ } {tt.num_stages = 3 : i32}')
+    ck("a depth>1 attribute still reads as pipelined",
+       "IS software-pipelined" in v_deep, v_deep)
+    v_none = _verdict("scf.for %i = %c0 to %n step %c1 iter_args(%a = %x, %b = %y) { }")
+    ck("a dump with no tt.num_stages is INCONCLUSIVE, not a verdict",
+       "INCONCLUSIVE" in v_none, v_none)
 
     ck("_backend_key amd", _backend_key("gfx942") == ("amd", "hip", "gfx942", 64))
     ck("_backend_key nvidia via sm90", _backend_key("sm90") == ("nvidia", "cuda", 90, 32))

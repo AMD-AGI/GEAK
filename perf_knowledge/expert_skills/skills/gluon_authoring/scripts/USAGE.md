@@ -17,7 +17,7 @@ equivalence check, and both of those have already cost this branch a patch.
 | `dump_ir.sh` | Runs a compile command with IR dumping on and collects `.ttir` / `.ttgir` / `.amdgcn` per variant. `--emit-gluon layouts\|anchor\|pipeline` additionally emits a Gluon skeleton from the dumped TTGIR. Grammar: `bash dump_ir.sh <compile_cmd ...> --variant <name> --out <ir_dir> [--knobs ...] [--emit-gluon ...] [--kernel module.path:object] [--kernel-name <substring>] [--arch gfx950]` — every token that is not one of those flags belongs to `<compile_cmd>`, so it may be split around them. `--help` prints the same. **`--kernel-name` pins WHICH kernel's artifacts are taken** and is not the same flag as `--kernel` (that one is `module.path:object`, for the translator) — see the multi-kernel hazard below. |
 | `recover_gluon.py` | The older driver: dump → recover layouts → emit an anchor → `--verify`. Worth running for the **anchor assembly** and for the algorithm skeleton (`--with-skeleton`); prefer `ttgir_bridge.py verify` for the gate. Its `--verify` compares canonical attribute **text** as a set — sound in one direction only (equal text means equal layout, but two spellings of one layout read as different), and the set predicate is itself a patch over an earlier multiset version that could not pass on an auto-pipelined plain kernel. Normal forms do not need that patch. `--selftest` runs the equivalence checks offline. |
 | `ttgir_to_gluon.py` | The pure-text parser/emitter underneath `recover_gluon.py`. No GPU and no `triton` import needed, which is the one reason to reach for it. Covers `#blocked`, `#amd_mfma`, `#swizzled_shared`, `#padded_shared`, `#linear`, `ttg.dot_op`, `ttg.slice`. Its output is a starting point, **not a proof**: a hand-written mapping silently emits a layout missing a field whenever upstream adds or renames one, which is exactly what `835a3c1` had to fix (`tilesPerWarp` / `elementBitWidth` were being dropped, and `--verify` caught it only as an unexplained text mismatch). Does not place `convert_layout` (manual, see `references/tile-programming/layout-recipes.md`) and cannot name `amd_rotating_shared`. |
-| `smoke_test_recover.sh` | Offline end-to-end check of the recovery toolchain. |
+| `smoke_test_recover.sh` | Offline end-to-end check of the recovery toolchain, and the single entry point for **all ten** `--selftest` suites in this directory — run it before trusting any of these scripts on a new box. If you add a script with a `--selftest`, wire it in here: four of these were reachable only by hand, and that is how both a wrong LDS/CU divisor and a wrong pipeline verdict shipped. Needs no GPU and no `triton`; pass a `gfx950-gluon-tutorials` checkout as `$1` to add the recover/verify-against-real-dumps layer. |
 | `smoke_recover_gpu.py` | On-GPU version; needs `torch` + `triton`. |
 | **`probe.py measure\|plan`** | **Compile-only occupancy probe — run it the moment the anchor builds, before any timing.** `measure` parses the compiled artifact for `shared` bytes/WG, ArchVGPR+AGPR and the resulting waves/SIMD in seconds, with no kernel launch, no GPU time and no profiler, so a dozen variants can be screened in the time one profile takes. `plan` answers the other half — whether a tile shape can reach a target occupancy *at all* — by adding up the resident tensors on paper, before the code exists. Both occupancy limiters are reported together, which matters because a kernel can be capped by LDS while its register count still looks safe. This is the only instrument that sees the cost of transcribing a pass-through `ttg.local_alloc` as a user buffer: the `local_alloc` count and the layout diff are identical either way, so `verify` and the numeric oracle cannot. Takes `--dir` (the artifact directory step 3 dumped), not a source file. Needs `amd_occupancy.py` beside it and `references/hardware/hw_constants.json` above it — without the json the LDS half silently reports nothing, which is the half that catches an over-allocated staging buffer. All three are vendored. |
 
@@ -162,11 +162,13 @@ visible peeled prologue.
 > loop body that is clean on its own still fails. Grep the anchor source for `buffer_` before arming,
 > rather than reading the loop.
 
-> **`recover`'s `LDS:` line sums *declared* allocations and does not model liveness**, so it
-> over-reports on a non-pipelined dump where the backend allocator would have reused one buffer across
-> disjoint live ranges. Read it as an upper bound and a comparator against plain's own line — not as the
-> `shared` bytes/WG the kernel will be charged. `probe.py measure` reads the compiled artifact and is the
-> figure to quote once an anchor exists.
+> **`recover`'s `LDS:` line is in ELEMENTS, and it sums *declared* allocations without modelling
+> liveness.** Two separate reasons not to compare it directly against a byte figure: the unit differs from
+> `probe.py`'s `lds/WG` (multiply by the element size), and it over-reports on a non-pipelined dump where
+> the backend allocator would have reused one buffer across disjoint live ranges. Read it as an **upper
+> bound** in elements and as a comparator against plain's own line — not as the `shared` bytes/WG the
+> kernel will be charged. `probe.py measure` reads the compiled artifact and is the figure to quote once an
+> anchor exists.
 
 > **If you are on a copy of `gluon_swp.py` older than this one, check `disable()` first.** It used to
 > capture `gluon_to_ttgir` as a *resolved* attribute, which loses the `staticmethod` descriptor, so

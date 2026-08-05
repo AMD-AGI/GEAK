@@ -265,10 +265,14 @@ the layouts, and iterate until `--verify` passes.
 > step.** It is the executable form — six numbered stages, one command and one decision each — and it
 > carries two things this summary cannot: the **Apply** checklist (declaring a layout is not applying it;
 > a body left on `AutoLayout` compiles, passes the oracle, and is several times slower), and the rule for
-> **classifying each `ttg.local_alloc` before transcribing it** — with two corrections the vendored copy
-> predates: classify against a **`ns=1` dump**, because at the shipped depth the staging is usually the
-> pipeliner's rather than the author's; and `--verify` *does* fail on a wrong choice (naming the missing
-> `swizzled_shared`), so what it cannot see is allocation **size**, not the classification.
+> **classifying each `ttg.local_alloc` before transcribing it** — with three corrections the vendored copy
+> predates (all three in [`reference.md`](reference.md); the third, that the performance sign is
+> kernel-dependent, is in `## Do-no-harm notes` below): classify against a **`ns=1` dump**, because at the
+> shipped depth the staging is usually the
+> pipeliner's rather than the author's; and `--verify` is blind to the choice **only where the layout is
+> `UNRECOVERABLE`** (which is the case that advice was written for — an excluded layout's buffer can be
+> dropped invisibly). On a recoverable shared layout it FAILs and names the missing `swizzled_shared`, so
+> what it cannot see is allocation **size**, not the classification.
 > Check the size with `scripts/probe.py measure` — compile-only, seconds, no GPU — as soon as the
 > anchor builds, not after the first timing. Read **both** limiters it prints: registers and LDS each cap
 > workgroups per CU, and quoting the LDS side alone will hand you generous headroom on a kernel that is
@@ -389,19 +393,41 @@ champion with its pipeline turned off, at its own config, and compare three numb
 | `plain@ns=1` **faster** than `plain` | the shipped `num_stages` is a *pessimisation* | **do not recover it** — recovering it recovers a negative. Not a rare case: a library kernel whose wrapper passes no `num_stages` inherits the AMD default of 2, which nobody chose for that body. Report it to the kernel's owner |
 | your anchor ≈ `plain@ns=1` **<** `plain` | the entire gap is the missing pipeline, and no layout work will move it | this is the real debt — continue to 2b |
 
-**Read plain's `num_stages` off the LOOP, not the launch — the annotation *overrides* the launch value, and
-getting this backwards manufactures a "no debt" verdict.** A launch-level `num_stages=` does nothing at
-all to a bare-`range` dot-free loop — measured, plain's TTGIR was byte-identical at launch 1/2/3 — while
-a `tl.range(..., num_stages=2)` annotation on the same loop went 2 → 4 → 6 loads. Worse, where the loop
-carries an explicit annotation it wins outright: a kernel that hard-codes `tl.range(num_stages=1)` compiles
-**byte-identically** at every launch depth, so the three arms above come back equal and read as "no
-pipeline to lose" — while the real depth, reachable only by editing that one token in the kernel source, is
-a genuine win. A champion whose launch passes nothing may still be fully pipelined, and one that passes
-`num_stages=2` may never reach the pipeliner at all. The `plain@ns=1` control has to flip whichever
-knob that kernel actually uses, and a frozen annotation is itself a library bug worth reporting.
-`scripts/pipeline_survey.py <tree>` classifies a source tree by which
+**On the middle row, read `spill=` before you write the report, because a pessimising depth is usually a
+register wall and then the bug is the tile rather than the depth.** Measured on one card with only the tile
+varying: the wide tile pessimised at `ns=3` (1.45× worse than its own `ns=1`) while the narrow tile gained,
+and the discriminator was the spill column — the losing arm pinned at the 256-VGPR cap and spilled
+hundreds of bytes per wave *inside* the loop, the winners spilled nothing. `WGs/CU by LDS` was 1 for both
+and could not separate them. This also means **the sign of a debt does not transfer across generations for
+arch reasons alone**: a narrower MFMA shape needs more instructions and keeps twice the dot-operand
+registers live per K-tile, so the same source config can sit on either side of the wall on two gens.
+
+**Find out WHICH `num_stages` knob your champion actually uses before you flip one — there are two, they
+are not equivalent, and turning the wrong one manufactures a "no debt" verdict.** The rule has three cases
+and only the middle one is obvious:
+
+| the loop | what sets the depth | flipping the launch arg |
+| --- | --- | --- |
+| carries `tl.range(..., num_stages=N)` | **the annotation, outright** | **inert** — every launch depth compiles byte-identically |
+| bare `range`, **with a dot** | the launch argument | works; it is the only knob |
+| bare `range`, **dot-free** | nothing — no anchor to pipeline | inert, and so is the launch arg |
+
+So the trap is a kernel that hard-codes `tl.range(num_stages=1)`: the three arms above come back
+**byte-identical**, read as "no pipeline to lose", and the real depth is one token away in the kernel
+source. Measured, that recovered a large win on a kernel this screen had written off. Conversely a
+champion whose launch passes nothing may still be fully pipelined, and one that passes `num_stages=2` may
+never reach the pipeliner at all. Read the annotation, flip *that*, and re-dump to confirm the depth moved
+(load count and `memdesc_index` both scale). A depth frozen in source where the tuner cannot reach it is
+itself a library bug worth reporting. `scripts/pipeline_survey.py <tree>` classifies a source tree by which
 pipeline form each kernel can exercise; treat it as a **screen for what to measure**, not a verdict —
 only a dump settles whether a given dispatch compiled pipelined.
+
+> **`recover`'s pipeline verdict reads `tt.num_stages`; do not let a carry count overrule it.** The
+> attribute is decisive. The `iter_args` count is not — an online-softmax or reduction loop carries
+> accumulators for algorithmic reasons, so it reads ≥ 2 while un-pipelined, and one dump cannot separate
+> the pipeliner's carries from the algorithm's. The tool asserted a positive off the carry count alone and
+> mislabelled an attention champion that its own output showed at `tt.num_stages=1`; it now lets the
+> attribute decide and says INCONCLUSIVE when the attribute is absent.
 
 **2b. Three conditions, all required — none of them alone does anything.**
 
@@ -409,7 +435,7 @@ only a dump settles whether a given dispatch compiled pipelined.
 | --- | --- | --- |
 | 1 | **the loop needs an anchor, and the anchor is a `tt.dot` — not the loop syntax** | `add_schedule_loops(pm, ns)` takes the depth as a **pass argument** and reads no attribute off the loop. So a loop **containing a dot pipelines on a bare `range`**; a **dot-free** loop has no anchor and is the *only* case that needs `tl.range(..., num_stages=N)`, where `None` inherits the launch value |
 | 2 | **the loads must still be `tt.load` when the pipeliner runs** | plain orders the pipeliner at #15/#16 and `add_convert_to_buffer_ops` at **#28**, so plain's own pipeliner only ever sees `tt.load`. Write `gl.load` and arm `buffer_ops=True` to restore that order |
-| 3 | **the staging must be the pipeliner's own** | a hand-written `allocate_shared_memory` + `gl.barrier()` body starves it, and it must be removed **entirely** — one `ttg.barrier` left in the loop makes the pass skip the loop wholesale |
+| 3 | **the staging the pipeliner is asked to build must be its own** | a hand-written `allocate_shared_memory` + `gl.barrier()` body starves it, and to give the pass a loop it will take, that staging has to come out **entirely** — one `ttg.barrier` left in the loop makes the pass skip that loop wholesale. **Scope: this is per-operand, not per-loop** (see below) |
 
 > **Do not generalise the 2×2 in `references/gluon/pipeline-reference.md`.** It reports
 > `gl.load` + bare `range` as not pipelining, which is true **on the dot-free kernel it was measured on**
@@ -420,6 +446,15 @@ On condition 3, the failure has a misleading error: `'ttg.local_alloc' op pipeli
 predicate this op` is the **symptom of staging not removed**, not a language wall — the first
 investigation to hit it concluded that Gluon's `allocate_shared_memory` was fundamentally incompatible
 with the pipeliner, and that was wrong.
+
+**Condition 3 is also narrower than "hand-written staging blocks the pass", and reading it as the broad
+claim will make you skip a loop that would have paid.** What the pass needs is *one* dot whose operands it
+can trace back to a `tt.load`; a **mixed** loop qualifies. Measured on an attention body with three dots:
+the SSA walk back from two of them dies at a `local_store`, but the third is a pure register path
+(`gl.load` → `convert_layout` → permute → `convert_layout` → dot), so the pipeliner fires on that one and
+multi-buffers the rest of the loop along with it — visibly, the body went 3 dots / 104 `v_mfma` to 6 / 208.
+That arm was the kernel's best result. So confirm the pass did nothing from the **IR**, not from the shape
+of your source.
 `buffer_ops=True` is **opt-in** because it fails three ways: on an anchor whose **loads** are already
 `buffer_load` it aborts the pass manager loudly; on one whose **stores** are buffer ops it does not
 raise at all — `LLVM ERROR: Fatal pipeliner error` kills the interpreter; and a single buffer op left
@@ -472,6 +507,10 @@ on a fork that already splices the passes in, because running them twice is a di
 > spill**, because pipelining without the buffer conversion leaves 64-bit pointer *tensors* live across
 > the peeled stages. Occupancy can look untouched — only the `spill=` field moves — so **check the pass
 > list, not the exception**, and check `spill=` rather than `shared`.
+>
+> **The pipeliner and the tail are a pair, and each half alone is a trap in a different direction.**
+> Pipeliner without the tail is the case above. Tail without the pipeliner is worse than slow: it returns
+> **NaN**, because `add_block_pingpong` assumes the pipeliner has run. Neither half is a valid arm.
 >
 > `add_remove_layout_conversions` is the pass that folds the double trip. If you hit it, splice plain's
 > own order after `add_pipeline`: `add_convert_to_tensor_ops` → canonicalizer →
@@ -702,6 +741,12 @@ Do-not-write list, i.e. what compiles and then costs you:
   analysis and fails silently.
 - **`amd_rotating_shared`** — has no `gluon.language` constructor; do not hand-roll a basis for it.
 - **RDNA WMMA formulas.** Not vendored and not applicable; `match.gens` is CDNA.
+- **Copying the champion's `waves_per_eu` across with the rest of its config.** It is not a hint: it
+  reaches LLVM as `amdgpu-waves-per-eu` and **caps** occupancy outright. Measured, an anchor left without
+  it ran at 3 waves/SIMD and was the faster arm; adding the champion's `waves_per_eu=2` left VGPR count
+  unchanged and dropped it to 2 waves/SIMD and a slower clock. The throttle was tuned for plain's
+  register-heavy *pipelined* body, which is not what an un-injected anchor is. Carry the tile shape and
+  the depth over; leave this one off until it earns its way back in.
 - **Sweeping `num_warps` on a transcribed kernel.** `ttgir_to_gluon.py` emits the IR's *literal*
   `warps_per_cta`, so any other warp count disagrees with the layouts — a correctness bug, not a slow
   config. `triton.autotune` itself works on `gluon.jit` and upstream's own Gluon examples use it, but they
@@ -763,13 +808,18 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
     `allocate_shared_memory` keeps it live for the whole function and the allocator charges every
     buffer separately; leaving the same conversions as `ttg.convert_layout` lets the backend
     decompose them against one shared conversion scratch. The second form can cost far less LDS for
-    identical arithmetic — but **cheaper LDS is not the same as faster**, and the direction is not the
-    one the saving suggests: letting the backend reuse one small scratch many times per iteration buys a
-    full-drain `s_barrier` on each reuse, and a transcription that cut its shared footprint by most of an
-    order of magnitude can run slower for that reason alone, with an *identical* instruction multiset
-    otherwise. Compare `s_barrier` and `lgkmcnt(0)` counts, not just `shared` bytes; and check whether
-    LDS was ever the binding limiter, because a saving under a register-bound ceiling buys nothing at all.
-    Neither form is always right — read it off the artifacts rather than assuming.
+    identical arithmetic — but **cheaper LDS is not the same as faster, and the sign is kernel-dependent,
+    so this is a measurement and not a rule.** Three kernels authored both ways and bit-exact: two were
+    **slower** as pass-through despite cutting `shared` by 3× and 8×, one was **faster**. The two
+    mechanisms that decide it are both visible in the artifacts:
+    - **barriers.** Letting the backend reuse one small scratch several times per iteration buys a
+      full-drain `s_barrier` on each reuse. On the two that lost, the loop's instruction *multiset* was
+      identical and only `s_barrier` moved (2 → 16 and 2 → 10). Compare `s_barrier` and `lgkmcnt(0)`,
+      not just `shared` bytes.
+    - **whether the saving is on the binding limiter at all.** On one of them registers pinned occupancy
+      at 1 WG/CU either way, so a 57 KiB saving bought exactly nothing while the barriers cost real time.
+    A third cost is arch-specific: on one kernel the pass-through form lost the hardware transpose
+    entirely (`ds_read_b64_tr` 64 → 0). Read all three off the artifacts rather than assuming.
 - **Writing a batch of variants without timing them is not a search.** Variants that differ only in
   ways the backend folds away measure the same, and without an A/B between them that is invisible,
   so a run can spend its whole budget producing them. Time each variant against the comparator as
@@ -786,7 +836,7 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
   (`.cursor/skills/tile-programming-gluon/`), **pruned to the API surface, the do-not-write lists and the
   two mechanics above**, plus the transcription runbook and the compile-only occupancy probe that step 1
   and step 4 depend on: 16 of 70 reference files and 11 of 51 scripts. Upstream
-  remains the SSOT; this is a one-way snapshot. `references/` is unmodified. `scripts/` carries **eight
+  remains the SSOT; this is a one-way snapshot. `references/` is unmodified. `scripts/` carries **nine
   corrections**, all of which should go back upstream:
   - `ttgir_to_gluon.py` dropped `tilesPerWarp` and `elementBitWidth` when emitting
     `gl.amd.AMDMFMALayout`, so a chained-dot (gfx950, 16×16 mfma) or scaled-MFMA kernel — both of which
@@ -833,6 +883,14 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
   - `ttgir_bridge.py` hard-coded `gl.amd.cdna3.*` in three pieces of advice text, which is wrong guidance
     on `gfx950` — the other generation in this skill's own `match.gens`. Now derived from `rec.arch`,
     with a placeholder rather than a guess for an unknown one.
+  - `recover`'s **pipeline verdict** asserted "plain IS software-pipelined" on `max_iter_args >= 2` alone,
+    independently of `tt.num_stages`. That is a false positive on any accumulator loop, and it fired on an
+    attention champion **in the same report that correctly printed `tt.num_stages=1`** — every
+    online-softmax body carries `m`/`l`/`acc` plus an offset. The verdict decides which control to measure
+    and therefore whether a shortfall reads as a debt or a defect, so a wrong positive sends the author to
+    re-inject a pipeline that was never there. The attribute now decides; a carry count with no attribute
+    reports `INCONCLUSIVE` instead of guessing; and the `num_stages=1` branch now points out that a depth
+    pinned by a source annotation may still be reachable. Four `--selftest` cases pin both directions.
   - `probe.py` printed its `WGs/CU by LDS<=` line from the module-level `LDS_PER_CU = 65536` — the
     constant its own comment labels "fallback only; prefer `lds_per_cu(<arch>)`" — instead of the
     arch-dispatched helper defined immediately above it, and `plan`'s closing LDS note did the same. This
@@ -864,9 +922,14 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
     hazard it is describing. `--kernel` without a colon is now a hard error naming the flag you meant.
     The runbook line itself needs the upstream fix; this is the guard that makes the mistake loud here.
 
-  `ttgir_bridge.py` and the added scripts are `ruff --no-cache` clean; the 20 pre-existing findings
-  in the four older scripts are untouched. All three offline `--selftest` entry points also run from
-  `scripts/smoke_test_recover.sh`, so the two rules above are guarded without a GPU.
+  `ttgir_bridge.py` and the added scripts are `ruff --no-cache` clean; the pre-existing findings in the
+  vendored ones are untouched (20 across the older four, 12 in `probe.py` — including the `F821` for the
+  dead `LDS_PER_CU_BY_ARCH` above, left unreached on purpose). **All ten offline `--selftest` entry
+  points in `scripts/` now run from `scripts/smoke_test_recover.sh`**, so every rule above is guarded
+  without a GPU or a `triton` import. **Four** of them were reachable only by hand before — including
+  `amd_occupancy.py`, which is where `probe.py` delegates the divisor and whose self-test cross-checks
+  `hw_constants.json` — and that is how both the LDS/CU divisor and the pipeline verdict shipped wrong.
+  `gluon_swp` self-skips where no AMD backend imports, by design.
 - **Deliberately not vendored — the whole process layer**: round loop, hardware budget / roofline models,
   profiling (rocprof / ATT / PMC), the lever-card catalogue, bound-class signals, the escalation gate,
   orchestration, experiment records, benchmark hygiene, the transcription *protocol* page, and the

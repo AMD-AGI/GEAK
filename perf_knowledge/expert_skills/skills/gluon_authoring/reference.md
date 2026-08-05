@@ -37,12 +37,21 @@ Load this one **before writing the anchor**, not after it fails. Two of its stag
 other file states: *Apply* (a body left on `AutoLayout` compiles, passes the oracle, and is several
 times slower than the champion) and the classification of each `ttg.local_alloc` (staged vs pass-through).
 
-Two corrections to that classification, both measured after the runbook was written and both owed
-upstream: it is a property of **the dump's `num_stages`**, not of the kernel — at the shipped depth the
-staging you are looking at is often the *pipeliner's*, which a faithful un-pipelined anchor has nothing to
-transcribe, so classify against a **`ns=1` dump**. And `--verify` is **not** blind to the choice: getting it
-wrong shows up as a hard FAIL with the missing `swizzled_shared` named. What `verify` cannot see is
-allocation *size*, which is the narrower claim.
+Three corrections to that classification, all measured after the runbook was written and all owed
+upstream:
+
+1. It is a property of **the dump's `num_stages`**, not of the kernel. At the shipped depth the staging you
+   are looking at is often the *pipeliner's*, which a faithful un-pipelined anchor has nothing to
+   transcribe — so classify against a **`ns=1` dump**. Confirmed independently on two kernels, both of
+   which read "staged" at the shipped depth and textbook "pass-through" at `ns=1`.
+2. **`--verify` is blind to the choice only when the layout is `UNRECOVERABLE`.** That is the case the
+   runbook's advice was written for: a layout with no Gluon constructor is excluded from the comparison, so
+   dropping its buffer is invisible. Where the shared layout *is* recoverable, `verify` sees it and returns
+   a hard FAIL naming the missing `swizzled_shared`. What `verify` cannot see in either case is allocation
+   *size*.
+3. **The performance sign is kernel-dependent.** Of three kernels authored both ways, pass-through was
+   slower on two and faster on one. Judge it from `s_barrier` counts, from which limiter actually binds,
+   and from whether an arch instruction was lost — see `skill.md ## Do-no-harm notes`.
 
 ## Per-arch constants (`references/hardware/`)
 

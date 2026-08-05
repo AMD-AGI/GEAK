@@ -22,7 +22,13 @@ CDNA facts applied (gfx942/gfx950):
   * ArchVGPR + AGPR share ONE 512-entry register file per SIMD -- they are NOT separate budgets
     (this is the single biggest difference from NVIDIA's per-thread 255 and it is why an
     accumulator-heavy tile silently caps at 1 wave/SIMD).
-  * VGPR allocation granularity 8; LDS 64 KiB/CU; wave64.
+  * VGPR allocation granularity 8; wave64; 4 SIMDs/CU.
+  * LDS/CU is **per-generation** -- 64 KiB on CDNA3/gfx942, 160 KiB on CDNA4/gfx950 -- so it is
+    dispatched from `lds_per_cu(arch)` and never quoted as a constant. `measure` prints the
+    divisor and its basis for exactly this reason.
+  * Occupancy is capped JOINTLY by LDS and by registers. Reporting only the LDS side invites the
+    wrong decision: on a register-bound kernel the LDS line can advertise an order of magnitude
+    of headroom that does not exist. `measure` prints both and names which one binds.
 
 The register geometry is NOT the same on RDNA (wave32, a 1536-entry file per SIMD, 256 per
 wave, no AGPRs) -- `measure` reads the target out of the artifact, and `plan` takes `--arch`.

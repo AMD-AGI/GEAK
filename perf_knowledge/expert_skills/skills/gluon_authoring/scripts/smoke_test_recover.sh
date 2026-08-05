@@ -29,12 +29,27 @@ echo "== 1b. layout-equivalence self-test =="
 python3 "$SCRIPT_DIR/recover_gluon.py" --selftest
 
 echo "== 1c. pipeline-recovery self-tests =="
-# Also offline. The candidacy rule and the version-dependent splice point are the two
+# Also offline. The candidacy rule and the two version-dependent splice points are the
 # things here that can be wrong without failing loudly, so they are pinned rather than
 # left to the on-box run. gluon_swp reports itself skipped where no AMD backend imports.
 python3 "$SCRIPT_DIR/pipeline_survey.py" --selftest
 python3 "$SCRIPT_DIR/patch_reinject.py" --selftest
+python3 "$SCRIPT_DIR/patch_async_reinject.py" --selftest
 python3 "$SCRIPT_DIR/gluon_swp.py" --selftest
+
+echo "== 1d. layout-bridge, occupancy and capability self-tests =="
+# All four were reachable only by hand, which is how a wrong LDS/CU divisor and a wrong
+# pipeline verdict both shipped. The bridge's cases include the attention-shaped false
+# positive (a loop-carry count must not overrule tt.num_stages) and probe's include the
+# per-arch divisor, so both are guarded here rather than on the box.
+python3 "$SCRIPT_DIR/ttgir_bridge.py" --selftest
+python3 "$SCRIPT_DIR/probe.py" --selftest
+# amd_occupancy is where probe DELEGATES the divisor, and its self-test cross-checks
+# hw_constants.json -- i.e. it is the one that catches a bad per-arch figure at the source
+# rather than in the report. probe_levers degrades to available=None without triton rather
+# than failing, so it is offline-safe here too.
+python3 "$SCRIPT_DIR/amd_occupancy.py" --selftest
+python3 "$SCRIPT_DIR/probe_levers.py" --selftest
 
 if [ -f "$V5" ] && [ -f "$V3SW" ] && [ -f "$V3NO" ]; then
   echo "== 2. recover anchor (--with-pipeline) from a real plain .ttgir =="
