@@ -184,18 +184,74 @@ def convert_layer_inplace(layer):
 
 
 # ---- runtime -----------------------------------------------------------------
-def _pick_tiles(M, N, K):
-    tile_m = 16 if M <= 64 else 32
-    tile_n = 256
-    while N % tile_n != 0:
-        tile_n //= 2
-    tile_k = 128
-    while (K % tile_k != 0) or (tile_k % 32 != 0) or ((tile_m * tile_k * 2) % 256 != 0):
-        tile_k -= 32
-        if tile_k < 32:
-            tile_k = 32
+# AUTHORED WINNER PORT (fused_moe_kernel_gptq_awq r2_d0, Director-verified 2.32x geomean):
+# on-box swept prefill tiles for the M>=512 bucket (gfx942, int4_bf16, E=384,
+# hidden=7168, inter=256, group_size=32): stage1 gate_up (64,128,64) 3.91->3.02 ms,
+# stage2 down (64,128,64) 2.03->1.90 ms — both beat the generic tile_m=32 heuristic.
+# Mid (M>64) and decode (M<=64) buckets are unchanged from the validated shim.
+def _validate_tiles(M, N, K, tm, tn, tk):
+    if N % tn != 0:
+        tn = 256
+        while N % tn != 0:
+            tn //= 2
+    while (K % tk != 0) or (tk % 32 != 0) or ((tm * tk * 2) % 256 != 0):
+        tk -= 32
+        if tk < 32:
+            tk = 32
             break
-    return tile_m, tile_n, tile_k
+    return tm, tn, tk
+
+
+# Decode CU-fill tiles (r1_d1). The decode bucket (M<=64) is CU-underfill /
+# latency bound: the stage1 grid is (N1//tile_n, blocks, k_batch) and at M=1/64
+# `blocks` is tiny (~8-16 expert-blocks), so only a fraction of the 304 CUs run.
+# WINNER: shrink stage1 tile_n 256 -> 64 so gx = N1//tile_n = 1024//64 = 16 (vs 4),
+# raising active CTAs 4x on the CORRECT fused-silu, non-atomic path. This lifts
+# decode_M1 ~1.75x and decode_M64 ~1.07x while PASSING the correctness gate. tile_m
+# stays 16 (larger tile_m over-pads the tiny M=64 bucket and regresses it). tile_n=64
+# is the floor (must be divisible by CShuffleNLane*EVec=64).
+#
+# NOTE on split-K: `compile_moe_gemm1` supports k_batch>1 (the classic CU-fill lever)
+# and it IS a large decode win (decode_M1 up to 1.59x at k_batch=2), BUT the DSL's
+# int4_bf16 groupwise split-K epilogue is numerically defective on gfx942 — it writes
+# raw gate|up partials (no fused silu) that are ~2% off in magnitude (cos~0.98,
+# rel_l1~3.5) INDEPENDENT of k_batch/tile_n, failing the rel_l1<=5e-2 OR cos>=0.99
+# gate. Fixing it needs edits to kernels/moe_gemm_2stage.py (out of this lane), so
+# split-K stays disabled (k_batch=1). The split-K plumbing below is kept, gated off.
+_DECODE_TILE_N = int(os.environ.get("FLYDSL_DECODE_TILE_N", "64"))
+_DECODE_TILE_M = int(os.environ.get("FLYDSL_DECODE_TILE_M", "16"))
+_DECODE_TILE_K = int(os.environ.get("FLYDSL_DECODE_TILE_K", "128"))
+_DECODE_KBATCH = int(os.environ.get("FLYDSL_DECODE_KBATCH", "1"))
+
+
+def _pick_tiles(M, N, K):
+    if M >= 512:                    # prefill bucket -> swept tiles (authored winner)
+        tm, tn, tk = 64, 128, 64
+    elif M > 64:                    # mid bucket
+        tm, tn, tk = 32, 256, 128
+    else:                           # decode bucket
+        tm, tn, tk = _DECODE_TILE_M, _DECODE_TILE_N, _DECODE_TILE_K
+    return _validate_tiles(M, N, K, tm, tn, tk)
+
+
+def _decode_k_batch(M, model_dim, tile_k):
+    """Stage1 split-K factor for the decode bucket ONLY. Validates the FlyDSL
+    ping-pong constraints (model_dim % k_batch == 0, K_per_batch % tile_k == 0,
+    K_per_batch/tile_k even and >= 4). Returns 1 (no split-K) if invalid or non-decode."""
+    if M > 64:
+        return 1
+    kb = _DECODE_KBATCH
+    if kb <= 1:
+        return 1
+    if model_dim % kb != 0:
+        return 1
+    k_per = model_dim // kb
+    if k_per % tile_k != 0:
+        return 1
+    kt = k_per // tile_k
+    if kt < 4 or (kt % 2) != 0:
+        return 1
+    return kb
 
 
 def _get_exe1(wptr, M, hidden, N1, inter, E, top_k):
@@ -209,13 +265,27 @@ def _get_exe1(wptr, M, hidden, N1, inter, E, top_k):
     # Keep the proven _pick_tiles heuristic; call it with the same (N1, hidden)
     # the previous stage-1 path used so tile_m/tile_n/tile_k are unchanged.
     tile_m, tile_n, tile_k = _pick_tiles(M, N1, hidden)
-    exe = _compile_moe_gemm1(
-        model_dim=hidden, inter_dim=inter, experts=E, topk=top_k,
-        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        doweight_stage1=False, in_dtype="int4_bf16", group_size=32,
-        out_dtype="bf16", scale_is_bf16=True, use_cshuffle_epilog=False,
-    )
-    ent = dict(exe=exe, tile_m=tile_m, compiled=None)
+    # Decode-only split-K on stage1 (K=hidden) to fill the CUs (r1_d1). Split-K
+    # forces the CShuffle + atomic-partial path, so use_cshuffle_epilog must not be
+    # False when k_batch>1 (the DSL sets it internally, but we pass None to let it
+    # pick the split-K path). bf16 global atomics are supported on gfx942.
+    k_batch = _decode_k_batch(M, hidden, tile_k)
+    if k_batch > 1:
+        exe = _compile_moe_gemm1(
+            model_dim=hidden, inter_dim=inter, experts=E, topk=top_k,
+            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+            doweight_stage1=False, in_dtype="int4_bf16", group_size=32,
+            out_dtype="bf16", scale_is_bf16=True, use_cshuffle_epilog=None,
+            k_batch=k_batch,
+        )
+    else:
+        exe = _compile_moe_gemm1(
+            model_dim=hidden, inter_dim=inter, experts=E, topk=top_k,
+            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+            doweight_stage1=False, in_dtype="int4_bf16", group_size=32,
+            out_dtype="bf16", scale_is_bf16=True, use_cshuffle_epilog=False,
+        )
+    ent = dict(exe=exe, tile_m=tile_m, compiled=None, k_batch=k_batch)
     _ECACHE[key] = ent
     return ent
 
@@ -291,6 +361,37 @@ if _HAS_TRITON:
         tl.store(sw_ptr + offs, w, mask=mask)
 
 
+if _HAS_TRITON:
+    @triton.jit
+    def _silu_and_mul_kernel(
+        gu_ptr,     # bf16 [R, 2*inter]  raw gate|up (split-K stage1 output)
+        out_ptr,    # bf16 [R, inter]    silu(gate)*up
+        inter,
+        BLOCK: tl.constexpr,
+    ):
+        # One program per (row, inter-block). gate at col j, up at col inter+j.
+        row = tl.program_id(0)
+        cb = tl.program_id(1) * BLOCK
+        offs = cb + tl.arange(0, BLOCK)
+        mask = offs < inter
+        g = tl.load(gu_ptr + row * (2 * inter) + offs, mask=mask, other=0.0).to(tl.float32)
+        u = tl.load(gu_ptr + row * (2 * inter) + inter + offs, mask=mask, other=0.0).to(tl.float32)
+        y = (g * tl.sigmoid(g)) * u
+        tl.store(out_ptr + row * inter + offs, y.to(out_ptr.dtype.element_ty), mask=mask)
+
+
+def _silu_and_mul(gate_up, inter):
+    """Device-side silu_and_mul for the split-K stage1 path (which writes raw
+    [R, 2*inter] gate|up, no fused epilogue silu). Capture-safe: fixed grid from
+    static shapes, no host sync. Returns [R, inter] bf16 activation."""
+    R = gate_up.shape[0]
+    out = torch.empty(R, inter, device=gate_up.device, dtype=torch.bfloat16)
+    BLOCK = 512
+    grid = (R, (inter + BLOCK - 1) // BLOCK)
+    _silu_and_mul_kernel[grid](gate_up, out, inter, BLOCK=BLOCK)
+    return out
+
+
 def _routing_post_fused(flat, twf, numel, tk, M):
     """Collapse the ~13-op torch post-processing of vLLM's moe_align output
     (flat->token/slot decode, (slot<<24)|token fused encode, sorted-weight gather,
@@ -350,7 +451,15 @@ def _grouped_gemm1(a, w_packed, scale_flat, N1, hidden, inter, E, exe_ent, rt, M
     flyc = _flyc
     DEV = a.device
     a_scale_1d = _empty_scale(DEV)
-    out = torch.empty(M * top_k, inter, device=DEV, dtype=torch.bfloat16)
+    kb = exe_ent.get("k_batch", 1)
+    if kb > 1:
+        # Split-K stage1 writes RAW gate|up [M*top_k, 2*inter] (the atomic-partial
+        # CShuffle epilogue does NOT fuse silu -- silu(sum_k partials) != sum_k
+        # silu(partials)), and atomically accumulates so the buffer MUST start
+        # zeroed. Capture-safe: single device memset, fixed shape, no host sync.
+        out = torch.zeros(M * top_k, 2 * inter, device=DEV, dtype=torch.bfloat16)
+    else:
+        out = torch.empty(M * top_k, inter, device=DEV, dtype=torch.bfloat16)
 
     def args(o):
         # gemm1 launch order: (o, x, w, sx, sw, sorted_ids, expert_ids,
@@ -365,6 +474,9 @@ def _grouped_gemm1(a, w_packed, scale_flat, N1, hidden, inter, E, exe_ent, rt, M
         cexe = flyc.compile(exe_ent["exe"], *args(out))
         exe_ent["compiled"] = cexe
     cexe(*args(out))
+    if kb > 1:
+        # Apply silu_and_mul on device to collapse [M*top_k, 2*inter] -> [M*top_k, inter].
+        out = _silu_and_mul(out, inter)
     return out
 
 
