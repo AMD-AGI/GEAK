@@ -61,6 +61,16 @@ ov = _load("overlay_setup", "overlay_setup.py")
 
 EMPTY_MANIFEST = {"modules": [], "rebinds": [], "captures": []}
 
+# The overlay's fixed code files. The apply logic lives in _overlay_apply.py (imported by both
+# sitecustomize.py — parent + forked sglang workers — and _overlay_worker_ext.py — vLLM spawned TP
+# workers via --worker-extension-cls). A bare overlay contains these three plus the manifest.
+CODE_FILES = ["_overlay_apply.py", "_overlay_worker_ext.py", "sitecustomize.py"]
+
+
+def _entries(*extra):
+    """Sorted overlay dir listing = the fixed code files + the manifest + any extra impl files."""
+    return sorted(CODE_FILES + ["_overlay_manifest.json"] + list(extra))
+
 
 class _RecordingRun:
     """Stands in for subprocess.run: records argv and cwd, never executes anything.
@@ -183,8 +193,10 @@ class TestEnsureOverlay(_OverlayCase):
         man = ov._ensure_overlay(self.overlay)
 
         self.assertEqual(man, os.path.join(self.overlay, "_overlay_manifest.json"))
-        self.assertEqual(self._overlay_entries(), ["_overlay_manifest.json", "sitecustomize.py"])
+        self.assertEqual(self._overlay_entries(), _entries())
         self.assertEqual(self._read(os.path.join(self.overlay, "sitecustomize.py")), ov.SITECUSTOMIZE)
+        self.assertEqual(self._read(os.path.join(self.overlay, "_overlay_apply.py")), ov.OVERLAY_APPLY)
+        self.assertEqual(self._read(os.path.join(self.overlay, "_overlay_worker_ext.py")), ov.OVERLAY_WORKER_EXT)
         self.assertEqual(self._manifest(), EMPTY_MANIFEST)
 
     def test_missing_intermediate_dirs_are_created(self):
@@ -193,22 +205,32 @@ class TestEnsureOverlay(_OverlayCase):
         self.assertTrue(os.path.isfile(os.path.join(nested, "sitecustomize.py")))
 
     def test_shim_is_syntactically_valid_python(self):
-        # sitecustomize.py is exec'd by the interpreter before the server imports anything; a
-        # SyntaxError here would take down the whole inference process, not just the overlay.
+        # All three code files are exec'd/imported by the interpreter before the server imports anything;
+        # a SyntaxError would take down the whole inference process, not just the overlay.
         compile(ov.SITECUSTOMIZE, "sitecustomize.py", "exec")
+        compile(ov.OVERLAY_APPLY, "_overlay_apply.py", "exec")
+        compile(ov.OVERLAY_WORKER_EXT, "_overlay_worker_ext.py", "exec")
 
-    def test_shim_consumes_the_three_manifest_sections(self):
-        shim = ov.SITECUSTOMIZE
+    def test_apply_consumes_the_three_manifest_sections(self):
+        # The manifest-driven apply logic lives in _overlay_apply.py (imported by the shim + worker-ext).
+        apply_src = ov.OVERLAY_APPLY
         for section in EMPTY_MANIFEST:
-            self.assertIn('_m.get("%s", [])' % section, shim)
+            self.assertIn('_m.get("%s", [])' % section, apply_src)
 
-    def test_shim_calls_capture_shapes_install_as_capture_shapes_defines_it(self):
-        # The shim's only cross-file call. capture_shapes.install(target, out_dir, max_cases=5)
-        # is copied in by add-capture, so the 3-positional-arg call site must keep matching.
+    def test_apply_calls_capture_shapes_install_as_capture_shapes_defines_it(self):
+        # apply()'s only cross-file call. capture_shapes.install(target, out_dir, max_cases=5) is copied
+        # in by add-capture, so the 3-positional-arg call site must keep matching.
         self.assertIn('capture_shapes.install(_e["target"], _e["out"], int(_e.get("max", 5)))',
-                      ov.SITECUSTOMIZE)
+                      ov.OVERLAY_APPLY)
         self.assertIn("def install(target, out_dir, max_cases=5):",
                       self._read(os.path.join(SCRIPTS_DIR, "capture_shapes.py")))
+
+    def test_shim_and_worker_ext_delegate_to_apply(self):
+        # Both entry points must import _overlay_apply so the rebind runs in whichever process loads them
+        # (sitecustomize: parent + forked sglang workers; worker-ext: vLLM spawned TP workers).
+        self.assertIn("import _overlay_apply", ov.SITECUSTOMIZE)
+        self.assertIn("import _overlay_apply", ov.OVERLAY_WORKER_EXT)
+        self.assertIn("class OverlayWorkerExtension", ov.OVERLAY_WORKER_EXT)
 
     def test_rerun_preserves_an_edited_shim_and_an_existing_manifest(self):
         # Re-running any add-* must not reset an overlay that already carries accepted kernels.
@@ -520,7 +542,7 @@ class TestAddRebind(_OverlayCase):
     def test_without_impl_file_nothing_extra_is_written(self):
         # The impl is expected to be importable already; the overlay must not invent a file.
         self._run(ov.cmd_add_rebind, self._ns_rebind())
-        self.assertEqual(self._overlay_entries(), ["_overlay_manifest.json", "sitecustomize.py"])
+        self.assertEqual(self._overlay_entries(), _entries())
 
     def test_impl_file_is_copied_to_the_overlay_root_so_it_is_importable(self):
         # The overlay dir itself is on PYTHONPATH, so `import fast_act` must resolve from its root.
@@ -530,8 +552,7 @@ class TestAddRebind(_OverlayCase):
 
         copied = os.path.join(self.overlay, "fast_act.py")
         self.assertEqual(self._read(copied), "def fast_silu_and_mul():\n    return 1\n")
-        self.assertEqual(self._overlay_entries(),
-                         ["_overlay_manifest.json", "fast_act.py", "sitecustomize.py"])
+        self.assertEqual(self._overlay_entries(), _entries("fast_act.py"))
 
     def test_re_rebinding_the_same_target_replaces_it(self):
         self._run(ov.cmd_add_rebind, self._ns_rebind())
@@ -568,11 +589,10 @@ class TestAddCapture(_OverlayCase):
         self.assertEqual(out[1], "add-capture %s -> %s" % (self.TARGET, os.path.join(self.tmp, "task")))
 
     def test_capture_file_is_always_named_capture_shapes_py(self):
-        # The shim does a bare `import capture_shapes`, so the basename cannot be preserved.
+        # apply() does a bare `import capture_shapes`, so the basename cannot be preserved.
         cap = self._write("my_capture.py", "def install(target, out_dir, max_cases=5):\n    pass\n")
         self._run(ov.cmd_add_capture, self._ns_capture(capture_file=cap))
-        self.assertEqual(self._overlay_entries(),
-                         ["_overlay_manifest.json", "capture_shapes.py", "sitecustomize.py"])
+        self.assertEqual(self._overlay_entries(), _entries("capture_shapes.py"))
 
     def test_default_capture_file_is_the_repo_copy_beside_this_script(self):
         self._run(ov.cmd_add_capture, self._ns_capture())

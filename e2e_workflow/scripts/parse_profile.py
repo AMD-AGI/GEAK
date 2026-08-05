@@ -49,7 +49,7 @@ from collections import defaultdict
 RULES = [
     (r"triton|_kernel_0d1d|tt\.|fused_.*kernel", "triton", "triton", True,
      "Triton kernel — extractable; try Triton tuning, or a CK/HIP rewrite if memory/compute bound."),
-    (r"Cijk|Tensile|hipblaslt|hipBLASLt|rocblas|miopen|cublas|cutlass|GemmEx|\bhgemm\b|\bsgemm\b|\bf16_gemm\b|\bigemm\b",
+    (r"Cijk|Tensile|hipblaslt|rocblas|miopen|cublas|cutlass|_gemm|GemmEx|gemm_|hgemm|sgemm|f16_gemm|igemm",
      "library_gemm", "hipblaslt", False,
      "Library GEMM (hipBLASLt/Tensile/rocBLAS/…). Tune via heuristics/env or swap to aiter/CK GEMM; rarely source-editable."),
     (r"aiter|ater::", "fused_custom", "aiter", True,
@@ -75,30 +75,32 @@ RULES = [
 ]
 
 
-# Lowercase vendor-library prefixes that ship a `..._kernel`-named symbol which is NOT source-editable
-# (a compiled library entry, tuned via env/heuristics, not a @jit body). These must NOT be caught by the
-# snake_case-`_kernel` guard below — they belong to the library_gemm rule. NOTE: `ck`/`aiter`/triton names
-# are deliberately absent (those ARE editable via their own RULES entries).
-_LIB_KERNEL_PREFIX = re.compile(r"^(rocblas|hipblaslt|tensile|miopen|cublas|cutlass)_", re.IGNORECASE)
+# A leading-underscore, all-lowercase `_..._kernel` symbol is the aiter/Triton `@jit` naming convention
+# (e.g. `_gemm_a8w8_blockscale_kernel`, `_fwd_kernel`) — a source-editable kernel, even when its body
+# contains a `gemm`/`_gemm` token that the library_gemm rule would otherwise swallow. `body` is the name
+# up to `_kernel`, so an uppercase autotune suffix (`..._kernel_GROUP_K_128`) does not disqualify it. A
+# mangled/qualified C++ symbol (`void gemm_kernel<float>`, `Cijk_...`, `rocblas_gemm_kernel`) does NOT
+# start with `_`+lowercase, so it is NOT rescued and stays library_gemm. Attention kernels are excluded so
+# the library_attn rule still classifies them.
+_JIT_KERNEL = re.compile(r"^_[a-z0-9_]*_kernel", re.ASCII)
+_ATTN_HINT = re.compile(r"flash|fmha|attention|attn|_mha_|paged|kv_cache|decode_attention", re.IGNORECASE)
 
 
 def classify(name):
-    # Snake_case JIT-kernel guard (runs BEFORE the RULES scan). A name whose body up to `_kernel` is pure
-    # lowercase snake_case is a Triton/custom @jit kernel and is source-editable — even if that body
-    # contains substrings like `_gemm` that would otherwise match the library_gemm rule. An uppercase
-    # autotune suffix (e.g. `_GROUP_K_128`) after `_kernel` is ignored; a mangled C++ symbol (`..._Kernel`,
-    # `Cijk_...`) fails the lowercase test and falls through to RULES. This is the fix for editable Triton
-    # GEMMs like `_gemm_a8w8_blockscale_kernel_...` being mislabeled library_gemm/non-editable. Exception:
-    # a lowercase VENDOR-library symbol (e.g. `rocblas_gemm_kernel`) is NOT editable — exempt it so it falls
-    # through to the library_gemm rule rather than being pulled into the author lane.
-    m = re.search(r"_kernel", name, re.IGNORECASE)
-    if not _LIB_KERNEL_PREFIX.match(name) and (
-            (m and re.match(r"^[a-z0-9_]+$", name[:m.end()])) or re.search(r"_fwd_kernel|_bwd_kernel", name, re.IGNORECASE)):
-        return ("triton", "triton", True,
-                "Snake_case JIT kernel (likely Triton). Extractable; tune or compare backends.")
     for rx, cls, backend, editable, hint in RULES:
         if re.search(rx, name, re.IGNORECASE):
+            # Narrow rescue: only a library_gemm hit on a leading-underscore lowercase `_..._kernel` (a JIT
+            # GEMM like `_gemm_a8w8_blockscale_kernel`) is a mislabel — re-route it to editable Triton. Every
+            # other rule (incl. attention, real vendor GEMMs, mangled C++ symbols) is left untouched.
+            if cls == "library_gemm" and _JIT_KERNEL.match(name) and not _ATTN_HINT.search(name):
+                return ("triton", "triton", True,
+                        "Editable Triton/aiter JIT GEMM (leading-'_' snake_case _kernel). Extractable; tune or compare backends.")
             return cls, backend, editable, hint
+    # Fallback: a snake_case symbol ending in 'kernel' (and not a mangled C++ symbol) is almost
+    # always a Triton/custom JIT kernel in sglang -> editable.
+    if re.search(r"^[a-z0-9_]+kernel[a-z0-9_]*$", name) or re.search(r"_fwd_kernel|_bwd_kernel", name):
+        return ("triton", "triton", True,
+                "Snake_case JIT kernel (likely Triton). Extractable; tune or compare backends.")
     return "other", "unknown", True, "Unclassified — inspect source to route."
 
 

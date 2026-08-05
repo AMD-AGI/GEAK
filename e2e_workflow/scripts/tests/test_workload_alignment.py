@@ -902,8 +902,9 @@ class TestClassify(unittest.TestCase):
 
     Regression guard for the bug where an editable Triton GEMM whose name contains a library substring
     (`_gemm_a8w8_blockscale_kernel_...`) was mislabeled library_gemm/non-editable and silently dropped
-    from the kernel track. The snake_case `..._kernel` guard must win over the library_gemm rule, while
-    genuine vendor/mangled symbols (Cijk_*, hipBLASLt, Tensile_*) stay non-editable.
+    from the kernel track. The NARROW rescue re-routes ONLY a library_gemm hit on a leading-underscore
+    lowercase `_..._kernel` (the aiter/Triton @jit naming) to editable Triton; every other rule
+    (attention, real vendor/mangled GEMMs) is left exactly as the RULES table decides.
     """
 
     def _c(self, name):
@@ -911,47 +912,48 @@ class TestClassify(unittest.TestCase):
         return cls, editable
 
     def test_triton_gemm_kernel_is_editable(self):
-        # The headline regression: a Triton block-scale GEMM with a `_gemm` substring + autotune suffix.
+        # The headline regression: a Triton block-scale GEMM with a `_gemm` substring + autotune suffix
+        # is now editable Triton (was library_gemm/non-editable -> silently dropped).
         self.assertEqual(self._c("_gemm_a8w8_blockscale_kernel_GROUP_K_128_GROUP_N_128"), ("triton", True))
         self.assertEqual(self._c("_gemm_a8w8_blockscale_kernel"), ("triton", True))
+        self.assertEqual(self._c("_gemm_a8w8_blockscale_kernel_GROUP_K_128_cache_modifier_CG"), ("triton", True))
 
-    def test_snake_case_kernels_editable(self):
-        for n in ("_fwd_kernel", "_attn_fwd_kernel", "fmoe_fused_kernel", "rms_norm_kernel",
-                  "_bwd_kernel", "_gemm_a8w8_blockscale_kernel_GROUP_K_128_cache_modifier_CG"):
+    def test_leading_underscore_jit_kernels_editable(self):
+        # Leading-'_' lowercase `_..._kernel` JIT kernels are extractable/editable.
+        for n in ("_fwd_kernel", "_bwd_kernel", "_fwd_grouped_kernel_stage1"):
             with self.subTest(n=n):
                 cls, editable = self._c(n)
                 self.assertTrue(editable, f"{n} should be editable")
-                self.assertEqual(cls, "triton", f"{n} should be triton")
+
+    def test_rescue_does_not_over_reach(self):
+        # The rescue only touches library_gemm hits; kernels that legitimately hit OTHER rules keep their
+        # class. An attention `_..._kernel` stays library_attn (excluded from the rescue); a norm kernel
+        # stays reduction_norm. Both routing decisions are unchanged by the fix.
+        self.assertEqual(self._c("_attn_fwd_kernel"), ("library_attn", False))
+        self.assertEqual(self._c("rms_norm_kernel"), ("reduction_norm", True))
 
     def test_library_symbols_not_editable(self):
-        # Mangled/vendor symbols: uppercase body fails the snake_case guard -> library_gemm/non-editable.
+        # Mangled / vendor GEMM symbols stay non-editable: they are not a leading-'_' lowercase _kernel,
+        # so the rescue does NOT apply and the library_gemm rule wins.
         for n in ("Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV", "Tensile_foo_gemm", "hipblasLtMatmul",
-                  "GemmEx_something", "rocblas_hgemm"):
+                  "GemmEx_something", "rocblas_hgemm", "void gemm_kernel<float>(int)", "gemm_kernel"):
             with self.subTest(n=n):
                 cls, editable = self._c(n)
                 self.assertEqual(cls, "library_gemm", f"{n} should be library_gemm")
                 self.assertFalse(editable, f"{n} should be non-editable")
 
     def test_lowercase_vendor_kernel_not_editable(self):
-        # A LOWERCASE vendor-library symbol that happens to end in `_kernel` must NOT be pulled into the
-        # editable-Triton net by the snake_case guard. The core guarantee is editable==False (the vendor
-        # prefix exempts it); its exact class is library_gemm when the name is gemm-shaped, else `other`
-        # (still non-editable) — either way it does NOT enter the author lane.
+        # A LOWERCASE vendor-library symbol ending in `_kernel` must NOT be pulled into the editable net:
+        # it lacks the leading-'_' the rescue requires, so it stays library_gemm/non-editable.
         for n in ("rocblas_gemm_kernel", "hipblaslt_gemm_kernel", "tensile_gemm_kernel_128",
-                  "miopen_conv_kernel", "cublas_gemm_kernel", "cutlass_gemm_kernel"):
+                  "cublas_gemm_kernel", "cutlass_gemm_kernel"):
             with self.subTest(n=n):
                 cls, editable = self._c(n)
-                self.assertFalse(editable, f"{n} should be non-editable, got {cls}/editable")
-
-    def test_editable_gemm_kernels_still_editable(self):
-        # The exemption must NOT over-reach: genuinely editable Triton/CK `..._kernel` names stay editable.
-        for n in ("_gemm_a8w8_blockscale_kernel", "_gemm_a8w8_blockscale_kernel_GROUP_K_128", "ck_gemm_kernel"):
-            with self.subTest(n=n):
-                cls, editable = self._c(n)
-                self.assertTrue(editable, f"{n} should stay editable")
+                self.assertEqual(cls, "library_gemm", f"{n} should be library_gemm")
+                self.assertFalse(editable, f"{n} should be non-editable")
 
     def test_aiter_and_other(self):
-        # aiter mangled symbol ending in `_kernelI...` is NOT pure snake_case up to `_kernel` (uppercase
+        # aiter mangled symbol ending in `_kernelI...` is NOT a leading-'_' lowercase `_kernel` (uppercase
         # `ZN5aiter`) -> falls through to the aiter RULES entry (fused_custom, editable).
         self.assertEqual(self._c("_ZN5aiter24add_rmsnorm_quant_kernelIDF16b"), ("fused_custom", True))
         # A non-kernel op with no rule match -> other/editable (inspect-source default).

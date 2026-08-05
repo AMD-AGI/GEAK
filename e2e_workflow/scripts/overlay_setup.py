@@ -157,13 +157,17 @@ def module_file(dotted):
 
 def _ensure_overlay(overlay):
     os.makedirs(overlay, exist_ok=True)
-    # Always (re)write the code files so an upgraded overlay_setup.py refreshes them in an existing overlay
-    # dir; they are content-fixed templates so overwriting is safe and reversible (drop the dir to revert).
+    # WRITE-IF-MISSING (never clobber): overlays COMPOUND — a candidate overlay is `cp -r` from the current
+    # accepted stack and then `add-*` appends to it, so a re-run of any add-* must preserve an existing
+    # (possibly operator-edited) shim + the accepted manifest. The three code files are content-fixed
+    # templates; a `cp -r`'d overlay already carries them, so only a genuinely fresh dir writes them here.
     for fname, body in (("_overlay_apply.py", OVERLAY_APPLY),
                         ("sitecustomize.py", SITECUSTOMIZE),
                         ("_overlay_worker_ext.py", OVERLAY_WORKER_EXT)):
-        with open(os.path.join(overlay, fname), "w") as fh:
-            fh.write(body)
+        p = os.path.join(overlay, fname)
+        if not os.path.exists(p):
+            with open(p, "w") as fh:
+                fh.write(body)
     man = os.path.join(overlay, "_overlay_manifest.json")
     if not os.path.exists(man):
         with open(man, "w") as fh:
