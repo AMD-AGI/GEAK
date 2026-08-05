@@ -26,15 +26,16 @@ expects:
   parity: required
 validation:
   status: validated
-  last_verified: '2026-07-20'
+  last_verified: '2026-07-26'
   gpu: gfx942/MI300X
   model: Kimi-K2.6-int4-W4A16
   measured:
-    isolated: '2.0-2.3x'
+    isolated: '2.0-2.32x'
     e2e_pct: 46.3
     e2e_pct_equal_config: 77.0
+    e2e_pct_best_full_stack: 143.2
     parity: pass
-    note: 'RUN5 (07-20) full-config accepted +46.3% same-session (1.63x), +77% equal-config; startup no-OOM re-verified 2026-07-23 at mem 0.9 / full 262144 (Available KV 25.25 GiB, capture 51/51+35/35, no hang). Older capped +32.6% was the pre-accumulate=True shim.'
+    note: 'BEST (2026-07-26, Kimi-K2.6 int4-W4A16, MI300X TP4): full-stack same-session warm A/B, TRUE bare baseline 393.3 -> 956.3 tok/s = 2.43x (+143.2%), parity pass, TPOT 158.9->64.7 ms (decode 2.45x), TTFT 4427->2673. Stack = cfg0 (VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4 + aiter-MLA, which UPGRADES the decode path to a FULL cuda-graph; +2.68%) THEN the flydsl authored int4-W4A16 2-stage MoE (h0 alone ref 399.53->956.66 = +139.45%, iso 2.32x, non-overlapping, parity pass) THEN decode tile_n=64 refinement (+3.34%). KEY ENABLER: the decode-FULL cuda-graph (via aiter MLA) is what lets the flydsl decode gain fully surface; without it the win is much smaller. This does NOT conflict with the RUN5 numbers below — those are flydsl-marginal (+46.3% same-session) / equal-config (+77%); +143.2% is the whole accepted stack vs the bare baseline. RUN5 (07-20): flydsl-marginal +46.3% same-session (1.63x), +77% equal-config. Startup no-OOM re-verified 2026-07-23 at mem 0.9 / full 262144 (Available KV 25.25 GiB, capture 51/51+35/35, no hang). Older capped +32.6% was the pre-accumulate=True shim.'
   artifact: perf_knowledge/expert_skills/skills/apply_flydsl_moe_to_vllm
 role: advisory_prior
 supersedes: []
@@ -163,6 +164,32 @@ installed vLLM (off by default ⇒ byte-identical stock; back up the two files f
    found in 60 seconds`), step 2b was not wired — do NOT report a number; fix the seam, do not reject.
 5. **Gate**: same-session A/B baseline (Triton, `VLLM_USE_FLYDSL_MOE` unset) vs FlyDSL, BOTH graph, identical
    `vllm bench serve` (ISL/OSL/conc), plus GSM8K within noise. Quote same-session ratios only.
+   - **GATE ON THE LIVE SERVING REGIME — pick the acceptance metric from the actual ISL/OSL; do NOT assume
+     decode (regime-adaptive, verified 2026-08-04).** The isolated op-bench M-weighting MUST mirror the served
+     shapes, and the same-session A/B must improve the metric the *dominant* regime is bound by:
+     - **decode-dominated serving** (short ISL, e.g. 1024/1024/64) → primary signal is a **TPOT drop** (best
+       run 07-26: 158.9 -> 64.7 ms, decode 2.45x). Here a candidate whose isolated bake-off is weighted toward
+       large-M prefill (observed: M8192 = 72% of the metric) can be REAL 1.83x isolated yet REGRESS decode
+       serving by **-15.95% e2e**, because its tuned tiles lose to vLLM's default at the live decode M-buckets
+       → `rejected`.
+     - **prefill-heavy serving** (long ISL, e.g. 8192/1024/64) → primary signal is a **TTFT drop and/or
+       output-throughput gain** (TPOT is secondary here); the prefill M-buckets dominate e2e. Validated on
+       ISL8192: 300.51 -> 398.35 tok/s (+32.6%) and the +79.95% ISL8192 run. Do NOT reject a real prefill win
+       merely because TPOT did not move — that would be the wrong metric for this regime.
+     - **balanced / unknown** → require a same-session throughput gain AND no regression in EITHER TTFT or TPOT.
+     Universal rule: the isolated bake-off M-weighting must match the served ISL/OSL, and never stack an e2e
+     regression. The shim already buckets tiles by M (prefill M>=512 swept / mid M>64 / decode M<=64 tile_n=64),
+     so the decode tile_n=64 refinement is scoped to decode and never perturbs the prefill bucket.
+   - **Sit the flydsl MoE on a decode-FULL cuda-graph config stack.** The big decode gain only surfaces when
+     the decode path is a FULL cuda-graph. On Kimi-K2.6 that upgrade came from the aiter MLA backend (enabled
+     by `VLLM_ROCM_USE_AITER=1`), which flips decode capture from PIECEWISE-only to FULL; pair with
+     `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4`. The +143.2% best run = this cfg0 stack THEN the flydsl kernel.
+   - **Note on ceiling vs AMD's published +162%:** AMD's blog (+162% / TPOT -69% / TTFT -65%, Kimi-K2.5, gfx942)
+     came from an INSTRUCTION-LEVEL hand-authored FLIR kernel (hand-placed mfma sched / direct-to-LDS / LDS
+     swizzle / software pipeline). This skill only LANDS a rewrite (apply mechanics); reproducing the full
+     ceiling needs the sibling `flydsl_rewrite_quantized_moe` to author a kernel that wins DECODE, not just a
+     per-M tile reuse. gfx942 caveat: async-copy/direct-to-LDS is gfx950-default (off on gfx942), LDS budget
+     65536 B — so gfx942 needs arch-specific hand-tuning, not a stock-primitive swap.
 
 ## Knobs & pitfalls
 - **Obtain & PIN FlyDSL — DELEGATE to the `ensure_flydsl` skill (the single source of truth for the
