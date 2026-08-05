@@ -29,41 +29,40 @@ changes, a read-only or system-wide install is fine, and the effect ends with th
 
 THREE CONDITIONS THE KERNEL MUST MEET, or this changes nothing at all:
 
-  1. THE ANCHOR IS THE `tt.dot` IN THE LOOP, NOT THE LOOP SYNTAX. `add_schedule_loops(pm, ns)`
-     takes the depth as a PASS ARGUMENT and does not read an attribute off the loop -- plain's
-     own `scf.for` carries no `tt.num_stages` either and pipelines regardless. So a loop that
-     contains a dot pipelines on a BARE `range`, measured. `tl.range(..., num_stages=N)` is
-     required only for a DOT-FREE loop, which has no anchor otherwise; there `None` inherits
-     the launch value and a bare `range` does nothing.
-     (An earlier revision of this docstring stated the reverse as a general rule. It had been
-     measured on a dot-free kernel and generalised. Two authors rewrote working bare-`range`
-     dot loops into `tl.range` for no effect before it was caught.)
+  1. the loop must be a pipelining CANDIDATE, which depends on the DOT, not on loop syntax.
+     `add_schedule_loops(pm, ns)` takes the depth as a pass OPTION and never reads a
+     `tt.num_stages` attribute off the loop -- plain's own `scf.for` carries none and
+     pipelines anyway. So a **bare `range` with a `tt.dot` in the body pipelines**; verified by
+     dumping the same bare-`range` source armed and unarmed and counting `ttg.memdesc_index`.
+     Do NOT rewrite a loop to `tl.range` for this shim's sake -- the annotation only matters
+     on the no-dot path, where it is the sole way to request the transform.
   2. the loads must be `gl.load`, not `gl.amd.cdna<N>.buffer_load`. Plain's own `make_ttgir`
-     runs the pipeliner at pass #15/#16 and `add_convert_to_buffer_ops` at #28, so plain's
-     pipeliner only ever sees `tt.load`. Pass `buffer_ops=True` to restore that conversion
-     after the pipeliner and get both -- but only when the body has NO residual `amdg.buffer_*`
-     on either side: it aborts loudly on buffer loads and kills the interpreter on buffer
-     STORES (`LLVM ERROR: Fatal pipeliner error`, no exception).
-  3. the staging must be the pipeliner's own. A hand-written `allocate_shared_memory` +
-     `gl.barrier()` body starves it, and the error it then raises
-     (`'ttg.local_alloc' op pipeliner doesn't know how to predicate this op`) is the SYMPTOM
-     of staging not removed, not a language wall. Remove it ENTIRELY -- one `ttg.barrier` left
-     in the loop makes the pass skip it wholesale.
+     runs the pipeliner before `add_convert_to_buffer_ops`, so plain's pipeliner only ever
+     sees `tt.load`; a body already on buffer ops is skipped in silence. `buffer_ops=True`
+     restores that conversion after the pipeliner -- but only for a body with NO `amdg.buffer_*`
+     left of its own, including in early-exit branches. Converting one that does have them
+     fails as `failed to legalize operation 'amdg.buffer_load/store'`, or as a
+     `TritonAMDGPUCanonicalizePointers` / `PassManager::run failed` abort. Mixed body:
+     `buffer_ops=False`.
+  3. the staging must be the pipeliner's own. It multi-buffers an immutable
+     `tt.load -> ttg.local_alloc` chain, whereas `allocate_shared_memory` yields a MUTABLE
+     `ttg.local_alloc` that it refuses with
+     `'ttg.local_alloc' op pipeliner doesn't know how to predicate this op`.
+     Read that as "the hand staging is still there", NOT as a language limit -- a transcription
+     concluded the latter and had to retract it. Partial removal does not count: one
+     `ttg.barrier` left in the loop makes the pass skip it entirely and in silence. Remove the
+     allocation, the barriers and the sliced loads together.
 
-KNOWN LIMITATION -- THIS MODULE STOPS AT `add_pipeline` AND OMITS PLAIN'S POST-PIPELINE TAIL.
-The consequence is not "less gain": the pipeliner's `local_load` lands in a blocked layout
-with a separate `convert_layout` to the dot operand, so each operand takes an EXTRA LDS round
-trip on top of the multi-buffered staging. On a tile whose staging already fills the budget
-that surfaces as `OutOfResources: Required <n>, Hardware limit 65536` -- i.e. the injection
-succeeded and looks broken. `add_remove_layout_conversions` is the pass that folds the double
-trip. If you hit this, splice plain's own order after `add_pipeline`:
-`add_convert_to_tensor_ops` -> canonicalizer -> `add_remove_layout_conversions` ->
-`add_reduce_data_duplication` -> `add_move_up_prologue_loads` -> `add_block_pingpong(ns)`,
-recording any pass absent on this build as `-name` rather than skipping it silently (3.6.0
-lacks the first and the fifth, and still reaches the same op census with the other four).
-
-`references/gluon/pipeline-reference.md` has the 2x2 -- note it was measured on a dot-free
-loop, so read condition 1 above before generalising it -- and the per-shape behaviour.
+De-staging is NOT free, and the injection does not always pay it back: removing hand staging
+is a large regression on its own, and the net can stay NEGATIVE on some toolchain versions
+even though the injection itself is worth a consistent speedup everywhere. Judge it on the
+same-window per-rep ratio of armed-and-de-staged over the original anchor; differencing two
+percentages against a noisy shipped baseline cannot resolve an effect this small. A cheap
+pre-check tells you whether to attempt it at all: compare the PLAIN kernel's own
+`num_stages=1` against its `num_stages=2` -- where plain itself gains nothing from pipelining
+on a version, recovering the pipeline for a transcription did not pay off there either.
+`references/gluon/pipeline-reference.md` has the measured 2x2; the trial report has the
+per-kernel numbers.
 """
 from __future__ import annotations
 
@@ -74,6 +73,23 @@ import sys
 
 _ORIGINAL = None
 _STATE: dict = {}
+_APPLIED: list = []
+
+# `add_pipeline` is NOT the end of what plain does. Plain's make_ttgir keeps going, and two of
+# those passes are load-bearing rather than cosmetic:
+#   * without `remove_layout_conversions` the pipeliner's `local_load` stays in a blocked layout
+#     with a separate `convert_layout` to the dot operand hanging off it, so every operand takes
+#     a SECOND trip through LDS on top of the multi-buffer staging. On a tile whose staging
+#     already fills the budget the arm then fails to LAUNCH on shared memory -- the injection
+#     looks broken when it actually worked.
+#   * without `in_thread_transpose` (arch-gated upstream by `is_in_thread_transpose_enabled`)
+#     `optimize_dot_operands` picks a degenerate shared layout and a wide LDS read collapses
+#     into many narrow ones. It also decides layout FIDELITY: with it, the pipeliner emits the
+#     rotating shared layout that Gluon has no constructor for, so an operand staging that is
+#     UNRECOVERABLE by hand comes back for free.
+# Both were found the hard way, and neither symptom looks like "a pass is missing".
+POST_RECIPES = ("none", "minimal", "plain", "plain_pp", "plain_itt")
+_DEFAULT_POST = "plain_itt"
 
 
 def _backend():
@@ -132,13 +148,69 @@ def cache_tag() -> str:
     """
     if _ORIGINAL is None:
         return "swp_off"
-    return (f"swp{_STATE.get('num_stages')}"
+    return (f"swp{_STATE.get('num_stages')}_post{_STATE.get('post')}"
             f"_buf{int(bool(_STATE.get('buffer_ops')))}"
             f"_pp{_STATE.get('pingpong')}_ac{_STATE.get('async_copy')}")
 
 
+def applied() -> list:
+    """Pass names spliced on the last compile. A leading '-' means the pass does not exist on
+    this build, so a recipe degrades between Triton minors unless you read this."""
+    return list(_APPLIED)
+
+
+def _post_pipeline_tail(C, pm, recipe, ns, pingpong, arch):
+    """Append `recipe`'s post-pipeline passes to `pm`; return the names applied."""
+    tg, agt = C.passes.ttgpuir, C.amd.passes.ttgpuir
+    done = []
+
+    def opt(owner, name, *args):
+        fn = getattr(owner, name, None)
+        if fn is None:
+            done.append(f"-{name}")   # absent on this build: recorded, never silent
+            return
+        fn(pm, *args)
+        done.append(name)
+
+    if recipe == "none":
+        return done
+    if recipe == "minimal":
+        C.passes.common.add_canonicalizer(pm)
+        done.append("canonicalizer")
+        opt(tg, "add_remove_layout_conversions")
+        return done
+    opt(agt, "add_convert_to_tensor_ops")
+    C.passes.common.add_canonicalizer(pm)
+    done.append("canonicalizer")
+    opt(tg, "add_remove_layout_conversions")
+    opt(tg, "add_reduce_data_duplication")
+    if recipe == "plain_itt":
+        # Plain runs this between reduce_data_duplication and move_up_prologue_loads, gated on
+        # the arch. Probe the gate rather than assuming: a static namespace read cannot see it.
+        gate = getattr(C, "is_in_thread_transpose_enabled", None)
+        if gate is None or bool(gate(arch)):
+            opt(agt, "add_in_thread_transpose")
+            opt(tg, "add_remove_layout_conversions")
+        else:
+            done.append("-in_thread_transpose(arch-gated off)")
+    opt(agt, "add_move_up_prologue_loads")
+    if recipe in ("plain_pp", "plain_itt") and pingpong and ns and ns > 1:
+        # Can only fire on staging the pipeliner built: it collects `local_load`s whose source
+        # is a loop-carried BlockArgument, and hand staging reaches it via `memdesc_index`.
+        opt(agt, "add_block_pingpong", ns)
+    if recipe == "plain_itt":
+        opt(agt, "add_fold_true_cmpi")
+        opt(agt, "add_prepare_if_combining")
+        C.passes.common.add_canonicalizer(pm)
+        done.append("canonicalizer")
+        opt(C.passes.common, "add_cse")
+        opt(C.passes.common, "add_symbol_dce")
+    return done
+
+
 def enable(num_stages: int, *, buffer_ops: bool = False, pingpong: bool | None = None,
-           async_copy: bool | None = None, verbose: bool = False) -> None:
+           async_copy: bool | None = None, post: str = _DEFAULT_POST,
+           verbose: bool = False) -> None:
     """Install the wrapper. `num_stages` is what add_schedule_loops is given.
 
     `pingpong` / `async_copy` default to whatever this backend decides for the arch, which
@@ -171,7 +243,9 @@ def enable(num_stages: int, *, buffer_ops: bool = False, pingpong: bool | None =
         # selftest could not see it, because it compared the RESOLVED attribute, which is the
         # same function object whether or not the descriptor survived.
         _ORIGINAL = C.HIPBackend.__dict__["gluon_to_ttgir"]
-    _STATE.update(num_stages=num_stages, buffer_ops=buffer_ops, pingpong=pingpong,
+    if post not in POST_RECIPES:
+        raise ValueError(f"post must be one of {POST_RECIPES}, got {post!r}")
+    _STATE.update(post=post, num_stages=num_stages, buffer_ops=buffer_ops, pingpong=pingpong,
                   async_copy=async_copy, verbose=verbose)
     orig = _ORIGINAL.__func__ if isinstance(_ORIGINAL, staticmethod) else _ORIGINAL
 
@@ -193,6 +267,7 @@ def enable(num_stages: int, *, buffer_ops: bool = False, pingpong: bool | None =
         C.amd.passes.ttgpuir.add_optimize_dot_operands(pm, arch)
         C.amd.passes.ttgpuir.add_schedule_loops(pm, ns)
         C.amd.passes.ttgpuir.add_pipeline(pm, ac, pp)
+        _APPLIED[:] = _post_pipeline_tail(C, pm, _STATE["post"], ns, pp, arch)
         if _STATE["buffer_ops"]:
             # plain's ORDER: pipeline first, buffer conversion after. Restoring it is what
             # lets an anchor be written with gl.load (which the pipeliner can see) and still
@@ -320,6 +395,31 @@ if __name__ == "__main__":
                  if v not in os.environ]
         ck("fork-only knobs are not required by this module", len(inert) == 3,
            "they are read by a vendor fork only; this module does not consult them")
+
+        # --- post-pipeline tail ---
+        refused = False
+        try:
+            enable(2, post="nonsuch")
+        except ValueError:
+            refused = True
+        except Exception:
+            pass
+        finally:
+            disable()
+        ck("an unknown post recipe is refused, not silently ignored", refused,
+           "a typo'd recipe falling through to no tail would read as 'the tail did nothing'")
+
+        with pipelined(2, post="minimal"):
+            t_min = cache_tag()
+        with pipelined(2, post=_DEFAULT_POST):
+            t_def = cache_tag()
+        ck("cache_tag() distinguishes post recipes", t_min != t_def,
+           f"{t_min} vs {t_def}: two recipes sharing a cache dir serve each other's code")
+
+        ck("the default recipe is not the tail-free one", _DEFAULT_POST != "none",
+           "add_pipeline alone can leave a dot-operand loop over the shared-memory budget")
+        ck("the default recipe carries in_thread_transpose", _DEFAULT_POST == "plain_itt",
+           "without it a wide LDS read degenerates and the rotating shared layout is lost")
         print(f"SELFTEST {'PASS' if not fails else 'FAIL'}"
               + (f" ({len(fails)} failed: {', '.join(fails)})" if fails else ""))
         raise SystemExit(1 if fails else 0)

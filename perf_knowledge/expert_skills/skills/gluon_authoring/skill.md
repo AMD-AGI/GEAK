@@ -258,6 +258,124 @@ selects its next move from arrives as a by-product of landing the port. Profile 
 when the profile is about the kernel you are optimizing. On a short budget this ordering is the
 difference between reaching step 4 and not: the port is cheap and front-loaded analysis is not.
 
+### The gates are executable, and a gate is passed by TOOL OUTPUT, not by assertion
+
+Everything in this section was already prescribed in prose below, and prose did not hold: a run has
+gone to step 4 from a **0.715×** anchor, reported 1.19× against that anchor, and closed at **0.85×**
+against the champion — with every step's *text* obeyed. So each exit condition now has a command, and
+**the round log must carry the command's output.** "The precondition holds" is not a gate; it is the
+claim the gate exists to test.
+
+**Two of the five are entry-state-dependent, and getting that wrong loses a run in either
+direction.** `## When to use` already splits the two entry states; the gates split the same way, and
+`references/entry-modes.md` is the one-page table if you want it side by side.
+
+| # | gate | command | applies on `from_backend: triton` (PORT) | applies on `from_backend: gluon` (IN-PLACE) |
+| --- | --- | --- | --- | --- |
+| G0 | the harness loop shape matches the entry | inspect the launch args (see below) | **PORT shape** — `port: "true"` must be present | **ORDINARY optimize** — `port: "true"` here is the mirror-image mistake |
+| G1 | the comparator can support a claim at all | `scripts/champion_gate.py --champion <bundle>` | YES, on `plain_champion.json` | YES, on an **incumbent** bundle — see `entry-modes.md` for which fields change meaning |
+| G2 | the transcription debt is paid, and if not, WHO owes it | `scripts/parity_gate.py …` | YES, before the FIRST climb | **NO — nothing was transcribed.** The tool is still useful as a *diagnostic* on a mid-run regression; say which you are doing |
+| G3 | the occupancy is not already lost | `scripts/probe.py measure --dir ir/<tag>/` | YES | YES |
+| G4 | the number is a number | `scripts/ab_bench.py --module <adapter>.py --permute` | YES | YES |
+
+On failure: **G0** — stop before dispatching; the loop will terminate two rounds into a port that is
+working exactly as designed. **G1** — stop, edit nothing, report `blocked`; a gate failure is the
+front end's bug, not yours to route around. **G2** — **DO NOT CLIMB**; exit 2 means this round's
+outcome is `recovery` against the suspect it closed, never a win. **G3** — read BOTH limiters;
+registers and LDS cap WGs/CU independently. **G4** — a delta under the spread is `NOT RESOLVED`.
+
+**Why G2 is not merely skipped on an in-place entry but must not be RUN as a gate.** There is no
+anchor, so there is no `anchor_ms`. Passing the incumbent as both sides returns ratio 1.00 →
+CLEARED, which is *true and vacuous*: it records a gate as satisfied that was never applicable, which
+is worse than not running it. And note what the in-place entry loses along with the debt — the
+two-comparator discipline collapses to one, so nothing structurally reminds you that the denominator
+has to be honest. The incumbent must therefore be a **measured, asserted** number, not "the file I
+started from" and not a figure inherited from another GPU or another container.
+
+**G0 is checked before anything is dispatched, and it has silently cost three runs — all three of
+them ports.** Everything in the rest of this G0 discussion is about the PORT entry. On an in-place
+entry the harness defaults are already right and `port: "true"` must **not** be set: a candidate floor
+below 1.0 and a negative progress delta keep a genuinely stalled search alive, burning exactly the
+budget the port shape exists to protect. A transcription
+port must run at `mode: optimize` — it transcribes the existing source's own TTGIR, so `author` mode
+would overwrite the very thing being ported — and `mode` therefore cannot be what tells the loop this
+is a port. `kernel_workflow.js` provides `port: "true"` for exactly this, and its own comment
+(lines 40–47) describes the consequence of omitting it better than any summary:
+
+> *"Applied unchanged to a port they delete its recovery phase: the transcription round produces no
+> candidate at all, so no patch is saved, no verify runs, `winner` is null, and the loop stops two
+> rounds into a port that is working exactly as designed."*
+
+The four defaults that flip with `PORT_SHAPE`, and what each one does to a port left on the
+`optimize` values:
+
+| knob | optimize | port | what the optimize value does to a port |
+| --- | --- | --- | --- |
+| `candidate_floor` | 1.0 | 0.5 | a faithful anchor is below the comparator **by construction**, so it never enters the candidate list: no patch saved, no verify, `winner = null` |
+| `max_no_improve` | 2 | 4 | ends the run two rounds in, which is before the recovery round has finished |
+| `progress_delta` | +`min_improve` | −0.05 | a layout experiment that costs ground is information on a port; here it reads as a stall |
+| `budget` | 6 | 20 | `budget` counts **directions**, and a `deep_explore` direction costs 2 — so `BUDGET/2` is the achievable round count. 20 gives 10 rounds; 10 gives 5 |
+
+**Two things to set beyond the port defaults, both from measurement rather than taste.**
+`max_no_improve: 4` is still short of what a real climb needs — on `pa_decode` the winning levers
+landed at rounds 1, 8, 8, 9 and 10 with **five consecutive** non-improving rounds in between, so 4
+ends the run one round before the payoff and **6** is the value that survives the measured trajectory.
+And `candidate_floor: 0.5` is uncomfortably tight: an observed naive anchor on a MoE INT4 kernel
+measured **0.51×**, one bad window from falling out of its own candidate list. Set the floor from the
+debt you actually took — `parity_gate.py` reports it — rather than accepting a default that has to
+guess. *(The deeper point, worth sending upstream rather than working around: on a port, "is this a
+candidate" is the question `parity_gate.py` answers properly, as a recovery verdict with an
+attribution. A fixed ratio floor is a proxy for it, and the right proxy value is not knowable before
+the anchor is measured.)*
+
+**G2 is the one that was missing, and it is the one that decides a port.** A faithful anchor is a
+regression you knowingly created — not a baseline to quietly climb from. `parity_gate.py` splits the
+anchor→champion gap across the three suspects **from the compiled artifacts**, so the attribution is
+measured rather than argued:
+
+- `lost_pipeline` — the champion's TTGIR carries `ttg.memdesc_index` / `ttg.local_store` /
+  `num_stages > 1` and the anchor's does not. *Note the inverse trap the tool refuses to fall into:
+  `max iter_args >= 2` is NOT evidence of pipelining — every accumulator loop, including any
+  online-softmax kernel, satisfies it.*
+- `lost_layout` — a load-width or LDS-op histogram narrowed (`dwordx4` → `ushort`, `ds_read_b128` →
+  `ds_read_u16`), or `shared` bytes/WG grew. Pass `--*-lds` from the Triton cache metadata's `shared`
+  field: the `.amdgcn`'s own `LDSByteSize` is a **structural 0** on Triton kernels, and the tool will
+  tell you the LDS half of this suspect went untested rather than silently clearing it.
+- `lost_RA` — the instruction multiset is unchanged and the allocator serialized it anyway. The
+  signal is address **rematerialization**: an address recomputed into a register immediately above
+  the `ds_read` that consumes it, which puts every read behind a WAR hazard on that one register.
+  This is the row a layout-equivalence checker structurally cannot see — *equivalent layouts, equal
+  counters, unequal address-register pressure.* Read the `ds_read` **operands**, not just the count.
+
+Two more rules that are about the instrument rather than the kernel, both learned from results that
+passed every other check:
+
+- **A flat result set is a cache-collision suspect, not a finding.** Two variants differing only by a
+  `gl.constexpr` layout constant share a Triton cache entry, and the second silently runs the first's
+  binary. It is numerically perfect — every arm computes the right answer, just not with its own code
+  — and it yields the most seductive possible artifact: arms that all tie, reading as a clean
+  "the layout levers do not move the clock". Give each arm its own kernel object and its own
+  `TRITON_CACHE_DIR`, expose `fingerprint()` so `ab_bench.py` can prove the binaries differ, and
+  before recording any flat verdict run `--permute` and check whether the numbers follow the **code**
+  or the **position**.
+- **A tolerance comparison cannot fail on NaN.** `NaN > tol` is False, so an all-NaN output scores
+  zero out-of-tolerance elements and prints ALL PASS. `ab_bench.py` now fails any non-finite metric
+  and, given an `outputs()` hook, scans the tensors itself — one level below the adapter, because
+  that is where the trap lives.
+
+**Budget: the round count is the denominator, not a ceiling.** A 20-round budget spent as ~1 round of
+wall clock is not a 20-round search; it is a 1-round search that reports a 20-round budget. Size the
+wall clock to the rounds, and checkpoint every kept win (diff + metrics + that variant's private IR
+dir) the moment it lands, so a hard stop is a pause rather than a discard. For calibration: on
+`pa_decode` the winning levers landed at rounds 1, 8, 8, 9 and 10 with **five consecutive negatives
+at rounds 2–6** in between. A loop that ends at round 1 cannot reach any of them.
+
+**Two comparators, both carried in every result.** Correctness and layout equivalence are versus the
+**anchor**; performance is versus the **champion**. `vs_anchor` alone hides the whole question — the
+anchor is a regression you created, so beating it proves nothing. The same climb scores 1.19× or
+0.85× depending only on which denominator is read, and the honest report carries both with the
+champion one deciding.
+
 **1. Transcribe, and drive it to layout equivalence.** Pin the tuned plain kernel, dump its IR, recover
 the layouts, and iterate until `--verify` passes.
 
@@ -580,7 +698,7 @@ behaviour, the ping-pong window and why async copy is not reachable from plain o
 | checkpoint | what it is | when |
 | --- | --- | --- |
 | Layout equivalence + bit-parity | `--verify` PASS, and no numeric delta vs the plain anchor (transcription is layout-only, so any delta is a bug, not a Gluon property) | **exit condition of step 1 — always, never deferred** |
-| **≥95% of the tuned plain kernel's throughput** | the port has actually landed | exit condition of step 2 — immediately, when 2a found no debt; once the injection is confirmed fired, when it did |
+| **≥95% of the tuned plain kernel's throughput** — decided by `scripts/parity_gate.py` (exit 0), whose output goes in the round log | the port has actually landed | exit condition of step 2 — immediately, when 2a found no debt; once the injection is confirmed fired, when it did. **Exit 2 forbids step 4**: the round's outcome is `recovery`, and the next round closes the suspect the tool named. Reaching parity is not a win either — it is getting back to a number the front end already measured |
 
 They are ordered, not scheduled: the first is what makes the anchor trustworthy, so nothing downstream
 means anything until it passes, and it is never the one allowed to slip. The second is only readable

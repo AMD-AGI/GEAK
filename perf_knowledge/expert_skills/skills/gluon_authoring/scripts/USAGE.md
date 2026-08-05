@@ -204,6 +204,29 @@ kernel. Two of its guards are not defensive style: handing a memdesc to `get_glu
 **segfaults**, and calling `to_linear_layout` at a mismatched rank trips an LLVM assert. Both are
 process death with no traceback, so both are checked before the call rather than caught after.
 
+## Gates
+
+Five gates bracket a run, and **two of them are entry-state-dependent**. `skill.md ### The gates are
+executable` carries the table with the per-entry column; `references/entry-modes.md` is the same split
+as a one-pager. A gate is passed by **tool output in the round log**, never by asserting that its
+precondition holds — that is the distinction three runs were lost on.
+
+| command | gives you |
+| --- | --- |
+| **`champion_gate.py --champion <bundle> [--allow-provisional] [--allow-ungated] [--json]`** | **the entry assertion (G1), both entry states.** Ten checks; the two that fail most often and most silently are `SOURCE` (the bundle's recorded sha still describes the file on disk) and `LIVE` (the file the run actually loads is byte-identical to the measured one — a comparator overwritten by a later track's winner passes `SOURCE` and fails here). Also `CONFIG` (the dump came from that source at the pinned config, cross-checked against the IR's own `ttg.num-warps`), `COMPARATOR` (the comparator beats the kernel's own default, i.e. is not an inverted strawman), `GATED`/`SAMPLING` (was the sweep oracle-gated, was the grid covered), `LOCUS`/`TOOLCHAIN` (run where it was measured — cross-GPU and cross-container comparators have drifted 25% on measured hardware). **`SAMPLING`'s PASS is reported as unfalsified, not verified**: it can only read the bundle's own claim, so spot-check the pin at ±1 grid step on each swept axis first — a 6.1% plain win has been found one grid point outside a range whose tier log claimed a completed re-sweep. On failure: edit nothing, report `blocked`. |
+| **`parity_gate.py --champion-ms C --anchor-ms A --champion-asm F --anchor-asm F [--champion-ttgir F --anchor-ttgir F] [--champion-lds N --anchor-lds N] [--threshold 0.95] [--json]`** | **the transcription debt (G2), PORT entry only.** Exits **2** while `champion_ms/anchor_ms` is under the threshold — which means the round's outcome is `recovery` against the suspect it closed, **never** a win, and climbing is not yet permitted. Attributes the gap from the compiled artifacts across `lost_pipeline` (the champion's TTGIR carries `memdesc_index` / `local_store` / `num_stages>1` and yours does not — and it refuses the inverse trap: `iter_args >= 2` is **not** evidence of pipelining, every accumulator loop including any online-softmax kernel has it), `lost_layout` (a load-width or LDS-op histogram narrowed, or `shared` bytes/WG grew), and `lost_RA` (same instruction multiset, allocator serialized it anyway — the signal is an address **rematerialized** into a register immediately above the `ds_read` consuming it, which is the row a layout-equivalence check structurally cannot see). Pass `--*-lds` from the Triton cache metadata's `shared`: the asm's own `LDSByteSize` is a structural 0 on Triton kernels, and the tool then says the LDS half went **untested** rather than clearing it silently. An anchor *faster* than the champion clears, and is told to attribute that too rather than pocket it. **On an IN-PLACE entry do not run this as a gate** — there is no anchor, so passing the incumbent as both sides returns a vacuous CLEARED. It remains a good *diagnostic* on a mid-run regression; say which you are doing. |
+| **`probe.py measure --dir ir/<tag>/`** | **G3**, both entry states — documented above under Transcription. Read **both** limiters, every time. |
+| **`ab_bench.py --module <adapter>.py [--permute] [--json F]`** | **G4**, both entry states. Same-window interleaved A/B: every variant in ONE process, order rotated per cell, `stable_min` + median + spread, oracle **before** timing, and `NOT RESOLVED` when a delta is under the measured spread. Two numbers from two processes are not comparable on a clock-unstable box. Three things it now refuses: a **non-finite metric is a failure** whatever the adapter concluded (`NaN > tol` is False, so an all-NaN output used to print ALL PASS — add an `outputs(name)` hook and this file scans the tensors itself, one level below the adapter, which is where the trap lives); **duplicate `fingerprint(name)` values are a hard failure** before any timing (two variants differing only by a `gl.constexpr` share a Triton cache entry and the second silently runs the first's binary — numerically perfect, attributionally worthless); and a **flat set across 3+ arms is a COLLISION SUSPECT**, not a finding, because flatness reads exactly like a clean negative and cannot be told from one by inspection. `--permute` is the discriminating experiment: a second window with the order reversed, reporting whether each number followed the **code** or the **position**. |
+| `gpu_lock.sh <id> <cmd>` | serialize timed runs on a shared box. |
+| `locus.sh` | record/verify the execution locus the comparator was measured at. |
+| `asm_loop_audit.py` | static hot-loop audit: instruction census, LDS bytes/WG from the cache metadata (**not** `group_segment_fixed_size`, a structural 0). |
+
+Selftests, offline, no GPU:
+
+```bash
+for s in champion_gate parity_gate ab_bench probe ttgir_bridge ttgir_to_gluon; do python3 $s.py --selftest; done
+```
+
 ## Triton-version notes
 
 Checked against upstream `triton-lang/triton` at `v3.6.0`, `v3.7.1`, `release/3.8.x` and `main`. The
@@ -272,8 +295,10 @@ points at files the package does not carry:
   that the track continues past it.
 - Several docstrings and `cmd` fields cite files this package does not carry (`compiler-contract.md`,
   `transcribe.md`, `experiment-records.md`, `lever-cards.json`, `opt_swp_test.py`, `bench.py`,
-  `prof_driver.py`, `asm_loop_audit.py`, `mfma_efficiency.py`, `champion_gate.py`). Dead by design — do
-  not go looking for them.
+  `prof_driver.py`, `mfma_efficiency.py`). Dead by design — do not go looking for them.
+  **`champion_gate.py`, `parity_gate.py`, `ab_bench.py`, `asm_loop_audit.py`, `gpu_lock.sh` and
+  `locus.sh` are NO LONGER on that list — they now ship here** (see `## Gates` below), so a docstring
+  citing them is live, not dead.
 
 **Two previously-flagged conflicts are resolved upstream and no longer apply.**
 `references/tile-programming/pipeline.md` used to send you to
