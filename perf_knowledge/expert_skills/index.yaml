@@ -90,6 +90,31 @@ skills:
     e2e_delta_min_pct: 1.0
     parity: required
   validation_status: validated
+- id: gluon_authoring
+  file: skills/gluon_authoring/skill.md
+  scope: kernel
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - bf16
+    - fp16
+    - fp8_e4m3_fnuz
+    - fp8_e4m3
+    regimes:
+    - '*'
+    from_backend:
+    - triton
+    - gluon
+    to_backend: gluon
+  expects:
+    isolated_speedup_min: 1.1
+    parity: required
+  validation_status: draft
 - id: mla_tilelang_to_triton
   file: skills/mla_tilelang_to_triton/skill.md
   scope: kernel

@@ -53,10 +53,13 @@ Read ALL of these before and during your work, and re-consult as the bottleneck 
 ## Operator/language SOTA knowledge (REFERENCE ONLY — same contract as the specialist)
 When `KERNEL_KNOWLEDGE_DIR` is non-empty AND `KK_OPERATOR` is set, mine the cards (`KK_REFS`,
 `operators/<KK_OPERATOR>/backends/<KK_LANGUAGE>.md`, `operators/<KK_OPERATOR>/{tuning,numerics,fusion}.md`,
-`index/recipes.md`) to *widen* your candidate techniques (knobs, skeletons, split-K/preshuffle, fusion,
-MFMA/numerics pitfalls, alternative backends worth mimicking). **Contract:** facts/how-to, not
-decisions; it may be stale/wrong; your measured benchmark is the floor; ignore stored `status`/TFLOPS
-as decisions. It can only add candidates, never narrow them. Skip entirely if empty / `KK_OPERATOR` null.
+`index/recipes.md`, plus `languages/<dir>/` for the programming model when `KK_LANGUAGE` is one you
+cannot write from memory — `flydsl`/`tilelang`/`gluon` map to the same dir name, triton→`triton_amd`,
+hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`) to *widen* your candidate techniques (knobs,
+skeletons, split-K/preshuffle, fusion, MFMA/numerics pitfalls, alternative backends worth mimicking).
+**Contract:** facts/how-to, not decisions; it may be stale/wrong; your measured benchmark is the floor;
+ignore stored `status`/TFLOPS as decisions. It can only add candidates, never narrow them. Skip entirely
+if empty / `KK_OPERATOR` null.
 
 ## Roofline targeting (how to know how far you really are)
 Your target may be expressed as "% of roofline". Estimate the ceiling, then drive toward it:
