@@ -327,7 +327,7 @@ that area — each has rules that CI or a maintainer will hold you to.
 | **e2e workflow** (`e2e_workflow/`) | System-layer roles, knowledge, pipeline | [`e2e_workflow/README.md`](e2e_workflow/README.md) (+ `roles/`, `knowledge/`). Keep the L0 node regression (`use_expert_skills=OFF` byte-identical) green. |
 | **Kernel workflow** (`kernel_workflow/`) | Single-kernel optimizer roles/knowledge | [`kernel_workflow/README.md`](kernel_workflow/README.md) (+ `roles/`, `knowledge/`). |
 | **CI harness** (`ci/`, `.github/workflows/`) | Runner scripts, matrix, monitors | [`ci/README.md`](ci/README.md). Use a `ci/<topic>` branch (maintainers only) and self-test on the L1 runner. |
-| **Enroll a model / Docker image for L1** | A new SPUR model or arch image | [`ci/ONBOARDING.md`](ci/ONBOARDING.md) — weights staging, handoff layout, `exp_root=geak`, TraceLens priors, `models.tsv`, `docker_default.json`. |
+| **Enroll a model / Docker image for L1** | A new SPUR model or arch image | [`ci/ONBOARDING.md`](ci/ONBOARDING.md) — weights staging, handoff layout, `exp_root=geak`, TraceLens priors, `models.tsv`, `docker_setup/` image presets. |
 | **run_e2e contract / API** | The `handoff.json → e2e_workflow` interface | [`docs/reference/run-e2e-contract.md`](docs/reference/run-e2e-contract.md) · [`docs/reference/api-reference.md`](docs/reference/api-reference.md). The L0 dry-run guards this mapping. |
 
 > If your change spans several of these, still keep the PR focused (one type label)

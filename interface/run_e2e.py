@@ -27,6 +27,7 @@ from __future__ import annotations
 import atexit
 import glob
 import json
+import math
 import os
 import shlex
 import shutil
@@ -38,7 +39,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+KERNEL_JOURNEY_SCHEMA_VERSION = 1
+
+try:
+    SAME_CONFIG_DIVERGENCE_WARN_PCT = float(
+        os.environ.get("GEAK_SAME_CONFIG_DIVERGENCE_WARN_PCT", "3.0")
+    )
+    if (
+        not math.isfinite(SAME_CONFIG_DIVERGENCE_WARN_PCT)
+        or SAME_CONFIG_DIVERGENCE_WARN_PCT < 0.0
+    ):
+        raise ValueError("warning threshold must be finite and non-negative")
+except (TypeError, ValueError):
+    SAME_CONFIG_DIVERGENCE_WARN_PCT = 3.0
+
+BASELINE_ALIGNMENT_BEGIN = "<!-- GEAK_BASELINE_ALIGNMENT_BEGIN -->"
+BASELINE_ALIGNMENT_END = "<!-- GEAK_BASELINE_ALIGNMENT_END -->"
 
 # interface/ is a sibling of e2e_workflow/ under the repo root.
 INTERFACE_DIR = Path(__file__).resolve().parent
@@ -1039,6 +1056,56 @@ def _state_op_names(wf: dict, queue: str) -> set[str]:
     return names
 
 
+def _divergence_pct(measured: Any, reference: Any) -> float | None:
+    """Return percentage divergence from a positive reference."""
+    try:
+        measured_value = float(measured)
+        reference_value = float(reference)
+    except (TypeError, ValueError):
+        return None
+    if (
+        not math.isfinite(measured_value)
+        or not math.isfinite(reference_value)
+        or measured_value <= 0.0
+        or reference_value <= 0.0
+    ):
+        return None
+    return round(
+        100.0 * (measured_value - reference_value) / reference_value,
+        2,
+    )
+
+
+def _positive_finite_float(value: Any) -> float:
+    """Normalize external numeric input for strict JSON serialization."""
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(normalized) or normalized <= 0.0:
+        return 0.0
+    return normalized
+
+
+def _build_baseline_alignment(
+    same_config_divergence_pct: float | None,
+) -> dict[str, Any]:
+    """Classify cross-harness alignment using only the same-config metric."""
+    if same_config_divergence_pct is None:
+        status = "unavailable"
+    elif abs(same_config_divergence_pct) > SAME_CONFIG_DIVERGENCE_WARN_PCT:
+        status = "warning"
+    else:
+        status = "aligned"
+    return {
+        "status": status,
+        "primary_metric": "current_best_same_config_divergence_pct",
+        "divergence_pct": same_config_divergence_pct,
+        "warning_threshold_pct": SAME_CONFIG_DIVERGENCE_WARN_PCT,
+        "raw_session_divergence_is_measurement_signal": False,
+    }
+
+
 def normalize_result(h: dict, wf: dict) -> dict:
     eval_dir = Path(wf["eval_dir"])
     validation = _read_json(eval_dir / "director_e2e_validation.json")
@@ -1145,76 +1212,47 @@ def normalize_result(h: dict, wf: dict) -> dict:
                 wf["accepted_heads"] = [_entry]
             wf["attribution_backfilled"] = True
 
-    # baseline measurement-protocol cross-check (GEAK-E2E vs Hyperloom-E2E divergence).
-    # GEAK's measured baseline is already seeded with Hyperloom's accepted config (map_args forwards
-    # accepted_flags/accepted_env), so it should match Hyperloom's own baseline. Surface BOTH numbers
-    # plus their divergence so the caller can tell a real win from a measurement mismatch (different
-    # client/protocol/warm-vs-cold) instead of trusting a gain measured against a different baseline.
-    geak_baseline = float(
+    # Cross-harness measurement-protocol check. GEAK's measured baseline is
+    # seeded with the upstream orchestrator's accepted config, so compare it
+    # separately with the raw session baseline and the same-config current best.
+    geak_baseline = _positive_finite_float(
         wf.get("baseline_throughput_tok_s")
         or validation.get("baseline_throughput_tok_s")
         or 0.0
     )
-    geak_final = float(
+    geak_final = _positive_finite_float(
         wf.get("final_throughput_tok_s")
         or validation.get("director_verified_throughput_tok_s")
         or 0.0
     )
-    try:
-        orch_baseline = float(h.get("raw_baseline_tput") or 0.0)
-    except (TypeError, ValueError):
-        orch_baseline = 0.0
+    orch_baseline = _positive_finite_float(h.get("raw_baseline_tput"))
     # Orchestrator throughput measured on the SAME config GEAK seeds with
-    # (== Hyperloom current_best config). When present it isolates the PURE
+    # (the upstream orchestrator's current-best config). When present it isolates
+    # the PURE
     # cross-harness measurement residue (identical config, both harnesses) from
     # the explore/framework config gain that is baked into the raw-baseline
-    # comparison. Falls back to raw baseline when absent (older handoffs).
-    try:
-        orch_same_cfg = float(h.get("orchestrator_best_tput_same_config") or 0.0)
-    except (TypeError, ValueError):
-        orch_same_cfg = 0.0
-    # Conflates the accepted-config gain with measurement residue — not a clean signal.
-    raw_div = (
-        round(100.0 * (geak_baseline - orch_baseline) / orch_baseline, 2)
-        if (geak_baseline > 0 and orch_baseline > 0) else None
+    # comparison. It remains unavailable when absent from older handoffs.
+    orch_same_cfg = _positive_finite_float(
+        h.get("orchestrator_best_tput_same_config")
     )
-    # Pure measurement residue: identical config both sides. Promote-side gating uses this.
-    same_cfg_div = (
-        round(100.0 * (geak_baseline - orch_same_cfg) / orch_same_cfg, 2)
-        if (geak_baseline > 0 and orch_same_cfg > 0) else None
-    )
-    if same_cfg_div is not None:
-        divergence_note = (
-            f"primary = same_config_measurement_divergence_pct ({same_cfg_div:+.2f}%): "
-            "identical accepted config both sides, so it isolates measurement residue."
-        )
-        if raw_div is not None:
-            divergence_note += (
-                f" raw_session_baseline_divergence_pct ({raw_div:+.2f}%) is vs the RAW "
-                "pre-explore baseline and also contains the config gain."
-            )
-    else:
-        divergence_note = (
-            "handoff.orchestrator_best_tput_same_config absent => clean measurement "
-            "residue UNDEFINED. raw_session_baseline_divergence_pct CONFLATES the "
-            "config gain with measurement residue; do not gate on it or quote it as a "
-            "measurement mismatch."
-        )
-
+    raw_session_divergence_pct = _divergence_pct(geak_baseline, orch_baseline)
+    same_config_divergence_pct = _divergence_pct(geak_baseline, orch_same_cfg)
+    baseline_alignment = _build_baseline_alignment(same_config_divergence_pct)
     baseline_basis = {
         # GEAK's own measured baseline (Hyperloom-accepted config = fair engagement baseline; gating uses this).
         "geak_measured_baseline_tok_s": geak_baseline or None,
         # Hyperloom's own measured baseline forwarded in the handoff (the orchestrator reference).
         "orchestrator_baseline_tok_s": orch_baseline or None,
-        # Legacy names — Hyperloom's kernel phase reads measurement_divergence_pct by name.
-        "baseline_divergence_pct": raw_div,
-        "measurement_divergence_pct": same_cfg_div,
-        "raw_session_baseline_divergence_pct": raw_div,
-        "same_config_measurement_divergence_pct": same_cfg_div,
-        "primary_divergence_metric": "same_config_measurement_divergence_pct",
-        "primary_divergence_pct": same_cfg_div,
-        "same_config_baseline_available": same_cfg_div is not None,
-        "divergence_note": divergence_note,
+        # Audit-only comparison with the RAW session baseline. This includes
+        # accepted upstream config gain and is not a measurement-drift signal.
+        "raw_session_baseline_divergence_pct": raw_session_divergence_pct,
+        # PURE cross-harness measurement residue: GEAK baseline vs the
+        # orchestrator's throughput on the SAME (accepted) config. Both sides
+        # run the identical config, so this isolates client/protocol/warm-cold
+        # differences from the config gain. This is the primary alignment metric.
+        "current_best_same_config_divergence_pct": same_config_divergence_pct,
+        # Backward-compatible alias consumed by existing orchestrators.
+        "measurement_divergence_pct": same_config_divergence_pct,
         "orchestrator_best_tput_same_config": orch_same_cfg or None,
         # Gain measured against the ORCHESTRATOR baseline (what Hyperloom sees end-to-end).
         "gain_vs_orchestrator_baseline": (
@@ -1298,11 +1336,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "status": status,
         "result_source": result_source,
         "eval_dir": str(eval_dir),
-        "baseline_throughput_tok_s": float(
-            wf.get("baseline_throughput_tok_s")
-            or validation.get("baseline_throughput_tok_s")
-            or 0.0
-        ),
+        "baseline_throughput_tok_s": geak_baseline,
         # Promoted final: the COLD final when it is a real cold win, else the HOT
         # median (see the final-basis selection above). final_throughput_basis says
         # which one this is, so a consumer can tell cold-to-cold from hot-to-cold.
@@ -1348,11 +1382,158 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "accepted_config": wf.get("accepted_config") or {},
         # Self-describing baseline measurement-protocol + Hyperloom cross-check (see baseline_basis above).
         "baseline_basis": baseline_basis,
+        # Reliability classification is independent of the optimization status.
+        "baseline_alignment": baseline_alignment,
         # Cold/hot speedup cross-checks (double-check only; see alignment_metrics above).
         # Does NOT change the promoted final_throughput_tok_s / throughput_speedup.
         "alignment_metrics": alignment_metrics,
         "report_path": wf.get("report_path") or str(eval_dir / "final_report.md"),
     }
+
+
+def _format_optional_number(
+    value: Any,
+    *,
+    digits: int = 2,
+    suffix: str = "",
+) -> str:
+    try:
+        return f"{float(value):.{digits}f}{suffix}"
+    except (TypeError, ValueError):
+        return "unavailable"
+
+
+def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
+    """Render a deterministic, same-config-first report section."""
+    basis = result.get("baseline_basis") or {}
+    alignment = result.get("baseline_alignment") or {}
+    geak_baseline = _format_optional_number(
+        basis.get("geak_measured_baseline_tok_s"), digits=3, suffix=" tok/s"
+    )
+    same_config_baseline = _format_optional_number(
+        basis.get("orchestrator_best_tput_same_config"),
+        digits=3,
+        suffix=" tok/s",
+    )
+    same_config_divergence = _format_optional_number(
+        basis.get("current_best_same_config_divergence_pct"),
+        digits=2,
+        suffix="%",
+    )
+    raw_baseline = _format_optional_number(
+        basis.get("orchestrator_baseline_tok_s"), digits=3, suffix=" tok/s"
+    )
+    raw_divergence = _format_optional_number(
+        basis.get("raw_session_baseline_divergence_pct"),
+        digits=2,
+        suffix="%",
+    )
+    threshold = _format_optional_number(
+        alignment.get("warning_threshold_pct"), digits=1, suffix="%"
+    )
+    status = str(alignment.get("status") or "unavailable")
+    return "\n".join(
+        [
+            BASELINE_ALIGNMENT_BEGIN,
+            "## Baseline alignment",
+            "",
+            "Primary same-config comparison:",
+            "",
+            f"- GEAK measured baseline: {geak_baseline}",
+            (
+                "- Upstream current-best baseline on the same config: "
+                f"{same_config_baseline}"
+            ),
+            f"- Same-config divergence: {same_config_divergence}",
+            f"- Alignment status: `{status}` (warning threshold: ±{threshold})",
+            "",
+            "Raw-session audit comparison:",
+            "",
+            f"- Upstream raw-session baseline: {raw_baseline}",
+            f"- Raw-session baseline divergence: {raw_divergence}",
+            "",
+            (
+                "The raw-session baseline predates accepted upstream configuration "
+                "changes and is not expected to match the GEAK baseline. Its "
+                "divergence includes previously accepted configuration gains and "
+                "is not a pure measurement-drift signal."
+            ),
+            BASELINE_ALIGNMENT_END,
+        ]
+    )
+
+
+def _upsert_marked_markdown_section(
+    text: str,
+    section: str,
+    *,
+    begin_marker: str,
+    end_marker: str,
+) -> str:
+    """Replace a generated section or insert it after the first H1."""
+    begin = text.find(begin_marker)
+    end = text.find(end_marker)
+    if begin >= 0 and end >= begin:
+        end += len(end_marker)
+        return text[:begin] + section + text[end:]
+
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.startswith("# "):
+            return (
+                "".join(lines[: index + 1])
+                + "\n"
+                + section
+                + "\n\n"
+                + "".join(lines[index + 1 :])
+            )
+    return section + "\n\n" + text
+
+
+def _update_baseline_alignment_reports(result: dict[str, Any]) -> list[str]:
+    """Idempotently add baseline alignment to every existing primary report."""
+    section = _render_baseline_alignment_section(result)
+    eval_dir = str(result.get("eval_dir") or "").strip()
+    if not eval_dir:
+        return []
+    eval_root = Path(eval_dir).resolve(strict=False)
+
+    candidates: list[Path] = []
+    report_path = str(result.get("report_path") or "").strip()
+    if report_path:
+        report_candidate = Path(report_path)
+        if not report_candidate.is_absolute():
+            report_candidate = eval_root / report_candidate
+        candidates.append(report_candidate)
+    candidates.append(eval_root / "final_report.md")
+
+    updated: list[str] = []
+    seen: set[str] = set()
+    for path in candidates:
+        resolved_path = path.resolve(strict=False)
+        try:
+            resolved_path.relative_to(eval_root)
+        except ValueError:
+            continue
+        key = str(resolved_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not resolved_path.is_file():
+            continue
+        original = resolved_path.read_text(encoding="utf-8")
+        rendered = _upsert_marked_markdown_section(
+            original,
+            section,
+            begin_marker=BASELINE_ALIGNMENT_BEGIN,
+            end_marker=BASELINE_ALIGNMENT_END,
+        )
+        if rendered != original:
+            tmp = resolved_path.with_name(resolved_path.name + ".tmp")
+            tmp.write_text(rendered, encoding="utf-8")
+            os.replace(tmp, resolved_path)
+        updated.append(str(resolved_path))
+    return updated
 
 
 # ---------------------------------------------------------------------------
@@ -2138,7 +2319,7 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
         }]
 
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": KERNEL_JOURNEY_SCHEMA_VERSION,
         "producer": "kernel-agent",
         "eval_dir": eval_dir_str,
         "versions": _geak_versions(),
@@ -2167,7 +2348,7 @@ def _empty_journey(eval_dir: Path, normalized: dict) -> dict:
     finds a parseable file and can see WHY nothing landed — used on an error/
     timeout/no-recovery run, or as the fallback when the full build raises."""
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": KERNEL_JOURNEY_SCHEMA_VERSION,
         "producer": "kernel-agent",
         "eval_dir": str(eval_dir),
         "versions": _geak_versions(),
@@ -2314,6 +2495,15 @@ def main(argv: list[str]) -> int:
                 out["kernel_journey_path"] = _write_kernel_journey(eval_dir, wf, out)
             except Exception as kj_exc:
                 out["kernel_journey_error"] = f"{type(kj_exc).__name__}: {kj_exc}"
+        if out.get("baseline_basis"):
+            try:
+                updated_reports = _update_baseline_alignment_reports(out)
+                if updated_reports:
+                    out["baseline_alignment_report_paths"] = updated_reports
+            except Exception as report_exc:
+                out["baseline_alignment_report_error"] = (
+                    f"{type(report_exc).__name__}: {report_exc}"
+                )
         try:
             result_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = result_path.with_name(result_path.name + ".tmp")

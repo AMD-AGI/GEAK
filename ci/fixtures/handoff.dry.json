@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "model_path": "/tmp/geak-ci/models/Qwen3-8B",
+  "framework": "vllm",
+  "gpu_type": "mi300x",
+  "tp": 1,
+  "workload": {
+    "isl": 1024,
+    "osl": 1024,
+    "conc": 64
+  },
+  "accepted_flags": "--kv-cache-dtype fp8 --max-num-seqs 256 --quantization fp8 --enable-chunked-prefill --max-num-batched-tokens 4096 --async-scheduling",
+  "accepted_env": "VLLM_USE_AITER=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1 VLLM_ROCM_USE_AITER_RMSNORM=1",
+  "launch_recipe": "/tmp/geak-ci/baseline_config.with_envs.yaml",
+  "raw_baseline_tput": 4458.59,
+  "orchestrator_best_tput_same_config": 4680.25,
+  "exp_root": "/tmp/geak-ci/geak",
+  "bench_client": "auto",
+  "inferencex_path": "/tmp/geak-ci/InferenceX",
+  "gpu_ids": "0",
+  "bench_protocol": {
+    "random_range_ratio": 1.0,
+    "num_prompts": 320,
+    "num_warmups": 8
+  }
+}

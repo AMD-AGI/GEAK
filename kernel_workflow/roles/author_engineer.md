@@ -20,7 +20,9 @@ from the op task dir). The op's correctness contract is an **IMMUTABLE** unittes
   `b_shape`/`transpose_b`/`bias` (gemm), captured tensor spec (attn), `dtype`, `math_contract`
   (e.g. `C = A·Bᵀ + bias`), `regime` (prefill|decode|both).
 - `WORKSPACE` — the canonical workspace to write your implementation into (a `kernel_src/` lives here).
-- `TASK_DIR` — the op task dir holding the **IMMUTABLE** `unittest.py` + `reference_io.pt` + `meta.json`.
+- `TASK_DIR` — the op task dir holding the **IMMUTABLE** `unittest.py` + `meta.json` + `baseline_src/`
+  (plus `reference_io.pt` **if** the dir came from e2e's `kernel_extractor`; a `oracle_freezer` dir has
+  none — it re-derives operands from `meta.cases[]` seeds and checks parity against `baseline_src/` live).
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path (its CORRECTNESS/BENCHMARK point at the immutable
   unittest), and `KERNEL_KNOWLEDGE_DIR` (the AMD authoring knowledge base, may be empty).
 
@@ -69,9 +71,10 @@ Read, as reference, before writing:
 > 15.7× isolated, ~0% e2e). Your seed competes against the live Triton path, not against itself.
 
 ## Rules (NON-NEGOTIABLE)
-1. NEVER modify `TASK_DIR/unittest.py`, `cases.py`, `reference_io.pt`, `meta.json`, `harness_lib.py`,
-   `leg_runner.py`, `baseline_overlay/` or `baseline_ref/` — they are the immutable oracle + the frozen
-   real-online baseline (anti-cheating). You only write into `WORKSPACE/kernel_src/`.
+1. NEVER modify `TASK_DIR/unittest.py`, `cases.py`, `meta.json`, `harness_lib.py`, `leg_runner.py`,
+   `baseline_overlay/` / `baseline_ref/` / `baseline_src/`, or `reference_io.pt` if the dir has one —
+   they are the immutable oracle + the frozen real-online baseline (anti-cheating). You only write into
+   `WORKSPACE/kernel_src/`.
 1a. **The speedup denominator is the frozen REAL ONLINE kernel, not your seed.** The immutable
    `unittest.py` reaches its baseline leg through `baseline_overlay/` on PYTHONPATH (the live production
    stack). There is no baseline callable for you to point anywhere, and no same-language naive impl can

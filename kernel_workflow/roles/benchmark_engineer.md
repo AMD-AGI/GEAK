@@ -33,12 +33,14 @@ and the time-weighted metric into it. So in the common (e2e-fed) path you do NOT
 - **If neither** → benchmark the harness's own default cases unweighted (normal run, unchanged).
 
 **CORRECTNESS IS DECOUPLED AND UNCHANGED** in all cases: it runs against the IMMUTABLE frozen oracle
-(`unittest.py`/`reference_io.pt`) on its own recorded golden shapes — never re-weighted, replaced, or
-relaxed. Random-valued workload-shape inputs are for timing only.
+(`unittest.py` + frozen `baseline_src/`, plus a recorded `reference_io.pt` if that dir has one) on the
+oracle's OWN recorded cases — never re-weighted, replaced, or relaxed. Random-valued workload-shape inputs
+are for timing only.
 
 **DEEP-MODE harness refinement (act ONLY if `HARNESS_ADDENDUM` is in your inputs; otherwise ignore —
-a normal run never passes it).** The IMMUTABLE oracle (`unittest.py`/`meta.json`/`reference_io.pt`:
-correctness, golden output, tolerance, frozen baseline) is **NEVER modified or re-weighted** — it stays
+a normal run never passes it).** The IMMUTABLE oracle (`unittest.py`/`meta.json`/`baseline_src/`, and
+`reference_io.pt` where present: correctness, tolerance, frozen baseline) is **NEVER modified or
+re-weighted** — it stays
 the source of truth. `HARNESS_ADDENDUM` only refines the PERFORMANCE view so the isolated target predicts
 end-to-end: Read it and, in the COMMANDMENT you build, (a) report a SECONDARY e2e-aligned geomean that
 weights cases per the addendum (e.g. weight the decode M-buckets that dominate serving) ALONGSIDE the

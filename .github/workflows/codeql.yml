@@ -1,0 +1,62 @@
+name: CodeQL
+
+# Static security analysis (GitHub code scanning). Lives in its own workflow rather
+# than as another job in ci-l0-checks.yml for three reasons:
+#   1. it needs `security-events: write` to upload SARIF, and L0 is `contents: read`
+#      for every job — keeping it separate avoids widening L0's token,
+#   2. L0 sets cancel-in-progress:true; cancelling an in-flight analysis leaves the
+#      code-scanning alert state stale for that ref,
+#   3. the weekly cron below re-scans UNCHANGED code against updated query packs,
+#      which would pointlessly re-run L0's test suite if it lived there.
+#
+# GPU-free, secret-free, GitHub-hosted — same cost tier as L0. Does NOT touch L1:
+# L1 runs only on the `l1-ci-smoke` / `l1-ci-full` PR labels or a manual dispatch.
+#
+# NOTE: CodeQL has no shell support, so ci/*.sh is NOT analyzed by this workflow.
+
+on:
+  push:
+    # NOTE: ci/** is TEMPORARY (self-test before this lands on main), mirroring the
+    # same allowance in ci-l0-checks.yml. Revert to just ["main"] before real use.
+    branches: ["main", "ci/**"]
+  pull_request:
+    branches: ["main", "ci/**"]
+  schedule:
+    # Mondays 03:00 UTC — catches new queries firing on code that hasn't changed.
+    - cron: "0 3 * * 1"
+
+# Let an in-flight analysis finish; a cancelled run leaves alerts stale for the ref.
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # python: interface/, e2e_workflow/scripts/, geak/
+        # javascript-typescript: e2e_workflow/*.js, kernel_workflow/*.js
+        language: ["python", "javascript-typescript"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          language: ${{ matrix.language }}
+          # Default query suite. Widen with `queries: security-extended` once the
+          # baseline findings are triaged.
+          build-mode: none
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

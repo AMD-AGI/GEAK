@@ -11,12 +11,12 @@ two failure modes that inflate the leaderboard:
 The contract under test (see run_e2e normalize_result / baseline_basis +
 alignment_metrics):
 
-  * ``measurement_divergence_pct`` = GEAK baseline vs the orchestrator's tput on
-    the SAME accepted config (identical config both sides) — the clean residue,
-    populated only when the handoff forwards
-    ``orchestrator_best_tput_same_config``.
-  * ``baseline_divergence_pct`` = GEAK baseline vs the orchestrator RAW baseline
-    (conflates config gain + residue) — kept for continuity.
+  * ``current_best_same_config_divergence_pct`` = GEAK baseline vs the
+    orchestrator's tput on the SAME accepted config — the primary clean residue.
+  * ``measurement_divergence_pct`` is the backward-compatible alias for that
+    same-config metric.
+  * ``raw_session_baseline_divergence_pct`` = GEAK baseline vs the orchestrator
+    RAW baseline (conflates config gain + residue) — audit only.
   * ``cold_speedup`` = GEAK cold final / orchestrator COLD baseline — the exact
     number Hyperloom promotes as its (cross-harness) PROVISIONAL gain, so it must
     equal current_best.tput / baseline_tput.
@@ -55,41 +55,85 @@ def _wf(eval_dir: Path, *, base: float, final: float, speedup: float) -> dict:
     }
 
 
-def test_measurement_divergence_uses_same_config_not_raw_baseline(tmp_path: Path) -> None:
-    """The clean residue divides GEAK baseline by the SAME-config orch tput.
-
-    A large raw-baseline divergence must NOT masquerade as a measurement
-    mismatch when the same-config numbers actually agree.
-    """
+def test_issue6_names_raw_and_same_config_divergence_explicitly(
+    tmp_path: Path,
+) -> None:
+    """Issue 6 values distinguish accepted gain from measurement residue."""
     eval_dir = tmp_path / "e2e"
     eval_dir.mkdir()
-    geak_baseline = 2974.662
-    orch_raw = 2844.209          # lower — includes the config gain GEAK seeds with
-    orch_same_cfg = 2960.0       # orchestrator on the identical accepted config
+    geak_baseline = 537.354
+    orch_raw = 498.81
+    orch_same_cfg = 537.15
     h = {
-        "workload": {"isl": 1024, "osl": 1024, "conc": 64},
+        "workload": {"isl": 16384, "osl": 512, "conc": 16},
         "raw_baseline_tput": orch_raw,
         "orchestrator_best_tput_same_config": orch_same_cfg,
     }
-    wf = _wf(eval_dir, base=geak_baseline, final=3236.489, speedup=1.088)
+    wf = _wf(eval_dir, base=geak_baseline, final=532.119, speedup=0.9903)
 
     out = rx.normalize_result(h, wf)
     bb = out["baseline_basis"]
 
-    # Pure residue: GEAK baseline vs SAME-config orchestrator tput.
-    assert bb["measurement_divergence_pct"] == pytest.approx(
-        100.0 * (geak_baseline - orch_same_cfg) / orch_same_cfg, abs=0.01
+    assert bb["raw_session_baseline_divergence_pct"] == pytest.approx(
+        7.73, abs=0.01
     )
-    # Raw-baseline divergence is the LARGER, config-conflated number.
-    assert bb["baseline_divergence_pct"] == pytest.approx(
-        100.0 * (geak_baseline - orch_raw) / orch_raw, abs=0.01
+    assert bb["current_best_same_config_divergence_pct"] == pytest.approx(
+        0.04, abs=0.01
     )
-    assert abs(bb["baseline_divergence_pct"]) > abs(bb["measurement_divergence_pct"])
+    assert (
+        bb["measurement_divergence_pct"]
+        == bb["current_best_same_config_divergence_pct"]
+    )
+    assert "baseline_divergence_pct" not in bb
     assert bb["orchestrator_best_tput_same_config"] == pytest.approx(orch_same_cfg)
+    assert out["baseline_alignment"]["status"] == "aligned"
 
 
-def test_measurement_divergence_none_when_same_config_absent(tmp_path: Path) -> None:
-    """Older handoffs (no same-config tput) leave the clean residue undefined."""
+def test_same_config_divergence_above_threshold_is_warning(tmp_path: Path) -> None:
+    """A real same-config mismatch warns without changing optimization status."""
+    eval_dir = tmp_path / "e2e"
+    eval_dir.mkdir()
+    h = {
+        "workload": {"isl": 1024, "osl": 1024, "conc": 64},
+        "raw_baseline_tput": 1331.7541295483402,
+        "orchestrator_best_tput_same_config": 1872.9515966860333,
+    }
+    wf = _wf(eval_dir, base=1785.741, final=2869.795, speedup=1.607)
+
+    out = rx.normalize_result(h, wf)
+
+    assert out["baseline_basis"][
+        "current_best_same_config_divergence_pct"
+    ] == pytest.approx(-4.66, abs=0.01)
+    assert out["baseline_alignment"]["status"] == "warning"
+    assert out["status"] == "ok"
+
+
+def test_large_raw_gain_does_not_trigger_alignment_warning(tmp_path: Path) -> None:
+    """Accepted config gain is audit-only when same-config measurements align."""
+    eval_dir = tmp_path / "e2e"
+    eval_dir.mkdir()
+    h = {
+        "workload": {"isl": 1024, "osl": 1024, "conc": 64},
+        "raw_baseline_tput": 100.0,
+        "orchestrator_best_tput_same_config": 120.0,
+    }
+    wf = _wf(eval_dir, base=120.2, final=125.0, speedup=1.04)
+
+    out = rx.normalize_result(h, wf)
+    bb = out["baseline_basis"]
+
+    assert bb["raw_session_baseline_divergence_pct"] == pytest.approx(
+        20.2, abs=0.01
+    )
+    assert bb["current_best_same_config_divergence_pct"] == pytest.approx(
+        0.17, abs=0.01
+    )
+    assert out["baseline_alignment"]["status"] == "aligned"
+
+
+def test_same_config_alignment_unavailable_without_reference(tmp_path: Path) -> None:
+    """Older handoffs never fall back to raw divergence for alignment."""
     eval_dir = tmp_path / "e2e"
     eval_dir.mkdir()
     h = {
@@ -99,38 +143,87 @@ def test_measurement_divergence_none_when_same_config_absent(tmp_path: Path) -> 
     }
     wf = _wf(eval_dir, base=2974.662, final=3236.489, speedup=1.088)
 
-    bb = rx.normalize_result(h, wf)["baseline_basis"]
+    out = rx.normalize_result(h, wf)
+    bb = out["baseline_basis"]
     assert bb["measurement_divergence_pct"] is None
-    assert bb["baseline_divergence_pct"] is not None  # raw still computable
+    assert bb["current_best_same_config_divergence_pct"] is None
+    assert bb["raw_session_baseline_divergence_pct"] is not None
+    assert out["baseline_alignment"]["status"] == "unavailable"
 
 
-def _bb(tmp_path: Path, **extra) -> dict:
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_divergence_inputs_are_unavailable(
+    tmp_path: Path,
+    value: float,
+) -> None:
     eval_dir = tmp_path / "e2e"
-    eval_dir.mkdir(exist_ok=True)
-    h = {"workload": {"isl": 1024, "osl": 1024, "conc": 64},
-         "raw_baseline_tput": 2844.209, **extra}
-    wf = _wf(eval_dir, base=2974.662, final=3236.489, speedup=1.088)
-    return rx.normalize_result(h, wf)["baseline_basis"]
+    eval_dir.mkdir()
+    h = {
+        "workload": {"isl": 1024, "osl": 1024, "conc": 64},
+        "raw_baseline_tput": 100.0,
+        "orchestrator_best_tput_same_config": value,
+    }
+    wf = _wf(eval_dir, base=120.0, final=125.0, speedup=1.04)
+
+    out = rx.normalize_result(h, wf)
+
+    assert out["baseline_basis"]["measurement_divergence_pct"] is None
+    assert out["baseline_basis"]["orchestrator_best_tput_same_config"] is None
+    assert out["baseline_alignment"]["status"] == "unavailable"
+    json.dumps(out, allow_nan=False)
 
 
-def test_divergence_aliases_mirror_legacy_fields(tmp_path: Path) -> None:
-    """Aliases name WHICH baseline is compared; legacy keys stay (Hyperloom reads them)."""
-    bb = _bb(tmp_path, orchestrator_best_tput_same_config=2960.0)
-    assert bb["raw_session_baseline_divergence_pct"] == bb["baseline_divergence_pct"]
-    assert bb["same_config_measurement_divergence_pct"] == bb["measurement_divergence_pct"]
-    assert bb["primary_divergence_metric"] == "same_config_measurement_divergence_pct"
-    assert bb["primary_divergence_pct"] == bb["measurement_divergence_pct"]
-    assert bb["same_config_baseline_available"] is True
-    assert "identical accepted config" in bb["divergence_note"]
+def test_alignment_report_is_same_config_first_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    report = tmp_path / "final_report.md"
+    report.write_text("# GEAK final report\n\nExisting content.\n", encoding="utf-8")
+    result = {
+        "report_path": str(report),
+        "eval_dir": str(tmp_path),
+        "baseline_basis": {
+            "geak_measured_baseline_tok_s": 537.354,
+            "orchestrator_baseline_tok_s": 498.81,
+            "raw_session_baseline_divergence_pct": 7.73,
+            "current_best_same_config_divergence_pct": 0.04,
+            "measurement_divergence_pct": 0.04,
+            "orchestrator_best_tput_same_config": 537.15,
+        },
+        "baseline_alignment": {
+            "status": "aligned",
+            "primary_metric": "current_best_same_config_divergence_pct",
+            "divergence_pct": 0.04,
+            "warning_threshold_pct": 3.0,
+            "raw_session_divergence_is_measurement_signal": False,
+        },
+    }
+
+    rx._update_baseline_alignment_reports(result)
+    rx._update_baseline_alignment_reports(result)
+
+    rendered = report.read_text(encoding="utf-8")
+    assert rendered.count(rx.BASELINE_ALIGNMENT_BEGIN) == 1
+    assert rendered.count(rx.BASELINE_ALIGNMENT_END) == 1
+    assert rendered.index("Primary same-config comparison") < rendered.index(
+        "Raw-session audit comparison"
+    )
+    assert "not a pure measurement-drift signal" in rendered
 
 
-def test_missing_same_config_baseline_is_loud_not_silent(tmp_path: Path) -> None:
-    """Null primary must announce itself, not leave the conflated number standing alone."""
-    bb = _bb(tmp_path)
-    assert bb["same_config_baseline_available"] is False
-    assert bb["primary_divergence_pct"] is None
-    assert "CONFLATES" in bb["divergence_note"]
-    assert "raw_session_baseline_divergence_pct" in bb["divergence_note"]
+def test_alignment_report_refuses_path_outside_eval_dir(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    eval_dir.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("# External report\n", encoding="utf-8")
+    result = {
+        "report_path": str(outside),
+        "eval_dir": str(eval_dir),
+        "baseline_basis": {},
+        "baseline_alignment": {"status": "unavailable"},
+    }
+
+    assert rx._update_baseline_alignment_reports(result) == []
+    assert outside.read_text(encoding="utf-8") == "# External report\n"
 
 
 @pytest.mark.parametrize("val,want", [(1800, "1800"), ("900", "900")])

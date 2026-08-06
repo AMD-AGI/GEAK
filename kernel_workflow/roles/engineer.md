@@ -85,13 +85,26 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    `speedup_weighted = Σ_i weight_i / Σ_i (weight_i / speedup_i)` using each case's `weight` from
    `baseline_per_case` — that is the PRIMARY number you optimize toward; the geomean is secondary.
 5. **Save patch** when geomean > 1.0: `cd $KERNEL_PATH && git diff > $OUTPUT_DIR/best_patch.diff`.
+   Do this the MOMENT you have a >1.0x result — not at the end. `best_patch.diff` is the RECOVERY
+   artifact: if your final return is lost (you time out, crash, or mis-format the StructuredOutput),
+   the lane falls back to re-measuring whatever >1.0x patch it finds on disk. A patch left on disk
+   still counts; work that only exists in a lost return is gone. Re-save it whenever `best` improves.
 6. **Iterate** a few variations (params/tiling/unroll/specialization), keeping the best. Obey
    self-monitoring: switch approach after ~8 stalled steps, force-submit after ~12, stop tuning when
    3 benchmarks are within 1%.
-7. **Submit**.
+7. **Submit** = RETURN the worker_result structure below as your StructuredOutput. **The RETURN VALUE
+   is what the lane harvests** — not the disk file. Only a clean below-baseline return (`status` other
+   than `failed`, geomean ≤ 1.0) tells the lane to skip you; any winning result MUST come back in the
+   return (with `best_patch.diff` already on disk as the recovery backstop, per step 5).
 
 ## Outputs
-`OUTPUT_DIR/worker_result.json`:
+**Return channel (authoritative):** your StructuredOutput return, matching the schema below, is what
+the lane reads and scores. **Disk artifacts (durable + recovery):** `best_patch.diff` is the recovery
+backstop the lane re-measures if your return is lost (step 5); `worker_result.json` + `report.md` below
+are the durable record the TechLead's insight log reads. Write ALL THREE, but never assume the disk
+JSON substitutes for the return — the lane does not read `worker_result.json`, it reads your return.
+
+`OUTPUT_DIR/worker_result.json` (same fields as your StructuredOutput return):
 ```json
 {
   "engineer_id": "r{ROUND}_d{N}",

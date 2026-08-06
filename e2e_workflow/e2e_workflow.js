@@ -28,10 +28,30 @@ if (!WORKFLOW_DIR) {
 // The UNCHANGED single-kernel workflow. Default: sibling "kernel_workflow" dir next to this one.
 const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kernel_workflow')).replace(/\/+$/, '');
-const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_workflow.js`;
+// The single-language WORKER lane. kernel_workflow.js is now a dispatcher (mode=optimize/author ->
+// this worker; mode=bakeoff -> multi-language fan-out), so e2e MUST call the worker DIRECTLY
+// (kernel_lane.js) — routing through the dispatcher would add a nesting level (e2e -> dispatcher ->
+// worker = 3 levels) and the runtime forbids it. The worker's behavior/args are unchanged.
+const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
+
+// ---- Profile-analysis skill (OPTIONAL, pluggable; see knowledge/analysis_skills/INDEX.md) ----
+// After parse_profile.py emits the standardized Top-N, the Profiler may run ONE analysis skill to
+// enrich it with a headroom estimate the Architect can route on. Default `roofline`: per-kernel % of
+// the hardware ceiling -> attainable speedup -> expected e2e gain, so budget goes to the kernel with
+// HEADROOM rather than merely the biggest one. STRICTLY ADVISORY: it annotates and suggests an
+// ordering, never prunes a candidate and never overrides the measured pct_gpu_time.
+// `analysis_skill=none` (or a missing/unreadable skill dir) disables the step and the run behaves
+// exactly as it did before the feature existed -> ANALYSIS_SKILL_* are '' and nothing is injected.
+const ANALYSIS_SKILL = String(A.analysis_skill != null ? A.analysis_skill : 'roofline').trim();
+const ANALYSIS_SKILL_ON = !!ANALYSIS_SKILL && ANALYSIS_SKILL !== 'none' && ANALYSIS_SKILL !== 'false';
+const ANALYSIS_SKILL_INPUTS = ANALYSIS_SKILL_ON ? {
+  ANALYSIS_SKILL: ANALYSIS_SKILL,
+  ANALYSIS_SKILL_DIR: `${WORKFLOW_DIR}/knowledge/analysis_skills/${ANALYSIS_SKILL}`,
+} : { ANALYSIS_SKILL: '', ANALYSIS_SKILL_DIR: '' };
+if (ANALYSIS_SKILL_ON) log(`Profile-analysis skill: ${ANALYSIS_SKILL} (advisory; annotates + reorders, never prunes).`);
 
 // ---- Upstream TraceLens / kernel-agent prior (OPTIONAL; forwarded by run_e2e.py as args.tracelens) ----
 // run_e2e.py resolves these paths beside the geak handoff and forwards ONLY the non-null ones.
@@ -425,6 +445,13 @@ const STRATEGY_SCHEMA = obj({
   drop_list: arrObj, order_of_work: arrStr, strategy_path: { type: 'string' },
 }, ['kernel_candidates']);
 
+// Result of the ensure_flydsl provisioning gate (build-on-demand). ok=true iff flydsl is importable
+// (flydsl + kernels.moe_gemm_2stage) after sourcing env_file; built distinguishes a fresh build from reuse.
+const FLYDSL_GATE_SCHEMA = obj({
+  ok: { type: 'boolean' }, built: { type: 'boolean' },
+  env_file: { type: 'string' }, version: { type: 'string' }, reason: { type: 'string' },
+}, ['ok']);
+
 const SWEEP_SCHEMA = obj({
   trials: arrObj, accepted_flags: { type: 'string' }, accepted_env: { type: 'string' },
   best_throughput_tok_s: { type: 'number' }, throughput_speedup_vs_baseline: { type: 'number' },
@@ -662,6 +689,46 @@ async function safeAgent(prompt, opts, tries = 3) {
   }
   log(`agent[${(opts && opts.label) || '?'}] DEGRADED to null after ${tries} tries (${String(lastErr).slice(0, 120)})`);
   return null;
+}
+
+// --- FlyDSL provisioning gate -------------------------------------------------
+// Design intent (roles/system_architect.md §0a): the MOMENT strategize routes a flydsl backend onto
+// any head/kernel candidate, FlyDSL must be provisioned via the ensure_flydsl expert skill BEFORE any
+// consumer can select it. We enforce it in the ORCHESTRATOR — not by trusting the architect LLM to have
+// run it — so "decide to use flydsl" and "ensure_flydsl" are one inseparable step. The detect->reuse-or-build
+// decision lives ENTIRELY inside ensure_flydsl.sh (its own version gate: import flydsl + kernels.moe_gemm_2stage
+// AND __version__ >= FLYDSL_MIN_VERSION, default 0.2.2). is_flydsl_available() is NOT used to decide anything.
+let flydslProvisioned = false;   // guard so the two call sites (strategize / re-strategize) provision at most once
+const _wantsFlydsl = (c) => ((c && c.candidate_backends) || []).some((b) => String(b).toLowerCase() === 'flydsl');
+const flydslRouted = (...queues) => queues.some((q) => (q || []).some(_wantsFlydsl));
+function stripFlydslFromQueues(...queues) {
+  let n = 0;
+  for (const q of queues) for (const c of (q || [])) {
+    if (_wantsFlydsl(c)) { c.candidate_backends = (c.candidate_backends || []).filter((b) => String(b).toLowerCase() !== 'flydsl'); n++; }
+  }
+  return n;
+}
+async function ensureFlydslGate() {
+  if (flydslProvisioned) return;                      // already provisioned this run
+  if (!flydslRouted(headQueue, kernelQueue)) return;  // strategize did not route flydsl -> nothing to do
+  log('[flydsl-gate] strategize routed a flydsl backend -> running ensure_flydsl (detect -> reuse-or-build) BEFORE any consumer.');
+  const g = await safeAgent(
+    `You are the flydsl provisioner. Run the ensure_flydsl expert skill EXACTLY as ` +
+    `${WORKFLOW_DIR}/../perf_knowledge/expert_skills/skills/ensure_flydsl/skill.md specifies: launch ` +
+    `${WORKFLOW_DIR}/../perf_knowledge/expert_skills/skills/ensure_flydsl/ensure_flydsl.sh DETACHED and poll ` +
+    `(success = flydsl_env.sh written; failure = .flydsl_build.failed). The script's own version gate ` +
+    `(import flydsl AND kernels.moe_gemm_2stage AND __version__ >= FLYDSL_MIN_VERSION, default 0.2.2) is the ` +
+    `SOLE authority: reuse an ambient flydsl if satisfied, else clone+build the pin (~15-18min). Do NOT use ` +
+    `is_flydsl_available() to decide anything. Return {ok,built,env_file,version,reason}; ok=true iff, after ` +
+    `sourcing flydsl_env.sh, "import flydsl, kernels.moe_gemm_2stage" works.`,
+    { phase: 'Strategize', label: 'architect:ensure_flydsl', schema: FLYDSL_GATE_SCHEMA });
+  if (g && g.ok) {
+    flydslProvisioned = true;
+    log(`[flydsl-gate] FlyDSL ready (${g.built ? 'built' : 'reused'} ${g.version || '?'}); env=${g.env_file || '(default /opt/flydsl/FlyDSL/flydsl_env.sh)'}.`);
+  } else {
+    const n = stripFlydslFromQueues(headQueue, kernelQueue);
+    log(`[flydsl-gate] ensure_flydsl FAILED (${(g && g.reason) || 'no result'}) -> stripped 'flydsl' from ${n} candidate backend list(s); those heads fall back to their other backends (no silent flydsl selection).`);
+  }
 }
 
 // A FROZEN baseline is resolvable when the extractor seeded baseline_overlay/ + declared
@@ -1084,7 +1151,7 @@ if (want('setup')) {
     roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
       OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-      ...TRACELENS_INPUTS,
+      ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
   log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
@@ -1094,7 +1161,7 @@ if (want('setup')) {
     roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
       EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
       WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
-      ...TRACELENS_INPUTS,
+      ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
@@ -1118,6 +1185,8 @@ if (want('setup')) {
   }
   if (_fusedTagged) log(`[op-identity] ${_fusedTagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
   log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
+  // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
+  await ensureFlydslGate();
 } else {
   // Load carried state from a prior phase invocation (args.state).
   EVAL_DIR = ST.eval_dir || EVAL_DIR_OVERRIDE;
@@ -1157,6 +1226,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       roleAgent('profiler', 'reprofile', 'Re-profile after the config sweep.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'config',
         OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Profile', label: 'profiler:post-config', schema: PROFILE_SCHEMA });
     // Re-strategize the kernel queue against the new profile.
@@ -1164,10 +1234,13 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       roleAgent('system_architect', 'strategize', 'Re-route after config changed the landscape.', {
         EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
         WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
     if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
     if (restrat && restrat.head_candidates) headQueue = restrat.head_candidates.slice();
+    // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
+    await ensureFlydslGate();
   } else {
     log(`Config sweep found no win above the noise band.`);
   }
@@ -2074,6 +2147,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       roleAgent('profiler', 'reprofile', 'Re-profile after head-kernel wins.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'head',
         OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Profile', label: 'profiler:post-head', schema: PROFILE_SCHEMA });
   }
@@ -2113,6 +2187,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, MILESTONE_MIN_PCT,
         MIN_KERNEL_TASKS, DISPATCHED_SO_FAR: dispatched, BELOW_MIN_FLOOR: belowFloor,
         PROFILE_TOPN: profile ? profile.profile_topN_json : '', HISTORY: history, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Milestone', label: `architect:plan m${milestone}`, schema: PLAN_SCHEMA });
 
@@ -2257,6 +2332,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       roleAgent('profiler', 'reprofile', 'Re-profile the new best server.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: milestone,
         OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Profile', label: `profiler:reprofile m${milestone}`, schema: PROFILE_SCHEMA });
   } else {
@@ -2269,6 +2345,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       ROUND: milestone, EVAL_DIR, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
       MILESTONE_RESULTS: history.ledger.slice(-cands.length),
       REPROFILE_SHIFT: profile ? profile.shift_note : '', PRIOR_HISTORY: history,
+      ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Milestone', label: `architect:experience m${milestone}`, schema: EXPERIENCE_SCHEMA });
   if (exp) {
@@ -2411,6 +2488,7 @@ if (want('final')) {
       ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
+      ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Report', label: 'architect:report', schema: REPORT_SCHEMA });
 

@@ -35,7 +35,9 @@ continued wave build on the cumulative best instead of restarting. Handle it as 
   workspace — it contains the optimized `kernel_src/` AND the immutable oracle `unittest.py`/`meta.json`/
   `reference_io.pt`): create `EVAL_DIR` as usual, but **seed `baseline/` and `workspace/` by copying from
   `$STATE_DIR/best/`** (same tar-pipe excludes as the optimize-mode copy) instead of from
-  `KERNEL_PATH_ORIG`. Re-apply `chmod -w` to the oracle files. `git init` + commit this seeded state as
+  `KERNEL_PATH_ORIG`. (The golden rides in `best/` as an absolute symlink → `KERNEL_PATH_ORIG/reference_io.pt`;
+  the tar-pipe carries it verbatim — do NOT add `-h/--dereference`, and do NOT re-copy it.) Re-apply
+  `chmod -w` to the oracle files. `git init` + commit this seeded state as
   HEAD (so this wave's patches diff from the cumulative best). Then read `$STATE_DIR/STATE.json` if present
   and return `resumed: true` plus `prior_state` (its `cumulative`, `insights`, `ledger`, `bottleneck_now`,
   `best_per_case`). Verify the oracle is intact: `reference_io.pt` sha256 must still match `meta.json`'s
@@ -56,18 +58,27 @@ Do this instead of the optimize-mode steps below:
    mkdir -p "$EVAL_DIR/workspace/kernel_src" "$EVAL_DIR/baseline"
    echo "$KERNEL_PATH_ORIG" > "$EVAL_DIR/original_kernel_path.txt"
    # Copy the IMMUTABLE oracle in read-only (the Author/optimize loop judge against it, never edit it).
-   # baseline_overlay/ rides along too: it IS the timing denominator (the live serving stack), so it must
-   # be present and unwritable regardless of TARGET_LANGUAGE — otherwise the unittest has nothing to time
-   # the authored seed against except the seed's own language scaffold.
-   for f in meta.json unittest.py cases.py reference_io.pt harness_lib.py leg_runner.py overlay_setup.py; do
+   # This INCLUDES baseline_overlay/ + harness_lib.py: the frozen live serving stack IS the timing-baseline
+   # denominator regardless of TARGET_LANGUAGE — it must ride along, immutable, so the unittest can time
+   # the authored seed against the live online path (never against the seed's own language scaffold).
+   # (baseline_src/ is the oracle_freezer-era equivalent; the guards below cover whichever the task dir has.)
+   # reference_io.pt is OPTIONAL and usually ABSENT: only e2e's kernel_extractor records a golden (it
+   # captures unsynthesizable real routing / paged-KV metadata off a live server). An oracle_freezer dir
+   # has no golden — it re-derives operands from meta.cases[] seeds and checks parity against the
+   # frozen baseline live. The [ -e ] guards below already handle both; do not "fix" a missing file.
+   for f in meta.json unittest.py cases.py harness_lib.py leg_runner.py overlay_setup.py; do
      [ -e "$KERNEL_PATH_ORIG/$f" ] && cp "$KERNEL_PATH_ORIG/$f" "$EVAL_DIR/workspace/$f"
    done
-   for d in baseline_overlay baseline_ref; do
+   # golden is BIG (~1 GB) and IMMUTABLE — SHARE the single original via an ABSOLUTE symlink instead of
+   # copying it into every workspace. unittest loads it with os.path.join(HERE, "reference_io.pt") and the
+   # sha check hashes the file bytes, both transparent through a symlink. Downstream tars (engineer/verify)
+   # carry the symlink verbatim (no -h/--dereference anywhere), so the whole lane shares one physical file.
+   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
+   for d in baseline_overlay baseline_ref baseline_src; do
      [ -d "$KERNEL_PATH_ORIG/$d" ] && cp -r "$KERNEL_PATH_ORIG/$d" "$EVAL_DIR/workspace/$d"
    done
    chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
-   [ -e "$EVAL_DIR/workspace/reference_io.pt" ] && chmod -w "$EVAL_DIR/workspace/reference_io.pt" 2>/dev/null || true
-   for d in baseline_overlay baseline_ref; do
+   for d in baseline_overlay baseline_ref baseline_src; do
      [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
    done
    cd "$EVAL_DIR/workspace"
@@ -112,7 +123,10 @@ Steps:
    # friction) AND the source .git — which may carry prior/optimized history — can never leak into a
    # workspace where an engineer could `git show` it. IMPORTANT: also dropping any `.torch_ext` —
    # torch's build.ninja stores ABSOLUTE source paths, so an inherited cache would rebuild the wrong
-   # location; each workspace must build its own fresh.
+   # location; each workspace must build its own fresh. ALSO exclude reference_io.pt: the golden is BIG
+   # (~1 GB) and IMMUTABLE, so we SHARE the single original via an absolute symlink (below) instead of
+   # copying it into every workspace. Only `workspace/` needs it (CANONICAL = workspace; the unittest
+   # loads it there and baseline/ never reads a golden).
    for d in baseline workspace; do
      ( cd "$KERNEL_PATH_ORIG" && tar \
          --exclude='./.git' --exclude='*/.git' \
@@ -120,9 +134,13 @@ Steps:
          --exclude='./__pycache__' --exclude='*/__pycache__' \
          --exclude='./.torch_ext' --exclude='*/.torch_ext' \
          --exclude='./.rocprofv3' --exclude='*/.rocprofv3' \
+         --exclude='./reference_io.pt' --exclude='*/reference_io.pt' \
          --exclude='*.so' --exclude='*.o' \
          -cf - . ) | ( cd "$EVAL_DIR/$d" && tar -xf - )
    done
+   # Share the immutable golden by absolute symlink (sha check + torch.load are transparent through it;
+   # downstream engineer/verify tars carry the symlink verbatim — never add -h/--dereference).
+   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
    printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
@@ -198,15 +216,18 @@ baseline latencies recorded at benchmark setup).
    [ -e "$VWS" ] && mv "$VWS" "${VWS}.old_$(date +%s)_$$" 2>/dev/null || true
    mkdir -p "$VWS"
    # Copy from the ORIGINAL excluding .git + build artifacts (tar-pipe), so the source history can't
-   # leak into validation and no build cache is inherited.
+   # leak into validation and no build cache is inherited. Exclude the big immutable golden too — it is
+   # shared via an absolute symlink below (validation runs correctness, so it must resolve).
    ( cd "$KERNEL_PATH_ORIG" && tar \
        --exclude='./.git' --exclude='*/.git' \
        --exclude='./build' --exclude='*/build' \
        --exclude='./__pycache__' --exclude='*/__pycache__' \
        --exclude='./.torch_ext' --exclude='*/.torch_ext' \
        --exclude='./.rocprofv3' --exclude='*/.rocprofv3' \
+       --exclude='./reference_io.pt' --exclude='*/reference_io.pt' \
        --exclude='*.so' --exclude='*.o' \
        -cf - . ) | ( cd "$EVAL_DIR/validation_workspace" && tar -xf - )
+   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/validation_workspace/reference_io.pt"
    cd "$EVAL_DIR/validation_workspace"
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A
@@ -245,6 +266,24 @@ baseline latencies recorded at benchmark setup).
    - Within 10%, or Director higher → `accepted`.
    - Director LOWER than claim by >10% → `flagged` (use Director's measured numbers as official).
    - Correctness fail / patch fails to apply → `flagged`.
+   **TIMING RECEIPT GATE — run this BEFORE the comparisons above.** Parse `GEAK_TIMING_RECEIPT` out of the
+   FULL_BENCHMARK output (see `oracle_freezer.md` step 4) and copy it verbatim into
+   `director_validation.json` as `timing_receipt`. A speedup is a claim about DEVICE time; the receipt is
+   the only evidence that it is one. Then:
+   - `all_primed: true` → proceed normally.
+   - `all_primed: false` with `timer_unprimed: false` → at least one leg is HOST-BOUND at these dims. The
+     ratio is a dispatch-latency ratio, not a kernel speedup. Still report the number, but set
+     `timing_basis: "host_bound"` and name the affected cases in `arbitration_note` — a host-bound win does
+     NOT survive integration into a server that already replays this op inside its own graph.
+   - `timer_unprimed: true` → the task was frozen against a `harness_lib.py` that predates dispatch priming,
+     so BOTH legs carry a bubble of unknown sign. Set `timing_basis: "unprimed"` and `status: "flagged"`.
+     Do not attempt a correction factor: the bubble is a constant that inflates whichever leg is relatively
+     smaller, so it moves different cases in different directions. Re-freeze against a current
+     `$HARNESS_LIB` is the only fix.
+   - Receipt ABSENT entirely → the unittest is older than this contract. `timing_basis: "unknown"`,
+     `status: "flagged"`. Absence is not evidence of priming.
+   Whatever the outcome, `timing_basis` is REQUIRED in `director_validation.json`, and any campaign summary
+   that quotes the speedup must carry it — an unlabelled number is read as a clean device-time win.
 7. If `APPLY_TO_ORIGINAL=true` AND status is `accepted`:
    ```bash
    cd "$KERNEL_PATH_ORIG"

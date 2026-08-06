@@ -26,7 +26,10 @@ const TASK = A.task != null ? String(A.task) : '';
 const KERNELS = Array.isArray(A.kernels) ? A.kernels : [];
 if (!KERNELS.length) throw new Error('args.kernels must be a non-empty array');
 
-const TEAM = WF + '/kernel_workflow.js';
+// Call the single-language WORKER lane directly. kernel_workflow.js is now a dispatcher that itself
+// nests into the worker; this batch orchestrator is already a top-level workflow, so routing through the
+// dispatcher would be bmk -> dispatcher -> worker = 3 levels (forbidden). kernel_lane.js is the worker.
+const TEAM = WF + '/kernel_lane.js';
 
 phase('Optimize');
 log(`[gpu ${GPU}] ${KERNELS.length} kernels: ${KERNELS.map(k => k.split('/').pop()).join(', ')}`);

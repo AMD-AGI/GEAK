@@ -4,8 +4,8 @@
 touches. Everything volatile about the e2e workflow (the `e2e_workflow.js` arg
 names, the Claude Code `Workflow` invocation, the `--effort ultracode`
 requirement, the SDK-vs-CLI choice) is hidden behind one command and two JSON
-files. As long as `schema_version` stays `1`, the caller never changes when
-the workflow evolves internally.
+files. The result schema is versioned so callers can distinguish contract
+changes while the workflow evolves internally.
 
 ## Command
 
@@ -30,7 +30,7 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 
 ```jsonc
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "model_path": "/models/Qwen-Qwen3.5-27B",
   "framework": "sglang",                 // -> backend (sglang|vllm)
   "gpu_type": "MI300X",
@@ -40,7 +40,8 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "accepted_flags": "--attention-backend triton",  // best config from the caller's search
   "accepted_env": "SGLANG_USE_AITER=1",
   "launch_recipe": "/path/baseline_config.with_envs.yaml",  // optional launch script/recipe
-  "raw_baseline_tput": 1485.4,           // caller's official raw baseline (carried for reference)
+  "raw_baseline_tput": 1485.4,           // caller's pre-change session baseline (audit reference)
+  "orchestrator_best_tput_same_config": 1550.8, // caller best measured with accepted_flags/env
   "exp_root": "/work/experiment/geak",   // basename MUST be `geak`; the timestamped run dir is created here
   "bench_client": "auto",                // auto|inferencex|native — see口径 alignment below
   "inferencex_path": "/opt/InferenceX",  // optional; else taken from $INFERENCEX_PATH
@@ -78,6 +79,8 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 | `accepted_flags` | `initial_extra_server_args` | seeds the baseline = caller best config |
 | `accepted_env` | `initial_extra_env` | seeds baseline env |
 | `launch_recipe` | `launch_script` | optional |
+| `raw_baseline_tput` | result audit metadata | pre-change session baseline; never used as the measurement-alignment signal |
+| `orchestrator_best_tput_same_config` | result alignment metadata | caller throughput on the accepted config GEAK uses for its baseline |
 | `exp_root` | `exp_root` | run dir root |
 | (derived from `exp_root`) | `tracelens` | auto-discovered upstream TraceLens / kernel-agent artifacts (see below); only non-null paths forwarded; key omitted entirely when none found |
 | `bench_client` / `inferencex_path` | env `BENCH_CLIENT` + `INFERENCEX_PATH` | exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
@@ -122,7 +125,7 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
 
 ```jsonc
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "ok | no_gain | error",
   "eval_dir": "/work/experiment/geak/e2e_<model>_<ts>",
   "baseline_throughput_tok_s": 1485.4,   // baseline (= caller best config)
@@ -141,11 +144,37 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
   "accepted_kernels": [ /* what was optimized + how (per-kernel) */ ],
   "accepted_heads": [ /* head GEMM/attn winners */ ],
   "accepted_config": { "flags": "...", "env": "..." },
+  "baseline_basis": {
+    "geak_measured_baseline_tok_s": 1551.4,
+    "orchestrator_baseline_tok_s": 1485.4,
+    "raw_session_baseline_divergence_pct": 4.44, // audit only; includes accepted config gain
+    "orchestrator_best_tput_same_config": 1550.8,
+    "current_best_same_config_divergence_pct": 0.04, // primary alignment metric
+    "measurement_divergence_pct": 0.04 // backward-compatible alias
+  },
+  "baseline_alignment": {
+    "status": "aligned | warning | unavailable",
+    "primary_metric": "current_best_same_config_divergence_pct",
+    "divergence_pct": 0.04,
+    "warning_threshold_pct": 3.0,
+    "raw_session_divergence_is_measurement_signal": false
+  },
   "report_path": ".../final_report.md",  // human report: per-kernel optimizations, changed params, TTFT/TPOT
   "kernel_journey_path": ".../kernel_journey.json",  // per-kernel journey contract (see below); absent if nothing accepted
   "recovered_from_disk": true             // present+true only when the handoff was rebuilt from on-disk artifacts
 }
 ```
+
+`raw_session_baseline_divergence_pct` compares GEAK's accepted-config baseline
+with the caller's pre-change session baseline. It is audit-only because it
+includes configuration gains accepted before GEAK started.
+
+`current_best_same_config_divergence_pct` compares the same accepted
+configuration in both harnesses and is the primary alignment metric.
+`measurement_divergence_pct` remains an exact compatibility alias for existing
+callers. If the handoff omits `orchestrator_best_tput_same_config`, both
+same-config fields are `null` and `baseline_alignment.status` is `unavailable`;
+GEAK never falls back to the raw-session divergence as a drift signal.
 
 ## Handoff resilience (the workflow return is never the single point of failure)
 
