@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GEAK · 可切换 code-agent 后端(适配 qcoder)</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2430; --line:#30363d;
+    --ink:#e6edf3; --dim:#9aa7b4; --faint:#6e7b8a;
+    --accent:#58a6ff;   /* claude/native */
+    --qwen:#a371f7;     /* qcoder */
+    --good:#3fb950; --warn:#d29922; --bad:#f85149;
+    --chip:#21262d;
+    --shadow:0 1px 0 rgba(255,255,255,.03), 0 8px 24px rgba(0,0,0,.4);
+    --radius:14px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f6f8fa; --panel:#ffffff; --panel2:#f0f3f6; --line:#d0d7de;
+           --ink:#1f2328; --dim:#59636e; --faint:#818b98; --chip:#eaeef2;
+           --shadow:0 1px 2px rgba(0,0,0,.06), 0 10px 24px rgba(140,149,159,.15);}
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Helvetica,Arial,sans-serif;
+    line-height:1.55;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1120px;margin:0 auto;padding:40px 24px 80px}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:14.5px;margin:0 0 4px}
+  .tag{display:inline-block;font-size:12px;color:var(--faint);
+    border:1px solid var(--line);border-radius:999px;padding:2px 10px;margin-top:10px}
+  h2{font-size:15px;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);
+    margin:44px 0 16px;font-weight:600;display:flex;align-items:center;gap:10px}
+  h2::before{content:"";width:6px;height:16px;border-radius:3px;background:var(--accent)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    box-shadow:var(--shadow)}
+  .pad{padding:20px 22px}
+  code,.mono{font-family:"SF Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+  .kbd{background:var(--chip);border:1px solid var(--line);border-radius:6px;padding:1px 7px;font-size:12px}
+
+  /* ---- flow diagram ---- */
+  .flow{display:grid;grid-template-columns:1fr;gap:14px}
+  .lane{display:flex;align-items:stretch;gap:12px;flex-wrap:wrap}
+  .box{background:var(--panel2);border:1px solid var(--line);border-radius:12px;
+    padding:12px 14px;min-width:0;flex:1;position:relative}
+  .box .t{font-weight:600;font-size:14px;margin-bottom:3px}
+  .box .d{color:var(--dim);font-size:12.5px}
+  .box.new{border-color:color-mix(in srgb,var(--qwen) 55%, var(--line))}
+  .box.new::after{content:"新增";position:absolute;top:-9px;right:10px;background:var(--qwen);
+    color:#fff;font-size:10.5px;padding:1px 8px;border-radius:999px;font-weight:600}
+  .box.keep{opacity:.92}
+  .box.keep::after{content:"没动";position:absolute;top:-9px;right:10px;background:var(--good);
+    color:#04220c;font-size:10.5px;padding:1px 8px;border-radius:999px;font-weight:700}
+  .arrow{align-self:center;color:var(--faint);font-size:20px;padding:0 2px}
+  .switch{border:1px dashed color-mix(in srgb,var(--warn) 60%, var(--line));
+    background:color-mix(in srgb,var(--warn) 8%, transparent);border-radius:12px;padding:10px 14px;
+    text-align:center;font-size:13px}
+  .switch b{color:var(--warn)}
+  .fanout{display:flex;gap:10px;flex-wrap:wrap;margin-top:2px}
+  .pill{flex:1;min-width:150px;text-align:center;border-radius:10px;padding:10px;font-size:13px;
+    border:1px solid var(--line);background:var(--panel2)}
+  .pill.claude{border-color:color-mix(in srgb,var(--accent) 50%,var(--line))}
+  .pill.qwen{border-color:color-mix(in srgb,var(--qwen) 55%,var(--line))}
+  .pill .h{font-weight:700;margin-bottom:2px}
+  .pill.claude .h{color:var(--accent)} .pill.qwen .h{color:var(--qwen)}
+  .pill .s{color:var(--dim);font-size:12px}
+  .note{color:var(--faint);font-size:12px;margin-top:10px}
+
+  /* ---- tables ---- */
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.6px}
+  tr:last-child td{border-bottom:none}
+  td.n{color:var(--faint);width:26px;text-align:center;font-variant-numeric:tabular-nums}
+  .badge{font-size:11px;padding:1px 8px;border-radius:999px;white-space:nowrap;font-weight:600}
+  .b-new{background:color-mix(in srgb,var(--qwen) 20%,transparent);color:var(--qwen)}
+  .b-edit{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent)}
+  .b-keep{background:color-mix(in srgb,var(--good) 18%,transparent);color:var(--good)}
+  .why{color:var(--dim)}
+  .file{white-space:nowrap}
+  .risk{color:var(--warn);font-weight:600}
+
+  /* ---- before/after ---- */
+  .ba{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:720px){.ba{grid-template-columns:1fr}}
+  .ba .col{padding:16px 18px}
+  .ba h3{margin:0 0 12px;font-size:14px}
+  .ba .before h3{color:var(--faint)} .ba .after h3{color:var(--qwen)}
+  .ba ul{margin:0;padding-left:18px} .ba li{margin:6px 0;font-size:13.5px;color:var(--dim)}
+  .ba li b{color:var(--ink)}
+
+  .foot{color:var(--faint);font-size:12px;margin-top:40px;text-align:center}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;font-size:12px;color:var(--dim)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:9px;height:9px;border-radius:3px;display:inline-block}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>GEAK · 可切换 code-agent 后端</h1>
+  <p class="sub">让 GEAK 的优化流程能换用 <b style="color:var(--qwen)">qcoder(Qwen Code)</b> 或 <b style="color:var(--accent)">Claude Code</b> —— 一个开关切换,核心流程一字未改。</p>
+  <span class="tag">分支 test/code-agent-swap · 未提交 · 待 node 环境验证</span>
+
+  <!-- ============ 核心问题 ============ -->
+  <h2>为什么不能直接换 qcoder</h2>
+  <div class="card pad">
+    <p style="margin:0 0 10px">GEAK 的流程写在 <code>kernel_workflow.js</code> / <code>e2e_workflow.js</code> 里,满篇是
+      <code>agent()</code> <code>parallel()</code> <code>workflow()</code> —— 这些<b>不是普通 JS,是 Claude Code 私有的编排功能</b>。
+      qcoder 打开这个文件一行都跑不了。</p>
+    <p style="margin:0;color:var(--dim)">再加上:qcoder 的并行是"模型临时决定的"、且<b>子任务不能嵌套</b>,而 GEAK 的 e2e 恰恰要递归套娃。
+      所以只能<b style="color:var(--ink)">在旁边搭一层适配</b>,而不是去改 GEAK。</p>
+  </div>
+
+  <!-- ============ 架构图 ============ -->
+  <h2>架构:搭一层"翻译执行器",后端做成可插拔</h2>
+  <div class="card pad">
+    <div class="flow">
+      <div class="lane">
+        <div class="box keep"><div class="t">GEAK 流程 <span class="mono" style="color:var(--faint)">*.js / roles / knowledge</span></div>
+          <div class="d">优化逻辑:派 agent、并行、验证、递归 —— 固定不变</div></div>
+      </div>
+      <div style="text-align:center;color:var(--faint);font-size:18px">▼</div>
+      <div class="switch">入口 <code>run_e2e.py</code> 看一个开关 <b>GEAK_AGENT_BACKEND</b> 决定走哪条路</div>
+      <div class="lane">
+        <div class="box keep" style="flex:1"><div class="t">不设(默认)</div>
+          <div class="d">走原生 <b style="color:var(--accent)">Claude Code · Workflow 工具</b> —— 和以前完全一样</div></div>
+        <div class="arrow">或</div>
+        <div class="box new" style="flex:1.2"><div class="t">设为 claude / qwen</div>
+          <div class="d">走新增的 <b style="color:var(--qwen)">独立 Node 运行时</b> <code>run_workflow.mjs</code></div></div>
+      </div>
+      <div style="text-align:center;color:var(--faint);font-size:18px">▼ &nbsp;运行时自己实现 agent / parallel / workflow(并行 & 套娃都在这里)</div>
+      <div class="lane">
+        <div class="box new" style="flex:1"><div class="t">每调一次 <code>agent()</code></div>
+          <div class="d">抢一个并发名额 → 起<b>一个一次性命令行进程</b> → 拿回结果</div></div>
+      </div>
+      <div class="fanout">
+        <div class="pill claude"><div class="h">backends/claude.mjs</div><div class="s"><code>claude -p</code> · 对照测试用</div></div>
+        <div class="pill qwen"><div class="h">backends/qwen.mjs</div><div class="s"><code>qwen -p --yolo</code> · qcoder 专属</div></div>
+      </div>
+      <p class="note">★ 关键:并行 & 套娃由<b style="color:var(--ink)">运行时在进程级完成</b>,qcoder 只当"跑单活的进程" —— 所以"qcoder 不能并行/不能嵌套"被彻底绕开。</p>
+    </div>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--qwen)"></i>新增 / qcoder 相关</span>
+      <span><i class="dot" style="background:var(--accent)"></i>原生 Claude 路径</span>
+      <span><i class="dot" style="background:var(--good)"></i>没动的 GEAK 资产</span>
+    </div>
+  </div>
+
+  <!-- ============ 决策表 ============ -->
+  <h2>适配 qcoder:每个坑 → 对策 → 为什么</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th class="n">#</th><th>qcoder 的坑</th><th>我做了什么</th><th class="file">文件</th><th>为什么</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td>
+          <td>不认识 GEAK 的流程语言(<code>agent/parallel/workflow</code> 是 Claude Code 私有)</td>
+          <td>自己写一个最小流程引擎,让普通 Node 能跑那个 .js</td>
+          <td class="file"><code>run_workflow.mjs</code></td>
+          <td class="why">硬门槛:文件先跑得起来,后面才谈得上</td></tr>
+        <tr><td class="n">2</td>
+          <td>并行靠不住 + 子任务不能嵌套</td>
+          <td>把并行、套娃放进运行时用进程级实现;qcoder 只当一次性单活</td>
+          <td class="file"><code>run_workflow.mjs</code></td>
+          <td class="why"><b>方案关键</b>:不依赖 qcoder 的并行 → 你担心的问题直接绕开</td></tr>
+        <tr><td class="n">3</td>
+          <td>不保证返回规整 JSON(Claude 有强制机制,它没有)</td>
+          <td>追加"只输出 json 块"要求 + 自己抽取/校验/重试,失败返回 null</td>
+          <td class="file"><code>schema.mjs</code></td>
+          <td class="why"><span class="risk">最大风险点</span>:得真跑才知道它听不听话</td></tr>
+        <tr><td class="n">4</td>
+          <td>命令行调用方式不同(<code>qwen -p --yolo</code>、OpenAI 兼容 env)</td>
+          <td>封装"怎么正确启动 qcoder 进程"</td>
+          <td class="file"><code>backends/qwen.mjs</code></td>
+          <td class="why"><b>唯一纯为 qcoder 写的文件</b>;细节关在一处</td></tr>
+        <tr><td class="n">5</td>
+          <td>入口得能选用 qcoder</td>
+          <td>加开关 <span class="kbd">GEAK_AGENT_BACKEND=qwen</span></td>
+          <td class="file"><code>run_e2e.py</code></td>
+          <td class="why">一个环境变量切换,<b>默认行为完全不变</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ============ 文件清单 ============ -->
+  <h2>全部文件清单</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>文件</th><th style="width:96px">状态</th><th style="width:70px">行数</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td class="file"><code>interface/runtime/run_workflow.mjs</code></td><td><span class="badge b-new">新增</span></td><td>277</td><td>主程序:流程引擎 + 并行 + 套娃</td></tr>
+        <tr><td class="file"><code>interface/runtime/schema.mjs</code></td><td><span class="badge b-new">新增</span></td><td>134</td><td>逼 qcoder 返回规整 JSON</td></tr>
+        <tr><td class="file"><code>interface/runtime/backends/base.mjs</code></td><td><span class="badge b-new">新增</span></td><td>82</td><td>"起一个 agent 子进程"的通用代码</td></tr>
+        <tr><td class="file"><code>interface/runtime/backends/claude.mjs</code></td><td><span class="badge b-new">新增</span></td><td>42</td><td>起 <code>claude -p</code>(对照测试)</td></tr>
+        <tr><td class="file"><code>interface/runtime/backends/qwen.mjs</code></td><td><span class="badge b-new">新增</span></td><td>52</td><td>起 <code>qwen -p</code>(<b>qcoder 专属</b>)</td></tr>
+        <tr><td class="file"><code>interface/runtime/selftest.mjs</code></td><td><span class="badge b-new">新增</span></td><td>165</td><td>自测(不用 GPU/网络)</td></tr>
+        <tr><td class="file"><code>interface/run_e2e.py</code></td><td><span class="badge b-edit">改动</span></td><td>+90/−3</td><td>加开关:选 qcoder 还是原生 Claude</td></tr>
+        <tr><td class="file"><code>README.md</code></td><td><span class="badge b-edit">改动</span></td><td>+26</td><td>使用说明</td></tr>
+        <tr><td class="file"><code>interface/run_e2e.md</code></td><td><span class="badge b-edit">改动</span></td><td>+47</td><td>环境变量/开关说明</td></tr>
+        <tr><td class="file"><code>*_workflow.js · roles · knowledge · scripts</code></td><td><span class="badge b-keep">没动</span></td><td>0</td><td>GEAK 核心资产,一字未改</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ============ 前后对比 ============ -->
+  <h2>改造前 vs 改造后</h2>
+  <div class="ba">
+    <div class="card col before">
+      <h3>改造前</h3>
+      <ul>
+        <li>只能用 <b>Claude Code</b>,和框架焊死</li>
+        <li>换 agent:<b>做不到</b></li>
+        <li>并行 / 套娃:由 Claude Code 负责</li>
+        <li>想用 qcoder:流程文件根本跑不起来</li>
+      </ul>
+    </div>
+    <div class="card col after">
+      <h3>改造后</h3>
+      <ul>
+        <li>claude / qcoder <b>可切换</b></li>
+        <li>换 agent:<b>改一个环境变量</b></li>
+        <li>并行 / 套娃:由运行时负责,<b>不依赖 agent</b></li>
+        <li>默认行为 <b>不变</b>(不设开关 = 老路)</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ============ 用法 ============ -->
+  <h2>用法</h2>
+  <div class="card pad mono" style="font-size:12.5px;color:var(--dim);white-space:pre-wrap;line-height:1.9">
+<span style="color:var(--faint)"># 用 qcoder 跑 e2e(不设这个变量 = 原生 Claude,行为不变)</span>
+export <b style="color:var(--warn)">GEAK_AGENT_BACKEND</b>=qwen
+npm i -g @qwen-code/qwen-code          <span style="color:var(--faint)"># 需 Node ≥ 18 + 可达 Qwen 端点</span>
+python interface/run_e2e.py handoff.json result.json
+
+<span style="color:var(--faint)"># 单内核直接用运行时</span>
+node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --args '{...}'
+
+<span style="color:var(--faint)"># 逻辑自测(无需 GPU/网络)</span>
+node interface/runtime/selftest.mjs</div>
+
+  <p class="foot">GEAK · switchable code-agent backend &nbsp;·&nbsp; 一句话:没有改 GEAK 去迁就 qcoder,而是补齐 qcoder 缺的能力,再用一个开关把它接进来。</p>
+
+</div>
+</body>
+</html>

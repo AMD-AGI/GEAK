@@ -68,6 +68,23 @@ WORKFLOW_SETTINGS = os.environ.get(
 # GEAK_CLAUDE_BIN to pin a specific build (e.g. an older native version).
 CLAUDE_BIN = os.environ.get("GEAK_CLAUDE_BIN", "").strip()
 
+# --- Swappable agent backend (standalone runtime) --------------------------
+# When GEAK_AGENT_BACKEND is set (e.g. "qwen" or "claude"), the JS workflow is
+# NOT run through Claude Code's Workflow tool. Instead it runs on the standalone
+# Node runtime (interface/runtime/run_workflow.mjs), which re-implements the
+# Workflow globals (agent/parallel/pipeline/phase/workflow) itself and dispatches
+# each agent() call to the named backend's one-shot CLI (qwen -p / claude -p).
+# This is what lets GEAK use qcoder (qwen-code), whose own CLI cannot orchestrate
+# parallel/nested subagents — the runtime does all of that. Unset (default) keeps
+# the original Claude/Workflow path below, byte-for-byte unchanged.
+AGENT_BACKEND = os.environ.get("GEAK_AGENT_BACKEND", "").strip()   # == --agent (back-compat alias)
+AGENT_PROFILE = os.environ.get("GEAK_AGENT_PROFILE", "").strip()   # a registry profile = (agent, model)
+AGENT_MODEL = os.environ.get("GEAK_MODEL", "").strip()             # override the model axis
+RUNTIME_SCRIPT = INTERFACE_DIR / "runtime" / "run_workflow.mjs"
+NODE_BIN = os.environ.get("GEAK_NODE_BIN", "node")
+# Take the standalone-runtime path when EITHER an agent or a profile is selected.
+USE_RUNTIME = bool(AGENT_BACKEND or AGENT_PROFILE)
+
 # Background-task completion race (see _invoke_via_sdk completion gate):
 # when the SDK turn "looks done" (a background task notified terminal + the
 # main turn produced a ResultMessage) but the workflow has NOT yet written its
@@ -805,8 +822,111 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
     return out
 
 
-def invoke_workflow(prompt: str, timeout_s: int, eval_dir: str | None = None) -> dict:
-    """Run the JS workflow and return its parsed JSON return value."""
+def _runtime_selection_args() -> list[str]:
+    """The agent/model selection flags passed to run_workflow.mjs.
+
+    Precedence mirrors the runtime: a profile (agent+model combo) OR an explicit
+    agent, plus an optional model override. run_workflow.mjs also reads the same
+    GEAK_* env, so this is belt-and-suspenders + makes the dry-run legible.
+    """
+    sel: list[str] = []
+    if AGENT_PROFILE:
+        sel += ["--profile", AGENT_PROFILE]
+    if AGENT_BACKEND:
+        sel += ["--agent", AGENT_BACKEND]
+    if AGENT_MODEL:
+        sel += ["--model", AGENT_MODEL]
+    return sel
+
+
+def runtime_combo_label() -> str:
+    parts = []
+    if AGENT_PROFILE:
+        parts.append(f"profile={AGENT_PROFILE}")
+    if AGENT_BACKEND:
+        parts.append(f"agent={AGENT_BACKEND}")
+    if AGENT_MODEL:
+        parts.append(f"model={AGENT_MODEL}")
+    return " ".join(parts) or "native (claude/Workflow)"
+
+
+def _invoke_via_runtime(
+    ps_args: dict, timeout_s: int, eval_dir: str | None = None
+) -> dict:
+    """Run the JS workflow on the standalone Node runtime with a swappable backend.
+
+    Bypasses Claude Code's Workflow tool entirely: the runtime provides the
+    Workflow globals and dispatches agent() calls to the selected agent CLI
+    (claude | qwen | codex | kimi) via the config registry. The workflow's
+    top-level return value is captured from the runtime's ``--result-file`` (most
+    robust); we fall back to parsing stdout and finally to the on-disk
+    ``workflow_return.json`` the JS also writes.
+    """
+    result_file = None
+    metrics_file = None
+    if eval_dir:
+        result_file = str(Path(eval_dir) / "runtime_result.json")
+        metrics_file = str(Path(eval_dir) / "runtime_metrics.json")
+    cmd = [
+        NODE_BIN, str(RUNTIME_SCRIPT), str(E2E_SCRIPT),
+        "--args", json.dumps(ps_args),
+        *_runtime_selection_args(),
+    ]
+    if result_file:
+        cmd += ["--result-file", result_file]
+    if metrics_file:
+        cmd += ["--metrics-file", metrics_file]
+    # The JS enforces the wall-clock budget internally (args.time_budget_s); give
+    # the wrapper a margin so a graceful finalize is never killed prematurely.
+    wrap_timeout = (timeout_s + 900) if timeout_s else None
+    proc = subprocess.run(
+        cmd, cwd=str(E2E_DIR), env=dict(os.environ), capture_output=True,
+        text=True, timeout=wrap_timeout,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"runtime (node, {runtime_combo_label()}) failed (rc={proc.returncode}): "
+            f"{proc.stderr[-2000:]}"
+        )
+    # 1) result-file (authoritative top-level return).
+    if result_file and Path(result_file).exists():
+        try:
+            obj = json.loads(Path(result_file).read_text())
+            if isinstance(obj, dict) and obj.get("eval_dir"):
+                return obj
+        except (json.JSONDecodeError, OSError):
+            pass
+    # 2) stdout "WORKFLOW_RESULT <json>" line.
+    try:
+        return _parse_last_json_line(proc.stdout)
+    except WorkflowParseError:
+        pass
+    # 3) on-disk workflow_return.json the JS persists as its final act.
+    if eval_dir:
+        wr = Path(eval_dir) / "workflow_return.json"
+        if wr.exists():
+            obj = _read_json(wr)
+            if obj.get("eval_dir"):
+                return obj
+    raise WorkflowParseError(
+        "runtime produced no parseable workflow return (with eval_dir). "
+        f"Last 2000 chars of stdout:\n{(proc.stdout or '')[-2000:]}"
+    )
+
+
+def invoke_workflow(
+    prompt: str, timeout_s: int, eval_dir: str | None = None,
+    ps_args: dict | None = None,
+) -> dict:
+    """Run the JS workflow and return its parsed JSON return value.
+
+    Dispatches on GEAK_AGENT_BACKEND / GEAK_AGENT_PROFILE: when either is set
+    (and ps_args available), runs on the standalone Node runtime with the selected
+    agent/model; otherwise the original Claude/Workflow path (SDK preferred, CLI
+    fallback).
+    """
+    if USE_RUNTIME and ps_args is not None:
+        return _invoke_via_runtime(ps_args, timeout_s, eval_dir)
     try:
         import claude_agent_sdk  # noqa: F401
         raw = _invoke_via_sdk(prompt, timeout_s, eval_dir)
@@ -2207,6 +2327,9 @@ def main(argv: list[str]) -> int:
                           "bench_protocol": bench_protocol,
                           "alignment_flags": alignment_flags,
                           "inferencex_path": os.environ.get("INFERENCEX_PATH", ""),
+                          "agent_backend": runtime_combo_label(),
+                          "runtime_selection": _runtime_selection_args() if USE_RUNTIME else None,
+                          "runtime_script": str(RUNTIME_SCRIPT) if USE_RUNTIME else None,
                           "prompt": prompt, "e2e_script": str(E2E_SCRIPT)}, indent=2))
         return 0
 
@@ -2331,7 +2454,7 @@ def main(argv: list[str]) -> int:
     err: object = None
     err_class: str | None = None
     try:
-        wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"])
+        wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"], ps_args=ps_args)
     except Exception as e:  # scrape/crash/timeout/SIGTERM: recover from disk.
         err = e
         err_class = _classify_error(e)

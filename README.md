@@ -103,6 +103,45 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions
 Then just describe what you want in natural language (examples below). Claude Code resolves the paths and
 invokes the `Workflow` tool for you.
 
+### Swappable agent backend (Claude Code ↔ qwen-code / qcoder)
+
+The workflows are plain JS that normally run on **Claude Code's `Workflow` tool** (which provides the
+`agent()` / `parallel()` / `pipeline()` / `workflow()` orchestration primitives). To run the **same
+workflows** under a different coding-agent CLI — e.g. **qwen-code (qcoder)** — GEAK ships a **standalone
+Node runtime** (`interface/runtime/`) that re-implements those primitives itself and dispatches each
+`agent()` call to a one-shot backend process. All parallelism and one-level nesting happen in the runtime,
+so the agent CLI does **not** need to support parallel or nested subagents.
+
+Two orthogonal axes live in `interface/runtime/registry.json`: **agents** (which CLI: claude / qwen /
+codex / kimi) × **models** (which endpoint). A **profile** pins one `(agent, model)` combo.
+
+```bash
+# One switch selects the backend; the .js workflows / roles / knowledge are used unmodified.
+export GEAK_AGENT_PROFILE=qwen         # unset = native Claude/Workflow (default)
+npm i -g @qwen-code/qwen-code          # the chosen CLI; needs Node ≥ 18 + a reachable endpoint
+
+# e2e goes through run_e2e.py as usual (auto-routes to the runtime when the env is set):
+python interface/run_e2e.py handoff.json result.json
+
+# single kernel runs on the runtime directly:
+node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --profile qwen \
+  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
+```
+
+**Controlled (agent × model) comparison experiments are built in** — sweep the matrix, N repeats,
+fixed task/budget, get a comparison table (speedup / success-rate / wall; no token/cost):
+
+```bash
+node interface/runtime/experiment.mjs --script kernel_workflow/kernel_workflow.js \
+  --agents claude,qwen,codex --models default --repeats 3 \
+  --args '{"kernel_path":"/abs/knn","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
+```
+
+Adding a new CLI = a `registry.json` entry (zero code). Full env knobs, the compatibility checklist,
+and a no-GPU smoke test (`node interface/runtime/selftest.mjs`) are in
+[interface/run_e2e.md](interface/run_e2e.md) and
+[interface/runtime/DEV_SUMMARY.md](interface/runtime/DEV_SUMMARY.md).
+
 ---
 
 ## e2e_workflow — whole-model serving throughput ⭐

@@ -1,0 +1,152 @@
+{
+  "_comment": "Config-driven agent/model registry for the GEAK standalone runtime. Two orthogonal axes: 'agents' (how to drive a code-agent CLI, model-independent) and 'models' (an endpoint, CLI-independent). A 'profile' pins one (agent, model) combo. See COMPAT_findings.md R1-R7 for the fields that must be confirmed per CLI with `<cli> --help` at bring-up. Flags below are best-effort defaults; override any without editing code via env (GEAK_<CLI>_* / GEAK_QWEN_EXTRA_ARGS) or a backends/<name>.mjs escape hatch.",
+  "default_profile": "claude",
+  "agents": {
+    "claude": {
+      "bin": "claude",
+      "prompt": "stdin",
+      "args": [
+        "-p",
+        "--dangerously-skip-permissions",
+        "--allowedTools",
+        "Bash",
+        "Read",
+        "Write"
+      ],
+      "model_flag": "--model",
+      "base_url_env": "ANTHROPIC_BASE_URL",
+      "env": {
+        "IS_SANDBOX": "1"
+      },
+      "dialect": "anthropic",
+      "structured": "prompt",
+      "bin_env": "GEAK_CLAUDE_BIN",
+      "model_env": "GEAK_CLAUDE_MODEL"
+    },
+    "qwen": {
+      "bin": "qwen",
+      "prompt": "stdin",
+      "args": [
+        "-p"
+      ],
+      "approve": "--yolo",
+      "model_flag": "-m",
+      "base_url_env": "OPENAI_BASE_URL",
+      "env": {
+        "QWEN_CODE_SUPPRESS_YOLO_WARNING": "1"
+      },
+      "dialect": "openai",
+      "structured": "prompt",
+      "note": "non-interactive auth needs ~/.qwen/settings.json {security.auth.selectedType:'openai'}; OpenAI-compatible via OPENAI_API_KEY/OPENAI_BASE_URL; verified against SaFE gateway + claude-opus-4-8 2026-07-31.",
+      "bin_env": "GEAK_QWEN_BIN",
+      "model_env": "GEAK_QWEN_MODEL",
+      "approve_env": "GEAK_QWEN_APPROVE",
+      "extra_args_env": "GEAK_QWEN_EXTRA_ARGS"
+    },
+    "codex": {
+      "bin": "codex",
+      "prompt": "stdin",
+      "args": [
+        "exec",
+        "--dangerously-bypass-approvals-and-sandbox"
+      ],
+      "model_flag": "-m",
+      "base_url_env": "OPENAI_BASE_URL",
+      "env": {},
+      "dialect": "openai",
+      "structured": "prompt",
+      "bin_env": "GEAK_CODEX_BIN",
+      "model_env": "GEAK_CODEX_MODEL",
+      "approve_env": "GEAK_CODEX_APPROVE",
+      "extra_args_env": "GEAK_CODEX_EXTRA_ARGS",
+      "note": "Rust bin: uses ~/.codex/config.toml provider (wire_api=responses) + SSL_CERT_FILE (not NODE_EXTRA_CA_CERTS); verified gpt-5.4 via SaFE /v1/responses 2026-07-31."
+    },
+    "kimi": {
+      "bin": "kimi",
+      "prompt": "arg",
+      "args": [
+        "--quiet",
+        "--afk",
+        "-p"
+      ],
+      "dialect": "openai",
+      "structured": "prompt",
+      "bin_env": "GEAK_KIMI_BIN",
+      "model_env": "GEAK_KIMI_MODEL",
+      "note": "official kimi-cli (PyPI, install via uv --python 3.13). OpenAI-compatible via ~/.kimi/config.toml (type=openai_legacy, default_model). --quiet=print+final-only, --afk=unattended auto-approve. Needs SSL_CERT_FILE for gateway CA. prompt is the value of -p (last arg); model via config default_model (generic path omits -m to keep -p<prompt> adjacent)."
+    },
+    "cursor": {
+      "bin": "cursor-agent",
+      "prompt": "arg",
+      "args": [
+        "--force",
+        "--print",
+        "--output-format",
+        "text"
+      ],
+      "model_flag": "--model",
+      "dialect": "cursor-cloud",
+      "structured": "prompt",
+      "bin_env": "GEAK_CURSOR_BIN",
+      "model_env": "GEAK_CURSOR_MODEL",
+      "extra_args_env": "GEAK_CURSOR_EXTRA_ARGS",
+      "note": "AgentKernelArena-style cursor-agent CLI (--force --print). Auth via cursor-agent's own login / CURSOR_API_KEY in env; runs on Cursor cloud (NOT SaFE gateway); no base_url. Model = Cursor-side id (e.g. sonnet-4-thinking). Verify --output-format/model against `cursor-agent --help` at bring-up; stream-json parsing may be needed if text mode is noisy."
+    }
+  },
+  "_models_comment": "SaFE gateway (OpenAI-compatible) models — all reachable at the same base_url with a SaFE ak- key in OPENAI_API_KEY. Verified via /v1/models 2026-07-31. base_url is applied to the agent's base_url_env; the key stays in env (never in this file).",
+  "models": {
+    "opus48": {
+      "id": "claude-opus-4-8",
+      "base_url": "https://global.primus-safe.amd.com/api/v1/llm-proxy/v1",
+      "key_env": "OPENAI_API_KEY"
+    },
+    "opus5": {
+      "id": "claude-opus-5",
+      "base_url": "https://global.primus-safe.amd.com/api/v1/llm-proxy/v1",
+      "key_env": "OPENAI_API_KEY"
+    },
+    "gpt54": {
+      "id": "gpt-5.4",
+      "base_url": "https://global.primus-safe.amd.com/api/v1/llm-proxy/v1",
+      "key_env": "OPENAI_API_KEY"
+    },
+    "gpt56": {
+      "id": "gpt-5.6",
+      "base_url": "https://global.primus-safe.amd.com/api/v1/llm-proxy/v1",
+      "key_env": "OPENAI_API_KEY"
+    }
+  },
+  "profiles": {
+    "claude": {
+      "agent": "claude"
+    },
+    "qwen": {
+      "agent": "qwen"
+    },
+    "codex": {
+      "agent": "codex"
+    },
+    "kimi": {
+      "agent": "kimi"
+    },
+    "qwen-opus48": {
+      "agent": "qwen",
+      "model": "opus48"
+    },
+    "codex-gpt54": {
+      "agent": "codex",
+      "model": "gpt54"
+    },
+    "kimi-opus48": {
+      "agent": "kimi",
+      "model": "opus48"
+    },
+    "codex-opus48": {
+      "agent": "codex",
+      "model": "opus48"
+    },
+    "cursor": {
+      "agent": "cursor"
+    }
+  }
+}
