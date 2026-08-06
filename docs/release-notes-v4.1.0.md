@@ -10,8 +10,7 @@
 
 - Adds an expert skill (`gluon_authoring`) that ports a tuned plain-Triton champion to Gluon, faithfully recovering layouts and optionally re-injecting the pipeline, enabling further Gluon optimization.
 - Applies to MI325X (gfx942) and MI355X (gfx950) on Triton 3.6–3.8, covering attention, block-scaled GEMM, and more, boosting performance over their tuned Triton champion.
-- To enable, turn on expert skills (`use_expert_skills=true`). It ships as `draft`, so it must be handed to a run directly; once validated, matching offers it as an advisory candidate like any other skill.
-- Next: promote out of draft, widen the measured set, e2e workflow support, and LLVM/LLIR co-design support.
+- To enable, turn on expert skills (`use_expert_skills=true`); while it ships as `draft`, hand it to a run directly. Future work: promotion out of draft, a wider measured set, e2e workflow support, and LLVM/LLIR co-design.
 
 ### Enhanced FlyDSL integration
 
