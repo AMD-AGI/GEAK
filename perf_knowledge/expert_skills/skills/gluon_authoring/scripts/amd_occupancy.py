@@ -158,16 +158,42 @@ def occupancy_from_asm(text, vgpr=None):
 
 
 # --------------------------------------------------------------------------------- reference SoT
+HW_SEARCH_MAX_DEPTH = 4      # scripts/ -> package root is one level; 4 leaves room to nest
+
+
 def _find_hw_constants():
-    """hw_constants.json sits under references/hardware/ one or two levels above scripts/."""
-    import glob
-    for c in (os.path.join(HERE, "..", "references", "hardware", "hw_constants.json"),
-              os.path.join(HERE, "..", "..", "references", "hardware", "hw_constants.json")):
-        if os.path.exists(c):
-            return c
-    hits = glob.glob(os.path.join(HERE, "..", "..", "**", "references", "hardware",
-                                  "hw_constants.json"), recursive=True)
-    return hits[0] if hits else None
+    """Locate this package's `references/hardware/hw_constants.json`, or return None.
+
+    Bounded at BOTH ends, because the two obvious implementations each fail silently in
+    their own direction:
+
+      * the previous one ended in `glob(HERE/../../**/.../hw_constants.json, recursive=True)`.
+        With the scripts copied to a shallow directory -- e.g. /tmp/pf/, which USAGE.md's own
+        "run the selftests on a new box" step invites -- `HERE/../..` resolves to `/` and the
+        glob walks the entire filesystem. It does not fail, it HANGS, with no message.
+      * an unbounded walk UP the ancestors trades that hang for something quieter: it accepts
+        any `references/hardware/` it passes, so a stray `/tmp/references/...` left by an
+        unrelated run becomes the source of truth. Observed, not hypothetical.
+
+    So: accept a tree sitting directly beside the scripts (an explicit copy-out layout), else
+    only a real skill package, identified by the `skill.md` next to its `references/`. Anything
+    else returns None, which every caller already handles -- `probe.py` reports the LDS side as
+    unavailable rather than measuring against another generation's divisor.
+    """
+    here = os.path.abspath(HERE)
+    beside = os.path.join(here, "references", "hardware", "hw_constants.json")
+    if os.path.exists(beside):
+        return beside
+    d = here
+    for _ in range(HW_SEARCH_MAX_DEPTH):
+        if os.path.exists(os.path.join(d, "skill.md")):
+            c = os.path.join(d, "references", "hardware", "hw_constants.json")
+            return c if os.path.exists(c) else None
+        parent = os.path.dirname(d)
+        if parent == d:                      # filesystem root
+            break
+        d = parent
+    return None
 
 
 def _selftest():
@@ -218,6 +244,27 @@ def _selftest():
     assert occupancy_from_asm(cdna_asm, 81)[:2] == (5, "model"), occupancy_from_asm(cdna_asm, 81)
     # A dump with no target at all: refuse, do not guess.
     assert occupancy_from_asm("s_nop 0\n", 64)[1] == "unknown"
+
+    # The reference lookup is bounded on purpose; both bounds have failed in the field.
+    import tempfile
+    global HERE
+    _here_saved = HERE
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "references", "hardware"))
+            with open(os.path.join(td, "references", "hardware", "hw_constants.json"), "w") as f:
+                f.write("{}")
+            HERE = os.path.join(td, "scripts")
+            os.makedirs(HERE)
+            assert _find_hw_constants() is None, \
+                "a references/ tree with no skill.md beside it must NOT be accepted"
+            with open(os.path.join(td, "skill.md"), "w") as f:
+                f.write("#")
+            assert _find_hw_constants() is not None, \
+                "the same tree IS this package's once skill.md is beside it"
+    finally:
+        HERE = _here_saved
+    assert _find_hw_constants() == _find_hw_constants(), "lookup must be deterministic"
 
     # The JSON reference layer is the SoT for these numbers; when it is reachable (composed
     # pack), it must agree with the table above -- otherwise the two drift silently.

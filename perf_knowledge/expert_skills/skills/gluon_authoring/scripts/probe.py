@@ -82,8 +82,17 @@ VGPR_GRANULE = 8
 # LDS/CU lives in the shared vendor/amd occupancy model, which is where the arch dispatch
 # already is. It is a PER-ARCH table there and not a family field, because gfx94*/gfx95* share
 # the register geometry but not the LDS (64 KiB vs 160 KiB).
-def lds_per_cu(arch, default=65536):
-    """LDS bytes per CU for `arch`; `default` only when the shared model has no figure."""
+def lds_per_cu(arch, default=None):
+    """LDS bytes per CU for `arch`, or None when the shared model has no figure.
+
+    Declining is the correct degrade, and the default used to be 65536 -- the CDNA3
+    figure -- which reintroduced the exact bug the arch dispatch was added to kill,
+    just one level down: with no reference tree reachable (scripts copied out, or
+    `hw_constants.json` absent) a gfx950 kernel was measured against the CDNA3
+    divisor and reported `LDS<=0 -> 0 WGs/CU, LDS bind`, i.e. a hard blocker, on a
+    kernel that demonstrably runs. `reference.md` already promises the LDS half
+    reports *nothing* without the json; this makes the code match that promise.
+    """
     if _OCC is not None and hasattr(_OCC, "lds_per_cu"):
         v = _OCC.lds_per_cu(arch)
         if v:
@@ -218,6 +227,71 @@ def _meta_from_dir(d: str) -> dict[str, dict]:
     return out
 
 
+def _waves_for(meta_name: str, kernels: list[dict]):
+    """waves/SIMD for the kernel a metadata row describes, joined BY NAME.
+
+    `waves_per_simd` is parsed per artifact, so collapsing it to one value across the
+    directory drops the register limiter as soon as the dir holds two kernels with
+    different occupancy -- and a multi-kernel dir is the NORMAL case, not the
+    exception: a harness' pack / split-K reduce kernel compiles into the same cache
+    dir as the body. Measured on one dump: the same `_mla_gluon` reported
+    `regs<=1 ... both bind` alone and `regs<=?` beside a 8-waves/SIMD pack kernel,
+    i.e. the tool silently withheld exactly the half it exists to make un-missable.
+
+    Asm names carry a file extension and may carry a dump suffix, and the metadata
+    name is truncated to 44 chars, so match the stem exactly first, then by prefix in
+    either direction. Ambiguity returns None: a guess here is a wrong limiter.
+    """
+    stems = {}
+    for k in kernels:
+        stem = re.sub(r"\.(amdgcn|s)$", "", k["name"])
+        stem = re.sub(r"_final_isa$", "", stem)
+        if k["waves_per_simd"]:
+            stems[stem] = k["waves_per_simd"]
+    if meta_name in stems:
+        return stems[meta_name]
+    cands = {w for s, w in stems.items() if s.startswith(meta_name) or meta_name.startswith(s)}
+    return cands.pop() if len(cands) == 1 else None
+
+
+def _limiter_row(name, shared_b, num_warps, waves, cap, simds):
+    """One `measure` row: both occupancy limiters, and which of them binds.
+
+    Pure and selftested, because three of its states are wrong-answer-shaped rather than
+    crash-shaped and all three have been produced by this tool:
+
+      cap is None    the LDS divisor is UNKNOWN. Naming a binder here asserts that LDS does
+                     not bind, which is the confident-wrong-number failure the arch dispatch
+                     exists to prevent -- so no binder is named and the cell reads `?`.
+      shared_b == 0  the kernel allocates no LDS, so LDS genuinely does not bound it. That is
+                     NOT the same as unknown; the cell reads `-` and REGISTERS bind. Comparing
+                     the two limiters as ints in this state used to raise TypeError.
+      waves is None  no artifact matched this metadata row. Say that, rather than blaming
+                     `num_warps` and sending someone to fix a file that is already correct.
+    """
+    if not shared_b:
+        # A kernel that allocates no LDS is not bounded by LDS, and that holds whether or
+        # not a divisor is reachable -- so this row stays decidable in the degraded case.
+        by_lds, lds_unknown = None, False
+    else:
+        lds_unknown = cap is None
+        by_lds = None if lds_unknown else cap // shared_b
+    by_reg = (waves * simds) // num_warps if (waves and num_warps) else None
+    cell = "?" if lds_unknown else ("-" if by_lds is None else str(by_lds))
+    row = f"  {name:46s} lds/WG={shared_b:6d} B  LDS<={cell}"
+    if by_reg is None:
+        why = ("no num_warps in metadata" if not num_warps
+               else f"no .amdgcn/.s matched the name {name!r}")
+        return row + f"  regs<=? -- {why}, register side not computable"
+    regs = f"  regs<={by_reg} (waves/SIMD={waves} x{simds} / nw={num_warps})"
+    if lds_unknown:
+        return row + regs + f"  -> <={by_reg} WGs/CU from REGISTERS alone; LDS side unknown"
+    if by_lds is None:
+        return row + regs + f"  -> {by_reg} WGs/CU, REGISTERS bind (kernel allocates no LDS)"
+    binder = ("REGISTERS" if by_reg < by_lds else "LDS" if by_lds < by_reg else "both")
+    return row + regs + f"  -> {min(by_lds, by_reg)} WGs/CU, {binder} bind"
+
+
 def cmd_measure(a):
     asms = []
     for root, _dirs, files in os.walk(a.dir):
@@ -253,23 +327,15 @@ def cmd_measure(a):
         # error this tool exists to prevent: on one measured kernel the arm with the most LDS
         # headroom (20 WGs/CU) was the SLOWEST, because 2 waves/SIMD x 4 SIMDs = 8 waves/CU against
         # a num_warps=8 workgroup already pinned it to 1. So print both and name which one binds.
-        wps = {k["waves_per_simd"] for k in kernels if k["waves_per_simd"]}
-        waves = wps.pop() if len(wps) == 1 else None
-        print(f"  LDS/CU basis: {cap} B [{basis}]  SIMDs/CU={simds}"
-              + ("" if waves else "   (waves/SIMD differs across kernels -- register side per-kernel)"))
+        if cap is None:
+            print(f"  LDS/CU basis: UNAVAILABLE for [{basis}] -- no hw_constants.json reachable. "
+                  "The LDS side is NOT reported rather than measured against another "
+                  "generation's divisor; rows whose kernel allocates LDS name no binder.")
+        else:
+            print(f"  LDS/CU basis: {cap} B [{basis}]  SIMDs/CU={simds}"
+                  "   (register side joined per kernel)")
         for n, b in sorted(lds.items(), key=lambda kv: -kv[1]):
-            nw = meta[n]["num_warps"]
-            by_lds = cap // b if b else None
-            by_reg = (waves * simds) // nw if (waves and nw) else None
-            row = f"  {n:46s} lds/WG={b:6d} B  LDS<={by_lds if by_lds is not None else '-'}"
-            if by_reg is not None:
-                binder = ("REGISTERS" if by_reg < by_lds else
-                          "LDS" if by_lds < by_reg else "both")
-                row += (f"  regs<={by_reg} (waves/SIMD={waves} x{simds} / nw={nw})"
-                        f"  -> {min(by_lds, by_reg)} WGs/CU, {binder} bind")
-            else:
-                row += "  regs<=? -- no num_warps in metadata, register side not computable"
-            print(row)
+            print(_limiter_row(n, b, meta[n]["num_warps"], _waves_for(n, kernels), cap, simds))
     else:
         print("  lds/WG UNAVAILABLE -- no Triton cache metadata under this dir. Do NOT read LDS "
               "from the KD or rocprof-compute: both are structurally 0 for Triton kernels.")
@@ -354,14 +420,50 @@ def cmd_plan(a):
                   "LOWER bound and\n  a real kernel's non-resident pressure is routinely larger "
                   "than the resident set itself.\n  Confirm with `probe.py measure` on the first "
                   "compile before betting a round on this tile.")
-    print(f"\n  (LDS is a SECOND, independent limiter -- check it too: "
-          f"{lds_per_cu(a.arch)} B/CU on {a.arch}.)")
+    _cap = lds_per_cu(a.arch)
+    print("\n  (LDS is a SECOND, independent limiter -- check it too: "
+          + (f"{_cap} B/CU on {a.arch}.)" if _cap else
+             f"no hw_constants.json figure for {a.arch}, so this run cannot name its LDS/CU.)"))
     return 0
 
 
 def _selftest():
     assert waves_by_vgpr(256) == 2 and waves_by_vgpr(257) == 1, "512-file boundary"
     assert waves_by_vgpr(128) == 4 and waves_by_vgpr(0) == 8
+
+    # --- the two occupancy limiters. Both rules below have shipped wrong, silently. -----
+    ks = [{"name": "body.amdgcn", "waves_per_simd": 2},
+          {"name": "pack_final_isa.s", "waves_per_simd": 8}]
+    assert _waves_for("body", ks) == 2 and _waves_for("pack", ks) == 8, "joined per kernel"
+    assert _waves_for("absent", ks) is None
+    # a metadata name truncated at 44 chars still matches its artifact by prefix
+    assert _waves_for("body", [{"name": "body_0d1e2f.amdgcn", "waves_per_simd": 3}]) == 3
+    # ...but an ambiguous prefix is not a guess: a wrong waves value is a wrong limiter
+    assert _waves_for("k", [{"name": "k1.amdgcn", "waves_per_simd": 2},
+                            {"name": "k2.amdgcn", "waves_per_simd": 4}]) is None
+
+    _binders = ("REGISTERS bind", "LDS bind", "both bind")
+    # NB: not named `r` -- that name carries a `# noqa: F841` further down, and using it
+    # here would make the suppression unused (RUF100) rather than doing anything useful.
+    rb = _limiter_row("k", 65536, 4, 2, 163840, 4)
+    assert "LDS<=2" in rb and "both bind" in rb, rb
+    rb = _limiter_row("k", 8192, 8, 8, 163840, 4)
+    assert "REGISTERS bind" in rb, rb
+    rb = _limiter_row("k", 65536, 1, 8, 163840, 4)
+    assert "LDS bind" in rb, rb
+    # no LDS at all: LDS does not bound it, and comparing the limiters must not raise
+    r0 = _limiter_row("k", 0, 4, 8, 163840, 4)
+    assert "LDS<=-" in r0 and "REGISTERS bind" in r0 and "allocates no LDS" in r0, r0
+    # no divisor: DISTINCT from the above, and no binder may be named
+    ru = _limiter_row("k", 65536, 4, 2, None, 4)
+    assert "LDS<=?" in ru and "unknown" in ru and not any(b in ru for b in _binders), ru
+    # an unmatched artifact is named as such, not blamed on the metadata
+    rw = _limiter_row("k", 65536, 4, None, 163840, 4)
+    assert "no .amdgcn/.s matched" in rw, rw
+    # a zero-LDS kernel stays decidable with no divisor: LDS cannot bound it either way
+    r0u = _limiter_row("k", 0, 4, 8, None, 4)
+    assert "LDS<=-" in r0u and "REGISTERS bind" in r0u, r0u
+
     # granularity: 130 rounds to 136 -> 512//136 = 3
     assert waves_by_vgpr(130) == 3, waves_by_vgpr(130)
     # RDNA is a different file, granule and cap -- the CDNA answer is wrong there by 2-3x

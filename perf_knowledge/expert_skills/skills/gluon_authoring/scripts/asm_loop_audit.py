@@ -277,7 +277,13 @@ def lds_from_meta(meta_path: str) -> list[tuple[str, int]]:
 
 # LDS/CU comes from the shared vendor/amd occupancy model (per-arch there, because
 # gfx94*/gfx95* share the register family but not the LDS: 64 KiB vs 160 KiB).
-def lds_per_cu(arch, default=65536):
+def lds_per_cu(arch, default=None):
+    """LDS bytes per CU for `arch`, or None when the shared model has no figure.
+
+    `default` is None for the same reason it is in `probe.py`: 65536 is the CDNA3 figure,
+    and handing it to a gfx950 kernel overstates LDS pressure by 2.5x -- a confident wrong
+    occupancy verdict, which is worse than declining. Pass `--lds-per-cu` to name it.
+    """
     try:
         import amd_occupancy as _o
     except ImportError:
@@ -291,7 +297,7 @@ def lds_per_cu(arch, default=65536):
     return default
 
 
-def print_lds_budget(meta_path: str | None, lds_per_cu: int) -> None:
+def print_lds_budget(meta_path: str | None, lds_per_cu: int | None) -> None:
     """LDS/WG -> WGs/CU. A SECOND occupancy limiter, independent of the register one: a kernel
     can be capped by both at once, and relieving only one buys nothing."""
     print("LDS budget per workgroup (the SECOND occupancy limiter):")
@@ -306,8 +312,13 @@ def print_lds_budget(meta_path: str | None, lds_per_cu: int) -> None:
     # several kernels in one dump -> the MAX drives occupancy (same rule as kd_regs).
     name, shared = max(kernels, key=lambda kv: kv[1])
     if shared:
-        print(f"  lds_bytes_per_wg = {shared}  ({name})  -> WGs/CU by LDS <= {lds_per_cu // shared}"
-              f"  ({lds_per_cu}/{shared})")
+        if lds_per_cu:
+            print(f"  lds_bytes_per_wg = {shared}  ({name})  -> WGs/CU by LDS <= "
+                  f"{lds_per_cu // shared}  ({lds_per_cu}/{shared})")
+        else:
+            print(f"  lds_bytes_per_wg = {shared}  ({name})  -> WGs/CU by LDS UNKNOWN: no "
+                  f"hw_constants.json figure for this arch. Pass --lds-per-cu rather than "
+                  f"assuming 64 KiB, which is 2.5x wrong on CDNA4.")
     else:
         print(f"  lds_bytes_per_wg = 0  ({name})  -> no LDS staging in this kernel")
     for n, s in sorted(kernels, key=lambda kv: -kv[1])[1:]:
