@@ -37,13 +37,64 @@ if (!WORKFLOW_DIR) {
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
 const KERNEL_PATH_ORIG = A.kernel_path;
-const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
+// mode=author is the PORT SHAPE: a fresh seed, or a plain -> Gluon/TileLang/HIP transcription,
+// starts BELOW the frozen comparator by construction and climbs back. Every default below was tuned
+// for mode=optimize, where a candidate under the baseline is worthless and a round that fails to beat
+// the incumbent really is a stalled search. Applied unchanged to a port they delete its recovery
+// phase: the transcription round produces no candidate at all, so no patch is saved, no verify runs,
+// `winner` is null, and the loop stops two rounds into a port that is working exactly as designed.
+// So the four knobs a port needs differently are defaulted per MODE. Every one is still overridable
+// by an explicit arg, and on mode=optimize every value below is the historical one — so an ordinary
+// run, and every e2e path that dispatches `mode: 'optimize'`, is byte-identical to the previous build.
+const MODE = String(A.mode != null ? A.mode : 'optimize').trim() || 'optimize';
+// Two DIFFERENT runs have this shape, and only one of them is `mode=author`:
+//   - author: a fresh from-scratch seed REPLACES the source, then the optimize loop runs on it.
+//   - a TRANSCRIPTION port (plain Triton -> Gluon/TileLang/HIP) must run at `mode=optimize`,
+//     because it transcribes the existing source's own TTGIR and therefore needs that source to
+//     SURVIVE -- author mode would overwrite exactly the thing being ported.
+// Keying the port defaults on `mode` alone would therefore miss the transcription port, which is
+// the case this skill exists for. `port: "true"` states it explicitly, and a `target_language`
+// passed on the optimize branch implies it: that argument is otherwise inert there, so nobody
+// passes it except to say "this run ends in a different language than it started in".
+const PORT_SHAPE = MODE === 'author'
+  || String(A.port != null ? A.port : '').trim().toLowerCase() === 'true'
+  || (MODE === 'optimize' && A.target_language != null && String(A.target_language).trim() !== '');
+// A dedicated deep_explore round costs DEEP_COST (2), so BUDGET/2 is the achievable round count.
+// 6 gives a port 3 rounds, of which the first two are transcribe + recover -- i.e. one round of
+// actual optimization. 20 gives 10.
+const BUDGET = parseInt(A.budget != null ? A.budget : (PORT_SHAPE ? 20 : 6), 10);
 // Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
 // into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the
 // gate is tunable per run (e.g. raise it on a noisy box, lower it to bank small compounding wins).
 const MIN_IMPROVE = (() => {
   const v = parseFloat(A.min_improve != null ? A.min_improve : 0.02);
   return Number.isFinite(v) && v >= 0 ? v : 0.02;
+})();
+// Minimum verified speedup for a candidate to be VERIFIED and to enter the round's candidate list.
+// Default 1.0 = "only a candidate that beats the baseline is worth looking at", which is right for an
+// ordinary optimization and is the historical behavior. It is wrong for a PORT: a plain -> Gluon /
+// TileLang / HIP transcription lands BELOW the comparator by construction and climbs back, so at 1.0
+// the entire recovery phase is invisible — no patch is saved, no verify runs, `winner` is null every
+// round, and the loop stalls out on a port that is working as designed. A port wave lowers this (e.g.
+// 0.5) so its trajectory is representable; the COMMIT gate is unaffected and still requires beating
+// `cumulative` by MIN_IMPROVE, so a sub-baseline candidate can be tracked but can never be banked.
+const CANDIDATE_FLOOR = (() => {
+  const dflt = PORT_SHAPE ? 0.5 : 1.0;
+  const v = parseFloat(A.candidate_floor != null ? A.candidate_floor : dflt);
+  return Number.isFinite(v) && v > 0 ? v : dflt;
+})();
+// How far BELOW the best candidate ever seen a round may land and still count as "the search is
+// advancing". On mode=optimize this is +MIN_IMPROVE: a round must beat the best ever seen by the
+// commit margin, which is the historical behavior. On a port it is NEGATIVE: exploration legitimately
+// costs ground -- un-staging a hand-written LDS path before the pipeliner rebuilds it is a large
+// intermediate regression, and a layout experiment that does not pay is information, not a stall. So
+// a port keeps working while it stays within 5% of its own best, and BUDGET is what bounds the run.
+// A round with NO candidate at all is still never progress (enforced at the call site), so a dead
+// round cannot hold the loop open regardless of this value.
+const PROGRESS_DELTA = (() => {
+  const dflt = PORT_SHAPE ? -0.05 : MIN_IMPROVE;
+  const v = parseFloat(A.progress_delta != null ? A.progress_delta : dflt);
+  return Number.isFinite(v) && v > -1 ? v : dflt;
 })();
 // Budget cost of ONE `deep_explore` direction. The deep-explore engineer does far more than a single
 // specialist — broad rewrite authority, its own multi-iteration measure→profile→rewrite loop — so it
@@ -67,7 +118,7 @@ const KERNEL_NAME_HINT = KERNEL_PATH_ORIG.replace(/\/+$/, '').split('/').pop();
 // frozen online kernel, never against the seed's own language. KERNEL_KNOWLEDGE_DIR is the AMD authoring
 // knowledge base — REFERENCE ONLY (facts/how-to, never decisions; the author always measures regardless). Default:
 // sibling perf_knowledge/ so standalone runs use it too; empty if WORKFLOW_DIR is unset (no behavior change).
-const MODE = String(A.mode != null ? A.mode : 'optimize').trim() || 'optimize';
+// (MODE is defined next to the port-shape knobs above, since BUDGET's default depends on it.)
 const TARGET_LANGUAGE = String(A.target_language != null ? A.target_language : 'triton').trim() || 'triton';
 const OP_SPEC = A.op_spec || {};
 // When the op will run on the CUDA/HIP-graph-captured decode path (e2e sets op_spec.cuda_graph_safe=true),
@@ -153,7 +204,8 @@ const HARNESS_ADDENDUM = String(A.harness_addendum || '').trim();
 // Unset (default/fast / first deep burst) => spreading {} adds nothing => byte-identical prompts.
 const INCREMENTAL = !!STATE_DIR && String(A.incremental_analyze || '') === 'true';
 const RESUME_INPUT = INCREMENTAL ? { INCREMENTAL_RESUME: '1' } : {};
-const MAX_NO_IMPROVE = Math.max(1, parseInt(A.max_no_improve != null ? A.max_no_improve : 2, 10));
+const MAX_NO_IMPROVE = Math.max(1, parseInt(
+  A.max_no_improve != null ? A.max_no_improve : (PORT_SHAPE ? 4 : 2), 10));
 // Conditional inputs: spreading {} adds NOTHING to a prompt (byte-identical) when a hook is unset.
 const KB_INPUTS = {
   ...(SHARED_KB ? { SHARED_KB } : {}),
@@ -380,9 +432,10 @@ async function agentT(p, o) {
   return null;
 }
 
-// Expert-skills injection. PURELY ADDITIVE: '' when OFF or the role is not a skills consumer, so
-// roleAgent is byte-identical to the pre-feature build in those cases. When ON, appends an advisory
-// pointer telling the agent to Read the fragment + query the skills index (scripts have no fs access).
+// Expert-skills injection. PURELY ADDITIVE: '' when OFF or the role is not a skills consumer, so both
+// call sites (roleAgent, and the inline Optimize-phase engineer prompt) are byte-identical to the
+// pre-feature build in those cases. When ON, appends an advisory pointer telling the agent to Read the
+// fragment + query the skills index (scripts have no fs access).
 function expertSkillsBlock(role) {
   if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role) || !EXPERT_SKILLS_DIR) return '';
   return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
@@ -423,6 +476,13 @@ const CANONICAL = setup.workspace;       // canonical current-best workspace (ad
 const KERNEL_NAME = setup.kernel_name;
 const COMMANDMENT = `${EVAL_DIR}/COMMANDMENT.md`;
 log(`Setup done. EVAL_DIR=${EVAL_DIR}`);
+if (PORT_SHAPE) {
+  log(`Port shape (mode=${MODE}): budget=${BUDGET} (=${Math.floor(BUDGET / DEEP_COST)} dedicated ` +
+      `deep_explore rounds at DEEP_COST=${DEEP_COST}), candidate_floor=${CANDIDATE_FLOOR}, ` +
+      `max_no_improve=${MAX_NO_IMPROVE}, progress_delta=${PROGRESS_DELTA} ` +
+      `(a round within ${(Math.abs(PROGRESS_DELTA) * 100).toFixed(0)}% below the best seen still ` +
+      `counts as advancing). Commit gate is unchanged at +${(MIN_IMPROVE * 100).toFixed(0)}%.`);
+}
 
 // ---------------------------------------------------------------------------
 // Enforce a FROZEN REAL-ONLINE BASELINE in BOTH modes (author AND same-language
@@ -533,6 +593,14 @@ log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (d
 let dispatched = 0;          // counts ONLY optimization-direction engineers (the budget)
 let round = 0;
 let cumulative = 1.0;        // best verified geomean speedup vs the TRUE baseline
+// `noImprove` answers "is the SEARCH still advancing", which is NOT the same question as "did this
+// round beat the incumbent". A port (plain -> Gluon/TileLang/HIP) is built to start BELOW the
+// comparator and climb back: a track going 0.31x -> 0.64x -> 0.98x advances every round while never
+// once clearing `cumulative`. Scoring those rounds as non-improving stops a working port at
+// MAX_NO_IMPROVE (default 2) no matter how much budget was given. So progress is measured against the
+// best candidate ever SEEN (`bestSeen`), while the commit gate below still requires beating
+// `cumulative` — same strictness, different question.
+let bestSeen = 0;            // best verified geomean of any candidate, committed or not
 let noImprove = 0;
 let bestPerCase = BASELINE_PER_CASE;
 let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source}
@@ -620,7 +688,7 @@ mkdir -p ${d.out_dir}/workspace
 ${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
 (facts/how-to only; measure everything; never go below baseline).
-Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patch.diff\` when geomean>1.0.
+Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patch.diff\` when geomean>${CANDIDATE_FLOOR}.
 
 ## Inputs
 ${cfg({
@@ -639,7 +707,10 @@ ${cfg({
         ...KB_INPUTS,
       })}
 
-Return ONLY the worker_result.json structure as StructuredOutput.`,
+Return ONLY the worker_result.json structure as StructuredOutput.` +
+      // This prompt is built inline rather than via roleAgent(), so the injection has to be appended
+      // here too; without it the roles that actually edit the source never see the skills index.
+      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
     ).then((eng) => ({ d, eng }));
     },
@@ -648,8 +719,9 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
       const { d, eng } = prev;
       const patch = `${d.out_dir}/best_patch.diff`;
       // Harvest is MEASUREMENT-anchored, not return-value-anchored. An engineer only writes
-      // best_patch.diff when it beat baseline (the Optimize prompt: "Save best_patch.diff ... when
-      // geomean>1.0"), so a lost/failed StructuredOutput does NOT imply there is no winning patch: an
+      // best_patch.diff when it beat the candidate floor (the Optimize prompt: "Save best_patch.diff
+      // ... when geomean>CANDIDATE_FLOOR"), so a lost/failed StructuredOutput does NOT imply there is
+      // no winning patch: an
       // engineer that died, timed out, or mis-returned can still have left an applies-clean >1.0x diff
       // on disk (observed in a bake-off: a 1.56x Triton patch was silently dropped because its
       // worker_result.json/StructuredOutput never came back). The only return we can TRUST to suppress
@@ -659,7 +731,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
       // cannot stat the file from the workflow sandbox, so the "is there actually a patch" decision is
       // delegated to verify, which returns apply_failed on an absent/empty patch — dropped by the
       // `verified` filter below, i.e. the same outcome as skipping, but with no false loss.
-      const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > 1.0);
+      const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR);
       if (trustworthyBelowBaseline) {
         return { d, eng, ver: null };
       }
@@ -680,7 +752,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
 
   const clean = results.filter(Boolean);
   const verified = clean.filter(r => r.ver && says(r.ver.status, 'verified') &&
-    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > 1.0);
+    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR);
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
   // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
@@ -726,6 +798,10 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
   candidates.sort((a, b) => b.geomean - a.geomean);
   const winner = candidates[0] || null;
   const improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  // Progress is a separate signal from `improved` (see `bestSeen` above). A round with NO candidate at
+  // all — every direction failed, or its engineer died — is never progress, so a dead round still
+  // counts against MAX_NO_IMPROVE and cannot keep the loop alive indefinitely.
+  const madeProgress = !!(winner && winner.geomean > bestSeen * (1 + PROGRESS_DELTA));
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
@@ -753,7 +829,6 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     cumulative = winner.geomean;
     bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
     finalWinner = winner;
-    noImprove = 0;
 
     // --- (f) Re-profile the new best ------------------------------------
     profileSummary = await agentT(
@@ -762,9 +837,12 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         COMMANDMENT, PREVIOUS_METRICS: profileSummary,
       }),
       { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
-  } else {
-    noImprove++;
   }
+
+  // Continue-or-stop is decided by PROGRESS, not by the commit decision above. A committed win always
+  // counts too, so the stall counter can never be advanced by a round that actually banked something.
+  if (winner && winner.geomean > bestSeen) bestSeen = winner.geomean;
+  if (madeProgress || improved) { noImprove = 0; } else { noImprove++; }
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
   const mem = await agentT(
@@ -796,7 +874,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
     improved, cumulative,
   });
-  log(`Round ${round} done. winner=${winner ? winner.source + ' ' + winner.geomean.toFixed(2) + 'x' : 'none'}, cumulative=${cumulative.toFixed(2)}x, noImprove=${noImprove}`);
+  log(`Round ${round} done. winner=${winner ? winner.source + ' ' + winner.geomean.toFixed(2) + 'x' : 'none'}, cumulative=${cumulative.toFixed(2)}x, bestSeen=${bestSeen.toFixed(2)}x, committed=${improved}, progress=${madeProgress}, noImprove=${noImprove}`);
 }
 
 // ===========================================================================

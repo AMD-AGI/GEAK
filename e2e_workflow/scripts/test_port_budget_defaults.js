@@ -22,7 +22,9 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const KW = path.join(ROOT, 'kernel_workflow', 'kernel_workflow.js');
+// kernel_workflow.js is a thin mode dispatcher; the budget-controlled round loop these knobs govern
+// lives in the single-language WORKER, kernel_lane.js.
+const KW = path.join(ROOT, 'kernel_workflow', 'kernel_lane.js');
 const E2E = path.join(ROOT, 'e2e_workflow', 'e2e_workflow.js');
 const src = fs.readFileSync(KW, 'utf8');
 
@@ -37,7 +39,7 @@ const ok = (cond, msg, detail) => {
 function knobs(A) {
   const grab = (re, name) => {
     const m = src.match(re);
-    if (!m) throw new Error(`could not extract ${name} from kernel_workflow.js`);
+    if (!m) throw new Error(`could not extract ${name} from kernel_lane.js`);
     return m[0];
   };
   const body = [
