@@ -8,9 +8,10 @@
 
 ### Gluon authoring and optimization
 
-- Adds a Gluon authoring expert skill: the API surface, a do-not-write list of constructs that compile and then silently cost performance, and a procedure with the scripts to execute it.
-- The Triton to Gluon port recovers layout and pipeline faithfully rather than translating them, taking layouts from the kernel's own compiler IR through the compiler's own conversion with a round-trip proof for each. Applies to gfx942 and gfx950, entered from a tuned Triton kernel or an existing Gluon one.
-- To enable, turn on expert skills. The skill is advisory, never overrides a measured A/B, and ships as a draft, so nothing selects it until it is validated.
+- Adds an expert skill (`gluon_authoring`) that ports a tuned plain-Triton champion to Gluon, faithfully recovering layouts and optionally re-injecting the pipeline, enabling further Gluon optimization.
+- Applies to MI325X (gfx942) and MI355X (gfx950) on Triton 3.6–3.8, covering attention, block-scaled GEMM, and more, boosting performance over their tuned Triton champion.
+- To enable, turn on expert skills (`use_expert_skills=true`). It ships as `draft`, so it must be handed to a run directly; once validated, matching offers it as an advisory candidate like any other skill.
+- Next: promote out of draft, widen the measured set, e2e workflow support, and LLVM/LLIR co-design support.
 
 ### Enhanced FlyDSL integration
 
