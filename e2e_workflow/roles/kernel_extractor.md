@@ -256,10 +256,11 @@ freeze an out-of-regime oracle nobody should trust.
    while the e2e gate runs on the stack is what made isolated and e2e numbers incomparable.
    (An empty `CURRENT_OVERLAY` — the first milestone — is fine: `baseline_overlay/` is then a valid
    empty overlay and the baseline leg resolves straight to the install, which IS the live stack.)
-   🔴 **`OVERLAY_KIND=capture` is REQUIRED.** Without it the run gets the 360s fail-fast budget
-   meant for rejecting a wedged *candidate*, which just truncates a slow cold start
-   ("Server not healthy within 360s") and capture never runs. Capture's budget is 1800s; widen it
-   alone with `CAPTURE_HEALTH_TRIES=<n>` (×5s) — `SERVER_STARTUP_TIMEOUT_SEC` applies to every kind.
+   **Cold start needs no knob.** `bench_e2e.sh` waits on *progress* (log growth), not on a fixed
+   budget, so a slow TP4 checkpoint load + AITER compile is allowed to take as long as it keeps
+   moving; only `STALL_WINDOW_SEC` (default 600s) of total silence ends the wait. If it does fail,
+   read `$OUT_DIR/server_start.json` — `reason` distinguishes `stalled` / `oom` / `died_early` /
+   `ceiling_exceeded` (the last one names `SERVER_STARTUP_TIMEOUT_SEC` as the override).
 
    🔴 **ISL/OSL/CONC MUST be the deployment `WORKLOAD` values.** Shrinking OSL captures a decode
    regime the deployment never runs, so every downstream speedup is measured on the wrong shapes.
