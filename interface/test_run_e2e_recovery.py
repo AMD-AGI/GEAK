@@ -320,6 +320,109 @@ def test_normalize_does_not_reconcile_genuine_no_gain(tmp_path):
     assert out["result_source"] == "workflow_return"
 
 
+# ── validated-win ATTRIBUTION backfill (the Qwen3.5-27B-FP8 director-override) ─
+
+def test_normalize_backfills_validated_win_attribution_head(tmp_path):
+    """A live return with a Director validated_win (speedup 1.59) but EMPTY
+    accepted_heads AND accepted_kernels: the winning head was ledgered 'dead_end'
+    by the single-head Amdahl guard and the Director's override never wrote it
+    back. normalize_result must recover the attribution into accepted_heads (from
+    the in-run ledger, routed by headQueue), tagged director_override — while
+    accepted_kernels stays [] (it was NOT an authored kernel)."""
+    eval_dir = tmp_path / "e2e_validated_dropped"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "director_e2e_validation.json").write_text(json.dumps({
+        "validation_status": "validated_win",
+        "throughput_speedup": 1.5948,
+        "director_verified_throughput_tok_s": 1684.6,
+        "baseline_throughput_tok_s": 1058.9,
+        "output_parity": "pass",
+    }), encoding="utf-8")
+    wf = {
+        "eval_dir": str(eval_dir),
+        "throughput_speedup": 1.5948,
+        "final_throughput_tok_s": 1684.6,
+        "baseline_throughput_tok_s": 1058.9,
+        "validation_status": "validated_win",
+        "accepted_heads": [],
+        "accepted_kernels": [],
+        "accepted_config": {"flags": "--context-length 6144", "env": "SGLANG_USE_AITER=1"},
+        "state": {
+            "headQueue": [
+                {"id": "h0", "short_name": "fp8 a8w8 blockscale GEMM — up/gate", "pct_gpu_time": 33.74},
+                {"id": "h1", "short_name": "fp8 a8w8 blockscale GEMM — down-proj", "pct_gpu_time": 16.08},
+            ],
+            "kernelQueue": [
+                {"id": "k0", "short_name": "chunk_gated_delta_rule_fwd_kernel", "pct_gpu_time": 2.04},
+            ],
+            "history": {"ledger": [
+                {"direction": "fp8 a8w8 blockscale GEMM — up/gate",
+                 "isolated_speedup": 1.72, "e2e_delta_pct": 58.99, "verdict": "dead_end",
+                 "lesson": "implausible_speedup (+59.0% >> Amdahl ceiling +16.4%)"},
+            ]},
+        },
+    }
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "ok"
+    assert out["result_source"] == "workflow_return"
+    # accepted_kernels stays empty (the win was NOT an authored kernel).
+    assert out["accepted_kernels"] == []
+    # the head win is recovered into accepted_heads, tagged director_override.
+    assert len(out["accepted_heads"]) == 1
+    head = out["accepted_heads"][0]
+    assert head["short_name"] == "fp8 a8w8 blockscale GEMM — up/gate"
+    assert head["accepted_via"] == "director_override"
+    assert head["e2e_delta_pct"] == pytest.approx(58.99)
+
+
+def test_normalize_backfill_routes_kernel_from_kernelqueue(tmp_path):
+    """When the dropped winner matches the kernelQueue (an editable kernel, not a
+    head), the backfill routes it to accepted_kernels — not accepted_heads."""
+    eval_dir = tmp_path / "e2e_validated_kernel"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "director_e2e_validation.json").write_text(json.dumps({
+        "validation_status": "validated_win", "throughput_speedup": 1.2,
+    }), encoding="utf-8")
+    wf = {
+        "eval_dir": str(eval_dir), "throughput_speedup": 1.2,
+        "validation_status": "validated_win",
+        "accepted_heads": [], "accepted_kernels": [],
+        "state": {
+            "headQueue": [{"short_name": "some_gemm_head", "pct_gpu_time": 30}],
+            "kernelQueue": [{"short_name": "fused_recurrent_gated_delta", "pct_gpu_time": 3}],
+            "history": {"ledger": [
+                {"direction": "fused_recurrent_gated_delta", "isolated_speedup": 1.4,
+                 "e2e_delta_pct": 8.0, "verdict": "confirmed"},
+            ]},
+        },
+    }
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["accepted_heads"] == []
+    assert len(out["accepted_kernels"]) == 1
+    assert out["accepted_kernels"][0]["short_name"] == "fused_recurrent_gated_delta"
+    assert out["accepted_kernels"][0]["accepted_via"] == "director_override"
+
+
+def test_normalize_backfill_noop_without_validated_win(tmp_path):
+    """Do-no-harm: a positive-speedup return WITHOUT a Director validated_win must
+    NOT be backfilled (the guard requires the override signal) — empty attribution
+    lists stay empty, never fabricated."""
+    eval_dir = tmp_path / "e2e_no_validated"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "director_e2e_validation.json").write_text(json.dumps({
+        "validation_status": "flagged", "throughput_speedup": 1.3,
+    }), encoding="utf-8")
+    wf = {
+        "eval_dir": str(eval_dir), "throughput_speedup": 1.3,
+        "accepted_heads": [], "accepted_kernels": [],
+        "state": {"headQueue": [{"short_name": "x", "pct_gpu_time": 30}],
+                  "history": {"ledger": [{"direction": "x", "e2e_delta_pct": 20.0}]}},
+    }
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["accepted_heads"] == []
+    assert out["accepted_kernels"] == []
+
+
 def test_result_source_no_gain(tmp_path):
     eval_dir = _make_no_gain_eval_dir(tmp_path)
     wf = rx._recover_workflow_return(eval_dir.parent)

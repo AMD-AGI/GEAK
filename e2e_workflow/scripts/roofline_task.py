@@ -397,15 +397,23 @@ def main(argv=None):
     if args.phase == "baseline":
         patterns = [p for p in [name_match] if p]
     else:
-        # post: prefer an explicit winner symbol; else profile the dominant kernel the
-        # candidate-only driver runs (patterns=[] => roofline_kernel picks the top kernel).
-        patterns = [p for p in [args.kernel_pattern] if p]
-        # Backend/config swap: --candidate-spec deploys a DIFFERENT callable than the frozen
-        # baseline. The harness hook runs candidate-only, but as belt-and-suspenders we still
-        # exclude the baseline's matched kernel from the duration-ranked fallback so the DEPLOYED
-        # kernel is selected (no manual --kernel-pattern needed). Skipped when an explicit pattern
-        # was given (it already pins the winner) or when no
-        # candidate-spec is set (we're profiling the frozen callable itself).
+        # post: prefer an explicit winner symbol; otherwise reuse the SAME positive name_match the
+        # baseline used, so both phases select the SAME kernel family and the eff% is comparable.
+        #
+        # APPLES-TO-APPLES fix (F5): the candidate-only driver profiles ONLY the deployed kernel,
+        # so a POSITIVE name_match is the right selector in every case:
+        #   - env-overlay / same-family tune (e.g. a CK autotune accept via GEAK_GEMM_CANDIDATE):
+        #     the deployed kernel STILL matches baseline's name_match => it is positively selected.
+        #     The old code instead EXCLUDED baseline's matched kernel (belt-and-suspenders), which for
+        #     a same-family tune excluded the real compute-bearing CK kernel and forced a wrong,
+        #     zero-compute Tensile Cijk_* dispatch to be headlined => post eff% spuriously < baseline.
+        #   - genuine backend swap to a differently-named kernel: name_match matches nothing in the
+        #     candidate-only profile => roofline_kernel falls back to the dominant candidate kernel
+        #     (the newly deployed one). Correct, and we never exclude the real kernel.
+        patterns = [p for p in [args.kernel_pattern] if p] or [p for p in [name_match] if p]
+        # Last resort ONLY when there is no positive pattern at all (no winner symbol AND no
+        # name_match) but a candidate_spec deployed a different callable: exclude the baseline's
+        # matched kernel from the duration-ranked fallback so the deployed kernel still wins.
         if args.candidate_spec and not patterns:
             baseline_report = args.baseline_report or os.path.join(out_dir, "baseline_roofline.json")
             exclude_patterns = _baseline_exclude_patterns(baseline_report)

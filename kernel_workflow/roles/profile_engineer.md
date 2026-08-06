@@ -76,6 +76,15 @@ assumed MI300X.
    compute-bound / memory-bound / latency-bound / lds-bound / balanced. ALSO flag **overhead-bound**
    when per-case latencies are similar across very different problem sizes, or dispatch count > 1
    with small kernels — this points at host/dispatch overhead (see `geomean_levers.md`).
+   - **Do not call it memory-bound on a small AI alone** — only when HBM/VMEM utilization is actually
+     high. A small AI with low HBM util is latency-bound (`profiling_guide.md` → decision tree note).
+   - **When latency-bound, name the sub-case in your opportunities**: dependency-wait dominant (C1,
+     shorten the serial chain) vs issue-wait dominant (C2, raise occupancy / GPU fill). They have
+     opposite fixes, so the TechLead needs the sub-case, not just "latency". Re-read this split after
+     any tile / `num_stages` / `num_warps` change — it is a property of the config, not the source.
+   - **Run the cheap peak/fill sanity-checks** (`profiling_guide.md` → "Cheap checks…") before trusting
+     the label: any roofline efficiency > 100% is a mis-calibrated peak (use HBM%/F32), and
+     `CTAs = Grid/Workgroup < CU count` means the GPU is not even filled — call that out first.
 8. Write `EVAL_DIR/baseline_metrics.json` (or `round_N_metrics.json`) and
    `EVAL_DIR/profiling_summary.md` (or `round_N_shift_analysis.md`). For reprofile, include a
    BEFORE→AFTER shift section explaining why the bottleneck moved and what to target next. Preserve the

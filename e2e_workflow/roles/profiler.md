@@ -202,6 +202,25 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    inconsistent and will under-rank the real targets. If the trace can't be sampled, degrade to a
    qualitative flag (high avg+calls collective → "likely spin-inflated, discount"; one giant first-call →
    "JIT warmup, discount"; large-M+small-M same name → "split regimes") — never fail or block the Top-N.
+6. **Analysis skill (ONLY if `ANALYSIS_SKILL_DIR` is a non-empty path that EXISTS — else skip entirely
+   and return `profile_roofline_json: ""`).** Read `ANALYSIS_SKILL_DIR/SKILL.md` and execute it against
+   the Top-N you just wrote, producing the artifact it specifies (for `roofline`:
+   `profile/round_${ROUND}/profile_roofline.{json,md}`). Report its path as `profile_roofline_json`.
+   This runs **after** the Top-N is final — it enriches, it never edits `profile_topN.json`, and it must
+   never change a `pct_gpu_time`. The skill defines its own degradation ladder: follow it, and **if the
+   skill errors out at any point, note it and return the Top-N anyway — a failed analysis skill must
+   never fail or block the profile.**
+   - **Prefer measured over modelled (bridge to the measurement engine).** Before analytic modelling,
+     call `load_measured_roofline(ROOFLINE_MEASURED_GLOB, target_eff=TARGET_EFF[op_kind])` (from
+     `ANALYSIS_SKILL_DIR/roofline_tools.py`). `ROOFLINE_MEASURED_GLOB` is the input the workflow passes
+     (`EVAL_DIR/kernels/*/roofline/*_roofline.json`, `""` when unset). For any kernel it returns, use
+     the **measured** `roofline_pct`/`attainable_speedup`/`bound_type`/`headroom_class` and set
+     `roofline_source:"measured"`, `roofline_confidence:"high"`. Kernels with no measured file fall
+     back to the analytic stage-A/B estimate and are tagged `roofline_source:"analytic"`. Early rounds
+     (before any baseline profile has run) legitimately return `{}` → everything is analytic; later
+     rounds pick up the engine's baseline/post roofline. See SKILL.md §5 "Stage C — measured roofline".
+   - Every entry in `profile_roofline.json` MUST carry `roofline_source` and `roofline_confidence` so
+     the Architect can honour confidence when it re-ranks (system_architect.md step 1c).
 
 Return JSON:
 ```json
@@ -209,6 +228,7 @@ Return JSON:
   "round": 0,
   "profile_topN_json": "<EVAL_DIR>/profile/round_0/profile_topN.json",
   "profile_topN_md": "<EVAL_DIR>/profile/round_0/profile_topN.md",
+  "profile_roofline_json": "<EVAL_DIR>/profile/round_0/profile_roofline.json  (\"\" if no analysis skill ran)",
   "source": "torch-trace|merged|tracelens|tracelens+trace",
   "total_gpu_time_ms": 0.0,
   "top_kernels": [

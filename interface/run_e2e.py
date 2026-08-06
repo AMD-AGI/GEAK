@@ -987,6 +987,41 @@ def _wf_best_accepted_delta_pct(wf: dict) -> float:
     return best
 
 
+def _best_ledger_win(wf: dict) -> dict | None:
+    """Largest positive-``e2e_delta_pct`` direction the run actually MEASURED.
+
+    Read from the workflow return's in-run experience ledger
+    (``state.history.ledger`` — the Architect's per-direction record). This is the
+    honest source for the winning op's identity when the accepted lists were
+    dropped. Returns ``None`` when the ledger is absent or holds no positive
+    direction (never fabricates a winner).
+    """
+    ledger = (((wf.get("state") or {}).get("history") or {}).get("ledger") or [])
+    best: dict | None = None
+    best_delta = 0.0
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        if not (entry.get("direction") or entry.get("short_name")):
+            continue
+        try:
+            delta = float(entry.get("e2e_delta_pct") or 0.0)
+        except (TypeError, ValueError):
+            delta = 0.0
+        if delta > best_delta:
+            best, best_delta = entry, delta
+    return best
+
+
+def _state_op_names(wf: dict, queue: str) -> set[str]:
+    """``short_name`` set of the return's ``state.<queue>`` (headQueue|kernelQueue)."""
+    names: set[str] = set()
+    for op in ((wf.get("state") or {}).get(queue) or []):
+        if isinstance(op, dict) and op.get("short_name"):
+            names.add(str(op["short_name"]))
+    return names
+
+
 def normalize_result(h: dict, wf: dict) -> dict:
     eval_dir = Path(wf["eval_dir"])
     validation = _read_json(eval_dir / "director_e2e_validation.json")
@@ -1051,6 +1086,47 @@ def normalize_result(h: dict, wf: dict) -> dict:
         result_source = "disk_director_validation"
     else:
         result_source = "workflow_return"
+
+    # ── Reconcile a VALIDATED win whose ATTRIBUTION was dropped (director
+    # override) ───────────────────────────────────────────────────────────────
+    # A live return can carry a real, Director-validated speedup
+    # (validation_status == "validated_win") yet ship EMPTY accepted_heads AND
+    # accepted_kernels — e.g. the head-track Amdahl plausibility guard marked the
+    # winning direction "dead_end" (scored on a single head's mass) and the
+    # Director's later validated_win never wrote it back, so result.json credits a
+    # real win to nothing. Recover the winner's IDENTITY from the in-run ledger
+    # (state.history.ledger — the direction the run actually MEASURED) and route it
+    # to accepted_heads / accepted_kernels by which queue it came from. Do-no-harm:
+    # fires ONLY on a live workflow_return with a positive validated speedup and
+    # BOTH accepted lists empty; never overrides a populated list; never fabricates
+    # (no ledger winner => no change). Tagged accepted_via="director_override" so the
+    # provenance is auditable. See interface/run_e2e.md + GEAK#377.
+    if (
+        result_source == "workflow_return"
+        and speedup > 1.0
+        and (validation.get("validation_status") == "validated_win"
+             or wf.get("validation_status") == "validated_win")
+        and not (wf.get("accepted_kernels") or wf.get("accepted_heads"))
+    ):
+        _win = _best_ledger_win(wf)
+        if _win is not None:
+            _name = str(_win.get("direction") or _win.get("short_name") or "")
+            _entry = {
+                "short_name": _name,
+                "e2e_delta_pct": _win.get("e2e_delta_pct"),
+                "isolated": _win.get("isolated_speedup"),
+                "backend": "geak",
+                "accepted_via": "director_override",
+                "note": _win.get("lesson"),
+            }
+            _kernels = _state_op_names(wf, "kernelQueue")
+            _heads = _state_op_names(wf, "headQueue")
+            wf = dict(wf)   # don't mutate the caller's return object
+            if _name and _name in _kernels and _name not in _heads:
+                wf["accepted_kernels"] = [_entry]
+            else:
+                wf["accepted_heads"] = [_entry]
+            wf["attribution_backfilled"] = True
 
     # baseline measurement-protocol cross-check (GEAK-E2E vs Hyperloom-E2E divergence).
     # GEAK's measured baseline is already seeded with Hyperloom's accepted config (map_args forwards

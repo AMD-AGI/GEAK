@@ -2,12 +2,103 @@
 key: fp8_a8w8_blockscale dense GEMM · gfx942 · sglang Triton live path
 type: lever
 confidence: ★★★
-effect: iso ~1.06–1.16× prefill (Triton-overlay, DEPRECATED); CK-tuned KERNEL ~1.78× vs untuned Triton on the M=13645 head (kernel-level). down_proj WITH production-module rebuild: decode 4.2–4.6×, prefill M=1024 1.43× (CK wins ALL M — unconditional overlay)
-confirms: 43
-last_seen: 2026-08-02
+effect: iso ~1.06–1.16× prefill (Triton-overlay, DEPRECATED); CK-tuned KERNEL ~1.78× vs untuned Triton on the M=13645 head (kernel-level). down_proj WITH production-module rebuild: decode 4.2–4.6×, prefill M=1024 1.43× (CK wins ALL M — unconditional overlay). **e2e VERIFIED (Qwen3-14B-FP8 gfx942 TP=1): model-wide M-routed CK overlay = ~2.06× aggregate throughput, gsm8k 0.905 PASS**
+confirms: 49
+last_seen: 2026-08-04
 status: DEPRECATED-FOR-THIS-EVAL
-caution: the tuned CSV lookup logging "is tuned on cu_num" does NOT guarantee the tuned kernel RUNS — a stale prebuilt production module_gemm_a8w8_blockscale.so (shipped in image) silently falls back to the untuned default (prefill 0.73ms → looks like 0.86× loss). MUST rebuild the production module with AITER_CONFIG_GEMM_A8W8_BLOCKSCALE set (rm the prebuilt .so + blob, call the op once, gen_instances --tune_file bakes the tuned instance in) BEFORE measuring/deploying; then prefill M=1024 wins 1.43×.
+caution: the tuned CSV lookup logging "is tuned on cu_num" does NOT guarantee the tuned kernel RUNS — a stale prebuilt production module_gemm_a8w8_blockscale.so (shipped in image) silently falls back to the untuned default (prefill 0.73ms → looks like 0.86× loss). MUST rebuild the production module with AITER_CONFIG_GEMM_A8W8_BLOCKSCALE set (rm the prebuilt .so + blob, call the op once, gen_instances --tune_file bakes the tuned instance in) BEFORE measuring/deploying; then prefill M=1024 wins 1.43×. The rebuild need is IMAGE/STATE-dependent: on the gate_up_proj run below env-alone did NOT engage (found config but ran wrong instance @23.4ms) and rebuild WAS required (→7.53ms), whereas the down_proj run picked it up without rebuild — so ALWAYS rm+rebuild to be safe.
 ---
+> ✅ **49th confirm + REBUILD-FLIP RE-RE-VERIFIED (2026-08-04, Qwen3_14B_20260803 bakeoff, o_proj head
+> 11.76% GPU, SQUARE N=K=5120, m_buckets={1,64,1024,16384}; sglang 0.5.12, gfx942 cu_num=304).** Third
+> fp8 family this eval (after down_proj + gate_up). CK tuner `--libtype both --mp 1` (26s, 4 shapes, all
+> winners libtype=ck, errRatio 0). op_bench dominant M=16384 = UNTUNED/stale CK 3.43ms vs Triton 1.71ms
+> (0.5×) → the exact stale-`.so` artifact the caution predicts, NOT a CK loss. After the MANDATED
+> rm module_gemm_a8w8_blockscale.so + build blob → rebuild with AITER_CONFIG set (105s JIT bakes tuned
+> instances), engaged ("is tuned on cu_num=304" all 4 M), per-bucket verify_ck vs Triton: **M=1 5.65×,
+> M=64 5.57×, M=1024 2.35×, M=16384 1.70× — CK WINS ALL M (unconditional switch overlay OK, no M-routing).**
+> Correctness rel_err ≤1.8e-5 vs Triton (§9.1 transpose_scale=False; « tol 0.08). o_proj is a strong-decode
+> square family (matches 29th/32nd/42nd) but ALSO wins the M=16384 prefill bucket post-rebuild — the pre-16k
+> siblings that only tested M≤1024 missed this. Shipped `winner_kind=env` (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=
+> config/a8w8_blockscale_tuned_o_proj.csv; merged 3-family config/a8w8_blockscale_tuned_combined_dp_gu_oproj.csv)
+> + SGLANG_FP8_BLOCKSCALE_USE_CK=1 + fp8_utils_ck_switch.overlay.diff + MANDATORY .so-rebuild prereq
+> (config/ck_blockscale_DEPLOY_PREREQ_o_proj.md). amdahl @11.76% GPU, 1.70× dominant ≈ +4.8% e2e ceiling
+> (model-wide overlay across ~77% GPU fp8 seam → far larger). Integrator: rebuild the production module with
+> the combined CSV before the e2e A/B, §10.1 greedy parity M≥2 on the engaged CK server. flydsl author +
+> Triton-JSON overlay + aiter-bf16 all FORBIDDEN this eval. e2e gate pending.
+> ✅ **48th confirm + REBUILD-FLIP RE-VERIFIED via IMMUTABLE UT (2026-08-04, Qwen3_14B_20260803 bakeoff,
+> gate_up_proj head 15.88% GPU, N=34816/K=5120, m_buckets={1,64,1024,16384}; sglang 0.5.12, gfx942
+> cu_num=304).** Re-ran the CK skill; hit the stale-prebuilt gotcha EXACTLY as the caution predicts. CK
+> tuner `--libtype both --mp 1` (77s, 4 shapes, all winners libtype=ck, errRatio 0). ENV-ALONE (tuned CSV,
+> banner "is tuned on cu_num=304" present) STILL ran the stale untuned default — immutable UT (cuda-graph)
+> GEAK_WEIGHTED=**0.584** (M=1 1.12x but M=64 0.88x, M=1024 0.54x, M=16384 0.55x=23.3ms) → looks like a CK
+> REGRESSION. **After the MANDATED rm module_gemm_a8w8_blockscale.so + build blob → rebuild with
+> AITER_CONFIG set (102.6s JIT bakes tuned instances into the compile-time lookup), the SAME UT flips to
+> GEAK_WEIGHTED=1.595 (geomean 1.35): M=1 1.10x, M=64 1.11x, M=1024 1.60x, M=16384 7.558 vs Triton 12.918ms
+> = 1.71x — CK WINS ALL M (unconditional overlay OK here, no M-routing needed).** Correctness PASS (eager +
+> 3-draw random-parity + graph-replay, rel_err ~0.007 « tol 0.08; §9.1 transpose_scale=False confirmed).
+> KEY LESSON REINFORCED: the "is tuned on cu_num" banner is NOT proof the tuned kernel runs — ALWAYS
+> rm+rebuild the .so with the CSV set BEFORE trusting/deploying, and judge on the IMMUTABLE UT (graph),
+> never the tuner's optimistic hot `us` (tuner said M=16384=6989µs/835TFLOPS; un-rebuilt runtime 23.3ms/251,
+> rebuilt 7.56ms/452). Shipped `winner_kind=env` (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=config/
+> a8w8_blockscale_tuned_gateup.csv + SGLANG_FP8_BLOCKSCALE_USE_CK=1) + fp8_utils Triton→CK overlay
+> (config/fp8_utils_ck_switch.overlay.diff, git apply --check CLEAN, reversible) + MANDATORY .so-rebuild
+> prereq. Integrator: rebuild the production module with the (combined 4-family) CSV before the e2e A/B,
+> §10.1 greedy parity M≥2 on the engaged CK server. e2e gate pending.
+> ✅ **47th confirm + LARGE-M RECONCILIATION (2026-08-04, Qwen3_14B_20260803 / Qwen3-14B-FP8 TP=1, gfx942
+> cu_num=304, down_proj head 37.66% GPU — N=5120/K=17408, m_buckets={1,64,1024,16384}; sglang 0.5.12, aiter
+> HEAD a6bb49937, synthesized task).** CK skill bakeoff, re-verifying the 44th's crossover claim. aiter CK
+> tuner had already produced config/a8w8_blockscale_tuned_down_proj.csv (all 4 M winners libtype=ck, errRatio
+> 0). op_bench_cktuned reported plain-CK target 11.6ms @ M=16384 (LOSS) — but that was the STALE prebuilt
+> module_gemm_a8w8_blockscale.so running the untuned legacy default (the 28th-gotcha). **After the MANDATED
+> rm+rebuild of the .so with AITER_CONFIG_GEMM_A8W8_BLOCKSCALE set (104.8s JIT, bakes tuned instances into the
+> compile-time lookup), the engaged tuned-CK at the DOMINANT M=16384 bucket = 4.17ms vs Triton 6.03ms = 1.44×
+> WIN** (banner "is tuned on cu_num=304 ... intrawave_v3", rel_err 2e-5 vs Triton @ §9.1 transpose_scale=False).
+> ⚠️ RECONCILES the 44th/16th "CK loses large-M (M≥2048)" verdict: that loss was the un-rebuilt stale module,
+> NOT a real tuned-CK regression — post-rebuild tuned CK wins even at M=16384, so the down_proj overlay can be
+> UNCONDITIONAL (no M-routing needed) provided the Integrator does the rebuild. The tuner's own us (3882µs) is
+> slightly optimistic vs the cold re-measure (4174µs) but the WIN direction holds. amdahl @37.66% GPU, 1.44×
+> ≈ +11.5% e2e ceiling (combined CSV across the ~77% GPU fp8 families → far larger). Shipped `winner_kind=env`
+> (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=config/a8w8_blockscale_tuned_down_proj.csv + SGLANG_FP8_BLOCKSCALE_USE_CK=1)
+> + fp8_utils_ck_switch.overlay.diff + MANDATORY .so rebuild prereq (config/ck_blockscale_DEPLOY_PREREQ_down_proj.md).
+> flydsl author + Triton-JSON overlay + aiter-bf16 all FORBIDDEN this eval. e2e gate pending (Integrator; §10.1
+> greedy parity M≥2 on the engaged CK server; self-verify the rebuilt instance actually RUNS).
+> ✅ **45th confirm (2026-08-04, Qwen3_14B_20260803 / Qwen3-14B-FP8 TP=1, gfx942 cu_num=304, bakeoff):
+> gate_up_proj head 15.88% GPU, N=34816/K=5120, m_buckets={1,64,1024,16384}. CK tuner `--libtype both
+> --mp 1` (76s, 4 shapes, all winners libtype=ck, errRatio 0, 0 failed). §9.1 transpose_scale=False,
+> ck_vs_triton rel_err 7.5e-3 (« tol 0.08). op_bench dominant M=16384: untuned-CK 23.4ms LOSES to Triton
+> 13.0ms; after rm+rebuild of module_gemm_a8w8_blockscale.so from the tuned CSV, tuned-CK 7.56ms → iso
+> 1.72× (Amdahl e2e ceiling 7.12%). Env-alone (no rebuild) did NOT engage — reinforces the rebuild caution.
+> **e2e-transfer VERIFIED (Integrator, M-ROUTED overlay SGLANG_CK_BLOCKSCALE_M_MAX=1024 + AITER_CONFIG
+> tuned CSV, engaged [CK-overlay] banner + "is tuned on cu_num=304" ×9): cand ~4355→4428 tok/s vs Triton
+> ref ~2139 tok/s = ~2.06× e2e aggregate throughput, TPOT 14.15 vs 29.6ms; gsm8k 0.905 on the ENGAGED CK
+> server (§10.1 parity PASS). The overlay is model-wide (all 4 fp8 families) so the e2e win ≫ this op's
+> 7.12% single-op ceiling — the 4-family fp8 seam is ~77% GPU. Large-M prefill (M=16384) correctly kept on
+> Triton: tuned-CSV CK at M=16384 = 23.4ms (cold) LOSES 13.0ms Triton → M_MAX=1024 routing dodges it.**
+> ✅ **44th confirm + CROSSOVER MAPPED (2026-08-04, Qwen3_14B_20260803 / Qwen3-14B-FP8 TP=1, gfx942/MI300X
+> cu_num=304, conc=64, isl=osl=1024, down_proj head 37.66% GPU (live_pct 77.04%) — N=5120/K=17408,
+> m_buckets={1,64,1024,16384}; sglang 0.5.12, aiter HEAD a6bb49937 = descendant of skill 303a583c;
+> synthesized task, no reference_io.pt).** CK skill end to end (bakeoff). op_bench dominant-bucket = M=16384
+> (the ONE bucket CK loses) → reports 1.0×, NOT no-win. aiter CK tuner `--libtype both --mp 1` (46s, 4
+> shapes + a 3-shape extra run for the crossover): ALL winners `libtype=ck`, errRatio 0.0, 0 failed. §9.1:
+> CK correct at `transpose_scale=False`, ck_vs_triton relerr **0.0000 at M=1/64/1024/16384** (matches live
+> gfx942 use_triton=True non-transposed seam → drop-in). Engagement CONFIRMED "is tuned on cu_num=304"
+> (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE, no module rebuild needed this run — plain CK runtime lookup picked up
+> the CSV). Hot CUDA-event A/B tuned-CK vs Triton: **decode M=1 4.95×, M=64 4.47×; prefill M=1024 1.56× —
+> CK WINS; M=2048 0.71×, M=4096 0.57×, M=8192 0.54×, M=16384 0.53× — CK LOSES.** NEW: mapped the crossover
+> — CK wins for **M≤1024, loses for M≥2048** (prior confirms only sampled ≤1024; this run tuned+timed
+> 2048/4096/8192/16384 to pin it). ⚠️ NOTE the tuner's own `us` for M=16384 (3882µs=752TFLOPS) is
+> OPTIMISTIC — production `aiter.gemm_a8w8_blockscale` runs 11.5ms (251TFLOPS) for the SAME kernelId 0 →
+> trust the production A/B, not the tuner CSV `us`, for the large-M verdict (reconfirms the 16th's caution).
+> GEAK serving-weighted (workload weights decode_M64=99463 > prefill_M16384=50149 > decode_M1=24865 >
+> prefill_M1024=3134) M-routed = **~2.24×**; amdahl @37.66% GPU ≈ +26% e2e ceiling (combined CSV across the
+> 77% fp8 families → far larger). Shipped `winner_kind=env`
+> (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=config/a8w8_blockscale_tuned_down_proj.csv, 7-shape) + reversible
+> M-ROUTED fp8_utils Triton→CK overlay (config/fp8_utils_ck_overlay.diff, `SGLANG_CK_BLOCKSCALE_M_MAX`
+> default **1024**, transpose_scale unchanged=False — every bucket ≥ Triton, no regression). Integrator:
+> §10.1 greedy parity M≥2 on the engaged CK server, self-verify the tuned instance actually RUNS (heed the
+> stale-prebuilt caution), merge other fp8 families into the combined CSV. flydsl author + Triton-JSON
+> overlay + aiter-bf16 all FORBIDDEN this eval. e2e gate pending.
+
 > ✅ **43rd confirm (2026-08-02, Qwen3_14B_20260802 / Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304,
 > conc=64, isl=osl=1024, qkv_proj head 11.52% GPU — N=7168/K=5120, M={1,64,1024}; reference_io.pt oracle
 > sha 8adbfdf..., sibling of the o_proj/gate_up 41st/42nd this eval; sglang 0.5.12, aiter HEAD a6bb49937 =

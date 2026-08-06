@@ -61,6 +61,27 @@ const TRACELENS_INPUTS = {
 };
 if (TL && Object.keys(TL).length) log(`TraceLens prior present: ${Object.keys(TL).filter(k => TL[k]).join(', ') || '(none non-null)'}.`);
 
+// ---- Pluggable profile-analysis skill (roofline-guided routing; ADVISORY, never prunes) ----
+// A named skill under knowledge/analysis_skills/<skill>/ that the Profiler runs after the Top-N and the
+// Architect reads as a routing PRIOR. Default 'roofline'. Set analysis_skill=none|false to disable: then
+// the run behaves exactly as it did before the feature existed -> the inputs are '' and nothing is injected.
+const ANALYSIS_SKILL = String(A.analysis_skill != null ? A.analysis_skill : 'roofline').trim();
+const ANALYSIS_SKILL_ON = !!ANALYSIS_SKILL && ANALYSIS_SKILL !== 'none' && ANALYSIS_SKILL !== 'false';
+const ANALYSIS_SKILL_INPUTS = ANALYSIS_SKILL_ON ? {
+  ANALYSIS_SKILL: ANALYSIS_SKILL,
+  ANALYSIS_SKILL_DIR: `${WORKFLOW_DIR}/knowledge/analysis_skills/${ANALYSIS_SKILL}`,
+} : { ANALYSIS_SKILL: '', ANALYSIS_SKILL_DIR: '' };
+if (ANALYSIS_SKILL_ON) log(`Profile-analysis skill: ${ANALYSIS_SKILL} (advisory; annotates + reorders, never prunes).`);
+// FUSION bridge to Branch A's empirical rocprof-compute roofline: the analysis skill prefers the MEASURED
+// per-kernel roofline (kernels/*/roofline/*_roofline.json, written by the roofline_probe hooks reusing
+// roofline_kernel.py) as stage-C (high confidence), falling back to its analytic byte/FLOP model when a
+// kernel has no measured artifact yet. Empty when the skill is off or before EVAL_DIR exists.
+// Recursive `**` so the pattern spans BOTH layouts: the e2e probe's flat
+// kernels/<task>/roofline/<phase>_roofline.json AND the kernel layer's nested
+// kernels/_exp/<team>/<task>/roofline/<phase>/<phase>_roofline.json. load_measured_roofline
+// globs with recursive=True and keys each file by the segment before `roofline/`.
+const rooflineMeasuredGlob = () => (ANALYSIS_SKILL_ON && EVAL_DIR) ? `${EVAL_DIR}/kernels/**/roofline/**/*_roofline.json` : '';
+
 // ---- single-kernel pass-through: if kernel_path (and no model_path), just run the kernel layer ----
 const KERNEL_PATH = A.kernel_path || '';
 const MODEL_PATH = A.model_path || '';
@@ -1134,7 +1155,7 @@ if (want('setup')) {
     roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
       OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-      ...TRACELENS_INPUTS,
+      ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ROOFLINE_MEASURED_GLOB: rooflineMeasuredGlob(),
     }),
     { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
   log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
@@ -1144,7 +1165,7 @@ if (want('setup')) {
     roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
       EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
       WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
-      ...TRACELENS_INPUTS,
+      ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ROOFLINE_MEASURED_GLOB: rooflineMeasuredGlob(),
     }),
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
@@ -1207,6 +1228,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       roleAgent('profiler', 'reprofile', 'Re-profile after the config sweep.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'config',
         OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS, ROOFLINE_MEASURED_GLOB: rooflineMeasuredGlob(),
       }),
       { phase: 'Profile', label: 'profiler:post-config', schema: PROFILE_SCHEMA });
     // Re-strategize the kernel queue against the new profile.
@@ -1214,6 +1236,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       roleAgent('system_architect', 'strategize', 'Re-route after config changed the landscape.', {
         EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
         WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS, ROOFLINE_MEASURED_GLOB: rooflineMeasuredGlob(),
       }),
       { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
     if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
@@ -1529,6 +1552,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const rp = await safeAgent(
           roleAgent('profiler', 'reprofile', 'Re-profile the CURRENT overlaid server; return refreshed head pct_gpu_time so EV re-weights toward the new bottleneck.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+            ...ANALYSIS_SKILL_INPUTS, ROOFLINE_MEASURED_GLOB: rooflineMeasuredGlob(),
           }),
           { phase: 'HeadKernel', label: `reprofile g${e2eGateCount}`, schema: { type: 'object', additionalProperties: true, properties: { heads: { type: 'array', items: { type: 'object', additionalProperties: true } } } } });
         if (rp && Array.isArray(rp.heads)) {
@@ -2129,6 +2153,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       roleAgent('profiler', 'reprofile', 'Re-profile after head-kernel wins.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'head',
         OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS, ROOFLINE_MEASURED_GLOB: rooflineMeasuredGlob(),
       }),
       { phase: 'Profile', label: 'profiler:post-head', schema: PROFILE_SCHEMA });
   }
@@ -2165,6 +2190,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, MILESTONE_MIN_PCT,
         MIN_KERNEL_TASKS, DISPATCHED_SO_FAR: dispatched, BELOW_MIN_FLOOR: belowFloor,
         PROFILE_TOPN: profile ? profile.profile_topN_json : '', HISTORY: history, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS, ROOFLINE_MEASURED_GLOB: rooflineMeasuredGlob(),
       }),
       { phase: 'Milestone', label: `architect:plan m${milestone}`, schema: PLAN_SCHEMA });
 
@@ -2309,6 +2335,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       roleAgent('profiler', 'reprofile', 'Re-profile the new best server.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: milestone,
         OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS, ROOFLINE_MEASURED_GLOB: rooflineMeasuredGlob(),
       }),
       { phase: 'Profile', label: `profiler:reprofile m${milestone}`, schema: PROFILE_SCHEMA });
   } else {
@@ -2319,6 +2346,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   const exp = await safeAgent(
     roleAgent('system_architect', 'update_experience', 'Curate knowledge/learned/ (merge/insert >=2-star / archive contradicted) per learned/README.md.', {
       ROUND: milestone, EVAL_DIR, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
+      ...ANALYSIS_SKILL_INPUTS, ROOFLINE_MEASURED_GLOB: rooflineMeasuredGlob(),
       MILESTONE_RESULTS: history.ledger.slice(-cands.length),
       REPROFILE_SHIFT: profile ? profile.shift_note : '', PRIOR_HISTORY: history,
     }),
@@ -2482,6 +2510,7 @@ if (want('final')) {
     roleAgent('system_architect', 'report', 'Write architect_report.md AND the full final_report.md in English (with the Phases tree + artifacts tree modules + the 📊 Empirical roofline section from kernels/*/roofline/).', {
       EVAL_DIR, HISTORY: history, BASELINE_THROUGHPUT: BASELINE_TPUT, FINAL_THROUGHPUT: finalTput,
       ROOFLINE_GLOB: `${EVAL_DIR}/kernels/*/roofline/`, ROOFLINE_ENABLED: ROOFLINE_ON,
+      ...ANALYSIS_SKILL_INPUTS, ROOFLINE_MEASURED_GLOB: rooflineMeasuredGlob(),
       ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,

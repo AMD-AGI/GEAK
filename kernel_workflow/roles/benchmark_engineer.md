@@ -61,6 +61,32 @@ imports/reuses the frozen `meta.json` / `harness_lib.py` case and invokes the sa
 This sidecar is a profiler driver, never a replacement performance harness. If isolation is impossible,
 use the existing profile command, set `mixed_case=true`, and note that roofline confidence is low.
 
+**MANDATORY un-shadow prologue for `generated/roofline_driver.py` (prevents a hard profile failure).**
+The task dir ships an oracle named `unittest.py`, which SHADOWS the stdlib `unittest`. When the driver
+runs `import torch`, torch internally does `import unittest.mock`; if the task dir (or CWD, or the
+driver's own dir) is on `sys.path` ahead of the stdlib, that resolves to the ORACLE's `unittest.py`,
+whose module-level weight-synthesis (`_synth_weight` → `torch.randn(device=...)`) executes against a
+half-initialized torch and dies with `DeferredCudaCallError`, so `rocprof-compute profile` exits 1 and
+the kernel is recorded as measured=**failed**. The driver MUST therefore begin — **before any `import
+torch` or any import that transitively pulls torch** — with a prologue that removes every `sys.path`
+entry containing a local `unittest.py` and evicts any already-shadowed module, then let the stdlib win:
+
+```python
+import sys, os
+# Un-shadow stdlib `unittest`: drop any sys.path dir that holds a local unittest.py (the task oracle),
+# so torch's internal `import unittest.mock` resolves to the stdlib, not the oracle. Must run FIRST.
+sys.path[:] = [p for p in sys.path
+               if not os.path.isfile(os.path.join(os.path.abspath(p or os.getcwd()), "unittest.py"))]
+for _m in ("unittest.mock", "unittest"):
+    sys.modules.pop(_m, None)
+import torch  # now safe
+```
+
+Do NOT filter by directory NAME (removing `generated/` or `workspace/` by string match misses the
+actual shadowing dir); filter by "does this path contain a `unittest.py`". After the prologue you may
+re-add the task dir with `sys.path.append(TASK_DIR)` if you need to import the frozen case module — the
+stdlib `unittest` is by then already bound in `sys.modules`, so a later oracle import can't re-shadow it.
+
 Manifest shape:
 
 ```json
