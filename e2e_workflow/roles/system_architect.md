@@ -42,6 +42,14 @@ e2e is **Amdahl-dominated**: rank every candidate by `pct_gpu_time × achievable
 2%-of-time kernel is invisible — but a mere **1.15× on a 78% GEMM is ~+10% e2e**. So the head of the
 profile is where the budget goes, even though those kernels are library calls.
 
+**`achievable_speedup` is the half everyone guesses wrong.** A big `pct_gpu_time` is *necessary* but not
+*sufficient*: a kernel already running at the hardware's bandwidth or compute ceiling has no time left to
+recover, no matter how much of the profile it owns. When a roofline prior is available (step 1c) use it
+to ground that factor in a measured ceiling instead of a class prior — but note what it does and does not
+mean: **a saturated kernel is done with micro-tuning, NOT done being optimized.** If it is still the
+largest consumer of GPU time it remains the top target; the lever just moves from "make this kernel
+faster" to "make it move fewer bytes" (step 1d). Never let a headroom estimate drop the biggest kernel.
+
 **`edit=N` (library) does NOT mean "skip" — it means "Tier-C code rewrite is unavailable."** A
 fixed-shape GEMM is one of the most tunable things on the chip. Route by *which optimization the op
 admits*, not by the edit flag:
@@ -64,6 +72,8 @@ admits*, not by the edit flag:
 Inputs: `EVAL_DIR`, `PROFILE_TOPN` (path to profile_topN.json + inline top entries),
 `BASELINE_THROUGHPUT`, `WORKLOAD` (isl/osl/conc → tells you prefill vs decode regime mix),
 `BUDGET` (max kernel-optimization tasks), `CONFIG_TUNE_ENABLED` (bool), `SKILL_DIR`.
+OPTIONAL profile-analysis prior (empty string = not provided): `ANALYSIS_SKILL`, `ANALYSIS_SKILL_DIR`
+(+ the Profiler's `profile_roofline_json`) — see step 1c.
 OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing as "not provided"):
 `TRACELENS_KERNEL_CANDIDATES_JSON`, `TRACELENS_REPORT_JSON`, `TRACELENS_ANALYSIS_MD`,
 `TRACELENS_TRACE_FILE`.
@@ -134,6 +144,51 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    profile is the judge; TraceLens only ADDs hints/candidates, never prunes them.** Treat any `shapes` it
    carries as a STARTING hint that the Extractor will re-verify against a live capture (they may be inaccurate).
    If the prior is absent, proceed exactly as before.
+1c. **Roofline prior (ADVISORY — only if `ANALYSIS_SKILL_DIR` is non-empty AND the Profiler returned a
+   `profile_roofline_json` that EXISTS; otherwise skip this step entirely and route exactly as before).**
+   Read the artifact. Per entry it gives `roofline_pct` (how much of the hardware ceiling the kernel
+   already reaches), `bound_type`, `attainable_speedup`, `expected_e2e_gain_pct`, `headroom_class` and a
+   `confidence`. Use it to answer the question `pct_gpu_time` alone cannot: **is the time this kernel
+   spends actually recoverable?**
+
+   **The doctrine (do not violate).** `roofline_pct` measures how well a kernel executes its *current*
+   byte/FLOP budget; it says NOTHING about whether that budget is necessary. So:
+   - **NEVER prune a candidate on roofline.** Same rule as TraceLens: the measured `pct_gpu_time` is the
+     judge; this prior only ADDs information and REORDERS. `drop_list` decisions stay Amdahl-based.
+   - **A saturated head is NOT dropped — it is REROUTED.** A kernel that is both a large `pct_gpu_time`
+     and `headroom_class: saturated` is done with *micro-tuning*, not done being optimized. It remains a
+     top target; what changes is the class of fix (see 1d).
+   - Honour `confidence`: **`low` (stage A, or derived peaks) = display and annotate ONLY, do not rank on
+     it.** `medium`/`high` may be used as a SECONDARY ranking key. `unknown`/`suspect`/`modeled:false`
+     entries fall back to the ordinary playbook prior for that entry alone.
+   - If a kernel squad later measures an isolated speedup LARGER than `attainable_speedup`, the roofline
+     model was wrong: prefer the measurement, and say so in the report.
+
+   **Routing table** (applies only at `confidence` ≥ medium; otherwise use `pct_gpu_time` order):
+
+   | `headroom_class` | `pct_gpu_time` | route |
+   |---|---|---|
+   | underperforming | high | **kernel/head track, top priority** — real headroom exists |
+   | **saturated** | **high** | **byte-reduction track (1d) — NOT dropped, NOT another tuning pass** |
+   | any | low | low priority (ordinary Amdahl) |
+   | unknown / low confidence | any | ignore roofline; order by `pct_gpu_time` |
+
+   Report BOTH orderings in `strategy.md` — the one by `pct_gpu_time` and the one by
+   `expected_e2e_gain_pct` — and state explicitly which you followed and why. When they disagree, that
+   disagreement is the most useful thing in the analysis; do not hide it behind a single blended number.
+
+1d. **Byte-reduction levers (for a `saturated` + high-`pct_gpu_time` head).** The kernel is at the
+   bandwidth/compute wall, so the only remaining win is to make it do the same work moving fewer bytes.
+   Enumerate concretely: **fuse an adjacent op away** (a separate quant/silu/norm kernel in the Top-N →
+   fusing it removes a whole activation round-trip *and* that kernel's own GPU time); **stop reading what
+   isn't used** (e.g. streaming all `E` experts when routing only touches a fraction); **layout/packing**
+   (padding waste, coalescing, L2 reuse between stages); **lower-precision weights** (fp8→fp4, lossy →
+   must pass the accuracy gate).
+   **🔴 Hard constraints — a "win" that violates these is not a win:** the **measurement contract is
+   fixed**. The user-supplied workload — `isl`, `osl`, **`conc`/batch size — must NOT be changed**, and
+   **speculative decoding (MTP or otherwise) must NOT be introduced** as an optimization. Raising
+   throughput by changing what is being measured is out of scope for this workflow.
+
 2. Partition the Top-N into FOUR routes (by what optimization the op admits, NOT by edit flag):
    - **config fast path** — service-level env/flag with no op isolation: `--attention-backend` swap,
      `--quantization fp8`, cuda-graph, torch-compile, kv-cache-dtype, scheduling/mem knobs → Config
@@ -207,7 +262,11 @@ Return JSON:
      "amdahl_priority": 0.0, "rationale": "why this is the head; what win to expect; if is_fused_kernel, WHY the chosen lever reaches live_call_seam (signature match)",
      "source_hint": "<TraceLens source_file/source_path if any, else ''>",
      "launcher_hint": "<TraceLens kernel_path/launcher_source_file if any, else ''>",
-     "bound_type": "<memory|compute|'' from TraceLens>"}
+     "bound_type": "<memory|compute|'' from TraceLens or the roofline prior>",
+     "roofline_pct": 0.0, "attainable_speedup": 0.0, "expected_e2e_gain_pct": 0.0,
+     "headroom_class": "<underperforming|moderate|saturated|unknown|'' if no roofline prior>",
+     "roofline_confidence": "<low|medium|high|'' if none>",
+     "byte_reduction_levers": ["only when headroom_class=saturated; see step 1d"]}
   ],
   "kernel_candidates": [
     {"id": "k0", "short_name": "...", "classification": "...", "pct_gpu_time": 0.0,
@@ -215,7 +274,11 @@ Return JSON:
      "amdahl_priority": 0.0, "extract_hint": "which callable to hook (module:attr) + why",
      "source_hint": "<TraceLens source_file/source_path if any, else ''>",
      "launcher_hint": "<TraceLens kernel_path/launcher_source_file if any, else ''>",
-     "bound_type": "<memory|compute|'' from TraceLens>"}
+     "bound_type": "<memory|compute|'' from TraceLens or the roofline prior>",
+     "roofline_pct": 0.0, "attainable_speedup": 0.0, "expected_e2e_gain_pct": 0.0,
+     "headroom_class": "<underperforming|moderate|saturated|unknown|'' if no roofline prior>",
+     "roofline_confidence": "<low|medium|high|'' if none>",
+     "byte_reduction_levers": ["only when headroom_class=saturated; see step 1d"]}
   ],
   "drop_list": [{"short_name": "...", "why": "below Amdahl threshold"}],
   "order_of_work": ["config fast path first", "then h0 (GEMM #1)", "then k0", "..."],
@@ -248,6 +311,12 @@ change), `HISTORY`, `SKILL_DIR`.
 4. **Amdahl stop rule:** estimate remaining headroom = Σ over untouched above-bar editable kernels of
    `(pct_gpu_time × plausible_speedup_fraction)`. If the best remaining candidate can't plausibly move
    e2e beyond the noise band, set `stop=true`.
+   **If a roofline prior is available at `confidence` ≥ medium** (`profile_roofline_json`, step 1c),
+   prefer its `expected_e2e_gain_pct` over a guessed `plausible_speedup_fraction` — it is derived from a
+   measured ceiling rather than a class prior. It still may not PRUNE a candidate: use it to ORDER the
+   remaining pool and to justify `stop`. Never stop solely because roofline says headroom is small while
+   a large `pct_gpu_time` kernel remains untouched — such a kernel routes to the byte-reduction track
+   (step 1d) instead.
 5. Issue concrete directions: exact callable to extract (`module:attr`) + candidate backends, citing the
    profile entry + pct_gpu_time. **Use HISTORY only to ORDER/diversify (deprioritize a direction that
    already showed no e2e gain THIS run, prefer a different kernel or a different mechanism) — NEVER as a
@@ -290,6 +359,15 @@ verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SK
      A claim CONTRADICTED by new evidence → move its card to `_archive.md` with the refuting source.
    Mechanism facts are recorded as POSITIVE ROUTING ("optimize GEMM via aiter DB"), not "X failed".
 2. Keep the in-run hypothesis ledger (wins AND nulls, for THIS run's report) in `EVAL_DIR/insight_log.md`.
+3. **Calibrate the roofline prior (ONLY if one was used — `ANALYSIS_SKILL_DIR` non-empty and a
+   `profile_roofline_json` exists; else skip).** For each direction this milestone measured, record
+   `predicted vs actual` in `knowledge/backend_playbook.md`: predicted `attainable_speedup` /
+   `expected_e2e_gain_pct` against the measured isolated speedup and measured e2e delta. This is how the
+   `target_eff` priors and byte models in the skill's `SKILL.md` self-correct across runs, so state the
+   *direction* of any error ("attention decode: predicted 1.7×, measured 1.56× — prior slightly
+   optimistic"). **A measured speedup that EXCEEDS the predicted `attainable_speedup` means the byte/FLOP
+   model was wrong** — record that loudly, since it is the failure mode that would otherwise cause the
+   prior to under-rank a real opportunity in a future run. Keep it to one line per direction.
 
 Return JSON:
 ```json
@@ -455,6 +533,14 @@ attempt, win or not. REQUIRED sections, in order:
    `EVAL_DIR/final/bench_baseline_ab/bench_summary.json`); tag them provisional. The Director's `validate`
    phase reconciles this section to `EVAL_DIR/validation/{base,final}/bench_summary.json` (its authoritative
    same-session TTFT/TPOT/throughput).
+
+   The external interface deterministically injects a **Baseline alignment**
+   section after the workflow returns. Do not invent cross-harness baseline
+   values. If existing artifacts expose them, treat the upstream current-best
+   throughput measured on the same accepted configuration as the primary
+   alignment reference. Treat the upstream raw-session baseline as audit-only:
+   it may predate accepted configuration changes, so its divergence includes
+   configuration gain and must never be described as pure measurement drift.
 
 Data sources (read the ACTUAL files, never invent): `director_e2e_validation.json`,
 `final/bench/bench_summary.json`, `config/sweep_results.json`, `overlay/cand_*/integrate_result.json`,

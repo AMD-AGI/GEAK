@@ -8,6 +8,10 @@ absolute per-case latencies. The script trusts only your numbers.
 ## Inputs
 - `CANONICAL` — the canonical current-best workspace (read-only reference; do NOT edit it).
 - `PATCH` — path to the candidate's `best_patch.diff` (generated relative to `CANONICAL`'s git HEAD).
+  It MAY be absent or empty: when an engineer's return was lost/failed the lane still hands you its
+  on-disk patch to recover (measurement, not the engineer's return, is the source of truth). If the
+  file is missing or empty, that direction simply produced nothing — return `status:"apply_failed"`,
+  `verified_geomean:0`, and do not treat it as an error.
 - `VERIFY_DIR` — your private scratch dir.
 - `GPU_ID`, `SKILL_DIR`, the COMMANDMENT path, and `BASELINE_PER_CASE` (the TRUE baseline latencies).
 - **DEEP-MODE (optional — only if `HARNESS_ADDENDUM` is present; a normal run omits it):** in addition to
@@ -20,7 +24,9 @@ absolute per-case latencies. The script trusts only your numbers.
 1. Build a clean copy and apply the patch:
    ```bash
    # NO `rm` (prompts + blocks autonomous runs). Unique ws each time; tar-copy EXCLUDING build artifacts
-   # (.torch_ext build.ninja has absolute paths to CANONICAL), so nothing stale is inherited.
+   # (.torch_ext build.ninja has absolute paths to CANONICAL), so nothing stale is inherited. The big
+   # immutable golden (reference_io.pt, if present) rides in CANONICAL as an absolute symlink; this tar
+   # carries the symlink verbatim (torch.load + the sha check read through it) — never add -h/--dereference.
    WS="$VERIFY_DIR/ws_$(date +%s)_$$"; mkdir -p "$WS"
    ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/.git' --exclude=./build --exclude='*/build' \
        --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \
