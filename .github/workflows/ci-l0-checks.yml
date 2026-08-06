@@ -1,0 +1,200 @@
+name: CI L0 — checks
+
+# L0: cheap, fast, GPU-free checks that gate every push / PR.
+# Runs entirely on GitHub-hosted ubuntu runners — no dataset, no GPU, no Claude,
+# no secrets. The expensive GPU e2e lives in the self-hosted L1 workflow.
+
+on:
+  # The v4 line now lives on `main` (the default branch), so CI gates main.
+  push:
+    branches: ["main", "ci/**"]
+  pull_request:
+    # NOTE: ci/** is TEMPORARY (self-test via a PR whose base is a ci/** branch).
+    # Revert to just ["main"] before real use.
+    branches: ["main", "ci/**"]
+
+# Supersede in-flight runs for the same ref (a new push cancels the old run).
+concurrency:
+  group: l0-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (ruff, advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      # Advisory only for now (the tree has pre-existing findings); surfaces
+      # issues in the log without blocking merges. Flip to blocking once clean.
+      - name: ruff check (non-blocking)
+        continue-on-error: true
+        run: ruff check .
+
+  pytest:
+    name: Python unit tests + coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pytest pytest-cov coverage
+      # Stdlib-only tests (import run_e2e via importlib; no claude_agent_sdk / GPU).
+      # Files are listed explicitly rather than discovered, so that adding a test
+      # under examples/ (torch/triton + GPU) can never silently break this job.
+      #
+      # torch is deliberately NOT installed here: it is optional in these tests and
+      # only the CUDA-dependent assertions need it, which belong on L1's GPU runner.
+      # Installing it would add minutes to a job that currently finishes in seconds.
+      #
+      # --cov-fail-under=0 defers the gate to the dedicated step below, so a
+      # coverage shortfall is reported as its own named, legible failure rather
+      # than as trailing output on the test step.
+      - name: unit tests (no GPU)
+        run: |
+          python -m pytest -q --cov --cov-report=term --cov-fail-under=0 \
+            interface/test_run_e2e_recovery.py \
+            interface/test_run_e2e_alignment.py \
+            interface/test_run_e2e_dispatch.py \
+            e2e_workflow/scripts/tests/test_workload_alignment.py \
+            e2e_workflow/scripts/tests/test_run_correctness_gate.py \
+            e2e_workflow/scripts/tests/test_parse_regime_sources.py \
+            e2e_workflow/scripts/tests/test_gsm8k_eval.py \
+            e2e_workflow/scripts/tests/test_parse_profile.py \
+            e2e_workflow/scripts/tests/test_capture_shapes.py \
+            e2e_workflow/scripts/tests/test_overlay_setup.py \
+            e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
+            e2e_workflow/scripts/tests/test_op_bench.py \
+            e2e_workflow/scripts/tests/test_harness_lib.py \
+            geak/test_bootstrap.py
+
+      # Renders the per-file table + total into the run's Job Summary, which is
+      # where the coverage percentage is read from the GitHub web UI. Runs even
+      # when the suite failed, so a red run still shows what was measured.
+      - name: Coverage summary
+        if: always()
+        run: |
+          python3 <<'PY'
+          import os, pathlib, subprocess, sys, tomllib
+
+          cfg = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          gate = int(cfg["tool"]["coverage"]["report"].get("fail_under", 0))
+          out = [f"## Coverage (gate: {gate}%)", ""]
+
+          if not pathlib.Path(".coverage").exists():
+              out += ["No `.coverage` data — the test step did not produce a measurement."]
+          else:
+              txt = subprocess.run(
+                  ["coverage", "report", "--skip-empty"],
+                  capture_output=True, text=True, check=False,
+              ).stdout or ""
+              print(txt)  # full report stays in the step log
+              rows, total = [], None
+              for line in txt.splitlines():
+                  parts = line.split()
+                  if len(parts) < 4 or line.startswith(("Name", "-")):
+                      continue
+                  try:
+                      stmts, miss = int(parts[-3]), int(parts[-2])
+                  except ValueError:
+                      continue
+                  name = " ".join(parts[:-3])
+                  if name == "TOTAL":
+                      total = (stmts, miss, parts[-1])
+                  else:
+                      rows.append((name, stmts, miss, parts[-1]))
+              if total:
+                  pct = float(total[2].rstrip("%"))
+                  mark = "✅" if pct >= gate else "❌"
+                  out += [f"**{mark} {total[2]}** of {total[0]} statements "
+                          f"({total[1]} uncovered). Gate is {gate}%.", ""]
+              # Worst-covered first: this is the to-do list for raising the gate.
+              rows.sort(key=lambda r: float(r[3].rstrip("%")))
+              out += ["| File | Stmts | Miss | Cover |", "|---|---:|---:|---:|"]
+              out += [f"| `{n}` | {s} | {m} | {c} |" for n, s, m, c in rows]
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              pathlib.Path(summary).write_text("\n".join(out) + "\n", encoding="utf-8")
+          PY
+
+      # The gate itself. Reads fail_under back out of pyproject.toml so the
+      # threshold has exactly one home. No `if:` — a failed suite skips this,
+      # since coverage from a partial run would be meaningless.
+      # COVERAGE_RELAX_FAIL_UNDER=1 (repo variable) bypasses it in an emergency.
+      - name: Enforce coverage gate
+        env:
+          COVERAGE_RELAX_FAIL_UNDER: ${{ vars.COVERAGE_RELAX_FAIL_UNDER }}
+        run: |
+          python3 <<'PY'
+          import os, pathlib, subprocess, sys, tomllib
+
+          if (os.environ.get("COVERAGE_RELAX_FAIL_UNDER") or "").strip().lower() in {"1", "true", "yes", "on"}:
+              print("::notice::COVERAGE_RELAX_FAIL_UNDER set — coverage gate not enforced.")
+              sys.exit(0)
+          if not pathlib.Path(".coverage").exists():
+              print("::error::No .coverage data for the coverage gate.")
+              sys.exit(1)
+          cfg = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          gate = int(cfg["tool"]["coverage"]["report"].get("fail_under", 0))
+          r = subprocess.run(["coverage", "report", f"--fail-under={gate}", "--skip-empty"])
+          if r.returncode:
+              print(f"::error::Coverage is below the {gate}% gate. Add tests, or see "
+                    "pyproject.toml [tool.coverage.report].")
+          sys.exit(r.returncode)
+          PY
+
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Scans the WORKING TREE, not git history: actions/checkout fetches a single
+      # commit by default, so a history scan here would be meaningless. This is the
+      # gate that stops a NEW secret from landing. Known false positives are
+      # allowlisted in .gitleaks.toml.
+      # The upstream binary is used directly rather than gitleaks-action, which
+      # requires a paid license key for organization-owned repos.
+      - name: gitleaks (working tree)
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks dir . --no-banner --redact --config .gitleaks.toml
+
+  node-regression:
+    name: Node regression (expert_skills)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # Proves the use_expert_skills=OFF path injects nothing (byte-identical).
+      # Pure node (fs/path only) — no npm install needed.
+      - name: expert_skills OFF-identical regression
+        run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+
+  dry-run:
+    name: run_e2e dry-run mapping
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Validates the handoff -> e2e_workflow.js args mapping against a committed
+      # fixture (ci/fixtures/handoff.dry.json), so it needs no geak_runtime
+      # dataset, GPU, or Claude. Guards the map_args / build_prompt code path.
+      - name: handoff -> args mapping (fixture)
+        run: python interface/run_e2e.py ci/fixtures/handoff.dry.json /tmp/l0_result.json --dry-run

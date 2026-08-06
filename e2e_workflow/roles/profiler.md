@@ -202,6 +202,14 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    inconsistent and will under-rank the real targets. If the trace can't be sampled, degrade to a
    qualitative flag (high avg+calls collective → "likely spin-inflated, discount"; one giant first-call →
    "JIT warmup, discount"; large-M+small-M same name → "split regimes") — never fail or block the Top-N.
+6. **Analysis skill (ONLY if `ANALYSIS_SKILL_DIR` is a non-empty path that EXISTS — else skip entirely
+   and return `profile_roofline_json: ""`).** Read `ANALYSIS_SKILL_DIR/SKILL.md` and execute it against
+   the Top-N you just wrote, producing the artifact it specifies (for `roofline`:
+   `profile/round_${ROUND}/profile_roofline.{json,md}`). Report its path as `profile_roofline_json`.
+   This runs **after** the Top-N is final — it enriches, it never edits `profile_topN.json`, and it must
+   never change a `pct_gpu_time`. The skill defines its own degradation ladder: follow it, and **if the
+   skill errors out at any point, note it and return the Top-N anyway — a failed analysis skill must
+   never fail or block the profile.**
 
 Return JSON:
 ```json
@@ -209,6 +217,7 @@ Return JSON:
   "round": 0,
   "profile_topN_json": "<EVAL_DIR>/profile/round_0/profile_topN.json",
   "profile_topN_md": "<EVAL_DIR>/profile/round_0/profile_topN.md",
+  "profile_roofline_json": "<EVAL_DIR>/profile/round_0/profile_roofline.json  (\"\" if no analysis skill ran)",
   "source": "torch-trace|merged|tracelens|tracelens+trace",
   "total_gpu_time_ms": 0.0,
   "top_kernels": [

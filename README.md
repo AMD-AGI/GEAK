@@ -2,6 +2,12 @@
   <img src="examples/images/logo.png" alt="GEAK v4" width="300">
 </p>
 
+<p align="center">
+  <a href="https://www.amd.com/en/developer/resources/technical-articles/2026/geak-v4.html"><b>📝 Blog</b></a>
+  &nbsp;•&nbsp;
+  <a href="https://rocm.docs.amd.com/projects/geak/en/latest/"><b>📚 Documentation</b></a>
+</p>
+
 GEAK is an autonomous optimization agent that makes AMD Instinct GPUs run faster, automatically. Built as a
 multi-agent system with an evolving knowledge base, it learns from every optimization run and continuously
 improves its strategies over time. Point it at a single kernel or a live model-serving stack such as vLLM or

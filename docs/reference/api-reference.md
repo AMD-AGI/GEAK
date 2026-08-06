@@ -253,8 +253,10 @@ Env: `PROFILER_PRIORITY` (default `rocprof-compute omniperf rocprofv3 rocprof me
 
 ## External-orchestrator contract (`interface/run_e2e.py`)
 
-The only surface an external orchestrator (for example, Hyperloom) touches — wraps `e2e_workflow.js` arg names
-behind one command and two JSON files (`schema_version` 1).
+The only surface an external orchestrator (for example, Hyperloom) touches —
+wraps `e2e_workflow.js` arg names behind one command and two JSON files. The
+current result schema is version 2; handoff schema 1 remains accepted, while
+schema 2 carries same-config alignment metadata.
 
 ```bash
 python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
@@ -262,7 +264,7 @@ python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 
 Stable `handoff.json` fields: `model_path`, `framework` (→ `backend`), `tp`, `gpu_ids`,
 `workload{isl, osl, conc}`, `accepted_flags` / `env`, `exp_root`, `bench_client`, `bench_protocol`,
-`inferencex_path`, `raw_baseline_tput`.
+`inferencex_path`, `raw_baseline_tput`, `orchestrator_best_tput_same_config`.
 
 Env knobs: `GEAK_CLAUDE_MODEL` (`claude-opus-4-8`), `GEAK_CLAUDE_EFFORT` (`ultracode`),
 `GEAK_E2E_TIMEOUT_S` (`43200` = 12h), `GEAK_ROOT`, `GEAK_EVAL_DIR`, `INFERENCEX_PATH`.
