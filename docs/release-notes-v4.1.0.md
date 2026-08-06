@@ -28,11 +28,9 @@
 
 ## CI/CD infrastructure
 
-The sections above are what GEAK can optimize; this one is how GEAK itself is developed. A change to an agent workflow is now validated by running it, not by reading it.
-
-- A GPU-free tier runs on every change: lint, unit tests behind a coverage gate, secret scanning, code analysis, workflow control-flow regressions, and a dry-run check of the end-to-end entry point.
-- A self-hosted tier runs the real end-to-end workflow per model on ROCm hardware, gating on GPU health before it commits an allocation, killing a wedged run instead of letting it burn to the wall-clock cap, and judging the outcome on exit code and result status, including whether the measured baseline is real.
-- The agent model and the per-model budget are configured through repository variables, and an onboarding guide covers enrolling a new model or image. No secrets or endpoints live in the repository.
+- The CI/CD now gates every change with two tiers of protection. The first tier is GPU-free: lint, unit tests, secret scanning, code analysis, workflow control-flow regressions, and a dry-run of the end-to-end entry point.
+- The second tier runs each enrolled model end-to-end on ROCm hardware under close monitoring, judging the result on exit code, execution status, and baseline integrity; maintainers control the container image and the per-model budget.
+- Every enrolled model reports its own verdict, and a final job collects them into one table with a single overall result, so one model's failure never hides the rest.
 
 ---
 
