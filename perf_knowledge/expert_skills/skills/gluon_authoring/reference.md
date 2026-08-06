@@ -1,6 +1,6 @@
 # gluon_authoring — reference router
 
-16 files, ~3.6 k lines, all **lazy**: load one only when [`skill.md`](skill.md) cites it, or when you
+17 files, ~3.8 k lines, all **lazy**: load one only when [`skill.md`](skill.md) cites it, or when you
 reach for the construct it documents. Two groups only — the API, and what not to write.
 
 ## First, check which generation you are on
@@ -87,6 +87,21 @@ the more LDS the generation gives you the more likely that is the case.
 | constructs that compile and are then silently wrong or slow | `gluon-negative-patterns.md` |
 | ROCm / driver / toolchain constraints and broken paths | `platform-known-issues.md` |
 | the condensed list | `skill.md ## Knobs & pitfalls` |
+
+## How much a direction may cost
+
+| you need | read |
+| --- | --- |
+| which gates apply in your entry state, **and the depth contract** — why a layout-coupled direction cannot be run as a one-lever round, and the three rules that keep it reachable | `entry-modes.md` |
+
+Read the depth contract **before writing the brief**, not after the deadline. This skill owns no
+round loop, and the callers that do own one measure progress in *directions closed* — so the default
+reading is one experiment per direction, under which LDS swizzle/padding choice and LDS dedup (the
+two things plain Triton has no syntax for, and the only reason to be here) are unreachable, because
+both touch several layouts at once. One in-place run diagnosed its residual correctly, named the
+coupled fix, declined it as "not a one-lever round", closed 22 directions and moved nothing
+structural, against an `expects.isolated_speedup_min` of 1.10. The tell is in the file: **a
+direction that invalidates more than one layout constructor is a rewrite, not a lever.**
 
 ## Layout and overlap — the two mechanics, by entry state
 

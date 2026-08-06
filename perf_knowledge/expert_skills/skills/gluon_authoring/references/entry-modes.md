@@ -79,6 +79,51 @@ incumbent bundle (below), and re-measure it in your own first window.
 mistake: a candidate floor below 1.0 and a negative progress delta keep a genuinely stalled search
 alive, burning the budget that the port shape exists to protect.
 
+**Ordinary optimize shape is about the candidate floor, not about the round size.** See the depth
+contract below — it is the one thing in-place mode needs that the gates do not supply.
+
+---
+
+## The depth contract (applies to every mode, bites hardest in-place)
+
+This skill owns no round loop and no budget model, and the callers that do own them measure
+progress in *directions closed*. Nothing in either layer says how much a single direction may
+cost — so the default reading is one experiment per direction, and under that reading the only
+work this skill exists for becomes unreachable. LDS swizzle/padding choice and LDS dedup are the
+two things plain Triton has no syntax for; they are also the two that touch several layouts at
+once. A brief that says "one lever per round, record the wall, take the next lever" is a
+breadth-first search that is nominally compliant with everything here and structurally cannot
+enter them.
+
+Observed: an in-place run measured its own residual correctly (both occupancy limiters pinned at 1,
+MFMA and LDS at parity, ~3x the overlap floor in exposed latency), identified `warps_per_cta=[4,1]`
+replicating the LDS reads 4x as the one structural fix, and then declined it in those words — *"not
+attempted, it is a layout rewrite, not a one-lever round"*. It closed 22 directions, kept 8, banked
++6 %, and moved nothing structural. `expects.isolated_speedup_min` is 1.10.
+
+**The tell for a coupled direction: it invalidates more than one layout constructor.** Count the
+sites before pricing it — `grep` the source for `warp_bases` / `offset_bases` / the shared-layout
+constructors. One site is a lever. Fourteen is a rewrite.
+
+Three rules, and they are cheap to honour:
+
+- **A coupled direction gets a multi-round write budget up front**, sized before the first edit.
+  It will be numerically wrong or slower in its intermediate rounds — that is the shape of a
+  coordinated layout change, not a stall, and it is the same allowance a port's transcription gets
+  for the same reason.
+- **A coupled direction is not closed by one probe.** A single compile failure on a partial edit is
+  evidence about the partial edit. `platform-known-issues.md ## warps_per_cta` is the worked
+  example: changing one of fourteen coupled sites crashes the pass manager with no attribution, and
+  reading that as an arch verdict is a false negative.
+- **State the split before the first round.** If the whole budget goes to one-lever peepholes, say
+  so and expect a few percent; if a coupled direction is in scope, name it and reserve its rounds.
+  Discovering at the deadline that the structural direction was never affordable is a planning
+  result, not a measurement.
+
+What this does *not* license: mixing a refactor with an optimization in one edit (that still
+destroys attribution), or moving the comparator. A coupled direction is still one direction, still
+attributed as a whole, and still gated by G4 at the end — it just is not one round.
+
 ### The incumbent bundle: same schema, different meaning per field
 
 `champion_gate.py` keys on `schema: plain_champion` and every check still means something with the

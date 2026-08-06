@@ -200,6 +200,51 @@ mismatch; wrapper/artifact selection. If no single removable overhead is visible
 stop the Gluon search for that direction and return to the layer matching the
 measured bottleneck.
 
+## Instruction count is not the objective function
+
+Deleting work from the hot loop is the default instinct and it is wrong often enough
+to need its own entry. **At low occupancy, whether VALU costs anything depends on
+where it sits, not how much of it there is** — and a census cannot see the
+difference, so an edit that improves every count you are looking at can be slower.
+
+Four measured rounds on one gfx950 MLA forward, register- **and** LDS-bound at
+1 wave/SIMD, all interleaved A/B in clean windows:
+
+| edit | census | result |
+| --- | --- | --- |
+| transpose V on read instead of in registers | **−51** instr, `mfma`/`ds_read`/`shared` identical | **−1.4 %** |
+| hoist the V `local_load` above the softmax | reorder only | **−1.0 %** (full drains 4→6, `s_nop` 7→11) |
+| skip `acc *= re_scale` behind an exponent-margin test | **−64** `v_pk_mul_f32`/iter | **−6 %** (the branch + reduce cost more) |
+| fuse the three back-to-back epilogue `acc` scales | −2 tile multiplies | **+0.6 %** |
+
+**Carry the cell-to-cell spread next to each of those, and treat any delta under it
+as `NOT RESOLVED`** — `ab_bench.py`'s own rule. Of the four, three are losses large
+enough to act on; the **+0.6 %** is at the resolution limit and is recorded here as
+the direction it pointed, not as a banked win.
+
+The discriminator that predicts the three losses: **VALU the scheduler can hide
+behind MFMA is free; VALU it cannot is exposed latency.** At 1 wave/SIMD there is no
+second wave to interleave, so the only slack is intra-wave co-issue with the MFMA
+pipe. Two places have none — the dependent chain between a dot and the reduce that
+consumes it, and anything after the *last* MFMA in the epilogue — and the only edit
+that did not lose was in the second of them. (The one edit aimed at the first, the
+`re_scale` skip, still lost: what it removed was exposed, but a branch plus a reduce
+cost more than the multiplies did. So "exposed" is a necessary condition for removal
+to pay, not a sufficient one.) Everything the loop body could co-issue was already
+free, so trading it for LDS pressure or for a branch is a straight loss.
+
+How to use this rather than re-deriving it:
+
+- **Locate before deleting.** Ask which side of the last MFMA the instruction is on,
+  and whether anything is available to co-issue with it. `probe.py measure` gives the
+  occupancy that decides whether co-issue slack exists at all.
+- **A pipe at parity is not a pipe to feed.** On the same kernel MFMA and LDS were
+  both ~2048 cyc/iter against a measured 6500–7700, i.e. the residual was neither
+  pipe. Handing either one more slack (retiring global loads earlier, relocating LDS
+  reads earlier) bought nothing, twice.
+- **Report the count and the time separately.** A kept build that is 51 instructions
+  *longer* and 1.4 % *faster* is a normal outcome here, not a measurement error.
+
 ## gfx942 / CDNA3 negative-result signatures (mechanism + error text)
 
 Documented signatures so a future run recognizes the pattern without re-deriving it.

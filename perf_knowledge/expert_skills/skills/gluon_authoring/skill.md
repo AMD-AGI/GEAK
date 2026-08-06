@@ -139,7 +139,7 @@ residual is layout-shaped, because LDS swizzle/padding choice and LDS dedup are 
 Triton has no syntax for.
 
 **Lazy-loading contract.** Read this file plus [`reference.md`](reference.md). Everything under
-[`references/`](references/) is lazy — 16 files, ~3.6 k lines, load one only when you reach for the
+[`references/`](references/) is lazy — 17 files, ~3.8 k lines, load one only when you reach for the
 construct it documents.
 
 ## Arch dispatch: gfx942 (CDNA3) vs gfx950 (CDNA4)
@@ -167,7 +167,8 @@ one gen is a *confidently wrong* verdict on the other, not a rounding error.
 | **The omitted post-pipeline tail** | — | the same defect announces itself as `OutOfResources` on CDNA3 and, because the larger ceiling absorbs it, becomes a **silent slowdown** on CDNA4. Check the pass list, not the exception (`## Procedure` step 2c) |
 
 **Three gfx950 keys are missing where gfx942 has them, and the first two are traps rather than gaps** —
-`references/` is a one-way snapshot, so these are to report upstream rather than patch here.
+`references/hardware/hw_constants.json` is vendored, so these are to report upstream rather than
+patch here.
 `fp8_dtype` is covered above. `lds_min_alloc_bytes` is what tells a reported `lds/WG` apart from an
 allocator round-up, and gfx950's `lds_align_bytes` is **not** that granularity despite looking like it — a
 measured allocation need not be a multiple of it, so do not substitute one for the other.
@@ -953,9 +954,23 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
 - Vendored from `AMD-AGI/TileProgrammingAgentSkills@541a180`
   (`.cursor/skills/tile-programming-gluon/`), **pruned to the API surface, the do-not-write lists and the
   two mechanics above**, plus the transcription runbook and the compile-only occupancy probe that step 1
-  and step 4 depend on: 16 of 70 reference files and 11 of 51 scripts. Upstream
-  remains the SSOT; this is a one-way snapshot. `references/` is unmodified. `scripts/` carries **nine
-  corrections**, all of which should go back upstream:
+  and step 4 depend on: 16 of 70 reference files and 11 of 51 scripts, plus `references/entry-modes.md`
+  authored here. Upstream remains the SSOT and this is a one-way snapshot, so **re-syncing by overwrite
+  would silently drop the additions below** — take them with you.
+
+  `references/` **is no longer byte-identical to upstream.** Three vendored files carry GEAK additions,
+  each of them a measured finding that belongs topically where it sits rather than in a parallel file,
+  and each owed upstream:
+  - `platform-known-issues.md ## warps_per_cta` — the mapping is restated in every layout in a
+    hand-authored file, so editing `warps_per_cta` alone crashes the pass manager with an
+    `iota_range` assert and **no attribution**, which reads like an arch verdict and is not one.
+  - `gluon-negative-patterns.md ## Instruction count is not the objective function` — at 1 wave/SIMD
+    whether VALU costs anything depends on where it sits, not how much of it there is, so a census-
+    improving edit can be slower. Four measured rounds.
+  - `gluon/memory-reference.md` — `ds_read_*_tr_*` is a saving only when the transpose is not already
+    free; check the ISA first. Measured: −51 instructions, identical counts, **−1.4 %**.
+
+  `scripts/` carries **ten corrections**, all of which should go back upstream:
   - `ttgir_to_gluon.py` dropped `tilesPerWarp` and `elementBitWidth` when emitting
     `gl.amd.AMDMFMALayout`, so a chained-dot (gfx950, 16×16 mfma) or scaled-MFMA kernel — both of which
     make `AccelerateAMDMatmul` choose non-default values — transcribed to a silently different layout.
@@ -1031,6 +1046,24 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
     turning the register limit into a workgroup limit the way the hardware does
     (`waves/SIMD x simds_per_cu / num_warps`); `num_warps` was already in the metadata it reads,
     and `simds_per_cu` comes from the same per-arch reference as the divisor.
+  - **The LDS/CU figure had three more ways to be confidently wrong, and the first two are the same
+    bug as the one above, one level down.** (i) `amd_occupancy.py`'s lookup ended in an unbounded
+    recursive `glob` from `HERE/../..`; with the scripts copied to a shallow directory — which
+    `USAGE.md`'s own "run the selftests on a new box" step invites — that resolves to `/` and walks
+    the whole filesystem. It does not fail, it **hangs**. Replacing it with an unbounded walk *up*
+    the ancestors only trades the hang for something quieter: it accepts any `references/hardware/`
+    it passes, so a stray `/tmp/references/…` becomes the source of truth — observed while
+    reviewing this very fix. The lookup is now bounded at both ends and anchored on the package's
+    own `skill.md`. (ii) `probe.py` and `asm_loop_audit.py` both defaulted `lds_per_cu` to **65536**,
+    the CDNA3 figure, so with no reference tree reachable a gfx950 kernel was measured against the
+    wrong divisor and reported `0 WGs/CU, LDS bind` — a hard blocker on a kernel that runs. Both now
+    return `None` and say so; `reference.md` already promised the LDS half reports *nothing* without
+    the json. (iii) `measure` collapsed `waves/SIMD` to one value per directory, so it dropped the
+    register limiter entirely as soon as a dump held two kernels with different occupancy — which is
+    the normal case, since a harness' pack / split-K kernel compiles into the same cache dir. It is
+    now joined per kernel by name, and "no LDS at all" is printed distinctly from "no divisor
+    known", two states it used to conflate into a `TypeError`-shaped comparison. The row logic is
+    factored out and pinned by six `--selftest` cases, and the lookup bound by two more.
   - `dump_ir.sh` accepted `--kernel <bare-name>` and silently did nothing with it. The two flags are
     not interchangeable — `--kernel` is `module.path:object` for the translator, `--kernel-name` is
     the substring that **pins** which compiled kernel gets copied — and `references/phases/transcribe-runbook.md`

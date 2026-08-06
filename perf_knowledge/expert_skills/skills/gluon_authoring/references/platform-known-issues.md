@@ -132,6 +132,44 @@ boundaries:
   recovered async layout per sub-tile, `tile-programming/layout-recipes.md`) for
   causal / short loops.
 
+## `warps_per_cta` is not an independently tunable knob (hand-authored Gluon)
+
+It reads like a config field, so it invites a one-line A/B. It is not one: in a
+hand-authored kernel the warp-to-tile mapping is **restated in every layout in the
+file**, and changing `mfma_layout.warps_per_cta` alone makes the module incoherent.
+
+Measured, gfx950, triton `3.7.0+amd.rocm7.2.0.git89002410` — editing only
+`warps_per_cta=[4, 1] -> [2, 2]` on an MLA forward:
+
+```
+llvm/ADT/Sequence.h:275: iota_range::iota_range(T, T, bool):
+  Assertion `Begin <= End && "Begin must be less or equal to End."' failed.
+```
+
+The process dumps core with **no attribution to a layout or a line**, which reads
+like a compiler bug and is not one: that kernel pins **14 hardcoded `warp_bases`
+tuples** across its blocked, linear and dot-operand layouts, every one written for a
+4-warps-tile-M mapping — one of them the degenerate all-warps-see-everything form
+`warp_bases=((0, 0), (0, 0))`, which is only meaningful when warps do **not** tile
+the reduced dimension. `[2, 2]` invalidates all of them at once, and the assert is
+the pass manager meeting that incoherence.
+
+Consequences, both of which have cost a run:
+
+- **Do not read the crash as "this arch/build cannot do `[2,2]`."** Nothing about
+  the target was tested. Grep the source for `warp_bases` first; the count tells you
+  the real size of the change.
+- **Scope it as a coupled layout rewrite, not a knob.** Every `warp_bases` in the
+  file moves together, plus whatever cross-warp exchange the new mapping introduces
+  (splitting warps across the reduced dimension means the two dots no longer see the
+  same operand rows). That is a multi-round direction; attempting it as a one-lever
+  round produces this crash and a false negative. See
+  [`entry-modes.md ## The depth contract`](entry-modes.md).
+
+Why it keeps getting attempted: `warps_per_cta=[N, 1]` broadcasts the B operand to
+all N warps, so an MLA-shaped kernel reads its whole K and V tile N times out of LDS.
+Halving that replication is a real prize — it is just not a one-line one.
+
 ## Benchmark-sensitive platform issues
 
 Implicit cache reuse; artifact path collisions; backend-specific warmup; import

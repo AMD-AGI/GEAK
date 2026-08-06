@@ -117,6 +117,25 @@ Not every shared layout lowers for the async direct-to-LDS path:
   behaviour of reading a tile both ways and its mitigation live in
   `../tile-programming/layout-recipes.md ## Padding vs swizzle (LDS bank conflicts)`.
 
+  **It is a saving only when the transpose is not already free. Check the ISA for
+  an existing `ds_read_*_tr_*` before reaching for it.** The competing form —
+  load in a linear layout and transpose in registers (`gl.permute` +
+  `convert_layout`) — looks strictly worse in a census and can be strictly
+  faster: on a gfx950 MLA forward pinned at 1 wave/SIMD, moving V's transpose
+  from registers into the LDS read removed 51 instructions, left `mfma` and
+  `ds_read` counts and `shared` bytes/WG **identical**, was bit-for-bit
+  numerically equal — and lost **1.4 %** (1.0433x vs 1.0585x, interleaved A/B in
+  one clean window; record the window's spread alongside, per `ab_bench.py`).
+  The register path was already landing 384 `ds_read_b64_tr_b16`, i.e. the
+  hardware was already doing the cheap part, so the transpose did not disappear:
+  it moved into that read's bank pattern, while the `v_mov`s it replaced had been
+  co-issuing under MFMA for free. On the same kernel a padding change to the same
+  buffer cost 10–11 pp in both directions, so the LDS access pattern was the
+  sensitive axis and the registers were not.
+
+  The general rule this is an instance of is in
+  [`../gluon-negative-patterns.md ## Instruction count is not the objective function`](../gluon-negative-patterns.md).
+
 ## gfx950 <-> gfx942 delta
 
 - buffer ops: `gl.amd.cdna4.buffer_load/store` (gfx950) vs
