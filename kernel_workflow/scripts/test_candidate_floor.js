@@ -198,6 +198,19 @@ const doomed = replay(PORT, [0.60, 0.72, 0.81, 0.88, 0.95, 0.99]);
 ok(doomed.commits === 0, 'nothing sub-baseline is ever committed', doomed.commits);
 ok(doomed.final === 1.0, 'and the cumulative best stays at the baseline', doomed.final);
 
+console.log('\n# the Optimize prompt is built inline, so it must append the expert-skills block itself');
+// Every other consumer role gets the block from roleAgent(). This one prompt is assembled by hand, so
+// dropping the append is invisible: the run succeeds and the engineers simply never see the skills
+// index. Listing the roles in EXPERT_SKILL_ROLES is the other half -- without it the block is always ''.
+{
+  const declared = (src.match(/const EXPERT_SKILL_ROLES = new Set\(\[([^\]]*)\]\)/) || [, ''])[1];
+  ok(/\+\s*(?:\/\/[^\n]*\n\s*)*expertSkillsBlock\(isDeep \? 'deep_engineer' : 'engineer'\)/.test(src),
+     'the inline Optimize prompt appends expertSkillsBlock (additive)');
+  for (const r of ['engineer', 'deep_engineer']) {
+    ok(new RegExp(`'${r}'`).test(declared), `EXPERT_SKILL_ROLES includes '${r}' (the inline site is live)`);
+  }
+}
+
 console.log(failures
   ? `\nFAIL: ${failures} check(s) failed.`
   : '\nPASS: CANDIDATE_FLOOR defaults to 1.0; a lowered floor tracks but never banks.');
