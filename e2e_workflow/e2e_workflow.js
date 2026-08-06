@@ -443,6 +443,13 @@ const STRATEGY_SCHEMA = obj({
   drop_list: arrObj, order_of_work: arrStr, strategy_path: { type: 'string' },
 }, ['kernel_candidates']);
 
+// Result of the ensure_flydsl provisioning gate (build-on-demand). ok=true iff flydsl is importable
+// (flydsl + kernels.moe_gemm_2stage) after sourcing env_file; built distinguishes a fresh build from reuse.
+const FLYDSL_GATE_SCHEMA = obj({
+  ok: { type: 'boolean' }, built: { type: 'boolean' },
+  env_file: { type: 'string' }, version: { type: 'string' }, reason: { type: 'string' },
+}, ['ok']);
+
 const SWEEP_SCHEMA = obj({
   trials: arrObj, accepted_flags: { type: 'string' }, accepted_env: { type: 'string' },
   best_throughput_tok_s: { type: 'number' }, throughput_speedup_vs_baseline: { type: 'number' },
@@ -633,6 +640,46 @@ async function safeAgent(prompt, opts, tries = 3) {
   }
   log(`agent[${(opts && opts.label) || '?'}] DEGRADED to null after ${tries} tries (${String(lastErr).slice(0, 120)})`);
   return null;
+}
+
+// --- FlyDSL provisioning gate -------------------------------------------------
+// Design intent (roles/system_architect.md §0a): the MOMENT strategize routes a flydsl backend onto
+// any head/kernel candidate, FlyDSL must be provisioned via the ensure_flydsl expert skill BEFORE any
+// consumer can select it. We enforce it in the ORCHESTRATOR — not by trusting the architect LLM to have
+// run it — so "decide to use flydsl" and "ensure_flydsl" are one inseparable step. The detect->reuse-or-build
+// decision lives ENTIRELY inside ensure_flydsl.sh (its own version gate: import flydsl + kernels.moe_gemm_2stage
+// AND __version__ >= FLYDSL_MIN_VERSION, default 0.2.2). is_flydsl_available() is NOT used to decide anything.
+let flydslProvisioned = false;   // guard so the two call sites (strategize / re-strategize) provision at most once
+const _wantsFlydsl = (c) => ((c && c.candidate_backends) || []).some((b) => String(b).toLowerCase() === 'flydsl');
+const flydslRouted = (...queues) => queues.some((q) => (q || []).some(_wantsFlydsl));
+function stripFlydslFromQueues(...queues) {
+  let n = 0;
+  for (const q of queues) for (const c of (q || [])) {
+    if (_wantsFlydsl(c)) { c.candidate_backends = (c.candidate_backends || []).filter((b) => String(b).toLowerCase() !== 'flydsl'); n++; }
+  }
+  return n;
+}
+async function ensureFlydslGate() {
+  if (flydslProvisioned) return;                      // already provisioned this run
+  if (!flydslRouted(headQueue, kernelQueue)) return;  // strategize did not route flydsl -> nothing to do
+  log('[flydsl-gate] strategize routed a flydsl backend -> running ensure_flydsl (detect -> reuse-or-build) BEFORE any consumer.');
+  const g = await safeAgent(
+    `You are the flydsl provisioner. Run the ensure_flydsl expert skill EXACTLY as ` +
+    `${WORKFLOW_DIR}/../perf_knowledge/expert_skills/skills/ensure_flydsl/skill.md specifies: launch ` +
+    `${WORKFLOW_DIR}/../perf_knowledge/expert_skills/skills/ensure_flydsl/ensure_flydsl.sh DETACHED and poll ` +
+    `(success = flydsl_env.sh written; failure = .flydsl_build.failed). The script's own version gate ` +
+    `(import flydsl AND kernels.moe_gemm_2stage AND __version__ >= FLYDSL_MIN_VERSION, default 0.2.2) is the ` +
+    `SOLE authority: reuse an ambient flydsl if satisfied, else clone+build the pin (~15-18min). Do NOT use ` +
+    `is_flydsl_available() to decide anything. Return {ok,built,env_file,version,reason}; ok=true iff, after ` +
+    `sourcing flydsl_env.sh, "import flydsl, kernels.moe_gemm_2stage" works.`,
+    { phase: 'Strategize', label: 'architect:ensure_flydsl', schema: FLYDSL_GATE_SCHEMA });
+  if (g && g.ok) {
+    flydslProvisioned = true;
+    log(`[flydsl-gate] FlyDSL ready (${g.built ? 'built' : 'reused'} ${g.version || '?'}); env=${g.env_file || '(default /opt/flydsl/FlyDSL/flydsl_env.sh)'}.`);
+  } else {
+    const n = stripFlydslFromQueues(headQueue, kernelQueue);
+    log(`[flydsl-gate] ensure_flydsl FAILED (${(g && g.reason) || 'no result'}) -> stripped 'flydsl' from ${n} candidate backend list(s); those heads fall back to their other backends (no silent flydsl selection).`);
+  }
 }
 
 // A FROZEN baseline is resolvable when the extractor either froze baseline_src/ (baseline_frozen)
@@ -1045,6 +1092,8 @@ if (want('setup')) {
   }
   if (_fusedTagged) log(`[op-identity] ${_fusedTagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
   log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
+  // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
+  await ensureFlydslGate();
 } else {
   // Load carried state from a prior phase invocation (args.state).
   EVAL_DIR = ST.eval_dir || EVAL_DIR_OVERRIDE;
@@ -1097,6 +1146,8 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
     if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
     if (restrat && restrat.head_candidates) headQueue = restrat.head_candidates.slice();
+    // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
+    await ensureFlydslGate();
   } else {
     log(`Config sweep found no win above the noise band.`);
   }
