@@ -224,3 +224,11 @@ exp/
 .torch_ext/
 # bench_e2e.sh default output dir (OUT_DIR=$(pwd)/e2e_bench_out) — runtime measurements
 e2e_bench_out/
+# swappable-backend runtime artifacts (keep code + config, ignore generated state)
+interface/runtime/shim.log
+interface/runtime/shim_req.json
+interface/runtime/shim_upstream.json
+interface/runtime/codex-home/*
+!interface/runtime/codex-home/config.toml
+# per-backend experiment output dirs (exp_codex_knn/, exp_cursor_run/, ...)
+exp_*/
