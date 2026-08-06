@@ -209,15 +209,8 @@ Rules:
    (a) the specialist directions have **plateaued** (the ledger shows the last round's verified gains
    are small and orthogonal tweaks are exhausted), OR (b) the kernel needs a **ground-up rewrite** that
    no single narrow lane can deliver (the winning implementation must fuse algorithm + memory + compute
-   + host_runtime at once), OR (c) you want to make a focused push to a **roofline target**, OR
-   (d) this is a **PORT** — a transcription of a tuned kernel into another language (plain Triton →
-   Gluon / TileLang / HIP). A port is the one case where specialists are actively wrong rather than
-   merely weaker: the transcription is *deterministic*, so parallel arms do not explore alternatives —
-   they all reproduce the same transcription and any bug in it identically — and the work that follows
-   is *stateful*, chosen from the IR and profile of the anchor the previous step just built. Splitting
-   it across engineers throws that state away at the moment it becomes useful. Expect a port's first
-   round to land **below** the comparator; that is the shape, not a failure (the loop's progress signal
-   and candidate floor are set for it on `mode=author`). How to issue it:
+   + host_runtime at once), OR (c) you want to make a focused push to a **roofline target**. How to
+   issue it:
    - Make it the **only** direction that round (the script enforces a dedicated round anyway, and it
      costs DEEP_COST budget — so confirm `BUDGET_REMAINING ≥ DEEP_COST` before issuing one).
    - Set an **ambitious `expected_speedup`** (e.g. ~2–3× beyond the current cumulative, or the multiple

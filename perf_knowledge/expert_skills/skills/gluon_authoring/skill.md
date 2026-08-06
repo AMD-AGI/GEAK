@@ -89,19 +89,51 @@ what to try next is chosen from the IR and profile of the anchor you just built,
 built it is holding and a fresh agent would have to rebuild. Splitting the track at the gates throws
 that away at the moment it becomes useful.
 
-**What the track needs from the caller.** This skill owns no budget model, but the port has a shape the
-round loop has to be told about: a transcription lands **below** the comparator and climbs back, and at
-the optimize-tuned defaults that phase is not representable at all — the transcription round produces
-no candidate, so no patch is saved, no verify runs, and the loop stops two rounds in. `kernel_workflow`
-therefore carries port-shape defaults (a port-sized budget, a candidate floor below 1.0, and a
-**negative** progress band so a round that gives ground while exploring does not end the run).
+**What the track needs from the caller.** This skill owns no budget model, but the port has a shape
+the round loop has to be told about: a transcription lands **below** the comparator and climbs back,
+and at the stock defaults that phase is not representable at all — the transcription round produces no
+candidate, so no patch is saved, no verify runs, and the loop stops two rounds in. There is no "port
+mode" to switch on; there are **launch args**, and a port is a set of values for four of them. Pass
+them explicitly on the `kernel_workflow` launch, and check them at G0 before anything is dispatched:
 
-**Run this port at `mode=optimize`, and say so.** Author mode writes a fresh seed that *replaces* the
-source — which would overwrite the very kernel being transcribed, since the port needs that kernel's
-own `.ttgir`. So the run that needs these defaults is an *optimize* run, and it declares itself by
-passing **`target_language=gluon`** (inert on the optimize branch otherwise, so it means exactly "this
-run ends in a different language than it started in") or an explicit **`port=true`**. A plain optimize
-run with neither is unchanged. The commit gate is untouched either way — nothing sub-baseline is banked.
+| arg | default | pass on a port | why the default breaks a port |
+| --- | --- | --- | --- |
+| `candidate_floor` | `1.0` | from the measured debt (see below) | a faithful anchor is below the comparator **by construction**, so it never enters the candidate list: no patch saved, no verify, `winner = null` |
+| `max_no_improve` | `2` | `6` | ends the run two rounds in, which is before the recovery round has finished |
+| `budget` | `6` | `20` | `budget` counts **directions**, and a `deep_explore` direction costs 2 — so `budget/2` is the achievable round count. 20 gives 10 rounds; 6 gives 3 |
+| `progress_delta` | `+min_improve` | `-0.05` | progress is measured against the best candidate ever seen, so a monotone climb never stalls at any value — but a port that **gives ground** while exploring reads as a stall. On the measured `pa_decode` run, leaving this at the default ends it at round 7 with 1.04× instead of round 10 with 1.25× |
+
+**Run this port at `mode: optimize`.** Author mode writes a fresh seed that *replaces* the source —
+which would overwrite the very kernel being transcribed, since the port needs that kernel's own
+`.ttgir`. So `mode` is not what carries the port's shape; the four args above are. A run that does not
+pass them behaves exactly as it always has. The commit gate is untouched by all of this and still
+requires beating the cumulative best by `min_improve`, so a sub-baseline candidate can be **tracked**
+but can never be **banked**.
+
+The whole launch, with the two measured values at their opening guesses — replace both once you have
+numbers, per *Set two of the four from measurement rather than taste* below:
+
+```js
+Workflow({
+  scriptPath: "<REPO>/kernel_workflow/kernel_workflow.js",
+  args: {
+    kernel_path: "<TASK_DIR>",
+    workflow_dir: "<REPO>/kernel_workflow",
+    mode: "optimize",              // NOT author — author would overwrite the source being transcribed
+    target_language: "gluon",
+    use_expert_skills: "true",     // this skill is injected only when this is on
+    budget: 20,
+    max_no_improve: 6,             // measured on pa_decode; 4 ends one round before the payoff
+    candidate_floor: 0.5,          // opening guess — reset from the debt parity_gate.py reports
+    progress_delta: -0.05,
+    gpu_ids: "0",
+  },
+})
+```
+
+Steer the round toward a **single `deep_explore` direction** rather than a specialist fan-out, for the
+reasons in the paragraph above this one — the harness has no way to infer that from the args, so say it
+in `task`.
 
 In `kernel_workflow` terms this is the **`deep_explore` track**, not a set of specialist directions: it
 runs alone in its own round, carries its own long measure→self-profile→rewrite loop, and has authority
@@ -273,7 +305,7 @@ direction.** `## When to use` already splits the two entry states; the gates spl
 
 | # | gate | command | applies on `from_backend: triton` (PORT) | applies on `from_backend: gluon` (IN-PLACE) |
 | --- | --- | --- | --- | --- |
-| G0 | the harness loop shape matches the entry | inspect the launch args (see below) | **PORT shape** — `port: "true"` must be present | **ORDINARY optimize** — `port: "true"` here is the mirror-image mistake |
+| G0 | the harness loop shape matches the entry | inspect the launch args (see below) | **PORT shape** — `candidate_floor` / `progress_delta` / `max_no_improve` / `budget` must all be set | **ORDINARY optimize** — setting them here is the mirror-image mistake |
 | G1 | the comparator can support a claim at all | `scripts/champion_gate.py --champion <bundle>` | YES, on `plain_champion.json` | YES, on an **incumbent** bundle — see `entry-modes.md` for which fields change meaning |
 | G2 | the transcription debt is paid, and if not, WHO owes it | `scripts/parity_gate.py …` | YES, before the FIRST climb | **NO — nothing was transcribed.** The tool is still useful as a *diagnostic* on a mid-run regression; say which you are doing |
 | G3 | the occupancy is not already lost | `scripts/probe.py measure --dir ir/<tag>/` | YES | YES |
@@ -295,35 +327,26 @@ started from" and not a figure inherited from another GPU or another container.
 
 **G0 is checked before anything is dispatched, and it has silently cost three runs — all three of
 them ports.** Everything in the rest of this G0 discussion is about the PORT entry. On an in-place
-entry the harness defaults are already right and `port: "true"` must **not** be set: a candidate floor
+entry the harness defaults are already right and the four args must **not** be set: a candidate floor
 below 1.0 and a negative progress delta keep a genuinely stalled search alive, burning exactly the
-budget the port shape exists to protect. A transcription
-port must run at `mode: optimize` — it transcribes the existing source's own TTGIR, so `author` mode
-would overwrite the very thing being ported — and `mode` therefore cannot be what tells the loop this
-is a port. `kernel_workflow.js` provides `port: "true"` for exactly this, and its own comment
-(lines 40–47) describes the consequence of omitting it better than any summary:
+budget the port shape exists to protect. A transcription port must run at `mode: optimize` — it transcribes the existing source's own
+TTGIR, so `author` mode would overwrite the very thing being ported — so `mode` cannot be what tells
+the loop this is a port. Nothing does: the loop reads the four args, and omitting them is indistinguishable
+from an ordinary run. `kernel_lane.js`'s own comment on `CANDIDATE_FLOOR` describes the consequence
+better than any summary:
 
-> *"Applied unchanged to a port they delete its recovery phase: the transcription round produces no
-> candidate at all, so no patch is saved, no verify runs, `winner` is null, and the loop stops two
-> rounds into a port that is working exactly as designed."*
+> *"a TRANSCRIPTION (plain Triton -> Gluon / TileLang / HIP) lands BELOW the comparator by
+> construction and climbs back, so at 1.0 its whole recovery phase is invisible -- no patch is saved,
+> no verify runs, `winner` is null every round, and the loop stalls on a run that is working as
+> designed."*
 
-The four defaults that flip with `PORT_SHAPE`, and what each one does to a port left on the
-`optimize` values:
-
-| knob | optimize | port | what the optimize value does to a port |
-| --- | --- | --- | --- |
-| `candidate_floor` | 1.0 | 0.5 | a faithful anchor is below the comparator **by construction**, so it never enters the candidate list: no patch saved, no verify, `winner = null` |
-| `max_no_improve` | 2 | 4 | ends the run two rounds in, which is before the recovery round has finished |
-| `progress_delta` | +`min_improve` | −0.05 | a layout experiment that costs ground is information on a port; here it reads as a stall |
-| `budget` | 6 | 20 | `budget` counts **directions**, and a `deep_explore` direction costs 2 — so `BUDGET/2` is the achievable round count. 20 gives 10 rounds; 10 gives 5 |
-
-**Two things to set beyond the port defaults, both from measurement rather than taste.**
-`max_no_improve: 4` is still short of what a real climb needs — on `pa_decode` the winning levers
+**Set two of the four from measurement rather than taste.**
+A `max_no_improve` of 4 is short of what a real climb needs — on `pa_decode` the winning levers
 landed at rounds 1, 8, 8, 9 and 10 with **five consecutive** non-improving rounds in between, so 4
 ends the run one round before the payoff and **6** is the value that survives the measured trajectory.
-And `candidate_floor: 0.5` is uncomfortably tight: an observed naive anchor on a MoE INT4 kernel
+And a `candidate_floor` of 0.5 is uncomfortably tight: an observed naive anchor on a MoE INT4 kernel
 measured **0.51×**, one bad window from falling out of its own candidate list. Set the floor from the
-debt you actually took — `parity_gate.py` reports it — rather than accepting a default that has to
+debt you actually took — `parity_gate.py` reports it — rather than picking a round number that has to
 guess. *(The deeper point, worth sending upstream rather than working around: on a port, "is this a
 candidate" is the question `parity_gate.py` answers properly, as a recovery verdict with an
 attribution. A fixed ratio floor is a proxy for it, and the right proxy value is not knowable before
