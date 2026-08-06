@@ -112,8 +112,11 @@ _BRANCH_RE = re.compile(r"^\s*s_(cbranch\w*|branch|cbranch)\s+(\.?\w[\w.$@]*)")
 #             s_wait_loadcnt_dscnt 0x0        -- fused, one immediate for the pair
 #             s_waitcnt_vscnt null, 0x0       -- gfx10 store-counter spelling
 _CNT_RE = re.compile(r"(\w*cnt)\s*\(\s*(\d+)\s*\)")
+# The counter group excludes `_` on purpose: `_` is the SEPARATOR between fused counters, so letting
+# the inner class match it too makes every separator ambiguous and the match exponential in the number
+# of `cnt_` repetitions (CodeQL: inefficient regular expression). Counter names are pure letters.
 _WAIT_IMM_RE = re.compile(
-    r"^s_wait(?:cnt)?_([a-z_]*cnt(?:_[a-z_]*cnt)*)\s+(?:null\s*,\s*)?"
+    r"^s_wait(?:cnt)?_([a-z]*cnt(?:_[a-z]*cnt)*)\s+(?:null\s*,\s*)?"
     r"(?:0[xX]([0-9a-fA-F]+)|(\d+))\s*$")
 
 
