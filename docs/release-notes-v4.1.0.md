@@ -24,6 +24,12 @@
 - Routing reports two orderings, by share of GPU time and by expected gain, rather than silently combining them, and a saturated kernel is rerouted toward moving fewer bytes rather than dropped.
 - The skill is advisory and may never prune a candidate or override measured GPU time. With the analysis skill off, behavior is byte-identical to v4.0.
 
+### On-demand GPU scheduling in kernel_workflow
+
+- Replaces index-pinning with a shared pool: every GPU consumer receives the whole allocation and `gpu_lock.sh` takes whichever GPU is unlocked and idle at acquire time, so placement follows what work actually costs instead of an index fixed before the cost is known. A round ends with the slowest task rather than the slowest GPU.
+- The same kernels reach the same speedups on fewer GPUs, and finish sooner when engineers are oversubscribed to cards. Idleness is read from the kernel driver rather than the tool's own locks, so a foreign tenant on a shared box is detected and stepped around instead of silently corrupting timings; pinned runs now make the same check and fail loudly rather than measuring on a contaminated card.
+- Pool mode is the default; `gpu_mode=pin` restores index pinning and `GEAK_GPU_REQUIRE_IDLE=0` restores the previous behavior for deliberately co-tenanted runs. Future work: disjoint serving and optimization GPU pools, and a clearer failure when every GPU in a pool is held by a foreign tenant.
+
 ---
 
 ## CI/CD infrastructure
@@ -51,7 +57,7 @@
 - Better use of optimization budget through headroom-aware routing.
 - More trustworthy measurement and stricter acceptance, so a reported winner is one that beat the frozen baseline.
 - Clearer end-to-end reporting of baseline alignment, backend provenance, and the final verdict.
-- Kernel runs now schedule GPUs on demand instead of pinning one per engineer, so the same kernels reach the same speedups on fewer GPUs: measured across 12 head kernels at two engineers per GPU, median wall-clock fell from 76 to 64 minutes and GPU-seconds held fell 19%, with kernel speedup unchanged.
+- Kernel runs now schedule GPUs on demand instead of pinning one per engineer, so the same kernels reach the same speedups on fewer GPUs and finish sooner when engineers are oversubscribed to cards.
 - Fixes for a memory-duplication bug in the FlyDSL MoE apply-back and an import shadowing issue in the operator benchmark.
 
 ---
