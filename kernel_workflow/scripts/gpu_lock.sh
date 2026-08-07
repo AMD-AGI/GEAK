@@ -18,11 +18,45 @@
 
 set -euo pipefail
 
-GPU_SPEC="${1:?Usage: gpu_lock.sh <gpu_id|pool> <command...>   (pool = comma list, e.g. 0,1,2,3)}"
+# The usage line deliberately shows NO concrete ids. It used to read "e.g. 0,1,2,3", and that
+# example was copied verbatim into real commands by agents improvising one-off checks -- the
+# literal string "0,1,2,3" turned up in 15 invocations from runs that had been allocated neither
+# GPU 2 nor 3. An example in a usage line gets read as a default; here the value is never
+# defaultable, so it names no ids.
+GPU_SPEC="${1:?Usage: gpu_lock.sh <gpu_id|pool> <command...>   (pool = comma list of the GPUs THIS run was allocated)}"
 shift
 
 LOCK_DIR="/tmp/team_gpu_locks"
 mkdir -p "$LOCK_DIR"
+
+# ---- Allocation fence ---------------------------------------------------------------------------
+# GEAK_GPU_ALLOWED (comma list) is the set of GPUs the CALLER was actually allocated. When it is
+# set, a <gpu_spec> naming anything outside it is refused. Unset = no fence, so every existing
+# caller is unaffected.
+#
+# Why this exists: the spec arrives as an argv string written by whoever composes the command, and
+# in an agent-driven workflow that author is a model. Agents reproduce the usage line's example
+# verbatim when improvising a check outside the workflow's normal call sites. The idleness test
+# below catches the common case -- a busy foreign card gets skipped -- but it is the wrong
+# instrument: it asks "is this GPU free?" when the question is "is this GPU MINE?". A neighbour's
+# momentarily-idle card passes idleness and fails ownership, and a run labelled "2 GPUs" silently
+# becomes a 3-GPU run, which invalidates the measurement rather than merely slowing it.
+#
+# Enforced here because this wrapper is the single chokepoint: every compile/correctness/benchmark/
+# profile command goes through it by contract, so one check also covers call sites that do not exist
+# yet. A hard error rather than a silent intersection -- a caller asking for a GPU it does not own
+# has a bug, and quietly running elsewhere would hide it while still producing a number.
+if [ -n "${GEAK_GPU_ALLOWED:-}" ]; then
+    _bad=""
+    for _r in $(echo "$GPU_SPEC" | tr ',' ' '); do
+        case ",${GEAK_GPU_ALLOWED}," in *",${_r},"*) ;; *) _bad="$_bad $_r" ;; esac
+    done
+    if [ -n "$_bad" ]; then
+        echo "ERROR: gpu_lock.sh asked for GPU(s)${_bad} but this run is allocated only [${GEAK_GPU_ALLOWED}]." >&2
+        echo "       Use the allocated set: gpu_lock.sh ${GEAK_GPU_ALLOWED} <command...>" >&2
+        exit 1
+    fi
+fi
 
 # ---- GPU selection ------------------------------------------------------------------------------
 # <gpu_spec> is either a single id ("2", the historical contract, unchanged) or a POOL ("0,1,2,3").
@@ -38,7 +72,8 @@ mkdir -p "$LOCK_DIR"
 # timings. Measured on an idle MI350X: gpu_busy_percent=0, mem_info_vram_used=284MB; under load:
 # 100% / 1837MB. amd-smi is deliberately NOT used here: it returns EMPTY output while another
 # process holds the GPU, i.e. it fails exactly when we need it. Set GEAK_GPU_REQUIRE_IDLE=0 to skip
-# (e.g. deliberately co-tenanted screening runs).
+# (e.g. deliberately co-tenanted screening runs). The default is 1 on BOTH paths: pool mode steps to
+# another GPU when one is busy, single-GPU mode has nowhere to step and so fails loudly instead.
 _gpu_is_idle() {
     local id="$1" dev busy vram
     dev="$(readlink -f "/sys/class/drm/renderD$((128 + 8 * id))/device" 2>/dev/null)" || return 0
@@ -52,7 +87,12 @@ case "$GPU_SPEC" in
   *,*)
     # --- pool mode: block until some lane is free AND idle, then hold it for the whole command ---
     POOL="$(echo "$GPU_SPEC" | tr ',' ' ')"
-    _deadline=$(( SECONDS + ${GEAK_GPU_POOL_WAIT:-1200} ))
+    # When the wait started. Time spent blocked here is the SCHEDULER'S COST -- the price paid for
+    # sharing GPUs instead of pinning one per engineer -- and it used to leave no trace at all: the
+    # loop retries on `sleep 0.2` and only writes the use-log AFTER it wins a GPU, so an acquisition
+    # that took ten minutes and one that took none were recorded identically.
+    _wait_t0=$SECONDS
+    _deadline=$(( _wait_t0 + ${GEAK_GPU_POOL_WAIT:-1200} ))
     GPU_ID=""
     while [ -z "$GPU_ID" ]; do
         for _g in $POOL; do
@@ -63,7 +103,21 @@ case "$GPU_SPEC" in
                     flock -u "$_fd"; exec {_fd}>&-   # foreign job on this GPU: try the next lane
                     continue
                 fi
-                GPU_ID="$_g"; POOL_FD="$_fd"; break
+                GPU_ID="$_g"; POOL_FD="$_fd"
+                # Record which GPU of the pool was actually taken. Without this a pool acquisition
+                # is unobservable after the fact: when a foreign tenant holds part of the pool the
+                # loop above silently settles for a smaller set, and the run is still filed under
+                # its original "N GPUs" label. One append-only line per acquisition makes the real
+                # GPU set recoverable. Off unless GEAK_GPU_USE_LOG names a file.
+                #
+                # wait_s goes on the SAME line rather than into a new file: it is a property of this
+                # acquisition, every reader already parses this line, and appending a field stays
+                # backward-compatible with logs written before it existed. Nothing is added inside
+                # the timed region -- the arithmetic runs after the GPU is already won.
+                [ -n "${GEAK_GPU_USE_LOG:-}" ] && \
+                    echo "{\"t\":$(date +%s),\"gpu\":$_g,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pool\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
+                        >> "$GEAK_GPU_USE_LOG" 2>/dev/null
+                break
             fi
             exec {_fd}>&-
         done
@@ -124,15 +178,29 @@ if [ -n "${POOL_FD:-}" ]; then
     export HIP_VISIBLE_DEVICES="$GPU_ID"
     "$@"
 else
+    # Single-GPU mode BLOCKS TOO, and its wait must be measured for the same reason the pool's is.
+    # Pinning does not mean "no contention": with 4 engineers over 2 pinned GPUs, two engineers share
+    # each card and serialize on exactly this flock. That queueing is the pinned policy's own cost,
+    # and comparing a measured pool wait against an assumed-zero pin wait would build the scheduler's
+    # advantage into the instrument. Both paths measure, so the comparison is real.
+    _wait_t0=$SECONDS
     (
         flock -x -w 1200 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 1200s"; exit 1; }
-        # Idleness is OPT-IN here (default 0) but on by default in pool mode. Deliberate: a pool can
-        # step to another GPU when one is busy, whereas a single GPU has no alternative, so enabling
-        # it by default would turn a previously-working run into a hard failure.
-        if [ "${GEAK_GPU_REQUIRE_IDLE:-0}" = "1" ] && ! _gpu_is_idle "$GPU_ID"; then
+        # Default 1, matching pool mode above. It was 0 here, so a PINNED engineer skipped the
+        # foreign-work check entirely -- not "sampled it once", never ran it. That is how two
+        # measurement cells ended up timed on a GPU another tenant was executing on. Both paths ask
+        # the same question of the same driver; there is no reason for them to answer differently,
+        # and the unsafe default was the one nobody had to opt into. The original rationale for 0
+        # was that a single GPU has no alternative to step to, which is true -- but it argues for a
+        # loud failure, not for measuring on a contaminated card. Set GEAK_GPU_REQUIRE_IDLE=0 to
+        # restore the old behavior for deliberately co-tenanted runs.
+        if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] && ! _gpu_is_idle "$GPU_ID"; then
             echo "ERROR: GPU $GPU_ID has foreign work running (busy/VRAM above threshold); refusing to measure on it" >&2
             exit 1
         fi
+        [ -n "${GEAK_GPU_USE_LOG:-}" ] && \
+            echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
+                >> "$GEAK_GPU_USE_LOG" 2>/dev/null
         export HIP_VISIBLE_DEVICES="$GPU_ID"
         "$@"
     ) 200>"$LOCK_FILE"
