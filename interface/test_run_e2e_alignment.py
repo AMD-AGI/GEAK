@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -224,23 +223,6 @@ def test_alignment_report_refuses_path_outside_eval_dir(tmp_path: Path) -> None:
 
     assert rx._update_baseline_alignment_reports(result) == []
     assert outside.read_text(encoding="utf-8") == "# External report\n"
-
-
-@pytest.mark.parametrize("val,want", [(1800, "1800"), ("900", "900")])
-def test_apply_server_timeouts_exports_ceiling(val, want, monkeypatch) -> None:
-    monkeypatch.delenv("SERVER_STARTUP_TIMEOUT_SEC", raising=False)
-    assert rx.apply_server_timeouts({"server_startup_timeout_sec": val}) == {
-        "SERVER_STARTUP_TIMEOUT_SEC": want
-    }
-
-
-@pytest.mark.parametrize("bad", [None, "", "abc", 0, -5])
-def test_apply_server_timeouts_noop_on_absent_or_bad(bad, monkeypatch) -> None:
-    """Absent/garbage => nothing exported, so bench_e2e.sh keeps its own default."""
-    monkeypatch.delenv("SERVER_STARTUP_TIMEOUT_SEC", raising=False)
-    h = {} if bad is None else {"server_startup_timeout_sec": bad}
-    assert rx.apply_server_timeouts(h) == {}
-    assert "SERVER_STARTUP_TIMEOUT_SEC" not in os.environ
 
 
 def test_map_args_forwards_serving_fidelity_when_present(tmp_path: Path) -> None:

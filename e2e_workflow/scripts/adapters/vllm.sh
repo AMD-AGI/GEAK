@@ -41,12 +41,7 @@ adapter_launch() {
       # emits the execute_context_*_generation_* step spans (gpu_user_annotation, torch record_function —
       # they DO appear on ROCm) that parse_profile.py uses to split prefill/decode; without it the split
       # falls back to the analytic est_calls / shape path. record_shapes stays on for Input Dims.
-      # PROFILE_ACTIVE_ITERS: widen the profiler capture window (default vllm=5 steps). Set large to
-      # cover the whole short bench so trace and probe span the SAME steps -> count 绝对值可直接比.
-      local _ai="${PROFILE_ACTIVE_ITERS:-}"
-      local _aij=""
-      [ -n "$_ai" ] && _aij=",\"active_iterations\":$_ai"
-      _prof=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true$_aij}")
+      _prof=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true}")
     else
       _prof_env=(VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR")
     fi

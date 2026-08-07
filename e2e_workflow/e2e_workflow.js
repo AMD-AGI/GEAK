@@ -627,7 +627,7 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // Probe verification: after extract_op, confirm the kernel's decode m_buckets are REAL
 // (probe-measured), not the synthesized [1, CONC] guess the workflow injects. Uses the AGENT-RETURNED
 // fields (this script is a sandboxed Workflow script with NO fs access — it cannot read meta.json).
-// Same rule as scripts/probe_mbuckets_guard.py: fallback iff decode buckets ⊆ {1, conc} (incl. empty).
+// Rule: fallback iff decode buckets ⊆ {1, conc} (incl. empty).
 // Policy: WARN-but-continue (do NOT abort) — decode is graph-hidden so a probe miss falls back to the
 // synth guess, which is worse but not fatal. The warning is the signal to investigate.
 function verifyProbeMBuckets(ext, conc, log) {

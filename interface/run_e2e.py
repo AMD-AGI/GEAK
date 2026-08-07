@@ -560,23 +560,6 @@ def apply_bench_protocol(h: dict) -> dict:
     return exported
 
 
-def apply_server_timeouts(h: dict) -> dict:
-    """Export ``handoff.server_startup_timeout_sec`` so bench_e2e.sh inherits it.
-
-    Overrides the overlay-kind health-wait budget. Absent/invalid => nothing exported.
-    Returns the exported {env_var: value} (for --dry-run / logging).
-    """
-    exported: dict[str, str] = {}
-    try:
-        secs = int(float(h.get("server_startup_timeout_sec") or 0))
-    except (TypeError, ValueError):
-        return exported
-    if secs > 0:
-        os.environ["SERVER_STARTUP_TIMEOUT_SEC"] = str(secs)
-        exported["SERVER_STARTUP_TIMEOUT_SEC"] = str(secs)
-    return exported
-
-
 # ---------------------------------------------------------------------------
 # Invocation: SDK preferred, CLI fallback.
 # ---------------------------------------------------------------------------
@@ -2415,7 +2398,6 @@ def main(argv: list[str]) -> int:
     bench_client = apply_bench_client(h)
     bench_launcher = apply_bench_launcher(h)
     bench_protocol = apply_bench_protocol(h)
-    server_timeouts = apply_server_timeouts(h)
     alignment_flags = apply_alignment_flags(h)
     prompt = build_prompt(ps_args)
 
@@ -2424,7 +2406,6 @@ def main(argv: list[str]) -> int:
                           "bench_launcher": bench_launcher,
                           "magpie_launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
                           "bench_protocol": bench_protocol,
-                          "server_timeouts": server_timeouts,
                           "alignment_flags": alignment_flags,
                           "inferencex_path": os.environ.get("INFERENCEX_PATH", ""),
                           "prompt": prompt, "e2e_script": str(E2E_SCRIPT)}, indent=2))

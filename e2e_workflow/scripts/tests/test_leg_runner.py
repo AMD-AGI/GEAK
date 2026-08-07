@@ -183,8 +183,20 @@ class _LegRunnerTestCase(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class PathScrub(unittest.TestCase):
     def test_module_dir_is_dropped_from_sys_path_at_import(self):
-        """A task dir holds a file named unittest.py; leaving its dir on sys.path shadows stdlib."""
-        self.assertNotIn(os.path.abspath(SCRIPTS_DIR), [os.path.abspath(p or ".") for p in sys.path])
+        """A task dir holds a file named unittest.py; leaving its dir on sys.path shadows stdlib.
+
+        Re-run the scrub rather than asserting the process-global: other test modules in the same
+        pytest session put SCRIPTS_DIR back on sys.path at import time (test_op_bench,
+        test_run_correctness_gate), so a bare assertion here passes alone and fails in the suite.
+        What actually needs pinning is that EXECUTING leg_runner removes its own dir.
+        """
+        here = os.path.abspath(SCRIPTS_DIR)
+        saved = list(sys.path)
+        self.addCleanup(sys.path.__setitem__, slice(None), saved)
+        sys.path.insert(0, here)
+        self.addCleanup(sys.modules.pop, "leg_runner_scrub_probe", None)
+        _load("leg_runner_scrub_probe", "leg_runner.py")
+        self.assertNotIn(here, [os.path.abspath(p or ".") for p in sys.path])
 
 
 # --------------------------------------------------------------------------- #
