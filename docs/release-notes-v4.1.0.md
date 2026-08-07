@@ -51,6 +51,7 @@
 - Better use of optimization budget through headroom-aware routing.
 - More trustworthy measurement and stricter acceptance, so a reported winner is one that beat the frozen baseline.
 - Clearer end-to-end reporting of baseline alignment, backend provenance, and the final verdict.
+- Kernel runs now schedule GPUs on demand instead of pinning one per engineer, so the same kernels reach the same speedups on fewer GPUs: measured across 12 head kernels at two engineers per GPU, median wall-clock fell from 76 to 64 minutes and GPU-seconds held fell 19%, with kernel speedup unchanged.
 - Fixes for a memory-duplication bug in the FlyDSL MoE apply-back and an import shadowing issue in the operator benchmark.
 
 ---
