@@ -1,0 +1,433 @@
+{
+  "_doc": "Machine-readable arch FACTS - mirror of planning-constants.md. Reference facts: read directly, or by a rule engine where one is shipped. Keyed by arch (SKU peaks/ridge live in sku.json). Every value is calibratable; recalibrate from trace per roofline-models.md ## Calibration.",
+  "_source": "references/hardware/planning-constants.md + isa-mechanisms.md",
+  "arch": {
+    "gfx942": {
+      "family": "CDNA3",
+      "wave_size": 64,
+      "lds_per_cu_kib": 64,
+      "lds_banks": 32,
+      "lds_bank_stride_bytes": 4,
+      "lds_bytes_per_clk": 128,
+      "lds_min_alloc_bytes": 512,
+      "ds_read_b128_conflict_free_cyc": 16,
+      "ds_read_b128_full_conflict_stride_bytes": 128,
+      "ds_read_b64_conflict_free_cyc": 8,
+      "buffer_load_issue_cyc": 64,
+      "lds_sp_fifo_entries_per_simd_pair": 8,
+      "_sched_interval_note": "buffer_load_issue_cyc = the global-load (GR) throughput interval the interleave scheduler spreads MFMA against; the MFMA-per-load ratio = buffer_load_issue_cyc / mfma_cadence_cyc[dtype]. lds_sp_fifo_entries_per_simd_pair x (2 pairs/CU) = ds_reads in flight/CU before the steady ds_read_b*_conflict_free_cyc rate applies (burst model).",
+      "vgpr_per_simd": 512,
+      "vgpr_file_per_simd": 512,
+      "vgpr_per_wave": 512,
+      "vgpr_alloc_granule": 8,
+      "max_waves_per_simd": 8,
+      "vgpr_wave_steps": [
+        [
+          64,
+          8
+        ],
+        [
+          72,
+          7
+        ],
+        [
+          80,
+          6
+        ],
+        [
+          96,
+          5
+        ],
+        [
+          128,
+          4
+        ],
+        [
+          168,
+          3
+        ],
+        [
+          255,
+          2
+        ]
+      ],
+      "_vgpr_occupancy_basis": "compiler-derived (LLVM `; Occupancy:` sweep, ROCm 7.2.1/LLVM 22; reproduce per scripts/amd_occupancy.py docstring). Steps are [max_next_free_vgpr, waves_per_simd] -- the LAST VGPR count that still fits that many waves. waves = min(cap, file // (granule * ceil(vgpr/granule))). next_free_vgpr is the ArchVGPR+AGPR COMBINED budget on CDNA.",
+      "tcp_inflight_cap_kib": 32,
+      "simds_per_cu": 4,
+      "mfma_cadence_cyc": {
+        "fp16": 16,
+        "bf16": 16,
+        "fp8": 32,
+        "bf8": 32
+      },
+      "mfma_write_read_latency_cyc": 10,
+      "exp_rate_vs_valu": 0.25,
+      "matrix_layout_family": "AMDMFMALayout(version=3)",
+      "direct_to_lds_bit_widths": [
+        32
+      ],
+      "async_dma_bytes_per_op": 4,
+      "fp8_dtype": "float8_e4m3fnuz",
+      "ds_read_tr": false,
+      "cvt_off_f32_i4": false,
+      "_cvt_off_f32_i4_note": "Records ROCDL/MLIR BINDING availability (hasattr(rocdl,'cvt_off_f32_i4')), NOT silicon. The instruction IS in the gfx942 ISA -- v_cvt_off_f32_i4_e32 assembles on gfx942/gfx950/gfx1100/gfx1201 alike -- so false here is a wrapper gap reachable via inline asm, never a hardware does-not-lower ceiling.",
+      "permlane_swap": false,
+      "gws": true,
+      "mfma_valu_coexec": true,
+      "_mfma_valu_coexec_note": "MFMA co-issues with VALU (MI-calc: v_mfma_f32_16x16x16_f16 = 16 cyc / 12 co-issuable; 32x32x8 = 32 / 28). RDNA WMMA canNOT co-execute at all -- hiding softmax/dequant VALU under the matrix op is a CDNA-only lever.",
+      "isa_types": [
+        "MFMA"
+      ],
+      "scaled_mfma": false,
+      "_ref": "cdna3-gfx942.md"
+    },
+    "gfx950": {
+      "family": "CDNA4",
+      "wave_size": 64,
+      "lds_per_cu_kib": 160,
+      "lds_banks": 64,
+      "lds_bank_stride_bytes": 4,
+      "lds_bytes_per_clk": 256,
+      "lds_align_bytes": 1280,
+      "ds_read_b128_conflict_free_cyc": 16,
+      "ds_read_b128_full_conflict_stride_bytes": 256,
+      "ds_read_b128_2way_stride_bytes": 128,
+      "ds_read_b64_conflict_free_cyc": 8,
+      "buffer_load_issue_cyc": 64,
+      "lds_sp_fifo_entries_per_simd_pair": 8,
+      "_sched_interval_note": "buffer_load_issue_cyc = the global-load (GR) throughput interval the interleave scheduler spreads MFMA against; the MFMA-per-load ratio = buffer_load_issue_cyc / mfma_cadence_cyc[dtype]. lds_sp_fifo_entries_per_simd_pair x (2 pairs/CU) = ds_reads in flight/CU before the steady ds_read_b*_conflict_free_cyc rate applies (burst model).",
+      "vgpr_per_simd": 512,
+      "vgpr_file_per_simd": 512,
+      "vgpr_per_wave": 512,
+      "vgpr_alloc_granule": 8,
+      "max_waves_per_simd": 8,
+      "vgpr_wave_steps": [
+        [
+          64,
+          8
+        ],
+        [
+          72,
+          7
+        ],
+        [
+          80,
+          6
+        ],
+        [
+          96,
+          5
+        ],
+        [
+          128,
+          4
+        ],
+        [
+          168,
+          3
+        ],
+        [
+          255,
+          2
+        ]
+      ],
+      "_vgpr_occupancy_basis": "compiler-derived (LLVM `; Occupancy:` sweep, ROCm 7.2.1/LLVM 22; reproduce per scripts/amd_occupancy.py docstring). Steps are [max_next_free_vgpr, waves_per_simd] -- the LAST VGPR count that still fits that many waves. waves = min(cap, file // (granule * ceil(vgpr/granule))). next_free_vgpr is the ArchVGPR+AGPR COMBINED budget on CDNA.",
+      "tcp_inflight_cap_kib": 32,
+      "simds_per_cu": 4,
+      "xcd_count": 8,
+      "l2_fabric_latency_high_cyc": 300,
+      "_l2_fabric_latency_note": "A-NUMBER, gfx950/CDNA4-calibrated (round_44/49 read-latency 256-317 cyc). memory sub=latency fires above this. gfx942/gfx1250 have no calibrated value yet -> classify falls back to thresholds.json (recalibrate per arch; Infinity-Fabric topology/XCD count differ).",
+      "mfma_cadence_cyc": {
+        "fp16": 16,
+        "bf16": 16,
+        "fp8": 32,
+        "bf8": 32,
+        "fp4": 32
+      },
+      "mfma_write_read_latency_cyc": 10,
+      "exp_rate_vs_valu": 0.25,
+      "matrix_layout_family": "AMDMFMALayout(version=4)",
+      "direct_to_lds_bit_widths": [
+        128,
+        32
+      ],
+      "async_dma_bytes_per_op": 16,
+      "ds_read_tr": true,
+      "permlane_swap": true,
+      "gws": true,
+      "mfma_valu_coexec": true,
+      "_gws_note": "GWS (DS_GWS) is NOT removed on CDNA4 -- ds_gws_init/ds_gws_sema_v assemble on both gfx942 and gfx950; it is removed on RDNA4 (gfx1201 rejects them).",
+      "isa_types": [
+        "MFMA",
+        "scaled-MFMA"
+      ],
+      "scaled_mfma": true
+    },
+    "gfx1250": {
+      "family": "CDNA5",
+      "wave_size": 32,
+      "lds_per_cu_kib": 320,
+      "vgpr_file_per_simd": 1024,
+      "vgpr_alloc_granule": 16,
+      "max_waves_per_simd": 16,
+      "vgpr_wave_steps": [
+        [
+          64,
+          16
+        ],
+        [
+          80,
+          12
+        ],
+        [
+          96,
+          10
+        ],
+        [
+          112,
+          9
+        ],
+        [
+          128,
+          8
+        ],
+        [
+          144,
+          7
+        ],
+        [
+          160,
+          6
+        ],
+        [
+          192,
+          5
+        ],
+        [
+          256,
+          4
+        ]
+      ],
+      "_vgpr_occupancy_basis": "compiler-derived (LLVM `; Occupancy:` sweep, ROCm 7.2.1/LLVM 22; reproduce per scripts/amd_occupancy.py docstring). gfx1250 is its OWN geometry -- neither the CDNA 512/8 nor the RDNA 1536/24 file applies.",
+      "direct_to_lds_bit_widths": [
+        128,
+        64,
+        32
+      ],
+      "isa_types": [
+        "WMMA",
+        "TDM"
+      ],
+      "scaled_mfma": true,
+      "_note": "MI450; wave32 in-kernel (get_warp_size may return 64 - hardcode 32); microarch constants TBD-probe on target"
+    },
+    "gfx1201": {
+      "family": "RDNA4",
+      "wave_size": 32,
+      "lds_per_wgp_kib": 128,
+      "lds_per_wg_kib": 64,
+      "lds_banks": 32,
+      "lds_cacheline_bytes": 256,
+      "vgpr_per_wave": 256,
+      "vgpr_file_per_simd": 1536,
+      "vgpr_alloc_granule": 24,
+      "max_waves_per_simd": 16,
+      "vgpr_wave_steps": [
+        [
+          96,
+          16
+        ],
+        [
+          120,
+          12
+        ],
+        [
+          144,
+          10
+        ],
+        [
+          168,
+          9
+        ],
+        [
+          192,
+          8
+        ],
+        [
+          216,
+          7
+        ],
+        [
+          240,
+          6
+        ],
+        [
+          256,
+          5
+        ]
+      ],
+      "_vgpr_occupancy_basis": "compiler-derived (LLVM `; Occupancy:` sweep, ROCm 7.2.1/LLVM 22; reproduce per scripts/amd_occupancy.py docstring). vgpr_per_wave (256) is the per-WAVE addressable cap, NOT the per-SIMD file -- dividing 256 by a kernel's VGPR count (the old calc_perf/hw_budget bug) under-reports RDNA occupancy 2-3x. Same steps measured on gfx1100/gfx1151/gfx1200/gfx1201.",
+      "dynamic_vgpr": false,
+      "gws": false,
+      "mfma_valu_coexec": false,
+      "_dynamic_vgpr_note": "S_ALLOC_VGPR is rejected as 'invalid instruction' by ROCm 7.1 / LLVM 20 for gfx1200 AND gfx1201, and no +dynamic-vgpr subtarget feature exists -- dynamic VGPR is a gfx1250 (CDNA5) feature. Plan RDNA4 occupancy on the static <=256 VGPR/wave model only.",
+      "_mfma_valu_coexec_note": "RDNA WMMA canNOT co-issue with VALU (MI-calc 'Can co-execute with VALU: False' on rdna3 AND rdna4). Do not port a CDNA 'interleave VALU into the MFMA shadow' plan here.",
+      "matrix_layout_family": "AMDWMMALayout(v8-operand)",
+      "isa_types": [
+        "WMMA"
+      ],
+      "scaled_mfma": false,
+      "_note": "R9700/RX9070XT; occupancy-first, no mfma_scaled/blockscale, no TDM; do not apply CDNA combined-512-VGPR formula (rdna-fork.md)"
+    },
+    "gfx1200": {
+      "family": "RDNA4",
+      "wave_size": 32,
+      "lds_per_wgp_kib": 128,
+      "lds_per_wg_kib": 64,
+      "vgpr_per_wave": 256,
+      "vgpr_file_per_simd": 1536,
+      "vgpr_alloc_granule": 24,
+      "max_waves_per_simd": 16,
+      "vgpr_wave_steps": [
+        [
+          96,
+          16
+        ],
+        [
+          120,
+          12
+        ],
+        [
+          144,
+          10
+        ],
+        [
+          168,
+          9
+        ],
+        [
+          192,
+          8
+        ],
+        [
+          216,
+          7
+        ],
+        [
+          240,
+          6
+        ],
+        [
+          256,
+          5
+        ]
+      ],
+      "_vgpr_occupancy_basis": "compiler-derived (same sweep as gfx1201, measured on gfx1200 itself -- not extrapolated).",
+      "dynamic_vgpr": false,
+      "mfma_valu_coexec": false,
+      "isa_types": [
+        "WMMA"
+      ],
+      "scaled_mfma": false,
+      "_note": "RX9070XT/RX9070. Same RDNA4 microarch as gfx1201; only the occupancy geometry is recorded here, the rest of the RDNA4 facts live under gfx1201."
+    },
+    "gfx1151": {
+      "family": "RDNA3.5",
+      "wave_size": 32,
+      "lds_per_wg_kib": 64,
+      "vgpr_per_wave": 256,
+      "vgpr_file_per_simd": 1536,
+      "vgpr_alloc_granule": 24,
+      "max_waves_per_simd": 16,
+      "vgpr_wave_steps": [
+        [
+          96,
+          16
+        ],
+        [
+          120,
+          12
+        ],
+        [
+          144,
+          10
+        ],
+        [
+          168,
+          9
+        ],
+        [
+          192,
+          8
+        ],
+        [
+          216,
+          7
+        ],
+        [
+          240,
+          6
+        ],
+        [
+          256,
+          5
+        ]
+      ],
+      "_vgpr_occupancy_basis": "compiler-derived (same sweep, measured on gfx1151 itself).",
+      "isa_types": [
+        "WMMA"
+      ],
+      "scaled_mfma": false,
+      "_note": "Strix Halo APU (AI MAX 395/495); WMMA _w32, LPDDR-attached -- treat the memory roofline as APU-shared, not discrete-GPU HBM"
+    },
+    "gfx1100": {
+      "family": "RDNA3",
+      "wave_size": 32,
+      "lds_per_wg_kib": 64,
+      "vgpr_per_wave": 256,
+      "vgpr_file_per_simd": 1536,
+      "vgpr_alloc_granule": 24,
+      "max_waves_per_simd": 16,
+      "vgpr_wave_steps": [
+        [
+          96,
+          16
+        ],
+        [
+          120,
+          12
+        ],
+        [
+          144,
+          10
+        ],
+        [
+          168,
+          9
+        ],
+        [
+          192,
+          8
+        ],
+        [
+          216,
+          7
+        ],
+        [
+          240,
+          6
+        ],
+        [
+          256,
+          5
+        ]
+      ],
+      "_vgpr_occupancy_basis": "compiler-derived (same sweep, measured on gfx1100 itself).",
+      "isa_types": [
+        "WMMA"
+      ],
+      "scaled_mfma": false,
+      "_note": "RDNA3 discrete; WMMA _w32 planning default"
+    }
+  }
+}

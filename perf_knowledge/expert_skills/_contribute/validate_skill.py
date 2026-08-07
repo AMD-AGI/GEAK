@@ -53,8 +53,13 @@ def static_check(fm, body):
     op = (fm.get("match") or {}).get("operator")
     if os.path.exists(CAP_INDEX):
         ops = {c["operator"] for c in (yaml.safe_load(open(CAP_INDEX)).get("candidates") or [])}
-        if op not in ops:
-            errs.append(f"match.operator '{op}' not in capability_index.yaml")
+        # `*` is the wildcard the schema already uses for arch_class: a skill whose applicability
+        # is decided by the STATE of the source rather than by what the kernel computes cannot name
+        # one operator, and forcing it to pick one makes the selector decline the matches it should
+        # take. A list is accepted for the middle ground.
+        for one in ([op] if isinstance(op, str) else list(op or [])):
+            if one != "*" and one not in ops:
+                errs.append(f"match.operator '{one}' not in capability_index.yaml")
     exp = fm.get("expects") or {}
     if fm.get("scope") == "kernel" and "isolated_speedup_min" not in exp:
         errs.append("kernel scope needs expects.isolated_speedup_min")
@@ -87,11 +92,27 @@ def emit_plan(skill_id, fm, args):
         print("# DO-NO-HARM (control model that does NOT match the selector must stay within noise band):")
         print(f"  model_path=<CONTROL_MODEL> use_expert_skills=true  # expect |e2e delta| < noise band")
     else:
+        match = fm.get("match") or {}
+        dst = match.get("to_backend") or "triton"
+        srcs = match.get("from_backend") or []
+        srcs = [srcs] if isinstance(srcs, str) else list(srcs)
         print("# EFFICACY (kernel_workflow, isolated A/B vs the immutable oracle):")
         print(f"Workflow scriptPath={GEAK}/kernel_workflow/kernel_workflow.js args:")
         print(f"  kernel_path=<OP_TASK_DIR> workflow_dir={GEAK}/kernel_workflow use_expert_skills=true")
-        print(f"  target_language={(fm.get('match') or {}).get('to_backend') or 'triton'}")
+        # kernel_workflow reads target_language ONLY on the mode=author branch, so a port has to ask for
+        # that branch or the run silently measures the untouched source language instead of the migration.
+        if [s for s in srcs if s != dst]:
+            print(f"  mode=author target_language={dst}"
+                  f"   # port from {'|'.join(s for s in srcs if s != dst)};"
+                  " target_language is inert without mode=author")
+        else:
+            print(f"  target_language={dst}")
         print(f"  task='reproduce expert_skill:{skill_id}; beat oracle, hold parity'")
+        if dst in srcs:
+            print(f"# The selector also matches an existing {dst} source ({dst}->{dst}); measure that entry")
+            print("# state separately in the default mode=optimize (no mode/target_language args).")
+        print("# DO-NO-HARM (control op that does NOT match the selector must stay within noise band):")
+        print("  kernel_path=<CONTROL_OP_TASK_DIR> use_expert_skills=true  # expect no regression")
     print("\nThen stamp the result with:  validate_skill.py", skill_id,
           "--record --artifact <eval_dir> ...")
 

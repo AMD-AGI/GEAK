@@ -67,6 +67,13 @@ of warp-specialization as the route to peak.
 - [programming_model.md](programming_model.md) — the abstraction: warp/wave-level control, manual
   pipelining, MFMA intrinsics, MXFP4 scaled-MFMA, how it differs from Triton autoscheduling.
 - [gemm_cookbook.md](gemm_cookbook.md) — the near-peak GEMM recipe (v0→v9) + the measured ceilings.
+- [`expert_skills/skills/gluon_authoring`](../../expert_skills/skills/gluon_authoring/skill.md) — one level
+  down from this page: the per-construct **API reference** (layouts, MFMA, memory/async-copy, shared
+  allocation, barriers, launch/AOT, runnable gfx950 skeletons), a **do-not-write list** of things that
+  compile and then cost you, and the two mechanics for **migrating an existing Triton kernel** — recovering
+  the compiler-inferred layouts out of its `.ttgir` into explicit Gluon, and re-injecting plain's software
+  pipeliner into `gluon_to_ttgir` so the transcribed kernel does not lose plain's cross-iteration overlap.
+  Advisory, and only injected when `use_expert_skills` is on.
 
 ## Sources
 - From Naive to Near-Peak: GEMM Kernels with Gluon (MI350/MI355, ROCm 7.0): https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html

@@ -41,6 +41,10 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
 - `KERNEL_KNOWLEDGE_DIR/operators/<KK_OPERATOR>/backends/<KK_LANGUAGE>.md` — the card for your exact
   language (skeleton + knobs + pitfalls), plus `operators/<KK_OPERATOR>/{tuning,numerics,fusion}.md`.
 - `KERNEL_KNOWLEDGE_DIR/index/recipes.md` — durable how-to / knob dictionaries.
+- `KERNEL_KNOWLEDGE_DIR/languages/<dir>/` — the programming model for `KK_LANGUAGE`, when that language
+  is one you cannot write from memory (`flydsl`, `tilelang`, `gluon`). Read it BEFORE editing, or you
+  will spend the round on syntax. Dir map: flydsl/tilelang/gluon→same name, triton→`triton_amd`,
+  hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`.
 
 **Contract (do not violate — this guarantees the base can only help, never hurt):**
 - *Facts/how-to, not decisions.* The base may be stale/incomplete/wrong. It only *adds candidates and

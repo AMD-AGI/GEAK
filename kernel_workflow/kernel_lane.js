@@ -1,7 +1,7 @@
 export const meta = {
   name: 'kernel-lane',
   description: 'SINGLE-LANGUAGE kernel optimization worker (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes ONE kernel in ONE language (mode=optimize) or authors a fresh seed then optimizes it (mode=author). This is the worker invoked per lane by the kernel-workflow dispatcher (kernel_workflow.js) and by e2e_workflow; prefer calling kernel-workflow directly unless you specifically want one unchanged lane. Target: AMD Instinct MI-series GPUs (MI300X/300A/308X/325X on CDNA3 gfx942, MI350X/355X on CDNA4 gfx950 — the target card is auto-detected on-box).',
-  whenToUse: 'Internal single-language worker. Prefer the kernel-workflow dispatcher (kernel_workflow.js) as the entry point; invoke this directly only to run one unchanged lane. Pass args.kernel_path (required), args.mode, args.target_language, args.budget, args.gpu_ids, args.task.',
+  whenToUse: 'Internal single-language worker. Prefer the kernel-workflow dispatcher (kernel_workflow.js) as the entry point; invoke this directly only to run one unchanged lane. Pass args.kernel_path (required), args.mode, args.target_language, args.budget, args.gpu_ids, args.gpu_mode, args.task.',
   phases: [
     { title: 'Setup', detail: 'director builds the isolated eval dir + canonical workspace' },
     { title: 'Author', detail: 'author_engineer writes a fresh optimize-loop seed (only when mode=author); speedup denominator stays the frozen online kernel' },
@@ -45,6 +45,30 @@ const MIN_IMPROVE = (() => {
   const v = parseFloat(A.min_improve != null ? A.min_improve : 0.02);
   return Number.isFinite(v) && v >= 0 ? v : 0.02;
 })();
+// Minimum verified speedup for a candidate to enter the round's candidate list (default 1.0 = only a
+// candidate that beats the baseline is worth looking at). A knob for the same reason MIN_IMPROVE is:
+// a transcription (plain Triton -> Gluon/TileLang/HIP) lands BELOW the comparator by construction, and
+// at 1.0 its recovery phase is invisible -- no patch saved, no verify, `winner` null every round. The
+// COMMIT gate is separate and still requires beating `cumulative` by MIN_IMPROVE, so a sub-baseline
+// candidate can be TRACKED but never BANKED.
+const CANDIDATE_FLOOR = (() => {
+  const v = parseFloat(A.candidate_floor != null ? A.candidate_floor : 1.0);
+  return Number.isFinite(v) && v > 0 ? v : 1.0;
+})();
+// Rendered into the Optimize prompt, where `${1.0}` would stringify to "1" and silently reword a
+// prompt that has always said "geomean>1.0". Keeps the default run byte-identical.
+const CANDIDATE_FLOOR_TXT = Number.isInteger(CANDIDATE_FLOOR)
+  ? CANDIDATE_FLOOR.toFixed(1) : String(CANDIDATE_FLOOR);
+// How far BELOW the best candidate ever seen a round may land and still count as "the search is
+// advancing" (default +MIN_IMPROVE = the historical test). A knob because a climb that starts under
+// the comparator advances for many rounds without ever clearing `cumulative`, and scoring those as
+// stalls ends it at MAX_NO_IMPROVE however much budget was given -- and no static counter substitutes,
+// since it would have to pre-guess how many rounds the climb takes. Negative admits a round that gives
+// ground (a layout experiment that does not pay is information, not a stall).
+const PROGRESS_DELTA = (() => {
+  const v = parseFloat(A.progress_delta != null ? A.progress_delta : MIN_IMPROVE);
+  return Number.isFinite(v) && v > -1 ? v : MIN_IMPROVE;
+})();
 // Budget cost of ONE `deep_explore` direction. The deep-explore engineer does far more than a single
 // specialist — broad rewrite authority, its own multi-iteration measure→profile→rewrite loop — so it
 // is charged more than 1 against the direction budget (default 2). It also always runs in a DEDICATED
@@ -55,6 +79,20 @@ const DEEP_COST = (() => {
 })();
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
+// Every GPU consumer gets the WHOLE pool rather than a pinned lane. gpu_lock.sh
+// resolves a comma spec by flocking whichever lane is free AND idle at acquire
+// time, so placement follows what work actually costs instead of an index fixed
+// before the cost is known. Measured task costs span 23x on campaign20, and a
+// pinned round ends with the slowest LANE, not the slowest task -- at 4-way that
+// idles ~43% of lane time. Pinning is also fragile on a shared box: GPU_LIST[0]
+// has no fallback when lane 0 has a foreign tenant.
+// gpu_mode='pin' restores the pre-scheduler behavior (direction i pinned to GPU_LIST[i % n]).
+// It exists ONLY so the scheduler can be A/B'd as a single-variable change against the arm it
+// replaced; leaving it out would make the "before" arm unreachable and force the comparison to be
+// made across two different scripts, where any other drift would be indistinguishable from the
+// scheduler's effect. Default 'pool'.
+const GPU_MODE = String(A.gpu_mode || 'pool') === 'pin' ? 'pin' : 'pool';
+const GPU_POOL = GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(',');
 const TASK = A.task || '';
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
@@ -62,8 +100,7 @@ const KERNEL_NAME_HINT = KERNEL_PATH_ORIG.replace(/\/+$/, '').split('/').pop();
 
 // --- author mode: when there is NO existing source, write a fresh from-scratch SEED first, then optimize it.
 // mode=optimize (default) keeps the exact original behavior (backward compatible). mode=author seeds
-// the workspace from an op task dir (immutable oracle + the frozen live stack in baseline_overlay/,
-// or the freezer-era baseline_src/), the
+// the workspace from an op task dir (immutable oracle + frozen online kernel in baseline_src/), the
 // author_engineer writes a passing seed, then the SAME optimize loop runs — always timing against the
 // frozen online kernel, never against the seed's own language. KERNEL_KNOWLEDGE_DIR is the AMD authoring
 // knowledge base — REFERENCE ONLY (facts/how-to, never decisions; the author always measures regardless). Default:
@@ -194,9 +231,9 @@ const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
   kernel_name: { type: 'string' }, source_files: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
   // Frozen-baseline verdict (BOTH modes). The unittest's timing + random-value parity baseline MUST be
-  // the real online kernel — the immutable baseline_overlay/ (the live stack) / baseline_src/ OR an
-  // importable meta.baseline_callable — never kernel_src/ (the candidate's own scaffold). The director
-  // sets baseline_frozen=true after copying it in; the script aborts the run if neither holds.
+  // the real online kernel — the immutable baseline_src/ dir OR an importable meta.baseline_callable —
+  // never kernel_src/ (the candidate's own scaffold). The director sets baseline_frozen=true after it
+  // copies baseline_src/ + confirms meta.baseline_callable; the script aborts the run if neither holds.
   baseline_frozen: { type: 'boolean' }, baseline_callable: { type: 'string' },
   // DEEP-MODE resume only: populated by the director ONLY when STATE_DIR was provided AND a prior best
   // exists there. Lets a continued wave restore its cumulative speedup + insight/ledger history so it
@@ -381,9 +418,10 @@ async function agentT(p, o) {
   return null;
 }
 
-// Expert-skills injection. PURELY ADDITIVE: '' when OFF or the role is not a skills consumer, so
-// roleAgent is byte-identical to the pre-feature build in those cases. When ON, appends an advisory
-// pointer telling the agent to Read the fragment + query the skills index (scripts have no fs access).
+// Expert-skills injection. PURELY ADDITIVE: '' when OFF or the role is not a skills consumer, so both
+// call sites (roleAgent, and the inline Optimize prompt) are byte-identical to the pre-feature build in
+// those cases. When ON, appends an advisory pointer telling the agent to Read the fragment + query the
+// skills index (scripts have no fs access).
 function expertSkillsBlock(role) {
   if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role) || !EXPERT_SKILLS_DIR) return '';
   return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
@@ -428,16 +466,16 @@ log(`Setup done. EVAL_DIR=${EVAL_DIR}`);
 // ---------------------------------------------------------------------------
 // Enforce a FROZEN REAL-ONLINE BASELINE in BOTH modes (author AND same-language
 // optimize). The immutable unittest times + parity-checks the candidate against
-// baseline_overlay/ / baseline_src/ / meta.baseline_callable (the live online stack); if neither
+// baseline_src/ / meta.baseline_callable (the live online kernel); if neither
 // exists it would silently fall back to timing kernel_src/ against itself — the
 // "optimized-HIP vs naive-HIP = fake 15.7×" bug this harness exists to prevent.
 // The script has no FS access, so we trust the director's structured verdict
-// (it copied the frozen baseline in + confirmed the callable). Missing -> abort/re-extract.
+// (it copied baseline_src/ + confirmed the callable). Missing -> abort/re-extract.
 // ---------------------------------------------------------------------------
 const hasBaseline = setup.baseline_frozen === true ||
   (typeof setup.baseline_callable === 'string' && setup.baseline_callable.trim().length > 0);
 if (!hasBaseline) {
-  const reason = `no frozen baseline (baseline_overlay/ or baseline_src/ or meta.baseline_callable) for ${KERNEL_NAME} — ` +
+  const reason = `no frozen baseline (baseline_src/ or meta.baseline_callable) for ${KERNEL_NAME} — ` +
     `re-extract; refusing to time the candidate against kernel_src/ (fake-win risk)`;
   log(`Setup ABORT: ${reason}`);
   return {
@@ -452,9 +490,8 @@ if (!hasBaseline) {
 // optimize loop's CODE SEED. On success, HEAD of CANONICAL becomes that seed
 // (what the optimize loop diffs its edits against) and the rest of the pipeline
 // (Analyze/Benchmark/Profile/optimize loop) runs UNCHANGED on it. The SPEEDUP
-// denominator is NEVER the seed — it is the frozen live serving stack reached
-// through baseline_overlay/ on PYTHONPATH (or baseline_src/ / meta.baseline_callable
-// on a freezer-built task dir), regardless of TARGET_LANGUAGE.
+// denominator is NEVER the seed — it is the frozen REAL ONLINE kernel in
+// baseline_src/ (meta.baseline_callable), regardless of TARGET_LANGUAGE.
 // On failure (no correct seed), abort early with a structured result so the
 // e2e caller drops this language.
 // ===========================================================================
@@ -463,7 +500,7 @@ if (MODE === 'author') {
   const authored = await agentT(
     roleAgent('author_engineer', 'author', 'Write the simplest correct baseline in the target language.', {
       TARGET_LANGUAGE, OP_SPEC, WORKSPACE: CANONICAL, TASK_DIR: KERNEL_PATH_ORIG,
-      GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, KERNEL_KNOWLEDGE_DIR,
+      GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, KERNEL_KNOWLEDGE_DIR,
     }),
     { phase: 'Author', label: `author:${TARGET_LANGUAGE}`, schema: AUTHOR_SCHEMA });
   if (!authored || !authored.authored || !says(authored.correctness, 'pass')) {
@@ -504,7 +541,7 @@ const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs
 phase('Benchmark');
 const bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
-    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0],
+    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     ANALYSIS: analysis,
     ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
     ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
@@ -522,7 +559,7 @@ log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, 
 phase('Profile');
 let profileSummary = await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
-    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: 0,
+    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
     COMMANDMENT,
     ...RESUME_INPUT,
   }),
@@ -535,6 +572,7 @@ log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (d
 let dispatched = 0;          // counts ONLY optimization-direction engineers (the budget)
 let round = 0;
 let cumulative = 1.0;        // best verified geomean speedup vs the TRUE baseline
+let bestSeen = 0;            // best verified geomean of any candidate, committed or not
 let noImprove = 0;
 let bestPerCase = BASELINE_PER_CASE;
 let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source}
@@ -578,7 +616,7 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     ...d,
     idx: i,
     id: d.id || `r${round}_d${i}`,
-    gpu_id: GPU_LIST[i % GPU_LIST.length],
+    gpu_id: GPU_MODE === 'pin' ? GPU_LIST[i % GPU_LIST.length] : GPU_POOL,
     out_dir: `${EVAL_DIR}/round_${round}/engineer_${i}`,
   }));
   // deep_explore is a DEDICATED-ROUND, heavyweight mandate: if the plan includes one, run ONLY it this
@@ -622,10 +660,7 @@ mkdir -p ${d.out_dir}/workspace
 ${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
 (facts/how-to only; measure everything; never go below baseline).
-Save best_patch.diff via \`cd <KERNEL_PATH> && git diff -- "\$([ -d kernel_src ] && echo kernel_src || echo .)" > ${d.out_dir}/best_patch.diff\`
-when geomean>1.0. The pathspec is what keeps the diff to the OPTIMIZATION WORKSPACE: on an extracted
-task dir only kernel_src/ is yours, and a diff that also carried unittest.py/meta.json/baseline_* would
-propagate a tampered harness into the winner merge.
+Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patch.diff\` when geomean>${CANDIDATE_FLOOR_TXT}.
 
 ## Inputs
 ${cfg({
@@ -644,7 +679,9 @@ ${cfg({
         ...KB_INPUTS,
       })}
 
-Return ONLY the worker_result.json structure as StructuredOutput.`,
+Return ONLY the worker_result.json structure as StructuredOutput.` +
+      // Built inline, not via roleAgent(), so the injection has to be appended here too.
+      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
     ).then((eng) => ({ d, eng }));
     },
@@ -653,18 +690,18 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
       const { d, eng } = prev;
       const patch = `${d.out_dir}/best_patch.diff`;
       // Harvest is MEASUREMENT-anchored, not return-value-anchored. An engineer only writes
-      // best_patch.diff when it beat baseline (the Optimize prompt: "Save best_patch.diff ... when
-      // geomean>1.0"), so a lost/failed StructuredOutput does NOT imply there is no winning patch: an
-      // engineer that died, timed out, or mis-returned can still have left an applies-clean >1.0x diff
+      // best_patch.diff when it beat the floor (the Optimize prompt: "Save best_patch.diff ... when
+      // geomean>CANDIDATE_FLOOR"), so a lost/failed StructuredOutput does NOT imply there is no winning patch: an
+      // engineer that died, timed out, or mis-returned can still have left an applies-clean above-floor diff
       // on disk (observed in a bake-off: a 1.56x Triton patch was silently dropped because its
       // worker_result.json/StructuredOutput never came back). The only return we can TRUST to suppress
-      // a patch is a clean below-baseline one — the engineer ran, measured, honestly reported <=1.0, and
-      // therefore wrote no patch. In every other case (null/failed return, OR a claimed >1.0) a patch
+      // a patch is a clean below-floor one — the engineer ran, measured, honestly reported <=the floor, and
+      // therefore wrote no patch. In every other case (null/failed return, OR a claimed above-floor one) a patch
       // MIGHT be on disk, so we hand the path to verify and let the oracle be the source of truth. We
       // cannot stat the file from the workflow sandbox, so the "is there actually a patch" decision is
       // delegated to verify, which returns apply_failed on an absent/empty patch — dropped by the
       // `verified` filter below, i.e. the same outcome as skipping, but with no false loss.
-      const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > 1.0);
+      const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR);
       if (trustworthyBelowBaseline) {
         return { d, eng, ver: null };
       }
@@ -685,7 +722,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
 
   const clean = results.filter(Boolean);
   const verified = clean.filter(r => r.ver && says(r.ver.status, 'verified') &&
-    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > 1.0);
+    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR);
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
   // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
@@ -705,7 +742,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
     integrate = await agentT(
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
         CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
-        GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+        GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
@@ -731,6 +768,11 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
   candidates.sort((a, b) => b.geomean - a.geomean);
   const winner = candidates[0] || null;
   const improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  // Separate question from `improved`: is the SEARCH advancing, not did it beat the incumbent. The
+  // `bestSeen > 0` guard keeps round 1 deciding on `improved` alone; from then on bestSeen >= cumulative
+  // at the default floor, so at the default PROGRESS_DELTA this implies `improved` and changes nothing.
+  // A round with NO candidate is never progress, so a dead round still counts against MAX_NO_IMPROVE.
+  const madeProgress = !!(winner && bestSeen > 0 && winner.geomean > bestSeen * (1 + PROGRESS_DELTA));
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
@@ -758,18 +800,18 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     cumulative = winner.geomean;
     bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
     finalWinner = winner;
-    noImprove = 0;
 
     // --- (f) Re-profile the new best ------------------------------------
     profileSummary = await agentT(
       roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
-        WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: round,
+        WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
         COMMANDMENT, PREVIOUS_METRICS: profileSummary,
       }),
       { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
-  } else {
-    noImprove++;
   }
+
+  if (winner && winner.geomean > bestSeen) bestSeen = winner.geomean;
+  if (madeProgress || improved) { noImprove = 0; } else { noImprove++; }
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
   const mem = await agentT(
@@ -822,7 +864,7 @@ const report = await agentT(
 phase('Validate');
 const validation = await agentT(
   roleAgent('director', 'validate', 'Independently validate the final patch vs the TRUE baseline.', {
-    KERNEL_PATH_ORIG, EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0],
+    KERNEL_PATH_ORIG, EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     APPLY_TO_ORIGINAL, COMMANDMENT,
     FINAL_PATCH: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
     TECH_LEAD_REPORTED_GEOMEAN: report ? report.final_speedup_geomean : cumulative,
