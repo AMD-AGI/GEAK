@@ -59,6 +59,14 @@ async function testSchemaUnit() {
   ok(!validate({ items: [] }, sch).ok, 'validate missing required');
   ok(!validate({ id: 5, items: [] }, sch).ok, 'validate wrong type');
   ok(!validate({ id: 'a', items: [{ y: 1 }] }, sch).ok, 'validate nested required');
+
+  // enum: GEAK branches on exact enum strings — out-of-enum must be rejected
+  // (parity with native's forced StructuredOutput tool).
+  const esch = { type: 'object', required: ['outcome'], properties: { outcome: { type: 'string', enum: ['have_winner', 'no_win', 'tamper'] } } };
+  ok(validate({ outcome: 'have_winner' }, esch).ok, 'validate enum accepts allowed value');
+  ok(!validate({ outcome: 'won' }, esch).ok, 'validate enum rejects out-of-enum value');
+  ok(validate('memory', { type: 'string', enum: ['memory', 'compute'] }).ok, 'validate enum at top level ok');
+  ok(!validate('gpu', { type: 'string', enum: ['memory', 'compute'] }).ok, 'validate enum at top level reject');
 }
 
 async function testParallel() {

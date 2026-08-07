@@ -117,6 +117,17 @@ function check(v, schema, path, errors) {
     }
   }
 
+  // enum: the value must be one of the allowed literals. GEAK branches on these
+  // exact strings (director specialty, e2e outcome/status), so an out-of-enum
+  // value slipping through would silently mis-route logic. Native's forced
+  // StructuredOutput tool enforces this; emulate it here (deep-equal for safety).
+  if (Array.isArray(schema.enum)) {
+    const inEnum = schema.enum.some((e) => JSON.stringify(e) === JSON.stringify(v));
+    if (!inEnum) {
+      errors.push(`${path}: value ${JSON.stringify(v)} not in enum [${schema.enum.map((e) => JSON.stringify(e)).join(', ')}]`);
+    }
+  }
+
   if ((typeOf(v) === 'object') && schema.properties) {
     if (Array.isArray(schema.required)) {
       for (const key of schema.required) {

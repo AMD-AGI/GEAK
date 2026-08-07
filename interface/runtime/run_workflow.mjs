@@ -90,6 +90,15 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 // ---------------------------------------------------------------------------
 const MAX_TOTAL_AGENTS = 1000;         // lifetime backstop, matches Workflow tool
 const MAX_NESTING = 1;                 // workflow() may nest exactly one level
+// Native Claude Code imposes NO per-agent timeout — GEAK owns the FUNCTIONAL
+// timeout via its own hang-guards (kernel agentT ~60min, e2e agentBounded ~120min).
+// To match native, the runtime's spawn timeout is only a GENEROUS BACKSTOP, kept
+// strictly longer than GEAK's largest wrapper so it NEVER preempts a legitimately-
+// long agent — it only reaps a subprocess that GEAK's Promise.race abandoned (its
+// hang-guard resolves null but the OS child keeps holding a semaphore slot). The
+// previous 60min default was SHORTER than e2e's 120min agents and silently killed
+// them (spawning duplicate exp dirs). 4h. Set to 0 to disable the backstop.
+const DEFAULT_AGENT_TIMEOUT_MS = 14400000;
 
 function nowStamp() {
   // Date.now() is intentionally avoided inside scripts; here (host side) it is fine.
@@ -106,7 +115,7 @@ function nowStamp() {
 export function createRuntime({
   backend,
   concurrency = 8,
-  agentTimeoutMs = 3600000,
+  agentTimeoutMs = DEFAULT_AGENT_TIMEOUT_MS,
   schemaRetries = 2,
   log = (msg) => process.stderr.write(`[${nowStamp()}] ${msg}\n`),
 } = {}) {
@@ -283,9 +292,14 @@ async function main() {
     ? parseInt(opts.concurrency, 10)
     : (parseInt(process.env.GEAK_CONCURRENCY || '', 10) || defaultConcurrency(cpus().length));
 
-  const agentTimeoutMs = opts['agent-timeout-ms'] && opts['agent-timeout-ms'] !== true
-    ? parseInt(opts['agent-timeout-ms'], 10)
-    : (parseInt(process.env.GEAK_AGENT_TIMEOUT_MS || '', 10) || 3600000);
+  // Honor an explicit 0 (disable backstop) from CLI or env: use Number.isFinite,
+  // NOT `|| DEFAULT`, since 0 is falsy and would otherwise be silently overridden.
+  const cliTimeout = (opts['agent-timeout-ms'] && opts['agent-timeout-ms'] !== true)
+    ? parseInt(opts['agent-timeout-ms'], 10) : NaN;
+  const envTimeout = parseInt(process.env.GEAK_AGENT_TIMEOUT_MS || '', 10);
+  const agentTimeoutMs = Number.isFinite(cliTimeout) ? cliTimeout
+    : Number.isFinite(envTimeout) ? envTimeout
+    : DEFAULT_AGENT_TIMEOUT_MS;
 
   // schema-extraction retries WITHIN a single agent() call (mirrors the harness
   // "model retries on mismatch"); the script's agentT adds an OUTER retry layer.
