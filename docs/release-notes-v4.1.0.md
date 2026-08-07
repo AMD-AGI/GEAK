@@ -26,9 +26,8 @@
 
 ### On-demand GPU scheduling in kernel_workflow
 
-- Replaces index-pinning with a shared pool: every GPU consumer receives the whole allocation and `gpu_lock.sh` takes whichever GPU is unlocked and idle at acquire time, so placement follows what work actually costs instead of an index fixed before the cost is known. A round ends with the slowest task rather than the slowest GPU.
-- The same kernels reach the same speedups on fewer GPUs, and finish sooner when engineers are oversubscribed to cards. Idleness is read from the kernel driver rather than the tool's own locks, so a foreign tenant on a shared box is detected and stepped around instead of silently corrupting timings; pinned runs now make the same check and fail loudly rather than measuring on a contaminated card.
-- Pool mode is the default; `gpu_mode=pin` restores index pinning and `GEAK_GPU_REQUIRE_IDLE=0` restores the previous behavior for deliberately co-tenanted runs. Future work: disjoint serving and optimization GPU pools, and a clearer failure when every GPU in a pool is held by a foreign tenant.
+- Replaces index-pinning with a shared pool: `gpu_lock.sh` takes whichever GPU is unlocked and idle at acquire time, so a round ends with the slowest task rather than the slowest GPU. The same kernels reach the same speedups on fewer GPUs, and finish sooner when engineers are oversubscribed to cards.
+- Idleness is read from the kernel driver rather than the tool's own locks, so a foreign tenant on a shared box is stepped around instead of silently corrupting timings; pinned runs now make the same check and fail loudly. Pool mode is the default — `gpu_mode=pin` restores index pinning, and `GEAK_GPU_REQUIRE_IDLE=0` the previous behavior for deliberately co-tenanted runs.
 
 ---
 
