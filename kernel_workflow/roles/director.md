@@ -205,7 +205,16 @@ baseline latencies recorded at benchmark setup).
    git -c user.email=team@workflow -c user.name=team add -A
    git -c user.email=team@workflow -c user.name=team commit -q -m "validation_baseline"
    git apply "$EVAL_DIR/final_patch.diff"
-   # (No artifact cleanup needed — the tar copy excluded build/__pycache__/*.so; git apply adds only source.)
+   # ENFORCE the immutable measurement contract (COMMANDMENT: "never edit the golden copy or the
+   # harness"): only the declared source_file_path may change. Restore every OTHER tracked file the
+   # patch touched (harness_run.py / task_runner.py / _runtime.py / test_cases.json / source_golden/…)
+   # back to the pristine baseline, so the measured speedup reflects ONLY the kernel-source change and
+   # an agent cannot inflate results by tuning launch params inside the harness. No-op for clean,
+   # source-only patches — only reverts out-of-contract edits.
+   SRC=$(awk '/^source_file_path:/{f=1;next} /^[^[:space:]-]/{f=0} f&&/-/{sub(/.*-[[:space:]]*/,"");print}' config.yaml)
+   for f in $(git diff --name-only); do
+     printf '%s\n' "$SRC" | grep -qxF "$f" || git checkout -- "$f"
+   done
    ```
 3. Run CORRECTNESS (from COMMANDMENT, with cwd = validation_workspace). If it fails → status
    `flagged`, record the failure, do NOT report a speedup as accepted.
