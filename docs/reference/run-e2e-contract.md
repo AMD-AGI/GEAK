@@ -101,6 +101,28 @@ The mapping is owned by `run_e2e.py:map_args`.
 | — | `config_tune="false"` | caller already did config search; not repeated |
 | — | `apply_to_original="true"` | `final/final_launch.sh` and overlay are emitted for sweep reuse |
 
+### Workflow-arg overrides from the environment
+
+Owned by `run_e2e.py:load_workflow_overrides`. GEAK's own tuning knobs
+(`head_budget`, `head_threshold_pct`, `budget`, `milestone_min_pct`, `deep_mode`,
+the accuracy gate, …) are what the person running the experiment varies per
+model, so they are read from the environment instead of widening this schema:
+
+* `GEAK_ARG_<ARG>` — one variable per knob, mapped to the lower-cased arg name
+  (`GEAK_ARG_HEAD_BUDGET=6` → `head_budget: 6`). Values are coerced by shape:
+  int, float, `true`/`false`, else string. Any non-protected workflow arg works;
+  there is no per-knob whitelist to keep in sync. Boolean knobs need the words —
+  the workflow tests them as `String(x) === 'true'`, so `=1` reads as false.
+* `GEAK_EXTRA_WORKFLOW_ARGS` — one JSON object for setting several at once.
+
+Per-knob variables are applied after, and therefore win over, the JSON object.
+Overrides are applied after the table above and are visible in `--dry-run`'s
+`mapped_args`. Keys the handoff owns are dropped with a warning: `model_path`,
+`workflow_dir`, `exp_root`, `eval_dir`, `state`, `phases`, `time_budget_s`,
+`tracelens`, `backend`, `tp`, `gpu_ids`, `isl`, `osl`, `conc`,
+`initial_extra_server_args`, `initial_extra_env`. Malformed configuration
+degrades to stock settings rather than failing the run.
+
 ### TraceLens prior autodiscovery
 
 Owned by `run_e2e.py:resolve_tracelens_report`. An upstream orchestrator might have

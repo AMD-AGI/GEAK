@@ -192,6 +192,13 @@ class _RunE2ECase(unittest.TestCase):
         self._sigterm = signal.getsignal(signal.SIGTERM)
         self.tmp = Path(tempfile.mkdtemp(prefix="run_e2e_dispatch_"))
         self.addCleanup(self._restore)
+        # The workflow-arg override channel reads the ambient environment, so a
+        # var exported in the developer's shell would otherwise leak into every
+        # mapped_args assertion. Cleared here (and restored by _restore) so the
+        # suite is deterministic wherever it runs.
+        os.environ.pop("GEAK_EXTRA_WORKFLOW_ARGS", None)
+        for var in [v for v in os.environ if v.startswith(rx._OVERRIDE_PREFIX)]:
+            os.environ.pop(var)
 
     def _restore(self):
         for name, prev in reversed(self._attrs):
@@ -323,6 +330,13 @@ class TestMapArgs(_RunE2ECase):
         ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
         self.assertNotIn("tracelens", ps)
 
+    def test_no_override_env_leaves_the_mapping_untouched(self):
+        """Nothing exported => byte-identical to the pre-feature mapping."""
+        self.assertEqual(rx.load_workflow_overrides(), {})
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
+        self.assertNotIn("head_budget", ps)
+        self.assertEqual(ps["config_tune"], "false")
+
     def test_experiment_root_strips_only_a_geak_leaf(self):
         self.assertEqual(
             rx._experiment_root_from_exp_root("/a/b/geak/"), "/a/b"
@@ -335,6 +349,98 @@ class TestMapArgs(_RunE2ECase):
         self.assertEqual(report["search_root"], "")
         self.assertIsNone(report["analysis_md"])
         self.assertIsNone(report["trace_file"])
+
+    # ----------------------------------------------------------------- #
+    # workflow-arg overrides from the environment (GEAK's tuning surface)
+    # ----------------------------------------------------------------- #
+    def test_per_knob_env_vars_reach_the_workflow_args(self):
+        """The everyday path: export one var per knob before a run."""
+        os.environ["GEAK_ARG_HEAD_BUDGET"] = "6"
+        os.environ["GEAK_ARG_HEAD_THRESHOLD_PCT"] = "2"
+        os.environ["GEAK_ARG_DEEP_MODE"] = "true"
+        os.environ["GEAK_ARG_ANALYSIS_SKILL"] = "roofline"
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
+        self.assertEqual(ps["head_budget"], 6)
+        self.assertEqual(ps["head_threshold_pct"], 2)
+        self.assertIs(ps["deep_mode"], True)
+        self.assertEqual(ps["analysis_skill"], "roofline")
+
+    def test_env_values_are_coerced_by_shape(self):
+        self.assertEqual(rx._coerce_env_value("6"), 6)
+        self.assertEqual(rx._coerce_env_value(" 2.5 "), 2.5)
+        self.assertIs(rx._coerce_env_value("TRUE"), True)
+        self.assertIs(rx._coerce_env_value("false"), False)
+        self.assertEqual(rx._coerce_env_value("triton:optimize,hip:author"),
+                         "triton:optimize,hip:author")
+        # NaN/Infinity have no JSON representation the JS side can read back.
+        self.assertEqual(rx._coerce_env_value("nan"), "nan")
+        self.assertEqual(rx._coerce_env_value("Infinity"), "Infinity")
+
+    def test_bulk_json_env_sets_a_whole_set_at_once(self):
+        os.environ["GEAK_EXTRA_WORKFLOW_ARGS"] = json.dumps(
+            {"head_budget": 6, "budget": 10, "milestone_min_pct": 2}
+        )
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
+        self.assertEqual(ps["head_budget"], 6)
+        self.assertEqual(ps["budget"], 10)
+        self.assertEqual(ps["milestone_min_pct"], 2)
+
+    def test_per_knob_var_wins_over_the_bulk_json(self):
+        """The bulk form is the standing set; a single var is the ad-hoc tweak
+        layered on top of it, so it must win."""
+        os.environ["GEAK_EXTRA_WORKFLOW_ARGS"] = json.dumps(
+            {"head_budget": 3, "budget": 10}
+        )
+        os.environ["GEAK_ARG_HEAD_BUDGET"] = "8"
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
+        self.assertEqual(ps["head_budget"], 8)
+        self.assertEqual(ps["budget"], 10)   # untouched by the per-knob var
+
+    def test_unrelated_geak_env_vars_are_not_mistaken_for_args(self):
+        """GEAK_* is a crowded namespace (GEAK_EVAL_DIR, GEAK_CLAUDE_BIN, ...);
+        only the GEAK_ARG_ prefix may become a workflow arg."""
+        os.environ["GEAK_CLAUDE_BIN"] = "/usr/bin/claude"
+        os.environ["GEAK_DONE_GRACE_S"] = "60"
+        os.environ["GEAK_ARG_"] = "6"          # empty knob name
+        overrides = rx.load_workflow_overrides()
+        self.assertEqual(overrides, {})
+
+    def test_protected_keys_are_never_overridable(self):
+        """eval_dir/state drive resume + disk recovery; the workload quartet IS
+        the measurement contract. An override of either must be dropped, not
+        honoured, or the run's number stops being comparable."""
+        pinned = str(self.tmp / "e2e_pinned")
+        os.environ["GEAK_EXTRA_WORKFLOW_ARGS"] = json.dumps({
+            "eval_dir": "/tmp/hijacked", "model_path": "/models/other",
+            "conc": 999, "tp": 1, "backend": "vllm",
+            "initial_extra_server_args": "--wrong",
+            "head_budget": 6,
+        })
+        os.environ["GEAK_ARG_GPU_IDS"] = "7"      # protected via the per-knob form too
+        h = self._handoff(eval_dir=pinned, accepted_flags="--right")
+        ps = rx.map_args(h, timeout_s=600)
+        self.assertEqual(ps["eval_dir"], pinned)
+        self.assertEqual(ps["model_path"], "/models/fake-8b")
+        self.assertEqual(ps["conc"], 8)
+        self.assertEqual(ps["tp"], 4)
+        self.assertEqual(ps["gpu_ids"], "0,1,2,3")
+        self.assertEqual(ps["backend"], "sglang")
+        self.assertEqual(ps["initial_extra_server_args"], "--right")
+        self.assertEqual(ps["time_budget_s"], 600)
+        self.assertEqual(ps["head_budget"], 6)   # the unprotected knob still lands
+
+    def test_malformed_overrides_degrade_instead_of_raising(self):
+        """An operator typo must cost stock settings, not a 12h job."""
+        os.environ["GEAK_EXTRA_WORKFLOW_ARGS"] = "{not json"
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
+        self.assertNotIn("head_budget", ps)
+
+        os.environ["GEAK_EXTRA_WORKFLOW_ARGS"] = json.dumps(["head_budget", 6])
+        self.assertEqual(rx.load_workflow_overrides(), {})
+
+        # a broken bulk var must not swallow the per-knob vars beside it
+        os.environ["GEAK_ARG_BUDGET"] = "8"
+        self.assertEqual(rx.load_workflow_overrides(), {"budget": 8})
 
     def test_build_prompt_carries_script_args_and_tracelens_block(self):
         ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_prompt")))

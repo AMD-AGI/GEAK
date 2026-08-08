@@ -88,6 +88,59 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 | — | `config_tune="false"` | caller already did config search; never double-run |
 | — | `apply_to_original="true"` | so `final/final_launch.sh` + overlay are emitted for sweep reuse |
 
+### Workflow-arg overrides from the environment (owned by `run_e2e.py:load_workflow_overrides`)
+
+The handoff carries what the **caller** must decide (model, workload, accepted
+config, budget). GEAK's own tuning surface — `head_budget`, `head_threshold_pct`,
+`budget` / `min_kernel_tasks` / `milestone_min_pct`, `deep_mode` / `fast_mode`,
+`analysis_skill`, the accuracy gate — is what the person running the experiment
+varies from model to model, so it is read from the environment instead of the
+handoff (which would force a lockstep change in every orchestrator every time a
+knob moves). Applied AFTER the mapping above:
+
+| env var | shape | when |
+|---|---|---|
+| `GEAK_ARG_<ARG>` | one var per knob, e.g. `GEAK_ARG_HEAD_BUDGET=6` | the everyday form |
+| `GEAK_EXTRA_WORKFLOW_ARGS` | one JSON object | setting several knobs at once |
+
+`GEAK_ARG_<ARG>` maps to the lower-cased arg name (`GEAK_ARG_HEAD_BUDGET` →
+`head_budget`). No per-knob whitelist: any `e2e_workflow.js` arg that is not
+protected can be set this way, so a new workflow knob needs no change here.
+Values are coerced by shape — `6` → int, `2.5` → float, `true`/`false` → bool,
+anything else stays a string. **Boolean knobs need the words**: the workflow
+tests them as `String(x) === 'true'`, so `GEAK_ARG_DEEP_MODE=1` leaves deep mode
+OFF. Per-knob vars are applied after (and therefore win over)
+`GEAK_EXTRA_WORKFLOW_ARGS`, so the JSON var can hold a standing set while a
+single var tweaks one knob for one run.
+
+Per model, just export before the run:
+
+```bash
+# small dense model: standard depth, a couple more heads
+export GEAK_ARG_HEAD_BUDGET=4
+python3 interface/run_e2e.py handoff.json result.json
+
+# large MoE with a flat profile: go deep and wide
+export GEAK_ARG_DEEP_MODE=true GEAK_ARG_HEAD_BUDGET=6 GEAK_ARG_HEAD_THRESHOLD_PCT=2
+python3 interface/run_e2e.py handoff.json result.json
+```
+
+Verify a resolved set with `--dry-run` — the overrides appear in `mapped_args`,
+and applying any override also logs the resolved dict to stderr.
+
+**Protected keys** (`_OVERRIDE_PROTECTED`) are dropped with a stderr warning
+rather than honoured: `model_path`, `workflow_dir`, `exp_root`, `eval_dir`,
+`state`, `phases`, `time_budget_s`, `tracelens`, `backend`, `tp`, `gpu_ids`,
+`isl`, `osl`, `conc`, `initial_extra_server_args`, `initial_extra_env`. The
+first group is computed here and the resume + disk-recovery paths key off it;
+the second IS the measurement contract — changing it makes the resulting
+throughput incomparable to the caller's baseline, which is the one thing this
+interface exists to guarantee.
+
+Nothing here can raise: malformed JSON or a non-object payload degrades to "run
+with stock settings", so an operator typo cannot kill a 12-hour job before it
+starts.
+
 ### TraceLens prior auto-discovery (owned by `run_e2e.py:resolve_tracelens_report`)
 
 An upstream orchestrator may have already profiled the SAME baseline workload with

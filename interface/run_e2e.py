@@ -194,6 +194,107 @@ def _fold_serving_fidelity_flags(
 
 
 # ---------------------------------------------------------------------------
+# Workflow-arg overrides from the environment (handoff schema unchanged).
+# ---------------------------------------------------------------------------
+# The handoff contract carries what the CALLER must decide: which model, which
+# workload, which accepted config, which budget. GEAK's own tuning surface --
+# how many head kernels to bake off, which depth mode, the Amdahl thresholds --
+# is something the person running the experiment wants to vary per model, so
+# putting it in the handoff would mean a lockstep change in every orchestrator
+# every time a knob moves. It is read from the environment instead:
+#
+#   GEAK_ARG_HEAD_BUDGET=6        one knob per var: GEAK_ARG_<ARG> -> <arg>
+#   GEAK_EXTRA_WORKFLOW_ARGS={..} one JSON object for a whole set at once
+#
+# With neither set, map_args returns exactly what it returned before.
+#
+# Keys the handoff owns are NOT overridable. Two reasons: eval_dir/exp_root/
+# state/phases are computed here and the disk-recovery + resume paths key off
+# them, and the workload/serving quartet (isl/osl/conc/tp/gpu_ids/backend plus
+# the seeded baseline config) IS the measurement contract -- changing it makes
+# the resulting throughput incomparable to the caller's baseline, which is the
+# one thing this interface exists to guarantee.
+_OVERRIDE_PREFIX = "GEAK_ARG_"
+_OVERRIDE_PROTECTED = frozenset({
+    "model_path", "workflow_dir", "exp_root", "eval_dir", "state", "phases",
+    "time_budget_s", "tracelens",
+    "backend", "tp", "gpu_ids", "isl", "osl", "conc",
+    "initial_extra_server_args", "initial_extra_env",
+})
+
+
+def _warn(msg: str) -> None:
+    sys.stderr.write(f"[run_e2e] WARNING: {msg}\n")
+
+
+def _coerce_env_value(raw: str) -> Any:
+    """``"6"`` -> 6, ``"true"`` -> True, ``"2.5"`` -> 2.5, else the string.
+
+    The workflow parses its own args defensively (``parseInt`` / ``String(x) ===
+    'true'``), so a bare string would also work; coercing keeps --dry-run's
+    mapped_args readable and matches what an operator means by ``=6``.
+
+    Note the workflow's boolean test is ``String(x) === 'true'``, so a boolean
+    knob must be spelled ``true``/``false`` -- ``=1`` reaches it as the number 1
+    and reads as false. Documented in interface/run_e2e.md.
+    """
+    val = raw.strip()
+    low = val.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    try:
+        return int(val)
+    except ValueError:
+        pass
+    try:
+        num = float(val)
+    except ValueError:
+        return val
+    # "nan"/"inf" would serialize as bare NaN/Infinity tokens, which the JS side
+    # cannot parse out of the prompt. Keep them as the literal string instead.
+    return num if math.isfinite(num) else val
+
+
+def load_workflow_overrides() -> dict:
+    """Workflow-arg overrides exported by the operator (may be empty).
+
+    Later wins: ``GEAK_EXTRA_WORKFLOW_ARGS`` (a JSON object, for setting several
+    knobs at once) then the individual ``GEAK_ARG_<ARG>`` vars (the quick
+    per-run tweak, so it overrides the bulk form).
+
+    Never raises. Malformed JSON, a non-object payload or a protected key is
+    warned about on stderr and skipped, so an operator's typo degrades to "run
+    with stock settings" instead of killing a 12-hour job before it starts.
+    """
+    merged: dict = {}
+    inline = os.environ.get("GEAK_EXTRA_WORKFLOW_ARGS", "").strip()
+    if inline:
+        try:
+            parsed = json.loads(inline)
+        except ValueError as exc:
+            _warn(f"GEAK_EXTRA_WORKFLOW_ARGS is not valid JSON ({exc}); ignored")
+        else:
+            if isinstance(parsed, dict):
+                merged.update(parsed)
+            else:
+                _warn(
+                    "GEAK_EXTRA_WORKFLOW_ARGS: expected a JSON object, got "
+                    f"{type(parsed).__name__}; ignored"
+                )
+
+    for var, raw in os.environ.items():
+        if var.startswith(_OVERRIDE_PREFIX) and len(var) > len(_OVERRIDE_PREFIX):
+            merged[var[len(_OVERRIDE_PREFIX):].lower()] = _coerce_env_value(raw)
+
+    blocked = sorted(k for k in merged if k in _OVERRIDE_PROTECTED)
+    for key in blocked:
+        merged.pop(key)
+    if blocked:
+        _warn(f"workflow-arg override(s) {blocked} are owned by the handoff contract; ignored")
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # handoff (stable)  ->  e2e_workflow.js args (volatile, owned here)
 # ---------------------------------------------------------------------------
 def map_args(h: dict, timeout_s: int | None = None) -> dict:
@@ -299,6 +400,16 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
     if tl_paths:
         ps_args["tracelens"] = tl_paths
+    # Operator tuning (head_budget, depth mode, Amdahl thresholds, ...) exported
+    # per experiment. Applied LAST so it wins over the stock mapping above, but
+    # it cannot touch a protected key (see _OVERRIDE_PROTECTED). Empty unless an
+    # env override was exported => unchanged mapping.
+    overrides = load_workflow_overrides()
+    if overrides:
+        ps_args.update(overrides)
+        sys.stderr.write(
+            f"[run_e2e] workflow-arg overrides applied: {json.dumps(overrides, sort_keys=True)}\n"
+        )
     return ps_args
 
 

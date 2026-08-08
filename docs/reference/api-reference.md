@@ -103,6 +103,27 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 | `perf_knowledge_dir` | sibling `perf_knowledge/` | Authoring knowledge base. |
 | `time_budget_s`, `initial_extra_server_args`, `initial_extra_env`, `tracelens`, `agent_timeout_ms` | — | Forwarded from the external orchestrator. |
 
+### Setting these when an external orchestrator drives the run
+
+Under `interface/run_e2e.py` the caller's `handoff.json` is a fixed schema that
+carries no tuning knobs, so the tuning args above are exported as environment
+variables instead — no change to the calling orchestrator, and a different set
+per model is just a different export:
+
+```bash
+export GEAK_ARG_HEAD_BUDGET=6          # GEAK_ARG_<ARG> -> <arg>
+export GEAK_ARG_HEAD_THRESHOLD_PCT=2
+export GEAK_ARG_DEEP_MODE=true
+# or set several at once
+export GEAK_EXTRA_WORKFLOW_ARGS='{"budget":10,"milestone_min_pct":2}'
+```
+
+Any non-protected arg works; keys owned by the handoff (`eval_dir`, `phases`,
+`state`, the workload/serving quartet, the seeded baseline config) are dropped
+with a warning. Boolean knobs must be spelled `true`/`false` (`=1` reads as
+false). See [External orchestrator contract](./run-e2e-contract.md) for the
+coercion rules, precedence, and the full protected-key list.
+
 ### Example
 
 ```js
