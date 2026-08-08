@@ -45,18 +45,27 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
    `"byte_exact"` when acceptance rests on hard greedy byte-parity vs the TRUE baseline; `"accuracy"`
    when it rests on the soft sampled task-accuracy probe (a quant kernel / `ACCURACY_GATE=gsm8k`, where
    byte-parity is waived); `"none"` if no correctness check ran. This matters: the orchestrator only
-   distrusts a too-good-to-be-true speedup on an `accuracy` (soft) accept — a `byte_exact` accept is a
-   hard correctness guarantee and is trusted even above its Amdahl ceiling (the profile can under-count).
+   distrusts a too-good-to-be-true speedup on an `accuracy` (soft) accept, or on a `"none"` accept where
+   nothing was checked at all — a `byte_exact` accept is a hard correctness guarantee and is trusted even
+   above its Amdahl ceiling (the profile can under-count).
 6. **Implausible-speedup guard (a correctness signal, not a win) — for the SOFT gate.** The MOST e2e
    speedup an op that is `pct_gpu_time`% of GPU time can yield at its isolated speedup S is the Amdahl
    ceiling `1/(1 - (pct/100)(1 - 1/S))`. When you accept a QUANT / accuracy-gated kernel (byte-parity
-   waived) and the measured e2e delta BLOWS PAST that ceiling, the kernel is likely doing LESS / degenerate
+   waived) and the measured e2e delta BLOWS PAST that ceiling, the kernel MAY be doing LESS / degenerate
    work (corruption) that squeaked past a small accuracy sample — a fast-but-wrong server (truncated /
-   degenerate generations). Re-check accuracy on a LARGER sample vs the TRUE baseline; if it does not
-   genuinely hold, report `gate:"rejected"` with reason **`implausible_speedup`**. (A byte-exact accept is
-   NOT subject to this — trust it.) Use the reason vocabulary the orchestrator's auto-correct classifier
-   keys on — `parity_regression`, `accuracy_regression`, `implausible_speedup`, `output_corruption` — so a
-   fixable correctness reject is routed to a corrective re-author rather than dropped.
+   degenerate generations). **The ceiling is a theoretical bound from an imperfect profile, so it is a
+   trigger to INVESTIGATE, never a verdict on its own** — a genuine win legitimately exceeds it when the
+   profile under-counts the op or the change has system-wide effects (memory pressure / batching).
+   So: re-check accuracy on a LARGER sample vs the TRUE baseline, and compare **mean generated tokens per
+   request** cand-vs-ref (the direct fingerprint — a degenerate server is fast precisely BECAUSE it emits
+   less, and at fixed concurrency that can make aggregate tok/s RISE while the model is broken).
+   - If it does NOT hold, report `gate:"rejected"` with reason **`implausible_speedup`** plus the numbers.
+   - If it DOES hold, keep the accept and set **`revalidated: true`** with `accuracy_sample_n`. This is
+     load-bearing: without it the orchestrator runs its own adjudication pass (PHASE=revalidate below),
+     duplicating work you already did. Never set `revalidated` without actually running the larger probe.
+   (A byte-exact accept is NOT subject to this — trust it.) Use the reason vocabulary the orchestrator's
+   auto-correct classifier keys on — `parity_regression`, `accuracy_regression`, `implausible_speedup`,
+   `output_corruption` — so a fixable correctness reject is routed to a corrective re-author, not dropped.
 
 If any fails, REJECT and record why (with the numbers) for the eval-dir timeline report — a real
 isolated speedup that doesn't show up e2e is an expected Amdahl outcome, not a bug.
@@ -309,9 +318,62 @@ Return JSON:
   "ab_complete": true,
   "output_parity": "pass|fail",
   "parity_kind": "byte_exact|accuracy|none",
+  "revalidated": false,
+  "accuracy_sample_n": 0,
   "gate": "accepted|stack|rejected|incomplete",
   "accepted_overlay": "<path to the overlay to carry forward>",
   "reason": "why accepted/rejected/incomplete (cite Amdahl + measured delta vs noise band)"
+}
+```
+
+---
+
+## PHASE=revalidate  (adjudicate a too-good-to-be-true accept)
+
+You are called when a candidate PASSED the gate on a SOFT acceptance (`parity_kind` = `accuracy`/`none`)
+but its `e2e_delta_pct` exceeds the op's Amdahl ceiling by more than the allowed margin. The orchestrator
+does NOT reject on that arithmetic alone, because the ceiling comes from an imperfect profile and a real
+win can legitimately exceed it. Your job is to settle it with EVIDENCE.
+
+**You do not optimize, re-author, or rebuild the overlay.** The candidate overlay already exists at
+`CAND_OVERLAY_DIR`. Inputs also carry `OBSERVED_DELTA_PCT`, `AMDAHL_CEILING_PCT`, `PCT_GPU_TIME`,
+`ISOLATED_SPEEDUP`, and an `ACCURACY_LIMIT` deliberately larger than the gate's.
+
+1. **Task accuracy on a LARGER sample vs the TRUE no-overlay baseline.** Spin a fresh baseline server (no
+   overlay) and the candidate, score both with `GSM8K_EVAL_SCRIPT` at `ACCURACY_LIMIT` (greedy, fixed
+   seed). Record `baseline_accuracy`, `cand_accuracy`, `accuracy_sample_n`.
+2. **Degenerate-output check (the decisive one).** Report `ref_mean_gen_tokens` and
+   `cand_mean_gen_tokens` (mean generated tokens per request) and `truncated_or_empty_rate` for the
+   candidate. A corrupt kernel is fast BECAUSE it emits less — at fixed concurrency shorter generations
+   free up slots, so aggregate tok/s can RISE while the model is broken. A materially shorter mean
+   generation with unchanged prompts is corruption regardless of what throughput says.
+3. **One re-measure** of the candidate leg (same protocol as the gate) to rule out a fluke. Report
+   `remeasured_throughput_tok_s` / `remeasured_delta_pct`; the orchestrator prefers these over the
+   original gate numbers when present.
+
+Verdict — set `holds`:
+- `holds: true` when accuracy is within `ACCURACY_TOL` of the baseline AND the mean generation length is
+  not materially shorter AND the re-measure reproduces a positive delta. The win is real and the profile
+  simply under-counted the op; the orchestrator banks it.
+- `holds: false` when accuracy dropped, generations are degenerate/truncated, or the delta did not
+  reproduce. Put the concrete numbers in `evidence` — that string is fed verbatim into the corrective
+  re-author, so it is the difference between "your kernel is wrong somehow" and an actionable diagnosis.
+
+Be explicit in `evidence` either way (both accuracies + n, both mean lengths, the re-measured delta).
+
+Return JSON:
+```json
+{
+  "holds": true,
+  "evidence": "gsm8k 0.612 vs baseline 0.618 (n=500); mean gen tokens 174 vs 178; re-measured +9.4%",
+  "baseline_accuracy": 0.0,
+  "cand_accuracy": 0.0,
+  "accuracy_sample_n": 0,
+  "ref_mean_gen_tokens": 0.0,
+  "cand_mean_gen_tokens": 0.0,
+  "truncated_or_empty_rate": 0.0,
+  "remeasured_throughput_tok_s": 0.0,
+  "remeasured_delta_pct": 0.0
 }
 ```
 

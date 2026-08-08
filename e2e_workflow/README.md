@@ -189,6 +189,28 @@ args: { ...same..., accuracy_gate:"gsm8k", accuracy_limit:200, accuracy_tol:0.01
 - The eval client is `scripts/gsm8k_eval.py` (model-agnostic; queries the OpenAI-compatible endpoint).
 - Leaving it unset (`"none"`) changes nothing vs before — the gate stays throughput + parity only.
 
+## Implausible-speedup re-validation — ON by default
+An op that is `pct_gpu_time`% of GPU time at isolated speedup S can move e2e by at most the Amdahl
+ceiling `1/(1 - (pct/100)(1 - 1/S))`. A measured delta far above it *can* be a corrupt kernel that is
+fast only because it does less work — but it can equally be a real win on an op the profile under-counts.
+So the ceiling is a **trigger to investigate, not a verdict**: when a SOFT (non-byte-exact) accept blows
+past it, the Integrator is re-invoked with `PHASE=revalidate` to settle it on evidence — task accuracy vs
+a fresh TRUE baseline at a larger sample, **mean generated tokens cand-vs-ref** (a degenerate server is
+fast precisely because it emits less, which throughput alone cannot see), and one re-measure.
+- Holds → the win is banked and the run logs that the profile under-counts that op.
+- Fails → a *confirmed* `implausible_speedup` reject whose evidence is fed into the corrective re-author.
+- Cannot adjudicate (budget spent / deadline fired / agent returned nothing) → falls back to the previous
+  reject-immediately behavior. It is never more permissive without evidence.
+
+```
+args: { ...same..., implausible_revalidate:true, reval_accuracy_limit:500, reval_budget:4 }
+```
+- `implausible_revalidate:false` restores the old behavior (reject on the arithmetic alone).
+- `reval_accuracy_limit` = sample size for the adjudication probe (default **max(500, 3×accuracy_limit)**).
+- `reval_budget` = whole-run cap on adjudication passes (default **4**; each ≈ one server launch + eval).
+- A `byte_exact` accept is never subject to this. `parity_kind:"none"` (no correctness check ran at all)
+  now counts as soft, so it gets the backstop instead of being trusted unconditionally.
+
 ## Output
 Everything lands under `<exp_root>/e2e_<model>_<timestamp>/`:
 - `env_report.{md,json}` — the preflight capability report every phase routes on

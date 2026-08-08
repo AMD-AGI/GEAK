@@ -207,10 +207,18 @@ function amdahlCeilingPct(pct_gpu_time, isolated) {
 // even above the ceiling → never flagged. This removes the false-positive on byte-exact (incl. config
 // env/flag) wins while keeping the backstop exactly where byte-parity is waived. Backward-safe: an
 // integrator that doesn't report `parity_kind` only trips the guard when the RUN uses an accuracy gate.
+// `parity_kind:'none'` means NO correctness check ran at all — the case that most NEEDS the backstop, so
+// it counts as soft (it used to be lumped in with byte_exact, i.e. trusted unconditionally). That is only
+// safe now that a flagged candidate is RE-VALIDATED rather than rejected outright.
+// `revalidated:true` marks a candidate already adjudicated on EVIDENCE (larger accuracy sample +
+// degenerate-output check vs the TRUE baseline — see adjudicateImplausible, or reported by the integrator
+// when it did the larger-sample re-check itself). Measurement then outranks the theoretical ceiling. Without
+// this the corrective loop's own implausible re-check would contradict a re-validation that already passed.
 function parityIsSoft(integ) {
+  if (integ && integ.revalidated === true) return false; // adjudicated on evidence -> the measurement wins
   const pk = integ && integ.parity_kind;               // 'byte_exact' | 'accuracy' | 'none' (optional)
-  if (pk === 'accuracy') return true;
-  if (pk === 'byte_exact' || pk === 'none') return false;
+  if (pk === 'byte_exact') return false;               // hard greedy byte-parity vs the TRUE baseline
+  if (pk === 'accuracy' || pk === 'none') return true;  // sampled probe, or NO check at all -> needs the backstop
   return ACCURACY_GATE !== 'none';                      // unknown -> soft only when the run uses an accuracy gate
 }
 function isImplausibleSpeedup(pct_gpu_time, isolated, integ) {
@@ -240,6 +248,93 @@ function gateRejectReason(integ, pct_gpu_time, isolated) {
       && isImplausibleSpeedup(pct_gpu_time, isolated, integ))
     return `implausible_speedup (+${(integ.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pct_gpu_time, isolated).toFixed(1)}% on a soft/accuracy-gated accept — likely corruption/degenerate work)`;
   return integ ? (integ.reason || integ.gate || '') : '';
+}
+// ---- IMPLAUSIBLE-SPEEDUP ADJUDICATION: re-validate on evidence, don't reject on theory ---------------
+// The Amdahl ceiling is a THEORETICAL bound computed from an imperfect profile, so exceeding it should
+// trigger SUSPICION, not a verdict. Rejecting outright is doubly wrong on a GENUINE win: the corrective
+// loop is sent to "fix" a kernel that is already correct (burning up to HEAD_CORRECTIVE_MAX re-authors,
+// the heavy tier being hours), and since no re-author can make a real delta smaller, the win is then
+// DROPPED entirely. So a flagged candidate earns ONE cheap evidence-gathering pass instead:
+//   (a) re-score task accuracy vs the TRUE no-overlay baseline on a LARGER sample (REVAL_ACCURACY_LIMIT);
+//   (b) compare mean generated tokens/request cand-vs-ref — the DIRECT fingerprint of the failure mode
+//       this guard exists for. A degenerate server is fast BECAUSE it emits less: at fixed concurrency
+//       short generations finish sooner, more requests land per second, and aggregate tok/s can RISE
+//       while the model is broken. Throughput cannot see this; mean output length can.
+//   (c) re-measure the candidate leg once to rule out a fluke measurement.
+// HOLDS -> mark `revalidated` so the normal accept path banks it (and log that the profile evidently
+//   UNDER-COUNTS this op's pct_gpu_time — that stale pct would otherwise mis-rank the next milestone).
+// FAILS -> a CONFIRMED corruption reject carrying real evidence into the corrective re-author, replacing
+//   today's evidence-free "an implausible speedup means it is doing less work — treat as wrong" assertion.
+// Same idiom as DEEP_FINAL_ACCURACY_LIMIT: decide a boundary candidate on signal, not on a noisy proxy.
+// FAIL-CLOSED: whenever it cannot adjudicate (feature off, budget spent, deadline fired, agent returned
+// nothing) it returns the candidate untouched, i.e. exactly the previous reject-immediately behavior —
+// this is never MORE permissive than before without evidence. No-op unless the guard actually fired.
+let revalSpent = 0;
+async function adjudicateImplausible(integ, pct_gpu_time, isolated, ctx) {
+  if (!IMPLAUSIBLE_REVALIDATE) return integ;
+  // Only a COMPLETED PASS is worth adjudicating. isImplausibleSpeedup() looks purely at the delta vs the
+  // ceiling (its callers check the gate separately), so without this an already-rejected or half-measured
+  // candidate with a large delta would burn a re-validation.
+  if (!integ || (integ.gate !== 'accepted' && integ.gate !== 'stack')) return integ;
+  if (integ.ab_complete === false) return integ;
+  if (!isImplausibleSpeedup(pct_gpu_time, isolated, integ)) return integ;   // normal path: pure no-op
+  const label = (ctx && ctx.short_name) || 'candidate';
+  const phaseName = (ctx && ctx.phase_name) || 'HeadKernel';
+  const delta = integ.e2e_delta_pct || 0;
+  const ceil = amdahlCeilingPct(pct_gpu_time, isolated);
+  if (revalSpent >= REVAL_BUDGET) {
+    log(`  ${label}: implausible speedup flagged, but the re-validation budget (${REVAL_BUDGET}) is spent — falling back to reject.`);
+    return integ;
+  }
+  if ((FAST_MODE && FAST_DEADLINE_HIT) || TIME_DEADLINE_HIT) {
+    log(`  ${label}: implausible speedup flagged, but the wall-clock deadline has fired — falling back to reject.`);
+    return integ;
+  }
+  revalSpent++;
+  log(`  ${label}: e2e +${delta.toFixed(1)}% exceeds the Amdahl ceiling +${ceil.toFixed(1)}% on a soft gate — RE-VALIDATING on evidence (${revalSpent}/${REVAL_BUDGET}) instead of rejecting on theory.`);
+  const rv = await safeAgent(
+    roleAgent('e2e_integrator', 'revalidate',
+      `This candidate PASSED the e2e gate (+${delta.toFixed(1)}%) but its delta exceeds the op's Amdahl ceiling ` +
+      `(+${ceil.toFixed(1)}%, from pct_gpu_time=${pct_gpu_time} and isolated=${(isolated || 0).toFixed(2)}x) on a SOFT ` +
+      `(non-byte-exact) acceptance. Do NOT re-optimize and do NOT rebuild the overlay — GATHER EVIDENCE and decide ` +
+      `whether the win is REAL or the server is fast because it is generating degenerate/truncated output.`, {
+        ...(ctx && ctx.inputs ? ctx.inputs : {}),
+        CAND_OVERLAY_DIR: integ.accepted_overlay || (ctx && ctx.cand_overlay_dir) || '',
+        REVALIDATE_REASON: 'implausible_speedup',
+        OBSERVED_DELTA_PCT: delta, AMDAHL_CEILING_PCT: ceil,
+        PCT_GPU_TIME: pct_gpu_time, ISOLATED_SPEEDUP: isolated || 0,
+        ...ACCURACY_INPUTS,                       // spread FIRST so the larger sample below wins
+        ACCURACY_GATE: (ACCURACY_GATE !== 'none' ? ACCURACY_GATE : 'gsm8k'),
+        ACCURACY_LIMIT: REVAL_ACCURACY_LIMIT,
+        GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py`,
+        SKILL_DIR: WORKFLOW_DIR,
+      }),
+    { phase: phaseName, label: `revalidate ${label}`, schema: REVALIDATE_SCHEMA });
+  if (!rv || typeof rv.holds !== 'boolean') {
+    log(`  ${label}: re-validation produced no verdict (${rv ? 'no holds field' : 'null'}) — falling back to reject (do-no-harm).`);
+    return integ;
+  }
+  const ev = rv.evidence
+    || `accuracy ${rv.cand_accuracy != null ? rv.cand_accuracy : '?'} vs baseline ${rv.baseline_accuracy != null ? rv.baseline_accuracy : '?'} ` +
+       `(n=${rv.accuracy_sample_n || REVAL_ACCURACY_LIMIT}); mean gen tokens cand ${rv.cand_mean_gen_tokens != null ? rv.cand_mean_gen_tokens : '?'} ` +
+       `vs ref ${rv.ref_mean_gen_tokens != null ? rv.ref_mean_gen_tokens : '?'}`;
+  if (!rv.holds) {
+    log(`  ${label}: re-validation CONFIRMS corruption — ${ev}.`);
+    return { ...integ, gate: 'rejected', revalidated: true, revalidation_evidence: ev,
+      reason: `implausible_speedup CONFIRMED by re-validation: ${ev}` };
+  }
+  // The win survived a stricter probe than the gate itself used. Take the re-measured numbers when the
+  // integrator produced them (they supersede a possible fluke), else keep the gate's.
+  const tput = (rv.remeasured_throughput_tok_s > 0) ? rv.remeasured_throughput_tok_s : integ.e2e_throughput_tok_s;
+  const dpct = Number.isFinite(rv.remeasured_delta_pct) ? rv.remeasured_delta_pct : delta;
+  log(`  ${label}: re-validation HOLDS — banking ${tput} tok/s (+${dpct.toFixed(1)}%). ${ev}. NOTE: the verified delta ` +
+    `exceeds the Amdahl ceiling, so the profile under-counts this op (recorded pct_gpu_time=${pct_gpu_time}%).`);
+  history.ledger.push({ direction: `${label}:revalidation`, isolated_speedup: isolated || 0, e2e_delta_pct: dpct,
+    verdict: 'revalidated_hold',
+    lesson: `+${dpct.toFixed(1)}% exceeded the Amdahl ceiling +${ceil.toFixed(1)}% but VERIFIED on evidence (${ev}) — ` +
+      `profile under-counts pct_gpu_time (recorded ${pct_gpu_time}%); do not re-rank this op on that stale share.` });
+  return { ...integ, revalidated: true, revalidation_evidence: ev,
+    e2e_throughput_tok_s: tput, e2e_delta_pct: dpct };
 }
 // ---- DEEP MODE (opt-in, default OFF) ----------------------------------------------------------------
 // A long, thorough HeadKernel mode that pursues SOTA per head op via CROSS-BACKEND CO-OPTIMIZATION:
@@ -317,6 +412,19 @@ const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01);
 const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
   ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
   : {};
+// ---- IMPLAUSIBLE-SPEEDUP RE-VALIDATION (default ON) -------------------------------------------------
+// Turns the Amdahl-ceiling guard from a VERDICT into a TRIGGER: a flagged candidate is re-validated on
+// evidence (bigger accuracy sample + mean-generated-length check + one re-measure) and is only rejected
+// when that evidence confirms corruption. See adjudicateImplausible for the full rationale.
+// implausible_revalidate=false restores the previous reject-immediately behavior exactly.
+const IMPLAUSIBLE_REVALIDATE = String(A.implausible_revalidate != null ? A.implausible_revalidate : 'true') === 'true';
+// Sample size for the adjudication probe. Must be materially larger than the gate's own ACCURACY_LIMIT —
+// a degenerate candidate squeaking past n=200 is precisely what this is here to catch (same reasoning as
+// DEEP_FINAL_ACCURACY_LIMIT).
+const REVAL_ACCURACY_LIMIT = parseInt(A.reval_accuracy_limit != null ? A.reval_accuracy_limit : Math.max(500, ACCURACY_LIMIT * 3), 10);
+// Whole-run cap on adjudication passes (each ≈ one server launch + one eval). Implausible flags are rare
+// by construction (soft gate AND delta > 2x ceiling), so this only bounds a pathological run.
+const REVAL_BUDGET = parseInt(A.reval_budget != null ? A.reval_budget : 4, 10);
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
@@ -516,9 +624,29 @@ const INTEGRATE_SCHEMA = obj({
   // baseline), 'accuracy' (soft sampled task-accuracy probe — quant / accuracy_gate), or 'none'. The
   // implausible-speedup guard only distrusts an 'accuracy'/soft accept; a byte_exact accept is trusted.
   parity_kind: { type: 'string' },
+  // Set true when the integrator ALREADY re-checked a too-good-to-be-true delta on a larger sample vs the
+  // TRUE baseline and found the win genuine (report accuracy_sample_n with it). Without this the
+  // orchestrator would re-litigate a question the integrator has answered — it would run its own
+  // adjudication pass, or (pre-adjudication) simply overrule the accept. Optional; absent => unknown.
+  revalidated: { type: 'boolean' }, accuracy_sample_n: { type: 'number' },
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
   accepted_overlay: { type: 'string' }, reason: { type: 'string' },
 }, ['gate', 'e2e_throughput_tok_s']);
+
+// Adjudication of an implausible (above-Amdahl-ceiling) soft-gate accept. Evidence, not re-optimization:
+// `holds` is the verdict, the rest is the evidence trail that either banks the win or gives the
+// corrective re-author something concrete to fix. See adjudicateImplausible.
+const REVALIDATE_SCHEMA = obj({
+  holds: { type: 'boolean' },
+  evidence: { type: 'string' },
+  baseline_accuracy: { type: 'number' }, cand_accuracy: { type: 'number' },
+  accuracy_sample_n: { type: 'number' },
+  // The degenerate-output fingerprint: a broken server is fast because it emits LESS.
+  ref_mean_gen_tokens: { type: 'number' }, cand_mean_gen_tokens: { type: 'number' },
+  truncated_or_empty_rate: { type: 'number' },
+  // One re-measure to rule out a fluke; absent => keep the gate's numbers.
+  remeasured_throughput_tok_s: { type: 'number' }, remeasured_delta_pct: { type: 'number' },
+}, ['holds']);
 
 const FINALIZE_SCHEMA = obj({
   final_overlay: { type: 'string' }, final_patch: { type: 'string' }, final_launch_script: { type: 'string' },
@@ -839,7 +967,10 @@ async function tryCorrectiveReauthor(spec) {
     `into a reused output, zero it each call inside the captured region. VALIDATE your fix adversarially: call the ` +
     `kernel on TWO different routing snapshots back-to-back REUSING the same input buffers, and on repeated calls ` +
     `with fresh contents, asserting bit/tol correctness on EACH — a data_ptr cache or stale reuse must fail this. ` +
-    `An implausible speedup (far above the op's Amdahl ceiling) means it is doing less/degenerate work — treat as wrong.`;
+    `If the reject reason above is an implausible_speedup CONFIRMED by re-validation, the quoted evidence ` +
+    `(accuracy vs the true baseline, mean generated tokens cand-vs-ref) tells you HOW it is wrong: a much ` +
+    `shorter mean generation means the kernel truncates/degenerates the output and is "fast" only because it ` +
+    `does less work. Fix the computation, not the timing — reproduce it with the two-snapshot check above.`;
   for (let cAttempt = 1; cAttempt <= HEAD_CORRECTIVE_MAX; cAttempt++) {
     log(`  ${spec.short_name}: ${fixClass.toUpperCase()} reject (${reason}) — corrective ${cAttempt}/${HEAD_CORRECTIVE_MAX} (fix-and-retry the iso winner; NOT a new head, NOT charged to head_budget).`);
     // TIER 1 — lightweight SURGICAL patch (one agent, minutes). Most rejects are a tiny seam bug.
@@ -883,14 +1014,21 @@ async function tryCorrectiveReauthor(spec) {
       fixInputs.CURRENT_OVERLAY = spec.cur.overlay; fixInputs.CURRENT_FLAGS = spec.cur.flags;
       fixInputs.CURRENT_ENV = spec.cur.env; fixInputs.CURRENT_THROUGHPUT = spec.cur.tput;
     }
-    const integ2 = await runIntegrateBothLegs(
+    const integ2Raw = await runIntegrateBothLegs(
       'Apply the CORRECTIVELY-FIXED kernel winner; gate on e2e throughput.', fixInputs,
       `integrate ${spec.short_name} corrective`, spec.phase_name || 'HeadKernel');
-    const ab2 = !!(integ2 && integ2.gate !== 'incomplete' && integ2.ab_complete !== false);
     const pctForGuard = spec.pct_gpu_time || (spec.base_inputs && spec.base_inputs.KERNEL_RESULT && spec.base_inputs.KERNEL_RESULT.pct_gpu_time) || 0;
-    // Implausible-speedup guard: a "win" whose e2e delta blows past the op's Amdahl ceiling is corruption
-    // masquerading as a win (does less/degenerate work) — never bank it; treat as a correctness reject and
-    // let the next corrective attempt fix it. GENERIC (uses only pct_gpu_time + isolated).
+    // Implausible-speedup guard: a "win" whose e2e delta blows past the op's Amdahl ceiling MAY be
+    // corruption masquerading as a win (does less/degenerate work). Adjudicate it on evidence first —
+    // the corrective path is exactly where a false positive is most expensive, since it would send the
+    // NEXT attempt to re-fix an already-correct kernel and then drop the win.
+    const integ2 = await adjudicateImplausible(integ2Raw, pctForGuard, fix.final_geomean,
+      { short_name: spec.short_name, phase_name: spec.phase_name || 'HeadKernel', inputs: fixInputs });
+    const ab2 = !!(integ2 && integ2.gate !== 'incomplete' && integ2.ab_complete !== false);
+    // Re-validation CONFIRMED the corruption (it rewrote the gate to 'rejected'), so the flag below is
+    // false while the kernel is still wrong — track it separately or the do-no-harm stop would read
+    // "parity didn't fail, not implausible" and quit while a fixable corruption is on the table.
+    const confirmedCorrupt2 = !!(integ2 && integ2.revalidated === true && integ2.gate === 'rejected');
     const implausible2 = ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack')
       && isImplausibleSpeedup(pctForGuard, fix.final_geomean, integ2);
     if (ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack') && integ2.e2e_throughput_tok_s > curTput && !implausible2) {
@@ -903,7 +1041,7 @@ async function tryCorrectiveReauthor(spec) {
     // it was RESOLVED, which would loop wastefully). If this attempt made the kernel CORRECT (parity no
     // longer failing) and it was not an implausible speedup, the ONLY remaining problem is throughput/
     // do-no-harm — more re-authoring cannot create Amdahl headroom that isn't there, so STOP now.
-    if (ab2 && integ2.output_parity !== 'fail' && !implausible2) {
+    if (ab2 && integ2.output_parity !== 'fail' && !implausible2 && !confirmedCorrupt2) {
       log(`  ${spec.short_name}: corrective produced a CORRECT kernel with no e2e win (do-no-harm: ${reason}) — stopping; throughput headroom for this op is exhausted.`);
       break;
     }
@@ -1385,8 +1523,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       log(`[deep] E2E GATE #${e2eGateCount} on serving {${SERVING_GPU}} TP=${SERVING_TP}: [${cands.map(c => c.uid + ' ' + c.best.toFixed(3) + 'x').join(', ')}] (overlapping co-opt on dedicated cards).`);
       for (const c of cands) {
         if (opts.final && bankedHeads.has(c.head.short_name)) { log(`  [deep] FINALIZE: skip ${c.uid} -- head ${c.head.short_name} already banked (same module, cannot stack).`); continue; }
-        const integ = await safeAgent(
-          roleAgent('e2e_integrator', 'integrate', 'Apply a deep head candidate; gate on e2e throughput; report engagement/cudagraph/mem/decode for feedback.', {
+        const deepIntegrateInputs = {
             EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
             KERNEL_RESULT: {
               short_name: c.head.short_name, task_dir: c.ext.task_dir, op_kind: c.ext.op_kind, lane: c.key,
@@ -1400,8 +1537,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
             ...ACCURACY_INPUTS,
             ...(opts.final && ACCURACY_GATE !== 'none' ? { ACCURACY_LIMIT: DEEP_FINAL_ACCURACY_LIMIT } : {}),   // de-noise the finalize accuracy decision
-          }),
+        };
+        const integRaw = await safeAgent(
+          roleAgent('e2e_integrator', 'integrate', 'Apply a deep head candidate; gate on e2e throughput; report engagement/cudagraph/mem/decode for feedback.', deepIntegrateInputs),
           { phase: 'HeadKernel', label: `integrate ${c.uid} g${e2eGateCount}`, schema: INTEGRATE_SCHEMA });
+        const integ = await adjudicateImplausible(integRaw, c.head.pct_gpu_time, c.best,
+          { short_name: c.uid, phase_name: 'HeadKernel', inputs: deepIntegrateInputs });
         if (integ && integ.output_parity === 'fail') {
           log(`  [deep] ${c.uid}: REJECTED — output_parity=fail vs true baseline.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
@@ -1707,8 +1848,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       st.cands.sort((a, b) => (b.isolated || 0) - (a.isolated || 0));
       const cand = st.cands[0];
       log(`  ${h.short_name}: best candidate=${cand.source} (${(cand.isolated || 0).toFixed(2)}x, ${cand.kind}). Integrating to e2e (serial, slot {${SERVING_GPU}}).`);
-      const integ = await runIntegrateBothLegs(
-        'Apply the head-op winner; gate on e2e throughput.', {
+      const headIntegrateInputs = {
           EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
           KERNEL_RESULT: { short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
             winner_kind: cand.winner_kind, winner_backend: cand.source,
@@ -1725,8 +1865,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
           CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
           ENGAGEMENT_CHECK: h.engagement_check || '',
-        },
+      };
+      const integRaw = await runIntegrateBothLegs(
+        'Apply the head-op winner; gate on e2e throughput.', headIntegrateInputs,
         `integrate ${h.short_name}`, 'HeadKernel');
+      const integ = await adjudicateImplausible(integRaw, h.pct_gpu_time, cand.isolated,
+        { short_name: h.short_name, phase_name: 'HeadKernel', inputs: headIntegrateInputs });
       if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput) {
         curOverlay = integ.accepted_overlay || curOverlay;
         if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
@@ -1944,9 +2088,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     for (let ci = 0; ci < headCands.length; ci++) {
       const cand = headCands[ci];
       const inputs = mkIntegrateInputs(cand, ci, sharedRefMed);
-      const integ = await runIntegrateBothLegs(
+      const integRaw = await runIntegrateBothLegs(
         'Apply a head-op candidate; gate on e2e throughput (the reference config is shared across this head\'s candidates — reuse it when REUSE_REF/SHARED_REF_MED are set).',
         inputs, `integrate ${h.short_name}:${cand.source}`, 'HeadKernel');
+      const integ = await adjudicateImplausible(integRaw, h.pct_gpu_time, cand.isolated,
+        { short_name: `${h.short_name}:${cand.source}`, phase_name: 'HeadKernel', inputs });
       // A/B completion: gate:'incomplete' / ab_complete:false means a leg is still missing (NOT a rejection).
       const abc = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
       if (sharedRefMed == null && abc && integ.ref_med) sharedRefMed = integ.ref_med;   // lock the shared ref
@@ -2163,9 +2309,11 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
     };
-    const integ = await runIntegrateBothLegs(
+    const integRaw = await runIntegrateBothLegs(
       'Overlay the optimized kernel back; gate on e2e throughput.', mileIntegrateInputs,
       `integrate ${c.short_name}`, 'Milestone');
+    const integ = await adjudicateImplausible(integRaw, c.pct_gpu_time, kl.final_geomean,
+      { short_name: c.short_name, phase_name: 'Milestone', inputs: mileIntegrateInputs });
 
     // Three-state gate (see head track): incomplete A/B => PENDING, not rejected.
     // Backward-compatible: null (timeout/hang/degrade) or an explicit incomplete
@@ -2324,13 +2472,15 @@ if (want('final')) {
     const p = pendingIntegrations.shift();   // pop one per iteration => guaranteed termination
     log(`Finalize-gate: finishing pending A/B (${p.short_name}, ${(p.isolated || 0).toFixed(2)}x isolated); ` +
       `${pendingIntegrations.length} more queued.`);
-    const integ = await runIntegrateBothLegs(
+    // Pin the CURRENT carried overlay/flags/env/throughput so the A/B is
+    // measured against the latest accepted baseline.
+    const finishInputs = { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput };
+    const integRaw = await runIntegrateBothLegs(
       'Finish the e2e A/B for this verified-isolated win. Run BOTH legs (reference + candidate) to ' +
       'completion, then return accepted/stack/rejected with ab_complete:true.',
-      // Pin the CURRENT carried overlay/flags/env/throughput so the A/B is
-      // measured against the latest accepted baseline.
-      { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
-      `finish-integrate ${p.short_name}`, 'Finalize');
+      finishInputs, `finish-integrate ${p.short_name}`, 'Finalize');
+    const integ = await adjudicateImplausible(integRaw, p.pct_gpu_time, p.isolated,
+      { short_name: p.short_name, phase_name: 'Finalize', inputs: finishInputs });
     if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       if (p.track === 'head') {
