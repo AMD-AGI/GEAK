@@ -67,7 +67,7 @@ Do this instead of the optimize-mode steps below:
    [ -e "$EVAL_DIR/workspace/reference_io.pt" ] && chmod -w "$EVAL_DIR/workspace/reference_io.pt" 2>/dev/null || true
    [ -d "$EVAL_DIR/workspace/baseline_src" ] && chmod -R -w "$EVAL_DIR/workspace/baseline_src" 2>/dev/null || true
    cd "$EVAL_DIR/workspace"
-   printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A
@@ -121,7 +121,7 @@ Steps:
    done
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
-   printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
    # Avoid git hangs/failures in non-interactive agents: no pager, no prompts, and ALWAYS pass an
    # identity (the machine may have no global git user). Fresh repo (the source .git was never copied
    # in) so HEAD is exactly this baseline.
