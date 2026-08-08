@@ -52,6 +52,13 @@ const ANALYSIS_SKILL_INPUTS = ANALYSIS_SKILL_ON ? {
 } : { ANALYSIS_SKILL: '', ANALYSIS_SKILL_DIR: '' };
 if (ANALYSIS_SKILL_ON) log(`Profile-analysis skill: ${ANALYSIS_SKILL} (advisory; annotates + reorders, never prunes).`);
 
+// ---- Baseline semantic mapping (OPTIONAL, additive sidecar) -----------------
+// Runs once after the baseline Profile/Strategize and builds auditable
+// Pattern/Phase/Layer/Kernel tables for future fusion discovery. It never changes
+// Top-N routing and is not re-run after config/head/kernel wins.
+const SEMANTICS_MAPPING_ON = String(
+  A.semantics_mapping != null ? A.semantics_mapping : 'true') === 'true';
+
 // ---- Upstream TraceLens / kernel-agent prior (OPTIONAL; forwarded by run_e2e.py as args.tracelens) ----
 // run_e2e.py resolves these paths beside the geak handoff and forwards ONLY the non-null ones.
 // They are a PRIOR for the Profile/Strategize/Extract phases: if analysis_md exists the Profiler skips
@@ -433,9 +440,20 @@ const SETUP_SCHEMA = obj({
 const PROFILE_SCHEMA = obj({
   round: { type: 'number' }, profile_topN_json: { type: 'string' }, profile_topN_md: { type: 'string' },
   profile_workload_json: { type: 'string' }, // per-(shape,dtype) weighted workload model (optional)
+  trace_dir: { type: 'string' }, trace_files: arrStr, analysis_rank_trace: { type: 'string' },
+  trace_manifest_json: { type: 'string' }, phase_evidence_status: { type: 'string' },
   source: { type: 'string' }, total_gpu_time_ms: { type: 'number' }, top_kernels: arrObj,
   shift_note: { type: 'string' }, notes: { type: 'string' },
 }, ['profile_topN_json', 'top_kernels']);
+
+const SEMANTICS_SCHEMA = obj({
+  status: { type: 'string' }, round: { type: 'number' },
+  trace_manifest_json: { type: 'string' }, structural_patterns_json: { type: 'string' },
+  semantic_event_audit_jsonl: { type: 'string' }, layer_instance_audit_json: { type: 'string' },
+  semantic_table_json: { type: 'string' }, semantic_table_md: { type: 'string' },
+  shape_capture_plan_json: { type: 'string' }, quality_json: { type: 'string' },
+  notes: { type: 'string' },
+}, ['status']);
 
 const STRATEGY_SCHEMA = obj({
   regime_summary: { type: 'string' }, config_directions: arrObj,
@@ -1058,7 +1076,7 @@ if (!MODEL_PATH && KERNEL_PATH) {
 // ===========================================================================
 // PHASE: Setup + Baseline profile + Strategize  (gated; else load carried state)
 // ===========================================================================
-let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, profile, strategy, kernelQueue, headQueue;
+let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, profile, strategy, kernelQueue, headQueue, semantics;
 if (want('setup')) {
   phase('Setup');
   const setup = await safeAgent(
@@ -1117,6 +1135,26 @@ if (want('setup')) {
   }
   if (_fusedTagged) log(`[op-identity] ${_fusedTagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
   log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
+  // One-shot, non-gating baseline sidecar. It is deliberately awaited so its
+  // artifact paths are durable in carried state, but bounded to one agent
+  // attempt and never allowed to alter native routing.
+  if (SEMANTICS_MAPPING_ON && profile && profile.trace_manifest_json) {
+    semantics = await safeAgent(
+      roleAgent('semantics_mapper', 'build_table',
+        'Build auditable Pattern/Phase/Layer/Kernel tables from the clean baseline trace.', {
+          EVAL_DIR, MODEL_PATH, MODEL_NAME, BACKEND, WORKLOAD, ROUND: 0,
+          TRACE_MANIFEST_JSON: profile.trace_manifest_json,
+          PROFILE_TOPN_JSON: profile.profile_topN_json || '',
+          PROFILE_WORKLOAD_JSON: profile.profile_workload_json || '',
+          SKILL_DIR: WORKFLOW_DIR,
+        }),
+      { phase: 'Profile', label: 'semantics-mapper:baseline', schema: SEMANTICS_SCHEMA },
+      1);
+    log(`Baseline semantics mapping: ${semantics ? semantics.status : 'failed'} (non-gating).`);
+  } else {
+    semantics = { status: SEMANTICS_MAPPING_ON ? 'failed' : 'disabled',
+      notes: SEMANTICS_MAPPING_ON ? 'baseline profiler returned no raw trace manifest' : 'disabled by args.semantics_mapping' };
+  }
   // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
   await ensureFlydslGate();
 } else {
@@ -1132,6 +1170,7 @@ if (want('setup')) {
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
   headQueue = ST.headQueue || [];
+  semantics = ST.semantics_mapping || { status: 'unavailable' };
   log(`Loaded carried state: EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT}, flags='${curFlags}', env='${curEnv}', ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
 }
 
@@ -2069,6 +2108,20 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Profile', label: 'profiler:post-head', schema: PROFILE_SCHEMA });
+    // Head wins can remove/merge the very kernels in the original Milestone
+    // queue. Refresh routing before any single-kernel dispatch.
+    const restrat = await safeAgent(
+      roleAgent('system_architect', 'strategize',
+        'Re-route after accepted head kernels changed the profile landscape.', {
+          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '',
+          BASELINE_THROUGHPUT: curTput, WORKLOAD, BUDGET,
+          HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+      { phase: 'Strategize', label: 'architect:post-head-re-strategize', schema: STRATEGY_SCHEMA });
+    if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
+    if (restrat && restrat.head_candidates) headQueue = restrat.head_candidates.slice();
+    log(`Post-head routing refreshed: ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
   }
   log(`Head-kernel track done. ${acceptedHeads.length} accepted, throughput ${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x).`);
   if (flaggedHeads.length) {
@@ -2440,6 +2493,7 @@ const carryState = {
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
+  semantics_mapping: semantics || { status: 'unavailable' },
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
   // Carry pending (verified-isolated, A/B-incomplete) wins WITH their inputs so a
   // resumed phase run can finish their A/B instead of re-discovering them.
@@ -2471,6 +2525,7 @@ const wfReturn = {
        : (want('final') ? 'unknown' : 'phase_partial')),
   output_parity: validation ? validation.output_parity : 'unknown',
   accepted_config: { flags: curFlags, env: curEnv },
+  semantics_mapping: semantics || { status: 'unavailable' },
   accepted_kernels: acceptedKernels,
   accepted_heads: acceptedHeads,
   // Verified-isolated wins whose e2e A/B never completed (timeout/hang mid-gate).

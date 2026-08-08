@@ -191,6 +191,20 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    target kernel's cases out of this so kernel_workflow benchmarks the shapes the workload actually
    hits. It needs the torch trace's `Input Dims` (record_shapes); if shapes are absent the cases come
    out `weight_source:"regime_prior"` — note that in `notes`. Report its path as `profile_workload_json`.
+3b. Build the additive raw-trace manifest for optional downstream semantic analysis. This must not
+   change the Top-N result if it fails:
+   ```bash
+   TRACE_MANIFEST="$EVAL_DIR/profile/round_${ROUND}/profile_trace_manifest.json"
+   python3 "$SKILL_DIR/scripts/trace_capability.py" \
+     --trace-dir "$PDIR" --analysis-rank 0 --out "$TRACE_MANIFEST" \
+     || TRACE_MANIFEST=""
+   ```
+   For the TraceLens fast-path, point `--trace-dir` at the provided trace directory/file when present.
+   If no raw trace exists, return an empty path; never fabricate a manifest from analysis Markdown.
+   Copy the selected manifest values into the additive Profile fields `trace_dir`, `trace_files`
+   (rank-sorted path strings), and `analysis_rank_trace`. Set `phase_evidence_status` to
+   `measured_annotation` only when the capability report found execute-step annotations; otherwise
+   set it to `unresolved`.
 4. Sanity-read `profile_topN.md`. Resolve any `other`-classified top entries before finishing: grep
    the `short_name` under the serving-stack package dir (sglang/vllm, from `env_info.txt`) to identify
    it, and note the correct class in `notes` so the Architect routes it right. Flag same-named kernels appearing with BOTH large-M and small-M shapes
@@ -227,6 +241,12 @@ Return JSON:
   "profile_topN_json": "<EVAL_DIR>/profile/round_0/profile_topN.json",
   "profile_topN_md": "<EVAL_DIR>/profile/round_0/profile_topN.md",
   "profile_roofline_json": "<EVAL_DIR>/profile/round_0/profile_roofline.json  (\"\" if no analysis skill ran)",
+  "profile_workload_json": "<EVAL_DIR>/profile/round_0/profile_workload.json",
+  "trace_manifest_json": "<EVAL_DIR>/profile/round_0/profile_trace_manifest.json (\"\" if no raw trace)",
+  "trace_dir": "<raw trace directory (\"\" if absent)>",
+  "trace_files": ["<rank-sorted trace path>"],
+  "analysis_rank_trace": "<selected rank-0 trace path (\"\" if absent)>",
+  "phase_evidence_status": "measured_annotation|unresolved",
   "source": "torch-trace|merged|tracelens|tracelens+trace",
   "total_gpu_time_ms": 0.0,
   "top_kernels": [
