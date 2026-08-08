@@ -149,21 +149,50 @@ Steps:
      the pristine original (set `baseline_callable` from `meta.json:target_callable` if present, else "").
    Only report `baseline_frozen: false` if you genuinely cannot anchor a baseline (should not happen in
    optimize mode) — the orchestrator then ABORTS rather than time `kernel_src/` against itself.
-3b. **Freeze the measurement harness (MANDATORY — mirrors 3a + author-mode's `chmod -w`).** The perf
-   harness is the measurement CONTRACT, not an optimization target: only the declared
-   `config.yaml:source_file_path` (the kernel) is editable. Correctness already has a frozen
-   `source_golden`; give performance the same protection so agents optimize the KERNEL, not the harness.
-   Make every non-source measurement file read-only:
+3b. **Freeze the measurement harness the SAME way correctness freezes `source_golden`.** The perf
+   harness (timer, input generation, golden compare, launch config) is the measurement CONTRACT, not an
+   optimization target: only the declared `config.yaml:source_file_path` (the kernel) is editable.
+   Correctness already reads a pristine, frozen `source/source_golden` copy — give performance the
+   identical treatment: keep a read-only golden copy of every non-source measurement file OUTSIDE the
+   workspace, and (see the COMMANDMENT) restore from it before EVERY measurement. `chmod -w` alone is
+   not enough — the agent runs as root and can `chmod +w`; the HARD guarantee is that each measurement
+   re-copies the frozen files in first, so no per-round number can ever reflect a harness edit and the
+   agent gets ZERO reward for tampering. This forces re-tiling and launch-config changes to happen
+   INSIDE the kernel source (`tl.constexpr`, internal autotune) instead of by editing the harness — the
+   legitimate outlet — and it surfaces any kernel that was co-designed with a tampered harness as a
+   failure IN THE SAME ROUND (not only at final Validate), so the loop can self-correct.
    ```bash
    cd "$EVAL_DIR/workspace"
    SRC=$(awk '/^source_file_path:/{f=1;next} /^[^[:space:]-]/{f=0} f&&/-/{sub(/.*-[[:space:]]*/,"");print}' config.yaml)
+   FROZEN="$EVAL_DIR/measure_golden"          # read-only golden for the perf harness (sibling of workspace)
+   mkdir -p "$FROZEN"
    for f in scripts/harness_run.py scripts/task_runner.py scripts/_runtime.py test_cases.json; do
-     printf '%s\n' "$SRC" | grep -qxF "$f" || { [ -e "$f" ] && chmod -w "$f" 2>/dev/null || true; }
+     printf '%s\n' "$SRC" | grep -qxF "$f" && continue   # never freeze a file the kernel legitimately owns
+     [ -e "$f" ] || continue
+     mkdir -p "$FROZEN/$(dirname "$f")"
+     cp -f "$f" "$FROZEN/$f"
+     chmod -w "$f" 2>/dev/null || true                    # soft in-workspace signal (root may override)
    done
+   # A tiny restorer the COMMANDMENT calls before each measurement. Write it INTO the frozen dir, then
+   # make the whole golden read-only. It restores exactly the files that were frozen (so it never
+   # clobbers the editable kernel source), forcing chmod +w first so a root chmod -w cannot block it.
+   cat > "$FROZEN/restore.sh" <<'RESTORE'
+#!/usr/bin/env bash
+# Restore the frozen measurement harness into the CURRENT workspace before a measurement.
+# Mirrors correctness always reading the frozen source_golden. Run with cwd = the workspace.
+FROZEN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for f in scripts/harness_run.py scripts/task_runner.py scripts/_runtime.py test_cases.json; do
+  [ -e "$FROZEN/$f" ] || continue
+  [ -e "$f" ] && chmod +w "$f" 2>/dev/null || true
+  cp -f "$FROZEN/$f" "$f"
+done
+RESTORE
+   chmod +x "$FROZEN/restore.sh"
+   chmod -R a-w "$FROZEN" 2>/dev/null || true             # frozen golden: read-only for the whole run
    ```
-   (Belt-and-suspenders: the Validate step ALSO restores these from the pristine baseline before it
-   measures, so even a root agent that does `chmod +w` and edits the harness cannot affect the official
-   number — the restore makes the final measurement honest regardless.)
+   (Belt-and-suspenders: the Validate step ALSO rebuilds a fresh workspace from the TRUE original and
+   restores every non-source file before it measures, so even if a root agent defeats the per-round
+   restore, the official number still reflects ONLY the kernel-source change.)
 4. List the source files (so downstream agents know what exists):
    `find "$EVAL_DIR/workspace" -maxdepth 3 -type f \( -name '*.py' -o -name '*.hip' -o -name '*.cu' -o -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cuh' -o -name '*.yaml' \) | sort`
 

@@ -116,6 +116,21 @@ essential: without (a), parallel engineers compiling `torch.utils.cpp_extension.
 share ONE global cache → they serialize on a single lock and can benchmark each other's `.so`;
 without (b) every compile builds ~9 architectures. These are generic to any torch HIP extension.
 
+**Freeze-restore prefix (measurement integrity — MANDATORY).** Setup created a read-only golden of the
+perf harness at `$EVAL_DIR/measure_golden/` (pristine `scripts/harness_run.py` / `scripts/task_runner.py`
+/ `scripts/_runtime.py` / `test_cases.json`, plus a `restore.sh`) — the exact analog of the frozen
+`source_golden` that correctness reads. EVERY GPU measurement command you write into the COMMANDMENT
+(CORRECTNESS / BENCHMARK / FULL_BENCHMARK / PROFILE) MUST re-restore that golden into the workspace
+IMMEDIATELY before it runs, so no per-round number can ever reflect a harness edit — only the kernel
+source counts. Concretely, prefix every measurement command (inside the workspace, before `gpu_lock.sh`)
+with `bash <EVAL_DIR>/measure_golden/restore.sh &&` using the concrete `EVAL_DIR` path, e.g.:
+```
+cd <workspace> && bash <EVAL_DIR>/measure_golden/restore.sh && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <perf cmd>
+```
+`restore.sh` only re-copies the frozen NON-source files, so it never touches the editable kernel. Do NOT
+rely on `chmod` (the agent is root) — restore-before-measure is the hard guarantee, mirroring how
+correctness always reads `source_golden`.
+
 The COMMANDMENT MUST contain, with concrete commands (not placeholders):
 - `SETUP` — `cd <workspace>`. Do NOT use `rm` anywhere in the COMMANDMENT (it triggers an approval
   prompt that blocks autonomous/background runs). Each workspace is already a fresh artifact-free copy
@@ -124,9 +139,9 @@ The COMMANDMENT MUST contain, with concrete commands (not placeholders):
   (e.g. after editing headers), MOVE it aside instead of deleting:
   `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true` (a fresh `.torch_ext` rebuilds).
   So `SETUP` is just `cd <workspace>` (plus the env exports below) — no deletion.
-- `CORRECTNESS` — wrapped: `cd <workspace> && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <correctness cmd>`.
-- `BENCHMARK` — wrapped in gpu_lock (quick measurement).
-- `FULL_BENCHMARK` — wrapped in gpu_lock (authoritative).
+- `CORRECTNESS` — restore-then-wrapped: `cd <workspace> && bash <EVAL_DIR>/measure_golden/restore.sh && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <correctness cmd>`.
+- `BENCHMARK` — restore prefix + wrapped in gpu_lock (quick measurement).
+- `FULL_BENCHMARK` — restore prefix + wrapped in gpu_lock (authoritative).
 - `PROFILE` — `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<cmd that cd's into the workspace>" <out_dir>`.
   If the report shows a `!!! PROFILER FAILED` block, follow the fault-tolerance ladder in
   `knowledge/profiling_guide.md` (override the named env var with the corrected flag, or degrade and say so).
