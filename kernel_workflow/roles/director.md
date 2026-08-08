@@ -149,9 +149,12 @@ Steps:
      the pristine original (set `baseline_callable` from `meta.json:target_callable` if present, else "").
    Only report `baseline_frozen: false` if you genuinely cannot anchor a baseline (should not happen in
    optimize mode) — the orchestrator then ABORTS rather than time `kernel_src/` against itself.
-3b. **Freeze the measurement harness the SAME way correctness freezes `source_golden`.** The perf
-   harness (timer, input generation, golden compare, launch config) is the measurement CONTRACT, not an
-   optimization target: only the declared `config.yaml:source_file_path` (the kernel) is editable.
+3b. **(OPT-IN) Freeze the measurement harness the SAME way correctness freezes `source_golden`.**
+   This entire step is gated behind `GEAK_FREEZE_HARNESS=1` — when the env var is unset/`0` (the
+   DEFAULT), do NOTHING here and GEAK's baseline framework behavior is byte-for-byte unchanged. Only
+   when explicitly enabled do the following. The perf harness (timer, input generation, golden compare,
+   launch config) is the measurement CONTRACT, not an optimization target: only the declared
+   `config.yaml:source_file_path` (the kernel) is editable.
    Correctness already reads a pristine, frozen `source/source_golden` copy — give performance the
    identical treatment: keep a read-only golden copy of every non-source measurement file OUTSIDE the
    workspace, and (see the COMMANDMENT) restore from it before EVERY measurement. `chmod -w` alone is
@@ -163,6 +166,7 @@ Steps:
    failure IN THE SAME ROUND (not only at final Validate), so the loop can self-correct.
    ```bash
    cd "$EVAL_DIR/workspace"
+   if [ "${GEAK_FREEZE_HARNESS:-0}" = "1" ]; then   # DEFAULT off → upstream behavior; only opt-in freezes
    SRC=$(awk '/^source_file_path:/{f=1;next} /^[^[:space:]-]/{f=0} f&&/-/{sub(/.*-[[:space:]]*/,"");print}' config.yaml)
    FROZEN="$EVAL_DIR/measure_golden"          # read-only golden for the perf harness (sibling of workspace)
    mkdir -p "$FROZEN"
@@ -189,6 +193,7 @@ done
 RESTORE
    chmod +x "$FROZEN/restore.sh"
    chmod -R a-w "$FROZEN" 2>/dev/null || true             # frozen golden: read-only for the whole run
+   fi   # end GEAK_FREEZE_HARNESS
    ```
    (Belt-and-suspenders: the Validate step ALSO rebuilds a fresh workspace from the TRUE original and
    restores every non-source file before it measures, so even if a root agent defeats the per-round
@@ -249,16 +254,18 @@ baseline latencies recorded at benchmark setup).
    git -c user.email=team@workflow -c user.name=team add -A
    git -c user.email=team@workflow -c user.name=team commit -q -m "validation_baseline"
    git apply "$EVAL_DIR/final_patch.diff"
-   # ENFORCE the immutable measurement contract (COMMANDMENT: "never edit the golden copy or the
-   # harness"): only the declared source_file_path may change. Restore every OTHER tracked file the
-   # patch touched (harness_run.py / task_runner.py / _runtime.py / test_cases.json / source_golden/…)
-   # back to the pristine baseline, so the measured speedup reflects ONLY the kernel-source change and
-   # an agent cannot inflate results by tuning launch params inside the harness. No-op for clean,
-   # source-only patches — only reverts out-of-contract edits.
-   SRC=$(awk '/^source_file_path:/{f=1;next} /^[^[:space:]-]/{f=0} f&&/-/{sub(/.*-[[:space:]]*/,"");print}' config.yaml)
-   for f in $(git diff --name-only); do
-     printf '%s\n' "$SRC" | grep -qxF "$f" || git checkout -- "$f"
-   done
+   # (OPT-IN, GEAK_FREEZE_HARNESS=1 only) ENFORCE the immutable measurement contract (COMMANDMENT:
+   # "never edit the golden copy or the harness"): only the declared source_file_path may change.
+   # Restore every OTHER tracked file the patch touched (harness_run.py / task_runner.py / _runtime.py
+   # / test_cases.json / source_golden/…) back to the pristine baseline, so the measured speedup
+   # reflects ONLY the kernel-source change and an agent cannot inflate results by tuning launch params
+   # inside the harness. DEFAULT off → the full patch is applied exactly as upstream (no restore).
+   if [ "${GEAK_FREEZE_HARNESS:-0}" = "1" ]; then
+     SRC=$(awk '/^source_file_path:/{f=1;next} /^[^[:space:]-]/{f=0} f&&/-/{sub(/.*-[[:space:]]*/,"");print}' config.yaml)
+     for f in $(git diff --name-only); do
+       printf '%s\n' "$SRC" | grep -qxF "$f" || git checkout -- "$f"
+     done
+   fi
    ```
 3. Run CORRECTNESS (from COMMANDMENT, with cwd = validation_workspace). If it fails → status
    `flagged`, record the failure, do NOT report a speedup as accepted.
