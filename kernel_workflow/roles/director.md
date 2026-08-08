@@ -149,6 +149,21 @@ Steps:
      the pristine original (set `baseline_callable` from `meta.json:target_callable` if present, else "").
    Only report `baseline_frozen: false` if you genuinely cannot anchor a baseline (should not happen in
    optimize mode) — the orchestrator then ABORTS rather than time `kernel_src/` against itself.
+3b. **Freeze the measurement harness (MANDATORY — mirrors 3a + author-mode's `chmod -w`).** The perf
+   harness is the measurement CONTRACT, not an optimization target: only the declared
+   `config.yaml:source_file_path` (the kernel) is editable. Correctness already has a frozen
+   `source_golden`; give performance the same protection so agents optimize the KERNEL, not the harness.
+   Make every non-source measurement file read-only:
+   ```bash
+   cd "$EVAL_DIR/workspace"
+   SRC=$(awk '/^source_file_path:/{f=1;next} /^[^[:space:]-]/{f=0} f&&/-/{sub(/.*-[[:space:]]*/,"");print}' config.yaml)
+   for f in scripts/harness_run.py scripts/task_runner.py scripts/_runtime.py test_cases.json; do
+     printf '%s\n' "$SRC" | grep -qxF "$f" || { [ -e "$f" ] && chmod -w "$f" 2>/dev/null || true; }
+   done
+   ```
+   (Belt-and-suspenders: the Validate step ALSO restores these from the pristine baseline before it
+   measures, so even a root agent that does `chmod +w` and edits the harness cannot affect the official
+   number — the restore makes the final measurement honest regardless.)
 4. List the source files (so downstream agents know what exists):
    `find "$EVAL_DIR/workspace" -maxdepth 3 -type f \( -name '*.py' -o -name '*.hip' -o -name '*.cu' -o -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cuh' -o -name '*.yaml' \) | sort`
 
