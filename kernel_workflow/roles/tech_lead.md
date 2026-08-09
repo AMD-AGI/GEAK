@@ -77,11 +77,17 @@ analysis below exactly as before.)
      `gather_scatter`, `reduction`, …). Use `null` if NONE genuinely fits (most point-cloud/custom HIP
      ops — do NOT force a bad match).
    - `kk_language`: the backend/language id of the editable source — `triton` | `hip` | `ck` | `asm`
-     | `flydsl` | `tilelang` (match the kernel's actual language).
+     | `flydsl` | `tilelang` | `gluon` (match the kernel's actual language; `gluon` only when the
+     source really is Gluon, i.e. `gluon.jit` / explicit layouts — a plain `triton.jit` kernel is
+     `triton` even if you plan to migrate it).
    - `kk_refs`: 2–4 concrete card paths under `KERNEL_KNOWLEDGE_DIR` worth reading first, e.g.
      `operators/<kk_operator>/tuning.md`, `operators/<kk_operator>/backends/<kk_language>.md`,
      `operators/<kk_operator>/{numerics,fusion}.md`, `index/recipes.md`. Verify each path exists
      (`ls`); drop any that don't. Empty `[]` when `kk_operator` is `null`.
+     For `flydsl` | `tilelang` | `gluon`, also include the language dir `languages/<kk_language>/` —
+     the engineers cannot be assumed to write these from memory, and only that dir carries the
+     programming model. (Dir names differ from the ids for the others: triton→`triton_amd`,
+     hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`.)
    Treat all of this as facts/how-to to *widen* the candidate set — not decisions (see the contract
    above). Do not let it override the per-case data or measurement.
 5. Write `EVAL_DIR/analysis.json` and `EVAL_DIR/codebase_context.md` (human-readable, INCLUDE the
@@ -103,7 +109,7 @@ Return JSON:
     {"title": "...", "specialty": "algorithm|memory|compute|host_runtime", "why": "..."}
   ],
   "kk_operator": "<taxonomy operator id or null>",
-  "kk_language": "<triton|hip|ck|asm|flydsl|tilelang or null>",
+  "kk_language": "<triton|hip|ck|asm|flydsl|tilelang|gluon or null>",
   "kk_refs": ["<existing card paths under KERNEL_KNOWLEDGE_DIR>"]
 }
 ```
@@ -257,7 +263,9 @@ none of them, so skip this whole block then):**
   ```bash
   mkdir -p "$STATE_DIR"
   # sync the cumulative-best workspace (code + immutable oracle) to STATE_DIR/best (tar-pipe, exclude
-  # .git/build/__pycache__/.torch_ext/*.so) so the next wave's director seeds from it. NO `rm` (it
+  # .git/build/__pycache__/.torch_ext/*.so) so the next wave's director seeds from it. The golden
+  # (reference_io.pt, if present) is an absolute symlink in CANONICAL; this tar carries it verbatim so
+  # best/ shares the one physical file — never add -h/--dereference. NO `rm` (it
   # prompts and blocks autonomous runs): stage into a UNIQUE tmp, then atomically swap with mv-aside.
   TMP="$STATE_DIR/best.tmp_$(date +%s)_$$"; mkdir -p "$TMP"
   ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/build' --exclude='*/__pycache__' \

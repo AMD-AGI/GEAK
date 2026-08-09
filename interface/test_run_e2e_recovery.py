@@ -62,7 +62,7 @@ def _make_eval_dir(tmp_path: Path, *, accepted: bool = True,
 
 def _handoff(eval_dir: Path) -> dict:
     return {
-        "schema_version": 1, "model_path": "/models/fake", "framework": "vllm",
+        "schema_version": 2, "model_path": "/models/fake", "framework": "vllm",
         "tp": 8, "workload": {"isl": 8192, "osl": 1024, "conc": 64},
         "exp_root": str(eval_dir.parent), "eval_dir": str(eval_dir),
     }
@@ -449,29 +449,51 @@ def test_result_source_live_workflow_return(tmp_path):
 
 # ── guaranteed emit in main() ───────────────────────────────────────────────
 
-def _run_main(monkeypatch, tmp_path, eval_dir, *, invoke):
+def _run_main(monkeypatch, tmp_path, eval_dir, *, invoke, handoff_extra=None):
     monkeypatch.setattr(rx, "invoke_workflow", invoke)
     monkeypatch.setattr(rx, "apply_bench_client", lambda h: "native")
     monkeypatch.setattr(rx, "apply_bench_protocol", lambda h: {})
     hp = tmp_path / "handoff.json"
     rp = tmp_path / "out" / "result.json"
-    hp.write_text(json.dumps(_handoff(eval_dir)), encoding="utf-8")
+    handoff = _handoff(eval_dir)
+    handoff.update(handoff_extra or {})
+    hp.write_text(json.dumps(handoff), encoding="utf-8")
     rc = rx.main([str(hp), str(rp)])
     return rc, rp
 
 
 def test_emit_on_success(monkeypatch, tmp_path):
     eval_dir = _make_eval_dir(tmp_path, with_validation=True)
+    report = eval_dir / "final_report.md"
+    report.write_text("# GEAK final report\n", encoding="utf-8")
 
     def ok_invoke(prompt, t, ed):
         return {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
                 "final_throughput_tok_s": 535.352,
-                "baseline_throughput_tok_s": 461.314}
+                "baseline_throughput_tok_s": 461.314,
+                "report_path": str(report)}
 
-    rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=ok_invoke)
+    rc, rp = _run_main(
+        monkeypatch,
+        tmp_path,
+        eval_dir,
+        invoke=ok_invoke,
+        handoff_extra={
+            "raw_baseline_tput": 430.0,
+            "orchestrator_best_tput_same_config": 460.0,
+        },
+    )
     assert rp.is_file(), "result.json MUST exist on success"
     out = json.loads(rp.read_text())
     assert out["status"] == "ok"
+    assert out["schema_version"] == 2
+    assert out["baseline_alignment"]["status"] == "aligned"
+    assert out["baseline_basis"]["measurement_divergence_pct"] == out[
+        "baseline_basis"
+    ]["current_best_same_config_divergence_pct"]
+    assert "baseline_divergence_pct" not in out["baseline_basis"]
+    rendered = report.read_text(encoding="utf-8")
+    assert rendered.count(rx.BASELINE_ALIGNMENT_BEGIN) == 1
     assert (eval_dir / "kernel_journey.json").is_file()
 
 
@@ -479,16 +501,31 @@ def test_emit_when_workflow_raises_but_disk_has_intermediate(monkeypatch, tmp_pa
     """The killer case: workflow dies before Validate, but an accepted
     intermediate is on disk -> result.json MUST still be ok (not discarded)."""
     eval_dir = _make_eval_dir(tmp_path, accepted=True, with_validation=False)
+    report = eval_dir / "final_report.md"
+    report.write_text("# Recovered GEAK report\n", encoding="utf-8")
 
     def boom(prompt, t, ed):
         raise TimeoutError("budget expired before Validate")
 
-    rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=boom)
+    rc, rp = _run_main(
+        monkeypatch,
+        tmp_path,
+        eval_dir,
+        invoke=boom,
+        handoff_extra={
+            "raw_baseline_tput": 430.0,
+            "orchestrator_best_tput_same_config": 461.0,
+        },
+    )
     assert rp.is_file(), "result.json MUST exist even when workflow raised"
     out = json.loads(rp.read_text())
     assert out["status"] == "ok"
     assert out.get("recovered_from_disk") is True
     assert out["final_throughput_tok_s"] == pytest.approx(535.352)
+    assert out["baseline_alignment"]["status"] == "aligned"
+    assert report.read_text(encoding="utf-8").count(
+        rx.BASELINE_ALIGNMENT_BEGIN
+    ) == 1
     assert (eval_dir / "kernel_journey.json").is_file()
 
 

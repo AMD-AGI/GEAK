@@ -53,10 +53,13 @@ Read ALL of these before and during your work, and re-consult as the bottleneck 
 ## Operator/language SOTA knowledge (REFERENCE ONLY — same contract as the specialist)
 When `KERNEL_KNOWLEDGE_DIR` is non-empty AND `KK_OPERATOR` is set, mine the cards (`KK_REFS`,
 `operators/<KK_OPERATOR>/backends/<KK_LANGUAGE>.md`, `operators/<KK_OPERATOR>/{tuning,numerics,fusion}.md`,
-`index/recipes.md`) to *widen* your candidate techniques (knobs, skeletons, split-K/preshuffle, fusion,
-MFMA/numerics pitfalls, alternative backends worth mimicking). **Contract:** facts/how-to, not
-decisions; it may be stale/wrong; your measured benchmark is the floor; ignore stored `status`/TFLOPS
-as decisions. It can only add candidates, never narrow them. Skip entirely if empty / `KK_OPERATOR` null.
+`index/recipes.md`, plus `languages/<dir>/` for the programming model when `KK_LANGUAGE` is one you
+cannot write from memory — `flydsl`/`tilelang`/`gluon` map to the same dir name, triton→`triton_amd`,
+hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`) to *widen* your candidate techniques (knobs,
+skeletons, split-K/preshuffle, fusion, MFMA/numerics pitfalls, alternative backends worth mimicking).
+**Contract:** facts/how-to, not decisions; it may be stale/wrong; your measured benchmark is the floor;
+ignore stored `status`/TFLOPS as decisions. It can only add candidates, never narrow them. Skip entirely
+if empty / `KK_OPERATOR` null.
 
 ## Roofline targeting (how to know how far you really are)
 Your target may be expressed as "% of roofline". Estimate the ceiling, then drive toward it:
@@ -76,7 +79,7 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
 
 ## Rules (NON-NEGOTIABLE)
 1. NEVER modify the test harness / task_runner / COMMANDMENT / oracle (`unittest.py`, `meta.json`,
-   `reference_io.pt`), or any file outside `KERNEL_PATH`.
+   `baseline_src/`, and `reference_io.pt` if one is present), or any file outside `KERNEL_PATH`.
 2. Preserve the kernel's external interface (entry-point signature + semantics) so the wrapper/tests
    still work. You may change internals, layouts, and the wrapper/binding freely.
 3. NEVER set `HIP_VISIBLE_DEVICES` directly — run correctness AND benchmark via
@@ -95,7 +98,10 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    from other categories (e.g. warp-cooperative rewrite + native output layout + dispatch fusion).
 3. **Implement → correctness → benchmark** the change. Keep it only if correct AND faster than your
    current best. Save `best_patch.diff` (`cd $KERNEL_PATH && git diff > $OUTPUT_DIR/best_patch.diff`)
-   whenever you set a new best with geomean > 1.0.
+   the MOMENT you set a new best with geomean > 1.0 — not at the end. It is the RECOVERY artifact: if
+   your final return is lost (timeout/crash/mis-formatted StructuredOutput), the lane falls back to
+   re-measuring whatever >1.0x patch it finds on disk. A patch on disk still counts; a result that only
+   exists in a lost return is gone.
 4. **Self-profile to re-steer**: every few accepted changes, re-run
    `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<benchmark cmd that cd's into $KERNEL_PATH>" $OUTPUT_DIR/profile_rN`
    to find the NEW dominant bottleneck, and attack that next. This is the core of going deep.
@@ -112,7 +118,13 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    patch and explain — that is signal for the ledger.
 
 ## Outputs
-`OUTPUT_DIR/worker_result.json` (same schema as the specialist engineer):
+**Return channel (authoritative):** your StructuredOutput return, matching the schema below, is what the
+lane harvests and scores — NOT the disk JSON. **Disk artifacts:** `best_patch.diff` is the recovery
+backstop the lane re-measures if your return is lost (step 3); `worker_result.json` + `report.md` are the
+durable record for the TechLead's insight log. Write all three; never assume the disk JSON substitutes
+for the return.
+
+`OUTPUT_DIR/worker_result.json` (same schema as the specialist engineer, same fields as your return):
 ```json
 {
   "engineer_id": "r{ROUND}_d{N}",

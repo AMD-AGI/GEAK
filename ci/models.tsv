@@ -1,0 +1,34 @@
+# CI model enrollment registry.  TAB-separated.  '#' lines and blanks ignored.
+#
+# Columns:
+#   1  model_key   folder name under geak_runtime/ (also the handoff dir)
+#   2  hf_repo     HuggingFace repo id for auto-download of weights, or '-' if
+#                  weights must be pre-staged on the cluster (no auto-download)
+#   3  tier        'smoke' -> used by the l1-ci-smoke L1 smoke (single model)
+#                  'verify'-> used only by the l1-ci-full full matrix
+#                  (the smoke model is ALSO part of the full matrix)
+#
+# framework (vllm/sglang) and tp (GPU count) are NOT listed here — they are the
+# single source of truth in each model's handoff.json and read from there.
+#
+# Enrollment is intentionally limited to models with FULL GEAK input material
+# (handoff + launch_recipe + tracelens + torch_trace) per geak_ci_workspace/TABLE.md.
+# Add a row here only once a model's material is complete.
+#
+# model_key	hf_repo	tier
+# --- Currently enrolled: the 5 GEAK-v4 onboarded models with FULL material
+#     (handoff + launch_recipe + tracelens triad + torch_trace) and weights
+#     pre-staged as symlinks under $HF_MODELS_DIR. hf_repo is '-' (CI never
+#     auto-downloads: stage_weights requires GEAK_ALLOW_DOWNLOAD=1). framework +
+#     tp come from each handoff.json. The 'smoke' row is ALSO in the full matrix,
+#     so l1-ci-full runs all 5; l1-ci-smoke runs only the 'smoke' row.
+MiniMaxAI-MiniMax-M2.5	-	smoke
+moonshotai-Kimi-K2.6-int4	-	verify
+MiniMaxAI-MiniMax-M3-MXFP8	-	verify
+Qwen-Qwen3-14B-FP8	-	verify
+Qwen-Qwen3.5-27B-FP8	-	verify
+#
+# --- Previously enrolled (reference models). Disabled while the matrix targets
+#     the GEAK-v4 onboarded set above. Re-enable a row to bring it back.
+# Qwen-Qwen3-8B	Qwen/Qwen3-8B	smoke
+

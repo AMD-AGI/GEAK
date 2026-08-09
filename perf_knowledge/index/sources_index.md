@@ -4,7 +4,7 @@ kind: reference
 updated: 2026-06-09
 ---
 
-# Sources index — 498 unique URLs across 630 docs
+# Sources index — 503 unique URLs across 649 docs
 
 Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources.py`). Each doc keeps its own inline `## Sources`.
 
@@ -233,6 +233,8 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://github.com/ROCm/flash-attention
 - https://github.com/ROCm/flashinfer
 - https://github.com/ROCm/gfx950-gluon-tutorials
+- https://github.com/ROCm/gfx950-gluon-tutorials.git
+- https://github.com/ROCm/gfx950-gluon-tutorials/tree/main/layout_plot
 - https://github.com/ROCm/hipBLASLt
 - https://github.com/ROCm/hipBLASLt/blob/develop/LICENSE.md
 - https://github.com/ROCm/iris
@@ -317,6 +319,9 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://github.com/triton-lang/triton/issues/4959
 - https://github.com/triton-lang/triton/issues/6635
 - https://github.com/triton-lang/triton/issues/9822
+- https://github.com/triton-lang/triton/tree/main/python/triton/experimental/gluon/language/amd
+- https://github.com/triton-lang/triton/tree/main/python/triton/experimental/gluon/language/amd/cdna4
+- https://github.com/triton-lang/triton/tree/main/python/triton/experimental/gluon/language/amd/gfx1250
 - https://github.com/uccl-project/uccl
 - https://github.com/uccl-project/uccl/tree/main/ep
 - https://github.com/vllm-project/vllm

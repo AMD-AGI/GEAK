@@ -20,7 +20,9 @@ from the op task dir). The op's correctness contract is an **IMMUTABLE** unittes
   `b_shape`/`transpose_b`/`bias` (gemm), captured tensor spec (attn), `dtype`, `math_contract`
   (e.g. `C = A·Bᵀ + bias`), `regime` (prefill|decode|both).
 - `WORKSPACE` — the canonical workspace to write your implementation into (a `kernel_src/` lives here).
-- `TASK_DIR` — the op task dir holding the **IMMUTABLE** `unittest.py` + `reference_io.pt` + `meta.json`.
+- `TASK_DIR` — the op task dir holding the **IMMUTABLE** `unittest.py` + `meta.json` + `baseline_src/`
+  (plus `reference_io.pt` **if** the dir came from e2e's `kernel_extractor`; a `oracle_freezer` dir has
+  none — it re-derives operands from `meta.cases[]` seeds and checks parity against `baseline_src/` live).
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path (its CORRECTNESS/BENCHMARK point at the immutable
   unittest), and `KERNEL_KNOWLEDGE_DIR` (the AMD authoring knowledge base, may be empty).
 
@@ -44,9 +46,15 @@ Read, as reference, before writing:
   fusion, knob dictionaries) that don't go stale.
 - **Language skeleton:** `KERNEL_KNOWLEDGE_DIR/languages/<dir>/` — map: triton→`triton_amd`, flydsl→`flydsl`,
   hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`, tilelang→`tilelang`, gluon→`gluon`,
-  hipkittens→`hipkittens` (read `overview.md`/`patterns.md`/`knobs.md`). For **flydsl GEMM**, the simplest
+  hipkittens→`hipkittens`. **The file set differs per language** — `ls` the dir and read what is there
+  (`overview.md` / `patterns.md` / `knobs.md` / `pitfalls.md` / `primitives.md`); only `triton_amd` and
+  `flydsl` carry all three of overview/patterns/knobs. For **flydsl GEMM**, the simplest
   correct baseline is to call aiter's `flydsl_hgemm` — `out = a @ b.T (+bias)` — rather than hand-writing
   layout algebra; commit that, the optimize loop tunes tile/split_k/preshuffle. flydsl is JIT (no build).
+  For **gluon** the dir is facts-only (`overview.md`, `programming_model.md`, `gemm_cookbook.md`); the
+  fuller language surface, the TTGIR→Gluon transcription toolchain and pipeline re-injection live in the
+  `gluon_authoring` expert skill and are only injected when `use_expert_skills` is on. That skill is
+  mechanics only — it carries no search strategy, so it does not compete with your own loop.
 - **Op + per-backend authoring card:** `KERNEL_KNOWLEDGE_DIR/operators/<op>/overview.md` plus
   `operators/<op>/backends/<lang>.md` (the card for your exact language — code skeleton, knobs, pitfalls).
   Op short→dir: gemm→`dense_gemm`, attention_prefill→`attention_prefill_fmha`,
@@ -69,7 +77,8 @@ Read, as reference, before writing:
 > 15.7× isolated, ~0% e2e). Your seed competes against the live Triton path, not against itself.
 
 ## Rules (NON-NEGOTIABLE)
-1. NEVER modify `TASK_DIR/unittest.py`, `reference_io.pt`, `meta.json`, or `baseline_src/` — they are the
+1. NEVER modify `TASK_DIR/unittest.py`, `meta.json`, `baseline_src/`, or `reference_io.pt` if the dir has
+   one — they are the
    immutable oracle + the frozen real-online-kernel baseline (anti-cheating). You only write into
    `WORKSPACE/kernel_src/`.
 1a. **The speedup denominator is the frozen REAL ONLINE kernel, not your seed.** The immutable
