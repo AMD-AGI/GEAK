@@ -104,6 +104,12 @@ class SemanticKernelMappingTest(unittest.TestCase):
                 tables = json.load(fh)["tables"]
             self.assertEqual({table["phase"] for table in tables},
                              {"prefill", "decode"})
+            self.assertTrue(all(
+                table["pattern_layer_ids"] == [0, 1]
+                and table["pattern_layer_count"] == 2
+                and table["representative_layer_id"]
+                in table["pattern_layer_ids"]
+                for table in tables))
             self.assertTrue(all(row["shape"]["source"] == "kernel_exact"
                                 for table in tables for row in table["rows"]))
             self.assertTrue(all(

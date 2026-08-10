@@ -1384,6 +1384,9 @@ def _table(pattern_doc, rows, representatives, table_phases=None):
             key=lambda item: (
                 phase_order.get(item[0][0], 99), item[0][1])):
         total = sum(row["duration_us"] for row in group)
+        pattern_layer_ids = sorted(
+            int(layer_id) for layer_id in
+            pattern_meta.get(pattern_id, {}).get("layer_ids", []))
         output_rows = []
         for pos, row in enumerate(group):
             item = dict(row)
@@ -1396,6 +1399,8 @@ def _table(pattern_doc, rows, representatives, table_phases=None):
             "pattern_id": pattern_id,
             "pattern_display_name": pattern_meta.get(
                 pattern_id, {}).get("pattern_display_name", pattern_id),
+            "pattern_layer_ids": pattern_layer_ids,
+            "pattern_layer_count": len(pattern_layer_ids),
             "representative_layer_id": representatives[pattern_id]["layer_id"],
             "selected_step_id": group[0].get("step_id"),
             "selected_bucket": {
@@ -1448,13 +1453,19 @@ def _representative_integrity(rows, tables, representatives):
         duration_matches = math.isclose(
             duration_sum, float(table.get("layer_total_us", 0) or 0),
             rel_tol=0, abs_tol=1e-6)
+        pattern_layer_ids = table.get("pattern_layer_ids", [])
+        representative_in_pattern = (
+            table["representative_layer_id"] in pattern_layer_ids)
         passed = (
             first is not None and last is not None and exact_once and ordered
-            and interval_complete and duration_matches)
+            and interval_complete and duration_matches
+            and representative_in_pattern)
         audits.append({
             "pattern_id": pattern_id,
             "phase": phase,
             "representative_layer_id": table["representative_layer_id"],
+            "pattern_layer_ids": pattern_layer_ids,
+            "representative_in_pattern": representative_in_pattern,
             "body_start_device_seq_index": first,
             "body_end_device_seq_index": last,
             "expected_event_count": len(expected_ids),
@@ -1623,6 +1634,8 @@ def _shape_capture_plan(tables, pattern_doc, trace_path):
         "target_buckets": target_buckets,
         "patterns": [{
             "pattern_id": table["pattern_id"],
+            "pattern_layer_ids": table.get("pattern_layer_ids", []),
+            "pattern_layer_count": table.get("pattern_layer_count", 0),
             "representative_layer_id": table["representative_layer_id"],
             "structural_context": table.get("structural_context", {}),
         } for table in tables],
@@ -1646,6 +1659,11 @@ def _markdown(tables, quality):
         lines.extend([
             "## %s — %s" % (table["phase"].upper(), table["pattern_display_name"]),
             "",
+            "- pattern layers (%d): `%s`" % (
+                int(table.get(
+                    "pattern_layer_count",
+                    len(table.get("pattern_layer_ids", [])))),
+                json.dumps(table.get("pattern_layer_ids", []))),
             "- representative layer: `L%s`" % table["representative_layer_id"],
             "- selected bucket: `%s`" % json.dumps(
                 table.get("selected_bucket", {}), sort_keys=True),

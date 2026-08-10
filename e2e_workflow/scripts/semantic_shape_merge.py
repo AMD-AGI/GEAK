@@ -644,6 +644,11 @@ def _markdown(table_doc):
                 str(table["phase"]).upper(),
                 table.get("pattern_display_name", table["pattern_id"])),
             "",
+            "- pattern layers (%d): `%s`" % (
+                int(table.get(
+                    "pattern_layer_count",
+                    len(table.get("pattern_layer_ids", [])))),
+                json.dumps(table.get("pattern_layer_ids", []))),
             "- representative layer: `L%s`" % table["representative_layer_id"],
             "- selected bucket: `%s`" % json.dumps(
                 table.get("selected_bucket", {}), sort_keys=True),

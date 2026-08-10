@@ -62,6 +62,8 @@ class SemanticShapeMergeTest(unittest.TestCase):
                 "tables": [{
                     "phase": "decode",
                     "pattern_id": "P",
+                    "pattern_layer_ids": [1, 2, 3],
+                    "pattern_layer_count": 3,
                     "representative_layer_id": 2,
                     "selected_bucket": {
                         "phase": "decode", "batch_size": 4,
@@ -161,6 +163,7 @@ class SemanticShapeMergeTest(unittest.TestCase):
                 layer_io["input"]["axis_0_source"], "clean_trace_step")
             with open(result["semantic_table_md"]) as fh:
                 markdown = fh.read()
+            self.assertIn("pattern layers (3): `[1, 2, 3]`", markdown)
             self.assertIn("shape type", markdown)
             self.assertIn("layer total %", markdown)
             self.assertNotIn("| evidence |", markdown)
