@@ -103,33 +103,26 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions
 Then just describe what you want in natural language (examples below). Claude Code resolves the paths and
 invokes the `Workflow` tool for you.
 
-### Swappable agent backend (Claude Code ↔ qwen-code / qcoder)
+### Swappable agent backend (Claude Code ↔ codex / cursor)
 
 The workflows are plain JS that normally run on **Claude Code's `Workflow` tool** (which provides the
 `agent()` / `parallel()` / `pipeline()` / `workflow()` orchestration primitives). To run the **same
-workflows** under a different coding-agent CLI — e.g. **qwen-code (qcoder)** — GEAK ships a **standalone
-Node runtime** (`interface/runtime/`) that re-implements those primitives itself and dispatches each
-`agent()` call to a one-shot backend process. All parallelism and one-level nesting happen in the runtime,
-so the agent CLI does **not** need to support parallel or nested subagents.
+workflows** under a different coding-agent CLI — primarily **codex** or **cursor-agent** — GEAK ships a
+**standalone Node runtime** (`interface/runtime/`) that re-implements those primitives itself and
+dispatches each `agent()` call to a one-shot backend process. All parallelism and one-level nesting
+happen in the runtime, so the agent CLI does **not** need to support parallel or nested subagents.
 
-Two orthogonal axes live in `interface/runtime/registry.json`: **agents** (which CLI: claude / qwen /
-codex / kimi) × **models** (which endpoint). A **profile** pins one `(agent, model)` combo.
+Two orthogonal axes live in `interface/runtime/registry.json`: **agents** (which CLI: claude / codex /
+cursor / qwen / kimi) × **models** (which endpoint). A **profile** pins one `(agent, model)` combo.
+Select a backend with `--agent` / `--profile` (or `GEAK_AGENT_BACKEND` / `GEAK_AGENT_PROFILE`); the `.js`
+workflows / roles / knowledge are used unmodified. **e2e** always goes through `run_e2e.py` (which
+auto-routes to the runtime once a backend is set) and **single kernels** through `run_workflow.mjs`.
+The two main backends — **codex** and **cursor** — are documented next.
 
-```bash
-# One switch selects the backend; the .js workflows / roles / knowledge are used unmodified.
-export GEAK_AGENT_PROFILE=qwen         # unset = native Claude/Workflow (default)
-npm i -g @qwen-code/qwen-code          # the chosen CLI; needs Node ≥ 18 + a reachable endpoint
+#### codex backend — self-contained setup
 
-# e2e goes through run_e2e.py as usual (auto-routes to the runtime when the env is set):
-python interface/run_e2e.py handoff.json result.json
-
-# single kernel runs on the runtime directly:
-node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --profile qwen \
-  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
-```
-
-**codex backend — self-contained setup.** The codex provider is auto-configured from the key you
-provide (no `config.toml` editing, no provider selection).
+The codex provider is auto-configured from the key you provide (no `config.toml` editing, no provider
+selection).
 
 *1. Install the codex CLI* (do not assume it is already present):
 ```bash
@@ -186,12 +179,34 @@ manually. 401 → key unset/invalid; 404 model → `GEAK_CODEX_MODEL` unavailabl
 TLS error → intranet gateways need `SSL_CERT_FILE` (public OpenAI does not). claude-via-SaFE needs the
 de-stream shim — see [`interface/runtime/SETUP.md`](interface/runtime/SETUP.md).
 
+#### cursor backend — runs on Cursor cloud (NOT via a gateway)
+
+`cursor-agent` uses **Cursor-side models on Cursor's own cloud**, so it needs no gateway, no
+`SSL_CERT_FILE`, and no shim — but requests + code leave for Cursor's cloud, and the model is a
+Cursor-side id (not one your gateway serves).
+
+```bash
+# 1) install cursor-agent (see Cursor docs), then authenticate ONCE:
+cursor-agent login                          # or: export CURSOR_API_KEY=...
+export GEAK_CURSOR_MODEL=composer-2.5       # a Cursor-side model id (e.g. composer-2.5, sonnet-4-thinking)
+
+# 2) run — single kernel:
+node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent cursor \
+  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
+# e2e:
+export GEAK_AGENT_BACKEND=cursor
+python interface/run_e2e.py handoff.json result.json
+```
+
+> Because cursor uses Cursor-side models + cloud, it **cannot** join a strict "same gateway, same model"
+> comparison against codex/claude. More detail: [`interface/runtime/SETUP.md`](interface/runtime/SETUP.md) §B.
+
 **Controlled (agent × model) comparison experiments are built in** — sweep the matrix, N repeats,
 fixed task/budget, get a comparison table (speedup / success-rate / wall; no token/cost):
 
 ```bash
 node interface/runtime/experiment.mjs --script kernel_workflow/kernel_workflow.js \
-  --agents claude,qwen,codex --models default --repeats 3 \
+  --agents claude,codex,cursor --models default --repeats 3 \
   --args '{"kernel_path":"/abs/knn","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
 ```
 
