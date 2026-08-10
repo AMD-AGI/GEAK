@@ -1,0 +1,46 @@
+{
+  "run_id": "_topk_forward-kernel_20_geak_0808_4h",
+  "date": "2026-08-08",
+  "kernel_class": "topk / routing",
+  "gfx": "gfx950",
+  "regime": "launch-bound",
+  "toolchain": "triton 3.6.0 / torch 2.11.0+gitd0c8b1f / gfx950 CDNA4",
+  "box_quiet": true,
+  "validation_status": "accepted",
+  "held_out": false,
+  "kernel_names": [
+    "_topk_forward",
+    "_topk_forward_kernel",
+    "streaming_topk",
+    "_TopkLauncher"
+  ],
+  "citations": [],
+  "cards": [
+    {
+      "type": "lever",
+      "title": "Collapse the Python launch path before tuning the body",
+      "confidence": "★★",
+      "effect": "1.58x geomean standalone, and per-case it tracks how launch-bound the case is: 2.19x on the smallest grid (~64 CTAs, device time fully hidden behind the launch) / 1.67x mid / 1.05x on the largest (~2048 CTAs, device-exposed). Largest single component of a director-verified 2.28x end state (per-case 2.35 / 2.49 / 2.03).",
+      "attempts": 4,
+      "blind": true,
+      "lever": "On a small op whose per-call device time is single-digit microseconds and whose caller re-invokes it with identical argument objects, Triton's Python launch path (signature binding, arg specialization and hashing, grid canonicalization) can be most of the measured wall; collapse it before spending a round on the kernel body, and re-test config knobs afterwards because a device-side win can score as a regression while a host floor hides it.",
+      "apply": "Bind the CompiledKernel once out of the JIT's per-device cache, cache the bound args and grid behind an argument-identity guard with a full fallback to the stock path on any mismatch, and keep the wrapper's call protocol identical to the JITFunction's (subscript-for-grid, plus a .fn whose __globals__ stay reachable) so anything that introspects the callable still works.",
+      "verify": "Measure per-call CPU enqueue directly (many back-to-back launches, no sync inside, MIN of several) AND confirm one full dispatch per timed iteration in a profiler trace, since a cache that memoizes or early-returns shows fewer dispatches; then re-measure wall in an order-balanced ABBA interleave against a same-session pristine control, strict A-then-B biased toward the first arm here badly enough that MIN and median disagreed (1.019 vs 0.905).",
+      "caution": "The first collapse takes nearly all of it: below roughly 2.5-3.5 us/call of enqueue, d(wall)/d(enqueue) fell to ~0 here, a further verified 24-27% enqueue cut (0.85 us/call) moved the wall 0.0-0.7% at a 53% block win rate, so also price any residual with a 3-arm slope test before spending a round on it. Also verify graph capture on its own terms: a validated 1-node replay cost 2x a cached direct launch, and a silently empty capture reads as +45%.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    },
+    {
+      "type": "lever",
+      "title": "Move small-k selection onto a chunk axis, off the distributed axis",
+      "confidence": "★★",
+      "effect": "Device time -30 to -33% on every case (min 3280/4560/7160 -> 2200/3200/4840 ns) at zero occupancy cost; per-case at the wall it paid only where device work was exposed: +26% on the largest grid, ~+3% (inside noise) on the two smaller launch-bound cases, +10.4% geomean against a same-session paired control, verified cumulative step 1.699x -> 1.807x.",
+      "attempts": 4,
+      "blind": true,
+      "lever": "For a small-k selection in Triton the real cost is often cross-lane traffic, not bytes and not occupancy: tl.topk / tl.sort / tl.softmax / reduce_or along Triton's distributed axis each expand into permute networks. Restating the selection over a separate chunk axis is what paid here; the three attempts that kept the work on the distributed axis (full-width single-shot, chain shortening, mask/select elimination) each measured out between 0 and -1.4%.",
+      "apply": "Load chunks into separate tiles, do the elementwise compare/sort work per chunk, collapse the chunks with exactly ONE tl.reduce carrying a tuple combine_fn (a bitonic k-way merge), and keep the k winners as k rank-1 tiles so the whole tail stays elementwise.",
+      "verify": "Check the compiled object rather than the source: more registers with waves/SIMD unchanged is a free win (16->28 VGPR held min(8, 512/vgpr) at 8 here, so compute the occupancy step before rejecting a register-hungry rewrite), and dump the ISA to confirm the permute/DPP ops actually went away; then take wall in a paired same-session interleave, because a 31% device win converted to under 5% of wall once the launch floor was over half of it.",
+      "caution": "Before spending a round, price the whole arithmetic lane with a delete-the-work probe (keep every load, store and epilogue, remove only the computation), and re-run that probe against current HEAD: ours re-ran 8x smaller after later launch-path work landed, capping the remaining in-kernel lane at +6% on the one device-exposed case and +0.4% geomean. Also verify a wider load tile against bytes-per-lane-per-instruction first, four 64B segments already issued the ISA-max dwordx4.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    }
+  ]
+}

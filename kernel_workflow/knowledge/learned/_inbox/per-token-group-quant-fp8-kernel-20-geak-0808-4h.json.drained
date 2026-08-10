@@ -1,0 +1,44 @@
+{
+  "run_id": "_per_token_group_quant_fp8-kernel_20_geak_0808_4h",
+  "date": "2026-08-08",
+  "kernel_class": "quantize / cast",
+  "gfx": "gfx950",
+  "regime": "mixed",
+  "toolchain": "rocm 7.2 / triton 3.6.0 / torch 2.11.0",
+  "box_quiet": true,
+  "validation_status": "accepted",
+  "held_out": false,
+  "kernel_names": [
+    "_per_token_group_quant_fp8",
+    "per_token_group_quant"
+  ],
+  "citations": [],
+  "cards": [
+    {
+      "type": "lever",
+      "title": "Narrow-dtype convert and divide can lower to emulation - census the ISA",
+      "confidence": "★★",
+      "effect": "Full stack director-verified 3.75x geomean: 2.77x on the small launch-bound case, 4.76x and 4.00x on the two large memory-bound streaming cases. The two instruction-level fixes below carried the large cases: in-run the native fp8 emit alone measured 1.14x on the small case vs 3.11x / 3.29x on the large ones, and the amortized reciprocal plus pre-convert fixup added a further +21% geomean; VALU/wave 812 -> 159.",
+      "attempts": 5,
+      "blind": true,
+      "lever": "In a quantize/cast kernel, disassemble before trusting a profiler's VALU-per-element number: on this stack an fp32 -> fp8-fnuz store convert emits ~23 VALU/element of software emulation with zero convert instructions in the dump, and both `1.0/x` and libdevice rcp lower to the full IEEE divide expansion. Each of those steps has a native-instruction route.",
+      "apply": "fnuz e4m3 (bias 8) and OCP e4m3 (bias 7) share byte patterns under an exact factor of two - convert `2*v` to the OCP fp8 type, which does lower to the packed native convert, bitcast the bytes, and fold the x2 into the stored scale (scale*0.5) so the division and its rounding are literally unchanged (it is not a reciprocal-multiply, so an exact-numerics gate still holds). For the divide, keep the reciprocal on the REDUCED-RANK divisor: one inline-asm v_rcp_f32 per tile on the [GROUPS] tensor plus a 3-FMA Markstein refine (q=n*r; rem=fma(-d,q,n); q=fma(rem,r,q)), byte-exact wherever over/underflow is unreachable.",
+      "verify": "Re-dump the AMDGCN, grep for the packed convert and for v_rcp, and re-count VALU/wave; then byte-compare the output against golden rather than reading the harness's max-rel/cosine verdict.",
+      "caution": "OCP e4m3 carries -0 where fnuz flushes to +0/NaN, so also verify a magnitude-band fixup done in fp32 BEFORE the convert (tl.where(abs(q) > 2^-10, q, 0), ~2 VALU vs ~79 for the same fixup on the converted bytes), and also verify inf/NaN inputs by hand: a max-rel gate scores 0-(-0)=0 and a cosine gate is blind to the whole representation gap.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    },
+    {
+      "type": "lever",
+      "title": "The generic Triton launch path is not the floor when the small case is launch-bound",
+      "confidence": "★★",
+      "effect": "Director-verified per-case: 2.77x on the small launch-bound case vs 4.76x and 4.00x on the large memory-bound cases (3.75x geomean). The launch-path work is what moved the small case - in-run it went 1.15x -> 2.76x while the two large cases did not move at all, so expect ~1.0x wherever the kernel is already bandwidth-bound. Host CPU 13.4 -> 4.45 us/call against a ~5 us kernel.",
+      "attempts": 4,
+      "blind": true,
+      "lever": "When the small-shape case is launch-bound (host us/call at or above kernel us/call), the generic Python launch path is skippable rather than a floor: the compilation key is constant per shape class, so memoize the CompiledKernel and call its low-level entry directly instead of walking the JIT wrapper's specialization each call.",
+      "apply": "Cache (CompiledKernel.run, function, packed_metadata) plus a pre-built positional arg tuple on a hand-made shape key (dtypes, contiguity, constexpr values); pass cached integer data_ptr()s instead of tensors, which skips a data_ptr() call and a driver pointer query per pointer per launch; declare any new constexpr knob as a module-level global instead of threading it into the hand-built tuple; and keep a degrade ladder that peels one tier per compile failure and clears used_global_vals, or a stripped hint can never be retried.",
+      "verify": "Measure CPU us/call with an in-process no-sync probe and compare it against the kernel's own device time - the win exists only while host exceeds device - and confirm every call still dispatches, because a launcher that quietly stops launching reads as an enormous speedup.",
+      "caution": "Also verify the alternating-caller anti-pattern before shipping any last-call fast path: arming on FIRST sighting made a caller alternating between two buffer sets 1.35x slower, while requiring the key to repeat before arming restored parity. Also verify how much room is left underneath - here the residual was a ~2.3 us driver launch call, and a ctypes bypass came out 0.64 us slower than the stock C launcher while doing less work.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    }
+  ]
+}

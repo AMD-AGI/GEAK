@@ -1,0 +1,45 @@
+{
+  "run_id": "paged_attention_decode-kernel_20_geak_0808_4h",
+  "date": "2026-08-08",
+  "kernel_class": "attention",
+  "gfx": "gfx950",
+  "regime": "decode",
+  "toolchain": "rocm 7.2.3 / torch 2.11.0 / hip (AOT hipcc, template-codegen op)",
+  "box_quiet": true,
+  "validation_status": "accepted",
+  "held_out": false,
+  "kernel_names": [
+    "paged_attention_decode",
+    "attention_decode_paged",
+    "pa_v1"
+  ],
+  "citations": [],
+  "cards": [
+    {
+      "type": "lever",
+      "title": "Size the host launch path before the device on decode shapes",
+      "confidence": "★★",
+      "effect": "1.51x geomean director-verified; per-case 1.63x on the smallest decode batch, 1.52x mid, 1.39x on the largest — the ratio decays as device time grows because the saving is a fixed ~15-17 us of host per call, not a device win. It was essentially the run's whole gain (1.47x of the 1.51x); the device-side edits that shipped alongside measured a tie.",
+      "attempts": 3,
+      "blind": true,
+      "lever": "On a decode-regime op whose per-call device time is only tens of microseconds, size the host launch path before the device: a wrapper that re-resolves the compiled callable and re-marshals FFI arguments on every call can own the majority of wall time, and the profile will still label the bottleneck 'overhead' without saying which side of the PCIe boundary it is on.",
+      "apply": "Memoize the compiled-callable lookup on exactly the tuple of compile-time/template kwargs that forms the build hash — everything pointer- or grid-shaped is refilled per call and belongs outside the key — install FFI argument types once instead of per call, and cache constant device property queries. Re-read the stream on every call so a caller on a side stream is not silently redirected.",
+      "verify": "Numerics stay bit-identical (unchanged SNR) and the compiled object is unchanged (same VGPR/SGPR/LDS/grid) — a host-only change that moved device metrics changed something else too. Then confirm the saving is a fixed per-call cost by checking the speedup ratio shrinks monotonically as the case gets bigger.",
+      "caution": "Also verify how much of the residual host cost is editable before budgeting a second host round: here ~20 us/call was a synchronizing pageable H2D inside a caller outside the editable surface, widening the same cache a second time returned +1% (noise), and replaying the identical 2-node launch as a captured graph cost a constant +4.6 us more than the direct launches it replaced. Also verify with interleaved A/B medians over >=10 reps — a fixed per-call saving on a sub-50 us op sits inside single-shot wall-clock spread.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    },
+    {
+      "type": "method",
+      "title": "Null the kernel body before optimizing it",
+      "confidence": "★★",
+      "effect": "An instrument, not a speedup: gutting a small dispatch's whole body to a trivial copy (deliberately wrong output) measured 4.00 us min vs 4.04 us stock — zero work was not one nanosecond faster, so that dispatch was 100% workgroup-dispatch floor. The prediction held: really optimizing that same body then measured 0% per-kernel and 0.9-5.2% WORSE wall on all three decode cases, so one ~40 s measurement stood in for a whole direction.",
+      "attempts": 1,
+      "blind": true,
+      "lever": "Before spending a direction on a kernel body, build a deliberately-incorrect null version of it (write a trivial value and return) and measure that as the lane's lower bound. If the null is not faster, the body is not the cost, and the entire lane is priced at zero in one measurement.",
+      "apply": "Keep launch geometry, arguments and dispatch count identical and gut only the body, so the difference isolates body work from the dispatch/occupancy floor. The same idiom sizes a fusion or coherence lever: a fence-free (incorrect) build is the zero-coherence-cost ceiling for any cross-workgroup reduction, and if that ceiling is ~1.0x no correct variant can beat it.",
+      "verify": "Confirm the null really ran wrong (the correctness metric collapses) — a null that still passes numerics did not replace the body. Read per-dispatch device time round-robin interleaved against stock rather than sequentially; single-shot per-dispatch readings carried +-3.5% spread here and reversed three verdicts.",
+      "caution": "Also verify the case is not host-bound before turning any device-time saving into an expected wall gain: here the two dispatches summed to ~30 us of device time against a 44 us wall on the largest decode case, so even a free dispatch would have bought ~0 wall.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    }
+  ]
+}

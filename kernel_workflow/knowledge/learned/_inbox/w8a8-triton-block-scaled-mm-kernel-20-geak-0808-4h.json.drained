@@ -1,0 +1,43 @@
+{
+  "run_id": "_w8a8_triton_block_scaled_mm-kernel_20_geak_0808_4h",
+  "date": "2026-08-08",
+  "kernel_class": "quantized gemm",
+  "gfx": "gfx950",
+  "regime": "compute-bound",
+  "toolchain": "rocm 7.2.3 / triton 3.6.0 / torch 2.11.0",
+  "box_quiet": true,
+  "validation_status": "accepted",
+  "held_out": false,
+  "kernel_names": [
+    "_w8a8_triton_block_scaled_mm"
+  ],
+  "citations": [],
+  "cards": [
+    {
+      "type": "lever",
+      "title": "Hand-write the fp8 upcast as packed-dword SWAR",
+      "confidence": "★★",
+      "effect": "the hand-written bit-trick upcast alone measured 5.92x over the stock kernel, and moving the same bit arithmetic to packed dwords a further 1.35x; the cost is per loaded element so both held on every case (the run's final verified geomean, with tiling and a hand prefetch stacked on top, was 13.43x — 11.36x on the smallest-M case, 14.45x and 14.76x on the two large-M cases)",
+      "attempts": 6,
+      "blind": true,
+      "lever": "When the quantized operand dtype has no native matrix-core path on the target gfx (fnuz fp8 here, which the compiler notes it upcasts to fp16), the emitted per-element software upcast — not the matrix core — is the bottleneck: hand-write that conversion, and do its bit arithmetic on packed 32-bit registers rather than on the sub-32-bit tensor, since gfx9 has no packed 16-bit AND and one mask line on a uint16 tile lowers to 4 VALU per 2 elements.",
+      "apply": "Census the k-loop ISA per source line to find the widened lines, then express the conversion as tl.inline_asm_elementwise over dwords: read the byte operand through an int16 pointer view with pack=2 so the asm gets one dword = 4 fp8 values, declare scratch outputs early-clobber '=&v' (plain '=v' lets LLVM alias scratch onto the input, compiles and runs, and silently zeroes the odd elements), size outputs as ceil(n*sizeof(dtype)/4) registers, and restore k order with reshape(join(lo,hi)); fold any constant scale as an exact power of two.",
+      "verify": "Re-census the loop — instructions and VALU per iteration should fall several-fold with the MFMA count unchanged and lane-ops per converted element approaching 2 — then re-sweep the launch config on the new body (the previous table goes stale: re-sweeping after the body edit was worth +8% and +17.3% over stacking the old one) and A/B on the official runner, alternating binaries and discarding each binary's first pass.",
+      "caution": "Also verify whether the native low-precision matrix-core path is really the faster target before assuming it is the goal — here it compiled and ran yet landed below the hand-written fp16 route once the emulation storm was gone, and it could not reproduce a bit-exact output gate; and check the packed form preserves the k order the reduction sees, because the natural two-output dword split separates even-k from odd-k elements.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    },
+    {
+      "type": "method",
+      "title": "Perf-only config sweeps elect silently wrong configs",
+      "confidence": "★★",
+      "effect": "a correctness gate on the sweep caught 3 tile configs and 3 launch-knob configs that ran fast and computed wrong output, among them the single fastest config measured in the entire run (+2.6% over the one shipped); a k tile wider than the quantization group passed both smaller cases and failed only on the largest (max_rel 4.37 vs 0.00), while k tiles narrower than the group failed on every case (max_rel 1.18 and 1.69)",
+      "attempts": 4,
+      "blind": true,
+      "lever": "In a group/block-scaled quantized GEMM the k tile is coupled to the quantization group through the scale index, so BLOCK_K is not a free tuning axis; add a per-config golden comparison to whatever sweep picks the config, because the configs that break that coupling are the fastest rows the sweep will see and time alone ranks them first.",
+      "apply": "Have the sweep compute max_rel against the golden for every row before it ranks on time, run it on the largest shape in the set, and extend the gate to every knob the sweep touches — a warp count and a loop-unroll setting each produced fast, silently wrong binaries here, not only the tile.",
+      "verify": "Check the scale-index arithmetic maps exactly one scale per quantization group per k step for the elected config (a k tile wider than the group applies one scale to two groups; a narrower one splits one group across two accumulator updates), and confirm with max_rel — cosine similarity read 1.000000 on candidates with millions of violating elements.",
+      "caution": "Also verify on the largest shape available rather than a quick small one, since the widest-k-tile violation was clean on both smaller cases and only the largest exposed it; and re-confirm the elected row on the official runner, because an in-process sweep reusing the same tensors over-reports cache-sensitive knobs.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    }
+  ]
+}

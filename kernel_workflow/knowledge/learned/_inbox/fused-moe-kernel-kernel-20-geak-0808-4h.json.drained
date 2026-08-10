@@ -1,0 +1,43 @@
+{
+  "run_id": "fused_moe_kernel-kernel_20_geak_0808_4h",
+  "date": "2026-08-08",
+  "kernel_class": "moe grouped gemm",
+  "gfx": "gfx950",
+  "regime": "mixed",
+  "toolchain": "rocm 7.2.3 / triton 3.6.0 / torch 2.11.0",
+  "box_quiet": true,
+  "validation_status": "accepted",
+  "held_out": false,
+  "kernel_names": [
+    "fused_moe_kernel"
+  ],
+  "citations": [],
+  "cards": [
+    {
+      "type": "lever",
+      "title": "Check whether the fp8 operand dialect is the one this part executes natively",
+      "confidence": "★★",
+      "effect": "15.4x geomean from one edit when the operands were in the non-native fp8 dialect; it held on every case, and the round's integrated build ran 14.5x on the small-batch case and 17.8-18.2x on the two large-batch cases",
+      "attempts": 1,
+      "blind": true,
+      "lever": "On CDNA4 the native fp8 dialect is OCP e4m3; operands typed in the older fnuz dialect are lowered by Triton to a per-element software conversion before the dot (a NaN-check and select storm measured at 410 VALU instructions per MFMA, VALU 86% busy, MFMA under 1%), so the matrix core is idle while the vector unit emulates the cast.",
+      "apply": "Bitcast both dot operands to the native OCP e4m3 type at the dot site and fold the resulting 2^-2 exponent-bias factor into a scale multiply the kernel already performs (per-block, per-channel or per-tensor), so the inner loop gains no new math; masked loads with other=0.0 stay dialect-safe because +0 has the same encoding in both.",
+      "verify": "grep the emitted .amdgcn for the native fp8 MFMA opcode (should appear) and for the fnuz NaN-compare instructions (should fall to zero), then re-run correctness before banking the clock — a wall-clock drop alone does not prove the intended instruction is issued.",
+      "caution": "the bitcast is exact only where the operand bytes carry no fnuz-NaN code (0x80) and no exponent-field-15 codes, which is a byte-histogram property of the real tensors and cheap to check offline; also verify it there, and where it is violated a packed-dword clamp costs about 1 op per 4 elements against the ~25 ops per element removed, so the direction can survive the check failing.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    },
+    {
+      "type": "lever",
+      "title": "A frozen launch config still leaves the program-to-tile map open",
+      "confidence": "★★",
+      "effect": "two fusion steps took the verified geomean 17.2x -> 46.5x (+30%, then +107%); per-case at that point the two large-batch cases sat at 57-60x while the small-batch case, already at its DRAM compulsory floor, reached only ~28x",
+      "attempts": 6,
+      "blind": true,
+      "lever": "When the harness freezes grid, block sizes, num_warps and num_stages, work-per-program is still free: hand the first 1/G of the programs G tiles each along an axis the shared operand does not depend on and let the surplus programs retire at the top. The produced tile set is bit-identical, and the shared operand is fetched once per G tiles instead of once per tile.",
+      "apply": "choose the fusion axis by which operand is invariant along it, then collapse the G tiles into ONE wide dot (BM = tile_M * G) and merge their index, scale and mask plumbing into a single set rather than keeping G separate dots — the merged form is what lets the compiler pick the wider MFMA shape and what keeps the register cost affordable.",
+      "verify": "measure L1-from-L2 bytes and bytes per MFMA per output tile, read .vgpr_count and shared out of the compiled artifact before benchmarking, and confirm the wider MFMA opcode appears; wait-percentage counters are not an objective function here — one went the wrong way while the kernel got 30% faster, because each surviving wave now carries G times the work.",
+      "caution": "this buys reuse by spending occupancy (registers roughly doubled, waves per SIMD halved), so also verify wall clock rather than a resource model; and when a fused variant was rejected on a predicted register count rather than a measured clock, re-measure it once the plumbing is merged — the same fusion factor measured -14% with per-tile dots and +107% with one merged dot.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    }
+  ]
+}

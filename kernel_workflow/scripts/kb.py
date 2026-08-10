@@ -79,12 +79,22 @@ UNMATCHED = "unmatched"
 
 
 def normalize_class(operator, kernel_name=""):
+    """Longest matching needle wins — NEVER first-match-in-dict-order.
+
+    The classes overlap by construction: "linear attention" contains "attention", "moe grouped gemm"
+    contains "gemm". With first-match, whichever class happened to be declared first in the dict won,
+    so a curator that correctly said "linear attention" had its card filed under "attention" — and a
+    later attention kernel would then be handed linear-attention cards. That mis-filing is silent:
+    the card exists, the lookup succeeds, and only the content is wrong. Observed on the first real
+    batch. Specificity, not declaration order, decides.
+    """
     hay = f"{operator or ''} {kernel_name or ''}".lower()
+    best, best_len = UNMATCHED, 0
     for cls, needles in CLASS_VOCAB.items():
         for n in needles:
-            if n in hay:
-                return cls
-    return UNMATCHED
+            if n in hay and len(n) > best_len:
+                best, best_len = cls, len(n)
+    return best
 
 
 def normalize_gfx(device):
@@ -351,8 +361,13 @@ def _render_index(cards):
         out.append(f"\n## {key}")
         for c in sorted(by_key[key], key=lambda x: -rank(x)):
             m = c["meta"]
-            out.append(f"- {m.get('confidence','★')} {os.path.basename(c['path'])[:-3]} — "
-                       f"{m.get('effect','')} "
+            # The index is a ROUTER: you scan it to decide which cards to open. A curator that writes
+            # a paragraph of evidence into `effect` is right to do so — the card is the place for it —
+            # but pasted whole it makes the index unscannable, which defeats the one job it has.
+            eff = " ".join(str(m.get("effect", "")).split())
+            if len(eff) > 140:
+                eff = eff[:137].rstrip() + "…"
+            out.append(f"- {m.get('confidence','★')} {os.path.basename(c['path'])[:-3]} — {eff} "
                        f"[cited {m.get('confirms_cited',0)} / blind {m.get('confirms_blind',0)} / "
                        f"lost {m.get('losses',0)} / attempts {m.get('attempts',0)}]")
     return "\n".join(out).strip() or "_(empty — no cards distilled yet)_"

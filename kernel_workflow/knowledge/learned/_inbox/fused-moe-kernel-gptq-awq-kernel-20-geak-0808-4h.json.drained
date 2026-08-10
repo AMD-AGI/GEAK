@@ -1,0 +1,44 @@
+{
+  "run_id": "fused_moe_kernel_gptq_awq-kernel_20_geak_0808_4h",
+  "date": "2026-08-08",
+  "kernel_class": "moe grouped gemm",
+  "gfx": "gfx950",
+  "regime": "large-batch",
+  "toolchain": "triton 3.6.0 / torch 2.11.0 / gfx950",
+  "box_quiet": true,
+  "validation_status": "accepted",
+  "held_out": false,
+  "kernel_names": [
+    "fused_moe_kernel_gptq_awq",
+    "fused_moe_grouped_gemm"
+  ],
+  "citations": [],
+  "cards": [
+    {
+      "type": "lever",
+      "title": "Pad the grid to a multiple of NUM_XCD so the pid swizzle fires",
+      "confidence": "★★",
+      "effect": "Standalone A/B on one compiled binary: +2.5% on the smallest case, +6.0% and +4.4% on the two larger cases (L2 hit 64.7 -> 85.1%, L2 miss traffic -58%, VALU/MFMA/wave counts byte-identical); +3.3% on the run geomean, on top of an already-retiled 1.75x kernel, and the last verified gain of a 7-round run.",
+      "attempts": 3,
+      "blind": true,
+      "lever": "On a multi-XCD CDNA part an XCD round-robin pid remap (pid -> (pid % NUM_XCD) * (grid / NUM_XCD) + pid / NUM_XCD) buys L2 locality only when the launch grid is a multiple of NUM_XCD; pad the grid up to that multiple rather than guarding the remap on divisibility.",
+      "apply": "Round the grid up to a multiple of NUM_XCD (8 on this part), keep the remap a bijection over the padded range, and apply it on EVERY path the kernel can take; padded programs exit on the existing bounds check before touching memory, so the pad is free.",
+      "verify": "Toggle the remap off in the SAME binary and diff L2 hit rate and L2 miss bytes: a real win shows up as locality at an identical instruction/VALU/MFMA/wave count. If those counters do not move, the remap never engaged.",
+      "caution": "Also verify the divisibility guard actually fired before recording any swizzle experiment as neutral - a knob that self-disables reads exactly like a measured negative, and here it hid a whole round's win. Also re-check any pid grouping already present: an L2-grouping knob worth 1.077x standalone went dead once the remap landed, and the two were anti-additive.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    },
+    {
+      "type": "lever",
+      "title": "Merge adjacent same-group row-blocks to amortise weight dequant",
+      "confidence": "★★",
+      "effect": "Director-verified per-case 1.39x on the smallest shape and 2.03-2.16x on the two large shapes (geomean 1.83x) for the patch it anchors. Within that patch the merge is what broke the plateau on the large shapes (~1.23x) after BLOCK_N/BLOCK_K growth had already flattened; on the smallest shape every merged configuration measured 6-30% SLOWER than un-merged.",
+      "attempts": 6,
+      "blind": true,
+      "lever": "In a grouped/MoE GEMM the per-row-block group-id table caps the natural tile height at that block size; fusing two ADJACENT row-blocks carrying the SAME id into one double-height tile halves weight unpack/dequant work per output element - which BLOCK_N and BLOCK_K cannot do, since the mfma-per-dequantised-element ratio scales with tile height alone.",
+      "apply": "Read both row-block ids, reduce 'same id' in-kernel, take the merged tile when they match and fall back to the single-block tile when they do not (a few percent of pairs mismatch at a few hundred groups); gate the merged path on the grid still filling the device.",
+      "verify": "Cross-process full-benchmark repeats per shape (in-process interleaved medians biased the small-shape delta by about the size of the effect being hunted, and one sign flipped when promoted to a real edit), plus the compiled artifact for spill and waves/SIMD, since doubling tile height doubles the accumulator VGPR.",
+      "caution": "Also verify the packed-weight read is already K-major and coalesced - the two shipped in one patch here, so the merge alone may not carry it. Also verify at the small end and beyond merge factor 2: factor 4 lost at zero spill in every configuration tried, factor 3 did not compile, and forcing the merged path on the small shape lost at every (merge factor, BLOCK_N) point.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    }
+  ]
+}

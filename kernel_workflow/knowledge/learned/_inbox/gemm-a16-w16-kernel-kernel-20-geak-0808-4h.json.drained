@@ -1,0 +1,44 @@
+{
+  "run_id": "_gemm_a16_w16_kernel-kernel_20_geak_0808_4h",
+  "date": "2026-08-08",
+  "kernel_class": "dense gemm",
+  "gfx": "gfx950",
+  "regime": "compute-bound",
+  "toolchain": "rocm 7.2.3 / triton 3.6.0 / torch 2.11.0",
+  "box_quiet": true,
+  "validation_status": "accepted",
+  "held_out": false,
+  "kernel_names": [
+    "_gemm_a16_w16_kernel",
+    "gemm_a16_w16"
+  ],
+  "citations": [],
+  "cards": [
+    {
+      "type": "method",
+      "title": "Price the vendor library on the exact shapes before funding kernel-source rounds",
+      "confidence": "★★",
+      "effect": "director-verified 3.71x geomean over the untuned capture (per-case 3.00x on the small-M shape M~2K, 4.18x and 4.09x on the large-M shapes M>=32K); six prior rounds of in-language tuning in the same run had plateaued near 2.9x self-reported, so the library body was worth ~+25% on top of an already-tuned kernel, 1451 vs 1163 TFLOP/s bf16",
+      "attempts": 1,
+      "blind": false,
+      "lever": "Before spending rounds on kernel-source micro-optimization, time a vendor GEMM (hipBLASLt through torch.addmm/torch.mm, or the aiter equivalent) on the exact shapes at hand. The answer bounds the campaign either way: a slower library says the remaining gap is physics and the kernel lane is worth funding; a faster one says the gap is a code-generation gap whose size you now know before the budget is spent.",
+      "apply": "Measure it in-process on the same inputs and in the output form the harness fixes: under a caller-owned output buffer the out= form (torch.addmm(bias, a, b, out=c)) carries the whole margin, because a library entry point that allocates its own result pays a full-size copy back that can exceed the win.",
+      "verify": "Interleaved in-process A/B on wall-clock ms against the current kernel plus correctness on every case, and confirm from rocprofv3 which kernel actually dispatched (a Tensile Cijk_* name means the library body is the one running).",
+      "caution": "Also verify the task's rules accept a body written outside the kernel language before scoring on it, and report both numbers (library and best in-language) so the reviewer keeps that call; the measurement is informative even where the substitution turns out to be out of bounds.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    },
+    {
+      "type": "lever",
+      "title": "Tile aspect at fixed area, under a hard accumulator-per-lane wall",
+      "confidence": "★★",
+      "effect": "launch-config plus pid-order retuning alone carried a captured GEMM from 1.00x to 2.64x with a byte-identical kernel body, and a fixed-area aspect re-sweep (wide to square) then added +7.5% on all three cases at once (per-case 2.22x / 3.21x / 3.21x, small-M and large-M shapes alike); by contrast the best kernel-body change of the entire run was +2.8%",
+      "attempts": 4,
+      "blind": false,
+      "lever": "On a captured Triton GEMM, treat the launch config as the first-order lever and sweep tile ASPECT at fixed area before growing area: accumulators per lane = tile_area / (64 * num_warps) with num_warps capped at 16, so a tile above ~64 fp32 accumulators per lane spills and lands 3-4x SLOWER than the untuned baseline (measured 0.27-0.38x), and at equal legal area square beat wide-N beat tall-M (2.84 / 2.71 / 2.62) because the N-side operand is shared across the whole M-grid through L2 while the M-side operand is not.",
+      "apply": "Enumerate the legal lattice first (tl.arange forces power-of-2 block sizes, so the tile and BLOCK_K ladders are short and finite), sweep aspect at fixed area, and retune the pid-group size after every tile change: a group size tuned against a 64-row tile spans 8x the intended rows under a 512-row one.",
+      "verify": "Rank candidates on wall-clock ms from an interleaved in-process A/B that re-times the control inside every rep, and read VGPR count and scratch off the compile to separate a spilled config (a cliff) from a merely poor one (a few percent).",
+      "caution": "Also verify each cache-modifier and pid-grouping choice again after the tile moves, since they are tuned against a traffic mix rather than against the code: a write-through epilogue hint worth +4-6% at one tile cost -5% at the next, and pid grouping went from worth 15x to flat across a single aspect change.",
+      "source": "run kernel_20_geak_0808_4h 2026-08-08"
+    }
+  ]
+}
