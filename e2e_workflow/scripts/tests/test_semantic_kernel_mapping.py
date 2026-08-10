@@ -131,6 +131,52 @@ class SemanticKernelMappingTest(unittest.TestCase):
         self.assertEqual(gate["status"], "fail")
         self.assertEqual(gate["tables"][0]["dropped_row_ids"], ["event-2"])
 
+    def test_non_dominant_metadata_prefix_is_demoted_losslessly(self):
+        rows = []
+        sequence = 0
+        for layer_id, stages in (
+                (0, ["elementwise", "norm", "gemm"]),
+                (1, ["norm", "gemm"]),
+                (2, ["norm", "gemm"])):
+            for index, stage in enumerate(stages):
+                rows.append({
+                    "row_id": "event-%d" % sequence,
+                    "device_seq_index": sequence,
+                    "phase": "prefill",
+                    "step_id": "step-1",
+                    "assignment": "layer_body",
+                    "layer_id": layer_id,
+                    "layer_instance_id": "instance-%d" % layer_id,
+                    "pattern_id": "P_DENSE",
+                    "stage": stage,
+                    "layer_evidence": "module_span_sequence_medoid",
+                    "layer_region": "layer_body",
+                    "boundary_role": (
+                        "body_start_kernel" if index == 0 else None),
+                })
+                sequence += 1
+        diagnostics = [{
+            "step_id": "step-1",
+            "mapped_event_count": len(rows),
+            "layer_boundaries": [
+                {"layer_id": 0, "body_start_event": "event-0"},
+                {"layer_id": 1, "body_start_event": "event-3"},
+                {"layer_id": 2, "body_start_event": "event-5"},
+            ],
+        }]
+        demotions = mapping._demote_non_dominant_prefixes(
+            rows, diagnostics)
+        self.assertEqual(len(demotions), 1)
+        self.assertEqual(rows[0]["assignment"], "transition_global")
+        self.assertEqual(
+            rows[0]["layer_evidence"],
+            "pattern_variant_prefix_demoted")
+        self.assertEqual(rows[1]["boundary_role"], "body_start_kernel")
+        self.assertEqual(
+            diagnostics[0]["layer_boundaries"][0]["body_start_event"],
+            "event-1")
+        self.assertEqual(diagnostics[0]["mapped_event_count"], 6)
+
     def test_shared_external_id_is_parent_context_not_kernel_exact(self):
         with tempfile.TemporaryDirectory() as tmp:
             patterns = self._patterns(tmp)

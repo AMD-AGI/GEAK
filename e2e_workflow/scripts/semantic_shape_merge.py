@@ -654,17 +654,18 @@ def _markdown(table_doc):
             "- structural context: `%s`" % _structural_summary(table),
             "- representative layer I/O: `%s`" % _layer_io_summary(table),
             "",
-            "| pos | stage | kernel | parent operator | shape type | duration us |",
-            "|---:|---|---|---|---|---:|",
+            "| pos | stage | kernel | parent operator | shape type | duration us | layer total % |",
+            "|---:|---|---|---|---|---:|---:|",
         ])
         for row in table.get("rows", []):
-            lines.append("| %d | %s | `%s` | %s | %s | %.3f |" % (
+            lines.append("| %d | %s | `%s` | %s | %s | %.3f | %.3f |" % (
                 row["pos"], row.get("stage", "unknown"),
                 row.get("short_name", row.get("raw_name", "?")),
                 str(row.get("parent_operator", {}).get(
                     "canonical_op", "unresolved")).replace("|", "\\|"),
                 _shape_text(row).replace("|", "\\|"),
-                float(row.get("duration_us", 0))))
+                float(row.get("duration_us", 0)),
+                float(row.get("layer_total_pct", 0))))
         lines.append("")
     return "\n".join(lines) + "\n"
 

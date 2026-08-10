@@ -1176,6 +1176,121 @@ def _layer_instances(rows):
     return instances
 
 
+def _demote_non_dominant_prefixes(rows, partition_diagnostics):
+    """Move proven per-instance setup prefixes outside the layer body.
+
+    A prefix is demoted only when at least two different layers of the same
+    Pattern/phase share one dominant stage sequence and that full sequence
+    occurs exactly once as a suffix of the variant instance.  This preserves
+    every device event while avoiding kernel-name or model-specific rules.
+    """
+    groups = {}
+    for row in rows:
+        instance_id = row.get("layer_instance_id")
+        if row.get("assignment") == "layer_body" and instance_id:
+            groups.setdefault(instance_id, []).append(row)
+    by_pattern_phase = {}
+    for instance_id, group in groups.items():
+        group.sort(key=lambda item: item["device_seq_index"])
+        key = (group[0].get("phase"), group[0].get("pattern_id"))
+        sequence = tuple(item.get("stage") for item in group)
+        by_pattern_phase.setdefault(key, []).append(
+            (instance_id, group, sequence))
+
+    dominant = {}
+    for key, values in by_pattern_phase.items():
+        stats = {}
+        for _, group, sequence in values:
+            item = stats.setdefault(sequence, {
+                "count": 0,
+                "layer_ids": set(),
+            })
+            item["count"] += 1
+            item["layer_ids"].add(group[0].get("layer_id"))
+        ranked = sorted(
+            stats.items(),
+            key=lambda item: (
+                len(item[1]["layer_ids"]), item[1]["count"]),
+            reverse=True)
+        if not ranked or len(ranked[0][1]["layer_ids"]) < 2:
+            continue
+        best_score = (
+            len(ranked[0][1]["layer_ids"]), ranked[0][1]["count"])
+        if (len(ranked) > 1
+                and (len(ranked[1][1]["layer_ids"]),
+                     ranked[1][1]["count"]) == best_score):
+            continue
+        dominant[key] = ranked[0][0]
+
+    demotions = []
+    diagnostics_by_step = {
+        item.get("step_id"): item for item in partition_diagnostics}
+    for key, values in by_pattern_phase.items():
+        expected = dominant.get(key)
+        if not expected:
+            continue
+        for instance_id, group, observed in values:
+            if observed == expected or len(observed) <= len(expected):
+                continue
+            positions = [
+                index for index in range(len(observed) - len(expected) + 1)
+                if observed[index:index + len(expected)] == expected]
+            if len(positions) != 1:
+                continue
+            start = positions[0]
+            if start <= 0 or start + len(expected) != len(observed):
+                continue
+            prefix = group[:start]
+            remaining = group[start:]
+            layer_id = group[0].get("layer_id")
+            step_id = group[0].get("step_id")
+            for row in prefix:
+                row["boundary_reclassification"] = {
+                    "from": "layer_body",
+                    "to": "transition_global",
+                    "rule": (
+                        "prefix absent from the unique cross-layer dominant "
+                        "stage sequence for this Pattern/phase"),
+                    "original_layer_id": layer_id,
+                    "original_pattern_id": key[1],
+                }
+                row["assignment"] = "transition_global"
+                row["layer_id"] = None
+                row["layer_instance_id"] = None
+                row["pattern_id"] = None
+                row["layer_evidence"] = "pattern_variant_prefix_demoted"
+                row["layer_region"] = "transition_global"
+                row["boundary_role"] = None
+            remaining[0]["boundary_role"] = "body_start_kernel"
+            demotion = {
+                "step_id": step_id,
+                "phase": key[0],
+                "pattern_id": key[1],
+                "layer_id": layer_id,
+                "instance_id": instance_id,
+                "demoted_row_ids": [row["row_id"] for row in prefix],
+                "new_body_start_event": remaining[0]["row_id"],
+                "evidence": "unique_cross_layer_dominant_stage_suffix",
+            }
+            demotions.append(demotion)
+            diagnostic = diagnostics_by_step.get(step_id)
+            if diagnostic is not None:
+                diagnostic["mapped_event_count"] = max(
+                    0, int(diagnostic.get("mapped_event_count", 0))
+                    - len(prefix))
+                diagnostic.setdefault(
+                    "demoted_prefix_event_count", 0)
+                diagnostic["demoted_prefix_event_count"] += len(prefix)
+                diagnostic.setdefault("prefix_demotions", []).append(
+                    demotion)
+                for boundary in diagnostic.get("layer_boundaries", []):
+                    if boundary.get("layer_id") == layer_id:
+                        boundary["body_start_event"] = (
+                            remaining[0]["row_id"])
+                        break
+    return demotions
+
+
 def _representatives(pattern_doc, instances):
     by_pattern = {}
     for instance in instances:
@@ -1197,8 +1312,9 @@ def _representatives(pattern_doc, instances):
         for phase in phases:
             phase_values = [item for item in values if item["phase"] == phase]
             for layer_id in candidates:
-                durations = [item["duration_us"] for item in phase_values
-                             if item["layer_id"] == layer_id]
+                durations = [
+                    item["duration_us"] for item in phase_values
+                    if item["layer_id"] == layer_id]
                 if durations:
                     layer_phase_medians[(phase, layer_id)] = statistics.median(durations)
             medians[phase] = statistics.median(
@@ -1219,8 +1335,10 @@ def _representatives(pattern_doc, instances):
         selected_instances = {}
         if selected_layer is not None:
             for phase in phases:
-                phase_instances = [item for item in values
-                                   if item["phase"] == phase and item["layer_id"] == selected_layer]
+                phase_instances = [
+                    item for item in values
+                    if item["phase"] == phase
+                    and item["layer_id"] == selected_layer]
                 target = layer_phase_medians.get((phase, selected_layer), 0)
                 if phase_instances:
                     chosen = min(phase_instances, key=lambda item: (
@@ -1558,6 +1676,8 @@ def build(trace_path, pattern_path, out_dir, table_phases=None):
     module_interpolated = _complete_module_ranges(rows, module_scopes, patterns)
     partition_diagnostics, pattern_templates = _stage_sequence_partition(
         rows, pattern_doc)
+    prefix_demotions = _demote_non_dominant_prefixes(
+        rows, partition_diagnostics)
     instances = _layer_instances(rows)
     representative_instances = [
         instance for instance in instances
@@ -1587,6 +1707,7 @@ def build(trace_path, pattern_path, out_dir, table_phases=None):
             "module_scope_count": len(module_scopes),
             "module_interpolated_event_count": module_interpolated,
             "boundary_partition_diagnostics": partition_diagnostics,
+            "prefix_demotions": prefix_demotions,
             "pattern_stage_templates": pattern_templates,
             "instances": instances, "representatives": representatives}),
         (paths["semantic_table_json"], {

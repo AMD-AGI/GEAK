@@ -162,6 +162,7 @@ class SemanticShapeMergeTest(unittest.TestCase):
             with open(result["semantic_table_md"]) as fh:
                 markdown = fh.read()
             self.assertIn("shape type", markdown)
+            self.assertIn("layer total %", markdown)
             self.assertNotIn("| evidence |", markdown)
             self.assertIn(
                 "P(wrapper): x=BF16[4×8]<br>weight=FP8[16×8]"
