@@ -145,8 +145,35 @@ Director/TechLead/Engineer orchestration is identical.
 kernel_workflow.js     orchestration (deterministic)
 roles/               director, tech_lead, engineer, deep_engineer (deep_explore),
                      author_engineer, benchmark_engineer, profile_engineer,
-                     verify_engineer, integrator
+                     verify_engineer, integrator, curator (distil, opt-in)
 knowledge/           optimization_strategies, hip/triton/wrapper, profiling_guide,
                      amd_instinct (multi-card: gfx942/gfx950), self_monitoring, geomean_levers
-scripts/             gpu_lock.sh, profile_kernel.sh
+knowledge/learned/   cross-RUN memory: distilled class-level advisory cards + their contract
+scripts/             gpu_lock.sh, profile_kernel.sh, kb.py
 ```
+
+### Cross-run learning (two opt-in halves, both default OFF)
+
+Everything else here is per-run: the insight blackboard and hypothesis ledger carry knowledge across
+*rounds*, then die with the run. `knowledge/learned/` is the persistent tier.
+
+- **`learn=true` — write.** After `director:validate`, a `curator` distils 0–2 *class-level* cards and
+  submits them via `kb.py propose`, which lints them into `knowledge/learned/_inbox/`. It refuses runs
+  that were flagged, contended, or drawn from the held-out split, and may cite only director-verified
+  numbers.
+- **`use_learned_kb=true` — read.** From round `kb_first_round` (default 2 — round 1 stays cold) the
+  TechLead may pull ≤3 matched cards via `kb.py match`. At most `kb_dir_cap` (default 1) directions
+  per round may be KB-seeded; the script strips surplus citations, so ADD-only is enforced rather
+  than requested.
+- **Merge** — `kb.py drain --apply` is the single writer, run by one operator between campaigns.
+  Concurrent curation is not merely a locking problem: 20 curators cannot see each other, so "merge if
+  the key exists" is unimplementable in parallel.
+
+The loop has a down escalator as well as an up one: every KB-seeded direction is joined against what
+the verifier measured and flows back through `citations`, so a card that keeps being tried and keeps
+not paying accumulates `losses`, gets a conditioned caution, and is demoted.
+
+`kb.py` serves **every** `knowledge/learned/` tree in the repo (kernel-level here, e2e-level in
+`e2e_workflow/`), which is why `--kb-dir` is required and has no default. Read
+`knowledge/learned/README.md` before adding to it — the ADD-only contract, the confirms-blind rule
+and the leakage rules are enforced by `kb.py`, not by convention.

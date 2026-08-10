@@ -13,6 +13,7 @@ export const meta = {
     { title: 'Merge', detail: 'integrator combines the round winners' },
     { title: 'Report', detail: 'tech_lead writes the final report + patch' },
     { title: 'Validate', detail: 'director independently validates vs the true baseline' },
+    { title: 'Distil', detail: 'curator proposes class-level learned cards from a VALIDATED run (opt-in: learn=true)' },
   ],
 };
 
@@ -113,6 +114,47 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only planning + authoring roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
+
+// ---------------------------------------------------------------------------
+// LEARNED KNOWLEDGE — the cross-RUN loop (as opposed to the cross-ROUND memory the insight
+// blackboard already gives us). Two independently-flagged halves, both default OFF, so the
+// conditional spreads below add NOTHING and prompts stay byte-identical to a build without this
+// feature. That is what keeps every already-completed campaign comparable.
+//
+//   learn=true          WRITE. After a validated run a Curator distils 0-2 CLASS-LEVEL cards into
+//                       knowledge/learned/_inbox/<run_id>.json. `kb.py drain` (one operator, between
+//                       campaigns) is the only thing that ever edits the KB itself.
+//   use_learned_kb=true READ. From round KB_FIRST_ROUND the TechLead may pull <=3 matched cards.
+//
+// The halves are separate so a campaign can bank knowledge for a while and have a human read it
+// before any of it is allowed to steer anything.
+const USE_LEARNED_WRITE = String(A.learn != null ? A.learn : 'false') === 'true';
+const USE_LEARNED_READ = String(A.use_learned_kb != null ? A.use_learned_kb : 'false') === 'true';
+const LEARNED_KB_DIR = String(A.learned_kb_dir ||
+  (WORKFLOW_DIR ? WORKFLOW_DIR + '/knowledge/learned' : '')).replace(/\/+$/, '');
+// RUN_ID names the inbox file. Unique per run AND stable within one run: that is what makes the
+// curator's write lock-free across 8 drivers on 2 hosts. It is also in the curator prompt so a
+// resumed workflow cannot replay a cached proposal from an earlier run under a new identity.
+const RUN_ID = String(A.run_id || '').trim();
+// A run that shared its GPU with another tenant measured contention, not the kernel. A run on a
+// held-out kernel is the instrument for measuring whether the KB works at all. Neither may become a
+// card. Defaults are permissive, so the DRIVER is responsible for declaring a busy box.
+const BOX_QUIET = String(A.box_quiet != null ? A.box_quiet : 'true') === 'true';
+const HELD_OUT = String(A.held_out != null ? A.held_out : 'false') === 'true';
+// First round allowed to see cards. Default 2: round 1 stays cold and profile-derived, because a
+// prior has the most power to narrow exactly when there is least measured evidence to overrule it.
+// A knob rather than a constant so the A/B can test whether that belief is actually true.
+const KB_FIRST_ROUND = Math.max(1, parseInt(A.kb_first_round != null ? A.kb_first_round : 2, 10));
+// How many directions per round may be KB-seeded. ADD-only is the contract, but contracts written in
+// prose decay — the sibling e2e index grew a "MANDATED LEVER" and a "do NOT use it" one edit after
+// its README banned both. So the cap is enforced here: surplus `learned_refs` are stripped after the
+// plan returns, and the strip is logged. At 1, a wrong prior costs at most one budget unit per round
+// and can never crowd out the profile-derived directions.
+const KB_DIR_CAP = Math.max(0, parseInt(A.kb_dir_cap != null ? A.kb_dir_cap : 1, 10));
+// A/B arm: 'on' (matched cards), 'mismatched' (cards for a plausible-but-wrong key — the control
+// that separates "the content helped" from "any extra prose helped"), 'off'. Set by an experiment
+// driver only; the planner is told to ignore it.
+const KB_ARM = String(A.kb_arm || 'on').trim();
 
 // ---------------------------------------------------------------------------
 // DEEP-MODE continuation + cross-backend / e2e-feedback hooks. ALL OPTIONAL.
@@ -256,6 +298,10 @@ const PLAN_SCHEMA = obj({
       focus_files: { type: 'array', items: { type: 'string' } },
       expected_speedup: { type: 'number' }, prompt: { type: 'string' },
       kk_refs: { type: 'array', items: { type: 'string' } }, // optional: perf_knowledge card paths for THIS direction (REFERENCE ONLY)
+      // Learned-KB cards that SEEDED this direction. Structural attribution: the planner declares
+      // it, the script joins it against what the verifier independently measured. A citation, never
+      // a causal claim — the planner saw the profile too, and a run contains no counterfactual.
+      learned_refs: { type: 'array', items: { type: 'string' } },
     }, ['id', 'title', 'specialty', 'prompt']),
   },
 }, ['stop', 'directions']);
@@ -313,6 +359,18 @@ const VALIDATE_SCHEMA = obj({
   per_case: perCase, applied_to_original: { type: 'string' },
   arbitration_note: { type: 'string' }, final_patch: { type: 'string' },
 }, ['director_verified_speedup_geomean', 'validation_status']);
+
+// `proposed:false` is a first-class outcome, not a failure — most runs should not produce a card.
+// `rejected` carries what the linter refused and why, so a KB that is quietly learning nothing shows
+// up in the run's return value instead of only in an inbox nobody opens.
+const CURATE_SCHEMA = obj({
+  proposed: { type: 'boolean' },
+  reason: { type: 'string' },
+  cards: { type: 'number' },
+  rejected: { type: 'array', items: obj({ title: { type: 'string' },
+    reasons: { type: 'array', items: { type: 'string' } } }, []) },
+  proposal_path: { type: 'string' },
+}, ['proposed']);
 
 // ---------------------------------------------------------------------------
 // Prompt helpers. Every agent reads its role file from WORKFLOW_DIR and the
@@ -532,6 +590,10 @@ let noImprove = 0;
 let bestPerCase = BASELINE_PER_CASE;
 let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source}
 const history = { insights: [], ledger: [], rounds: [], bottleneck_now: profileSummary ? profileSummary.bottleneck : 'unknown', suggest_next: '' };
+// One row per KB-seeded direction, joined against what the verifier measured. Fed to the curator and
+// returned to the caller. This is the ONLY channel by which a card can lose standing — see the push
+// site below and the `citations` handling in kb.py drain.
+const citations = [];
 
 // DEEP-MODE resume: restore cumulative speedup + insight/ledger history from the prior wave so this
 // continuation builds ON the cumulative best (canonical was already seeded from STATE_DIR/best by the
@@ -559,6 +621,19 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
       KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
       ...KB_INPUTS,
+      // The TechLead resolves its own cards: this script has no filesystem access, and handing over
+      // a command rather than an index keeps the channel to <=3 cards. plan_round already carries
+      // four other advisory channels; a 40-line index as a fifth would drown the profile.
+      ...(USE_LEARNED_READ && round >= KB_FIRST_ROUND ? {
+        LEARNED_KB_DIR,
+        LEARNED_KB_MATCH_CMD: `python3 ${WORKFLOW_DIR}/scripts/kb.py --kb-dir ${LEARNED_KB_DIR} match` +
+          ` --operator ${JSON.stringify(KK_OPERATOR || '')}` +
+          ` --language ${JSON.stringify(KK_LANGUAGE || '')}` +
+          ` --device ${JSON.stringify((profileSummary && profileSummary.device) || '')}` +
+          ` --regime ${JSON.stringify((analysis && analysis.regime) || '')} --max 3`,
+        LEARNED_KB_CAP: KB_DIR_CAP,
+        KB_ARM,
+      } : {}),
     }),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
 
@@ -577,6 +652,24 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // deep_explore is a DEDICATED-ROUND, heavyweight mandate: if the plan includes one, run ONLY it this
   // round (its broad ground-up rewrite touches many files and can't be merged with specialist patches),
   // and charge DEEP_COST against the budget. Otherwise each specialist direction costs 1.
+  // ADD-only, enforced rather than requested. Note what is stripped: the CITATION, not the
+  // direction. The direction still runs — the cap can therefore never reduce the search, it only
+  // bounds how much of the round the KB may claim. Logged, because a cap that binds every round is a
+  // KB quietly taking over the planning.
+  if (USE_LEARNED_READ) {
+    let kept = 0;
+    const stripped = [];
+    for (const d of directions) {
+      if (d.learned_refs && d.learned_refs.length) {
+        if (kept < KB_DIR_CAP) kept++;
+        else { stripped.push(d.id); d.learned_refs = []; }
+      }
+    }
+    if (stripped.length) {
+      log(`Round ${round}: KB cap ${KB_DIR_CAP} — kept ${kept} KB-seeded direction(s), stripped the ` +
+          `citation from ${stripped.join(', ')} (those directions still run).`);
+    }
+  }
   const deepDir = directions.find(d => d.specialty === 'deep_explore');
   if (deepDir) directions = [deepDir];
   const roundCost = directions.reduce((s, d) => s + (d.specialty === 'deep_explore' ? DEEP_COST : 1), 0);
@@ -637,6 +730,10 @@ ${cfg({
         INSIGHTS: history.insights,
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
         KK_REFS: (d.kk_refs && d.kk_refs.length ? d.kk_refs : KK_REFS),
+        // Only THIS direction's cards, never the index: an engineer that can browse the KB starts
+        // shopping for a different direction than the one it was dispatched to run.
+        ...(USE_LEARNED_READ && d.learned_refs && d.learned_refs.length
+            ? { LEARNED_REFS: d.learned_refs } : {}),
         ...KB_INPUTS,
       })}
 
@@ -772,9 +869,25 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     if (mem.bottleneck_now) history.bottleneck_now = mem.bottleneck_now;
     if (mem.suggest_next) history.suggest_next = mem.suggest_next;
   }
+  // Structural attribution, derived here rather than self-reported: the planner declared which cards
+  // seeded which direction, and the verifier independently re-measured that direction. Their join is
+  // a fact. It is NOT evidence the card caused the win — hence the field name — and it is also how a
+  // card LOSES standing, which is the only downward pressure in the whole design.
+  for (const r of clean) {
+    const refs = (r.d.learned_refs || []);
+    if (!refs.length) continue;
+    for (const card of refs) {
+      citations.push({
+        card, round, direction: r.d.id, specialty: r.d.specialty,
+        cited_then_verified: r.ver ? r.ver.verified_geomean : 0,
+        became_winner: !!(winner && winner.source === r.d.id),
+      });
+    }
+  }
   history.rounds.push({
     round,
-    directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty })),
+    directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty,
+      focus_files: d.focus_files || [], learned_refs: d.learned_refs || [] })),
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
       verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none') })),
     integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
@@ -821,6 +934,44 @@ log(`COMPLETE. ${KERNEL_NAME}: verified ${HAS_WORKLOAD ? 'time-weighted' : 'geom
     `${HAS_WORKLOAD && Number.isFinite(finalGeomean) ? ` (unweighted geomean ${finalGeomean.toFixed(2)}x)` : ''}` +
     ` (status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
 
+// ===========================================================================
+// PHASE: Distil (Curator) — the cross-run learning write path. OPT-IN.
+// ===========================================================================
+// After validation on purpose. Everything upstream of the Director is self-reported by the agents
+// that produced it, and on this benchmark the TechLead's geomean has been off by 8% from verified
+// (25.49x claimed vs 23.45x). A card outlives its run, so it may only cite a number that something
+// independent re-measured. Running per-round would also inflate `confirms` by the round count, and
+// under deep mode again by the wave count.
+let curation = null;
+if (USE_LEARNED_WRITE) {
+  const gateFail =
+    !validation ? 'no director verdict (validate returned null)'
+    : validation.validation_status !== 'accepted' ? `validation_status=${validation.validation_status}`
+    : HELD_OUT ? 'kernel is in the held-out split'
+    : !BOX_QUIET ? 'box was contended'
+    : '';
+  if (gateFail) {
+    // Not an error: refusing to learn from a run that cannot support a claim IS the feature.
+    log(`Distil skipped — ${gateFail}.`);
+    curation = { proposed: false, reason: gateFail };
+  } else {
+    phase('Distil');
+    curation = await agentT(
+      roleAgent('curator', 'distill', 'Distil 0-2 class-level cards from this validated run.', {
+        EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, LEARNED_KB_DIR,
+        RUN_ID: RUN_ID || `${KERNEL_NAME}-${EVAL_DIR.split('/').filter(Boolean).slice(-2)[0]}`,
+        KERNEL_NAME, KK_OPERATOR, KK_LANGUAGE,
+        DEVICE: profileSummary ? profileSummary.device : '',
+        REGIME: analysis ? analysis.regime : '',
+        HISTORY: history, VALIDATION: validation,
+        CITATIONS: citations,
+        BOX_QUIET, HELD_OUT,
+      }),
+      { phase: 'Distil', label: 'curator:distill', schema: CURATE_SCHEMA });
+    log(`Distil: ${curation ? (curation.proposed ? `${curation.cards} card(s) proposed` : `nothing proposed (${curation.reason})`) : 'curator returned null'}`);
+  }
+}
+
 return {
   mode: MODE,
   target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
@@ -839,4 +990,21 @@ return {
   budget_total: BUDGET,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
   final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
+  // Learning outcome. null when the feature is off; {proposed:false, reason} when a gate refused the
+  // run. A driver aggregating these is how you notice the curator has been silently returning null
+  // for 14 of 20 kernels — the same number kb.py drain reports as coverage.
+  curation: USE_LEARNED_WRITE ? (curation || { proposed: false, reason: 'curator returned null' }) : null,
+  // The monoculture canary, and it costs no GPU time: how many DISTINCT (specialty, focus_files)
+  // directions this run explored vs how many it issued. A KB that helps raises the verified speedup;
+  // a KB that cages lowers this without raising that. Reported ALWAYS, including on KB-off runs —
+  // those are the baseline it has to be read against.
+  direction_entropy: (() => {
+    const seen = new Set(); let n = 0;
+    for (const r of history.rounds) for (const d of (r.directions || [])) {
+      n++; seen.add(`${d.specialty}|${(d.focus_files || []).slice().sort().join(',')}`);
+    }
+    return n ? { distinct: seen.size, issued: n, ratio: +(seen.size / n).toFixed(3) } : null;
+  })(),
+  learned_citations: USE_LEARNED_READ ? citations : null,
+  kb_arm: USE_LEARNED_READ ? KB_ARM : 'off',
 };

@@ -20,6 +20,12 @@ work in your OWN private workspace copy — total isolation, no coordination wit
   weighted target and never violate its gates, e.g. decode-no-regress or the memory cap).
 - `KERNEL_KNOWLEDGE_DIR` (may be empty), `KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` — pointers into the
   AMD operator×backend SOTA base, resolved by the TechLead for THIS kernel (see the next section).
+- `LEARNED_REFS` (optional) — the card(s) that seeded *your* direction, distilled from earlier runs on
+  kernels of this class. A starting point, not a specification: they were written against a different
+  kernel, so the shape that made the lever pay there may not exist here. **Measure exactly as you
+  would have without them** — the verifier re-measures independently and does not care where an idea
+  came from, and a card that does not pay here is supposed to be recorded as not paying. You get only
+  your own direction's cards; do not go looking for the rest.
 
 ## Load only the knowledge for your specialty (keeps context focused)
 - algorithm  → `hip_optimization.md` (P0/P1) or `triton_optimization.md`, + `geomean_levers.md`

@@ -133,6 +133,27 @@ passes them):**
 - `HARNESS_ADDENDUM` — path to an e2e-refined harness addendum (which cases to weight, a cudagraph-capture
   wrapper, hard constraint gates). Plan toward the addendum's weighted target.
 
+**LEARNED-KB hook (present only from the configured first round onward — round 1 is cold by design —
+and only when the run opted in; a normal run passes none of this):**
+- `LEARNED_KB_MATCH_CMD` — run it. It returns **at most 3** cards distilled from earlier runs on
+  kernels of this class. Do NOT read the index yourself: the command is the interface, and it exists
+  so this channel stays small next to the profile.
+- **Form your profile-driven plan FIRST, then read the cards as a cross-check and a source of EXTRA
+  candidates.** A card may only ADD a direction. It may never remove one, shorten the round, or
+  replace a measurement you would otherwise have made. If a card contradicts your profile, the
+  profile wins and the card is wrong — say so in `reasoning`.
+- Judge a card by its evidence, not its existence. `effect` says which shapes it held on; `attempts`
+  is the base rate; `losses` counts the runs that tried it and got nothing. `cited 2 / attempts 14`
+  is a weak hint however many stars it shows.
+- If a card seeds a direction, put its slug in that direction's `learned_refs`. That is how the run
+  accounts for what the KB contributed — and, just as importantly, how a card that keeps being tried
+  and keeps not paying gets demoted. An unlisted card is invisible to both.
+- **At most `LEARNED_KB_CAP` (default 1) of your directions may be KB-seeded.** The script strips the
+  surplus citations, so exceeding it buys no extra KB influence — it only makes the accounting wrong.
+  Spend the rest of the round on what the profile told you.
+- `KB_ARM` — if present, an experiment is running. Ignore it and plan normally; it is recorded so the
+  analysis can distinguish a matched card from a deliberately mismatched control.
+
 **Workload-aligned runs (COMMANDMENT METRIC = time-weighted ratio-of-sums):** `CUMULATIVE_SPEEDUP` is
 then the time-weighted speedup, and the per-case table carries each case's `count` / time-share. Steer
 toward the cases that DOMINATE that weighted metric (high `count·latency` share) — a big win on a
