@@ -613,7 +613,32 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // it to 45min so a single hung/slow agent can't blow the wall-clock budget (still ample for the director
 // baseline + the head e2e A/B). Default mode keeps 120min → unchanged.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : (FAST_MODE ? 2700000 : 7200000), 10);
-function agentBounded(prompt, opts) {
+// Process-safety rule prepended to EVERY agent prompt. It is injected at this funnel
+// (the one place `agent()` is ever called) rather than in roleAgent(), because several
+// prompts are built inline and would otherwise never see it — and any future call site
+// inherits it automatically instead of having to remember it. Bash-capable agents own
+// server lifecycles, and a pattern-matched kill is indistinguishable from a correct one
+// until it TERMs the caller's orchestrator and fails the whole task.
+const PROCESS_SAFETY = `## PROCESS SAFETY (a violation can kill the caller's orchestrator, failing the whole task)
+This container's PID 1 is the CALLER's orchestrator process, not yours, and it is NOT restartable.
+NEVER run global or pattern-matched process cleanup: no \`pkill -f\` / \`pgrep -f ... | xargs kill\` /
+\`killall\` / \`ps aux | grep ... | xargs kill\`, and never \`kill -- -PGID\` for a group you did not
+create. A pattern as innocent as \`-f vllm\` matches the orchestrator's own command line and TERMs it.
+Manage ONLY processes you started, by the pid you captured at launch. When a script of yours launches a
+server, do NOT hand-roll the shutdown — source the shared teardown contract, which verifies process
+identity (pid, pgid, /proc start time) before signalling anything:
+    source ${WORKFLOW_DIR}/scripts/server_teardown.sh
+    trap server_teardown EXIT
+    \${SERVER_LAUNCH_PREFIX:-} <launch server> &   # own session => pgid == pid
+    SERVER_PID=\$!; server_record_identity "\$SERVER_PID"
+
+`;
+function withProcessSafety(prompt) {
+  return typeof prompt === 'string' ? PROCESS_SAFETY + prompt : prompt;
+}
+
+function agentBounded(rawPrompt, opts) {
+  const prompt = withProcessSafety(rawPrompt);
   if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return agent(prompt, opts);
   let to;
   const guard = new Promise((resolve) => {

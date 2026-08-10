@@ -46,8 +46,10 @@ adapter_launch() {
       _prof_env=(VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR")
     fi
   fi
+  # Launch through $SERVER_LAUNCH_PREFIX (adapter contract): it puts the server in its
+  # own session so teardown can prove the process group is ours. Empty when unset.
   # shellcheck disable=SC2086
-  env $EXTRA_ENV \
+  ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
     ${_ga:+GPU_ARCHS=$_ga} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     "${_prof_env[@]}" \

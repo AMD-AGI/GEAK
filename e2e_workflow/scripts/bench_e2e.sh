@@ -15,6 +15,16 @@
 #   adapter_launch                  -> launch the server in background; set global SERVER_PID; write $LOG.
 #                                      Reads: MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS
 #                                             EXTRA_ENV OVERLAY_PYTHONPATH PROFILE PROFILE_DIR
+#                                      MUST launch through the shared prefix:
+#                                        ${SERVER_LAUNCH_PREFIX:-} env ... <server> ... & SERVER_PID=$!
+#                                      That prefix (server_teardown.sh) puts the server in its OWN
+#                                      session, which is the ONLY thing that lets teardown PROVE the
+#                                      process group belongs to this launch and reap the whole tree.
+#                                      An adapter that launches without it still works, but its
+#                                      teardown degrades to pid+descendants. A launcher that cannot
+#                                      control the launch (it delegates to an external script) must
+#                                      instead set SERVER_GROUP_UNVERIFIED=1 unless it can show the
+#                                      pid leads its own group.
 #   adapter_health                  -> return 0 iff $BASE_URL is serving (e.g. curl /health)
 #   adapter_bench  NUMP MAXC PROF   -> run ONE bench (random ISL/OSL), append a result JSON line to
 #                                      $RESULT_JSONL with canonical keys (output_throughput,
@@ -323,32 +333,15 @@ echo "Out dir:      $OUT_DIR"
 echo
 
 SERVER_PID=""
-cleanup() {
-  [ -n "${SERVER_PID:-}" ] || return 0
-  echo ">>> Shutting down server (pid $SERVER_PID) ..."
-  # A launcher that starts the server in its OWN process group / session (e.g.
-  # the Magpie launcher uses `setsid`) leaves the worker/child procs OUTSIDE
-  # $SERVER_PID, so a bare `kill $SERVER_PID` orphans them (leaked VRAM, ghost
-  # listeners on the port). When the server's process group differs from OURS,
-  # reap the WHOLE group (TERM, then KILL after a grace window). The own-group
-  # guard is critical: for a NATIVE launch the server shares our group, so we
-  # must NOT group-kill (that would kill bench_e2e.sh itself) — fall back to the
-  # single-pid kill, byte-identical to before.
-  local _pgid _self
-  _pgid="$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')"
-  _self="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
-  if [ -n "$_pgid" ] && [ "$_pgid" != "$_self" ]; then
-    kill -TERM "-$_pgid" 2>/dev/null || kill -TERM "$SERVER_PID" 2>/dev/null || true
-    for _i in $(seq 1 "${SERVER_STOP_GRACE_S:-10}"); do
-      kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 1
-    done
-    kill -0 "$SERVER_PID" 2>/dev/null && kill -KILL "-$_pgid" 2>/dev/null || true
-  else
-    kill "$SERVER_PID" 2>/dev/null || true
-  fi
-  wait "$SERVER_PID" 2>/dev/null || true
-}
-trap cleanup EXIT
+# Server lifecycle: the teardown contract lives in server_teardown.sh so the SAME
+# identity-verified kill is used by this dispatcher and by any role-authored capture
+# script (which previously hand-rolled its own kill). The old cleanup resolved the
+# server's pgid AT KILL TIME and group-killed whenever it differed from ours — a pid
+# that had exited and been recycled resolved to a stranger's group, which is how a
+# teardown can reach the caller's orchestrator / PID 1.
+# shellcheck disable=SC1090
+source "$HERE/server_teardown.sh"
+trap server_teardown EXIT
 
 # ---- serving-GPU mutex ----
 # TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
@@ -374,6 +367,9 @@ if [ "$REUSE_SERVER" != "1" ]; then
   echo ">>> Launching $BACKEND server (log: $LOG) ..."
   adapter_launch
   if [ -z "${SERVER_PID:-}" ]; then echo "!!! adapter_launch did not set SERVER_PID"; exit 2; fi
+  # Freeze the server's process identity NOW (pid, pgid, /proc start time) so the
+  # EXIT teardown never has to ask "who owns this pid?" after the pid may be gone.
+  server_record_identity "$SERVER_PID"
 
   echo ">>> Waiting for server health ..."
   # An overlaid candidate can wedge: process stays alive but /health 503s forever (JIT deadlock /
