@@ -131,6 +131,7 @@ jobs:
             e2e_workflow/scripts/tests/test_agentx_client_canonicality.py \
             e2e_workflow/scripts/tests/test_roofline_skill.py \
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
+            e2e_workflow/scripts/tests/test_llm_ledger.py \
             geak/test_bootstrap.py
 
       - name: expert skill static validation
