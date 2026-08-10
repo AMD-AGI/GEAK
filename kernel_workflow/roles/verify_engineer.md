@@ -27,15 +27,36 @@ absolute per-case latencies. The script trusts only your numbers.
        --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$WS" && tar -xf - )
    cd "$WS"
    git checkout -- . 2>/dev/null || true
-   git apply "$PATCH" || { echo "PATCH_APPLY_FAILED"; }
+   # `git apply` is UNSAFE here: the tar copy excluded .git, so $WS is not a repo. If ANY ancestor
+   # directory is a git repo, git resolves the patch's a/<path> against THAT repo's top level, prints
+   # "Skipped patch ..." only under -v, and EXITS 0 — leaving the source UNPATCHED while every
+   # exit-code guard (including `git apply --check`) reports success. This silently benchmarked the
+   # pristine baseline and threw away a real 1.20x candidate. Use `patch`, and ASSERT the content moved.
+   patch -p1 --forward --batch < "$PATCH" || { echo "PATCH_APPLY_FAILED"; }
    ```
    (Use `$WS` as your verify workspace for all subsequent commands.)
    If the patch fails to apply → return `status:"apply_failed"`, `verified_geomean:0`.
+1b. **MANDATORY apply assertion — exit codes are NOT sufficient.** Before measuring anything, prove
+   the patched file differs from the pristine reference; a verify that measures unpatched source is
+   worse than no verify at all:
+   ```bash
+   cd "$WS" && for f in source/*.py; do
+     if cmp -s "$f" "${f/source\//source_golden/}" 2>/dev/null; then
+       echo "PATCH_DID_NOT_CHANGE $f"; fi; done
+   diff -q <(md5sum "$PATCH") /dev/null >/dev/null   # patch is non-empty
+   ```
+   Also `grep` for a distinctive line of the patch's `+` side in the patched file. If the source is
+   byte-identical to `source_golden/` (or to `$CANONICAL`'s copy when the canonical already differs
+   from golden) while `$PATCH` is non-empty → return `status:"apply_failed"`, `verified_geomean:0`,
+   and say so in `notes`. Never report a latency measured from an unpatched tree.
 2. Read `COMMANDMENT.md` for the exact correctness + full-benchmark commands + parse hint.
 3. Run CORRECTNESS (cwd = your ws). If it fails → `status:"correctness_failed"`, no speedup.
 4. Run FULL_BENCHMARK via `bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <cmd>`. Parse per-case
    latency using the parse hint. Run it **twice** and keep the better/median if the two disagree by
-   >5% (note the variance).
+   >5% (note the variance). **If ANY case's two medians disagree by more than the COMMANDMENT's noise
+   floor (or that case is flagged unstable in the round inputs), run FULL_BENCHMARK until you have
+   ≥5 medians for it and report the MEDIAN OF MEDIANS**, plus the observed spread in `variance_note`.
+   A candidate must not be rejected on a single unstable case's worst draw.
 4b. **(ONLY if `REQUIRE_GRAPH_CAPTURE` is set) CUDA/HIP-graph capture-safety smoke.** This op will be
    overlaid on the graph-captured decode path, so a kernel that passes iso but host-syncs or lazily
    compiles UNDER CAPTURE passes here yet CRASHES the live TP>1 server. Catch it now (cheap), in `$WS`

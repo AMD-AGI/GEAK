@@ -609,6 +609,14 @@ mkdir -p ${d.out_dir}/workspace
 ( cd ${CANONICAL} && tar --exclude=./.git --exclude='*/.git' --exclude=./build --exclude='*/build' \\
     --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \\
     --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd ${d.out_dir}/workspace && tar -xf - )
+# The tar EXCLUDES .git, so the copy is NOT a repo — without this init, \`git diff\` silently walks UP to
+# an ancestor repo and emits a patch of unrelated files. Seed a repo so \`git diff\` means YOUR edits.
+cd ${d.out_dir}/workspace
+export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
+printf '%s\\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+git init -q && git -c user.email=team@workflow -c user.name=team add -A \\
+  && git -c user.email=team@workflow -c user.name=team commit -q -m "engineer ${d.id} start"
+git rev-parse --show-toplevel   # MUST print ${d.out_dir}/workspace before you trust any git diff
 \`\`\`
 ${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section

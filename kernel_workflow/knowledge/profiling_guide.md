@@ -242,6 +242,16 @@ real mislabel. Run them before forming a hypothesis.
 - **Occupancy ceiling:** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved.
 - **Spill:** any nonzero `Scratch_Per_Workitem` comes first, before other register work.
 - **LDS bank conflict:** `SQ_LDS_BANK_CONFLICT / SQ_LDS_IDX_ACTIVE > 20%` → pad the row stride / swizzle.
+  **CAVEAT — this trigger mis-fires on WIDE/TRANSPOSE LDS ops** (`ds_read_b64_tr_b16`, `ds_write_b128`,
+  `ds_read_b128`). Such an instruction moves more bytes than LDS can deliver in one cycle (e.g. 64 lanes
+  × 8 B = 512 B against 128 B/cycle), so *every* bank must serve several distinct dword addresses no
+  matter how you permute — a large, irreducible slice of the counter is the instruction's own multi-cycle
+  service, not a permutation defect. Before acting: build a **swizzle-free control** and confirm how much
+  of the counter is actually address-sensitive; if a structurally different conflict-optimal permutation
+  reproduces the same counter to 5 digits, you are already on the floor. Also expect the ratio to RISE
+  when you replace many narrow LDS ops with fewer wide ones — that is an instruction-mix artifact, not a
+  regression. Finally, price a conflict cycle before funding the work (delete the swizzle, measure the
+  e2e cost of the extra conflicts, extrapolate); on a memory-bound kernel it can be worth <0.5% e2e.
 - **Coalescing:** `TD_COALESCABLE_WAVEFRONT_sum / TD_LOAD_WAVEFRONT_sum < 50%` → fix access pattern.
 
 Only tune registers/occupancy when achieved occupancy actually sits at the register ceiling; if it is

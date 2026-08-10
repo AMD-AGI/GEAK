@@ -23,6 +23,13 @@ do not invent new optimizations; you compose and reconcile existing ones.
        --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \
        --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$WS" && tar -xf - )
    cd "$WS"
+   # The tar excludes .git, so $WS is NOT a repo: `git apply`/`git diff` would resolve to an ancestor
+   # repo and your integrated_patch.diff would contain unrelated files. Seed a repo first.
+   export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
+   printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   git init -q && git -c user.email=team@workflow -c user.name=team add -A \
+     && git -c user.email=team@workflow -c user.name=team commit -q -m "integrate start"
+   git rev-parse --show-toplevel   # MUST print $WS
    ```
 2. Sort patches by verified speedup (best first). Check compatibility using
    `optimization_strategies.md` (compatible: template+launch-bounds, tiling+coalescing, warp-coop +

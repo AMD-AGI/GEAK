@@ -79,6 +79,11 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    `speedup_weighted = Σ_i weight_i / Σ_i (weight_i / speedup_i)` using each case's `weight` from
    `baseline_per_case` — that is the PRIMARY number you optimize toward; the geomean is secondary.
 5. **Save patch** when geomean > 1.0: `cd $KERNEL_PATH && git diff > $OUTPUT_DIR/best_patch.diff`.
+   Your workspace tar-copy EXCLUDES `.git`, so it is not a repo until you `git init` + commit the
+   seeded state (the spawn recipe does this). If you skip that, `git diff` silently resolves to an
+   ANCESTOR repo and writes a patch containing unrelated files — a verified speedup with a non-kernel
+   patch is an integration trap. Always check `git rev-parse --show-toplevel` == `$KERNEL_PATH` and
+   that the saved diff's `+++` lines are your kernel sources.
 6. **Iterate** a few variations (params/tiling/unroll/specialization), keeping the best. Obey
    self-monitoring: switch approach after ~8 stalled steps, force-submit after ~12, stop tuning when
    3 benchmarks are within 1%.

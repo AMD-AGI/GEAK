@@ -95,7 +95,11 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    from other categories (e.g. warp-cooperative rewrite + native output layout + dispatch fusion).
 3. **Implement → correctness → benchmark** the change. Keep it only if correct AND faster than your
    current best. Save `best_patch.diff` (`cd $KERNEL_PATH && git diff > $OUTPUT_DIR/best_patch.diff`)
-   whenever you set a new best with geomean > 1.0.
+   whenever you set a new best with geomean > 1.0. **The workspace tar-copy excludes `.git`, so
+   `git init` + an initial commit in `$KERNEL_PATH` FIRST** — otherwise `git diff` resolves to an
+   ancestor repo and silently writes a patch of unrelated files. Verify with
+   `git -C $KERNEL_PATH rev-parse --show-toplevel` (must equal `$KERNEL_PATH`) and confirm the saved
+   diff's `+++` paths are your kernel sources.
 4. **Self-profile to re-steer**: every few accepted changes, re-run
    `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<benchmark cmd that cd's into $KERNEL_PATH>" $OUTPUT_DIR/profile_rN`
    to find the NEW dominant bottleneck, and attack that next. This is the core of going deep.
