@@ -85,6 +85,7 @@ jobs:
             e2e_workflow/scripts/tests/test_harness_lib.py \
             e2e_workflow/scripts/tests/test_server_teardown.py \
             e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
+            e2e_workflow/scripts/tests/test_llm_ledger.py \
             geak/test_bootstrap.py
 
       # Renders the per-file table + total into the run's Job Summary, which is

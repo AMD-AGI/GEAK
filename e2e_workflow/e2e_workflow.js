@@ -653,14 +653,56 @@ function agentBounded(rawPrompt, opts) {
   ]);
 }
 
+// --- LLM stats: which agent ran, in which phase, in what order ---------------------------------
+// GEAK measures what it achieves and nothing about what it SPENDS. scripts/llm_ledger.py fixes that
+// by reading the Claude Code transcripts, which carry the exact billed token counts and a timestamp
+// for every single API call. The one thing those transcripts cannot know is which workflow PHASE a
+// call belonged to — and prompt text alone is ambiguous (`bakeoff` runs in both HeadKernel and
+// Milestone; `reprofile` in three phases). So we record the association here.
+//
+// DELIBERATELY NO TIMESTAMPS. Date.now()/new Date() are unavailable in workflow scripts (see the
+// fast-mode note below), so this timeline records ORDER and ASSOCIATION only; every duration in the
+// final report is derived from the transcripts, which are timestamped by the CLI.
+//
+// PURELY ADDITIVE: args.llm_stats="false" makes every function here a no-op and leaves the generated
+// prompts byte-identical to a build without the feature.
+const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'e2e_workflow', events: [], nested: [] };
+// One event per ATTEMPT (not per agent), so a retry storm is visible as a retry storm rather than
+// hiding inside a single "the agent ran" row.
+function tlAgent(opts, attempt, ok) {
+  if (!LLM_STATS) return;
+  LLM_TL.events.push({
+    seq: LLM_TL.events.length,
+    phase: (opts && opts.phase) || '',
+    label: (opts && opts.label) || 'agent',
+    attempt: attempt,
+    ok: !!ok,
+  });
+}
+// A nested kernel workflow returns its own timeline on its result object. workflow() is a native
+// primitive — the child runs inline and returns straight to this script with no model in between —
+// so absorbing it here costs nothing and saves the kernel layer from writing its own file.
+function nestedWorkflow(ref, wfArgs) {
+  // Only rewrite the args when stats are OFF, so the default path passes exactly the args it always
+  // did (the nested run defaults to stats-on by itself) and its resume-cache key is unchanged.
+  const p = workflow(ref, LLM_STATS ? wfArgs : { ...wfArgs, llm_stats: 'false' });
+  if (!LLM_STATS) return p;
+  return p.then((r) => {
+    if (r && r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
+    return r;
+  });
+}
+
 async function safeAgent(prompt, opts, tries = 3) {
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
       const r = await agentBounded(prompt, opts);
-      if (r) return r;
+      if (r) { tlAgent(opts, i + 1, true); return r; }
+      tlAgent(opts, i + 1, false);
       lastErr = 'null/empty result';
-    } catch (e) { lastErr = String(e); }
+    } catch (e) { tlAgent(opts, i + 1, false); lastErr = String(e); }
     log(`agent[${(opts && opts.label) || '?'}] attempt ${i + 1}/${tries} failed: ${String(lastErr).slice(0, 160)}`);
   }
   log(`agent[${(opts && opts.label) || '?'}] DEGRADED to null after ${tries} tries (${String(lastErr).slice(0, 120)})`);
@@ -957,7 +999,7 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
 // workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
 // existing null-guards treat it as "no kernel" and continue.
 function fastBoundedWorkflow(ref, wfArgs, label) {
-  const p = workflow(ref, wfArgs);
+  const p = nestedWorkflow(ref, wfArgs);
   if (!FAST_MODE || typeof setTimeout !== 'function' || !(FAST_HEAD_WF_MS > 0)) return p;
   let to;
   const guard = new Promise((resolve) => {
@@ -998,7 +1040,7 @@ if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HE
   }, TIME_HEAD_DEADLINE_MS);
 }
 function deepBoundedWorkflow(ref, wfArgs, label) {
-  const p = workflow(ref, wfArgs);
+  const p = nestedWorkflow(ref, wfArgs);
   if (!DEEP_MODE || typeof setTimeout !== 'function' || !(DEEP_HEAD_WF_MS > 0)) return p;
   let to;
   const guard = new Promise((resolve) => {
@@ -1038,7 +1080,7 @@ if (!MODEL_PATH && KERNEL_PATH) {
   // nesting). kernel_workflow.js returns {eval_dir, final_geomean, final_patch, validation_status, ...}.
   let passthru;
   try {
-    const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+    const r = await nestedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
       kernel_path: KERNEL_PATH, workflow_dir: KERNEL_WF_DIR,
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       budget: KERNEL_BUDGET, gpu_ids: GPU_IDS, task: TASK, exp_root: EXP_ROOT,
@@ -2145,7 +2187,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
     let kl;
     try {
-      const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+      const r = await nestedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
@@ -2521,12 +2563,51 @@ if (EVAL_DIR) {
       `Do NOT reformat, truncate, summarize, or add/remove any keys or values:\n\n` +
       '```json\n' + json + '\n```\n\n' +
       `Then return {"written": true, "path": "${EVAL_DIR}/workflow_return.json"}.`,
-      { phase: 'Validate', label: 'persist-workflow-return',
+      // Label shaped `role:sub_phase:detail` like every other call, so the token ledger can match
+      // this agent to its transcript. The PROMPT below is untouched — it is the contract run_e2e.py
+      // reads first, and nothing about accounting is worth perturbing it.
+      { phase: 'Validate', label: 'file_writer:persist:workflow-return',
         schema: obj({ written: { type: 'boolean' }, path: { type: 'string' } }, []) },
       2);
     log(`Persisted canonical workflow_return.json -> ${EVAL_DIR}/workflow_return.json (run_e2e.py reads this first).`);
   } catch (e) {
     log(`persist workflow_return.json failed (NON-FATAL — run_e2e.py will recover from disk): ${String(e)}`);
+  }
+}
+
+// --- LLM stats: persist the timeline, then build the token + time tables ------------------------
+// Deliberately AFTER the workflow_return persist, never merged into it. That write is the contract
+// run_e2e.py reads first and its prompt says "do NOT truncate"; padding it with the timeline would
+// put a safety-critical file at risk of a truncated write for the sake of saving one agent call.
+//
+// This costs one small agent invocation: the script has no filesystem access, so an agent is the
+// only thing that can write the file and run the collector. That final call is therefore the one
+// call the in-workflow tables cannot include — run_e2e.py re-runs the collector afterwards and
+// picks it up on the driven path. Entirely best-effort: accounting must never fail a run that
+// produced a real speedup.
+if (EVAL_DIR && LLM_STATS) {
+  try {
+    const tlJson = JSON.stringify(LLM_TL);
+    const tlPath = `${EVAL_DIR}/reports/trace/agent_timeline.json`;
+    // The header line is the one every role prompt opens with. It is what lets the ledger see this
+    // as its own agent instead of folding its tokens into whichever agent happened to run before it.
+    await safeAgent(
+      `You are the file_writer. PHASE=persist_llm_stats.\n` +
+      `Do exactly two things, in order:\n` +
+      `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
+      `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
+      '```json\n' + tlJson + '\n```\n\n' +
+      `2. Then run this Bash command (it is best-effort; if it fails, carry on and report ok=false):\n` +
+      `   python3 "${WORKFLOW_DIR}/scripts/llm_ledger.py" --eval-dir "${EVAL_DIR}"\n\n` +
+      `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
+      { phase: 'Validate', label: 'file_writer:persist_llm_stats',
+        schema: obj({ written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } }, []) },
+      2);
+    const nestedNote = LLM_TL.nested.length ? ' plus ' + LLM_TL.nested.length + ' nested kernel run(s)' : '';
+    log(`LLM token+time ledger -> ${EVAL_DIR}/reports/trace/ (token_stats.md, llm_calls.jsonl). ` +
+        `${LLM_TL.events.length} agent attempts recorded${nestedNote}.`);
+  } catch (e) {
+    log(`LLM stats emit failed (NON-FATAL — the run is unaffected): ${String(e)}`);
   }
 }
 

@@ -106,6 +106,9 @@ Workflow({
     use_expert_skills: "false", // consult perf_knowledge/expert_skills (advisory priors) on/off (default OFF, opt-in);
                           //   set "true" to enable. When OFF (default) nothing is injected -> behavior is
                           //   byte-identical to a run without the feature. Threaded down to the kernel layer too.
+    llm_stats: "true",    // per-API-call token + time ledger (default ON). See "Token + time
+                          //   accounting" below. "false" makes it a no-op and leaves the generated
+                          //   prompts byte-identical to a build without the feature.
     gpu_ids: "0",         // comma-separated
     isl: 1024, osl: 1024, conc: 64,  // workload (profile + bench use the SAME)
     task: "focus on ...", // optional steer
@@ -200,6 +203,47 @@ Everything lands under `<exp_root>/e2e_<model>_<timestamp>/`:
 - `overlay/…` — candidate + accepted reversible overlays
 - `final/{overlay, final_patch.diff, final_launch.sh}` — the deliverable bundle
 - `architect_report.md`, `director_e2e_validation.json` — the official verified throughput result
+- `reports/trace/…` — what the run COST: one row per LLM API call, plus the stat tables (below)
+
+## Token + time accounting (`reports/trace/`)
+Every run writes a ledger of what it spent, alongside what it achieved. One row per LLM API call —
+however small — with the tokens the API actually billed, what each call cost, how long it took, and
+which phase it belonged to.
+
+| file | contents |
+|---|---|
+| `token_stats.md` | the stat tables: run totals, tokens by phase, time by phase, by role, ten most expensive agents |
+| `token_stats.json` | the same, machine-readable |
+| `llm_calls.jsonl` | one row per API call — the raw ledger |
+| `agent_calls.jsonl` | one row per agent invocation, incl. attempts that hung and produced nothing |
+| `agent_timeline.json` | what the workflow recorded: which agent ran in which phase, in order |
+| `driver_usage.json` | the SDK's own figure for the outermost turn, kept as a cross-check (run_e2e.py path only) |
+
+**Where the numbers come from.** Tokens are not estimated: Claude Code writes a transcript for every
+session and sub-agent, and each assistant record carries the exact billed usage (fresh input, cache
+read, cache write split 5-minute/1-hour, output). `scripts/llm_ledger.py` reads those, deduplicates
+responses that were flushed twice, and derives each call's duration from the gap to the preceding
+record. The workflows contribute only the *association* — which agent ran in which phase, in what
+order — because `Date.now()` is unavailable in workflow scripts and prompt text alone is ambiguous
+(`bakeoff` runs in both HeadKernel and Milestone; `setup` in both the e2e and kernel layers).
+
+Nested kernel-layer phases are prefixed `kernel/`. Phase spans **overlap** by design: `kernel/Optimize`
+runs inside `Milestone`, so both tick at once, and the shares are of the whole run rather than of each
+other. A high cache-hit rate is not the same as efficiency — it can also mean cheaply re-sending
+something that should not be sent at all.
+
+Run it by hand over a finished run, or with different prices:
+```
+python3 scripts/llm_ledger.py --eval-dir <exp_root>/e2e_<model>_<ts>
+python3 scripts/llm_ledger.py --eval-dir <dir> --rates my_rates.json
+```
+Prices default to $5/MTok fresh input and $25/MTok output with the published cache multipliers, in one
+overridable table at the top of the script; raw token counts are measured either way, so the dollar
+columns can be ignored if the rate is wrong for your contract.
+
+Pass `llm_stats: "false"` to switch the whole feature off — the generated prompts are then
+byte-identical to a build without it. Accounting is best-effort everywhere: a run that produced a real
+speedup is never failed by its own bookkeeping.
 
 ## Files
 ```
@@ -207,7 +251,7 @@ e2e_workflow.js   orchestration (deterministic; recursively calls ../kernel_work
 roles/                 director, system_architect, profiler, config_tuner, kernel_extractor, op_benchmarker, e2e_integrator
 knowledge/             e2e_optimization, profile_parse, preflight (env self-check), backend_playbook + gemm_attention_backends (persistent), sglang_internals, shape_capture
 knowledge/analysis_skills/  pluggable profile-analysis skills (INDEX.md + one dir per skill; `roofline` ships by default)
-scripts/               bench_e2e.sh (backend-agnostic dispatcher), adapters/{sglang,vllm}.sh, parse_profile.py (Top-N), op_bench.py, capture_shapes.py, overlay_setup.py
+scripts/               bench_e2e.sh (backend-agnostic dispatcher), adapters/{sglang,vllm}.sh, parse_profile.py (Top-N), op_bench.py, capture_shapes.py, overlay_setup.py, llm_ledger.py (token + time ledger)
 scripts/server_teardown.sh  the shared server-kill contract (identity verified at LAUNCH: pid, pgid, /proc start time). Every script that launches a server, including role-authored capture scripts, must source it instead of hand-rolling a kill.
 ```
 

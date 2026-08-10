@@ -388,11 +388,38 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+// --- LLM stats: which agent ran, in which phase, in what order ---------------------------------
+// Companion to e2e_workflow.js's block of the same name. The exact billed token counts live in the
+// Claude Code transcripts; the one thing those cannot know is the workflow PHASE, and prompt text
+// alone is ambiguous here (`setup` runs under both the Setup and Benchmark phases). So we record
+// the association and hand it up to the caller on the return value — workflow() is a native
+// primitive, so a nested run's timeline reaches the parent with no model in between and no cost.
+//
+// DELIBERATELY NO TIMESTAMPS: Date.now()/new Date() are unavailable in workflow scripts. Every
+// duration in the final report comes from the transcripts. See scripts/llm_ledger.py.
+// PURELY ADDITIVE: args.llm_stats="false" makes it a no-op.
+const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_lane', events: [], nested: [] };
+function tlAgent(o, attempt, ok) {
+  if (!LLM_STATS) return;
+  LLM_TL.events.push({
+    seq: LLM_TL.events.length,
+    phase: (o && o.phase) || '',
+    label: (o && o.label) || 'agent',
+    attempt: attempt,
+    ok: !!ok,
+  });
+}
+
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     try {
-      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return await agent(p, o);
+      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const r0 = await agent(p, o);
+        tlAgent(o, attempt, !!r0);
+        return r0;
+      }
       let to;
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
@@ -401,11 +428,14 @@ async function agentT(p, o) {
         }, AGENT_TIMEOUT_MS);
       });
       // A timeout resolves null (returned as-is, no retry). An API/agent error rejects -> caught below.
-      return await Promise.race([
-        agent(p, o).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+      const r = await Promise.race([
+        agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
         guard,
       ]);
+      tlAgent(o, attempt, !!r);
+      return r;
     } catch (e) {
+      tlAgent(o, attempt, false);
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
       if (attempt < AGENT_RETRIES) {
         log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} hit an API/agent error (${msg}) — retrying so a transient outage doesn't kill the run.`);
@@ -901,4 +931,7 @@ return {
   budget_total: BUDGET,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
   final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
+  // Hand this lane's agent/phase timeline up to whoever called us (e2e_workflow.js or the bake-off
+  // dispatcher), so the whole run's token ledger can be written once at the top instead of N times.
+  llm_timeline: LLM_STATS ? LLM_TL : undefined,
 };

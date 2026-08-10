@@ -62,6 +62,10 @@ INTERFACE_DIR = Path(__file__).resolve().parent
 GEAK_ROOT = INTERFACE_DIR.parent
 E2E_DIR = GEAK_ROOT / "e2e_workflow"
 E2E_SCRIPT = E2E_DIR / "e2e_workflow.js"
+# Per-API-call token + time ledger. Run as a subprocess rather than imported so a
+# fault in the accounting can never reach the run it is accounting for.
+LLM_LEDGER_SCRIPT = E2E_DIR / "scripts" / "llm_ledger.py"
+LLM_LEDGER_TIMEOUT_S = 300
 BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
 
 # Workflow primitives are only available at this effort tier (see README).
@@ -656,6 +660,72 @@ def _workflow_done_on_disk(eval_dir: str | None) -> bool:
     ).is_file()
 
 
+def _build_llm_ledger(eval_dir: Path) -> str:
+    """Build the run's token + time tables under <eval_dir>/reports/trace/.
+
+    Returns the path to token_stats.md, or "" when the ledger could not be built
+    (no collector on disk, no transcripts, a timeout). Never raises: the caller
+    is the guaranteed-emit path and must reach result.json regardless.
+    """
+    if not LLM_LEDGER_SCRIPT.is_file():
+        return ""
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(LLM_LEDGER_SCRIPT), "--eval-dir", str(eval_dir), "--quiet"],
+            check=False, timeout=LLM_LEDGER_TIMEOUT_S,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"GEAK e2e: llm_ledger did not run ({type(exc).__name__}: {exc})", file=sys.stderr)
+        return ""
+    # The collector reports an incomplete ledger on stderr (e.g. no transcripts
+    # found). Surface it in the run log rather than swallowing it — a silently
+    # empty ledger reads exactly like a cheap run, which is the wrong conclusion.
+    for line in (proc.stderr or "").splitlines():
+        if line.strip():
+            print(f"GEAK e2e: {line.strip()}", file=sys.stderr)
+    md = eval_dir / "reports" / "trace" / "token_stats.md"
+    return str(md) if md.is_file() else ""
+
+
+def _record_driver_usage(msg: Any, eval_dir: str | None) -> None:
+    """Persist the driver turn's own token usage as an independent cross-check.
+
+    The driver turn is the outermost call — the one that invokes the Workflow
+    tool and waits. Its tokens are already in the session transcript that
+    ``scripts/llm_ledger.py`` reads, so this is NOT a second source of truth to
+    add up; it is the SDK's own figure, written down so the ledger can be
+    reconciled against it. A mismatch means transcript discovery missed
+    something, which is exactly the failure that would otherwise pass unnoticed.
+
+    Best-effort in every direction: no SDK field, no eval dir, or an unwritable
+    path all end the same way — silently, with the run unaffected.
+    """
+    if not eval_dir:
+        return
+    usage = getattr(msg, "usage", None)
+    if isinstance(usage, dict):
+        payload = dict(usage)
+    elif usage is not None:
+        payload = {k: getattr(usage, k) for k in
+                   ("input_tokens", "output_tokens",
+                    "cache_read_input_tokens", "cache_creation_input_tokens")
+                   if hasattr(usage, k)}
+    else:
+        payload = {}
+    if not payload:
+        return
+    payload["total_cost_usd"] = getattr(msg, "total_cost_usd", None)
+    payload["source"] = "claude_agent_sdk.ResultMessage"
+    try:
+        out = Path(eval_dir) / "reports" / "trace"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "driver_usage.json").write_text(
+            json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) -> str:
     """Drive the JS workflow through the SDK, version-robustly.
 
@@ -749,6 +819,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                             chunks.append(summ)
                     elif name == "ResultMessage":
                         saw_result = True
+                        _record_driver_usage(msg, eval_dir)
 
                     # ---- completion gate (independent of turn blocking) ----
                     # Never stop while a background task is still running.
@@ -2531,6 +2602,17 @@ def main(argv: list[str]) -> int:
                 out["kernel_journey_path"] = _write_kernel_journey(eval_dir, wf, out)
             except Exception as kj_exc:
                 out["kernel_journey_error"] = f"{type(kj_exc).__name__}: {kj_exc}"
+            # Token + time ledger. Runs here, on the GUARANTEED-emit path, so the
+            # accounting lands even when the run timed out or crashed — the runs
+            # you most want the numbers for. The workflow already built it once
+            # from inside itself; this second pass costs nothing extra and picks
+            # up the calls made after that point (its own emit agent, the final
+            # Validate leg). Best-effort by construction: a run that produced a
+            # real speedup must never be failed by its own bookkeeping.
+            try:
+                out["llm_stats_path"] = _build_llm_ledger(eval_dir)
+            except Exception as ledger_exc:
+                out["llm_stats_error"] = f"{type(ledger_exc).__name__}: {ledger_exc}"
         if out.get("baseline_basis"):
             try:
                 updated_reports = _update_baseline_alignment_reports(out)

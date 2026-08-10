@@ -133,11 +133,38 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // Hung-agent + API-fault guard (same contract as kernel_lane.js:agentT).
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+// --- LLM stats: which agent ran, in which phase, in what order ---------------------------------
+// Companion to the blocks of the same name in e2e_workflow.js / kernel_lane.js. Records only the
+// association (phase <- agent), never timestamps: Date.now()/new Date() are unavailable in workflow
+// scripts, and every duration in the final report comes from the Claude Code transcripts instead.
+// Each bake-off lane hands its own timeline back on its return value, which we absorb below, so the
+// whole tree is written once at the top. PURELY ADDITIVE: args.llm_stats="false" makes it a no-op.
+const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_workflow', events: [], nested: [] };
+function tlAgent(o, attempt, ok) {
+  if (!LLM_STATS) return;
+  LLM_TL.events.push({
+    seq: LLM_TL.events.length,
+    phase: (o && o.phase) || '',
+    label: (o && o.label) || 'agent',
+    attempt: attempt,
+    ok: !!ok,
+  });
+}
+function absorbNested(r) {
+  if (LLM_STATS && r && r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
+  return r;
+}
+
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     try {
-      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return await agent(p, o);
+      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const r0 = await agent(p, o);
+        tlAgent(o, attempt, !!r0);
+        return r0;
+      }
       let to;
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
@@ -145,11 +172,14 @@ async function agentT(p, o) {
           resolve(null);
         }, AGENT_TIMEOUT_MS);
       });
-      return await Promise.race([
-        agent(p, o).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+      const r = await Promise.race([
+        agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
         guard,
       ]);
+      tlAgent(o, attempt, !!r);
+      return r;
     } catch (e) {
+      tlAgent(o, attempt, false);
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
       if (attempt < AGENT_RETRIES) {
         log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} error (${msg}) — retrying.`);
@@ -344,7 +374,7 @@ phase('Bakeoff');
 const sem = makeSem(GPU_LIST);
 const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
   try {
-    const r = await workflow({ scriptPath: WORKER }, {
+    const r = absorbNested(await workflow({ scriptPath: WORKER }, {
       kernel_path: oracle.task_dir, workflow_dir: WORKFLOW_DIR,
       mode: l.mode, target_language: l.lang,
       op_spec: oracle.op_spec || OP_SPEC, workload_spec_path: oracle.workload_path || WORKLOAD_SPEC_PATH || '',
@@ -352,7 +382,8 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       exp_root: `${EVAL_DIR}/bakeoff/${l.key}`,
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
-    });
+      llm_stats: LLM_STATS ? 'true' : 'false',
+    }));
     const speedup = primSpeedup(r);
     log(`lane ${l.key}:${l.mode} -> ${speedup ? speedup.toFixed(2) + 'x' : 'no result'} (${r ? r.validation_status : 'null'})`);
     return { lane: l, r, speedup };
@@ -458,4 +489,7 @@ return {
   report_path: rep ? rep.report_path : `${EVAL_DIR}/bakeoff_report.md`,
   applied_to_original: rep ? rep.applied_to_original : '',
   validation_status: winner ? 'ok' : 'no_winner',
+  // This dispatcher's agents plus every bake-off lane's timeline, handed up so the caller can write
+  // the whole run's token ledger once. See the LLM stats block above.
+  llm_timeline: LLM_STATS ? LLM_TL : undefined,
 };
