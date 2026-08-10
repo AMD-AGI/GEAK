@@ -58,6 +58,14 @@ if (ANALYSIS_SKILL_ON) log(`Profile-analysis skill: ${ANALYSIS_SKILL} (advisory;
 // Top-N routing and is not re-run after config/head/kernel wins.
 const SEMANTICS_MAPPING_ON = String(
   A.semantics_mapping != null ? A.semantics_mapping : 'true') === 'true';
+// Phase 1.2 performs one extra, instrumented Shape-only replay after the clean
+// representative tables exist. It is deliberately opt-in because it launches
+// a second model service; failures remain sidecar-only and never affect routing.
+const SEMANTICS_SHAPE_CAPTURE_ON = String(
+  A.semantics_shape_capture != null ? A.semantics_shape_capture : 'false') === 'true';
+const SEMANTICS_SHAPE_CAPTURE_SETUP =
+  (A.semantics_shape_capture_setup && typeof A.semantics_shape_capture_setup === 'object')
+    ? A.semantics_shape_capture_setup : {};
 
 // ---- Upstream TraceLens / kernel-agent prior (OPTIONAL; forwarded by run_e2e.py as args.tracelens) ----
 // run_e2e.py resolves these paths beside the geak handoff and forwards ONLY the non-null ones.
@@ -452,6 +460,9 @@ const SEMANTICS_SCHEMA = obj({
   semantic_event_audit_jsonl: { type: 'string' }, layer_instance_audit_json: { type: 'string' },
   semantic_table_json: { type: 'string' }, semantic_table_md: { type: 'string' },
   shape_capture_plan_json: { type: 'string' }, quality_json: { type: 'string' },
+  shape_log_jsonl: { type: 'string' }, op_coverage_manifest: { type: 'string' },
+  kernel_semantic_evidence_jsonl: { type: 'string' },
+  shape_type_verification_json: { type: 'string' },
   notes: { type: 'string' },
 }, ['status']);
 
@@ -1150,6 +1161,24 @@ if (want('setup')) {
         }),
       { phase: 'Profile', label: 'semantics-mapper:baseline', schema: SEMANTICS_SCHEMA },
       1);
+    if (SEMANTICS_SHAPE_CAPTURE_ON && semantics &&
+        semantics.status !== 'failed' && semantics.status !== 'fail') {
+      const completed = await safeAgent(
+        roleAgent('semantics_mapper', 'complete_table',
+          'Run one metadata-only Shape replay for unresolved representative-layer rows and merge the evidence without changing Clean Trace rows.', {
+            EVAL_DIR, MODEL_PATH, MODEL_NAME, BACKEND, WORKLOAD, ROUND: 0,
+            TRACE_MANIFEST_JSON: profile.trace_manifest_json,
+            STRUCTURAL_PATTERNS_JSON: semantics.structural_patterns_json || '',
+            SEMANTIC_TABLE_JSON: semantics.semantic_table_json || '',
+            SHAPE_CAPTURE_PLAN_JSON: semantics.shape_capture_plan_json || '',
+            SHAPE_CAPTURE_SETUP: SEMANTICS_SHAPE_CAPTURE_SETUP,
+            SKILL_DIR: WORKFLOW_DIR,
+          }),
+        { phase: 'Profile', label: 'semantics-mapper:shape-completion',
+          schema: SEMANTICS_SCHEMA },
+        1);
+      if (completed) semantics = completed;
+    }
     log(`Baseline semantics mapping: ${semantics ? semantics.status : 'failed'} (non-gating).`);
   } else {
     semantics = { status: SEMANTICS_MAPPING_ON ? 'failed' : 'disabled',

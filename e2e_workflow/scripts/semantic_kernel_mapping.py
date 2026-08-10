@@ -315,6 +315,13 @@ def _event_rows(events, pattern_doc):
                      and event.get("cat") in DEVICE_CATEGORIES]
     device_events.sort(key=lambda item: (
         item[1].get("ts") is None, item[1].get("ts") or 0, item[0]))
+    external_id_launch_count = {}
+    for _, device_event in device_events:
+        device_args = device_event.get("args") or {}
+        device_external_id = device_args.get("External id")
+        if device_external_id is not None:
+            external_id_launch_count[device_external_id] = (
+                external_id_launch_count.get(device_external_id, 0) + 1)
     for raw_index, event in device_events:
         ts = event.get("ts")
         step = _step_at(ts, spans, span_starts)
@@ -361,7 +368,9 @@ def _event_rows(events, pattern_doc):
         classification, provider, _, _ = parse_profile.classify(name)
         dims = (parent or {}).get("input_dims") or []
         types = (parent or {}).get("input_types") or []
-        shape_source = "kernel_exact" if dims else (
+        one_to_one_launch = (
+            ext is not None and external_id_launch_count.get(ext) == 1)
+        shape_source = "kernel_exact" if dims and one_to_one_launch else (
             "parent_context" if parent else "unresolved")
         stage, stage_rule_id, stage_source = _stage_detail(
             name, event.get("cat"), (parent or {}).get("name", ""))
@@ -378,6 +387,8 @@ def _event_rows(events, pattern_doc):
             "phase": phase or "unresolved",
             "phase_source": step[6] if step else "unresolved",
             "step_id": step[5] if step else None,
+            "step_batch_size": step[4] if step else None,
+            "step_input_tokens": step[3] if step else None,
             "assignment": assignment,
             "layer_id": layer_id,
             "layer_instance_id": layer_instance_id,
@@ -398,6 +409,10 @@ def _event_rows(events, pattern_doc):
                 "canonical_op": (parent or {}).get("name", "unresolved"),
                 "mapping_level": "external_id" if ext in cpu_by_ext else (
                     "cpu_scope" if scope else "unresolved"),
+                "mapping_cardinality": (
+                    "1:1" if ext in cpu_by_ext and one_to_one_launch else
+                    "1:N" if ext in cpu_by_ext else "unresolved"),
+                "device_launch_count": external_id_launch_count.get(ext),
                 "confidence": "high" if ext in cpu_by_ext else (
                     "medium" if scope else "low"),
                 "evidence_event_index": (parent or {}).get("event_index"),
@@ -1228,8 +1243,10 @@ def _representatives(pattern_doc, instances):
 
 
 def _table(pattern_doc, rows, representatives, table_phases=None):
-    display = {pattern["pattern_id"]: pattern["pattern_display_name"]
-               for pattern in pattern_doc.get("patterns", [])}
+    pattern_meta = {
+        pattern["pattern_id"]: pattern
+        for pattern in pattern_doc.get("patterns", [])
+    }
     grouped = {}
     for row in rows:
         if table_phases and row["phase"] not in table_phases:
@@ -1259,8 +1276,20 @@ def _table(pattern_doc, rows, representatives, table_phases=None):
         tables.append({
             "phase": phase,
             "pattern_id": pattern_id,
-            "pattern_display_name": display.get(pattern_id, pattern_id),
+            "pattern_display_name": pattern_meta.get(
+                pattern_id, {}).get("pattern_display_name", pattern_id),
             "representative_layer_id": representatives[pattern_id]["layer_id"],
+            "selected_step_id": group[0].get("step_id"),
+            "selected_bucket": {
+                "phase": phase,
+                "batch_size": group[0].get("step_batch_size"),
+                "input_tokens": group[0].get("step_input_tokens"),
+            },
+            "structural_context": pattern_meta.get(
+                pattern_id, {}).get(
+                    "structural_context",
+                    pattern_meta.get(pattern_id, {}).get(
+                        "structural_signature", {})),
             "event_count": len(group),
             "layer_total_us": round(total, 6),
             "rows": output_rows,
@@ -1268,9 +1297,73 @@ def _table(pattern_doc, rows, representatives, table_phases=None):
     return tables
 
 
+def _representative_integrity(rows, tables, representatives):
+    """Verify only the Pattern representatives exported for downstream fusion."""
+    by_position = {
+        row["device_seq_index"]: row
+        for row in rows
+    }
+    audits = []
+    for table in tables:
+        pattern_id = table["pattern_id"]
+        phase = table["phase"]
+        selected = (
+            representatives.get(pattern_id, {}).get(
+                "selected_instances", {}).get(phase) or {})
+        first = selected.get("first_device_seq_index")
+        last = selected.get("last_device_seq_index")
+        expected = [
+            by_position[position]
+            for position in range(first, last + 1)
+            if first is not None and last is not None and position in by_position
+        ]
+        actual = table.get("rows", [])
+        expected_ids = [row["row_id"] for row in expected]
+        actual_ids = [row["row_id"] for row in actual]
+        duration_sum = round(sum(
+            float(row.get("duration_us", 0) or 0) for row in actual), 6)
+        exact_once = len(actual_ids) == len(set(actual_ids))
+        ordered = [
+            row["device_seq_index"] for row in actual
+        ] == sorted(row["device_seq_index"] for row in actual)
+        interval_complete = actual_ids == expected_ids
+        duration_matches = math.isclose(
+            duration_sum, float(table.get("layer_total_us", 0) or 0),
+            rel_tol=0, abs_tol=1e-6)
+        passed = (
+            first is not None and last is not None and exact_once and ordered
+            and interval_complete and duration_matches)
+        audits.append({
+            "pattern_id": pattern_id,
+            "phase": phase,
+            "representative_layer_id": table["representative_layer_id"],
+            "body_start_device_seq_index": first,
+            "body_end_device_seq_index": last,
+            "expected_event_count": len(expected_ids),
+            "actual_event_count": len(actual_ids),
+            "dropped_row_ids": [
+                row_id for row_id in expected_ids if row_id not in set(actual_ids)],
+            "duplicate_row_ids": sorted({
+                row_id for row_id in actual_ids if actual_ids.count(row_id) > 1}),
+            "exact_once": exact_once,
+            "ordered": ordered,
+            "interval_complete": interval_complete,
+            "duration_sum_us": duration_sum,
+            "declared_layer_total_us": table.get("layer_total_us"),
+            "duration_matches": duration_matches,
+            "status": "pass" if passed else "fail",
+        })
+    return {
+        "status": "pass" if tables and all(
+            item["status"] == "pass" for item in audits) else "fail",
+        "table_count": len(tables),
+        "tables": audits,
+    }
+
+
 def _quality(
         pattern_doc, rows, instances, representatives, spans, out_of_scope,
-        partition_diagnostics):
+        partition_diagnostics, tables):
     input_count = len(rows)
     assigned_count = sum(1 for row in rows if row["assignment"] in (
         "layer_body", "transition_global", "concurrent_unresolved"))
@@ -1310,9 +1403,11 @@ def _quality(
     mechanical_pass = (not partition_diagnostics or bool(step_audits)) and all(
         item["status"] == "pass" for item in step_audits)
     phase_status = "pass" if spans else "partial"
-    status = "fail" if pattern_missing else (
-        "partial" if phase_status == "partial" or incomplete
-        or not mechanical_pass or
+    representative_integrity = _representative_integrity(
+        rows, tables, representatives)
+    status = "fail" if (
+        pattern_missing or representative_integrity["status"] == "fail") else (
+        "partial" if phase_status == "partial" or
         pattern_doc.get("quality", {}).get("status") == "partial" else "pass")
     return {
         "schema_version": 1,
@@ -1337,20 +1432,36 @@ def _quality(
             },
             "layer_boundaries": {
                 "status": "pass" if not incomplete and not pattern_missing else "fail",
+                "gating": False,
+                "scope": "all_layer_instances_diagnostic",
                 "incomplete_instances": len(incomplete),
                 "patterns_without_representative": pattern_missing,
             },
             "step_layer_order": {
                 "status": "pass" if mechanical_pass else "fail",
+                "gating": False,
+                "scope": "all_layer_instances_diagnostic",
                 "steps": step_audits,
             },
+            "representative_layer_integrity": representative_integrity,
         },
     }
 
 
-def _shape_capture_plan(tables):
+def _shape_capture_plan(tables, pattern_doc, trace_path):
     needs = []
+    target_layers = sorted({
+        int(table["representative_layer_id"]) for table in tables
+        if table.get("representative_layer_id") is not None})
+    target_buckets = []
     for table in tables:
+        bucket = dict(table.get("selected_bucket") or {})
+        bucket.update({
+            "pattern_id": table["pattern_id"],
+            "representative_layer_id": table["representative_layer_id"],
+            "step_id": table.get("selected_step_id"),
+        })
+        target_buckets.append(bucket)
         for row in table["rows"]:
             if row["shape"]["source"] == "kernel_exact":
                 continue
@@ -1360,11 +1471,54 @@ def _shape_capture_plan(tables):
                 "representative_layer_id": table["representative_layer_id"],
                 "pos": row["pos"],
                 "row_id": row["row_id"],
+                "raw_event_index": row["raw_event_index"],
+                "device_seq_index": row["device_seq_index"],
+                "event_type": row["event_type"],
+                "raw_name": row["raw_name"],
+                "short_name": row["short_name"],
+                "provider": row["provider"],
+                "classification": row["classification"],
+                "stage": row["stage"],
+                "external_id": row.get("external_id"),
                 "parent_operator": row["parent_operator"]["canonical_op"],
+                "parent_mapping_level": row["parent_operator"]["mapping_level"],
+                "parent_mapping_cardinality": row[
+                    "parent_operator"].get("mapping_cardinality"),
+                "parent_device_launch_count": row[
+                    "parent_operator"].get("device_launch_count"),
+                "candidate_op_path": None,
+                "candidate_wrapper": None,
+                "candidate_terminal_launcher": None,
+                "mapping_cardinality": "unresolved",
+                "source_evidence": [],
+                "selected_bucket": table.get("selected_bucket", {}),
                 "missing_fields": ["tensor roles", "input/output shapes", "dtype"],
                 "current_source": row["shape"]["source"],
             })
-    return {"schema_version": 1, "capture_targets": needs, "target_count": len(needs)}
+    return {
+        "schema_version": 2,
+        "scope": "representative_layers_only",
+        "analysis_rank": 0,
+        "trace_path": os.path.abspath(trace_path),
+        "trace_sha256": _sha(trace_path),
+        "representative_layer_filter": target_layers,
+        "target_buckets": target_buckets,
+        "patterns": [{
+            "pattern_id": table["pattern_id"],
+            "representative_layer_id": table["representative_layer_id"],
+            "structural_context": table.get("structural_context", {}),
+        } for table in tables],
+        "capture_policy": {
+            "rank": 0,
+            "max_matched_forwards_per_bucket": 1,
+            "metadata_only": True,
+            "stdout": False,
+            "unresolved_targets_only": True,
+            "decode_capture_windows": ["graph_capture", "warmup", "enforce_eager_probe"],
+        },
+        "capture_targets": needs,
+        "target_count": len(needs),
+    }
 
 
 def _markdown(tables, quality):
@@ -1375,8 +1529,12 @@ def _markdown(tables, quality):
             "## %s — %s" % (table["phase"].upper(), table["pattern_display_name"]),
             "",
             "- representative layer: `L%s`" % table["representative_layer_id"],
+            "- selected bucket: `%s`" % json.dumps(
+                table.get("selected_bucket", {}), sort_keys=True),
             "- complete-layer device event count: `%s`" % table["event_count"],
             "- raw one-layer device event total us: `%.3f`" % table["layer_total_us"],
+            "- structural context: `%s`" % json.dumps(
+                table.get("structural_context", {}), sort_keys=True),
             "",
             "| pos | stage | kernel | parent operator | shape source | duration us | layer total % |",
             "|---:|---|---|---|---|---:|---:|",
@@ -1408,8 +1566,8 @@ def build(trace_path, pattern_path, out_dir, table_phases=None):
     tables = _table(pattern_doc, rows, representatives, table_phases)
     quality = _quality(
         pattern_doc, rows, instances, representatives, spans, out_of_scope,
-        partition_diagnostics)
-    capture_plan = _shape_capture_plan(tables)
+        partition_diagnostics, tables)
+    capture_plan = _shape_capture_plan(tables, pattern_doc, trace_path)
     os.makedirs(out_dir, exist_ok=True)
     paths = {
         "semantic_event_audit_jsonl": os.path.join(out_dir, "semantic_event_audit.jsonl"),
@@ -1432,7 +1590,7 @@ def build(trace_path, pattern_path, out_dir, table_phases=None):
             "pattern_stage_templates": pattern_templates,
             "instances": instances, "representatives": representatives}),
         (paths["semantic_table_json"], {
-            "schema_version": 1, "trace_path": os.path.abspath(trace_path),
+            "schema_version": 2, "trace_path": os.path.abspath(trace_path),
             "trace_sha256": _sha(trace_path), "patterns_path": os.path.abspath(pattern_path),
             "table_phases": sorted(table_phases) if table_phases else ["all"],
             "tables": tables}),

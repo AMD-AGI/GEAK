@@ -91,6 +91,12 @@ class SemanticKernelMappingTest(unittest.TestCase):
             self.assertEqual(gate["input_event_count"], 4)
             self.assertEqual(gate["assigned_event_count"], 4)
             self.assertEqual(gate["status"], "pass")
+            integrity = quality["gates"]["representative_layer_integrity"]
+            self.assertEqual(integrity["status"], "pass")
+            self.assertEqual(integrity["table_count"], 2)
+            self.assertTrue(all(
+                item["interval_complete"] and item["duration_matches"]
+                for item in integrity["tables"]))
             with open(result["layer_instance_audit_json"]) as fh:
                 audit = json.load(fh)
             self.assertIn(audit["representatives"]["P_DENSE"]["layer_id"], [0, 1])
@@ -100,6 +106,62 @@ class SemanticKernelMappingTest(unittest.TestCase):
                              {"prefill", "decode"})
             self.assertTrue(all(row["shape"]["source"] == "kernel_exact"
                                 for table in tables for row in table["rows"]))
+            self.assertTrue(all(
+                "batch_size" in table["selected_bucket"]
+                for table in tables))
+
+    def test_representative_integrity_rejects_a_truncated_table(self):
+        rows = [
+            {"row_id": "event-1", "device_seq_index": 1, "duration_us": 1.0},
+            {"row_id": "event-2", "device_seq_index": 2, "duration_us": 2.0},
+        ]
+        representatives = {"P": {"selected_instances": {
+            "decode": {
+                "first_device_seq_index": 1,
+                "last_device_seq_index": 2,
+            }}}}
+        tables = [{
+            "phase": "decode", "pattern_id": "P",
+            "representative_layer_id": 0, "event_count": 1,
+            "layer_total_us": 1.0,
+            "rows": [dict(rows[0], pos=0)],
+        }]
+        gate = mapping._representative_integrity(
+            rows, tables, representatives)
+        self.assertEqual(gate["status"], "fail")
+        self.assertEqual(gate["tables"][0]["dropped_row_ids"], ["event-2"])
+
+    def test_shared_external_id_is_parent_context_not_kernel_exact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            patterns = self._patterns(tmp)
+            events = [
+                {"cat": "gpu_user_annotation",
+                 "name": "step[EXTEND bs=1 toks=8]", "ts": 0, "dur": 100},
+                {"cat": "cpu_op", "name": "aiter::wrapper",
+                 "ts": 5, "dur": 10,
+                 "args": {"External id": 7, "Input Dims": [[8, 4]],
+                          "Input type": ["BFloat16"],
+                          "Module Hierarchy": "model.layers.0.mlp"}},
+                {"cat": "kernel", "name": "child_kernel_a", "ts": 20,
+                 "dur": 1, "args": {"External id": 7}},
+                {"cat": "kernel", "name": "child_kernel_b", "ts": 22,
+                 "dur": 1, "args": {"External id": 7}},
+            ]
+            trace = os.path.join(tmp, "trace.json")
+            with open(trace, "w") as fh:
+                json.dump({"traceEvents": events}, fh)
+            result = mapping.build(trace, patterns, os.path.join(tmp, "out"))
+            with open(result["semantic_table_json"]) as fh:
+                rows = json.load(fh)["tables"][0]["rows"]
+            self.assertEqual(
+                [row["shape"]["source"] for row in rows],
+                ["parent_context", "parent_context"])
+            self.assertTrue(all(
+                row["parent_operator"]["mapping_cardinality"] == "1:N"
+                for row in rows))
+            with open(result["shape_capture_plan_json"]) as fh:
+                plan = json.load(fh)
+            self.assertEqual(plan["target_count"], 2)
 
     def test_missing_annotations_degrades_phase_without_losing_events(self):
         with tempfile.TemporaryDirectory() as tmp:
