@@ -163,7 +163,12 @@ async function testConfig() {
     default_profile: 'claude',
     agents: {
       claude: { bin: 'claude', prompt: 'stdin', args: ['-p'], model_flag: '--model', base_url_env: 'ANTHROPIC_BASE_URL', env: { IS_SANDBOX: '1' }, dialect: 'anthropic' },
-      codex: { bin: 'codex', prompt: 'arg', args: ['exec', '--dangerously-bypass-approvals-and-sandbox'], approve: '', model_flag: '-m', base_url_env: 'OPENAI_BASE_URL', dialect: 'openai' },
+      codex: { bin: 'codex', prompt: 'arg', args: ['exec', '--dangerously-bypass-approvals-and-sandbox'], approve: '', model_flag: '-m', base_url_env: 'OPENAI_BASE_URL', dialect: 'openai', provider_autoconfig: 'codex', extra_args_env: 'GEAK_CODEX_EXTRA_ARGS',
+        provider_autoselect: [
+          { trigger_env: 'AMDKEY', base_url: 'https://llm-api.amd.com/Unified/v1', key_env: 'AMDKEY', env_http_headers: { 'Ocp-Apim-Subscription-Key': 'AMDKEY' } },
+          { trigger_env: 'SAFE_API_KEY', base_url: 'https://global.primus-safe.amd.com/api/v1/llm-proxy/v1', key_env: 'SAFE_API_KEY' },
+          { trigger_env: 'OPENAI_API_KEY', base_url: 'https://api.openai.com/v1', key_env: 'OPENAI_API_KEY' },
+        ] },
       qwen: { bin: 'qwen', prompt: 'stdin', args: ['-p'], approve: '--yolo', model_flag: '-m', base_url_env: 'OPENAI_BASE_URL', dialect: 'openai' },
     },
     models: { qc: { id: 'Qwen3-Coder', base_url: 'http://ep:8000/v1', key_env: 'OPENAI_API_KEY' } },
@@ -191,6 +196,43 @@ async function testConfig() {
   const invC = buildInvocation(c.agent, null, 'PROMPT_TEXT', { env: {} });
   eq(invC.promptOnStdin, false, 'codex prompt via arg');
   eq(invC.args[invC.args.length - 1], 'PROMPT_TEXT', 'codex prompt appended as last arg');
+
+  // codex provider auto-config: helper reads the value of a `-c key=value` override
+  const cval = (args, key) => {
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '-c' && args[i + 1].startsWith(key + '=')) return args[i + 1].slice(key.length + 1);
+    }
+    return undefined;
+  };
+  // (a) base_url-driven: explicit OPENAI_BASE_URL -> geak_auto provider + that base_url
+  const invAuto = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'https://api.openai.com/v1' } });
+  eq(cval(invAuto.args, 'model_provider'), '"geak_auto"', 'autoconfig sets model_provider');
+  eq(cval(invAuto.args, 'model_providers.geak_auto.base_url'), '"https://api.openai.com/v1"', 'autoconfig base_url from OPENAI_BASE_URL');
+  eq(cval(invAuto.args, 'model_providers.geak_auto.wire_api'), '"responses"', 'autoconfig wire_api=responses');
+  // (b) shim base_url -> NO autoconfig (preserve config.toml safe_shim path)
+  const invShim = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'http://127.0.0.1:8791/v1' } });
+  eq(cval(invShim.args, 'model_provider'), undefined, 'autoconfig skipped for local shim base_url');
+  // (c) key-driven auto-select: AMDKEY set (no base_url) -> AMD endpoint + Ocp-Apim header
+  const invAmd = buildInvocation(c.agent, null, 'P', { env: { AMDKEY: 'x' } });
+  eq(cval(invAmd.args, 'model_providers.geak_auto.base_url'), '"https://llm-api.amd.com/Unified/v1"', 'auto-select AMDKEY -> AMD base_url');
+  eq(cval(invAmd.args, 'model_providers.geak_auto.env_key'), '"AMDKEY"', 'auto-select AMD env_key');
+  eq(cval(invAmd.args, 'model_providers.geak_auto.env_http_headers.Ocp-Apim-Subscription-Key'), '"AMDKEY"', 'auto-select AMD APIM header');
+  // (d) key-driven auto-select: only OPENAI_API_KEY -> OpenAI official
+  const invOai = buildInvocation(c.agent, null, 'P', { env: { OPENAI_API_KEY: 'sk-x' } });
+  eq(cval(invOai.args, 'model_providers.geak_auto.base_url'), '"https://api.openai.com/v1"', 'auto-select OPENAI_API_KEY -> OpenAI official');
+  // (e) disabled via GEAK_CODEX_AUTOCONFIG=0
+  const invOff = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'https://api.openai.com/v1', GEAK_CODEX_AUTOCONFIG: '0' } });
+  eq(cval(invOff.args, 'model_provider'), undefined, 'autoconfig disabled by GEAK_CODEX_AUTOCONFIG=0');
+  // (f) caller pins model_provider via extra args -> skip autoconfig
+  const invPin = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'https://api.openai.com/v1', GEAK_CODEX_EXTRA_ARGS: '-c model_provider=safe_direct' } });
+  eq(cval(invPin.args, 'model_provider'), 'safe_direct', 'extra_args model_provider wins over autoconfig');
+  // codex thinking level: default max, GEAK_CODEX_EFFORT override, extra_args pin not double-emitted
+  eq(cval(invOai.args, 'model_reasoning_effort'), 'max', 'codex effort defaults to max');
+  const invEff = buildInvocation(c.agent, null, 'P', { env: { OPENAI_API_KEY: 'sk-x', GEAK_CODEX_EFFORT: 'high' } });
+  eq(cval(invEff.args, 'model_reasoning_effort'), 'high', 'GEAK_CODEX_EFFORT overrides default');
+  const invEffPin = buildInvocation(c.agent, null, 'P', { env: { OPENAI_API_KEY: 'sk-x', GEAK_CODEX_EXTRA_ARGS: '-c model_reasoning_effort=low' } });
+  eq(invEffPin.args.filter((a) => a.startsWith('model_reasoning_effort=')).length, 1, 'effort not double-emitted when pinned via extra_args');
+  eq(cval(invEffPin.args, 'model_reasoning_effort'), 'low', 'extra_args effort wins');
 
   // neutralizeForBackend
   const p = 'Return ONLY the structured JSON (a StructuredOutput tool is forced).';

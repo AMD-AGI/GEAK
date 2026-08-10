@@ -86,6 +86,70 @@ export function buildInvocation(agent, model, prompt, opts = {}) {
     || '';
   if (modelId && agent.model_flag) args.push(agent.model_flag, modelId);
 
+  // codex provider auto-config (Hyperloom-style): emit `-c model_providers.geak_auto.*`
+  // overrides so NO hand-written config.toml and NO `-c model_provider=` selection are
+  // needed. Two resolution modes (first wins), gated on agent.provider_autoconfig==='codex':
+  //   (1) base_url-driven — an explicit OPENAI_BASE_URL (or the selected model's
+  //       base_url) is used directly. key_env defaults to OPENAI_API_KEY.
+  //   (2) key-driven auto-SELECT — when no base_url is available, walk
+  //       agent.provider_autoselect in order and pick the first provider whose
+  //       trigger_env is set: e.g. AMDKEY->AMD, SAFE_API_KEY->SaFE, OPENAI_API_KEY->
+  //       OpenAI official. Each entry carries base_url / key_env / optional
+  //       env_http_headers, so "give the AMD key -> AMD, the OpenAI key -> OpenAI".
+  // Emitted BEFORE extra_args so GEAK_CODEX_EXTRA_ARGS still wins. Skipped when
+  // disabled (GEAK_CODEX_AUTOCONFIG=0), the base_url is the local responses-shim
+  // (127.0.0.1/localhost — keep the config.toml safe_shim path), or the caller
+  // already pins model_provider via extra_args. OPENAI_CUSTOM_HEADERS (JSON
+  // {"Header":"ENV_VAR_NAME"}) overrides a selected provider's headers.
+  if (agent.provider_autoconfig === 'codex'
+      && String(penv.GEAK_CODEX_AUTOCONFIG ?? '1') !== '0') {
+    let baseUrl = String(penv.OPENAI_BASE_URL || (model && model.base_url) || '').trim();
+    let keyEnv = (model && model.key_env) || 'OPENAI_API_KEY';
+    let headers = null;
+    if (!baseUrl && Array.isArray(agent.provider_autoselect)) {
+      for (const p of agent.provider_autoselect) {
+        if (p && p.trigger_env && String(penv[p.trigger_env] || '').trim()) {
+          baseUrl = String(p.base_url || '').trim();
+          keyEnv = p.key_env || keyEnv;
+          headers = p.env_http_headers || null;
+          break;
+        }
+      }
+    }
+    // explicit OPENAI_CUSTOM_HEADERS wins over an auto-selected provider's headers
+    try { const h = JSON.parse(penv.OPENAI_CUSTOM_HEADERS || 'null'); if (h && typeof h === 'object') headers = h; } catch { /* ignore */ }
+
+    const isShim = /^(https?:\/\/)?(127\.0\.0\.1|localhost)([:/]|$)/i.test(baseUrl);
+    const extra = (agent.extra_args_env && penv[agent.extra_args_env]) || '';
+    const providerPinned = /model_provider\s*=/.test(extra);
+    if (baseUrl && !isShim && !providerPinned) {
+      const P = 'geak_auto';
+      const ts = (s) => '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+      args.push('-c', `model_provider=${ts(P)}`);
+      args.push('-c', `model_providers.${P}.name=${ts(P)}`);
+      args.push('-c', `model_providers.${P}.base_url=${ts(baseUrl)}`);
+      args.push('-c', `model_providers.${P}.env_key=${ts(keyEnv)}`);
+      args.push('-c', `model_providers.${P}.wire_api=${ts('responses')}`);
+      if (headers && typeof headers === 'object') {
+        for (const [h, v] of Object.entries(headers)) {
+          if (h && v) args.push('-c', `model_providers.${P}.env_http_headers.${h}=${ts(v)}`);
+        }
+      }
+    }
+  }
+
+  // codex thinking level (reasoning effort). Default 'max'; override via
+  // GEAK_CODEX_EFFORT, or pin through GEAK_CODEX_EXTRA_ARGS (appended after, so it
+  // wins). Applies to the codex agent regardless of provider source (auto-config
+  // or codex-home/config.toml). Emitted only when not already set in extra_args.
+  if (agent.provider_autoconfig === 'codex') {
+    const extra0 = (agent.extra_args_env && penv[agent.extra_args_env]) || '';
+    if (!/model_reasoning_effort\s*=/.test(extra0)) {
+      const effort = String(penv.GEAK_CODEX_EFFORT ?? 'max').trim();
+      if (effort) args.push('-c', `model_reasoning_effort=${effort}`);
+    }
+  }
+
   // extra args (env only) — an escape hatch for build-specific flags
   if (agent.extra_args_env && penv[agent.extra_args_env]) {
     args.push(...String(penv[agent.extra_args_env]).split(/\s+/).filter(Boolean));

@@ -59,7 +59,13 @@
       "model_env": "GEAK_CODEX_MODEL",
       "approve_env": "GEAK_CODEX_APPROVE",
       "extra_args_env": "GEAK_CODEX_EXTRA_ARGS",
-      "note": "Rust bin: uses ~/.codex/config.toml provider (wire_api=responses) + SSL_CERT_FILE (not NODE_EXTRA_CA_CERTS); verified gpt-5.4 via SaFE /v1/responses 2026-07-31."
+      "provider_autoconfig": "codex",
+      "provider_autoselect": [
+        { "trigger_env": "AMDKEY", "base_url": "https://llm-api.amd.com/Unified/v1", "key_env": "AMDKEY", "env_http_headers": { "Ocp-Apim-Subscription-Key": "AMDKEY" } },
+        { "trigger_env": "SAFE_API_KEY", "base_url": "https://global.primus-safe.amd.com/api/v1/llm-proxy/v1", "key_env": "SAFE_API_KEY" },
+        { "trigger_env": "OPENAI_API_KEY", "base_url": "https://api.openai.com/v1", "key_env": "OPENAI_API_KEY" }
+      ],
+      "note": "Rust bin: wire_api=responses. Provider is AUTO-CONFIGURED via `-c model_providers.geak_auto.*` overrides (no hand-written config.toml). Resolution: (1) explicit OPENAI_BASE_URL (or the selected model's base_url) is used directly; (2) else key-driven auto-SELECT walks provider_autoselect and picks the first provider whose trigger_env is set — AMDKEY->AMD (adds Ocp-Apim header), SAFE_API_KEY->SaFE, OPENAI_API_KEY->OpenAI official. Disable with GEAK_CODEX_AUTOCONFIG=0; a base_url on 127.0.0.1/localhost keeps the config.toml safe_shim path; GEAK_CODEX_EXTRA_ARGS with model_provider= wins. SSL_CERT_FILE still needed for intranet-gateway CAs (not public OpenAI)."
     },
     "kimi": {
       "bin": "kimi",
@@ -114,6 +120,12 @@
       "id": "gpt-5.6",
       "base_url": "https://global.primus-safe.amd.com/api/v1/llm-proxy/v1",
       "key_env": "OPENAI_API_KEY"
+    },
+    "openai_official": {
+      "id": "<your-openai-model-id>",
+      "base_url": "https://api.openai.com/v1",
+      "key_env": "OPENAI_API_KEY",
+      "note": "Official OpenAI (api.openai.com). Standard Bearer auth via OPENAI_API_KEY (sk-...); public CA, no shim, no APIM header. `id` is a REQUIRED placeholder — set GEAK_CODEX_MODEL to a real OpenAI model your account serves over the Responses API (e.g. gpt-5.x). Do NOT use a gateway id like gpt-5.6-sol here — api.openai.com does not serve it and codex 404s. Pair with codex config provider `openai` (see codex-home/config.toml)."
     }
   },
   "profiles": {
@@ -144,6 +156,10 @@
     "codex-opus48": {
       "agent": "codex",
       "model": "opus48"
+    },
+    "codex-openai": {
+      "agent": "codex",
+      "model": "openai_official"
     },
     "cursor": {
       "agent": "cursor"

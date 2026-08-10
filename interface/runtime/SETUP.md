@@ -11,7 +11,7 @@
 ### 前提(你自己的环境提供)
 1. **能访问 SaFE 网关** `https://global.primus-safe.amd.com`(在别的集群先确认网络可达;不可达则整条不通)。
 2. `node` 在 PATH 上(v20+)。
-3. codex CLI:`npm i -g @openai/codex`(或你的共享 prefix)。
+3. codex CLI:`npm i -g @openai/codex@0.146.1`(0.147 与网关不兼容;安装细节见 A2 "前置")。
 4. **API key**:SaFE `ak-` key。
 5. **CA 证书**:连网关 TLS 用的 CA bundle(你机器本地路径)。
 
@@ -43,6 +43,70 @@ node interface/runtime/run_workflow.mjs <workflow.js> --profile codex-gpt54    #
 
 ---
 
+## A2. codex 自动按 key 选网关(OpenAI 官方 / AMD / SaFE)
+
+codex 的 provider **自动配置**,无需手写 config.toml、无需 `setup.sh`、无需选 provider。
+runtime 在启动 codex 时按下面顺序解析(第一个命中),生成 `-c model_providers.geak_auto.*` 覆盖:
+
+1. **显式 `OPENAI_BASE_URL`** → 直接用它(任意 OpenAI 兼容网关)。
+2. 否则**按"哪个 key 非空"自动选**:`AMDKEY`→AMD、`SAFE_API_KEY`→SaFE、`OPENAI_API_KEY`→OpenAI 官方。
+
+### 前置:安装 codex CLI(不要假设已装好)
+```bash
+# 1) Node.js v20+(codex 依赖)
+node -v        # 无 node 或 <20:先装 Node 20+(nvm / 系统包管理器 / nodejs.org)
+
+# 2) 安装 codex CLI —— 务必 pin 0.146.1(0.147 与网关不兼容)
+npm i -g @openai/codex@0.146.1
+#   若没有 /usr/local 写权限,用用户级 prefix:
+#   npm config set prefix "$HOME/.npm-global"
+#   export PATH="$HOME/.npm-global/bin:$PATH"      # 建议写进 ~/.bashrc
+#   npm i -g @openai/codex@0.146.1
+
+# 3) 验证
+codex --version        # 期望 0.146.1
+```
+
+### 第 1 步:选 provider —— 设对应的 key(三选一)
+```bash
+# 官方 OpenAI(最简单:公网 CA,无需 shim / SSL_CERT_FILE / config.toml)
+export OPENAI_API_KEY="sk-....."
+export GEAK_CODEX_MODEL="<你的-OpenAI-模型id>"   # 必填:官方模型 id(如 gpt-5.x);勿用 AMD 的 gpt-5.6-sol(官方端点 404)
+
+# 或 —— AMD 网关(自动加 Ocp-Apim header + llm-api.amd.com)
+# export AMDKEY="<32位hex 订阅 key>"
+# export SSL_CERT_FILE="/path/to/amd-ca.pem"      # 内网 CA
+# export GEAK_CODEX_MODEL="gpt-5.6-sol"           # 例:AMD 网关上的模型 id
+
+# 或 —— SaFE 网关(gpt 直连)
+# export SAFE_API_KEY="ak-....."
+# export SSL_CERT_FILE="/path/to/safe-ca.pem"     # 内网 CA
+# export GEAK_CODEX_MODEL="gpt-5.6"               # 例:SaFE 网关上的模型 id
+```
+> claude-via-SaFE 需要 de-stream shim(见 A 节:`. setup.sh` + `--profile codex-opus48`);上面 SaFE 的自动选择走的是 gpt 直连。
+
+### 第 2 步:运行(设 `GEAK_AGENT_BACKEND=codex`,再选 e2e 或单核)
+```bash
+export GEAK_AGENT_BACKEND=codex
+
+# e2e(整模型吞吐):用 handoff.json 描述任务(字段/示例见 interface/run_e2e.md)
+python3 interface/run_e2e.py <handoff.json> <result.json>
+
+# 单核:
+node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
+  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
+```
+
+### 覆盖 / 关闭 / 排错
+- **thinking level(reasoning effort)默认 `max`**;改用 `GEAK_CODEX_EFFORT`(`low`/`medium`/`high`/`xhigh`/`max`),如 `export GEAK_CODEX_EFFORT=xhigh`;或用 `GEAK_CODEX_EXTRA_ARGS="-c model_reasoning_effort=xhigh"` 显式钉(优先)。
+- 任意网关:`export OPENAI_BASE_URL=https://你的网关/v1`(+ 对应 key)——优先于 key 自动选。
+- 关闭自动配置:`export GEAK_CODEX_AUTOCONFIG=0`(回落到 `codex-home/config.toml`)。
+- 手动指定 provider:`export GEAK_CODEX_EXTRA_ARGS="-c model_provider=safe_direct"`(优先于自动)。
+- base_url 指向 `127.0.0.1`/`localhost`(即本地 shim)时**不会**自动覆盖,保留 config.toml 的 `safe_shim` 路径。
+- 401 → key 空/无效;404 model → `GEAK_CODEX_MODEL` 不可用或不支持 Responses API;TLS 错 → 内网网关需 `SSL_CERT_FILE`(官方 OpenAI 不需要)。
+
+---
+
 ## B. cursor(注意:走 Cursor 私有云,**不经** SaFE 网关)
 
 cursor 与 shim/网关无关,不需要 `setup.sh`。
@@ -65,11 +129,11 @@ node interface/runtime/run_workflow.mjs <workflow.js> --profile cursor
 
 ## 验证 runtime 本身没坏(可选,不需网络/GPU)
 ```bash
-node interface/runtime/selftest.mjs      # 期望 36/36
+node interface/runtime/selftest.mjs      # 期望 50/50
 ```
 
 ## 各文件是什么
 - `run_workflow.mjs` runtime 核心 · `config.mjs`+`registry.json` 后端/模型配置
 - `backends/` 后端契约与 generic 实现 · `schema.mjs` 结构化输出
 - `responses_shim.mjs` codex+claude 的 de-stream 代理 · `setup.sh` 一键起环境
-- `codex-home/config.toml` 仓库内 CODEX_HOME(provider 指向 shim)
+- `codex-home/config.toml` 仓库内 CODEX_HOME(providers:`safe_shim` 默认 / `safe_direct` / `openai` 官方)
