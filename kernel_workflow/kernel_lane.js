@@ -9,6 +9,7 @@ export const meta = {
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
     { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
     { title: 'Research', detail: 'OPT-IN (args.dra_enabled): researcher fans research questions out in parallel via native WebSearch/WebFetch, writes a ranked-directions brief the planner seeds from' },
+    { title: 'WarmStart', detail: 'search the local experience KB (kb_artifacts/) for the top-3 best patches for this (kernel,language,gfx), validate each through the verify gate, adopt the first that passes [warm_start!=off]' },
     { title: 'Optimize', detail: 'budget loop: tech_lead plans, specialist OR deep_explore engineers optimize, reprofile' },
     { title: 'Verify', detail: 'each candidate patch independently re-benchmarked' },
     { title: 'Merge', detail: 'integrator combines the round winners' },
@@ -208,6 +209,27 @@ const KB_COLD_DIRECTION = String(A.kb_cold_direction != null ? A.kb_cold_directi
 let kbCapBound = 0;      // rounds where the cap actually had to strip something
 const UPDATE_EXPERIENCE = String(A.update_experience != null ? A.update_experience : 'on').trim().toLowerCase() || 'on';
 const UPDATE_EXPERIENCE_ON = UPDATE_EXPERIENCE !== 'off' && UPDATE_EXPERIENCE !== 'false' && UPDATE_EXPERIENCE !== 'none';
+
+// ---------------------------------------------------------------------------
+// WARM-START (local experience KB). The kernel_workflow's machine-produced,
+// code-carrying store (kb_artifacts/) — distinct from the human perf_knowledge/
+// index. Before the optimize loop, search this store for the top-3 historically
+// best patches for THIS (kernel, language, gfx), validate each through the SAME
+// verify_engineer gate, and adopt the first that passes as the starting point.
+// After Validate, write this run's own win back. Design: KernelForge experience-KB
+// lifecycle (../KernelForge/docs/conceptual/experience-kb-lifecycle.md), plan Part 4.
+//   warm_start = on (default)   | read + validate top-3, ADOPT the first that passes.
+//              = reference       | read top-3 as prose only, never auto-apply.
+//              = return_after_read| adopt then RETURN before the optimize loop.
+//              = off | false | none | resume-skip | no-arch => cold start (byte-identical).
+// kb_artifacts_dir default: sibling of the workflow dir (<repo>/kb_artifacts).
+const WARM_START = String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on';
+const WARM_START_ON = WARM_START !== 'off' && WARM_START !== 'false' && WARM_START !== 'none';
+const WARM_START_REF_ONLY = WARM_START === 'reference';
+const WARM_START_RETURN_AFTER = WARM_START === 'return_after_read';
+const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
+  (WORKFLOW_DIR ? WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts' : '')).replace(/\/+$/, '');
+const EXPERIENCE_STORE = `${WORKFLOW_DIR}/scripts/experience_store.py`;
 
 // ---------------------------------------------------------------------------
 // DEEP-MODE continuation + cross-backend / e2e-feedback hooks. ALL OPTIONAL.
@@ -478,6 +500,25 @@ const VALIDATE_SCHEMA = obj({
   per_case: perCase, applied_to_original: { type: 'string' },
   arbitration_note: { type: 'string' }, final_patch: { type: 'string' },
 }, ['director_verified_speedup_geomean', 'validation_status']);
+
+// Warm-start resolver output = experience_store.py `resolve` JSON, verbatim.
+const WARMSTART_RESOLVE_SCHEMA = obj({
+  read_reason: { type: 'string' }, slug: { type: 'string' },
+  candidates: {
+    type: 'array',
+    items: obj({
+      rank: { type: 'number' }, slug: { type: 'string' }, speedup: { type: 'number' },
+      exp_dir: { type: 'string' }, arch: { type: 'string' },
+      patch_path: { type: 'string' }, prose_path: { type: 'string' },
+      strategy: { type: 'string' }, status: { type: 'string' },
+    }, ['rank', 'patch_path']),
+  },
+}, ['read_reason']);
+// Warm-start writer output = experience_store.py `write` JSON, verbatim.
+const WARMSTART_WRITE_SCHEMA = obj({
+  written: { type: 'boolean' }, reason: { type: 'string' }, slug: { type: 'string' },
+  dir: { type: 'string' }, speedup: { type: 'number' },
+}, ['written']);
 
 // ---------------------------------------------------------------------------
 // Prompt helpers. Every agent reads its role file from WORKFLOW_DIR and the
@@ -852,7 +893,108 @@ if (setup.resumed && setup.prior_state) {
   log(`RESUMED from STATE_DIR: cumulative=${cumulative.toFixed(3)}x, ${history.insights.length} insights, ${history.ledger.length} ledger entries carried forward.`);
 }
 
-while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
+// ===========================================================================
+// PHASE: WarmStart — search the local experience store for the top-3 best patches
+// for THIS (kernel, language, gfx), validate each through the SAME verify_engineer
+// gate as a round winner, and ADOPT the first that passes as the starting point.
+// The recorded speedup only ranks; adoption is decided by a FRESH measurement here.
+// Skipped (cold start; run byte-identical to pre-feature) when warm_start=off, a
+// STATE_DIR resume is active, no arch was detected, or the store has nothing.
+// gfx is read from the baseline profile's on-box `device` string (no extra probe).
+// ===========================================================================
+const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
+let warm_start = { adopted: false, read_reason: WARM_START_ON ? 'read' : 'disabled', candidates: [] };
+let skipLoop = false;
+if (WARM_START_ON && !setup.resumed && KB_ARTIFACTS_DIR) {
+  phase('WarmStart');
+  if (!GFX) {
+    warm_start.read_reason = 'missing_arch';
+    log('[kb] warm-start skipped: no gfx detected from the baseline profile device string.');
+  } else {
+    const resolved = await agentT(
+      `You are the warm-start resolver. Run EXACTLY this command and return its single-line JSON stdout ` +
+      `verbatim as StructuredOutput — do not add, drop, reorder, or reinterpret any field:
+\`\`\`bash
+python3 ${EXPERIENCE_STORE} resolve --root ${KB_ARTIFACTS_DIR} \\
+  --kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\
+  --gfx ${GFX} --top-n 3 --refs-dir ${EVAL_DIR}/kb_references
+\`\`\``,
+      { phase: 'WarmStart', label: 'warm_start:resolve', schema: WARMSTART_RESOLVE_SCHEMA }) || {};
+    warm_start.read_reason = resolved.read_reason || 'read';
+    warm_start.slug = resolved.slug || '';
+    const cands = Array.isArray(resolved.candidates) ? resolved.candidates : [];
+    warm_start.candidates = cands.map(c => ({ rank: c.rank, slug: c.slug, speedup: c.speedup, status: 'read' }));
+    log(`[kb] experience read: slug=${resolved.slug || '?'} reason=${warm_start.read_reason} candidates=${cands.length}`);
+    // reference-only: prose is already mirrored to EVAL_DIR/kb_references by the resolver; do not apply.
+    if (!WARM_START_REF_ONLY) {
+      for (const c of cands) {                              // already rank-ordered (fastest first)
+        const rec = warm_start.candidates.find(x => x.rank === c.rank);
+        const ver = await agentT(
+          roleAgent('verify_engineer', 'verify',
+            'Validate a HISTORICAL warm-start patch — the SAME gate as any round candidate. FIRST, before ' +
+            'applying, check that EVERY path this patch touches maps into the editable set (see EDITABLE_SET ' +
+            'input) at some strip depth; if none maps, return status:"apply_failed", notes "patch_outside_' +
+            'editable_set", and DO NOT apply. Apply with `git apply "$PATCH" || git apply --3way "$PATCH"`. ' +
+            'On ANY failure restore the working copy fully (git checkout -- . and delete untracked files) ' +
+            'before returning so the next candidate starts from a clean tree.', {
+            CANONICAL, PATCH: c.patch_path, VERIFY_DIR: `${EVAL_DIR}/warm_start/cand_${c.rank}`,
+            EDITABLE_SET: (analysis && analysis.modifiable_files) || [],
+            GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+            ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
+            ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
+          }),
+          { phase: 'WarmStart', label: `warm_start:verify c${c.rank}`, schema: VERIFY_SCHEMA });
+        const sp = primSpeedup(ver);
+        if (ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && sp > 1.0) {
+          const adopt = await agentT(
+            `You are the TechLead adopting a validated warm-start patch into the canonical workspace.
+\`\`\`bash
+export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
+cd ${CANONICAL}
+git checkout -- .
+git apply ${c.patch_path} || git apply --3way ${c.patch_path}
+git -c user.email=team@workflow -c user.name=team add -A
+git -c user.email=team@workflow -c user.name=team commit -q -m "warm-start adopt: ${c.slug} (${sp.toFixed(2)}x)"
+git --no-pager diff "$(git rev-list --max-parents=0 HEAD)..HEAD" > ${EVAL_DIR}/current_best.diff
+\`\`\`
+If BOTH applies fail, apply manually to match intent, then add -A + commit and RE-RUN the COMMANDMENT
+correctness check; only report committed=true if it still passes. Return JSON {committed, current_best_diff, note}.`,
+            { phase: 'WarmStart', label: `warm_start:adopt c${c.rank}`, schema: COMMIT_SCHEMA });
+          if (adopt && adopt.committed) {
+            // Adopt: the optimize loop now builds ON this patch. cumulative starts at the adopted Nx (vs the
+            // pristine frozen baseline), so a run that improves nothing still reports total=Nx — the KB gain
+            // is attributed to history, never to this run's own rounds (KernelForge total vs incremental).
+            cumulative = sp;
+            bestPerCase = (ver.per_case && ver.per_case.length) ? ver.per_case : bestPerCase;
+            finalWinner = { source: `warm_start:${c.slug}`, geomean: sp,
+              arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path };
+            if (bestSeen < sp) bestSeen = sp;
+            warm_start.adopted = true;
+            warm_start.adopted_speedup = sp;
+            warm_start.slug = c.slug;
+            warm_start.total_speedup = sp;                  // relative to the pristine frozen baseline
+            if (rec) rec.status = 'adopted';
+            log(`[kb] warm-start ADOPTED ${c.slug} @ ${sp.toFixed(2)}x — optimizing from the patched state.`);
+            profileSummary = await agentT(
+              roleAgent('profile_engineer', 'reprofile',
+                'Re-profile the adopted warm-start state and classify the new bottleneck.', {
+                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: 0,
+                COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+              }),
+              { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
+            if (history) history.bottleneck_now = profileSummary ? profileSummary.bottleneck : history.bottleneck_now;
+            if (WARM_START_RETURN_AFTER) { skipLoop = true; warm_start.returned_after_read_kb = true; }
+            break;
+          }
+        }
+        if (rec && rec.status !== 'adopted') rec.status = (ver && ver.status) ? `rejected:${ver.status}` : 'rejected:apply_failed';
+        log(`[kb] warm-start candidate c${c.rank} ${rec ? rec.status : 'rejected'} (${sp ? sp.toFixed(2) + 'x' : 'no measure'}).`);
+      }
+    }
+  }
+}
+
+while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
   // is never interrupted — a killed round leaves a half-verified patch and no report.
@@ -1283,7 +1425,6 @@ if (kbGate) log(`[kb] not distilling: ${kbGate}.`);
 // run did not earn. Reported in review of #411.
 const kbAccepted = String((validation && validation.validation_status) || '').toLowerCase() === 'accepted';
 if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
-  const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
   try {
     learned_card = await agentT(
       roleAgent('update_experience', 'Validate',
@@ -1351,6 +1492,43 @@ Return {"filed": <the "citations" number the command printed, or 0>}.`,
   }
 }
 
+// ===========================================================================
+// Write this run's outcome back to the local experience store (kb_artifacts/) — the
+// producer half of the warm-start loop. The script applies its own gate
+// (missing_arch / no_improvement / empty_diff) and prints a single-line JSON; the
+// whole step is wrapped so a store failure NEVER fails the run (plan Part 4.2). The
+// JS-side `finalPrimary > 1.0` pre-check just avoids spending an agent on a run that
+// cannot pass the gate anyway.
+// ===========================================================================
+let kb_written = null;
+if (KB_ARTIFACTS_DIR && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+  const kernelClass = (analysis && analysis.kernel_type) || 'unknown';
+  const finalPatch = report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`;
+  const reportPath = report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`;
+  kb_written = await agentT(
+    `You are the experience writer. Run EXACTLY this command (it applies its own gates and prints a ` +
+    `single-line JSON) and return that JSON verbatim as StructuredOutput. If the command errors, return ` +
+    `{"written": false, "reason": "io_error"}.
+\`\`\`bash
+python3 ${EXPERIENCE_STORE} write --root ${KB_ARTIFACTS_DIR} \\
+  --kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\
+  --gfx ${GFX} --kernel-class ${JSON.stringify(kernelClass)} \\
+  --speedup ${finalPrimary} --baseline-wall-ms ${BASELINE_GEOMEAN_MS} \\
+  --patch ${finalPatch} --eval-dir ${EVAL_DIR} --report ${reportPath}
+\`\`\``,
+    { phase: 'Validate', label: 'kb:write', schema: WARMSTART_WRITE_SCHEMA });
+  log(kb_written && kb_written.written
+    ? `[kb] experience written: ${kb_written.slug} (speedup ${finalPrimary.toFixed(2)})`
+    : `[kb] experience not written: ${kb_written ? kb_written.reason : 'writer returned nothing'}`);
+}
+
+// The headline speedup relative to the PRISTINE frozen baseline. When a warm-start patch was adopted,
+// this run's own rounds only earned the delta ABOVE the adopted starting point — split them out so a
+// KB-derived gain is never reported as this run's work (KernelForge total vs incremental).
+const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
+  ? (Number.isFinite(finalPrimary) ? finalPrimary / warm_start.adopted_speedup : null)
+  : finalPrimary;
+
 return {
   mode: MODE,
   target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
@@ -1401,4 +1579,17 @@ return {
   learned_card: learned_card && learned_card.card_path
     ? { action: learned_card.action || '', card_path: learned_card.card_path, key: learned_card.key || '' }
     : null,
+  // Warm-start (local experience KB) outcome. adopted=false + read_reason on a cold start.
+  warm_start: {
+    adopted: warm_start.adopted,
+    read_reason: warm_start.read_reason,
+    slug: warm_start.slug || '',
+    adopted_speedup: warm_start.adopted ? warm_start.adopted_speedup : null,
+    total_speedup: Number.isFinite(finalPrimary) ? finalPrimary : null,
+    incremental_speedup: incrementalSpeedup,
+    incremental_improved: !!(warm_start.adopted && Number.isFinite(incrementalSpeedup) && incrementalSpeedup > 1 + MIN_IMPROVE),
+    returned_after_read_kb: !!warm_start.returned_after_read_kb,
+    candidates: warm_start.candidates,
+  },
+  kb_written: kb_written && kb_written.written ? { slug: kb_written.slug, dir: kb_written.dir } : null,
 };

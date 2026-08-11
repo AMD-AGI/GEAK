@@ -76,6 +76,14 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 const EXPERT_SKILL_ROLES = new Set(['op_benchmarker']);
 
+// Warm-start experience KB (Part 4). Threaded down to each lane so every language lane reads/writes its
+// own slug (<kernel_class>__<lane_lang>__<gfx>). Default ON; reuse the repo-root kb_artifacts/ store
+// (Part 1.7) unless the caller overrides. kernel_lane derives the same default independently, but we pass
+// it explicitly here because the bakeoff lane invocation spreads SPECIFIC keys (not ...A).
+const WARM_START = String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on';
+const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
+  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts')).replace(/\/+$/, '');
+
 // ---------------------------------------------------------------------------
 // Schema helpers.
 // ---------------------------------------------------------------------------
@@ -374,6 +382,7 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
       // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
       update_experience: 'off',
+      warm_start: WARM_START, kb_artifacts_dir: KB_ARTIFACTS_DIR,
     });
     const speedup = primSpeedup(r);
     log(`lane ${l.key}:${l.mode} -> ${speedup ? speedup.toFixed(2) + 'x' : 'no result'} (${r ? r.validation_status : 'null'})`);
