@@ -146,6 +146,20 @@ gate("an unknown lifecycle is refused", "lifecycle must be", lifecycle="retired"
 gate("a bare geomean with no per-case evidence is refused", "per-case", effect="1.15x geomean.")
 gate("★★★ without a blind confirmation is refused", "confirms_blind",
      confidence="★★★", confirms_blind="0")
+# Optional fields: the lint checks FORMAT, never presence. A field documented as part of the schema
+# that no card carries and no gate wants teaches a curator that the schema is approximate.
+gate("a malformed cost tier is refused", "cost must be", cost="L9")
+gate("an unparseable verified_on is refused", "verified_on must be", verified_on="yesterday")
+
+# `kernels` must stay OPTIONAL. Requiring a field the writer cannot derive does not produce blanks,
+# it produces plausible fiction: requiring this one while migrating class-level cards invented 11
+# symbols, one of them in 17 cards. Deleting the exemption must turn this red.
+dd = fresh()
+write(dd, "c.md", card("c", kernels="[]"))
+_, out, _ = run(dd, "lint", "--cards")
+check("an empty kernels list is ALLOWED (a grep aid, not a provenance claim)",
+      json.loads(out)["cards_failing"] == 0, json.dumps(json.loads(out)["failures"]))
+shutil.rmtree(dd)
 
 # The audit must SEE the cards most likely to be broken. all_cards() filters to active for every other
 # caller, so an unknown lifecycle would otherwise make a card invisible to the very check that would

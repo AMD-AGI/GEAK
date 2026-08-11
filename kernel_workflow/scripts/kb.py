@@ -163,8 +163,14 @@ ABSOLUTE_UNIT_PATTERNS = [
 # Their discovery header is what the generated INDEX.md is built from: a card missing one of these is
 # either invisible (no description => "(no description)") or unfindable (no keywords/kernels), which
 # looks identical to "the KB had nothing for this run".
-REQUIRED_HEADER_FIELDS = ("name", "description", "keywords", "kernels", "platforms",
+REQUIRED_HEADER_FIELDS = ("name", "description", "keywords", "platforms",
                           "kernel_class", "regime", "lifecycle")
+# `kernels` is DELIBERATELY not in that list, and the reason generalises: a required field whose
+# value the writer has no way to know does not get left blank, it gets filled with something
+# plausible. Measured here — requiring it while migrating 78 class-level cards (whose bodies are
+# forbidden from naming a kernel, so the symbol genuinely was not recoverable) produced 11 invented
+# symbols across the corpus, one of them, `fused_moe_grouped_gemm`, in 17 cards. A grep aid that
+# sends the reader to the wrong card is worse than an absent one. Optional, and checked when given.
 MAX_DESCRIPTION_CHARS = 160          # README: the description IS the index line
 CARD_BODY_FIELDS = ("title", "lever", "apply", "stack", "verify", "pitfall", "caution", "effect",
                     "source")
@@ -207,6 +213,20 @@ def lint_card(card, kernel_names=(), strict_source=True):
                     f"line, so it has to read as one")
     if str(card.get("lifecycle", "active")) not in ("active", "archived"):
         errs.append(f"lifecycle must be active|archived, got {card.get('lifecycle')!r}")
+
+    # OPTIONAL fields, validated only when present. README used to document `layer`, `levers`,
+    # `cost`, `verified_on` and `roofline` as part of the schema while nothing wrote them and nothing
+    # checked them — 0 of 78 real cards carried any. A documented field that no card has and no gate
+    # wants is not a schema, it is a wish, and it teaches a curator that the schema is approximate.
+    # So: the README now marks them optional, and anything a card DOES carry has to be well-formed.
+    cost = str(card.get("cost", "")).strip()
+    if cost and not re.fullmatch(r"L[0-3]", cost):
+        errs.append(f"cost must be L0|L1|L2|L3 (env/flag · config · host rewrite · new kernel), "
+                    f"got {cost!r}")
+    von = str(card.get("verified_on", "")).strip()
+    if von and von != "null" and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", von):
+        errs.append(f"verified_on must be YYYY-MM-DD or null, got {von!r} — it means the date an "
+                    f"on-box A/B confirmed this, so an unparseable one is worse than none")
     # `key` is their plain-English identity and the merge target. A rigid triple defeats its purpose:
     # it collapses a vLLM MXFP8 card and an sglang bf16 card of the same class onto one key and
     # invites a wrong merge. The machine-readable slots live in the header above.
@@ -414,7 +434,11 @@ def cmd_lint(kb, a):
             e = lint_card(card, strict_source=False)
             if e:
                 bad[os.path.basename(c["path"])] = e
-        print(json.dumps({"cards_audited": len(all_cards(kb)), "cards_failing": len(bad),
+        # Count what was actually audited. Reporting len(all_cards(kb)) here counted ACTIVE cards
+        # while the loop above walks archived ones too, so an audit of 32 cards announced 23 — and
+        # the number a reader checks against "did it look at everything?" was the wrong one.
+        print(json.dumps({"cards_audited": len(all_cards(kb, include_archived=True)),
+                          "cards_failing": len(bad),
                           "failures": bad}, ensure_ascii=False, indent=2))
         return 0
     prop = json.load(open(a.file))

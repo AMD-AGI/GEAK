@@ -130,16 +130,22 @@ key: <one line of plain English identifying WHAT this card is about>
                                             # The MACHINE-readable slots are the discovery-header fields
                                             # above (kernel_class/platforms/regime); `key` does not need
                                             # to repeat their job, so let it say what a person would say.
-layer: learned
-levers: [<lever id>]                        # e.g. host.launch-overhead, mem.lds-tiling — free-form but reused
-cost: L0|L1|L2|L3                           # L0 env/flag · L1 config/knob · L2 wrapper/host rewrite · L3 new kernel
 lifecycle: active
+# --- OPTIONAL below: write them when you have them; the lint validates FORMAT, not presence. They
+#     were documented as required for a while and no card ever carried one, which teaches a curator
+#     that the schema is approximate — so they are marked here for what they are.
+layer: learned                              # optional
+levers: [<lever id>]                        # optional. e.g. host.launch-overhead, mem.lds-tiling
+cost: L0|L1|L2|L3                           # optional. L0 env/flag · L1 config/knob · L2 wrapper/host
+                                            # rewrite · L3 new kernel. Checked against that set.
 type: routing | lever | method
 confidence: ★ | ★★ | ★★★                    # how often it REPRODUCED (a hint strength, not authority)
 effect: <RELATIVE only — e.g. "1.34x isolated (weighted), non-overlapping vs frozen baseline". No ms.>
-roofline: <bound class before → after, + % of achievable peak, e.g. "HBM-bound 41%→ compute-bound 78% of
+roofline: <optional. bound class before → after, + % of achievable peak, e.g. "HBM-bound 41%→ compute-bound 78% of
            achievable BW"; relative positions only, never absolute GB/s or TFLOP/s>
-verified_on: YYYY-MM-DD | null              # the date an on-box A/B actually confirmed it
+verified_on: YYYY-MM-DD | null              # optional, but say it if you know it: the date an on-box
+                                            # A/B actually confirmed this. Checked for format.
+                                            # `source:` (REQUIRED) already carries run id + date.
 last_seen: YYYY-MM-DD
 ---
 # <short title>
@@ -194,6 +200,76 @@ one direction landed, omit `stack:` entirely — `effect:` already says it.
 - ★   = single run, isolated distributions overlapped (≈ noise / unverified) — weak hint.
 - ★★  = single-run non-overlapping isolated A/B, OR ≥2 consistent runs.
 - ★★★ = ≥2 independent runs non-overlapping on the frozen-baseline A/B.
+
+## What is ENFORCED and what is advice
+
+Everything above describes intent. This section says which parts a machine checks, because a rule
+that lives only in prose decays — this repo's own e2e index grew a "MANDATED LEVER" and a "do NOT use
+it" one edit after its README banned both, and 47 of the first 78 real cards carried an absolute
+wall-clock number under a Content rule that forbids them.
+
+`python3 kernel_workflow/scripts/kb.py --kb-dir <this dir> lint --cards` REJECTS a card that:
+
+| check | why it is mechanical |
+|---|---|
+| cites ms / µs / ns / FLOP/s / B/s / GHz / watts | Content rule 1. A box's absolute number reads to the next run as a target. |
+| contains a mandate or prohibition | the ADD-only contract. A `caution:` must read "also verify X". |
+| carries an eval-dir path, patch filename or harness case id | that is memorising a run, not distilling a principle. |
+| names a specific kernel in `key` or the body | cards are class-level; campaigns re-run the same kernels. |
+| has a bare `class · gfx · regime` `key` | the header already holds those slots; `key` is the human merge target. |
+| has an empty/missing discovery-header field, or a `description` over 160 chars | the index line is built from them, and a card the reader cannot find is indistinguishable from a KB that learned nothing. |
+| gives a bare geomean with no per-case evidence | a lever that helped one shape and did nothing elsewhere reads identically otherwise. |
+| claims ★★★ without `confirms_blind >= 1` | self-confirmation cannot buy authority. |
+| has an unknown `lifecycle`, a `cost` outside L0-L3, or an unparseable `verified_on` | a malformed field is worse than an absent one. |
+
+The audit reads ARCHIVED cards too. Every other caller sees active only, so a card whose `lifecycle`
+is a typo would otherwise be invisible to the one check that would have caught it.
+
+Not enforced, and deliberately so: whether a card is TRUE, whether its lever generalises, and whether
+it was worth writing. Those are judgement, and the box overrules all three.
+
+## How a card LOSES standing (the only downward pressure)
+
+Confidence that can only rise is not a signal. A card read fifty times that carried nothing looks
+exactly like one that carried every round it touched, so the write path alone cannot tell them apart.
+
+The loop: the planner names, in a direction's `learned_refs`, the card that seeded it; the verifier
+re-measures that direction without knowing what suggested it; `update_experience` joins the two into
+the cited card's counters. Declared rather than inferred, because the read path is semantic — nothing
+downstream can reconstruct which card the planner acted on.
+
+- the cited direction won its round -> `confirms_cited` += 1. **Only this is a confirmation.**
+- it did not beat the frozen baseline -> `losses` += 1.
+- anything between -> `attempts` += 1 and nothing else. `verified_geomean` is measured against the
+  FROZEN baseline, so at 2.5x cumulative every non-regressing direction clears 1.0; counting those
+  would let a card bank credit for advancing nothing. Seen for real: cited twice at 2.548x and
+  2.555x, winner neither time.
+- `losses >= 3` and above `confirms_cited` -> drop one star and add a `caution:` naming the base rate.
+
+Two runs may not produce a card at all, and neither case is a failure: a **contended box** measured
+its neighbours, and a **held-out kernel** is the instrument for measuring whether the KB works — a
+card distilled from it means the next A/B over that kernel reads back its own answer.
+
+Each run also returns `direction_entropy` (distinct/issued directions). A KB that helps raises the
+verified speedup; a KB that CAGES lowers this without raising that.
+
+## Bulk import — seeding this KB from campaigns that already ran
+
+One run produces at most one card, so a KB starting empty needs as many runs as it wants cards. It
+does not have to: `kb.py drain` takes proposals from `_inbox/` (one JSON per run, written by
+`propose`, name carries the run id so parallel lanes never collide), merges by `key`, applies every
+gate above, enforces the per-class budget, and regenerates the index — one operator, between
+campaigns, so that "merge if the key exists" is actually implementable.
+
+That is how this tree was seeded: 20 kernels' worth of finished 16h campaigns distilled in one pass
+instead of 20 runs. Anything the gates refuse is reported with its reason rather than dropped.
+
+**Budget is per class, not global.** A flat total is set by whichever class was optimized most — one
+ingest put 15 cards in `moe_grouped_gemm` and 2 in `quantize_cast`, and a global cap would have had
+the prolific class evict the sparse ones wholesale, narrowing the KB toward the last campaign. Over
+cap, the lowest `confidence × freshness × earned-standing` card in THAT class is archived. Standing
+is in that product on purpose: ranking on stars and date alone let a card written this morning that
+nothing had ever tested outrank one cited and confirmed three times.
 
 ## How to UPDATE it after a run (write path) — CURATE, never blind-append
 Owner: **TechLead** (holds the global routing view; runs the `update_experience` step after Report).

@@ -1,0 +1,28 @@
+---
+name: return-the-tile-loop-to-the-backend-async-copy-pipeliner-attention-gfx950-decode
+description: Delete hand-rolled prefetch and hand the tile loop to the backend async-copy pipeliner: +11.0% on latency-bound attention decode, 0% on the bandwidth-bound case
+keywords: [async-copy, pipeliner, num-stages, lds, vgpr, decode, isa-check, prefetch]
+kernels: [_fwd_grouped_kernel_stage1]
+platforms: [gfx950]
+kernel_class: attention
+regime: decode
+key: replacing accreted manual double-buffering with the AMD async-copy pipeliner in a Triton grouped/MLA decode attention stage-1 kernel on gfx950
+lifecycle: archived
+type: lever
+confidence: ★★
+effect: director-verified 1.86x geomean end state (1.82 / 2.11 / 1.67 at batch 2 / 32 / 64, decode q_len=1); this lever's own A/B was +11.0% over the then-best body, concentrated on the latency-bound small/mid-batch shapes (1.28x at batch=2, 1.15x at batch=32) and 0% on the large-batch shape already running at ~78% of nameplate bandwidth
+confirms_cited: 0
+confirms_blind: 1
+losses: 0
+attempts: 5
+toolchain: rocm7.2.3 / triton3.6.0 / torch2.11.0
+source: run kernel_20_geak_0808_4h 2026-08-08
+last_seen: 2026-08-08
+---
+# Return the tile loop to the backend async-copy pipeliner
+- lever: When several rounds of hand-written prefetch / double-buffering have accreted on a tiled loop, measure DELETING them and handing the loop to the backend async-copy path with a per-loop stage count: register relief and issue depth can turn out to be one edit rather than two problems, and a hand-rolled prefetch that beat the compiler early can be the thing blocking it later.
+- apply: Enable the AMD async-copy knob around compilation (it is a triton.knobs global with no compile-option surface, so set and restore it) and put the stage count on the loop range itself, which leaves a caller-pinned kernel-level num_stages kwarg untouched; then drop the manual prefetch state the pipeliner now owns.
+- verify: Read the cached ISA: global-to-LDS staging loads appear, per-tile LDS writes and barriers collapse (13->0 and 6->1 here), architectural VGPRs fall (250->220) and outstanding loads at the first vector wait rise (0->9); then re-measure per case, because an ISA success criterion can be met in full while the clock stays flat.
+- pitfall: the whole async structure silently reverted to the old lowering -> one loop-carried load survived in the body and switched the async lowering off entirely -> check the ISA for staging loads rather than trusting that the knob was set.
+- caution: Also re-sweep the schedule hint and the stage count afterwards, since both optima moved when the copy path changed.
+- source: run kernel_20_geak_0808_4h 2026-08-08
