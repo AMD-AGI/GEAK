@@ -28,8 +28,10 @@ adapter_launch() {
   # (~77 per import), which hang under GPU/KFD contention and pile up into a box-degrading storm
   # (observed: 561 procs, e2e throughput halved). Detect once here; honor a caller-set value.
   local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
+  # Launch through $SERVER_LAUNCH_PREFIX (adapter contract): it puts the server in its
+  # own session so teardown can prove the process group is ours. Empty when unset.
   # shellcheck disable=SC2086
-  env $EXTRA_ENV \
+  ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
     ${_ga:+GPU_ARCHS=$_ga} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     SGLANG_TORCH_PROFILER_DIR="$PROFILE_DIR" \
