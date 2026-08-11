@@ -275,7 +275,7 @@ def read_card(path):
             continue
         k, v = line.split(":", 1)
         k, v = k.strip(), v.strip()
-        # Parse `[a, b]` into a list, exactly as build_learned_index.js parseFrontmatter() does.
+        # Parse `[a, b]` into a list, exactly as the JS parseFrontmatter() this replaced did.
         # Without this the two readers disagree about the same file: the generator saw an empty
         # `keywords: []` and dropped the card's tags, while this side saw the STRING "[]" — truthy,
         # non-empty — and reported the header complete. A lint that cannot see an empty list cannot
@@ -307,7 +307,7 @@ def write_card(path, meta, body):
 
 
 def all_cards(kb, include_archived=False):
-    """Active cards only, by default — the SAME predicate `build_learned_index.js collect()` uses.
+    """Active cards only, by default — the SAME predicate `build_index()` uses.
 
     If these two disagree about what is live, the index and every check in this file are describing
     different knowledge bases, and the disagreement is invisible: `doctor` would report a healthy
@@ -445,7 +445,7 @@ def cmd_propose(kb, a):
     return 0
 
 
-# INDEX.md has exactly one writer in this repo: `build_learned_index.js`. The splice-based renderer
+# INDEX.md has exactly one writer in this repo: `build_index()` below. The splice-based renderer
 # that used to live here was the second one, and a second writer of a generated file is how the index
 # and the cards drift apart. `drain` now shells out to the generator instead (see the end of it).
 

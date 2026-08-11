@@ -17,7 +17,9 @@ Always-available references (Read what's relevant to the phase):
 - `SKILL_DIR/knowledge/amd_instinct.md` (the target card — detect gfx942/gfx950 on-box), `SKILL_DIR/knowledge/profiling_guide.md`
 - `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience from past runs as **advisory priors**
   (an aid, not a rule). Read it **after** you have formed your own profile-driven plan, then open the
-  cards whose key matches this run's `(kernel_class, gfx, regime)`. Three hard rules, per
+  0-3 cards that look relevant. Judge that by MEANING, from the index line's description, kernels and
+  keywords — not by matching `key`, which is deliberately a plain-English sentence and not a lookup
+  token (the machine slots are the header's `kernel_class`/`platforms`/`regime`). Three hard rules, per
   `knowledge/learned/README.md`: cards may only **ADD** candidate directions (never prune one, never
   skip a measurement); the **frozen-baseline A/B + oracle parity is always the judge** — if a card and
   the box disagree, the box wins; a `caution:` means "also verify X", never "don't do Y". The file may
@@ -26,6 +28,11 @@ Always-available references (Read what's relevant to the phase):
   symbols it was measured on, and its keywords. Match on *meaning*, not wording: a `split-k on skinny-M
   GEMM` card is worth opening for a tall-K GEMM, a `launch-overhead` card for any dispatch-bound op. Do
   not decide "there is no card for this" from a failed string search. Then open the 0–3 that look worth it.
+  **If a card seeded a direction, name its filename in that direction's `learned_refs`.** That is the
+  whole feedback loop: the verifier re-measures the direction without knowing what suggested it, and
+  the join of your declaration with its number is the only way a card can ever LOSE standing. Cite
+  only what actually shaped the direction — an ornamental citation makes a weak card look productive,
+  and you are the only one who knows which it was.
 
 ### `KERNEL_KNOWLEDGE_DIR` — the AMD operator×backend SOTA base (REFERENCE ONLY)
 When `KERNEL_KNOWLEDGE_DIR` is non-empty, it points at the `perf_knowledge/` base: per-operator,

@@ -62,7 +62,7 @@ Cards are **self-describing**: each opens with a discovery header, so it can be 
 `INDEX.md` can be **regenerated** from the cards rather than hand-maintained:
 
 ```bash
-node kernel_workflow/scripts/build_learned_index.js e2e_workflow/knowledge/learned
+python3 kernel_workflow/scripts/kb.py --kb-dir e2e_workflow/knowledge/learned index
 ```
 
 (One generator serves both `learned/` sinks — referenced in place, not copied, the same convention the
@@ -131,7 +131,7 @@ Owners: System Architect (routing/method cards) and Op Benchmarker (head GEMM/at
    (`name`, `description`, `keywords`, `kernels`, `platforms`, `kernel_class`, `regime`) — that header is
    what makes it findable and what the generated index is built from.
 3a. **Publish it in the index.** Once this folder's cards all carry headers, that is
-   `node kernel_workflow/scripts/build_learned_index.js e2e_workflow/knowledge/learned` and nothing is
+   `python3 kernel_workflow/scripts/kb.py --kb-dir e2e_workflow/knowledge/learned index` and nothing is
    hand-edited. Until then, add the ONE index line by hand — and check no other card is missing one.
 4. **NULL / overlapping / unverified → write NOTHING here** (eval-dir report only).
 5. **A surprising negative → a CONDITIONED `caution:` line** on the relevant card (with the condition it

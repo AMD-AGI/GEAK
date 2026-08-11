@@ -310,6 +310,13 @@ const PLAN_SCHEMA = obj({
       focus_files: { type: 'array', items: { type: 'string' } },
       expected_speedup: { type: 'number' }, prompt: { type: 'string' },
       kk_refs: { type: 'array', items: { type: 'string' } }, // optional: perf_knowledge card paths for THIS direction (REFERENCE ONLY)
+      // Learned cards that SEEDED this direction, by filename. Structural attribution: the planner
+      // declares what it opened, the script joins that against what the VERIFIER independently
+      // measured. Declared here rather than inferred because the read path is semantic — the planner
+      // reads INDEX.md and judges by meaning, so nothing downstream can reconstruct which card it
+      // acted on. A citation is not a causal claim (the planner saw the profile too, and one run
+      // holds no counterfactual); it is the only way a card can ever LOSE standing.
+      learned_refs: { type: 'array', items: { type: 'string' } },
     }, ['id', 'title', 'specialty', 'prompt']),
   },
 }, ['stop', 'directions']);
@@ -594,6 +601,10 @@ let noImprove = 0;
 let bestPerCase = BASELINE_PER_CASE;
 let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source}
 const history = { insights: [], ledger: [], rounds: [], bottleneck_now: profileSummary ? profileSummary.bottleneck : 'unknown', suggest_next: '' };
+// One row per KB-seeded direction, joined against what the verifier measured (see the push site in
+// the round loop). Fed to update_experience and returned to the caller: a driver aggregating these
+// is how anyone notices the KB has been cited fifty times and never once carried a round.
+const citations = [];
 
 // DEEP-MODE resume: restore cumulative speedup + insight/ledger history from the prior wave so this
 // continuation builds ON the cumulative best (canonical was already seeded from STATE_DIR/best by the
@@ -851,9 +862,25 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     if (mem.bottleneck_now) history.bottleneck_now = mem.bottleneck_now;
     if (mem.suggest_next) history.suggest_next = mem.suggest_next;
   }
+  // Join the planner's declared citations against what the verifier independently measured. Derived
+  // here rather than self-reported: the planner said which card seeded which direction, the verifier
+  // re-measured that direction without knowing, and their join is a fact neither one could fake.
+  // `became_winner` and not `verified > 1.0` is the standing test — verified_geomean is measured
+  // against the FROZEN baseline, so once a kernel sits at 2.5x cumulative every non-regressing
+  // direction clears 1.0 and a card would accrue credit for advancing nothing.
+  for (const r of clean) {
+    for (const cardRef of (r.d.learned_refs || [])) {
+      citations.push({
+        card: cardRef, round, direction: r.d.id, specialty: r.d.specialty,
+        cited_then_verified: r.ver ? r.ver.verified_geomean : 0,
+        became_winner: !!(winner && winner.id === r.d.id),
+      });
+    }
+  }
   history.rounds.push({
     round,
-    directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty })),
+    directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty,
+      learned_refs: d.learned_refs || [] })),
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
       verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none') })),
     integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
@@ -908,7 +935,17 @@ log(`COMPLETE. ${KERNEL_NAME}: verified ${HAS_WORKLOAD ? 'time-weighted' : 'geom
 // `cumulative`. ADD-only, so a skipped or failing step leaves the run byte-neutral.
 // ===========================================================================
 let learned_card = null;
-if (UPDATE_EXPERIENCE_ON && validation && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+// Two runs must never become a card, and neither is a failure. A run that shared its GPU measured
+// contention, not the kernel. A run on a HELD-OUT kernel is the instrument for measuring whether the
+// KB helps at all — distil it and the next A/B over that kernel reads back its own answer and looks
+// spectacular. Defaults are permissive, so the CALLER is the one who has to declare a busy box.
+const BOX_QUIET = String(A.box_quiet != null ? A.box_quiet : 'true') === 'true';
+const HELD_OUT = String(A.held_out != null ? A.held_out : 'false') === 'true';
+const kbGate = !BOX_QUIET ? 'the box was contended — the number measured neighbours, not the kernel'
+  : HELD_OUT ? 'this kernel is in the held-out split and is the measuring instrument'
+  : '';
+if (kbGate) log(`[kb] not distilling: ${kbGate}.`);
+if (!kbGate && UPDATE_EXPERIENCE_ON && validation && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
   try {
     learned_card = await agentT(
@@ -926,6 +963,10 @@ if (UPDATE_EXPERIENCE_ON && validation && Number.isFinite(finalPrimary) && final
           // `rounds[]` (per-round directions + per-candidate claimed/verified/status + running
           // `cumulative`) is what makes the card's `stack:` attribution and `pitfall:` lines derivable.
           HISTORY: history,
+          // What this run's plan actually cited, and whether the cited direction went on to win.
+          // The curator MERGES these into the cited cards' counters; that is the only mechanism by
+          // which a card in this tree can lose confidence rather than only ever gaining it.
+          CITATIONS: citations,
           PROFILE: profileSummary,
           REPORT_PATH: report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
         }),
@@ -957,6 +998,20 @@ return {
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
   final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
   // null when the step was off, or the run earned nothing worth a card.
+  // What the plan cited and whether it carried its round. Returned ALWAYS, including when nothing was
+  // cited (an empty array is the finding: the KB was read and nothing in it was worth acting on).
+  learned_citations: citations,
+  // The monoculture canary, and it costs no GPU time: how many DISTINCT (specialty, focus_files)
+  // directions this run explored vs how many it issued. A KB that helps raises the verified speedup;
+  // a KB that cages lowers this without raising that. Reported on KB-less runs too — those are the
+  // baseline it has to be read against.
+  direction_entropy: (() => {
+    const seen = new Set(); let n = 0;
+    for (const r of history.rounds) for (const d of (r.directions || [])) {
+      n++; seen.add(`${d.specialty}|${(d.focus_files || []).slice().sort().join(',')}`);
+    }
+    return n ? { distinct: seen.size, issued: n, ratio: +(seen.size / n).toFixed(3) } : null;
+  })(),
   learned_card: learned_card && learned_card.card_path
     ? { action: learned_card.action || '', card_path: learned_card.card_path, key: learned_card.key || '' }
     : null,

@@ -170,7 +170,7 @@ measurement. Disable with `update_experience: 'off'`.
 Each card is **self-describing**: it opens with a skill-style discovery header (`name`, `description`,
 `keywords`, `kernels`, `platforms`, `kernel_class`, `regime`, `confidence`).
 `knowledge/learned/INDEX.md` is a **generated** projection of those headers — rebuild it with
-`node scripts/build_learned_index.js` (`--check` fails when it is stale). Nothing appends to the index by
+`python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned index` (`--check` fails when it is stale). Nothing appends to the index by
 hand, which is also why concurrent lanes can no longer drop each other's entries.
 
 Retrieval is **semantic and done by the reading role**, not by a matcher: the index is ≤40 cards, each
@@ -250,7 +250,7 @@ knowledge/learned/   distilled experience cards (ADVISORY priors; each card self
                      kernel-gated (frozen-baseline isolated A/B); e2e-gated lessons stay in
                      e2e_workflow/knowledge/learned/ and cite these cards -- see learned/README.md
 scripts/             gpu_lock.sh, profile_kernel.sh,
-                     build_learned_index.js (regenerate a learned/INDEX.md from the cards' discovery
+                     kb.py ... index      (regenerate a learned/INDEX.md from the cards' discovery
                      frontmatter; sink-agnostic -- takes the dir, so it also serves
                      e2e_workflow/knowledge/learned; `--check` for CI), test_learned_index.js (its guard),
                      test_mode_dispatch.js (regression guard: mode dispatch + bake-off lane

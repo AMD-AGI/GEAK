@@ -61,10 +61,10 @@ Each card also opens with the same **discovery header** (`name`, `description`, 
 `platforms`, `kernel_class`, `regime`, `confidence`), so it stays self-describing when opened directly or
 when the index is missing.
 
-`INDEX.md` is **generated** from those headers by `kernel_workflow/scripts/build_learned_index.js`
+`INDEX.md` is **generated** from those headers by `kernel_workflow/scripts/kb.py ... index`
 (grouped by `kernel_class`, ordered by confidence, plus the keyword vocabulary appendix). The generator is
 sink-agnostic — it takes the folder as an argument, so the same one serves `e2e_workflow`'s `learned/`
-(`node kernel_workflow/scripts/build_learned_index.js e2e_workflow/knowledge/learned`); one mechanism,
+(`python3 kernel_workflow/scripts/kb.py --kb-dir e2e_workflow/knowledge/learned index`); one mechanism,
 referenced in place, never copied.
 **Never hand-edit it** — edit the card's `description`/`keywords`/`confidence` and regenerate. Two
 consequences worth knowing: the index can never drift from the cards, and parallel lanes cannot lose each
@@ -210,7 +210,7 @@ One transaction:
    total-then-per-direction for a stacked win). This applies to a MERGE too: never let an absolute timing
    in through the back door of an updated `effect:`.
 3a. **Regenerate the index — never hand-edit it.**
-   `node kernel_workflow/scripts/build_learned_index.js` (add `--check` in CI to catch a stale file).
+   `python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned index` (add `--check` in CI to catch a stale file).
 4. **NULL / overlapping / unverified → write NOTHING here** (the `EVAL_DIR` report is enough). A one-off
    raw number is not a card; only a reusable `(kernel_class, gfx, regime) → lever` lesson earns one.
 5. **A surprising negative → a CONDITIONED `caution:`** on the relevant card (with the condition it held

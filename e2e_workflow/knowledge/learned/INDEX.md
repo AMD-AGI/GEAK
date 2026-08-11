@@ -8,7 +8,7 @@ Confidence (a hint strength, not authority): ★ noise/unverified · ★★ sing
 > ⚠ **This index is hand-maintained and has drifted before** — cards have sat in this folder with no line
 > here, which makes them invisible to every reader. `ls` the folder before concluding a card does not
 > exist, and add the missing line when you find one. It becomes a **generated** file (from each card's
-> discovery header, via `node kernel_workflow/scripts/build_learned_index.js e2e_workflow/knowledge/learned`)
+> discovery header, via `python3 kernel_workflow/scripts/kb.py --kb-dir e2e_workflow/knowledge/learned index`)
 > once the cards carry those headers — see `README.md`.
 
 ## dense GEMM

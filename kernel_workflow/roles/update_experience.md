@@ -59,7 +59,7 @@ do not "find" a nearby `learned/` folder.
 
 ## Inputs
 `SCOPE` (`lane` | `bakeoff`), `LEARNED_DIR` (the sink), `SKILL_DIR` (the owning workflow — its
-`scripts/build_learned_index.js` regenerates the index), `EVAL_DIR` (this run's episodic record),
+`kb.py ... index` regenerates it), `EVAL_DIR` (this run's episodic record),
 `REPORT_PATH` (the final report), `WINNER` (the winning candidate + its verified speedup; on a lane run
 it also carries `kernel`/`language`/`gfx`/`kernel_class`/`bottleneck`), `HISTORY` (lane only: the
 per-round ledger, insights, and each round's directions/results/winner/cumulative — this is what lets
@@ -109,14 +109,32 @@ fraction before it reaches the card), `CANDIDATES` (bake-off only), `OP_SPEC` (b
 7. **Regenerate the index — never hand-edit `INDEX.md`.** It is a generated projection of the cards'
    discovery headers:
    ```bash
-   node ${SKILL_DIR}/scripts/build_learned_index.js ${LEARNED_DIR}
+   node ${SKILL_DIR}/scripts/kb.py ... index ${LEARNED_DIR}
    ```
    (If `SKILL_DIR` is not in your inputs, the script sits next to the workflow that owns `${LEARNED_DIR}`:
-   `<workflow>/scripts/build_learned_index.js`.) The regen reads whatever cards are on disk, so a lane
+   `<workflow>/scripts/kb.py ... index`.) The regen reads whatever cards are on disk, so a lane
    running concurrently with you cannot lose its entry and you cannot lose yours — no append, no race.
    Report a bad/edited `description` by fixing the **card** and regenerating, never by editing the index.
    Then **read the regenerated index once**: if it now shows a ⚠ near-duplicate keyword block naming a
    term you just used, fix your card to the established spelling and regenerate again.
+
+## Merge `CITATIONS` before you write anything new
+
+`CITATIONS` is one row per direction this run's plan seeded from a card: `{card, round, direction,
+cited_then_verified, became_winner}`. Apply it to the CITED cards, not to the card you are writing:
+
+- `attempts` += 1 for every row naming that card.
+- `became_winner: true` -> `confirms_cited` += 1. That, and only that, is a confirmation.
+- `cited_then_verified <= 1.0` -> `losses` += 1.
+- Anything between — verified above the frozen baseline but not the round winner — counts as an
+  attempt and nothing else. `verified_geomean` is measured against the FROZEN baseline, so once a
+  kernel sits at 2.5x cumulative *every* non-regressing direction clears 1.0; scoring those as wins
+  would let a card bank credit for advancing nothing. Observed: a card cited twice at 2.548x and
+  2.555x, winner neither time.
+- A card whose `losses` reach 3 and exceed its `confirms_cited` drops one confidence star and gains a
+  `caution:` naming the base rate. Demote, never delete, and never write a blocklist.
+
+This is the only downward pressure in the design. Skip it and confidence only ever rises.
 
 ## Return JSON (StructuredOutput)
 ```json
