@@ -353,6 +353,26 @@ def resolve_tracelens_report(exp_root: str) -> dict:
     return report
 
 
+# The e2e workflow prepends this to every role agent it spawns (PROCESS_SAFETY in
+# e2e_workflow.js). The TOP-LEVEL driver agent we spawn here was the one agent that
+# never saw it, yet it is the one closest to the caller: its Bash tool runs with
+# bypassPermissions as a direct child of this process, so a single `pkill -f vllm`
+# from it reproduces issue #397 (a pattern kill that reaches the caller's orchestrator)
+# with nothing in between. Same rule, same wording, one level up.
+PROCESS_SAFETY = (
+    "## PROCESS SAFETY (a violation can kill the caller's orchestrator, failing the "
+    "whole task)\n"
+    "This container's PID 1 is the CALLER's orchestrator process, not yours, and it is "
+    "NOT restartable. NEVER run global or pattern-matched process cleanup: no "
+    "`pkill -f` / `pgrep -f ... | xargs kill` / `killall` / `ps aux | grep ... | xargs "
+    "kill`, and never `kill -- -PGID` for a group you did not create. A pattern as "
+    "innocent as `-f vllm` matches the orchestrator's own command line and TERMs it.\n"
+    "Manage ONLY processes you started, by the pid you captured at launch. Freeing a "
+    "GPU, unwedging a port, or recovering from a failed Workflow call is NOT an "
+    "exception to this rule: leave the process alone and report it instead.\n\n"
+)
+
+
 def build_prompt(ps_args: dict) -> str:
     eval_dir = ps_args.get("eval_dir", "")
     # Locate the upstream TraceLens / kernel-agent artifacts (analysis.md,
@@ -373,7 +393,8 @@ def build_prompt(ps_args: dict) -> str:
     # budget; enforcement lives entirely in the JS (the time_budget_s arg drives the
     # setTimeout deadlines), and the value is already passed via args.time_budget_s.
     return (
-        "Invoke the Workflow tool exactly once with:\n"
+        PROCESS_SAFETY
+        + "Invoke the Workflow tool exactly once with:\n"
         f'  scriptPath: "{E2E_SCRIPT}"\n'
         f"  args: {json.dumps(ps_args)}\n"
         "CRITICAL: pass `args` as a real JSON OBJECT (a mapping), NOT as a "
@@ -2371,6 +2392,39 @@ def _write_kernel_journey(eval_dir: Path, wf: dict | None, normalized: dict) -> 
     return str(path)
 
 
+def _publish_protected_pgids() -> str:
+    """Tell the benchmark teardown which process groups it must NEVER signal.
+
+    ``e2e_workflow/scripts/server_teardown.sh`` refuses a group kill against any pgid
+    in ``GEAK_PROTECTED_PGIDS``. Nothing was ever publishing that list, so the hook
+    only ever held its two built-in defaults. We are the process the caller (Hyperloom)
+    launches, so we are the one place that knows the two groups a bench cleanup must
+    never reach: OUR group (the whole GEAK subtree runs in it) and our PARENT's — the
+    orchestrator that was TERMed by a bench teardown in issue #397. pid 1 is included
+    explicitly because a container's init IS that orchestrator in the deployment where
+    this happened.
+
+    Purely additive: a group kill is only ever allowed for a server that leads its own
+    session (pgid == pid), which can never be one of these groups, so no legitimate
+    teardown is downgraded by this.
+
+    Returns:
+        str: the published, space-separated pgid list (also set in ``os.environ``).
+    """
+    protected: set[str] = {"1"}
+    for pid in (0, os.getppid()):
+        try:
+            protected.add(str(os.getpgid(pid)))
+        except OSError:  # racing parent exit / unsupported platform
+            pass
+    protected.update(
+        tok for tok in os.environ.get("GEAK_PROTECTED_PGIDS", "").split() if tok.isdigit()
+    )
+    value = " ".join(sorted(protected, key=int))
+    os.environ["GEAK_PROTECTED_PGIDS"] = value
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -2395,6 +2449,7 @@ def main(argv: list[str]) -> int:
     # check (_workflow_done_on_disk) and the scrape-independent disk recovery
     # (_discover_eval_dir) target EXACTLY this run's dir, deterministically.
     os.environ["GEAK_EVAL_DIR"] = ps_args["eval_dir"]
+    _publish_protected_pgids()
     bench_client = apply_bench_client(h)
     bench_launcher = apply_bench_launcher(h)
     bench_protocol = apply_bench_protocol(h)

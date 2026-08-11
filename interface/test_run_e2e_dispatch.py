@@ -346,6 +346,55 @@ class TestMapArgs(_RunE2ECase):
         # search_root is internal bookkeeping and must never reach the agent.
         self.assertNotIn("search_root", prompt)
 
+    def test_build_prompt_leads_with_process_safety(self):
+        """The driver agent holds Bash under bypassPermissions as a direct child of
+        this process, so it needs the same pattern-kill ban the role agents get: one
+        `pkill -f vllm` from it reaches the caller's orchestrator (issue #397)."""
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_safety")))
+        prompt = rx.build_prompt(ps)
+        self.assertTrue(prompt.startswith("## PROCESS SAFETY"), prompt[:80])
+        for banned in ("pkill -f", "killall", "kill -- -PGID"):
+            self.assertIn(banned, prompt)
+
+
+class TestProtectedPgids(_RunE2ECase):
+    """`_publish_protected_pgids` is the caller-side half of the #397 fix: the
+    teardown in e2e_workflow/scripts/server_teardown.sh vetoes a group kill against
+    any pgid listed in GEAK_PROTECTED_PGIDS, and this is the only publisher."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved = os.environ.get("GEAK_PROTECTED_PGIDS")
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._saved is None:
+            os.environ.pop("GEAK_PROTECTED_PGIDS", None)
+        else:
+            os.environ["GEAK_PROTECTED_PGIDS"] = self._saved
+
+    def test_publishes_own_group_parent_group_and_init(self):
+        os.environ.pop("GEAK_PROTECTED_PGIDS", None)
+        value = rx._publish_protected_pgids()
+        published = value.split()
+        self.assertEqual(value, os.environ["GEAK_PROTECTED_PGIDS"])
+        self.assertIn("1", published)
+        self.assertIn(str(os.getpgid(0)), published)
+        self.assertIn(str(os.getpgid(os.getppid())), published)
+
+    def test_merges_existing_value_and_drops_non_numeric(self):
+        """A caller may pre-export its own pgids; keep them, drop garbage, no dupes."""
+        os.environ["GEAK_PROTECTED_PGIDS"] = "77 bogus 77"
+        published = rx._publish_protected_pgids().split()
+        self.assertIn("77", published)
+        self.assertNotIn("bogus", published)
+        self.assertEqual(len(published), len(set(published)))
+
+    def test_is_idempotent(self):
+        os.environ.pop("GEAK_PROTECTED_PGIDS", None)
+        first = rx._publish_protected_pgids()
+        self.assertEqual(first, rx._publish_protected_pgids())
+
 
 class TestFlagPresent(_RunE2ECase):
     def test_unbalanced_quote_falls_back_to_whitespace_split(self):
@@ -1466,6 +1515,23 @@ class TestMain(_RunE2ECase):
         self.assertEqual(plan["e2e_script"], str(rx.E2E_SCRIPT))
         self.assertIn("Invoke the Workflow tool exactly once", plan["prompt"])
         self.assertFalse(self.result_path.exists())
+
+    def test_protected_pgids_are_published_before_any_launch(self):
+        """Pins the CALL SITE, not just the helper: the veto must be in the
+        environment before main() can reach a bench, so it is set even on the
+        --dry-run path, which returns before invoke_workflow()."""
+        saved = os.environ.pop("GEAK_PROTECTED_PGIDS", None)
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, "GEAK_PROTECTED_PGIDS", saved)
+        else:
+            self.addCleanup(os.environ.pop, "GEAK_PROTECTED_PGIDS", None)
+        self.patch_rx("invoke_workflow",
+                      lambda *a, **k: self.fail("dry-run must not invoke"))
+        rc, _stdout = self._run(self._handoff(), "--dry-run")
+        self.assertEqual(rc, 0)
+        published = os.environ["GEAK_PROTECTED_PGIDS"].split()
+        self.assertIn("1", published)
+        self.assertIn(str(os.getpgid(0)), published)
 
     def test_timeout_budget_is_read_from_the_environment(self):
         os.environ["GEAK_E2E_TIMEOUT_S"] = "600"

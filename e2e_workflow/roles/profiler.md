@@ -142,9 +142,16 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    - rocprofv3 finalization is SLOW on multi-rank serving (TP>1): on shutdown the multiprocessing
      `resource_tracker` reaps the vLLM TP workers' leaked shm/semaphores, and the CSV is flushed only
      AFTER that — this routinely takes **8–20 min. That is normal, not a hang.**
-   - So after the bench: stop the server through the shared teardown contract
-     (`scripts/server_teardown.sh` — see PROCESS SAFETY in your prompt), never a hand-rolled or
-     pattern-matched kill, and NEVER `kill -9` the rocprofv3 parent — then
+   - So after the bench: **stop nothing yourself.** `bench_e2e.sh` has already torn the server down
+     through the shared teardown contract (`scripts/server_teardown.sh`) in its EXIT trap by the time
+     the command in step 1 returns, so there is no server left for you to stop, and a `pgrep`/`pkill`
+     hunt for the "leftover" rocprofv3 or server process is the exact banned action (see PROCESS
+     SAFETY in your prompt) — never a hand-rolled or pattern-matched kill, and NEVER `kill -9` the
+     rocprofv3 parent. If you ever launch a long-lived server YOURSELF rather than through
+     `bench_e2e.sh`, you must launch it through that same contract
+     (`source "$EVAL_DIR/server_teardown.sh"; trap server_teardown EXIT; ${SERVER_LAUNCH_PREFIX:-}
+     <launch> & server_record_identity "$!"`) — sourcing it in a shell that did not launch the server
+     is a no-op by design. Then
      **WAIT PATIENTLY for the CSV to flush — poll for `*kernel*trace*.csv` / `*kernel*stats*.csv` to
      appear, up to ~25 min, and only then continue. Do NOT abandon at 3–5 min.** (The instrumented
      server's health-wait may stay bounded at ~10 min, since a genuinely stuck load is a real failure;

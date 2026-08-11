@@ -123,6 +123,35 @@ _group_kill_allowed() {
   return 0
 }
 
+# Does the frozen identity still hold? "" start ticks means we could never verify in
+# the first place (unreadable /proc) -- that fails OPEN by design, since the pgid==pid
+# proof and the protected-pgid veto still stand between us and a stranger's group.
+_identity_still_matches() {
+  local _now
+  [ -n "$SERVER_START_TICKS" ] || return 0
+  _now="$(_start_ticks_of "$SERVER_PID" || true)"
+  [ -z "$_now" ] || [ "$_now" = "$SERVER_START_TICKS" ]
+}
+
+# Is PID an ancestor of the benchmark shell? Such a pid CANNOT be a server we launched:
+# it is our parent chain -- the run_e2e driver, the caller's orchestrator, init. A pid
+# file that names one (stale, or recycled into the caller's tree) would otherwise send
+# the teardown walking UP the process tree, which is exactly how issue #397 killed the
+# coordinator. Checked on the pid path too, where the pgid==pid proof does not apply.
+_is_bench_ancestor() {  # _is_bench_ancestor PID
+  local _map _p="$BENCH_PID" _parent _hops=0
+  _map="$(ps -eo pid=,ppid= 2>/dev/null)"
+  while [ "$_hops" -lt 64 ]; do
+    _parent="$(printf '%s\n' "$_map" | awk -v k="$_p" '$1==k{print $2; exit}')"
+    [ -n "$_parent" ] || return 1
+    [ "$_parent" = "$1" ] && return 0
+    [ "$_parent" -gt 1 ] 2>/dev/null || return 1
+    _p="$_parent"
+    _hops=$((_hops + 1))
+  done
+  return 1
+}
+
 # Transitive descendants of SERVER_PID, excluding pid 1 and ourselves.
 _server_descendants() {
   ps -eo pid=,ppid= 2>/dev/null | awk -v root="$SERVER_PID" -v self="$BENCH_PID" '
@@ -158,21 +187,35 @@ server_teardown() {
     return 0
   fi
   # PID-reuse gate: a pid whose start time moved is a DIFFERENT process. Send nothing.
-  local _now
-  _now="$(_start_ticks_of "$SERVER_PID" || true)"
-  if [ -n "$SERVER_START_TICKS" ] && [ -n "$_now" ] && [ "$_now" != "$SERVER_START_TICKS" ]; then
-    echo "!!! pid $SERVER_PID start_time changed ($SERVER_START_TICKS -> $_now): the pid was REUSED;" \
+  if ! _identity_still_matches; then
+    echo "!!! pid $SERVER_PID start_time changed (was $SERVER_START_TICKS): the pid was REUSED;" \
          "refusing to signal an unrelated process." >&2
     return 0
   fi
-  local _grace="${SERVER_STOP_GRACE_S:-10}" _deny="" _i _k _kids
+  # Never signal our own ancestors, whatever the mode.
+  if _is_bench_ancestor "$SERVER_PID"; then
+    echo "!!! pid $SERVER_PID is an ANCESTOR of this benchmark shell (pid $BENCH_PID), so it cannot" \
+         "be a server we launched; no signal sent." >&2
+    return 0
+  fi
+  local _grace="${SERVER_STOP_GRACE_S:-10}" _deny="" _i _k _kids _kids_now
+  # An unusable grace makes `seq` fail, which would collapse TERM->KILL to no wait at all.
+  case "$_grace" in ''|*[!0-9]*) _grace=10 ;; esac
   if _group_kill_allowed; then
     echo ">>> Shutting down server (pid $SERVER_PID) -- GROUP kill pgid=$SERVER_PGID ..."
     kill -TERM "-$SERVER_PGID" 2>/dev/null || kill -TERM "$SERVER_PID" 2>/dev/null || true
     for _i in $(seq 1 "$_grace"); do
       kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 1
     done
-    kill -0 "$SERVER_PID" 2>/dev/null && kill -KILL "-$SERVER_PGID" 2>/dev/null || true
+    # Re-check identity before escalating: `kill -0` also succeeds against a stranger
+    # who inherited the pid during the grace window, and SIGKILL cannot be ignored.
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+      if _identity_still_matches; then
+        kill -KILL "-$SERVER_PGID" 2>/dev/null || true
+      else
+        echo "!!! pid $SERVER_PID was REUSED during the grace window; skipping SIGKILL." >&2
+      fi
+    fi
   else
     echo ">>> Shutting down server (pid $SERVER_PID) -- PID+descendants kill;" \
          "group kill REFUSED: $_deny"
@@ -182,8 +225,19 @@ server_teardown() {
     for _i in $(seq 1 "$_grace"); do
       kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 1
     done
-    kill -0 "$SERVER_PID" 2>/dev/null && kill -KILL "$SERVER_PID" 2>/dev/null || true
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+      if _identity_still_matches; then
+        kill -KILL "$SERVER_PID" 2>/dev/null || true
+      else
+        echo "!!! pid $SERVER_PID was REUSED during the grace window; skipping SIGKILL." >&2
+        _kids=""   # the tree we mapped belonged to the old process; do not escalate into it
+      fi
+    fi
+    # Escalate only against pids that are STILL descendants: one that no longer is was
+    # either reaped (and possibly recycled) or was never ours.
+    _kids_now="$(_server_descendants)"
     for _k in $_kids; do
+      case " $_kids_now " in *" $_k "*) ;; *) continue ;; esac
       kill -0 "$_k" 2>/dev/null && kill -KILL "$_k" 2>/dev/null || true
     done
   fi

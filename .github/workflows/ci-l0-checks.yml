@@ -37,6 +37,16 @@ jobs:
         continue-on-error: true
         run: ruff check .
 
+      # Blocking, unlike ruff: the shell here is not advisory decoration, it is the
+      # server-kill contract (server_teardown.sh) and the dispatcher that must find it.
+      # A parse error there means the EXIT trap never binds and a served model is left
+      # holding its VRAM and port. `bash -n` catches that in milliseconds; no shellcheck
+      # dependency, so the job keeps its no-install-beyond-ruff shape.
+      - name: bash syntax check (e2e shell contract)
+        run: |
+          find e2e_workflow/scripts kernel_workflow/scripts -name '*.sh' -print0 \
+            | xargs -0 -n1 bash -n
+
   pytest:
     name: Python unit tests + coverage
     runs-on: ubuntu-latest
@@ -73,6 +83,8 @@ jobs:
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \
             e2e_workflow/scripts/tests/test_harness_lib.py \
+            e2e_workflow/scripts/tests/test_server_teardown.py \
+            e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
             geak/test_bootstrap.py
 
       # Renders the per-file table + total into the run's Job Summary, which is

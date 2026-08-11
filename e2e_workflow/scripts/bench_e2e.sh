@@ -339,8 +339,30 @@ SERVER_PID=""
 # server's pgid AT KILL TIME and group-killed whenever it differed from ours — a pid
 # that had exited and been recycled resolved to a stranger's group, which is how a
 # teardown can reach the caller's orchestrator / PID 1.
+#
+# This script is COPIED into $EVAL_DIR (roles/director.md) and run from there, so the
+# library has to be found next to the copy. If it is not, the teardown silently becomes
+# a no-op: `source` fails, the EXIT trap resolves to a missing function, and the served
+# model is left running with its VRAM and port held while the serving-GPU lock is
+# released — the next launch then OOMs. So look next to us, then in the ORIGINAL scripts
+# dir when the caller told us where that is, and REFUSE to run otherwise. A benchmark
+# that cannot stop what it starts must not start it.
+TEARDOWN_LIB=""
+for _cand in "$HERE/server_teardown.sh" "${SKILL_DIR:-}/scripts/server_teardown.sh" \
+             "${WORKFLOW_DIR:-}/scripts/server_teardown.sh"; do
+  case "$_cand" in /scripts/server_teardown.sh) continue ;; esac   # unset SKILL_DIR/WORKFLOW_DIR
+  [ -f "$_cand" ] && { TEARDOWN_LIB="$_cand"; break; }
+done
+if [ -z "$TEARDOWN_LIB" ]; then
+  echo "!!! server_teardown.sh not found next to this script ($HERE) or under SKILL_DIR/WORKFLOW_DIR." >&2
+  echo "    It carries the server-kill contract; without it the EXIT trap is a no-op and the" >&2
+  echo "    launched server would be LEAKED (VRAM + port held, serving-GPU lock released)." >&2
+  echo "    Stage it alongside bench_e2e.sh: cp \"\$SKILL_DIR/scripts/server_teardown.sh\" \"\$EVAL_DIR/\"" >&2
+  exit 3
+fi
+[ "$TEARDOWN_LIB" = "$HERE/server_teardown.sh" ] || echo ">>> teardown contract: $TEARDOWN_LIB (not staged next to this copy)"
 # shellcheck disable=SC1090
-source "$HERE/server_teardown.sh"
+source "$TEARDOWN_LIB"
 trap server_teardown EXIT
 
 # ---- serving-GPU mutex ----

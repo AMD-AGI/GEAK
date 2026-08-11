@@ -20,6 +20,8 @@ signals actually sent rather than from a log line:
   group holds pid 1         -> refused
   pgid == 1                 -> refused (`kill -TERM -1` is a BROADCAST, not a group)
   pid start time moved      -> the pid was reused; send NOTHING at all
+  reuse during TERM->KILL   -> escalation re-verifies, so no SIGKILL to a stranger
+  pid is our own ancestor   -> refused (a server we launched can never be one)
   pid-kill path             -> still reaps verified descendants (no leaked VRAM)
 
 `ps`, `kill` and `sleep` are replaced by fakes on PATH (the `kill` builtin is disabled
@@ -42,10 +44,10 @@ BASH = shutil.which("bash")
 FAKE_PS = """#!/usr/bin/env bash
 case "$*" in
   "-o pgid= -p "*)
-    _pid="${*##* }"
+    _pid="${@: -1}"
     cat "$FIX/pgid_$_pid" 2>/dev/null || cat "$FIX/pgid_default" 2>/dev/null || exit 1 ;;
   "-o args= -p "*)
-    _pid="${*##* }"; cat "$FIX/args_$_pid" 2>/dev/null || true ;;
+    _pid="${@: -1}"; cat "$FIX/args_$_pid" 2>/dev/null || true ;;
   "-eo pid=,pgid=") cat "$FIX/pid_pgid" 2>/dev/null || true ;;
   "-eo pid=,ppid=") cat "$FIX/pid_ppid" 2>/dev/null || true ;;
   *) exit 1 ;;
@@ -62,6 +64,9 @@ if [ "$1" = "-0" ]; then
   exit 1
 fi
 _reap() {
+  # $FIX/no_reap models a server that ignores SIGTERM, so the grace window expires
+  # and the library reaches its SIGKILL escalation.
+  [ -e "$FIX/no_reap" ] && return 0
   grep -vx -- "$1" "$FIX/alive" > "$FIX/alive.next" 2>/dev/null
   mv "$FIX/alive.next" "$FIX/alive"
 }
@@ -126,6 +131,23 @@ class ServerTeardownTest(unittest.TestCase):
             calls = [line.strip() for line in fh if line.strip()]
         # Liveness probes are noise for mode assertions; keep the real signals.
         return [c for c in calls if not c.startswith("-0 ")], proc.stdout + proc.stderr
+
+    # ---- the fixture itself ---------------------------------------------------
+    def test_fake_ps_answers_per_pid_not_the_default(self):
+        """Guard the fixture: `ps -o pgid= -p <pid>` must read pgid_<pid>.
+
+        The pid is the LAST word of the query, and `${*##* }` strips the pattern from
+        every positional parameter separately rather than from the joined string -- so
+        it returns the whole query unchanged, every lookup misses `pgid_<pid>` and
+        silently falls through to `pgid_default`. Every server then looks like it sits
+        in the bench's group, which turns the group-kill tests green no matter what the
+        library does. Assert the resolution directly so that failure can't hide.
+        """
+        env = dict(os.environ, FIX=self.fix, PATH=os.path.join(self.fix, "bin") + os.pathsep + os.environ["PATH"])
+        got = subprocess.run(
+            ["ps", "-o", "pgid=", "-p", "500"], env=env, capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(got.stdout.strip(), "500", "fake ps fell back to pgid_default")
 
     # ---- mode selection -------------------------------------------------------
     def test_own_group_leader_allows_group_kill(self):
@@ -197,6 +219,72 @@ class ServerTeardownTest(unittest.TestCase):
             'server_record_identity 500\nFAKE_TICKS=999\nserver_teardown\n'
         )
         self.assertEqual(signals, [], f"signalled a recycled pid: {signals}")
+
+    # Installed AFTER server_record_identity has frozen ticks=100, so reading #1 is the
+    # pre-signal gate (still 100, teardown proceeds) and every later reading is 999 --
+    # i.e. the pid is reused exactly inside the TERM->KILL grace window.
+    _TICKS_FLIP_AFTER_FIRST_READ = (
+        '_start_ticks_of() { local _n; _n="$(cat "$FIX/ncalls" 2>/dev/null || echo 0)";'
+        ' echo $((_n + 1)) > "$FIX/ncalls";'
+        ' if [ "$_n" -ge 1 ]; then echo 999; else echo 100; fi; }\n'
+    )
+
+    def test_reuse_during_the_grace_window_blocks_the_group_sigkill(self):
+        """`kill -0` also succeeds against the STRANGER who inherited the pid while we
+        waited, and SIGKILL cannot be ignored -- so re-verify before escalating."""
+        self.write("no_reap", "")
+        signals, out = self.run_body(
+            "server_record_identity 500\n" + self._TICKS_FLIP_AFTER_FIRST_READ + "server_teardown\n"
+        )
+        self.assertIn("-TERM -500", signals)
+        self.assertNotIn("-KILL -500", signals, "SIGKILLed a recycled pid's group")
+        self.assertIn("REUSED during the grace window", out)
+
+    def test_reuse_during_the_grace_window_blocks_the_pid_sigkill(self):
+        """Same gate on the pid path, including the descendants mapped before TERM."""
+        self.write("no_reap", "")
+        self.write("pgid_500", "4242\n")
+        self.write("pid_pgid", "500 4242\n4242 4242\n1 1\n")
+        self.write("pid_ppid", "500 4242\n610 500\n4242 1\n")
+        self.write("alive", "500\n610\n")
+        signals, out = self.run_body(
+            "server_record_identity 500\n" + self._TICKS_FLIP_AFTER_FIRST_READ + "server_teardown\n"
+        )
+        self.assertIn("-TERM 500", signals)
+        self.assertFalse([s for s in signals if s.startswith("-KILL")],
+                         f"SIGKILLed after the identity moved: {signals}")
+
+    def test_stubborn_server_is_still_escalated_when_identity_holds(self):
+        """The re-check must not disarm the escalation for the normal case."""
+        self.write("no_reap", "")
+        signals, _ = self.run_body('server_record_identity 500\nserver_teardown\n')
+        self.assertIn("-TERM -500", signals)
+        self.assertIn("-KILL -500", signals, "a TERM-ignoring server would leak VRAM")
+
+    def test_ancestor_of_the_bench_is_never_signalled(self):
+        """A stale pid file naming a pid in OUR parent chain (the run_e2e driver, the
+        caller's orchestrator) must send nothing: we cannot have launched it."""
+        self.write("pgid_500", "4242\n")
+        self.write("pid_pgid", "500 4242\n4242 4242\n1 1\n")
+        self.write("pid_ppid", "4242 500\n500 300\n300 1\n")
+        self.write("alive", "500\n")
+        signals, out = self.run_body(
+            'BENCH_PID=4242\nserver_record_identity 500\nserver_teardown\n'
+        )
+        self.assertEqual(signals, [], f"signalled an ancestor: {signals}")
+        self.assertIn("ANCESTOR", out)
+
+    def test_non_numeric_grace_does_not_collapse_the_term_kill_window(self):
+        """`seq 1 abc` fails, which would turn the grace window into zero waits."""
+        self.write("no_reap", "")
+        signals, _ = self.run_body(
+            'server_record_identity 500\nserver_teardown\n',
+            env={"SERVER_STOP_GRACE_S": "abc"},
+        )
+        self.assertGreaterEqual(
+            len([s for s in signals if s == "-TERM -500"]), 1
+        )
+        self.assertIn("-KILL -500", signals)
 
     def test_dead_pid_is_not_signalled(self):
         self.write("alive", "")
