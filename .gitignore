@@ -229,3 +229,7 @@ e2e_bench_out/
 # launched from this directory. Build output, never source.
 .rocprofv3/
 **/.rocprofv3/
+
+# Machine-produced experience KB (warm-start store, kernel_workflow Part 4/1.7): runtime-accumulated
+# best patches + meta; volume is unbounded, so default-ignore and commit selectively via a whitelist.
+kb_artifacts/

@@ -183,6 +183,7 @@ GEAK/
 │   ├── roles/  knowledge/  scripts/   # gpu_lock.sh, profile_kernel.sh
 │   └── README.md
 ├── perf_knowledge/      # AMD operator × backend SOTA knowledge base (REFERENCE ONLY)
+├── kb_artifacts/        # machine-produced best patches (code-carrying, gitignored, warm-start source)
 ├── examples/            # Example kernel tasks, benchmark comparisons, real e2e runs
 └── exp/                 # Experiment outputs (timestamped per run)
 ```
