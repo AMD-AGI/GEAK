@@ -142,6 +142,7 @@ budget-controlled, each patch independently verified.
 | `target_language` | `triton` | Author-mode language: `triton` \| `flydsl` \| `hip` \| `ck`. |
 | `op_spec` | `{}` | Op specification (author mode). |
 | `perf_knowledge_dir` | sibling `perf_knowledge/` | Knowledge base. |
+| `update_experience` | `on` | Curate ONE distilled card into `kernel_workflow/knowledge/learned/` after a measured win (every lane run; once centrally per bake-off). `off` skips it. The sink is always this workflow's own `learned/` — an e2e-opened lane never writes into `e2e_workflow/knowledge/learned/`. Cards carry a skill-style discovery header (`name`/`description`/`keywords`/`kernels`/`platforms`/`kernel_class`/`regime`) and `learned/INDEX.md` is regenerated from it by `kernel_workflow/scripts/build_learned_index.js` (`--check` = fail-if-stale). Numbers on a card are relative only (ratios, % of achievable peak) — never wall-clock. |
 | `workload_spec_path` | — | Workload-alignment spec; makes the primary metric the time-weighted ratio-of-sums. |
 | `agent_timeout_ms` | `3600000` | Per-agent timeout (1h). |
 | `agent_retries` | `4` | Agent retry count (min 1). |

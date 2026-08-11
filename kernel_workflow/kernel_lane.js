@@ -12,7 +12,7 @@ export const meta = {
     { title: 'Verify', detail: 'each candidate patch independently re-benchmarked' },
     { title: 'Merge', detail: 'integrator combines the round winners' },
     { title: 'Report', detail: 'tech_lead writes the final report + patch' },
-    { title: 'Validate', detail: 'director independently validates vs the true baseline' },
+    { title: 'Validate', detail: 'director independently validates vs the true baseline, then the TechLead curates ONE distilled card into knowledge/learned/ on a measured win [update_experience!=off]' },
   ],
 };
 
@@ -156,6 +156,17 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only planning + authoring roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
+
+// ---------------------------------------------------------------------------
+// LEARNED-KNOWLEDGE SINK. Derived from WORKFLOW_DIR and nothing else, so a lane spawned by
+// e2e_workflow still curates into kernel_workflow/knowledge/learned/ — e2e's learned/ is a
+// separate memory owned by its own system_architect step.
+//   update_experience = on (default) | off | false | none
+// The bake-off dispatcher passes `off` and curates once centrally instead (N parallel lanes would
+// file N near-duplicate cards for one op).
+const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
+const UPDATE_EXPERIENCE = String(A.update_experience != null ? A.update_experience : 'on').trim().toLowerCase() || 'on';
+const UPDATE_EXPERIENCE_ON = UPDATE_EXPERIENCE !== 'off' && UPDATE_EXPERIENCE !== 'false' && UPDATE_EXPERIENCE !== 'none';
 
 // ---------------------------------------------------------------------------
 // DEEP-MODE continuation + cross-backend / e2e-feedback hooks. ALL OPTIONAL.
@@ -345,6 +356,12 @@ const REPORT_SCHEMA = obj({
   rounds: { type: 'number' }, budget_used: { type: 'number' },
   report_path: { type: 'string' }, final_patch: { type: 'string' }, per_case: perCase,
 }, ['final_speedup_geomean', 'report_path', 'final_patch']);
+
+const UPDATE_EXPERIENCE_SCHEMA = obj({
+  action: { type: 'string' },      // created | merged | skipped
+  card_path: { type: 'string' },   // path under knowledge/learned/, or "" if nothing distilled
+  key: { type: 'string' }, note: { type: 'string' },
+}, []);
 
 const VALIDATE_SCHEMA = obj({
   kernel_name: { type: 'string' },
@@ -883,6 +900,44 @@ log(`COMPLETE. ${KERNEL_NAME}: verified ${HAS_WORKLOAD ? 'time-weighted' : 'geom
     `${HAS_WORKLOAD && Number.isFinite(finalGeomean) ? ` (unweighted geomean ${finalGeomean.toFixed(2)}x)` : ''}` +
     ` (status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
 
+// ===========================================================================
+// PHASE: UpdateExperience — distill ONE reusable card into this workflow's knowledge/learned/
+// (see knowledge/learned/README.md). Runs ONCE, at the very end: never per round, because only
+// the final director-verified speedup is evidence a card may cite. `validation` is required for
+// the same reason — without it `finalPrimary` falls back to the TechLead's own unverified
+// `cumulative`. ADD-only, so a skipped or failing step leaves the run byte-neutral.
+// ===========================================================================
+let learned_card = null;
+if (UPDATE_EXPERIENCE_ON && validation && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+  const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
+  try {
+    learned_card = await agentT(
+      roleAgent('update_experience', 'Validate',
+        'Curate one distilled learned card from this lane\'s verified win (ADD-only, measured evidence, ' +
+        'ratios not wall-clock; record the pitfalls hit; total-then-per-direction for a stacked win).', {
+          SCOPE: 'lane', LEARNED_DIR, SKILL_DIR: WORKFLOW_DIR, EVAL_DIR,
+          PERF_KNOWLEDGE_DIR: KERNEL_KNOWLEDGE_DIR,
+          WINNER: {
+            kernel: KERNEL_NAME, language: TARGET_LANGUAGE, mode: MODE, gfx: GFX,
+            kernel_class: (analysis && analysis.kernel_type) || '',
+            speedup: finalPrimary, validation_status: validation ? validation.validation_status : '',
+            bottleneck: profileSummary ? profileSummary.bottleneck : '',
+          },
+          // `rounds[]` (per-round directions + per-candidate claimed/verified/status + running
+          // `cumulative`) is what makes the card's `stack:` attribution and `pitfall:` lines derivable.
+          HISTORY: history,
+          PROFILE: profileSummary,
+          REPORT_PATH: report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
+        }),
+      { phase: 'Validate', label: 'update_experience', schema: UPDATE_EXPERIENCE_SCHEMA });
+    if (learned_card && learned_card.card_path) {
+      log(`[kb] learned card ${learned_card.action || 'written'}: ${learned_card.card_path}`);
+    }
+  } catch (e) {
+    log(`[kb] update_experience skipped: ${e && e.message ? e.message : e}`);
+  }
+}
+
 return {
   mode: MODE,
   target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
@@ -901,4 +956,8 @@ return {
   budget_total: BUDGET,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
   final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
+  // null when the step was off, or the run earned nothing worth a card.
+  learned_card: learned_card && learned_card.card_path
+    ? { action: learned_card.action || '', card_path: learned_card.card_path, key: learned_card.key || '' }
+    : null,
 };

@@ -15,6 +15,17 @@ Always-available references (Read what's relevant to the phase):
 - `SKILL_DIR/knowledge/hip_optimization.md` / `triton_optimization.md` — per kernel type
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns
 - `SKILL_DIR/knowledge/amd_instinct.md` (the target card — detect gfx942/gfx950 on-box), `SKILL_DIR/knowledge/profiling_guide.md`
+- `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience from past runs as **advisory priors**
+  (an aid, not a rule). Read it **after** you have formed your own profile-driven plan, then open the
+  cards whose key matches this run's `(kernel_class, gfx, regime)`. Three hard rules, per
+  `knowledge/learned/README.md`: cards may only **ADD** candidate directions (never prune one, never
+  skip a measurement); the **frozen-baseline A/B + oracle parity is always the judge** — if a card and
+  the box disagree, the box wins; a `caution:` means "also verify X", never "don't do Y". The file may
+  be empty (no cards yet) — that changes nothing about how you plan.
+  **Read the index and judge relevance yourself** — each line carries the card's description, the kernel
+  symbols it was measured on, and its keywords. Match on *meaning*, not wording: a `split-k on skinny-M
+  GEMM` card is worth opening for a tall-K GEMM, a `launch-overhead` card for any dispatch-bound op. Do
+  not decide "there is no card for this" from a failed string search. Then open the 0–3 that look worth it.
 
 ### `KERNEL_KNOWLEDGE_DIR` — the AMD operator×backend SOTA base (REFERENCE ONLY)
 When `KERNEL_KNOWLEDGE_DIR` is non-empty, it points at the `perf_knowledge/` base: per-operator,
