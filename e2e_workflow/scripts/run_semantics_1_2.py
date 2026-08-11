@@ -59,6 +59,67 @@ def run(config_path, trace_path, shape_log_path, out_dir,
 
     semantic = semantic_kernel_mapping.build(
         trace_path, patterns_path, out_dir)
+
+    # --- Layer-boundary evidence gate (module spans) -------------------------
+    # semantic_kernel_mapping resolves per-layer boundaries from python_function
+    # `nn.Module: ...DecoderLayer_<id>` spans, captured only when the torch
+    # profiler ran with with_stack/with_modules. Without them the boundary step
+    # degrades to forced_best_alignment and mis-places layer start/end. Fail
+    # loudly instead of silently emitting unreliable boundaries; allow an
+    # explicit opt-in to proceed degraded.
+    with open(semantic["layer_instance_audit_json"]) as fh:
+        module_scope_count = int(
+            json.load(fh).get("module_scope_count", 0) or 0)
+    allow_no_module_spans = os.environ.get(
+        "GEAK_SEMANTICS_ALLOW_NO_MODULE_SPANS", "0") in ("1", "true", "True")
+    boundary_evidence = (
+        "module_span" if module_scope_count > 0
+        else "degraded_no_module_span")
+    if module_scope_count == 0 and not allow_no_module_spans:
+        # Non-gating sidecar: do NOT crash or re-capture. Return an explicit
+        # failed status so the caller (e2e_workflow) skips Semantics 1.2 +
+        # semantic/fusion and falls back to the native optimization flow.
+        notes = (
+            "clean trace has no DecoderLayer module spans "
+            "(module_scope_count=0): the torch profiler was captured without "
+            "with_stack/with_modules, so per-layer kernel boundaries would "
+            "degrade to forced_best_alignment and are untrustworthy. Skipping "
+            "Semantics 1.2 + semantic/fusion; native flow should proceed. "
+            "Re-capture the trace with SGLANG_PROFILE_WITH_STACK=1 (keep "
+            "record_shapes on), or set GEAK_SEMANTICS_ALLOW_NO_MODULE_SPANS=1 "
+            "to force a degraded run.")
+        result = {
+            "schema_version": 1,
+            "pipeline": "geak_semantics_1_2",
+            "status": "failed",
+            "boundary_evidence": boundary_evidence,
+            "module_scope_count": module_scope_count,
+            "notes": notes,
+            "inputs": {
+                "config": {
+                    "path": os.path.abspath(config_path),
+                    "sha256": _sha256(config_path),
+                },
+                "trace": {
+                    "path": os.path.abspath(trace_path),
+                    "sha256": _sha256(trace_path),
+                },
+                "agent_structural_patterns": {
+                    "path": structural_patterns_input,
+                    "sha256": structural_patterns_input_sha256,
+                },
+            },
+            "structural_patterns_json": patterns_path,
+            "semantic_mapping": semantic,
+            "published_semantic_table_json": semantic["semantic_table_json"],
+            "published_semantic_table_md": semantic["semantic_table_md"],
+        }
+        result_path = os.path.join(out_dir, "SEMANTICS_1_2_RUN.json")
+        result["result_json"] = result_path
+        with open(result_path, "w") as fh:
+            json.dump(result, fh, indent=2)
+        return result
+
     phase_1_1_json = os.path.join(
         out_dir, "pattern_layer_kernel_table_1_1.json")
     phase_1_1_md = os.path.join(
@@ -145,6 +206,7 @@ def run(config_path, trace_path, shape_log_path, out_dir,
         semantic["status"] != "fail"
         and merged["status"] == "pass"
         and capture_phase_coverage_complete
+        and boundary_evidence == "module_span"
     ) else "fail"
     result = {
         "schema_version": 1,
@@ -160,6 +222,8 @@ def run(config_path, trace_path, shape_log_path, out_dir,
         "status": status,
         "capture_phase_coverage_complete": (
             capture_phase_coverage_complete),
+        "boundary_evidence": boundary_evidence,
+        "module_scope_count": module_scope_count,
         "inputs": {
             "config": {
                 "path": os.path.abspath(config_path),

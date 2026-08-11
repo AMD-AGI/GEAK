@@ -1108,10 +1108,18 @@ if (want('setup')) {
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
 
   phase('Profile');
+  // The semantics sidecar cuts per-layer boundaries from DecoderLayer module spans,
+  // which the sglang profiler only emits with with_stack=true. Turn it on for the
+  // BASELINE capture (only) when semantics mapping is enabled, so the shared clean
+  // trace carries the module hierarchy semantics needs. Reprofiles keep curEnv
+  // (the optimization Top-N does not need stacks, which bloat the trace).
+  const baselineExtraEnv = SEMANTICS_MAPPING_ON
+    ? (curEnv ? curEnv + ' ' : '') + 'SGLANG_PROFILE_WITH_STACK=true'
+    : curEnv;
   profile = await safeAgent(
     roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
-      OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+      OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: baselineExtraEnv, SKILL_DIR: WORKFLOW_DIR,
       ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
