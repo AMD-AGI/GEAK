@@ -1,13 +1,5 @@
 ---
-name: pre-lay-a-strided-per-iteration-operand-in-a-prologue-kernel-moe-grouped-gemm-gfx950-mixed
-description: Pre-lay a strided per-iteration operand in a prologue kernel in the consumer's reading order: +11.5% geomean on an already-converged MoE grouped GEMM
-keywords: [moe, operand-reuse, l2-locality, address-locality, prologue-kernel, measurement-method]
-kernels: [fused_moe_kernel]
-platforms: [gfx950]
-kernel_class: moe_grouped_gemm
-regime: mixed
 key: a permuted-row gather of a small per-row operand (scale, bias, routing metadata) re-read inside the k-loop of a fused-MoE grouped GEMM on gfx950
-lifecycle: active
 type: lever
 confidence: ★★
 effect: +11.5% geomean on top of an already-converged stack, the largest single gain after the first round and 5x the prize the same operand's in-loop amortisation had been priced at; per-case +14.8% and +14.3% on the two large token counts, ~+1% on the smallest token count (which was already at ~92% of its compulsory-bandwidth roof). Run end state director-verified 58.56x geomean, 32.3x / 78.1x / 79.6x from smallest to largest token count, correctness PASS.
@@ -16,8 +8,15 @@ confirms_blind: 1
 losses: 0
 attempts: 6
 toolchain: rocm 7.x / triton 3.6.0 / torch 2.11.0
-source: run kb_on_0810 2026-08-11
 last_seen: 2026-08-11
+name: pre-lay-a-strided-per-iteration-operand-in-a-prologue-kernel-moe-grouped-gemm-gfx950-mixed
+description: Pre-lay a strided per-iteration operand in a prologue kernel in the consumer's reading order: +11.5% geomean on an already-converged MoE grouped GEMM
+keywords: ['moe', 'operand-reuse', 'l2-locality', 'address-locality', 'prologue-kernel', 'measurement-method']
+kernels: ['fused_moe_kernel']
+platforms: ['gfx950']
+kernel_class: moe_grouped_gemm
+regime: mixed
+lifecycle: active
 ---
 # Pre-lay a strided per-iteration operand in a prologue kernel, in the consumer's reading order
 - lever: When a small per-row operand (scale, bias, routing metadata) is re-read inside the k-loop through a permuted-row gather with a large stride, stop trying to amortise the gather inside the loop and change WHO produces it: a tiny prologue kernel writes the operand once into scratch in the consumer's access order (expanded rows, k-major) so the inner read is a short run of consecutive elements. The payoff is L1/L2 REQUEST count, and it can be several times what an in-loop estimate predicts, because the gather also holds address registers and serialises against the main operand staging.

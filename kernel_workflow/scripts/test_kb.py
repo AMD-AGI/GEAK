@@ -51,7 +51,8 @@ def card(name, **over):
         "source": "campaign20 2026-08-11", "last_seen": "2026-08-11",
     }
     fm.update({k: str(v) for k, v in over.items()})
-    body = "# " + name + "\n- lever: change who produces the operand.\n- verify: confirm it engaged.\n"
+    title = over.pop("_title", name)
+    body = "# " + str(title) + "\n- lever: change who produces the operand.\n- verify: confirm it engaged.\n"
     return "---\n" + "\n".join(f"{k}: {v}" for k, v in fm.items()) + "\n---\n" + body
 
 
@@ -138,6 +139,16 @@ gate("absolute bandwidth is refused", "absolute bandwidth",
      effect="4.9 TB/s sustained; per-case +14.8% on the large shapes.")
 gate("a mandate is refused", "a mandate", effect="you must use this; per-case +14.8% on large shapes.")
 gate("an eval-dir path is refused", "eval-dir", source="/shared_nfs/exp/kb_on_0810 run")
+
+# `source` is provenance and is exempt from the class-level kernel-name rule. Requiring both "every
+# claim needs a run id" and "never name a kernel" is unsatisfiable when run ids are named after their
+# kernel, which is how real campaigns name them. Delete the exemption and this goes red.
+dd = fresh()
+write(dd, "c.md", card("c", source="run _fwd_grouped_kernel_stage1-chuschen16h 2026-08-11"))
+_, out, _ = run(dd, "lint", "--cards")
+check("a kernel symbol in `source` is allowed (provenance, not the principle)",
+      json.loads(out)["cards_failing"] == 0, json.dumps(json.loads(out)["failures"]))
+shutil.rmtree(dd)
 gate("a bare class·gfx·regime key is refused", "bare class",
      key="moe_grouped_gemm · gfx950 · large-batch")
 gate("an over-long description is refused", "description is", description="x" * 170)
@@ -149,6 +160,26 @@ gate("★★★ without a blind confirmation is refused", "confirms_blind",
 # Optional fields: the lint checks FORMAT, never presence. A field documented as part of the schema
 # that no card carries and no gate wants teaches a curator that the schema is approximate.
 gate("a malformed cost tier is refused", "cost must be", cost="L9")
+
+# A missing title is written out as `none-<scope>.md` with an H1 of "# None" — non-empty, so a
+# truthiness check passes it. Two cards reached disk that way on the first real bulk import.
+dd = fresh()
+write(dd, "c.md", card("c", _title="None"))
+_, out, _ = run(dd, "lint", "--cards")
+check("a literal 'None' title is refused (str(None), not a title)",
+      any("no usable title" in f for f in json.loads(out)["failures"].get("c.md", [])),
+      json.dumps(json.loads(out)["failures"]))
+shutil.rmtree(dd)
+
+# ...and the audit must read the title from the body's H1, not substitute the filename, or the check
+# above can never fire on a real card.
+dd = fresh()
+write(dd, "c.md", card("c").replace("# c\n", ""))
+_, out, _ = run(dd, "lint", "--cards")
+check("a card with no H1 at all is refused",
+      any("no usable title" in f for f in json.loads(out)["failures"].get("c.md", [])),
+      json.dumps(json.loads(out)["failures"]))
+shutil.rmtree(dd)
 gate("an unparseable verified_on is refused", "verified_on must be", verified_on="yesterday")
 
 # `kernels` must stay OPTIONAL. Requiring a field the writer cannot derive does not produce blanks,

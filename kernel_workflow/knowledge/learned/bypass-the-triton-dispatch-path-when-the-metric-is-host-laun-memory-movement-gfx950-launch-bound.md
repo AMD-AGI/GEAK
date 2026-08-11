@@ -1,13 +1,5 @@
 ---
-name: bypass-the-triton-dispatch-path-when-the-metric-is-host-laun-memory-movement-gfx950-launch-bound
-description: Replace the graded symbol with a cached direct-launcher closure when the per-call time is host dispatch: 2.24x alone, 2.35x cumulative, uniform across batch
-keywords: [launch-overhead, dispatch-floor, launch-bound, measurement-method, control-experiment, graph-capture, memory-movement, interleaved-ab]
-kernels: [write_req_to_token_pool_triton]
-platforms: [gfx950]
-kernel_class: memory_movement
-regime: launch-bound
 key: collapsing the Python/Triton dispatch path of a tiny paged-KV copy kernel on gfx950, graded per call by an event-pair harness across a 32x batch-size range
-lifecycle: active
 type: lever
 confidence: ★★
 effect: 2.24x on its own and 2.35x cumulative (director-verified) on a tiny paged copy whose per-call time profiled as ~100% host dispatch, and it held uniformly at every batch case (2.32-2.43x per case across a 32x range in batch size) precisely because the body was never the cost; host enqueue itself fell ~2.9x
@@ -16,8 +8,15 @@ confirms_blind: 1
 losses: 0
 attempts: 6
 toolchain: rocm7.2 / triton3.6.0 / torch2.11
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-08
+name: bypass-the-triton-dispatch-path-when-the-metric-is-host-laun-memory-movement-gfx950-launch-bound
+description: Replace the graded symbol with a cached direct-launcher closure when the per-call time is host dispatch: 2.24x alone, 2.35x cumulative, uniform across batch
+keywords: ['launch-overhead', 'dispatch-floor', 'launch-bound', 'measurement-method', 'control-experiment', 'graph-capture', 'memory-movement', 'interleaved-ab']
+kernels: ['write_req_to_token_pool_triton']
+platforms: ['gfx950']
+kernel_class: memory_movement
+regime: launch-bound
+lifecycle: active
 ---
 # Bypass the Triton dispatch path when the metric is host-launch bound
 - lever: When the graded per-call time is dominated by Python/Triton dispatch - the tell is that an empty kernel through the stock path measures as slow as, or slower than, the real one - replace the graded symbol with an object whose __getitem__(grid) returns a per-(grid, signature) cached closure calling the compiled kernel's backend launcher directly, hoisting signature binding, specialization-key construction, cache lookup, option packing and the stream query out of the per-call path.

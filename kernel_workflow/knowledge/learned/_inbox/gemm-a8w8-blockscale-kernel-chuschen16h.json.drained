@@ -1,0 +1,137 @@
+{
+  "run_id": "_gemm_a8w8_blockscale_kernel-chuschen16h",
+  "date": "2026-08-11",
+  "kernel_names": [
+    "_gemm_a8w8_blockscale_kernel"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "fp8-hw-cvt-upcast-blockscaled-gemm",
+      "title": "fp8 hardware-cvt upcast is the wall under a block-scaled fp8 GEMM, not occupancy",
+      "description": "Block-scaled fp8 GEMM pinned near the latency-bound floor: hardware fnuz->OCP cvt upcast plus fused split-K reduce lifts it to compute-bound",
+      "keywords": [
+        "fp8",
+        "block-scale",
+        "dequant",
+        "split-k",
+        "upcast",
+        "triton",
+        "compute-bound",
+        "quantized-gemm"
+      ],
+      "kernels": [
+        "_gemm_a8w8_blockscale_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "per-1x128 block-scaled fp8 (A8W8) GEMM on gfx950/MI355X in Triton, seed emulating the fp8 upcast in VALU",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "24.08x weighted cumulative vs frozen baseline; per-case c2 24.29x, c32 23.76x, c64 23.88x (all three within 2%); roofline-emp 0.05 latency-bound -> 0.55 compute-bound",
+      "attempts": 3,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "16h per-kernel time-budget campaign (chuschen16h lane), 2026-08-11, 49 passes, Director-validated geomean",
+      "last_seen": "2026-08-11",
+      "verified_on": "2026-08-11",
+      "lever": "When a block-scaled fp8 GEMM sits at a few percent of achievable peak, suspect an emulated fnuz->OCP fp8 upcast in the VALU before suspecting occupancy: swap it for the hardware cvt and fold the constant 0.25 rescale into the accumulator (exact for finite positive-normal fp8).",
+      "apply": "Rewrite the operand-upcast in the K-loop to the hw convert intrinsic; for tiny-M cases add NUM_KSPLIT=2 to fill the grid (roughly doubles resident CTAs and halves per-CTA K iterations, which re-tunes num_warps/num_stages downward) and fuse the bf16 partial reduction into a companion reduce kernel.",
+      "stack": "total 24.08x weighted = three directions compounded, attribution incremental in landing order\n  1. fp8 hw-cvt upcast — 12.95x standalone (pass 1, verified) — carries the bulk\n  2. small-case split-K + fused reduce — +21.7% on top of (1) (pass 2, verified)\n  3. rank-1 scale collapse + 2-deep overlap unroll — 1.5263x on top of (1,2) (pass 3, verified)",
+      "verify": "Grep the generated ISA for the cvt opcode replacing the emulation sequence, then re-time every case against the frozen baseline; the bound class should move off latency-bound and the small-batch case should stop being grid-starved.",
+      "pitfall": "split-K win vanished -> the partial reduction was a 3-kernel torch.sum epilogue whose launches and HBM round-trips exceeded the split-K gain -> fuse the reduction into one bf16 reduce kernel; also KSPLIT=3/4 lose to 2 on the tiny case.",
+      "caution": "The 0.25 fold is exact only for finite positive-normal fp8 inputs, so also verify bit-exactness against the oracle on denormal and saturating operands before banking the win.",
+      "blind": false
+    },
+    {
+      "name": "rank1-scale-collapse-2deep-overlap-unroll",
+      "title": "Rank-1 scale collapse plus 2-deep overlap unroll hides dequant behind MFMA",
+      "description": "Per-1x128 dequant that is uniform across the N tile collapses to a rank-1 per-row FMA; unrolling K by 2 overlaps the second MFMA with the dequant VALU work",
+      "keywords": [
+        "dequant",
+        "block-scale",
+        "mfma",
+        "ilp",
+        "unroll",
+        "block-pingpong",
+        "fp8",
+        "quantized-gemm"
+      ],
+      "kernels": [
+        "_gemm_a8w8_blockscale_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "irreducible per-K-iteration dequant in a block-scaled fp8 GEMM on gfx950, medium/large shapes on the non-split-K path",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.5263x incremental on the medium/large non-split-K path over an already 15.8x seed, bit-exact; carries cumulative to 24.08x; the large case then sits at ~91% of its per-1x128 dequant-plus-MFMA floor and ~59% of native-fp8 MFMA partition peak",
+      "attempts": 2,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "16h per-kernel time-budget campaign (chuschen16h lane), 2026-08-11, two deep_explore directions, confirmed twice",
+      "last_seen": "2026-08-11",
+      "verified_on": "2026-08-11",
+      "lever": "Two co-levers on the dequant path: (a) when the weight scale is uniform across the N tile, load it as a scalar and apply dequant as a rank-1 per-row FMA instead of a full [M,N] outer product every K iteration; (b) unroll K by 2 so two independent dots are in flight and the ping-pong scheduler issues the second MFMA while the first block's dequant occupies the VALU.",
+      "apply": "Hoist the scale pointer to a scalar load per tile; restructure the K-loop into exactly two independent dot accumulations with num_stages=2 and an EVEN_K guard, leaving the compiler's natural register allocation alone.",
+      "verify": "Confirm both dots survive into the ISA (two MFMA groups interleaved with the scale FMA), then re-time against the frozen baseline per case; on the tiny grid-starved case expect no gain, the win is on the medium/large shapes.",
+      "pitfall": "4-deep unroll never compiled -> LDS request exceeded the hardware limit by ~60% -> the depth that pays is exactly 2; the rank-1 scale index is also only valid while the N tile equals the scale group width, so it silently mis-indexes under a sub-group-width N tile.",
+      "caution": "The overlap depends on two dots and stage count staying paired, so also verify the win survives a config re-tune rather than assuming it composes with an independent tile change.",
+      "blind": false
+    },
+    {
+      "name": "occupancy-push-dead-on-ilp-bound-dequant-gemm",
+      "title": "Occupancy push and four neighbouring axes are closed on an ILP-bound dequant GEMM",
+      "description": "At 2 waves/SIMD an ILP-bound block-scaled fp8 GEMM loses from any occupancy push; grid/tail, hand-scheduling, graph capture, microtune all zero",
+      "keywords": [
+        "occupancy",
+        "vgpr",
+        "ilp",
+        "spill",
+        "hip-graph",
+        "grid-tail",
+        "anti-pattern",
+        "quantized-gemm"
+      ],
+      "kernels": [
+        "_gemm_a8w8_blockscale_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "a block-scaled fp8 GEMM on gfx950 already at 2 waves/SIMD with no scratch spill, where the critical chain is MFMA -> scale -> accumulate",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "5 of 7 directions in the campaign returned 0% over the 24.08x seed: doubling warps reaches 5 waves/SIMD but regresses c32 and c64 by ~4% each; capping registers to force a third wave spills and regresses c32 ~14% / c64 ~14%; shrinking the N tile to remove a half-wasted tile column regresses the tiny case ~11%; hand-scheduled ping-pong and host-side graph capture/replay are byte-identical / slightly worse on all three cases",
+      "attempts": 5,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "16h per-kernel time-budget campaign (chuschen16h lane), 2026-08-11, five directions closed as dead ends",
+      "last_seen": "2026-08-11",
+      "verified_on": "2026-08-11",
+      "lever": "Before spending a round raising occupancy on a dequant GEMM, read the ISA: if the seed is already at 8 warps with no scratch spill and the accumulator plus per-K partial are algorithm-fixed in fp32, the 2-wave floor is likely the optimum ILP-for-registers trade and the profitable axes are elsewhere (dequant math, split-K on the tiny case).",
+      "apply": "Grep the compiled .amdgcn for the VGPR count, occupancy annotation and any scratch usage; treat a natural ~184-VGPR/2-wave pick with zero spill as evidence the compiler already made the trade, and budget the round for the dequant chain instead.",
+      "verify": "Re-time both directions against the frozen baseline rather than trusting the occupancy number: a config that reaches a higher wave count and still loses is the signal that the op is latency/ILP-bound on the accumulate chain.",
+      "pitfall": "A round reported IMPROVED=false and looked like an apply failure -> it was a genuine true negative, the workspace md5 matched the seed and no winning diff was produced -> confirm the patch marker and the config delta in the verify workspace, and compare against baseline, before recording either a win or a harness bug.",
+      "caution": "This closure was measured with the fp32 accumulator and arbitrary per-1x128 fp32 scales that rule out native scaled-MFMA; if the harness pins a tile shape that admits an E8M0-style scaled MFMA, also re-open the occupancy and tile axes before assuming they stay closed.",
+      "blind": false
+    }
+  ]
+}

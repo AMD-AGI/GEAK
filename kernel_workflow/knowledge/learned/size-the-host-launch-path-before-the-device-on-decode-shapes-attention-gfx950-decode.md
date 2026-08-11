@@ -16,7 +16,6 @@ confirms_blind: 1
 losses: 0
 attempts: 3
 toolchain: rocm 7.2.3 / torch 2.11.0 / hip (AOT hipcc, template-codegen op)
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-08
 ---
 # Size the host launch path before the device on decode shapes

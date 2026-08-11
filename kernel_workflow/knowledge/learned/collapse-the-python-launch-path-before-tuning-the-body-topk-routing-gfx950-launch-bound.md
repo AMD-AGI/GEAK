@@ -1,13 +1,5 @@
 ---
-name: collapse-the-python-launch-path-before-tuning-the-body-topk-routing-gfx950-launch-bound
-description: Collapse Triton's Python launch path before tuning the body of a small launch-bound top-k op: 1.58x standalone, 2.19x on the smallest grid
-keywords: [launch-overhead, launch-bound, dispatch-floor, kernel-cache, topk, measurement-method, interleaved-ab, graph-capture]
-kernels: [_topk_forward]
-platforms: [gfx950]
-kernel_class: topk_routing
-regime: launch-bound
 key: Triton Python launch path (bind/specialize/hash/grid) on a small-grid top-k selection op, gfx950/CDNA4, grids small enough that device time hides behind the launch
-lifecycle: active
 type: lever
 confidence: ★★
 effect: 1.58x geomean standalone, and per-case it tracks how launch-bound the case is: 2.19x on the smallest grid (~64 CTAs, device time fully hidden behind the launch) / 1.67x mid / 1.05x on the largest (~2048 CTAs, device-exposed). Largest single component of a director-verified 2.28x end state (per-case 2.35 / 2.49 / 2.03).
@@ -16,8 +8,15 @@ confirms_blind: 1
 losses: 0
 attempts: 4
 toolchain: triton 3.6.0 / torch 2.11.0+gitd0c8b1f / gfx950 CDNA4
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-08
+name: collapse-the-python-launch-path-before-tuning-the-body-topk-routing-gfx950-launch-bound
+description: Collapse Triton's Python launch path before tuning the body of a small launch-bound top-k op: 1.58x standalone, 2.19x on the smallest grid
+keywords: ['launch-overhead', 'launch-bound', 'dispatch-floor', 'kernel-cache', 'topk', 'measurement-method', 'interleaved-ab', 'graph-capture']
+kernels: ['_topk_forward']
+platforms: ['gfx950']
+kernel_class: topk_routing
+regime: launch-bound
+lifecycle: active
 ---
 # Collapse the Python launch path before tuning the body
 - lever: On a small op whose per-call device time is the same order as the dispatch itself and whose caller re-invokes it with identical argument objects, Triton's Python launch path (signature binding, arg specialization and hashing, grid canonicalization) can be most of the measured wall; collapse it before spending a round on the kernel body, and re-test config knobs afterwards because a device-side win can score as a regression while a host floor hides it.

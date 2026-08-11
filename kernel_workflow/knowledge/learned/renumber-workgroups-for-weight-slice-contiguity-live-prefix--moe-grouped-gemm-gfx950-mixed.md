@@ -16,7 +16,6 @@ confirms_blind: 1
 losses: 0
 attempts: 4
 toolchain: rocm7.2 / torch2.11.0 / hip (CK C++ templates, JIT-compiled)
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-08
 ---
 # Renumber workgroups for weight-slice contiguity, live prefix only

@@ -1,0 +1,138 @@
+{
+  "run_id": "fused_moe_kernel-chuschen16h",
+  "date": "2026-08-11",
+  "kernel_names": [
+    "fused_moe_kernel"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "fp4-weight-storage-moe-grouped-gemm",
+      "title": "fp4-weight-storage-moe-grouped-gemm",
+      "description": "Store the streamed MoE expert-weight operand as fp4 consumed natively by scaled MFMA: 42x isolated on a weight-streaming grouped GEMM, gfx950.",
+      "keywords": [
+        "fp4",
+        "dot-scaled",
+        "mfma",
+        "moe",
+        "grouped-gemm",
+        "weight-streaming",
+        "hbm-bound",
+        "nonkdim",
+        "xcd-swizzle"
+      ],
+      "kernels": [
+        "fused_moe_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "fp4-weight (block-scaled) MoE grouped GEMM on gfx950, Triton dot_scaled, weight-streaming across batch sizes",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "42.2x cumulative isolated (weighted geomean, director-validated) vs frozen baseline; per-case ~29.9x at the smallest batch, ~50.0x and ~50.2x at the two larger batches; empirical roofline 0.02 -> 0.51 of achievable peak, bound class latency-bound -> compute-bound.",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "16h per-kernel time-budget campaign, lane chuschen16h, 35 resumed passes, 2026-08-11",
+      "last_seen": "2026-08-11",
+      "verified_on": "2026-08-11",
+      "lever": "When the grouped-GEMM weight operand is streamed once per block and dominates traffic, re-store it in fp4 and let the scaled-MFMA path consume it natively; then stack a wider-K MFMA shape (matrix_instr_nonkdim=16), a per-case num_stages bump on the smallest batch, and XCD de-interleave on the large grid.",
+      "apply": "Env/flag-gated variants over one source: fp4 storage for the streamed operand with a per-block fp32 scale folded into the epilogue scale, activation operand kept at fp8, SUPER_M=8 / BM=128; nonkdim override only on the large grid; num_stages 1->2 only on the small-batch case.",
+      "stack": "total 42.2x isolated (weighted, director-verified) = four directions compounded, incremental in landing order\n  - 1. fp4 storage of the streamed weight operand — 39.95x cumulative (verified) — carries essentially the whole win by breaking the memory roof\n  - 2. wider-K scaled MFMA via nonkdim=16 on the large grid — 41.57x cumulative, ~+4% on top of (1)\n  - 3. num_stages 1->2, small-batch case only — 41.95x cumulative, ~+1% on top of (1,2)\n  - 4. XCD de-interleave for per-XCD single-expert L2 residency — 42.24x cumulative, ~+0.7% on top; a ceiling, not a lever\n  - note: attribution is incremental in landing order, not independent.",
+      "verify": "Re-time every variant against the same frozen baseline and check the parity gate (cosine) per case; confirm the low-precision storage flag actually engaged by watching the small-batch case move independently of the large ones, and confirm the wider-K shape only helps where the grid is well filled.",
+      "pitfall": "Cumulative best stalled while individual variants verified faster -> the pass script reported no improvement because the work tree was ignored and its diff came back empty -> rebuild the patch as a textual diff against the canonical source and refresh the recorded best by hand.",
+      "caution": "Also verify the scale operand vectorizes on your MFMA output layout before counting on the epilogue: with a 16x16x128 instruction the per-row scale multiply stays scalar, and reassociating that epilogue measured -2% to -23% here."
+    },
+    {
+      "name": "occupancy-pipeline-knobs-closed-when-dep-chain-bound",
+      "title": "occupancy-pipeline-knobs-closed-when-dep-chain-bound",
+      "description": "Anti-pattern: at occupancy 1 with a reused operand far larger than L2, occupancy, pipeline-depth and L2-swizzle knobs are all negative or ~1% ceilings.",
+      "keywords": [
+        "occupancy",
+        "software-pipelining",
+        "double-buffer",
+        "prefetch",
+        "num-stages",
+        "l2-residency",
+        "xcd-swizzle",
+        "dep-chain",
+        "moe",
+        "grouped-gemm"
+      ],
+      "kernels": [
+        "fused_moe_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "low-precision weight-streaming grouped GEMM sitting at occupancy 1 on gfx950, where the residual is an unpack-to-MFMA dependency chain rather than exposed load latency",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "Whole axis disconfirmed against a 42.2x incumbent: a genuine double-buffer of the streamed operand -14% (both larger-batch cases regressed per-case), a second occupancy wave -76%, sequential sub-tiling with operand reload -55%, pipeline depth 2 net-negative, and disabling the existing 1-deep prefetch -43%; the L2/XCD reorder that does help is a ~1% ceiling (+1.2% at mid batch, neutral at the largest, unchanged at the smallest).",
+      "attempts": 6,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "16h per-kernel time-budget campaign, lane chuschen16h, ledger dead_end / TRUE-NEG entries, 2026-08-11",
+      "last_seen": "2026-08-11",
+      "verified_on": "2026-08-11",
+      "lever": "Treat occupancy, pipeline depth and cache-residency hints as a single axis that is only worth a round while the kernel is single-wave latency-STALLED; spend the round elsewhere once a cheap probe says otherwise.",
+      "apply": "Cheap probe first: add one software double-buffer of the operand that is actually on the memory critical path. If it REGRESSES, the residual is a dependency chain plus reuse traffic, and no depth knob, extra wave or eviction hint reaches it — the extra buffer only adds register pressure.",
+      "verify": "Read the prefetch knob's own source before sweeping it: here the values were not a depth, only {on, off}, so three of five settings silently disabled a 1-deep buffer and looked like a depth regression. Re-time each setting against the frozen baseline per case.",
+      "pitfall": "A second occupancy wave passed the parity gate and still cost ~76% -> the reused operand set per compute unit doubled and is two orders of magnitude larger than L2, so the second wave only thrashed -> keep one wave and size tiles for reuse instead.",
+      "caution": "Also verify the reused operand set against L2 capacity before borrowing an eviction-policy or non-temporal lever from another op: when reuse far exceeds L2 the op is traffic-bound, not pollution-bound, and the hint has nothing to protect."
+    },
+    {
+      "name": "activation-operand-shrink-precision-floor",
+      "title": "activation-operand-shrink-precision-floor",
+      "description": "Anti-pattern: once weights are fp4, shrinking the activation operand is closed three ways — parity floor, no fp6 lowering, no outliers to protect.",
+      "keywords": [
+        "fp4",
+        "fp6",
+        "mixed-precision",
+        "parity-gate",
+        "outliers",
+        "activation-quant",
+        "dot-scaled",
+        "moe",
+        "grouped-gemm"
+      ],
+      "kernels": [
+        "fused_moe_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "shrinking the activation operand of an already-fp4-weight grouped GEMM on gfx950 under a cosine parity gate, Triton 3.6.0",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "Three disconfirmed sub-directions off a 42.2x incumbent, none landed: direct fp4 activations reach ~+13% (~45x cumulative, all cases) but sit at a cosine of 0.9883 against a 0.99 gate; fp6 activations do not compile or lower at all; outlier-preserving mixed precision tops out ~+5% at an unsafe error margin.",
+      "attempts": 3,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "16h per-kernel time-budget campaign, lane chuschen16h, ledger dead_end entries, 2026-08-11",
+      "last_seen": "2026-08-11",
+      "verified_on": "2026-08-11",
+      "lever": "Cache the shrunk-activation variant behind a flag and cost it against the parity gate rather than retiring it: it is a ~+13% option that re-opens the moment the gate loosens slightly or the real data grows per-channel outliers.",
+      "apply": "Measure the parity metric of the shrunk activation operand BEFORE writing the kernel variant: a pure numeric-floor check costs minutes, and it decided all three sub-directions here.",
+      "verify": "Check the frontend and the target actually lower the narrower format end to end; a format the language accepts in one place can still have no instruction lowering, which reads as a mysterious build failure rather than an unsupported feature.",
+      "pitfall": "An outlier-preserving mixed-precision split looked like free headroom -> the harness activations are i.i.d. Gaussian, so the max-abs channel is random and the split protects nothing -> check the operand's actual channel distribution before budgeting a round for it.",
+      "caution": "Also verify whether the narrow operand is consumed natively by the matrix instruction before proposing a cheaper unpack: consumed natively, there is no software unpack left to make cheaper, and the apparent lever does not exist."
+    }
+  ]
+}

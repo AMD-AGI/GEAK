@@ -1,13 +1,5 @@
 ---
-name: narrow-dtype-convert-and-divide-can-lower-to-emulation-censu-quantize-cast-gfx950-mixed
-description: Census the ISA for emulated narrow-dtype convert and divide in a quantize/cast kernel: 3.75x geomean, 4.76x/4.00x on the memory-bound streaming cases
-keywords: [fp8, dtype-dialect, isa-check, valu-emulation, quant, inline-asm, memory-bound, launch-bound]
-kernels: [_per_token_group_quant_fp8]
-platforms: [gfx950]
-kernel_class: quantize_cast
-regime: mixed
 key: fp32 -> fp8-fnuz store convert and per-group divide in a Triton per-token-group quantize/cast kernel on gfx950, one small launch-bound case and two large streaming cases
-lifecycle: active
 type: lever
 confidence: ★★
 effect: Full stack director-verified 3.75x geomean: 2.77x on the small launch-bound case, 4.76x and 4.00x on the two large memory-bound streaming cases. The two instruction-level fixes below carried the large cases: in-run the native fp8 emit alone measured 1.14x on the small case vs 3.11x / 3.29x on the large ones, and the amortized reciprocal plus pre-convert fixup added a further +21% geomean; VALU/wave 812 -> 159.
@@ -16,8 +8,15 @@ confirms_blind: 1
 losses: 0
 attempts: 6
 toolchain: rocm 7.2 / triton 3.6.0 / torch 2.11.0
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-10
+name: narrow-dtype-convert-and-divide-can-lower-to-emulation-censu-quantize-cast-gfx950-mixed
+description: Census the ISA for emulated narrow-dtype convert and divide in a quantize/cast kernel: 3.75x geomean, 4.76x/4.00x on the memory-bound streaming cases
+keywords: ['fp8', 'dtype-dialect', 'isa-check', 'valu-emulation', 'quant', 'inline-asm', 'memory-bound', 'launch-bound']
+kernels: ['_per_token_group_quant_fp8']
+platforms: ['gfx950']
+kernel_class: quantize_cast
+regime: mixed
+lifecycle: active
 ---
 # Narrow-dtype convert and divide can lower to emulation - census the ISA
 - lever: In a quantize/cast kernel, disassemble before trusting a profiler's VALU-per-element number: on this stack an fp32 -> fp8-fnuz store convert emits ~23 VALU/element of software emulation with zero convert instructions in the dump, and both `1.0/x` and libdevice rcp lower to the full IEEE divide expansion. Each of those steps has a native-instruction route.

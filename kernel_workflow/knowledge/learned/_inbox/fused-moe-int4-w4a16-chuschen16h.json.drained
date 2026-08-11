@@ -1,0 +1,138 @@
+{
+  "run_id": "fused_moe_int4_w4a16-chuschen16h",
+  "date": "2026-08-11",
+  "kernel_names": [
+    "fused_moe_int4_w4a16"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "kernel_class": "moe_grouped_gemm",
+  "gfx": "gfx950",
+  "regime": "both",
+  "cards": [
+    {
+      "name": "per-m-bucket-host-launch-config-int4-moe-gemm",
+      "title": "per-m-bucket-host-launch-config-int4-moe-gemm",
+      "description": "Per-M-bucket host launch-config retune on int4-weight MoE grouped GEMM: 3.33x isolated with the JIT body left byte-identical.",
+      "keywords": [
+        "moe-grouped-gemm",
+        "int4-dequant",
+        "w4a16",
+        "launch-config",
+        "host-tuning",
+        "per-m-bucket",
+        "block-size",
+        "group-size-m"
+      ],
+      "kernels": [
+        "fused_moe_int4_w4a16"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "int4-weight / 16-bit-activation fused-MoE grouped GEMM on gfx950, Triton — the win lives in the host wrapper's per-M-bucket launch config, not in the kernel body",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "3.33x cumulative isolated geomean vs frozen baseline, parity-clean on all 8 cases; per-case 2.58x on the small-M case and 3.68x / 3.89x on the two large-M cases; roofline fraction 0.26 -> 0.98 of its own ceiling, compute-bound both sides",
+      "attempts": 2,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "lever": "Retune the launch config per M-bucket in the host wrapper (block sizes, group-size-M, num_warps, num_stages) and leave the compiled body untouched; when the dequant inner loop is M-independent, one config per bucket captures most of the available win.",
+      "apply": "L2, wrapper-only: a config table keyed by M-bucket; two independent host patches stacked here without conflict, and the kernel source stayed byte-identical to the golden baseline.",
+      "stack": "total 3.33x from two non-overlapping host-side directions - 1. per-M-bucket launch-config retune, 3.26x standalone (carries essentially the whole win); 2. a second wrapper patch, +~2% on top of (1); attribution is incremental in landing order, not independent.",
+      "verify": "Frozen-baseline isolated A/B per case plus oracle parity on every case, then confirm the config actually engaged by diffing the emitted launch arguments - a host-only patch can silently no-op and still look neutral.",
+      "pitfall": "An inner de-interleave rewrite that removed the int4 K-reorder shuffle measured only ~1.03x -> it was mutually exclusive with the large-tile config that carried the win -> evaluate an algorithmic tweak jointly with the config winner, not against the untuned baseline.",
+      "caution": "Also verify the small-M case on its own: it settled on a different group-size-M from the two large cases, so a single global config understates the achievable win.",
+      "source": "16h per-kernel time-budget campaign, 49 resumed passes, run id in this proposal, 2026-08-11",
+      "last_seen": "2026-08-11",
+      "body": "- lever: retune the launch config per M-bucket in the host wrapper; leave the compiled body untouched\n- apply: wrapper-only config table keyed by M-bucket\n- verify: frozen-baseline isolated A/B per case + oracle parity + confirm the config engaged\n- pitfall: de-interleave rewrite ~1.03x and mutually exclusive with the large-tile config winner\n- caution: also verify the small-M case separately\n- source: 16h per-kernel time-budget campaign, 49 passes, 2026-08-11"
+    },
+    {
+      "name": "in-kernel-axes-closed-on-dequant-latency-bound-moe-gemm",
+      "title": "in-kernel-axes-closed-on-dequant-latency-bound-moe-gemm",
+      "description": "On a dequant-latency-bound int4 MoE grouped GEMM at the host-config optimum, seven in-kernel axes each re-measured as no-gain or a regression.",
+      "keywords": [
+        "moe-grouped-gemm",
+        "int4-dequant",
+        "anti-pattern",
+        "closed-axis",
+        "split-k",
+        "num-warps",
+        "matrix-instr-nonkdim",
+        "num-stages",
+        "cuda-graph"
+      ],
+      "kernels": [
+        "fused_moe_int4_w4a16"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "int4 W4A16 fused-MoE grouped GEMM on gfx950, Triton, at its host-config optimum — which in-kernel knob axes were already swept to exhaustion",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "seven axes disconfirmed against a 3.33x incumbent: MFMA nonkdim 32 regressed +18.4% / +1.2% / +1.7% across the three M-bucket cases and kpack 0/1/2 was inert; num_warps=4 up to 6.5x worse (fp32 accumulator spill); block-K 64 +12-58% every case; block-K>=256 or num_stages=3 aborted on LDS overflow for the two large cases; a bf16 dequant intermediate took the geomean 3.33x -> 2.95x; genuine split-K lost in every case; wrapper graph replay 0.985x",
+      "attempts": 9,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "lever": "Once the host-config optimum is in hand for this class, prefer spending the round on the operand/instruction-format axis over re-sweeping in-kernel knobs: nonkdim x kpack, block-K x num_stages, num_warps, split-K, a narrowed dequant intermediate dtype, lop3-style bit-trick dequant and graph capture were each re-measured here and none moved the incumbent.",
+      "apply": "Treat those axes as already-swept priors and re-open one only when something invalidates the measurement - a different tile, a non-fp32 accumulator, or a grid too small to fill the CUs.",
+      "verify": "The expected signature of a closed axis is an empty patch: cumulative geomean unchanged to four decimals across the whole direction, which reads as nothing-to-gain rather than measurement failure; every combination stayed bit-correct, so the loss is pure performance.",
+      "pitfall": "A 16x16 -> 32x32 MFMA tile win carried over from a different MoE-stage kernel class regressed here -> that op was issue-count bound and this one is dependency-latency bound -> check the bound class before transferring a tile-shape or wave-count result across kernel classes.",
+      "caution": "Also verify the grid is genuinely CU-saturating before treating split-K as closed - the negative here held at roughly 3072 tiles over 256 CUs, and a smaller grid would reopen it.",
+      "source": "16h per-kernel time-budget campaign, 49 resumed passes, 9 dead-end directions, 2026-08-11",
+      "last_seen": "2026-08-11",
+      "body": "- lever: at the host-config optimum, prefer the operand/instruction-format axis over re-sweeping in-kernel knobs\n- apply: treat nonkdim/kpack, block-K x num_stages, num_warps, split-K, dequant dtype, bit-trick dequant, graph capture as swept priors\n- verify: an empty patch (geomean unchanged to 4 decimals) is the closed-axis signature\n- pitfall: an MFMA tile win from another MoE-stage class regressed here (different bound class)\n- caution: also verify the grid is CU-saturating before treating split-K as closed\n- source: 16h per-kernel time-budget campaign, 9 dead-end directions, 2026-08-11"
+    },
+    {
+      "name": "count-vs-latency-bound-discriminator",
+      "title": "count-vs-latency-bound-discriminator",
+      "description": "Three cheap probes separate issue-throughput from dependency-latency/VGPR ceilings in a quantized-dequant GEMM inner loop before spending a round.",
+      "keywords": [
+        "instrument",
+        "roofline",
+        "valu-bound",
+        "dependency-latency",
+        "occupancy",
+        "launch-overhead",
+        "vgpr-pressure",
+        "int4-dequant"
+      ],
+      "kernels": [
+        "fused_moe_int4_w4a16"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "n/a",
+      "key": "distinguishing an issue-throughput ceiling from a dependency-latency / register-pressure ceiling in a quantized-dequant GEMM inner loop on gfx950",
+      "lifecycle": "active",
+      "type": "instrument",
+      "confidence": "★★",
+      "effect": "the discriminator fired on both large-M cases: VALU op count fell 1168 -> 1093 and converts 226 -> 98 in the bottleneck loop, yet latency rose +7% on both, small-M case neutral; the paired probes agreed - forcing occupancy 3 made the mid case ~4% worse, and graph replay came in at 0.985x with host enqueue under ~1/13 of per-call GPU time",
+      "attempts": 3,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "lever": "Before spending a round on reducing dequant instruction count, run the count-vs-latency pair: instruction counts on the bottleneck loop and the isolated latency together. Count down with latency up identifies a dependency-latency plus register-pressure ceiling, where any issue-count reduction is unlikely to pay.",
+      "apply": "Three L0/L1 probes - static VALU/convert counts from the compiled body, a forced-higher-occupancy build, and a host-enqueue vs GPU-time split taken from the wrapper.",
+      "verify": "Read them as ratios: the enqueue/GPU-time split settles the dispatch question, the forced-occupancy build settles register pressure, the instruction-count diff settles issue throughput; only if all three come back negative is the ceiling a latency wall.",
+      "pitfall": "A warm-up outlier on the first repeat of the largest case inflated run-to-run spread -> take the median of at least three full benchmark repeats and drop the first -> without that, a neutral direction reads as a win.",
+      "caution": "Also verify the counts came from the loop that dominates rather than the whole module - a module-wide count can fall while the bottleneck loop stays flat.",
+      "source": "16h per-kernel time-budget campaign, instruction-count and occupancy probes across 3 directions, 2026-08-11",
+      "last_seen": "2026-08-11",
+      "body": "- lever: run the count-vs-latency pair before optimizing dequant instruction count\n- apply: static VALU/convert counts, a forced-occupancy build, an enqueue-vs-GPU-time split\n- verify: read all three as ratios; all-negative means a latency wall\n- pitfall: warm-up outlier on the first repeat -> median of >=3 repeats, drop the first\n- caution: also verify the counts come from the dominant loop, not the whole module\n- source: 16h per-kernel time-budget campaign, 2026-08-11"
+    }
+  ]
+}

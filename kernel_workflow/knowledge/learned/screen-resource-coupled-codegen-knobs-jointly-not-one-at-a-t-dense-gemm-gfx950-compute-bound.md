@@ -1,13 +1,5 @@
 ---
-name: screen-resource-coupled-codegen-knobs-jointly-not-one-at-a-t-dense-gemm-gfx950-compute-bound
-description: Screen codegen knobs that share a hardware budget jointly: two each filed dead alone measured +8.9%/+5.8% together, carrying the round 2.98x -> 3.19x geomean
-keywords: [config-sweep, lds, vgpr, pipeline-stages, async-copy, tile-shape, occupancy, measurement-method, dense-gemm, compute-bound]
-kernels: [_gemm_a16_w16_kernel]
-platforms: [gfx950]
-kernel_class: dense_gemm
-regime: compute-bound
 key: one-at-a-time codegen knob sweeps on a Triton fp16 dense GEMM on gfx950 where async-copy staging depth and the K-tile spend the same LDS budget, large-M cases
-lifecycle: active
 type: method
 confidence: ★★
 effect: A pair of knobs each already filed as a dead end from single-knob screens (async-copy staging alone +0.7%/-1.6%; halving the K-tile alone -12.7%/-13.0%) measured +8.9%/+5.8% TOGETHER, carrying the round from 2.98x to 3.19x geomean (+7.2%, the largest in-language gain of the run) on the two large-M cases with the small-M case flat.
@@ -16,8 +8,15 @@ confirms_blind: 1
 losses: 0
 attempts: 5
 toolchain: rocm 7.2 / triton 3.6.0 / torch 2.11.0
-source: run kb_on_0810 2026-08-10
 last_seen: 2026-08-10
+name: screen-resource-coupled-codegen-knobs-jointly-not-one-at-a-t-dense-gemm-gfx950-compute-bound
+description: Screen codegen knobs that share a hardware budget jointly: two each filed dead alone measured +8.9%/+5.8% together, carrying the round 2.98x -> 3.19x geomean
+keywords: ['config-sweep', 'lds', 'vgpr', 'pipeline-stages', 'async-copy', 'tile-shape', 'occupancy', 'measurement-method', 'dense-gemm', 'compute-bound']
+kernels: ['_gemm_a16_w16_kernel']
+platforms: ['gfx950']
+kernel_class: dense_gemm
+regime: compute-bound
+lifecycle: active
 ---
 # Screen resource-coupled codegen knobs jointly, not one at a time
 - lever: Knobs that spend the SAME hardware budget (LDS bytes, VGPRs, pipeline stages) are not separable: one alone can only overspend or underuse the budget, so a one-at-a-time sweep reports both as losses. Re-screen the pairs that share a resource before declaring a knob dead.

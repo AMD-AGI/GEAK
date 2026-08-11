@@ -16,7 +16,6 @@ confirms_blind: 1
 losses: 0
 attempts: 4
 toolchain: triton 3.6.0 / torch 2.11.0+gitd0c8b1f / gfx950 CDNA4
-source: run kernel_20_geak_0808_4h 2026-08-10
 last_seen: 2026-08-10
 ---
 # on a latency-bound GEMM, source statement order is a tunable: resident loads to the head, streaming loads to the tail

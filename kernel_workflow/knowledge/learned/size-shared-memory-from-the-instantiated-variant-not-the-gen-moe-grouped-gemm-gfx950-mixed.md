@@ -1,13 +1,5 @@
 ---
-name: size-shared-memory-from-the-instantiated-variant-not-the-gen-moe-grouped-gemm-gfx950-mixed
-description: Size each shared-memory buffer from the instantiated template variant, not the generic max: 1.29x on an MoE grouped GEMM by doubling resident workgroups per CU
-keywords: [lds, occupancy, vgpr, moe, template-instantiation, isa-check, code-object, dead-allocation]
-kernels: [moe_stage1]
-platforms: [gfx950]
-kernel_class: moe_grouped_gemm
-regime: mixed
 key: dead shared-memory allocation from a generic shared-size helper in a CK/HIP templated fp8 block-scaled MoE stage-1 grouped GEMM on gfx950
-lifecycle: active
 type: lever
 confidence: ★★
 effect: director-verified 1.49x geomean end state; this lever ALONE measured 1.29x, per-case 1.21x at the smallest token count and 1.34x / 1.34x at the two large token counts (16x and 32x more tokens) - it doubled resident workgroups per CU (2 -> 4) with an unchanged instruction stream and bit-exact output, and it outweighed every tile and instance knob tried in the same round.
@@ -16,8 +8,15 @@ confirms_blind: 1
 losses: 0
 attempts: 3
 toolchain: rocm7.2 / torch2.11.0 / hip (CK C++ templates, JIT-compiled)
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-11
+name: size-shared-memory-from-the-instantiated-variant-not-the-gen-moe-grouped-gemm-gfx950-mixed
+description: Size each shared-memory buffer from the instantiated template variant, not the generic max: 1.29x on an MoE grouped GEMM by doubling resident workgroups per CU
+keywords: ['lds', 'occupancy', 'vgpr', 'moe', 'template-instantiation', 'isa-check', 'code-object', 'dead-allocation']
+kernels: ['moe_stage1']
+platforms: ['gfx950']
+kernel_class: moe_grouped_gemm
+regime: mixed
+lifecycle: active
 ---
 # Size shared memory from the instantiated variant, not the generic max
 - lever: In a templated GEMM / grouped-GEMM family, check that every shared-memory declaration is sized for the variant actually instantiated: the shared-size helper returns a generic max over all code paths (operand staging vs the epilogue's shuffle buffer), and a second ping-pong buffer often reuses that same max while only one term ever addresses it - so a template flag that zeroes a term (an operand preshuffled straight into registers, never staged) leaves a large dead allocation that halves resident workgroups per CU.

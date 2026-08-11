@@ -1,0 +1,139 @@
+{
+  "run_id": "fused_moe_kernel_gptq_awq-chuschen16h",
+  "date": "2026-08-11",
+  "kernel_names": [
+    "fused_moe_kernel_gptq_awq"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "int4-weight-moe-per-bucket-blockm-and-byte-once-dequant",
+      "title": "Per-bucket BLOCK_M plus byte-once dual-nibble int4 dequant on weight-quantized MoE GEMM",
+      "description": "Per-bucket BLOCK_M/num_warps plus byte-once dual-nibble int4 dequant lifts a weight-quantized MoE grouped GEMM ~4.6x, empirical roofline 0.10 to 0.60.",
+      "keywords": [
+        "moe",
+        "int4",
+        "weight-only-quant",
+        "grouped-gemm",
+        "block-m",
+        "num-warps",
+        "mfma-nonkdim",
+        "dequant",
+        "software-pipeline",
+        "gfx950"
+      ],
+      "kernels": [
+        "fused_moe_kernel_gptq_awq"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "int4 weight-only (GPTQ/AWQ-style) fused-MoE grouped GEMM on gfx950/CDNA4, Triton, batch-swept from single-token to large-batch",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "4.58x isolated geomean vs the frozen baseline, non-overlapping; per case batch-2 3.43x, batch-32 4.88x, batch-64 5.74x (best single pass 5.11x). Empirical roofline 0.10 -> 0.60, compute-bound throughout.",
+      "attempts": 6,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "16h single-kernel time-budget campaign, run id chuschen16h, 32 passes, 2026-08-11",
+      "last_seen": "2026-08-11",
+      "verified_on": "2026-08-11",
+      "lever": "Tune the tile/launch config PER BATCH BUCKET rather than once, and load each packed 4-bit weight byte once, extracting both nibbles with constant shifts held in registers.",
+      "apply": "Bucket the autotune space by M: small-M gets a small BLOCK_M with a no-prefetch JIT K-loop, large-M gets BLOCK_M 256/512 with num_warps 8 and matrix_instr_nonkdim=16; replace the two-load nibble path with one byte load + dual-nibble constant-shift extract interleaved over 32 rows; keep a hand-written register double-buffer as the pipeline.",
+      "stack": "total 4.58x isolated geomean (frozen baseline) = four directions compounded\n  - 1. byte-once dual-nibble int4 dequant + register interleave — 1.82x standalone (verified) — the largest single step\n  - 2. num_warps 4->8 + matrix_instr_nonkdim=16 — 2.23x cumulative on top of (1) (verified); num_warps 16 spills\n  - 3. per-bucket BLOCK_M enlargement (64 / 256 / 512) — 2.23x -> 4.00x cumulative (verified) — amortizes cross-tile weight re-dequant\n  - 4. small-M no-prefetch gate — 1.13x on top of (1-3), 1.46x on the batch-2 case only\n  - note: attribution is incremental in landing order, not independent",
+      "verify": "Re-time every bucket against the frozen baseline separately, not just the geomean: the small-batch bucket is dispatch/latency-bound at high occupancy and moves for different reasons than the register-tight large-M buckets, and a config that wins one can regress another.",
+      "pitfall": "The harness IMPROVED=false verdict was a false negative on rounds that actually won -> the marker/delta grep and the verified geomean disagreed -> confirm the edit landed in the source and judge the geomean against a ~1-2% run-to-run noise floor before discarding a round.\nWidening BLOCK_N instead of BLOCK_M regressed -> the accumulator register floor is set by the M extent -> sweep BLOCK_M per bucket and leave BLOCK_N alone unless a re-measure says otherwise.",
+      "caution": "Also verify that deferring the per-group weight scale out of the inner loop is numerically legal for your gate: with signed operands, deep K and a per-element relative-error bound, one cancellation element blew the tolerance by ~5 orders of magnitude even though the same deferral is fine on 8-bit siblings."
+    },
+    {
+      "name": "unified-vgpr-agpr-pool-occupancy-floor-cdna4",
+      "title": "Accumulator-set occupancy floor on a unified VGPR+AGPR pool closes the occupancy-escape lane",
+      "description": "On CDNA4 the VGPR and AGPR files share one budget, so a large fp32 accumulator pins occupancy at 2; four occupancy-escape rewrites all measured non-positive.",
+      "keywords": [
+        "occupancy",
+        "vgpr",
+        "agpr",
+        "accumulator",
+        "raw-hip",
+        "warp-specialization",
+        "register-pressure",
+        "moe",
+        "grouped-gemm",
+        "gfx950"
+      ],
+      "kernels": [
+        "fused_moe_kernel_gptq_awq"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "occupancy-2 register-tight int4 MoE grouped GEMM on gfx950/CDNA4 where the fp32 accumulator, not scheduling, sets the ceiling",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "0 of 4 occupancy-escape directions beat the frozen baseline on any case: AGPR-accumulator occ3 and warp-specialized dequant 0x (never reached a passing build/measurement), hand-written inline-asm inner GEMM 1.005x (inside the ~1-2% noise band), operand-staging-in-LDS for the batch-64 case 0x. The large-batch buckets sit at 186/204 registers with zero spill; occupancy 2 is arithmetic, not a tuning miss.",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "16h single-kernel time-budget campaign, run id chuschen16h, 32 passes, 2026-08-11",
+      "last_seen": "2026-08-11",
+      "verified_on": "2026-08-11",
+      "lever": "Before spending rounds on an occupancy escape, compute the floor: on this arch occupancy is 512/(ArchVGPR+AGPR) with the two files SUMMED, so an fp32 [BLOCK_M,64] MFMA accumulator costs 64 registers per lane in either file and the sum already decides the answer.",
+      "apply": "Read the register counts and spill count out of the compiled ISA for each bucket; if the accumulator alone puts the sum over the occupancy-3 threshold, the escape is arithmetically unavailable and the round is better spent on tile shape or data movement.",
+      "verify": "An escape claim is only real if the ISA shows the register total actually dropped below the next occupancy step AND the isolated A/B moves more than the noise band; a rewrite that lands at 1.005x has changed nothing.",
+      "pitfall": "A hand-written low-level rewrite of the inner GEMM looked like free headroom -> the compiler-scheduled version was already spill-free and software-pipelined at the same occupancy, so there was no register or scheduling slack to reclaim -> treat a zero-spill, already-pipelined inner loop as evidence against the rewrite lane rather than for it.",
+      "caution": "Also verify the pool semantics on YOUR arch before reusing this: the summed-file behaviour is what closes the lane here, and an arch with independent accumulator registers can still make the escape pay."
+    },
+    {
+      "name": "dequant-opcount-and-load-hints-off-the-occ2-critical-path",
+      "title": "At an occupancy floor, dequant op-count, load cache hints and auto-pipelining are all off the critical path",
+      "description": "On a register-tight int4 GEMM at occupancy 2, cheaper dequant math, load cache modifiers and compiler auto-pipelining all measured neutral to clearly negative.",
+      "keywords": [
+        "dequant",
+        "cache-modifier",
+        "num-stages",
+        "software-pipeline",
+        "lds",
+        "int4",
+        "grouped-gemm",
+        "noise-floor",
+        "gfx950"
+      ],
+      "kernels": [
+        "fused_moe_kernel_gptq_awq"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "micro-optimizing the dequant/load path of an occupancy-2 int4 weight-only GEMM on gfx950 that already carries a manual register pipeline",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "3 independent directions, none positive. Magic-number bit-cast dequant: bit-exact, ISA-confirmed conversion-op removal (17 -> 1 per loop body), yet 0.988x overall and 0.978x on the batch-2 case. Load cache modifier '.cg': 0.83x on batch-32 and 0.89x on batch-64. Compiler auto num_stages>=2: -15% to -36% at BLOCK_M 256/512, and num_stages=3 exceeds the LDS capacity outright.",
+      "attempts": 3,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "16h single-kernel time-budget campaign, run id chuschen16h, 32 passes, 2026-08-11",
+      "last_seen": "2026-08-11",
+      "verified_on": "2026-08-11",
+      "lever": "Treat the dequant ALU chain as already overlapped once the loop is at its occupancy floor: the scalar work hides under the matrix pipeline, so removing conversion instructions buys nothing and the payoff sits in tile shape and reuse instead.",
+      "apply": "If the loop already carries a hand-written register double-buffer, leave the compiler's auto-staging at its default: layering an explicit stage count on top either does nothing (default), only disables the automatic staging (one stage, noise-level), or multi-buffers operands through LDS and regresses. Default L1 caching of the read-once streamed quantized weight is the fast setting.",
+      "verify": "Confirm the edit actually reached the machine code before believing a null: the cache-modifier lane was only trustworthy because the '.cg' variant regressed measurably, which proves the hint landed; a flat result with no ISA delta is an un-applied patch, not a negative.",
+      "pitfall": "A ~0.6% gain on one bucket looked like a win -> the per-bucket spread across repeat launches is wider than that -> re-run the A/B and treat anything inside a ~1-2% band as noise rather than banking it.",
+      "caution": "Also verify this on your own occupancy: the finding is conditioned on being register-pinned with the accumulator near the ceiling, and on a loop that is not accumulator-limited the same dequant and staging levers can still pay."
+    }
+  ]
+}

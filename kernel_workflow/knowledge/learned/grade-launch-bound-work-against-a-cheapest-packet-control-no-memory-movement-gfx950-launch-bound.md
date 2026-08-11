@@ -1,13 +1,5 @@
 ---
-name: grade-launch-bound-work-against-a-cheapest-packet-control-no-memory-movement-gfx950-launch-bound
-description: Grade launch-bound work against a cheapest-packet control, not the baseline: called the graded outcome 3/3 times on a dispatch-floor-bound copy kernel
-keywords: [launch-overhead, dispatch-floor, control-experiment, measurement-method, launch-bound, interleaved-ab]
-kernels: [write_req_to_token_pool_triton]
-platforms: [gfx950]
-kernel_class: memory_movement
-regime: launch-bound
 key: scoring single-dispatch launch-bound work on a paged-KV copy kernel timed by an event-pair harness, gfx950 - reading the harness floor as the real ceiling
-lifecycle: active
 type: method
 confidence: ★★
 effect: Called the graded outcome 3/3 times: an empty kernel measured 1.17x the real one's time before the host path was collapsed and matched it to within ~1% after, after which a 21% cut in GPU time and a further host-enqueue cut each moved the metric by exactly 0.00x. Converged case spread ~1.5% across a 32x range in batch size, and the derived ceiling (2.463x) sat 2.8% above the shipped 2.39x.
@@ -16,8 +8,15 @@ confirms_blind: 1
 losses: 1
 attempts: 4
 toolchain: rocm7.2 / triton3.6.0 / torch2.11
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-10
+name: grade-launch-bound-work-against-a-cheapest-packet-control-no-memory-movement-gfx950-launch-bound
+description: Grade launch-bound work against a cheapest-packet control, not the baseline: called the graded outcome 3/3 times on a dispatch-floor-bound copy kernel
+keywords: ['launch-overhead', 'dispatch-floor', 'control-experiment', 'measurement-method', 'launch-bound', 'interleaved-ab']
+kernels: ['write_req_to_token_pool_triton']
+platforms: ['gfx950']
+kernel_class: memory_movement
+regime: launch-bound
+lifecycle: active
 ---
 # Grade launch-bound work against a cheapest-packet control, not the baseline
 - lever: On a harness that records a timing-event pair around every iteration, the reported number is a difference of two GPU timestamps, so it behaves like max(host_enqueue, gpu_time) plus a fixed floor rather than their sum. Measure that floor early with an empty kernel and with the cheapest legal packet, and read baseline/floor as the ceiling for any single-dispatch implementation.

@@ -1,13 +1,5 @@
 ---
-name: price-a-memory-bound-round-against-a-standalone-ruler-re-mea-linear-attention-gfx950-mixed
-description: Price a memory-bound round against a standalone ruler at the kernel's exact read+write byte count: re-priced 1.4x of funded headroom to a measured 1.18x
-keywords: [roofline, measurement-method, memory-bound, control-experiment, dispatch-floor, interleaved-ab, linear-attention]
-kernels: [chunk_scaled_dot_kkt_fwd_kernel]
-platforms: [gfx950]
-kernel_class: linear_attention
-regime: mixed
 key: roofline denominators for a chunked linear-attention (delta-rule / KKT) kernel on gfx950, store-dominated large-batch case
-lifecycle: active
 type: method
 confidence: ★★
 effect: Instrument, not a speedup: end state director-verified 25.55x geomean (3.21x on the smallest batch case, 47.2x and 110.2x on the two larger). Its value showed on the largest, store-dominated case, where a freshly built ruler re-priced remaining headroom from a funded 1.4x to a measured 1.18x (that case sat at 85% of its own achievable roofline) and the structural round it graded returned +2.3% interleaved-A/B. A carried absolute-bandwidth figure had inflated three rounds of roofline percentages by ~20%, and a flat-fill ruler read 33% off the mixed read+write ruler at the same byte count.
@@ -16,8 +8,15 @@ confirms_blind: 0
 losses: 0
 attempts: 6
 toolchain: rocm 7.2.3 / triton 3.6.0 / torch 2.11.0
-source: run kb_on_0810 2026-08-10
 last_seen: 2026-08-10
+name: price-a-memory-bound-round-against-a-standalone-ruler-re-mea-linear-attention-gfx950-mixed
+description: Price a memory-bound round against a standalone ruler at the kernel's exact read+write byte count: re-priced 1.4x of funded headroom to a measured 1.18x
+keywords: ['roofline', 'measurement-method', 'memory-bound', 'control-experiment', 'dispatch-floor', 'interleaved-ab', 'linear-attention']
+kernels: ['chunk_scaled_dot_kkt_fwd_kernel']
+platforms: ['gfx950']
+kernel_class: linear_attention
+regime: mixed
+lifecycle: active
 ---
 # Price a memory-bound round against a standalone ruler re-measured at the kernel's exact mixed read+write byte count
 - lever: Before funding a structural memory round, spend an hour on a standalone ~60-line kernel that reproduces this kernel's grid, addressing and EXACT traffic (bytes read at the read dtype + bytes written at the write dtype), and use it — not a carried absolute-bandwidth number and not a flat fill — as the denominator for every expected_speedup in the plan.

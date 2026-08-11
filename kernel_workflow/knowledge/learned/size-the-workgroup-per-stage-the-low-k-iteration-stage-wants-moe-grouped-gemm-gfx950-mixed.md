@@ -16,7 +16,6 @@ confirms_blind: 1
 losses: 0
 attempts: 12
 toolchain: rocm7.2.3 / torch2.11.0 / hip-ck-codegen
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-08
 ---
 # Size the workgroup per stage: the low-K-iteration stage wants fatter waves

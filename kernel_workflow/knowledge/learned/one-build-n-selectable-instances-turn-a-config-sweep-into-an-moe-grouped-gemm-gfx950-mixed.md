@@ -1,13 +1,5 @@
 ---
-name: one-build-n-selectable-instances-turn-a-config-sweep-into-an-moe-grouped-gemm-gfx950-mixed
-description: Register N candidate instances in one build and pick by env var: a 7-config sweep fits in one round and found the run's largest lever (up to +11.4%)
-keywords: [config-sweep, env-switch, build-cost, measurement-method, interleaved-ab, moe, workgroup-size]
-kernels: [moe_gemm_fp8_blockscale]
-platforms: [gfx950]
-kernel_class: moe_grouped_gemm
-regime: mixed
 key: sweeping instance configs of a templated/codegen fp8 block-scaled MoE grouped GEMM (hip-ck codegen) on gfx950 without paying one build per config
-lifecycle: active
 type: method
 confidence: ★★
 effect: Three separate multi-config instance sweeps returned nothing across three rounds while paying one build per config; registering candidates additively in one module made a 7-config sweep fit inside a single round, and that sweep found the run's largest lever (+5.4 / +10.8 / +11.4% on the three scored batch sizes; whole-stack director-verified 1.22-1.29x per case). Incremental rebuild ~8x cheaper.
@@ -16,8 +8,15 @@ confirms_blind: 1
 losses: 0
 attempts: 6
 toolchain: rocm7.2.3 / torch2.11.0 / hip-ck-codegen
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-08
+name: one-build-n-selectable-instances-turn-a-config-sweep-into-an-moe-grouped-gemm-gfx950-mixed
+description: Register N candidate instances in one build and pick by env var: a 7-config sweep fits in one round and found the run's largest lever (up to +11.4%)
+keywords: ['config-sweep', 'env-switch', 'build-cost', 'measurement-method', 'interleaved-ab', 'moe', 'workgroup-size']
+kernels: ['moe_gemm_fp8_blockscale']
+platforms: ['gfx950']
+kernel_class: moe_grouped_gemm
+regime: mixed
+lifecycle: archived
 ---
 # One build, N selectable instances: turn a config sweep into an env switch
 - lever: For a codegen or templated kernel family, candidate instances are additive inside ONE compiled module: register N of them and pick one at runtime from an env var, so an N-config sweep costs one build and every comparison becomes a paired A/B inside a single binary.

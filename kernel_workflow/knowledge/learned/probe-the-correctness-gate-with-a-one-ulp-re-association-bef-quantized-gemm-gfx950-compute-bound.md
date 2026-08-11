@@ -1,13 +1,5 @@
 ---
-name: probe-the-correctness-gate-with-a-one-ulp-re-association-bef-quantized-gemm-gfx950-compute-bound
-description: Probe the correctness gate with a one-ulp re-association before funding any reduction-reordering lane: it retired four rounds aimed at a ~1.6x roof
-keywords: [correctness-gate, measurement-method, dtype-dialect, mfma, quantized-gemm, roofline, control-experiment]
-kernels: [_gemm_a8w8_blockscale_kernel, _w8a8_triton_block_scaled_mm]
-platforms: [gfx950]
-kernel_class: quantized_gemm
-regime: compute-bound
 key: whether a tight max_rel correctness gate admits a reordered reduction on a block-scaled quantized GEMM (Triton) on gfx950, largest shape
-lifecycle: active
 type: method
 confidence: ★★
 effect: No speedup -- it retires lanes. A one-ulp scalar re-association of a rescale term measured max_rel 0.545 against a <1e-2 bar on the largest shape; four rounds of briefs were nevertheless aimed at a native low-precision matrix-core path whose nominal prize was ~1.6x the achievable roof, and when finally probed it produced 100% NaN from quantizer saturation, then cos=0.999555 / max_rel=1.5e5 with saturation patched, then a reduction 412x less accurate than the wider-dot path against an fp64 reference with saturation removed by construction.
@@ -16,8 +8,15 @@ confirms_blind: 0
 losses: 0
 attempts: 4
 toolchain: triton 3.6.0 / torch 2.11.0 / gfx950 CDNA4
-source: run kb_on_0810 2026-08-11
 last_seen: 2026-08-11
+name: probe-the-correctness-gate-with-a-one-ulp-re-association-bef-quantized-gemm-gfx950-compute-bound
+description: Probe the correctness gate with a one-ulp re-association before funding any reduction-reordering lane: it retired four rounds aimed at a ~1.6x roof
+keywords: ['correctness-gate', 'measurement-method', 'dtype-dialect', 'mfma', 'quantized-gemm', 'roofline', 'control-experiment']
+kernels: ['_gemm_a8w8_blockscale_kernel', '_w8a8_triton_block_scaled_mm']
+platforms: ['gfx950']
+kernel_class: quantized_gemm
+regime: compute-bound
+lifecycle: active
 ---
 # Probe the correctness gate with a one-ulp re-association before funding any lane that reorders the reduction
 - lever: When the harness scores correctness with a tight max_rel or bitwise comparison, treat 'does this gate admit a different summation order' as a measurable precondition, not an assumption: any lane that changes the reduction (a narrower matrix-core dtype, split-K or stream-K, atomics, algebraic re-association of a scale) is only worth funding if the gate tolerates reorder at all.

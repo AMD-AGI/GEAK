@@ -1,0 +1,132 @@
+{
+  "run_id": "wvSplitK-chuschen16h",
+  "date": "2026-08-11",
+  "kernel_names": [
+    "wvSplitK"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "dispatch-floor-hides-gpu-wins",
+      "description": "On tiny skinny-GEMV decode ops the host dispatch floor sits above GPU time: a correct 1.61x GPU-side roofline rewrite moved the scored wall 1.02x.",
+      "keywords": [
+        "launch-overhead",
+        "dispatch-floor",
+        "skinny-m",
+        "gemv",
+        "decode",
+        "roofline",
+        "memory-latency"
+      ],
+      "kernels": [
+        "wvSplitK"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "dense_gemm",
+      "regime": "decode",
+      "key": "tiny skinny-GEMV / thin dense linear on gfx950 whose per-call wall time is dominated by the torch->hipLaunchKernel + event dispatch path rather than by the device kernel",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "GPU-side rewrite verified 1.61x device time and effective bandwidth ~11%->~17% of peak, yet same-session wall A/B 1.018x; per-case wall unchanged at batch 2/32/64 (all three cases inside +-3-4% clock noise). Three further device axes (split-K CU-fill, grid-trim, occupancy-2 via LDS shrink) each measured 1.00x.",
+      "attempts": 5,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "chuschen 16h per-kernel time-budget campaign, 18 passes, 2026-08-11",
+      "last_seen": "2026-08-11",
+      "verified_on": "2026-08-11",
+      "title": "Device-side wins are invisible under a host dispatch floor",
+      "lever": "before spending rounds on device rewrites for a sub-dispatch-scale op, measure device kernel time against the scored wall; when the wall floor is above device time the profitable axes are host-side, and device axes are worth a cheap probe at most.",
+      "apply": "read the device duration from the profiler dispatch record and compare it with the harness wall per call; the gap is the floor. If device < wall, target the host path (allocation reuse, lookup caching) instead of occupancy/CU-fill.",
+      "verify": "same-session interleaved A/B of the device patch against the seed on the scored wall metric, not on profiled device time; a device-only improvement with a flat wall confirms the floor.",
+      "pitfall": "occupancy work looked mandatory from the profile -> the grid launches one block per CU but only ~16 blocks do work, so a freed occupancy slot is filled by an exit-immediately block -> LDS shrink and forced occupancy-2 both engaged (confirmed in the ELF group segment size) and both measured 1.00x or worse from register spill.",
+      "caution": "also verify whether the shape regime is genuinely below the floor: the same class at larger batch can climb above it, at which point the device axes reopen.",
+      "cost": "L3"
+    },
+    {
+      "name": "single-kernel-graph-capture-regresses-tiny-ops",
+      "description": "Graph-capturing one tiny kernel to beat the launch floor: replay measured ~2x slower than eager, and the signature-cache wrapper alone nets 0.88-0.96x.",
+      "keywords": [
+        "hip-graph",
+        "launch-overhead",
+        "dispatch-floor",
+        "decode",
+        "skinny-m",
+        "host-runtime"
+      ],
+      "kernels": [
+        "wvSplitK"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "dense_gemm",
+      "regime": "decode",
+      "key": "graph capture/replay as a launch-overhead lever for a single-kernel dense linear op on gfx950 ROCm, where one launch is the whole workload",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "replay ~2x slower than eager, robust across 3 signatures x 3 repeats; the wrapper's own signature cache costs ~0.9-1.0x of a launch on the host critical path so even the eager-fallback wrapper nets 0.88-0.96x per-case (batch 2 0.88x, batch 32 0.91x, batch 64 0.96x). Captured output passed parity, so the loss is timing, not capture.",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 1,
+      "source": "chuschen 16h per-kernel time-budget campaign, 18 passes, 2026-08-11",
+      "last_seen": "2026-08-11",
+      "verified_on": "2026-08-11",
+      "title": "Graph replay of a one-kernel graph can cost more than the launch it replaces",
+      "lever": "treat graph capture as a candidate for multi-kernel sequences; for a single-launch op, price the replay path against eager in the same session before investing a round in wiring it.",
+      "apply": "capture the one launch, then A/B replay vs eager inside the same wrapper, with the timing region placed exactly where the harness places it (all wrapper Python is inside it).",
+      "verify": "interleave replay and eager in one process across every input signature; a robust ratio across repeats separates a real ordering from clock drift.",
+      "pitfall": "the wrapper added to dispatch the graph became the regression itself -> a per-call pointer/shape/dtype signature tuple plus closure dispatch runs inside the timed region -> even the eager fallback path lost to the unwrapped baseline, so the graph experiment cannot be read without measuring the empty wrapper first.",
+      "caution": "also verify the kernel count under capture: the conclusion is about a one-launch graph, and a sequence amortising several launches per replay is a different measurement worth taking.",
+      "cost": "L2"
+    },
+    {
+      "name": "host-hit-path-cache-then-floor",
+      "description": "Allocation reuse plus a lock-free last-hit shortcut was the only paying lever on a dispatch-floored dense linear; further host trimming measured zero.",
+      "keywords": [
+        "host-runtime",
+        "launch-overhead",
+        "dispatch-floor",
+        "caching",
+        "decode",
+        "skinny-m",
+        "measurement-drift"
+      ],
+      "kernels": [
+        "wvSplitK"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "dense_gemm",
+      "regime": "decode",
+      "key": "host binding hit path (allocation reuse + lookup shortcut) for a repeatedly called thin dense linear on gfx950, where the device kernel is untouched",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.08-1.10x attributable on same-session A/B, collapsing ~45% of the per-call host work; per-case cumulative vs the frozen baseline 1.27x / 1.34x / 1.32x at batch 2 / 32 / 64. The follow-on trim of redundant validation on the same hit path measured 1.00x (+-3-4%, inside noise), so the host axis closes after the cache.",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 1,
+      "source": "chuschen 16h per-kernel time-budget campaign, 18 passes, 2026-08-11",
+      "last_seen": "2026-08-11",
+      "verified_on": "2026-08-11",
+      "title": "Cache the host hit path first; the rest of the host path is floor",
+      "lever": "on a repeatedly called small op, reuse the output/workspace allocation and shortcut the config lookup with a lock-free thread-local last-hit slot before touching the device kernel.",
+      "apply": "in the C++ binding, keep the previous key and dispatch target in thread-local storage and skip the mutex plus table scan on a repeat hit; confirm the device side is untouched (dispatch count per call stays 1).",
+      "verify": "same-session interleaved A/B against the seed across every case, repeated enough to see the within-config spread; only credit a delta that survives interleaving.",
+      "pitfall": "the cumulative number jumped 1.10x -> 1.31x with no new patch -> the box was simply running faster than when the baseline snapshot was taken -> re-measured the cache-only path in the same session and credited the ~1.08-1.10x, keeping the drifted figure out of the attribution.",
+      "caution": "also verify the residual host work is really below the launch/enqueue floor before booking another host round: here integer-compare trimming on the same path was correct and measured zero.",
+      "cost": "L2"
+    }
+  ]
+}

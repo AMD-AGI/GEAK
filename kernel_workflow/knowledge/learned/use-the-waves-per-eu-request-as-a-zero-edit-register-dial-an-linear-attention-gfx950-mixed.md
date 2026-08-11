@@ -1,13 +1,5 @@
 ---
-name: use-the-waves-per-eu-request-as-a-zero-edit-register-dial-an-linear-attention-gfx950-mixed
-description: Sweep waves-per-EU as a zero-edit register dial on linear attention: falsified a funded occupancy direction fast, then shipped as a +2% pin after a rewrite
-keywords: [waves-per-eu, vgpr, occupancy, isa-check, config-sweep, linear-attention, measurement-method]
-kernels: [chunk_scaled_dot_kkt_fwd_kernel]
-platforms: [gfx950]
-kernel_class: linear_attention
-regime: mixed
 key: register/occupancy dialing via the waves-per-EU compile request on a chunked linear-attention (delta-rule / KKT) kernel on gfx950, all batch cases
-lifecycle: active
 type: lever
 confidence: ★★
 effect: As a probe it is free and decisive: requesting 4/5/6/8 waves moved the compiled register budget deterministically (128/96/80/64) with no source change, and in a few minutes falsified an occupancy hypothesis that had been funded as a whole direction (the wider-warp form crossed the register threshold cleanly with zero spills and was still 9.7% slower on the largest case, 14% on the mid case). As a shipping value it flipped: retired as probe-only on one code shape, it became the elected pin (+2%) on the restructured shape in a later round. End state director-verified 25.55x geomean (3.21x / 47.2x / 110.2x from smallest to largest batch case).
@@ -16,8 +8,15 @@ confirms_blind: 1
 losses: 0
 attempts: 4
 toolchain: rocm 7.2.3 / triton 3.6.0 / torch 2.11.0
-source: run kb_on_0810 2026-08-10
 last_seen: 2026-08-10
+name: use-the-waves-per-eu-request-as-a-zero-edit-register-dial-an-linear-attention-gfx950-mixed
+description: Sweep waves-per-EU as a zero-edit register dial on linear attention: falsified a funded occupancy direction fast, then shipped as a +2% pin after a rewrite
+keywords: ['waves-per-eu', 'vgpr', 'occupancy', 'isa-check', 'config-sweep', 'linear-attention', 'measurement-method']
+kernels: ['chunk_scaled_dot_kkt_fwd_kernel']
+platforms: ['gfx950']
+kernel_class: linear_attention
+regime: mixed
+lifecycle: active
 ---
 # Use the waves-per-EU request as a zero-edit register dial, and re-run the ladder after every structural edit
 - lever: Before funding a body rewrite whose goal is to save registers, sweep the waves-per-EU request as a compile-time dial and read the resulting register/spill counts and times; and treat any occupancy verdict as scoped to the code shape it was measured on, re-running the same short ladder after each structural edit.

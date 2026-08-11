@@ -16,7 +16,6 @@ confirms_blind: 1
 losses: 0
 attempts: 5
 toolchain: rocm7.2.3 / triton3.6.0 / torch2.11.0
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-08
 ---
 # Return the tile loop to the backend async-copy pipeliner

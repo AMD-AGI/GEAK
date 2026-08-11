@@ -1,13 +1,5 @@
 ---
-name: the-generic-triton-launch-path-is-not-the-floor-when-the-sma-quantize-cast-gfx950-mixed
-description: Memoize the compiled kernel and call its low-level entry directly on a launch-bound quant/cast shape: 2.77x there, ~1.0x once the case is bandwidth-bound
-keywords: [launch-overhead, dispatch-floor, measurement-method, launch-bound, kernel-cache, quant]
-kernels: [_per_token_group_quant_fp8]
-platforms: [gfx950]
-kernel_class: quantize_cast
-regime: mixed
 key: per-token quantize/cast on gfx950 driven through the generic Triton Python launch path, where the small shape is host-launch-bound and the large ones are bandwidth-bound
-lifecycle: active
 type: lever
 confidence: ★★
 effect: Director-verified per-case: 2.77x on the small launch-bound case vs 4.76x and 4.00x on the two large memory-bound cases (3.75x geomean). The launch-path work is what moved the small case - in-run it went 1.15x -> 2.76x while the two large cases did not move at all, so expect ~1.0x wherever the kernel is already bandwidth-bound. Host CPU per call fell 3.0x, from ~2.7x the kernel's own device time down to ~0.9x it.
@@ -16,8 +8,15 @@ confirms_blind: 1
 losses: 0
 attempts: 5
 toolchain: rocm 7.2 / triton 3.6.0 / torch 2.11.0
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-10
+name: the-generic-triton-launch-path-is-not-the-floor-when-the-sma-quantize-cast-gfx950-mixed
+description: Memoize the compiled kernel and call its low-level entry directly on a launch-bound quant/cast shape: 2.77x there, ~1.0x once the case is bandwidth-bound
+keywords: ['launch-overhead', 'dispatch-floor', 'measurement-method', 'launch-bound', 'kernel-cache', 'quant']
+kernels: ['_per_token_group_quant_fp8']
+platforms: ['gfx950']
+kernel_class: quantize_cast
+regime: mixed
+lifecycle: active
 ---
 # The generic Triton launch path is not the floor when the small case is launch-bound
 - lever: When the small-shape case is launch-bound (host time per call at or above kernel time per call), the generic Python launch path is skippable rather than a floor: the compilation key is constant per shape class, so memoize the CompiledKernel and call its low-level entry directly instead of walking the JIT wrapper's specialization each call.

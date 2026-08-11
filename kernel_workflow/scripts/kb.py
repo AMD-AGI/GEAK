@@ -181,6 +181,15 @@ def lint_card(card, kernel_names=(), strict_source=True):
     """Return a list of rejection reasons; empty == accepted."""
     errs = []
     text = "\n".join(str(card.get(f, "")) for f in CARD_BODY_FIELDS)
+    # `source` is PROVENANCE, and provenance is exempt from the class-level rule below. Those two
+    # requirements contradict each other otherwise, and it is not hypothetical: a campaign whose run
+    # ids are named after their kernel ("_fwd_grouped_kernel_stage1-chuschen16h") cannot satisfy both
+    # "every claim needs a run id" and "never name a kernel". Hit on the first real bulk import; the
+    # curator complied by de-identifying `source`, which destroyed exactly the run id the other rule
+    # demands. A kernel symbol in the LEVER is memorising a run; a kernel symbol in the CITATION is
+    # what makes the claim checkable.
+    principle_text = "\n".join(str(card.get(f, ""))
+                               for f in CARD_BODY_FIELDS if f != "source")
 
     for pat, what in LEAK_PATTERNS:
         m = re.search(pat, text, re.I)
@@ -188,7 +197,7 @@ def lint_card(card, kernel_names=(), strict_source=True):
             errs.append(f"leaks an instance identifier ({what}): {m.group(0)!r}")
     # The most direct leak, and the one a well-meaning curator writes without noticing.
     for kn in kernel_names:
-        if kn and len(kn) > 4 and re.search(re.escape(kn), text, re.I):
+        if kn and len(kn) > 4 and re.search(re.escape(kn), principle_text, re.I):
             errs.append(f"names a specific kernel ({kn!r}); keys and bodies must be class level")
     for pat, what in MANDATE_PATTERNS:
         m = re.search(pat, text, re.I)
@@ -237,6 +246,13 @@ def lint_card(card, kernel_names=(), strict_source=True):
         errs.append(f"key {key!r} is a bare class·gfx·regime triple — the header already carries "
                     f"those; write what a person would say (op, arch, framework, dtype, regime)")
 
+    # "None" is not a title, it is `str(None)`. Checking only for emptiness misses the way this
+    # actually fails: an absent key reaches slugify() and the card lands on disk as `none-<scope>.md`
+    # with an H1 reading "# None" — non-empty, so a truthiness check waves it through. Two cards did
+    # exactly that on the first real bulk import.
+    if str(card.get("title", "")).strip().lower() in ("", "none", "null", "n/a"):
+        errs.append(f"no usable title ({card.get('title')!r}): it becomes the card's H1 and its "
+                    f"filename slug, and an absent one is written out as 'none-<scope>.md'")
     if strict_source and not str(card.get("source", "")).strip():
         errs.append("no source: every claim needs a run id + date")
     if not str(card.get("effect", "")).strip():
@@ -424,7 +440,11 @@ def cmd_lint(kb, a):
         # the reader that filters on active never sees it and reports a clean tree.
         for c in all_cards(kb, include_archived=True):
             card = dict(c["meta"])
-            card["title"] = os.path.basename(c["path"])
+            # Take the title from the body's H1, which is where it actually lives — NOT from the
+            # filename. Substituting the filename here made "this card has no title" unobservable to
+            # the only check that would report it, and two cards reached disk named `none-*.md`.
+            h1 = re.search(r"^#\s+(.+)$", c["body"], re.M)
+            card["title"] = h1.group(1).strip() if h1 else ""
             for f in ("lever", "apply", "verify", "caution", "source"):
                 m = re.search(rf"^- {f}:\s*(.*?)(?=\n- \w+:|\Z)", c["body"], re.S | re.M)
                 if m:
@@ -641,7 +661,13 @@ def cmd_drain(kb, a):
     merged, inserted, rejected, demoted = [], [], [], []
 
     for fname, prop, _ in proposals:
-        key = make_key(prop.get("kernel_class") or prop.get("operator"),
+        # FALLBACK only. `key` belongs to the card and is plain English by design; deriving a
+        # class·gfx·regime triple here and writing it over the curator's line destroyed exactly what
+        # the schema asks for — and the lint, which rejects bare triples, then failed all 58 cards
+        # `drain` had just written. Seen on the first real bulk import through this path. The triple
+        # still earns its keep as the eviction bucket (from the header fields) and as a filename
+        # slug when a card supplies no key of its own.
+        fallback_key = make_key(prop.get("kernel_class") or prop.get("operator"),
                        prop.get("gfx") or prop.get("device"), prop.get("regime"), "")
         names = prop.get("kernel_names") or ([prop["kernel_name"]] if prop.get("kernel_name") else [])
 
@@ -652,11 +678,23 @@ def cmd_drain(kb, a):
                 rejected.append({"run": prop.get("run_id"), "title": card.get("title"),
                                  "reasons": errs})
                 continue
-            fn = f"{slugify(card.get('title'))}-{slugify(key)}.md"
+            key = str(card.get("key", "")).strip() or fallback_key
+            fn_scope = "-".join(x for x in [card.get("kernel_class", ""),
+                                            "-".join(card.get("platforms") or []),
+                                            card.get("regime", "")] if x)
+            fn = f"{slugify(card.get('title'))}-{slugify(fn_scope or key)}.md"
             blind = 1 if card.get("blind") else 0
             cited = 0 if card.get("blind") else 1
             if fn in cards:
                 m = cards[fn]["meta"]
+                # A merge refreshes the header too: a card whose description still describes the
+                # first run it came from is a stale index line, and the index line is the read path.
+                for hf in ("description", "kernel_class", "regime"):
+                    if card.get(hf):
+                        m[hf] = card[hf]
+                for lf in ("keywords", "kernels", "platforms"):
+                    if card.get(lf):
+                        m[lf] = sorted(set(list(m.get(lf) or []) + list(card[lf])))
                 m["confirms_cited"] = int(m.get("confirms_cited", 0)) + cited
                 m["confirms_blind"] = int(m.get("confirms_blind", 0)) + blind
                 m["attempts"] = int(m.get("attempts", 0)) + int(card.get("attempts", 1))
@@ -672,14 +710,40 @@ def cmd_drain(kb, a):
                     rejected.append({"run": prop.get("run_id"), "title": card.get("title"),
                                      "reasons": ["INSERT requires >=★★ (merge-only at ★)"]})
                     continue
-                meta = {"key": key, "type": card.get("type", "lever"),
-                        "confidence": card.get("confidence"), "effect": card.get("effect"),
-                        "confirms_cited": cited, "confirms_blind": blind, "losses": 0,
-                        "attempts": int(card.get("attempts", 1)),
-                        "toolchain": prop.get("toolchain", "unknown"),
-                        "last_seen": prop.get("date", str(date.today()))}
+                # Carry the DISCOVERY HEADER through. This list used to stop at `key` and the
+                # counters, which predates the header — so `drain` wrote cards with no `description`,
+                # no `keywords`, no `kernel_class`, and three things broke at once, none loudly:
+                # the generated index rendered them as "(no description)" under a group called
+                # `other`; the per-class budget saw every card in ONE bucket and evicted 50 of 60 to
+                # a cap meant for one class; and `lint --cards` then failed the very cards `drain`
+                # had just written. The bulk-import path was producing cards that violate the schema
+                # it enforces, and it went unnoticed because the first 87 cards were placed by hand.
+                # If a field is part of the header, it belongs here — not in a list to keep in sync.
+                meta = {
+                    "name": fn[:-3],
+                    "description": card.get("description", ""),
+                    "keywords": card.get("keywords", []),
+                    "kernels": card.get("kernels", []),
+                    "platforms": card.get("platforms", []),
+                    "kernel_class": card.get("kernel_class", "other"),
+                    "regime": card.get("regime", ""),
+                    "key": key, "layer": "learned",
+                    "lifecycle": card.get("lifecycle", "active"),
+                    "type": card.get("type", "lever"),
+                    "confidence": card.get("confidence"), "effect": card.get("effect"),
+                    "confirms_cited": cited, "confirms_blind": blind, "losses": 0,
+                    "attempts": int(card.get("attempts", 1)),
+                    "toolchain": prop.get("toolchain", "unknown"),
+                    "last_seen": prop.get("date", str(date.today())),
+                }
+                for opt in ("cost", "verified_on", "roofline", "levers"):
+                    if card.get(opt):
+                        meta[opt] = card[opt]
                 body = f"# {card.get('title')}\n"
-                for f_ in ("lever", "apply", "verify", "caution", "source"):
+                # `stack` and `pitfall` are part of the card body in this schema — a stacked win's
+                # per-direction attribution and the traps actually hit are the two things the next
+                # run needs most, and they were being dropped on the floor here.
+                for f_ in ("lever", "apply", "stack", "verify", "pitfall", "caution", "source"):
                     if card.get(f_):
                         body += f"- {f_}: {card[f_]}\n"
                 cards[fn] = {"path": os.path.join(kb.root, fn), "meta": meta, "body": body}

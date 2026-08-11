@@ -1,0 +1,134 @@
+{
+  "run_id": "chunk_scaled_dot_kkt_fwd_kernel-chuschen16h",
+  "date": "2026-08-11",
+  "kernel_names": [
+    "chunk_scaled_dot_kkt_fwd_kernel"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "launch-grid-collapse-redundant-batch-dim",
+      "description": "Host-shim collapse of a redundant batch dim in the launch grid kills ~98% empty workgroups on chunked linear attention: ~2.8x on the largest case",
+      "keywords": [
+        "launch-overhead",
+        "grid-collapse",
+        "host-shim",
+        "linear-attention",
+        "varlen",
+        "empty-workgroups"
+      ],
+      "kernels": [
+        "chunk_scaled_dot_kkt_fwd_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "linear_attention",
+      "regime": "prefill",
+      "key": "chunked linear-attention forward (K-Kt chunk product) on gfx950, launched by a Triton harness whose grid carries a batch dim each program ignores",
+      "lifecycle": "active",
+      "type": "lever",
+      "cost": "L2",
+      "confidence": "★★",
+      "effect": "cumulative 5.7x -> 12.1x on the frozen-baseline isolated A/B; per-case: largest-batch case ~2.8x, mid case ~1.5x, tiny case unchanged (already few workgroups); bit-identical output",
+      "attempts": 2,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-11",
+      "last_seen": "2026-08-11",
+      "roofline": "dispatch/overhead-bound -> memory-bound; empirical roofline fraction 0.13 -> 0.63 over the campaign",
+      "source": "16h single-kernel time-budget campaign (48 passes), 2026-08-11; directions r1_d0 and r2_d0, both Director-verified",
+      "title": "collapse a redundant launch-grid dimension in a host shim",
+      "lever": "when the caller launches grid dim = B*H but each program's result depends on only one of the B slots, rewrite the grid in a host-side launcher shim so that dim becomes H and remap program ids",
+      "apply": "wrap the entry point in a small launcher object that recomputes the grid; an in-kernel early-return guard on the redundant index is the cheap first version and banks part of the win before the shim supersedes it",
+      "verify": "check the launched workgroup product actually fell, confirm bit-identical output against the frozen baseline, then re-time the isolated A/B per case rather than on the geomean",
+      "pitfall": "the guard-only version still dispatches the redundant workgroups -> the cost is the dispatch flood, not the arithmetic -> move the collapse into the launch grid itself",
+      "caution": "the bound class flips once the flood is gone, so also verify a fresh profile before choosing the next direction; the pre-collapse roofline no longer describes the kernel"
+    },
+    {
+      "name": "non-temporal-store-write-once-output",
+      "description": "Write-combining cache modifier on write-once fp32 output stores bypasses L2 write-allocate on gfx950: +6.4% on the store-bound case, bit-identical",
+      "keywords": [
+        "non-temporal-store",
+        "cache-modifier",
+        "store-bandwidth",
+        "l2-write-allocate",
+        "linear-attention",
+        "memory-bound"
+      ],
+      "kernels": [
+        "chunk_scaled_dot_kkt_fwd_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "linear_attention",
+      "regime": "prefill",
+      "key": "store-bandwidth-bound Triton op on gfx950 whose fp32 output buffer is written once and never re-read inside the launch",
+      "lifecycle": "active",
+      "type": "lever",
+      "cost": "L1",
+      "confidence": "★★",
+      "effect": "+6.4% on the largest per-case shape (store-bandwidth-bound), cumulative 15.09x -> 15.36x; ~80-97% of achievable HBM store roofline after; smaller cases flat (they sit on the harness event-timing floor); bit-identical, cos=1.0",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-11",
+      "last_seen": "2026-08-11",
+      "roofline": "store-bandwidth-bound both sides; store utilization ~0.85 -> ~0.9+ of the achievable store roof",
+      "source": "16h single-kernel time-budget campaign (48 passes), 2026-08-11; deep_explore direction, status verified, stable across 8+ repeats",
+      "title": "streaming (non-temporal) stores for a write-once output",
+      "lever": "for an output written once and never re-read, tag the stores with a write-combining / non-temporal cache modifier ('.cs', '.wt' in Triton) so they lower to a streaming buffer_store with the nt bit set and skip L2 write-allocate / read-for-ownership",
+      "apply": "one argument on the store calls; no layout, dtype or vectorization change — where the stores are already the widest dword form this is a pure cache-POLICY win, not a vectorization one",
+      "verify": "inspect the lowered store for the nt bit, confirm bit-identical output, and A/B the store-bound case on its own, since a geomean over tiny cases hides a single-digit percent move",
+      "pitfall": "the eviction_policy argument alone changed nothing -> it does not select write-combining -> the cache_modifier argument is the one that engages the lever",
+      "caution": "holds only where the buffer really is write-once for the launch; also verify nothing re-reads it later in the same kernel, and re-check parity bit-for-bit rather than by tolerance"
+    },
+    {
+      "name": "store-roof-closes-occupancy-wgcount-and-replay-axes",
+      "description": "At an HBM-store-bandwidth roof, occupancy lift, persistent/fewer workgroups, finer store-skip granularity and graph replay all measured null or negative",
+      "keywords": [
+        "anti-pattern",
+        "store-bandwidth",
+        "occupancy",
+        "persistent-kernel",
+        "grid-stride",
+        "graph-replay",
+        "launch-overhead",
+        "measurement-methodology"
+      ],
+      "kernels": [
+        "chunk_scaled_dot_kkt_fwd_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "linear_attention",
+      "regime": "prefill",
+      "key": "an op already sitting at its output-store bandwidth roof on gfx950, with the workgroup count already well matched to the CU count",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "cost": "L1",
+      "confidence": "★★",
+      "effect": "all disconfirming, per-case on the store-bound large case: persistent grid-stride +16% to +21% slower (a logically no-op stride factor still cost +16%, so it is codegen), doubling rows-per-program +21% slower, finer 4x4 and 16x16 skip-store did not beat the coarse 2x2 form, VGPR 152->109 with occupancy 3->4 waves gave 0%; on the tiny case forced graph replay gave 0% scoreable gain",
+      "attempts": 8,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-11",
+      "last_seen": "2026-08-11",
+      "source": "16h single-kernel time-budget campaign (48 passes), 2026-08-11; eight dead_end / partial ledger entries across four waves",
+      "title": "what stops paying once the store pipe is the roof",
+      "lever": "once the profile says store-bandwidth-bound, put rounds into store POLICY and store BYTES; give the occupancy / workgroup-count / launch-overhead family a cheap probe first, because here every member of it came back null or negative",
+      "apply": "cheapest probes: one autotune point with lower VGPR pressure, one stride-factor persistent variant, one finer skip granularity — each is a single config, and each closed its axis in one round here",
+      "verify": "attribute per case, not on the geomean, and re-run the losing variant interleaved with the incumbent; a variant that is a logical no-op yet still regresses is telling you the cost is codegen, not the idea",
+      "pitfall": "a batched-throughput micro-bench (many launches, one sync) reported graph replay as not beneficial and the benefit gate silently left it disabled, while the scoring harness brackets every call separately -> the two disagree about whether a host launch gap exists -> probe the launcher mode after the real warmup instead of trusting the gate",
+      "caution": "an isolated in-process probe showed replay ahead of eager and a fresh short-lived process did not reproduce it, so also verify any launch-overhead win in the same interleaved alternating run as the incumbent; and re-check your own bound class and grid size before assuming these closures carry"
+    }
+  ]
+}

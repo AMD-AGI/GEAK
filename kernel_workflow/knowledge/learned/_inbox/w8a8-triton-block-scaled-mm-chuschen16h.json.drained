@@ -1,0 +1,133 @@
+{
+  "run_id": "_w8a8_triton_block_scaled_mm-chuschen16h",
+  "date": "2026-08-11",
+  "kernel_names": [
+    "_w8a8_triton_block_scaled_mm"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "order-preserving-critical-path-levers-fp8-blockscale-gemm",
+      "title": "order-preserving-critical-path-levers-fp8-blockscale-gemm",
+      "description": "fp8 block-scaled GEMM, gfx950: fold the scale-format fixup into the native scaled-cvt operand, pack 4 fp8 per dword, coarsen sub-K - 10.66x bit-exact",
+      "keywords": [
+        "fp8",
+        "block-scale",
+        "quantized-gemm",
+        "dep-chain",
+        "sub-k-coarsening",
+        "scaled-cvt",
+        "lds-tiling",
+        "bit-exact",
+        "gfx950",
+        "critical-path"
+      ],
+      "kernels": [
+        "_w8a8_triton_block_scaled_mm"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "mixed",
+      "key": "Triton fp8 block-scaled W8A8 GEMM upcast+MFMA path on gfx950/CDNA4, under a near-bit-exact parity gate",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "10.66x isolated vs the frozen baseline, bit-exact (max_rel=0); per-case 9.81x / 11.15x / 11.08x over three M scales (smallest M gains least); roofline-emp 0.03 -> 0.34, latency-bound -> compute-bound",
+      "attempts": 6,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 1,
+      "lever": "On a dequant-then-MFMA fp8 path the payoff is DEP-CHAIN LENGTH, not op count: derive magnitude and sign from ONE native packed scaled-cvt, and regroup the inner K sub-tiles into fewer wider dots while keeping one linear fp32 accumulator.",
+      "apply": "Fold the fnuz->OCP 2^-1 fixup into the fp32 scale operand of the native scaled-cvt; feed it int32-packed 4-fp8-per-dword loads (cast the pointer, pack=1, two f16x2 outputs); lift sign from each fp8 byte's bit7 instead of a second cvt + abs; load B transposed [BLOCK_N,SUB_K] and transpose back so it rides LDS; sweep NSUB over the values that keep SUB_K a multiple of the MFMA K (here {1,2,4,8}).",
+      "stack": "total 10.66x isolated (bit-exact, task-runner re-verified) = four order-preserving directions compounded\n  - 1. drop redundant inner sub-K masks when K is an exact multiple of BLOCK_K - +2.7% (round 1, verified)\n  - 2. scale-operand fold + int32-packed fp8 loads + transposed-B/LDS path - to 8.98x (verified); the LDS B-path alone carried ~+15% on the two larger cases\n  - 3. single-cvt signed upcast (cvts 192->96, v_and 153->9) - +1.5-1.8% on top of (2) (verified)\n  - 4. sub-K coarsening NSUB 8->4 - 9.17x -> 10.66x, the largest single step (verified)\n  - note: attribution is incremental in landing order; (3) is small because the win is pipeline balance, and the 96-cvt cut alone measured ~0.",
+      "verify": "Re-time on the official runner rather than the authoring loop (self-reports drifted; ~1% run-to-run there), confirm parity reports max_rel=0, and read VGPR/occupancy off the static AMDGCN of a PERF-only build - the golden's emulated upcast is a phantom target.",
+      "pitfall": "pitfall: coarsening past the sweet spot (NSUB<=2) spills VGPRs and regresses -> wider dots grow the live set -> keep the widest sub-K that holds occupancy 3 at zero spill.\npitfall: the earlier-measured optimum NSUB flipped after the packed-cvt/LDS-B rewrite landed -> a knob optimum is conditional on the surrounding structure -> re-sweep the knob after any structural change instead of trusting the recorded value.",
+      "caution": "The occupancy drop this stack causes (4->3) is not a regression signal here; also verify on your shapes whether the op is issue/dep-chain-bound before reading occupancy as the score.",
+      "source": "16h single-kernel time-budget campaign, chuschen16h wave, 31 STATE-resumed passes / 4 rounds, 2026-08-11"
+    },
+    {
+      "name": "parity-gate-freezes-fp32-reduction-order",
+      "title": "parity-gate-freezes-fp32-reduction-order",
+      "description": "Under a near-bit-exact parity gate the fp32 MFMA K-reduction order is structural: ILP splits, Kahan and native fp8 MFMA all fail parity, not perf",
+      "keywords": [
+        "bit-exact",
+        "parity-gate",
+        "reduction-order",
+        "reassociation",
+        "mfma",
+        "fp8",
+        "quantized-gemm",
+        "gfx950",
+        "anti-pattern"
+      ],
+      "kernels": [
+        "_w8a8_triton_block_scaled_mm"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "mixed",
+      "key": "accumulation-order changes on an fp32 MFMA K-reduction judged against a golden f16-MFMA reference, gfx950 Triton GEMM",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "0 of 4 accumulation-order variants cleared parity on any case: 2-way contiguous-half accumulator split max_rel=0.1146 at cos=1.0, even/odd split identical, compensated (Kahan) summation ~100% rel err, native fp8 MFMA max_rel=65 - while the order-PRESERVING regrouping of the same reduction passed at max_rel=0 and paid 1.16x",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 4,
+      "lever": "When the correctness gate is cos>=0.99 AND max_rel<1e-2 with a small denominator clamp, treat the reference's fp32 accumulation ORDER as part of the spec: cancellation-to-near-zero elements make the relative-error term near-bit-exact, so any reassociation is a parity failure long before it is a perf question.",
+      "apply": "Spend the round on regrouping that preserves order (fewer, wider dots over the same linear accumulator) instead of splitting the accumulator; before authoring, run the parity gate on a one-line proof-of-order variant to learn the gate's true tightness cheaply.",
+      "verify": "Report max_rel alongside cosine - cosine stayed at 1.0 for a split that missed the gate by an order of magnitude, so a cosine-only check reads a parity failure as a pass.",
+      "pitfall": "pitfall: a hardware-native low-precision MFMA looked like free throughput -> it accumulates in a different fp32 order than the emulated reference -> it fails the same gate for a reason no tuning can remove.",
+      "caution": "This holds where the reference is itself an emulated fp32-accumulate reduction with a tight relative-error gate; also verify your gate's clamp and tolerance first - a looser or cosine-only gate reopens the whole axis.",
+      "source": "16h single-kernel time-budget campaign, chuschen16h wave, rounds 3-4 rigorous-negative lanes, 2026-08-11"
+    },
+    {
+      "name": "occupancy-and-manual-pipelining-dead-on-issue-bound-gemm",
+      "title": "occupancy-and-manual-pipelining-dead-on-issue-bound-gemm",
+      "description": "Issue/dep-chain-bound Triton GEMM on gfx950: manual K-block pipelining, occupancy raising, B re-layout and host graph replay all lost - 5 lanes, 0 wins",
+      "keywords": [
+        "occupancy",
+        "software-pipelining",
+        "num-stages",
+        "vgpr-pressure",
+        "launch-overhead",
+        "hip-graph",
+        "lds-tiling",
+        "quantized-gemm",
+        "gfx950",
+        "anti-pattern"
+      ],
+      "kernels": [
+        "_w8a8_triton_block_scaled_mm"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "VALU-issue and MFMA-dependency-bound Triton GEMM on gfx950 where occupancy, hand pipelining and host-side replay are all spent lanes",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "5 lanes, 0 wins against the seed: hand-pipelined K-block prefetch ~10% slower (loads only) and ~20% slower (loads+cvt) on every case via an occupancy 3->2 collapse at VGPR 154->202 with zero spill; no-transpose B re-layout ~25% slower at occupancy 2; host graph replay regressed all three cases; occupancy 4->5 unreachable",
+      "attempts": 5,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 5,
+      "lever": "Before spending a round on occupancy or hand-written software pipelining, classify the bound: when the profile says VALU-issue then MFMA-dep-chain, more waves cannot raise per-SIMD issue rate, and the compiler's num_stages pipeliner is already prefetching the raw loads across the outer loop.",
+      "apply": "Price a manual prefetch in registers first: compare the seed's VGPR count against the architecture's headroom for its current occupancy tier (here roughly 16 registers of slack) - if the loop-carried prefetch state does not fit, the restructure buys scheduling and pays an occupancy tier.",
+      "verify": "Read the occupancy and VGPR count out of the static AMDGCN of the candidate, and check for spill separately: the whole loss here was a tier drop at zero spill, which a spill-only check reports as clean.",
+      "pitfall": "pitfall: a scheduler-opaque inline-asm sequence read as a free win -> it breaks the auto-pipeliner it sits inside -> it measured ~10% slower than the plain form.\npitfall: host-side graph replay was expected to remove a launch floor -> the async queue was already saturated and the enqueue cost is negligible against the device time -> no case improved.",
+      "caution": "All of this is conditioned on an issue/dep-chain-bound profile at occupancy 3 with no spill; also verify your own bound class and register headroom, since the same lanes are live on a genuinely latency- or occupancy-limited shape.",
+      "source": "16h single-kernel time-budget campaign, chuschen16h wave, rounds 1-4 dead-end lanes, 2026-08-11"
+    }
+  ]
+}

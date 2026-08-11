@@ -1,13 +1,5 @@
 ---
-name: null-the-kernel-body-before-optimizing-it-attention-gfx950-decode
-description: Null the kernel body (deliberately wrong) to price a whole direction in one measurement: predicted the 0% outcome of optimizing a decode dispatch
-keywords: [control-experiment, measurement-method, dispatch-floor, launch-overhead, decode, null-baseline]
-kernels: [paged_attention_decode]
-platforms: [gfx950]
-kernel_class: attention
-regime: decode
 key: pricing a body-optimization direction on a small paged-attention decode dispatch (AOT hipcc template codegen) on gfx950 before spending a round on it
-lifecycle: active
 type: method
 confidence: ★★
 effect: An instrument, not a speedup: gutting a small dispatch's whole body to a trivial copy (deliberately wrong output) measured 1.01x vs stock - zero work was not measurably faster, so that dispatch was 100% workgroup-dispatch floor. The prediction held: really optimizing that same body then measured 0% per-kernel and 0.9-5.2% WORSE wall on all three decode cases, so one short control measurement stood in for a whole direction.
@@ -16,8 +8,15 @@ confirms_blind: 1
 losses: 0
 attempts: 5
 toolchain: rocm 7.2.3 / torch 2.11.0 / hip (AOT hipcc, template-codegen op)
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-10
+name: null-the-kernel-body-before-optimizing-it-attention-gfx950-decode
+description: Null the kernel body (deliberately wrong) to price a whole direction in one measurement: predicted the 0% outcome of optimizing a decode dispatch
+keywords: ['control-experiment', 'measurement-method', 'dispatch-floor', 'launch-overhead', 'decode', 'null-baseline']
+kernels: ['paged_attention_decode']
+platforms: ['gfx950']
+kernel_class: attention
+regime: decode
+lifecycle: active
 ---
 # Null the kernel body before optimizing it
 - lever: Before spending a direction on a kernel body, build a deliberately-incorrect null version of it (write a trivial value and return) and measure that as the lane's lower bound. If the null is not faster, the body is not the cost, and the entire lane is priced at zero in one measurement.

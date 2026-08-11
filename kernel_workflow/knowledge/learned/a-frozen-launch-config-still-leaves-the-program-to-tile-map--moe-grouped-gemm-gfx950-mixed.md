@@ -16,7 +16,6 @@ confirms_blind: 1
 losses: 0
 attempts: 6
 toolchain: rocm 7.2.3 / triton 3.6.0 / torch 2.11.0
-source: run kernel_20_geak_0808_4h 2026-08-08
 last_seen: 2026-08-08
 ---
 # A frozen launch config still leaves the program-to-tile map open

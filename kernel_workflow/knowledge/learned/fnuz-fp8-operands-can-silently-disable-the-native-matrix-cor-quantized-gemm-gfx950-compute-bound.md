@@ -16,7 +16,6 @@ confirms_blind: 1
 losses: 0
 attempts: 2
 toolchain: triton 3.6.0 / torch 2.11.0+gitd0c8b1f / gfx950 CDNA4
-source: run kernel_20_geak_0808_4h 2026-08-10
 last_seen: 2026-08-10
 ---
 # fnuz fp8 operands can silently disable the native matrix core: bitcast to OCP and fold the bias
