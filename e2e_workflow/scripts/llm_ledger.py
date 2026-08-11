@@ -608,6 +608,11 @@ def render_md(agg, meta):
         "" if meta.get("attribution_mode") == "timeline"
         else " — no workflow timeline was found, so phases are a best guess from prompt text and timing"))
     L.append("- transcripts read: %d" % len(meta.get("transcripts", [])))
+    if meta.get("calls_excluded_outside_window"):
+        L.append("- excluded: %d call(s) before this run began. Finding a transcript by its "
+                 "eval-dir path is not the same as dating it — a session that launched the run "
+                 "also holds whatever else it did that day."
+                 % meta["calls_excluded_outside_window"])
     if meta.get("warnings"):
         L.append("- **incomplete**: " + "; ".join(meta["warnings"]))
     L.append("")
@@ -680,7 +685,30 @@ def render_md(agg, meta):
 # --------------------------------------------------------------------------- #
 # Driver
 # --------------------------------------------------------------------------- #
-def build(eval_dir, explicit_globs=None, rates=None, roots=None):
+def run_window(groups, since_ms=None, until_ms=None):
+    """When did this run actually happen?
+
+    Mentioning the eval dir is necessary to find a transcript but not sufficient
+    to date it. The session that LAUNCHES a run keeps one long transcript, and if
+    a human drove it interactively that transcript also holds every unrelated
+    thing they did that day — all of it mentioning the eval-dir path. Counted
+    naively it dwarfs the run (observed: 248 of 386 calls, and 95M of 115M input
+    tokens, from before the run even started).
+
+    The run starts at its FIRST ROLE AGENT. Everything GEAK does goes through
+    roleAgent(), so the earliest such call is the earliest moment any of this
+    could be GEAK's. Driver-session chatter before that point is somebody else's
+    day. --since/--until override when a caller knows better.
+    """
+    if since_ms is None:
+        starts = [g["t0_ms"] for g in groups
+                  if g["role"] != DRIVER and g["t0_ms"] is not None]
+        since_ms = min(starts) if starts else None
+    return since_ms, until_ms
+
+
+def build(eval_dir, explicit_globs=None, rates=None, roots=None,
+          since_ms=None, until_ms=None):
     """Build the whole ledger. Returns (rows, agent_rows, agg, meta)."""
     rates = rates or DEFAULT_RATES
     warnings = []
@@ -703,6 +731,25 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None):
             g["t0_ms"], g["t1_ms"] = (min(ts), max(ts)) if ts else (None, None)
             g["transcript"] = path
             groups.append(g)
+
+    # Drop everything outside the run's own window BEFORE attributing, so a
+    # launching session's unrelated history cannot be billed to this run.
+    win_t0, win_t1 = run_window(groups, since_ms, until_ms)
+    dropped = 0
+    if win_t0 is not None or win_t1 is not None:
+        for g in groups:
+            keep = [c for c in g["calls"]
+                    if c["ts_ms"] is None
+                    or ((win_t0 is None or c["ts_ms"] >= win_t0)
+                        and (win_t1 is None or c["ts_ms"] <= win_t1))]
+            dropped += len(g["calls"]) - len(keep)
+            g["calls"] = keep
+            ts = [c["ts_ms"] for c in keep if c["ts_ms"] is not None]
+            g["t0_ms"], g["t1_ms"] = (min(ts), max(ts)) if ts else (None, None)
+        groups = [g for g in groups if g["calls"]]
+    if dropped:
+        warnings.append("%d call(s) outside the run window were excluded "
+                        "(a launching session's earlier, unrelated work)" % dropped)
 
     mode = attribute(groups, timeline)
 
@@ -754,6 +801,8 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None):
     meta = {
         "schema": SCHEMA, "eval_dir": eval_dir, "attribution_mode": mode,
         "transcripts": transcripts, "timeline_sources": timeline["sources"],
+        "window_start": _ms_to_iso(win_t0), "window_end": _ms_to_iso(win_t1),
+        "calls_excluded_outside_window": dropped,
         "warnings": warnings, "rates": rates, "complete": not warnings,
         "generated_at": _ms_to_iso(int(datetime.now(tz=timezone.utc).timestamp() * 1000)),
     }
@@ -783,6 +832,9 @@ def main(argv=None):
     ap.add_argument("--transcripts", action="append", default=None,
                     help="explicit transcript glob (repeatable); default is to discover them")
     ap.add_argument("--rates", default=None, help="JSON file overriding the per-million-token prices")
+    ap.add_argument("--since", default=None,
+                    help="ISO time; ignore calls before it. Default: the run's first role agent.")
+    ap.add_argument("--until", default=None, help="ISO time; ignore calls after it")
     ap.add_argument("--quiet", action="store_true", help="do not print the summary to stdout")
     args = ap.parse_args(argv)
 
@@ -800,7 +852,9 @@ def main(argv=None):
             print("llm_ledger: --rates ignored (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
 
     try:
-        rows, agent_rows, agg, meta = build(args.eval_dir, args.transcripts, rates)
+        rows, agent_rows, agg, meta = build(
+            args.eval_dir, args.transcripts, rates,
+            since_ms=_iso_to_ms(args.since), until_ms=_iso_to_ms(args.until))
         out_dir = write_outputs(args.eval_dir, rows, agent_rows, agg, meta)
     except Exception as exc:  # never fail the run that called us
         print("llm_ledger: FAILED (%s: %s) — run is unaffected" % (type(exc).__name__, exc), file=sys.stderr)

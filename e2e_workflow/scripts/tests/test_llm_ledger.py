@@ -335,6 +335,61 @@ class TestSoftFailure(LedgerTestBase):
         self.assertEqual(rc, 0)
 
 
+class TestRunWindow(LedgerTestBase):
+    """Found against a live run: the eval-dir filter finds a transcript but does not date it.
+
+    A session that launches a run keeps ONE long transcript, and when a human drove it
+    interactively that transcript also holds everything else they did that day -- all of it
+    mentioning the eval-dir path. Counted naively it dwarfed the run: 248 of 386 calls and
+    95M of 115M input tokens came from before the run started, and the reported wall clock
+    read 24h for an 84-minute run.
+    """
+
+    def _session_with_prior_history(self):
+        # One long driver transcript: unrelated work, THEN the run's agents.
+        write_transcript(os.path.join(self.tdir, "driver.jsonl"), [
+            user_rec("unrelated work mentioning %s" % self.eval_dir, 0),
+            asst_rec(10, "old1", read=9_000_000, out=5000),
+            asst_rec(20, "old2", read=9_000_000, out=5000),
+            user_rec(prompt_for("director", "setup", self.eval_dir), 1000),
+            asst_rec(1010, "run1", read=1000, out=10),
+        ])
+
+    def test_calls_before_the_first_role_agent_are_excluded(self):
+        self._session_with_prior_history()
+        rows, _, agg, meta = self.build()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(agg["total"]["cache_read_input_tokens"], 1000)
+        self.assertEqual(meta["calls_excluded_outside_window"], 2)
+        self.assertTrue(any("outside the run window" in w for w in meta["warnings"]))
+
+    def test_wall_clock_reflects_the_run_not_the_session(self):
+        self._session_with_prior_history()
+        _, _, agg, _ = self.build()
+        # Session spans ~17 minutes; the run itself is one call.
+        self.assertLess(agg["total"]["wall_ms"], 60_000)
+
+    def test_since_overrides_the_default_window(self):
+        self._session_with_prior_history()
+        rows, _, _, _ = self.build(since_ms=L._iso_to_ms(_ts(0)))
+        self.assertEqual(len(rows), 3)   # caller asked for everything
+
+    def test_driver_work_during_the_run_is_kept_but_labelled(self):
+        """In-window driver calls are real; they just are not GEAK's."""
+        write_transcript(os.path.join(self.tdir, "driver.jsonl"), [
+            user_rec(prompt_for("director", "setup", self.eval_dir), 0),
+            asst_rec(10, "run1", read=1000, out=10),
+        ])
+        write_transcript(os.path.join(self.tdir, "human.jsonl"), [
+            user_rec("a human checking on %s mid-run" % self.eval_dir, 20),
+            asst_rec(30, "human1", read=500_000, out=100),
+        ])
+        _, _, agg, _ = self.build()
+        self.assertIn(L.DRIVER, agg["by_phase"])
+        self.assertEqual(agg["by_phase"][L.DRIVER]["calls"], 1)
+        self.assertEqual(agg["by_role"]["director"]["calls"], 1)
+
+
 class TestDiscovery(LedgerTestBase):
     def test_only_transcripts_mentioning_this_eval_dir_are_used(self):
         roots = os.path.join(self.tmp, "claude")
