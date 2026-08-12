@@ -127,8 +127,22 @@ const REPORT_SCHEMA = obj({
 // ---------------------------------------------------------------------------
 // Prompt + agent helpers (self-contained; mirror kernel_lane.js / e2e_workflow.js).
 // ---------------------------------------------------------------------------
-const cfg = (o) => Object.entries(o).map(([k, v]) =>
-  `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
+// Inputs are rendered VOLATILE-LAST. A cached prompt prefix is reusable only up to its first
+// changing byte, so a per-round counter emitted early strands every stable byte behind it. Measured
+// on a Qwen3-14B run: consecutive tech_lead:plan_round prompts shared only 597 of 7,591 characters
+// because ROUND / BUDGET_REMAINING / CUMULATIVE_SPEEDUP led the block, and tech_lead sat at 83%
+// cache-read against a 96% run average. Moving those few keys to the end lets the stable remainder —
+// the bulk of the prompt — stay reusable across rounds and across sibling lanes.
+// Ordering only; no key is added, removed or reworded.
+const VOLATILE_LAST = new Set([
+  'ROUND', 'BUDGET_REMAINING', 'CUMULATIVE_SPEEDUP', 'BUDGET', 'DISPATCHED',
+  'EVAL_DIR', 'STATE_DIR', 'SHARED_KB', 'GLOBAL_KB', 'PRIOR_STATE',
+]);
+const cfg = (o) => {
+  const es = Object.entries(o);
+  return [...es.filter(([k]) => !VOLATILE_LAST.has(k)), ...es.filter(([k]) => VOLATILE_LAST.has(k))]
+    .map(([k, v]) => `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
+};
 
 // Hung-agent + API-fault guard (same contract as kernel_lane.js:agentT).
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);

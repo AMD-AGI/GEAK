@@ -45,21 +45,39 @@ each with target kernels + rationale), `CURRENT_FLAGS`/`CURRENT_ENV` (the accept
 > `sglang_kernels`, vllm→`vllm_kernels`) and `perf_knowledge/reference/env_vars.md`. Always pass
 > `BACKEND=<backend>` to bench_e2e.sh.
 
+### SCREEN CHEAPLY, THEN MEASURE THE SURVIVOR PROPERLY
+
+Measuring every candidate at full rigour is where this phase's wall-clock goes. On a measured
+Qwen3-14B run the sweep spent **50 minutes waiting on benchmarks against 7 minutes of thinking**,
+because all eight candidates got three timed repeats plus a cold run — including one that lost by 25%
+and was obvious after a single repeat. A screening pass at `REPEATS=1` costs about a third as much and
+separates a 12% winner from a 25% loser just as reliably; three repeats exist to resolve differences
+NEAR the noise band, which is a question you only need to ask about candidates that survive.
+
+So: **two rungs.** Screen at `REPEATS=1`, promote only what clears the bar, and re-measure survivors at
+`REPEATS=3` before accepting. Never accept on a screening number alone — a rung-1 result decides what
+to measure, never what is true.
+
 For EACH direction, in the Architect's order:
 1. Build the candidate config = current accepted config + this ONE change.
-2. Launch + bench via the shared script:
+2. **Rung 1 — screen** (`REPEATS=1`, no profiling):
    ```bash
    # SERVING config MUST match the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
-   BACKEND="<backend>" OUT_DIR="$EVAL_DIR/config/<dir_id>" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
-   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=3 PROFILE=0 \
+   BACKEND="<backend>" OUT_DIR="$EVAL_DIR/config/<dir_id>_screen" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
+   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=1 PROFILE=0 \
    EXTRA_SERVER_ARGS="<current flags + this flag>" EXTRA_ENV="<current env + this env>" \
-     bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/cfg_<dir_id>.log"
+     bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/cfg_<dir_id>_screen.log"
    ```
-3. Read `bench_summary.json`. delta% = `(cand_median - current_median)/current_median*100`.
-4. Parity check if numerics could change. Verify the swap took (server log).
-5. Keep the change ONLY if delta% > noise band AND parity passes. Accepted changes COMPOUND into the
-   running config for subsequent directions.
-6. (GEMM tuning is NOT a config axis — it lives in the head-kernel track now.)
+   Compute delta% against the current accepted median. **Drop the candidate now** if
+   `delta% <= 0.5 x noise_band` — that is a loser or a wash, and a second look will not rescue it.
+   Record it in `sweep_results.json` with `"rung": "screen"` and move to the next direction.
+3. **Rung 2 — confirm** (survivors only, `REPEATS=3`, `OUT_DIR="$EVAL_DIR/config/<dir_id>"`): rerun the
+   same command with `REPEATS=3`. This is the number that decides acceptance.
+4. Read `bench_summary.json`. delta% = `(cand_median - current_median)/current_median*100`.
+5. Parity check if numerics could change. Verify the swap took (server log).
+6. Keep the change ONLY if the **rung-2** delta% > noise band AND parity passes. Accepted changes
+   COMPOUND into the running config for subsequent directions.
+7. (GEMM tuning is NOT a config axis — it lives in the head-kernel track now.)
 
 Record every trial (kept + rejected) in `EVAL_DIR/config/sweep_results.json`.
 
