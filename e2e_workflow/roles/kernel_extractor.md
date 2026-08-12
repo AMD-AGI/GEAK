@@ -237,11 +237,8 @@ freeze an out-of-regime oracle nobody should trust.
    > `knowledge/sglang_internals.md` §3).
    > **🔴 `kernel_src/` is the ONLY writable path in the task dir.** `baseline_overlay/` is the live
    > serving stack and is never touched; `baseline_ref/*.orig` is text for diffing and is deliberately
-   > unimportable. Because the baseline leg is an ENVIRONMENT, not a file the optimizer can reach, a
-   > cross-language rewrite competes against the production kernel automatically — there is nothing left
-   > for `mode=author` to substitute (that is what manufactured the fake 15.7× optimized-HIP-vs-naive-HIP).
-   > `candidate_bind` is also exactly what the e2e Integrator replays to wire an accepted kernel, so an
-   > isolated win is rebindable e2e by construction.
+   > unimportable. `candidate_bind` is also exactly what the e2e Integrator replays to wire an accepted
+   > kernel, so an isolated win is rebindable e2e by construction.
 4. **Write `unittest.py`** — backend-agnostic and IMMUTABLE. It is the SINGLE harness: it judges
    correctness AND measures the workload-weighted speedup; there is no separate downstream perf harness.
    **It MUST import the vendored `harness_lib` and use it for all timing + correctness** — do NOT
@@ -385,15 +382,10 @@ freeze an out-of-regime oracle nobody should trust.
      > params (isl/osl). The profile's shape-less latency is only trustworthy for this kernel's GPU-time
      > SHARE vs OTHER kernels (kernel selection) — NEVER for the intra-kernel prefill/decode split, which
      > you reconstruct from measured latency × analytic calls.
-     > **🔴 THE BASELINE LEG IS THE LIVE SERVING STACK — it is an ENVIRONMENT, not a callable you bind.**
-     > `baseline_overlay/` is a frozen snapshot of `CURRENT_OVERLAY` (the install + every already-accepted
-     > kernel). Neither you nor the optimizer can edit what it imports, so `speedup = baseline_ms /
-     > optimized_ms` is ALWAYS measured against the live path no matter what LANGUAGE the candidate is
-     > written in (Triton→HIP→CK all compete against the SAME production baseline). There is no way for
-     > `mode=author` to substitute its from-scratch seed as the baseline — that is what manufactured the
-     > fake 15.7× (optimized-HIP vs naive-HIP) that vanished at e2e. If the target op cannot be resolved
-     > on the live stack at all (it only exists fused in the compile graph), say so in `notes` and report
-     > `editable:false`.
+     > **🔴 The baseline leg is the ENVIRONMENT (`baseline_overlay/`), never a callable you bind** — see
+     > the TWO LEGS section. So a candidate in ANY language (Triton→HIP→CK) competes against the SAME
+     > production baseline. If the target op cannot be resolved on the live stack at all (it only exists
+     > fused in the compile graph), say so in `notes` and report `editable:false`.
    - It must NOT import any backend by name and must NOT read anything outside the task dir, so it
      transparently judges a triton/HIP/CK/aiter/asm reimplementation against the real online baseline.
      The baseline is reached through `PYTHONPATH`, not through a path in the UT.

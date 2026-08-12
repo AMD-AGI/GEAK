@@ -31,7 +31,7 @@
 #                                      saturated PROF=1 bench.
 #
 # KEY OUTPUTS (written to $OUT_DIR):
-#   server_start.json      {status, attempts, reason, phase_hint, wait_sec, ceiling_sec, ...} — ALWAYS
+#   server_start.json      {status, reason, phase_hint, wait_sec, ceiling_sec, ...} — ALWAYS
 #                          written when we launch, so a failed cold start is a readable REASON
 #                          downstream instead of a silently empty output dir
 #   bench_runs.jsonl       one bench result object per repeat
@@ -151,8 +151,7 @@ OVERLAY_PYTHONPATH=${OVERLAY_PYTHONPATH:-}
 # separate budgets and a caller that forgets to set it is not penalized.
 OVERLAY_KIND=${OVERLAY_KIND:-candidate}
 # Health wait (see the launch block): STALL_WINDOW_SEC = how long with NO log growth counts as wedged
-# (default 600). SERVER_STARTUP_TIMEOUT_SEC overrides the checkpoint-size-derived backstop.
-# SERVER_START_ATTEMPTS (default 2) bounds the retry of TRANSIENT startup faults only.
+# (default 600). SERVER_STARTUP_TIMEOUT_SEC overrides the 7200s backstop on total startup time.
 SERVER_STARTUP_TIMEOUT_SEC=${SERVER_STARTUP_TIMEOUT_SEC:-}
 
 # ---- port: auto-allocate a free one if not pinned (avoids 30000 collisions on shared boxes) ----
@@ -387,59 +386,43 @@ fi
 # AITER compile + capture-overlay imports). That is how issue #389's MoE shape capture died at 360s and
 # the kernel was never authored. So: keep waiting while the server log keeps growing; give up after
 # STALL_WINDOW_SEC with no growth (which rejects a wedged candidate SOONER, and on the right evidence).
-# CEILING is only a backstop against a server that spins printing forever. It is DERIVED from the
-# checkpoint size instead of guessed per purpose, so no caller has to set a per-model knob.
+# CEILING is only a backstop against a server that spins printing forever, so it is one generous
+# constant rather than a per-purpose (or per-model) budget nobody can pick correctly.
 if [ "$REUSE_SERVER" != "1" ]; then
   mkdir -p "$PROFILE_DIR"
   STALL_WINDOW_SEC=${STALL_WINDOW_SEC:-600}
   HEALTH_POLL_SEC=${HEALTH_POLL_SEC:-5}
-  SERVER_START_ATTEMPTS=${SERVER_START_ATTEMPTS:-2}
-  case "${SERVER_STARTUP_TIMEOUT_SEC:-}" in ''|*[!0-9]*) CEILING="" ;; *) CEILING="$SERVER_STARTUP_TIMEOUT_SEC" ;; esac
-  if [ -z "$CEILING" ]; then
-    CEILING=1800                                    # HF id / unreadable path: no size to go on
-    if [ -d "$MODEL" ]; then
-      _bytes=$(timeout 30 du -sbL "$MODEL" 2>/dev/null | cut -f1)
-      case "${_bytes:-}" in ''|*[!0-9]*) _bytes=0 ;; esac
-      if [ "$_bytes" -gt 0 ]; then
-        # ~400MB/s/rank sustained, times ~3 slack. A BACKSTOP, not a prediction — stall is the judge.
-        CEILING=$(( 600 + 8 * (_bytes / 1073741824) / TP ))
-        [ "$CEILING" -lt 900 ] && CEILING=900
-        [ "$CEILING" -gt 7200 ] && CEILING=7200
-      fi
-    fi
-  fi
-  case "${HEALTH_TRIES:-}" in ''|*[!0-9]*) ;; *) CEILING=$((HEALTH_TRIES*5)) ;; esac   # deprecated alias
+  case "${SERVER_STARTUP_TIMEOUT_SEC:-}" in ''|*[!0-9]*) CEILING=7200 ;; *) CEILING="$SERVER_STARTUP_TIMEOUT_SEC" ;; esac
 
-  _up=0; _reason=""; _attempt=0; _waited=0
-  while [ "$_attempt" -lt "$SERVER_START_ATTEMPTS" ]; do
-    _attempt=$((_attempt+1))
-    echo ">>> Launching $BACKEND server (attempt $_attempt/$SERVER_START_ATTEMPTS, log: $LOG) ..."
-    adapter_launch
-    if [ -z "${SERVER_PID:-}" ]; then echo "!!! adapter_launch did not set SERVER_PID"; exit 2; fi
-    echo ">>> Waiting for server health (stall window ${STALL_WINDOW_SEC}s, backstop ${CEILING}s) ..."
-    _t0=$SECONDS; _last_tok=""; _last_change=$SECONDS; _reason=""
-    while :; do
-      if adapter_health >/dev/null 2>&1; then _up=1; break; fi
-      if ! kill -0 "$SERVER_PID" 2>/dev/null; then _reason="died_early"; break; fi
-      if grep -Eq 'CUDA out of memory|HIP out of memory' "$LOG" 2>/dev/null; then _reason="oom"; break; fi
-      if grep -Eq 'watchdog timeout|Capturing cuda graph failed|FATAL' "$LOG" 2>/dev/null; then
-        _reason="fatal_marker"; break
-      fi
-      # Progress token = log byte count. Both backends print continuously through dist init, shard
-      # load and graph capture, so "no new bytes for a long time" IS the observable form of wedged.
-      _tok=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
-      if [ "$_tok" != "$_last_tok" ]; then
-        _last_tok="$_tok"; _last_change=$SECONDS
-      elif [ $((SECONDS-_last_change)) -ge "$STALL_WINDOW_SEC" ]; then
-        _reason="stalled"; break
-      fi
-      if [ $((SECONDS-_t0)) -ge "$CEILING" ]; then _reason="ceiling_exceeded"; break; fi
-      sleep "$HEALTH_POLL_SEC"
-    done
-    _waited=$((SECONDS-_t0))
-    if [ "$_up" = "1" ]; then echo ">>> Server up after ~${_waited}s."; break; fi
-    # Classify. Only unambiguously TRANSIENT faults are retried. OOM never is: lowering MEM_FRACTION
-    # would hide "this candidate does not fit", which is a real result, not a flake.
+  _up=0; _reason=""
+  echo ">>> Launching $BACKEND server (log: $LOG) ..."
+  adapter_launch
+  if [ -z "${SERVER_PID:-}" ]; then echo "!!! adapter_launch did not set SERVER_PID"; exit 2; fi
+  echo ">>> Waiting for server health (stall window ${STALL_WINDOW_SEC}s, backstop ${CEILING}s) ..."
+  _t0=$SECONDS; _last_tok=""; _last_change=$SECONDS
+  while :; do
+    if adapter_health >/dev/null 2>&1; then _up=1; break; fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then _reason="died_early"; break; fi
+    if grep -Eq 'CUDA out of memory|HIP out of memory' "$LOG" 2>/dev/null; then _reason="oom"; break; fi
+    if grep -Eq 'watchdog timeout|Capturing cuda graph failed|FATAL' "$LOG" 2>/dev/null; then
+      _reason="fatal_marker"; break
+    fi
+    # Progress token = log byte count. Both backends print continuously through dist init, shard
+    # load and graph capture, so "no new bytes for a long time" IS the observable form of wedged.
+    _tok=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
+    if [ "$_tok" != "$_last_tok" ]; then
+      _last_tok="$_tok"; _last_change=$SECONDS
+    elif [ $((SECONDS-_last_change)) -ge "$STALL_WINDOW_SEC" ]; then
+      _reason="stalled"; break
+    fi
+    if [ $((SECONDS-_t0)) -ge "$CEILING" ]; then _reason="ceiling_exceeded"; break; fi
+    sleep "$HEALTH_POLL_SEC"
+  done
+  _waited=$((SECONDS-_t0))
+  if [ "$_up" = "1" ]; then
+    echo ">>> Server up after ~${_waited}s."
+  else
+    # Refine the reason so the caller can tell a flaky rendezvous apart from a real wedge/OOM.
     case "$_reason" in
       died_early|ceiling_exceeded|stalled)
         if grep -Eq 'ngine ?[Cc]ore.*([Tt]imed out|TimeoutError)|frontend.*handshake.*timed out' "$LOG" 2>/dev/null; then
@@ -450,19 +433,12 @@ if [ "$REUSE_SERVER" != "1" ]; then
     esac
     echo "!!! Server did not come up (reason=$_reason) after ~${_waited}s. Last log:"; tail -n 60 "$LOG"
     cleanup; SERVER_PID=""
-    case "$_reason" in
-      engine_core_timeout|dist_init_fail)
-        if [ "$_attempt" -lt "$SERVER_START_ATTEMPTS" ]; then
-          echo ">>> Transient startup fault ($_reason); relaunching ..."; sleep 10
-        fi ;;
-      *) break ;;
-    esac
-  done
+  fi
   # Structured outcome, ALWAYS written (success too), so a failed start is a REASON downstream can
   # read rather than an empty task dir that looks like "authored and found no gain".
   _phase=$(tail -n 1 "$LOG" 2>/dev/null | tr -d '\r\\' | tr '"' "'" | cut -c1-200)
-  printf '{"status":"%s","attempts":%d,"reason":"%s","phase_hint":"%s","wait_sec":%d,"ceiling_sec":%d,"stall_window_sec":%d,"port":"%s","backend":"%s","overlay_kind":"%s","log":"%s"}\n' \
-    "$([ "$_up" = "1" ] && echo ok || echo failed)" "$_attempt" "${_reason:-none}" "$_phase" \
+  printf '{"status":"%s","reason":"%s","phase_hint":"%s","wait_sec":%d,"ceiling_sec":%d,"stall_window_sec":%d,"port":"%s","backend":"%s","overlay_kind":"%s","log":"%s"}\n' \
+    "$([ "$_up" = "1" ] && echo ok || echo failed)" "${_reason:-none}" "$_phase" \
     "$_waited" "$CEILING" "$STALL_WINDOW_SEC" "$PORT" "$BACKEND" "$OVERLAY_KIND" "$LOG" \
     > "$OUT_DIR/server_start.json"
   if [ "$_up" != "1" ]; then
