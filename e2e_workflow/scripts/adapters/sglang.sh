@@ -97,12 +97,29 @@ adapter_profile_window() {
   local deadline=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
-    [ "$after" -gt "$before" ] && { sleep 2; return 0; }   # +2s for the write to flush
+    [ "$after" -gt "$before" ] && { sleep 2; _prune_nonrank0_traces; return 0; }   # +2s for the write to flush
     sleep 3
   done
   # num_steps may not be honored on some builds — force a stop and re-check
   curl -sf -X POST "${BASE_URL}/stop_profile" >/dev/null 2>&1 || true
   sleep 3
   after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
+  [ "$after" -gt "$before" ] && _prune_nonrank0_traces
   [ "$after" -gt "$before" ]
+}
+
+# Drop the traces the parser never consumes: rank>=1 worker traces and the *.async_llm.* engine trace;
+# only rank0 is read downstream. Saves disk and disambiguates the dir for the single-file parser. DENYLIST,
+# not allowlist: rank0 and an unmarked single-worker trace are always kept, so we never delete the only
+# trace. Only *.trace.json* files are touched. PROFILE_KEEP_ALL_RANKS=1 disables pruning (diagnostics).
+_prune_nonrank0_traces() {
+  [ "${PROFILE_KEEP_ALL_RANKS:-0}" = "1" ] && return 0
+  local f
+  for f in "$PROFILE_DIR"/*.trace.json*; do
+    [ -f "$f" ] || continue
+    case "$f" in *rank0*|*rank-0*) continue ;; esac      # never touch rank0
+    case "$f" in
+      *rank[1-9]*|*rank-[1-9]*|*.async_llm.*) rm -f "$f" ;;
+    esac
+  done
 }

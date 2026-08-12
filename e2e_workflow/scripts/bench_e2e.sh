@@ -276,6 +276,15 @@ PROFILE_NUM_STEPS_MAX=${PROFILE_NUM_STEPS_MAX:-64}  # CAP on captured steps (sgl
                                              # trace whose roctracer flush takes minutes AND BLOCKS the
                                              # server (health drops, requests time out). 64 steps still
                                              # spans the prefill ramp + a decode sample. Raise if needed.
+# vllm 0.26+ ProfilerConfig step knobs (adapters/vllm.sh). Fixed at SERVER LAUNCH (the CLI flag is set
+# once, before the profile-time window sizing runs), so they live here rather than in the sizing block.
+PROFILE_MAX_ITERS=${PROFILE_MAX_ITERS:-${PROFILE_NUM_STEPS_MAX:-64}}  # HARD cap: profiler auto-stops after
+                                             # this many worker steps (wrapper.py step()->_call_stop),
+                                             # bounding the event buffer where vllm otherwise had NO bound
+                                             # (issue #398). Same ceiling the sglang step count uses, so no
+                                             # representativeness regression. Ignored on <0.26 (field absent).
+PROFILE_DELAY_ITERS=${PROFILE_DELAY_ITERS:-0}  # steps to skip before the profiler arms. 0 keeps the prefill
+                                             # burst visible (matches PROFILE_WARMUP_SEC=0). Ignored on <0.26.
 PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-0}  # 0 = arm the profiler AT load start so the capture INCLUDES
                                              # the initial prefill burst. A non-zero warmup lets the load
                                              # pass the prefill ramp first, so the window lands in decode
@@ -286,18 +295,23 @@ PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}  # >CONC so the queue 
 PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}            # optional req/s to stagger arrivals; empty
                                              # = inf (max_concurrency still caps in-flight at CONC).
 PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}     # max wait for the trace file to appear.
-PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-40}             # capture DURATION FLOOR for time-windowed
+PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-20}             # capture DURATION FLOOR for time-windowed
                                              # backends (vllm: /start_profile has no num_steps, so the
                                              # window is controlled by start -> sleep this long ->
                                              # /stop_profile). sglang ignores this (uses PROFILE_NUM_STEPS).
+                                             # On vllm 0.26+ the profiler ALSO self-stops at max_iterations
+                                             # (PROFILE_MAX_ITERS, adapters/vllm.sh) so the buffer is
+                                             # step-bounded by construction and this sleep is only a safety
+                                             # upper bound; on <0.26 (no step knob) it is the ONLY bound,
+                                             # which is why the band was lowered (issue #398).
                                              # This is a FLOOR: when TPOT_MS is known (auto-derived from
                                              # the timed bench below) the window auto-scales to
                                              # TARGET_STEPS*TPOT*1.5 so it spans the prefill ramp (warmup=0)
                                              # AND a steady decode sample, then is CLAMPED to
-                                             # [40, PROFILE_WINDOW_SEC_MAX]. Longer is NOT free: a torch
+                                             # [20, PROFILE_WINDOW_SEC_MAX]. Longer is NOT free: a torch
                                              # trace grows ~linearly with the window (must stay <
                                              # PROFILE_WINDOW_TIMEOUT, and can OOM the profiler buffer).
-PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-60}     # CAP for the auto-scaled vllm window. Bounds
+PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-30}     # CAP for the auto-scaled vllm window. Bounds
                                              # trace size: with warmup=0 the whole prefill ramp is recorded,
                                              # so a heavy/low-TPOT workload could otherwise size a multi-GB
                                              # trace that fails to flush. Raise if you need a longer window.
@@ -318,6 +332,7 @@ COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
 export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
+export PROFILE_MAX_ITERS PROFILE_DELAY_ITERS
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
 export BENCH_TRUST_REMOTE_CODE HF_HUB_TRUST_REMOTE_CODE
 
@@ -513,8 +528,10 @@ PY
   #   STEADY = max(30, 5*ceil(OSL/CONC))  decode steps for a stable, representative sample
   # TARGET = RAMP + STEADY + margin. Sized deterministically UP FRONT for BOTH backends (the old reactive
   # re-capture gate is DISABLED — no reliable per-step signal without annotations). The ISL/OSL/CONC/prompts
-  # math is the guarantee: PROFILE_NUM_STEPS -> TARGET (sglang, step-controlled), and PROFILE_WINDOW_SEC is
-  # auto-scaled from the derived TPOT and clamped to [40, PROFILE_WINDOW_SEC_MAX] (vllm, time-controlled),
+  # math is the guarantee: PROFILE_NUM_STEPS -> TARGET (sglang, step-controlled). On vllm 0.26+ the profiler
+  # is step-bounded by PROFILE_MAX_ITERS (adapters/vllm.sh) and PROFILE_WINDOW_SEC is only a safety cap;
+  # on vllm <0.26 (no step knob) PROFILE_WINDOW_SEC is the sole bound. Either way it is auto-scaled from the
+  # derived TPOT and clamped to [PROFILE_WINDOW_SEC floor, PROFILE_WINDOW_SEC_MAX] (vllm, time-controlled),
   # so the single window spans the prefill ramp (warmup=0) + a steady decode sample.
   # Assumes a saturated queue + KV headroom for CONC concurrent decodes (else batch can't reach CONC).
   _CHUNK="${PREFILL_CHUNK:-$ISL}"
@@ -540,10 +557,10 @@ PY
   # [PROFILE_WINDOW_SEC floor, PROFILE_WINDOW_SEC_MAX cap]. The cap bounds trace size (warmup=0 records the
   # whole ramp, so a heavy/low-TPOT workload could otherwise size a multi-GB trace that fails to flush).
   if [ -n "${TPOT_MS:-}" ]; then
-    _WMAX="${PROFILE_WINDOW_SEC_MAX:-60}"
-    _WSEC=$(python3 -c "import math;print(min($_WMAX, max(${PROFILE_WINDOW_SEC:-40}, math.ceil($_TARGET_STEPS*$TPOT_MS/1000.0*1.5))))" 2>/dev/null || echo "${PROFILE_WINDOW_SEC:-40}")
+    _WMAX="${PROFILE_WINDOW_SEC_MAX:-30}"
+    _WSEC=$(python3 -c "import math;print(min($_WMAX, max(${PROFILE_WINDOW_SEC:-20}, math.ceil($_TARGET_STEPS*$TPOT_MS/1000.0*1.5))))" 2>/dev/null || echo "${PROFILE_WINDOW_SEC:-20}")
     if [ "$_WSEC" != "${PROFILE_WINDOW_SEC}" ]; then
-      echo ">>> steady-state sizing: PROFILE_WINDOW_SEC ${PROFILE_WINDOW_SEC}->${_WSEC}s (TPOT=${TPOT_MS}ms x ${_TARGET_STEPS} steps x1.5, clamped [${PROFILE_WINDOW_SEC:-40},${_WMAX}]s)"
+      echo ">>> steady-state sizing: PROFILE_WINDOW_SEC ${PROFILE_WINDOW_SEC}->${_WSEC}s (TPOT=${TPOT_MS}ms x ${_TARGET_STEPS} steps x1.5, clamped [${PROFILE_WINDOW_SEC:-20},${_WMAX}]s)"
       PROFILE_WINDOW_SEC=$_WSEC
     fi
   fi

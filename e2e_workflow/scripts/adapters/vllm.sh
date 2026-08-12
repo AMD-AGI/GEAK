@@ -35,14 +35,56 @@ adapter_launch() {
   local -a _prof=()
   local -a _prof_env=()
   if [ -n "${PROFILE_DIR:-}" ]; then
-    if python3 -c 'from vllm.config import ProfilerConfig' 2>/dev/null; then
-      # We deliberately DO NOT pass detailed_trace_annotation: current vllm's ProfilerConfig is a strict
-      # (pydantic extra=forbid) schema that ABORTS the server on that key. When a build DOES accept it, it
-      # emits the execute_context_*_generation_* step spans (gpu_user_annotation, torch record_function —
-      # they DO appear on ROCm) that parse_profile.py uses to split prefill/decode; without it the split
-      # falls back to the analytic est_calls / shape path. record_shapes stays on for Input Dims.
-      _prof=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true}")
+    # Field-granular capability probe (mirrors Hyperloom PR #1157's _vllm_profiler_is_native): the
+    # ProfilerConfig schema is strict (pydantic extra=forbid) and ABORTS the server on an unknown key,
+    # so we may only emit fields the INSTALLED build actually declares. Print the union of dataclass
+    # fields / pydantic model_fields / __annotations__ so this works across the 0.19->0.26 schema churn.
+    local _prof_fields
+    _prof_fields="$(python3 - <<'PY' 2>/dev/null
+names=set()
+try:
+    from vllm.config import ProfilerConfig
+    import dataclasses
+    try:
+        names |= {f.name for f in dataclasses.fields(ProfilerConfig)}
+    except Exception:
+        pass
+    names |= set(getattr(ProfilerConfig, "model_fields", {}) or {})
+    names |= set(getattr(ProfilerConfig, "__annotations__", {}) or {})
+    print(" ".join(sorted(names)))
+except Exception:
+    pass
+PY
+)"
+    _has() { case " $_prof_fields " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+    if [ -n "$_prof_fields" ]; then
+      # New build (>=0.19): pass --profiler-config, built one field at a time so an older schema that
+      # lacks the 0.26 knobs still launches. record_shapes stays on for Input Dims.
+      local _json="{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true"
+      # #398 primary fix: stacks default True upstream and are the biggest per-event cost (sglang.sh
+      # already turns them off). Dropping them is the single largest cut to the profiler event buffer.
+      _has torch_profiler_with_stack && _json="$_json,\"torch_profiler_with_stack\":false"
+      # 0.26+ step control: max_iterations auto-stops the profiler after N worker steps (wrapper.py
+      # step()->_call_stop), turning the wall-clock window step-bounded and capping the buffer by
+      # construction. delay_iterations skips cold start; ignore_frontend is their required companion
+      # (silences the high-overhead warning when delay/max are set).
+      _has max_iterations   && _json="$_json,\"max_iterations\":${PROFILE_MAX_ITERS:-64}"
+      _has delay_iterations && _json="$_json,\"delay_iterations\":${PROFILE_DELAY_ITERS:-0}"
+      _has ignore_frontend  && _json="$_json,\"ignore_frontend\":true"
+      # 0.26+ shape param riding along in the same config: emits the execute_..._context_N(sq..sk..)_
+      # generation_N(...) dialect that parse_profile.py's _seg/_classify_step already parse, activating
+      # the measured prefill/decode split. Emit-side cheap (one annotation per ITERATION, not per op).
+      _has detailed_trace_annotation && _json="$_json,\"detailed_trace_annotation\":true"
+      # 0.26+ rank0 decode-shape capture: OPT-IN only (PROFILE_CAPTURE_TRACES=1). Upstream hardcodes
+      # with_stack+profile_memory for this path, so it needs memory validation on a 512 GiB pod first.
+      if [ "${PROFILE_CAPTURE_TRACES:-0}" = "1" ]; then
+        _has capture_torch_profiler && _json="$_json,\"capture_torch_profiler\":true"
+      fi
+      _json="$_json}"
+      _prof=(--profiler-config "$_json")
     else
+      # Old build (<0.19): the CLI flag does not exist (argparse would abort), so use the env var. No
+      # with_stack/step knob here -> the shorter time window (bench_e2e.sh) is the only buffer bound.
       _prof_env=(VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR")
     fi
   fi
@@ -110,8 +152,9 @@ adapter_profile_window() {
     echo "!!! /start_profile request failed (vllm torch profiler not enabled at launch?)" >&2
     return 1
   fi
-  # profile a steady-state window of this duration (no num_steps knob on vllm)
-  sleep "${PROFILE_WINDOW_SEC:-40}"
+  # profile a steady-state window of this duration. On 0.26+ the profiler self-stops at max_iterations
+  # (adapter_launch), so this sleep is just a safety upper bound; on <0.26 it is the only buffer bound.
+  sleep "${PROFILE_WINDOW_SEC:-20}"
   # /stop_profile flushes the trace; the server waits for the flush, so give curl a generous timeout.
   curl -s --max-time "${PROFILE_WINDOW_TIMEOUT:-180}" -X POST "${BASE_URL}/stop_profile" \
     >/dev/null 2>&1 || echo "!!! /stop_profile request errored (checking for a trace anyway)" >&2
@@ -119,9 +162,29 @@ adapter_profile_window() {
   local deadline=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
-    [ "$after" -gt "$before" ] && { sleep 2; return 0; }   # +2s for the write to flush
+    [ "$after" -gt "$before" ] && { sleep 2; _prune_nonrank0_traces; return 0; }   # +2s for the write to flush
     sleep 3
   done
   after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
+  [ "$after" -gt "$before" ] && _prune_nonrank0_traces
   [ "$after" -gt "$before" ]
+}
+
+# Drop the traces parse_profile.py never consumes: rank>=1 WORKER traces (TP/EP) and the *.async_llm.*
+# engine trace (python_function only, no kernels). Only rank0 is read downstream (roles/profiler.md).
+# Pruning saves disk + makes the dir unambiguous for the single-file parser. This does NOT cut the
+# concurrent buffer peak (all workers still buffer during the window) — max_iterations bounds that.
+# DENYLIST, not allowlist: a rank0 trace, or a TP=1 trace with NO rank marker at all, is always kept, so
+# we never delete the only trace. Only ordinary *.trace.json* files are touched (a capture_traces/ subdir
+# and non-trace files are left). PROFILE_KEEP_ALL_RANKS=1 disables pruning (diagnostics).
+_prune_nonrank0_traces() {
+  [ "${PROFILE_KEEP_ALL_RANKS:-0}" = "1" ] && return 0
+  local f
+  for f in "$PROFILE_DIR"/*.trace.json*; do
+    [ -f "$f" ] || continue
+    case "$f" in *rank0*|*rank-0*) continue ;; esac      # never touch rank0
+    case "$f" in
+      *rank[1-9]*|*rank-[1-9]*|*.async_llm.*) rm -f "$f" ;;
+    esac
+  done
 }
