@@ -26,7 +26,10 @@ Commands:
   add-capture   install a shape/IO capture hook on module:attr (uses capture_shapes.py)
                 --overlay O --target sglang...:fn --out <task_dir> [--max 5] [--capture-file capture_shapes.py]
   check         print where a module resolves from (run with the overlay on PYTHONPATH)
-                --module sglang.srt.layers.activation
+                --module sglang.srt.layers.activation [--path-only]
+  Every add-* takes --from BASE to SEED a new overlay from an existing one, so a candidate overlay is
+  "the live stack + ONE entry". Stacking by PYTHONPATH does NOT work: only the first sitecustomize on
+  sys.path is imported, so a second overlay dir is silently dead. Seeding by copy is the only way.
 
 Back-compat aliases: `monkeypatch` == add-rebind, `copy-subtree` == add-module (file granularity).
 Stdlib only.
@@ -103,7 +106,13 @@ def module_file(dotted):
     return spec.origin
 
 
-def _ensure_overlay(overlay):
+def _ensure_overlay(overlay, base=""):
+    # --from BASE seeds a NEW overlay from an existing one, so a candidate overlay is literally
+    # "the live stack + one entry". Two overlay dirs on PYTHONPATH do NOT compound (only the first
+    # sitecustomize is imported) — seeding by copy is the only correct way to stack.
+    if base and not os.path.exists(os.path.join(overlay, "_overlay_manifest.json")):
+        if os.path.isdir(base):
+            shutil.copytree(base, overlay, dirs_exist_ok=True)
     os.makedirs(overlay, exist_ok=True)
     sc = os.path.join(overlay, "sitecustomize.py")
     if not os.path.exists(sc):
@@ -145,7 +154,7 @@ def _try_apply(patch, target_file=None, cwd=None):
 
 
 def cmd_add_module(a):
-    man = _ensure_overlay(a.overlay)
+    man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     patched_dir = os.path.join(a.overlay, "_patched")
     os.makedirs(patched_dir, exist_ok=True)
     dst = os.path.join(patched_dir, a.module + ".py")
@@ -166,7 +175,7 @@ def cmd_add_module(a):
 
 
 def cmd_add_rebind(a):
-    man = _ensure_overlay(a.overlay)
+    man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     if a.impl_file:
         shutil.copy2(a.impl_file, os.path.join(a.overlay, os.path.basename(a.impl_file)))
     m = _load_man(man)
@@ -179,7 +188,7 @@ def cmd_add_rebind(a):
 
 
 def cmd_add_capture(a):
-    man = _ensure_overlay(a.overlay)
+    man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     cap = a.capture_file or os.path.join(os.path.dirname(os.path.abspath(__file__)), "capture_shapes.py")
     shutil.copy2(cap, os.path.join(a.overlay, "capture_shapes.py"))
     m = _load_man(man)
@@ -193,6 +202,9 @@ def cmd_add_capture(a):
 
 def cmd_check(a):
     f = module_file(a.module)
+    if getattr(a, "path_only", False):
+        print(f)
+        return
     print(f"{a.module} -> {f}")
     print("OVERLAY_ACTIVE" if os.sep + "_patched" + os.sep in f else
           ("INJECTED" if f.endswith(a.module + ".py") else "INSTALL (overlay not shadowing this module)"))
@@ -212,6 +224,7 @@ def main():
         p.add_argument("--patched-file", default="")
         p.add_argument("--src-file", default="")
         p.add_argument("--patch", default="")
+        p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
         p.set_defaults(func=_dispatch_add_module)
 
     for name in ("add-rebind", "monkeypatch"):
@@ -221,6 +234,7 @@ def main():
         p.add_argument("--impl-module", required=True, dest="impl_module")
         p.add_argument("--impl-attr", required=True, dest="impl_attr")
         p.add_argument("--impl-file", default="", dest="impl_file")
+        p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
         p.set_defaults(func=cmd_add_rebind)
 
     p = sub.add_parser("add-capture")
@@ -229,10 +243,12 @@ def main():
     p.add_argument("--out", required=True, help="task dir to flush reference_io.pt + meta.json into")
     p.add_argument("--max", type=int, default=5)
     p.add_argument("--capture-file", default="", dest="capture_file")
+    p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
     p.set_defaults(func=cmd_add_capture)
 
     p = sub.add_parser("check")
     p.add_argument("--module", required=True)
+    p.add_argument("--path-only", action="store_true", dest="path_only")
     p.set_defaults(func=cmd_check)
 
     a = ap.parse_args()

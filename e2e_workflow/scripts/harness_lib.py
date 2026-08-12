@@ -36,8 +36,12 @@ It exists to close two systematic "isolated win / e2e loss" holes that a naive p
       form (observed-vs-ceiling) available to any downstream e2e comparison; an observed delta far above
       the ceiling is box drift / measurement error, not the kernel.
 """
+import json
 import math
 import os
+import shutil
+import subprocess
+import sys
 import time
 
 
@@ -615,7 +619,8 @@ def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3)
 
 # --------------------------------------------------------------------------- (b) random-value parity vs live baseline
 def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
-                             draws=3, warmup=10, repeats=50, inner=1, graph=False, seed=0):
+                             draws=3, warmup=10, repeats=50, inner=1, graph=False, seed=0,
+                             baseline_outputs=None):
     """Validate the candidate against the LIVE frozen baseline on MANY RANDOM INPUT VALUE DRAWS at the
     SAME online-aligned shapes (NOT random shapes — dims are fixed per `sig`, only values vary). The
     frozen oracle (`reference_io.pt`) pins ONE recorded input+golden; this catches value-dependent bugs
@@ -631,8 +636,13 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
     with the L2/Infinity cache flushed cold before each iteration; `inner=1` (one launch per event window)
     since events time the GPU timeline directly — no host-side amortization loop is needed.
 
-    `baseline_call(args) -> out`  invokes the frozen real online kernel (meta.baseline_callable /
-        baseline_src/). `current_call(args) -> out` invokes the candidate in kernel_src/.
+    `baseline_outputs` (PREFERRED) = the dict `baseline_random_outputs(...)` recorded by the BASELINE
+        leg in its OWN subprocess (`leg_runner.py --mode oracle` under `baseline_overlay/`), keyed
+        `"<sig>|<draw>"`. Same seed => same inputs, so the two legs never have to be co-resident and no
+        `baseline_call` closure — the thing an inverted binding used to hide in — exists at all. When it
+        is given, `baseline_call` is ignored and `speedup` is None here (timing comes from `measure_legs`).
+    `baseline_call(args) -> out` is the LEGACY in-process form, kept for op_bench / single-process tasks.
+        `current_call(args) -> out` invokes the candidate in kernel_src/.
     `shapes` is a list of {"sig": <label>, "make_inputs": callable(rng) -> args}. `make_inputs` builds a
         FRESH random in-regime input set for that shape's fixed dims (the unittest closes over
         regime_spec/synth_kv_cache); `rng` is a seeded torch.Generator for reproducibility.
@@ -649,9 +659,16 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
             rng = torch.Generator(device=device).manual_seed(int(seed) + i)
             try:
                 args = make_inputs(rng)
-                base_out = baseline_call(args)
-                base_snap = base_out.detach().clone()      # snapshot BEFORE current runs (anti-alias)
-                cand_out = current_call(args)
+                if baseline_outputs is not None:
+                    ref = baseline_outputs.get(f"{sig}|{i}")
+                    if ref is None:
+                        raise KeyError(f"no recorded baseline output for {sig}|{i}")
+                    cand_out = current_call(args)
+                    base_snap = ref.to(cand_out.device)
+                else:
+                    base_out = baseline_call(args)
+                    base_snap = base_out.detach().clone()  # snapshot BEFORE current runs (anti-alias)
+                    cand_out = current_call(args)
             except Exception as e:
                 all_ok = False
                 per_case.append({"case": f"random[{i}]:{sig}", "correct": False, "max_rel_err": None,
@@ -659,9 +676,12 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
                 continue
             ok, err = correct(cand_out, base_snap, tol)
             all_ok = all_ok and ok
-            ms_base = time_op(lambda: baseline_call(args), warmup, repeats, inner, graph)
-            ms_cand = time_op(lambda: current_call(args), warmup, repeats, inner, graph)
-            speedup = (ms_base / ms_cand) if (ms_base and ms_cand) else None
+            if baseline_outputs is not None:
+                speedup = None                             # timing belongs to measure_legs, not here
+            else:
+                ms_base = time_op(lambda: baseline_call(args), warmup, repeats, inner, graph)
+                ms_cand = time_op(lambda: current_call(args), warmup, repeats, inner, graph)
+                speedup = (ms_base / ms_cand) if (ms_base and ms_cand) else None
             per_case.append({"case": f"random[{i}]:{sig}", "correct": ok,
                              "max_rel_err": round(err, 5) if math.isfinite(err) else None,
                              "speedup": round(speedup, 3) if speedup else None,
@@ -853,8 +873,8 @@ UT_HARNESS_INCOMPLETE_SENTINEL = "UT_HARNESS_INCOMPLETE"
 # the h2 paged_attention failure. `run_correctness` closes both holes: the trigger is the AUTHORITATIVE
 # deployment fact `deployment_graph_mode(regime)` (regime.cuda_graph, from the launch flags), and a
 # graph-deploy kernel that supplies no >=2-shape replay bundle FAILS CLOSED instead of silently passing.
-def run_correctness(regime, *, eager_cases, baseline_call, current_call, random_shapes, tol,
-                    replay=None, draws=3):
+def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
+                    baseline_call=None, baseline_outputs=None, replay=None, draws=3):
     """The SINGLE correctness entrypoint every generated unittest must call. Runs, in order:
       1. eager multi-case vs oracle (`check_correct_multi`) — also the output-independence check;
       2. random-value parity vs the frozen live baseline (`check_random_vs_baseline`);
@@ -878,8 +898,12 @@ def run_correctness(regime, *, eager_cases, baseline_call, current_call, random_
     report["eager"] = per
     ok = ok and c_ok
 
+    if baseline_call is None and baseline_outputs is None:
+        raise ValueError("run_correctness needs baseline_outputs (preferred: recorded by the baseline "
+                         "leg via baseline_random_outputs) or a legacy in-process baseline_call")
     r_ok, perr = check_random_vs_baseline(baseline_call, current_call, random_shapes, tol,
-                                          draws=draws, graph=deployment_graph_mode(regime))
+                                          draws=draws, graph=deployment_graph_mode(regime),
+                                          baseline_outputs=baseline_outputs)
     report["random"] = perr
     ok = ok and r_ok
 
@@ -977,3 +1001,115 @@ def shuffled_block_table(num_seqs, blocks_per_seq, pool_blocks=0, seed=0, torch=
     g = torch.Generator(device=device).manual_seed(int(seed))
     perm = torch.randperm(pool, generator=g, device=device)[:need].to(torch.int32)
     return perm.reshape(int(num_seqs), int(blocks_per_seq))
+
+
+# --------------------------------------------------------------------------- (d) two-leg measurement
+# WHY: the baseline used to be a SECOND copy of the source inside the task dir, selected by a
+# `meta.baseline_callable` string that the generated harness bound by hand. Both trees held byte-
+# identical, identically-named code, so "which one is the baseline" was a coin flip the harness could
+# lose SILENTLY — both legs are correct implementations, so correctness still passed and only the ratio
+# inverted. It also made `mode=author` time optimized-HIP against its own naive-HIP seed.
+#
+# Here the baseline is not a copy at all: it is the LIVE SERVING STACK (install + every accepted
+# kernel = the e2e gate's ref leg), reached by running the SAME leg_runner.py + cases.py under
+# `baseline_overlay/` on PYTHONPATH. The candidate is that same stack plus ONE entry generated from
+# kernel_src/. Direction is a property of the environment, not of a name the harness picks, and
+# `assert_legs_differ` refuses to measure anything until it has PROVEN the two legs import different
+# code and that the baseline resolves OUTSIDE the task dir (so nothing the optimizer can edit).
+def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600):
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    cmd = [sys.executable, os.path.join(task_dir, "leg_runner.py"),
+           "--task", task_dir, "--mode", mode, "--seed", str(int(seed))]
+    if bucket:
+        cmd += ["--bucket", bucket]
+    if out:
+        cmd += ["--out", out]
+    if draws:
+        cmd += ["--draws", str(int(draws))]
+    r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError(f"leg({mode}) under {overlay} exited {r.returncode}: {r.stderr[-800:]}")
+    lines = [ln for ln in r.stdout.strip().splitlines() if ln.startswith("{")]
+    if not lines:
+        raise RuntimeError(f"leg({mode}) under {overlay} produced no JSON: {r.stdout[-800:]}")
+    return json.loads(lines[-1])
+
+
+def build_candidate_overlay(task_dir, meta):
+    """Rebuild `<task>/_cand_overlay` = baseline_overlay + ONE entry from kernel_src/ (meta.candidate_bind).
+
+    Rebuilt on EVERY measurement because kernel_src/ is the optimizer's live workspace. `candidate_bind`
+    is the same {kind, module|target, file} the e2e Integrator uses to wire the accepted kernel, so an
+    isolated win is rebindable e2e by construction (no `no_rebind_seam` surprise)."""
+    task = os.path.abspath(task_dir)
+    base = os.path.join(task, "baseline_overlay")
+    cand = os.path.join(task, "_cand_overlay")
+    shutil.rmtree(cand, ignore_errors=True)
+    b = meta.get("candidate_bind") or {}
+    src = os.path.join(task, b.get("file", "") or "")
+    if not b.get("file") or not os.path.exists(src):
+        raise RuntimeError("meta.candidate_bind missing or its file is absent — cannot build the candidate leg")
+    tool = [sys.executable, os.path.join(task, "overlay_setup.py")]
+    if b.get("kind") == "rebind":
+        args = ["add-rebind", "--target", b["target"], "--impl-module", b["impl_module"],
+                "--impl-attr", b["impl_attr"], "--impl-file", src]
+    else:
+        args = ["add-module", "--module", b["module"], "--patched-file", src]
+    r = subprocess.run(tool + args + ["--overlay", cand, "--from", base], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"candidate overlay build failed: {r.stderr[-800:]}")
+    return base, cand
+
+
+def assert_legs_differ(task_dir, base, cand, meta, timeout=600):
+    """Refuse to measure unless the two legs provably import DIFFERENT code AND the baseline leg
+    resolves OUTSIDE the task dir. This is the single check that makes an inverted or self-referential
+    baseline impossible rather than merely discouraged."""
+    task = os.path.abspath(task_dir)
+    target = meta["target_callable"]
+    bi = _run_leg(task, base, "resolve", timeout=timeout)
+    ci = _run_leg(task, cand, "resolve", timeout=timeout)
+    for who, ident in (("baseline", bi), ("candidate", ci)):
+        if ident.get("error"):
+            raise RuntimeError(f"{who} leg cannot import {target}: {ident['error']}")
+    if bi == ci:
+        raise RuntimeError(
+            f"both legs resolve {target} to the SAME code ({bi}) — the candidate overlay is not "
+            "shadowing it, so any measured 'speedup' is noise. Check meta.candidate_bind.")
+    if bi.get("file", "").startswith(task + os.sep):
+        raise RuntimeError(
+            f"baseline leg resolved INSIDE the task dir ({bi['file']}) — the baseline must be the live "
+            "serving stack, never a copy the optimizer can edit.")
+    return bi, ci
+
+
+def measure_legs(task_dir, meta, *, timeout=3600):
+    """`per_case` for `serving_weighted_speedup`, one bucket per FRESH subprocess per leg.
+
+    Fresh-per-bucket is not optional: a warm interpreter shares JIT/autotune state between the legs and
+    reports a pseudo-1.0x that is an artifact, not a measurement."""
+    task = os.path.abspath(task_dir)
+    base, cand = build_candidate_overlay(task, meta)
+    assert_legs_differ(task, base, cand, meta)
+    per_case = []
+    for sig in _run_leg(task, base, "list", timeout=timeout)["sigs"]:
+        b = _run_leg(task, base, "time", bucket=sig, timeout=timeout)["cases"]
+        o = _run_leg(task, cand, "time", bucket=sig, timeout=timeout)["cases"]
+        if not b or not o:
+            continue
+        bm, om = b[0].get("ms"), o[0].get("ms")
+        per_case.append({"sig": sig, "regime": b[0].get("regime", ""), "m": b[0].get("m"),
+                         "baseline_ms": bm, "optimized_ms": om,
+                         "speedup": (bm / om) if (bm and om) else None})
+    return per_case
+
+
+def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600):
+    """Random-draw outputs recorded by the BASELINE leg in its own process, for
+    `check_random_vs_baseline(baseline_outputs=...)`. Same seed => same inputs on both sides."""
+    task = os.path.abspath(task_dir)
+    out = os.path.join(task, "_baseline_random.pt")
+    _run_leg(task, os.path.join(task, "baseline_overlay"), "oracle",
+             out=out, seed=seed, draws=draws, timeout=timeout)
+    return _torch().load(out, map_location="cpu")

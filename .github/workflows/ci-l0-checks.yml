@@ -73,6 +73,7 @@ jobs:
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \
             e2e_workflow/scripts/tests/test_harness_lib.py \
+            e2e_workflow/scripts/tests/test_leg_runner.py \
             geak/test_bootstrap.py
 
       # Renders the per-file table + total into the run's Job Summary, which is
