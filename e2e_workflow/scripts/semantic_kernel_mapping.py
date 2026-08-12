@@ -1291,6 +1291,29 @@ def _demote_non_dominant_prefixes(rows, partition_diagnostics):
     return demotions
 
 
+def _boundary_rank(instance):
+    """Lower is a more trustworthy layer boundary. Prefer module-span-cut
+    instances over collective-anchor, then repeated-sequence, then forced
+    alignment, so the representative table is taken from the best-evidenced cut
+    (not merely the one whose duration is closest to the median)."""
+    sources = (instance.get("boundary_evidence") or {}).get("sources") or []
+    best = 9
+    for src in sources:
+        text = str(src)
+        if "module_span" in text:
+            rank = 0
+        elif text in ("router_then_collective_end", "ordered_collective_anchor"):
+            rank = 1
+        elif text in ("repeated_sequence_medoid", "module_sequence_interpolation"):
+            rank = 2
+        elif text == "forced_best_alignment":
+            rank = 3
+        else:
+            rank = 4
+        best = min(best, rank)
+    return best
+
+
 def _representatives(pattern_doc, instances):
     by_pattern = {}
     for instance in instances:
@@ -1342,7 +1365,9 @@ def _representatives(pattern_doc, instances):
                 target = layer_phase_medians.get((phase, selected_layer), 0)
                 if phase_instances:
                     chosen = min(phase_instances, key=lambda item: (
-                        abs(item["duration_us"] - target), item["first_device_seq_index"]))
+                        _boundary_rank(item),
+                        abs(item["duration_us"] - target),
+                        item["first_device_seq_index"]))
                     selected_instances[phase] = {
                         "body_start_event": chosen["body_start_event"],
                         "body_end_event": chosen["body_end_event"],
