@@ -9,3 +9,6 @@
 
 ### Archived 2026-08-11 (per-class cap 8)
 - one-build-n-selectable-instances-turn-a-config-sweep-into-an-moe-grouped-gemm-gfx950-mixed.md
+
+### Archived 2026-08-12 (per-class cap 8; claim narrowed by a later run)
+- streaming-kv-loads-the-non-temporal-cache-modifier-can-cost--attention-decode-gfx950-decode.md

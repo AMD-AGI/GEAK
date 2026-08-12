@@ -3,12 +3,12 @@ key: Triton attention decode with a serial online-softmax recurrence and an alre
 type: anti-pattern
 confidence: ★★
 effect: Disconfirming, no patch shipped: manual QK/PV pipelining that carries the raw score tile across the loop back-edge regresses 40-56% on every case; reordering the PV dot ahead of the accumulator rescale is a 0% no-op; wrapper-level graph capture regresses per-case c2 -49.6%, c32 -40.2%, c64 -29.0%.
-confirms_cited: 1
+confirms_cited: 2
 confirms_blind: 0
 losses: 0
-attempts: 2
+attempts: 5
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: prove-the-floor-before-restructuring-ilp-or-wrapping-the-lau-attention-decode-gfx950-decode
 description: At an attention decode's ISA and launcher floor, manual SW-pipelining and graph capture both regress; probe occupancy and host share first
 keywords: ['attention', 'decode', 'software-pipelining', 'num-stages', 'launch-overhead', 'graph-capture', 'occupancy', 'dead-end']

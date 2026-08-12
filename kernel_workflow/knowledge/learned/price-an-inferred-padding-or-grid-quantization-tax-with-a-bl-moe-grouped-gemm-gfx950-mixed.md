@@ -5,10 +5,10 @@ confidence: ★★
 effect: Two taxes inferred from grid arithmetic (a 1.5x row-padding tax and a grid staircase) survived four consecutive round plans unmeasured and both turned out to be fictions: a 120..416 block sweep gave latency LINEAR in block count with per-block cost improving ~1.17x across the sweep instead of worsening, and the alignment metadata had ZERO fully-padded blocks (mean 42.6 valid rows of 64). The lane returned 0% over 3 budget units while the small-batch case stayed at 2.49x against 3.14x / 3.18x on the large-batch cases (run 2.92x geomean, director-verified).
 confirms_cited: 0
 confirms_blind: 1
-losses: 0
-attempts: 4
+losses: 1
+attempts: 7
 toolchain: rocm 7.2.3 / triton 3.6.0 / torch 2.11.0
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 name: price-an-inferred-padding-or-grid-quantization-tax-with-a-bl-moe-grouped-gemm-gfx950-mixed
 description: Price an inferred padding or grid-quantization tax with a block-count sweep before funding a round: both inferred taxes were fictions and the lane returned 0%
 keywords: ['grid-geometry', 'control-experiment', 'measurement-method', 'moe', 'tile-shape', 'memory-bound', 'launch-config']

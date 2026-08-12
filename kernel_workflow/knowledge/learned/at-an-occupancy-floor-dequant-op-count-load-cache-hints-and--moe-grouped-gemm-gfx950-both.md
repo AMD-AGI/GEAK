@@ -5,10 +5,10 @@ confidence: ★★
 effect: 3 independent directions, none positive. Magic-number bit-cast dequant: bit-exact, ISA-confirmed conversion-op removal (17 -> 1 per loop body), yet 0.988x overall and 0.978x on the batch-2 case. Load cache modifier '.cg': 0.83x on batch-32 and 0.89x on batch-64. Compiler auto num_stages>=2: -15% to -36% at BLOCK_M 256/512, and num_stages=3 exceeds the LDS capacity outright.
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 3
+losses: 1
+attempts: 5
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: at-an-occupancy-floor-dequant-op-count-load-cache-hints-and--moe-grouped-gemm-gfx950-both
 description: On a register-tight int4 GEMM at occupancy 2, cheaper dequant math, load cache modifiers and compiler auto-pipelining all measured neutral to clearly negative.
 keywords: ['dequant', 'cache-modifier', 'num-stages', 'software-pipeline', 'lds', 'int4', 'grouped-gemm', 'noise-floor', 'gfx950']

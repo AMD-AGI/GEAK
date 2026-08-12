@@ -5,10 +5,10 @@ confidence: ★★
 effect: Whole axis disconfirmed against a 42.2x incumbent: a genuine double-buffer of the streamed operand -14% (both larger-batch cases regressed per-case), a second occupancy wave -76%, sequential sub-tiling with operand reload -55%, pipeline depth 2 net-negative, and disabling the existing 1-deep prefetch -43%; the L2/XCD reorder that does help is a ~1% ceiling (+1.2% at mid batch, neutral at the largest, unchanged at the smallest).
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 6
+losses: 2
+attempts: 8
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: occupancy-pipeline-knobs-closed-when-dep-chain-bound-moe-grouped-gemm-gfx950-both
 description: Anti-pattern: at occupancy 1 with a reused operand far larger than L2, occupancy, pipeline-depth and L2-swizzle knobs are all negative or ~1% ceilings.
 keywords: ['occupancy', 'software-pipelining', 'double-buffer', 'prefetch', 'num-stages', 'l2-residency', 'xcd-swizzle', 'dep-chain', 'moe', 'grouped-gemm']

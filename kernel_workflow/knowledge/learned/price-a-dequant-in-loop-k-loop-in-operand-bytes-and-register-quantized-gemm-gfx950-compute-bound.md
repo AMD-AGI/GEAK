@@ -6,7 +6,7 @@ effect: no speedup of its own -- a screen. On the run's director-verified end st
 confirms_cited: 0
 confirms_blind: 1
 losses: 0
-attempts: 5
+attempts: 7
 toolchain: triton 3.6.0 / torch 2.11.0 / gfx950 CDNA4
 last_seen: 2026-08-11
 name: price-a-dequant-in-loop-k-loop-in-operand-bytes-and-register-quantized-gemm-gfx950-compute-bound

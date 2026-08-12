@@ -3,12 +3,12 @@ key: measuring true per-CU occupancy of a JIT-compiled AMD GPU kernel from its E
 type: instrument
 confidence: ★★
 effect: the profiler register count read about 0.5x the ISA-true value, enough to classify the kernel as occupancy-limited on every case; the descriptor read showed it already at the register-bound cap of 3 workgroups per CU on all three cases, turning an expected 1.3x direction into a measured 1.00x
-confirms_cited: 1
+confirms_cited: 2
 confirms_blind: 0
 losses: 0
-attempts: 1
+attempts: 2
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: method-gfx950-n-a
 description: Read VGPR/LDS from the .kd descriptor in the loaded JIT object to get true occupancy; the profiler counter under-reported registers by about half
 keywords: ['instrument', 'occupancy', 'vgpr', 'register-bound', 'profiler', 'jit', 'elf']

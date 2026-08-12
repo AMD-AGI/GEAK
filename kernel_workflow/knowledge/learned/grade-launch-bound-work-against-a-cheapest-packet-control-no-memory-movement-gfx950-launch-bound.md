@@ -3,12 +3,12 @@ key: scoring single-dispatch launch-bound work on a paged-KV copy kernel timed b
 type: method
 confidence: ★★
 effect: Called the graded outcome 3/3 times: an empty kernel measured 1.17x the real one's time before the host path was collapsed and matched it to within ~1% after, after which a 21% cut in GPU time and a further host-enqueue cut each moved the metric by exactly 0.00x. Converged case spread ~1.5% across a 32x range in batch size, and the derived ceiling (2.463x) sat 2.8% above the shipped 2.39x.
-confirms_cited: 0
+confirms_cited: 1
 confirms_blind: 1
-losses: 1
-attempts: 4
+losses: 2
+attempts: 7
 toolchain: rocm7.2 / triton3.6.0 / torch2.11
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 name: grade-launch-bound-work-against-a-cheapest-packet-control-no-memory-movement-gfx950-launch-bound
 description: Grade launch-bound work against a cheapest-packet control, not the baseline: called the graded outcome 3/3 times on a dispatch-floor-bound copy kernel
 keywords: ['launch-overhead', 'dispatch-floor', 'control-experiment', 'measurement-method', 'launch-bound', 'interleaved-ab']

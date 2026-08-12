@@ -14,9 +14,9 @@ effect: +3.6% at M=64k from moving one load statement; +5.5% / +3.5% / +3.6% at 
 confirms_cited: 0
 confirms_blind: 1
 losses: 0
-attempts: 4
+attempts: 5
 toolchain: triton 3.6.0 / torch 2.11.0+gitd0c8b1f / gfx950 CDNA4
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 ---
 # on a latency-bound GEMM, source statement order is a tunable: resident loads to the head, streaming loads to the tail
 - lever: When the profile says dependency-wait rather than bandwidth, WHERE each load is issued in source order is worth several percent at zero register or LDS cost: classify every load stream as cache-RESIDENT (a few scalars that retire for free at the head of the queue) or STREAMING (a vector or tile whose latency can only hide behind the tile loads), then issue resident loads at the head of the loop body and streaming loads at the tail.

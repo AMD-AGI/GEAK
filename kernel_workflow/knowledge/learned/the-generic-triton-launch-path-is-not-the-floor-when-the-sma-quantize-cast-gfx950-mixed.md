@@ -6,9 +6,9 @@ effect: Director-verified per-case: 2.77x on the small launch-bound case vs 4.76
 confirms_cited: 0
 confirms_blind: 1
 losses: 0
-attempts: 5
+attempts: 6
 toolchain: rocm 7.2 / triton 3.6.0 / torch 2.11.0
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 name: the-generic-triton-launch-path-is-not-the-floor-when-the-sma-quantize-cast-gfx950-mixed
 description: Memoize the compiled kernel and call its low-level entry directly on a launch-bound quant/cast shape: 2.77x there, ~1.0x once the case is bandwidth-bound
 keywords: ['launch-overhead', 'dispatch-floor', 'measurement-method', 'launch-bound', 'kernel-cache', 'quant']

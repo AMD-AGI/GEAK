@@ -5,10 +5,10 @@ confidence: ★★
 effect: 1.00x (clean measured negative, no patch banked): captured replay lands at ~1.4-1.7x the cost of the direct launch it replaces; no gain on any case, and the low-row cases where launch overhead dominates are exactly the ones that regress. Two capture layers (launcher and wrapper) both measured.
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 2
+losses: 1
+attempts: 5
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: graph-capture-does-not-pay-for-one-small-dispatch-moe-router-topk-gfx950-decode
 description: Anti-pattern: graph capture/replay around a single tiny kernel is slower than a direct launch; replay dispatch alone exceeds the whole launch it replaces.
 keywords: ['graph-capture', 'launch-overhead', 'dispatch-bound', 'anti-pattern', 'triton', 'decode']

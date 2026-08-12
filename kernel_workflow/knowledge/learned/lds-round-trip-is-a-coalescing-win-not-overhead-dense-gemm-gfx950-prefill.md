@@ -3,12 +3,12 @@ key: removing the shared-memory layout round-trip / hand-pipelining global-to-LD
 type: anti-pattern
 confidence: ★★
 effect: Loading directly into the dot layout to skip the round-trip measured 2.5x slower on the same shapes; a faithful reimplementation of the async-pipelined reference reproduced 2.667x vs the incumbent 2.664x weighted, i.e. no gain on any of the three cases, leaving the op at ~65% of its MFMA-efficiency ceiling.
-confirms_cited: 1
+confirms_cited: 3
 confirms_blind: 0
-losses: 0
-attempts: 3
+losses: 1
+attempts: 9
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: lds-round-trip-is-a-coalescing-win-not-overhead-dense-gemm-gfx950-prefill
 description: The shared-memory layout round-trip in a Triton GEMM is a coalescing win: removing it is 2.5x slower, and the async-copy replacement does not lower.
 keywords: ['dense-gemm', 'convert-layout', 'lds-tiling', 'async-copy', 'software-pipeline', 'coalescing', 'roofline', 'anti-pattern', 'gfx950']

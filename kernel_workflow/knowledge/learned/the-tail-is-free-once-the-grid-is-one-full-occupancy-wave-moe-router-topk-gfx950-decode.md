@@ -5,8 +5,8 @@ confidence: ★★
 effect: 1.00-1.01x across two independent clean negatives on the largest case: (a) eliminating 100% of the transposed-store layout round-trips and 9 barriers moved it <1%, inside jitter, and a word-split store variant went the wrong way ~3%; (b) halving serial reduction depth (4 reductions+3 masks -> 2+1) passed correctness and gave exactly 0%. Smaller cases unaffected (dispatch-floored). Achieved roofline stayed ~0.10 -> ~0.14 of peak.
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 3
+losses: 1
+attempts: 6
 toolchain: unknown
 last_seen: 2026-08-11
 name: the-tail-is-free-once-the-grid-is-one-full-occupancy-wave-moe-router-topk-gfx950-decode

@@ -6,9 +6,9 @@ effect: No speedup -- it retires lanes. A one-ulp scalar re-association of a res
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 4
+attempts: 5
 toolchain: triton 3.6.0 / torch 2.11.0 / gfx950 CDNA4
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: probe-the-correctness-gate-with-a-one-ulp-re-association-bef-quantized-gemm-gfx950-compute-bound
 description: Probe the correctness gate with a one-ulp re-association before funding any reduction-reordering lane: it retired four rounds aimed at a ~1.6x roof
 keywords: ['correctness-gate', 'measurement-method', 'dtype-dialect', 'mfma', 'quantized-gemm', 'roofline', 'control-experiment']

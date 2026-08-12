@@ -3,12 +3,12 @@ key: attention decode whose golden casts P to bf16 inside the V dot, graded by w
 type: anti-pattern
 confidence: ★★
 effect: Disconfirming: KV reassociation lands max_rel 1.357 against a 1e-2 gate, invariant to the number of splits, 999/8192 elements failing; lower-precision KV blows worst-case relative error 36-125x on the ~16% near-zero output rows while cosine stays 0.9992+. Zero speedup shipped from either axis across cases c2/c32/c64.
-confirms_cited: 1
+confirms_cited: 3
 confirms_blind: 0
-losses: 0
-attempts: 2
+losses: 2
+attempts: 9
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: a-worst-element-parity-gate-closes-kv-reassociation-and-lowe-attention-decode-gfx950-decode
 description: Split-KV/flash-decode and fp8 KV both die on a worst-element max_rel gate when the golden bakes a bf16 cast inside the V dot; cosine stays ~1.0 and hides it
 keywords: ['attention', 'decode', 'split-kv', 'flash-decode', 'fp8-kv', 'numerics', 'oracle-parity', 'dead-end']

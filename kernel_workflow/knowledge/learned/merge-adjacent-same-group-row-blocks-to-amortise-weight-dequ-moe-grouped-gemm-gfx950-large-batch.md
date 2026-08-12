@@ -6,9 +6,9 @@ effect: Director-verified per-case 1.39x on the smallest shape and 2.03-2.16x on
 confirms_cited: 0
 confirms_blind: 1
 losses: 3
-attempts: 9
+attempts: 11
 toolchain: triton 3.6.0 / torch 2.11.0 / gfx950
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: merge-adjacent-same-group-row-blocks-to-amortise-weight-dequ-moe-grouped-gemm-gfx950-large-batch
 description: Merge adjacent same-group row-blocks into a double-height tile to amortise weight dequant: ~1.23x on large-batch MoE shapes, slower on the smallest
 keywords: ['dequant', 'tile-shape', 'moe', 'operand-reuse', 'vgpr', 'large-batch', 'interleaved-ab']
@@ -25,4 +25,5 @@ lifecycle: active
 - pitfall: the small-shape delta came out the wrong size and one sign flipped when promoted to a real edit -> in-process interleaved medians biased it by about the size of the effect being hunted -> score it from cross-process full-benchmark repeats instead.
 - caution: Also verify the packed-weight read is already K-major and coalesced - the two shipped in one patch here, so the merge alone may not carry it. Also verify at the small end and beyond merge factor 2: factor 4 lost at zero spill in every configuration tried, factor 3 did not compile, and forcing the merged path on the small shape lost at every (merge factor, BLOCK_N) point.
 - source: run kernel_20_geak_0808_4h 2026-08-08
-- caution: cited 9 time(s) with 3 non-improving outcome(s) as of 2026-08-11 - also verify it engages on your shapes before spending a round on it.
+- caution: Also verify the FORM of the merge on your shapes: a later run of this class measured a taller double-height dot at about half speed and won instead with G separate small-M dots over one shared dequantised weight tile.
+- caution: cited 11 time(s) with 3 non-improving outcome(s) as of 2026-08-12 - also verify it engages on your shapes before spending a round on it.

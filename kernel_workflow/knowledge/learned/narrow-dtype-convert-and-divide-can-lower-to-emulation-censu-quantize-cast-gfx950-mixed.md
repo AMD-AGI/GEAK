@@ -5,10 +5,10 @@ confidence: ★★
 effect: Full stack director-verified 3.75x geomean: 2.77x on the small launch-bound case, 4.76x and 4.00x on the two large memory-bound streaming cases. The two instruction-level fixes below carried the large cases: in-run the native fp8 emit alone measured 1.14x on the small case vs 3.11x / 3.29x on the large ones, and the amortized reciprocal plus pre-convert fixup added a further +21% geomean; VALU/wave 812 -> 159.
 confirms_cited: 0
 confirms_blind: 1
-losses: 0
-attempts: 6
+losses: 1
+attempts: 9
 toolchain: rocm 7.2 / triton 3.6.0 / torch 2.11.0
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 name: narrow-dtype-convert-and-divide-can-lower-to-emulation-censu-quantize-cast-gfx950-mixed
 description: Census the ISA for emulated narrow-dtype convert and divide in a quantize/cast kernel: 3.75x geomean, 4.76x/4.00x on the memory-bound streaming cases
 keywords: ['fp8', 'dtype-dialect', 'isa-check', 'valu-emulation', 'quant', 'inline-asm', 'memory-bound', 'launch-bound']

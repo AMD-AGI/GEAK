@@ -14,9 +14,9 @@ effect: 9.30 / 9.14 / 9.21x standalone at M=2k / 32k / 64k, and the precondition
 confirms_cited: 0
 confirms_blind: 1
 losses: 0
-attempts: 2
+attempts: 5
 toolchain: triton 3.6.0 / torch 2.11.0+gitd0c8b1f / gfx950 CDNA4
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 ---
 # fnuz fp8 operands can silently disable the native matrix core: bitcast to OCP and fold the bias
 - lever: If the harness hands fp8 operands in a bias-8 'fnuz' dtype on a target whose matrix cores implement only OCP e4m3 (bias 7), the compiler may silently upcast both operands and run a software GEMM at a few percent of fp8 peak; bitcast both operands to the OCP type at the dot and fold the 2x exponent-bias difference (a factor 0.25 for a product of two operands) into a scale that is already being multiplied.

@@ -6,7 +6,7 @@ effect: 1.58x geomean standalone, and per-case it tracks how launch-bound the ca
 confirms_cited: 0
 confirms_blind: 1
 losses: 0
-attempts: 4
+attempts: 5
 toolchain: triton 3.6.0 / torch 2.11.0+gitd0c8b1f / gfx950 CDNA4
 last_seen: 2026-08-08
 name: collapse-the-python-launch-path-before-tuning-the-body-topk-routing-gfx950-launch-bound

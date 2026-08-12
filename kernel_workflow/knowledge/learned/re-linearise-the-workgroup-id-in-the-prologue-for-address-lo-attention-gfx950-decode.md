@@ -6,9 +6,9 @@ effect: director-verified 1.86x geomean end state (1.82 / 2.11 / 1.67 at batch 2
 confirms_cited: 0
 confirms_blind: 1
 losses: 0
-attempts: 5
+attempts: 10
 toolchain: rocm7.2.3 / triton3.6.0 / torch2.11.0
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 name: re-linearise-the-workgroup-id-in-the-prologue-for-address-lo-attention-gfx950-decode
 description: Re-linearise the workgroup id so consecutive workgroups walk one request's contiguous KV: +3.1% on attention decode, scaling with workgroup count
 keywords: ['pid-remap', 'l2-locality', 'xcd', 'address-locality', 'decode', 'isa-check', 'bijection', 'interleaved-ab']

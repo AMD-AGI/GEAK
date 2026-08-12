@@ -3,12 +3,12 @@ key: per-operand memory-ceiling probes on a fused-MoE grouped GEMM (Triton) on g
 type: method
 confidence: ★★
 effect: Bounded the whole memory system at ~10% of the largest case's time with per-operand ceilings of -4.8% / -4.1% / -1.4% / 0.0%, which retired four separately-funded memory directions before any of them was built, and on the smallest case the same probe read -37% and correctly declared it compulsory-bound and finished. It also showed request count is invariant to ADDRESS: collapsing an operand's footprint to a single tile moved L2 misses 57% and L2 requests only 2.7%.
-confirms_cited: 0
+confirms_cited: 1
 confirms_blind: 1
-losses: 0
-attempts: 3
+losses: 2
+attempts: 7
 toolchain: rocm 7.x / triton 3.6.0 / torch 2.11.0
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: freeze-one-operand-s-pointer-at-a-time-to-put-an-upper-bound-moe-grouped-gemm-gfx950-mixed
 description: Freeze one operand's pointer at a time to upper-bound every memory-side direction: capped the whole memory system at ~10% on the largest MoE GEMM case
 keywords: ['control-experiment', 'measurement-method', 'l2-locality', 'operand-reuse', 'moe', 'counters']

@@ -5,8 +5,8 @@ confidence: ★★
 effect: The patch that owned producer+consumer as one edit cut 599 -> 530 static instructions (-11.5%), ds_write 9->1, ds_read 3->1, s_barrier 3->1, local_alloc -> 0; it paid +7.2% (12/12 paired wins) on the only case with device time still above the host enqueue and +2.3% geomean, and ~0% on the two smaller launch-masked cases. Director-verified end state 2.351x geomean (2.33 / 2.46 / 2.26 from smallest to largest token count). Two earlier attempts at the same seam authored only at the consumer measured exactly 0%.
 confirms_cited: 0
 confirms_blind: 1
-losses: 0
-attempts: 5
+losses: 1
+attempts: 6
 toolchain: ROCm 7.2 / triton 3.6.0 / torch 2.11.0+gitd0c8b1f / gfx950 CDNA4
 last_seen: 2026-08-10
 name: reshape-a-tile-into-the-layout-s-own-factorisation-instead-o-topk-routing-gfx950-launch-bound

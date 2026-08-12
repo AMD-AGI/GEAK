@@ -28,6 +28,13 @@ Always-available references (Read what's relevant to the phase):
   symbols it was measured on, and its keywords. Match on *meaning*, not wording: a `split-k on skinny-M
   GEMM` card is worth opening for a tall-K GEMM, a `launch-overhead` card for any dispatch-bound op. Do
   not decide "there is no card for this" from a failed string search. Then open the 0–3 that look worth it.
+  **Read as much of the index as you like — the budget is on how much of the ROUND the KB steers, not
+  on what you may look at.** `LEARNED_KB_BUDGET` states it per round and the orchestrator enforces it:
+  at most N directions may draw on cards, and at least one direction must be planned from the profile
+  alone with an empty `learned_refs`. That cold direction is the round's control. It is not ceremony:
+  an arm whose planner was handed at most 3 matched cards reached 4.45x geomean where the same 16
+  kernels under free index-reading reached 3.44x, and the losses landed on the kernels where the
+  bounded arm had found an unusual win — the cards crowded out what the profile would have tried.
   **If a card seeded a direction, name its filename in that direction's `learned_refs`.** That is the
   whole feedback loop: the verifier re-measures the direction without knowing what suggested it, and
   the join of your declaration with its number is the only way a card can ever LOSE standing. Cite

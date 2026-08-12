@@ -3,12 +3,12 @@ key: occupancy-2 register-tight int4 MoE grouped GEMM on gfx950/CDNA4 where the 
 type: anti-pattern
 confidence: ★★
 effect: 0 of 4 occupancy-escape directions beat the frozen baseline on any case: AGPR-accumulator occ3 and warp-specialized dequant 0x (never reached a passing build/measurement), hand-written inline-asm inner GEMM 1.005x (inside the ~1-2% noise band), operand-staging-in-LDS for the batch-64 case 0x. The large-batch buckets sit at 186/204 registers with zero spill; occupancy 2 is arithmetic, not a tuning miss.
-confirms_cited: 1
+confirms_cited: 3
 confirms_blind: 0
-losses: 0
-attempts: 4
+losses: 2
+attempts: 10
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: accumulator-set-occupancy-floor-on-a-unified-vgpr-agpr-pool--moe-grouped-gemm-gfx950-both
 description: On CDNA4 the VGPR and AGPR files share one budget, so a large fp32 accumulator pins occupancy at 2; four occupancy-escape rewrites all measured non-positive.
 keywords: ['occupancy', 'vgpr', 'agpr', 'accumulator', 'raw-hip', 'warp-specialization', 'register-pressure', 'moe', 'grouped-gemm', 'gfx950']

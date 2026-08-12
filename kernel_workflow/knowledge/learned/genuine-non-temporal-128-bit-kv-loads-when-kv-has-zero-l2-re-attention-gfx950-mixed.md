@@ -1,14 +1,14 @@
 ---
 key: paged/ragged attention over a read-once bf16 KV cache on gfx950 (HIP body, frozen QKV inner loop) — cache-bypass hinting on the KV stream
 type: lever
-confidence: ★★
+confidence: ★
 effect: 1.066x weighted geomean vs frozen baseline, all 9 cases improved, no regression: +6.5..+7.6% on the eight short-context signature cases, +2.6% on the long-context (S=512, ctx=4096) case; ISA-confirmed
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 1
+losses: 4
+attempts: 5
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: genuine-non-temporal-128-bit-kv-loads-when-kv-has-zero-l2-re-attention-gfx950-mixed
 description: Read-once paged-KV attention: one __builtin_nontemporal_load on a native 128-bit vector emits a real nt dwordx4; the shipped nt helper drops nt on gfx950.
 keywords: ['non-temporal', 'nontemporal-load', 'kv-cache', 'l2-reuse', 'vectorized-load', 'memory-bound', 'attention', 'gfx950', 'isa-check']
@@ -25,4 +25,5 @@ lifecycle: active
 - verify: Disassemble and confirm the nt modifier survives on the dwordx4; then re-run the frozen-baseline isolated A/B per case plus oracle parity — a real nt lifts every case here, so a mixed sign means it did not engage.
 - pitfall: speedup absent though the source says nontemporal -> the vendor multi-scalar nt helper compiles to plain loads on this arch -> emit the single 128-bit intrinsic and check the ISA rather than the source.
 - caution: The SIGN of nt / evict-first depends on L2 reuse of the streamed set — also verify reuse before assuming it is uniformly favorable: on a sibling decode kernel the same bit flipped +7% at one context length and -7% at another as the streamed-set size changed.
+- caution: Also verify the streamed set really misses cache in YOUR harness before funding this: cited 5 times across runs, 4 of those directions failed to beat the frozen baseline (the latest on a dispatch-floored copy op that was not store- or load-bound at all) (in the latest, a repeated-rep harness kept the whole KV set resident and the nt hint removed that residency), and only 1 ever won its round.
 - source: 16h single-kernel time-budget campaign, run id chuschen16h, round 1 direction d0, 2026-08-11

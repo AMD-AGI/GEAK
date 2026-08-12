@@ -6,9 +6,9 @@ effect: 5 of 7 directions in the campaign returned 0% over the 24.08x seed: doub
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 5
+attempts: 7
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: occupancy-push-and-four-neighbouring-axes-are-closed-on-an-i-quantized-gemm-gfx950-compute-bound
 description: At 2 waves/SIMD an ILP-bound block-scaled fp8 GEMM loses from any occupancy push; grid/tail, hand-scheduling, graph capture, microtune all zero
 keywords: ['occupancy', 'vgpr', 'ilp', 'spill', 'hip-graph', 'grid-tail', 'anti-pattern', 'quantized-gemm']

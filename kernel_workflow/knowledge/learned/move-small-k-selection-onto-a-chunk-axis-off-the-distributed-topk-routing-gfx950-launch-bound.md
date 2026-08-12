@@ -5,8 +5,8 @@ confidence: ★★
 effect: Device time -30 to -33% on every case (per-case -33% / -30% / -32% on the three grids) at zero occupancy cost; per-case at the wall it paid only where device work was exposed: +26% on the largest grid, ~+3% (inside noise) on the two smaller launch-bound cases, +10.4% geomean against a same-session paired control, verified cumulative step 1.699x -> 1.807x.
 confirms_cited: 0
 confirms_blind: 1
-losses: 0
-attempts: 5
+losses: 1
+attempts: 8
 toolchain: triton 3.6.0 / torch 2.11.0+gitd0c8b1f / gfx950 CDNA4
 last_seen: 2026-08-10
 name: move-small-k-selection-onto-a-chunk-axis-off-the-distributed-topk-routing-gfx950-launch-bound

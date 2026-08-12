@@ -6,9 +6,9 @@ effect: +5.1% geomean with BYTE-IDENTICAL device code (3.7604 -> 3.9526 self-mea
 confirms_cited: 0
 confirms_blind: 1
 losses: 0
-attempts: 4
+attempts: 5
 toolchain: rocm 7.2 / triton 3.6.0 / torch 2.11.0
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 name: settle-the-clock-controller-with-untimed-real-work-before-th-dense-gemm-gfx950-compute-bound
 description: Settle the clock with untimed real work before the timed window: +5.1% geomean on a dense GEMM with byte-identical device code
 keywords: ['measurement-method', 'control-experiment', 'dense-gemm', 'compute-bound', 'interleaved-ab', 'harness-artifact', 'counters']

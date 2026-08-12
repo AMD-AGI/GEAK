@@ -6,9 +6,9 @@ effect: This axis alone re-verified 2.24x against a 1.94x incumbent (+15%) and c
 confirms_cited: 0
 confirms_blind: 1
 losses: 0
-attempts: 5
+attempts: 6
 toolchain: rocm 7.2.3 / triton 3.6.0 / torch 2.11.0
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 name: merge-several-quant-groups-into-one-dot-instead-of-one-dot-p-moe-grouped-gemm-gfx950-mixed
 description: Merge G quant groups into ONE dot instead of one dot per group on a packed-weight MoE GEMM: 2.24x vs a 1.94x incumbent (+15%), 2.92x geomean end state
 keywords: ['dequant', 'quantization-group', 'mfma', 'moe', 'isa-check', 'interleaved-ab', 'tile-shape']

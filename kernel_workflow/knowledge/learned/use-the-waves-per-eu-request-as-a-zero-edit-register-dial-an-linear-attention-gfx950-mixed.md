@@ -3,12 +3,12 @@ key: register/occupancy dialing via the waves-per-EU compile request on a chunke
 type: lever
 confidence: ★★
 effect: As a probe it is free and decisive: requesting 4/5/6/8 waves moved the compiled register budget deterministically (128/96/80/64) with no source change, and in a few minutes falsified an occupancy hypothesis that had been funded as a whole direction (the wider-warp form crossed the register threshold cleanly with zero spills and was still 9.7% slower on the largest case, 14% on the mid case). As a shipping value it flipped: retired as probe-only on one code shape, it became the elected pin (+2%) on the restructured shape in a later round. End state director-verified 25.55x geomean (3.21x / 47.2x / 110.2x from smallest to largest batch case).
-confirms_cited: 0
+confirms_cited: 2
 confirms_blind: 1
-losses: 0
-attempts: 4
+losses: 2
+attempts: 9
 toolchain: rocm 7.2.3 / triton 3.6.0 / torch 2.11.0
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 name: use-the-waves-per-eu-request-as-a-zero-edit-register-dial-an-linear-attention-gfx950-mixed
 description: Sweep waves-per-EU as a zero-edit register dial on linear attention: falsified a funded occupancy direction fast, then shipped as a +2% pin after a rewrite
 keywords: ['waves-per-eu', 'vgpr', 'occupancy', 'isa-check', 'config-sweep', 'linear-attention', 'measurement-method']

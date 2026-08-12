@@ -14,9 +14,9 @@ effect: the hand-written bit-trick upcast alone measured 5.92x over the stock ke
 confirms_cited: 0
 confirms_blind: 1
 losses: 0
-attempts: 6
+attempts: 10
 toolchain: rocm 7.2.3 / triton 3.6.0 / torch 2.11.0
-last_seen: 2026-08-08
+last_seen: 2026-08-12
 ---
 # Hand-write the fp8 upcast as packed-dword SWAR
 - lever: When the quantized operand dtype has no native matrix-core path on the target gfx (fnuz fp8 here, which the compiler notes it upcasts to fp16), the emitted per-element software upcast — not the matrix core — is the bottleneck: hand-write that conversion, and do its bit arithmetic on packed 32-bit registers rather than on the sub-32-bit tensor, since gfx9 has no packed 16-bit AND and one mask line on a uint16 tile lowers to 4 VALU per 2 elements.

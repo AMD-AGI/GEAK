@@ -6,9 +6,9 @@ effect: 1.5263x incremental on the medium/large non-split-K path over an already
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 2
+attempts: 3
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: rank-1-scale-collapse-plus-2-deep-overlap-unroll-hides-dequa-quantized-gemm-gfx950-compute-bound
 description: Per-1x128 dequant that is uniform across the N tile collapses to a rank-1 per-row FMA; unrolling K by 2 overlaps the second MFMA with the dequant VALU work
 keywords: ['dequant', 'block-scale', 'mfma', 'ilp', 'unroll', 'block-pingpong', 'fp8', 'quantized-gemm']

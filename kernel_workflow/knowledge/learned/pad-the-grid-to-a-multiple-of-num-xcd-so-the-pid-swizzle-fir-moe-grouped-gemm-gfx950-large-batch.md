@@ -1,14 +1,14 @@
 ---
 key: XCD round-robin pid swizzle on a bf16/int4 fused-MoE grouped GEMM at large batch, gfx950 multi-XCD part
 type: lever
-confidence: ★★
+confidence: ★
 effect: Standalone A/B on one compiled binary: +2.5% on the smallest case, +6.0% and +4.4% on the two larger cases (L2 hit 64.7 -> 85.1%, L2 miss traffic -58%, VALU/MFMA/wave counts byte-identical); +3.3% on the run geomean, on top of an already-retiled 1.75x kernel, and the last verified gain of a 7-round run.
-confirms_cited: 0
+confirms_cited: 1
 confirms_blind: 1
-losses: 1
-attempts: 4
+losses: 3
+attempts: 11
 toolchain: triton 3.6.0 / torch 2.11.0 / gfx950
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 name: pad-the-grid-to-a-multiple-of-num-xcd-so-the-pid-swizzle-fir-moe-grouped-gemm-gfx950-large-batch
 description: Pad the launch grid to a multiple of NUM_XCD so the XCD pid remap engages: +3.3% geomean on an already-retiled MoE grouped GEMM, L2 hit 65%->85%
 keywords: ['pid-remap', 'l2-locality', 'xcd', 'grid-geometry', 'moe', 'large-batch', 'isa-check', 'interleaved-ab']
@@ -24,4 +24,7 @@ lifecycle: active
 - verify: Toggle the remap off in the SAME binary and diff L2 hit rate and L2 miss bytes: a real win shows up as locality at an identical instruction/VALU/MFMA/wave count. If those counters do not move, the remap never engaged.
 - pitfall: a whole round's win read as a measured negative -> the remap's own divisibility guard silently self-disabled on a non-multiple grid, so the knob never engaged -> pad the grid instead of guarding, and confirm the guard fired before recording any swizzle experiment as neutral.
 - caution: Also re-check any pid grouping already present: an L2-grouping knob worth 1.077x standalone went dead once the remap landed, and the two were anti-additive.
+- caution: The sign of that interaction is not settled — on a block-scaled fp8 GEMM the remap and an in-body grouping swizzle were strongly CO-dependent instead (each ~1% alone, 6-10x that in the other's presence, and the grouping's own optimum moved when the load cache policy changed), so also measure the remap and the grouping together in both orders rather than assuming either sign. There, the remap's own binding was the failure: the kernel discarded the helper's return value, so grep for the binding too, not only for the divisibility guard.
+- caution: Also weigh the base rate before seeding a direction from this card: cited 10 times, 3 of those directions did not clear the frozen baseline and only 1 won its round, so treat it as a hint to check the grid geometry rather than as a likely win.
 - source: run kernel_20_geak_0808_4h 2026-08-08
+- source: run kernel_20_geak_0811_2h_kb_new, 2026-08-12

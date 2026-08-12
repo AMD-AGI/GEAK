@@ -3,12 +3,12 @@ key: launch-config and tile-aspect tuning of a captured Triton bf16 dense GEMM o
 type: lever
 confidence: ★★
 effect: launch-config plus pid-order retuning alone carried a captured GEMM from 1.00x to 2.64x with a byte-identical kernel body, and a fixed-area aspect re-sweep (wide to square) then added +7.5% on all three cases at once (per-case 2.22x / 3.21x / 3.21x, small-M and large-M shapes alike); by contrast the best kernel-body change of the entire run was +2.8%
-confirms_cited: 1
+confirms_cited: 2
 confirms_blind: 0
-losses: 0
-attempts: 5
+losses: 2
+attempts: 15
 toolchain: rocm 7.2.3 / triton 3.6.0 / torch 2.11.0
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 name: tile-aspect-at-fixed-area-under-a-hard-accumulator-per-lane--dense-gemm-gfx950-compute-bound
 description: Sweep tile aspect at fixed area under the accumulator-per-lane wall before growing area: +7.5% on all cases atop a 2.64x launch-config retune
 keywords: ['tile-shape', 'tile-aspect', 'launch-config', 'vgpr', 'dense-gemm', 'compute-bound', 'interleaved-ab', 'occupancy']

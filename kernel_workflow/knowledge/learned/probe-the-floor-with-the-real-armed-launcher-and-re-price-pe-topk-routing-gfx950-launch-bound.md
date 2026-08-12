@@ -3,12 +3,12 @@ key: finding the real per-call floor of a launch-bound Triton top-k op on gfx950
 type: method
 confidence: ★★
 effect: Turned an estimated ceiling into a measured one and closed the run: the harness event loop around the SAME armed launcher at minimal grid came within ~1% of the full-grid kernel on two of three cases (indistinguishable on one of them), bounding all remaining headroom at +7.1% and at most +4.1% through the kernel body. It also retroactively explained two whole rounds of real, ISA-verified device wins (-16% and -6.3% device time) that integrated to ~0% and 1.8% worse, and one round of the same character that shipped +2.3% — the discriminator was purely whether the case was still above the host enqueue.
-confirms_cited: 1
+confirms_cited: 2
 confirms_blind: 0
 losses: 0
-attempts: 4
+attempts: 7
 toolchain: ROCm 7.2 / triton 3.6.0 / torch 2.11.0+gitd0c8b1f / gfx950 CDNA4
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 name: probe-the-floor-with-the-real-armed-launcher-and-re-price-pe-topk-routing-gfx950-launch-bound
 description: Probe the per-call floor with the real armed launcher, not an empty jitted kernel: bounded all remaining headroom at +7.1% and closed the run
 keywords: ['launch-overhead', 'dispatch-floor', 'launch-bound', 'measurement-method', 'topk', 'control-experiment', 'interleaved-ab']

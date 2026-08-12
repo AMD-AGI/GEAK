@@ -6,9 +6,9 @@ effect: seven axes disconfirmed against a 3.33x incumbent: MFMA nonkdim 32 regre
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 9
+attempts: 11
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: in-kernel-axes-closed-on-dequant-latency-bound-moe-gemm-moe-grouped-gemm-gfx950-both
 description: On a dequant-latency-bound int4 MoE grouped GEMM at the host-config optimum, seven in-kernel axes each re-measured as no-gain or a regression.
 keywords: ['moe-grouped-gemm', 'int4-dequant', 'anti-pattern', 'closed-axis', 'split-k', 'num-warps', 'matrix-instr-nonkdim', 'num-stages', 'cuda-graph']

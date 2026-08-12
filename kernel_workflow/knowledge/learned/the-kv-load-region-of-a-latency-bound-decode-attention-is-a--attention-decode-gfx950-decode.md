@@ -1,14 +1,14 @@
 ---
 key: KV-streaming load region of a Triton paged decode attention on gfx950 that is latency-bound rather than bandwidth-starved
 type: anti-pattern
-confidence: ★★
+confidence: ★
 effect: 0 of 4 memory-side directions beat the frozen baseline: K/V cache_modifier '.cg' cost +20% (K) and +12% (V) on the long-context case (all-.cg 1.16x slower than incumbent), '.cs' is a hard compile error on this arch, a loop-carried double-buffer prefetch of the page index was +3% worse on that same case, and loop-split was 4-5% worse; the short case (c2) and mid case (c32) stayed within noise throughout.
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 4
+losses: 4
+attempts: 9
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: the-kv-load-region-of-a-latency-bound-decode-attention-is-a--attention-decode-gfx950-decode
 description: Anti-pattern: on latency-bound paged decode attention already issuing 128-bit KV loads, cache hints, prefetch and loop-split all measured null-to-negative.
 keywords: ['cache-modifier', 'software-prefetch', 'vectorization', 'latency-bound', 'attention-decode', 'paged-kv', 'anti-pattern', 'memory-bound']
@@ -29,4 +29,5 @@ levers: ['mem.cache-modifier', 'mem.software-prefetch']
 - verify: Disassemble the candidate and count load widths, and A/B each hint against the frozen baseline per case rather than on the geomean, since the short launch-floored case masks a regression in the long one.
 - pitfall: A cache hint that reads as a demotion added an L2 round trip instead of removing one -> the default full-L1 path plus two-stage pipelining was already hiding the latency -> reverting to the default hint recovered the loss.
 - caution: Also verify this on a kernel with more than ~1 workgroup per CU before assuming it carries: the closure was measured where occupancy is one workgroup per CU, and a bandwidth-starved variant may still pay.
+- caution: Also verify this on your own case mix before funding a round on it: cited 9 times across runs, 4 of those directions failed to beat the frozen baseline and only 1 won its round.
 - source: 16h per-kernel time-budget campaign (chuschen16h wave, 61 passes), 2026-08-11

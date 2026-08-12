@@ -3,12 +3,12 @@ key: paged/ragged attention on gfx950 whose GPU work per call dwarfs host marsha
 type: anti-pattern
 confidence: ★★
 effect: Host-marshalling memoization 1.009x (real CPU saving, invisible to the per-call event window); wrapper-level graph capture of both launches 0.986x geomean — net regression, helping only 1 of 9 cases (+3%) and costing ~2% on the other short-context cases; graph-off reproduced the baseline exactly
-confirms_cited: 1
+confirms_cited: 2
 confirms_blind: 0
-losses: 0
-attempts: 2
+losses: 1
+attempts: 4
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: host-marshalling-and-graph-capture-buy-nothing-when-the-op-i-attention-gfx950-mixed
 description: GPU-bound op: real host-side savings and a correct wrapper HIP-graph capture measured 1.009x and 0.986x; a below-noise delta cannot be gated into a win.
 keywords: ['launch-overhead', 'hip-graph', 'graph-capture', 'host-runtime', 'gpu-bound', 'harness-noise', 'per-shape-gate', 'attention', 'gfx950', 'anti-pattern']

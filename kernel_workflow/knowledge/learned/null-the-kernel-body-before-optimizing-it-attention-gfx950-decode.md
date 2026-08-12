@@ -3,12 +3,12 @@ key: pricing a body-optimization direction on a small paged-attention decode dis
 type: method
 confidence: ★★
 effect: An instrument, not a speedup: gutting a small dispatch's whole body to a trivial copy (deliberately wrong output) measured 1.01x vs stock - zero work was not measurably faster, so that dispatch was 100% workgroup-dispatch floor. The prediction held: really optimizing that same body then measured 0% per-kernel and 0.9-5.2% WORSE wall on all three decode cases, so one short control measurement stood in for a whole direction.
-confirms_cited: 0
+confirms_cited: 1
 confirms_blind: 1
-losses: 0
-attempts: 5
+losses: 2
+attempts: 8
 toolchain: rocm 7.2.3 / torch 2.11.0 / hip (AOT hipcc, template-codegen op)
-last_seen: 2026-08-10
+last_seen: 2026-08-12
 name: null-the-kernel-body-before-optimizing-it-attention-gfx950-decode
 description: Null the kernel body (deliberately wrong) to price a whole direction in one measurement: predicted the 0% outcome of optimizing a decode dispatch
 keywords: ['control-experiment', 'measurement-method', 'dispatch-floor', 'launch-overhead', 'decode', 'null-baseline']

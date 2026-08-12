@@ -5,10 +5,10 @@ confidence: ★★
 effect: 3.33x cumulative isolated geomean vs frozen baseline, parity-clean on all 8 cases; per-case 2.58x on the small-M case and 3.68x / 3.89x on the two large-M cases; roofline fraction 0.26 -> 0.98 of its own ceiling, compute-bound both sides
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 2
+losses: 1
+attempts: 5
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: per-m-bucket-host-launch-config-int4-moe-gemm-moe-grouped-gemm-gfx950-both
 description: Per-M-bucket host launch-config retune on int4-weight MoE grouped GEMM: 3.33x isolated with the JIT body left byte-identical.
 keywords: ['moe-grouped-gemm', 'int4-dequant', 'w4a16', 'launch-config', 'host-tuning', 'per-m-bucket', 'block-size', 'group-size-m']

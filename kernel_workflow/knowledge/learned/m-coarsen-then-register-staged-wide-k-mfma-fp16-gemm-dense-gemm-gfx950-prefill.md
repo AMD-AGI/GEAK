@@ -3,12 +3,12 @@ key: fp16 (a16w16) dense GEMM with small-M / K=2880 / N=5120 shapes on gfx950, T
 type: lever
 confidence: ★★
 effect: 2.66x weighted vs frozen baseline; per-case 1.89x on the smallest-M case (M=2048, tail/occupancy limited) and 3.15x / 3.18x on the two larger-M cases. Intermediate stages on the same cases: 2.11x from LDS-per-workgroup reduction, 2.60x after in-body M-coarsening.
-confirms_cited: 1
+confirms_cited: 3
 confirms_blind: 0
-losses: 0
-attempts: 4
+losses: 2
+attempts: 11
 toolchain: unknown
-last_seen: 2026-08-11
+last_seen: 2026-08-12
 name: m-coarsen-then-register-staged-wide-k-mfma-fp16-gemm-dense-gemm-gfx950-prefill
 description: Frozen BLOCK_M is not a wall: in-body M-coarsening then a register-staged wide-K MFMA rewrite gives ~2.66x weighted on fp16 dense GEMM (gfx950).
 keywords: ['dense-gemm', 'fp16', 'm-coarsening', 'mfma', 'register-staging', 'wide-k', 'lds-tiling', 'num-stages', 'gfx950', 'skinny-m']
