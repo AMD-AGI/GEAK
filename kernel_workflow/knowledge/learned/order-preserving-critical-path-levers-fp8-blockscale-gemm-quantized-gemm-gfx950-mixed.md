@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: quantized_gemm
 regime: mixed
 layer: learned
-lifecycle: active
+lifecycle: archived
 ---
 # order-preserving-critical-path-levers-fp8-blockscale-gemm
 - lever: On a dequant-then-MFMA fp8 path the payoff is DEP-CHAIN LENGTH, not op count: derive magnitude and sign from ONE native packed scaled-cvt, and regroup the inner K sub-tiles into fewer wider dots while keeping one linear fp32 accumulator.

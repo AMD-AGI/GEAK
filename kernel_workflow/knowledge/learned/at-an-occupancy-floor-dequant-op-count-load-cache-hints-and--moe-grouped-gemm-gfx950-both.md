@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: moe_grouped_gemm
 regime: both
 layer: learned
-lifecycle: active
+lifecycle: archived
 verified_on: 2026-08-11
 ---
 # At an occupancy floor, dequant op-count, load cache hints and auto-pipelining are all off the critical path

@@ -1,0 +1,49 @@
+{
+  "run_id": "restore-probe-the-floor-with-the-real-armed-launcher-and-r",
+  "date": "2026-08-12",
+  "kernel_names": [],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "toolchain": "ROCm 7.2 / triton 3.6.0 / torch 2.11.0+gitd0c8b1f / gfx950 CDNA4",
+  "cards": [
+    {
+      "name": "probe-the-floor-with-the-real-armed-launcher-and-re-price-pe-topk-routing-gfx950-launch-bound",
+      "description": "Probe the per-call floor with the real armed launcher, not an empty jitted kernel: bounded all remaining headroom at +7.1% and closed the run",
+      "keywords": [
+        "launch-overhead",
+        "dispatch-floor",
+        "launch-bound",
+        "measurement-method",
+        "topk",
+        "control-experiment",
+        "interleaved-ab"
+      ],
+      "kernels": [
+        "_topk_forward"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "topk_routing",
+      "regime": "launch-bound",
+      "key": "finding the real per-call floor of a launch-bound Triton top-k op on gfx950 after the dispatch path has already been replaced by an armed launcher",
+      "lifecycle": "active",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "Turned an estimated ceiling into a measured one and closed the run: the harness event loop around the SAME armed launcher at minimal grid came within ~1% of the full-grid kernel on two of three cases (indistinguishable on one of them), bounding all remaining headroom at +7.1% and at most +4.1% through the kernel body. It also retroactively explained two whole rounds of real, ISA-verified device wins (-16% and -6.3% device time) that integrated to ~0% and 1.8% worse, and one round of the same character that shipped +2.3% — the discriminator was purely whether the case was still above the host enqueue.",
+      "title": "Probe the floor with the real armed launcher, and re-price per-case masking after every winner",
+      "lever": "Once you have replaced the dispatch path, a stock empty jitted kernel is no longer a valid floor probe — here it measured ~50% SLOWER than the real kernel. Probe instead with the real armed launcher and the real packed args at minimum grid, inside the harness's own timing loop, then model the metric as (constant timing-instrumentation cost) + max(host enqueue, device time) per case and price every candidate direction against that per case before funding it.",
+      "apply": "Copy the harness's exact event loop into a diagnostic, call the already-armed launcher with the same argument objects at grid=1, take the median; separately measure per-call enqueue. Fit the two-term model against measured per-case wall, then fund only directions whose device saving lands on a case where device time exceeds enqueue.",
+      "verify": "Check the model predicts the current per-case numbers within a few percent before trusting it, and re-derive the per-case masking after EVERY shipped winner.",
+      "pitfall": "two rounds of real ISA-verified device wins integrated to ~0% and 1.8% worse -> a shipped patch had pushed those cases below the host enqueue, silently retiring the headroom the next round was budgeted against (one case's slope went from 0.56-0.79 to ~0) -> re-derive the per-case mask after every winner, not once per run.",
+      "caution": "Also verify wins with in-session interleaved paired A/B under a GPU lock and a correctness check on every benchmarked candidate, not only the final one — that is what let two separate A/B runs here be pooled as 20/20 paired wins instead of two unverifiable anecdotes.",
+      "source": "run kb_on_0810 2026-08-10",
+      "confirms_cited": 2,
+      "confirms_blind": 0,
+      "losses": 0,
+      "attempts": 7
+    }
+  ]
+}

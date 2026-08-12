@@ -136,6 +136,22 @@ cited_then_verified, became_winner}`. Apply it to the CITED cards, not to the ca
 
 This is the only downward pressure in the design. Skip it and confidence only ever rises.
 
+## LINT WHAT YOU WROTE — the write path is not exempt
+
+After saving the card and BEFORE returning, run:
+
+    python3 kernel_workflow/scripts/kb.py --kb-dir <the LEARNED_DIR you were given> lint --cards
+
+and fix anything it reports about YOUR card. This step exists because writing straight to disk skips
+the gate every other entry point passes through, and three cards from one campaign proved what that
+costs: one carried an `/exp/` path (an instance identifier, not a principle), one ran to 34 body lines
+(narrative, not a distilled card), and two promoted themselves to ★★★ with `confirms_blind: 0` — a
+rank the self-confirmation cap forbids and no reader could have known was unearned. None of the three
+could have entered through `propose`; all three entered here.
+
+If the lint refuses something you cannot fix honestly — the claim needs an absolute number, the effect
+has no per-case evidence — write NO card. That is a correct outcome, not a failure.
+
 ## Return JSON (StructuredOutput)
 ```json
 {

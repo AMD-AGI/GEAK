@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: dense_gemm
 regime: prefill
 layer: learned
-lifecycle: active
+lifecycle: archived
 ---
 # m-coarsen-then-register-staged-wide-k-mfma-fp16-gemm
 - lever: Treat a frozen BLOCK_M as a knob you can still move from inside the kernel body (coarsen each program over 2 output tiles), then go further with a register-staged wide-K MFMA rewrite at a large M tile.

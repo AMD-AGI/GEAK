@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: quantized_gemm
 regime: mixed
 layer: learned
-lifecycle: active
+lifecycle: archived
 ---
 # parity-gate-freezes-fp32-reduction-order
 - lever: When the correctness gate is cos>=0.99 AND max_rel<1e-2 with a small denominator clamp, treat the reference's fp32 accumulation ORDER as part of the spec: cancellation-to-near-zero elements make the relative-error term near-bit-exact, so any reassociation is a parity failure long before it is a perf question.

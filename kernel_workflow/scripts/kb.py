@@ -158,7 +158,10 @@ ABSOLUTE_UNIT_PATTERNS = [
     (r"\b\d[\d.,]*\s*(?:T|G|M)?FLOP(?:/s|s\b)", "absolute throughput (FLOP/s)"),
     (r"\b\d[\d.,]*\s*(?:T|G|M|K)?B/s\b", "absolute bandwidth (B/s)"),
     (r"\b\d[\d.,]*\s*(?:GHz|MHz)\b", "an absolute clock"),
-    (r"\b\d[\d.,]*\s*(?:W|watts?)\b", "absolute power"),
+    # `W` must be a UNIT, not the start of another token. `\d[\d.,]*\s*W\b` matched "BLOCK=2, W..."
+    # — the comma was read as a thousands separator and `W` as watts — and refused a legitimate card.
+    # A gate that fires on correct input costs more than the one bad card it was meant to catch.
+    (r"\b\d+(?:\.\d+)?\s?(?:W|watts?)(?![A-Za-z0-9_-])", "absolute power"),
 ]
 # Their discovery header is what the generated INDEX.md is built from: a card missing one of these is
 # either invisible (no description => "(no description)") or unfindable (no keywords/kernels), which

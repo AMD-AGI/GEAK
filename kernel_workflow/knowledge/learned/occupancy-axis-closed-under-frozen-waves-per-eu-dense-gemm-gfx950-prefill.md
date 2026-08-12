@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: dense_gemm
 regime: prefill
 layer: learned
-lifecycle: active
+lifecycle: archived
 ---
 # occupancy-axis-closed-under-frozen-waves-per-eu
 - lever: Spend at most one round on occupancy here: the AMD backend emits a fixed waves-per-eu at the end of make_llir, so no in-body primitive changes it, and the shape wants the occupancy it already has.

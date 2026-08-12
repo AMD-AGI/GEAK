@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: moe_grouped_gemm
 regime: both
 layer: learned
-lifecycle: active
+lifecycle: archived
 ---
 # in-kernel-axes-closed-on-dequant-latency-bound-moe-gemm
 - lever: Once the host-config optimum is in hand for this class, prefer spending the round on the operand/instruction-format axis over re-sweeping in-kernel knobs: nonkdim x kpack, block-K x num_stages, num_warps, split-K, a narrowed dequant intermediate dtype, lop3-style bit-trick dequant and graph capture were each re-measured here and none moved the incumbent.

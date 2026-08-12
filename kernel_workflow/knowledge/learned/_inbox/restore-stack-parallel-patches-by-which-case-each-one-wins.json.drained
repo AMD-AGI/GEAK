@@ -1,0 +1,56 @@
+{
+  "run_id": "restore-stack-parallel-patches-by-which-case-each-one-wins",
+  "date": "2026-08-12",
+  "kernel_names": [],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "toolchain": "rocm 7.2 / triton 3.6.0 / torch 2.11.0",
+  "cards": [
+    {
+      "name": "stack-parallel-patches-by-which-case-each-one-wins-on-method-gfx950-n-a",
+      "description": "Merge parallel patches by WHICH SHAPE each one wins on, not by whether hunks collide: the shape-disjoint pair added +2.4%, three collision-free merges 0%",
+      "keywords": [
+        "measurement-method",
+        "interleaved-ab",
+        "control-experiment",
+        "tile-shape",
+        "num-stages",
+        "pid-remap",
+        "dense-gemm",
+        "compute-bound"
+      ],
+      "kernels": [
+        "_gemm_a16_w16_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "n/a",
+      "key": "deciding which patches from parallel optimization directions actually compose, on a multi-shape bf16 dense GEMM lane on gfx950",
+      "lifecycle": "active",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "Over four rounds, three merges whose hunks did not collide gained nothing (round integrates 1.000x, 0.998x and 0.997x relative to the best single patch of their round, one-sided across interleaved reps) because each pair removed the same stall; the one merge whose two patches won on DIFFERENT shapes added +2.4% over the best individual and became the run's best state, 2.6577x unweighted geomean vs the frozen baseline (per case: small-M 2.04x, large-M 3.03x and 3.04x).",
+      "cost": "L1",
+      "verified_on": "2026-08-12",
+      "levers": [
+        "method.integration-complementarity"
+      ],
+      "title": "Stack parallel patches by which case each one wins on",
+      "lever": "Before merging the survivors of a parallel round, tabulate each patch's per-shape delta and merge the pair whose GAINS land on different shapes. Two patches that both win on the same shape are usually substitutes for one stall and their merge ties the better of the two, however disjoint their text is; the pair that split the shape set between them (a locality/pid-swizzle win on the large shapes, a pipeline-depth refund on the launch-starved small shape) was the only superlinear stack after three rounds of ties.",
+      "apply": "Keep a per-shape column per candidate rather than a single geomean; predict the merged per-shape vector as the elementwise product and merge only where that prediction beats both singletons on at least one shape and regresses none. Shape-gate a patch that helps only one side rather than dropping it.",
+      "stack": "total 2.6577x unweighted geomean, director-verified against the frozen baseline (small-M 2.04x / large-M 3.03x / 3.04x) = four landings compounded\n  - 1. in-body M-coarsening to a large M-tile + an even-K restructure - 1.64x standalone (round 1, verified); the restructure is 1.000x alone but is the ENABLER that unmasks the K-loop loads\n  - 2. dropping the non-temporal cache hint on the live masked B load - 1.41x standalone (round 1, verified); hand-merged with (1) gives 2.17x, +32% over the best individual\n  - 3. joint tile-aspect x K-tile cross screen, growing M at a halved K-tile - 2.53x cumulative (round 3, verified), i.e. +17% on top of (1,2); the smaller K-tile is what stops the taller tile spilling\n  - 4a. shape-gated grouped/XCD pid swizzle at the new tile - +3..5% on the large shapes only (round 4, verified)\n  - 4b. pipeline depth 1 on the K-loop range - +4.8% small-M, +1.4% one large shape, flat on the other (round 4, verified); (4a)+(4b) integrate to +2.4% over either\n  - note: attribution is incremental in landing order, not independent - (3) re-tunes (1) rather than adding to it, and rounds 2 and 3 integrated to no improvement at all.",
+      "verify": "Re-measure the merged patch PER SHAPE against a same-session re-measurement of the reference, medians of >=3 paired runs; a merge that only ties on every shape is a substitutes verdict, not noise.",
+      "pitfall": "three consecutive integrates gained nothing although the hunks applied cleanly and touched different lines -> both patches in each pair removed the same stall (address-bound and LDS-bound were one stall; a K-tail elimination was deleted outright once the chosen K-tile divided K) -> ask which shape each win lands on, and whether one patch destroys the other's precondition, before spending the merge.",
+      "caution": "Also verify the reference in the same session before believing a round-over-round delta - one binary spread ~8% across runs on the largest shape here, enough to invent or erase a stack's entire margin.",
+      "source": "run kernel_20_geak_0811_2h_kb_new 2026-08-12",
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "attempts": 1
+    }
+  ]
+}

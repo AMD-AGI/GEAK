@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: quantized_gemm
 regime: compute-bound
 layer: learned
-lifecycle: active
+lifecycle: archived
 verified_on: 2026-08-11
 ---
 # Occupancy push and four neighbouring axes are closed on an ILP-bound dequant GEMM

@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: dense_gemm
 regime: both
 layer: learned
-lifecycle: active
+lifecycle: archived
 ---
 # Turn a block-scaled fp8 GEMM inner loop into an unscaled MFMA loop
 - lever: Get every scale operation out of the K-loop so the accumulation loop is a plain unscaled fp8 MFMA loop: first fold the per-column scale into the per-row scale when the scale group width equals the N tile (bit-exact), then hoist a full-K mean scale so zero scale ops remain inside the loop, applying scales in fp32 on the epilogue side.

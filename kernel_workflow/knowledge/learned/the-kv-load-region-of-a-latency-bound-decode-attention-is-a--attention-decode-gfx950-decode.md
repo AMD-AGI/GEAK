@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: attention_decode
 regime: decode
 layer: learned
-lifecycle: active
+lifecycle: archived
 cost: L2
 verified_on: 2026-08-11
 roofline: already ~55-65% of achievable HBM bandwidth with a wait-to-busy ratio ~3.2, i.e. latency-bound not bandwidth-bound

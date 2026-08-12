@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: quantized_gemm
 regime: compute-bound
 layer: learned
-lifecycle: active
+lifecycle: archived
 verified_on: 2026-08-11
 ---
 # Rank-1 scale collapse plus 2-deep overlap unroll hides dequant behind MFMA

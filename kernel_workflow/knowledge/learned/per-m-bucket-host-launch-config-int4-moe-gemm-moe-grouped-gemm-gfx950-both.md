@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: moe_grouped_gemm
 regime: both
 layer: learned
-lifecycle: active
+lifecycle: archived
 ---
 # per-m-bucket-host-launch-config-int4-moe-gemm
 - lever: Retune the launch config per M-bucket in the host wrapper (block sizes, group-size-M, num_warps, num_stages) and leave the compiled body untouched; when the dequant inner loop is M-independent, one config per bucket captures most of the available win.
