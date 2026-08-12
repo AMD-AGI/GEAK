@@ -1,34 +1,22 @@
 #!/usr/bin/env python3
-"""Local experience store for the kernel workflow — the machine-produced, code-carrying KB.
+"""Local experience store for the kernel workflow — the machine-produced KB that carries the diff.
 
-This is the concrete v1 of the warm-start experience store described in the KB plan
-(Part 4). It is deliberately self-contained and dependency-light (stdlib + PyYAML) so a
-lane agent can call it over Bash with no orchestration.
-
-Two knowledge sources must not be confused (see the plan, Part 4.0):
-  * perf_knowledge/ + learned cards  — human methodology, injected as an index.
-  * kb_artifacts/ (THIS store)       — machine-produced run outcomes that CARRY the diff.
-
-On-disk layout (rooted at --root, default <repo>/kb_artifacts):
+Self-contained, stdlib + PyYAML only, so a lane agent can call it over Bash. On-disk layout
+(rooted at --root, default <repo>/kb_artifacts):
 
     <root>/<gfx>/<kernel_class>/<slug>/<exp_id>/
         meta.yaml     # identity + metric + prose pointers
-        patch.diff    # the cumulative winning diff (verbatim copy)
-        report.md     # optional: the tech_lead report copied for prose (strategy/recipe/lessons)
+        patch.diff    # the winning diff (verbatim copy)
+        report.md     # optional tech_lead report, copied for prose
 
-    slug = <kernel_name>__<language>__<gfx>     # deterministic, identical on read + write
+    slug = <kernel_name>__<language>__<gfx>     # deterministic; read and write derive it identically
 
 Subcommands:
-    write    Store one measured win. Applies the KernelForge write gate
-             (missing_arch / no_improvement / empty_diff) and NEVER raises — any
-             failure prints {"written": false, "reason": ...} and exits 0 so the
-             calling run degrades instead of crashing.
-    resolve  Enumerate solutions for a slug, keep the SAME gfx only, rank by speedup,
-             return the top-N, and mirror every candidate's prose into
-             <refs-dir>/ (kb_references) so a rejected warm start is still visible.
+    write    Store one measured win behind the gate (missing_arch / no_improvement / empty_diff).
+    resolve  Rank the top-N same-gfx solutions for a slug and mirror their prose into <refs-dir>.
 
-All speedups are only comparable within one GPU arch, so resolve drops cross-arch
-candidates outright rather than down-weighting them.
+Speedups only compare within one GPU arch, so resolve drops cross-arch entries outright. Neither
+command ever raises: on failure it prints a JSON reason and exits 0 so the caller degrades.
 """
 
 import argparse
@@ -42,14 +30,12 @@ import time
 
 try:
     import yaml
-except Exception:  # pragma: no cover - yaml ships in this env; degrade to json-only meta
+except Exception:  # yaml ships in this env; degrade to json-only meta
     yaml = None
 
 
-# --------------------------------------------------------------------------- #
-# Identity helpers — read and write MUST derive the slug identically, never via
-# an LLM, or a run can never find its own lineage.
-# --------------------------------------------------------------------------- #
+# Identity: read and write MUST derive the slug identically (never via an LLM) or a run
+# can never find its own lineage.
 def _safe(seg: str) -> str:
     """Slug-safe a path segment: keep [A-Za-z0-9._-], collapse the rest to '-'."""
     s = re.sub(r"[^A-Za-z0-9._-]+", "-", str(seg or "").strip())
@@ -84,7 +70,7 @@ def _dump_meta(meta: dict) -> str:
 
 
 def _atomic_write(path: str, data: str):
-    """Same-directory temp file -> fsync -> os.replace -> dir fsync (crash-safe)."""
+    """Crash-safe: same-dir temp -> fsync -> os.replace -> dir fsync."""
     d = os.path.dirname(path) or "."
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp_", suffix=".swap")
@@ -114,9 +100,6 @@ def _impl_signature(patch_text: str) -> str:
     return "sha256:" + hashlib.sha256(patch_text.encode("utf-8", "replace")).hexdigest()[:32]
 
 
-# --------------------------------------------------------------------------- #
-# write
-# --------------------------------------------------------------------------- #
 def cmd_write(a) -> dict:
     gfx = _norm_gfx(a.gfx)
     if not gfx:
@@ -155,7 +138,7 @@ def cmd_write(a) -> dict:
 
     meta = {
         "layer": "artifact",
-        "lifecycle": "candidate",           # earns 'active' only via independent reproduction (plan Part 2.5)
+        "lifecycle": "candidate",           # earns 'active' only via independent reproduction
         "gfx": gfx,
         "platforms": [gfx],
         "kernel_class": kernel_class,
@@ -169,13 +152,12 @@ def cmd_write(a) -> dict:
         },
         "impl_signature": _impl_signature(patch_text),
         "verified_on": time.strftime("%Y-%m-%d"),
-        "verified_stack": {},               # filled by a later stack-aware pass (plan Part 2.1)
+        "verified_stack": {},               # filled by a later stack-aware pass
         "source_eval_dir": a.eval_dir or "",
         "patch_content": "patch.diff",
     }
 
-    # Prose (strategy / recipe / lessons). v1 copies the tech_lead report verbatim as the prose
-    # body and lifts its first non-empty line as the one-sentence strategy.
+    # Copy the tech_lead report verbatim as prose; lift its first non-empty line as the strategy.
     strategy = ""
     report_copied = None
     if a.report and os.path.isfile(a.report):
@@ -212,9 +194,6 @@ def cmd_write(a) -> dict:
     }
 
 
-# --------------------------------------------------------------------------- #
-# resolve
-# --------------------------------------------------------------------------- #
 def _iter_solutions(root: str, gfx: str, slug: str):
     """Yield (meta, exp_dir) for every solution matching (gfx, slug), any kernel_class."""
     base = os.path.join(root, gfx)
@@ -252,8 +231,7 @@ def cmd_resolve(a) -> dict:
         return {"read_reason": "kernel_page_not_found", "slug": slug, "candidates": []}
 
     found = list(_iter_solutions(root, gfx, slug))
-    # Same-arch is already guaranteed by the <gfx> path segment; the metric's gpu_arch is a
-    # second belt-and-braces guard against a mislabeled entry.
+    # The <gfx> path segment already guarantees same-arch; re-check metric.gpu_arch to catch a mislabeled entry.
     found = [(m, d) for (m, d) in found
              if _norm_gfx((m.get("metric") or {}).get("gpu_arch") or m.get("gfx") or gfx) == gfx]
     if not found:
@@ -262,9 +240,8 @@ def cmd_resolve(a) -> dict:
     found.sort(key=lambda md: _speedup_of(md[0]), reverse=True)
     top = found[: max(1, int(a.top_n or 3))]
 
-    # Mirror EVERY selected candidate's prose into kb_references/ up front, so a rejected warm
-    # start is still visible after the fact (plan Part 4.6). The verify loop later rewrites
-    # index.md statuses; here we seed it with status "read".
+    # Mirror each candidate's prose into kb_references/ up front, so a rejected warm start stays
+    # auditable. Seed every index entry with status "read"; the verify loop rewrites it later.
     refs_dir = a.refs_dir
     set_hash = hashlib.sha1(("|".join(d for _, d in top)).encode("utf-8", "replace")).hexdigest()[:7]
     set_dir = os.path.join(refs_dir, "sets", set_hash)
@@ -315,7 +292,6 @@ def cmd_resolve(a) -> dict:
     return {"read_reason": "read", "slug": slug, "candidates": candidates}
 
 
-# --------------------------------------------------------------------------- #
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
