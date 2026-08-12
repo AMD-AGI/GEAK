@@ -397,11 +397,23 @@ def load_timeline(eval_dir):
                 continue
             seen_nodes.add(fp)
             for e in evs:
+                # role/sub_phase are the join key. The workflow records them from the
+                # prompt; `label` is a free-form display string and is NOT parseable
+                # into an identity ('architect:strategize' for role system_architect,
+                # 'bakeoff <op name>', 'eng r1_d0:memory'). Older timelines predate the
+                # fields, so fall back to the label's leading role:sub_phase if it
+                # happens to look like one.
+                role, sub = e.get("role") or "", e.get("sub_phase") or ""
+                if not role:
+                    bits = (e.get("label") or "").split(":")
+                    if len(bits) >= 2 and " " not in bits[0]:
+                        role, sub = bits[0], bits[1].split(" ")[0]
                 events.append({
                     "workflow": wf,
                     "tree": "root" if wf == "e2e_workflow" else "kernel",
                     "phase": e.get("phase") or UNATTRIBUTED,
                     "label": e.get("label") or "agent",
+                    "key": "%s:%s" % (role, sub) if sub else role,
                     "attempt": e.get("attempt") or 1,
                     "ok": bool(e.get("ok")),
                     "seq": e.get("seq"),
@@ -440,7 +452,10 @@ def attribute(groups, timeline):
             if g["role"] == DRIVER:
                 g["phase"], g["attribution"] = DRIVER, "driver"
             else:
-                g["phase"] = "%s/%s" % (UNATTRIBUTED, g["subphase"] or "?")
+                # No timeline: group by the agent's own identity rather than dumping it
+                # in a nameless bucket. `~` marks "grouped by role, phase not recorded",
+                # so it can never be mistaken for a real workflow phase name.
+                g["phase"] = "~%s" % g["label"]
                 g["attribution"] = "inferred"
         return "inferred"
 
@@ -448,7 +463,9 @@ def attribute(groups, timeline):
     by_wf = defaultdict(lambda: defaultdict(list))
     labels_of_wf = defaultdict(set)
     for e in events:
-        key = ":".join(e["label"].split(":")[:2])
+        key = e.get("key") or ""
+        if not key:
+            continue
         by_wf[e["workflow"]][key].append(e)
         labels_of_wf[e["workflow"]].add(key)
 
@@ -482,7 +499,10 @@ def attribute(groups, timeline):
                 g["attribution"] = "timeline"
                 break
         else:
-            g["phase"] = "%s/%s" % (UNATTRIBUTED, g["subphase"] or "?")
+            # No timeline slot: group by the agent's own identity rather than dumping
+            # it in a nameless bucket. `~` marks "grouped by role, phase not recorded"
+            # so it can never be mistaken for a workflow phase name.
+            g["phase"] = "~%s" % g["label"]
     return "timeline"
 
 
