@@ -51,13 +51,12 @@ classification semantics) and `SKILL_DIR/knowledge/sglang_internals.md` (profile
     decode-step count is only a COARSE shape-visibility proxy. Do NOT expect to verify steadiness from the
     trace — trust the up-front analytic sizing + the saturated load. The prefill/decode split is recovered
     downstream ANALYTICALLY (parse_profile's `analytic_calls` / `est_shape`), not from the trace.
-  - Profiler memory bound (issue #398): the torch profiler event buffer is what drove the host-RAM OOMs.
-    `adapter_launch` now sets `torch_profiler_with_stack=false` (drops the biggest per-event cost; sglang
-    already did) and, on 0.26+, `max_iterations` (`PROFILE_MAX_ITERS`, default 64) so the profiler
-    SELF-STOPS after N worker steps — the window is step-bounded by construction, not just by the
-    `PROFILE_WINDOW_SEC` wall-clock sleep (lowered to a 20–30s band). On <0.26 there is no step knob, so the
-    shorter time window is the only bound. Grep server.log for `Max profiling iterations reached` to
-    confirm the step self-stop fired.
+  - Profiler memory bound: the torch profiler event buffer drove the host-RAM OOMs. `adapter_launch` now
+    sets `torch_profiler_with_stack=false` (drops the biggest per-event cost; sglang already did) and, on
+    0.26+, `max_iterations` (`PROFILE_MAX_ITERS`, derived from the ISL/OSL/CONC step target and clamped to
+    `PROFILE_NUM_STEPS_MAX`) so the profiler SELF-STOPS after N worker steps — step-bounded by construction,
+    not just by the `PROFILE_WINDOW_SEC` sleep (20–30s band). On <0.26 the shorter time window is the only
+    bound. Grep server.log for `Max profiling iterations reached` to confirm the self-stop fired.
   - The old adaptive "enlarge window + re-capture until N decode steps" gate is DISABLED — that proxy loop
     used to double the window until the trace bloated / OOMed the profiler buffer. `bench_e2e.sh` now
     captures ONCE with the up-front-sized window; trust the sizing.
