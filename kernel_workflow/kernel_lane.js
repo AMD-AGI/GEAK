@@ -211,18 +211,14 @@ const UPDATE_EXPERIENCE = String(A.update_experience != null ? A.update_experien
 const UPDATE_EXPERIENCE_ON = UPDATE_EXPERIENCE !== 'off' && UPDATE_EXPERIENCE !== 'false' && UPDATE_EXPERIENCE !== 'none';
 
 // ---------------------------------------------------------------------------
-// WARM-START (local experience KB). The kernel_workflow's machine-produced,
-// code-carrying store (kb_artifacts/) — distinct from the human perf_knowledge/
-// index. Before the optimize loop, search this store for the top-3 historically
-// best patches for THIS (kernel, language, gfx), validate each through the SAME
-// verify_engineer gate, and adopt the first that passes as the starting point.
-// After Validate, write this run's own win back. Design: KernelForge experience-KB
-// lifecycle (../KernelForge/docs/conceptual/experience-kb-lifecycle.md), plan Part 4.
-//   warm_start = on (default)   | read + validate top-3, ADOPT the first that passes.
-//              = reference       | read top-3 as prose only, never auto-apply.
-//              = return_after_read| adopt then RETURN before the optimize loop.
-//              = off | false | none | resume-skip | no-arch => cold start (byte-identical).
-// kb_artifacts_dir default: sibling of the workflow dir (<repo>/kb_artifacts).
+// WARM-START (local experience KB). Before the optimize loop, search the machine-produced
+// kb_artifacts/ store for the top-3 best patches for THIS (kernel, language, gfx), validate
+// each through the SAME verify_engineer gate, and adopt the first that passes; after Validate,
+// write this run's own win back.
+//   on (default)      | read + validate top-3, ADOPT the first that passes.
+//   reference         | read top-3 as prose only, never auto-apply.
+//   return_after_read | adopt then RETURN before the optimize loop.
+//   off/false/none, a STATE_DIR resume, or no arch => cold start (byte-identical to pre-feature).
 const WARM_START = String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on';
 const WARM_START_ON = WARM_START !== 'off' && WARM_START !== 'false' && WARM_START !== 'none';
 const WARM_START_REF_ONLY = WARM_START === 'reference';
@@ -894,13 +890,9 @@ if (setup.resumed && setup.prior_state) {
 }
 
 // ===========================================================================
-// PHASE: WarmStart — search the local experience store for the top-3 best patches
-// for THIS (kernel, language, gfx), validate each through the SAME verify_engineer
-// gate as a round winner, and ADOPT the first that passes as the starting point.
-// The recorded speedup only ranks; adoption is decided by a FRESH measurement here.
-// Skipped (cold start; run byte-identical to pre-feature) when warm_start=off, a
-// STATE_DIR resume is active, no arch was detected, or the store has nothing.
-// gfx is read from the baseline profile's on-box `device` string (no extra probe).
+// PHASE: WarmStart. The recorded speedup only RANKS; adoption is decided by a fresh
+// measurement through the verify gate here. gfx comes from the baseline profile's
+// on-box `device` string (no extra probe).
 // ===========================================================================
 const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
 let warm_start = { adopted: false, read_reason: WARM_START_ON ? 'read' : 'disabled', candidates: [] };
@@ -961,9 +953,8 @@ If BOTH applies fail, apply manually to match intent, then add -A + commit and R
 correctness check; only report committed=true if it still passes. Return JSON {committed, current_best_diff, note}.`,
             { phase: 'WarmStart', label: `warm_start:adopt c${c.rank}`, schema: COMMIT_SCHEMA });
           if (adopt && adopt.committed) {
-            // Adopt: the optimize loop now builds ON this patch. cumulative starts at the adopted Nx (vs the
-            // pristine frozen baseline), so a run that improves nothing still reports total=Nx — the KB gain
-            // is attributed to history, never to this run's own rounds (KernelForge total vs incremental).
+            // The optimize loop now builds ON this patch: cumulative starts at the adopted Nx, so this
+            // run's own rounds only earn the delta above it (split out as incremental_speedup below).
             cumulative = sp;
             bestPerCase = (ver.per_case && ver.per_case.length) ? ver.per_case : bestPerCase;
             finalWinner = { source: `warm_start:${c.slug}`, geomean: sp,
@@ -972,7 +963,6 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             warm_start.adopted = true;
             warm_start.adopted_speedup = sp;
             warm_start.slug = c.slug;
-            warm_start.total_speedup = sp;                  // relative to the pristine frozen baseline
             if (rec) rec.status = 'adopted';
             log(`[kb] warm-start ADOPTED ${c.slug} @ ${sp.toFixed(2)}x — optimizing from the patched state.`);
             profileSummary = await agentT(
@@ -1493,12 +1483,9 @@ Return {"filed": <the "citations" number the command printed, or 0>}.`,
 }
 
 // ===========================================================================
-// Write this run's outcome back to the local experience store (kb_artifacts/) — the
-// producer half of the warm-start loop. The script applies its own gate
-// (missing_arch / no_improvement / empty_diff) and prints a single-line JSON; the
-// whole step is wrapped so a store failure NEVER fails the run (plan Part 4.2). The
-// JS-side `finalPrimary > 1.0` pre-check just avoids spending an agent on a run that
-// cannot pass the gate anyway.
+// Write this run's outcome back to kb_artifacts/ — the producer half of the loop.
+// The script applies its own gate and never fails the run; the `finalPrimary > 1.0`
+// pre-check just avoids spending an agent on a run that cannot pass the gate anyway.
 // ===========================================================================
 let kb_written = null;
 if (KB_ARTIFACTS_DIR && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
@@ -1522,9 +1509,8 @@ python3 ${EXPERIENCE_STORE} write --root ${KB_ARTIFACTS_DIR} \\
     : `[kb] experience not written: ${kb_written ? kb_written.reason : 'writer returned nothing'}`);
 }
 
-// The headline speedup relative to the PRISTINE frozen baseline. When a warm-start patch was adopted,
-// this run's own rounds only earned the delta ABOVE the adopted starting point — split them out so a
-// KB-derived gain is never reported as this run's work (KernelForge total vs incremental).
+// finalPrimary is the total vs the pristine baseline; when a warm-start patch was adopted, split out
+// the delta ABOVE it so a KB-derived gain is never reported as this run's own work.
 const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
   ? (Number.isFinite(finalPrimary) ? finalPrimary / warm_start.adopted_speedup : null)
   : finalPrimary;
