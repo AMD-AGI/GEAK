@@ -1,0 +1,158 @@
+{
+  "run_id": "fused_moe_kernel_gptq_awq-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "fused_moe_kernel_gptq_awq"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "amortize-int4-dequant-across-m-blocks",
+      "description": "Amortize (do not shrink) int4 weight dequant in a MoE grouped GEMM: one dequantized B tile per several M blocks, tails split not padded; 2.61x geomean",
+      "keywords": [
+        "int4",
+        "w4a16",
+        "moe-grouped-gemm",
+        "dequant",
+        "amortization",
+        "triton",
+        "gfx950",
+        "bit-exact",
+        "tile-geometry"
+      ],
+      "kernels": [
+        "fused_moe_kernel_gptq_awq"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "int4 w4a16 GPTQ/AWQ-style fused-MoE grouped GEMM with packed-nibble weights and per-group scales, Triton on gfx950/MI355 under a package power cap",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "compute.dequant-amortization",
+        "mem.nibble-split",
+        "host.two-specialisation-dispatch"
+      ],
+      "cost": "L3",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "2.61x geomean isolated vs frozen baseline, non-overlapping (per-case 2.04x at M=2048, 2.93x at M=32768, 2.99x at M=65536; bit-exact vs golden; reproduced under a cold compiler cache)",
+      "verified_on": "2026-08-12",
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "attempts": 1,
+      "last_seen": "2026-08-12",
+      "title": "Amortize int4 dequant across M-blocks instead of shrinking it",
+      "lever": "Make one dequantized weight tile serve more MFMA work: fuse several M blocks of the same expert behind one dequant pass, round a short expert tail UP into a padded merge, and express an odd rung as two accumulators (2+1) in one K loop rather than padding to the next power of two; on top of that a magic-number nibble->fp32 conversion that is bit-exact and removes every in-loop int->float convert.",
+      "apply": "Load the packed weight tile once as [BK/2, BN] uint8 and split low/high nibbles with constant masks (fold the 0.0625 into the high-nibble scale); dispatch on the host to a merged vs unmerged specialisation by an expanded/valid row ratio; re-sweep BLOCK_SIZE_K, num_warps, num_stages and matrix_instr_nonkdim after every body rewrite.",
+      "stack": "total 2.61x isolated (geomean, director-verified) = four groups compounded\n  - 1. nibble split + launch re-tile — 1.72x cumulative; the split alone is 1.10x and the re-sweep on the merged body carries it (stacking the two bodies without re-tuning scored only 1.23x)\n  - 2. magic-number dequant + nonkdim16 — 1.85x cumulative, bit-exact\n  - 3. M-block fusion (+16.2%) and the run-length tail ladder (7.4% total across rungs)\n  - 4. shader-engine phase-lock fix (+2.6 to +3.0%) and the 2+1 split rung (+3.0% at M=32768, +1.6% at M=65536)\n  - note: attribution is incremental in landing order, not independent.",
+      "verify": "Expect the MFMA instruction count per output tile to stay identical while VALU drops (-61% at the fusion step) and the output stays bit-exact against the golden; re-time the smallest shape separately, since it gains least.",
+      "pitfall": "Two verified wins hand-merged, each keeping its own tuning constants, scored below the better one alone -> tuning metaparams are body-specific and expire on a body rewrite -> resolve every shared constant by re-measurement on the merged body.",
+      "caution": "Also verify that a skinny / low-expansion shape is routed to its own specialisation: merging there measured +41% to +271% because that shape wants more workgroups, not less operand traffic.",
+      "source": "run fused_moe_kernel_gptq_awq-own16h, 19-round campaign 2026-08-08/09, director-validated 2026-08-12 (bit-exact, cold-cache cross-check)"
+    },
+    {
+      "name": "closed-axes-register-bound-quantized-moe-gemm",
+      "description": "On a register-bound int4 MoE grouped GEMM, VALU cuts, occupancy, tile geometry, split-K, grid compaction and a hand-written port all return ~1.00x or worse",
+      "keywords": [
+        "int4",
+        "w4a16",
+        "moe-grouped-gemm",
+        "dequant",
+        "occupancy",
+        "tile-geometry",
+        "split-k",
+        "anti-pattern",
+        "gfx950",
+        "triton"
+      ],
+      "kernels": [
+        "fused_moe_kernel_gptq_awq"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "an int4 w4a16 fused-MoE grouped GEMM already sitting at a 240-register allocation with zero spills, 2 waves/SIMD and no pipe above ~44% busy, Triton on gfx950/MI355",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "compute.valu-reduction",
+        "compute.occupancy",
+        "compute.split-k",
+        "host.grid-compaction"
+      ],
+      "cost": "L1",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "disconfirming, all isolated vs the frozen baseline: deleting 100% of the dequant buys only +2.4% on the merged path and +6.5% on the M=2048 case; 7 bit-exact VALU cuts measured 0.5-2.9% slower; split-K 0.962x and 0.934x; grid compaction (4x fewer workgroups, bit-exact) -1.7%; 12 alternative tile geometries -7% to -90%; a hand-written non-Triton MFMA port -17.9% at M=32768 and -14.4% at M=65536; backend knobs inside a +-0.5% control spread",
+      "verified_on": "2026-08-12",
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "attempts": 1,
+      "last_seen": "2026-08-12",
+      "title": "Axes that returned about 1.00x on a register-bound quantized MoE GEMM",
+      "lever": "Price the ceiling before funding a round: run the free upper-bound oracle first (delete the candidate work while holding operand traffic constant) and do the register arithmetic (accumulator registers vs the budget the next occupancy step needs) before writing any variant.",
+      "apply": "Dump the register census and the pipe-busy counters as the round's first GPU job; if the busiest pipe is well under half busy at 2 waves/SIMD the body is dependency/issue-latency bound, and both cures (more waves, more ILP per wave) compete for the same register file.",
+      "verify": "Re-derive the headroom from counters rather than from a percent-of-roof figure: a low MFMA busy fraction that is co-limited by LDS is not spare capacity, and here the honest remaining headroom in this language measured ~2%.",
+      "pitfall": "'43% of the MFMA roof' was read as roughly 2x of headroom -> MFMA idles because LDS is the co-limiter and neither moves without occupancy the register file forbids -> retire the roofline framing and quote the measured pipe-busy set instead.",
+      "caution": "Also verify the opposite end of a two-variable trade before treating it as closed: occupancy looked dead by a 72-register gap on the large tile, yet a smaller tile did reach 3 waves/SIMD (+5.5% within its own family) and still lost 2.0% overall.",
+      "source": "run fused_moe_kernel_gptq_awq-own16h, 19-round campaign 2026-08-08/09, ~15 closed directions, director-validated 2026-08-12"
+    },
+    {
+      "name": "ab-protocol-and-oracle-confounds-power-capped-gpu",
+      "description": "On a power-capped GPU, delete-the-work oracles and batched timers lie: per-launch event pairs and entropy-preserving probes cut in-batch control spread ~15x",
+      "keywords": [
+        "ab-protocol",
+        "measurement",
+        "power-cap",
+        "oracle",
+        "triton",
+        "gfx950",
+        "anti-pattern",
+        "bit-exact"
+      ],
+      "kernels": [
+        "fused_moe_kernel_gptq_awq"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "n/a",
+      "key": "isolated A/B and upper-bound-oracle protocol for Triton kernels on a power-capped many-XCD GPU, where wall-clock tracks energy per unit work rather than cycles",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "method.ab-protocol",
+        "method.upper-bound-oracle"
+      ],
+      "cost": "L2",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "one event pair per launch cut the in-batch control spread from 4.39% to 0.08-0.49% on all three cases; the landed body then re-measured within 0.38% across six independent sessions, and two oracle confounds each forged an effect larger than the round's real win (+17.2% and 2.36x)",
+      "verified_on": "2026-08-12",
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "attempts": 1,
+      "last_seen": "2026-08-12",
+      "title": "A/B protocol and oracle confounds on a power-capped GPU",
+      "lever": "Time one event pair per launch, alternating candidate and control inside a single locked process with a duplicate control in every batch; in any 'delete the work' oracle hold the operand VALUES and the address spread fixed and change only the thing under test.",
+      "apply": "Build variants by rewriting frozen defaults into the source rather than reading environment knobs at runtime, and assert the post-condition when landing a winner (the canonical tree actually changed), not just that a diff exists and re-measures well.",
+      "verify": "The duplicate control in each batch should land within a fraction of a percent of its twin; a control spread of several percent means the timer, not the candidate, is what is being measured.",
+      "pitfall": "An oracle that refilled the weight operand with a constant pattern read +17.2% faster on a byte-identical binary -> switching energy is data-dependent under a package power cap -> preserve operand entropy and vary addresses only.",
+      "caution": "Also verify a claimed register or energy premise against a counter/ISA dump before funding a round on it, and check that a variant knob is actually reachable at runtime: frozen defaults silently made every env-var knob a no-op for several rounds, and one collapsed-window traffic probe measured cache hotspotting (2.36x slower) instead of traffic.",
+      "source": "run fused_moe_kernel_gptq_awq-own16h, 19-round campaign 2026-08-08/09, director-validated 2026-08-12"
+    }
+  ]
+}

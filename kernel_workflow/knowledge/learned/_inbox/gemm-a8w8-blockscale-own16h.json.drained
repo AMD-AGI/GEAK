@@ -1,0 +1,131 @@
+{
+  "run_id": "gemm_a8w8_blockscale-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "gemm_a8w8_blockscale"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "fp8-legacy-flavour-emulated-reinterpret-to-native-mfma",
+      "description": "Legacy-flavour fp8 operands get silently emulated in fp16 on CDNA4; a zero-copy bit reinterpretation to the native fp8 type engages the matrix core, ~7.8x",
+      "keywords": [
+        "fp8",
+        "mfma",
+        "quantized-gemm",
+        "bit-reinterpret",
+        "emulation-fallback",
+        "isa-census",
+        "block-scale"
+      ],
+      "kernels": [
+        "_gemm_a8w8_blockscale_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "block-scaled fp8 A8W8 linear in Triton on gfx950/CDNA4, where the tensors carry the previous arch's fp8 flavour",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "7.83x isolated vs frozen baseline, non-overlapping; per-case 6.15x at M=2048, 8.81x at M=32768, 9.04x at M=65536 (N=4096, K=3072), no case regressed",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L2",
+      "verified_on": "2026-08-12",
+      "title": "Reinterpret legacy fp8 bits to the arch-native fp8 type to reach the matrix core",
+      "lever": "When a quantized GEMM's operands carry the previous arch's fp8 flavour, the compiler may emulate the format (per-element upcast to fp16, then the fp16 MFMA) and never touch the native fp8 matrix core; a zero-copy bit reinterpretation to the native type is worth trying before any tile or occupancy work.",
+      "apply": "view() both operands to the native fp8 dtype behind a guard (source dtype is the legacy flavour AND last dim unit-stride), drop input_precision='ieee' on the dot so it lowers to the native fp8 path, and fold one constant fixup for the exponent-bias remap into the epilogue; no extra memory pass, no extra launch, no per-element branch.",
+      "verify": "ISA census must show the native fp8 mfma opcode present and the fp16 mfma opcode at zero, with the emulation cmp/cndmask population collapsing by two orders of magnitude; parity gate unchanged (cos ~0.999999, err_ratio 0).",
+      "pitfall": "parity failed at cos ~0.12 -> the fixup constant was inverted: the native read is 2x the legacy value per operand, so the dot comes out 4x large and the fixup is 0.25 rather than 4 -> cos ~0.12 is the self-diagnosing signature of a 16x scale error.",
+      "caution": "also verify the shipped tuning configs afterwards: the native instruction has a different K depth, so tile / nonkdim / num_stages were tuned for an instruction that no longer exists, and a re-sweep paid a further ~1.32x here; and also verify the quantizer cannot emit the legacy NaN/edge encodings, which alias under the remap.",
+      "source": "run gemm_a8w8_blockscale-own16h, 2026-08-12, round 1 direction d0, director-validated"
+    },
+    {
+      "name": "launcher-arg-plan-replay-and-its-free-extra-dispatch",
+      "description": "Arg-plan replay beats device-graph capture at low dispatch counts (13.5% of geomean); its free extra dispatch funds a host restage of a scale operand",
+      "keywords": [
+        "launch-overhead",
+        "host-runtime",
+        "graph-replay",
+        "quantized-gemm",
+        "scale-operand",
+        "block-scale",
+        "cache-line"
+      ],
+      "kernels": [
+        "_gemm_a8w8_blockscale_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "mixed",
+      "key": "host/launch path of a block-scaled fp8 linear under Triton on gfx950, a handful of large dispatches per call",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "host lane worth 13.5% of the final geomean on all three cases (M=2048/32768/65536), plus 1.044x cumulative from the scale restage; a per-case decision between replay and eager measured 0.000%",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L2",
+      "verified_on": "2026-08-12",
+      "title": "Arg-plan replay beats graph replay at low dispatch counts, and pays a second time",
+      "lever": "Memoize and replay the Triton launcher's argument plan (keyed on the callable identity) instead of capturing a device graph: at these dispatch counts the plan replay's CPU cost was well under half the graph's. The plan captures N launches, so an additional small dispatch inside the captured region is nearly free -- which funds a host-side restage the kernel could not do for itself.",
+      "apply": "Wrapper-level: build the arg plan once, replay it per call. Then pre-transpose the operand whose in-loop access stride is smaller than a cache line into a pooled buffer as a second captured dispatch, so the tile read becomes contiguous; the kernel needs no edit when it already takes strides as runtime args (four in-kernel attempts at the same gather failed on register pressure).",
+      "verify": "Alternate replay and eager arms with >=4 reps and paired in-process medians (the eager arm's cross-run spread is wide on the mid case); confirm the restage by cache lines touched per scale tile rather than by clock alone; run the parity gate through the replay path, not only the eager path.",
+      "pitfall": "a pooled staging buffer keyed by shape handed two distinct tensors the same buffer -> plan replay retargets the stream and destroys the program order that shape-keying silently assumes -> re-key the pool and exercise replay inside the correctness run, which surfaced corruption on 19 of 20 iterations.",
+      "caution": "also verify the in-loop stride really is below the cache line before restaging: generalizing the same transform to the two main operands returned exactly 1.000x because both were already line-aligned.",
+      "source": "run gemm_a8w8_blockscale-own16h, 2026-08-12, rounds 2-4 host lane and round 11 direction d1, director-validated"
+    },
+    {
+      "name": "closed-axes-once-the-library-sits-below-your-language-floor",
+      "description": "Occupancy, geometry, split-K, barriers, VALU count, epilogue and a Gluon rewrite all returned <=1.00x; price the library floor vs a scale-free floor first",
+      "keywords": [
+        "anti-pattern",
+        "closed-axis",
+        "roofline",
+        "split-k",
+        "occupancy",
+        "quantized-gemm",
+        "isa-census",
+        "block-scale"
+      ],
+      "kernels": [
+        "_gemm_a8w8_blockscale_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "a register-limited scale-applying fp8 linear on gfx950 already close to the on-box vendor-library floor",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "seven directions measured at or below parity on all cases (M=2048/32768/65536): barrier removal ~0.95x, num_warps=8 0.634x, >=256 tiles 0.897x, a Gluon rewrite 0.84x, split-K and VALU-count and epilogue rework each ~1.00x",
+      "attempts": 7,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L1",
+      "verified_on": "2026-08-12",
+      "title": "Where the headroom is not, and the two floors that tell you so",
+      "lever": "Before funding loop-schedule rounds, measure two floors on the same box: the vendor library at your shape, and the best implementation in your own language with the quantization/scale machinery deleted. When the library sits below your language's scale-free floor, the in-language axis set is closed and the remaining rounds are better spent on correctness or on leaving the language.",
+      "apply": "Build the scale-free variant as a throwaway measurement artifact (numerics wrong on purpose, parity off) purely to price the language floor, then decompose the current time as language-floor + exact-scale-apply + slack, in ratios of the case total.",
+      "verify": "Each closed axis earns its own disconfirming measurement rather than an argument -- removing the per-iteration barriers succeeded (count cut 4x at zero spills) and measured slower; occupancy-limited claims need the register census plus the clock, since split-K raises total CTAs and not concurrent ones when occupancy is register-limited.",
+      "pitfall": "two arms with byte-identical compile metadata (VGPR/LDS/spill/opcode census) sat ~12% apart in wall clock, reproduced five times -> the census is blind to addressing and to VMEM issue order -> treat metadata as a rejector only, and re-derive every knob verdict after a tile or accumulator-shape change (five verdicts went void that way).",
+      "caution": "also verify a control that closed an axis was closed for the right reason: one control here was VALU-identical rather than scale-free, so the same physical quantity was quoted three different ways across rounds and one axis was re-opened after being declared dead.",
+      "source": "run gemm_a8w8_blockscale-own16h, 2026-08-12, rounds 4-13 dead-end table, director-validated"
+    }
+  ]
+}

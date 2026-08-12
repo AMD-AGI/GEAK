@@ -1,0 +1,138 @@
+{
+  "run_id": "_gemm_a16_w16_kernel-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "_gemm_a16_w16_kernel"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "own-the-dispatch-shim-then-race-backends",
+      "description": "Own the launch/dispatch layer of a frozen bf16 dense GEMM, then race Triton vs hand HIP vs tuned vendor library per shape: 4.05x geomean.",
+      "keywords": [
+        "dense-gemm",
+        "bf16",
+        "gfx950",
+        "dispatch-shim",
+        "backend-routing",
+        "vendor-library",
+        "hipblaslt",
+        "launch-config",
+        "argmin-dispatch",
+        "codegen"
+      ],
+      "kernels": [
+        "_gemm_a16_w16_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "dense_gemm",
+      "regime": "compute-bound",
+      "key": "bf16 dense GEMM + bias with a frozen launch config, large-M compute-bound, gfx950/MI355 — the editable surface is one Python file that owns dispatch",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "4.05x geomean director-verified, paired in-session, non-overlapping (two invocations 4.0448/4.0461); per-case 3.53x at M=2048, 4.36x at M=32768, 4.30x at M=65536",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L3",
+      "verified_on": "2026-08-12",
+      "title": "Own the dispatch layer, then race backends behind it",
+      "lever": "When the editable file owns the launcher, treat the frozen launch config as the defect first, then reuse that shim as a per-shape backend selector (in-tree kernel / hand-authored HIP / tuned vendor library) chosen by measured argmin, not by reasoning.",
+      "apply": "Replace the fixed grid with a real tile (256x256x64, 16 warps, 3 stages, tuned GROUP_SIZE_M); JIT extra backends from the same file via cpp_extension load_inline; freeze per-shape vendor algo indices from an exhaustive solution sweep; cache plans keyed by shape+algo+pointer; fuse bias into the library epilogue for a single copy-free dispatch; keep named fallback tiers.",
+      "stack": "total 4.05x director-verified geomean = three directions compounded, each landing at the shim\n  - 1. tile/launch-config escape - 2.78x standalone (round 1, verified) - the whole cumulative for four rounds and the enabler of the rest\n  - 2. hand-authored HIP kernel, same tile/waves/MFMA - +21% on top of (1) (round 5, verified) - isolates codegen, not algorithm, as the wall\n  - 3. tuned vendor-library backend - +17% on top of (1,2) (round 7, verified) - largest single win\n  - note: attribution is incremental in landing order; (2) and (3) are mutually exclusive backends, so (3) alone over (1) is roughly the product of the two.",
+      "verify": "Paired golden-vs-candidate A/B inside one process, repeated invocations; confirm the intended tier actually engaged (one-shot named warning on every fallback transition, strict env flag to make them fatal) - otherwise a build failure reads as 'the fast path was chosen'.",
+      "pitfall": "A shared build cache served a stale artifact so the old binary was timed -> validate any new instrument against a known-good reference dispatch before trusting one number from it.\nAn in-process sweep reported a zero duration for every algo while parity showed cos 1.000000 -> the timer, not the kernels, was broken.",
+      "caution": "Frozen algo indices are card- and library-version specific; also verify they still resolve on your build - an unresolved index degrades to the framework path silently, correct but roughly 5% slower, and shapes outside the frozen table lose ~1.11x at the smallest M.",
+      "source": "run _gemm_a16_w16_kernel-own16h, 2026-08-12, kernel_workflow 16h campaign, director-validated"
+    },
+    {
+      "name": "shipped-vendor-solution-is-the-roof",
+      "description": "For mid-size bf16 dense GEMM on gfx950, five independent code generators all land below the shipped vendor solution; that axis is closed, not underexplored.",
+      "keywords": [
+        "dense-gemm",
+        "bf16",
+        "gfx950",
+        "vendor-library",
+        "codegen",
+        "anti-pattern",
+        "split-k",
+        "occupancy",
+        "tile-geometry",
+        "roofline"
+      ],
+      "kernels": [
+        "_gemm_a16_w16_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "dense_gemm",
+      "regime": "compute-bound",
+      "key": "trying to out-generate the shipped vendor assembly for bf16 dense GEMM on gfx950, once the op already routes to the tuned library",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "closed axis: five generators raced per-case against the shipped solution on the smallest case all lose - hand HIP 0.878x, vendor ASM library ~0.93x, Composable Kernel 0.834x, TileLang 0.63x, re-driven assembly backend 0.960x; four consecutive rounds returned ~1.00x",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L3",
+      "verified_on": "2026-08-12",
+      "title": "Once it routes to tuned vendor assembly, out-generating it is a closed axis",
+      "lever": "Spend the round elsewhere: after a tuned library backend is in place and the op sits at high MFMA duty, the remaining named lanes here (rewriting the kernel in another generator, decomposition, fill/occupancy, tile padding) each returned ~1.00x or worse.",
+      "apply": "Before opening such a lane, race one cheap instance of the candidate generator against the shipped solution on the worst case only; if it lands under 1.0x there, the full port will too - all five here ranged 0.63x-0.96x of shipped.",
+      "verify": "Race per-case in one process against the shipped path, with parity checked on every arm (cos 1.000000) and proof the alternative binary really loaded; a generator that fails to load times as the incumbent.",
+      "pitfall": "Two plausible causes of the small case's gap - tile padding waste and sub-full occupancy - were eliminated by construction and the result got worse: a zero-padding exactly-full-occupancy tile measured 4.7% slower than the shipped 3.1%-padded one, and a resource-verified custom kernel with both fixed hit 0.878x.\nRebuilding the vendor library from its source tag is not a superset of what is installed: the shipped winner exists in no tagged logic file and the re-derived same-geometry control was 8% slower.",
+      "caution": "This is measured for one op/dtype/arch at high MFMA duty; also verify your own case is really inside vendor assembly (check duty per case - here 82%/82%/50%) before assuming the same ceiling, since a low-duty case can still have headroom of a different kind.",
+      "source": "run _gemm_a16_w16_kernel-own16h, 2026-08-12, kernel_workflow 16h campaign, rounds 8-10 dead-end ledger"
+    },
+    {
+      "name": "host-residue-before-launch-overhead-round",
+      "description": "Size exposed host residue first: with kernel time far above per-call host cost, a 25.6% host cut and graph replay each bought 0 on a bf16 dense GEMM.",
+      "keywords": [
+        "dense-gemm",
+        "gfx950",
+        "launch-overhead",
+        "hip-graph",
+        "host-dispatch",
+        "anti-pattern",
+        "dispatch-shim",
+        "bf16"
+      ],
+      "kernels": [
+        "_gemm_a16_w16_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "dense_gemm",
+      "regime": "compute-bound",
+      "key": "host dispatch / graph-replay lane on a bf16 dense GEMM whose smallest case still runs several times longer than one host call, gfx950",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "0 gain: per-case graph replay 0.92x/0.99x/1.00x and the whole lane ceils at 1.005x; a real shape-independent 25.6% cut in per-call host cost moved the geomean by 1.0009x across all three cases",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L2",
+      "verified_on": "2026-08-12",
+      "title": "Size the exposed host residue before buying a launch-overhead round",
+      "lever": "Estimate residue first as (per-call host cost) / (kernel duration) on the smallest case plus the measured inter-kernel gap; when host cost is a small fraction of the kernel and the queue never starves, the exposed residue is 0 and the lane cannot pay whatever the profile suggests.",
+      "apply": "Measure per-call host cost and inter-kernel gap directly, then decompose the host cost into non-editable harness floor / framework dispatch / your own code - here only a small tail was ours, so even eliminating it entirely was bounded near 1.00x.",
+      "verify": "Re-time the full paired A/B after the host cut rather than trusting the host-side delta; the host number improved by a quarter while the geomean stayed inside the noise floor.",
+      "pitfall": "Graph capture and replay was assumed a free win and measured negative on the smallest case -> capture/replay overhead and its allocation behaviour outweigh a gap that was already under a fraction of one dispatch -> the lane was closed twice, once from each side.\nTwo earlier rounds each estimated a couple of dispatches' worth of exposed residue from the profile; direct measurement put it at exactly 0.",
+      "caution": "This holds where the kernel dominates the call; also verify the opposite regime (many tiny dispatches, or a queue that visibly starves) separately, where the same lane can be the whole win.",
+      "source": "run _gemm_a16_w16_kernel-own16h, 2026-08-12, kernel_workflow 16h campaign, rounds 4 and 8 host_runtime lanes"
+    }
+  ]
+}
