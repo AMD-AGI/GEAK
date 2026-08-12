@@ -175,6 +175,13 @@ const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
 // must be "an accelerant, NOT a cage", and this is the line that keeps that true.
 //   KB_DIR_CAP        directions per round that may draw on cards (default 1)
 //   KB_COLD_DIRECTION at least one direction per round must be profile-only (default on)
+// Whether the planner is being pointed at the learned KB at all. Defined HERE because this lane is
+// where it is USED: the constant of this name lives in the dispatcher, and referencing it from the
+// lane threw `USE_LEARNED_READ is not defined` at the first plan step of every kernel — 13 of them
+// before the run was stopped. A parse test cannot catch that: the file compiles, and the reference
+// only resolves when the line runs. Default ON, matching this branch's design where the tech_lead
+// role reads INDEX.md unconditionally; `use_learned_kb=false` turns the budget block off with it.
+const USE_LEARNED_READ = String(A.use_learned_kb != null ? A.use_learned_kb : 'true') === 'true';
 const KB_DIR_CAP = Math.max(0, parseInt(A.kb_dir_cap != null ? A.kb_dir_cap : 1, 10));
 const KB_COLD_DIRECTION = String(A.kb_cold_direction != null ? A.kb_cold_direction : 'true') === 'true';
 let kbCapBound = 0;      // rounds where the cap actually had to strip something
