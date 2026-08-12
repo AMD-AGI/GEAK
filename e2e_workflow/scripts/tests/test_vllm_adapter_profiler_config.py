@@ -5,18 +5,14 @@ Run:  python3 -m unittest discover -s e2e_workflow/scripts/tests -v
   or: python3 e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py
 
 WHY THESE EXIST: the #398 memory bound lives entirely in the exact JSON adapter_launch
-hands to `vllm serve --profiler-config`, and in which trace files survive the window.
-Both are computed by shell from a capability probe, so they are asserted at the shell
-layer with fakes rather than trusted:
+hands to `vllm serve --profiler-config`. That JSON is computed by shell from a capability
+probe, so it is asserted at the shell layer with fakes rather than trusted:
 
   * The ProfilerConfig schema is strict (pydantic extra=forbid) and ABORTS the server on
     an unknown key, so adapter_launch may only emit fields the INSTALLED build declares.
     A fake `python3` stands in for the probe and prints the field set we want to model
     (0.26+, 0.19-era, or an import failure), and a fake `vllm` echoes the argv it was
     handed so we can read back the emitted JSON.
-  * adapter_profile_window must keep only rank0 traces (all other per-rank/engine traces
-    are pruned) unless PROFILE_KEEP_ALL_RANKS=1. A fake `curl` materialises the trace
-    files on /stop_profile so the function's "a new trace landed" gate fires.
 
 No GPU or real vLLM is needed: everything the adapter touches is a fake on PATH.
 """
@@ -63,13 +59,6 @@ class VllmProfilerConfigTest(unittest.TestCase):
                     '#!/usr/bin/env bash\n'
                     'printf \'VLLM_ARGV: %s\\n\' "$*"\n'
                     'printf \'VLLM_ENV: VLLM_TORCH_PROFILER_DIR=%s\\n\' "${VLLM_TORCH_PROFILER_DIR:-}"\n')
-        # Fake `curl`: on /stop_profile, materialise the trace files so the window's
-        # "a new trace landed" gate fires; otherwise just succeed.
-        self._write(os.path.join(self.bin, "curl"),
-                    '#!/usr/bin/env bash\n'
-                    'for a in "$@"; do case "$a" in\n'
-                    '  *stop_profile*) for f in ${SEED_TRACES:-}; do : > "$PROFILE_DIR/$f"; done ;;\n'
-                    'esac; done\nexit 0\n')
 
     def _write(self, path, body):
         with open(path, "w", encoding="utf-8") as fh:
@@ -147,26 +136,6 @@ class VllmProfilerConfigTest(unittest.TestCase):
         self._run("adapter_launch", probe_fields="")
         self.assertNotIn("--profiler-config", self._argv())
         self.assertIn(f"VLLM_TORCH_PROFILER_DIR={self.profile_dir}", self._log())
-
-    # ---- rank0-only pruning ---------------------------------------------------
-
-    TRACES = "host_rank0.trace.json host_rank1.trace.json host.async_llm.trace.json"
-
-    def test_prune_keeps_only_rank0(self):
-        self._run("adapter_profile_window", SEED_TRACES=self.TRACES)
-        left = sorted(os.listdir(self.profile_dir))
-        self.assertEqual(left, ["host_rank0.trace.json"])
-
-    def test_keep_all_ranks_disables_prune(self):
-        self._run("adapter_profile_window", SEED_TRACES=self.TRACES,
-                  PROFILE_KEEP_ALL_RANKS="1")
-        self.assertEqual(len(os.listdir(self.profile_dir)), 3)
-
-    def test_unmarked_single_worker_trace_survives(self):
-        """DENYLIST guarantee: a TP=1 trace with no rank marker is the ONLY trace, so it
-        must be kept — deleting it would leave the parser nothing to read."""
-        self._run("adapter_profile_window", SEED_TRACES="host.pid123.trace.json")
-        self.assertEqual(sorted(os.listdir(self.profile_dir)), ["host.pid123.trace.json"])
 
 
 if __name__ == "__main__":

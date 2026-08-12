@@ -44,8 +44,8 @@ classification semantics) and `SKILL_DIR/knowledge/sglang_internals.md` (profile
     (i) `parse_profile` reads them only from the `gpu_user_annotation` category — some captures put
     `execute_*` in `user_annotation` (CPU) only, and those are silently missed; (ii) parse the rank0 WORKER
     trace (`dp0_pp0_tp0..._rank0`), NOT the `*.async_llm.*` engine-process trace (python_function only, no
-    kernels) — the adapter now PRUNES every non-rank0 `*.trace.json*` after the window (unless
-    `PROFILE_KEEP_ALL_RANKS=1`), so the dir is unambiguous for the single-file parser.
+    kernels). With TP>1 the dir holds one trace per rank; the parser already selects `*rank0*` (see the
+    `TLT=$(ls ... *rank0* ...)` selection below), so the extra per-rank files are harmless, just unused.
   - Consequence on a build WITHOUT `detailed_trace_annotation`: `parse_profile` CANNOT measure the decode
     batch or a per-kernel `phase` from the trace (no `serving` block, no per-kernel `phase`), and the
     decode-step count is only a COARSE shape-visibility proxy. Do NOT expect to verify steadiness from the
@@ -56,8 +56,7 @@ classification semantics) and `SKILL_DIR/knowledge/sglang_internals.md` (profile
     already did) and, on 0.26+, `max_iterations` (`PROFILE_MAX_ITERS`, default 64) so the profiler
     SELF-STOPS after N worker steps — the window is step-bounded by construction, not just by the
     `PROFILE_WINDOW_SEC` wall-clock sleep (lowered to a 20–30s band). On <0.26 there is no step knob, so the
-    shorter time window is the only bound. rank0-only pruning cuts disk + flush, not the concurrent buffer
-    peak — `max_iterations` is what bounds that. Grep server.log for `Max profiling iterations reached` to
+    shorter time window is the only bound. Grep server.log for `Max profiling iterations reached` to
     confirm the step self-stop fired.
   - The old adaptive "enlarge window + re-capture until N decode steps" gate is DISABLED — that proxy loop
     used to double the window until the trace bloated / OOMed the profiler buffer. `bench_e2e.sh` now
