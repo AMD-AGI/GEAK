@@ -400,12 +400,19 @@ const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_ret
 // PURELY ADDITIVE: args.llm_stats="false" makes it a no-op.
 const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
 const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_lane', events: [], nested: [] };
-function tlAgent(o, attempt, ok) {
+const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
+function tlAgent(prompt, o, attempt, ok) {
   if (!LLM_STATS) return;
+  // Identity comes from the PROMPT, not opts.label: labels here are free-form display strings
+  // ('eng r1_d0:memory', 'tech_lead:plan r1') that cannot be parsed into role/sub_phase. The
+  // prompt's opening line always can, and it is the same line the transcript carries.
+  const m = TL_ROLE_RE.exec(String(prompt || ''));
   LLM_TL.events.push({
     seq: LLM_TL.events.length,
     phase: (o && o.phase) || '',
     label: (o && o.label) || 'agent',
+    role: m ? m[1] : '',
+    sub_phase: m ? m[2] : '',
     attempt: attempt,
     ok: !!ok,
   });
@@ -417,7 +424,7 @@ async function agentT(p, o) {
     try {
       if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
         const r0 = await agent(p, o);
-        tlAgent(o, attempt, !!r0);
+        tlAgent(p, o, attempt, !!r0);
         return r0;
       }
       let to;
@@ -432,10 +439,10 @@ async function agentT(p, o) {
         agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
         guard,
       ]);
-      tlAgent(o, attempt, !!r);
+      tlAgent(p, o, attempt, !!r);
       return r;
     } catch (e) {
-      tlAgent(o, attempt, false);
+      tlAgent(p, o, attempt, false);
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
       if (attempt < AGENT_RETRIES) {
         log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} hit an API/agent error (${msg}) — retrying so a transient outage doesn't kill the run.`);

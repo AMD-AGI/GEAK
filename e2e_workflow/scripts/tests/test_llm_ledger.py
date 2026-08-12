@@ -218,8 +218,38 @@ class TestPhaseAttribution(LedgerTestBase):
         self.assertEqual(meta["attribution_mode"], "inferred")
         self.assertFalse(meta["complete"])
         self.assertTrue(any("agent_timeline" in w for w in meta["warnings"]))
-        # It must not invent a phase name that looks authoritative.
-        self.assertTrue(rows[0]["phase"].startswith(L.UNATTRIBUTED))
+        # It must not invent a phase name that looks authoritative -- but it should
+        # still say WHICH agent the spend belongs to. `~` marks the distinction.
+        self.assertEqual(rows[0]["phase"], "~op_benchmarker:bakeoff")
+
+    def test_free_form_labels_still_resolve_via_recorded_identity(self):
+        """Found on the first real run: labels are display strings, not identities.
+
+        GEAK's call sites label agents for humans -- 'architect:strategize' when the role
+        is system_architect, 'bakeoff <op name>', 'eng r1_d0:memory'. Parsing those as
+        role:sub_phase left most of a 12-hour run's spend unattributed. The workflow now
+        records role and sub_phase from the prompt, and THAT is the join key.
+        """
+        self.put_timeline({
+            "schema": "geak.agent_timeline/1", "workflow": "e2e_workflow", "nested": [],
+            "events": [
+                {"seq": 0, "phase": "Strategize", "label": "architect:strategize",
+                 "role": "system_architect", "sub_phase": "strategize", "attempt": 1, "ok": True},
+                {"seq": 1, "phase": "HeadKernel", "label": "bakeoff mlp.gate_up_proj fp8 GEMM",
+                 "role": "op_benchmarker", "sub_phase": "bakeoff", "attempt": 1, "ok": True},
+            ],
+        })
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("system_architect", "strategize", self.eval_dir), 0),
+            asst_rec(1, "m1", read=100, out=1),
+        ])
+        write_transcript(os.path.join(self.tdir, "b.jsonl"), [
+            user_rec(prompt_for("op_benchmarker", "bakeoff", self.eval_dir), 100),
+            asst_rec(101, "m2", read=200, out=2),
+        ])
+        rows, _, agg, _ = self.build()
+        self.assertEqual({r["phase"] for r in rows}, {"Strategize", "HeadKernel"})
+        self.assertNotIn("~system_architect:strategize", agg["by_phase"])
 
     def test_director_setup_is_split_between_the_two_layers(self):
         """`director:setup` exists in BOTH workflows; the kernel eval dir decides."""

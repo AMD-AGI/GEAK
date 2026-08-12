@@ -670,12 +670,22 @@ const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLo
 const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'e2e_workflow', events: [], nested: [] };
 // One event per ATTEMPT (not per agent), so a retry storm is visible as a retry storm rather than
 // hiding inside a single "the agent ran" row.
-function tlAgent(opts, attempt, ok) {
+//
+// role/sub_phase are read back out of the PROMPT, not from opts.label. Labels here are free-form
+// display strings ('architect:strategize' when the role is system_architect, 'bakeoff <op name>',
+// 'eng r1_d0:memory'), so they cannot be parsed into an identity. The prompt's opening line is the
+// one thing that is always exactly `You are the <role>. PHASE=<sub_phase>.` — the same line the
+// transcript carries — so recording it here is what lets the ledger join the two without guessing.
+const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
+function tlAgent(prompt, opts, attempt, ok) {
   if (!LLM_STATS) return;
+  const m = TL_ROLE_RE.exec(String(prompt || ''));
   LLM_TL.events.push({
     seq: LLM_TL.events.length,
     phase: (opts && opts.phase) || '',
     label: (opts && opts.label) || 'agent',
+    role: m ? m[1] : '',
+    sub_phase: m ? m[2] : '',
     attempt: attempt,
     ok: !!ok,
   });
@@ -699,10 +709,10 @@ async function safeAgent(prompt, opts, tries = 3) {
   for (let i = 0; i < tries; i++) {
     try {
       const r = await agentBounded(prompt, opts);
-      if (r) { tlAgent(opts, i + 1, true); return r; }
-      tlAgent(opts, i + 1, false);
+      if (r) { tlAgent(prompt, opts, i + 1, true); return r; }
+      tlAgent(prompt, opts, i + 1, false);
       lastErr = 'null/empty result';
-    } catch (e) { tlAgent(opts, i + 1, false); lastErr = String(e); }
+    } catch (e) { tlAgent(prompt, opts, i + 1, false); lastErr = String(e); }
     log(`agent[${(opts && opts.label) || '?'}] attempt ${i + 1}/${tries} failed: ${String(lastErr).slice(0, 160)}`);
   }
   log(`agent[${(opts && opts.label) || '?'}] DEGRADED to null after ${tries} tries (${String(lastErr).slice(0, 120)})`);
