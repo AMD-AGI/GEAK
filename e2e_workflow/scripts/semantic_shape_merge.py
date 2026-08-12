@@ -100,6 +100,16 @@ def _bucket_fields(record):
     return phase, int(batch_size or -1), int(input_tokens or -1)
 
 
+def _record_layer_id(record):
+    # NOTE: use `is not None`, not `or`, so layer_id 0 (the first decoder layer)
+    # is kept as 0 and not coerced to the -1 "global op" sentinel.
+    for key in ("layer_id", "layer"):
+        value = record.get(key)
+        if value is not None:
+            return int(value)
+    return -1
+
+
 def _groups(records):
     grouped = {}
     for record in records:
@@ -111,8 +121,7 @@ def _groups(records):
             "op_instance_id": oid,
             "phase": phase,
             "rank": int(record.get("rank", 0) or 0),
-            "layer_id": int(record.get(
-                "layer_id", record.get("layer", -1)) or -1),
+            "layer_id": _record_layer_id(record),
             "batch_size": batch_size,
             "input_tokens": input_tokens,
             "op_name": record.get(
