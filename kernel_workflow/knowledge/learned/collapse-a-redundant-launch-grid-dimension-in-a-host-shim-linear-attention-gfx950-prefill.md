@@ -3,12 +3,12 @@ key: chunked linear-attention forward (K-Kt chunk product) on gfx950, launched b
 type: lever
 confidence: ★★
 effect: cumulative 5.7x -> 12.1x on the frozen-baseline isolated A/B; per-case: largest-batch case ~2.8x, mid case ~1.5x, tiny case unchanged (already few workgroups); bit-identical output
-confirms_cited: 2
+confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 3
+attempts: 2
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: collapse-a-redundant-launch-grid-dimension-in-a-host-shim-linear-attention-gfx950-prefill
 description: Host-shim collapse of a redundant batch dim in the launch grid kills ~98% empty workgroups on chunked linear attention: ~2.8x on the largest case
 keywords: ['launch-overhead', 'grid-collapse', 'host-shim', 'linear-attention', 'varlen', 'empty-workgroups']

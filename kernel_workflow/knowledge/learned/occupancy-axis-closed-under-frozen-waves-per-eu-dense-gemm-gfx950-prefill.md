@@ -3,12 +3,12 @@ key: occupancy tuning on a register-tight fp16 dense GEMM at gfx950 where the ba
 type: anti-pattern
 confidence: ★★
 effect: 0 of 5 occupancy directions beat the incumbent on any case: occupancy-1 register double-buffer ~0.5x (VGPR 304), 8-wave workgroups cost ~80% (2 workgroups/CU collapse to 1), coarsening to 3 tiles 1.00x, tile-shrink and 32x32 MFMA both <1.0x, BM=512 ~0.1x from accumulator spill. All three shapes agreed.
-confirms_cited: 2
+confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 8
+attempts: 5
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: occupancy-axis-closed-under-frozen-waves-per-eu-dense-gemm-gfx950-prefill
 description: On compute-bound fp16 GEMM at gfx950 the occupancy axis is closed: every occ-raising/lowering variant lost, some catastrophically.
 keywords: ['dense-gemm', 'occupancy', 'waves-per-eu', 'num-warps', 'ping-pong', 'register-double-buffer', 'anti-pattern', 'gfx950', 'fp16']

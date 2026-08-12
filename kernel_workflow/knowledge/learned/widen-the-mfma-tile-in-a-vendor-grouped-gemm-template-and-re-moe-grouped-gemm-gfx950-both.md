@@ -3,15 +3,15 @@ key: fp8 per-block-scale grouped MoE second-stage GEMM on gfx950, vendor CK 2-st
 type: lever
 confidence: ★★
 effect: 1.25x isolated weighted vs frozen baseline; per-case 1.18x at the smallest token count, 1.29x and 1.30x at the two larger ones; bit-exact on every case
-confirms_cited: 2
+confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 20
+attempts: 11
 toolchain: unknown
 last_seen: 2026-08-11
-name: moe-grouped-gemm-gfx950-both
-description: When the hot gridwise sits in a frozen vendor library, occupancy/host-launch/epilogue/low-precision-B axes each returned ~1.00x: a ~1% ceiling, not a lever
-keywords: ['anti-pattern', 'bank-conflict', 'blockscale', 'composable-kernel', 'epilogue', 'fp8', 'grouped-gemm', 'hip-graph', 'launch-overhead', 'lds-padding', 'mfma', 'moe', 'mxfp4', 'occupancy', 'reachability', 'weight-preshuffle']
+name: widen-the-mfma-tile-in-a-vendor-grouped-gemm-template-and-re-moe-grouped-gemm-gfx950-both
+description: Widen MFMA tile 16x16->32x32 with a matching host B-preshuffle (then pad A-LDS) on fp8 per-block-scale grouped MoE GEMM: 1.25x isolated
+keywords: ['mfma', 'moe', 'grouped-gemm', 'fp8', 'blockscale', 'lds-padding', 'bank-conflict', 'weight-preshuffle', 'composable-kernel']
 kernels: ['moe_stage2']
 platforms: ['gfx950']
 kernel_class: moe_grouped_gemm
@@ -33,6 +33,4 @@ roofline: compute-bound 0.24 -> compute-bound 0.31 of its own roof
 - pitfall: Widened the MFMA tile while the host preshuffle stayed on the narrow pairing -> B fragments consumed in the wrong order -> parity failure; fixing the preshuffle in the same patch restored bit-exactness.
 Raising the block tile above the expert-sort granularity built cleanly but let one tile span two expert groups -> wrong-expert weights, large error ratio; keeping block tile == sort granularity fixed it.
 - caution: Also verify the epilogue store-vector width separately once the MFMA tile changes: widening it regressed monotonically here even though the same width paid off on the sibling first-stage kernel.
-- source: GEAK per-kernel time-budget campaign, chuschen16h lane, 2026-08-11
-
 - source: GEAK per-kernel time-budget campaign, chuschen16h lane, 2026-08-11

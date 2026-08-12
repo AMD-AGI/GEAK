@@ -51,7 +51,8 @@
       "verify": "Bit-exact against the frozen oracle plus a non-overlapping isolated A/B on all three token-count cases; grep the built object for the new tile marker, since the config can silently not engage.",
       "pitfall": "Widened the MFMA tile while the host preshuffle stayed on the narrow pairing -> B fragments consumed in the wrong order -> parity failure; fixing the preshuffle in the same patch restored bit-exactness.\nRaising the block tile above the expert-sort granularity built cleanly but let one tile span two expert groups -> wrong-expert weights, large error ratio; keeping block tile == sort granularity fixed it.",
       "caution": "Also verify the epilogue store-vector width separately once the MFMA tile changes: widening it regressed monotonically here even though the same width paid off on the sibling first-stage kernel.",
-      "source_line": ""
+      "source_line": "",
+      "title": "Widen the MFMA tile in a vendor grouped-GEMM template and re-preshuffle B to match"
     },
     {
       "name": "frozen-vendor-gridwise-caps-the-modifiable-surface",
@@ -94,7 +95,8 @@
       "verify": "A direction that survives reachability still needs the isolated A/B; measure host-side probes interleaved in the same process, because a sequential A/B on a compute-bound kernel reports launch wins that vanish when interleaved.",
       "pitfall": "A mirror source tree accepted edits and produced bit-identical results -> it was never compiled -> the compiled surface was a different directory, found with a canary error.\nA loose correctness gate suggested a low-precision-B swap was affordable, but that operand format is a distinct gridwise with an incompatible scale granularity the harness never emits -> the round was spent proving unreachability, not measuring.",
       "caution": "Also verify the profiler's improvement verdict against the raw per-case numbers: this lane saw improved=false emitted on rounds that were genuinely improving, so a config delta plus a diff against the canonical build is the safer read.",
-      "source_line": ""
+      "source_line": "",
+      "title": "A frozen vendor gridwise closes the occupancy, host-launch and epilogue axes at once"
     },
     {
       "name": "read-occupancy-from-kd-descriptor-not-profiler-counter",
@@ -132,7 +134,8 @@
       "verify": "Cross-check the descriptor numbers against the tile shape they imply; if a framework-level minimum-occupancy setting disagrees with the descriptor, the setting is a compiler floor the hardware can exceed.",
       "pitfall": "The occupancy premise came from a profiler register counter that disagreed with the descriptor by roughly a factor of two -> the direction was budgeted as a large win and returned parity -> reading the descriptor first would have retired it before authoring.",
       "caution": "Also verify which variant of the kernel was dispatched before trusting a descriptor read: a tail or odd-size specialization can carry a different register footprint than the main one.",
-      "source_line": ""
+      "source_line": "",
+      "title": "Read occupancy from the code object's .kd descriptor, not the profiler counter"
     }
   ]
 }

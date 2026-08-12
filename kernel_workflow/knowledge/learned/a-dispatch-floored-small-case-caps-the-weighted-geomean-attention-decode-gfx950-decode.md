@@ -3,12 +3,12 @@ key: Low-concurrency decode cases of a paged attention on gfx950 whose grid is f
 type: anti-pattern
 confidence: ★★
 effect: Host graph capture/replay: the smallest case (grid ~8 workgroups vs 256 CUs) stayed tied at 1.00x while the two larger cases regressed to 0.82x (c32) and 0.79x (c64) — a net loss. Dropping a pinned occupancy hint and letting the compiler choose gained only ~0.7% geomean, carried entirely by c32 (~1.9%), with c64 and c2 tied across 13 interleaved runs. 61 passes over one 16h budget moved cumulative from 1.211x to 1.226x, and the 1.32x target stayed out of reach.
-confirms_cited: 2
+confirms_cited: 1
 confirms_blind: 0
-losses: 2
-attempts: 8
+losses: 0
+attempts: 3
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: a-dispatch-floored-small-case-caps-the-weighted-geomean-attention-decode-gfx950-decode
 description: Anti-pattern: when a decode case's grid is far under CU count, graph capture regresses it and occupancy-hint tuning buys ~1%; the geomean target is unreachable.
 keywords: ['launch-overhead', 'hip-graph', 'waves-per-eu', 'occupancy', 'attention-decode', 'anti-pattern', 'small-grid', 'decode']

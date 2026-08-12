@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: moe_grouped_gemm
 regime: mixed
 layer: learned
-lifecycle: active
+lifecycle: archived
 cost: L3
 verified_on: 2026-08-11
 ---

@@ -3,12 +3,12 @@ key: latency/dep-stall-bound fp8 block-scale grouped MoE GEMM on gfx950 with a s
 type: anti-pattern
 confidence: ★★
 effect: 0.851x overall vs the incumbent (net regression); on the small 2-token case the split variants got monotonically slower: KBatch=2 ~5.1x, =3 ~7.4x, =4 ~9.6x the fused non-split time, while staying numerically exact (err_ratio 0, cosine diff ~8e-8)
-confirms_cited: 2
+confirms_cited: 1
 confirms_blind: 0
-losses: 1
-attempts: 6
+losses: 0
+attempts: 1
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: a-56-dep-wait-on-a-grouped-moe-gemm-is-not-evidence-of-an-un-moe-grouped-gemm-gfx950-small-batch
 description: Anti-pattern: split-K/KBatch on a grouped MoE GEMM whose block grid already exceeds CU count regresses monotonically; dep-stall is not grid underfill
 keywords: ['split-k', 'moe', 'grouped-gemm', 'occupancy', 'dep-stall', 'grid-fill', 'anti-pattern', 'gfx950']
@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: moe_grouped_gemm
 regime: small-batch
 layer: learned
-lifecycle: active
+lifecycle: archived
 cost: L3
 verified_on: 2026-08-11
 ---

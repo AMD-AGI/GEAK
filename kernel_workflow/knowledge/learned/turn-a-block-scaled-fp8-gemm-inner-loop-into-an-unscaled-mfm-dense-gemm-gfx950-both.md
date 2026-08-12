@@ -1,14 +1,14 @@
 ---
 key: block-scaled fp8 (A8W8, per-group scales) dense GEMM on gfx950/MI355X, Triton — scale arithmetic living inside the K-loop
 type: lever
-confidence: ★
-effect: 20.1x isolated geomean vs frozen baseline, non-overlapping; per-case 18.1x / 21.4x / 21.3x over three growing-M cases (the smallest-M case gains least, it stays partly launch-limited); empirical roofline 0.25 memory-bound -> 0.60 compute-bound. Independently re-seen: a later run on the same op reached 22.0x isolated geomean (per-case 22.7x / 21.6x / 21.8x), and its step-2 claim below — that the tile-reorder and the load cache modifier are co-dependent — reproduced there at +1.5145x marginal with a third co-dependent lever added.
-confirms_cited: 2
+confidence: ★★
+effect: 20.1x isolated geomean vs frozen baseline, non-overlapping; per-case 18.1x / 21.4x / 21.3x over three growing-M cases (the smallest-M case gains least, it stays partly launch-limited); empirical roofline 0.25 memory-bound -> 0.60 compute-bound
+confirms_cited: 1
 confirms_blind: 0
-losses: 4
-attempts: 20
+losses: 0
+attempts: 9
 toolchain: triton-on-rocm
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: turn-a-block-scaled-fp8-gemm-inner-loop-into-an-unscaled-mfm-dense-gemm-gfx950-both
 description: Fold + hoist all block-scale arithmetic out of the fp8 GEMM K-loop so the inner loop is a native unscaled MFMA loop: ~20x isolated on gfx950
 keywords: ['fp8', 'block-scale', 'dense-gemm', 'mfma', 'scale-hoist', 'l2-reorder', 'hip-graph', 'gfx950']
@@ -26,6 +26,4 @@ lifecycle: active
 - verify: Check the compiled loop body actually contains no scale math and the intended MFMA opcode, then re-time against the frozen baseline per case; the fold and the reorder are bit-exact so parity should be exact, and the graph path should show the wrapper cost collapse only on the small-M case.
 - pitfall: the harness reported no-improvement on rounds that were in fact improving -> the check ran before the accepted patch marker was present in the verify workspace -> confirm the config delta and the patch marker by grep in the verify workspace before believing either verdict, positive or negative.
 - caution: The mean-scale hoist is the one step in the chain that is not bit-exact, so also verify oracle parity at the accuracy tolerance your consumer needs, and also verify the reorder and the cache modifier together rather than separately.
-- caution: Base rate — this card is broad enough to be cited on most fp8 block-scale directions: 19 cited attempts, 2 of which won their round and 4 of which did not clear the frozen baseline (an approximate full-K mean-scale hoist failed parity outright when the per-group scales were i.i.d. in K). So also re-price which step of the chain is still open on the CURRENT tree before funding a whole round from it.
 - source: 16h per-kernel time-budget campaign, block-scaled fp8 dense-GEMM lane, 35 passes, 2026-08-11
-- source: run kernel_20_geak_0811_2h_kb_new, 2 rounds / 6 directions, 2026-08-12

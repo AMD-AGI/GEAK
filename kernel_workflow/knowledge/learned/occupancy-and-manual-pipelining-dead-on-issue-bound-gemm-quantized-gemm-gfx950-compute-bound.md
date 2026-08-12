@@ -6,7 +6,7 @@ effect: 5 lanes, 0 wins against the seed: hand-pipelined K-block prefetch ~10% s
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 6
+attempts: 5
 toolchain: unknown
 last_seen: 2026-08-11
 name: occupancy-and-manual-pipelining-dead-on-issue-bound-gemm-quantized-gemm-gfx950-compute-bound

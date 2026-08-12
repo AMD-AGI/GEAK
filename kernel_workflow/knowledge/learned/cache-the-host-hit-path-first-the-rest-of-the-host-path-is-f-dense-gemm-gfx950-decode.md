@@ -3,12 +3,12 @@ key: host binding hit path (allocation reuse + lookup shortcut) for a repeatedly
 type: lever
 confidence: ★★
 effect: 1.08-1.10x attributable on same-session A/B, collapsing ~45% of the per-call host work; per-case cumulative vs the frozen baseline 1.27x / 1.34x / 1.32x at batch 2 / 32 / 64. The follow-on trim of redundant validation on the same hit path measured 1.00x (+-3-4%, inside noise), so the host axis closes after the cache.
-confirms_cited: 2
+confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 7
+attempts: 4
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: cache-the-host-hit-path-first-the-rest-of-the-host-path-is-f-dense-gemm-gfx950-decode
 description: Allocation reuse plus a lock-free last-hit shortcut was the only paying lever on a dispatch-floored dense linear; further host trimming measured zero.
 keywords: ['host-runtime', 'launch-overhead', 'dispatch-floor', 'caching', 'decode', 'skinny-m', 'measurement-drift']

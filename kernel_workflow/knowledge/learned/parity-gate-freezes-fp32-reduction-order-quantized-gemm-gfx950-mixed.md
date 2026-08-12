@@ -6,9 +6,9 @@ effect: 0 of 4 accumulation-order variants cleared parity on any case: 2-way con
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 8
+attempts: 4
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: parity-gate-freezes-fp32-reduction-order-quantized-gemm-gfx950-mixed
 description: Under a near-bit-exact parity gate the fp32 MFMA K-reduction order is structural: ILP splits, Kahan and native fp8 MFMA all fail parity, not perf
 keywords: ['bit-exact', 'parity-gate', 'reduction-order', 'reassociation', 'mfma', 'fp8', 'quantized-gemm', 'gfx950', 'anti-pattern']

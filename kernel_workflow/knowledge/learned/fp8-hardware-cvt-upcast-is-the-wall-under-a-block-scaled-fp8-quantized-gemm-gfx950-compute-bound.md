@@ -6,9 +6,9 @@ effect: 24.08x weighted cumulative vs frozen baseline; per-case c2 24.29x, c32 2
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 7
+attempts: 3
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: fp8-hardware-cvt-upcast-is-the-wall-under-a-block-scaled-fp8-quantized-gemm-gfx950-compute-bound
 description: Block-scaled fp8 GEMM pinned near the latency-bound floor: hardware fnuz->OCP cvt upcast plus fused split-K reduce lifts it to compute-bound
 keywords: ['fp8', 'block-scale', 'dequant', 'split-k', 'upcast', 'triton', 'compute-bound', 'quantized-gemm']

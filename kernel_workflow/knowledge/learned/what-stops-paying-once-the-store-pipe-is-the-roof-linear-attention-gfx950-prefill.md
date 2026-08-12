@@ -5,10 +5,10 @@ confidence: ★★
 effect: all disconfirming, per-case on the store-bound large case: persistent grid-stride +16% to +21% slower (a logically no-op stride factor still cost +16%, so it is codegen), doubling rows-per-program +21% slower, finer 4x4 and 16x16 skip-store did not beat the coarse 2x2 form, VGPR 152->109 with occupancy 3->4 waves gave 0%; on the tiny case forced graph replay gave 0% scoreable gain
 confirms_cited: 1
 confirms_blind: 0
-losses: 1
-attempts: 11
+losses: 0
+attempts: 8
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: what-stops-paying-once-the-store-pipe-is-the-roof-linear-attention-gfx950-prefill
 description: At an HBM-store-bandwidth roof, occupancy lift, persistent/fewer workgroups, finer store-skip granularity and graph replay all measured null or negative
 keywords: ['anti-pattern', 'store-bandwidth', 'occupancy', 'persistent-kernel', 'grid-stride', 'graph-replay', 'launch-overhead', 'measurement-methodology']

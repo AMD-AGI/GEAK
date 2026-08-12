@@ -5,10 +5,10 @@ confidence: ★★
 effect: replay ~2x slower than eager, robust across 3 signatures x 3 repeats; the wrapper's own signature cache costs ~0.9-1.0x of a launch on the host critical path so even the eager-fallback wrapper nets 0.88-0.96x per-case (batch 2 0.88x, batch 32 0.91x, batch 64 0.96x). Captured output passed parity, so the loss is timing, not capture.
 confirms_cited: 1
 confirms_blind: 0
-losses: 2
-attempts: 4
+losses: 0
+attempts: 1
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: graph-replay-of-a-one-kernel-graph-can-cost-more-than-the-la-dense-gemm-gfx950-decode
 description: Graph-capturing one tiny kernel to beat the launch floor: replay measured ~2x slower than eager, and the signature-cache wrapper alone nets 0.88-0.96x.
 keywords: ['hip-graph', 'launch-overhead', 'dispatch-floor', 'decode', 'skinny-m', 'host-runtime']

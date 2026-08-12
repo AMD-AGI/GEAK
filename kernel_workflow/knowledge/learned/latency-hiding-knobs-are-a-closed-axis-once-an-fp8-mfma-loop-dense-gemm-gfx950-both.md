@@ -3,12 +3,12 @@ key: scale-free fp8 MFMA GEMM loop on gfx950/MI355X whose residual stall is the 
 type: anti-pattern
 confidence: ★★
 effect: Disconfirming, on top of the 20.1x champion and on all three cases: deeper pipelining (stages=3) 1.0x and only fits shared memory at half the N tile, which halves arithmetic intensity; a 256x64 tile 0.64x; mfma non-K dim 16 -> 32 0.916x; VGPR shave for a third wave 1.0x; a hand-scheduled register-resident rewrite bypassing shared memory produced no accepted patch. Five directions, zero gains above the ~1% noise floor.
-confirms_cited: 2
+confirms_cited: 1
 confirms_blind: 0
-losses: 1
-attempts: 9
+losses: 0
+attempts: 5
 toolchain: triton-on-rocm
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: latency-hiding-knobs-are-a-closed-axis-once-an-fp8-mfma-loop-dense-gemm-gfx950-both
 description: On a scale-free fp8 MFMA loop, deeper pipelining, bigger tiles, wider mfma non-K dim and VGPR shaving all measured <=1.0x: a closed axis
 keywords: ['fp8', 'dense-gemm', 'mfma', 'occupancy', 'lds-tiling', 'num-stages', 'vgpr-pressure', 'gfx950']

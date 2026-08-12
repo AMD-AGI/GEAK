@@ -5,10 +5,10 @@ confidence: ★★
 effect: 4.58x isolated geomean vs the frozen baseline, non-overlapping; per case batch-2 3.43x, batch-32 4.88x, batch-64 5.74x (best single pass 5.11x). Empirical roofline 0.10 -> 0.60, compute-bound throughout.
 confirms_cited: 1
 confirms_blind: 0
-losses: 1
-attempts: 8
+losses: 0
+attempts: 6
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: per-bucket-block-m-plus-byte-once-dual-nibble-int4-dequant-o-moe-grouped-gemm-gfx950-both
 description: Per-bucket BLOCK_M/num_warps plus byte-once dual-nibble int4 dequant lifts a weight-quantized MoE grouped GEMM ~4.6x, empirical roofline 0.10 to 0.60.
 keywords: ['moe', 'int4', 'weight-only-quant', 'grouped-gemm', 'block-m', 'num-warps', 'mfma-nonkdim', 'dequant', 'software-pipeline', 'gfx950']

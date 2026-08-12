@@ -6,9 +6,9 @@ effect: 1.14-1.15x plateau held for 43 consecutive passes, then 2.29-2.32x geome
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 8
+attempts: 5
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: reinterpret-frozen-launch-via-wrapper-object-quantize-cast-gfx950-mixed
 description: Export a launcher OBJECT so the frozen num_warps=1/one-program-per-row launch can be re-tiled: 1.15x plateau -> 2.3x on memory-bound fp8 quant-cast.
 keywords: ['launch-config', 'wrapper-relaunch', 'harness-seam', 'quantize-cast', 'fp8', 'memory-bound', 'tiling', 'num-warps']

@@ -3,12 +3,12 @@ key: tiny index-scatter / pool-write Triton op on gfx950 whose per-call host sub
 type: lever
 confidence: ★★
 effect: 2.613x isolated vs frozen baseline, reproduced over dozens of resumed passes (2.49x-2.81x band); per-case 2.92x at batch=2, 2.60x at batch=32, 2.35x at batch=64 - the gain is pure submit cost, so it grows as the case shrinks. Same op: graph capture/replay only 1.32x.
-confirms_cited: 3
+confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 6
+attempts: 4
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: raw-driver-module-launch-dispatch-bound-copy-memory-movement-gfx950-launch-bound
 description: Dispatch-bound tiny memory-movement Triton kernels: replacing the Python launch wrapper with a raw ctypes driver module-launch gives ~2.6x.
 keywords: ['launch-overhead', 'host-dispatch', 'latency-bound', 'memory-movement', 'scatter', 'triton', 'ctypes', 'small-batch']

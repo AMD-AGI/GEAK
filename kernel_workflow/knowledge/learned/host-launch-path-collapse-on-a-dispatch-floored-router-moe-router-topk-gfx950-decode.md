@@ -6,7 +6,7 @@ effect: 2.12x cumulative vs frozen baseline; per-case 2.33x / 2.19x / 1.86x at r
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 4
+attempts: 3
 toolchain: unknown
 last_seen: 2026-08-11
 name: host-launch-path-collapse-on-a-dispatch-floored-router-moe-router-topk-gfx950-decode

@@ -202,6 +202,27 @@ check("the audit inspects archived cards too",
       "c.md" in json.loads(out)["failures"])
 shutil.rmtree(dd)
 
+# The eviction budget must be computed on the axis the index GROUPS by. Bucketing finer (adding
+# platforms/regime) silently let one heading hold 11 cards under a cap of 8, while the generator
+# warned about a limit nothing enforced. 12 cards of one class, 3 regimes: exactly 8 may stay active.
+dd = fresh()
+for i in range(12):
+    write(dd, f"k{i}.md", card(f"k{i}", regime=["decode", "mixed", "large-batch"][i % 3],
+                               last_seen=f"2026-08-{(i % 28) + 1:02d}"))
+    prop = {"run_id": f"r{i}", "date": "2026-08-11", "kernel_names": [], "validation_status": "accepted",
+            "box_quiet": True, "held_out": False, "citations": [], "cards": []}
+    with open(os.path.join(dd, "_inbox", f"r{i}.json"), "w") as f:
+        json.dump(prop, f)
+run(dd, "drain", "--apply", "--validated-runs", "12")
+active = 0
+for f in os.listdir(dd):
+    if f.endswith(".md") and f not in ("INDEX.md", "README.md") and not f.startswith("_"):
+        if "lifecycle: active" in open(os.path.join(dd, f)).read():
+            active += 1
+check("the per-class cap binds on the axis the index groups by",
+      active == kb.CLASS_CAP, f"{active} active, cap {kb.CLASS_CAP}")
+shutil.rmtree(dd)
+
 # A well-formed card must pass: a gate that rejects everything is not a gate.
 dd = fresh()
 write(dd, "c.md", card("c"))

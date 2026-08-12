@@ -43,8 +43,8 @@ import sys
 from datetime import date, datetime
 
 INDEX_CAP = 40   # retained: the archive header still reports the budget it was written under
-CLASS_CAP = 8    # cards kept per (kernel_class, platforms, regime) header bucket — the same
-                 # axis the generated index groups by. See the eviction block in `drain`.
+CLASS_CAP = 8    # active cards kept per `kernel_class` — the axis the generated index GROUPS by and
+                 # the one its over-cap warning counts. See the eviction block in `drain`.
 STARS = {"★": 1, "★★": 2, "★★★": 3}
 STAR_OF = {1: "★", 2: "★★", 3: "★★★"}
 
@@ -805,15 +805,16 @@ def cmd_drain(kb, a):
     # class would land in different buckets on a wording difference and neither would ever hit its
     # cap. The header fields are the ones the generator groups the index by, so the budget is
     # enforced on the same axis the reader browses.
+    # Bucket by `kernel_class` — the SAME axis the generated index groups by, and the same one its
+    # over-cap warning counts. Bucketing finer (class · platforms · regime) looked more careful and
+    # was wrong: `moe_grouped_gemm · both`, `· mixed` and `· large-batch` are three buckets of 8, so a
+    # class the reader sees as one heading held 11 cards under a cap of 8, and the generator warned
+    # about a limit the evictor was not enforcing. The budget exists to bound what a reader scans, so
+    # it has to be computed on what a reader scans.
     live, evicted = [], []
     by_class = {}
     for c in cards.values():
-        m = c["meta"]
-        plats = m.get("platforms") or []
-        bucket = " · ".join([str(m.get("kernel_class", "other")),
-                             ",".join(plats) if isinstance(plats, list) else str(plats),
-                             str(m.get("regime", ""))])
-        by_class.setdefault(bucket, []).append(c)
+        by_class.setdefault(str(c["meta"].get("kernel_class", "other")).strip(), []).append(c)
     for _key, group in sorted(by_class.items()):
         group.sort(key=lambda c: -rank(c))
         keep, drop = [], []

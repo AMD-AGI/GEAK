@@ -5,10 +5,10 @@ confidence: ★★
 effect: The smallest case stayed at 1.19-1.25x while the two larger cases reached 3.10x and 3.23x, capping the geomean near 2.3x. Graph capture/replay: ~12% pure-throughput on that case but +0.3% (noise) on the scored geomean, and the larger cases regress 4-7% so it only survives behind a size gate. Persistent grid-stride: 0 gain, faster-or-equal never beating the incumbent launch on any case.
 confirms_cited: 1
 confirms_blind: 0
-losses: 1
-attempts: 4
+losses: 0
+attempts: 2
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: small-case-floor-is-the-timing-bracket-quantize-cast-gfx950-launch-bound
 description: A tiny-shape case can be floored by the measurement bracket itself; graph replay and persistent grids buy pure throughput but ~0 scored, and cost the big cases.
 keywords: ['launch-overhead', 'closed-axis', 'measurement-floor', 'hip-graph', 'persistent-kernel', 'small-batch', 'quantize-cast']

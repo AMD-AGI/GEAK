@@ -5,10 +5,10 @@ confidence: ★★
 effect: +6.4% on the largest per-case shape (store-bandwidth-bound), cumulative 15.09x -> 15.36x; ~80-97% of achievable HBM store roofline after; smaller cases flat (they sit on the harness event-timing floor); bit-identical, cos=1.0
 confirms_cited: 1
 confirms_blind: 0
-losses: 2
-attempts: 5
+losses: 0
+attempts: 1
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-11
 name: streaming-non-temporal-stores-for-a-write-once-output-linear-attention-gfx950-prefill
 description: Write-combining cache modifier on write-once fp32 output stores bypasses L2 write-allocate on gfx950: +6.4% on the store-bound case, bit-identical
 keywords: ['non-temporal-store', 'cache-modifier', 'store-bandwidth', 'l2-write-allocate', 'linear-attention', 'memory-bound']
@@ -28,5 +28,4 @@ roofline: store-bandwidth-bound both sides; store utilization ~0.85 -> ~0.9+ of 
 - verify: inspect the lowered store for the nt bit, confirm bit-identical output, and A/B the store-bound case on its own, since a geomean over tiny cases hides a single-digit percent move
 - pitfall: the eviction_policy argument alone changed nothing -> it does not select write-combining -> the cache_modifier argument is the one that engages the lever
 - caution: holds only where the buffer really is write-once for the launch; also verify nothing re-reads it later in the same kernel, and re-check parity bit-for-bit rather than by tolerance
-- caution: also verify the op is actually store-bound before funding this - cited 5 times, 2 of those directions did not beat the frozen baseline, the latest on a dispatch-floored op where every cache-modifier variant landed inside the baseline's own run-to-run spread
 - source: 16h single-kernel time-budget campaign (48 passes), 2026-08-11; deep_explore direction, status verified, stable across 8+ repeats
