@@ -343,6 +343,15 @@ read the profile and re-route; do not re-issue a confirmed dead-end from HISTORY
 Inputs: `ROUND`, the milestone's results (each direction: class, backend tried, isolated speedup,
 verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SKILL_DIR`.
 
+> **FINAL RECONCILIATION pass (`ROUND="final"`, `FINAL_GATE=true`).** This action is also invoked ONCE
+> more after Finalize+Validate, with `ACCEPTED_HEADS` / `ACCEPTED_KERNELS`, the run `FINAL_THROUGHPUT` /
+> `FINAL_SPEEDUP` / `VALIDATION_STATUS` / `OUTPUT_PARITY`, and `MILESTONE_RESULTS` = only the
+> finalize-gate confirmations. Reason: a win whose e2e A/B was still INCOMPLETE at milestone time was
+> curated as "Integrator pending", but its e2e gate is confirmed LATER (Finalize-gate + Director
+> Validate). On this pass, for each accepted entry whose existing card still reads "pending" / carries no
+> e2e number, **MERGE** the verified gated result (effect from `e2e_delta_pct` + the run finals) and raise
+> `confidence` — same non-blind-append curate transaction below. Do not touch rejected/dead-end cards.
+
 1. **CURATE `SKILL_DIR/knowledge/learned/` — do NOT blind-append.** Follow the curate transaction in
    `knowledge/learned/README.md`: read `INDEX.md`, then for each durable finding:
    - **Match the reuse key** `kernel_class · gfx · regime`. If a card exists → **MERGE** (bump
@@ -358,6 +367,12 @@ verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SK
      blocklist / "don't use X"** — a future run must stay free to try (and beat) it; the box judges.
      A claim CONTRADICTED by new evidence → move its card to `_archive.md` with the refuting source.
    Mechanism facts are recorded as POSITIVE ROUTING ("optimize GEMM via aiter DB"), not "X failed".
+   - **SANITIZE — every card is PUBLIC.** Write ONLY general, transferable knowledge. Strip all
+     machine-/run-specific detail before writing: NO absolute paths, usernames, `/home`/`/root` dirs,
+     hostnames, IPs, secrets, or timestamped run-dir names. Cite evidence by a reusable RELATIVE form
+     (`exp/e2e_*<Model>*/ YYYY-MM-DD`, `config/ck_tune/`, `<skill>/<file>.md`), never a path a reader
+     can't reproduce. Run-config-only facts (which authors were enabled, an image missing a tool) stay
+     in the eval-dir report unless generalized into a conditioned `caution:`. (See `learned/README.md` rule 7.)
 2. Keep the in-run hypothesis ledger (wins AND nulls, for THIS run's report) in `EVAL_DIR/insight_log.md`.
 3. **Calibrate the roofline prior (ONLY if one was used — `ANALYSIS_SKILL_DIR` non-empty and a
    `profile_roofline_json` exists; else skip).** For each direction this milestone measured, record
