@@ -464,7 +464,9 @@ class TestBenchLauncher(_RunE2ECase):
         super().setUp()
         for key in ("BENCH_LAUNCHER", "MAGPIE_LAUNCH_SCRIPT",
                     "MAGPIE_LAUNCH_SCRIPT_SOURCE", "MAGPIE_VLLM_SCRIPT",
-                    "MAGPIE_SGLANG_SCRIPT", "MAX_MODEL_LEN"):
+                    "MAGPIE_SGLANG_SCRIPT", "MAX_MODEL_LEN",
+                    "RECIPE_ENV_FILE", "RECIPE_ENV_SOURCE", "RECIPE_ENV_REPLAYED",
+                    "RECIPE_ENV_GEAK_OWNED", "GEAK_STRICT_RECIPE_ENV"):
             os.environ.pop(key, None)
 
     def _recipe(self, *, script="vllm_mi355x.sh", subdir="", root=None,
@@ -585,6 +587,187 @@ class TestBenchLauncher(_RunE2ECase):
             "native",
         )
 
+    # -- the recipe's checkout is host-local; the handoff's usually is not ---- #
+    def _checkout(self, name, script="vllm_mi355x.sh"):
+        """A usable InferenceX checkout that no recipe points at."""
+        bench_dir = self.tmp / name / "benchmarks"
+        bench_dir.mkdir(parents=True, exist_ok=True)
+        (bench_dir / script).write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        (bench_dir / "benchmark_lib.sh").write_text("# lib\n", encoding="utf-8")
+        return str(self.tmp / name), str(bench_dir / script)
+
+    def test_a_stale_recipe_checkout_falls_back_to_the_handoff_checkout(self):
+        """The recipe names a container-local, content-hash addressed path. A
+        rebuild invalidates it while the same checkout survives on durable
+        storage — which the handoff names, and which the bench client already
+        resolves against."""
+        recipe, _ = self._recipe(root=str(self.tmp / "stale"),
+                                 write_script=False, with_lib=False)
+        survivor, script = self._checkout("durable")
+
+        launcher = rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "inferencex_path": survivor,
+             "framework": "vllm"}
+        )
+
+        self.assertEqual(launcher, "magpie")
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT_SOURCE"], "launch_recipe")
+
+    def test_the_recipe_checkout_wins_whenever_it_still_resolves(self):
+        """The recipe's path is the only one the orchestrator provably launched
+        from, so a fallback must never displace it."""
+        recipe, recipe_script = self._recipe()
+        other, other_script = self._checkout("durable")
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "inferencex_path": other, "framework": "vllm"}
+        )
+
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], recipe_script)
+        self.assertNotEqual(recipe_script, other_script)
+
+    def test_the_inferencex_path_env_is_the_last_resort(self):
+        recipe, _ = self._recipe(root=str(self.tmp / "stale"),
+                                 write_script=False, with_lib=False)
+        survivor, script = self._checkout("from_env")
+        os.environ["INFERENCEX_PATH"] = survivor
+        self.addCleanup(os.environ.pop, "INFERENCEX_PATH", None)
+
+        self.assertEqual(
+            rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"}),
+            "magpie",
+        )
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
+
+    def test_no_usable_checkout_anywhere_still_degrades_to_native(self):
+        recipe, _ = self._recipe(root=str(self.tmp / "stale"),
+                                 write_script=False, with_lib=False)
+
+        self.assertEqual(
+            rx.apply_bench_launcher(
+                {"launch_recipe": recipe,
+                 "inferencex_path": str(self.tmp / "also_gone"),
+                 "framework": "vllm"}
+            ),
+            "native",
+        )
+        self.assertNotIn("MAGPIE_LAUNCH_SCRIPT", os.environ)
+
+    # -- replaying the orchestrator's recorded launch environment -------------
+    # The launcher running the same SCRIPT only aligns the two servers where
+    # their ${X:-default} expansions agree. These pin the stronger property: what
+    # the orchestrator recorded is applied, what GEAK must own is not, and a
+    # recipe that recorded nothing refuses to launch rather than quietly falling
+    # back onto defaults that merely happened to match once.
+
+    def _recipe_with_envs(self, envs: str):
+        checkout = self.tmp / "InferenceX@abc123"
+        bench = checkout / "benchmarks"
+        bench.mkdir(parents=True, exist_ok=True)
+        (bench / "vllm_mi355x.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        (bench / "benchmark_lib.sh").write_text("# lib\n", encoding="utf-8")
+        recipe = self.tmp / "baseline_config.with_envs.yaml"
+        recipe.write_text(
+            "benchmark:\n"
+            "  framework: vllm\n"
+            f"{envs}"
+            "  runner_type: mi355x\n"
+            "  benchmark_script: vllm_mi355x.sh\n"
+            f"  inferencex_path: {checkout}\n",
+            encoding="utf-8",
+        )
+        return str(recipe)
+
+    def test_the_recorded_env_is_replayed_and_run_scoped_names_are_not(self):
+        recipe = self._recipe_with_envs(
+            "  envs:\n"
+            "    PATH: /opt/venv/bin:/usr/bin\n"
+            "    VLLM_ROCM_USE_AITER: '1'\n"
+            "    NUM_WARMUPS: 8\n"
+            "    PORT: 8844\n"                    # GEAK-owned: this run's port
+            "    ROCR_VISIBLE_DEVICES: '0'\n"     # GEAK-owned: this run's GPU
+        )
+        self.assertEqual(
+            rx.apply_bench_launcher(
+                {"launch_recipe": recipe, "framework": "vllm",
+                 "eval_dir": str(self.tmp / "eval")}
+            ),
+            "magpie",
+        )
+        replayed = os.environ["RECIPE_ENV_REPLAYED"].split()
+        self.assertEqual(replayed, ["NUM_WARMUPS", "PATH", "VLLM_ROCM_USE_AITER"])
+        self.assertEqual(
+            os.environ["RECIPE_ENV_GEAK_OWNED"].split(),
+            ["PORT", "ROCR_VISIBLE_DEVICES"],
+        )
+        # PATH carries no spaces here, but the file must still be NUL-delimited
+        # so that a value which does carry one survives the launcher's env call.
+        blob = Path(os.environ["RECIPE_ENV_FILE"]).read_bytes()
+        self.assertEqual(
+            blob.split(b"\0")[:-1],
+            [b"NUM_WARMUPS=8", b"PATH=/opt/venv/bin:/usr/bin", b"VLLM_ROCM_USE_AITER=1"],
+        )
+
+    def test_the_replay_says_nothing_on_stdout(self):
+        """Callers eval this function's stdout as shell (run_ab.sh does), so a
+        progress line on stdout is executed as a command and kills the run."""
+        recipe = self._recipe_with_envs("  envs:\n    TP: 1\n")
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rx.apply_bench_launcher(
+                {"launch_recipe": recipe, "framework": "vllm",
+                 "eval_dir": str(self.tmp / "eval")}
+            )
+        self.assertEqual(out.getvalue(), "")
+
+    def test_a_recipe_recording_no_env_warns_but_launches(self):
+        recipe = self._recipe_with_envs("")
+
+        self.assertEqual(
+            rx.apply_bench_launcher(
+                {"launch_recipe": recipe, "framework": "vllm",
+                 "eval_dir": str(self.tmp / "eval")}
+            ),
+            "magpie",
+        )
+        self.assertNotIn("RECIPE_ENV_FILE", os.environ)
+
+    def test_strict_mode_refuses_when_no_env_is_recorded(self):
+        recipe = self._recipe_with_envs("")
+        os.environ["GEAK_STRICT_RECIPE_ENV"] = "1"
+
+        with self.assertRaises(SystemExit) as caught:
+            rx.apply_bench_launcher(
+                {"launch_recipe": recipe, "framework": "vllm",
+                 "eval_dir": str(self.tmp / "eval")}
+            )
+        self.assertIn("records no envs", str(caught.exception))
+
+    def test_a_script_named_by_the_handoff_is_not_held_to_the_recipe(self):
+        # Nothing was derived from a recipe, so there is no recorded env to be
+        # missing and fail-closed must not fire.
+        self.assertEqual(
+            rx.apply_bench_launcher(
+                {"launch_server_script": "/magpie/launch.sh", "framework": "vllm"}
+            ),
+            "magpie",
+        )
+        self.assertNotIn("RECIPE_ENV_FILE", os.environ)
+
+    def test_the_recorded_max_model_len_outranks_the_handoff_scalar(self):
+        recipe = self._recipe_with_envs("  envs:\n    MAX_MODEL_LEN: 6144\n")
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm", "max_model_len": 4096,
+             "eval_dir": str(self.tmp / "eval")}
+        )
+        # Cleared, so the launcher's pass-through cannot land on top of the
+        # replayed value; the recipe's 6144 reaches the script via the replay.
+        self.assertNotIn("MAX_MODEL_LEN", os.environ)
+        self.assertIn(b"MAX_MODEL_LEN=6144",
+                      Path(os.environ["RECIPE_ENV_FILE"]).read_bytes())
+
     def test_a_missing_recipe_file_is_not_an_error(self):
         self.assertEqual(rx._recipe_fields("/nonexistent/recipe.yaml"), {})
         self.assertEqual(
@@ -604,13 +787,35 @@ class TestBenchLauncher(_RunE2ECase):
         )
 
     # -- max-model-len reaches the script as env, not as a duplicate flag ----- #
-    def test_max_model_len_is_forwarded_to_the_magpie_script(self):
+    def test_max_model_len_reaches_the_magpie_script(self):
         """Magpie's script defaults max-model-len to 4096. Left unset, the right
-        value only arrives as a duplicate flag that wins on argparse ordering."""
-        recipe, _ = self._recipe()
+        value only arrives as a duplicate flag that wins on argparse ordering.
+
+        Which CHANNEL carries it depends on whether the recipe recorded it: the
+        replay when it did, the pass-through when it did not. Asserting the
+        outcome rather than the channel keeps this pinned to the property that
+        matters -- 6144 reaches the script exactly once.
+        """
+        recipe, _ = self._recipe()   # records MAX_MODEL_LEN: 6144
 
         rx.apply_bench_launcher(
-            {"launch_recipe": recipe, "framework": "vllm", "max_model_len": 6144}
+            {"launch_recipe": recipe, "framework": "vllm", "max_model_len": 6144,
+             "eval_dir": str(self.tmp / "eval")}
+        )
+
+        via_replay = b"MAX_MODEL_LEN=6144" in Path(
+            os.environ.get("RECIPE_ENV_FILE", os.devnull)).read_bytes()
+        via_passthrough = os.environ.get("MAX_MODEL_LEN") == "6144"
+        self.assertTrue(via_replay or via_passthrough)
+        self.assertFalse(via_replay and via_passthrough, "must not arrive twice")
+
+    def test_max_model_len_falls_back_to_the_handoff_when_unrecorded(self):
+        """A recipe that records an env but not this one still gets the value."""
+        recipe = self._recipe_with_envs("  envs:\n    TP: 1\n")
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm", "max_model_len": 6144,
+             "eval_dir": str(self.tmp / "eval")}
         )
 
         self.assertEqual(os.environ["MAX_MODEL_LEN"], "6144")

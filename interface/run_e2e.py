@@ -34,6 +34,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -469,9 +470,92 @@ _MAGPIE_BACKENDS = {"sglang", "vllm"}
 
 # The scalars we need out of the orchestrator's launch recipe. Parsed by hand
 # rather than with a YAML library: GEAK carries no yaml dependency, and these
-# four flat scalars under one block do not justify adding one. Everything
-# nested (the envs: map) is deliberately ignored.
+# four flat scalars under one block do not justify adding one. The nested envs:
+# map is read separately by :func:`_recipe_launch_env`.
 _RECIPE_KEYS = ("inferencex_path", "benchmark_script", "framework", "runner_type")
+
+# Names the recipe may carry that GEAK must nevertheless own, because they
+# address THIS run's resources rather than the served configuration. Replaying
+# the orchestrator's values would not be fidelity -- it would point the server
+# at a port the orchestrator released months ago, a GPU this run was not given,
+# or another run's log file. Everything NOT listed here is replayed verbatim.
+#
+# The overlay is on the list for a different reason: applying it is the entire
+# purpose of a GEAK run, so the orchestrator's PYTHONPATH must not displace it.
+_RECIPE_ENV_GEAK_OWNED = frozenset({
+    "PORT", "RESULT_DIR", "SERVER_LOG", "PROFILE", "PROFILE_DIR", "PYTHONPATH",
+    "MAGPIE_RUN_PHASE", "MAGPIE_SERVER_PID_FILE", "BENCHMARK_BASE_URL",
+    # GPU pinning: the recipe names whichever of these its own runner used, and
+    # any of them left at the orchestrator's value would fight the device this
+    # run was allocated. The launcher sets all three coherently from $GPU.
+    "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
+    "VLLM_TORCH_PROFILER_DIR", "SGLANG_TORCH_PROFILER_DIR",
+})
+
+
+def _env_flag(name: str) -> bool:
+    """Truthiness for an opt-in env switch, matching the spelling used elsewhere."""
+    return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _recipe_env_block(recipe_path: str) -> dict[str, str]:
+    """Read the orchestrator's recorded launch environment (the ``envs:`` map).
+
+    This is the block :func:`_recipe_fields` skips. It is the only record of
+    what the orchestrator's server actually inherited, and until it is replayed
+    the two launches agree only where their DEFAULTS happen to agree -- which is
+    agreement by coincidence, not by construction, and silently stops holding
+    the moment the orchestrator sets something explicitly.
+
+    Indentation-scoped rather than regex'd, so it works on both shapes the
+    orchestrator emits: ``envs:`` nested under ``benchmark:`` in the recipe, and
+    ``envs:`` at column 0 in the per-round effective config.
+
+    Returns ``{}`` when the file is unreadable or names no ``envs:`` block --
+    callers distinguish "nothing recorded" from "could not read" via the recipe
+    fields they already hold.
+    """
+    if not recipe_path:
+        return {}
+    try:
+        text = Path(recipe_path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return {}
+    envs: dict[str, str] = {}
+    block_indent: int | None = None
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if block_indent is None:
+            if line.strip() == "envs:":
+                block_indent = indent
+            continue
+        if indent <= block_indent:
+            break  # dedented out of the block
+        key, sep, value = line.strip().partition(":")
+        if not sep or not key:
+            continue
+        # A nested map under envs: is not an environment variable; skipping it
+        # is safer than flattening it into a name the shell would not recognise.
+        value = value.strip()
+        if value:
+            envs[key.strip()] = value.strip("'\"")
+    return envs
+
+
+def _recipe_launch_env(h: dict) -> tuple[dict[str, str], list[str]]:
+    """Partition the recipe's recorded environment into replay set + GEAK-owned.
+
+    Returns ``(replay, owned)`` where ``replay`` is applied verbatim underneath
+    the launch and ``owned`` names the variables GEAK deliberately overrode.
+    Reporting ``owned`` rather than dropping it silently is what lets a reviewer
+    see the complete list of ways this launch is allowed to differ.
+    """
+    recorded = _recipe_env_block(str(h.get("launch_recipe") or ""))
+    replay = {k: v for k, v in recorded.items() if k not in _RECIPE_ENV_GEAK_OWNED}
+    owned = sorted(k for k in recorded if k in _RECIPE_ENV_GEAK_OWNED)
+    return replay, owned
 
 
 def _recipe_fields(recipe_path: str) -> dict[str, str]:
@@ -510,29 +594,60 @@ def _magpie_script_from_recipe(h: dict) -> str:
     InferenceX checkout and the script inside it, so the path is derivable
     without asking the orchestrator to send anything new.
 
-    Returns "" whenever the script cannot be confirmed usable on this box.
+    The checkout the RECIPE names is host-local and content-hash addressed
+    (``.../inferencex_local/<hash>``), so a container rebuild, a move to another
+    box, or a post-mortem re-run invalidates that one path while the very same
+    checkout is still on disk elsewhere. We therefore try, in order:
+
+      1. the checkout the recipe names — the only one the orchestrator provably
+         launched from, so whenever it resolves nothing else is consulted and
+         the result is exactly what it was before this fallback existed;
+      2. ``handoff.inferencex_path`` — same handoff, same writer, but usually
+         on durable storage rather than in a container-local cache;
+      3. ``$INFERENCEX_PATH``.
+
+    2 and 3 are the same two sources :func:`apply_bench_client` already trusts
+    to locate the bench client, so the launcher and the client now resolve
+    against ONE checkout instead of disagreeing about which one exists. Every
+    candidate passes the identical usability check below, and the first is
+    still preferred, so a fallback can only turn "" into a working script — it
+    can never displace a good one.
+
+    Returns "" whenever no script can be confirmed usable on this box.
     """
     fields = _recipe_fields(str(h.get("launch_recipe") or ""))
-    root, name = fields.get("inferencex_path", ""), fields.get("benchmark_script", "")
-    if not root or not name:
+    name = fields.get("benchmark_script", "")
+    if not name:
         return ""
-    benchmarks = Path(root) / "benchmarks"
-    # Mirror the orchestrator's own lookup: top level first, then subdirectories
-    # (its checkouts keep some scripts under single_node/ / multi_node/).
-    candidates = [benchmarks / name]
-    try:
-        candidates.extend(sorted(benchmarks.rglob(name)))
-    except OSError:
-        pass
-    for candidate in candidates:
-        if not candidate.is_file():
+    seen: set[str] = set()
+    for root in (
+        fields.get("inferencex_path", ""),
+        str(h.get("inferencex_path") or ""),
+        os.environ.get("INFERENCEX_PATH", ""),
+    ):
+        root = root.strip()
+        if not root or root in seen:
             continue
-        # The script sources benchmark_lib.sh from its own directory and dies
-        # without it. Checking here turns a half-populated checkout into a
-        # native-launch degrade instead of a hard failure at first bench.
-        if not (candidate.parent / "benchmark_lib.sh").is_file():
-            continue
-        return str(candidate)
+        seen.add(root)
+        benchmarks = Path(root) / "benchmarks"
+        # Mirror the orchestrator's own lookup: top level first, then
+        # subdirectories (its checkouts keep some scripts under single_node/ /
+        # multi_node/).
+        candidates = [benchmarks / name]
+        try:
+            candidates.extend(sorted(benchmarks.rglob(name)))
+        except OSError:
+            pass
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            # The script sources benchmark_lib.sh from its own directory and
+            # dies without it. Checking here turns a half-populated checkout
+            # into a native-launch degrade instead of a hard failure at first
+            # bench.
+            if not (candidate.parent / "benchmark_lib.sh").is_file():
+                continue
+            return str(candidate)
     return ""
 
 
@@ -616,13 +731,102 @@ def apply_bench_launcher(h: dict) -> str:
     # ever carried mem_fraction, and the script's 0.95 default IS the recipe we
     # are trying to match.
     if launcher == "magpie":
+        replay, owned = _recipe_launch_env(h)
+        _export_recipe_env(h, replay, owned, source)
+
         try:
             max_model_len = int(h.get("max_model_len") or 0)
         except (TypeError, ValueError):
             max_model_len = 0
-        if max_model_len > 0:
+        # The recipe's own record outranks the handoff scalar: it is what the
+        # reference server inherited, whereas max_model_len is a summary field
+        # that travelled separately and can drift from it. Disagreement is not
+        # fatal (a re-scoped run legitimately differs) but it is never silent --
+        # an unnoticed drift here is precisely the class of bug that produced
+        # the divergence this alignment exists to close.
+        recorded_mml = replay.get("MAX_MODEL_LEN", "").strip()
+        if recorded_mml:
+            if max_model_len > 0 and recorded_mml != str(max_model_len):
+                print(
+                    f"!!! recipe records MAX_MODEL_LEN={recorded_mml} but the handoff "
+                    f"says {max_model_len}; replaying the recipe's value.",
+                    file=sys.stderr,
+                )
+            # Cleared so the launcher's own MAX_MODEL_LEN pass-through cannot
+            # land on top of the replayed value.
+            os.environ.pop("MAX_MODEL_LEN", None)
+        elif max_model_len > 0:
             os.environ["MAX_MODEL_LEN"] = str(max_model_len)
     return launcher
+
+
+def _export_recipe_env(
+    h: dict, replay: dict[str, str], owned: list[str], source: str
+) -> str:
+    """Materialise the replay set for the launcher, or refuse to launch.
+
+    Written as a NUL-delimited ``NAME=VALUE`` file rather than passed as a
+    string: the recipe records PATH, and any value containing a space would be
+    word-split into two bogus assignments by the unquoted ``env $VAR`` idiom the
+    launcher uses for the flags it already had.
+
+    WARNS when the recipe carries no ``envs:`` block, but proceeds on defaults
+    so GEAK runs smoothly even against older orchestrator output that omits
+    the block. Set ``GEAK_STRICT_RECIPE_ENV=1`` to fail-close instead (useful
+    in CI or when investigating a divergence).
+
+    Returns the path written, or "" when there was nothing to write.
+    """
+    strict = source == "launch_recipe" and _env_flag("GEAK_STRICT_RECIPE_ENV")
+    if not replay:
+        if strict:
+            raise SystemExit(
+                "!!! recipe alignment: the launch recipe\n"
+                f"      {h.get('launch_recipe')}\n"
+                "    records no envs: block, so the environment the reference server\n"
+                "    ran with is unknown and this launch cannot be shown to match it.\n"
+                "    Re-export the recipe with its envs, point BENCH_LAUNCHER=native at\n"
+                "    an intentionally unaligned run, or unset GEAK_STRICT_RECIPE_ENV to\n"
+                "    launch on defaults anyway."
+            )
+        if source == "launch_recipe":
+            print(
+                ">>> recipe alignment: the recipe carries no envs: block; launching "
+                "with script defaults only. Set GEAK_STRICT_RECIPE_ENV=1 to refuse.",
+                file=sys.stderr,
+            )
+        return ""
+
+    out_dir = str(h.get("eval_dir") or "").strip() or tempfile.gettempdir()
+    try:
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        path = str(Path(out_dir) / "recipe_env.nul")
+        with open(path, "wb") as fh:
+            for key in sorted(replay):
+                fh.write(f"{key}={replay[key]}".encode("utf-8") + b"\0")
+    except OSError as exc:
+        if strict:
+            raise SystemExit(
+                f"!!! recipe alignment: cannot materialise the replay env ({exc}). "
+                "Refusing to launch a server whose environment would silently differ "
+                "from the reference."
+            ) from exc
+        return ""
+
+    os.environ["RECIPE_ENV_FILE"] = path
+    os.environ["RECIPE_ENV_SOURCE"] = str(h.get("launch_recipe") or "")
+    os.environ["RECIPE_ENV_REPLAYED"] = " ".join(sorted(replay))
+    os.environ["RECIPE_ENV_GEAK_OWNED"] = " ".join(owned)
+    # stderr, not stdout: callers evaluate this function's stdout as shell
+    # (run_ab.sh does `eval "$(python3 ... apply_bench_launcher ...)"`), so a
+    # progress line on stdout is parsed as a command and kills the run.
+    print(
+        f">>> recipe alignment: replaying {len(replay)} recorded env var(s) "
+        f"[{' '.join(sorted(replay))}]"
+        + (f"; GEAK owns [{' '.join(owned)}]" if owned else ""),
+        file=sys.stderr,
+    )
+    return path
 
 
 def apply_alignment_flags(h: dict) -> dict:

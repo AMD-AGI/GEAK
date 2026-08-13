@@ -68,12 +68,30 @@ adapter_launch() {
   local _args_var="EXTRA_${backend_uc}_ARGS"
   local _prof_var="${backend_uc}_TORCH_PROFILER_DIR"
 
-  # Map GEAK's env onto Magpie's server-phase env. Overlay is prepended so the
-  # launch_server child imports the patched subtree first. EXTRA_<BE>_ARGS carries
-  # the accepted extra flags; Magpie dedupes them against its own DEFAULT_ARGS.
+  # The orchestrator's RECORDED launch environment, replayed as the BASE layer.
+  # Without it the two servers agree only where their ${X:-default} expansions
+  # happen to agree -- true today only because both run in the same image, and
+  # false the moment the orchestrator sets anything explicitly (PATH selecting a
+  # different venv is the one that would silently serve a different vLLM build
+  # entirely). run_e2e.py has already removed the run-scoped names GEAK must own,
+  # so everything left here is safe to apply verbatim. NUL-delimited because the
+  # recipe records PATH and word-splitting a value would corrupt it.
+  local _recipe_env=()
+  if [ -n "${RECIPE_ENV_FILE:-}" ] && [ -f "${RECIPE_ENV_FILE}" ]; then
+    mapfile -d '' -t _recipe_env < "$RECIPE_ENV_FILE"
+    echo ">>> magpie launcher: replaying ${#_recipe_env[@]} recorded env var(s) from the recipe."
+  fi
+
+  # Map GEAK's env onto Magpie's server-phase env. Ordering IS the precedence
+  # policy: recipe replay first, then the accepted env under test, then the
+  # run-scoped names GEAK owns -- so a later layer knowingly overrides an
+  # earlier one and nothing GEAK sets can be silently displaced by the recipe.
+  # Overlay is prepended so the launch_server child imports the patched subtree
+  # first. EXTRA_<BE>_ARGS carries the accepted extra flags; Magpie dedupes them
+  # against its own DEFAULT_ARGS.
   # shellcheck disable=SC2086
-  env $EXTRA_ENV \
-    HIP_VISIBLE_DEVICES="$GPU" CUDA_VISIBLE_DEVICES="$GPU" \
+  env ${_recipe_env[@]+"${_recipe_env[@]}"} $EXTRA_ENV \
+    HIP_VISIBLE_DEVICES="$GPU" CUDA_VISIBLE_DEVICES="$GPU" ROCR_VISIBLE_DEVICES="$GPU" \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     MAGPIE_RUN_PHASE=server \
     MAGPIE_SERVER_PID_FILE="$_pidfile" \
