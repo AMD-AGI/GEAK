@@ -79,7 +79,10 @@ Never `stack` a parity-failure, a regression, or a non-engaging change.
 ## PHASE=integrate  (one optimized kernel)
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `GPU_ID`, `WORKLOAD`, `NOISE_BAND_PCT`
-(default 0.5), `E2E_REPEATS` (default 7; repeats per leg of the interleaved A/B),
+(default 0.5), `E2E_REPEATS` (repeats per leg of the interleaved A/B; **the workflow dispatches 2** —
+`e2e_workflow.js` defaults `A.e2e_repeats` to 2. The `${E2E_REPEATS:-7}` fallbacks in the shell blocks
+below apply only if the variable is somehow unset. Use the value in YOUR inputs, and say how many
+repeats you actually ran in `reasons` so the non-overlap gate can be read for what it is),
 `KERNEL_RESULT` (task_dir, source_path_in_sglang, target_callable, final_patch.diff,
 verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `winner_kind`
 ∈ {env,flag,patch}, `apply_env`, `apply_flags`, `code_patch`, `tuning_artifact`, `parity_note`),
@@ -228,6 +231,27 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      EXTRA_SERVER_ARGS="<cand flags>" EXTRA_ENV="<cand env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
    ```
+   **WAIT IN ONE CALL, NOT ONE CALL PER POLL.** A bench block runs for many minutes, longer than the
+   Bash tool's ceiling, so you will background it and wait. Waiting by re-invoking a trivial command
+   (`true`, `echo idle`, `date`) burns **one full API call per poll, at your full context size** — the
+   most expensive clock in the system. On a measured Qwen3-14B run this phase spent **133 API calls and
+   $11.15 doing nothing but polling** (129 of them were literally `bash true`), 41% of the phase's own
+   bill, for 12 minutes of wall clock it would have spent waiting anyway. Instead, background the job
+   with a completion sentinel and block inside a SINGLE call:
+   ```bash
+   # launch: background it, and record the exit code in a sentinel when it finishes
+   ( bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1; echo $? >"$CB/ref/.done" ) &
+
+   # wait: ONE call covers ~9.5 min. Set the Bash tool's timeout to 600000 (its maximum).
+   D="$CB/ref/.done"
+   for i in $(seq 1 38); do [ -f "$D" ] && break; sleep 15; done
+   [ -f "$D" ] && echo "DONE rc=$(cat "$D")" || echo "STILL RUNNING"
+   ```
+   If it prints `STILL RUNNING`, repeat that same wait call — each repeat costs one API call per 9.5
+   minutes instead of one per few seconds. Do NOT arm a `Monitor` and then spin: a monitor notifies you
+   between turns, so pairing it with a poll loop pays for both mechanisms and uses neither. Tail the log
+   for progress only when you actually intend to read it, not as a way to pass time.
+
    **Do NOT set the measurement-口径 knobs (`RANDOM_RANGE_RATIO` / `NUM_PROMPTS` /
    `NUM_WARMUPS` / `SEED`) in these blocks.** When an external orchestrator drives the run it has
    already exported its exact 口径 into the environment (`run_e2e.py:apply_bench_protocol` from

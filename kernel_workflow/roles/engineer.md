@@ -63,6 +63,19 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    `cd $KERNEL_PATH && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <cmd>`. The wrapper isolates your
    build cache (`$KERNEL_PATH/.torch_ext`) and compiles for the local arch only — this is why your
    compiles are fast and don't collide with other engineers. Always invoke it from `$KERNEL_PATH`.
+3a. **Wait in ONE call, never one call per poll.** Builds and benchmarks outrun the Bash tool's ceiling,
+   so you will background them and wait. Waiting by re-invoking a trivial command (`true`, `echo idle`,
+   `date`) costs **one full API call per poll at your full context size** — on a measured Qwen3-14B run
+   the engineers burned 42 such calls and $4.65 (and the integrator 133 calls and $11.15) buying nothing
+   but elapsed time. Background the job with a sentinel and block inside a single call instead:
+   ```bash
+   ( cd $KERNEL_PATH && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <cmd> >bench.log 2>&1; echo $? >.done ) &
+   # then, with the Bash tool's timeout set to 600000 (its max), ONE call covers ~9.5 min:
+   for i in $(seq 1 38); do [ -f .done ] && break; sleep 15; done
+   [ -f .done ] && echo "DONE rc=$(cat .done)" || echo "STILL RUNNING"
+   ```
+   Repeat that same wait call if it prints `STILL RUNNING`. Do not arm a `Monitor` and then also poll —
+   a monitor already notifies you between turns, so doing both pays twice and uses neither.
 4. After editing sources, ninja auto-rebuilds on the next run — you usually do NOT need to wipe the
    cache. NEVER use `rm` (it triggers an approval prompt that blocks the run). Your workspace is already
    an artifact-free fresh copy; if you ever suspect a stale build (e.g. after editing headers), MOVE the

@@ -12,6 +12,7 @@ steps_since_improvement = 0   # Steps since last speedup improvement
 consecutive_same_category = 0 # Consecutive attempts in same strategy category
 error_count = 0               # Consecutive identical errors
 last_3_speedups = []          # Last 3 benchmark results
+benchmarks_since_best = 0     # Full measurements since best_speedup last improved (see Guard 3)
 ```
 
 ## Guard Signals
@@ -29,6 +30,18 @@ last_3_speedups = []          # Last 3 benchmark results
 - **Last 3 benchmarks within 1% of each other**: You've hit a ceiling for this approach. Stop tuning parameters and either:
   - Switch to a different strategy category, OR
   - Submit your best result if speedup is already good
+- **3 consecutive full measurements that fail to BEAT your best**: submit your best and stop. This
+  threshold is measured, not guessed: across 22 engineer sessions in two instrumented Qwen3-14B runs,
+  the longest run of non-improving measurements that was ever *later* broken by a new best was **2**.
+  A 3-strike stop would not have cost a single win in either run, and two sessions that ignored it
+  spent $17 re-measuring a plateau they had already topped out on.
+
+### 3a. Do NOT stop early just because you have taken many steps
+Counting steps is not evidence of a ceiling; only measurements are. In those same 22 sessions the
+best result arrived at **76–98% of the session's length in 19 of them** — engineers win late, after a
+long grind of edit/compile/debug punctuated by only 1–12 actual benchmarks. Truncating on step count
+would have thrown away most of the wins. Grind as long as you are still making the code work; stop
+when the *measurements* stop improving (§3), not when the work feels long.
 
 ### 4. Crash Loop Recovery
 - **3 identical compile/runtime errors in a row**: STOP modifying incrementally. Instead:
@@ -60,7 +73,10 @@ When choosing what to try next, follow this order based on the profiling data:
 
 ## Benchmark Discipline
 
-1. Always clear build cache before benchmarking: `rm -rf build/ __pycache__/ *.so`
+1. You usually do NOT need to clear the build cache — ninja rebuilds what changed. **Never use `rm`**
+   (it triggers an approval prompt that blocks the run, and your workspace is already artifact-free).
+   If you genuinely suspect a stale build after editing headers, MOVE the cache aside instead:
+   `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true`
 2. Always run correctness test BEFORE benchmarking. Don't waste time benchmarking broken code.
 3. Use the COMMANDMENT commands exactly. Don't invent your own benchmark.
 4. Run benchmark at least 2 times if the result seems surprisingly good or bad.

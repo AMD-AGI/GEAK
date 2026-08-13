@@ -125,7 +125,9 @@ Return JSON:
 ## PHASE=validate
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `SKILL_DIR`, `GPU_ID`, `BASELINE_THROUGHPUT`, `NOISE_BAND_PCT`,
-`E2E_REPEATS` (default 7), the candidate final overlay `FINAL_OVERLAY` (dir) + `FINAL_FLAGS` (json),
+`E2E_REPEATS` (**the workflow dispatches 2**, not the 7 the `${E2E_REPEATS:-7}` shell fallbacks below
+suggest — use the value in YOUR inputs and state it in your report), the candidate final overlay
+`FINAL_OVERLAY` (dir) + `FINAL_FLAGS` (json),
 the Architect/Integrator's claimed throughput, `APPLY_TO_ORIGINAL`, and the already-written report files
 `ARCHITECT_REPORT` (`architect_report.md`) + `FINAL_REPORT` (`final_report.md`) to reconcile in step 7.
 
@@ -137,7 +139,7 @@ TRUE baseline with the tight 2-block protocol and decide if the COMBINED result 
 
 1. Measure baseline AND final **same-session, tight** (2 launches, not per-repeat): a reference block
    (stack/stack-default = the TRUE baseline config, i.e. NO overlay/flags) and a final block (full
-   overlay + flags), each `E2E_REPEATS` (default 7) timed repeats on ONE server:
+   overlay + flags), each `E2E_REPEATS` timed repeats on ONE server:
    The TRUE-baseline block MUST reproduce the seed config the baseline was measured on (the caller's
    best config = the recorded `baseline` flags/env, i.e. the same `INIT_FLAGS`/`INIT_ENV`) — NOT
    `FINAL_FLAGS` minus GEAK's kernel wins. Use the same `TP=SERVING_TP GPU=SERVING_GPU` as setup.
