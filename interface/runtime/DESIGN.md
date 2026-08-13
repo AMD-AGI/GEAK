@@ -484,6 +484,19 @@ backend.
 - **No NL entry for swapped backends** (§9). A "NL + `meta.whenToUse` → args JSON" pre-step would
   give non-claude backends a one-prompt UX too. New feature, out of scope for parity.
 
+### Empirical findings (early bring-up)
+
+- **The shell affects results, not just plumbing.** Early parity runs showed **codex (+ the
+  responses shim) noticeably weaker / early-stopping**, while **qwen-code ≈ native**. So a green
+  conformance means "can drive GEAK," not "matches native quality" — always confirm result parity
+  with `experiment.mjs` (claude vs the swapped backend) on a real task.
+- **Backend-specific operational caveats:**
+  - *codex + claude via the gateway* needs the external `responses_shim.mjs` running first, and a
+    **readable** `CODEX_HOME` config (a root-created 0600 file inside a container won't load the
+    provider — use `~/.codex` or `chown` it).
+  - *cursor* runs on Cursor cloud (not the SaFE gateway), so it can't do a strict same-model
+    comparison and sends data off-box; verify its `--output-format`/model at bring-up (registry note).
+
 ---
 
 ## Appendix — file map

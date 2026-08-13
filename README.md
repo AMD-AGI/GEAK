@@ -213,7 +213,7 @@ node interface/runtime/experiment.mjs --script kernel_workflow/kernel_workflow.j
 Adding a new CLI = a `registry.json` entry (zero code). Full env knobs, the compatibility checklist,
 and a no-GPU smoke test (`node interface/runtime/selftest.mjs`) are in
 [interface/run_e2e.md](interface/run_e2e.md) and
-[interface/runtime/DEV_SUMMARY.md](interface/runtime/DEV_SUMMARY.md).
+[interface/runtime/DESIGN.md](interface/runtime/DESIGN.md).
 
 ---
 

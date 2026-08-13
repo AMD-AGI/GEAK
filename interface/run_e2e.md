@@ -90,7 +90,7 @@ node interface/runtime/experiment.mjs \
 ```
 
 Runtime primitives + config resolution can be smoke-tested with no CLI/network/GPU:
-`node interface/runtime/selftest.mjs`. See `runtime/DEV_SUMMARY.md` for the full picture.
+`node interface/runtime/selftest.mjs`. See `runtime/DESIGN.md` for the full picture.
 
 The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 (`baseline/`, `validation/final/`, `final/` bundle, `director_e2e_validation.json`).

@@ -1,6 +1,6 @@
 # 快速上手:在你自己的机器上跑 GEAK 可切换后端(codex / cursor)
 
-> 这个分支的 runtime **自包含、零 npm 依赖**(只用 Node 内置模块)。`git pull` 后,只需装好 CLI、设几个环境变量,即可跑。设计/架构见 `BACKEND_DESIGN.md`。
+> 这个分支的 runtime **自包含、零 npm 依赖**(只用 Node 内置模块)。`git pull` 后,只需装好 CLI、设几个环境变量,即可跑。设计/架构见 `DESIGN.md`。
 
 本层目录:`interface/runtime/`。以下命令假设在**仓库根**执行。
 

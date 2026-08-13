@@ -62,7 +62,7 @@
 2. 跑 `selftest.mjs`(假后端)确认 runtime 本身 OK(已具备)。
 3. **冒烟单任务**:用该 CLI 跑一个最小 schema agent(比如 director:setup),重点看 R1(能不能拿到合法 JSON)。
 4. 端到端:`kernel_workflow` @ `examples/tasks/knn`,统计 R1 失败率、R4 有没有被超时截断。
-5. 与 claude 后端做 parity 对比(见 RESEARCH/OVERVIEW)。
+5. 与 claude 后端做 parity 对比(见 `DESIGN.md`)。
 
 ## 五、优先级
 
@@ -70,4 +70,4 @@
 - **高**:R2(headless 输出格式)、R4(单命令超时)。
 - **中**:R5/R6/R7 —— 一般够用,配置层能覆盖。
 
-> 关联文档:`RESEARCH_cli_parallelism.md`(并行能力调研)、`OVERVIEW.md`(架构)。
+> 关联文档:`DESIGN.md`(整体设计与实现)。
