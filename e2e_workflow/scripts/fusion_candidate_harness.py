@@ -20,6 +20,24 @@ API_COVERAGE = {"full", "partial", "similar"}
 API_SOURCE_KIND = {
     "runtime_environment", "runtime_source", "perf_knowledge"}
 
+GUARD_REGISTRY_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "knowledge", "collective_ar_guards.json")
+
+
+def _load_guard_registry():
+    """Best-effort load of the per-aiter-commit fused-AR guard registry."""
+    try:
+        with open(GUARD_REGISTRY_PATH) as fh:
+            return json.load(fh).get("guards", {}) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _short_ref(ref):
+    ref = str(ref or "")
+    return ref.split("/")[-1] or ref
+
 
 def _load(path):
     with open(path) as fh:
@@ -216,6 +234,8 @@ def validate(semantic_table_path, candidates_path):
         errors.append("summary_rows must be a list")
     if not isinstance(payload.get("candidates"), list):
         errors.append("candidates must be a list")
+    collective_guard = None
+    model_dims = None
     environment_path = payload.get("environment_api_inventory_json", "")
     if not environment_path or not os.path.exists(environment_path):
         errors.append(
@@ -228,6 +248,46 @@ def validate(semantic_table_path, candidates_path):
         if not environment.get("inspection_evidence"):
             errors.append(
                 "environment API inventory must record inspection_evidence")
+        # Collective fused-AR size guard becomes a machine-checked fact so the
+        # prefill=no / decode=yes Exact decision is deterministic instead of
+        # re-derived (and mis-numbered) by the model each run.
+        collective_guard = environment.get("collective_fused_ar_guard")
+        if (not isinstance(collective_guard, dict)
+                or not isinstance(collective_guard.get("threshold_bytes"), int)
+                or not collective_guard.get("source_expr")
+                or not collective_guard.get("source_ref")):
+            errors.append(
+                "environment API inventory must record collective_fused_ar_guard "
+                "{threshold_bytes:int, source_expr, source_ref}")
+            collective_guard = None
+        model_dims = environment.get("model_dims")
+        if (not isinstance(model_dims, dict)
+                or not isinstance(model_dims.get("hidden_size"), int)
+                or not isinstance(model_dims.get("dtype_bytes"), int)):
+            errors.append(
+                "environment API inventory must record model_dims "
+                "{hidden_size:int, dtype_bytes:int}")
+            model_dims = None
+        # Cross-check the declared threshold against the guard registry keyed by
+        # the recorded aiter commit, so the threshold number itself cannot drift.
+        if collective_guard is not None:
+            commit = (environment.get("toolchain", {}) or {}).get(
+                "aiter_git_commit") or environment.get("aiter_git_commit")
+            entry = _load_guard_registry().get(commit) if commit else None
+            if entry is not None:
+                expected = entry.get("fused_ar_threshold_bytes")
+                if (expected is not None
+                        and int(collective_guard["threshold_bytes"])
+                        != int(expected)):
+                    errors.append(
+                        "collective_fused_ar_guard.threshold_bytes %s disagrees "
+                        "with guard registry %s for aiter %s" % (
+                            collective_guard["threshold_bytes"], expected,
+                            commit))
+            else:
+                warnings.append(
+                    "no fused-AR guard registry entry for aiter commit %s; "
+                    "threshold not cross-checked" % commit)
     if errors:
         return payload, table, errors, warnings, {
             "source_row_count": len(source_rows),
@@ -273,6 +333,7 @@ def validate(semantic_table_path, candidates_path):
     candidates_by_id = {}
     candidate_member_ids = {}
     referenced_candidate_ids = set()
+    collective_guard_checks = []
     for index, candidate in enumerate(payload["candidates"]):
         path = "candidates[%d]" % index
         candidate_id = candidate.get("candidate_id")
@@ -295,6 +356,7 @@ def validate(semantic_table_path, candidates_path):
         member_ids = []
         member_total = 0.0
         previous_pos = None
+        is_boundary = bool(candidate.get("boundary"))
         for member_index, member in enumerate(members):
             member_path = "%s.members[%d]" % (path, member_index)
             row_id = member.get("row_id")
@@ -315,7 +377,11 @@ def validate(semantic_table_path, candidates_path):
                 if not matches:
                     errors.append("%s %s differs from semantic table" % (
                         member_path, field))
-            if previous_pos is not None and member.get("pos", -1) <= previous_pos:
+            # Boundary (cross-layer) candidates list the previous-layer tail
+            # all-reduce alongside this layer's head norm/quant, so their in-table
+            # pos wraps around; ordering is not enforced for them.
+            if (not is_boundary and previous_pos is not None
+                    and member.get("pos", -1) <= previous_pos):
                 errors.append("%s members are not in execution order" % path)
             previous_pos = member.get("pos")
         candidate_member_ids[candidate_id] = tuple(member_ids)
@@ -337,15 +403,66 @@ def validate(semantic_table_path, candidates_path):
                 candidate.get("addressable_us_per_layer"), removable_total):
             errors.append("%s addressable_us_per_layer must equal removable sum" % path)
         layer_count = int(candidate.get("pattern_layer_count", 0) or 0)
-        if layer_count != int(
-                tables[key].get("pattern_layer_count", 0) or 0):
+        pattern_layers = int(tables[key].get("pattern_layer_count", 0) or 0)
+        if layer_count != pattern_layers:
             errors.append("%s pattern_layer_count differs from semantic table" % path)
-        expected_stack = removable_total * layer_count
+        # A boundary candidate recurs once per homogeneous layer boundary, not
+        # once per pattern layer, so its ceiling uses a declared
+        # boundary_occurrences instead of pattern_layer_count.
+        if is_boundary:
+            occ = candidate.get("boundary_occurrences")
+            if (not isinstance(occ, int) or occ < 1
+                    or (pattern_layers and occ > pattern_layers)):
+                errors.append(
+                    "%s boundary candidate requires boundary_occurrences int in "
+                    "[1, pattern_layer_count]" % path)
+                occ = 0
+            ceiling_count = occ
+        else:
+            ceiling_count = layer_count
+        expected_stack = removable_total * ceiling_count
         if not _close(
                 candidate.get("stack_addressable_ceiling_us"),
                 expected_stack):
             errors.append(
                 "%s stack_addressable_ceiling_us formula mismatch" % path)
+        # Deterministic collective size-guard: a candidate that includes a
+        # communication-stage member is a collective (allreduce) fusion; the
+        # harness computes the AR tensor bytes from the selected bucket and
+        # model dims and enforces Exact=no when it exceeds the fused-AR guard.
+        if collective_guard is not None and model_dims is not None:
+            is_collective = any(
+                source_rows.get((key[0], key[1], rid), {}).get("stage")
+                == "communication" for rid in member_ids)
+            bucket = tables[key].get("selected_bucket", {}) or {}
+            tokens = (bucket.get("input_tokens") if key[0] == "prefill"
+                      else bucket.get("batch_size"))
+            if is_collective and tokens:
+                tensor_bytes = (int(tokens) * int(model_dims["hidden_size"])
+                                * int(model_dims["dtype_bytes"]))
+                threshold = int(collective_guard["threshold_bytes"])
+                exceeds = tensor_bytes >= threshold
+                ref = _short_ref(collective_guard.get("source_ref", ""))
+                candidate["_collective_guard"] = {
+                    "tensor_bytes": tensor_bytes, "threshold_bytes": threshold,
+                    "verdict": "exceeds" if exceeds else "fits",
+                    "source_ref": collective_guard.get("source_ref", "")}
+                collective_guard_checks.append({
+                    "candidate_id": candidate_id, "phase": key[0],
+                    "pattern_id": key[1], "tensor_bytes": tensor_bytes,
+                    "threshold_bytes": threshold,
+                    "verdict": "exceeds" if exceeds else "fits"})
+                if exceeds:
+                    if candidate.get("exact_kernel_status") == "yes":
+                        errors.append(
+                            "%s collective tensor %dB >= fused-AR guard %dB "
+                            "(%s); exact must be no" % (
+                                path, tensor_bytes, threshold, ref))
+                    candidate["exact_reason"] = (
+                        "collective tensor~%.0fMiB >= fused-AR guard %.0fMiB "
+                        "(%s) -> split fallback" % (
+                            tensor_bytes / 1048576.0, threshold / 1048576.0,
+                            ref))
         _validate_api_list(candidate, path, errors)
 
     summary_order = []
@@ -402,6 +519,11 @@ def validate(semantic_table_path, candidates_path):
                     plan_path, candidate_id))
                 continue
             referenced_candidate_ids.add(candidate_id)
+            _cand_guard = (candidates_by_id.get(candidate_id) or {}).get(
+                "_collective_guard")
+            if _cand_guard and _cand_guard.get("verdict") == "exceeds":
+                plan["exact_reason"] = candidates_by_id[candidate_id].get(
+                    "exact_reason", plan.get("exact_reason"))
             plan_title = plan.get("plan")
             if not plan_title:
                 errors.append("%s missing plan text" % plan_path)
@@ -476,6 +598,10 @@ def validate(semantic_table_path, candidates_path):
         if source_rows else 0.0,
         "candidate_count": len(candidates_by_id),
         "summary_row_count": len(payload["summary_rows"]),
+        "collective_candidate_count": len(collective_guard_checks),
+        "collective_guard_exceeds_count": sum(
+            1 for c in collective_guard_checks if c["verdict"] == "exceeds"),
+        "collective_guard_checks": collective_guard_checks,
     }
     return payload, table, errors, warnings, metrics
 
@@ -567,6 +693,15 @@ def render_markdown(payload, table):
                 "- existing API: " + _api_detail(candidate),
                 "- exact reason: " + candidate.get(
                     "exact_reason", "current environment fully verified"),
+            ] + ([
+                "- collective guard: tensor≈%.1f MiB vs fused-AR 阈值 %.1f MiB"
+                "（%s）→ %s" % (
+                    candidate["_collective_guard"]["tensor_bytes"] / 1048576.0,
+                    candidate["_collective_guard"]["threshold_bytes"]
+                    / 1048576.0,
+                    _short_ref(candidate["_collective_guard"]["source_ref"]),
+                    candidate["_collective_guard"]["verdict"])
+            ] if candidate.get("_collective_guard") else []) + [
                 "- risks: " + (
                     "；".join(map(str, candidate.get("risks", []))) or "none"),
                 "- validation: " + (

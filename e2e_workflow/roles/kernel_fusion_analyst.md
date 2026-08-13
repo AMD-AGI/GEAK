@@ -126,6 +126,32 @@ Mandatory collective coverage:
   parallel-consumer / `emit_bf16` runtime-source evidence and set readiness
   accordingly (dense adjacent-quant is `ready_for_api_validation`; a
   non-adjacent MoE quant is `needs_source_dependency_proof`).
+Cross-layer (boundary) collective coverage:
+
+- Each layer's tail all-reduce (FFN/expert output) feeds the NEXT layer's input
+  RMSNorm. In a homogeneous layer run the previous layer is identical to the
+  representative, so this boundary chain is fully representable from ONE table:
+  the tail `communication` row (the previous-layer FFN all-reduce — same kernel
+  and duration) plus this layer's head `norm` + `quant` (input_layernorm +
+  quant). No cross-table read and no Semantics change is needed.
+- At the input-norm (body-start) position emit the boundary family. ①
+  `norm + quant` is the existing body-start head candidate; ADD ②
+  `allreduce + norm` and ③ `allreduce + norm + quant` whose collective donor is
+  the table's tail all-reduce row. Mark these ②③ candidates `boundary: true`,
+  list them `mutually_exclusive_with` the head ①, set `boundary_occurrences` to
+  the number of homogeneous predecessor boundaries the representative stands for
+  (e.g. MoE→MoE = pattern_layer_count minus the first MoE layer whose
+  predecessor is Dense), and compute `stack_addressable_ceiling_us` as
+  `addressable × boundary_occurrences`.
+- List boundary members in cross-layer order (tail all-reduce, then head norm,
+  then head quant); the harness relaxes in-table `pos` ordering for `boundary`
+  candidates. `removable` is the head norm(+quant); the all-reduce is the donor.
+- The fused-AR size guard applies unchanged (prefill tail AR is large →
+  Exact=`no`; decode small → Exact=`yes`), computed by the harness.
+- Cross-pattern and first-layer boundaries (Dense→MoE at the first_k_dense edge,
+  and embedding→layer0) span two different tables; leave those as
+  `required_followups` rather than forcing a within-table representation.
+
 - If the traced communication implementation is QuickReduce or another
   collective, keep `allreduce` as the report-level semantic name and record the
   concrete implementation in details. For every `allreduce + *` candidate,
@@ -181,7 +207,22 @@ When `RUNTIME_SETUP_FILE` or `RUNTIME_IMAGE` is available:
 3. Write
    `$EVAL_DIR/profile/round_${ROUND}/fusion/environment_api_inventory.json`
    with the image reference/digest, inspected files/symbols, constraints, and
-   inspection commands/evidence.
+   inspection commands/evidence. Record the aiter commit under
+   `toolchain.aiter_git_commit`. It must ALSO include these two blocks, which the
+   harness reads to make the collective size-guard Exact decision deterministic:
+   - `collective_fused_ar_guard`: `{threshold_bytes:int, source_expr, source_ref}`
+     copied verbatim from the installed fused-collective dispatch guard (e.g.
+     `total_bytes < 8*1024*8192` in aiter
+     `dist/device_communicators/communicator_cuda.py::fused_allreduce_rmsnorm`).
+     Quote the real source expression; do NOT invent a threshold. The harness
+     cross-checks this number against a per-commit registry.
+   - `model_dims`: `{hidden_size:int, dtype_bytes:int}` from `config.json`.
+   The harness computes each collective candidate's AR tensor bytes
+   (`tokens × hidden_size × dtype_bytes`, tokens from the selected bucket) and
+   FORCES `exact_kernel_status="no"` when it reaches `threshold_bytes`. Therefore
+   never hand-write a byte/threshold number in a collective `exact_reason` — the
+   harness renders the authoritative figure. This is why the same collective is
+   Exact=`no` in prefill (large tensor) yet may be `yes` in decode (small tensor).
 4. Knowledge cards may guide where to inspect, but may not establish Exact.
 5. If the environment cannot be inspected, every Exact decision is `no`.
 

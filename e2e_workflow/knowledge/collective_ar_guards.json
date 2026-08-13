@@ -1,0 +1,12 @@
+{
+  "_comment": "Fused all-reduce (custom_all_reduce) size guards keyed by aiter git commit. Consumed by scripts/fusion_candidate_harness.py to cross-check the analyst-declared environment_api_inventory.collective_fused_ar_guard.threshold_bytes so the threshold number itself cannot drift/hallucinate between runs. Add a new entry when a new aiter build is inspected; verify the expr against the installed source before adding.",
+  "schema": "{aiter_commit: {fused_ar_threshold_bytes:int, expr:str, ref:str}}",
+  "guards": {
+    "a6bb499375849eec45d68c5ccaebc8865fd422c0": {
+      "fused_ar_threshold_bytes": 67108864,
+      "expr": "n <= 16384 and total_bytes < 8 * 1024 * 8192 and world_size != 6",
+      "ref": "aiter/dist/device_communicators/communicator_cuda.py::fused_allreduce_rmsnorm (can_use_fuse_ar_rms)",
+      "notes": "8*1024*8192 = 67108864 bytes = 64 MiB. Tensor >= this falls back to split all-reduce + separate rmsnorm. 1-stage vs 2-stage is a separate switch (total_bytes <= 128*1024) and does not affect availability."
+    }
+  }
+}
