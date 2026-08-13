@@ -367,6 +367,12 @@ verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SK
      blocklist / "don't use X"** — a future run must stay free to try (and beat) it; the box judges.
      A claim CONTRADICTED by new evidence → move its card to `_archive.md` with the refuting source.
    Mechanism facts are recorded as POSITIVE ROUTING ("optimize GEMM via aiter DB"), not "X failed".
+   - **SANITIZE — every card is PUBLIC.** Write ONLY general, transferable knowledge. Strip all
+     machine-/run-specific detail before writing: NO absolute paths, usernames, `/home`/`/root` dirs,
+     hostnames, IPs, secrets, or timestamped run-dir names. Cite evidence by a reusable RELATIVE form
+     (`exp/e2e_*<Model>*/ YYYY-MM-DD`, `config/ck_tune/`, `<skill>/<file>.md`), never a path a reader
+     can't reproduce. Run-config-only facts (which authors were enabled, an image missing a tool) stay
+     in the eval-dir report unless generalized into a conditioned `caution:`. (See `learned/README.md` rule 7.)
 2. Keep the in-run hypothesis ledger (wins AND nulls, for THIS run's report) in `EVAL_DIR/insight_log.md`.
 3. **Calibrate the roofline prior (ONLY if one was used — `ANALYSIS_SKILL_DIR` non-empty and a
    `profile_roofline_json` exists; else skip).** For each direction this milestone measured, record
