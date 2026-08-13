@@ -343,6 +343,15 @@ read the profile and re-route; do not re-issue a confirmed dead-end from HISTORY
 Inputs: `ROUND`, the milestone's results (each direction: class, backend tried, isolated speedup,
 verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SKILL_DIR`.
 
+> **FINAL RECONCILIATION pass (`ROUND="final"`, `FINAL_GATE=true`).** This action is also invoked ONCE
+> more after Finalize+Validate, with `ACCEPTED_HEADS` / `ACCEPTED_KERNELS`, the run `FINAL_THROUGHPUT` /
+> `FINAL_SPEEDUP` / `VALIDATION_STATUS` / `OUTPUT_PARITY`, and `MILESTONE_RESULTS` = only the
+> finalize-gate confirmations. Reason: a win whose e2e A/B was still INCOMPLETE at milestone time was
+> curated as "Integrator pending", but its e2e gate is confirmed LATER (Finalize-gate + Director
+> Validate). On this pass, for each accepted entry whose existing card still reads "pending" / carries no
+> e2e number, **MERGE** the verified gated result (effect from `e2e_delta_pct` + the run finals) and raise
+> `confidence` — same non-blind-append curate transaction below. Do not touch rejected/dead-end cards.
+
 1. **CURATE `SKILL_DIR/knowledge/learned/` — do NOT blind-append.** Follow the curate transaction in
    `knowledge/learned/README.md`: read `INDEX.md`, then for each durable finding:
    - **Match the reuse key** `kernel_class · gfx · regime`. If a card exists → **MERGE** (bump
