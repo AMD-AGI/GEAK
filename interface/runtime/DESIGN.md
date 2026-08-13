@@ -411,17 +411,41 @@ both converge to null via the wrapper, differing only in retry count.
 
 ## 12. Testing
 
-`selftest.mjs` runs the primitives against a **fake backend** (no CLI / network / GPU), asserting:
+Two complementary tests:
 
-- `extractJson` (fenced / balanced / last-wins / no-json throws)
-- `validate` (type / required / nested required / wrong type / **enum accept + reject**)
-- `parallel` per-thunk + throw→null; semaphore cap respected
-- `pipeline` per-item, `(prev,item,idx)`, stage-throw→null
-- `agent` schema parse + retry-count (`SCHEMA_RETRIES+1`)
-- `runScript` export-strip + top-level return + one-level `workflow()`; second-level nesting throws
-- config resolution + `buildInvocation` + `neutralizeForBackend` + the shipped `registry.json`
+**`selftest.mjs`** — runs the primitives against a **fake backend** (no CLI / network / GPU):
+`extractJson`, `validate` (incl. enum), `parallel`/`pipeline` degradation, semaphore cap,
+`agent` schema retry-count, `runScript` export-strip + one-level nesting, config resolution +
+`buildInvocation` + `neutralizeForBackend` + the shipped `registry.json`. Run:
+`node interface/runtime/selftest.mjs` (54 checks, all passing).
 
-Current: **40 checks, all passing.** Run: `node interface/runtime/selftest.mjs`.
+**`conformance.mjs`** — "does this backend actually support GEAK, and has GEAK stayed within the
+contract?" Two halves:
+
+- *Capability probes* (need a real/fake backend) — drive the real CLI through exactly what GEAK
+  requires, each mapped to a COMPAT R-item: P1 headless one-shot (R2), P2 structured output +
+  enum (R1), P3 Bash executes + reads a nonce it can't guess (R2/R3, proves no hallucination),
+  P4 Write outside cwd (R3/R7), P5 schema under `parallel()` (concurrency).
+- *Contract audit* (static, no CLI) — the drift detector. Reads the actual GEAK sources and
+  fails when the contract grows beyond what this runtime + probe set support:
+  `A-primitive` (a new injected global the runtime doesn't implement — snake_case names are
+  skipped since primitives are lowerCamelCase; a small reviewed baseline in `ACK_NONPRIMITIVE`
+  absorbs the heuristic's known locals), `A-tools` (a role now needs a tool beyond
+  Read/Write/Bash — WebFetch/WebSearch/MCP/…), `A-forbidden` (a script uses
+  Date.now/Math.random/new Date/process/require — native-forbidden), `A-wording` (a NEW
+  Claude-specific phrase not neutralized — WARN).
+
+  Pass = the backend conforms **and** GEAK hasn't drifted. When the audit fires, the fix is to
+  handle the new capability (implement the primitive / add a probe / add a neutralize rule) and
+  then update the baseline constant so it goes green on purpose, never by accident.
+
+  Run: `node interface/runtime/conformance.mjs --profile codex` (or `--agent cursor`);
+  `--fake` self-checks the harness with no CLI; `--audit-only` runs just the drift audit;
+  `--quick` skips the concurrency probe; `--geak-root DIR` points the audit at a tree.
+
+Calibrated so the current GEAK tree is all-green; a simulated upgrade (a new `superAgent()`
+call, a role using `WebFetch`, a `Date.now()` in a script, `ultracode` wording) trips the
+matching checks by name.
 
 ---
 
@@ -473,6 +497,7 @@ backend.
 | `backends/base.mjs` | backend contract + `spawnAgent` + `defaultConcurrency` |
 | `backends/generic.mjs` | config-driven backend for any CLI |
 | `experiment.mjs` | `(agent × model)` comparison runner |
-| `selftest.mjs` | no-GPU/no-network unit tests (40 checks) |
+| `selftest.mjs` | no-GPU/no-network unit tests of the primitives (54 checks) |
+| `conformance.mjs` | backend acceptance test (capability probes) + static contract-drift audit |
 | `responses_shim.mjs` | de-streaming shim so codex can drive claude via the gateway |
 | `../run_e2e.py` | programmatic entry; routes native vs runtime by env |
