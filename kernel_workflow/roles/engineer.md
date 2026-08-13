@@ -66,7 +66,7 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
 3a. **Wait in ONE call, never one call per poll.** Builds and benchmarks outrun the Bash tool's ceiling,
    so you will background them and wait. Waiting by re-invoking a trivial command (`true`, `echo idle`,
    `date`) costs **one full API call per poll at your full context size** — on a measured Qwen3-14B run
-   the engineers burned 42 such calls and $4.65 (and the integrator 133 calls and $11.15) buying nothing
+   the engineers burned 33 such calls and $3.08 (and the integrator 130 calls and $10.91) buying nothing
    but elapsed time. Background the job with a sentinel and block inside a single call instead:
    ```bash
    ( cd $KERNEL_PATH && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <cmd> >bench.log 2>&1; echo $? >.done ) &

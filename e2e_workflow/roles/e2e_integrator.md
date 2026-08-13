@@ -234,9 +234,9 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    **WAIT IN ONE CALL, NOT ONE CALL PER POLL.** A bench block runs for many minutes, longer than the
    Bash tool's ceiling, so you will background it and wait. Waiting by re-invoking a trivial command
    (`true`, `echo idle`, `date`) burns **one full API call per poll, at your full context size** — the
-   most expensive clock in the system. On a measured Qwen3-14B run this phase spent **133 API calls and
-   $11.15 doing nothing but polling** (129 of them were literally `bash true`), 41% of the phase's own
-   bill, for 12 minutes of wall clock it would have spent waiting anyway. Instead, background the job
+   most expensive clock in the system. On a measured Qwen3-14B run this phase spent **130 API calls and
+   $10.91 doing nothing but polling** (129 of them were literally `bash true`) — **42% of the phase's own
+   bill**, buying only wall clock it would have spent waiting anyway. Instead, background the job
    with a completion sentinel and block inside a SINGLE call:
    ```bash
    # launch: background it, and record the exit code in a sentinel when it finishes
