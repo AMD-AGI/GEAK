@@ -58,9 +58,15 @@ So: **two rungs.** Screen at `REPEATS=1`, promote only what clears the bar, and 
 `REPEATS=3` before accepting. Never accept on a screening number alone — a rung-1 result decides what
 to measure, never what is true.
 
+**Screen against a screening baseline, never against the rung-2 median.** A `REPEATS=1` number and
+a `REPEATS=3` median are different measurements; subtracting one from the other manufactures a delta
+out of the repeat count. Before the first candidate, take ONE `REPEATS=1` run of the *current
+accepted config* into `$EVAL_DIR/config/base_screen` and compare every rung-1 candidate against
+THAT. Re-take it whenever a change is accepted, because the accepted config has moved.
+
 For EACH direction, in the Architect's order:
 1. Build the candidate config = current accepted config + this ONE change.
-2. **Rung 1 — screen** (`REPEATS=1`, no profiling):
+2. **Rung 1 — screen** (`REPEATS=1`, no profiling; delta vs the `base_screen` median):
    ```bash
    # SERVING config MUST match the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/config/<dir_id>_screen" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
@@ -68,7 +74,7 @@ For EACH direction, in the Architect's order:
    EXTRA_SERVER_ARGS="<current flags + this flag>" EXTRA_ENV="<current env + this env>" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/cfg_<dir_id>_screen.log"
    ```
-   Compute delta% against the current accepted median. **Drop the candidate now** if
+   Compute delta% against the `base_screen` median. **Drop the candidate now** if
    `delta% <= 0.5 x noise_band` — that is a loser or a wash, and a second look will not rescue it.
    Record it in `sweep_results.json` with `"rung": "screen"` and move to the next direction.
 3. **Rung 2 — confirm** (survivors only, `REPEATS=3`, `OUT_DIR="$EVAL_DIR/config/<dir_id>"`): rerun the

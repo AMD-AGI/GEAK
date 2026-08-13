@@ -77,6 +77,14 @@ ROLE_RE = re.compile(r"You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]
 # added to whichever agent happened to run before them — a small error, but a wrong one, and it
 # would land on a different agent every run.
 BARE_RE = re.compile(r"You are a file writer\.")
+# Two kernel-lane agents do NOT use that header: the optimization engineers
+# (kernel_lane.js:683) and the round-winner commit step (kernel_lane.js:817). Between them the
+# engineers are the largest block of spend in a run — 948 calls / $108 on the first measured
+# Qwen3-14B run — so without these patterns the biggest cost centre in GEAK reads as "(driver)",
+# i.e. as though it were not GEAK's spend at all. Anchored at the start of the message so a
+# tool result that happens to quote a prompt cannot open a spurious conversation.
+ENGINEER_RE = re.compile(r"\A\s*You are Engineer (\S+) \(specialty=([A-Za-z0-9_.\-]+)\) for round")
+COMMIT_RE = re.compile(r"\A\s*You are the TechLead committing round")
 
 UNATTRIBUTED = "(unattributed)"
 DRIVER = "(driver)"
@@ -258,8 +266,19 @@ def split_conversations(records):
         if rec.get("type") == "user":
             text = _text_of(rec.get("message"))
             m = ROLE_RE.search(text)
-            role, sub = (m.group(1), m.group(2)) if m else (
-                ("file_writer", "persist") if BARE_RE.search(text) else (None, None))
+            me = None if m else ENGINEER_RE.search(text)
+            if m:
+                role, sub = m.group(1), m.group(2)
+            elif me:
+                # sub_phase is the specialty, so the report separates the memory lane from the
+                # compute lane rather than merging every engineer into one bucket.
+                role, sub = "engineer", me.group(2)
+            elif COMMIT_RE.search(text):
+                role, sub = "tech_lead", "commit"
+            elif BARE_RE.search(text):
+                role, sub = "file_writer", "persist"
+            else:
+                role, sub = None, None
             if role:
                 if cur["records"]:
                     groups.append(cur)

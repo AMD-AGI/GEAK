@@ -251,6 +251,45 @@ class TestPhaseAttribution(LedgerTestBase):
         self.assertEqual({r["phase"] for r in rows}, {"Strategize", "HeadKernel"})
         self.assertNotIn("~system_architect:strategize", agg["by_phase"])
 
+    def test_headerless_kernel_lane_agents_are_not_dumped_on_the_driver(self):
+        """Found on the second measured run: the biggest cost centre read as "(driver)".
+
+        Two kernel_lane.js agents skip the `You are the X. PHASE=Y.` header -- the
+        optimization engineers (:683) and the round-winner commit (:817). Without a pattern
+        for them they never open a conversation, so their calls stayed attached to the
+        preceding driver group. On the Qwen3-14B runs that was 948 calls / $108 -- 41% of the
+        run -- filed as though it were not GEAK's spend at all. Specialty is kept as the
+        sub_phase so the memory lane stays distinguishable from the compute lane.
+        """
+        eng = ("You are Engineer r2_d1 (specialty=memory) for round 2.\n"
+               "First create YOUR private workspace, then optimize.\n- EVAL_DIR: %s\n" % self.eval_dir)
+        commit = ("You are the TechLead committing round 2's winning patch into the canonical "
+                  "workspace.\n- EVAL_DIR: %s\n" % self.eval_dir)
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(eng, 0), asst_rec(1, "m1", read=100, out=1),
+            user_rec(commit, 100), asst_rec(101, "m2", read=200, out=2),
+        ])
+        rows, _, agg, _ = self.build()
+        self.assertEqual({r["phase"] for r in rows}, {"~engineer:memory", "~tech_lead:commit"})
+        self.assertNotIn("(driver)", agg["by_phase"])
+
+    def test_a_quoted_prompt_in_a_tool_result_does_not_open_a_conversation(self):
+        """The two headerless patterns are anchored, so quoting one cannot split a group.
+
+        A tech_lead reviewing a round quotes its engineers' prompts back. An unanchored
+        pattern would treat each quote as a new agent and re-file that spend.
+        """
+        quoted = ("Here is what the lane dispatched:\n\n"
+                  "  You are Engineer r1_d0 (specialty=compute) for round 1.\n")
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("tech_lead", "analyze", self.eval_dir), 0),
+            asst_rec(1, "m1", read=100, out=1),
+            user_rec(quoted, 10),
+            asst_rec(11, "m2", read=100, out=1),
+        ])
+        rows, _, _, _ = self.build()
+        self.assertEqual({r["phase"] for r in rows}, {"~tech_lead:analyze"})
+
     def test_director_setup_is_split_between_the_two_layers(self):
         """`director:setup` exists in BOTH workflows; the kernel eval dir decides."""
         kdir = os.path.join(self.eval_dir, "kernels", "_exp", "team_k1")

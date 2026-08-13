@@ -361,22 +361,8 @@ const VALIDATE_SCHEMA = obj({
 // Prompt helpers. Every agent reads its role file from WORKFLOW_DIR and the
 // relevant knowledge files itself; the script only passes paths + JSON inputs.
 // ---------------------------------------------------------------------------
-// Inputs are rendered VOLATILE-LAST. A cached prompt prefix is reusable only up to its first
-// changing byte, so a per-round counter emitted early strands every stable byte behind it. Measured
-// on a Qwen3-14B run: consecutive tech_lead:plan_round prompts shared only 597 of 7,591 characters
-// because ROUND / BUDGET_REMAINING / CUMULATIVE_SPEEDUP led the block, and tech_lead sat at 83%
-// cache-read against a 96% run average. Moving those few keys to the end lets the stable remainder —
-// the bulk of the prompt — stay reusable across rounds and across sibling lanes.
-// Ordering only; no key is added, removed or reworded.
-const VOLATILE_LAST = new Set([
-  'ROUND', 'BUDGET_REMAINING', 'CUMULATIVE_SPEEDUP', 'BUDGET', 'DISPATCHED',
-  'EVAL_DIR', 'STATE_DIR', 'SHARED_KB', 'GLOBAL_KB', 'PRIOR_STATE',
-]);
-const cfg = (o) => {
-  const es = Object.entries(o);
-  return [...es.filter(([k]) => !VOLATILE_LAST.has(k)), ...es.filter(([k]) => VOLATILE_LAST.has(k))]
-    .map(([k, v]) => `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
-};
+const cfg = (o) => Object.entries(o).map(([k, v]) =>
+  `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
 
 // --- Hung-agent guard ------------------------------------------------------
 // An agent LLM call that HANGS (no response, no terminal error) blocks a
@@ -415,18 +401,31 @@ const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_ret
 const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
 const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_lane', events: [], nested: [] };
 const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
+// Two agents in this file are written without that header and so need their own patterns, or
+// they record no identity and the ledger cannot place them. They are not a minor omission: the
+// optimization engineers are the single largest block of spend in a run. Keep these in step with
+// ENGINEER_RE / COMMIT_RE in e2e_workflow/scripts/llm_ledger.py — the two sides must agree on the
+// role and sub_phase strings or the join silently misses.
+const TL_ENG_RE = /^\s*You are Engineer (\S+) \(specialty=([A-Za-z0-9_.\-]+)\) for round/;
+const TL_COMMIT_RE = /^\s*You are the TechLead committing round/;
 function tlAgent(prompt, o, attempt, ok) {
   if (!LLM_STATS) return;
   // Identity comes from the PROMPT, not opts.label: labels here are free-form display strings
   // ('eng r1_d0:memory', 'tech_lead:plan r1') that cannot be parsed into role/sub_phase. The
   // prompt's opening line always can, and it is the same line the transcript carries.
-  const m = TL_ROLE_RE.exec(String(prompt || ''));
+  const p = String(prompt || '');
+  const m = TL_ROLE_RE.exec(p);
+  const e = m ? null : TL_ENG_RE.exec(p);
+  let role = '', sub = '';
+  if (m) { role = m[1]; sub = m[2]; }
+  else if (e) { role = 'engineer'; sub = e[2]; }
+  else if (TL_COMMIT_RE.test(p)) { role = 'tech_lead'; sub = 'commit'; }
   LLM_TL.events.push({
     seq: LLM_TL.events.length,
     phase: (o && o.phase) || '',
     label: (o && o.label) || 'agent',
-    role: m ? m[1] : '',
-    sub_phase: m ? m[2] : '',
+    role: role,
+    sub_phase: sub,
     attempt: attempt,
     ok: !!ok,
   });

@@ -549,22 +549,8 @@ const VALIDATE_SCHEMA = obj({
 // ---------------------------------------------------------------------------
 // Prompt helpers (mirror the single-kernel workflow).
 // ---------------------------------------------------------------------------
-// Inputs are rendered VOLATILE-LAST. A cached prompt prefix is reusable only up to its first
-// changing byte, so a per-round counter emitted early strands every stable byte behind it. Measured
-// on a Qwen3-14B run: consecutive tech_lead:plan_round prompts shared only 597 of 7,591 characters
-// because ROUND / BUDGET_REMAINING / CUMULATIVE_SPEEDUP led the block, and tech_lead sat at 83%
-// cache-read against a 96% run average. Moving those few keys to the end lets the stable remainder —
-// the bulk of the prompt — stay reusable across rounds and across sibling lanes.
-// Ordering only; no key is added, removed or reworded.
-const VOLATILE_LAST = new Set([
-  'ROUND', 'BUDGET_REMAINING', 'CUMULATIVE_SPEEDUP', 'BUDGET', 'DISPATCHED',
-  'EVAL_DIR', 'STATE_DIR', 'SHARED_KB', 'GLOBAL_KB', 'PRIOR_STATE',
-]);
-const cfg = (o) => {
-  const es = Object.entries(o);
-  return [...es.filter(([k]) => !VOLATILE_LAST.has(k)), ...es.filter(([k]) => VOLATILE_LAST.has(k))]
-    .map(([k, v]) => `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
-};
+const cfg = (o) => Object.entries(o).map(([k, v]) =>
+  `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
 
 // Expert-skills prompt injection. PURELY ADDITIVE: returns '' whenever the feature is OFF or the role
 // is not a skills consumer, so roleAgent's output is byte-identical to the pre-feature build in those
