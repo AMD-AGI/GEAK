@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: attention_decode
 regime: decode
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L2
 verified_on: 2026-08-12
 roofline: large-ctx case moves from an apparent ~0.5 of achievable HBM roof to VALU+LDS bound

@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: attention_decode
 regime: both
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L3
 verified_on: 2026-08-12
 roofline: memory-bound at roughly 0.8 of achievable HBM bandwidth before and after; the residual is ramp-up/down, not an attackable stall

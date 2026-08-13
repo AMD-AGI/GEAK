@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: method
 regime: decode
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L0
 verified_on: 2026-08-12
 levers: ['method.measurement']

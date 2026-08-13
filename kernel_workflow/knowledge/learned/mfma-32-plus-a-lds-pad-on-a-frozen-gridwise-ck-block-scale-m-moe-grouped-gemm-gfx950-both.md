@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: moe_grouped_gemm
 regime: both
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L1
 verified_on: 2026-08-12
 roofline: compute-bound 0.24 -> 0.31 of the empirical roof

@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: method
 regime: n/a
 layer: learned
-lifecycle: archived
+lifecycle: active
 verified_on: 2026-07-30
 ---
 # A/B in the graded case mix, and price a direction against the noise floor first

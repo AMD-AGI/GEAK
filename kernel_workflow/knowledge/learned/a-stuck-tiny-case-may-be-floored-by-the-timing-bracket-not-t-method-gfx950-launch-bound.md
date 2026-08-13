@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: method
 regime: launch-bound
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L2
 verified_on: 2026-07-30
 ---

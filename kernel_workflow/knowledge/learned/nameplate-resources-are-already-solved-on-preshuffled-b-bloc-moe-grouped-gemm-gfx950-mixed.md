@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: moe_grouped_gemm
 regime: mixed
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L1
 verified_on: 2026-08-11
 roofline: at stop: ~18-21% active, 53-61% dependency wait, 21-27% issue wait; 31-44% of the achievable HBM roof with occupancy unchanged from baseline

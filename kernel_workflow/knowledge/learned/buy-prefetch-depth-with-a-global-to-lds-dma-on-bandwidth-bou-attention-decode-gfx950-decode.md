@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: attention_decode
 regime: decode
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L3
 verified_on: 2026-08-12
 roofline: memory-bound throughout; the main dispatch ends at ~99.8% of a re-measured blended DRAM roof, and the occupancy limiter moves VGPR -> LDS once the DMA staging lands

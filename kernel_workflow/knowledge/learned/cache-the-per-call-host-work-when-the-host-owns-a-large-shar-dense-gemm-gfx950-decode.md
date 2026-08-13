@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: dense_gemm
 regime: decode
 layer: learned
-lifecycle: archived
+lifecycle: active
 ---
 # Cache the per-call host work when the host owns a large share of a tiny op's wall
 - lever: reuse allocations across calls and add a thread_local last-hit shortcut that skips the mutex and the table scan on the binding hit path

@@ -43,8 +43,26 @@ import sys
 from datetime import date, datetime
 
 INDEX_CAP = 40   # retained: the archive header still reports the budget it was written under
-CLASS_CAP = 8    # active cards kept per `kernel_class` — the axis the generated index GROUPS by and
-                 # the one its over-cap warning counts. See the eviction block in `drain`.
+CLASS_CAP = int(os.environ.get("KB_CLASS_CAP", "32"))
+# Active cards kept per `kernel_class` — the axis the generated index GROUPS by and the one its
+# over-cap warning counts. See the eviction block in `drain`.
+#
+# Was 8, and 8 was measured to be wrong. On a 121-card corpus it archived 60 cards — half the KB —
+# and it took them from exactly the classes that had the most to say: 24 of 32 from
+# `moe_grouped_gemm`, 16 of 24 from `attention_decode`. The comparison arm read 78 cards with none
+# trimmed; this one read 61, and lost worst (-32%) on `fused_moe_kernel`, a `moe_grouped_gemm` kernel
+# whose class had been cut by 75%.
+#
+# The reasoning behind 8 was that a prolific class would otherwise crowd out a sparse one. That
+# confused fairness with usefulness: a class has more cards mostly because more was learned about it,
+# and `match`/the reader select BY CLASS anyway, so a big `moe_grouped_gemm` shelf never competes for
+# attention with `quantize_cast`. Trimming it only destroys priors.
+#
+# 32 is the largest class in the current corpus, i.e. nothing is trimmed today. It stays a cap rather
+# than becoming unbounded because the index is read whole by a planner and an index that grows without
+# limit eventually costs recall — but the next value should be chosen from a measurement, not from a
+# tidiness instinct, and it should be raised before it is allowed to bind. Overridable via
+# KB_CLASS_CAP so an operator can test a different budget without editing code.
 STARS = {"★": 1, "★★": 2, "★★★": 3}
 STAR_OF = {1: "★", 2: "★★", 3: "★★★"}
 

@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: moe_grouped_gemm
 regime: both
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L1
 verified_on: 2026-08-12
 levers: ['compute.valu-reduction', 'compute.occupancy', 'compute.split-k', 'host.grid-compaction']

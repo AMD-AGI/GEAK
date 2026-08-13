@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: quantized_gemm
 regime: compute-bound
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L2
 verified_on: 2026-08-12
 ---

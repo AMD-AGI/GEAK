@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: moe_grouped_gemm
 regime: prefill
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L3
 verified_on: 2026-08-12
 roofline: memory / B-tile-traffic bound before -> MFMA/global-load interlock after, at ~54% of the achievable fp8 MFMA peak

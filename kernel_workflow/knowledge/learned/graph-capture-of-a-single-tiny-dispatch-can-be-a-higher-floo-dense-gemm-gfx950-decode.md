@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: dense_gemm
 regime: decode
 layer: learned
-lifecycle: archived
+lifecycle: active
 ---
 # Graph capture of a single tiny dispatch can be a higher floor than the dispatch it replaces
 - lever: graph capture is worth trying against a launch floor, but A/B the replay against eager in the same session before wiring it into the shipped wrapper

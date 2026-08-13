@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: attention_decode
 regime: decode
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L2
 verified_on: 2026-08-12
 roofline: main dispatch at ~99.8% of a re-measured blended DRAM roof; registers 124/128 unified, LDS 100% allocated, waves held at 4/SIMD

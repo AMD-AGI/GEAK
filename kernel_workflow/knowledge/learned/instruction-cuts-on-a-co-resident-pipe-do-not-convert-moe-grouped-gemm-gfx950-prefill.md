@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: moe_grouped_gemm
 regime: prefill
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L1
 verified_on: 2026-08-12
 roofline: LDS at 56% of speed-of-light co-resident with MFMA at 54%, i.e. not serialised in front of it

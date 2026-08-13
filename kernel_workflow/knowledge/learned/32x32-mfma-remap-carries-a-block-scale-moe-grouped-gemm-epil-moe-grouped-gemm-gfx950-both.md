@@ -17,7 +17,7 @@ platforms: ['gfx950']
 kernel_class: moe_grouped_gemm
 regime: both
 layer: learned
-lifecycle: archived
+lifecycle: active
 cost: L2
 verified_on: 2026-07-29
 roofline: memory-bound at ~0.40 of its roof -> compute-bound at ~0.53 of its roof
