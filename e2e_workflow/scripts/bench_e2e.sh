@@ -443,18 +443,22 @@ except Exception:
   echo ">>> overlay memory-parity OK (free ${_free_mb:-?}MB >= floor ${MEM_HEADROOM_MIN_MB}MB)"
 fi
 
-# ---- optional COLD full-round (align with Hyperloom's COLD baseline_tput) ----
-# Hyperloom's leaderboard denominator baseline_tput is a COLD single fresh-server
-# round (first-token / JIT / cuda-graph capture costs INCLUDED, no prior warmup).
-# GEAK's own final is a HOT median (warmup discarded). Comparing GEAK's hot final
-# to Hyperloom's cold baseline mixes thermal states. When BENCH_COLD_FINAL=1 we
-# also measure ONE cold full round (NUM_PROMPTS, no preceding warmup) on the fresh
-# server BEFORE the warmup+timed(hot) rounds, and record it separately, so the
-# caller can compute a fair cold-to-cold speedup (and keep the hot median as a
-# double-check). Default ON (BENCH_COLD_FINAL=1) — set BENCH_COLD_FINAL=0 to skip
-# the cold round (e.g. to save the one extra full round per bench). Only meaningful
-# on a fresh launch (a reused warm server has no cold state to measure).
-if [ "${BENCH_COLD_FINAL:-1}" = "1" ] && [ "$REUSE_SERVER" != "1" ]; then
+# ---- optional COLD full-round (DIAGNOSTIC ONLY, off by default) ----
+# One full round (NUM_PROMPTS, no preceding warmup) on the fresh server, recorded
+# separately from the timed(hot) repeats.
+#
+# "Cold" here means only "no warmup round preceded it in THIS bench" — it does
+# not mean a cold machine. Only the first bench of a session sees a genuinely
+# cold box; every later bench (the final leg included) starts with the JIT/HIP
+# kernel caches, torch.compile artifacts and page cache already populated by the
+# benches before it. So the baseline's cold round pays the full cache-fill cost
+# and the final's pays almost none, and a ratio of the two reports that
+# asymmetry as speedup. Never compare cold rounds taken at different points in a
+# session, and never promote one as the headline number.
+# Default OFF; set BENCH_COLD_FINAL=1 to measure it as a diagnostic (costs one
+# extra full round per bench). Only meaningful on a fresh launch (a reused warm
+# server has no cold state to measure at all).
+if [ "${BENCH_COLD_FINAL:-0}" = "1" ] && [ "$REUSE_SERVER" != "1" ]; then
   echo ">>> Cold full round (NUM_PROMPTS=$NUM_PROMPTS, no warmup; cold-baseline parity) ..."
   # adapter_bench is a shell FUNCTION that reads $RESULT_JSONL — a prefix var
   # assignment on a function has ambiguous persistence in bash, so point

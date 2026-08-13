@@ -463,8 +463,34 @@ class TestBenchLauncher(_RunE2ECase):
     def setUp(self):
         super().setUp()
         for key in ("BENCH_LAUNCHER", "MAGPIE_LAUNCH_SCRIPT",
-                    "MAGPIE_VLLM_SCRIPT", "MAGPIE_SGLANG_SCRIPT"):
+                    "MAGPIE_LAUNCH_SCRIPT_SOURCE", "MAGPIE_VLLM_SCRIPT",
+                    "MAGPIE_SGLANG_SCRIPT", "MAX_MODEL_LEN"):
             os.environ.pop(key, None)
+
+    def _recipe(self, *, script="vllm_mi355x.sh", subdir="", root=None,
+                with_lib=True, write_script=True):
+        """An orchestrator launch recipe next to a checkout it can point at."""
+        checkout = Path(root) if root else self.tmp / "InferenceX@abc123"
+        bench_dir = checkout / "benchmarks" / subdir if subdir else checkout / "benchmarks"
+        bench_dir.mkdir(parents=True, exist_ok=True)
+        if write_script:
+            (bench_dir / script).write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        if with_lib:
+            (bench_dir / "benchmark_lib.sh").write_text("# lib\n", encoding="utf-8")
+        recipe = self.tmp / "baseline_config.with_envs.yaml"
+        recipe.write_text(
+            "benchmark:\n"
+            "  framework: vllm\n"
+            "  model: /models/Qwen3-8B\n"
+            "  envs:\n"
+            "    TP: 1\n"
+            "    MAX_MODEL_LEN: 6144\n"
+            "  runner_type: mi355x\n"
+            f"  benchmark_script: {script}\n"
+            f"  inferencex_path: {checkout}\n",
+            encoding="utf-8",
+        )
+        return str(recipe), str(bench_dir / script)
 
     def test_handoff_script_enables_magpie_and_normalises_the_env_var(self):
         launcher = rx.apply_bench_launcher(
@@ -506,6 +532,116 @@ class TestBenchLauncher(_RunE2ECase):
         self.assertEqual(rx.apply_bench_launcher({"framework": "vllm"}), "native")
         self.assertNotIn("MAGPIE_LAUNCH_SCRIPT", os.environ)
 
+    # -- deriving the script from the recipe the orchestrator did send -------- #
+    def test_the_launch_script_is_derived_from_the_recipe(self):
+        """No handoff has ever named the launch script, but every one names the
+        recipe — and the recipe names both the checkout and the script."""
+        recipe, script = self._recipe()
+
+        launcher = rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm", "max_model_len": 6144}
+        )
+
+        self.assertEqual(launcher, "magpie")
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT_SOURCE"], "launch_recipe")
+
+    def test_a_script_in_a_checkout_subdirectory_is_found(self):
+        recipe, script = self._recipe(subdir="single_node")
+
+        rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"})
+
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
+
+    def test_an_explicit_script_outranks_the_recipe(self):
+        recipe, _ = self._recipe()
+
+        rx.apply_bench_launcher({
+            "launch_recipe": recipe,
+            "launch_server_script": "/magpie/explicit.sh",
+            "framework": "vllm",
+        })
+
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], "/magpie/explicit.sh")
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT_SOURCE"], "handoff")
+
+    def test_a_checkout_missing_its_script_library_degrades_to_native(self):
+        """The script sources benchmark_lib.sh from its own directory and dies
+        without it. Better to serve natively than to fail every bench."""
+        recipe, _ = self._recipe(with_lib=False)
+
+        launcher = rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"})
+
+        self.assertEqual(launcher, "native")
+        self.assertNotIn("MAGPIE_LAUNCH_SCRIPT", os.environ)
+
+    def test_an_unreachable_checkout_degrades_to_native(self):
+        """The recipe is written on the orchestrator's box; its checkout path
+        need not exist on ours."""
+        recipe, _ = self._recipe(root="/nonexistent/InferenceX@dead", write_script=False)
+
+        self.assertEqual(
+            rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"}),
+            "native",
+        )
+
+    def test_a_missing_recipe_file_is_not_an_error(self):
+        self.assertEqual(rx._recipe_fields("/nonexistent/recipe.yaml"), {})
+        self.assertEqual(
+            rx.apply_bench_launcher(
+                {"launch_recipe": "/nonexistent/recipe.yaml", "framework": "vllm"}
+            ),
+            "native",
+        )
+
+    def test_the_escape_hatch_outranks_a_derivable_recipe(self):
+        recipe, _ = self._recipe()
+        os.environ["BENCH_LAUNCHER"] = "native"
+
+        self.assertEqual(
+            rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"}),
+            "native",
+        )
+
+    # -- max-model-len reaches the script as env, not as a duplicate flag ----- #
+    def test_max_model_len_is_forwarded_to_the_magpie_script(self):
+        """Magpie's script defaults max-model-len to 4096. Left unset, the right
+        value only arrives as a duplicate flag that wins on argparse ordering."""
+        recipe, _ = self._recipe()
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm", "max_model_len": 6144}
+        )
+
+        self.assertEqual(os.environ["MAX_MODEL_LEN"], "6144")
+
+    def test_max_model_len_is_not_forwarded_on_the_native_path(self):
+        """Nothing on the native path reads it, and exporting it would leak a
+        server knob into an unrelated launch."""
+        rx.apply_bench_launcher({"framework": "vllm", "max_model_len": 6144})
+
+        self.assertEqual(rx.apply_bench_launcher({"framework": "vllm"}), "native")
+        self.assertNotIn("MAX_MODEL_LEN", os.environ)
+
+    def test_an_absent_max_model_len_leaves_the_script_default_alone(self):
+        """The script's own default IS what the orchestrator served with."""
+        recipe, _ = self._recipe()
+
+        rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"})
+
+        self.assertNotIn("MAX_MODEL_LEN", os.environ)
+
+    def test_the_recipe_parser_ignores_the_nested_env_map(self):
+        recipe, _ = self._recipe()
+
+        fields = rx._recipe_fields(recipe)
+
+        self.assertEqual(fields["benchmark_script"], "vllm_mi355x.sh")
+        self.assertEqual(fields["framework"], "vllm")
+        self.assertEqual(fields["runner_type"], "mi355x")
+        self.assertNotIn("MAX_MODEL_LEN", fields)
+        self.assertNotIn("TP", fields)
+
 
 class TestBenchProtocol(_RunE2ECase):
     def test_only_provided_keys_are_exported(self):
@@ -536,10 +672,16 @@ class TestBenchProtocol(_RunE2ECase):
 
 
 class TestAlignmentFlags(_RunE2ECase):
-    def test_cold_final_defaults_on(self):
+    def test_cold_final_defaults_off(self):
         os.environ.pop("BENCH_COLD_FINAL", None)
-        self.assertEqual(rx.apply_alignment_flags({}), {"BENCH_COLD_FINAL": "1"})
-        self.assertEqual(os.environ["BENCH_COLD_FINAL"], "1")
+        self.assertEqual(rx.apply_alignment_flags({}), {"BENCH_COLD_FINAL": "0"})
+        self.assertEqual(os.environ["BENCH_COLD_FINAL"], "0")
+
+    def test_explicit_truthy_handoff_enables(self):
+        self.assertEqual(
+            rx.apply_alignment_flags({"bench_cold_final": "1"}),
+            {"BENCH_COLD_FINAL": "1"},
+        )
 
     def test_explicit_falsey_handoff_disables(self):
         self.assertEqual(
@@ -550,8 +692,9 @@ class TestAlignmentFlags(_RunE2ECase):
     def test_env_value_is_used_when_the_handoff_is_silent(self):
         os.environ["BENCH_COLD_FINAL"] = "yes"
         self.assertEqual(rx.apply_alignment_flags({}), {"BENCH_COLD_FINAL": "1"})
+        # An empty env var carries no intent, so the default (off) applies.
         os.environ["BENCH_COLD_FINAL"] = ""
-        self.assertEqual(rx.apply_alignment_flags({}), {"BENCH_COLD_FINAL": "1"})
+        self.assertEqual(rx.apply_alignment_flags({}), {"BENCH_COLD_FINAL": "0"})
 
 
 # =========================================================================== #
@@ -1069,21 +1212,24 @@ class TestColdFinalBasis(_RunE2ECase):
             "output_parity": "pass",
         }
 
-    def test_cold_win_is_promoted_over_the_hot_median(self):
-        """Hyperloom's leaderboard denominator is a COLD round, so when GEAK also
-        measured cold and cold is a real gain, the promoted number must be the
-        cold one — otherwise the reported gain mixes thermal states."""
+    def test_a_cold_win_never_replaces_the_promoted_hot_median(self):
+        """A cold round measured mid-session is a warm round wearing the label,
+        so a flattering cold ratio must not become the headline: the promoted
+        pair stays hot-over-hot and the cold numbers stay diagnostic."""
         eval_dir = self._eval_dir(cold_final=520.0, cold_baseline=460.0)
         out = rx.normalize_result(
             {"raw_baseline_tput": 440.0}, self._wf(eval_dir)
         )
-        self.assertEqual(out["final_throughput_basis"], "cold")
-        self.assertEqual(out["final_throughput_tok_s"], 520.0)
-        self.assertEqual(out["throughput_speedup"], rx._safe_ratio(520.0, 460.0))
+        self.assertEqual(out["final_throughput_basis"], "hot")
+        self.assertEqual(out["final_throughput_tok_s"], 500.0)
+        self.assertEqual(out["throughput_speedup"], 1.1111)
         self.assertEqual(out["status"], "ok")
-        self.assertEqual(out["alignment_metrics"]["final_basis"], "cold")
+        self.assertEqual(out["alignment_metrics"]["final_basis"], "hot")
+        # Still reported, just no longer load-bearing.
         self.assertEqual(out["alignment_metrics"]["cold_speedup"],
                          rx._safe_ratio(520.0, 440.0))
+        self.assertEqual(out["alignment_metrics"]["cold_geak_speedup"],
+                         rx._safe_ratio(520.0, 460.0))
 
     def test_cold_loss_keeps_the_hot_median(self):
         """An authored overlay pays a one-off JIT/graph-capture cost on the cold
@@ -1094,22 +1240,20 @@ class TestColdFinalBasis(_RunE2ECase):
         self.assertEqual(out["final_throughput_tok_s"], 500.0)
         self.assertEqual(out["throughput_speedup"], 1.1111)
 
-    def test_standalone_run_gates_on_the_within_geak_cold_ratio(self):
-        """No orchestrator baseline => cold_speedup is undefined; the gate falls
-        back to GEAK's own cold-to-cold ratio rather than refusing cold."""
+    def test_cold_numbers_alone_never_move_the_promoted_pair(self):
+        """No orchestrator baseline, so the only cold ratio available is GEAK's
+        own — which used to be enough to switch the basis. It no longer is."""
         eval_dir = self._eval_dir(cold_final=520.0, cold_baseline=460.0)
         out = rx.normalize_result({}, self._wf(eval_dir))
-        self.assertEqual(out["final_throughput_basis"], "cold")
+        self.assertEqual(out["final_throughput_basis"], "hot")
         self.assertIsNone(out["alignment_metrics"]["cold_speedup"])
-        self.assertEqual(out["throughput_speedup"], rx._safe_ratio(520.0, 460.0))
+        self.assertEqual(out["throughput_speedup"], 1.1111)
 
-    def test_cold_final_without_a_cold_baseline_keeps_the_reported_speedup(self):
-        """Cold basis is adopted for the promoted number, but with no cold
-        baseline there is no self-consistent cold speedup to overwrite with."""
+    def test_a_cold_final_without_a_cold_baseline_changes_nothing(self):
         eval_dir = self._eval_dir(cold_final=520.0)
         out = rx.normalize_result({"raw_baseline_tput": 440.0}, self._wf(eval_dir))
-        self.assertEqual(out["final_throughput_basis"], "cold")
-        self.assertEqual(out["final_throughput_tok_s"], 520.0)
+        self.assertEqual(out["final_throughput_basis"], "hot")
+        self.assertEqual(out["final_throughput_tok_s"], 500.0)
         self.assertEqual(out["throughput_speedup"], 1.1111)
         self.assertIsNone(out["alignment_metrics"]["cold_geak_speedup"])
 
@@ -1511,7 +1655,7 @@ class TestMain(_RunE2ECase):
         self.assertEqual(plan["magpie_launch_script"], "/magpie/launch.sh")
         self.assertEqual(plan["bench_protocol"],
                          {"NUM_PROMPTS": "512", "SEED": "7"})
-        self.assertEqual(plan["alignment_flags"], {"BENCH_COLD_FINAL": "1"})
+        self.assertEqual(plan["alignment_flags"], {"BENCH_COLD_FINAL": "0"})
         self.assertEqual(plan["e2e_script"], str(rx.E2E_SCRIPT))
         self.assertIn("Invoke the Workflow tool exactly once", plan["prompt"])
         self.assertFalse(self.result_path.exists())

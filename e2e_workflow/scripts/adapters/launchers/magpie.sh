@@ -24,7 +24,15 @@
 #
 # bench_e2e.sh contract: sets global SERVER_PID; writes $LOG. Reads env:
 #   BACKEND MODEL TP PORT GPU EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
-#   PROFILE PROFILE_DIR LOG OUT_DIR.
+#   PROFILE PROFILE_DIR LOG OUT_DIR MAX_MODEL_LEN.
+#
+# TWO logs, deliberately: Magpie's script redirects the server with a
+# TRUNCATING '> $SERVER_LOG', so anything this adapter appended to the same file
+# would be destroyed the moment the server starts, and the script's own set -x
+# trace would interleave with server output in whatever survived. The script's
+# stdout/stderr therefore goes to magpie_launch.log and $LOG stays exclusively
+# the server's, which is also what makes $LOG parseable for the kernel-selection
+# fingerprint in result.json.serving_stack.
 # adapter_health is inherited from the BACKEND adapter (curl $BASE_URL/health),
 # which works regardless of who launched the server, so it is NOT redefined.
 
@@ -53,6 +61,7 @@ adapter_launch() {
 
   local _out_dir="${OUT_DIR:-${PROFILE_DIR:-$(pwd)}}"
   local _pidfile="$_out_dir/magpie_server.pid"
+  local _launchlog="$_out_dir/magpie_launch.log"
   rm -f "$_pidfile" 2>/dev/null || true
 
   # Per-backend var NAMES (regular rule), passed to the script via env NAME=VALUE.
@@ -74,14 +83,19 @@ adapter_launch() {
     RESULT_DIR="$_out_dir" \
     SERVER_LOG="$LOG" \
     PROFILE="${PROFILE:-0}" \
+    ${MAX_MODEL_LEN:+MAX_MODEL_LEN="$MAX_MODEL_LEN"} \
     ${PROFILE_DIR:+"${_prof_var}=$PROFILE_DIR"} \
     "${_args_var}=${EXTRA_SERVER_ARGS:-}" \
-    bash "$script" >> "$LOG" 2>&1
+    bash "$script" >> "$_launchlog" 2>&1
   local rc=$?
 
   if [ "$rc" -ne 0 ]; then
-    echo "!!! magpie launcher: server-phase script exited $rc. Last log:" >&2
-    tail -n 60 "$LOG" 2>/dev/null || true
+    # Both logs: a script that died before starting the server (missing env,
+    # failed download) left nothing in $LOG at all.
+    echo "!!! magpie launcher: server-phase script exited $rc. Last launch log:" >&2
+    tail -n 40 "$_launchlog" 2>/dev/null || true
+    echo "!!! magpie launcher: last server log:" >&2
+    tail -n 40 "$LOG" 2>/dev/null || true
     return 2
   fi
   if [ -f "$_pidfile" ]; then
@@ -89,7 +103,8 @@ adapter_launch() {
   fi
   if [ -z "${SERVER_PID:-}" ]; then
     echo "!!! magpie launcher: no server pid in $_pidfile (server may not have started)." >&2
-    tail -n 60 "$LOG" 2>/dev/null || true
+    tail -n 40 "$_launchlog" 2>/dev/null || true
+    tail -n 40 "$LOG" 2>/dev/null || true
     return 2
   fi
   # This pid came from an EXTERNAL script's pid file, so we cannot assume it leads its

@@ -42,6 +42,18 @@ from typing import Any
 SCHEMA_VERSION = 2
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
 
+# result.json must never state a speedup its own baseline/final pair
+# contradicts. Anything beyond this absolute gap on final/baseline means the
+# ratio was computed against a different pair than the one we report.
+SPEEDUP_SELF_CONSISTENCY_TOL = 1e-3
+
+# Headroom over an op's theoretical Amdahl ceiling before a measured e2e delta
+# is treated as corruption rather than a win. Mirrors
+# IMPLAUSIBLE_SPEEDUP_MARGIN in e2e_workflow.js (1.0 => must exceed 2x the
+# ceiling); both sides must agree or the recovery path banks what the live path
+# refuses.
+IMPLAUSIBLE_SPEEDUP_MARGIN = 1.0
+
 try:
     SAME_CONFIG_DIVERGENCE_WARN_PCT = float(
         os.environ.get("GEAK_SAME_CONFIG_DIVERGENCE_WARN_PCT", "3.0")
@@ -455,6 +467,74 @@ def apply_bench_client(h: dict) -> str:
 # all). Extend this set as Magpie adds backends — never add per-backend code.
 _MAGPIE_BACKENDS = {"sglang", "vllm"}
 
+# The scalars we need out of the orchestrator's launch recipe. Parsed by hand
+# rather than with a YAML library: GEAK carries no yaml dependency, and these
+# four flat scalars under one block do not justify adding one. Everything
+# nested (the envs: map) is deliberately ignored.
+_RECIPE_KEYS = ("inferencex_path", "benchmark_script", "framework", "runner_type")
+
+
+def _recipe_fields(recipe_path: str) -> dict[str, str]:
+    """Read the flat scalars we need out of an orchestrator launch recipe.
+
+    Returns ``{}`` for a missing/unreadable recipe so every caller degrades to
+    the native launch instead of failing the run.
+    """
+    if not recipe_path:
+        return {}
+    try:
+        text = Path(recipe_path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return {}
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition(":")
+        # First occurrence wins; the nested env map uses UPPERCASE names and so
+        # cannot collide with these keys.
+        if sep and key in _RECIPE_KEYS and key not in fields:
+            fields[key] = value.strip().strip("'\"")
+    return fields
+
+
+def _magpie_script_from_recipe(h: dict) -> str:
+    """Rebuild the path of the launch script the orchestrator itself ran.
+
+    This is the one piece of the launch recipe that never survived the handoff.
+    The orchestrator transfers its accepted flags and env, but the script it
+    launched with owns the platform kernel preset, ``--trust-remote-code`` and
+    the gpu-mem-util default — none of which are flags, so none of which a
+    flag-scraper can recover. Without the script GEAK re-baselines a different
+    engine and the same configuration serves measurably slower.
+
+    The handoff does name the recipe file, and the recipe names both the
+    InferenceX checkout and the script inside it, so the path is derivable
+    without asking the orchestrator to send anything new.
+
+    Returns "" whenever the script cannot be confirmed usable on this box.
+    """
+    fields = _recipe_fields(str(h.get("launch_recipe") or ""))
+    root, name = fields.get("inferencex_path", ""), fields.get("benchmark_script", "")
+    if not root or not name:
+        return ""
+    benchmarks = Path(root) / "benchmarks"
+    # Mirror the orchestrator's own lookup: top level first, then subdirectories
+    # (its checkouts keep some scripts under single_node/ / multi_node/).
+    candidates = [benchmarks / name]
+    try:
+        candidates.extend(sorted(benchmarks.rglob(name)))
+    except OSError:
+        pass
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        # The script sources benchmark_lib.sh from its own directory and dies
+        # without it. Checking here turns a half-populated checkout into a
+        # native-launch degrade instead of a hard failure at first bench.
+        if not (candidate.parent / "benchmark_lib.sh").is_file():
+            continue
+        return str(candidate)
+    return ""
+
 
 def apply_bench_launcher(h: dict) -> str:
     """Align the SERVER LAUNCH recipe with the external orchestrator (Magpie).
@@ -474,10 +554,13 @@ def apply_bench_launcher(h: dict) -> str:
     the launcher derives the per-backend flag/profiler var names from ``$BACKEND``.
 
     Resolution:
-      * explicit ``handoff.bench_launcher`` / ``$BENCH_LAUNCHER`` wins;
+      * explicit ``handoff.bench_launcher`` / ``$BENCH_LAUNCHER`` wins
+        (``BENCH_LAUNCHER=native`` is the escape hatch when the orchestrator's
+        script cannot run on this box);
       * else enable ``magpie`` ONLY when a script is discoverable
         (``handoff.launch_server_script``, or generic ``$MAGPIE_LAUNCH_SCRIPT``,
-        or per-backend ``$MAGPIE_<BACKEND>_SCRIPT`` e.g. ``$MAGPIE_VLLM_SCRIPT``)
+        or per-backend ``$MAGPIE_<BACKEND>_SCRIPT`` e.g. ``$MAGPIE_VLLM_SCRIPT``,
+        or derived from ``handoff.launch_recipe``)
         AND the backend is one Magpie supports; otherwise ``native``.
 
     When nothing is discoverable the native backend launch is kept, so the
@@ -489,17 +572,28 @@ def apply_bench_launcher(h: dict) -> str:
         h.get("bench_launcher") or os.environ.get("BENCH_LAUNCHER", "") or ""
     ).strip().lower()
     backend = str(h.get("framework", "sglang") or "sglang").strip().lower()
-    # Discover the Magpie launch script: explicit handoff, generic env, then the
-    # per-backend env (MAGPIE_SGLANG_SCRIPT / MAGPIE_VLLM_SCRIPT / ...).
-    script = str(
-        h.get("launch_server_script")
-        or os.environ.get("MAGPIE_LAUNCH_SCRIPT", "")
-        or os.environ.get(f"MAGPIE_{backend.upper()}_SCRIPT", "")
-        or ""
-    ).strip()
+    # Discover the Magpie launch script, most explicit source first: handoff,
+    # generic env, per-backend env (MAGPIE_SGLANG_SCRIPT / MAGPIE_VLLM_SCRIPT),
+    # then derived from the launch recipe the handoff points at. The recipe is
+    # last because it is inferred rather than stated, but in practice it is the
+    # only source that is ever populated: the orchestrator names its recipe on
+    # every handoff and names the script on none of them.
+    script = str(h.get("launch_server_script") or "").strip()
+    source = "handoff"
+    if not script:
+        script = str(
+            os.environ.get("MAGPIE_LAUNCH_SCRIPT", "")
+            or os.environ.get(f"MAGPIE_{backend.upper()}_SCRIPT", "")
+            or ""
+        ).strip()
+        source = "env"
+    if not script:
+        script = _magpie_script_from_recipe(h)
+        source = "launch_recipe"
     if script:
         # Normalise onto the generic var the backend-agnostic launcher reads.
         os.environ["MAGPIE_LAUNCH_SCRIPT"] = script
+        os.environ["MAGPIE_LAUNCH_SCRIPT_SOURCE"] = source
 
     if requested and requested != "auto":
         launcher = requested
@@ -508,6 +602,26 @@ def apply_bench_launcher(h: dict) -> str:
     else:
         launcher = "native"
     os.environ["BENCH_LAUNCHER"] = launcher
+
+    # Magpie's script defaults max-model-len to a value of its own (4096) that
+    # has nothing to do with this run, and the orchestrator overrode it via env
+    # when it measured the reference. Forward the same env so the script bakes
+    # in the right value, instead of leaving the correct number to arrive as a
+    # duplicate --max-model-len in EXTRA_<BACKEND>_ARGS and win only because
+    # argparse happens to take the last occurrence. Only forwarded when the
+    # handoff carried it; absent => the script's own default stands, which is
+    # what the orchestrator served with.
+    #
+    # gpu-mem-util is deliberately NOT forwarded the same way: no handoff has
+    # ever carried mem_fraction, and the script's 0.95 default IS the recipe we
+    # are trying to match.
+    if launcher == "magpie":
+        try:
+            max_model_len = int(h.get("max_model_len") or 0)
+        except (TypeError, ValueError):
+            max_model_len = 0
+        if max_model_len > 0:
+            os.environ["MAX_MODEL_LEN"] = str(max_model_len)
     return launcher
 
 
@@ -516,20 +630,27 @@ def apply_alignment_flags(h: dict) -> dict:
 
     Currently: ``BENCH_COLD_FINAL`` — when on, bench_e2e.sh also measures ONE cold
     full round per bench (surfaced as ``cold_output_throughput_tok_s`` in each
-    bench_summary.json, folded into ``result.json.alignment_metrics``, and used by
-    the cold-preferred final-basis selection in :func:`normalize_result`). Default
-    ON — the cold round is what enables the cold-to-cold promotion, so we opt IN by
-    default; a caller disables it with an explicit falsey ``handoff.bench_cold_final``
-    or ``$BENCH_COLD_FINAL=0`` (e.g. to save the one extra full round per bench).
+    bench_summary.json and folded into ``result.json.alignment_metrics``).
+
+    Default OFF. The round is labelled "cold" but only the FIRST bench of a
+    session ever runs on a genuinely cold box: by the time the final leg is
+    benched, the JIT/HIP kernel caches, torch.compile artifacts and the page
+    cache are all warm, so its "cold" round is a warm round wearing the label.
+    That makes the two cold numbers incomparable — the baseline's cold round
+    pays the full cache-fill cost and the final's pays almost none — and the
+    asymmetry has shown up as a double-digit phantom speedup. It stays available
+    as a diagnostic (explicit truthy ``handoff.bench_cold_final`` or
+    ``$BENCH_COLD_FINAL=1``) but no longer costs an extra full round per bench
+    by default, and never decides the promoted number.
     Returns the flags it exported.
     """
     exported: dict[str, str] = {}
     raw = h.get("bench_cold_final")
     if raw is None:
         raw = os.environ.get("BENCH_COLD_FINAL")
-    # Default ON: enabled unless an explicit falsey value is given.
+    # Default OFF: enabled only on an explicit truthy value.
     if raw is None or str(raw).strip() == "":
-        on = True
+        on = False
     else:
         on = str(raw).strip().lower() in {"1", "true", "yes", "on"}
     os.environ["BENCH_COLD_FINAL"] = "1" if on else "0"
@@ -1093,12 +1214,22 @@ def _positive_finite_float(value: Any) -> float:
 
 def _build_baseline_alignment(
     same_config_divergence_pct: float | None,
+    recipe_aligned: bool = True,
 ) -> dict[str, Any]:
-    """Classify cross-harness alignment using only the same-config metric."""
+    """Classify cross-harness alignment using only the same-config metric.
+
+    ``recipe_aligned`` says whether this run launched its servers through the
+    orchestrator's own launch script. When it did not, the two harnesses served
+    DIFFERENT stacks (the orchestrator's script owns the platform kernel preset,
+    ``--trust-remote-code`` and the gpu-mem-util default), so a divergence is
+    evidence about the launch recipe, not about the box or the bench client.
+    Saying that in the status keeps the number from being read as "GEAK
+    measured slow".
+    """
     if same_config_divergence_pct is None:
         status = "unavailable"
     elif abs(same_config_divergence_pct) > SAME_CONFIG_DIVERGENCE_WARN_PCT:
-        status = "warning"
+        status = "warning" if recipe_aligned else "warning_recipe_unaligned"
     else:
         status = "aligned"
     return {
@@ -1107,7 +1238,170 @@ def _build_baseline_alignment(
         "divergence_pct": same_config_divergence_pct,
         "warning_threshold_pct": SAME_CONFIG_DIVERGENCE_WARN_PCT,
         "raw_session_divergence_is_measurement_signal": False,
+        "recipe_aligned_with_orchestrator": recipe_aligned,
     }
+
+
+# Kernel-selection lines a serving stack prints at startup. Substring matching
+# is backend-agnostic on purpose: the goal is not to enumerate backends but to
+# record WHICH kernels the engine actually chose, so a launch that silently fell
+# back to a slower stack is visible in result.json instead of only in a
+# thousand-line server log.
+_STACK_SIGNAL_PATTERNS = (
+    "Final IR op priority",
+    "for Fp8LinearMethod",
+    "Fp8 MoE backend",
+    "ttention backend",  # "Attention backend" / "attention backend"
+    "server_args=ServerArgs(",
+)
+_STACK_SIGNAL_MAX_PICKS = 8
+
+
+def _serving_stack_signals(log_path: Path) -> dict[str, Any]:
+    """Summarize the kernel stack a server actually came up with.
+
+    Returns ``{}`` when the log is unreadable (leg never ran / was cleaned), so
+    the caller can carry the field harmlessly on a standalone run.
+    """
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return {}
+    picks: list[str] = []
+    for line in text.splitlines():
+        if not any(pattern in line for pattern in _STACK_SIGNAL_PATTERNS):
+            continue
+        # Drop the pid / timestamp / module prefix so the pick itself is legible.
+        picks.append(line.rsplit("] ", 1)[-1].strip()[:220])
+        if len(picks) >= _STACK_SIGNAL_MAX_PICKS:
+            break
+    return {
+        # A raw count, not a verdict: the accelerated-kernel stack is chatty at
+        # startup, so a near-zero count is the signature of a launch that never
+        # enabled it. Observed on one 122B session: 5499 mentions on the
+        # orchestrator's server vs 4 on GEAK's, for the identical config.
+        "aiter_mentions": text.lower().count("aiter"),
+        "kernel_picks": picks,
+    }
+
+
+def _cold_penalty_pct(cold: Any, hot: Any) -> float | None:
+    """How far a leg's cold round fell below that same leg's hot median, in %.
+
+    Negative is the expected direction (the cold round pays JIT / graph-capture
+    / page-cache costs). Comparing the two legs' penalties is what reveals
+    whether their cold rounds were measured in comparable thermal states.
+    """
+    cold_value, hot_value = _positive_finite_float(cold), _positive_finite_float(hot)
+    if cold_value <= 0.0 or hot_value <= 0.0:
+        return None
+    return round((cold_value - hot_value) / hot_value * 100.0, 3)
+
+
+def _overlay_has_loadable_code(path: Path) -> bool:
+    """True when ``path`` is an overlay a consumer could actually PYTHONPATH into.
+
+    The Finalize phase creates ``final/overlay`` unconditionally and drops a
+    marker file (``README.txt``, ``EMPTY_NO_ACCEPTED_OVERLAY.txt``) into it when
+    nothing was accepted, so directory existence proves nothing. What makes an
+    overlay real is importable code: a top-level module, the manifest the
+    overlay loader reads, or an accepted ``cand_*`` subtree.
+    """
+    if not path.is_dir():
+        return False
+    if (path / "_overlay_manifest.json").is_file() or (path / "sitecustomize.py").is_file():
+        return True
+    if any(p.suffix == ".py" for p in path.iterdir() if p.is_file()):
+        return True
+    return any(
+        d.is_dir() and (
+            (d / "_overlay_manifest.json").is_file()
+            or (d / "sitecustomize.py").is_file()
+        )
+        for d in path.glob("cand_*")
+    )
+
+
+def _patch_has_hunks(path: Path) -> bool:
+    """True when ``path`` is a unified diff that would actually change something.
+
+    ``final_patch.diff`` is written even when there is nothing to patch — the
+    header/provenance preamble alone runs to over a kilobyte — so a size check
+    passes on a patch that applies zero edits. A unified diff changes a file
+    only through an ``@@`` hunk, so that marker is the real test.
+    """
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(line.startswith("@@") for line in text.splitlines())
+
+
+def _material_overlay_path(eval_dir: Path, wf: dict) -> str:
+    """Path to a real overlay, or ``""`` when this run produced none.
+
+    Advertising a path that holds nothing (or does not exist at all) makes a
+    caller believe there is something to reuse; an empty string tells it the
+    truth. The path recorded on the return wins when it still resolves,
+    otherwise we look for the product under the eval_dir we were handed.
+    """
+    recorded = str(wf.get("final_overlay") or "").strip()
+    candidates: list[Path] = [Path(recorded)] if recorded else []
+    candidates += [eval_dir / "final" / "overlay", eval_dir / "final"]
+    for candidate in candidates:
+        if _overlay_has_loadable_code(candidate):
+            return str(candidate)
+    return ""
+
+
+def _material_patch_path(eval_dir: Path, wf: dict) -> str:
+    """Path to a patch that carries at least one hunk, or ``""``."""
+    recorded = str(wf.get("final_patch") or "").strip()
+    candidates: list[Path] = [Path(recorded)] if recorded else []
+    candidates.append(eval_dir / "final" / "final_patch.diff")
+    for candidate in candidates:
+        if _patch_has_hunks(candidate):
+            return str(candidate)
+    return ""
+
+
+def _same_session_baseline(
+    base_leg_summary: dict, validation: dict
+) -> tuple[float, str]:
+    """The baseline leg measured in the SAME Validate session as the final leg.
+
+    ``baseline/bench_summary.json`` is minted during Setup, often hours before
+    the final leg runs, and the box moves under us in between (we have observed
+    -4%..+15% drift within a single session). Dividing a Validate-time final by
+    a Setup-time baseline therefore reports drift as optimization. The Validate
+    phase re-measures the unpatched engine right next to the patched one, so
+    that pair — and only that pair — is a valid A/B.
+
+    Preference order, most to least direct:
+      1. ``validation/base/bench_summary.json`` — the re-measured base leg.
+      2. Director's ``base_block.throughput_tok_s_median`` — same leg, as the
+         Director recorded it (used when the summary file was not kept).
+      3. Director's ``drift_corrected_baseline_tok_s`` — the Director's own
+         drift correction, whose key name is stable across schema versions
+         (unlike ``baseline_throughput_tok_s``, which means the Setup baseline
+         in some versions and the corrected one in others).
+
+    Returns ``(0.0, "")`` when no same-session leg exists, which leaves the
+    caller on its previous baseline.
+    """
+    value = _positive_finite_float(base_leg_summary.get("throughput_tok_s_median"))
+    if value > 0.0:
+        return value, "validation_base_bench_summary"
+    base_block = validation.get("base_block") or {}
+    value = _positive_finite_float(base_block.get("throughput_tok_s_median"))
+    if value > 0.0:
+        return value, "director_base_block"
+    value = _positive_finite_float(validation.get("drift_corrected_baseline_tok_s"))
+    if value > 0.0:
+        return value, "director_drift_corrected"
+    return 0.0, ""
 
 
 def normalize_result(h: dict, wf: dict) -> dict:
@@ -1115,30 +1409,39 @@ def normalize_result(h: dict, wf: dict) -> dict:
     validation = _read_json(eval_dir / "director_e2e_validation.json")
     baseline_summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
     final_summary = _read_json(eval_dir / "validation" / "final" / "bench_summary.json")
+    # The unpatched leg re-measured during Validate, next to the final leg.
+    base_leg_summary = _read_json(eval_dir / "validation" / "base" / "bench_summary.json")
 
-    # ── Reconcile a CONTRADICTORY return (do-no-harm guard for the Hyperloom
-    # interface) ────────────────────────────────────────────────────────────
-    # result.json must NEVER report no_gain over a real, parity-checked
-    # same-session win. A return can be internally inconsistent: it ACCEPTED a
-    # head/kernel (accepted_heads/kernels carry a positive e2e_delta_pct + a
-    # complete integrate A/B is on disk) yet reports a degenerate final/speedup
-    # — e.g. the final Validate bench crashed in engine-core init, so the
-    # Director number came back 0. When that happens, backfill the throughput /
-    # speedup / baseline / latency from the best accepted intermediate A/B on
-    # disk (the same source _recover_best_intermediate_win trusts), and tag the
-    # provenance so Hyperloom sees the number came from the disk A/B. We only do
-    # this for a LIVE return (not one we already recovered from disk).
+    # ── Reconcile a return with NO final measurement (do-no-harm guard for the
+    # Hyperloom interface) ───────────────────────────────────────────────────
+    # A run can accept a head/kernel (a positive e2e_delta_pct with a complete
+    # integrate A/B on disk) and then lose the final number entirely — the
+    # Validate bench crashes in engine-core init and the Director reports 0. A
+    # real, parity-checked same-session win must not be thrown away because the
+    # last bench died, so backfill throughput / speedup / baseline / latency /
+    # overlay from the best accepted intermediate A/B on disk and tag the
+    # provenance. Only for a LIVE return (not one we already recovered).
+    #
+    # A MEASURED final of <= 1.0x is NOT this case. That is Validate's verdict:
+    # it re-ran the accepted change against a fresh base and did not confirm the
+    # gain, which is precisely the check the intermediate A/B cannot perform for
+    # itself. Overriding it here would promote the number the arbitration just
+    # rejected, so the trigger is the ABSENCE of a final, never a low one. The
+    # disagreement is still worth recording — see intermediate_win_not_confirmed.
     wf_speedup_raw = float(wf.get("throughput_speedup") or validation.get("throughput_speedup") or 1.0)
     wf_final_raw = float(
         wf.get("final_throughput_tok_s")
         or validation.get("director_verified_throughput_tok_s")
         or 0.0
     )
-    if (
+    live_accepted_win = (
         not wf.get("recovered_from_disk")
         and _wf_best_accepted_delta_pct(wf) > 0.0
-        and (wf_speedup_raw <= 1.0 or wf_final_raw <= 0.0)
-    ):
+    )
+    intermediate_win_not_confirmed = (
+        live_accepted_win and wf_final_raw > 0.0 and wf_speedup_raw <= 1.0
+    )
+    if live_accepted_win and wf_final_raw <= 0.0:
         recovered = _recover_best_intermediate_win(eval_dir)
         if recovered is not None and float(recovered.get("throughput_speedup") or 0.0) > 1.0:
             merged = dict(wf)
@@ -1146,9 +1449,16 @@ def normalize_result(h: dict, wf: dict) -> dict:
                       "final_throughput_tok_s", "output_parity", "ttft_ms", "tpot_ms"):
                 if recovered.get(k) is not None:
                     merged[k] = recovered[k]
+            # The recovered win's own overlay (C7); "" means config-only, in
+            # which case whatever the return already carried still stands.
+            if recovered.get("final_overlay"):
+                merged["final_overlay"] = recovered["final_overlay"]
             merged["recovered_intermediate"] = True   # provenance -> disk_intermediate_win
+            merged["validate_final_missing"] = True
             wf = merged
-            validation = {}   # the on-disk Director json (if any) was the crashed bench
+            # The Director json (the crashed bench) is kept, not erased: it is
+            # the evidence for WHY we fell back here, and validation_evidence
+            # reports it. Every number above is already sourced from wf first.
 
     speedup = float(wf.get("throughput_speedup") or validation.get("throughput_speedup") or 1.0)
     status = "ok" if speedup > 1.0 else "no_gain"
@@ -1169,7 +1479,13 @@ def normalize_result(h: dict, wf: dict) -> dict:
     if wf.get("recovered_no_gain"):
         result_source = "disk_no_gain_synthesis"
     elif wf.get("recovered_intermediate"):
-        result_source = "disk_intermediate_win"
+        # disk_stack_provisional — salvaged from candidates the integrator gated
+        # "stack" (carry forward to compound), i.e. none of them cleared its bar
+        # for a standalone win and no Director ever arbitrated the combination.
+        result_source = (
+            "disk_stack_provisional" if wf.get("recovered_stack_provisional")
+            else "disk_intermediate_win"
+        )
     elif wf.get("recovered_from_disk"):
         result_source = "disk_director_validation"
     else:
@@ -1219,11 +1535,32 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # Cross-harness measurement-protocol check. GEAK's measured baseline is
     # seeded with the upstream orchestrator's accepted config, so compare it
     # separately with the raw session baseline and the same-config current best.
+    # The A/B pair must be measured in the same session (see
+    # _same_session_baseline). A recovered intermediate win already carries its
+    # own paired legs (ref_med/cand_med from one integrate A/B) and a synthesized
+    # no-gain deliberately reports baseline == final, so neither may be re-based.
+    same_session_base, baseline_basis_source = 0.0, ""
+    if not (wf.get("recovered_intermediate") or wf.get("recovered_no_gain")):
+        same_session_base, baseline_basis_source = _same_session_baseline(
+            base_leg_summary, validation
+        )
+    setup_baseline = _positive_finite_float(
+        baseline_summary.get("throughput_tok_s_median")
+    )
     geak_baseline = _positive_finite_float(
-        wf.get("baseline_throughput_tok_s")
+        same_session_base
+        or wf.get("baseline_throughput_tok_s")
         or validation.get("baseline_throughput_tok_s")
         or 0.0
     )
+    if not baseline_basis_source and geak_baseline > 0.0:
+        baseline_basis_source = (
+            "recovered_intermediate_ab"
+            if wf.get("recovered_intermediate")
+            else "no_gain_synthesis"
+            if wf.get("recovered_no_gain")
+            else "setup_baseline"
+        )
     geak_final = _positive_finite_float(
         wf.get("final_throughput_tok_s")
         or validation.get("director_verified_throughput_tok_s")
@@ -1241,10 +1578,43 @@ def normalize_result(h: dict, wf: dict) -> dict:
     )
     raw_session_divergence_pct = _divergence_pct(geak_baseline, orch_baseline)
     same_config_divergence_pct = _divergence_pct(geak_baseline, orch_same_cfg)
-    baseline_alignment = _build_baseline_alignment(same_config_divergence_pct)
+
+    # ── serving-stack provenance ─────────────────────────────────────────────
+    # WHO launched the server, and WHAT kernels it selected. A cross-harness
+    # comparison only means something when both sides served the same stack, and
+    # the biggest way that breaks is silent: the orchestrator's launch script
+    # exports the platform kernel preset and GEAK's own adapter does not, so the
+    # identical config serves measurably slower. Recording the launcher next to
+    # the kernels it produced makes that visible in the interface file.
+    launcher = os.environ.get("BENCH_LAUNCHER", "native")
+    recipe_aligned = launcher == "magpie"
+    serving_stack = {
+        "launcher": launcher,
+        "launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
+        "launch_script_source": os.environ.get("MAGPIE_LAUNCH_SCRIPT_SOURCE", ""),
+        "recipe_aligned_with_orchestrator": recipe_aligned,
+        "baseline": _serving_stack_signals(eval_dir / "baseline" / "server.log"),
+        "validation_base": _serving_stack_signals(
+            eval_dir / "validation" / "base" / "server.log"
+        ),
+    }
+    baseline_alignment = _build_baseline_alignment(
+        same_config_divergence_pct, recipe_aligned
+    )
     baseline_basis = {
         # GEAK's own measured baseline (Hyperloom-accepted config = fair engagement baseline; gating uses this).
         "geak_measured_baseline_tok_s": geak_baseline or None,
+        # Which leg the denominator above came from, so a reviewer can tell a
+        # same-session A/B from a Setup-time comparison at a glance.
+        "baseline_basis_source": baseline_basis_source or None,
+        # The Setup-time baseline, kept for audit even when it is no longer the
+        # denominator, plus how far the box moved between Setup and Validate.
+        # A large drift means the Setup number was never a valid denominator.
+        "setup_baseline_tok_s": setup_baseline or None,
+        "baseline_drift_pct": (
+            round((geak_baseline - setup_baseline) / setup_baseline * 100.0, 3)
+            if (geak_baseline > 0.0 and setup_baseline > 0.0) else None
+        ),
         # Hyperloom's own measured baseline forwarded in the handoff (the orchestrator reference).
         "orchestrator_baseline_tok_s": orch_baseline or None,
         # Audit-only comparison with the RAW session baseline. This includes
@@ -1289,7 +1659,21 @@ def normalize_result(h: dict, wf: dict) -> dict:
     geak_hot_final = geak_final
     geak_hot_baseline = geak_baseline
     geak_cold_final = final_summary.get("cold_output_throughput_tok_s")
-    geak_cold_baseline = baseline_summary.get("cold_output_throughput_tok_s")
+    # Pair the cold legs the same way the hot ones are paired. The Setup-time
+    # cold round ran on a genuinely cold box; the Validate-time one did not, so
+    # dividing the second by the first charges the baseline for a cache fill the
+    # final never paid and returns the difference as speedup. Prefer the base leg
+    # re-measured alongside the final; fall back to Setup only when Validate did
+    # not run one, and let cold_penalty_pct_* below expose how far apart the two
+    # legs' cold rounds really are.
+    if base_leg_summary.get("cold_output_throughput_tok_s") is not None:
+        geak_cold_baseline = base_leg_summary.get("cold_output_throughput_tok_s")
+        cold_baseline_hot_leg = base_leg_summary.get("throughput_tok_s_median")
+        cold_pairing = "same_session"
+    else:
+        geak_cold_baseline = baseline_summary.get("cold_output_throughput_tok_s")
+        cold_baseline_hot_leg = baseline_summary.get("throughput_tok_s_median")
+        cold_pairing = "setup_vs_validate" if geak_cold_baseline is not None else None
     alignment_metrics = {
         "geak_hot_final_tok_s": geak_hot_final or None,
         "geak_hot_baseline_tok_s": geak_hot_baseline or None,
@@ -1301,39 +1685,120 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "hot_geak_speedup": _safe_ratio(geak_hot_final, geak_hot_baseline),
         "cold_speedup": _safe_ratio(geak_cold_final, orch_baseline),
         "cold_geak_speedup": _safe_ratio(geak_cold_final, geak_cold_baseline),
+        # Which two rounds cold_geak_speedup divides: "same_session" is a valid
+        # A/B, "setup_vs_validate" is a comparison across thermal states and the
+        # ratio should be read as such (or ignored).
+        "cold_pairing": cold_pairing,
+        # How much each leg's cold round lost against its OWN hot median. These
+        # tell you whether the cold rounds are comparable at all: similar
+        # penalties mean both paid a similar cache-fill cost, while a large
+        # baseline penalty next to a small final one is the signature of a
+        # "cold" round that ran on an already-warm box.
+        "cold_penalty_pct_baseline": _cold_penalty_pct(
+            geak_cold_baseline, cold_baseline_hot_leg
+        ),
+        "cold_penalty_pct_final": _cold_penalty_pct(
+            geak_cold_final, final_summary.get("throughput_tok_s_median")
+        ),
     }
 
-    # ── final-throughput BASIS selection (cold-preferred when it's a real cold win) ──
-    # When a COLD full round was measured (BENCH_COLD_FINAL=1), prefer the COLD final
-    # as the PROMOTED number: it is the SAME thermal state as Hyperloom's cold
-    # baseline_tput denominator, so the promoted gain becomes a fair cold-to-cold
-    # ratio. BUT an authored-kernel overlay pays a one-off JIT / cuda-graph capture
-    # cost on the cold round that does not amortize in a single pass, so a genuine
-    # steady-state win can surface as a cold LOSS. Guard against promoting that:
-    # only switch to cold when the cold measurement is itself a NON-NEGATIVE gain
-    # (cold_speedup >= 1.0 vs the orchestrator cold baseline it will be compared
-    # against; fall back to the within-GEAK cold ratio when running standalone).
-    # Otherwise keep the HOT median (today's behaviour). Default (no cold round
-    # measured) => HOT, byte-identical to before.
-    final_tput_out = geak_final          # hot median (== the pre-change promoted value)
+    # ── final-throughput BASIS ─────────────────────────────────────────────────
+    # Always the HOT median, i.e. the same basis the baseline above is measured
+    # on. This used to switch to the cold round whenever the cold ratio looked
+    # like a gain, which replaced the numerator and the reported speedup but
+    # left the hot baseline in place as the denominator — so result.json shipped
+    # a cold-over-cold ratio next to a cold-over-hot pair and the two disagreed
+    # by up to ten points. The cold rounds could not carry the comparison
+    # anyway: only the first bench of a session runs cold (see bench_e2e.sh), so
+    # the baseline's cold round pays a cache-fill cost the final's never does.
+    # Cold numbers remain in alignment_metrics as a diagnostic.
+    final_tput_out = geak_final
     final_basis = "hot"
-    cold_gate = (
-        alignment_metrics["cold_speedup"]
-        if alignment_metrics["cold_speedup"] is not None
-        else alignment_metrics["cold_geak_speedup"]
-    )
-    if geak_cold_final and cold_gate is not None and cold_gate >= 1.0:
-        final_tput_out = float(geak_cold_final)
-        final_basis = "cold"
-        # Keep GEAK's own speedup field + status consistent with the chosen basis.
-        # (Hyperloom recomputes the promoted gain from final_throughput_tok_s /
-        # baseline_tput itself; this only keeps result.json self-consistent and the
-        # ok/no_gain status gate correct for the number we actually promote.)
-        cold_geak_sp = alignment_metrics["cold_geak_speedup"]
-        if cold_geak_sp is not None:
-            speedup = float(cold_geak_sp)
-            status = "ok" if speedup > 1.0 else "no_gain"
     alignment_metrics["final_basis"] = final_basis
+
+    # ── speedup self-consistency invariant ───────────────────────────────────
+    # Everything above can move the numerator or the denominator independently:
+    # the basis switch replaces the final, the same-session re-base replaces the
+    # baseline, and the reported speedup arrives precomputed from a third place.
+    # Whatever the path, the last word belongs to the pair we actually publish —
+    # a consumer that recomputes final/baseline must land on the same number we
+    # printed. When they disagree the reported ratio is describing some other
+    # pair, so rebuild it from ours and re-derive the ok/no_gain gate with it.
+    promoted_final = _positive_finite_float(final_tput_out)
+    speedup_basis = "workflow_return"
+    speedup_as_returned = speedup
+    if geak_baseline > 0.0 and promoted_final > 0.0:
+        pair_ratio = promoted_final / geak_baseline
+        if abs(pair_ratio - speedup) > SPEEDUP_SELF_CONSISTENCY_TOL:
+            speedup = round(pair_ratio, 6)
+            status = "ok" if speedup > 1.0 else "no_gain"
+            speedup_basis = "final_over_baseline"
+    alignment_metrics["speedup_basis"] = speedup_basis
+    # Only populated when we had to override, so its presence is the signal.
+    alignment_metrics["speedup_as_returned"] = (
+        speedup_as_returned if speedup_basis == "final_over_baseline" else None
+    )
+
+    # ── validation evidence ──────────────────────────────────────────────────
+    # A speedup number on its own cannot be judged: 1.01x is a solid win on a
+    # bench that repeats within 0.2% and pure noise on one that swings 3%. This
+    # block carries what a reader needs to decide — the arbitration verdict, the
+    # run-to-run spread of each leg, the Director's noise band, and whether the
+    # delta clears them. Reported, never enforced: nothing here changes status.
+    delta_pct = round((speedup - 1.0) * 100.0, 3)
+    base_spread_pct = _positive_finite_float(
+        base_leg_summary.get("output_throughput_tok_s_spread_pct")
+        or (validation.get("base_block") or {}).get("spread_pct")
+        or baseline_summary.get("output_throughput_tok_s_spread_pct")
+    )
+    final_spread_pct = _positive_finite_float(
+        final_summary.get("output_throughput_tok_s_spread_pct")
+        or (validation.get("final_block") or {}).get("spread_pct")
+    )
+    noise_band_pct = _positive_finite_float(validation.get("noise_band_pct"))
+    # A delta smaller than the benches' own scatter, or than the band the
+    # Director declared, is not measurable with the data we have.
+    significance_threshold_pct = max(noise_band_pct, base_spread_pct, final_spread_pct)
+    validation_evidence = {
+        "validation_status": (
+            validation.get("validation_status")
+            or wf.get("validation_status")
+            or None
+        ),
+        "speedup_basis": speedup_basis,
+        "delta_pct": delta_pct,
+        "noise_band_pct": noise_band_pct or None,
+        "baseline_spread_pct": base_spread_pct or None,
+        "final_spread_pct": final_spread_pct or None,
+        "significance_threshold_pct": significance_threshold_pct or None,
+        "delta_exceeds_noise": (
+            abs(delta_pct) > significance_threshold_pct
+            if significance_threshold_pct > 0.0 else None
+        ),
+        # Stricter than the threshold above: do the two legs' spread intervals
+        # (median +/- spread/2) stay apart? Overlapping intervals mean a single
+        # pair of runs could have produced either ordering. None unless BOTH
+        # legs reported a spread — one unknown side cannot be assumed tight.
+        "spreads_non_overlapping": (
+            geak_baseline * (1.0 + base_spread_pct / 200.0)
+            < promoted_final * (1.0 - final_spread_pct / 200.0)
+            if (geak_baseline > 0.0 and promoted_final > 0.0
+                and base_spread_pct > 0.0 and final_spread_pct > 0.0) else None
+        ),
+        "beats_orchestrator_same_config": (
+            promoted_final > orch_same_cfg if orch_same_cfg > 0.0 else None
+        ),
+        # An intermediate A/B claimed a win that the arbitrated re-check did not
+        # confirm. We keep Validate's verdict (see the reconcile above); this
+        # flag is how the disagreement stays visible instead of disappearing.
+        "intermediate_win_not_confirmed": intermediate_win_not_confirmed or None,
+        # The Validate bench produced no final at all and the number above came
+        # from the best accepted intermediate A/B on disk.
+        "validate_final_missing": bool(wf.get("validate_final_missing")) or None,
+        # How a disk-salvaged headline was chosen out of the candidate pool
+        # (see _recover_best_intermediate_win). Absent for an arbitrated result.
+        "recovery": wf.get("recovery_evidence") or None,
+    }
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1356,8 +1821,11 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # Sweep-reuse handles (see interface/run_e2e.md).
         "final_launch_script": final_launch,
         "bench_script": str(eval_dir / "bench_e2e.sh"),
-        "final_patch": str(eval_dir / "final" / "final_patch.diff"),
-        "final_overlay": wf.get("final_overlay") or str(eval_dir / "final" / "overlay"),
+        # Empty string == this run produced no reusable artifact of that kind.
+        # Never a path to a directory/diff that holds nothing (see
+        # _material_overlay_path / _material_patch_path).
+        "final_patch": _material_patch_path(eval_dir, wf),
+        "final_overlay": _material_overlay_path(eval_dir, wf),
         # Measurement basis: read back from the bench_summary.json that actually produced these numbers
         # (bench_e2e.sh records "aggregate_output_tok_s" or "aggregate_total_token_tok_s" per E2E_METRIC),
         # so the label never lies about the basis. Falls back to output when neither summary carries it.
@@ -1388,6 +1856,13 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "baseline_basis": baseline_basis,
         # Reliability classification is independent of the optimization status.
         "baseline_alignment": baseline_alignment,
+        # WHO launched the servers these numbers were measured on, and which
+        # kernels those servers selected. This is what tells a reviewer whether
+        # baseline_alignment's divergence is a measurement signal at all.
+        "serving_stack": serving_stack,
+        # Whether the reported delta is distinguishable from measurement noise,
+        # and what the arbitration actually concluded (see above). Audit only.
+        "validation_evidence": validation_evidence,
         # Cold/hot speedup cross-checks (double-check only; see alignment_metrics above).
         # Does NOT change the promoted final_throughput_tok_s / throughput_speedup.
         "alignment_metrics": alignment_metrics,
@@ -1436,6 +1911,27 @@ def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
         alignment.get("warning_threshold_pct"), digits=1, suffix="%"
     )
     status = str(alignment.get("status") or "unavailable")
+    stack = result.get("serving_stack") or {}
+    launcher = str(stack.get("launcher") or "unknown")
+    recipe_aligned = bool(alignment.get("recipe_aligned_with_orchestrator", True))
+    recipe_caveat = (
+        []
+        if recipe_aligned
+        else [
+            "",
+            (
+                "The servers behind these numbers were launched by GEAK's own "
+                "backend adapter, not by the upstream orchestrator's launch "
+                "script. That script owns the platform kernel preset, "
+                "`--trust-remote-code` and the gpu-memory-utilization default, so "
+                "the two harnesses did not serve the same stack. Read the "
+                "same-config divergence above as a launch-recipe difference, not "
+                "as a measurement or hardware signal, and check "
+                "`serving_stack.baseline.kernel_picks` for which kernels each "
+                "side actually selected."
+            ),
+        ]
+    )
     return "\n".join(
         [
             BASELINE_ALIGNMENT_BEGIN,
@@ -1450,6 +1946,8 @@ def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
             ),
             f"- Same-config divergence: {same_config_divergence}",
             f"- Alignment status: `{status}` (warning threshold: ±{threshold})",
+            f"- Server launch recipe: `{launcher}`",
+            *recipe_caveat,
             "",
             "Raw-session audit comparison:",
             "",
@@ -1780,77 +2278,259 @@ def _ir_float(ir: dict, *keys: str) -> float:
         return 0.0
 
 
+def _amdahl_ceiling_pct(pct_gpu_time: float, isolated: float) -> float:
+    """Largest e2e gain an op can produce, from its GPU-time share and isolated speedup.
+
+    Port of ``amdahlCeilingPct`` in e2e_workflow.js. ``inf`` when either input is
+    missing, so an unknown profile never flags anything (fail-open).
+    """
+    share = max(0.0, min(1.0, (pct_gpu_time or 0.0) / 100.0))
+    speedup = isolated if (isolated and isolated > 1.0) else 1.0
+    if share <= 0.0 or speedup <= 1.0:
+        return math.inf
+    return (1.0 / (1.0 - share * (1.0 - 1.0 / speedup)) - 1.0) * 100.0
+
+
+def _parity_is_soft(ir: dict) -> bool:
+    """Whether the candidate's acceptance rests on a SAMPLED accuracy probe.
+
+    Byte-exact parity is a hard correctness guarantee, so a speedup above the
+    Amdahl ceiling is believed. A sampled accuracy gate can be squeaked past by
+    degenerate output, so an impossible speedup there is treated as corruption.
+
+    Diverges from ``parityIsSoft`` in e2e_workflow.js in one place: the JS falls
+    back to the run's ``accuracy_gate`` arg when the label is absent or
+    unrecognized, and that arg is not in any on-disk artifact. An unlabelled
+    candidate is therefore treated as soft — the guard still needs the delta to
+    exceed twice the ceiling before it fires, and a missing profile makes the
+    ceiling infinite, so this cannot drop a win on schema grounds alone.
+    """
+    kind = str(_ir_get(ir, "parity_kind") or "").strip().lower()
+    if kind in ("byte_exact", "none"):
+        return False
+    return True
+
+
+def _is_implausible_speedup(ir: dict, delta_pct: float, ceiling_pct: float) -> bool:
+    """A gain so far past the op's ceiling that it reads as corruption, not a win."""
+    if not _parity_is_soft(ir) or not math.isfinite(ceiling_pct):
+        return False
+    return delta_pct > ceiling_pct * (1.0 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9
+
+
+def _integrate_candidates(eval_dir: Path) -> list[dict]:
+    """Every integrate A/B on disk, normalized and judged.
+
+    Each entry keeps the candidate's OWN paired legs (``ref_med`` / ``cand_med``)
+    separate from ``e2e_throughput_tok_s``, which is not this candidate's
+    measurement at all: the workflow uses it as the running stack throughput
+    (``curTput``) and carries the previous value forward on a reject. Mixing the
+    two — a cumulative numerator over a local denominator — describes no A/B
+    that was ever run.
+
+    Eligibility mirrors what the live workflow requires before it banks a
+    candidate (``integAccepted`` + the parity check), so a candidate the live
+    path would refuse cannot slip in through recovery.
+    """
+    records: list[dict] = []
+    seen: set[str] = set()
+    for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
+        if not base.is_dir():
+            continue
+        for cand in sorted(base.glob("cand_*")):
+            if cand.name in seen:
+                continue
+            ir = _read_json(cand / "integrate_result.json")
+            if not ir:
+                continue
+            seen.add(cand.name)
+            gate = str(ir.get("gate") or "")
+            delta_pct = _ir_float(ir, "e2e_delta_pct", "delta_pct")
+            ceiling_pct = _amdahl_ceiling_pct(
+                _ir_float(ir, "pct_gpu_time"), _ir_float(ir, "isolated_speedup")
+            )
+            implausible = _is_implausible_speedup(ir, delta_pct, ceiling_pct)
+            parity = str(ir.get("output_parity") or "")
+            separated = ir.get("separated")
+            if separated is None:
+                separated = (ir.get("pooled_all_repeats") or {}).get("separated")
+            if separated is None:
+                separated = _ir_get(ir, "non_overlapping")
+            records.append({
+                "dir": cand,
+                "ir": ir,
+                "short_name": str(ir.get("short_name") or cand.name[len("cand_"):]),
+                "gate": gate,
+                "delta_pct": delta_pct,
+                "ref_med": _ir_float(ir, "ref_med", "ref_median_tok_s"),
+                "cand_med": _ir_float(ir, "cand_med", "cand_median_tok_s"),
+                "stack_tput": _ir_float(ir, "e2e_throughput_tok_s"),
+                "amdahl_ceiling_pct": (
+                    round(ceiling_pct, 3) if math.isfinite(ceiling_pct) else None
+                ),
+                "implausible": implausible,
+                "output_parity": parity or None,
+                "separated": separated,
+                # winner_kind in {"env","config","flags"} => config-only.
+                "is_kernel": _ir_get(ir, "winner_kind") not in ("env", "config", "flags"),
+                "eligible": (
+                    gate in ("accepted", "stack")
+                    and delta_pct > 0.0
+                    and parity != "fail"
+                    and ir.get("ab_complete") is not False
+                    and not implausible
+                ),
+            })
+    return records
+
+
 def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
     """Salvage the best accepted intermediate win when the run died BEFORE Validate.
 
     The whole-pipeline workflow records each accepted config/kernel integrate as
     ``overlay/<cand>/integrate_result.json`` with a measured e2e delta + gate.
     When no ``director_e2e_validation.json`` exists (the run was killed
-    mid-pipeline), pick the BEST accepted, positive-delta intermediate so a real,
-    parity-checked win is NEVER silently discarded.
+    mid-pipeline), salvage the best one so a real, parity-checked win is NEVER
+    silently discarded.
+
+    Selection follows the integrator's own vocabulary and its own numbers:
+
+    * ``accepted`` outranks ``stack``. The integrator writes ``stack`` to mean
+      "non-negative, engaged, parity-safe — carry it forward to compound, but it
+      is NOT a standalone win and the Director decides the headline". Promoting
+      one as the headline says the opposite of what the gate says, so a
+      stack-only salvage is returned flagged as provisional.
+    * Rank by each candidate's own ``e2e_delta_pct``, not by absolute
+      throughput. Every candidate was measured against its own reference leg at
+      its own point in the session, so absolute values are not comparable
+      across candidates — ranking by them preferentially picks whichever
+      candidate happened to draw the slowest reference, which is a property of
+      the box, not of the kernel.
+    * Report the winner's own two legs as the pair. See
+      :func:`_integrate_candidates` for why ``e2e_throughput_tok_s`` is not one
+      of them.
 
     Schema-robust: the integrator's integrate_result.json may carry the numbers
     flat or nested under ``e2e`` / ``accepted_config`` (see :func:`_ir_get`); both
     are read. Returns a workflow-return-shaped dict (status derived later by
     :func:`normalize_result`) or ``None`` when nothing acceptable is on disk.
     """
-    best: dict | None = None
-    best_tput = 0.0
-    for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
-        if not base.is_dir():
-            continue
-        for cand in sorted(base.glob("cand_*")):
-            ir = _read_json(cand / "integrate_result.json")
-            if not ir or ir.get("gate") not in ("accepted", "stack"):
-                continue
-            delta = _ir_float(ir, "e2e_delta_pct", "delta_pct")
-            tput = _ir_float(ir, "e2e_throughput_tok_s", "cand_median_tok_s", "cand_med")
-            if delta > 0.0 and tput > best_tput:
-                best_tput, best = tput, ir
-    if best is None:
+    candidates = _integrate_candidates(eval_dir)
+    eligible = [c for c in candidates if c["eligible"]]
+    if not eligible:
         return None
+    # Candidates sharing a short_name are competing IMPLEMENTATIONS of one kernel
+    # — the workflow benches several backends per op and banks at most one — not
+    # stacked changes. Collapse them so the run is credited with distinct
+    # kernels rather than with one kernel once per backend attempted.
+    by_name: dict[str, dict] = {}
+    for cand in eligible:
+        incumbent = by_name.get(cand["short_name"])
+        if incumbent is None or cand["delta_pct"] > incumbent["delta_pct"]:
+            by_name[cand["short_name"]] = cand
+    banked = sorted(by_name.values(), key=lambda c: -c["delta_pct"])
+    accepted = [c for c in banked if c["gate"] == "accepted"]
+    stack_only = not accepted
+    best = max(
+        accepted or banked,
+        key=lambda c: (c["delta_pct"], c["cand_med"] or c["stack_tput"]),
+    )
 
-    ref_med = _ir_float(best, "ref_med", "ref_median_tok_s")
-    final_tput = best_tput
-    delta_pct = _ir_float(best, "e2e_delta_pct", "delta_pct")
+    ir = best["ir"]
+    delta_pct = best["delta_pct"]
+    if best["cand_med"] > 0.0 and best["ref_med"] > 0.0:
+        final_tput, ref_med = best["cand_med"], best["ref_med"]
+    else:
+        # Only the cumulative stack number survived. Pair it with the
+        # denominator its own delta implies rather than with a reference leg
+        # from a different comparison.
+        final_tput = best["cand_med"] or best["stack_tput"]
+        ref_med = final_tput / (1.0 + delta_pct / 100.0)
     speedup = (final_tput / ref_med) if ref_med > 0 else (1.0 + delta_pct / 100.0)
-    name = str(best.get("short_name") or "")
-    # winner_kind in {"env","config","flags"} => config-only (no authored kernel).
-    is_kernel = _ir_get(best, "winner_kind") not in ("env", "config", "flags")
+    # A win recovered from an intermediate A/B never reached Finalize, so there is
+    # no ``final/overlay`` bundle — but the code that produced the win is on disk
+    # in the candidate's own overlay, and the integrator names it in
+    # ``accepted_overlay`` (which for a stacked gate points at the base of the
+    # stack, not at this candidate). Carrying it forward is the difference between
+    # a reusable win and a number the caller cannot reproduce. Re-root by name
+    # under this eval_dir when the recorded path no longer resolves (the run was
+    # archived or moved), and fall back to the winning candidate's own directory.
+    overlay_out = ""
+    recorded_overlay = str(_ir_get(ir, "accepted_overlay") or "").strip()
+    for cand_path in (
+        Path(recorded_overlay) if recorded_overlay else None,
+        (eval_dir / "overlay" / Path(recorded_overlay).name) if recorded_overlay else None,
+        best["dir"],
+    ):
+        if cand_path is not None and _overlay_has_loadable_code(cand_path):
+            overlay_out = str(cand_path)
+            break
+    # The deployed overlay is the STACK, so every eligible candidate is credited,
+    # not just the one whose pair became the headline. Reporting one of several
+    # stacked kernels loses both the attribution and the fact that more than one
+    # change is live.
+    accepted_kernels = [
+        {"short_name": c["short_name"], "kind": "authored", "backend": "geak",
+         "e2e_delta_pct": c["delta_pct"], "gate": c["gate"],
+         "headline": c is best}
+        for c in banked if c["is_kernel"] and c["short_name"]
+    ]
+    # Same reasoning for env/flags: a config win banked before a later kernel win
+    # is still live on the server, and dropping it makes every downstream reuse
+    # relaunch an UN-optimized server. The integrator emits these under either
+    # ``apply_*`` (flat/nested-e2e schema) or ``accepted_*`` (summary schema).
+    flags: list[str] = []
+    env: list[str] = []
+    for c in banked:
+        for value, sink in (
+            (str(_ir_get(c["ir"], "apply_flags", "accepted_flags") or ""), flags),
+            (str(_ir_get(c["ir"], "apply_env", "accepted_env") or ""), env),
+        ):
+            if value and value not in sink:
+                sink.append(value)
     return {
         "eval_dir": str(eval_dir),
         "throughput_speedup": speedup,
         "baseline_throughput_tok_s": ref_med,
         "final_throughput_tok_s": final_tput,
-        "output_parity": best.get("output_parity"),
+        "output_parity": ir.get("output_parity"),
         "validation_status": "recovered_intermediate",
         # Latency from the candidate (accepted) A/B leg when the integrator recorded
         # it (flat or nested) — so result.json carries real ttft/tpot even without a
         # final Validate bench. None when absent (never fabricated).
-        "ttft_ms": _ir_get(best, "ttft_ms_cand", "ttft_ms_median", "cand_ttft_ms"),
-        "tpot_ms": _ir_get(best, "tpot_ms_cand", "tpot_ms_median", "cand_tpot_ms"),
-        "final_overlay": "",                 # config-only: applied via env/flags
+        "ttft_ms": _ir_get(ir, "ttft_ms_cand", "ttft_ms_median", "cand_ttft_ms"),
+        "tpot_ms": _ir_get(ir, "tpot_ms_cand", "tpot_ms_median", "cand_tpot_ms"),
+        # The accepted candidate's overlay, or "" for a config-only win (applied
+        # through env/flags, so there is no overlay to hand back).
+        "final_overlay": overlay_out,
         "final_launch_script": "",
-        "accepted_config": {
-            # The integrator emits the winning config under either key family:
-            # ``apply_flags``/``apply_env`` (flat/nested-e2e schema) OR
-            # ``accepted_flags``/``accepted_env`` (the integrate_result.json
-            # summary schema). Read BOTH so a disk-recovered win never loses its
-            # server flags/env — otherwise the recovered result.json carries an
-            # empty accepted_config and every downstream reuse (sweep /
-            # conc_sweep) relaunches an UN-optimized server. General across every
-            # env/flags/config winner, not model-specific.
-            "flags": str(_ir_get(best, "apply_flags", "accepted_flags") or ""),
-            "env": str(_ir_get(best, "apply_env", "accepted_env") or ""),
-        },
-        "accepted_kernels": (
-            [{"short_name": name, "kind": "authored", "backend": "geak",
-              "e2e_delta_pct": delta_pct}]
-            if is_kernel and name else []
-        ),
+        "accepted_config": {"flags": " ".join(flags), "env": " ".join(env)},
+        "accepted_kernels": accepted_kernels,
         "accepted_heads": [],
         "recovered_from_disk": True,
         "recovered_intermediate": True,
+        # No candidate cleared the integrator's own bar for a standalone win.
+        "recovered_stack_provisional": stack_only or None,
+        # How the headline was chosen, so picking a maximum out of N noisy
+        # candidates is visible rather than implicit.
+        "recovery_evidence": {
+            "candidates_considered": len(candidates),
+            "candidates_eligible": len(eligible),
+            "distinct_kernels_banked": len(banked),
+            "selected": best["short_name"],
+            "selected_gate": best["gate"],
+            "selection_basis": "max_e2e_delta_pct",
+            "amdahl_ceiling_pct": best["amdahl_ceiling_pct"],
+            "delta_over_amdahl_ceiling": (
+                round(delta_pct / best["amdahl_ceiling_pct"], 2)
+                if best["amdahl_ceiling_pct"] else None
+            ),
+            "distributions_separated": best["separated"],
+            "stack_only": stack_only or None,
+            "excluded_as_implausible": [
+                c["short_name"] for c in candidates if c["implausible"]
+            ] or None,
+        },
     }
 
 
@@ -2460,6 +3140,7 @@ def main(argv: list[str]) -> int:
         print(json.dumps({"mapped_args": ps_args, "bench_client": bench_client,
                           "bench_launcher": bench_launcher,
                           "magpie_launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
+                          "magpie_launch_script_source": os.environ.get("MAGPIE_LAUNCH_SCRIPT_SOURCE", ""),
                           "bench_protocol": bench_protocol,
                           "alignment_flags": alignment_flags,
                           "inferencex_path": os.environ.get("INFERENCEX_PATH", ""),

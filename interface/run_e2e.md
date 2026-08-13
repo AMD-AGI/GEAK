@@ -127,16 +127,17 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
   "schema_version": 2,
   "status": "ok | no_gain | error",
   "eval_dir": "/work/experiment/geak/e2e_<model>_<ts>",
-  "baseline_throughput_tok_s": 1485.4,   // baseline (= caller best config)
-  "final_throughput_tok_s": 1551.4,
-  "throughput_speedup": 1.044,
+  "baseline_throughput_tok_s": 1485.4,   // baseline leg, measured in the SAME session as the final
+  "final_throughput_tok_s": 1551.4,      // hot median, always the same basis as the baseline
+  "final_throughput_basis": "hot",
+  "throughput_speedup": 1.044,           // ALWAYS equals final/baseline above (see invariant below)
   "output_parity": "pass | fail | n/a | unknown",
   "ttft_ms": 3598.0,                     // median, aligned with caller's ttft
   "tpot_ms": 39.5,                       // median, aligned with caller's tpot
   "final_launch_script": ".../final/final_launch.sh",  // self-contained: overlay/flags/env baked in
   "bench_script": ".../bench_e2e.sh",    // supports REUSE_SERVER=1 + CONC/ISL/OSL
-  "final_patch": ".../final/final_patch.diff",
-  "final_overlay": ".../final/overlay",
+  "final_patch": ".../final/final_patch.diff",   // "" when the run produced no applicable hunk
+  "final_overlay": ".../final/overlay",          // "" when the run produced no loadable overlay
   "metric_basis": "aggregate_output_tok_s",   // NOT per-GPU; matches Magpie output_throughput
   "bench_client": "inferencex",               // inferencex => identical client to caller; else native
   "validated_regimes": [ { "isl": 1024, "osl": 1024, "conc": 64 } ],  // redo parity outside these
@@ -145,6 +146,9 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
   "accepted_config": { "flags": "...", "env": "..." },
   "baseline_basis": {
     "geak_measured_baseline_tok_s": 1551.4,
+    "baseline_basis_source": "validation_base_bench_summary", // which leg the denominator came from
+    "setup_baseline_tok_s": 1498.2,        // Setup-time baseline, audit only
+    "baseline_drift_pct": 3.55,            // how far the box moved between Setup and Validate
     "orchestrator_baseline_tok_s": 1485.4,
     "raw_session_baseline_divergence_pct": 4.44, // audit only; includes accepted config gain
     "orchestrator_best_tput_same_config": 1550.8,
@@ -152,17 +156,101 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
     "measurement_divergence_pct": 0.04 // backward-compatible alias
   },
   "baseline_alignment": {
-    "status": "aligned | warning | unavailable",
+    "status": "aligned | warning | warning_recipe_unaligned | unavailable",
     "primary_metric": "current_best_same_config_divergence_pct",
     "divergence_pct": 0.04,
     "warning_threshold_pct": 3.0,
-    "raw_session_divergence_is_measurement_signal": false
+    "raw_session_divergence_is_measurement_signal": false,
+    "recipe_aligned_with_orchestrator": true   // false => the two harnesses served different stacks
+  },
+  "serving_stack": {                       // WHO launched the servers, and what they picked
+    "launcher": "magpie | native",
+    "launch_script": "/.../benchmarks/vllm_mi355x.sh",  // "" on the native path
+    "launch_script_source": "handoff | env | launch_recipe",
+    "recipe_aligned_with_orchestrator": true,
+    "baseline": {
+      "aiter_mentions": 5499,             // near-zero => the accelerated stack never came up
+      "kernel_picks": ["Selected AiterFp8BlockScaledMMKernel for Fp8LinearMethod", "..."]
+    },
+    "validation_base": { "aiter_mentions": 5471, "kernel_picks": ["..."] }
+  },
+  "validation_evidence": {                 // audit only; never changes status
+    "validation_status": "validated_win",
+    "speedup_basis": "workflow_return | final_over_baseline",
+    "delta_pct": 4.4,
+    "noise_band_pct": 1.0,                 // the Director's declared band for this box
+    "baseline_spread_pct": 0.2,            // run-to-run scatter of each leg
+    "final_spread_pct": 0.3,
+    "significance_threshold_pct": 1.0,     // the widest of the three above
+    "delta_exceeds_noise": true,
+    "spreads_non_overlapping": true,       // null unless BOTH legs reported a spread
+    "beats_orchestrator_same_config": true,
+    "intermediate_win_not_confirmed": null, // true => Validate did not confirm an accepted A/B
+    "validate_final_missing": null          // true => the final number came from a disk A/B
   },
   "report_path": ".../final_report.md",  // human report: per-kernel optimizations, changed params, TTFT/TPOT
   "kernel_journey_path": ".../kernel_journey.json",  // per-kernel journey contract (see below); absent if nothing accepted
   "recovered_from_disk": true             // present+true only when the handoff was rebuilt from on-disk artifacts
 }
 ```
+
+### The reported speedup is always the reported pair
+
+`throughput_speedup` equals `final_throughput_tok_s / baseline_throughput_tok_s`
+to within 1e-3, without exception. A consumer may recompute it and will get the
+same answer. Three rules keep that true:
+
+* **Same-session pair.** The denominator is the unpatched leg re-measured during
+  Validate (`validation/base`), not the Setup baseline. The box drifts by several
+  percent within a session, and a Setup denominator reports that drift as
+  optimization. `baseline_drift_pct` says how much drift there was, and
+  `setup_baseline_tok_s` keeps the old number for audit.
+* **One basis.** Both sides are hot medians. Cold rounds never become the
+  promoted number: only the first bench of a session runs on a genuinely cold
+  box, so a "cold" final measured hours later is a warm round wearing the label,
+  and the ratio of the two is mostly cache-fill asymmetry. Cold numbers stay in
+  `alignment_metrics` as a diagnostic, where `cold_pairing` says whether the two
+  cold rounds are even comparable and `cold_penalty_pct_baseline` /
+  `cold_penalty_pct_final` show what each leg paid.
+* **The pair has the last word.** If anything upstream reports a speedup the
+  published pair contradicts, it is rebuilt from the pair and
+  `alignment_metrics.speedup_basis` becomes `final_over_baseline`, with the
+  original preserved in `speedup_as_returned`.
+
+A measured Validate verdict is never overridden. When Validate re-runs an
+accepted change and does not confirm the gain, that verdict is what ships, with
+`validation_evidence.intermediate_win_not_confirmed` recording the disagreement.
+Only a **missing** final (the Validate bench crashed, so there is no verdict at
+all) falls back to the best accepted intermediate A/B on disk.
+
+`final_patch` and `final_overlay` are empty strings unless the run produced
+something loadable — a diff with at least one hunk, an overlay with importable
+code. Finalize writes both unconditionally, so their existence proves nothing.
+
+### Choosing a headline out of a candidate pool
+
+When a run dies before Validate, the result is salvaged from the intermediate
+A/Bs on disk. Choosing one candidate out of several can manufacture a gain by
+itself, because taking a maximum over a noisy pool preferentially selects
+whichever candidate drew the most favourable reference leg. The selection rules
+mirror what `e2e_workflow.js` requires before it banks a candidate live:
+
+* `accepted` outranks `stack`. The integrator writes `stack` to mean
+  "non-negative, engaged, parity-safe — carry it forward to compound, but not a
+  standalone win". A stack-only salvage ships as `result_source:
+  "disk_stack_provisional"`.
+* Candidates are ranked by their own `e2e_delta_pct`, never by absolute
+  throughput, which is not comparable across candidates measured at different
+  points in the session.
+* A soft-gated (sampled-accuracy) candidate whose delta exceeds twice its
+  Amdahl ceiling is excluded, exactly as `integAccepted()` excludes it live.
+  Byte-exact parity outranks the ceiling and is trusted.
+* Parity failures and incomplete A/Bs are skipped.
+* Every distinct kernel in the stack is credited, and competing backends of one
+  kernel are counted once.
+
+`validation_evidence.recovery` records the pool size, the pick, its gate, its
+delta-over-ceiling ratio, and anything excluded, so the choice is auditable.
 
 `raw_session_baseline_divergence_pct` compares GEAK's accepted-config baseline
 with the caller's pre-change session baseline. It is audit-only because it
@@ -174,6 +262,29 @@ configuration in both harnesses and is the primary alignment metric.
 callers. If the handoff omits `orchestrator_best_tput_same_config`, both
 same-config fields are `null` and `baseline_alignment.status` is `unavailable`;
 GEAK never falls back to the raw-session divergence as a drift signal.
+
+### Same config is not the same stack
+
+Both harnesses can apply the identical flags and environment and still serve
+different engines, because the orchestrator launches its server through its own
+script and that script — not the transferred config — owns the platform kernel
+preset, `--trust-remote-code`, and the gpu-memory-utilization default. When GEAK
+launches through its native backend adapter instead, the accelerated kernel
+stack can silently fail to come up and the same configuration serves around ten
+percent slower. The divergence metric then measures the launch recipe, not the
+box or the bench client.
+
+`serving_stack` makes that legible without reading a server log. `launcher`
+says who launched (`magpie` = the orchestrator's own script, `native` = GEAK's
+adapter), and each leg's `aiter_mentions` / `kernel_picks` record which kernels
+the engine actually selected. A near-zero `aiter_mentions` next to a large
+negative divergence is the signature of an unaligned recipe, and
+`baseline_alignment.status` reports `warning_recipe_unaligned` for exactly that
+case so the number is not read as a measurement problem.
+
+Set `BENCH_LAUNCHER=native` in the environment to force the adapter launch; it
+outranks every other resolution path and is the escape hatch when the
+orchestrator's script cannot run.
 
 ## Handoff resilience (the workflow return is never the single point of failure)
 
@@ -289,3 +400,35 @@ exports `BENCH_CLIENT` + `INFERENCEX_PATH` so every `bench_e2e.sh` the agents ru
 inherits it. The profile round (server-side trace) always delegates back to the
 backend's native bench. The chosen client is echoed in `result.bench_client`, and
 the sweep reuse path carries it forward so sweep points use the same client.
+
+### Server-LAUNCHER adapter (closes the launch-recipe residual)
+
+The client adapter above aligns *who measures*; this one aligns *what is being
+measured*. `BENCH_LAUNCHER=magpie` makes `adapters/launchers/magpie.sh` run the
+orchestrator's own launch script for every fresh server, with the authored-kernel
+overlay prepended to `PYTHONPATH` (which the orchestrator's own path cannot do),
+so recipe parity and overlay application coexist. One adapter serves every
+backend, because the scripts share one server-phase contract.
+
+The script itself is resolved most-explicit-first: `handoff.bench_launcher` /
+`$BENCH_LAUNCHER` decide the launcher, then the script comes from
+`handoff.launch_server_script`, `$MAGPIE_LAUNCH_SCRIPT`,
+`$MAGPIE_<BACKEND>_SCRIPT`, or — the case that actually fires — is derived from
+`handoff.launch_recipe`. No handoff has ever named the launch script, but every
+one names the recipe, and the recipe names both the InferenceX checkout and the
+script filename inside its `benchmarks/` directory.
+`serving_stack.launch_script_source` records which of those sources won.
+
+Resolution degrades to `native` rather than failing whenever the script cannot
+be confirmed usable — recipe unreadable, checkout not present on this box, or
+the script's `benchmark_lib.sh` sibling missing. `BENCH_LAUNCHER=native` forces
+that degrade explicitly and is the escape hatch.
+
+`MAX_MODEL_LEN` is forwarded to the script on the `magpie` path only, because
+the script's own default (4096) has nothing to do with the run and the
+orchestrator overrode it by env when it measured the reference. gpu-mem-util is
+deliberately *not* forwarded: no handoff carries `mem_fraction`, and the
+script's 0.95 default is the recipe being matched. The script writes the server
+to `$LOG` and its own trace to `magpie_launch.log` next to it, because the
+script's redirect truncates `$LOG` and would otherwise destroy anything the
+adapter wrote there.

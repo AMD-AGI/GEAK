@@ -127,6 +127,204 @@ def test_recover_intermediate_nested_schema(tmp_path):
     assert out["tpot_ms"] == pytest.approx(103.456)
 
 
+# ── which intermediate becomes the headline ─────────────────────────────────
+# Salvaging a win means choosing one candidate out of a pool and calling its
+# number the run's result. The pool is small and noisy, so the choice itself can
+# manufacture a gain: taking a maximum over N preferentially selects whichever
+# candidate drew the most favourable reference leg. These tests pin the rules
+# that keep the choice honest — the same rules e2e_workflow.js applies when it
+# banks a candidate live.
+
+def _candidate(eval_dir: Path, name: str, **fields) -> Path:
+    """One integrate A/B on disk. Defaults describe a clean, believable win."""
+    cand_dir = eval_dir / "overlay" / f"cand_{name}"
+    cand_dir.mkdir(parents=True, exist_ok=True)
+    (cand_dir / "_overlay_manifest.json").write_text("{}", encoding="utf-8")
+    ir = {
+        "short_name": name,
+        "gate": "accepted",
+        "output_parity": "pass",
+        "parity_kind": "byte_exact",
+        "ab_complete": True,
+        "ref_med": 1000.0,
+        "cand_med": 1100.0,
+        "e2e_throughput_tok_s": 1100.0,
+        "e2e_delta_pct": 10.0,
+    }
+    ir.update(fields)
+    (cand_dir / "integrate_result.json").write_text(json.dumps(ir), encoding="utf-8")
+    return cand_dir
+
+
+def test_the_candidate_with_the_larger_delta_wins_not_the_faster_one(tmp_path):
+    """Each candidate was measured against its own reference leg at its own point
+    in the session, so absolute throughputs are not comparable across them.
+    Ranking by throughput picks whichever one drew the slowest reference."""
+    eval_dir = tmp_path / "e2e_rank"
+    _candidate(eval_dir, "real_win", ref_med=1000.0, cand_med=1100.0,
+               e2e_throughput_tok_s=1100.0, e2e_delta_pct=10.0)
+    _candidate(eval_dir, "lucky_ref", ref_med=1190.0, cand_med=1200.0,
+               e2e_throughput_tok_s=1200.0, e2e_delta_pct=0.84)
+
+    wf = rx._recover_best_intermediate_win(eval_dir)
+
+    assert wf["accepted_kernels"][0]["short_name"] == "real_win"
+    assert wf["throughput_speedup"] == pytest.approx(1.1)
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(1000.0)
+    assert wf["final_throughput_tok_s"] == pytest.approx(1100.0)
+
+
+def test_an_accepted_candidate_outranks_a_stacked_one(tmp_path):
+    """'stack' means non-negative and worth compounding, NOT a standalone win —
+    so it never displaces a candidate the integrator actually accepted."""
+    eval_dir = tmp_path / "e2e_gate"
+    _candidate(eval_dir, "accepted_win", gate="accepted", e2e_delta_pct=2.0,
+               ref_med=1000.0, cand_med=1020.0, e2e_throughput_tok_s=1020.0)
+    _candidate(eval_dir, "stacked", gate="stack", e2e_delta_pct=9.0,
+               ref_med=1000.0, cand_med=1090.0, e2e_throughput_tok_s=1090.0)
+
+    wf = rx._recover_best_intermediate_win(eval_dir)
+
+    assert wf["throughput_speedup"] == pytest.approx(1.02)
+    assert wf["recovery_evidence"]["selected"] == "accepted_win"
+    assert wf["recovery_evidence"]["selected_gate"] == "accepted"
+    assert wf.get("recovered_stack_provisional") is None
+
+
+def test_a_stack_only_salvage_is_reported_as_provisional(tmp_path):
+    """Nothing cleared the integrator's bar for a standalone win and no Director
+    ever arbitrated the combination, so the number ships labelled as such rather
+    than as a clean win."""
+    eval_dir = tmp_path / "e2e_stack_only"
+    _candidate(eval_dir, "gemm1", gate="stack", e2e_delta_pct=1.95,
+               ref_med=9216.263, cand_med=9395.961, e2e_throughput_tok_s=9395.961)
+    _candidate(eval_dir, "gemm2", gate="stack", e2e_delta_pct=0.358,
+               ref_med=9349.13, cand_med=9382.56, e2e_throughput_tok_s=9382.56)
+
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf["recovered_stack_provisional"] is True
+    assert wf["recovery_evidence"]["stack_only"] is True
+
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["result_source"] == "disk_stack_provisional"
+    assert out["validation_evidence"]["recovery"]["selected"] == "gemm1"
+
+
+def test_a_speedup_far_past_the_amdahl_ceiling_is_not_salvaged(tmp_path):
+    """The live path refuses to bank a soft-gated candidate whose delta exceeds
+    twice its theoretical ceiling (corruption doing less work looks like a win).
+    Recovery must not be a way around that check."""
+    eval_dir = tmp_path / "e2e_implausible"
+    # 25.5% GPU time at 1.0338x isolated caps the e2e gain at ~0.84%.
+    _candidate(eval_dir, "corrupt", parity_kind="accuracy", pct_gpu_time=25.5,
+               isolated_speedup=1.0338, e2e_delta_pct=1.95,
+               ref_med=9216.263, cand_med=9395.961, e2e_throughput_tok_s=9395.961)
+
+    assert rx._recover_best_intermediate_win(eval_dir) is None
+
+
+def test_byte_exact_parity_is_trusted_above_its_ceiling(tmp_path):
+    """The ceiling comes from an imperfect profile, so a hard correctness
+    guarantee outranks it — the guard only applies where parity was waived."""
+    eval_dir = tmp_path / "e2e_byte_exact"
+    _candidate(eval_dir, "real", parity_kind="byte_exact", pct_gpu_time=5.09,
+               isolated_speedup=1.1362, e2e_delta_pct=2.935,
+               ref_med=12503.149, cand_med=12870.056,
+               e2e_throughput_tok_s=12870.056)
+
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf is not None
+    assert wf["recovery_evidence"]["delta_over_amdahl_ceiling"] == pytest.approx(4.78, abs=0.02)
+
+
+def test_a_parity_failure_is_never_salvaged(tmp_path):
+    eval_dir = tmp_path / "e2e_parity"
+    _candidate(eval_dir, "broken", output_parity="fail", e2e_delta_pct=12.0)
+    assert rx._recover_best_intermediate_win(eval_dir) is None
+
+
+def test_an_incomplete_ab_is_never_salvaged(tmp_path):
+    """Only one leg was measured, so there is no ratio to report."""
+    eval_dir = tmp_path / "e2e_incomplete"
+    _candidate(eval_dir, "half_measured", ab_complete=False, e2e_delta_pct=12.0)
+    assert rx._recover_best_intermediate_win(eval_dir) is None
+
+
+def test_every_distinct_kernel_in_the_stack_is_credited(tmp_path):
+    """The deployed overlay is the whole stack, so reporting one of several
+    stacked kernels loses both the attribution and the fact that more than one
+    change is live."""
+    eval_dir = tmp_path / "e2e_stacked"
+    _candidate(eval_dir, "kernel_a", e2e_delta_pct=4.0,
+               ref_med=1000.0, cand_med=1040.0, e2e_throughput_tok_s=1040.0)
+    _candidate(eval_dir, "kernel_b", gate="stack", e2e_delta_pct=1.0,
+               ref_med=1040.0, cand_med=1050.4, e2e_throughput_tok_s=1050.4)
+
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    kernels = {k["short_name"]: k for k in wf["accepted_kernels"]}
+
+    assert set(kernels) == {"kernel_a", "kernel_b"}
+    assert kernels["kernel_a"]["headline"] is True
+    assert kernels["kernel_b"]["headline"] is False
+    assert kernels["kernel_b"]["gate"] == "stack"
+    assert wf["recovery_evidence"]["distinct_kernels_banked"] == 2
+
+
+def test_competing_backends_for_one_kernel_are_counted_once(tmp_path):
+    """The workflow benches several backends per op and banks at most one, so
+    two candidates sharing a short_name are alternatives, not a stack."""
+    eval_dir = tmp_path / "e2e_backends"
+    _candidate(eval_dir, "mhc_fused", e2e_delta_pct=7.266,
+               ref_med=2507.818, cand_med=2690.029, e2e_throughput_tok_s=2690.029)
+    triton = eval_dir / "overlay" / "cand_mhc_fused_c1_flydsl"
+    triton.mkdir(parents=True)
+    (triton / "integrate_result.json").write_text(json.dumps({
+        "short_name": "mhc_fused", "gate": "stack", "output_parity": "pass",
+        "parity_kind": "byte_exact", "ab_complete": True, "e2e_delta_pct": 1.569,
+        "ref_med": 2507.818, "cand_med": 2547.158,
+        "e2e_throughput_tok_s": 2547.158,
+    }), encoding="utf-8")
+
+    wf = rx._recover_best_intermediate_win(eval_dir)
+
+    assert [k["short_name"] for k in wf["accepted_kernels"]] == ["mhc_fused"]
+    assert wf["recovery_evidence"]["candidates_eligible"] == 2
+    assert wf["recovery_evidence"]["distinct_kernels_banked"] == 1
+
+
+def test_config_from_every_banked_candidate_is_carried_forward(tmp_path):
+    """A config win banked before a later kernel win is still live on the
+    server; dropping it makes every downstream reuse relaunch un-optimized."""
+    eval_dir = tmp_path / "e2e_config"
+    _candidate(eval_dir, "env_tuning", winner_kind="env", e2e_delta_pct=3.0,
+               apply_env="FOO=1", apply_flags="--flag-a",
+               ref_med=1000.0, cand_med=1030.0, e2e_throughput_tok_s=1030.0)
+    _candidate(eval_dir, "kernel_win", e2e_delta_pct=6.0,
+               ref_med=1030.0, cand_med=1091.8, e2e_throughput_tok_s=1091.8)
+
+    wf = rx._recover_best_intermediate_win(eval_dir)
+
+    assert wf["accepted_config"]["env"] == "FOO=1"
+    assert wf["accepted_config"]["flags"] == "--flag-a"
+    # The config winner is not an authored kernel, so only the kernel is listed.
+    assert [k["short_name"] for k in wf["accepted_kernels"]] == ["kernel_win"]
+
+
+def test_the_stack_throughput_is_not_divided_by_a_local_reference(tmp_path):
+    """e2e_throughput_tok_s is the running stack total, carried forward
+    unchanged on a reject; ref_med is this candidate's own leg. Dividing one by
+    the other describes no A/B that was ever run."""
+    eval_dir = tmp_path / "e2e_mixed"
+    _candidate(eval_dir, "only_stack_total", gate="stack", e2e_delta_pct=2.0,
+               ref_med=12797.505, cand_med=0, e2e_throughput_tok_s=12870.056)
+
+    wf = rx._recover_best_intermediate_win(eval_dir)
+
+    assert wf["throughput_speedup"] == pytest.approx(1.02)
+    assert wf["final_throughput_tok_s"] == pytest.approx(12870.056)
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(12870.056 / 1.02)
+
+
 def test_recover_workflow_return_falls_back_to_intermediate(tmp_path):
     eval_dir = _make_eval_dir(tmp_path, accepted=True, with_validation=False)
     wf = rx._recover_workflow_return(eval_dir.parent)

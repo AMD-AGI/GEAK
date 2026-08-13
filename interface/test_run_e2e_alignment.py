@@ -88,10 +88,18 @@ def test_issue6_names_raw_and_same_config_divergence_explicitly(
     assert out["baseline_alignment"]["status"] == "aligned"
 
 
-def test_same_config_divergence_above_threshold_is_warning(tmp_path: Path) -> None:
-    """A real same-config mismatch warns without changing optimization status."""
+def test_same_config_divergence_above_threshold_is_warning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A real same-config mismatch warns without changing optimization status.
+
+    Both harnesses launched through the same script here, so the divergence is
+    a measurement signal and gets the plain `warning`. See
+    test_run_e2e_measurement_basis.py for the unaligned-recipe counterpart.
+    """
     eval_dir = tmp_path / "e2e"
     eval_dir.mkdir()
+    monkeypatch.setenv("BENCH_LAUNCHER", "magpie")
     h = {
         "workload": {"isl": 1024, "osl": 1024, "conc": 64},
         "raw_baseline_tput": 1331.7541295483402,
