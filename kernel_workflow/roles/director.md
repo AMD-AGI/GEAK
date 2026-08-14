@@ -253,6 +253,16 @@ baseline latencies recorded at benchmark setup).
    the profile window. If `res["weighted"] is None` (all buckets identity/untrusted) the measurement is not
    trustworthy → re-measure per-bucket ms / regenerate; fall back to `geomean` only then. This is identical
    to what the unittest computes, so Director and TechLead arbitrate on the same instrument.
+
+   **ALSO report the DEVICE-basis weighted speedup when you can measure it.** The numbers above are
+   wall-clock, which includes a near-constant host/launch overhead on BOTH legs and so pulls the ratio
+   toward 1.0. Downstream, the e2e Amdahl plausibility guard divides your speedup into a **device-time**
+   GPU share — feeding it a wall-clock number under-states the ceiling and has already thrown away a real,
+   accuracy-verified end-to-end win. If your per-case parse exposes device time (a kernel-time column, or
+   the same benchmark run under a device timer), recompute `h.serving_weighted_speedup` on those latencies
+   and report it as `director_verified_speedup_weighted_device`. Omit the field if you genuinely cannot
+   measure device time — omission is handled and is far better than a guess. Never relabel the wall figure
+   as device.
 6. Arbitration vs the TechLead's claim (on the PRIMARY metric — `director_verified_speedup_weighted` from
    `h.serving_weighted_speedup`; `geomean` only when it returns `None`):
    - Within 10%, or Director higher → `accepted`.
@@ -297,6 +307,8 @@ Return JSON:
   "director_verified_speedup_geomean": 0.0,
   "director_verified_speedup_arithmetic": 0.0,
   "director_verified_speedup_weighted": 0.0,
+  "director_verified_speedup_weighted_device": 0.0,
+  "timing_basis": "device|wall|host_bound|unprimed|unknown",
   "tech_lead_reported_speedup_geomean": 0.0,
   "validation_status": "accepted|flagged",
   "correctness": "pass|fail",
@@ -306,6 +318,10 @@ Return JSON:
   "final_patch": "<EVAL_DIR>/final_patch.diff"
 }
 ```
+
+`director_verified_speedup_weighted_device` is the ONE optional key above: OMIT it entirely when you
+could not measure device time. An omitted key is handled downstream; a guessed or relabelled wall-clock
+value is not. `timing_basis` is never optional.
 
 If status is `flagged` because the result is reproducible-but-lower (not a correctness failure),
 still report the verified numbers — the script may accept the verified result as official. Only

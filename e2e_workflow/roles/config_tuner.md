@@ -64,6 +64,25 @@ out of the repeat count. Before the first candidate, take ONE `REPEATS=1` run of
 accepted config* into `$EVAL_DIR/config/base_screen` and compare every rung-1 candidate against
 THAT. Re-take it whenever a change is accepted, because the accepted config has moved.
 
+**Run every bench in the BACKGROUND and block in ONE call.** A `REPEATS=3` serving bench runs longer
+than the Bash tool's 600 s ceiling, so a foreground `... | tee` call times out and you are left polling.
+On the same measured run this role spent **31 of its 106 API calls on literal `echo idle`** — $1.99,
+23.7% of its own cost — buying nothing but elapsed time, while the kernel engineers (who background with
+a sentinel) spent **zero**. Wrap every `bench_e2e.sh` invocation below in this shape instead:
+
+```bash
+# Launch once, in the background, with a sentinel that records the exit code.
+( <the full BACKEND=... bash "$EVAL_DIR/bench_e2e.sh" command> >"$EVAL_DIR/logs/cfg_<dir_id>.log" 2>&1
+  echo $? >"$EVAL_DIR/logs/cfg_<dir_id>.done" ) &
+# Then ONE call with the Bash tool's timeout set to 600000 (its max) covers ~9.5 min of waiting:
+for i in $(seq 1 38); do [ -f "$EVAL_DIR/logs/cfg_<dir_id>.done" ] && break; sleep 15; done
+[ -f "$EVAL_DIR/logs/cfg_<dir_id>.done" ] && echo "DONE rc=$(cat "$EVAL_DIR/logs/cfg_<dir_id>.done")" \
+  || echo "STILL RUNNING"
+```
+
+Repeat that same wait call while it prints `STILL RUNNING`. Read the log after `DONE`, not during — a
+`tail` mid-run is another full API call for a number that is not final yet.
+
 For EACH direction, in the Architect's order:
 1. Build the candidate config = current accepted config + this ONE change.
 2. **Rung 1 — screen** (`REPEATS=1`, no profiling; delta vs the `base_screen` median):

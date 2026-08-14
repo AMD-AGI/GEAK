@@ -207,13 +207,30 @@ function expertSkillsBlock(role) {
     `overriding your isolated A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
 
+// Waiting rule, injected into EVERY role prompt (same text and same reason as e2e_workflow.js and
+// kernel_lane.js). Roles reached from here can be borrowed from another workflow's roles/ dir, so they
+// cannot be assumed to carry the rule in their own role file. See research/08 §4.
+const WAIT_RULE = `
+## WAITING (applies to every long job you background)
+Compiles and benchmarks outrun the Bash tool's ceiling, so you will background them and wait. NEVER wait
+by re-invoking a trivial command ("true", "date", "echo idle", a bare "sleep"): each poll is a FULL API
+call at your full context size and buys nothing but elapsed time. Background the job with a sentinel file
+and BLOCK inside ONE call — set that call's Bash timeout to 600000 (its maximum), which covers ~9.5
+minutes of waiting per call:
+    ( <cmd> >run.log 2>&1; echo $? >.done ) &
+    for i in $(seq 1 38); do [ -f .done ] && break; sleep 15; done
+    [ -f .done ] && echo "DONE rc=$(cat .done)" || echo "STILL RUNNING"
+Repeat that same wait call while it prints STILL RUNNING. Do not arm a Monitor and also poll — a monitor
+already notifies you between turns, so doing both pays twice and uses neither.
+`;
+
 // Read a role file from an arbitrary roles/ dir (used for e2e's op_benchmarker referenced in place).
 function roleAgentFrom(dir, role, phaseName, intro, inputs) {
   const base = `You are the ${role}. PHASE=${phaseName}.
 First Read ${dir}/roles/${role}.md and follow its instructions for PHASE=${phaseName}.
 Read any knowledge files it points you to under ${dir}/knowledge/.
 Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
-
+${WAIT_RULE}
 ## Inputs
 ${cfg(inputs)}
 

@@ -351,6 +351,14 @@ const VALIDATE_SCHEMA = obj({
   director_verified_speedup_geomean: { type: 'number' },
   director_verified_speedup_arithmetic: { type: 'number' },
   director_verified_speedup_weighted: { type: 'number' }, // PRIMARY when workload_aligned
+  // BASIS (optional, backward-safe: absent => callers fall back to the wall-clock figures above).
+  // The PRIMARY numbers are wall-clock. Consumers that divide a speedup into a DEVICE-time share — the
+  // e2e Amdahl plausibility guard does exactly this — need a device-basis figure, because wall time adds a
+  // near-constant host/launch overhead to both legs and pulls the ratio toward 1.0. director.md REQUIRES
+  // `timing_basis`; carry it (and the device-basis weighted speedup when measurable) across this boundary
+  // instead of dropping it, so a downstream guard is never handed an unlabelled number. See research/08 §3.
+  director_verified_speedup_weighted_device: { type: 'number' },
+  timing_basis: { type: 'string' },   // 'device' | 'wall' | 'host_bound' | 'unprimed' | 'unknown'
   tech_lead_reported_speedup_geomean: { type: 'number' },
   validation_status: { type: 'string' }, correctness: { type: 'string' },
   per_case: perCase, applied_to_original: { type: 'string' },
@@ -482,12 +490,31 @@ function expertSkillsBlock(role) {
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
 
+// Waiting rule, injected into EVERY role prompt here for the same reason it is injected in
+// e2e_workflow.js: on run 3 the one role that carried it (engineer, via roles/engineer.md rule 3a) made
+// 672 calls with ZERO no-op polls, while a role that did not carry it spent 23.7% of its cost on literal
+// "echo idle". Roles here background compiles and benchmarks constantly, so none of them should rely on
+// its own role file remembering to say this. See research/08 §4.
+const WAIT_RULE = `
+## WAITING (applies to every long job you background)
+Compiles and benchmarks outrun the Bash tool's ceiling, so you will background them and wait. NEVER wait
+by re-invoking a trivial command ("true", "date", "echo idle", a bare "sleep"): each poll is a FULL API
+call at your full context size and buys nothing but elapsed time. Background the job with a sentinel file
+and BLOCK inside ONE call — set that call's Bash timeout to 600000 (its maximum), which covers ~9.5
+minutes of waiting per call:
+    ( <cmd> >run.log 2>&1; echo $? >.done ) &
+    for i in $(seq 1 38); do [ -f .done ] && break; sleep 15; done
+    [ -f .done ] && echo "DONE rc=$(cat .done)" || echo "STILL RUNNING"
+Repeat that same wait call while it prints STILL RUNNING. Do not arm a Monitor and also poll — a monitor
+already notifies you between turns, so doing both pays twice and uses neither.
+`;
+
 function roleAgent(role, phase, intro, inputs) {
   const base = `You are the ${role}. PHASE=${phase}.
 First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
 Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.
 Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
-
+${WAIT_RULE}
 ## Inputs
 ${cfg(inputs)}
 
@@ -943,6 +970,12 @@ return {
   final_speedup: finalPrimary,                 // PRIMARY metric (weighted when workload-aligned)
   final_weighted: finalWeighted,
   final_geomean: finalGeomean,
+  // Device-basis weighted speedup + the basis label, carried through for consumers whose arithmetic is on
+  // device time (the e2e Amdahl guard). Both are optional upstream, so both are null when unreported —
+  // null keeps every existing caller on exactly its current number. See VALIDATE_SCHEMA above.
+  final_weighted_device: validation && validation.director_verified_speedup_weighted_device != null
+    ? validation.director_verified_speedup_weighted_device : null,
+  timing_basis: validation && validation.timing_basis ? validation.timing_basis : 'unknown',
   final_arithmetic: validation ? validation.director_verified_speedup_arithmetic : null,
   tech_lead_reported_geomean: report ? report.final_speedup_geomean : cumulative,
   validation_status: validation ? validation.validation_status : 'unknown',

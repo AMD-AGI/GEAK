@@ -198,6 +198,24 @@ function amdahlCeilingPct(pct_gpu_time, isolated) {
   if (p <= 0 || s <= 1) return Infinity;   // unknown inputs -> never flag (fail-open)
   return (1 / (1 - p * (1 - 1 / s)) - 1) * 100;
 }
+// BASIS (measured 2026-08-14, research/08 §3). `pct_gpu_time` is a DEVICE-time share read off the
+// profiler, so the ceiling arithmetic needs a DEVICE-basis isolated speedup. The director measures
+// wall-clock by default, which adds a near-constant host/launch overhead to BOTH legs of the ratio and
+// therefore pulls it toward 1.0 — feeding a wall-basis number into a device-time share UNDER-states the
+// ceiling and over-rejects. On the run that exposed this the same candidate measured 1.0383 wall vs
+// 1.0645 device, worth ~65% more headroom. Prefer the lane's device-basis figure whenever it reports one.
+// Accepts either a head CANDIDATE ({isolated, isolated_device}) or a raw kernel-lane return
+// ({final_weighted, final_geomean, final_weighted_device}). Order: device-basis, then the time-weighted
+// wall figure, then the geomean. The geomean is the WORST input here — it is an unweighted average over
+// cases, so on a workload-aligned task it does not even answer the question the ceiling asks, and it runs
+// below the weighted figure (1.0341 vs 1.0383 on the observed run), computing a still lower ceiling.
+function isoForCeiling(x) {
+  if (!x) return undefined;
+  const pick = (v) => (typeof v === 'number' && v > 1) ? v : null;
+  return pick(x.isolated_device) || pick(x.final_weighted_device)
+      || pick(x.isolated) || pick(x.final_weighted)
+      || x.final_geomean;
+}
 // PARITY-AWARE guard (fixes the false-positive that would DROP real wins). The Amdahl ceiling is derived
 // from an imperfect profile `pct_gpu_time`; a genuine win can legitimately exceed it when the profile
 // under-counts the op, or when the change has system-wide effects (memory pressure / batching / a config
@@ -240,6 +258,39 @@ function gateRejectReason(integ, pct_gpu_time, isolated) {
       && isImplausibleSpeedup(pct_gpu_time, isolated, integ))
     return `implausible_speedup (+${(integ.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pct_gpu_time, isolated).toFixed(1)}% on a soft/accuracy-gated accept — likely corruption/degenerate work)`;
   return integ ? (integ.reason || integ.gate || '') : '';
+}
+// The numbers behind an implausible_speedup verdict, so a rejection is FLAGGED with its evidence rather
+// than vanishing. Returns null when the delta is plausible. A measured, accuracy-verified win discarded on
+// this arithmetic is the single most expensive silent failure observed (research/08 §3): the run that hit
+// it threw away a gsm8k-verified +1.659% e2e after 7 A/B repeats and reported `accepted_heads: []` with no
+// trace of why. Every field here is carried into flagged_heads so the loss is visible in the report.
+function implausibleDetail(pct_gpu_time, isolated, integ) {
+  if (!isImplausibleSpeedup(pct_gpu_time, isolated, integ)) return null;
+  const ceiling = amdahlCeilingPct(pct_gpu_time, isolated);
+  const measured = (integ && integ.e2e_delta_pct) || 0;
+  return {
+    measured_e2e_delta_pct: measured,
+    amdahl_ceiling_pct: ceiling,
+    reject_threshold_pct: ceiling * (1 + IMPLAUSIBLE_SPEEDUP_MARGIN),
+    over_ceiling_x: ceiling > 0 ? measured / ceiling : null,
+    pct_gpu_time: pct_gpu_time || 0,
+    isolated_speedup: isolated || 0,
+    isolated_basis: 'device_if_reported_else_wall',   // see isoForCeiling()
+    parity_kind: (integ && integ.parity_kind) || `unknown(accuracy_gate=${ACCURACY_GATE})`,
+    implausible_speedup_margin: IMPLAUSIBLE_SPEEDUP_MARGIN,
+    e2e_throughput_tok_s: (integ && integ.e2e_throughput_tok_s) || null,
+    note: 'Integrator GATED THIS ACCEPTED; the Amdahl plausibility guard overrode it. If the profile '
+        + 'under-counts the op or its weights are not pure-trace, the ceiling is too low and this is a REAL '
+        + 'win that was dropped — re-check before dismissing.',
+  };
+}
+// A flag raised by implausibleDetail() is raised BEFORE the corrective re-author runs, because the guard
+// fires at the gate. If the corrective then banks a win for the same head, that flag is no longer a loss.
+// Mark it resolved rather than deleting it: the report should still show the guard fired AND show that the
+// head was recovered, otherwise the guard's cost stays invisible in exactly the runs where it was wrong.
+function resolveImplausibleFlag(flags, short_name, note) {
+  for (const f of flags)
+    if (f && f.short_name === short_name && f.gate === 'implausible_speedup' && !f.resolved) f.resolved = note;
 }
 // ---- DEEP MODE (opt-in, default OFF) ----------------------------------------------------------------
 // A long, thorough HeadKernel mode that pursues SOTA per head op via CROSS-BACKEND CO-OPTIMIZATION:
@@ -565,6 +616,26 @@ function expertSkillsBlock(role) {
     `only, never overriding your on-box A/B, never reducing a result below the measured baseline.`;
 }
 
+// Waiting rule, injected into EVERY role prompt. Measured on run 3 (2026-08-13, research/08 §4): the
+// kernel `engineer` role, the only role that carried this rule at the time, made 672 calls with ZERO
+// no-op polls and 127 correct blocking waits; `config_tuner`, which did not carry it, spent 31 of its
+// 106 calls on literal "echo idle" — $1.99, 23.7% of its own cost, buying nothing but elapsed time.
+// Every role backgrounds something eventually, so the rule belongs in the shared preamble rather than in
+// the handful of role files that happen to need it today. ~120 tokens on a cached prefix.
+const WAIT_RULE = `
+## WAITING (applies to every long job you background)
+Builds, benchmarks and server launches outrun the Bash tool's ceiling, so you will background them and
+wait. NEVER wait by re-invoking a trivial command ("true", "date", "echo idle", a bare "sleep"): each
+poll is a FULL API call at your full context size and buys nothing but elapsed time. Background the job
+with a sentinel file and BLOCK inside ONE call — set that call's Bash timeout to 600000 (its maximum),
+which covers ~9.5 minutes of waiting per call:
+    ( <cmd> >run.log 2>&1; echo $? >.done ) &
+    for i in $(seq 1 38); do [ -f .done ] && break; sleep 15; done
+    [ -f .done ] && echo "DONE rc=$(cat .done)" || echo "STILL RUNNING"
+Repeat that same wait call while it prints STILL RUNNING. Do not arm a Monitor and also poll — a monitor
+already notifies you between turns, so doing both pays twice and uses neither.
+`;
+
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
@@ -588,7 +659,7 @@ GPU_IDS=${GPU_IDS} is a SEPARATE OPTIMIZATION-PARALLELISM pool: it is used ONLY 
 work (op_bench bake-offs, shape-capture, the recursive kernel layer), where each task pins ONE id from
 the pool via GPU_ID. Do NOT use the serving TP/GPU set for that isolated work, and do NOT use a single
 optimization-pool id for a serving launch — keep the two separate.
-
+${WAIT_RULE}
 ## Inputs
 ${cfg(inall)}
 
@@ -968,13 +1039,17 @@ async function tryCorrectiveReauthor(spec) {
     // Implausible-speedup guard: a "win" whose e2e delta blows past the op's Amdahl ceiling is corruption
     // masquerading as a win (does less/degenerate work) — never bank it; treat as a correctness reject and
     // let the next corrective attempt fix it. GENERIC (uses only pct_gpu_time + isolated).
+    // The ceiling is computed on the DEVICE-basis / time-weighted speedup (isoForCeiling), not the geomean:
+    // pct_gpu_time is a device-time share, and an unweighted geomean measured wall-clock is the wrong number
+    // on both counts, computing too low a ceiling and over-rejecting. See isoForCeiling() and research/08 §3.
+    const isoGuard2 = isoForCeiling(fix);
     const implausible2 = ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack')
-      && isImplausibleSpeedup(pctForGuard, fix.final_geomean, integ2);
+      && isImplausibleSpeedup(pctForGuard, isoGuard2, integ2);
     if (ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack') && integ2.e2e_throughput_tok_s > curTput && !implausible2) {
       return { banked: true, integ: integ2, isolated: fix.final_geomean };
     }
     reason = implausible2
-      ? `implausible_speedup (+${(integ2.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pctForGuard, fix.final_geomean).toFixed(1)}% — corruption)`
+      ? `implausible_speedup (+${(integ2.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pctForGuard, isoGuard2).toFixed(1)}% — corruption)`
       : ((integ2 && (integ2.reason || integ2.gate)) || reason);
     // STRUCTURED stop (do NOT re-classify from the prose reason — it may MENTION "corruption" while saying
     // it was RESOLVED, which would loop wastefully). If this attempt made the kernel CORRECT (parity no
@@ -1762,7 +1837,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const alIso = al.final_weighted != null ? al.final_weighted : al.final_geomean;
       if (al.authored !== false && alIso > 1.0 && al.final_patch) {
         st.cands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
-          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
+          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso,
+          // Device-basis figure for the Amdahl guard only (isoForCeiling); null when the director did not
+          // measure one, which leaves every existing consumer on `isolated` exactly as before.
+          isolated_device: al.final_weighted_device != null ? al.final_weighted_device : null,
+          timing_basis: al.timing_basis || 'unknown' });
         log(`  ${j.short_name}: authored ${lang} ${alIso.toFixed(2)}x weighted (vs the frozen online kernel, not the seed).`);
       } else {
         log(`  ${j.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
@@ -1804,7 +1883,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           ENGAGEMENT_CHECK: h.engagement_check || '',
         },
         `integrate ${h.short_name}`, 'HeadKernel');
-      if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput) {
+      const ceilIsoP = isoForCeiling(cand);
+      if (integAccepted(integ, h.pct_gpu_time, ceilIsoP) && integ.e2e_throughput_tok_s > curTput) {
         curOverlay = integ.accepted_overlay || curOverlay;
         if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
         if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
@@ -1815,7 +1895,16 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       } else {
         // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
         // impossible (corruption) — so a fake win routes to the correctness corrective instead of banking.
-        const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
+        // FLAG it too: a guard-only rejection of an integrator-accepted win must never leave the run silently.
+        const implP = implausibleDetail(h.pct_gpu_time, ceilIsoP, integ);
+        if (implP) {
+          flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'e2e_gate',
+            gate: 'implausible_speedup', backend: cand.source, kind: cand.winner_kind, detail: implP,
+            reason: gateRejectReason(integ, h.pct_gpu_time, ceilIsoP) });
+          log(`  ⚠️ ${h.short_name}: GATED ACCEPTED (+${implP.measured_e2e_delta_pct}% e2e) but rejected by the plausibility ` +
+              `guard (${implP.over_ceiling_x ? implP.over_ceiling_x.toFixed(1) : '?'}x the +${implP.amdahl_ceiling_pct.toFixed(2)}% ceiling). FLAGGED — see flagged_heads.`);
+        }
+        const reason = gateRejectReason(integ, h.pct_gpu_time, ceilIsoP);
         const corr = (cand.kind === 'authored' && rejectClass(reason) !== '')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: st.ext.op_kind, shapes: st.ext.shapes, dtype: st.ext.dtype, regime: h.regime,
@@ -1838,6 +1927,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (corr.banked) {
           curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
           acceptedHeads.push({ short_name: h.short_name, op_kind: st.ext.op_kind, backend: cand.source, kind: 'authored', e2e_delta_pct: corr.integ.e2e_delta_pct, isolated: corr.isolated, corrective: true });
+          resolveImplausibleFlag(flaggedHeads, h.short_name, 'recovered_by_corrective_reauthor');
           log(`  ${h.short_name}: ACCEPTED after corrective re-author (${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
           history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
         } else {
@@ -1968,7 +2058,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const alIso = al && (al.final_weighted != null ? al.final_weighted : al.final_geomean);
       if (al && al.authored !== false && alIso > 1.0 && al.final_patch) {
         headCands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
-          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
+          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso,
+          // Device-basis figure for the Amdahl guard only (isoForCeiling); null when the director did not
+          // measure one, which leaves every existing consumer on `isolated` exactly as before.
+          isolated_device: al.final_weighted_device != null ? al.final_weighted_device : null,
+          timing_basis: al.timing_basis || 'unknown' });
         log(`  ${h.short_name}: authored ${lang} ${alIso.toFixed(2)}x weighted (vs the frozen online kernel, not the seed).`);
       } else {
         log(`  ${h.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
@@ -2028,7 +2122,20 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const abc = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
       if (sharedRefMed == null && abc && integ.ref_med) sharedRefMed = integ.ref_med;   // lock the shared ref
       if (ci === 0) top = { cand, inputs, integ, abc };
-      const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput;
+      const ceilIso = isoForCeiling(cand);
+      const passed = abc && integAccepted(integ, h.pct_gpu_time, ceilIso) && integ.e2e_throughput_tok_s > curTput;
+      // FLAG, never silently drop: when the integrator gated this ACCEPTED and only the plausibility guard
+      // overrode it, surface it with its numbers. Otherwise the run reports an empty accepted_heads and the
+      // measured win leaves no trace at all (research/08 §3).
+      const impl = abc ? implausibleDetail(h.pct_gpu_time, ceilIso, integ) : null;
+      if (impl) {
+        flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'e2e_gate',
+          gate: 'implausible_speedup', backend: cand.source, kind: cand.winner_kind,
+          reason: gateRejectReason(integ, h.pct_gpu_time, ceilIso), detail: impl });
+        log(`  ⚠️ ${h.short_name}: candidate ${cand.source} was GATED ACCEPTED (+${impl.measured_e2e_delta_pct}% e2e) but the ` +
+            `plausibility guard rejected it (${impl.over_ceiling_x ? impl.over_ceiling_x.toFixed(1) : '?'}x the +${impl.amdahl_ceiling_pct.toFixed(2)}% ` +
+            `Amdahl ceiling at ${impl.pct_gpu_time}% GPU / ${impl.isolated_speedup}x iso). FLAGGED, not silently dropped — see flagged_heads.`);
+      }
       // Persist EVERY candidate's MEASURED e2e (one ledger row per backend, keyed short_name:backend) so the
       // report + experience library keep the full per-backend picture — not just the winning backend.
       history.ledger.push({ direction: `${h.short_name}:${cand.source}`, isolated_speedup: cand.isolated || 0,
@@ -2039,7 +2146,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (!bestPick || integ.e2e_throughput_tok_s > bestPick.integ.e2e_throughput_tok_s) bestPick = { cand, integ };
         log(`  ${h.short_name}: candidate ${cand.source} PASSED e2e gate (${integ.e2e_throughput_tok_s} tok/s, +${integ.e2e_delta_pct}%).`);
       } else {
-        log(`  ${h.short_name}: candidate ${cand.source} ${abc ? `rejected (${gateRejectReason(integ, h.pct_gpu_time, cand.isolated)})` : `A/B incomplete (${integ ? integ.reason || integ.gate : 'null/timeout'})`}.`);
+        log(`  ${h.short_name}: candidate ${cand.source} ${abc ? `rejected (${gateRejectReason(integ, h.pct_gpu_time, ceilIso)})` : `A/B incomplete (${integ ? integ.reason || integ.gate : 'null/timeout'})`}.`);
       }
     }
 
@@ -2079,6 +2186,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed crash: ${reason}` });
         } else {
           pendingIntegrations.push({ track: 'head', short_name: h.short_name, isolated: cand.isolated || 0,
+            // Carry the device-basis figure so the FINALIZE gate runs the same guard on the same basis as
+            // the head gate did; without it the finalize path silently reverts to the wall-clock number.
+            isolated_device: cand.isolated_device || null,
             pct_gpu_time: h.pct_gpu_time, inputs: headIntegrateInputs,
             winner_kind: cand.winner_kind, apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
             op_kind: ext.op_kind, backend: cand.source,
@@ -2090,7 +2200,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
         // impossible (corruption); rejectClass then routes parity/accuracy/implausible rejects to the
         // correctness corrective and JIT/capture/host-sync rejects to the integration corrective.
-        const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
+        const reason = gateRejectReason(integ, h.pct_gpu_time, isoForCeiling(cand));
         const corr = (cand.kind === 'authored')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
@@ -2102,6 +2212,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (corr.banked) {
           curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
           acceptedHeads.push({ short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: 'authored', e2e_delta_pct: corr.integ.e2e_delta_pct, isolated: corr.isolated, corrective: true });
+          resolveImplausibleFlag(flaggedHeads, h.short_name, 'recovered_by_corrective_reauthor');
           log(`  ${h.short_name}: ACCEPTED after corrective re-author. e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
           history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
         } else {
@@ -2124,9 +2235,23 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   }
   log(`Head-kernel track done. ${acceptedHeads.length} accepted, throughput ${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x).`);
   if (flaggedHeads.length) {
-    log(`⚠️ ${flaggedHeads.length} DOMINANT head(s) FLAGGED (not optimized, NOT silently skipped): ` +
-      flaggedHeads.map(f => `${f.short_name} [${(f.pct_gpu_time || 0).toFixed(1)}% GPU, ${f.gate}${f.harness_error ? '/harness' : ''}]`).join('; ') +
-      `. These carry the most headroom — see the report's FLAGGED section.`);
+    // Two distinct kinds live here now: heads that could NOT be optimized (extract/bakeoff/no_candidate),
+    // and heads that WERE optimized, measured a real e2e gain, and were then overridden by the plausibility
+    // guard. Report them separately — calling the second kind "not optimized" hides the more expensive loss.
+    const guardKilled = flaggedHeads.filter(f => f.gate === 'implausible_speedup' && !f.resolved);
+    const notOptimized = flaggedHeads.filter(f => f.gate !== 'implausible_speedup');
+    if (notOptimized.length) {
+      log(`⚠️ ${notOptimized.length} DOMINANT head(s) FLAGGED (not optimized, NOT silently skipped): ` +
+        notOptimized.map(f => `${f.short_name} [${(f.pct_gpu_time || 0).toFixed(1)}% GPU, ${f.gate}${f.harness_error ? '/harness' : ''}]`).join('; ') +
+        `. These carry the most headroom — see the report's FLAGGED section.`);
+    }
+    if (guardKilled.length) {
+      log(`⚠️ ${guardKilled.length} head(s) MEASURED an e2e gain the integrator accepted, then REJECTED by the ` +
+        `Amdahl plausibility guard: ` +
+        guardKilled.map(f => `${f.short_name} [+${((f.detail && f.detail.measured_e2e_delta_pct) || 0).toFixed(2)}% vs ` +
+          `+${((f.detail && f.detail.amdahl_ceiling_pct) || 0).toFixed(2)}% ceiling at ${(f.pct_gpu_time || 0).toFixed(1)}% GPU]`).join('; ') +
+        `. If the profile under-counts these ops the ceiling is too low and these are REAL wins — see flagged_heads.detail.`);
+    }
   }
 }
 
@@ -2248,7 +2373,8 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // Backward-compatible: null (timeout/hang/degrade) or an explicit incomplete
     // flag => not done; a legacy return without ab_complete behaves as before.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
-    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.final_geomean) && integ.e2e_throughput_tok_s > curTput) {
+    const klIsoGuard = isoForCeiling(kl);   // device-basis / weighted, never the bare geomean — see isoForCeiling()
+    if (abDone && integAccepted(integ, c.pct_gpu_time, klIsoGuard) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       curTput = integ.e2e_throughput_tok_s;
       acceptedKernels.push({ short_name: c.short_name, backend: kl.note || '', e2e_delta_pct: integ.e2e_delta_pct, isolated: kl.final_geomean });
@@ -2260,7 +2386,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       // crash-during-warmup (ab_complete=false) of an iso-verified editable kernel earns a corrective
       // re-author (re-optimize the EXISTING kernel; NOT charged to HEAD_BUDGET); only keep PENDING if the
       // A/B was merely incomplete for a NON-fixable reason (real transient timeout/hang). See tryCorrectiveReauthor.
-      const reason = gateRejectReason(integ, c.pct_gpu_time, kl.final_geomean);
+      const reason = gateRejectReason(integ, c.pct_gpu_time, klIsoGuard);
       const corr = (rejectClass(reason) !== '')
         ? await tryCorrectiveReauthor({
             short_name: c.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: c.regime,
@@ -2277,6 +2403,9 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         history.ledger.push({ direction: c.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
       } else if (!abDone) {
         pendingIntegrations.push({ track: 'milestone', short_name: c.short_name, isolated: kl.final_geomean,
+          // Same basis the milestone gate used (klIsoGuard), so the finalize gate does not silently fall
+          // back to the unweighted wall-clock geomean and compute a lower ceiling than the gate that ran here.
+          isolated_device: klIsoGuard != null && klIsoGuard !== kl.final_geomean ? klIsoGuard : null,
           pct_gpu_time: c.pct_gpu_time, inputs: mileIntegrateInputs, backend: kl.note || '',
           partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
         log(`  ${c.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
@@ -2408,7 +2537,10 @@ if (want('final')) {
       // measured against the latest accepted baseline.
       { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
       `finish-integrate ${p.short_name}`, 'Finalize');
-    if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
+    // Same basis as the gate that queued this (isoForCeiling reads p.isolated_device when it was carried,
+    // p.isolated otherwise) — a pending win must not be judged on a different clock than a live one.
+    const pIsoGuard = isoForCeiling(p);
+    if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, pIsoGuard) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       if (p.track === 'head') {
         if (p.winner_kind === 'env' && p.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + p.apply_env;
