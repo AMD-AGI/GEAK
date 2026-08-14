@@ -56,6 +56,12 @@ const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
 const KERNEL_PATH_ORIG = A.kernel_path;
 const KERNEL_NAME_HINT = String(KERNEL_PATH_ORIG).replace(/\/+$/, '').split('/').pop();
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
+// Per-lane WALL-CLOCK cap, forwarded to every worker lane. mode=optimize/author already forwards it in the
+// {...A} spread below; the bake-off dispatcher builds its lane args explicitly, so without this the caps
+// would silently stop at that boundary — and bake-off is exactly where one slow lane stalls a parallel
+// barrier. kernel_lane.js treats 0/absent as "no deadline", so an unset value stays byte-identical.
+const LANE_BUDGET_ARG = A.lane_deadline_ms != null && parseInt(A.lane_deadline_ms, 10) > 0
+  ? { lane_deadline_ms: parseInt(A.lane_deadline_ms, 10) } : {};
 const TASK = A.task || '';
 const OP_SPEC = A.op_spec || {};
 const WORKLOAD_SPEC_PATH = String(A.workload_spec_path || (OP_SPEC && OP_SPEC.workload_path) || '').trim();
@@ -399,7 +405,7 @@ const sem = makeSem(GPU_LIST);
 const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
   try {
     const r = absorbNested(await workflow({ scriptPath: WORKER }, {
-      kernel_path: oracle.task_dir, workflow_dir: WORKFLOW_DIR,
+      kernel_path: oracle.task_dir, workflow_dir: WORKFLOW_DIR, ...LANE_BUDGET_ARG,
       mode: l.mode, target_language: l.lang,
       op_spec: oracle.op_spec || OP_SPEC, workload_spec_path: oracle.workload_path || WORKLOAD_SPEC_PATH || '',
       budget: BUDGET, gpu_ids: gpu, gpu_mode: GPU_MODE, task: TASK, apply_to_original: 'false',

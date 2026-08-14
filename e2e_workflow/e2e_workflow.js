@@ -1124,6 +1124,34 @@ if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HE
     log(`[time-budget] dispatch deadline (${Math.round(TIME_HEAD_DEADLINE_MS / 60000)}min of ${Math.round(TIME_BUDGET_MS / 60000)}min budget) reached — no NEW head/milestone work will start; finishing in-flight then proceeding to Finalize/Report/Validate before the hard kill.`);
   }, TIME_HEAD_DEADLINE_MS);
 }
+// --- Per-lane wall-clock cap handed DOWN to each nested kernel lane ----------------------------------
+// The deadline above stops this workflow from DISPATCHING new head/milestone work. It cannot stop a lane
+// that is already running, and until now nothing did: in the 2026-08-13 Qwen3-14B run the HeadKernel phase
+// held 10.12h of a 12.82h run inside ONE lane, hours past this deadline, while heads 2 and 3 never started
+// and the milestone track never opened. So give the lane its own budget and split the head window across
+// the heads we mean to run. kernel_lane.js reads it at a ROUND boundary and still runs its Report/Validate,
+// so this bounds how long a lane EXPLORES and never discards a result it already banked.
+// The 2h FLOOR is measured, not guessed. A lane pays a fixed cost before its first optimization round can
+// start — Setup, Analyze, Author, Benchmark, Profile. In the 2026-08-13 run that cost was 55min (kernel/
+// Author opened 13:09:13, kernel/Optimize 14:04:45), and Report+Validate still have to run afterwards. A
+// cap anywhere near an hour therefore buys the authored SEED and no optimization at all, which is worse
+// than useless: it looks like a result. 2h leaves roughly an hour of real rounds on top of that fixed cost.
+// Arithmetic: 12h time_budget_s -> effective 11.04h -> head window 8.04h -> /3 heads = 2.68h a lane.
+// A budget too small to give every head the floor gives FEWER heads their full lane rather than giving
+// every head a lane too short to optimize in — depth beats coverage when coverage cannot be afforded.
+// head_budget=1 just hands the whole head window to the single lane. Omitted entirely when no time budget
+// was given (=> the arg never appears in the nested args, so such a run is byte-identical to today).
+const TIME_LANE_FLOOR_MS = parseInt(A.lane_deadline_floor_s != null ? A.lane_deadline_floor_s : 7200, 10) * 1000;
+const TIME_LANE_DEADLINE_MS = A.lane_deadline_ms != null ? parseInt(A.lane_deadline_ms, 10)
+  : (TIME_HEAD_DEADLINE_MS != null
+      ? Math.max(TIME_LANE_FLOOR_MS, Math.floor(TIME_HEAD_DEADLINE_MS / Math.max(1, HEAD_BUDGET)))
+      : null);
+// Spread this into every nested kernel-lane dispatch. {} when unset => identical args => identical resume key.
+const LANE_BUDGET_ARG = TIME_LANE_DEADLINE_MS != null && TIME_LANE_DEADLINE_MS > 0
+  ? { lane_deadline_ms: TIME_LANE_DEADLINE_MS } : {};
+if (TIME_LANE_DEADLINE_MS != null && TIME_LANE_DEADLINE_MS > 0) {
+  log(`[time-budget] per-lane cap ${Math.round(TIME_LANE_DEADLINE_MS / 60000)}min (head window ${Math.round(TIME_HEAD_DEADLINE_MS / 60000)}min / ${HEAD_BUDGET} head(s)) — a lane stops starting new rounds at the cap and reports its best banked kernel.`);
+}
 function deepBoundedWorkflow(ref, wfArgs, label) {
   const p = nestedWorkflow(ref, wfArgs);
   if (!DEEP_MODE || typeof setTimeout !== 'function' || !(DEEP_HEAD_WF_MS > 0)) return p;
@@ -1806,7 +1834,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         let al;
         try {
           al = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
-            kernel_path: j.ext.task_dir, workflow_dir: KERNEL_WF_DIR,
+            kernel_path: j.ext.task_dir, workflow_dir: KERNEL_WF_DIR, ...LANE_BUDGET_ARG,
             mode: j.ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
             op_spec: { op_kind: j.ext.op_kind, shapes: j.ext.shapes || {}, dtype: j.ext.dtype || 'bf16', regime: j.h.regime || '', cuda_graph_safe: true, ...(j.ext.workload_path ? { workload_path: j.ext.workload_path } : {}) },
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
@@ -2027,7 +2055,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       for (let attempt = 1; attempt <= AUTHOR_TRIES; attempt++) {
         try {
           al = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
-            kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
+            kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR, ...LANE_BUDGET_ARG,
             mode: ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
             op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '', cuda_graph_safe: true, ...(ext.workload_path ? { workload_path: ext.workload_path } : {}) },
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
@@ -2323,7 +2351,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     let kl;
     try {
       const r = await nestedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
-        kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
+        kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR, ...LANE_BUDGET_ARG,
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +

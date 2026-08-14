@@ -192,6 +192,25 @@ const HARNESS_ADDENDUM = String(A.harness_addendum || '').trim();
 const INCREMENTAL = !!STATE_DIR && String(A.incremental_analyze || '') === 'true';
 const RESUME_INPUT = INCREMENTAL ? { INCREMENTAL_RESUME: '1' } : {};
 const MAX_NO_IMPROVE = Math.max(1, parseInt(A.max_no_improve != null ? A.max_no_improve : 2, 10));
+// --- WALL-CLOCK lane budget (no-op unless the caller passes lane_deadline_ms) ------------------------
+// BUDGET and MAX_NO_IMPROVE are COUNTS, and a count cannot bound wall-clock. Measured consequence: in the
+// 2026-08-13 Qwen3-14B e2e run ONE lane held the HeadKernel phase for 10.12h of a 12.82h run and the other
+// two heads never started, because the caller's dispatch deadline only stops it from STARTING a new head
+// and nothing bounded the lane already inside. Date.now() is unavailable in workflow scripts (it would
+// break resume), so this mirrors e2e_workflow.js exactly: a one-shot setTimeout flag, read at the TOP of
+// a round. Checking at a ROUND BOUNDARY is what makes this safe for RESULT QUALITY -- the loop's existing
+// exit path still runs Report + Validate over whatever was banked, so a lane that runs out of time returns
+// its best verified kernel so far, never nothing. It bounds further EXPLORATION, it never discards a win.
+// Unset (or non-positive) => never registered => byte-identical to today.
+const LANE_DEADLINE_MS = parseInt(A.lane_deadline_ms != null ? A.lane_deadline_ms : 0, 10);
+let LANE_DEADLINE_HIT = false;
+if (LANE_DEADLINE_MS > 0 && typeof setTimeout === 'function') {
+  setTimeout(() => {
+    LANE_DEADLINE_HIT = true;
+    log(`[lane-budget] ${Math.round(LANE_DEADLINE_MS / 60000)}min wall-clock budget reached — no NEW optimization round will start; ` +
+        `finishing the in-flight round, then Report/Validate on the best candidate banked so far.`);
+  }, LANE_DEADLINE_MS);
+}
 // Conditional inputs: spreading {} adds NOTHING to a prompt (byte-identical) when a hook is unset.
 const KB_INPUTS = {
   ...(SHARED_KB ? { SHARED_KB } : {}),
@@ -668,7 +687,9 @@ if (setup.resumed && setup.prior_state) {
   log(`RESUMED from STATE_DIR: cumulative=${cumulative.toFixed(3)}x, ${history.insights.length} insights, ${history.ledger.length} ledger entries carried forward.`);
 }
 
-while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
+// LANE_DEADLINE_HIT is the wall-clock arm of this condition (inert unless lane_deadline_ms was passed).
+// It is read here, at the top of a round, so the exit runs the same Report/Validate tail as a natural stop.
+while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE && !LANE_DEADLINE_HIT) {
   round++;
   const remaining = BUDGET - dispatched;
   phase('Optimize');
@@ -982,6 +1003,11 @@ return {
   rounds: report ? report.rounds : round,
   budget_used: dispatched,
   budget_total: BUDGET,
+  // True when the lane stopped on WALL-CLOCK rather than on its round budget or a stall. The result above
+  // is still a real, director-validated result -- this only says exploration was cut short, which is the
+  // difference between "this kernel is the best there is" and "this is the best found in the time given".
+  stopped_on_deadline: LANE_DEADLINE_HIT ? true : undefined,
+  lane_deadline_ms: LANE_DEADLINE_MS > 0 ? LANE_DEADLINE_MS : undefined,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
   final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
   // Hand this lane's agent/phase timeline up to whoever called us (e2e_workflow.js or the bake-off
