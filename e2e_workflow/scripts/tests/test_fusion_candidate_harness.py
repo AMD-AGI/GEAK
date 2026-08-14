@@ -494,6 +494,172 @@ class FusionCandidateHarnessTest(unittest.TestCase):
                 "disagrees with guard registry" in error
                 for error in result["errors"]))
 
+    # ---- author-track completeness: a large non-donor helper must not be
+    # dropped into a fusion_opportunity=false stage ----
+    def _table_with_layout_helper(self, layout_us=10.0):
+        table_payload = self._table()
+        table_payload["tables"][0]["rows"].append({
+            "row_id": "r_layout", "pos": 3, "device_seq_index": 13,
+            "stream": 8, "duration_us": layout_us, "stage": "elementwise",
+            "shape": {"input_dims": [[128, 7168]],
+                      "input_types": ["c10::BFloat16"]}})
+        return table_payload
+
+    def _payload_covering_layout(self):
+        payload = self._payload()
+        # cover the layout row in the inventory (so coverage passes) but leave
+        # it out of every candidate -> it is a silently dropped helper.
+        payload["stage_inventory"][1]["row_ids"] = ["r2", "r_layout"]
+        return payload
+
+    def test_large_helper_dropped_without_candidate_or_followup_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            table = self._write(tmp, "table.json", self._table_with_layout_helper())
+            payload = self._payload_covering_layout()
+            payload["environment_api_inventory_json"] = self._env(tmp)
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(any(
+                "dropped without candidate" in error
+                for error in result["errors"]))
+            self.assertEqual(
+                result["metrics"]["dropped_helper_row_count"], 1)
+
+    def test_dropped_helper_rescued_by_followup_row_ids_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            table = self._write(tmp, "table.json", self._table_with_layout_helper())
+            payload = self._payload_covering_layout()
+            payload["environment_api_inventory_json"] = self._env(tmp)
+            payload["required_followups"] = [{
+                "id": "f_layout",
+                "reason": "output layout copy needs producer/consumer proof",
+                "recommended_next_step": "capture runtime-source dependency",
+                "row_ids": ["r_layout"],
+            }]
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual(
+                result["metrics"]["dropped_helper_row_count"], 0)
+
+    def test_large_helper_in_followup_still_fails_escalation(self):
+        # A 20us helper (>= escalate floor) deferred to a followup is NOT enough:
+        # it must be an actual candidate (author-track).
+        with tempfile.TemporaryDirectory() as tmp:
+            table = self._write(
+                tmp, "table.json", self._table_with_layout_helper(20.0))
+            payload = self._payload_covering_layout()
+            payload["environment_api_inventory_json"] = self._env(tmp)
+            payload["required_followups"] = [{
+                "id": "f_layout", "reason": "deferred",
+                "recommended_next_step": "capture", "row_ids": ["r_layout"]}]
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(any(
+                "must be CANDIDATES" in error for error in result["errors"]))
+            self.assertEqual(
+                result["metrics"]["escalated_missing_row_count"], 1)
+
+    def test_merge_ceiling_rejects_all_members_removable(self):
+        # norm+quant with BOTH removable and no anchor -> addressable = full
+        # chain = 100% -> must be rejected by the merge ceiling.
+        with tempfile.TemporaryDirectory() as tmp:
+            table = self._write(tmp, "table.json", self._table())
+            payload = self._payload()
+            payload["environment_api_inventory_json"] = self._env(tmp)
+            cand = payload["candidates"][0]
+            cand["removable_row_ids"] = ["r0", "r1"]      # both -> no anchor
+            cand["addressable_us_per_layer"] = 10.0        # 6+4 = full chain
+            cand["stack_addressable_ceiling_us"] = 20.0    # 10 * 2 layers
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(any(
+                "merge ceiling" in error for error in result["errors"]))
+
+    def test_collective_row_only_in_followup_fails(self):
+        # A tail all-reduce covered only by a followup (not a candidate member)
+        # must fail: every collective is a fusion anchor.
+        with tempfile.TemporaryDirectory() as tmp:
+            table_payload = self._table()
+            table_payload["tables"][0]["rows"].append({
+                "row_id": "tail_ar", "pos": 3, "device_seq_index": 13,
+                "stream": 8, "duration_us": 40.0, "stage": "communication"})
+            payload = self._payload()
+            payload["environment_api_inventory_json"] = self._env(tmp)
+            payload["stage_inventory"][1]["row_ids"] = ["r2", "tail_ar"]
+            payload["required_followups"] = [{
+                "id": "f_tail", "reason": "cross-layer boundary deferred",
+                "recommended_next_step": "boundary candidate",
+                "row_ids": ["tail_ar"]}]
+            table = self._write(tmp, "table.json", table_payload)
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(any(
+                "collective (all-reduce) rows are not candidate members"
+                in error for error in result["errors"]))
+            self.assertEqual(
+                result["metrics"]["collective_not_candidate_count"], 1)
+
+    def test_aggregate_escalation_clusters_small_helpers(self):
+        # Several sub-15us helpers that individually escape the per-row escalate
+        # floor but sum to >= the aggregate floor in one (phase, pattern) must
+        # become a cluster candidate, not scattered followup rows.
+        with tempfile.TemporaryDirectory() as tmp:
+            table_payload = self._table()
+            for i, dur in enumerate((8.0, 8.0, 8.0)):  # 24 us/layer >= 20
+                table_payload["tables"][0]["rows"].append({
+                    "row_id": "small%d" % i, "pos": 3 + i,
+                    "device_seq_index": 13 + i, "stream": 8,
+                    "duration_us": dur, "stage": "elementwise"})
+            payload = self._payload()
+            payload["environment_api_inventory_json"] = self._env(tmp)
+            payload["stage_inventory"][1]["row_ids"] = [
+                "r2", "small0", "small1", "small2"]
+            payload["required_followups"] = [{
+                "id": "f_small", "reason": "scattered small helpers",
+                "recommended_next_step": "cluster fusion",
+                "row_ids": ["small0", "small1", "small2"]}]
+            table = self._write(tmp, "table.json", table_payload)
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(any(
+                "cluster to" in error for error in result["errors"]))
+            self.assertEqual(
+                result["metrics"]["agg_escalate_violation_count"], 1)
+
+    def test_provenance_trace_sha_mismatch_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            table = self._write(tmp, "table.json", self._table())
+            payload = self._payload()
+            payload["environment_api_inventory_json"] = self._env(tmp)
+            payload["source_semantic_table"] = {
+                "path": "other.json", "trace_sha256": "not-abc"}
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(any(
+                "does not match semantic table trace_sha256" in error
+                for error in result["errors"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 
 
@@ -20,18 +21,152 @@ API_COVERAGE = {"full", "partial", "similar"}
 API_SOURCE_KIND = {
     "runtime_environment", "runtime_source", "perf_knowledge"}
 
-GUARD_REGISTRY_PATH = os.path.join(
+# Only the main compute/communication bodies are donors. Every other stage is a
+# removable helper (elementwise/layout/copy/norm/quant/activation/kv-cache
+# write) and must not be silently dropped into a fusion_opportunity=false stage.
+DONOR_STAGES = {
+    "gemm", "attn", "attention", "communication", "collective",
+    "moe", "expert_gemm"}
+# Helper rows at or above this duration may not vanish: each must be a candidate
+# member or a deferred required_followups[].row_ids entry.
+DEFAULT_HELPER_FLOOR_US = 5.0
+# Helper rows at or above this (higher) duration must be an actual CANDIDATE
+# (author-track), not merely deferred to a followup — completeness escalation.
+DEFAULT_ESCALATE_FLOOR_US = 15.0
+# Sub-floor helpers in one (phase, pattern) whose per-layer durations sum to at
+# least this must also become a candidate (cluster fusion) — catches many small
+# helpers that individually escape the per-row escalate floor but add up.
+DEFAULT_AGG_ESCALATE_FLOOR_US = 20.0
+
+# --- Roofline reuse: borrow GEAK's existing roofline peaks + launch constant to
+# turn "which rows fusion removes" into a physically-grounded savings estimate.
+# Defensive: a broken/absent roofline helper only drops the estimate to None; it
+# never fails validation (mirrors the roofline SKILL's own doctrine).
+_RF_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "..", "knowledge", "collective_ar_guards.json")
+    "..", "knowledge", "analysis_skills", "roofline")
+_PEAKS_MD = os.path.join(_RF_DIR, "peaks.md")
+try:
+    if _RF_DIR not in sys.path:
+        sys.path.insert(0, _RF_DIR)
+    import roofline_tools as _roofline
+except Exception:
+    _roofline = None
+LAUNCH_OVERHEAD_US = 5.0  # matches roofline_tools.LAUNCH_OVERHEAD_S (5e-6 s)
+# Per-gfx HBM bandwidth (bytes/us) fallback if peaks.md/roofline is unavailable.
+# 5.3e12 B/s (MI300X, gfx942) = 5.3e6 B/us; 8.0e12 (MI350, gfx950) = 8.0e6.
+_FALLBACK_HBM_BW_BYTES_PER_US = {"gfx942": 5.3e6, "gfx950": 8.0e6}
+_DTYPE_BYTES = {
+    "float8_e4m3fnuz": 1, "float8": 1, "fp8": 1, "int8": 1,
+    "bfloat16": 2, "c10::bfloat16": 2, "float16": 2, "c10::half": 2, "fp16": 2,
+    "bf16": 2, "float": 4, "float32": 4, "fp32": 4, "int32": 4, "int64": 8,
+    "float64": 8}
+
+
+def _gfx_key(environment):
+    """Extract a gfxNNN key from anywhere in the environment inventory."""
+    match = re.search(r"gfx\d+", json.dumps(environment or {}))
+    return match.group(0) if match else None
+
+
+def _hbm_bw_bytes_per_us(environment):
+    gfx = _gfx_key(environment)
+    if _roofline is not None and gfx:
+        try:
+            peaks = _roofline.load_peaks(_PEAKS_MD, gfx)
+            if peaks and peaks.get("hbm_bw_bytes_s"):
+                return float(peaks["hbm_bw_bytes_s"]) / 1e6
+        except Exception:
+            pass
+    return _FALLBACK_HBM_BW_BYTES_PER_US.get(gfx)
+
+
+def _dtype_bytes(name):
+    key = str(name or "").strip().lower()
+    return _DTYPE_BYTES.get(key, 2)
+
+
+def _row_bytes(row):
+    """Bytes the kernel moves through HBM, from the semantic table's shape."""
+    shape = row.get("shape") or {}
+    dims = shape.get("input_dims")
+    types = shape.get("input_types") or []
+    if not isinstance(dims, list) or not dims:
+        return None
+    total = 0
+    for index, dim in enumerate(dims):
+        if not isinstance(dim, list) or not dim:
+            continue
+        count = 1
+        for value in dim:
+            if isinstance(value, (int, float)) and value > 0:
+                count *= int(value)
+        dtype = types[index] if index < len(types) else None
+        total += count * _dtype_bytes(dtype)
+    return total if total > 0 else None
+
+
+def _estimate_savings(removable_ids, source_rows, key, bw_per_us, ceiling_us):
+    """Roofline-grounded savings for the rows a fusion removes.
+
+    Per removed helper the recoverable time is the launch it saves plus the HBM
+    round-trip it eliminates (bytes / bandwidth), capped by its own measured
+    duration — so a memory-bound helper recovers ~all of its time while a
+    compute-bound one recovers only the launch. Total is capped at the
+    duration-based ceiling (Σ removable). Returns estimate=None when bandwidth
+    or shapes are unavailable rather than guessing.
+    """
+    if not removable_ids:
+        return {"ceiling_us": round(ceiling_us, 3), "estimate_us": 0.0,
+                "basis": "empty"}
+    if not bw_per_us:
+        return {"ceiling_us": round(ceiling_us, 3), "estimate_us": None,
+                "basis": "no_bandwidth"}
+    estimate = 0.0
+    modeled_all = True
+    for row_id in removable_ids:
+        row = source_rows.get((key[0], key[1], row_id))
+        if not row:
+            continue
+        duration = float(row.get("duration_us", 0.0) or 0.0)
+        num_bytes = _row_bytes(row)
+        if num_bytes is None:
+            modeled_all = False
+            estimate += duration  # shape unknown -> optimistic (memory-bound)
+            continue
+        recoverable = LAUNCH_OVERHEAD_US + num_bytes / bw_per_us
+        estimate += min(duration, recoverable)
+    estimate = min(estimate, ceiling_us)
+    return {"ceiling_us": round(ceiling_us, 3),
+            "estimate_us": round(estimate, 3),
+            "basis": "roofline" if modeled_all else "roofline_partial"}
+
+# Per-aiter-commit fused all-reduce (custom_all_reduce) size-guard registry.
+# Consumed only by this harness to cross-check the analyst-declared
+# environment_api_inventory.collective_fused_ar_guard.threshold_bytes, so the
+# threshold number itself cannot drift/hallucinate between runs. Schema:
+#   {aiter_commit: {fused_ar_threshold_bytes:int, expr:str, ref:str, notes:str}}
+# Add a new entry when a new aiter build is inspected; verify the expr against
+# the installed source before adding. Kept inline (not a sidecar JSON) to match
+# GEAK's convention for small versioned single-consumer tables (see STAGE_RULES
+# in semantic_kernel_mapping.py) — e2e_workflow has no data-file convention.
+FUSED_AR_GUARD_REGISTRY = {
+    "a6bb499375849eec45d68c5ccaebc8865fd422c0": {
+        "fused_ar_threshold_bytes": 67108864,
+        "expr": "n <= 16384 and total_bytes < 8 * 1024 * 8192 and world_size != 6",
+        "ref": ("aiter/dist/device_communicators/communicator_cuda.py::"
+                "fused_allreduce_rmsnorm (can_use_fuse_ar_rms)"),
+        "notes": ("8*1024*8192 = 67108864 bytes = 64 MiB. Tensor >= this falls "
+                  "back to split all-reduce + separate rmsnorm. 1-stage vs "
+                  "2-stage is a separate switch (total_bytes <= 128*1024) and "
+                  "does not affect availability."),
+    },
+}
 
 
 def _load_guard_registry():
-    """Best-effort load of the per-aiter-commit fused-AR guard registry."""
-    try:
-        with open(GUARD_REGISTRY_PATH) as fh:
-            return json.load(fh).get("guards", {}) or {}
-    except (OSError, ValueError):
-        return {}
+    """Per-aiter-commit fused-AR guard registry (inline; see above)."""
+    return FUSED_AR_GUARD_REGISTRY
 
 
 def _short_ref(ref):
@@ -91,21 +226,34 @@ def _api_detail(plan):
     return "；".join(rendered)
 
 
-def _savings_text(plan, layer_total_us):
-    estimate = plan.get("estimated_savings_us") or []
-    if len(estimate) == 2:
-        low, high = map(float, estimate)
-        pct_low = low / layer_total_us * 100.0 if layer_total_us else 0.0
-        pct_high = high / layer_total_us * 100.0 if layer_total_us else 0.0
-        return "工程预估 %.2f–%.2f µs/层（%.2f%%–%.2f%%）" % (
-            low, high, pct_low, pct_high)
-    if len(estimate) == 1:
-        value = float(estimate[0])
-        pct = value / layer_total_us * 100.0 if layer_total_us else 0.0
-        return "工程预估 %.2f µs/层（%.2f%%）" % (value, pct)
-    ceiling = float(plan.get("addressable_us_per_layer", 0.0) or 0.0)
+def _savings_text(plan, layer_total_us, candidate=None):
+    # Total table shows the single roofline engineering estimate. The
+    # duration-based ceiling stays in the per-candidate detail. When the estimate
+    # is unavailable (missing shape/bandwidth) fall back to the ceiling, flagged.
+    savings = (candidate or {}).get("_savings") or {}
+    est = savings.get("estimate_us")
+    if est is not None:
+        pct = est / layer_total_us * 100.0 if layer_total_us else 0.0
+        note = "" if savings.get("basis") == "roofline" else "*"
+        return "%.2f µs/层（%.2f%%）%s" % (est, pct, note)
+    ceiling = float(
+        savings.get("ceiling_us",
+                    plan.get("addressable_us_per_layer", 0.0)) or 0.0)
     pct = ceiling / layer_total_us * 100.0 if layer_total_us else 0.0
-    return "最高 %.2f µs/层（%.2f%%）" % (ceiling, pct)
+    return "≤%.2f µs/层（%.2f%%，估算不可用）" % (ceiling, pct)
+
+
+def _forward_savings_text(candidate):
+    # Whole-forward projection: per-layer estimate × recurrence count, as a
+    # fraction of this phase's total forward time.
+    savings = (candidate or {}).get("_savings") or {}
+    stack = savings.get("stack_estimate_us")
+    if stack is None:
+        return "估算不可用"
+    pct = savings.get("total_forward_pct")
+    note = "" if savings.get("basis") == "roofline" else "*"
+    pct_text = ("%.3f%%" % pct) if pct is not None else "n/a"
+    return "%.1f µs（%s）%s" % (stack, pct_text, note)
 
 
 def _canonical_plan(value):
@@ -219,12 +367,25 @@ def _validate_api_list(owner, path, errors):
             errors.append("%s exact_reason must stay concise" % path)
 
 
-def validate(semantic_table_path, candidates_path):
+def validate(semantic_table_path, candidates_path,
+             helper_floor=DEFAULT_HELPER_FLOOR_US,
+             escalate_floor=DEFAULT_ESCALATE_FLOOR_US,
+             agg_escalate_floor=DEFAULT_AGG_ESCALATE_FLOOR_US):
     table = _load(semantic_table_path)
     payload = _load(candidates_path)
     tables, source_rows, table_order = _semantic_index(table)
     errors = []
     warnings = []
+    bw_per_us = None  # HBM bytes/us for the roofline savings estimate
+
+    # Provenance: the candidates must have been built from exactly this table.
+    declared = payload.get("source_semantic_table") or {}
+    declared_sha = declared.get("trace_sha256")
+    table_sha = table.get("trace_sha256")
+    if declared_sha and table_sha and declared_sha != table_sha:
+        errors.append(
+            "source_semantic_table.trace_sha256 %s does not match semantic "
+            "table trace_sha256 %s" % (declared_sha, table_sha))
 
     if payload.get("phase") != "generate_plans":
         errors.append("top-level phase must be generate_plans")
@@ -248,6 +409,7 @@ def validate(semantic_table_path, candidates_path):
         if not environment.get("inspection_evidence"):
             errors.append(
                 "environment API inventory must record inspection_evidence")
+        bw_per_us = _hbm_bw_bytes_per_us(environment)
         # Collective fused-AR size guard becomes a machine-checked fact so the
         # prefill=no / decode=yes Exact decision is deterministic instead of
         # re-derived (and mis-numbered) by the model each run.
@@ -330,6 +492,18 @@ def validate(semantic_table_path, candidates_path):
         errors.append("stage inventory misses %d/%d source rows; first=%s" % (
             len(missing_rows), len(source_rows), missing_rows[:5]))
 
+    # Per-phase total forward time = Σ over that phase's tables of
+    # (representative layer_total_us × pattern_layer_count). Prefill and decode
+    # are separate forwards, so each candidate's stack savings is expressed as a
+    # fraction of ITS phase's whole forward, never a prefill+decode mix.
+    phase_total_forward_us = {}
+    for item in table.get("tables", []):
+        phase = item.get("phase")
+        contribution = (float(item.get("layer_total_us", 0.0) or 0.0)
+                        * int(item.get("pattern_layer_count", 0) or 0))
+        phase_total_forward_us[phase] = (
+            phase_total_forward_us.get(phase, 0.0) + contribution)
+
     candidates_by_id = {}
     candidate_member_ids = {}
     referenced_candidate_ids = set()
@@ -402,6 +576,23 @@ def validate(semantic_table_path, candidates_path):
         if not _close(
                 candidate.get("addressable_us_per_layer"), removable_total):
             errors.append("%s addressable_us_per_layer must equal removable sum" % path)
+        # Merge ceiling: a fusion replaces N kernels with ONE fused kernel that
+        # still runs, so it must keep an anchor — the heaviest member cannot be
+        # counted as savings. This kills the "removable = every member -> save
+        # 100%" over-claim (e.g. norm+quant marked fully removable).
+        member_durations = [
+            float(source_rows[(key[0], key[1], rid)].get("duration_us", 0.0)
+                  or 0.0)
+            for rid in member_ids if (key[0], key[1], rid) in source_rows]
+        max_member = max(member_durations) if member_durations else 0.0
+        merge_ceiling = member_total - max_member
+        if removable_total > merge_ceiling + 1e-3:
+            errors.append(
+                "%s addressable %.3f exceeds merge ceiling %.3f (Σmembers − "
+                "heaviest member %.3f): a fused kernel is at least as costly as "
+                "its heaviest constituent, which cannot be counted as savings — "
+                "keep it as the anchor (not removable)" % (
+                    path, removable_total, merge_ceiling, max_member))
         layer_count = int(candidate.get("pattern_layer_count", 0) or 0)
         pattern_layers = int(tables[key].get("pattern_layer_count", 0) or 0)
         if layer_count != pattern_layers:
@@ -426,6 +617,23 @@ def validate(semantic_table_path, candidates_path):
                 expected_stack):
             errors.append(
                 "%s stack_addressable_ceiling_us formula mismatch" % path)
+        # Roofline savings (harness-computed) + whole-forward projection: scale
+        # per-layer savings by the recurrence count and express as a fraction of
+        # this phase's total forward time (all layers of all its patterns).
+        candidate["_savings"] = _estimate_savings(
+            removable, source_rows, key, bw_per_us, removable_total)
+        forward_total = float(phase_total_forward_us.get(key[0], 0.0) or 0.0)
+        _sv = candidate["_savings"]
+        _sv["ceiling_count"] = ceiling_count
+        _sv["stack_ceiling_us"] = round(removable_total * ceiling_count, 3)
+        _sv["stack_estimate_us"] = (
+            round(_sv["estimate_us"] * ceiling_count, 3)
+            if _sv.get("estimate_us") is not None else None)
+        _sv["phase_total_forward_us"] = round(forward_total, 3)
+        _sv["total_forward_pct"] = (
+            round(_sv["stack_estimate_us"] / forward_total * 100.0, 4)
+            if _sv.get("stack_estimate_us") is not None and forward_total
+            else None)
         # Deterministic collective size-guard: a candidate that includes a
         # communication-stage member is a collective (allreduce) fusion; the
         # harness computes the AR tensor bytes from the selected bucket and
@@ -587,6 +795,117 @@ def validate(semantic_table_path, candidates_path):
                     key, list(member_ids), order,
                     plan_title.replace("+", " + ")))
 
+    # No silent drop of author-track helpers: a non-donor helper row at or above
+    # the floor must be a candidate member or a deferred followup row. Absence of
+    # a ready API routes it to kernel authoring, never to omission.
+    member_row_ids = set()
+    for candidate in payload["candidates"]:
+        for member in candidate.get("members", []) or []:
+            if member.get("row_id"):
+                member_row_ids.add(member["row_id"])
+    deferred_row_ids = set()
+    for followup in payload.get("required_followups", []) or []:
+        for row_id in followup.get("row_ids", []) or []:
+            deferred_row_ids.add(row_id)
+    dropped_helpers = []
+    for (_phase, _pattern, row_id), row in source_rows.items():
+        stage = str(row.get("stage") or "").lower()
+        duration = float(row.get("duration_us", 0.0) or 0.0)
+        if stage in DONOR_STAGES or duration < helper_floor:
+            continue
+        if row_id in member_row_ids or row_id in deferred_row_ids:
+            continue
+        dropped_helpers.append((row_id, stage, duration))
+    dropped_helpers.sort(key=lambda item: -item[2])
+    dropped_helper_us = round(
+        sum(duration for _, _, duration in dropped_helpers), 3)
+    if dropped_helpers:
+        errors.append(
+            "%d helper rows >= %.1f us dropped without candidate or "
+            "required_followups.row_ids (total %.1f us); first=%s" % (
+                len(dropped_helpers), helper_floor, dropped_helper_us,
+                [(rid, stage, round(dur, 1))
+                 for rid, stage, dur in dropped_helpers[:5]]))
+
+    # Completeness escalation: a big non-donor helper must be an actual
+    # CANDIDATE (author-track), not merely deferred to a followup. A deferral
+    # (row_ids in required_followups) is NOT enough above the escalate floor.
+    escalated_missing = []
+    for (_phase, _pattern, row_id), row in source_rows.items():
+        stage = str(row.get("stage") or "").lower()
+        duration = float(row.get("duration_us", 0.0) or 0.0)
+        if stage in DONOR_STAGES or duration < escalate_floor:
+            continue
+        if row_id in member_row_ids:
+            continue
+        escalated_missing.append((row_id, stage, duration))
+    escalated_missing.sort(key=lambda item: -item[2])
+    escalated_missing_us = round(
+        sum(duration for _, _, duration in escalated_missing), 3)
+    if escalated_missing:
+        errors.append(
+            "%d helper rows >= %.1f us must be CANDIDATES (author-track), not "
+            "deferred to followups (total %.1f us); a deferral does not satisfy "
+            "escalation — emit a candidate even when blocked "
+            "(readiness=research_only/needs_source_dependency_proof); first=%s"
+            % (len(escalated_missing), escalate_floor, escalated_missing_us,
+               [(rid, stage, round(dur, 1))
+                for rid, stage, dur in escalated_missing[:5]]))
+
+    # Aggregate escalation: small helpers each below the per-row escalate floor
+    # can still add up to a big fusion opportunity within one (phase, pattern) —
+    # especially in high-layer-count patterns (e.g. linear attention x45). If the
+    # non-candidate sub-floor helpers in one table sum to >= the aggregate floor
+    # per layer, they must be surfaced as a candidate (a cluster fusion), not
+    # left as scattered followup rows.
+    agg_by_group = {}
+    for (phase, pattern, row_id), row in source_rows.items():
+        stage = str(row.get("stage") or "").lower()
+        duration = float(row.get("duration_us", 0.0) or 0.0)
+        if stage in DONOR_STAGES or duration >= escalate_floor:
+            continue
+        if row_id in member_row_ids:
+            continue
+        agg_by_group.setdefault((phase, pattern), [0.0, 0])
+        agg_by_group[(phase, pattern)][0] += duration
+        agg_by_group[(phase, pattern)][1] += 1
+    agg_violations = sorted(
+        [(key, total, count) for key, (total, count) in agg_by_group.items()
+         if total >= agg_escalate_floor],
+        key=lambda item: -item[1])
+    if agg_violations:
+        errors.append(
+            "deferred sub-floor helpers cluster to >= %.1f us/layer and must "
+            "become a candidate (cluster fusion), not scattered followup rows; "
+            "groups=%s" % (
+                agg_escalate_floor,
+                [{"phase": k[0], "pattern_id": k[1],
+                  "us_per_layer": round(total, 1), "rows": count}
+                 for k, total, count in agg_violations[:5]]))
+
+    # Every collective (all-reduce / reduce-scatter) is a fusion anchor — either
+    # its in-place AR+norm(+quant), or the cross-layer tail-AR -> next-layer head
+    # boundary. It must be a CANDIDATE member (as donor), not merely deferred to a
+    # followup. This is separate from the escalate check, which skips donors.
+    collective_not_candidate = []
+    for (_phase, _pattern, row_id), row in source_rows.items():
+        if str(row.get("stage") or "").lower() != "communication":
+            continue
+        if row_id in member_row_ids:
+            continue
+        collective_not_candidate.append(
+            (row_id, float(row.get("duration_us", 0.0) or 0.0)))
+    collective_not_candidate.sort(key=lambda item: -item[1])
+    if collective_not_candidate:
+        errors.append(
+            "%d collective (all-reduce) rows are not candidate members (only "
+            "covered/deferred); every collective is a fusion anchor incl. the "
+            "cross-layer tail-AR -> next head boundary and must be a candidate; "
+            "first=%s" % (
+                len(collective_not_candidate),
+                [(rid, round(dur, 1))
+                 for rid, dur in collective_not_candidate[:5]]))
+
     metrics = {
         "source_table_count": len(tables),
         "covered_table_count": len(set(
@@ -602,6 +921,53 @@ def validate(semantic_table_path, candidates_path):
         "collective_guard_exceeds_count": sum(
             1 for c in collective_guard_checks if c["verdict"] == "exceeds"),
         "collective_guard_checks": collective_guard_checks,
+        "helper_floor_us": helper_floor,
+        "dropped_helper_row_count": len(dropped_helpers),
+        "dropped_helper_us": dropped_helper_us,
+        "dropped_helper_rows": [
+            {"row_id": rid, "stage": stage, "duration_us": round(dur, 3)}
+            for rid, stage, dur in dropped_helpers[:20]],
+        "collective_not_candidate_count": len(collective_not_candidate),
+        "escalate_floor_us": escalate_floor,
+        "escalated_missing_row_count": len(escalated_missing),
+        "agg_escalate_floor_us": agg_escalate_floor,
+        "agg_escalate_violation_count": len(agg_violations),
+        "agg_escalate_violations": [
+            {"phase": k[0], "pattern_id": k[1],
+             "us_per_layer": round(total, 3), "rows": count}
+            for k, total, count in agg_violations[:20]],
+        "escalated_missing_us": escalated_missing_us,
+        "escalated_missing_rows": [
+            {"row_id": rid, "stage": stage, "duration_us": round(dur, 3)}
+            for rid, stage, dur in escalated_missing[:20]],
+        "hbm_bw_bytes_per_us": bw_per_us,
+        "savings_ceiling_us_total": round(sum(
+            (c.get("_savings") or {}).get("ceiling_us", 0.0) or 0.0
+            for c in candidates_by_id.values()), 3),
+        "savings_estimate_us_total": round(sum(
+            ((c.get("_savings") or {}).get("estimate_us") or 0.0)
+            for c in candidates_by_id.values()), 3),
+        # Per-candidate savings, machine-readable for Phase 2.2 Top-K ranking.
+        "phase_total_forward_us": {
+            k: round(v, 3) for k, v in phase_total_forward_us.items()},
+        "candidate_savings": [
+            {"candidate_id": cid,
+             "phase": c.get("phase"), "pattern_id": c.get("pattern_id"),
+             "pattern_layer_count": c.get("pattern_layer_count"),
+             "ceiling_us": (c.get("_savings") or {}).get("ceiling_us"),
+             "estimate_us": (c.get("_savings") or {}).get("estimate_us"),
+             "ceiling_count": (c.get("_savings") or {}).get("ceiling_count"),
+             "stack_ceiling_us": (c.get("_savings") or {}).get(
+                 "stack_ceiling_us"),
+             "stack_estimate_us": (c.get("_savings") or {}).get(
+                 "stack_estimate_us"),
+             "total_forward_pct": (c.get("_savings") or {}).get(
+                 "total_forward_pct"),
+             "basis": (c.get("_savings") or {}).get("basis"),
+             "exact_kernel_status": c.get("exact_kernel_status"),
+             "readiness": c.get("readiness"),
+             "implementation_class": c.get("implementation_class")}
+            for cid, c in candidates_by_id.items()],
     }
     return payload, table, errors, warnings, metrics
 
@@ -622,15 +988,16 @@ def render_markdown(payload, table):
         "",
         "| Phase | Pattern | Stage（时间顺序） | Fusion 方案（按建议顺序） | "
         "当前链耗时 µs/层 | 现成 fusion kernel / API | Exact Kernel | "
-        "预期节省 µs/层（单层比例） |",
-        "|---|---|---|---|---:|---|---|---:|",
+        "预期节省 µs/层（roofline 估算，单层比例） | "
+        "整 forward 预期节省 µs（占该 phase 全层比例） |",
+        "|---|---|---|---|---:|---|---|---:|---:|",
     ]
     for summary in summaries:
         plans = sorted(
             summary["plans"], key=lambda plan: int(plan.get("order", 0) or 0))
         lines.append(
             "| {phase} | {pattern} | {stage} | {plans} | {current} | "
-            "{apis} | {exact} | {savings} |".format(
+            "{apis} | {exact} | {savings} | {fwd} |".format(
                 phase=_escape(summary["phase"].capitalize()),
                 pattern=_escape(summary["pattern_short_name"]),
                 stage=_escape(summary["stage"]),
@@ -648,13 +1015,21 @@ def render_markdown(payload, table):
                     _savings_text(
                         plan, float(tables[(
                             summary["phase"], summary["pattern_id"])].get(
-                                "layer_total_us", 0.0) or 0.0))
+                                "layer_total_us", 0.0) or 0.0),
+                        candidates.get(plan.get("candidate_id")))
+                    for plan in plans])),
+                fwd=_escape(_numbered([
+                    _forward_savings_text(
+                        candidates.get(plan.get("candidate_id")))
                     for plan in plans]))))
     lines.extend([
         "",
-        "说明：当前链耗时与可寻址上限来自 Clean Trace。预期节省若出现，"
-        "必须明确标记为工程估算而非实测；主 GEMM/Attention/MoE/Collective "
-        "donor 本体默认不计入可消除收益。",
+        "说明：预期节省列 = `roofline 估算`——复用 GEAK roofline 的每-gfx HBM 带宽，"
+        "把「融合消除的访存往返 + launch」折算成 µs，是工程估算非实测，最终以 "
+        "benchmark 为准（`*` 表示部分行缺 shape、估算偏乐观；`≤X 估算不可用` 表示无 "
+        "shape/带宽时退回可寻址上限）。可寻址上限（Clean Trace 实测、扣除锚点/donor "
+        "的硬天花板）见每条候选明细。主 GEMM/Attention/MoE/Collective 及每条链最重的"
+        "成分作为锚点，不计入收益。",
         "",
         "## 候选证据明细",
         "",
@@ -684,6 +1059,23 @@ def render_markdown(payload, table):
                 "- chain/addressable: `%.3f / %.3f µs/层`" % (
                     float(candidate["current_chain_us_per_layer"]),
                     float(candidate["addressable_us_per_layer"])),
+                "- savings: 上限 `%.3f` / roofline 估算 `%s` µs/层（basis=%s）" % (
+                    float((candidate.get("_savings") or {}).get(
+                        "ceiling_us", 0.0) or 0.0),
+                    ("%.3f" % (candidate.get("_savings") or {})["estimate_us"])
+                    if (candidate.get("_savings") or {}).get(
+                        "estimate_us") is not None else "n/a",
+                    (candidate.get("_savings") or {}).get("basis", "n/a")),
+                "- 整 forward: ×%s 层 → stack 估算 `%s` µs（占该 phase 全 forward `%s`）" % (
+                    (candidate.get("_savings") or {}).get("ceiling_count", "?"),
+                    ("%.1f" % (candidate.get("_savings") or {})[
+                        "stack_estimate_us"])
+                    if (candidate.get("_savings") or {}).get(
+                        "stack_estimate_us") is not None else "n/a",
+                    ("%.3f%%" % (candidate.get("_savings") or {})[
+                        "total_forward_pct"])
+                    if (candidate.get("_savings") or {}).get(
+                        "total_forward_pct") is not None else "n/a"),
                 "- members: " + ", ".join(
                     "`pos%s %s %s (%s, %.3fµs)`" % (
                         member["pos"], member.get("stage", ""),
@@ -712,9 +1104,13 @@ def render_markdown(payload, table):
     return "\n".join(lines) + "\n"
 
 
-def run(semantic_table_path, candidates_path, out_md, result_json):
+def run(semantic_table_path, candidates_path, out_md, result_json,
+        helper_floor=DEFAULT_HELPER_FLOOR_US,
+        escalate_floor=DEFAULT_ESCALATE_FLOOR_US,
+        agg_escalate_floor=DEFAULT_AGG_ESCALATE_FLOOR_US):
     payload, table, errors, warnings, metrics = validate(
-        semantic_table_path, candidates_path)
+        semantic_table_path, candidates_path, helper_floor, escalate_floor,
+        agg_escalate_floor)
     result = {
         "schema_version": 1,
         "status": "pass" if not errors else "fail",
@@ -740,10 +1136,24 @@ def main():
     parser.add_argument("--candidates", required=True)
     parser.add_argument("--out-md", required=True)
     parser.add_argument("--result-json", required=True)
+    parser.add_argument(
+        "--helper-floor", type=float, default=DEFAULT_HELPER_FLOOR_US,
+        help="min duration (us) a non-donor helper row must clear before it "
+             "must be a candidate member or a deferred followup row")
+    parser.add_argument(
+        "--escalate-floor", type=float, default=DEFAULT_ESCALATE_FLOOR_US,
+        help="min duration (us) a non-donor helper row must clear before it "
+             "must be an actual candidate (a followup deferral is not enough)")
+    parser.add_argument(
+        "--agg-escalate-floor", type=float,
+        default=DEFAULT_AGG_ESCALATE_FLOOR_US,
+        help="min per-layer sum (us) of sub-floor non-candidate helpers in one "
+             "(phase, pattern) before they must become a cluster candidate")
     args = parser.parse_args()
     result = run(
         args.semantic_table, args.candidates,
-        args.out_md, args.result_json)
+        args.out_md, args.result_json, args.helper_floor, args.escalate_floor,
+        args.agg_escalate_floor)
     print(json.dumps(result, indent=2))
     return 0 if result["status"] == "pass" else 1
 

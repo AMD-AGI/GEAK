@@ -82,6 +82,28 @@ Every source row must belong to at least one inventory region, including
 regions where `fusion_opportunity=false`. This prevents the report from showing
 only a few easy candidates while silently omitting the rest of the layer.
 
+`fusion_opportunity=false` is reserved for stages whose rows are **only** main
+donor bodies (GEMM/Attention/MoE/Collective) or a helper that is genuinely
+required by its own donor and cannot be removed (e.g. an fp8 prequant that feeds
+its immediately-following fp8 GEMM). It is **not** an escape hatch for
+"no ready kernel" or "dependency needs proof". A non-donor helper row
+(elementwise/layout/copy/norm/quant/activation/kv-cache write) with a
+meaningful duration must either become a candidate member or be listed in a
+`required_followups[].row_ids` entry with a concrete next step. The harness
+enforces this: any helper row at or above `--helper-floor` µs that is neither a
+candidate member nor a deferred followup row fails validation. Absence of an
+existing API never justifies dropping such a row — it routes to kernel
+authoring, not to omission.
+
+Keep the decomposition fine-grained. Each distinct projection/compute boundary
+is its own Stage+candidate — do not collapse them into a coarse
+`copy + copy` / `elementwise + elementwise` bucket. In particular enumerate, at
+minimum, per site: each projection GEMM's `GEMM epilogue + cast/quant`, each
+fp8 `quant + GEMM prologue` (q_a, q_b, kv_b, o_proj, gate/up, down…), the
+head/QK `norm + quant`, the RoPE/qk-norm/kv-cache head-prep chain, and the
+activation `+ quant`. A coarser table that merges these into fewer generic
+copy candidates is a regression even if row coverage is 100%.
+
 For every opportunity Stage, enumerate alternatives from narrow to broad when
 they are semantically meaningful:
 
@@ -151,6 +173,10 @@ Cross-layer (boundary) collective coverage:
 - Cross-pattern and first-layer boundaries (Dense→MoE at the first_k_dense edge,
   and embedding→layer0) span two different tables; leave those as
   `required_followups` rather than forcing a within-table representation.
+- **Harness-enforced:** every `communication` (all-reduce/reduce-scatter) row —
+  including each layer's tail AR — must be a candidate member (as the donor of
+  its boundary/in-place collective family). A tail AR left only in a followup
+  fails validation. Do not defer collectives; they are always fusion anchors.
 
 - If the traced communication implementation is QuickReduce or another
   collective, keep `allreduce` as the report-level semantic name and record the
@@ -178,6 +204,14 @@ For every proposed chain:
 - Main GEMM, Attention, MoE, and Collective Kernels are donors/anchors unless
   the plan explicitly replaces them. Their full duration is never counted as
   removable benefit merely because they appear in the chain.
+- "Donor" applies to those main bodies **only**. An adjacent
+  elementwise/layout/copy/norm/quant/activation/kv-cache-write kernel is a
+  removable helper, not a donor, even when it sits next to a main GEMM/Attention
+  in the same stage. Evaluate each such helper as its own candidate; do not let
+  a neighbouring donor absorb it into a `fusion_opportunity=false` stage. The
+  largest decode/prefill helpers are frequently output-layout/absorption
+  elementwise kernels with no ready API — these are exactly the author-track
+  candidates Phase 2.1 exists to surface.
 
 Allowed readiness:
 
@@ -235,6 +269,30 @@ For each candidate distinguish:
 - `new_helper_kernel`
 - `main_kernel_or_algorithmic`
 
+Main donor bodies are not off-limits — they are donors only *until a plan
+explicitly replaces them*. For **every** main body (a main GEMM, Attention, or
+the MoE expert chain: routing/dispatch → GEMM1 → activation/quant → GEMM2), you
+must check `capability_index.yaml` and the relevant
+`PERF_KNOWLEDGE_DIR/operators/*` cards (for MoE:
+`fused_moe_grouped_gemm`, `grouped_gemm_moe`, `shared_expert_fusion`,
+`moe_dispatch_combine`, `moe_routing_topk`) for a **fused replacement** — e.g. a
+mega-fused MoE kernel that subsumes several of these bodies.
+
+- If a fused replacement plausibly exists, emit a candidate whose members are the
+  replaced bodies, list those body rows in `removable_row_ids` (their duration is
+  legitimately addressable **because the plan replaces them**, not merely because
+  they appear in the chain), and set `implementation_class` to
+  `existing_api_integrated`/`existing_api_needs_adapter` when it is an installed
+  API, else `main_kernel_or_algorithmic`. Apply the same Exact/guard rigor
+  (shape/dtype/scale-layout/gfx/TP) as any other candidate.
+- If no replacement exists, record that the body was checked and none was found
+  (in the candidate `notes` or a `required_followups` entry). Do not silently
+  omit the possibility.
+
+This makes body-level fusion (MoE included) a checked question for every main
+body, not something discovered by luck. It does not force a candidate where no
+replacement exists.
+
 Use strict, binary Exact semantics:
 
 - `yes`: a current-environment implementation completely covers the proposed
@@ -278,14 +336,60 @@ stack_addressable_ceiling_us =
     addressable_us_per_layer * pattern_layer_count
 ```
 
+**Keep an anchor — a fusion is a merge, not a deletion.** Fusing N kernels
+yields ONE fused kernel that still runs; it is at least as costly as its
+heaviest constituent. So the heaviest member of every candidate is the anchor
+and must NOT be in `removable_row_ids`. Concretely the harness enforces
+`addressable_us_per_layer ≤ current_chain_us_per_layer − max(member duration)`.
+Marking every member removable (donor empty, addressable = the whole chain =
+"save 100%") is rejected. Examples:
+
+- norm + quant → `add_rmsnorm_quant`: anchor = norm (the heavier); removable =
+  quant only. Not both.
+- allreduce + norm(+quant): anchor = the all-reduce (donor); removable =
+  norm(+quant).
+- Only a genuinely redundant kernel that disappears entirely (its consumer reads
+  the source directly) may be fully removable — say so explicitly in `notes`.
+
+**Do not hand-write savings numbers.** The harness computes both the duration
+ceiling and a roofline-grounded engineering estimate (launch overhead + the HBM
+round-trip a fusion eliminates ÷ the per-gfx bandwidth from GEAK's roofline
+`peaks.md`), then renders `上限 X / roofline 估算 Y`. Your job is only to mark
+`removable_row_ids` correctly and to **keep each member's `shape` populated**
+(input_dims + dtype) so the byte model works — a removable row without shape
+falls back to an optimistic estimate flagged with `*`.
+
 Do not:
 
-- claim this ceiling as expected speedup;
+- claim the ceiling as expected speedup;
 - add overlapping candidates that remove the same row/intermediate Tensor;
 - convert representative-stack percentages directly to TTFT/TPOT/TPS;
 - compare absolute Prefill microseconds across different token buckets.
 
 Record overlap through `conflict_row_ids` and `mutually_exclusive_with`.
+
+### 5b. Completeness escalation (list everything)
+
+Phase 2.1 must surface the whole addressable surface, not just ready-API wins.
+The harness enforces two floors on non-donor helper rows
+(elementwise/layout/copy/norm/quant/activation/kv-cache write):
+
+- `--helper-floor` (5 µs): the row may not vanish — it must be a candidate
+  member OR a `required_followups[].row_ids` deferral.
+- `--escalate-floor` (15 µs): the row must be an **actual candidate**
+  (author-track); a followup deferral is NOT enough. Emit the candidate even
+  when it has no ready kernel and cannot be proven yet — use
+  `implementation_class=new_helper_kernel|main_kernel_or_algorithmic` and
+  `readiness=research_only|needs_source_dependency_proof`, and describe the
+  fusion chain + mechanism + blocker. "No existing operator" and "dependency
+  needs source proof" are labels, never reasons to omit.
+- `--agg-escalate-floor` (20 µs/layer): many small helpers that each escape the
+  per-row floor can still add up to a big fusion — especially in high-layer-count
+  patterns (linear attention ×45). If the non-candidate sub-floor helpers in one
+  `(phase, pattern)` sum to at least this per layer, surface them as a **cluster
+  candidate** (e.g. "linear-attn head helper fusion" folding the in-conv /
+  gating / layout / l2norm glue), not as scattered followup rows. Group by the
+  natural region and emit one author-track candidate for the cluster.
 
 ### 6. Produce and validate Phase 2.1 artifacts
 
@@ -452,7 +556,8 @@ environment/API evidence, blockers, risks, and validation requirements.
     {
       "id": "...",
       "reason": "specific repeated/manual gap",
-      "recommended_next_step": "new script, capture, knowledge rule, or none"
+      "recommended_next_step": "new script, capture, knowledge rule, or none",
+      "row_ids": ["source rows this followup defers; required when deferring a helper row instead of emitting a candidate"]
     }
   ],
   "fusion_candidates_json": "<absolute path>",
