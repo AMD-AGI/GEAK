@@ -89,9 +89,19 @@ adapter_launch() {
   # Overlay is prepended so the launch_server child imports the patched subtree
   # first. EXTRA_<BE>_ARGS carries the accepted extra flags; Magpie dedupes them
   # against its own DEFAULT_ARGS.
+  #
+  # GPU pinning follows the orchestrator's own convention: ROCR alone. ROCR
+  # re-indexes the devices it exposes to 0..N-1, so a HIP_VISIBLE_DEVICES
+  # carrying the same PHYSICAL ids indexes past the end of that list for any
+  # allocation not starting at 0 -- GPU=2 exposes a single device numbered 0 and
+  # then asks HIP for device 2. Magpie's script derives the logical HIP range
+  # itself, but only while HIP is unset, so the inherited value is CLEARED
+  # rather than merely left unassigned. ROCR alone pins correctly either way: a
+  # script that derives nothing still sees exactly the allocated devices.
   # shellcheck disable=SC2086
-  env ${_recipe_env[@]+"${_recipe_env[@]}"} $EXTRA_ENV \
-    HIP_VISIBLE_DEVICES="$GPU" CUDA_VISIBLE_DEVICES="$GPU" ROCR_VISIBLE_DEVICES="$GPU" \
+  env -u HIP_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
+    ${_recipe_env[@]+"${_recipe_env[@]}"} $EXTRA_ENV \
+    ROCR_VISIBLE_DEVICES="$GPU" \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     MAGPIE_RUN_PHASE=server \
     MAGPIE_SERVER_PID_FILE="$_pidfile" \

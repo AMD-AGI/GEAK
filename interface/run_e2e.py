@@ -485,9 +485,15 @@ _RECIPE_KEYS = ("inferencex_path", "benchmark_script", "framework", "runner_type
 _RECIPE_ENV_GEAK_OWNED = frozenset({
     "PORT", "RESULT_DIR", "SERVER_LOG", "PROFILE", "PROFILE_DIR", "PYTHONPATH",
     "MAGPIE_RUN_PHASE", "MAGPIE_SERVER_PID_FILE", "BENCHMARK_BASE_URL",
+    # What this run was asked to serve, not what the recipe happened to record.
+    # The launcher passes both explicitly and so overrides them by ordering
+    # anyway; naming them here is what keeps RECIPE_ENV_REPLAYED honest instead
+    # of advertising a variable a later layer silently displaces.
+    "MODEL", "TP",
     # GPU pinning: the recipe names whichever of these its own runner used, and
     # any of them left at the orchestrator's value would fight the device this
-    # run was allocated. The launcher sets all three coherently from $GPU.
+    # run was allocated. The launcher sets ROCR alone from $GPU and clears
+    # HIP/CUDA, so the launch script derives the logical device range itself.
     "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
     "VLLM_TORCH_PROFILER_DIR", "SGLANG_TORCH_PROFILER_DIR",
 })
@@ -523,6 +529,7 @@ def _recipe_env_block(recipe_path: str) -> dict[str, str]:
         return {}
     envs: dict[str, str] = {}
     block_indent: int | None = None
+    nested_indent: int | None = None
     for line in text.splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
             continue
@@ -533,14 +540,21 @@ def _recipe_env_block(recipe_path: str) -> dict[str, str]:
             continue
         if indent <= block_indent:
             break  # dedented out of the block
+        if nested_indent is not None:
+            if indent > nested_indent:
+                continue  # still inside a nested map
+            nested_indent = None
         key, sep, value = line.strip().partition(":")
         if not sep or not key:
             continue
-        # A nested map under envs: is not an environment variable; skipping it
-        # is safer than flattening it into a name the shell would not recognise.
         value = value.strip()
-        if value:
-            envs[key.strip()] = value.strip("'\"")
+        if not value:
+            # A nested map under envs: is not an environment variable, and
+            # neither are its children: skip the whole subtree rather than
+            # flatten it into names the shell would not recognise.
+            nested_indent = indent
+            continue
+        envs[key.strip()] = value.strip("'\"")
     return envs
 
 

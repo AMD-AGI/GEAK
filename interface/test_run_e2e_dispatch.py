@@ -712,7 +712,7 @@ class TestBenchLauncher(_RunE2ECase):
     def test_the_replay_says_nothing_on_stdout(self):
         """Callers eval this function's stdout as shell (run_ab.sh does), so a
         progress line on stdout is executed as a command and kills the run."""
-        recipe = self._recipe_with_envs("  envs:\n    TP: 1\n")
+        recipe = self._recipe_with_envs("  envs:\n    VLLM_ROCM_USE_AITER: '1'\n")
 
         with contextlib.redirect_stdout(io.StringIO()) as out:
             rx.apply_bench_launcher(
@@ -720,6 +720,51 @@ class TestBenchLauncher(_RunE2ECase):
                  "eval_dir": str(self.tmp / "eval")}
             )
         self.assertEqual(out.getvalue(), "")
+
+    def test_what_the_launcher_overrides_is_not_reported_as_replayed(self):
+        """The launcher passes MODEL and TP positionally, after the replay, so
+        the recipe's values lose. Reporting them as replayed would name this run
+        as inheriting a model and a shard count it does not actually serve."""
+        recipe = self._recipe_with_envs(
+            "  envs:\n"
+            "    MODEL: /models/Some-Other-Model\n"
+            "    TP: 8\n"
+            "    VLLM_ROCM_USE_AITER: '1'\n"
+        )
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm",
+             "eval_dir": str(self.tmp / "eval")}
+        )
+
+        self.assertEqual(
+            os.environ["RECIPE_ENV_REPLAYED"].split(), ["VLLM_ROCM_USE_AITER"]
+        )
+        self.assertEqual(os.environ["RECIPE_ENV_GEAK_OWNED"].split(), ["MODEL", "TP"])
+        self.assertNotIn(b"TP=8", Path(os.environ["RECIPE_ENV_FILE"]).read_bytes())
+
+    def test_a_nested_map_under_envs_contributes_no_variables(self):
+        """Its children are keys of a structure, not names any shell exports;
+        flattening them would invent variables the orchestrator never set."""
+        recipe = self._recipe_with_envs(
+            "  envs:\n"
+            "    VLLM_ROCM_USE_AITER: '1'\n"
+            "    sweep:\n"
+            "      ISL: 128\n"
+            "      nested_deeper:\n"
+            "        OSL: 256\n"
+            "    NUM_WARMUPS: 8\n"          # the block resumes after the subtree
+        )
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm",
+             "eval_dir": str(self.tmp / "eval")}
+        )
+
+        self.assertEqual(
+            os.environ["RECIPE_ENV_REPLAYED"].split(),
+            ["NUM_WARMUPS", "VLLM_ROCM_USE_AITER"],
+        )
 
     def test_a_recipe_recording_no_env_warns_but_launches(self):
         recipe = self._recipe_with_envs("")
