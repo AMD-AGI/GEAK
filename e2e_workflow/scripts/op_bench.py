@@ -179,6 +179,35 @@ def _resolve_callable(spec):
         return None
 
 
+# Backend names main() treats as THE BASELINE when picking `baseline_ms`. An extra callable must
+# never shadow one, or the isolated_speedup denominator silently becomes the candidate itself.
+_RESERVED_BACKEND_NAMES = ("hipblaslt", "current", "aiter_blockscale")
+
+
+def _parse_extra_callables(spec):
+    """'name=module:attr[@form],...' -> [(name, 'module:attr', form)].
+
+    Malformed items are returned as (name, '', '') so the bench records a clean
+    "unparseable" row instead of the whole bake-off dying on a caller typo."""
+    out = []
+    for item in str(spec or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            out.append((item, "", ""))
+            continue
+        name, rest = item.split("=", 1)
+        name, rest = name.strip(), rest.strip()
+        form = ""
+        if "@" in rest:
+            rest, form = rest.rsplit("@", 1)
+        if name in _RESERVED_BACKEND_NAMES:
+            name = "x_" + name          # never shadow the baseline row
+        out.append((name, rest.strip(), form.strip()))
+    return out
+
+
 def _is_blockscale_gemm(meta):
     """True for a quantized block-scaled GEMM (fp8 a8w8 blockscale etc.) — these CANNOT be benched by the
     generic dense torch-BLAS path (fp8 + per-block scales), so they take the dedicated blockscale path."""
@@ -247,6 +276,23 @@ def _synth_blockscale_case(torch, meta, M, device, seed):
     return {"x": x_q, "w": w_q, "x_scale": x_scale, "w_scale": w_scale, "ref": ref, "M": M, "out_dt": out_dt}
 
 
+def _preshuffled_w(torch, w):
+    """Permute a row-major fp8 weight into the MFMA fragment layout a *_bpreshuffle kernel expects.
+
+    Returns (tensor, None) on success, (None, reason) when the layout cannot be produced — the
+    caller must then mark the candidate UNAVAILABLE rather than bench it with the wrong layout.
+    Uses aiter's own `shuffle_weight` so the permutation stays in lockstep with the kernel that
+    consumes it; there is no second implementation of it here to drift."""
+    try:
+        from aiter.ops.shuffle import shuffle_weight
+    except Exception as e:
+        return None, f"aiter.ops.shuffle.shuffle_weight unavailable: {e!r}"
+    try:
+        return shuffle_weight(w, layout=(16, 16)), None
+    except Exception as e:
+        return None, f"shuffle_weight raised: {e!r}"
+
+
 def bench_blockscale_gemm(args, meta):
     """Bake-off for an fp8 a8w8 blockscale GEMM head. The generic dense torch-BLAS backends cannot
     represent this op (fp8 + per-block scales), so the candidates are the meta callable(s):
@@ -262,15 +308,41 @@ def bench_blockscale_gemm(args, meta):
     case = _synth_blockscale_case(torch, meta, M, device, args.seed)
     out_dt = case["out_dt"]
 
-    def _call(fn):
+    blk = list(meta.get("weight_block_size") or [128, 128])
+
+    # PRESHUFFLED weight, built ONCE outside every timed region. A *_bpreshuffle kernel does not read
+    # the row-major weight: it expects B already permuted into the MFMA fragment layout. Handing it the
+    # plain tensor does not fail loudly — it returns numerically WRONG output at a very attractive
+    # speed (max_rel_err ~40+ against a ~0.007 correct baseline, every family, 2026-08-11 run), and
+    # only the correctness gate keeps it from being crowned. Shuffle it properly, or declare the
+    # candidate unavailable; never bench a layout the kernel cannot consume.
+    wshuf, wshuf_err = _preshuffled_w(torch, case["w"])
+    # ...and the matching K-major x_scale. The CK preshuffle path reads x_scale transposed-then-
+    # reinterpreted (aiter/op_tests/test_gemm_a8w8_blockscale.py::test_gemm), NOT the row-major one
+    # every other candidate takes. Same one-time cost, same reason: get the layout right or don't bench.
+    xs = case["x_scale"]
+    xs_bp = xs.transpose(0, 1).contiguous().view(*xs.shape) if wshuf is not None else None
+
+    def _call(fn, form="sglang5"):
+        """Argument REORDERING only — never a reshape/transpose/cast. The scale layouts
+        already agree across conventions: _synth_blockscale_case builds x_scale [M,ceil(K/128)]
+        NON-transposed and w_scale [ceil(N/128),ceil(K/128)], which is byte-identical to the
+        vLLM As/Bs contract. Any data movement here would contaminate the isolated timing.
+
+        The one exception is `sglang5_bpreshuffle`, whose weight was permuted ONCE above (a
+        deployment-time cost, not a per-call one) — the timed call still only reorders arguments."""
+        if form == "vllm6":
+            return fn(case["x"], case["w"], case["x_scale"], case["w_scale"], blk, out_dt)
+        if form == "sglang5_bpreshuffle":
+            return fn(case["x"], wshuf, xs_bp, case["w_scale"], dtype=out_dt)
         return fn(case["x"], case["w"], case["x_scale"], case["w_scale"], dtype=out_dt)
 
     results = []
 
-    def record(name, fn, note=""):
+    def record(name, fn, note="", form="sglang5"):
         try:
-            _call(fn); _sync(torch)          # warmup (compile/autotune) on a clean launch
-            out = _call(fn)
+            _call(fn, form); _sync(torch)    # warmup (compile/autotune) on a clean launch
+            out = _call(fn, form)
         except Exception as e:
             # An EXCEPTION (not a slow/incorrect number) -> candidate could not run. The op_benchmarker
             # treats "all candidates raised" as a harness self-fault (see its role); we surface it clearly.
@@ -278,7 +350,7 @@ def bench_blockscale_gemm(args, meta):
                             "note": f"call raised: {e!r}", "raised": True})
             return
         ok, err = _correct(torch, out, case["ref"], args.tol)
-        ms, wall_ms = _time_call(lambda: _call(fn), args.warmup, args.repeats)
+        ms, wall_ms = _time_call(lambda: _call(fn, form), args.warmup, args.repeats)
         results.append({"backend": name, "available": True, "correct": bool(ok),
                         "max_rel_err": round(err, 5) if math.isfinite(err) else None,
                         "ms": round(ms, 4) if ms else None,
@@ -288,15 +360,27 @@ def bench_blockscale_gemm(args, meta):
     base_spec = meta.get("baseline_callable") or meta.get("target_callable")
     tgt_spec = meta.get("target_callable") or base_spec
     seen = set()
-    plan = [("aiter_blockscale", base_spec)]
+    plan = [("aiter_blockscale", base_spec, "sglang5")]
     if tgt_spec and tgt_spec != base_spec:
-        plan.append(("aiter_blockscale_target", tgt_spec))
+        plan.append(("aiter_blockscale_target", tgt_spec, "sglang5"))
     # bpreshuffle variant (large-M prefill lever) lives at top-level aiter, NOT the triton submodule.
-    # Plain-weight call may not match its preshuffled-weight signature -> guarded by record()'s try/except
-    # + the correctness gate (a wrong-layout call fails correctness and is simply not a winner; the real
-    # CK/asm/bpreshuffle race is the aiter DB tune in Tier-B, which the op_benchmarker drives).
-    plan.append(("aiter_bpreshuffle", "aiter:gemm_a8w8_blockscale_bpreshuffle"))
-    for name, spec in plan:
+    # It consumes a PRESHUFFLED weight -> benched via form 'sglang5_bpreshuffle' (see _call). If the
+    # shuffle is unavailable the candidate is reported unavailable, NOT benched with a plain weight:
+    # a wrong-layout call is fast and silently incorrect, which is the worst kind of bake-off entry.
+    if wshuf is not None:
+        plan.append(("aiter_bpreshuffle", "aiter:gemm_a8w8_blockscale_bpreshuffle", "sglang5_bpreshuffle"))
+    else:
+        results.append({"backend": "aiter_bpreshuffle", "available": False, "correct": False,
+                        "ms": None, "raised": False,
+                        "note": f"needs a preshuffled weight; {wshuf_err}"})
+    # Caller-supplied extras (EvoK library hits, etc.) compete on IDENTICAL terms.
+    for name, spec, form in _parse_extra_callables(getattr(args, "extra_callables", "")):
+        plan.append((name, spec, form or "sglang5"))
+    for name, spec, form in plan:
+        if not spec:
+            results.append({"backend": name, "available": False, "correct": False, "ms": None,
+                            "note": "unparseable --extra-callables item", "raised": False})
+            continue
         fn = _resolve_callable(spec)
         if fn is None:
             results.append({"backend": name, "available": False, "correct": False, "ms": None,
@@ -305,7 +389,11 @@ def bench_blockscale_gemm(args, meta):
         if id(fn) in seen:
             continue
         seen.add(id(fn))
-        record(name, fn, note=f"{spec} @ M={M} (dominant bucket)")
+        # The form is named only when it is NOT this path's default. §11.1 asks that a run with no
+        # --extra-callables emit what this script emitted before the feature existed, and "identical
+        # except every note now says form=sglang5" is not that.
+        _fs = "" if form == "sglang5" else f", form={form}"
+        record(name, fn, note=f"{spec} @ M={M} (dominant bucket{_fs})", form=form)
     return results
 
 
@@ -534,6 +622,23 @@ def bench_gemm(args, meta):
             results.append({"backend": "triton", "available": False, "correct": False, "ms": None,
                             "note": f"triton unavailable: {e!r}", "artifact": ""})
 
+    # Caller-supplied extras (EvoK library hits). The dense form is fn(x, w, bias) with the
+    # F.linear weight convention [out, in]; if this task is NOT transpose_b the convention
+    # doesn't hold, so record a clean skip rather than a wrong number.
+    for name, spec, form in _parse_extra_callables(getattr(args, "extra_callables", "")):
+        f = form or "dense3"
+        fn = _resolve_callable(spec) if spec else None
+        if fn is None:
+            results.append({"backend": name, "available": False, "correct": False, "ms": None,
+                            "note": f"callable not importable: {spec}", "artifact": ""})
+            continue
+        if f != "dense3" or not transpose_b:
+            results.append({"backend": name, "available": False, "correct": False, "ms": None,
+                            "note": f"form={f} transpose_b={transpose_b}: not a dense F.linear "
+                                    f"candidate; skipped rather than mis-called", "artifact": ""})
+            continue
+        record(name, (lambda _f=fn: _f(A, B, bias)), note=f"{spec} (form=dense3)")
+
     return results
 
 
@@ -697,6 +802,21 @@ def main():
     ap.add_argument("--triton-autotune", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="")
+    # Extra bake-off candidates supplied by the caller (e.g. an EvoK library hit discovered by
+    # scripts/evok_lookup.py). Format:  name=module:attr[@form][,name2=mod2:attr2[@form2]]
+    # `form` is the CALLING CONVENTION (see _call in the bench functions):
+    #   vllm6  fn(A,B,As,Bs,block_size,output_dtype)   sglang5 fn(x,w,x_scale,w_scale,dtype=out)
+    #   dense3 fn(x,w,bias)
+    # Defaults per path: blockscale -> sglang5, dense -> dense3.
+    # These are ORDINARY candidates: same immutable oracle, same tol, same cold-cache CUDA-event
+    # timing, same correctness gate. Nothing about the baseline or the winner rule changes.
+    ap.add_argument("--extra-callables", default="", dest="extra_callables")
+    # PROVENANCE. An extra callable is just a 'module:attr' string here — nothing in the emitted JSON
+    # says WHERE it came from, so a reader (or the Integrator) cannot get back to the lookup that
+    # produced it. Pass the evok_lookup.py output path and it travels with the result.
+    ap.add_argument("--evok-hit-json", default="", dest="evok_hit_json",
+                    help="path to the evok_lookup.py output that supplied an --extra-callables entry; "
+                         "recorded verbatim in the summary for provenance")
     a = ap.parse_args()
 
     meta_path = os.path.join(a.task, "meta.json")
@@ -740,7 +860,10 @@ def main():
     speedup = (baseline["ms"] / winner["ms"]) if (winner and baseline and winner["ms"]) else (
         1.0 if winner else 0.0)
     wb = winner["backend"] if winner else None
+    _extras = {n: (s, f) for n, s, f in _parse_extra_callables(getattr(a, "extra_callables", ""))}
     # Only triton/hip are source-editable (-> Tier-C kernel-squad rewrite). ck is a library backend.
+    # NOTE an extra callable is deliberately NOT `editable`: `editable` routes the LIVE kernel into a
+    # Tier-C rewrite, and an EvoK impl is not the live kernel. It gets its own winner_kind instead.
     editable = bool(wb in ("triton", "hip"))
     art = (winner.get("artifact") if winner else "") or ""
 
@@ -752,6 +875,15 @@ def main():
         apply_env = "TORCH_BLAS_PREFER_HIPBLASLT=0"; kind = "env"
     elif wb == "ck":
         apply_env = ""; kind = "flag"   # ck deploy path is build/flag-dependent; integrate must verify
+    elif wb in _extras:
+        # A caller-supplied library callable (EvoK hit). It deploys by REBINDING the live seam via
+        # an overlay shim (scripts/evok_overlay_shim.py), not by env, flag, or source patch.
+        kind = "evok_rebind"
+    elif wb == "aiter_bpreshuffle":
+        # Wins on the prefill-M buckets, but ONLY against a weight permuted into the MFMA fragment
+        # layout (and a K-major x_scale). That permutation is a load-time cost the integrator must
+        # pay once per weight and CACHE by data_ptr — never per call, or the win evaporates.
+        kind = "rebind_preshuffled"
     elif editable:
         kind = "patch_candidate"
     elif wb == "hipblaslt":
@@ -785,13 +917,39 @@ def main():
         "winner_editable": editable,
         "winner_kind": kind,
         "tuning_artifact": art,
+        # Non-empty ONLY when the winner is a caller-supplied extra: what to rebind, and how to call it.
+        "winner_callable": _extras.get(wb, ("", ""))[0],
+        "winner_signature_form": _extras.get(wb, ("", ""))[1],
+        "extra_callables": a.extra_callables,
+        "evok_hit_json": a.evok_hit_json,
         "apply_env": apply_env,
         "apply_flags": apply_flags,
         "deployable_note": ("env loaded at server startup is captured into the cuda-graph (deployable)"
                             if kind == "env" else
+                            "library callable: deploy by overlay rebind of the LIVE seam "
+                            "(generate with scripts/evok_overlay_shim.py, or hand-write a "
+                            "sitecustomize overlay when an adapter/router is needed); prove "
+                            "engagement before the timed A/B by grepping the marker CLASS "
+                            r"'\[evok-[a-z]+\] (rebound|resolved)' + '\[evok-[a-z]+\] CALLS .*[0-9]+', "
+                            "not a fixed tag"
+                            if kind == "evok_rebind" else
+                            "aiter bpreshuffle: rebind the live seam to a wrapper that (1) permutes the "
+                            "weight with aiter.ops.shuffle.shuffle_weight(w, layout=(16,16)) ONCE, cached "
+                            "by w.data_ptr(), (2) passes a K-major x_scale "
+                            "(xs.transpose(0,1).contiguous().view(*xs.shape)). Both layouts are REQUIRED "
+                            "— the plain row-major call returns wrong output fast. Prove engagement "
+                            "before the timed A/B."
+                            if kind == "rebind_preshuffled" else
                             "hipblaslt default already in use; nothing to deploy" if wb == "hipblaslt" else
                             "verify deployability at the e2e gate"),
     }
+    # STRICT default-off equivalence: with no --extra-callables the emitted JSON must be
+    # byte-identical to what this script produced before the feature existed -- not "identical
+    # plus three empty strings". A diff of two opbench_result.json files is a real acceptance
+    # check (§11.1) and it is only worth having if it can actually be clean.
+    if not a.extra_callables:
+        for _k in ("winner_callable", "winner_signature_form", "extra_callables", "evok_hit_json"):
+            summary.pop(_k, None)
     out = json.dumps(summary, indent=2, default=str)
     if a.out:
         with open(a.out, "w") as fh:

@@ -22,7 +22,8 @@ Commands:
                 (--patched-file F  |  --patch D  [--src-file S])   # S defaults to the install's file
   add-rebind    rebind module:attr -> impl_module.impl_attr (single function/kernel swap; the default)
                 --overlay O --target sglang.srt.layers.activation:silu_and_mul
-                --impl-module fast_act --impl-attr fast_silu_and_mul [--impl-file fast_act.py]
+                --impl-module fast_act --impl-attr fast_silu_and_mul
+                [--impl-file fast_act.py | --impl-dir <dir with entry + sibling modules>]
   add-capture   install a shape/IO capture hook on module:attr (uses capture_shapes.py)
                 --overlay O --target sglang...:fn --out <task_dir> [--max 5] [--capture-file capture_shapes.py]
   check         print where a module resolves from (run with the overlay on PYTHONPATH)
@@ -169,6 +170,22 @@ def cmd_add_rebind(a):
     man = _ensure_overlay(a.overlay)
     if a.impl_file:
         shutil.copy2(a.impl_file, os.path.join(a.overlay, os.path.basename(a.impl_file)))
+    # An implementation that spans several files (sibling modules loaded relative to __file__ —
+    # e.g. an EvoK impls/<backend>/ dir, or a Tier-C authored kernel plus its config tables)
+    # cannot be carried by --impl-file, which copies exactly one file. Copy the whole dir's
+    # contents FLAT into the overlay so `import <impl_module>` and its siblings all resolve
+    # from the same (overlay) path entry.
+    if getattr(a, "impl_dir", ""):
+        for fn in sorted(os.listdir(a.impl_dir)):
+            src = os.path.join(a.impl_dir, fn)
+            if fn == "__pycache__" or fn.startswith("."):
+                continue
+            dst = os.path.join(a.overlay, fn)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns("__pycache__"))
+            else:
+                shutil.copy2(src, dst)
     m = _load_man(man)
     m["rebinds"] = [e for e in m.get("rebinds", []) if e["target"] != a.target]
     m["rebinds"].append({"target": a.target, "impl_module": a.impl_module, "impl_attr": a.impl_attr})
@@ -221,6 +238,9 @@ def main():
         p.add_argument("--impl-module", required=True, dest="impl_module")
         p.add_argument("--impl-attr", required=True, dest="impl_attr")
         p.add_argument("--impl-file", default="", dest="impl_file")
+        p.add_argument("--impl-dir", default="", dest="impl_dir",
+                       help="copy an ENTIRE impl dir (flat) into the overlay — for implementations "
+                            "whose entry loads sibling modules relative to __file__")
         p.set_defaults(func=cmd_add_rebind)
 
     p = sub.add_parser("add-capture")

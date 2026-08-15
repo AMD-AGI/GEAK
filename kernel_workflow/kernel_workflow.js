@@ -352,6 +352,13 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       exp_root: `${EVAL_DIR}/bakeoff/${l.key}`,
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
+      // GPU-idleness-gate settings are a property of the BOX, not of a lane, so they have to reach
+      // every lane. Forwarded rather than re-derived: a lane that inherits a different verdict from
+      // the dispatcher is a lane whose verifiers get refused while the dispatcher's do not.
+      // (mode=optimize/author already forward the whole of A above, so only bakeoff needs this.)
+      gpu_max_vram_mb: A.gpu_max_vram_mb, gpu_max_busy_pct: A.gpu_max_busy_pct,
+      gpu_allow_idle_vram: A.gpu_allow_idle_vram, gpu_require_idle: A.gpu_require_idle,
+      gpu_pool_wait: A.gpu_pool_wait, gpu_env: A.gpu_env,
     });
     const speedup = primSpeedup(r);
     log(`lane ${l.key}:${l.mode} -> ${speedup ? speedup.toFixed(2) + 'x' : 'no result'} (${r ? r.validation_status : 'null'})`);

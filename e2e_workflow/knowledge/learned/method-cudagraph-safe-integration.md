@@ -3,8 +3,8 @@ key: cuda/HIP-graph integration · any gfx · sglang/vllm decode
 type: method
 confidence: ★★★
 effect: the #1 e2e-integration killer — a kernel can win isolated yet never run live (or net ~0 e2e), OR crash the server
-confirms: 5
-last_seen: 2026-06-27
+confirms: 6
+last_seen: 2026-08-14
 ---
 # Make an optimized kernel survive CUDA/HIP-graph capture (or the win vanishes e2e)
 - lever: sglang/vLLM capture the decode path into a graph. A kernel that JITs, syncs the host, or
@@ -29,6 +29,15 @@ last_seen: 2026-06-27
   · key any weight cache by `weight.data_ptr()` (pure host int, weights persistent) — NEVER a
     `w_scale.sum().item()` fingerprint (a host sync that deadlocks capture).
   · no `.item()/.cpu()/.tolist()/synchronize()`/Python-if-on-GPU-scalar on the hot path.
+- caution (**cross-op "cluster fusion" that DEFERS a launch — also verify each output is not consumed
+  immediately**, gfx942/vLLM fp8 quant prologue, 2026-08-14): a fusion that batches sibling ops into ONE
+  dispatch (here 2×rms_add_quant + act_mul_quant + group_quant per decoder layer) is only legal if the
+  caller does not read each output before the flush. The live Qwen3 decoder does
+  `rms_add_quant → qkv_proj` and `act_mul_quant → down_proj` back-to-back, so the deferred buffers were
+  still `torch.empty` garbage (max|q−ref| 240.0 / nan) — while the frozen per-op unittest passed, because
+  the harness flushes before checking. Screen it with a `defer_probe.py` that calls the fused seam and
+  compares each output BEFORE any sibling flushes; if it fails, ship the per-op (unfused) lanes instead
+  (iso drops here 1.389× → 1.196×, still correct and engaged).
 - verify: the loose-tol unittest oracle will NOT catch a capture hang — only the e2e gate does. Confirm
   the optimized kernel actually launches INSIDE the graph (see [[method-verify-engagement]]), and that
   the candidate fits the SAME mem-fraction as the accepted config (a bf16 weight re-materialization can

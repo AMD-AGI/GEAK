@@ -335,6 +335,42 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
 const EXPERT_SKILL_ROLES = new Set(['system_architect', 'op_benchmarker', 'e2e_integrator']);
 const GEMM_SYNTH = String(A.gemm_synth != null ? A.gemm_synth : 'true');     // synth GEMM inputs (cheap)
 const ENABLE_FP8 = String(A.enable_fp8 != null ? A.enable_fp8 : 'false');    // Tier-D quant (parity-breaking)
+// ---- EvoK operator-library lookup (OPTIONAL; args.evok_root) ----------------------------------
+// EvoK is an importable, engine-independent kernel library grown by this same agent: leaves live at
+// kernels/<op_class>/<kernel>/<dtype>/{spec,impls} and each impls/<backend>/impl.json declares
+// role(baseline|candidate) + verified + a selector(archs/models/shapes). When evok_root is set, the
+// Tier-A bake-off asks scripts/evok_lookup.py whether the library already holds an impl of the op
+// being extracted, and — on a hit — enters it as ONE MORE ordinary bake-off candidate (same
+// immutable oracle, same cold-cache CUDA-event timing, same correctness gate).
+// ENTIRELY ADDITIVE + DEFAULT OFF: with evok_root absent every EVOK_* input is absent and the run
+// is byte-identical to before the feature existed. EvoK's own recorded speedups are NEVER trusted
+// as a result — they are a hint about WHERE to look; the number that counts is the one measured here.
+const EVOK_ROOT = String(A.evok_root || '').replace(/\/+$/, '');
+const EVOK_INPUTS = EVOK_ROOT ? {
+  EVOK_ROOT,
+  EVOK_LOOKUP: `${WORKFLOW_DIR}/scripts/evok_lookup.py`,
+  EVOK_SHIM: `${WORKFLOW_DIR}/scripts/evok_overlay_shim.py`,
+} : {};
+// NEVER SILENT. Default-off + no log made "GEAK did not use EvoK" indistinguishable from "EvoK was
+// never switched on" — the 2026-08-11 run nearly burned 21h on that ambiguity. Both states now speak.
+if (EVOK_ROOT) log(`EvoK library lookup: ON (${EVOK_ROOT}) — Tier-A enters any hit as an extra bake-off candidate (measured here, never trusted from the library).`);
+else log('EvoK library lookup: OFF (default) — pass args.evok_root=/path/to/EvoK to let the bake-off consider library impls. No EVOK_* input is handed to any role this run.');
+
+// EvoK SEED, ONE definition for ALL nested kernel_workflow launches. A bake-off that FOUND an EvoK
+// impl but did not crown it still produced something valuable: an independently-verified impl of
+// exactly this op, by someone who already did the tiling search. Hand it to the author/optimize lane
+// as a SEED to read, not a patch to apply — the speedup denominator stays the frozen online kernel,
+// so copying it wholesale caps the lane at the score it already lost with.
+// GENERAL BY CONSTRUCTION: takes any object carrying `evok_hit_json` (bake result, head candidate,
+// corrective spec) and returns '' when there is no hit, so every launcher — fast fan-out, deep wave,
+// corrective re-author — can append it unconditionally. Do NOT re-inline this at a call site: the
+// previous single-site version lived inside the DEEP-only branch and reached 0 of 61 agents.
+const evokSeed = (b) => (b && b.evok_hit_json)
+  ? ` SEED: the EvoK library holds an independently-verified implementation of this op at ` +
+    `${b.evok_callable || '(see the hit json)'} (see ${b.evok_hit_json}). READ IT FIRST for tiling/config ideas ` +
+    `and technique transfer. It lost the bake-off, so do NOT copy it wholesale — mine it. ` +
+    `Your speedup is still measured against the FROZEN ONLINE KERNEL, not against this seed.`
+  : '';
 const FAST_PATH_FIRST = String(A.fast_path_first != null ? A.fast_path_first : 'true') === 'true';
 const ISL = parseInt(A.isl != null ? A.isl : 1024, 10);
 const OSL = parseInt(A.osl != null ? A.osl : 1024, 10);
@@ -480,6 +516,11 @@ const OPBENCH_SCHEMA = obj({
   best_known_ms: { type: 'number' },
   recommend_tier_c: { type: 'boolean' }, author_plan: arrObj, tuning_artifact: { type: 'string' },
   apply_env: { type: 'string' }, apply_flags: { type: 'string' }, code_patch: { type: 'string' },
+  // Set ONLY when the bake-off winner is an EvoK library callable (winner_kind='evok_rebind').
+  // These travel to the Integrator so it can build the rebind overlay WITHOUT re-deriving any path.
+  evok_callable: { type: 'string' },        // 'module:attr' of the winning EvoK impl
+  evok_signature_form: { type: 'string' },  // vllm6 | sglang5 | dense3 — the calling convention
+  evok_hit_json: { type: 'string' },        // path to the evok_lookup.py output that produced it
   per_backend: arrObj, parity_note: { type: 'string' },
   gate: { type: 'string', enum: ['have_winner', 'author_recommended', 'no_win', 'harness_error', 'tamper'] },
   harness_suspect: { type: 'boolean' }, reason: { type: 'string' },
@@ -858,7 +899,8 @@ async function tryCorrectiveReauthor(spec) {
           task: `CORRECTIVE FIX — do NOT re-discover the algorithm; KEEP the ${(spec.isolated || 0).toFixed(2)}x isolated win. ` +
             `This kernel PASSED the isolated oracle and ENGAGED on all live workers but was REJECTED at the e2e serving gate ` +
             `for: "${reason}". ` + (fixClass === 'correctness' ? CORRECTNESS_FIX_TASK : INTEGRATION_FIX_TASK) +
-            ` Emit a fixed final_patch. ` + GRAPH_REQ + (TASK || ''),
+            // seed read off base_inputs.KERNEL_RESULT (every caller threads it) — one hook, all 5 call sites
+            ` Emit a fixed final_patch. ` + GRAPH_REQ + evokSeed((spec.base_inputs || {}).KERNEL_RESULT) + (TASK || ''),
           apply_to_original: 'false',
         }, `${spec.short_name}:corrective`);
       } catch (e) { fix = { authored: false, validation_status: 'error', reason: String(e) }; }
@@ -1244,6 +1286,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
           CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
           GPU_ID: GPU_LIST[0], ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET: DEEP_WAVE_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+          ...EVOK_INPUTS,
         }),
         { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
       // Lane roster: ALWAYS tune the live editable kernel + author EVERY backend the bake-off proposes
@@ -1272,6 +1315,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         ];
         for (const t of extra) lanesSpec.push(t);   // global pool — no per-card truncation here
       }
+      // EVERY deep lane works the SAME op, so every lane gets the seed — including the backend-override
+      // branch above. Applied once here, after lanesSpec is fully built, rather than per-entry.
+      { const s = evokSeed(bake); if (s) for (const l of lanesSpec) l.steer = (l.steer || '') + s; }
       const liveBaselineMs = (bake && Number.isFinite(bake.best_known_ms) && bake.best_known_ms > 0) ? bake.best_known_ms : 0;
       const deepDir = `${EVAL_DIR}/deep_head/${h.short_name}`;
       const sharedKb = `${deepDir}/SHARED_KB.md`;
@@ -1597,6 +1643,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
             CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
             GPU_ID: gpu, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+            ...EVOK_INPUTS,
           }),
           { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
         return { h, gpu, ext, bake };
@@ -1640,9 +1687,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (bake && bake.gate === 'have_winner' && bake.isolated_speedup > 1.0)
         st.cands.push({ kind: 'direct_light', source: bake.winner_backend, winner_kind: bake.winner_kind,
           apply_env: bake.apply_env || '', apply_flags: bake.apply_flags || '', code_patch: bake.code_patch || '',
+          evok_callable: bake.evok_callable || '', evok_signature_form: bake.evok_signature_form || '',
+          evok_hit_json: bake.evok_hit_json || '',
           tuning_artifact: bake.tuning_artifact || '', isolated: bake.isolated_speedup, parity_note: bake.parity_note || 'expected_close' });
       for (const ap of (bake && bake.author_plan ? bake.author_plan.slice(0, HEAD_AUTHOR_MAX) : []))
-        authorJobs.push({ short_name: h.short_name, h, ext, ap, best_known_ms: bake.best_known_ms });
+        // carry the seed STRING (not the bake object) — the job outlives the loop variable
+        authorJobs.push({ short_name: h.short_name, h, ext, ap, best_known_ms: bake.best_known_ms, seed: evokSeed(bake) });
     }
 
     // ---- opt-B: ALL (operator × direction) author jobs in ONE parallel pool, exclusive 1-card lease ----
@@ -1666,7 +1716,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `Cache any weight prep (transpose/requant/preshuffle) by weight.data_ptr() done ONCE, not per call. ` +
               `MEMORY FOOTPRINT IS A HARD CONSTRAINT: use the FUSED fp8 path (fold the block-scale into the operand scale, one fp8 MFMA ` +
               `GEMM) and cache only COMPACT fp8/preshuffled weights (never a bf16 expansion); the integrated kernel MUST fit at the ` +
-              `accepted config's mem-fraction. ` + GRAPH_REQ + (TASK || ''),
+              `accepted config's mem-fraction. ` + GRAPH_REQ + (j.seed || '') + (TASK || ''),
             apply_to_original: 'false',
           }, `${j.short_name}:${lang}`);
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
@@ -1716,6 +1766,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
             apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
             code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
+            evok_callable: cand.evok_callable || '', evok_signature_form: cand.evok_signature_form || '',
+            evok_hit_json: cand.evok_hit_json || '',
             verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time,
             // Pass the Architect's live seam + a concrete engagement assertion so the Integrator can
             // VERIFY the overlay actually binds on the live path BEFORE spending a full e2e A/B — an
@@ -1724,6 +1776,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             parity_note: cand.parity_note || 'expected_close' },
           CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
           CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
+          ...EVOK_INPUTS,
           ENGAGEMENT_CHECK: h.engagement_check || '',
         },
         `integrate ${h.short_name}`, 'HeadKernel');
@@ -1752,8 +1805,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
                   authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
                   apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
                   code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
+                  evok_callable: cand.evok_callable || '', evok_signature_form: cand.evok_signature_form || '',
+                  evok_hit_json: cand.evok_hit_json || '',
                   verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time, parity_note: 'expected_close' },
                 SKILL_DIR: WORKFLOW_DIR,
+                ...EVOK_INPUTS,
               },
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
             })
@@ -1815,6 +1871,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
         CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
         GPU_ID: h.gpu_id, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+        ...EVOK_INPUTS,
       }),
       { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
     if (!bake || (bake.gate !== 'have_winner' && bake.gate !== 'author_recommended')) {
@@ -1842,6 +1899,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     if (bake.gate === 'have_winner' && bake.isolated_speedup > 1.0) {
       headCands.push({ kind: 'direct_light', source: bake.winner_backend, winner_kind: bake.winner_kind,
         apply_env: bake.apply_env || '', apply_flags: bake.apply_flags || '', code_patch: bake.code_patch || '',
+        evok_callable: bake.evok_callable || '', evok_signature_form: bake.evok_signature_form || '',
+        evok_hit_json: bake.evok_hit_json || '',
         tuning_artifact: bake.tuning_artifact || '', isolated: bake.isolated_speedup,
         parity_note: bake.parity_note || 'expected_close' });
     }
@@ -1876,7 +1935,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `down → starves the KV-cache pool → net e2e REGRESSION even when the GEMM is faster). Use the FUSED fp8 path ` +
               `(fold the block-scale into the operand scale, run ONE fp8 MFMA GEMM — the "kill the dequant" lever) and cache ` +
               `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
-              `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + (TASK || ''),
+              `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + evokSeed(bake) + (TASK || ''),
             apply_to_original: 'false',
           }, `${h.short_name}:${lang}`);
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
@@ -1930,10 +1989,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
         apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
         code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
+        evok_callable: cand.evok_callable || '', evok_signature_form: cand.evok_signature_form || '',
+        evok_hit_json: cand.evok_hit_json || '',
         verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time,
         parity_note: cand.parity_note || 'expected_close' },
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
+      ...EVOK_INPUTS,
       CAND_TAG: `c${ci}_${cand.source}`,
       ...(sharedRefMed != null ? { REUSE_REF: true, SHARED_REF_MED: sharedRefMed } : {}),
     });

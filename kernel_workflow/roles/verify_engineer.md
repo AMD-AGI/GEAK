@@ -42,6 +42,17 @@ absolute per-case latencies. The script trusts only your numbers.
 4. Run FULL_BENCHMARK via `bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <cmd>`. Parse per-case
    latency using the parse hint. Run it **twice** and keep the better/median if the two disagree by
    >5% (note the variance).
+   **Tee every run to `$VERIFY_DIR/run<N>.log`** (`... 2>&1 | tee "$VERIFY_DIR/run1.log"`). Those logs
+   are the only record of your measurement that survives you: if this agent hangs or its return is
+   lost, the lane recovers the candidate by reading them, and an unlogged run is a lost one.
+   **If `gpu_lock.sh` REFUSES the GPU, that is a decision, not a transient — do NOT retry in a loop.**
+   Its stderr names which criterion failed (work actually EXECUTING vs. idle VRAM residency), the
+   measured values, and the switch that changes the verdict (`GEAK_GPU_ALLOW_IDLE_VRAM=1`,
+   `GEAK_GPU_MAX_VRAM_MB`, `GEAK_GPU_MAX_BUSY_PCT`). Apply the switch **only** if the refusal is the
+   idle-residency one — a card that is genuinely executing foreign work cannot produce a number worth
+   reporting, at any threshold. If you cannot get an idle card within **two** attempts, return
+   `status:"failed"` with that stderr in `notes` and STOP. A verifier that keeps retrying parks a
+   process on the GPU that outlives the workflow, contaminating everyone else's timings.
 4b. **(ONLY if `REQUIRE_GRAPH_CAPTURE` is set) CUDA/HIP-graph capture-safety smoke.** This op will be
    overlaid on the graph-captured decode path, so a kernel that passes iso but host-syncs or lazily
    compiles UNDER CAPTURE passes here yet CRASHES the live TP>1 server. Catch it now (cheap), in `$WS`

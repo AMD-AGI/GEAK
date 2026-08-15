@@ -74,6 +74,65 @@ one-at-a-time would bank NONE of them. So emit one of three gates:
 - **`rejected`** — parity fails, OR no engagement, OR `cand_med < ref_med` (a real regression).
 Never `stack` a parity-failure, a regression, or a non-engaging change.
 
+## Applying a `winner_kind:"evok_rebind"` candidate
+
+`KERNEL_RESULT` carries `evok_callable` ('module:attr'), `evok_signature_form`
+(vllm6|sglang5|dense3) and `evok_hit_json`. Inputs also carry `EVOK_ROOT` + `EVOK_SHIM`.
+
+1. **Re-read `evok_hit.json` and re-check `deployable`.** If false, reject immediately with
+   `reason:"no_rebind_seam: <hit.reason>"`. Do not start a server.
+
+2. **Determine the LIVE seam from the TASK, not from EvoK.** EvoK's `seam` field records the
+   engine it was captured from (often vLLM); this run may be serving sglang. The authority is
+   `meta.json:live_call_seam` on the extracted task (e.g.
+   `sglang.srt.layers.quantization.fp8_utils:apply_w8a8_block_fp8_linear`), cross-checked against
+   `rebind_seam_note`. If the live seam's convention differs from EvoK's entry, pass the
+   converting form (`--form sglang5_to_vllm6`).
+
+3. **Build the overlay — either route, your choice:**
+   - *generator* (fastest when the hit maps 1:1 onto the live seam):
+     ```bash
+     python3 "$EVOK_SHIM" --overlay "$CB/overlay" --hit "<evok_hit_json>" \
+       --live-seam "<meta.live_call_seam>" --tag "<short_name>" \
+       --counter-out "$CB/evok_calls.txt"
+     ```
+   - *hand-written* (required when you need an adapter the generator cannot express — a signature
+     conversion, a per-shape router between EvoK and a vendor kernel, a `torch.library.custom_op`
+     wrapper for graph capture): adapt `knowledge/templates/flydsl_overlay_sitecustomize.py`.
+
+   Whichever route, the overlay is deployed by PREPENDING its dir to `PYTHONPATH`
+   (`PYTHONPATH=$CB/overlay:$EVOK_ROOT/library:$PYTHONPATH`) and reverted by dropping it. Nothing
+   under the served install may be edited.
+
+4. **ENGAGEMENT PROOF BEFORE THE TIMED A/B — two marker CLASSES, both required.**
+   Match on MEANING, not on a literal prefix: the two routes above emit different tags
+   (`[evok-shim]` vs `[evok-overlay]`) and a hand-written adapter may pick its own. Any overlay
+   you build MUST print, to server stderr, lines satisfying both:
+   - **BIND** — `[evok-*] rebound|resolved <live_seam> -> <module>.<attr>`, once per worker at
+     interpreter startup or first import. Proves the attribute was replaced.
+   - **CALL** — `[evok-*] CALLS ...<n>` where the trailing integer is a monotonically growing call
+     count (`CALLS <resolve_key>=<n>` and `CALLS pid=<pid> n=<n>` are both valid forms), with
+     **n > 0** on the CANDIDATE leg and **no such line / n == 0** on the reference leg. Proves it
+     actually ran on the live path.
+
+   Grep for the *class*, e.g. `grep -E '\[evok-[a-z]+\] (rebound|resolved) ' server.log` and
+   `grep -E '\[evok-[a-z]+\] CALLS .*[0-9]+' server.log` — do NOT grep a fixed `[evok-shim]`
+   string; a hand-written overlay will silently look like a failure.
+   Missing BIND → `reason:"no_rebind_seam"`. BIND present, CALL absent or n == 0 →
+   `reason:"no_engagement"`. Either way reject in minutes — do NOT spend a full A/B.
+   Record the exact grep you used and its matched lines in `engagement_check` so the run's
+   evidence is reproducible.
+
+5. **Everything after that is the standard gate, unchanged:** delta > `NOISE_BAND_PCT` AND
+   `cand_min > ref_max`; parity against a FRESH no-overlay baseline (the TRUE baseline, not the
+   previously stacked leg); `parity_kind` will be `accuracy` for any fp8 GEMM rebind (the
+   numerics legitimately differ — do NOT demand `byte_exact`); implausible-speedup guard
+   `1/(1-(pct/100)(1-1/S))`; verdict `accepted` / `stack` / `rejected`.
+
+6. **Cost note.** The first call in each worker pays a triton JIT compile inside the shim's
+   lazy `_get()`. Warm the server before the timed window (the standard warm-up bench already
+   does this) or the first measurement absorbs compile time and reads as a regression.
+
 ---
 
 ## PHASE=integrate  (one optimized kernel)

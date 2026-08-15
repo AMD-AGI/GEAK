@@ -432,6 +432,42 @@ function expertSkillsBlock(role) {
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
 
+// --- GPU-gate environment --------------------------------------------------
+// scripts/gpu_lock.sh refuses to run on a card that is not idle. Its thresholds are env vars with
+// built-in defaults, and NOTHING used to put them in an agent's environment -- so when the gate's
+// verdict was wrong for a box (GPU 0 held a foreign, IDLE 161-164 GB allocation, busy 0%, for a
+// whole run), every launch was refused and the escape valve existed only for whoever went and read
+// the shell script. Exactly one of seven directions did; the rest lost their measurements, and the
+// blocked verifiers hung on the GPU instead of failing, outliving the workflow as orphans.
+// The valve therefore ships WITH the run: the caller sets it once in args, and it reaches every
+// role that touches a GPU (engineer, verify, benchmark, profile, integrator) through the one place
+// they all pass through. Empty by default -- the gate's own defaults still apply -- so this changes
+// nothing until a box needs it.
+const GPU_ENV = (() => {
+  const e = {};
+  const put = (k, v) => { if (v != null && String(v) !== '') e[k] = String(v); };
+  put('GEAK_GPU_MAX_VRAM_MB', A.gpu_max_vram_mb);
+  put('GEAK_GPU_MAX_BUSY_PCT', A.gpu_max_busy_pct);
+  put('GEAK_GPU_ALLOW_IDLE_VRAM', A.gpu_allow_idle_vram);
+  put('GEAK_GPU_REQUIRE_IDLE', A.gpu_require_idle);
+  put('GEAK_GPU_POOL_WAIT', A.gpu_pool_wait);
+  Object.entries(A.gpu_env || {}).forEach(([k, v]) => put(k, v));  // escape hatch for anything else
+  return e;
+})();
+const GPU_ENV_TXT = Object.keys(GPU_ENV).length
+  ? `\n\n## GPU gate environment (MANDATORY)
+${WORKFLOW_DIR}/scripts/gpu_lock.sh refuses to run on a card it judges non-idle. This run has been
+configured with the settings below; EXPORT THEM in every shell in which you invoke gpu_lock.sh
+(directly or through a script you write), or the gate will refuse launches it is meant to allow:
+\`\`\`bash
+${Object.entries(GPU_ENV).map(([k, v]) => `export ${k}=${JSON.stringify(v)}`).join('\n')}
+\`\`\`
+If the gate STILL refuses, read its stderr: it names which criterion failed (executing work vs. idle
+VRAM residency), the measured values, and the switch that changes the verdict. Do NOT loop retrying a
+refusal — a refusal is a decision, not a transient. Report it (\`status:"failed"\`, the message in
+\`notes\`) and return, so the round proceeds instead of leaving a process parked on the GPU.`
+  : '';
+
 function roleAgent(role, phase, intro, inputs) {
   const base = `You are the ${role}. PHASE=${phase}.
 First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
@@ -441,7 +477,7 @@ Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
 ## Inputs
 ${cfg(inputs)}
 
-Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
+Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).${GPU_ENV_TXT}`;
   return base + expertSkillsBlock(role);
 }
 
@@ -679,7 +715,7 @@ ${cfg({
         ...KB_INPUTS,
       })}
 
-Return ONLY the worker_result.json structure as StructuredOutput.` +
+Return ONLY the worker_result.json structure as StructuredOutput.${GPU_ENV_TXT}` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
       expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
@@ -716,7 +752,76 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
         { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
-      ).then((ver) => ({ d, eng, ver, patch }));
+      ).then((ver) => {
+        // The SAME measurement-anchored principle as the engineer harvest above, one layer down.
+        // The engineer stage learned not to trust a return value over what is on disk; the verify
+        // stage was still doing exactly that. verify's oracle writes its numbers to
+        // ${d.out_dir}/verify/run*.log BEFORE the agent composes its StructuredOutput, so a verify
+        // agent that hangs past the timeout (-> null), dies on a terminal API error (-> null), or
+        // mis-returns (status:'failed') can leave a fully-measured PASS on disk that this lane then
+        // scores as 0 and drops. That is a false loss of a real, oracle-measured candidate -- the
+        // one failure mode the whole harvest design exists to prevent.
+        // So: only a verify agent that actually came back gets to speak for itself. If it did not,
+        // ask a fresh agent to read the oracle's own log and report nothing but what the oracle
+        // printed. Recovery is EVIDENCE-ONLY -- no re-running, no inference, no benefit of the
+        // doubt: an incomplete/absent/failed log yields status 'failed' and the candidate stays
+        // dropped, exactly as today. What changes is only the case where the measurement exists.
+        // The recovered candidate is TAGGED (recovered_from_log) so it is distinguishable
+        // everywhere downstream, and the bar is NOT relaxed: it must still say verified + pass +
+        // beat the floor, and integration still requires two INDEPENDENT verified candidates.
+        if (ver && !says(ver.status, 'failed')) return { d, eng, ver, patch };
+        log(`Round ${round} dir ${d.id}: verify return ${ver ? 'failed' : 'missing'} — ` +
+          `harvesting the oracle's own log (${d.out_dir}/verify/run*.log) before scoring this 0.`);
+        return agentT(
+          `Recover a verification result that was already MEASURED but whose reporting agent did not come back.
+
+The verify agent for direction ${d.id} either hung, died, or returned a failed result. Its oracle may
+nevertheless have completed and written its numbers to disk. Your job is to report what the oracle
+printed -- and NOTHING else.
+
+## Do
+1. List and read every log under ${d.out_dir}/verify/ (\`run*.log\`, plus any other *.log there).
+   Read the tail of each; the oracle prints its summary at the end.
+2. Find the oracle's own summary lines, in this order of preference:
+   - \`GEAK_WEIGHTED_SPEEDUP=<float>\`  -> verified_weighted
+   - \`OVERALL:\` line                  -> verified_geomean (and arithmetic, if printed separately)
+   - the per-case table               -> per_case entries (name, baseline_ms, optimized_ms, speedup)
+3. Find the correctness verdict the oracle printed (a PASS/FAIL / all-close verdict). If the log does
+   not state correctness explicitly and unambiguously, correctness is NOT pass.
+4. The verify protocol (${WORKFLOW_DIR}/roles/verify_engineer.md, step 4) runs the full benchmark
+   **twice**. Recovery does NOT relax that: you need TWO complete benchmark runs on this patch. Report
+   their median (or the better one, noting the disagreement in variance_note if they differ by >5%).
+   One complete run is NOT enough -> status 'failed'. A run whose log stops mid-way is not a run.
+
+## Do not
+- Do NOT run the benchmark, the harness, the patch, or anything else. Read only. This lane's GPU may
+  already be in use by another direction; launching work here corrupts other directions' timings.
+- Do NOT compute, estimate, interpolate, or "reconstruct" a speedup the oracle did not print.
+- Do NOT take a number from the engineer's own logs, from best_patch.diff, or from any file outside
+  ${d.out_dir}/verify/ . An engineer's self-reported number is exactly what verification exists to
+  distrust.
+- Do NOT report status 'verified' unless a single complete run in that directory shows BOTH the
+  correctness pass AND the speedup you are reporting.
+
+## Return
+StructuredOutput matching the schema.
+- If you recovered a complete, correctness-passing run: status 'verified', correctness 'pass',
+  the oracle's numbers, and notes naming the exact log file and quoting the summary line(s) you read.
+- In EVERY other case (no log dir, no logs, no complete run, no explicit correctness pass, numbers
+  absent or unreadable): status 'failed', verified_geomean 0, and notes saying precisely what you
+  found and what was missing. Reporting 'failed' here is a correct and expected outcome -- a
+  candidate that cannot be evidenced must stay dropped.`,
+          { phase: 'Verify', label: `verify ${d.id} (log-harvest)`, schema: VERIFY_SCHEMA }
+        ).then((rec) => {
+          if (!rec || says(rec.status, 'failed')) {
+            log(`Round ${round} dir ${d.id}: no complete oracle run on disk — candidate stays dropped.`);
+            return { d, eng, ver, patch };
+          }
+          log(`Round ${round} dir ${d.id}: recovered ${primSpeedup(rec).toFixed(3)}x from the verify log ` +
+            `(agent return was ${ver ? 'failed' : 'missing'}).`);
+          return { d, eng, ver: Object.assign({}, rec, { recovered_from_log: true }), patch };
+        });
+      });
     }
   );
 
@@ -734,6 +839,10 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
     arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch,
+    // True when the verify AGENT never reported and the number came from the oracle's own log
+    // instead. The measurement is no weaker for it (same oracle, same run), but the provenance is
+    // different, so it stays visible in the candidate list, the memory update and the history.
+    ...(r.ver.recovered_from_log ? { recovered_from_log: true } : {}),
   }));
 
   let integrate = null;
@@ -819,7 +928,9 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR,
       ROUND_RESULTS: clean.map(r => ({ id: r.d.id, title: r.d.title, specialty: r.d.specialty,
         expected: r.d.expected_speedup, claimed: r.eng ? r.eng.speedup_geomean : 0,
-        verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
+        verified: r.ver ? r.ver.verified_geomean : 0,
+        status: r.ver ? (r.ver.status + (r.ver.recovered_from_log ? ' (recovered from verify log)' : ''))
+          : (r.eng ? r.eng.status : 'none'),
         notes: r.eng ? r.eng.notes : '' })),
       INTEGRATE: integrate, WINNER: winner ? { source: winner.source, geomean: winner.geomean } : null,
       IMPROVED: improved, REPROFILE_SHIFT: profileSummary ? profileSummary.shift_note : '',
@@ -838,7 +949,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     round,
     directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty })),
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
-      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none') })),
+      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
+      ...(r.ver && r.ver.recovered_from_log ? { recovered_from_log: true } : {}) })),
     integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
     winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
     improved, cumulative,

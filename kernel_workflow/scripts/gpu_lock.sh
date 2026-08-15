@@ -74,13 +74,45 @@ fi
 # process holds the GPU, i.e. it fails exactly when we need it. Set GEAK_GPU_REQUIRE_IDLE=0 to skip
 # (e.g. deliberately co-tenanted screening runs). The default is 1 on BOTH paths: pool mode steps to
 # another GPU when one is busy, single-GPU mode has nowhere to step and so fails loudly instead.
+#
+# The two criteria are reported SEPARATELY, because they are not the same finding.
+#   gpu_busy_percent  -- someone is executing on the CUs. This contaminates a timing. Hard stop.
+#   mem_info_vram_used -- someone has memory RESIDENT. At busy=0 that neighbour holds no CUs and no
+#                        bandwidth, so its effect on a measurement is ~nil.
+# Both used to exit through one message ("foreign work running"), and an idle 161-164 GB allocation
+# on GPU 0 -- busy 0% the whole time -- therefore read as "another tenant is computing" and refused
+# every verifier launch for two full rounds. The one direction that got a measurement did it by
+# setting GEAK_GPU_MAX_VRAM_MB=185000 itself, which relaxes ONLY the VRAM half; its two reps agreed
+# to 1.0%, i.e. relaxing was safe and the gate had simply not said what it was actually objecting to.
+# So: name the criterion that failed, quote the measured values, and name the switch that changes it.
+# GEAK_GPU_ALLOW_IDLE_VRAM=1 accepts a card whose VRAM is over threshold while busy% is under it
+# (a resident-but-idle neighbour). Default 0: unchanged behavior, but now a legible refusal.
+#
+# _gpu_is_idle sets _GPU_IDLE_WHY to a caller-printable explanation whenever it returns non-zero.
+_GPU_IDLE_WHY=""
 _gpu_is_idle() {
-    local id="$1" dev busy vram
+    local id="$1" dev busy vram maxbusy maxvram
+    _GPU_IDLE_WHY=""
     dev="$(readlink -f "/sys/class/drm/renderD$((128 + 8 * id))/device" 2>/dev/null)" || return 0
     [ -r "$dev/gpu_busy_percent" ] || return 0   # cannot tell -> do not block the run
     busy="$(cat "$dev/gpu_busy_percent" 2>/dev/null || echo 0)"
     vram="$(( $(cat "$dev/mem_info_vram_used" 2>/dev/null || echo 0) / 1048576 ))"
-    [ "${busy:-0}" -le "${GEAK_GPU_MAX_BUSY_PCT:-5}" ] && [ "$vram" -le "${GEAK_GPU_MAX_VRAM_MB:-1024}" ]
+    maxbusy="${GEAK_GPU_MAX_BUSY_PCT:-5}"
+    maxvram="${GEAK_GPU_MAX_VRAM_MB:-1024}"
+
+    if [ "${busy:-0}" -gt "$maxbusy" ]; then
+        _GPU_IDLE_WHY="foreign work is EXECUTING on GPU $id: gpu_busy_percent=${busy}% > GEAK_GPU_MAX_BUSY_PCT=${maxbusy}% (VRAM ${vram}MB). A timing taken here is contaminated; this is not a threshold to raise casually."
+        return 1
+    fi
+    if [ "$vram" -gt "$maxvram" ]; then
+        if [ "${GEAK_GPU_ALLOW_IDLE_VRAM:-0}" = "1" ]; then
+            echo "WARNING: GPU $id carries an IDLE VRAM allocation: ${vram}MB > GEAK_GPU_MAX_VRAM_MB=${maxvram}MB, but gpu_busy_percent=${busy}% <= ${maxbusy}%. Proceeding because GEAK_GPU_ALLOW_IDLE_VRAM=1 (resident memory at 0% busy holds no CUs and no bandwidth). Watch for OOM, not for skew." >&2
+            return 0
+        fi
+        _GPU_IDLE_WHY="GPU $id is NOT executing anything (gpu_busy_percent=${busy}% <= GEAK_GPU_MAX_BUSY_PCT=${maxbusy}%) but has ${vram}MB VRAM resident > GEAK_GPU_MAX_VRAM_MB=${maxvram}MB. This is a memory-residency refusal, NOT contention. If that allocation is a parked neighbour, set GEAK_GPU_ALLOW_IDLE_VRAM=1 (accept idle residency, keep the busy% check) or raise GEAK_GPU_MAX_VRAM_MB above ${vram}."
+        return 1
+    fi
+    return 0
 }
 
 case "$GPU_SPEC" in
@@ -95,12 +127,19 @@ case "$GPU_SPEC" in
     _deadline=$(( _wait_t0 + ${GEAK_GPU_POOL_WAIT:-1200} ))
     GPU_ID=""
     while [ -z "$GPU_ID" ]; do
+        _POOL_WHY=""   # reasons from THIS sweep only; the loop re-sweeps every 0.2s
         for _g in $POOL; do
             exec {_fd}>"${LOCK_DIR}/gpu_${_g}.lock"
             if flock -n -x "$_fd"; then
                 # We hold the lane. Only now check idleness -- checking before locking would race.
                 if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] && ! _gpu_is_idle "$_g"; then
-                    flock -u "$_fd"; exec {_fd}>&-   # foreign job on this GPU: try the next lane
+                    # Keep the newest reason per lane. Stepping to the next GPU is the right move,
+                    # but if the WHOLE pool is refused the deadline error below must be able to say
+                    # why each lane was refused -- "no free+idle GPU" alone is unactionable, and a
+                    # pool refused entirely for idle-VRAM looks identical to one that is genuinely
+                    # saturated.
+                    _POOL_WHY="$(printf '%s\n  - %s' "${_POOL_WHY:-}" "$_GPU_IDLE_WHY")"
+                    flock -u "$_fd"; exec {_fd}>&-   # this GPU is unusable right now: try the next lane
                     continue
                 fi
                 GPU_ID="$_g"; POOL_FD="$_fd"
@@ -122,7 +161,11 @@ case "$GPU_SPEC" in
             exec {_fd}>&-
         done
         if [ -z "$GPU_ID" ]; then
-            [ "$SECONDS" -ge "$_deadline" ] && { echo "ERROR: no free+idle GPU in pool [$GPU_SPEC] after ${GEAK_GPU_POOL_WAIT:-1200}s" >&2; exit 1; }
+            [ "$SECONDS" -ge "$_deadline" ] && {
+                echo "ERROR: no free+idle GPU in pool [$GPU_SPEC] after ${GEAK_GPU_POOL_WAIT:-1200}s" >&2
+                [ -n "${_POOL_WHY:-}" ] && echo "  last sweep, per GPU:${_POOL_WHY}" >&2
+                exit 1
+            }
             sleep 0.2
         fi
     done
@@ -195,7 +238,9 @@ else
         # loud failure, not for measuring on a contaminated card. Set GEAK_GPU_REQUIRE_IDLE=0 to
         # restore the old behavior for deliberately co-tenanted runs.
         if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] && ! _gpu_is_idle "$GPU_ID"; then
-            echo "ERROR: GPU $GPU_ID has foreign work running (busy/VRAM above threshold); refusing to measure on it" >&2
+            echo "ERROR: refusing to measure on GPU $GPU_ID." >&2
+            echo "  $_GPU_IDLE_WHY" >&2
+            echo "  (GEAK_GPU_REQUIRE_IDLE=0 disables this gate entirely -- only for deliberately co-tenanted runs, never for a number you intend to report.)" >&2
             exit 1
         fi
         [ -n "${GEAK_GPU_USE_LOG:-}" ] && \

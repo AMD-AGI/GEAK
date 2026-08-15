@@ -41,6 +41,34 @@ experience; treat the seed as priors, not gospel — the unittest is the judge.
 4. **CURATE** `knowledge/learned/` after the run (read INDEX → merge/insert ≥★★ / archive
    contradicted), per `knowledge/learned/README.md`.
 
+## Roofline-prior calibration (predicted vs actual — one line per measured direction)
+Recorded so the `target_eff` priors / byte models in `analysis_skills/roofline/SKILL.md` self-correct.
+- 2026-08-13 · gfx942 · vLLM Qwen3-14B-FP8 TP=1 conc=64 · **dense fp8 blockscale GEMM** (CK
+  `kernel_gemm_xdl_cshuffle_v3`, 62.14% GPU): predicted `roofline_pct 0.27`, `attainable 3.34×`,
+  `expected_e2e +41.5%` (confidence **low**, bound_type latency) → measured **iso 1.6955×, e2e +19.35%**.
+  Prior **~2× OPTIMISTIC in magnitude but CORRECT in rank** (it was the #1 underperforming head and the
+  authored-Triton route paid). Direction of error: `attainable_speedup` derived from a latency-bound
+  (non-HBM) roof over-credits headroom — treat low-confidence latency-bound `attainable` as an upper bound.
+- 2026-08-13 · same rig · **`kernel_unified_attention_3d`** (18.22→21.69% GPU): predicted
+  `roofline_pct 0.517` vs the 0.50 paged-attn target, `attainable 1.0×`, `expected_e2e 0.0` = *saturated*.
+  Not yet measured (extraction failed) — **unfalsified, do not upgrade its confidence.** Its SHARE rose
+  only because the GEMM shrank (absolute 3.10→2.96 ms/decode-step), which the prior predicted correctly.
+- 2026-08-13 · same rig · post-win head `_decode_gemm_kernel` 48.3% @ `roofline_pct 0.42`,
+  `attainable 2.14×`, `+25.7%` (low conf) — pending. Its `_reduce_kernel` (5.3%) is a *self-inflicted*
+  split-K round trip, i.e. a byte-reduction target the roofline model does not model as removable.
+- 2026-08-14 · same rig · **`_reduce_kernel`** (5.3% GPU, the split-K fp32 partial reduction): treated as a
+  standalone extraction → **measured iso 1.00× (no headroom)**. It is a pure streaming reduce already at the
+  HBM roof, so the roofline view was RIGHT that nothing is recoverable *in place*; the model's blind spot is
+  that the whole kernel is *removable by its producer*. Lesson for the prior: a self-inflicted round-trip
+  should be scored against the PRODUCER's byte budget, never as its own tuning target.
+- 2026-08-14 · same rig · **quant-prologue cluster** (`_fused_rms_fp8_group_quant` +
+  `_act_mul_and_dynamic_fp8_group_quant` + 2 aiter HIP quant kernels, 10.2% GPU): authored iso **1.3889×**,
+  but the one-dispatch fusion was live-UNSAFE (deferred launch vs. immediate consumer) so the DEPLOYED iso
+  was **1.196×** → Amdahl ceiling only **+1.71%**, measured e2e **+0.59% with overlapping distributions**
+  (session ref spread 5.8%). Calibration: Amdahl was accurate (0.59% ≤ 1.71%); the error mode to avoid is
+  budgeting from the AUTHORED iso instead of the DEPLOYABLE one. Under ~10% pct_gpu_time, screen with
+  `pct_gpu × (1 − 1/S_deployable)` and expect carry-forward, not a solo gate pass.
+
 ## Learned experience → `knowledge/learned/`
 Confirmed routing/method findings are NOT appended here anymore. They live as distilled, evidence-cited
 cards in **`knowledge/learned/`**, read via **`knowledge/learned/INDEX.md`** (grouped by reuse key

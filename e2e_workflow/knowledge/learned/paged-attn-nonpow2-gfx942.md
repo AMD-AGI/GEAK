@@ -3,8 +3,8 @@ key: paged decode attention · gfx942 · vLLM (pow2 + non-pow2 KV block; incl. M
 type: routing
 confidence: ★★★
 effect: head ~8-21% GPU; decode-regime Triton/HIP rewrite → ~+1-4% e2e ceiling (modest, real); op-level backend bake-off is N/A (server-flag swap)
-confirms: 6
-last_seen: 2026-07-05
+confirms: 7
+last_seen: 2026-08-13
 ---
 # vLLM paged attention with a non-pow2 KV block → the live path is the editable in-tree Triton kernel
 - lever: when the KV `block_size` is non-pow2 (e.g. 784), `use_rocm_custom_paged_attention()` returns
@@ -56,8 +56,23 @@ last_seen: 2026-07-05
   Integrator also rebinds the consumers' imported ref in vllm.v1.attention.backends.triton_attn /
   rocm_aiter_unified_attn. CK attention candidate here needs ckProfiler (absent on this image → advisory,
   fall back to triton/hip).
+- caution (vLLM 0.21 **ROCM_AITER_UNIFIED_ATTN** with `VLLM_ROCM_USE_AITER=1`, fp8 KV cache): the live
+  path is aiter's OWN copy `aiter.ops.triton.attention.unified_attention` (`kernel_unified_attention_3d`
+  split-K + `reduce_segments`) — the MIRROR of the in-tree-triton case above, so which copy is live must be
+  read from the server log, never assumed. It is EDITABLE Triton → Tier-C route=**rewrite**. Its launcher
+  picks configs by a hand-written arch heuristic (`TILE_SIZE`, `BLOCK_M`/`BLOCK_Q`, `num_warps`,
+  `num_stages`, `waves_per_eu`, `NUM_SEGMENTS_PER_SEQ`) with NO autotune → per-shape tuning headroom.
+  Rebind gotcha: aiter keeps a backward-compat module ALIAS
+  (`sys.modules['aiter.ops.triton.unified_attention']` is a DIFFERENT module object) and vLLM imports the
+  symbol into `vllm.v1.attention.backends.rocm_aiter_unified_attn` — a rebind must set all three or
+  engagement_hits=0. No op-level env/flag win (aiter↔triton = `--attention-backend`, Config Tuner).
+  op_bench `bench_attn` again only validates the oracle (harness_suspect=false expected, isolated_speedup
+  reported 0.0 = "not measured", NOT a no-win).
 - source: exp/e2e_*Qwen3.5-27B-FP8*/ 2026-06-15 (non-pow2); e2e_Qwen-Qwen3-14B_20260622 (pow2 bk=16, 21% head);
   e2e_moonshotai-Kimi-K2.6_20260622 (MLA decode stage1 TRITON_MLA, 17.23% head, baseline decode M1=0.219ms/M64=0.265ms, oracle rel=0;
   AND aiter `_ps` asm head h1 7.52%, baseline M1=0.062ms/M64=0.080ms/M64-long=0.312ms, oracle rel pass tol2e-2 → route=author triton);
   e2e_moonshotai-Kimi-K2.6_20260623 (re-confirm aiter `_ps` asm path, mla_a16w16_qh16..._ps.co loaded; 7.5% head, synth oracle PASS rel=0,
   baseline M1=0.184ms/M64=0.438ms; no op-level env/flag win → author_plan triton FIRST then hip, gate=author_recommended)
+  e2e_Qwen3-14B-FP8_20260813 (ROCM_AITER_UNIFIED_ATTN aiter-copy unified_attention_3d, 20.1% head, fp8 paged KV bs=64, GQA 40/8 hd=128;
+  oracle PASS, identity-run noise floor 1.0165x weighted; baseline decode m1=0.0240ms/m64=0.0931ms, prefill 8192tok=0.2306ms/mixed 2049tok=0.3022ms;
+  no op-level env/flag win -> author_plan triton route=rewrite, gate=author_recommended)

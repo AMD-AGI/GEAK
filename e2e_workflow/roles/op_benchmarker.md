@@ -190,6 +190,8 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
 Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_KIND` (gemm|attn),
 `PCT_GPU_TIME`, `CANDIDATE_BACKENDS` (Architect's ranked list), `GPU_ID`, `ENABLE_FP8`,
 `KERNEL_WF_DIR` (for Tier-C recursion), `KERNEL_BUDGET`, `SKILL_DIR`.
+OPTIONAL: `EVOK_ROOT`, `EVOK_LOOKUP`, `EVOK_SHIM` — present only when the run was launched with
+`args.evok_root`. When absent, skip step 2c entirely; everything else is unchanged.
 
 1. **Provenance**: re-hash `reference_io.pt`, compare to `meta.json.reference_io_sha256`. If mismatch →
    STOP, return `gate:"tamper"`.
@@ -255,6 +257,83 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    kernel is judged by the IMMUTABLE `unittest.py`, which is independent of this bake-off harness, so the
    head can still be optimized via the author route even if the bake-off probe could not measure a baseline.
 
+2c. **EvoK library lookup — ONLY when `EVOK_ROOT` is set** (skip silently otherwise).
+
+    EvoK is an engine-independent kernel library grown by this same agent. It may already hold a
+    verified implementation of this exact op. Finding out costs ~2 minutes; it is worth doing
+    BEFORE you spend authoring budget.
+
+    **Never trust EvoK's recorded number.** Two independent reasons it is not comparable:
+    (a) its denominator is EvoK's own frozen baseline, not the kernel this server actually runs;
+    (b) its harness does NOT flush caches cold, while `op_bench.py` does. Treat the library
+    entry as a POINTER to a candidate, and let the bake-off produce the number.
+
+    ```bash
+    python3 "$EVOK_LOOKUP" --evok-root "$EVOK_ROOT" --task "<OP_TASK_DIR>" \
+      --gfx "$(rocminfo 2>/dev/null | grep -m1 -o 'gfx[0-9a-z]*')" \
+      --shape-set "<MODEL_NAME shape set, e.g. Qwen3-14B-FP8>" \
+      --out "<OP_TASK_DIR>/evok_hit.json"
+    ```
+
+    Read `evok_hit.json`:
+    - `hit:false` → log the `reason` (`no_resolve_key_mapping` / `no_leaf_for_key` / …) in your
+      report and move on. This is a normal, boring outcome, NOT a failure.
+    - `hit:true` → re-run the Tier-A bake-off with the hit added as one more candidate:
+      ```bash
+      HIP_VISIBLE_DEVICES=<GPU_ID> CUDA_VISIBLE_DEVICES=<GPU_ID> \
+      PYTHONPATH="$(jq -r .evok_pythonpath <OP_TASK_DIR>/evok_hit.json):$PYTHONPATH" \
+      python3 "$SKILL_DIR/scripts/op_bench.py" --task "<OP_TASK_DIR>" \
+        --backends "<ranked,backends>" --repeats 50 --warmup 10 \
+        --extra-callables "evok_$(jq -r '.resolve_key+"_"+.backend' <OP_TASK_DIR>/evok_hit.json | tr '.' '_')=$(jq -r .module_attr <OP_TASK_DIR>/evok_hit.json)@$(jq -r .signature_form <OP_TASK_DIR>/evok_hit.json)" \
+        --evok-hit-json "<OP_TASK_DIR>/evok_hit.json" \
+        --out "<OP_TASK_DIR>/opbench_result.json"
+      ```
+      `--evok-hit-json` is PROVENANCE: it puts the lookup that produced the extra row into
+      `opbench_result.json`, so the Integrator (and any later reader) can get back to the hit
+      without re-deriving it. Always pass it when you pass `--extra-callables`.
+      The extra row is an ORDINARY candidate: same immutable oracle, same `tol`, same cold-cache
+      CUDA-event timing, same correctness gate. If it is not correct or not fastest, it simply
+      is not the winner — exactly like any other losing backend.
+
+      `module_attr` is the form a PLAIN process can import, with `evok_pythonpath` (which already
+      includes the impl dir) on `PYTHONPATH`. It can be **empty** — read `module_attr_note` — when
+      the impl is reachable only through `evok.resolve()` (a `kind:"package"` impl, or an entry
+      using relative imports). That is not a failure and not a `hit:false`: the op is still
+      deployable, because the overlay shim resolves lazily and never imports this name. It just
+      cannot be entered as an isolated bake-off row. Skip the `--extra-callables` re-run, say so in
+      `reason`, and route the impl to `author_plan[].seed_note`. Do NOT substitute
+      `package_module_attr` — that name is the in-process synthetic package, it exists only inside a
+      process that has already called `evok.resolve()`, and importing it fails.
+
+    **Reporting rules:**
+    - Always state in `reason` whether the EvoK candidate was entered, and what it measured.
+      "EvoK entered and lost at 1.02x vs aiter" is a VALUABLE result — it closes a direction.
+    - If `evok_hit.json.stale` is non-empty, say so: EvoK's own measurement is invalidated
+      (its `results.py::_sha_tree` digest of the impl dir no longer matches what was recorded),
+      which is precisely why re-measuring here is mandatory rather than optional.
+    - `status` is EvoK-internal bookkeeping about EvoK's own oracle, and since EvoK moved to
+      COMPUTED references (`oracle_reference:"in_test"`) every leaf currently reads
+      `static_only`. It says nothing about whether the impl is worth benching here — your oracle
+      is the task's `reference_io.pt`, not EvoK's. Do NOT gate on it; report it and continue.
+
+    **If the EvoK candidate WINS**, set in your return:
+    `winner_kind:"evok_rebind"`, `evok_callable:<module_attr>`,
+    `evok_signature_form:<signature_form>`, `evok_hit_json:<path>`.
+    Do NOT set `apply_env`/`apply_flags`/`code_patch` — a library callable deploys by REBINDING
+    the live seam, not by env, flag, or source patch. The Integrator builds the overlay — with
+    `$EVOK_SHIM` when the hit maps 1:1 onto the live seam, or by hand when an adapter/router is
+    needed — and proves engagement against the marker contract in `roles/e2e_integrator.md` §4.
+
+    **If it LOSES**, still record its ms in `per_backend` and mention the impl dir in
+    `author_plan[].seed_note` — a losing implementation is often a good STARTING POINT for the
+    author lane, and the authored speedup is measured against the frozen online kernel regardless
+    of where the lane started, so a high starting point cannot inflate the reported number.
+
+    **If `evok_hit.json.deployable` is false**, the impl is MEASURABLE but not drop-in
+    (e.g. `norm.fused_add_rmsnorm`: its entry returns `out` only while the vLLM IR seam requires
+    `(out, newres)`, and rebinding de-fuses Inductor across the whole norm cluster). Bench it for
+    information if cheap, but NEVER propose it as a `direct_light` winner — route it to seed.
+
 3. **Tier B per-backend tune (direct_light)** — for GEMM, run the **aiter DB tune** (see
    `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`). **The tune input MUST come from a live `AITER_TUNE_GEMM=1`
    capture, NOT synthesized/profile-derived shapes.** ⚠️ Critical: the runtime lookup key includes the
@@ -299,7 +378,7 @@ Return JSON:
   "op_kind": "gemm|attn",
   "provenance_ok": true,
   "winner_backend": "aiter|hipblaslt|triton|flydsl|ck|none",
-  "winner_kind": "env|flag|patch|none",
+  "winner_kind": "env|flag|patch|evok_rebind|rebind_preshuffled|none",
   "isolated_speedup": 1.0,
   "winner_editable": false,
   "best_known_ms": 0.0,
