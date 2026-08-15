@@ -264,43 +264,23 @@ fi
 # ---- modes ----
 REUSE_SERVER=${REUSE_SERVER:-0}       # 1 = a warm server is already up at HOST:PORT; don't launch/kill
 PROFILE=${PROFILE:-0}                 # 1 = also capture a profiler trace
-# Profiling is meant to capture the REAL continuous-batching steady state — prefill chunks and decode
-# steps interleaved as the scheduler actually runs them — NOT a cold prefill burst. So we profile a
-# WINDOW in the middle of a sustained, saturated load (see the PROFILE block below). Tunables:
-PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-40}   # forward steps to capture (sglang; step-controlled). Floor;
-                                             # auto-sizing below raises it to TARGET_STEPS (RAMP+STEADY+10)
-                                             # from ISL/OSL/CONC, then CLAMPS to PROFILE_NUM_STEPS_MAX.
-PROFILE_NUM_STEPS_MAX=${PROFILE_NUM_STEPS_MAX:-64}  # CAP on captured steps (sglang). At low conc STEADY
-                                             # = 5*ceil(OSL/CONC) explodes (e.g. 172 at conc2/osl64), and
-                                             # the sglang/ROCm trace is ~MBs PER STEP -> a multi-hundred-MB
-                                             # trace whose roctracer flush takes minutes AND BLOCKS the
-                                             # server (health drops, requests time out). 64 steps still
-                                             # spans the prefill ramp + a decode sample. Raise if needed.
-PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-0}  # 0 = arm the profiler AT load start so the capture INCLUDES
-                                             # the initial prefill burst. A non-zero warmup lets the load
-                                             # pass the prefill ramp first, so the window lands in decode
-                                             # only and prefill kernels are NEVER captured (Bug 1). The
-                                             # window is sized (below) to span the prefill ramp AND decode.
-PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}  # >CONC so the queue stays full and short
-                                             # (range-ratio>0) requests get replaced -> phases de-sync.
-PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}            # optional req/s to stagger arrivals; empty
-                                             # = inf (max_concurrency still caps in-flight at CONC).
-PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}     # max wait for the trace file to appear.
-PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-40}             # capture DURATION FLOOR for time-windowed
-                                             # backends (vllm: /start_profile has no num_steps, so the
-                                             # window is controlled by start -> sleep this long ->
-                                             # /stop_profile). sglang ignores this (uses PROFILE_NUM_STEPS).
-                                             # This is a FLOOR: when TPOT_MS is known (auto-derived from
-                                             # the timed bench below) the window auto-scales to
-                                             # TARGET_STEPS*TPOT*1.5 so it spans the prefill ramp (warmup=0)
-                                             # AND a steady decode sample, then is CLAMPED to
-                                             # [40, PROFILE_WINDOW_SEC_MAX]. Longer is NOT free: a torch
-                                             # trace grows ~linearly with the window (must stay <
-                                             # PROFILE_WINDOW_TIMEOUT, and can OOM the profiler buffer).
-PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-60}     # CAP for the auto-scaled vllm window. Bounds
-                                             # trace size: with warmup=0 the whole prefill ramp is recorded,
-                                             # so a heavy/low-TPOT workload could otherwise size a multi-GB
-                                             # trace that fails to flush. Raise if you need a longer window.
+# Profile a window mid-load so the trace holds the real prefill+decode steady state, not a cold burst.
+PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-40}          # sglang step count (floor; auto-raised to target below)
+PROFILE_NUM_STEPS_MAX=${PROFILE_NUM_STEPS_MAX:-64}  # step cap: sglang trace is ~MBs/step and its flush blocks the server
+# Step target from the workload: RAMP=ceil(CONC*ISL/chunk) prefill passes + STEADY=max(30,5*ceil(OSL/CONC))
+# decode steps + margin, so a capture bounded to it always spans a decode steady sample. Drives the sglang
+# step count, the vllm time window, and the vllm 0.26+ step cap.
+PROFILE_TARGET_STEPS=$(python3 -c "import math;print(math.ceil($CONC*$ISL/max(${PREFILL_CHUNK:-$ISL},1))+max(30,5*math.ceil($OSL/max($CONC,1)))+10)" 2>/dev/null || echo "$PROFILE_NUM_STEPS_MAX")
+# vllm 0.26+ ProfilerConfig knobs (adapters/vllm.sh), fixed at server launch. max_iterations self-stops the
+# profiler after N worker steps; default to the workload target clamped to the step cap (bounds the buffer).
+PROFILE_MAX_ITERS=${PROFILE_MAX_ITERS:-$(( PROFILE_TARGET_STEPS < PROFILE_NUM_STEPS_MAX ? PROFILE_TARGET_STEPS : PROFILE_NUM_STEPS_MAX ))}
+PROFILE_DELAY_ITERS=${PROFILE_DELAY_ITERS:-0}       # steps to skip before arming; 0 keeps the prefill burst
+PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-0}         # 0 = arm at load start so prefill is captured too
+PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}   # >CONC so the queue stays saturated
+PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}      # optional req/s to stagger arrivals; empty = inf
+PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}      # max wait for the trace file to land
+PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-20}        # vllm time window (floor; auto-scaled below). Sole bound on <0.26
+PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-30}      # cap for the auto-scaled window (bounds trace size)
 OUT_DIR=${OUT_DIR:-$(pwd)/e2e_bench_out}
 LOG=${LOG:-$OUT_DIR/server.log}
 
@@ -318,6 +298,7 @@ COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
 export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
+export PROFILE_MAX_ITERS PROFILE_DELAY_ITERS
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
 export BENCH_TRUST_REMOTE_CODE HF_HUB_TRUST_REMOTE_CODE
 
@@ -511,43 +492,27 @@ PY
     case "${TPOT_MS:-}" in ''|*[!0-9.]*) TPOT_MS="" ;; esac   # keep only a clean number
     [ -n "${TPOT_MS:-}" ] && echo ">>> steady-state sizing: derived TPOT_MS=${TPOT_MS}ms from timed bench (vllm window auto-scale)"
   fi
-  # ---- workload-aware steady-state window sizing (this is the ONLY sizing; adaptive re-capture is off) ----
-  # Reaching batch≈CONC = clear the prefill ramp, then sample steady decode:
-  #   RAMP   = ceil(CONC*ISL / chunk)     forward passes to prefill all CONC in-flight requests
-  #   STEADY = max(30, 5*ceil(OSL/CONC))  decode steps for a stable, representative sample
-  # TARGET = RAMP + STEADY + margin. Sized deterministically UP FRONT for BOTH backends (the old reactive
-  # re-capture gate is DISABLED — no reliable per-step signal without annotations). The ISL/OSL/CONC/prompts
-  # math is the guarantee: PROFILE_NUM_STEPS -> TARGET (sglang, step-controlled), and PROFILE_WINDOW_SEC is
-  # auto-scaled from the derived TPOT and clamped to [40, PROFILE_WINDOW_SEC_MAX] (vllm, time-controlled),
-  # so the single window spans the prefill ramp (warmup=0) + a steady decode sample.
-  # Assumes a saturated queue + KV headroom for CONC concurrent decodes (else batch can't reach CONC).
-  _CHUNK="${PREFILL_CHUNK:-$ISL}"
-  _RAMP=$(python3 -c "import math;print(math.ceil($CONC*$ISL/max($_CHUNK,1)))" 2>/dev/null || echo "$CONC")
-  _STEADYN=$(python3 -c "import math;print(max(30,5*math.ceil($OSL/max($CONC,1))))" 2>/dev/null || echo 30)
-  _TARGET_STEPS=$(( _RAMP + _STEADYN + 10 ))
-  if [ "${PROFILE_NUM_STEPS:-0}" -lt "$_TARGET_STEPS" ]; then
-    echo ">>> steady-state sizing: RAMP=${_RAMP}+STEADY=${_STEADYN}+10 -> PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${_TARGET_STEPS}"
-    PROFILE_NUM_STEPS=$_TARGET_STEPS
+  # Size the single capture to PROFILE_TARGET_STEPS (computed at launch): raise the sglang step count
+  # (clamped to the cap) and scale the vllm window to target*TPOT*1.5. vllm 0.26+ is already step-bounded
+  # by PROFILE_MAX_ITERS; the window is a safety cap there, the sole bound on <0.26.
+  if [ "${PROFILE_NUM_STEPS:-0}" -lt "$PROFILE_TARGET_STEPS" ]; then
+    echo ">>> sizing: PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${PROFILE_TARGET_STEPS}"
+    PROFILE_NUM_STEPS=$PROFILE_TARGET_STEPS
   fi
-  # CLAMP steps (sglang: ~MBs/step -> avoid a huge trace + server-blocking flush at low conc).
   if [ -n "${PROFILE_NUM_STEPS_MAX:-}" ] && [ "$PROFILE_NUM_STEPS" -gt "$PROFILE_NUM_STEPS_MAX" ]; then
-    echo ">>> steady-state sizing: PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${PROFILE_NUM_STEPS_MAX} (capped at PROFILE_NUM_STEPS_MAX)"
+    echo ">>> sizing: PROFILE_NUM_STEPS capped ${PROFILE_NUM_STEPS}->${PROFILE_NUM_STEPS_MAX}"
     PROFILE_NUM_STEPS=$PROFILE_NUM_STEPS_MAX
   fi
   _NEED_PROMPTS=$(python3 -c "import math;print($CONC + math.ceil($CONC*$PROFILE_NUM_STEPS/max($OSL,1)) + $CONC)" 2>/dev/null || echo "$PROFILE_NUM_PROMPTS")
   if [ "${PROFILE_NUM_PROMPTS:-0}" -lt "$_NEED_PROMPTS" ]; then
-    echo ">>> steady-state sizing: PROFILE_NUM_PROMPTS ${PROFILE_NUM_PROMPTS}->${_NEED_PROMPTS} (keep the queue full through the window)"
+    echo ">>> sizing: PROFILE_NUM_PROMPTS ${PROFILE_NUM_PROMPTS}->${_NEED_PROMPTS}"
     PROFILE_NUM_PROMPTS=$_NEED_PROMPTS
   fi
-  # vLLM time-window auto-scale (needs TPOT_MS, derived above): size the window to span the prefill ramp
-  # + a steady decode sample = TARGET_STEPS * per-step time, x1.5 margin, then CLAMP to
-  # [PROFILE_WINDOW_SEC floor, PROFILE_WINDOW_SEC_MAX cap]. The cap bounds trace size (warmup=0 records the
-  # whole ramp, so a heavy/low-TPOT workload could otherwise size a multi-GB trace that fails to flush).
   if [ -n "${TPOT_MS:-}" ]; then
-    _WMAX="${PROFILE_WINDOW_SEC_MAX:-60}"
-    _WSEC=$(python3 -c "import math;print(min($_WMAX, max(${PROFILE_WINDOW_SEC:-40}, math.ceil($_TARGET_STEPS*$TPOT_MS/1000.0*1.5))))" 2>/dev/null || echo "${PROFILE_WINDOW_SEC:-40}")
+    _WMAX="${PROFILE_WINDOW_SEC_MAX:-30}"
+    _WSEC=$(python3 -c "import math;print(min($_WMAX, max(${PROFILE_WINDOW_SEC:-20}, math.ceil($PROFILE_TARGET_STEPS*$TPOT_MS/1000.0*1.5))))" 2>/dev/null || echo "${PROFILE_WINDOW_SEC:-20}")
     if [ "$_WSEC" != "${PROFILE_WINDOW_SEC}" ]; then
-      echo ">>> steady-state sizing: PROFILE_WINDOW_SEC ${PROFILE_WINDOW_SEC}->${_WSEC}s (TPOT=${TPOT_MS}ms x ${_TARGET_STEPS} steps x1.5, clamped [${PROFILE_WINDOW_SEC:-40},${_WMAX}]s)"
+      echo ">>> sizing: PROFILE_WINDOW_SEC ${PROFILE_WINDOW_SEC}->${_WSEC}s"
       PROFILE_WINDOW_SEC=$_WSEC
     fi
   fi

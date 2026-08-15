@@ -47,7 +47,10 @@ last_seen: YYYY-MM-DD
 - verify: <how to confirm it engaged + that it helped e2e (not just isolated)>
 - caution: <a CONDITIONED "also verify X" — e.g. "on decode-bound serving, host-heavy rewrites have
             regressed e2e despite a big isolated win; check the e2e gate". NEVER a blanket prohibition.>
-- source: <eval_dir path | arXiv | repo@path>   # REQUIRED — no claim without evidence
+- source: <relative eval-dir glob | arXiv | repo@path>   # REQUIRED — no claim without evidence.
+          # PUBLIC-SAFE: NO absolute paths, usernames, /home or /root dirs, hostnames, or timestamped
+          # run dirs. Generalize to a reusable relative form, e.g. `exp/e2e_*<Model>*/ YYYY-MM-DD`
+          # plus a repo-relative recipe/artifact hint (`config/ck_tune/`, `gemm_tuning/…md`).
 ```
 
 ### Confidence tiers (a HINT strength, not an authority level)
@@ -68,6 +71,14 @@ Owners: System Architect (routing/method cards) and Op Benchmarker (head GEMM/at
    card to `_archive.md` with the refuting source. **Never write a blocklist / "never use X".**
 6. **Enforce the budget.** INDEX.md ≤ 40 card lines. Over → evict lowest `confidence × freshness` (its
    card → `_archive.md`). ★★★ is never auto-evicted.
+7. **SANITIZE — every card is PUBLIC.** Cards and INDEX lines must contain ONLY general, transferable
+   knowledge. Before writing, strip anything machine- or run-specific: absolute paths, usernames,
+   `/home`/`/root` dirs, hostnames, IPs, API keys/tokens, and timestamped run-dir names. Refer to
+   evidence by a **relative, reusable form** (`exp/e2e_*<Model>*/ YYYY-MM-DD`, `config/ck_tune/`,
+   `<skill>/<file>.md`) — never a path a reader can't reproduce. The lever/apply/verify lines must read
+   as "how anyone reproduces this", not "what happened on my box". If a fact is only true for one eval's
+   harness config (which authors were enabled, which image lacked a tool), leave it in the eval-dir
+   report, not here — unless you generalize it into a conditioned `caution:`.
 
 **Invariant:** a principle "exists" iff it has a line in INDEX.md (the single source of truth + size
 gate). Keep cards short: >15 lines means you're storing narrative, not a principle — distill it.

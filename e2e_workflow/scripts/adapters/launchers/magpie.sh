@@ -24,7 +24,8 @@
 #
 # bench_e2e.sh contract: sets global SERVER_PID; writes $LOG. Reads env:
 #   BACKEND MODEL TP PORT GPU EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
-#   PROFILE PROFILE_DIR LOG OUT_DIR MAX_MODEL_LEN.
+#   PROFILE PROFILE_DIR LOG OUT_DIR MAX_MODEL_LEN PROFILE_MAX_ITERS
+#   PROFILE_DELAY_ITERS.
 #
 # TWO logs, deliberately: Magpie's script redirects the server with a
 # TRUNCATING '> $SERVER_LOG', so anything this adapter appended to the same file
@@ -82,6 +83,52 @@ adapter_launch() {
     echo ">>> magpie launcher: replaying ${#_recipe_env[@]} recorded env var(s) from the recipe."
   fi
 
+  # Magpie's vllm script builds its own --profiler-config.* block but sets no step
+  # bound, so the host-side event buffer grows for as long as the load runs --
+  # the unbounded growth #398 fixed on the native path by passing max_iterations
+  # (vllm 0.26+ self-stops the profiler after N worker steps). Its buffer fills
+  # FASTER than the native one, too: it asks for with_memory and with_flops, and
+  # leaves with_stack at its default, all of which the native adapter declines.
+  # The script appends $EXTRA_<BE>_ARGS AFTER its own profiler args, so the bound
+  # reaches vllm without editing the recipe's script. ProfilerConfig is strict
+  # (extra=forbid) and an unknown key aborts the server, so emit only what this
+  # build declares -- the same probe the native adapter runs. It runs under the
+  # replayed recipe env because that PATH may select a different venv: the
+  # interpreter that answers has to be the one that will serve.
+  local _extra_args="${EXTRA_SERVER_ARGS:-}" _bound=""
+  if [ "${PROFILE:-0}" = "1" ] && [ "$backend_uc" = "VLLM" ]; then
+    local _prof_fields
+    _prof_fields="$(env ${_recipe_env[@]+"${_recipe_env[@]}"} python3 - <<'PY' 2>/dev/null
+names = set()
+try:
+    import dataclasses
+    from vllm.config import ProfilerConfig
+    try:
+        names |= {f.name for f in dataclasses.fields(ProfilerConfig)}
+    except Exception:
+        pass
+    names |= set(getattr(ProfilerConfig, "model_fields", {}) or {})
+    names |= set(getattr(ProfilerConfig, "__annotations__", {}) or {})
+    print(" ".join(sorted(names)))
+except Exception:
+    pass
+PY
+)"
+    case " $_prof_fields " in
+      *" max_iterations "*) _bound="$_bound --profiler-config.max_iterations ${PROFILE_MAX_ITERS:-64}" ;;
+    esac
+    case " $_prof_fields " in
+      *" delay_iterations "*) _bound="$_bound --profiler-config.delay_iterations ${PROFILE_DELAY_ITERS:-0}" ;;
+    esac
+    if [ -n "$_bound" ]; then
+      echo ">>> magpie launcher: bounding the profiler buffer:$_bound"
+      _extra_args="$_extra_args$_bound"
+    else
+      echo ">>> magpie launcher: this vllm build declares no profiler step bound;" \
+           "the bench time window is the only cap on the trace." >&2
+    fi
+  fi
+
   # Map GEAK's env onto Magpie's server-phase env. Ordering IS the precedence
   # policy: recipe replay first, then the accepted env under test, then the
   # run-scoped names GEAK owns -- so a later layer knowingly overrides an
@@ -113,7 +160,7 @@ adapter_launch() {
     PROFILE="${PROFILE:-0}" \
     ${MAX_MODEL_LEN:+MAX_MODEL_LEN="$MAX_MODEL_LEN"} \
     ${PROFILE_DIR:+"${_prof_var}=$PROFILE_DIR"} \
-    "${_args_var}=${EXTRA_SERVER_ARGS:-}" \
+    "${_args_var}=${_extra_args}" \
     bash "$script" >> "$_launchlog" 2>&1
   local rc=$?
 
