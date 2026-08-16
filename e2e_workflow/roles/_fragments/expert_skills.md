@@ -26,27 +26,16 @@ the measurement wins (note it so the skill is later marked `stale`).
    - `match.profile_signature` (if present): the Top-N op name matches `op_name_regex` and its
      `pct_gpu_time ≥ min_pct_gpu`
    - `validation_status == validated` (ignore `draft`/`failed`; treat `stale` as a plain reference only)
-3. **Gate version-sensitive runtimes before routing.** If the index entry has a non-empty `runtime`
-   contract, run:
-   ```bash
-   python3 <EXPERT_SKILLS_DIR>/_contribute/runtime_compat.py <skill-id> --json
-   ```
-   This is a read-only capability probe; it never installs or upgrades a package. If it reports
-   `compatible=false`, skip that skill and record `backend_incompatible` with its errors instead of
-   silently falling back. If it reports validation status `revalidation_required` or `stale`, the recipe
-   may enter the candidate set only as an untrusted reference; its historical numbers are not evidence
-   for this runtime. Require fresh isolated parity/performance plus the normal e2e A/B before retaining it.
-4. **For each matched, runtime-compatible skill**, Read its file and treat its `Procedure` as a
-   **high-prior candidate**:
+3. **For each matched skill**, Read its file and treat its `Procedure` as a **high-prior candidate**:
    - In routing (System Architect): list it in the head/kernel `author_plan` BEFORE generic backends,
      annotated `source: expert_skill:<id> (advisory)`.
    - In bake-off / integration (Op Benchmarker / e2e Integrator): reproduce its Procedure as one
      candidate, honor its `Knobs & pitfalls` and `Do-no-harm notes` (e.g. keep decode generic), and
      still run the normal e2e A/B gate. The skill's `expects` is a sanity reference for the delta, not
      an acceptance shortcut.
-5. **Never skip measurement.** Multiple matched skills all enter the candidate set (no ranking); the
+4. **Never skip measurement.** Multiple matched skills all enter the candidate set (no ranking); the
    on-box A/B picks the winner. Do not re-route away from what the profile says just because a skill exists.
-6. **Close the loop.** When you curate `knowledge/learned/` (update_experience phase), record on the
+5. **Close the loop.** When you curate `knowledge/learned/` (update_experience phase), record on the
    relevant card the skill id you used and its MEASURED result, so the skill's validation can be refreshed.
 
 If no skill matches, proceed exactly as you would without this fragment.

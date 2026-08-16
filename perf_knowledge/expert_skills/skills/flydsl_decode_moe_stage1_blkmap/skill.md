@@ -23,28 +23,6 @@ match:
   profile_signature:
     op_name_regex: ''
     min_pct_gpu: 0.0
-runtime:
-  language: flydsl
-  provider: aiter_vendored_flydsl
-  required_imports:
-  - flydsl
-  - aiter.ops.flydsl
-  - aiter.ops.flydsl.kernels.mixed_moe_gemm_2stage
-  required_symbols:
-  - flydsl.expr.buffer_ops:create_buffer_resource_from_addr
-  profiles:
-  - name: validated-0.2.2
-    specifier: ==0.2.2
-    validation_status: validated
-    required_symbols:
-    - flydsl.expr.typing:as_ir_value
-  - name: future-0.2
-    specifier: '>0.2.2,<0.3'
-    validation_status: revalidation_required
-    required_symbols:
-    - flydsl.expr.typing:as_ir_value
-  provisioning:
-    policy: reuse_only
 expects:
   isolated_speedup_min: 1.05
   isolated_scope: 'stage-1 ISOLATED SEGMENT = the gate+up GEMM kernel PLUS the descriptor-producer
@@ -103,26 +81,14 @@ Treat baseline config provenance and a clean worktree as hard preflight. The Fly
 the committed `tile_m=64` baseline and measured the honest stage-1 segment at `192.706 -> 174.498 us`
 (`1.104x`); a locally edited `tile_m=128` row is a different baseline and invalidates this comparison.
 
-## FlyDSL runtime compatibility
-This recipe targets the **AITER-vendored** FlyDSL provider, not a standalone source tree. Before changing
-the kernel, run:
+## FlyDSL portability
+This recipe requires FlyDSL `>=0.2.2`. The measured evidence below was produced on 0.2.2, but the
+transferable content is the pair-fuse/reuse mechanism, not private API names from that release.
 
-```bash
-python3 <EXPERT_SKILLS_DIR>/_contribute/runtime_compat.py flydsl_decode_moe_stage1_blkmap --json
-```
-
-GEAK requires FlyDSL `>=0.2.2,<0.3`. Exact `0.2.2` is validated here; newer `0.2.x` releases remain
-`revalidation_required` until their capability probe and strict A/B pass. For the typed-coordinate API,
-audit the whole vendored `mixed_moe_gemm_2stage.py` module before applying AM2:
-
-- Audit every direct dynamic argument passed to `idx2crd`/`crd2idx`; direct FlyDSL calls need
-  `fx.Int32` wrappers for `tx`, `lane_id`, dynamic rows, and coordinate elements. If the target AITER
-  already routes these calls through a local layout helper that performs the conversion, retain that
-  helper and do not mechanically double-wrap values.
-- Import `as_ir_value` from `flydsl.expr.typing` and use it at raw-MLIR boundaries instead of adding a
-  global `ArithValue.ir_value` monkey patch to site-packages.
-- Keep `create_buffer_resource_from_addr`, `buffer_load` and `buffer_store` on the AITER-vendored path;
-  the absence of top-level `kernels.moe_gemm_2stage` is not an incompatibility for this provider.
+On a newer FlyDSL version, inspect the current AITER/FlyDSL implementation, map the same descriptor,
+double-height tile, masking, and cache-identity invariants onto the available APIs, then run fresh
+compile/parity/A/B to revalidate it. A version difference alone is not a reason to skip the skill, and 0.2.2 performance
+numbers must not be reused as evidence for another version.
 
 Compile both the unpaired and paired stage-1 variants in a clean cache, then require the paired runtime
 signature (`_am2_bmap` plus one `_blkmap_kernel`) before parity or timing. The **0.2.2 compatibility smoke**

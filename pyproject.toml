@@ -13,7 +13,6 @@ license = { file = "LICENSE.md" }
 # Runtime deps. Add new packages here (this replaces the old requirements.txt).
 dependencies = [
     "pyyaml",
-    "packaging>=23",
     "requests",
     "datasets",
     # AMD GPU profiling helper (pinned git commit).

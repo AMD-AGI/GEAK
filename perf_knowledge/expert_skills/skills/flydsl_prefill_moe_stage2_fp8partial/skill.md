@@ -24,28 +24,6 @@ match:
   profile_signature:
     op_name_regex: ''
     min_pct_gpu: 0.0
-runtime:
-  language: flydsl
-  provider: aiter_vendored_flydsl
-  required_imports:
-  - flydsl
-  - aiter.ops.flydsl
-  - aiter.ops.flydsl.kernels.mixed_moe_gemm_2stage
-  required_symbols:
-  - flydsl.expr.buffer_ops:create_buffer_resource_from_addr
-  profiles:
-  - name: validated-0.2.2
-    specifier: ==0.2.2
-    validation_status: validated
-    required_symbols:
-    - flydsl.expr.typing:as_ir_value
-  - name: future-0.2
-    specifier: '>0.2.2,<0.3'
-    validation_status: revalidation_required
-    required_symbols:
-    - flydsl.expr.typing:as_ir_value
-  provisioning:
-    policy: reuse_only
 expects:
   isolated_speedup_min: 1.15
   isolated_scope: 'stage-2 SEGMENT = the down-proj GEMM kernel PLUS the separate top-k reduce kernel,
@@ -92,25 +70,14 @@ in the scored segment. If the evidence instead points at decode stage-1 gate/up 
 leader mapping, no top-k reduce), use the stage-1 blkmap recipe instead. If phase or stage remains ambiguous,
 treat this skill as not applicable and let the normal workflow exploration classify the bottleneck first.
 
-## FlyDSL runtime compatibility
-This recipe uses AITER's vendored `mixed_moe_gemm_2stage.py`; it does not require the standalone
-`kernels.moe_gemm_2stage` module. Before authoring or applying it, run:
+## FlyDSL portability
+This recipe requires FlyDSL `>=0.2.2`. The measured evidence below was produced on 0.2.2, but the
+transferable content is the fp8-partial store/load mechanism, not private API names from that release.
 
-```bash
-python3 <EXPERT_SKILLS_DIR>/_contribute/runtime_compat.py flydsl_prefill_moe_stage2_fp8partial --json
-```
-
-GEAK requires FlyDSL `>=0.2.2,<0.3`. Exact `0.2.2` is validated here; newer `0.2.x` releases remain
-`revalidation_required` until their capability probe and strict A/B pass. Audit the complete vendored
-module against the typed-coordinate API:
-
-- Audit direct `idx2crd`/`crd2idx` calls and convert dynamic inputs/elements to `fx.Int32`. If the target
-  AITER already uses a local layout helper that performs this conversion, preserve the helper rather than
-  double-wrapping its outputs.
-- Use `flydsl.expr.typing.as_ir_value` at raw-MLIR boundaries rather than globally monkey-patching
-  `ArithValue.ir_value`.
-- Keep the AITER-vendored raw buffer-resource path and verify that fp8 packing/unpacking still lowers to
-  the expected gfx950 OCP-E4M3 ROCDL conversions.
+On a newer FlyDSL version, inspect the current AITER/FlyDSL implementation, map the same partial format,
+scale, reducer, and cache-identity invariants onto the available APIs, then run fresh compile/parity/A/B.
+A version difference alone is not a reason to skip the skill; revalidate it on-box, and 0.2.2 performance numbers must not be
+reused as evidence for another version.
 
 The partial scale is part of the generated program ABI. Pass one scale as an explicit **compile argument**
 to both producer and reducer, derive the reciprocal from that same value, and include the scale in both
