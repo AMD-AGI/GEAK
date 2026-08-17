@@ -859,7 +859,7 @@ class TestInvokeViaCli(_RunE2ECase):
             "--output-format", "json",
             "--settings", rx.WORKFLOW_SETTINGS,
             "--model", rx.CLAUDE_MODEL,
-            "--allowed-tools", "Workflow,Bash,Read,Write",
+            "--allowed-tools", ",".join(rx.ALLOWED_TOOLS),
             "--permission-mode", "auto",
             "--effort", "max",
         ])
