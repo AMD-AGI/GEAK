@@ -1,33 +1,42 @@
 ---
-key: bf16 fused-MoE grouped GEMM · gfx942/MI300X · vLLM
+key: bf16 fused-MoE grouped GEMM · gfx942+gfx950 · vLLM
 type: lever
-confidence: ★★
-effect: per-shape Triton config tune (winner_kind=env, ZERO HBM) → isolated 1.06-1.25× per M-bucket (decode M32-128 ~1.2×, prefill M6202 ~1.06-1.11×, M1 up to 1.88×); e2e gate PENDING Integrator
-last_seen: 2026-07-05
+confidence: ★★★
+confirms: 3
+effect: per-shape Triton config tune (winner_kind=env, ZERO HBM) → iso 1.01–1.66× per M-bucket, serving-weighted 1.10–1.40×; e2e VERIFIED +7.01% (Mixtral-8x7B gfx950 TP8, Director-validated, byte-exact) — above the +3.37% Amdahl ceiling once bundled with `--max-num-batched-tokens 8192`.
+last_seen: 2026-08-17
 ---
-# bf16 fused-MoE grouped GEMM head → the memory-free vLLM config-tune lever (analog of the int4 card)
-- lever (try FIRST on a bf16 MoE model too, not just int4): vLLM ships NO tuned Triton config for an
-  unseen `(E,N)` bf16 fused-MoE shape on gfx942, so the expert grouped-GEMM falls back to a SLOW default
-  tile (server log: `Using default MoE config`). Tuning that one config is a memory-free e2e lever exactly
-  like the int4 case — the same `VLLM_TUNED_CONFIG_FOLDER` mechanism, just `dtype=None` (dense bf16) so the
-  lookup filename is `E=<E>,N=<N>,device_name=<dev>.json` (NO `dtype=` segment).
-- apply: adapt `SKILL_DIR/knowledge/gemm_tuning/moe_int4_tuning.md` to bf16 — dense bf16 weights
-  w1[E,2N,K]/w2[E,K,N] (no scales/quant_config), `activation=MoEActivation.GELU_TANH` for a gelu_tanh MoE,
-  sweep per M-bucket against `fused_experts`+`override_config` (parity rel<1e-2), write the JSON, deploy
-  `winner_kind=env VLLM_TUNED_CONFIG_FOLDER=<dir>` + `--max-num-batched-tokens ≈2·ISL` (clamp 8192..32768).
-  Tile-only → parity holds by construction, ZERO extra HBM (sails the mem_footprint gate).
-- verify: `get_config_file_name(E,N,None,None)` gives the target filename; confirm the pre-tune shape has
-  no shipped config for this device (only NVIDIA/fp8 `E=128,N=704` existed on the Gemma-4 run). Engagement:
-  REF server.log prints `Using default MoE config`; CAND prints `Using configuration from …E=<E>,N=<N>,…json`.
-- caution: **drop any bucket whose tuned tile is not >1.0× (keep vLLM's default there).** On Gemma-4
-  M=1024 came out 0.98× in the sweep and was dropped; a regressing tile in the JSON would slow that bucket.
-- caution: same JIT-warm-baseline optimism as the int4 card — the per-bucket subprocess sweep is the
-  trustworthy iso number; a merged single-process run inflates the default baseline (understates the win).
-- caution: **N is per-TP-rank (moe_intermediate//TP)** — re-derive from model config + serving TP; on the
-  Gemma-4 run TP=1 so N=moe_intermediate=704 directly.
-- source: 2026-07-05 Gemma-4-26B-A4B (gemma4_text MoE, E=128, N=704, K=2816, topk=8, gelu_tanh), vLLM
-  0.21.0, TP=1, gfx942/MI300X, ISL/OSL=1024, pct_gpu_time(moe)=40.66. Fresh per-bucket subprocess sweep:
-  M=1 1.88× / M=32 1.25× / M=64 1.19× / M=128 1.19× / M=6202(prefill) 1.06-1.11× / M=8192 1.09×, all
-  rel_err<1e-2, ZERO HBM. driver: EVAL_DIR/config/tune_moe_bf16.py. e2e gate pending Integrator.
-- also: editable in-tree Triton MoE exists (triton_moe.py) → Tier-C `route=rewrite`; flydsl available
-  (0.1.4) → `route=author`. Both emitted in author_plan to let the e2e gate pick best of {tuned, authored}.
+# bf16 fused-MoE grouped GEMM → the memory-free vLLM config-tune lever (analog of the int4 card)
+
+- path: (1) check whether a tuned config ships for this `(E,N,device)` — vLLM ships none for unseen
+  bf16 MoE shapes on gfx942/gfx950, so the expert grouped-GEMM falls back to a slow default tile
+  (server log: `Using default MoE config`). (2) Sweep per M-bucket and write the JSON. (3) Deploy via
+  `VLLM_TUNED_CONFIG_FOLDER`, paired with `--max-num-batched-tokens ≈2·ISL` (clamp 8192..32768).
+  Try this FIRST on bf16 MoE models, not just int4 — it is the same mechanism with `dtype=None`, so
+  the lookup filename is `E=<E>,N=<N>,device_name=<dev>.json` (no `dtype=` segment).
+- expected gain: iso 1.01–1.66× per bucket (large-M prefill buckets are the big ones — M=8192 hit
+  1.658× with BM256/BN256/BK128/w8), serving-weighted 1.10–1.40×, banking +7.01% e2e at ~35% MoE head
+  share. ZERO extra HBM, so it sails the mem_footprint gate.
+- apply: adapt `SKILL_DIR/knowledge/gemm_tuning/moe_int4_tuning.md` to bf16 — dense weights
+  w1[E,2N,K]/w2[E,K,N] (no scales/quant_config), the model's own activation (GELU_TANH for Gemma-4,
+  the default SILU for Mixtral), sweep against `fused_experts`+`override_config` (parity rel<1e-2).
+  On vLLM 0.26.0 `fused_experts` has no `inplace` kwarg — drop it. Tile-only, so parity holds by
+  construction. **N is per-TP-rank (`moe_intermediate//TP`)** — re-derive from model config + serving TP.
+- verify: `get_config_file_name(E,N,None,None)` gives the target filename; confirm nothing ships for
+  this device first. Engagement: REF log prints `Using default MoE config`, CAND prints
+  `Using configuration from …E=<E>,N=<N>,…json` with zero default-config lines.
+- caution: **drop any bucket whose tuned tile is not >1.0×** and keep vLLM's default there — a
+  regressing tile in the JSON slows that bucket (Gemma-4 M=1024 came out 0.98× and was dropped). The
+  per-bucket subprocess sweep is the trustworthy iso number; a merged single-process run inflates the
+  default baseline and understates the win. Do not treat the serving-weighted Amdahl ceiling as a cap
+  — the measured +7.01% exceeded +3.37% because device-time under-counted the MoE; trust the
+  byte-exact e2e A/B, and keep the batched-tokens flag paired with the config folder on re-deploy.
+- also: an editable in-tree Triton MoE exists (`kernel_src/fused_moe.py`, seam = fused_moe/grouped_gemm
+  dispatcher) → Tier-C `route=rewrite`; flydsl `flydsl_moe_stage1/stage2` DOES import on the gfx950
+  image (unlike the mxfp4 case) → `route=author`. Emit both and let the e2e gate pick.
+- source: 2026-07-05 Gemma-4-26B-A4B (E=128,N=704,K=2816, topk=8, gelu_tanh, vLLM 0.21.0, TP=1,
+  gfx942, MoE 40.66% GPU; iso M=1 1.88× … M=8192 1.09×, e2e gate pending);
+  2026-08-13 + 2026-08-17 Mixtral-8x7B-Instruct-v0.1 (E=8,N=1792,K=4096, topk=2, silu, vLLM 0.26.0,
+  TP=8, gfx950/MI355 OAM, MoE 35.21%/38.55% GPU; no shipped MI355 config → default fallback; e2e
+  Director-validated_win 10753→11508 tok/s, byte-exact 12/12).
+  driver: `EVAL_DIR/config/tune_moe_bf16.py`.
