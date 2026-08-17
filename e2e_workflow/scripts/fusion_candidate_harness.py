@@ -17,6 +17,13 @@ READINESS = {
     "research_only",
 }
 EXACT_STATUS = {"yes", "no"}
+# Author-track classes (no existing kernel -> 现成算子=无).
+AUTHOR_CLASSES = {"new_helper_kernel", "main_kernel_or_algorithmic"}
+# Generic tokens that indicate a quantization output/arg in a routed call
+# signature. Used to check that a flag actually fuses quant before an A-tier
+# *_quant candidate may claim it — model/kernel-agnostic, no hard-coded answer.
+_QUANT_SIG_TOKENS = (
+    "quant", "scale", "fp8", "fp4", "amax", "e4m3", "e5m2", "mxfp")
 API_COVERAGE = {"full", "partial", "similar"}
 API_SOURCE_KIND = {
     "runtime_environment", "runtime_source", "perf_knowledge"}
@@ -54,7 +61,7 @@ except Exception:
     _roofline = None
 LAUNCH_OVERHEAD_US = 5.0  # matches roofline_tools.LAUNCH_OVERHEAD_S (5e-6 s)
 # Per-gfx HBM bandwidth (bytes/us) fallback if peaks.md/roofline is unavailable.
-# 5.3e12 B/s (MI300X, gfx942) = 5.3e6 B/us; 8.0e12 (MI350, gfx950) = 8.0e6.
+# Values are per-gfx HBM bandwidth in bytes/us (peak B/s ÷ 1e6). Extend per gfx.
 _FALLBACK_HBM_BW_BYTES_PER_US = {"gfx942": 5.3e6, "gfx950": 8.0e6}
 _DTYPE_BYTES = {
     "float8_e4m3fnuz": 1, "float8": 1, "fp8": 1, "int8": 1,
@@ -206,9 +213,9 @@ def _api_summary(plan):
         for api in apis
     ]
     if plan.get("exact_kernel_status") == "no":
-        reason = plan.get("exact_reason", "当前环境无完整覆盖")
-        rendered.append("无 exact API（%s）" % reason)
-    return "；".join(rendered) if rendered else "无 exact API"
+        reason = plan.get("exact_reason", "无现成算子，需自写")
+        rendered.append("无现成算子（%s）" % reason)
+    return "；".join(rendered) if rendered else "无现成算子"
 
 
 def _api_detail(plan):
@@ -593,6 +600,37 @@ def validate(semantic_table_path, candidates_path,
                 "its heaviest constituent, which cannot be counted as savings — "
                 "keep it as the anchor (not removable)" % (
                     path, removable_total, merge_ceiling, max_member))
+        # A fused kernel cannot cross a main donor. An aggregate "cluster"
+        # candidate (family *_cluster, from the sub-floor escalation) must be a
+        # CONTIGUOUS run — no donor-stage row (GEMM/Attention/MoE/Collective) may
+        # sit strictly between its members' device_seq span unless it is a member;
+        # scattered small helpers on both sides of an attention/GEMM are separate
+        # clusters. (Single producer→consumer folds like norm→downstream-quant,
+        # and collective dual-output fusions, are NOT clusters and are exempt —
+        # their non-adjacent member is the same data path emitted in one kernel.)
+        cand_family = str(candidate.get("family") or "")
+        if not is_boundary and cand_family.endswith("_cluster") and members:
+            member_seqs = [
+                int(source_rows[(key[0], key[1], rid)].get(
+                    "device_seq_index", -1))
+                for rid in member_ids if (key[0], key[1], rid) in source_rows]
+            member_seq_set = set(member_seqs)
+            if member_seqs:
+                lo, hi = min(member_seqs), max(member_seqs)
+                spanned = [
+                    (row.get("device_seq_index"), row.get("stage"),
+                     row.get("row_id"))
+                    for row in tables[key].get("rows", [])
+                    if str(row.get("stage") or "").lower() in DONOR_STAGES
+                    and lo < int(row.get("device_seq_index", -1)) < hi
+                    and int(row.get("device_seq_index", -1))
+                    not in member_seq_set]
+                if spanned:
+                    errors.append(
+                        "%s non-boundary candidate spans %d main donor row(s) "
+                        "(a fused kernel cannot cross GEMM/Attention/MoE/"
+                        "Collective); split into contiguous sub-fusions; "
+                        "first=%s" % (path, len(spanned), spanned[:3]))
         layer_count = int(candidate.get("pattern_layer_count", 0) or 0)
         pattern_layers = int(tables[key].get("pattern_layer_count", 0) or 0)
         if layer_count != pattern_layers:
@@ -648,6 +686,13 @@ def validate(semantic_table_path, candidates_path,
             if is_collective and tokens:
                 tensor_bytes = (int(tokens) * int(model_dims["hidden_size"])
                                 * int(model_dims["dtype_bytes"]))
+                # Single fused-AR size guard (from the env-recorded threshold).
+                # NOTE: the AR+norm+quant path is variant-dependent — a per-TOKEN
+                # variant may add a tighter byte + shape-whitelist guard, while a
+                # per-GROUP variant (hidden % group == 0) shares this AR guard. Do
+                # NOT blanket the tighter guard onto the _quant family — that
+                # wrongly excludes the per-group path. Variant selection is an
+                # env/source fact recorded by the analyst, not a constant here.
                 threshold = int(collective_guard["threshold_bytes"])
                 exceeds = tensor_bytes >= threshold
                 ref = _short_ref(collective_guard.get("source_ref", ""))
@@ -660,18 +705,101 @@ def validate(semantic_table_path, candidates_path,
                     "pattern_id": key[1], "tensor_bytes": tensor_bytes,
                     "threshold_bytes": threshold,
                     "verdict": "exceeds" if exceeds else "fits"})
+                # A size-guard exceed does NOT change 现成算子(exact): the fused
+                # kernel still exists (exact stays 有). It只 means the fused path
+                # falls back to split at THIS shape, so the candidate is not
+                # applicable here — Top-K reads collective_guard_checks and drops
+                # it from the actionable board. Keep a note for the rendered MD.
                 if exceeds:
-                    if candidate.get("exact_kernel_status") == "yes":
-                        errors.append(
-                            "%s collective tensor %dB >= fused-AR guard %dB "
-                            "(%s); exact must be no" % (
-                                path, tensor_bytes, threshold, ref))
-                    candidate["exact_reason"] = (
+                    candidate["_collective_guard"]["note"] = (
                         "collective tensor~%.0fMiB >= fused-AR guard %.0fMiB "
-                        "(%s) -> split fallback" % (
+                        "(%s) -> split fallback at this shape" % (
                             tensor_bytes / 1048576.0, threshold / 1048576.0,
                             ref))
         _validate_api_list(candidate, path, errors)
+        # 现成算子 invariant: exact_kernel_status is a binary "is there a ready
+        # kernel". If the implementation cites a flag/existing API (A or B) there
+        # IS one -> exact must be 有(yes). If it is author-track (new kernel / main
+        # rewrite) there is NONE -> exact must be 无(no). This makes 现成算子 a
+        # clean function of the class (no adapter sub-shades) and stops A/B being
+        # filed as 无 (or C as 有).
+        _impl = candidate.get("implementation_class")
+        _exact = candidate.get("exact_kernel_status")
+        _author = _impl in ("new_helper_kernel", "main_kernel_or_algorithmic")
+        if _impl:
+            if _author and _exact != "no":
+                errors.append(
+                    "%s author-track (%s) has no existing kernel -> "
+                    "exact_kernel_status(现成算子) must be no" % (path, _impl))
+            elif not _author and _exact != "yes":
+                errors.append(
+                    "%s %s cites an existing kernel -> "
+                    "exact_kernel_status(现成算子) must be yes" % (path, _impl))
+        # Gate A — a flag-only (A) win must record the flag's ACTUAL routed call
+        # signature, and may only claim the ops that signature carries. A *_quant
+        # family cannot be A on a flag whose routed signature has no scale/quant/
+        # fp8 arg — that flag does not fuse quant (→ B, integrate the quant
+        # variant). Generic: checks the recorded signature tokens, not any model.
+        if _impl == "existing_flag_or_env":
+            sig = candidate.get("flag_routed_signature")
+            if (not isinstance(sig, dict)
+                    or not sig.get("routed_call_ref")
+                    or not sig.get("fused_fn")
+                    or not sig.get("arg_signature")):
+                errors.append(
+                    "%s existing_flag_or_env (A) must record flag_routed_signature "
+                    "{routed_call_ref, fused_fn, arg_signature, covers_ops}: the "
+                    "actual fused fn the flag routes to and its argument signature "
+                    "(so claimed ops are backed by the call, not assumed)" % path)
+            else:
+                fam = str(candidate.get("family") or "")
+                argsig = str(sig.get("arg_signature") or "").lower()
+                if "quant" in fam and not any(
+                        tok in argsig for tok in _QUANT_SIG_TOKENS):
+                    errors.append(
+                        "%s family %s implies quant but flag_routed_signature."
+                        "arg_signature has no scale/quant/fp8 arg -> the flag does "
+                        "not fuse quant; classify B (integrate the quant variant), "
+                        "not A" % (path, fam))
+        # Gate B — declaring 现成算子=无 (author-track / C) must be an EVIDENCED
+        # search conclusion, not an opinion: record the exhaustive symbol search
+        # (queries + installed locations + null results) proving no installed
+        # kernel implements this op combination. Finding one makes it B.
+        if _author:
+            searches = candidate.get("absence_search")
+            if not isinstance(searches, list) or not searches:
+                errors.append(
+                    "%s author-track (现成算子=无) must record absence_search "
+                    "[{query, location, result}]: the exhaustive symbol search "
+                    "over the installed libs proving no kernel does this fusion "
+                    "(finding one makes it B, not C)" % path)
+            else:
+                for si, srch in enumerate(searches):
+                    if not (isinstance(srch, dict) and srch.get("query")
+                            and srch.get("location")):
+                        errors.append(
+                            "%s absence_search[%d] must record query + location "
+                            "(the installed path searched)" % (path, si))
+        # Activation evidence: an exact=yes candidate is realized by config or by
+        # code, and which one decides its Top-K tier (A ConfigSweep vs B adapter)
+        # and 3.1 routing. Force that decision to be evidence-backed so a
+        # flag-only win (e.g. --enable-aiter-allreduce-fusion) is never silently
+        # filed as "needs adapter". Cheap and stops the A/B mislabel at the source.
+        if candidate.get("exact_kernel_status") == "yes":
+            impl = candidate.get("implementation_class")
+            seam = (candidate.get("live_call_seam") or "").strip()
+            if impl == "existing_flag_or_env" and not seam:
+                errors.append(
+                    "%s existing_flag_or_env must record the enabling flag/env "
+                    "in live_call_seam (e.g. --enable-aiter-allreduce-fusion)"
+                    % path)
+            elif impl in ("existing_api_needs_adapter",
+                          "reference_path_port") and not seam:
+                errors.append(
+                    "%s exact=yes + %s must record live_call_seam (where the "
+                    "code wires in); if instead a flag/env engages it with no "
+                    "code, classify existing_flag_or_env (A / ConfigSweep)"
+                    % (path, impl))
 
     summary_order = []
     reported_collective_plans = set()
@@ -727,11 +855,6 @@ def validate(semantic_table_path, candidates_path,
                     plan_path, candidate_id))
                 continue
             referenced_candidate_ids.add(candidate_id)
-            _cand_guard = (candidates_by_id.get(candidate_id) or {}).get(
-                "_collective_guard")
-            if _cand_guard and _cand_guard.get("verdict") == "exceeds":
-                plan["exact_reason"] = candidates_by_id[candidate_id].get(
-                    "exact_reason", plan.get("exact_reason"))
             plan_title = plan.get("plan")
             if not plan_title:
                 errors.append("%s missing plan text" % plan_path)
@@ -854,7 +977,7 @@ def validate(semantic_table_path, candidates_path,
 
     # Aggregate escalation: small helpers each below the per-row escalate floor
     # can still add up to a big fusion opportunity within one (phase, pattern) —
-    # especially in high-layer-count patterns (e.g. linear attention x45). If the
+    # especially in high-layer-count patterns. If the
     # non-candidate sub-floor helpers in one table sum to >= the aggregate floor
     # per layer, they must be surfaced as a candidate (a cluster fusion), not
     # left as scattered followup rows.
@@ -987,7 +1110,7 @@ def render_markdown(payload, table):
         "## Fusion 总表（Prefill → Decode）",
         "",
         "| Phase | Pattern | Stage（时间顺序） | Fusion 方案（按建议顺序） | "
-        "当前链耗时 µs/层 | 现成 fusion kernel / API | Exact Kernel | "
+        "当前链耗时 µs/层 | 现成 fusion kernel / API | 现成算子 | "
         "预期节省 µs/层（roofline 估算，单层比例） | "
         "整 forward 预期节省 µs（占该 phase 全层比例） |",
         "|---|---|---|---|---:|---|---|---:|---:|",

@@ -133,6 +133,7 @@ class FusionCandidateHarnessTest(unittest.TestCase):
                 "readiness": "ready_for_api_validation",
                 "implementation_class": "existing_api_needs_adapter",
                 "exact_kernel_status": "yes",
+                "live_call_seam": "layernorm.py:151 rmsnorm call site",
                 "existing_apis": [api],
                 "risks": [], "validation_requirements": [],
             }],
@@ -163,7 +164,7 @@ class FusionCandidateHarnessTest(unittest.TestCase):
             }],
         }
 
-    def _collective_payload(self, exact="no"):
+    def _collective_payload(self, exact="yes"):
         api = {
             "name": "fused_allreduce_rmsnorm", "coverage": "full",
             "source_kind": "runtime_environment",
@@ -190,6 +191,12 @@ class FusionCandidateHarnessTest(unittest.TestCase):
             "implementation_class": "existing_flag_or_env",
             "exact_kernel_status": exact,
             "exact_reason": "" if exact == "yes" else "unwired seam",
+            "live_call_seam": "--enable-aiter-allreduce-fusion",
+            "flag_routed_signature": {
+                "routed_call_ref": "layernorm.py:151",
+                "fused_fn": "fused_allreduce_rmsnorm",
+                "arg_signature": "(x, residual, weight, eps)",
+                "covers_ops": ["allreduce", "rmsnorm"]},
             "existing_apis": [api], "risks": [], "validation_requirements": []}
         return {
             "phase": "generate_plans", "status": "pass",
@@ -353,6 +360,12 @@ class FusionCandidateHarnessTest(unittest.TestCase):
             "implementation_class": "existing_flag_or_env",
             "exact_kernel_status": exact,
             "exact_reason": "" if exact == "yes" else "boundary",
+            "live_call_seam": "--enable-aiter-allreduce-fusion",
+            "flag_routed_signature": {
+                "routed_call_ref": "layernorm.py:151",
+                "fused_fn": "fused_allreduce_rmsnorm",
+                "arg_signature": "(x, residual, weight, eps)",
+                "covers_ops": ["allreduce", "rmsnorm"]},
             "existing_apis": [api], "risks": [], "validation_requirements": []}
         if include_occurrences:
             candidate["boundary_occurrences"] = occurrences
@@ -412,7 +425,11 @@ class FusionCandidateHarnessTest(unittest.TestCase):
             self.assertTrue(any(
                 "boundary_occurrences" in error for error in result["errors"]))
 
-    def test_boundary_size_guard_forces_no_in_prefill(self):
+    def test_boundary_size_guard_records_exceeds_without_forcing_no(self):
+        # 现成算子(exact) is binary "kernel exists" — a size-guard exceed does NOT
+        # flip it to 无. The fused kernel still exists (exact stays 有); the guard
+        # only records that the fused path falls back at this shape (Top-K drops
+        # it as non-actionable via collective_guard_checks).
         with tempfile.TemporaryDirectory() as tmp:
             table = self._write(tmp, "table.json", self._boundary_table())
             payload = self._boundary_payload(exact="yes", occurrences=57)
@@ -422,11 +439,13 @@ class FusionCandidateHarnessTest(unittest.TestCase):
             result = harness.run(
                 table, candidates, os.path.join(tmp, "report.md"),
                 os.path.join(tmp, "validation.json"))
-            self.assertEqual(result["status"], "fail")
-            self.assertTrue(any(
+            self.assertFalse(any(
                 "exact must be no" in error for error in result["errors"]))
+            self.assertTrue(any(
+                c["verdict"] == "exceeds"
+                for c in result["metrics"]["collective_guard_checks"]))
 
-    def test_collective_exact_forced_no_when_tensor_exceeds_guard(self):
+    def test_collective_guard_records_exceeds_keeps_exact_yes(self):
         # tokens=8 * hidden=16 * dtype=2 = 256 bytes >= 64 threshold -> exceeds
         with tempfile.TemporaryDirectory() as tmp:
             table = self._write(tmp, "table.json", self._collective_table())
@@ -437,9 +456,11 @@ class FusionCandidateHarnessTest(unittest.TestCase):
             result = harness.run(
                 table, candidates, os.path.join(tmp, "report.md"),
                 os.path.join(tmp, "validation.json"))
-            self.assertEqual(result["status"], "fail")
-            self.assertTrue(any(
+            self.assertEqual(result["status"], "pass")
+            self.assertFalse(any(
                 "exact must be no" in error for error in result["errors"]))
+            checks = result["metrics"]["collective_guard_checks"]
+            self.assertEqual(checks[0]["verdict"], "exceeds")
 
     def test_collective_exact_allowed_when_tensor_fits_guard(self):
         # 256 bytes < 100000 threshold -> fits -> exact=yes allowed
@@ -456,6 +477,77 @@ class FusionCandidateHarnessTest(unittest.TestCase):
             checks = result["metrics"]["collective_guard_checks"]
             self.assertEqual(len(checks), 1)
             self.assertEqual(checks[0]["verdict"], "fits")
+
+    def test_flag_quant_family_without_scale_arg_fails(self):
+        # Gate A: a *_quant family cannot be tier A on a flag whose routed
+        # signature carries no scale/quant/fp8 arg (the flag does not fuse quant).
+        with tempfile.TemporaryDirectory() as tmp:
+            table = self._write(tmp, "table.json", self._collective_table())
+            payload = self._collective_payload(exact="yes")
+            payload["candidates"][0]["family"] = "collective_norm_quant"
+            # routed signature has no scale/quant token -> quant NOT fused
+            payload["candidates"][0]["flag_routed_signature"][
+                "arg_signature"] = "(x, residual, weight, eps)"
+            payload["environment_api_inventory_json"] = self._env(
+                tmp, threshold_bytes=100000)
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(any(
+                "does not fuse quant" in e for e in result["errors"]))
+
+    def test_flag_missing_routed_signature_fails(self):
+        # Gate A: every existing_flag_or_env candidate must record the routed sig.
+        with tempfile.TemporaryDirectory() as tmp:
+            table = self._write(tmp, "table.json", self._collective_table())
+            payload = self._collective_payload(exact="yes")
+            payload["candidates"][0].pop("flag_routed_signature", None)
+            payload["environment_api_inventory_json"] = self._env(
+                tmp, threshold_bytes=100000)
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(any(
+                "flag_routed_signature" in e for e in result["errors"]))
+
+    def test_author_track_requires_absence_search(self):
+        # Gate B: 现成算子=无 (author-track) must record the exhaustive absence
+        # search; without it the claim "no kernel" is unbacked.
+        with tempfile.TemporaryDirectory() as tmp:
+            table = self._write(tmp, "table.json", self._table())
+            payload = self._payload()
+            c0 = payload["candidates"][0]
+            c0["implementation_class"] = "new_helper_kernel"
+            c0["exact_kernel_status"] = "no"
+            c0["exact_reason"] = "no installed kernel fuses norm+quant here"
+            c0["existing_apis"] = []
+            payload["summary_rows"][0]["plans"][0][
+                "exact_kernel_status"] = "no"
+            payload["summary_rows"][0]["plans"][0][
+                "exact_reason"] = "no installed kernel"
+            payload["summary_rows"][0]["plans"][0]["existing_apis"] = []
+            payload["environment_api_inventory_json"] = self._env(tmp)
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertTrue(any(
+                "absence_search" in e for e in result["errors"]))
+            # with a recorded search the absence_search gate no longer fires
+            c0["absence_search"] = [{
+                "query": "grep -rn 'rmsnorm.*quant' aiter/ops",
+                "location": "/sgl-workspace/aiter/aiter/ops",
+                "result": "no fused norm+quant kernel for this dtype"}]
+            candidates = self._write(tmp, "candidates2.json", payload)
+            result2 = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertFalse(any(
+                "absence_search" in e for e in result2["errors"]))
 
     def test_missing_collective_guard_fields_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -643,6 +735,81 @@ class FusionCandidateHarnessTest(unittest.TestCase):
                 "cluster to" in error for error in result["errors"]))
             self.assertEqual(
                 result["metrics"]["agg_escalate_violation_count"], 1)
+
+    def test_exact_yes_adapter_without_seam_fails(self):
+        # An exact=yes needs-adapter candidate with no live_call_seam must fail:
+        # if a flag/env engages it with no code it should be existing_flag_or_env
+        # (A / ConfigSweep), otherwise it must point at the wiring seam.
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._payload()
+            payload["environment_api_inventory_json"] = self._env(tmp)
+            del payload["candidates"][0]["live_call_seam"]  # exact=yes, adapter
+            table = self._write(tmp, "table.json", self._table())
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(any(
+                "must record live_call_seam" in error
+                for error in result["errors"]))
+
+    def test_flag_or_env_without_seam_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._payload()
+            payload["environment_api_inventory_json"] = self._env(tmp)
+            payload["candidates"][0][
+                "implementation_class"] = "existing_flag_or_env"
+            del payload["candidates"][0]["live_call_seam"]
+            table = self._write(tmp, "table.json", self._table())
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(any(
+                "existing_flag_or_env must record the enabling flag" in error
+                for error in result["errors"]))
+
+    def test_cluster_candidate_spanning_donor_fails(self):
+        # A *_cluster candidate whose members straddle a GEMM must fail: a fused
+        # kernel cannot cross a main donor.
+        with tempfile.TemporaryDirectory() as tmp:
+            table_payload = self._table()  # r0 norm10, r1 quant11, r2 gemm12
+            table_payload["tables"][0]["rows"].append({
+                "row_id": "r3", "pos": 3, "device_seq_index": 13,
+                "stream": 8, "duration_us": 8.0, "stage": "elementwise"})
+            payload = self._payload()
+            payload["environment_api_inventory_json"] = self._env(tmp)
+            payload["stage_inventory"][1]["row_ids"] = ["r2", "r3"]
+            # cluster candidate members r0(seq10) + r3(seq13) span r2 gemm(seq12)
+            payload["candidates"][0].update({
+                "candidate_id": "c_cluster", "family": "norm_quant_cluster",
+                "members": [
+                    {"row_id": "r0", "pos": 0, "device_seq_index": 10,
+                     "stream": 8, "duration_us": 6.0, "stage": "norm",
+                     "evidence_level": "P"},
+                    {"row_id": "r3", "pos": 3, "device_seq_index": 13,
+                     "stream": 8, "duration_us": 8.0, "stage": "elementwise",
+                     "evidence_level": "P"}],
+                "donor_row_ids": ["r0"], "removable_row_ids": ["r3"],
+                "current_chain_us_per_layer": 14.0,
+                "addressable_us_per_layer": 8.0,
+                "stack_addressable_ceiling_us": 16.0})
+            payload["summary_rows"][0]["source_row_ids"] = ["r0", "r3"]
+            payload["summary_rows"][0]["current_chain_us_per_layer"] = 14.0
+            payload["summary_rows"][0]["plans"][0].update({
+                "candidate_id": "c_cluster", "addressable_us_per_layer": 8.0,
+                "current_chain_us_per_layer": 14.0})
+            payload["stage_inventory"][0]["candidate_ids"] = ["c_cluster"]
+            table = self._write(tmp, "table.json", table_payload)
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertEqual(result["status"], "fail")
+            self.assertTrue(any(
+                "spans" in e and "main donor" in e for e in result["errors"]))
 
     def test_provenance_trace_sha_mismatch_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
