@@ -480,6 +480,10 @@ const DEADLINE_EPOCH = (() => {
   return Number.isFinite(v) && v > 0 ? v : 0;
 })();
 const NO_STOP_S = Math.max(0, parseInt(A.no_stop_s != null ? A.no_stop_s : 900, 10));
+// Run-level cap on how many TechLead stops may be refused (forcedReplans is not reset per round).
+// Not 1: the refusal must scale with the window, or a long budget is handed back early.
+// Not unbounded: a role that truly cannot name a direction would spend the window planning.
+const MAX_FORCED_REPLANS = Math.max(1, parseInt(A.max_forced_replans != null ? A.max_forced_replans : 6, 10));
 const CLOCK_SCHEMA = { type: 'object', properties: { epoch: { type: 'number' } },
                        required: ['epoch'], additionalProperties: true };
 let deadlineHit = false;
@@ -731,17 +735,22 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       planInputs(false)),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
 
-  // NO EARLY STOP: one forced re-plan when the window is materially unspent. Once only — a role that
-  // still says stop after being told it may not has run out of ideas, and looping would burn the
-  // window on planning instead of measuring.
-  if (DEADLINE_EPOCH && left > NO_STOP_S && (!plan || plan.stop || !plan.directions ||
-                                             plan.directions.length === 0)) {
+  // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
+  // on the reasoning that a role repeating "stop" has run out of ideas. Measured at a 2h budget that
+  // cost ~3 min (write_req_to_token_pool_triton stopped at 1.95h/2.00h) and looked harmless; the cost
+  // is proportional to the budget, so at 8h the same one-shot escape hands back hours. The caller's
+  // rule is "must keep optimizing until the budget is spent", so the refusal has to be as long-lived
+  // as the window. Bounded by MAX_FORCED_REPLANS so a role that cannot produce a direction at all
+  // degrades to stopping instead of spinning the window away on planning.
+  while (DEADLINE_EPOCH && left > NO_STOP_S && forcedReplans < MAX_FORCED_REPLANS &&
+         (!plan || plan.stop || !plan.directions || plan.directions.length === 0)) {
     forcedReplans++;
-    log(`Round ${round}: stop=true with ${(left / 60).toFixed(0)} min left — refusing once, re-planning.`);
+    log(`Round ${round}: stop=true with ${(left / 60).toFixed(0)} min left — refusing (#${forcedReplans}), re-planning.`);
     plan = await agentT(
       roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.',
         planInputs(true)),
-      { phase: 'Optimize', label: `tech_lead:replan r${round}`, schema: PLAN_SCHEMA });
+      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: PLAN_SCHEMA });
+    left = await secondsLeft(`replan-r${round}`);
   }
 
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
