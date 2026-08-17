@@ -85,6 +85,7 @@ jobs:
             e2e_workflow/scripts/tests/test_harness_lib.py \
             e2e_workflow/scripts/tests/test_server_teardown.py \
             e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
+            kernel_workflow/scripts/test_research_kb.py \
             geak/test_bootstrap.py
 
       # Renders the per-file table + total into the run's Job Summary, which is
@@ -185,7 +186,7 @@ jobs:
           /tmp/gitleaks dir . --no-banner --redact --config .gitleaks.toml
 
   node-regression:
-    name: Node regression (expert_skills)
+    name: Node regression (workflow modes)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -196,6 +197,8 @@ jobs:
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
         run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+      - name: Researcher KB online/offline routing
+        run: node kernel_workflow/scripts/test_research_kb_modes.js
 
   dry-run:
     name: run_e2e dry-run mapping

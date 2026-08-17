@@ -94,13 +94,21 @@ Workflow({
                                //   unweighted geomean is kept as a secondary diagnostic). Correctness is
                                //   unaffected (it stays on the frozen immutable oracle).
                                //   Also accepted as op_spec.workload_path, or op_spec.workload (inline).
-    // --- Deep Research Agent (DRA) — opt-in web-grounded research phase before the optimize loop ---
-    dra_enabled: "false",      // optional, default "false" (OFF → behavior byte-identical). "true" runs
-                               //   the Research phase after Profile / before the optimize loop.
+    // --- Deep Research Agent (DRA) + persistent offline Researcher knowledge ---
+    dra_mode: "off",           // optional: "off" (default) | "online" | "offline".
+                               //   online runs the unchanged web Researcher, feeds its fresh brief
+                               //   directly to TechLead, and immediately merges findings into the KB.
+                               //   offline invokes no Researcher/web tools and reconstructs the same
+                               //   planner brief from the persistent KB.
+    dra_enabled: "false",      // backward-compatible alias: "true" == dra_mode="online"
     dra_max_questions: 8,      // optional, default 8: max research questions fanned out in parallel
     dra_blindspot: "false",    // optional, default "false": run an extra blindspot-critique + 2nd
                                //   parallel research wave (Stage 5/6) — budget-permitting
-    dra_max_blindspots: 4      // optional, default 4: cap on blindspots / 2nd-wave follow-ups
+    dra_max_blindspots: 4,     // optional, default 4: cap on blindspots / 2nd-wave follow-ups
+    research_kb_dir: "",       // optional; default <perf_knowledge_dir>/researcher_findings
+    research_kb_update: "true",// online: immediately ingest after successful Stage 7
+    research_kb_snapshot: "",  // offline: explicit immutable snapshot; empty resolves channels/latest
+    research_kb_max_directions: 8 // offline: cap planner brief size
   }
 })
 ```
@@ -128,8 +136,9 @@ oracle), commits it as the baseline, and then the **same optimize loop** improve
 `authored:false` / `validation_status:"author_failed"` if no correct baseline can be produced (the
 caller drops that language). `mode="optimize"` (default) is unchanged and fully backward compatible.
 
-### Deep Research Agent / Research phase (NEW, opt-in)
-`dra_enabled="true"` inserts a **`Research` phase AFTER Profile and BEFORE the optimize loop** (so the
+### Deep Research Agent / online-offline Research phase (NEW, opt-in)
+`dra_mode="online"` (or legacy `dra_enabled="true"`) inserts a **`Research` phase AFTER Profile and
+BEFORE the optimize loop** (so the
 COMMANDMENT + baseline profile + analysis already exist). It lives in the `kernel_lane.js` worker
 alongside the rest of the pipeline, and the dispatcher forwards `dra_*` through unchanged. The
 **`researcher`** persona (`roles/researcher.md`) runs a v4-native deep-research pass:
@@ -157,6 +166,27 @@ not secondary. The brief is a prior, never a cage: profile/per-case data and mea
 (`interface/run_e2e.py` `ALLOWED_TOOLS`). For a standalone `claude -p` invocation of this workflow
 with `dra_enabled`, pass them on the allowlist too (`--allowed-tools Workflow,Bash,Read,Write,WebSearch,WebFetch`).
 With `dra_enabled` off (the default) nothing opts into the web tools and behavior is unchanged.
+
+#### Immediate knowledge update and offline replay
+
+Online Stage 7 still hands its fresh `deep_search_brief.md` directly to TechLead exactly as before.
+After synthesis succeeds, a separate deterministic manager immediately merges only the existing
+Researcher artifacts into the generated `perf_knowledge/researcher_findings/` collection. It performs
+no additional research or synthesis and the online run never re-reads its just-written duplicate.
+
+`dra_mode="offline"` follows the same phase position but invokes **no Researcher and no web tools**.
+It resolves `research_kb_snapshot` (or the atomic `channels/latest` pointer), retrieves cards matching
+the current operator/language/gfx/dtype/regime/source fingerprint, and writes
+`EVAL_DIR/deep_search_brief.offline.md`. TechLead receives that path through the unchanged
+`DEEP_SEARCH_BRIEF` input.
+
+The generated collection stores one canonical card per scoped mechanism rather than one card per CI
+run. Repeated weekly wording merges into the existing card; incompatible architectures/regimes and
+genuinely different mechanisms remain separate. Every update publishes a checksummed immutable
+snapshot so an offline experiment can name exactly what it consumed. After Director validation, the
+run appends a separate card/snapshot outcome to `validation/events.jsonl`; it does not rewrite the
+Researcher content or affect ranking in the initial experiment. See
+`perf_knowledge/researcher_findings/README.md`.
 
 ### Bake-off mode (NEW) — one kernel, many backend languages, keep the fastest
 `kernel_workflow.js` is now the single **ENTRY POINT / dispatcher**; the single-language pipeline lives
@@ -218,9 +248,12 @@ Everything lands under `<exp_root>/team_<kernel>_<timestamp>/<kernel>/` (default
 the `exp/` folder sibling to `workflow_dir`):
 - `COMMANDMENT.md`, `baseline_timing.json`, `analysis.json`, `codebase_context.md`, `roadmap.md`
 - `baseline_metrics.json`, `profiling_summary.md`
-- (DRA, when `dra_enabled`) `deep_search.md` (full research), `deep_search_brief.md` (compact ranked
+- (online DRA) `deep_search.md` (full research), `deep_search_brief.md` (compact ranked
   directions — the planner's input), `deep_search.json` (structured portfolio), and
   `research/{facts.json, questions.json, answers/<id>.json, blindspots.json}` (the research trail)
+- (offline DRA) `deep_search_brief.offline.md` + `research_kb_retrieval.json` (snapshot + retrieved
+  card IDs/scores); both online and offline lane returns include `dra_mode`, `research_brief_path`,
+  `research_kb_snapshot`, `research_kb_card_ids`, and `research_kb_validation_event`
 - `round_N/engineer_i/{worker_result.json, report.md, best_patch.diff}` — each engineer's mini-report
 - `round_N/integrate/`, `insight_log.md`, `current_best.diff`
 - `tech_lead_report.md` — round-by-round narrative + final per-case table (the TechLead summary)

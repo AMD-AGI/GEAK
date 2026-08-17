@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Analyze', detail: 'tech_lead analyzes kernel + writes roadmap' },
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
     { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
-    { title: 'Research', detail: 'OPT-IN (args.dra_enabled): researcher fans research questions out in parallel via native WebSearch/WebFetch, writes a ranked-directions brief the planner seeds from' },
+    { title: 'Research', detail: 'OPT-IN: dra_mode=online runs the unchanged web Researcher and immediately merges its findings into the offline KB; dra_mode=offline retrieves an equivalent planner brief from that KB' },
     { title: 'Optimize', detail: 'budget loop: tech_lead plans, specialist OR deep_explore engineers optimize, reprofile' },
     { title: 'Verify', detail: 'each candidate patch independently re-benchmarked' },
     { title: 'Merge', detail: 'integrator combines the round winners' },
@@ -158,15 +158,31 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
 // Only planning + authoring roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
 
-// --- Deep Research Agent (DRA) -------------------------------------------------------------------
-// OPT-IN: a v4-native research phase that runs AFTER Profile and BEFORE the optimize loop (so the
-// COMMANDMENT + baseline profile + analysis exist). The `researcher` persona extracts facts and a
-// ranked set of research QUESTIONS; the script fans those out in PARALLEL (each question = one
-// hang-guarded agent using native WebSearch/WebFetch), then a synthesis pass writes a ranked
-// directions portfolio (deep_search.md / deep_search_brief.md / deep_search.json) into EVAL_DIR that
-// the TechLead's plan_round seeds from. DEFAULT OFF: when dra_enabled is not "true" NOTHING runs and
-// behavior is byte-identical to a build without this feature (existing runs unchanged).
-const DRA_ENABLED = String(A.dra_enabled != null ? A.dra_enabled : 'false') === 'true';
+// --- Deep Research Agent (DRA) + persistent offline Researcher knowledge -------------------------
+// Backward compatibility: dra_enabled=true means dra_mode=online. The explicit mode adds:
+//   online  = run the EXISTING Researcher unchanged, feed its fresh brief directly to TechLead, and
+//             immediately merge Stage-7 findings into the persistent Researcher KB.
+//   offline = do NOT invoke Researcher/web tools; retrieve scoped findings from a frozen KB snapshot
+//             and materialize the SAME compact DEEP_SEARCH_BRIEF contract for TechLead.
+//   off     = historical default; no Researcher and no Researcher-KB retrieval.
+const DRA_MODE_RAW = String(A.dra_mode != null ? A.dra_mode : '').trim().toLowerCase();
+if (DRA_MODE_RAW && !['off', 'online', 'offline'].includes(DRA_MODE_RAW)) {
+  throw new Error(`unknown dra_mode='${DRA_MODE_RAW}'. Use off | online | offline.`);
+}
+const DRA_MODE = DRA_MODE_RAW ||
+  (String(A.dra_enabled != null ? A.dra_enabled : 'false') === 'true' ? 'online' : 'off');
+const DRA_ENABLED = DRA_MODE === 'online';
+const DRA_OFFLINE = DRA_MODE === 'offline';
+// The generated collection lives INSIDE the configured knowledge base but remains provenance-separate
+// from curated perf cards and measurement-derived learned cards.
+const RESEARCH_KB_DIR = String(A.research_kb_dir ||
+  (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/researcher_findings' : '')).replace(/\/+$/, '');
+const RESEARCH_KB_UPDATE = String(A.research_kb_update != null ? A.research_kb_update : 'true') === 'true';
+const RESEARCH_KB_SNAPSHOT = String(A.research_kb_snapshot || '').trim();
+const RESEARCH_KB_MAX_DIRECTIONS = (() => {
+  const v = parseInt(A.research_kb_max_directions != null ? A.research_kb_max_directions : 8, 10);
+  return Number.isFinite(v) && v >= 1 ? v : 8;
+})();
 const DRA_MAX_QUESTIONS = (() => {
   const v = parseInt(A.dra_max_questions != null ? A.dra_max_questions : 8, 10);
   return Number.isFinite(v) && v >= 1 ? v : 8;
@@ -367,6 +383,21 @@ const RESEARCH_SCHEMA = obj({
   notes: { type: 'string' },
 }, ['num_directions', 'brief_path']);
 
+// Deterministic Python manager result. It transforms existing Researcher artifacts only; no second
+// research/synthesis model is involved.
+const RESEARCH_KB_SCHEMA = obj({
+  ok: { type: 'boolean' },
+  mode: { type: 'string', enum: ['ingest', 'retrieve', 'validate'] },
+  run_id: { type: 'string' }, snapshot_id: { type: 'string' },
+  brief_path: { type: 'string' }, retrieval_path: { type: 'string' },
+  cards_retrieved: { type: 'number' }, card_ids: { type: 'array', items: { type: 'string' } },
+  directions_seen: { type: 'number' }, cards_created: { type: 'number' },
+  cards_merged: { type: 'number' }, cards_contested: { type: 'number' },
+  observations_unchanged: { type: 'number' },
+  validation_event_id: { type: 'string' }, validation_recorded: { type: 'boolean' },
+  card_count: { type: 'number' }, kb_dir: { type: 'string' }, error: { type: 'string' },
+}, ['ok', 'mode']);
+
 const PLAN_SCHEMA = obj({
   stop: { type: 'boolean' }, reasoning: { type: 'string' },
   directions: {
@@ -441,6 +472,8 @@ const VALIDATE_SCHEMA = obj({
 // ---------------------------------------------------------------------------
 const cfg = (o) => Object.entries(o).map(([k, v]) =>
   `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
+// POSIX shell quoting for the deterministic Researcher-KB Python command handed to the manager role.
+const shQuote = (v) => "'" + String(v == null ? '' : v).replace(/'/g, "'\"'\"'") + "'";
 
 // --- Hung-agent guard ------------------------------------------------------
 // An agent LLM call that HANGS (no response, no terminal error) blocks a
@@ -645,15 +678,26 @@ let profileSummary = await agentT(
 log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
 
 // ===========================================================================
-// PHASE: Research (Deep Research Agent — OPT-IN via args.dra_enabled)
-// Runs AFTER Profile / BEFORE the optimize loop: profile + COMMANDMENT + analysis exist by now, so
-// the researcher has the facts it needs. It produces EVAL_DIR/deep_search_brief.md (compact, ranked
-// directions) which the TechLead's plan_round seeds directions from. The per-question research is
-// fanned out with parallel() and EVERY research agent is wrapped in the agentT() hang-guard, so a
-// hung research agent resolves to null and the parallel round-barrier still proceeds (it never wedges
-// the run — the known v4 failure mode the hang-guard was built for). DEFAULT OFF → no behavior change.
+// PHASE: Research (online Researcher OR offline Researcher-KB retrieval)
+// Both modes produce the same compact DEEP_SEARCH_BRIEF handoff. Online keeps the existing Researcher
+// flow unchanged and writes its findings to the KB only AFTER Stage 7. Offline invokes no Researcher
+// agent and no web tools: the deterministic manager retrieves scoped cards and materializes a brief.
 // ===========================================================================
 let researchBriefPath = '';   // EVAL_DIR/deep_search_brief.md when the DRA produced one; '' otherwise
+let researchKbResult = null;   // ingest/retrieve metadata surfaced in the final lane return
+let researchKbValidationResult = null;
+const researchKbScript = `${WORKFLOW_DIR}/scripts/research_kb.py`;
+const researchKbScopeCli = [
+  `--kernel-path ${shQuote(CANONICAL)}`,
+  `--operator ${shQuote(KK_OPERATOR)}`,
+  `--language ${shQuote(KK_LANGUAGE)}`,
+  `--backend ${shQuote((analysis && analysis.kernel_backend) || KK_LANGUAGE)}`,
+  `--gfx ${shQuote((profileSummary && profileSummary.device) || '')}`,
+  `--dtype ${shQuote((OP_SPEC && OP_SPEC.dtype) || '')}`,
+  `--regime ${shQuote((OP_SPEC && OP_SPEC.regime) || '')}`,
+  `--bottleneck ${shQuote((profileSummary && profileSummary.bottleneck) || 'unknown')}`,
+  `--kernel-name ${shQuote(KERNEL_NAME)}`,
+].join(' ');
 if (DRA_ENABLED) {
   phase('Research');
   const RESEARCH_DIR = `${EVAL_DIR}/research`;
@@ -730,6 +774,46 @@ if (DRA_ENABLED) {
     log(`Research done. ${synth.num_directions || (synth.directions ? synth.directions.length : 0)} ranked direction(s) → ${researchBriefPath}`);
   } else {
     log('Research produced no brief (degraded) — plan_round proceeds without a DRA brief.');
+  }
+  // Knowledge update is an immediate side effect of a successful ONLINE synthesis. The current run
+  // still consumes its fresh brief directly; it never retrieves its just-written duplicate.
+  if (researchBriefPath && RESEARCH_KB_UPDATE && RESEARCH_KB_DIR) {
+    const command = `python3 ${shQuote(researchKbScript)} ingest ` +
+      `--eval-dir ${shQuote(EVAL_DIR)} --kb-dir ${shQuote(RESEARCH_KB_DIR)} ${researchKbScopeCli}`;
+    researchKbResult = await agentT(
+      roleAgent('research_kb_manager', 'ingest',
+        'Run the deterministic post-Researcher merge. Do not interpret the findings.', { COMMAND: command }),
+      { phase: 'Research', label: 'research_kb:ingest', schema: RESEARCH_KB_SCHEMA });
+    if (researchKbResult && researchKbResult.ok) {
+      log(`Research KB updated immediately: +${researchKbResult.cards_created || 0} new, ` +
+          `${researchKbResult.cards_merged || 0} merged, ${researchKbResult.cards_contested || 0} contested, ` +
+          `snapshot=${researchKbResult.snapshot_id || '?'}`);
+    } else {
+      log(`Research KB update failed/degraded (${researchKbResult ? researchKbResult.error || 'unknown' : 'no return'}); fresh online brief is still used.`);
+    }
+  }
+} else if (DRA_OFFLINE) {
+  phase('Research');
+  if (!RESEARCH_KB_DIR) {
+    log('Offline Research requested but research_kb_dir is empty — plan_round proceeds without a brief.');
+  } else {
+    const offlineBrief = `${EVAL_DIR}/deep_search_brief.offline.md`;
+    const command = `python3 ${shQuote(researchKbScript)} retrieve ` +
+      `--kb-dir ${shQuote(RESEARCH_KB_DIR)} --output ${shQuote(offlineBrief)} ` +
+      `--snapshot-id ${shQuote(RESEARCH_KB_SNAPSHOT)} ` +
+      `--max-directions ${shQuote(RESEARCH_KB_MAX_DIRECTIONS)} ${researchKbScopeCli}`;
+    researchKbResult = await agentT(
+      roleAgent('research_kb_manager', 'retrieve',
+        'Retrieve scoped offline findings and materialize the planner brief. Do not invoke Researcher or web tools.',
+        { COMMAND: command }),
+      { phase: 'Research', label: 'research_kb:retrieve', schema: RESEARCH_KB_SCHEMA });
+    if (researchKbResult && researchKbResult.ok && researchKbResult.brief_path) {
+      researchBriefPath = researchKbResult.brief_path;
+      log(`Offline Research KB: ${researchKbResult.cards_retrieved || 0} direction(s) from ` +
+          `snapshot=${researchKbResult.snapshot_id || '?'} → ${researchBriefPath}`);
+    } else {
+      log(`Offline Research KB produced no brief (${researchKbResult ? researchKbResult.error || 'no matching cards' : 'no return'}); plan_round proceeds normally.`);
+    }
   }
 }
 
@@ -1051,6 +1135,27 @@ const finalGeomean = validation ? validation.director_verified_speedup_geomean :
 const finalWeighted = validation && validation.director_verified_speedup_weighted != null
   ? validation.director_verified_speedup_weighted : null;
 const finalPrimary = HAS_WORKLOAD && Number.isFinite(finalWeighted) ? finalWeighted : finalGeomean;
+// Validation metadata is append-only and provenance-separate from Researcher-authored card content.
+// Recording it does not yet rewrite cards or alter retrieval rank.
+if (researchKbResult && researchKbResult.ok && researchKbResult.snapshot_id &&
+    Array.isArray(researchKbResult.card_ids) && researchKbResult.card_ids.length && RESEARCH_KB_DIR) {
+  const command = `python3 ${shQuote(researchKbScript)} validate ` +
+    `--kb-dir ${shQuote(RESEARCH_KB_DIR)} --snapshot-id ${shQuote(researchKbResult.snapshot_id)} ` +
+    `--eval-dir ${shQuote(EVAL_DIR)} --kernel-path ${shQuote(CANONICAL)} ` +
+    `--kernel-name ${shQuote(KERNEL_NAME)} --dra-mode ${shQuote(DRA_MODE)} ` +
+    `--card-ids ${shQuote(researchKbResult.card_ids.join(','))} ` +
+    `--final-speedup ${shQuote(finalPrimary || 0)} ` +
+    `--validation-status ${shQuote(validation ? validation.validation_status : 'unknown')} ` +
+    `--correctness ${shQuote(validation ? validation.correctness || '' : '')}`;
+  researchKbValidationResult = await agentT(
+    roleAgent('research_kb_manager', 'validate',
+      'Append the Director outcome as validation metadata. Do not alter Researcher card content.',
+      { COMMAND: command }),
+    { phase: 'Validate', label: 'research_kb:validate', schema: RESEARCH_KB_SCHEMA });
+  if (researchKbValidationResult && researchKbValidationResult.ok) {
+    log(`Research KB validation metadata: ${researchKbValidationResult.validation_event_id || '?'}`);
+  }
+}
 log(`COMPLETE. ${KERNEL_NAME}: verified ${HAS_WORKLOAD ? 'time-weighted' : 'geomean'} ${finalPrimary ? finalPrimary.toFixed(2) : '?'}x` +
     `${HAS_WORKLOAD && Number.isFinite(finalGeomean) ? ` (unweighted geomean ${finalGeomean.toFixed(2)}x)` : ''}` +
     ` (status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
@@ -1061,6 +1166,13 @@ return {
   authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
   kernel_name: KERNEL_NAME,
+  dra_mode: DRA_MODE,
+  research_brief_path: researchBriefPath,
+  research_kb_snapshot: researchKbResult ? researchKbResult.snapshot_id || '' : '',
+  research_kb_card_ids: researchKbResult && Array.isArray(researchKbResult.card_ids)
+    ? researchKbResult.card_ids : [],
+  research_kb_validation_event: researchKbValidationResult
+    ? researchKbValidationResult.validation_event_id || '' : '',
   workload_aligned: HAS_WORKLOAD,
   final_speedup: finalPrimary,                 // PRIMARY metric (weighted when workload-aligned)
   final_weighted: finalWeighted,
