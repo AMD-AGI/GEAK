@@ -243,6 +243,16 @@ const HEAD_AUTHOR_MAX = parseInt(A.head_author_max != null ? A.head_author_max :
 // hits a harness fault / no-win / extraction failure, the orchestrator LOUDLY flags it (and still tries
 // the author route when a plan exists) instead of dropping the biggest lever on the floor. Default 30%.
 const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_pct : 30);
+// Relevance gate: consume the Architect's drop_list (the candidates it judged not worth the time).
+// Until now drop_list was written by the Architect on every run and read by NOTHING — not code, not a
+// log, not a report, not another role's prompt. Modes:
+//   off    ignore drop_list completely; the queues are exactly what the Architect returned
+//   dryrun match entries and LOG what WOULD be dropped, but drop nothing            (default)
+//   on     actually drop
+// Default is dryrun because this list has never been acted on before: the first runs prove the matching
+// is sound before it is allowed to remove work. A candidate at or above HEAD_PROTECT_PCT is refused as a
+// drop in EVERY mode — the Amdahl-dominant op is never dropped on an LLM's say-so.
+const DROP_GATE = String(A.drop_gate != null ? A.drop_gate : 'dryrun').toLowerCase();
 // Corrective re-author: when a verified-isolated head winner is REJECTED at the e2e gate for a FIXABLE
 // integration reason (it ENGAGED live + beat the isolated oracle, only the integration POSTURE is wrong —
 // e.g. a JIT/DSL kernel lazily compiling in the TP>1 warmup -> NO_BINARY_FOR_GPU / cuda_graph_capture_unsafe,
@@ -1169,6 +1179,108 @@ function stripFlydslFromQueues(...queues) {
   }
   return n;
 }
+
+// --- Candidate queue normalization ---------------------------------------------------------------
+// EVERY site that (re)assigns headQueue/kernelQueue goes through this: the first strategize, the
+// carried-state reload, and the post-config re-strategize. Three ordered steps:
+//   (1) IDENTITY   — give every candidate a stable id and a matchable short_name, so a later stage can
+//                    refer to THIS candidate. Anything we have to invent is marked as invented.
+//   (2) OP-IDENTITY GUARD — the fused-MoE rule. It used to sit inline after the FIRST strategize only, so
+//                    a post-config re-strategize replaced the queue with fresh untagged candidates and
+//                    silently lost the protection the rule's own comment promises ("never SKIPPED").
+//   (3) RELEVANCE DROP — consume the Architect's drop_list (see DROP_GATE).
+// Order matters: (3) can match on the live seam, and (2) is what fills that in.
+// Inputs are DEEP-copied. These queues used to be shallow .slice()s, so steps (2)/(3) and the flydsl
+// strip wrote straight through into the Architect's own candidate objects and into carried state.
+const dropDecisions = (ST.drop_decisions || []).slice();   // audit trail: every drop_list entry and its outcome
+const _clone = (o) => JSON.parse(JSON.stringify(o == null ? {} : o));
+const _norm = (s) => String(s == null ? '' : s).trim().toLowerCase();
+// A seam is "module:attr(sig)"; the signature is advisory, so compare on "module:attr" only.
+const _seamKey = (c) => _norm(String((c && (c.live_call_seam || c.target_callable)) || '').split('(')[0]);
+
+function normalizeQueues({ head, kernel, dropList, origin }) {
+  let H = (head || []).map(_clone);
+  const K = (kernel || []).map(_clone);
+
+  // (1) IDENTITY. Give every candidate an id so a later stage can refer to THIS candidate. When the
+  // Architect omitted one we invent a positional stand-in AND record that we invented it: an invented id
+  // names nothing the Architect could have written down, so step (3) must never let one satisfy a
+  // drop_list entry.
+  // short_name is deliberately NOT filled in here. The head track and the milestone track each synthesize
+  // their own name downstream (`${op_kind}${i}` and `k${milestone}_${i}`), those names reach reports and
+  // task directories, and pre-empting them would silently rename kernels. A candidate with no short_name
+  // simply has no name for a drop_list entry to match on, which is the correct outcome.
+  const ident = (q, prefix) => q.forEach((c, i) => {
+    if (!_norm(c.id)) { c.id = `${prefix}${i}`; c.id_synthesized = true; }
+  });
+  ident(H, 'h'); ident(K, 'k');
+
+  // (2) OP-IDENTITY GUARD + ADMISSION.
+  // Seam-bind FIRST, then hand off to applyOpIdentityGuard (fused tagging + admitHeads). Two reasons the
+  // binding cannot move into that function: it must happen before admission, because admitHeads calls
+  // prepareHeadSelection on what it admits; and it is a superset of the fused-only rule, covering EVERY
+  // head that has a seam. That last part is bug 7 — the binding used to sit inside the fused-only branch,
+  // so a standalone head whose Architect-supplied seam was its only binding hint reached the extractor
+  // with target_callable=''. It is a fallback either way: consumers read ext.target_callable first and
+  // only fall back to the candidate's.
+  let seamBound = 0;
+  for (const c of H) {
+    if (!_norm(c.target_callable) && _norm(c.live_call_seam)) { c.target_callable = c.live_call_seam; seamBound++; }
+  }
+  // applyOpIdentityGuard is main's module-scoped fused-MoE rule; it also runs admitHeads, so a call site
+  // cannot tag identity and then forget to admit. Calling it here rather than re-implementing it keeps
+  // ONE definition of the rule, and it is what makes the drop filter below see the admitted queue.
+  H = applyOpIdentityGuard(H, origin);
+  if (seamBound) log(`[op-identity] (${origin}) ${seamBound} head(s) bound to their Architect-supplied live call seam.`);
+
+  // (3) RELEVANCE DROP.
+  const drops = (dropList || []).map(_clone);
+  if (DROP_GATE === 'off' || !drops.length) {
+    if (drops.length) log(`[drop-gate] (${origin}) OFF — ignoring ${drops.length} drop_list entr(ies).`);
+    return { head: H, kernel: K };
+  }
+  const doomed = new Set();
+  let wouldDrop = 0, dropped = 0, protectedN = 0, unmatched = 0;
+  for (const d of drops) {
+    // Match strictly, most specific first. Never match on a field we invented in step (1).
+    const matches = [...H, ...K].filter((c) => {
+      if (_norm(d.id) && !c.id_synthesized && _norm(d.id) === _norm(c.id)) return true;
+      if (_norm(d.short_name) && _norm(d.short_name) === _norm(c.short_name)) return true;
+      const dk = _norm(String(d.live_call_seam || d.target_callable || '').split('(')[0]);
+      return !!dk && dk === _seamKey(c);
+    });
+    const label = d.id || d.short_name || JSON.stringify(d);
+    if (!matches.length) {
+      // Loud on purpose: a silent no-match is indistinguishable from a working filter.
+      unmatched++;
+      log(`  [drop-gate] (${origin}) NO MATCH for drop_list entry "${label}" — nothing dropped for it.`);
+      dropDecisions.push({ origin, entry: label, why: d.why || '', outcome: 'no_match' });
+      continue;
+    }
+    for (const c of matches) {
+      const pct = Number(c.pct_gpu_time) || 0;
+      if (pct >= HEAD_PROTECT_PCT) {
+        protectedN++;
+        log(`  ⚠️ [drop-gate] (${origin}) REFUSING to drop "${c.short_name}" (${pct.toFixed(1)}% GPU >= HEAD_PROTECT_PCT ${HEAD_PROTECT_PCT}%) — Architect said "${d.why || 'no reason given'}". Keeping it in the queue.`);
+        dropDecisions.push({ origin, entry: label, matched: c.short_name, pct_gpu_time: pct, why: d.why || '', outcome: 'protected' });
+        continue;
+      }
+      if (DROP_GATE === 'dryrun') {
+        wouldDrop++;
+        log(`  [drop-gate] (${origin}) DRY RUN — would drop "${c.short_name}" (${pct.toFixed(1)}% GPU): ${d.why || 'no reason given'}`);
+        dropDecisions.push({ origin, entry: label, matched: c.short_name, pct_gpu_time: pct, why: d.why || '', outcome: 'would_drop' });
+        continue;
+      }
+      doomed.add(c);
+      dropped++;
+      log(`  [drop-gate] (${origin}) DROP "${c.short_name}" (${pct.toFixed(1)}% GPU): ${d.why || 'no reason given'}`);
+      dropDecisions.push({ origin, entry: label, matched: c.short_name, pct_gpu_time: pct, why: d.why || '', outcome: 'dropped' });
+    }
+  }
+  log(`[drop-gate] (${origin}) mode=${DROP_GATE}: ${drops.length} drop_list entr(ies) -> ${dropped} dropped, ${wouldDrop} would-drop, ${protectedN} protected, ${unmatched} unmatched.`);
+  return { head: H.filter((c) => !doomed.has(c)), kernel: K.filter((c) => !doomed.has(c)) };
+}
+
 async function ensureFlydslGate() {
   if (flydslProvisioned) return;                      // already provisioned this run
   if (!flydslRouted(headQueue, kernelQueue)) return;  // strategize did not route flydsl -> nothing to do
@@ -2899,9 +3011,13 @@ if (want('setup')) {
       ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
     }),
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
-  kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
-  headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
-  headQueue = applyOpIdentityGuard(headQueue, 'strategize');
+  // Identity -> op-identity guard (+ admission) -> relevance drop. See normalizeQueues.
+  ({ head: headQueue, kernel: kernelQueue } = normalizeQueues({
+    head: (strategy && strategy.head_candidates) || [],
+    kernel: (strategy && strategy.kernel_candidates) || [],
+    dropList: (strategy && strategy.drop_list) || [],
+    origin: 'strategize',
+  }));
   log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
   // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
   await ensureFlydslGate();
@@ -2917,8 +3033,13 @@ if (want('setup')) {
   curOverlay = ST.overlay || INIT_BASE_OVERLAY;
   profile = { profile_topN_json: ST.profile_topn_json || '' };
   strategy = { config_directions: ST.config_directions || [] };
-  kernelQueue = ST.kernelQueue || [];
-  headQueue = admitHeads(ST.headQueue || [], 'resume');
+  // Carried state was already filtered when it was first planned (and those decisions came back in
+  // ST.drop_decisions), so no drop_list here — but re-run identity + the op-identity guard, which are
+  // idempotent, so a resumed run holds exactly the same invariants as a fresh one. normalizeQueues runs
+  // admitHeads for us via applyOpIdentityGuard, so this still admits exactly as the plain resume did.
+  ({ head: headQueue, kernel: kernelQueue } = normalizeQueues({
+    head: ST.headQueue || [], kernel: ST.kernelQueue || [], dropList: [], origin: 'carried-state',
+  }));
   log(`Loaded carried state: EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT}, flags='${curFlags}', env='${curEnv}', ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
 }
 
@@ -2960,9 +3081,16 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
         ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
-    if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
-    if (restrat && restrat.head_candidates)
-      headQueue = applyOpIdentityGuard(restrat.head_candidates.slice(), 're-strategize');
+    // Replace only the queue the re-plan actually returned (unchanged), but run BOTH through
+    // normalizeQueues so the re-plan's fresh drop_list is looked at at all — it never was before.
+    if (restrat && (restrat.kernel_candidates || restrat.head_candidates)) {
+      ({ head: headQueue, kernel: kernelQueue } = normalizeQueues({
+        head: restrat.head_candidates || headQueue,
+        kernel: restrat.kernel_candidates || kernelQueue,
+        dropList: restrat.drop_list || [],
+        origin: 're-strategize',
+      }));
+    }
     // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
     await ensureFlydslGate();
   } else {
@@ -4637,6 +4765,15 @@ if (want('final')) {
 }
 
 // State to carry into the NEXT phase invocation (args.state) when driving phase-by-phase.
+// Drop-gate summary. Unconditional: drops apply to the milestone queue as well as the head queue, so
+// this must still print on a run where the head track never opened.
+if (dropDecisions.length) {
+  const tally = dropDecisions.reduce((m, d) => (m[d.outcome] = (m[d.outcome] || 0) + 1, m), {});
+  log(`[drop-gate] mode=${DROP_GATE}; ${dropDecisions.length} drop_list decision(s): ` +
+    Object.keys(tally).map((k) => `${k}=${tally[k]}`).join(', ') +
+    (DROP_GATE === 'dryrun' ? '. DRY RUN — nothing was actually dropped; re-run with drop_gate=on once the matching looks right.' : '.'));
+}
+
 const carryState = {
   backend: BACKEND,
   eval_dir: EVAL_DIR, model_name: MODEL_NAME, baseline_throughput_tok_s: BASELINE_TPUT,
@@ -4647,6 +4784,7 @@ const carryState = {
   // Full tuning-phase result, so a phase-by-phase resume does not re-run the tuning loop and the Report
   // phase still has the attribution numbers when it runs in a later invocation.
   ...(tuning ? { tuning } : {}),
+  drop_decisions: dropDecisions,   // every drop_list entry and what became of it (dropped/protected/unverified/ambiguous/no_match)
   // Carry pending (verified-isolated, A/B-incomplete) wins WITH their inputs so a
   // resumed phase run can finish their A/B instead of re-discovering them.
   pending_integrations: pendingIntegrations,
@@ -4760,6 +4898,8 @@ const wfReturn = {
     pct_gpu_time: p.pct_gpu_time, partial: p.partial || null,
   })),
   flagged_heads: flaggedHeads,   // dominant heads surfaced but not optimized (harness/extract/no-candidate) — never silently dropped
+  drop_gate: DROP_GATE,
+  drop_decisions: dropDecisions, // the Architect's drop_list, matched against the real queues, with the outcome of each
   config_tune_enabled: CONFIG_TUNE_ENABLED,
   head_budget: HEAD_BUDGET,
   head_used: headDispatched,

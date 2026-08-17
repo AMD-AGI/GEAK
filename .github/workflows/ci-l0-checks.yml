@@ -251,13 +251,17 @@ jobs:
           /tmp/gitleaks dir . --no-banner --redact --config .gitleaks.toml
 
   node-regression:
-    name: Node regression (expert_skills, kernel canonicalization, tuning phase, time budget)
+    name: Node regression (expert_skills, kernel canonicalization, tuning phase, time budget, drop_gate)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      # Parse check first: a syntax error in the orchestrator would fail every test
+      # below with a confusing message about the test instead of about the file.
+      - name: e2e_workflow.js parses
+        run: node --check e2e_workflow/e2e_workflow.js
       # Proves the use_expert_skills=OFF path injects nothing (byte-identical).
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
@@ -277,6 +281,10 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      # Proves drop_gate=off is inert, dryrun records but drops nothing, and a
+      # candidate at or above HEAD_PROTECT_PCT is never dropped in any mode.
+      - name: drop_gate relevance-gate regression
+        run: node e2e_workflow/scripts/test_drop_gate.js
 
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest
@@ -292,6 +300,10 @@ jobs:
       # Stdlib only; no GPU, no network.
       - name: verify vendored tree against manifest
         run: python3 e2e_workflow/scripts/tuning_skillset_sync.py --verify
+      # Proves drop_gate=off is inert, dryrun records but drops nothing, and a
+      # candidate at or above HEAD_PROTECT_PCT is never dropped in any mode.
+      - name: drop_gate relevance-gate regression
+        run: node e2e_workflow/scripts/test_drop_gate.js
 
   dry-run:
     name: run_e2e dry-run mapping
