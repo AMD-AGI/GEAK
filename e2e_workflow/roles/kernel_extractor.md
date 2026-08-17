@@ -738,3 +738,8 @@ Return JSON:
   "notes": "transpose/bias inference, regime, whether oracle was synthesized vs captured"
 }
 ```
+
+> **`smoke` is a verdict field, and the FIRST WORD is the verdict.** Start it with the bare token
+> `pass` or `fail`. Evidence may follow after it (`"pass — 6 oracle cases + 24 parity draws, all
+> max_rel_err=0.0"`), and evidence is welcome, but it must come AFTER the verdict, never before it.
+> Do not open with a heading, a command line, or a caveat. Put the full detail in `notes`.

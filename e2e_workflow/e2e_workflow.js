@@ -836,6 +836,33 @@ const hasFrozenBaseline = (ext) =>
   !!(ext && (ext.baseline_frozen === true ||
              (typeof ext.baseline_callable === 'string' && ext.baseline_callable.trim() !== '')));
 
+// A smoke result is a VERDICT, and the leading token IS the verdict. Both schemas type it as a free
+// string (EXTRACT_OP_SCHEMA `smoke`, EXTRACT_SCHEMA `unittest_smoke`), so a model that answers
+// `"PASS (rc=0). CORRECTNESS PASS on all three legs: 6 eager oracle cases ... all max_rel_err=0.0"`
+// is perfectly schema-valid and still fails a bare `=== 'pass'` test. That is not hypothetical: in the
+// 2026-08-14 run head h0 (qkv+o_proj, 9.18% of GPU, the ONE GEMM with real measured headroom) passed
+// every correctness leg, was recorded as `op extraction failed`, and was dropped after 27min of
+// verified extraction -- while an already-ACCEPTED +1.66% overlay for that exact seam sat on disk
+// from the run before. The run's own architect report caught it and ranked re-doing it the highest
+// confidence-per-minute work left on the box.
+//
+// So read the verdict, not the phrasing. FAIL-CLOSED: only a recognised affirmative LEADING token is
+// a pass; anything else -- empty, absent, prose, `"fail"`, `"FAIL (rc=1) ..."` -- is a fail. Deliberately
+// anchored at the start rather than scanning the whole string, because a truthful pass often quotes the
+// failure legend it did NOT hit (h0's own text ends `"Exit codes: 0 PASS, 1 correctness FAIL, ..."`),
+// and a substring search for "fail" would reject exactly the answers this is meant to rescue.
+//
+// NOT enforced with a schema enum, deliberately. An enum makes the tool layer reject and retry until
+// the model complies, which burns calls and, if it never does, returns null -- i.e. it converts this
+// silent-drop bug into a louder one, and it throws away diagnostic text that is genuinely useful
+// evidence (h0's string is what proved the extraction was sound). Normalising on READ costs nothing
+// and cannot fail. The role file states the terse contract; this makes obeying it non-load-bearing.
+function smokeVerdict(v) {
+  const s = String(v == null ? '' : v).trim().toLowerCase();
+  if (!s) return '';
+  return /^(pass|ok|true|success)/.test(s) ? 'pass' : 'fail';
+}
+
 // Run a kernel_extractor agent and GUARANTEE it froze a real baseline. safeAgent already retries
 // transient failures; this wraps it to ALSO re-extract when the extraction succeeds (smoke passed,
 // task dir present) but produced NO frozen baseline — re-invoking with a corrective instruction up
@@ -845,7 +872,7 @@ const hasFrozenBaseline = (ext) =>
 // are the roleAgent args; `opts` is the safeAgent opts (phase/label/schema). Used by every extract
 // site (deep, opt-A, milestone/head extract_op, and the non-op milestone extract).
 async function extractWithBaseline(role, phase, intro, inputs, opts) {
-  const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
+  const smokeOk = (e) => !!(e && e.task_dir && (smokeVerdict(e.smoke) === 'pass' || smokeVerdict(e.unittest_smoke) === 'pass'));
   let ext = await safeAgent(roleAgent(role, phase, intro, inputs), opts);
   let tries = 0;
   while (smokeOk(ext) && !hasFrozenBaseline(ext) && tries < BASELINE_EXTRACT_RETRIES) {
@@ -1152,6 +1179,46 @@ const LANE_BUDGET_ARG = TIME_LANE_DEADLINE_MS != null && TIME_LANE_DEADLINE_MS >
 if (TIME_LANE_DEADLINE_MS != null && TIME_LANE_DEADLINE_MS > 0) {
   log(`[time-budget] per-lane cap ${Math.round(TIME_LANE_DEADLINE_MS / 60000)}min (head window ${Math.round(TIME_HEAD_DEADLINE_MS / 60000)}min / ${HEAD_BUDGET} head(s)) — a lane stops starting new rounds at the cap and reports its best banked kernel.`);
 }
+// --- Per-HEAD wall-clock window ---------------------------------------------------------------------
+// The cap above bounds ONE LANE. A head runs up to HEAD_AUTHOR_MAX author languages and hands EACH the
+// full cap, so nothing bounds a HEAD. Measured, not feared: in the 2026-08-14 run two author lanes on one
+// head took 7h11m — 68% of a 11h20m run — on an op whose own measured Amdahl ceiling was +1.00% e2e, while
+// h2 (gate_up, 14.28% of GPU time, the largest GEMM by mass) was never dispatched at all. The second lane
+// (flydsl, 2h35m) landed 0 of 5 directions. That is the trade this fixes: a second opinion on an op we had
+// already optimized, bought with the only chance to look at a bigger one.
+//
+// Dividing the LANE cap by HEAD_AUTHOR_MAX as well does not work — at a 12h budget 8.04h/3/2 = 1.34h is
+// under the 2h floor, so the floor wins and both lanes still get 2h+. The binding resource is the HEAD's
+// share of the window, so bound that directly: window = head window / HEAD_BUDGET, the same arithmetic the
+// lane cap already uses. There is no clock in a workflow script (Date.now() throws — it would break resume),
+// so this is a one-shot setTimeout armed when the head starts, exactly like the two deadlines above.
+//
+// It gates ONLY the SECOND-and-later author language. The first always runs: gating it would let a head
+// produce nothing at all, which is strictly worse than what we have. The mark is set a lane-FLOOR early
+// (window − floor) rather than at the window itself, because starting a lane with less than the floor left
+// buys the authored seed and no optimization — that looks like a result and isn't one (same reasoning as
+// TIME_LANE_FLOOR_MS above). Consequence worth stating plainly: with a time budget set and the lane cap
+// equal to the head window, the first lane always runs past the mark, so the practical effect is ONE author
+// language per head and more heads. Raise head_author_max_window_s (or drop time_budget_s) to get the old
+// behaviour back. With NO time budget the mark is null and this is inert — byte-identical to today.
+const TIME_HEAD_WINDOW_MS = A.head_author_max_window_s != null
+  ? parseInt(A.head_author_max_window_s, 10) * 1000
+  : (TIME_HEAD_DEADLINE_MS != null ? Math.floor(TIME_HEAD_DEADLINE_MS / Math.max(1, HEAD_BUDGET)) : null);
+const TIME_EXTRA_LANE_MARK_MS = TIME_HEAD_WINDOW_MS != null ? TIME_HEAD_WINDOW_MS - TIME_LANE_FLOOR_MS : null;
+// Call ONCE per head, at head start. Returns {gated()} — true once this head has spent enough of its window
+// that another full-length lane no longer fits. Heads run sequentially here, so at most one is ever live.
+function armHeadWindow() {
+  if (TIME_EXTRA_LANE_MARK_MS == null) return { gated: () => false, mark_ms: null };
+  // Window too small to EVER fit a second floor-length lane: gate from the start, no timer needed.
+  if (TIME_EXTRA_LANE_MARK_MS <= 0) return { gated: () => true, mark_ms: TIME_EXTRA_LANE_MARK_MS };
+  if (typeof setTimeout !== 'function') return { gated: () => false, mark_ms: null };
+  const st = { hit: false };
+  setTimeout(() => { st.hit = true; }, TIME_EXTRA_LANE_MARK_MS);
+  return { gated: () => st.hit, mark_ms: TIME_EXTRA_LANE_MARK_MS };
+}
+if (TIME_HEAD_WINDOW_MS != null) {
+  log(`[time-budget] per-head window ${Math.round(TIME_HEAD_WINDOW_MS / 60000)}min; a 2nd/3rd author language starts only if the head is still inside its first ${Math.round(Math.max(0, TIME_EXTRA_LANE_MARK_MS) / 60000)}min (window − ${Math.round(TIME_LANE_FLOOR_MS / 60000)}min lane floor) — otherwise that time goes to an unexplored head.`);
+}
 function deepBoundedWorkflow(ref, wfArgs, label) {
   const p = nestedWorkflow(ref, wfArgs);
   if (!DEEP_MODE || typeof setTimeout !== 'function' || !(DEEP_HEAD_WF_MS > 0)) return p;
@@ -1350,6 +1417,12 @@ const acceptedHeads = (ST.accepted_heads || []).slice();
 const pendingIntegrations = (ST.pending_integrations || []).slice();
 const flaggedHeads = (ST.flagged_heads || []).slice();   // dominant heads that could NOT be optimized (loudly surfaced, never silently skipped)
 let headDispatched = 0;
+// Wall-clock caps that FIRED, surfaced on the return so a run can be AUDITED instead of inferred. Run 4's
+// per-lane cap could not be proven from any artefact: `stopped_on_deadline` existed only inside the lane's
+// return value, which is written to no file, and log() output is never persisted. Populated by the default
+// sequential head track (the live path); the deep/fast branches leave them empty.
+const laneDeadlineHits = [];   // a nested kernel lane stopped starting rounds at its cap
+const headLaneSkips = [];      // an author language NOT started because the head's window was spent
 const history = ST.history || { insights: [], ledger: [], milestones: [], bottleneck_now: '', suggest_next: '' };
 
 // A fused op (op_kind='moe', set by the op-identity guard OR the Architect) is extracted AS the fused op,
@@ -1412,7 +1485,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         },
         { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
-      if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
+      if (!ext || smokeVerdict(ext.smoke) !== 'pass' || !ext.task_dir) {
         const why = ext ? ext.notes || ext.smoke : 'none';
         log(`  [deep] ${h.short_name}: op extraction failed (${why})${isDominant ? ' [DOMINANT — flagged]' : ''}; skipping.`);
         if (isDominant) flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract', gate: 'extract_failed', reason: why });
@@ -1771,7 +1844,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
           },
           { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
-        if (!ext || ext.smoke !== 'pass' || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
+        if (!ext || smokeVerdict(ext.smoke) !== 'pass' || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
         const bake = await safeAgent(
           roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
             EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
@@ -1974,6 +2047,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       break;
     }
     headDispatched++;
+    // Start this head's wall-clock window HERE — extraction is part of the head's cost (27min in the
+    // 2026-08-14 run), so it must be inside the window, not free. Inert with no time budget.
+    const headWindow = armHeadWindow();
     // (h1) Extract the op into a standalone immutable unittest. The op-identity guard already forced a
     // fused/monolithic head to op_kind=moe with GEMM_SYNTH off (gemmSynthFor) so it is extracted as the
     // fused op bound at its live seam — never decomposed into a standalone dense GEMM. Nothing is skipped.
@@ -1992,7 +2068,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       },
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
     const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
-    if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
+    if (!ext || smokeVerdict(ext.smoke) !== 'pass' || !ext.task_dir) {
       const why = ext ? ext.notes || ext.smoke : 'none';
       if (isDominant) {
         log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU) op extraction FAILED (${why}) — flagged, NOT silently skipped.`);
@@ -2044,8 +2120,21 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // layer. mode=author writes a from-scratch baseline then optimizes it; mode=optimize rewrites an
     // existing editable impl. The immutable oracle in ext.task_dir is the judge for both.
     const plan = (bake.author_plan || []).slice(0, HEAD_AUTHOR_MAX);
+    let langsRun = 0;   // author languages actually DISPATCHED for this head (whatever they returned)
     for (const ap of plan) {
       const lang = ap.language || 'triton';
+      // Per-head window (see armHeadWindow). The FIRST language always runs; a later one starts only while
+      // this head still has a lane-floor of its window left. Skipping is recorded in the ledger AND on the
+      // return, so the next run can read what was traded away instead of guessing from a wall-clock split.
+      if (langsRun > 0 && headWindow.gated()) {
+        const skipped = plan.slice(langsRun).map(p => p.language || 'triton');
+        log(`  ${h.short_name}: per-head window (${Math.round(TIME_HEAD_WINDOW_MS / 60000)}min) spent by ${langsRun} lane(s) — NOT starting author ${skipped.join(', ')}. That time goes to an unexplored head instead; this head keeps every candidate it already banked.`);
+        history.ledger.push({ direction: `${h.short_name}:${skipped.join('+')}`, verdict: 'skipped',
+          lesson: `per-head window spent by ${langsRun} lane(s) — extra author language(s) deferred so an unexplored head can run` });
+        headLaneSkips.push({ head: h.short_name, pct_gpu_time: h.pct_gpu_time, after_lanes: langsRun,
+          skipped_languages: skipped, head_window_ms: TIME_HEAD_WINDOW_MS, mark_ms: headWindow.mark_ms });
+        break;
+      }
       let al;
       // Retry the nested author on a TRANSIENT/early failure (threw, or returned with no real
       // optimization: no final_geomean) — a transient nested-workflow death must NOT silently drop a
@@ -2078,6 +2167,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const transient = !al || al.validation_status === 'error' || (al.authored === false && al.final_geomean == null);
         if (!transient || attempt === AUTHOR_TRIES) break;
         log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
+      }
+      langsRun++;
+      // The lane tells us whether ITS cap fired (kernel_lane.js return, forwarded verbatim by
+      // kernel_workflow.js mode=author). Bank it: this is the only place the fact survives, and without it
+      // "did the cap work?" is unanswerable after the run — as it was for run 4.
+      if (al && al.stopped_on_deadline) {
+        laneDeadlineHits.push({ head: h.short_name, language: lang, track: 'head',
+          lane_deadline_ms: al.lane_deadline_ms != null ? al.lane_deadline_ms : TIME_LANE_DEADLINE_MS });
+        log(`  ${h.short_name}: author ${lang} lane stopped at its ${Math.round((al.lane_deadline_ms != null ? al.lane_deadline_ms : TIME_LANE_DEADLINE_MS) / 60000)}min cap (banked its best kernel; did not start another round).`);
       }
       // Rank on the WORKLOAD-WEIGHTED speedup (kernel layer's PRIMARY metric, same basis as the
       // env/direct_light candidate's bake.isolated_speedup) — NOT the unweighted geomean, which in a
@@ -2696,6 +2794,13 @@ const wfReturn = {
   config_tune_enabled: CONFIG_TUNE_ENABLED,
   head_budget: HEAD_BUDGET,
   head_used: headDispatched,
+  // Wall-clock caps as MEASURED, not as configured — what the run actually traded, auditable after the fact.
+  time_caps: {
+    head_deadline_ms: TIME_HEAD_DEADLINE_MS, head_window_ms: TIME_HEAD_WINDOW_MS,
+    lane_deadline_ms: TIME_LANE_DEADLINE_MS, lane_floor_ms: TIME_LANE_FLOOR_MS,
+    dispatch_deadline_hit: TIME_DEADLINE_HIT,
+    lane_deadline_hits: laneDeadlineHits, head_lane_skips: headLaneSkips,
+  },
   milestones: milestone,
   budget_used: dispatched,
   budget_total: BUDGET,
