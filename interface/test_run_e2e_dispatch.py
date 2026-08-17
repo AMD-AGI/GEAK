@@ -471,10 +471,17 @@ class TestBenchLauncher(_RunE2ECase):
 
     def _recipe(self, *, script="vllm_mi355x.sh", subdir="", root=None,
                 with_lib=True, write_script=True):
-        """An orchestrator launch recipe next to a checkout it can point at."""
+        """An orchestrator launch recipe next to a checkout it can point at.
+
+        ``write_script=False`` + ``with_lib=False`` leaves the checkout path
+        untouched so callers can point the recipe at a path that does not exist
+        on this box (the orchestrator's host-local checkout). Creating under
+        ``/nonexistent/...`` would PermissionError on CI.
+        """
         checkout = Path(root) if root else self.tmp / "InferenceX@abc123"
         bench_dir = checkout / "benchmarks" / subdir if subdir else checkout / "benchmarks"
-        bench_dir.mkdir(parents=True, exist_ok=True)
+        if write_script or with_lib:
+            bench_dir.mkdir(parents=True, exist_ok=True)
         if write_script:
             (bench_dir / script).write_text("#!/usr/bin/env bash\n", encoding="utf-8")
         if with_lib:
@@ -580,7 +587,13 @@ class TestBenchLauncher(_RunE2ECase):
     def test_an_unreachable_checkout_degrades_to_native(self):
         """The recipe is written on the orchestrator's box; its checkout path
         need not exist on ours."""
-        recipe, _ = self._recipe(root="/nonexistent/InferenceX@dead", write_script=False)
+        # Under self.tmp but never created — avoids mkdir('/nonexistent') which
+        # PermissionErrors on GitHub Actions while still being a missing path.
+        missing = self.tmp / "InferenceX@dead"
+        self.assertFalse(missing.exists())
+        recipe, _ = self._recipe(
+            root=str(missing), write_script=False, with_lib=False
+        )
 
         self.assertEqual(
             rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"}),
