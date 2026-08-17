@@ -80,7 +80,14 @@ BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
 # Workflow primitives are only available at this effort tier (see README).
 CLAUDE_EFFORT = os.environ.get("GEAK_CLAUDE_EFFORT", "ultracode")
 CLAUDE_MODEL = os.environ.get("GEAK_CLAUDE_MODEL", "claude-opus-4-8")
-ALLOWED_TOOLS = ["Workflow", "Bash", "Read", "Write"]
+# WebSearch/WebFetch are required by the Deep Research Agent (kernel_workflow's opt-in `Research`
+# phase, args.dra_enabled=true): its per-question research agents do native web research. They are
+# harmless when the DRA is off (nothing opts into them) — the reason v4 previously "had no websearch"
+# is simply that no tool was on the allowlist. The allowlist is the union of tools any agent in the
+# (possibly nested) Workflow session may call, so listing them here makes them available to the
+# kernel_workflow research agents the e2e pipeline drives. (For a standalone `claude -p ... Workflow`
+# invocation of kernel_workflow with dra_enabled, pass the same names via --allowed-tools.)
+ALLOWED_TOOLS = ["Workflow", "Bash", "Read", "Write", "WebSearch", "WebFetch"]
 
 # Public claude builds (>=2.1.x) REJECT "--effort ultracode". The Workflow /
 # parallel / phase primitives that e2e_workflow.js needs are instead gated behind
