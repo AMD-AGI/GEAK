@@ -2215,6 +2215,53 @@ def _journey_return_entry(eval_dir: str, k: dict, idx: int, wf: dict,
     }
 
 
+def _overlay_claim(ir: Any) -> dict | None:
+    """What an INTEGRATED overlay says it optimized, or None when the overlay is
+    not integrated (rejected / A/B never completed) and so claims nothing.
+
+    ``integrate_result.json`` is the only place that records both spellings of a
+    kernel: ``cand_tag`` is the overlay directory's name and ``short_name`` is the
+    symbol the workflow return uses. A claim carries the symbol plus the
+    integrated e2e delta, and is consumed at most once (``used``) so one overlay
+    can never account for two distinct acceptances.
+    """
+    if not isinstance(ir, dict):
+        return None
+    if str(ir.get("gate") or "").lower() not in ("accepted", "stack"):
+        return None
+    gain = ir.get("e2e_delta_pct")
+    return {
+        "sym": _norm_kname(str(ir.get("short_name") or "")),
+        "gain": float(gain) if isinstance(gain, (int, float))
+                and not isinstance(gain, bool) else None,
+        "used": False,
+    }
+
+
+def _claim_for(name: str, gain: Any, claims: list[dict]) -> dict | None:
+    """The overlay claim that already covers this return-named acceptance, or None
+    when the return names a kernel no overlay on disk accounted for.
+
+    Matched on the symbol first — the same normalization the profiler match uses,
+    so a spelling difference does not split one kernel in two. Falling back to the
+    integrated e2e delta covers the runs where the overlay recorded no usable
+    symbol: the return does not recompute that number, it copies the overlay's own
+    A/B result, so an EXACT hit is the same measurement rather than a coincidence.
+    The delta is only allowed to fold when exactly one unconsumed overlay claims
+    it; an ambiguous delta never merges two kernels.
+    """
+    nk = _norm_kname(name)
+    if nk:
+        for c in claims:
+            if c["sym"] and c["sym"] == nk:
+                return c
+    if isinstance(gain, (int, float)) and not isinstance(gain, bool):
+        hits = [c for c in claims if not c["used"] and c["gain"] == float(gain)]
+        if len(hits) == 1:
+            return hits[0]
+    return None
+
+
 def build_kernel_journey(wf: dict, normalized: dict) -> dict:
     """Build the kernel_journey handoff (recorder-input shapes the orchestrator
     replays through the SBD SDK — KERNEL_JOURNEY_SCHEMA.md §2).
@@ -2273,6 +2320,14 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
 
     kernels: list[dict] = []
     seen: set[str] = set()  # dedup on the FINAL emitted kernel_id
+    # What each INTEGRATED overlay says it optimized (see _overlay_claim). The id
+    # dedup above cannot carry pass 2, because the two substreams name a kernel
+    # differently: an overlay dir is named for its CANDIDATE TAG (``cand_c0_triton``)
+    # and the workflow return for the KERNEL SYMBOL
+    # (``dsa_sparse_attn_prefill_main_kernel``). integrate_result.json is the file
+    # that ties the two together, so the claim is read from there, never from the
+    # directory name.
+    claims: list[dict] = []
 
     # 1) Disk truth: one entry per optimization overlay, driven by integrate_result.
     if eval_dir:
@@ -2285,25 +2340,34 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
                 short = cand.name[len("cand_"):]
                 if not short:
                     continue
+                ir = _read_json(cand / "integrate_result.json")
+                claim = _overlay_claim(ir)
+                if claim:
+                    claims.append(claim)
                 m = _match_profiler(short)
                 kid = m["kid"] if m else _canon_kid(short)
                 if kid in seen:
                     continue
                 seen.add(kid)
-                ir = _read_json(cand / "integrate_result.json")
                 kernels.append(_journey_overlay_entry(
                     eval_dir, short, ir, wf, geak_sha, overall_parity,
                     m["pct"] if m else None, m["name"] if m else None,
                     kernel_id_override=kid))
 
     # 2) Augment with accepted kernels named only in the workflow return (live path
-    #    / no overlay on disk), deduped against the overlay entries above (by id).
+    #    / no overlay on disk), deduped against the overlay entries above: by id,
+    #    and by the identity those overlays claimed, which is what catches the same
+    #    acceptance spelled as a candidate tag on disk and as a symbol in the return.
     accepted = list(wf.get("accepted_kernels") or []) + list(wf.get("accepted_heads") or [])
     synth_hot: list[dict] = []
     for idx, k in enumerate(accepted):
         if not isinstance(k, dict):
             continue
         name = str(k.get("short_name") or k.get("name") or k.get("op_kind") or f"kernel{idx}")
+        claimed = _claim_for(name, k.get("e2e_delta_pct"), claims)
+        if claimed is not None:
+            claimed["used"] = True
+            continue
         m = _match_profiler(name)
         kid = m["kid"] if m else _canon_kid(name)
         if kid in seen:
