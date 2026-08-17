@@ -137,18 +137,47 @@ PY
   # first. EXTRA_<BE>_ARGS carries the accepted extra flags; Magpie dedupes them
   # against its own DEFAULT_ARGS.
   #
-  # GPU pinning follows the orchestrator's own convention: ROCR alone. ROCR
-  # re-indexes the devices it exposes to 0..N-1, so a HIP_VISIBLE_DEVICES
-  # carrying the same PHYSICAL ids indexes past the end of that list for any
-  # allocation not starting at 0 -- GPU=2 exposes a single device numbered 0 and
-  # then asks HIP for device 2. Magpie's script derives the logical HIP range
-  # itself, but only while HIP is unset, so the inherited value is CLEARED
-  # rather than merely left unassigned. ROCR alone pins correctly either way: a
-  # script that derives nothing still sees exactly the allocated devices.
+  # GPU pinning has TWO shapes; picking the wrong one steals someone else's card:
+  #
+  #   * Outer ROCR already set (GEAK CI via run_local.sh: docker
+  #     -e ROCR_VISIBLE_DEVICES=4,5,6,7 while /dev/dri is fully passed through).
+  #     ROCr has already sliced the physical set and renumbered it 0..N-1, so
+  #     $GPU is a LOGICAL index into that slice. Re-writing ROCR=$GPU would
+  #     index the FULL physical set (logical 0..3 -> physical 0..3) and land on
+  #     cards this job was never given. Keep the inherited ROCR and stack HIP
+  #     on top (HIP masks after ROCr renumbering). Re-assert the outer ROCR
+  #     AFTER $EXTRA_ENV so an accepted-env leak cannot clobber the mask.
+  #
+  #   * No outer ROCR (bare Magpie / whole-box Hyperloom). $GPU is PHYSICAL.
+  #     Pin with ROCR alone and clear HIP/CUDA: Magpie's script derives the
+  #     logical HIP range only while HIP is unset, and a HIP=PHYSICAL overlay
+  #     on top of ROCR would index past the renumbered list (ROCR=2 -> device 0,
+  #     HIP=2 -> OOB).
+  #
+  # The discriminator is simply whether ROCR_VISIBLE_DEVICES is already set in
+  # THIS shell when the launcher runs — the same signal run_local.sh uses.
+  local _outer_rocr="${ROCR_VISIBLE_DEVICES:-}"
+  local -a _env_unset=() _gpu_env=()
+  if [ -n "$_outer_rocr" ]; then
+    echo ">>> magpie launcher: outer ROCR_VISIBLE_DEVICES=$_outer_rocr present;" \
+         "pinning with HIP_VISIBLE_DEVICES=$GPU (logical) on top of inherited ROCR."
+    _env_unset=(-u CUDA_VISIBLE_DEVICES)
+    _gpu_env=(
+      ROCR_VISIBLE_DEVICES="$_outer_rocr"
+      HIP_VISIBLE_DEVICES="$GPU"
+    )
+  else
+    echo ">>> magpie launcher: no outer ROCR mask; pinning with" \
+         "ROCR_VISIBLE_DEVICES=$GPU (physical) and clearing HIP/CUDA."
+    _env_unset=(-u HIP_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES)
+    _gpu_env=(ROCR_VISIBLE_DEVICES="$GPU")
+  fi
   # shellcheck disable=SC2086
-  env -u HIP_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
-    ${_recipe_env[@]+"${_recipe_env[@]}"} $EXTRA_ENV \
-    ROCR_VISIBLE_DEVICES="$GPU" \
+  # ${EXTRA_ENV:-}: callers under `set -u` (bench/CI drive scripts) may leave
+  # EXTRA_ENV unset; empty expansion is fine and keeps word-split of KEY=VAL pairs.
+  env "${_env_unset[@]}" \
+    ${_recipe_env[@]+"${_recipe_env[@]}"} ${EXTRA_ENV:-} \
+    "${_gpu_env[@]}" \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     MAGPIE_RUN_PHASE=server \
     MAGPIE_SERVER_PID_FILE="$_pidfile" \

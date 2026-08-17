@@ -432,3 +432,23 @@ script's 0.95 default is the recipe being matched. The script writes the server
 to `$LOG` and its own trace to `magpie_launch.log` next to it, because the
 script's redirect truncates `$LOG` and would otherwise destroy anything the
 adapter wrote there.
+
+GPU pinning on the magpie path is **shape-dependent**. If
+`ROCR_VISIBLE_DEVICES` is already set in the launcher's shell (GEAK CI:
+`run_local.sh` docker `-e ROCR_VISIBLE_DEVICES=<physical ids>` while `/dev/dri`
+is fully passed through), `$GPU` is a *logical* index into that already-sliced
+set — the launcher keeps the inherited ROCR and stacks `HIP_VISIBLE_DEVICES=$GPU`
+on top (and re-asserts the outer ROCR after `$EXTRA_ENV` so an accepted-env leak
+cannot clobber the mask). If no outer ROCR is present (bare Magpie / whole-box
+Hyperloom), `$GPU` is *physical*: pin with `ROCR_VISIBLE_DEVICES=$GPU` alone and
+clear HIP/CUDA so Magpie can derive the logical HIP range. Unconditionally
+rewriting ROCR in the nested-CI shape would re-index the full physical set and
+land on cards the job was never given.
+
+Recorded recipe `PATH` entries are existence-checked before replay: missing
+directories are dropped, and `PATH` is omitted entirely when nothing remains so
+the ambient process `PATH` stands. GEAK's own CI entrypoint
+(`ci/node/run_geak_e2e.sh`) exports `BENCH_LAUNCHER="${BENCH_LAUNCHER:-native}"`
+and pins the same value into the patched handoff, so a shipped
+`baseline_config.with_envs.yaml` cannot silently flip the CI server start path
+to magpie.

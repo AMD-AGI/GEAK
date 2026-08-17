@@ -492,8 +492,9 @@ _RECIPE_ENV_GEAK_OWNED = frozenset({
     "MODEL", "TP",
     # GPU pinning: the recipe names whichever of these its own runner used, and
     # any of them left at the orchestrator's value would fight the device this
-    # run was allocated. The launcher sets ROCR alone from $GPU and clears
-    # HIP/CUDA, so the launch script derives the logical device range itself.
+    # run was allocated. Filtering them from the RECIPE replay is independent of
+    # how the launcher pins devices (ROCR-only on a bare box vs HIP-on-top when
+    # an outer ROCR mask is already set — see magpie.sh).
     "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
     "VLLM_TORCH_PROFILER_DIR", "SGLANG_TORCH_PROFILER_DIR",
 })
@@ -558,6 +559,30 @@ def _recipe_env_block(recipe_path: str) -> dict[str, str]:
     return envs
 
 
+def _sanitize_replay_path(path_value: str) -> tuple[str | None, list[str]]:
+    """Keep only existing directories from a recorded ``PATH``.
+
+    The orchestrator's recipe often records a host-local venv prefix
+    (``/opt/venv/bin:...``). Replaying it verbatim on a box where that prefix
+    is gone would put a dead entry first on ``PATH`` and silently select the
+    wrong interpreter / miss the intended one. Drop missing components; if
+    nothing remains, drop ``PATH`` from the replay entirely so the ambient
+    process ``PATH`` stands.
+
+    Returns ``(sanitized_or_None, dropped_components)``.
+    """
+    kept: list[str] = []
+    dropped: list[str] = []
+    for part in path_value.split(":"):
+        if not part:
+            continue
+        if Path(part).is_dir():
+            kept.append(part)
+        else:
+            dropped.append(part)
+    return (":".join(kept) if kept else None), dropped
+
+
 def _recipe_launch_env(h: dict) -> tuple[dict[str, str], list[str]]:
     """Partition the recipe's recorded environment into replay set + GEAK-owned.
 
@@ -565,10 +590,30 @@ def _recipe_launch_env(h: dict) -> tuple[dict[str, str], list[str]]:
     the launch and ``owned`` names the variables GEAK deliberately overrode.
     Reporting ``owned`` rather than dropping it silently is what lets a reviewer
     see the complete list of ways this launch is allowed to differ.
+
+    ``PATH`` is existence-checked before replay: missing directories are dropped
+    (and the whole variable omitted when nothing remains).
     """
     recorded = _recipe_env_block(str(h.get("launch_recipe") or ""))
     replay = {k: v for k, v in recorded.items() if k not in _RECIPE_ENV_GEAK_OWNED}
     owned = sorted(k for k in recorded if k in _RECIPE_ENV_GEAK_OWNED)
+    if "PATH" in replay:
+        sanitized, dropped = _sanitize_replay_path(replay["PATH"])
+        if dropped:
+            print(
+                ">>> recipe alignment: dropping missing PATH component(s) from "
+                f"replay: [{':'.join(dropped)}]",
+                file=sys.stderr,
+            )
+        if sanitized is None:
+            print(
+                ">>> recipe alignment: recorded PATH has no existing directories; "
+                "leaving the ambient PATH in place.",
+                file=sys.stderr,
+            )
+            del replay["PATH"]
+        else:
+            replay["PATH"] = sanitized
     return replay, owned
 
 

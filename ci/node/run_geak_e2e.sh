@@ -25,6 +25,7 @@
 #   EXP_ROOT                  writable run root; patches handoff.exp_root (default: <model_dir>/repro_out/exp)
 #   MODEL_PATH                real served model dir; patches handoff.model_path (default: keep handoff value)
 #   INFERENCEX_PATH           InferenceX checkout  -> bench_client=inferencex (else geak falls back to native)
+#   BENCH_LAUNCHER            server launcher: native (default, CI baseline) | magpie (recipe parity)
 #   OUT_DIR                   where result.json is written (default <model_dir>/repro_out)
 #   PERFSKILLS_CLAUDE_MODEL / PERFSKILLS_CLAUDE_EFFORT / PERFSKILLS_CLAUDE_BIN  (defaults match run_e2e.py)
 #
@@ -66,6 +67,16 @@ mkdir -p "$EXP_ROOT"
 # so we repoint it here. Default to the local checkout; set INFERENCEX_PATH="" to force native bench.
 INFERENCEX_PATH="${INFERENCEX_PATH-$(dirname "$GEAK_ROOT")/InferenceX}"
 export INFERENCEX_PATH
+
+# ---- Server launcher (explicit; do NOT leave this to recipe discovery) ----
+# run_e2e.py flips to magpie whenever a Magpie script is derivable from
+# launch_recipe. That is correct for Hyperloom alignment, but for GEAK's own
+# CI/repro baseline a shipped baseline_config.with_envs.yaml must NOT silently
+# swap the server start path. Default native; set BENCH_LAUNCHER=magpie only
+# when intentionally testing Magpie recipe parity. Exported BEFORE the handoff
+# patch so the patched JSON can pin the same value (handoff.bench_launcher
+# outranks $BENCH_LAUNCHER inside run_e2e.py).
+export BENCH_LAUNCHER="${BENCH_LAUNCHER:-native}"
 
 # If the local recipe was shipped alongside, repoint launch_recipe at it (the dataset value is a
 # stale /hyperloom/... path that won't exist on your box).
@@ -111,6 +122,12 @@ for key, derive in REWRITES.items():
     elif drop_if_none:
         h.pop(key, None)
 
+# Pin the server launcher from the CI shell (BENCH_LAUNCHER, default native).
+# run_e2e.py prefers handoff.bench_launcher over $BENCH_LAUNCHER, so a stale
+# handoff value would otherwise silently re-enable magpie despite the export
+# above. Force the patched handoff to match the explicit CI choice.
+h["bench_launcher"] = os.environ.get("BENCH_LAUNCHER", "native").strip() or "native"
+
 json.dump(h, open(dst, "w"), indent=2)
 
 # ---- B. reachability check: absolute paths run_e2e.py OPENS as real local
@@ -147,7 +164,7 @@ if crit:
                  f"likely a new/renamed handoff key not rewritten, or a missing local artifact:\n{msg}\n"
                  f"  Fix: add the key to REWRITES in run_geak_e2e.sh, or provide the file/dir there.")
 
-print(f"patched handoff -> {dst}\n  exp_root={h['exp_root']}\n  model_path={h.get('model_path')}\n  launch_recipe={h.get('launch_recipe')}\n  inferencex_path={h.get('inferencex_path')}")
+print(f"patched handoff -> {dst}\n  exp_root={h['exp_root']}\n  model_path={h.get('model_path')}\n  launch_recipe={h.get('launch_recipe')}\n  inferencex_path={h.get('inferencex_path')}\n  bench_launcher={h.get('bench_launcher')}")
 PY
 
 # ---- Budget: run_e2e reads PERFSKILLS_E2E_TIMEOUT_S (NOT the CLI flag). Export it. ----
@@ -157,7 +174,7 @@ export PERFSKILLS_E2E_TIMEOUT_S   # value/default from ci/config.sh
 export PERFSKILLS_CLAUDE_MODEL="${PERFSKILLS_CLAUDE_MODEL:-claude-opus-4-8}"
 export PERFSKILLS_CLAUDE_EFFORT="${PERFSKILLS_CLAUDE_EFFORT:-ultracode}"
 
-# (INFERENCEX_PATH already exported above; run_e2e exports BENCH_CLIENT from it.)
+# (INFERENCEX_PATH / BENCH_LAUNCHER already exported above.)
 
 echo "=============================================================="
 echo " GEAK e2e reproduction"
@@ -166,6 +183,7 @@ echo "   handoff  = $HANDOFF"
 echo "   result   = $RESULT"
 echo "   budget   = PERFSKILLS_E2E_TIMEOUT_S=$PERFSKILLS_E2E_TIMEOUT_S s"
 echo "   claude   = $PERFSKILLS_CLAUDE_MODEL / effort=$PERFSKILLS_CLAUDE_EFFORT"
+echo "   bench_launcher = $BENCH_LAUNCHER"
 echo "   inferencex_path = ${INFERENCEX_PATH:-<unset -> native bench>}"
 echo "   dry_run  = ${DRY:-<no>}"
 echo "=============================================================="

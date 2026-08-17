@@ -693,9 +693,12 @@ class TestBenchLauncher(_RunE2ECase):
         return str(recipe)
 
     def test_the_recorded_env_is_replayed_and_run_scoped_names_are_not(self):
+        # Use real directories for PATH so existence filtering keeps them.
+        venv_bin = self.tmp / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
         recipe = self._recipe_with_envs(
             "  envs:\n"
-            "    PATH: /opt/venv/bin:/usr/bin\n"
+            f"    PATH: {venv_bin}:/usr/bin\n"
             "    VLLM_ROCM_USE_AITER: '1'\n"
             "    NUM_WARMUPS: 8\n"
             "    PORT: 8844\n"                    # GEAK-owned: this run's port
@@ -717,10 +720,50 @@ class TestBenchLauncher(_RunE2ECase):
         # PATH carries no spaces here, but the file must still be NUL-delimited
         # so that a value which does carry one survives the launcher's env call.
         blob = Path(os.environ["RECIPE_ENV_FILE"]).read_bytes()
+        expected_path = f"PATH={venv_bin}:/usr/bin".encode()
         self.assertEqual(
             blob.split(b"\0")[:-1],
-            [b"NUM_WARMUPS=8", b"PATH=/opt/venv/bin:/usr/bin", b"VLLM_ROCM_USE_AITER=1"],
+            [b"NUM_WARMUPS=8", expected_path, b"VLLM_ROCM_USE_AITER=1"],
         )
+
+    def test_missing_path_components_are_dropped_from_replay(self):
+        """A host-local venv prefix that is gone on this box must not lead PATH."""
+        alive = self.tmp / "alive_bin"
+        alive.mkdir()
+        dead = self.tmp / "dead_venv" / "bin"   # never created
+        recipe = self._recipe_with_envs(
+            "  envs:\n"
+            f"    PATH: {dead}:{alive}:/usr/bin\n"
+            "    VLLM_ROCM_USE_AITER: '1'\n"
+        )
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm",
+             "eval_dir": str(self.tmp / "eval")}
+        )
+
+        blob = Path(os.environ["RECIPE_ENV_FILE"]).read_bytes()
+        self.assertIn(f"PATH={alive}:/usr/bin".encode(), blob)
+        self.assertNotIn(str(dead).encode(), blob)
+
+    def test_a_fully_missing_path_is_omitted_from_replay(self):
+        """Nothing usable left -> keep the ambient PATH rather than export junk."""
+        dead = self.tmp / "no_such_venv" / "bin"
+        recipe = self._recipe_with_envs(
+            "  envs:\n"
+            f"    PATH: {dead}\n"
+            "    VLLM_ROCM_USE_AITER: '1'\n"
+        )
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm",
+             "eval_dir": str(self.tmp / "eval")}
+        )
+
+        self.assertEqual(
+            os.environ["RECIPE_ENV_REPLAYED"].split(), ["VLLM_ROCM_USE_AITER"]
+        )
+        self.assertNotIn(b"PATH=", Path(os.environ["RECIPE_ENV_FILE"]).read_bytes())
 
     def test_the_replay_says_nothing_on_stdout(self):
         """Callers eval this function's stdout as shell (run_ab.sh does), so a
