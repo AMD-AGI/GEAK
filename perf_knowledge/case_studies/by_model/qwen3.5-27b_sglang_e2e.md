@@ -11,6 +11,13 @@ updated: 2026-06-08
 sources:
   - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
   - GEAK/e2e_workflow/knowledge/gemm_attention_backends.md
+layer: reference
+platforms: [gfx942]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L0
+levers: [env.flag]
+bound_type: [host_bound, hbm_bw]
 ---
 
 # Qwen3.5-27B / sglang / MI300X — full e2e run (the flagship)

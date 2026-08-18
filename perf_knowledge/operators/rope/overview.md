@@ -10,6 +10,11 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/rope.py
   - /sgl-workspace/aiter/aiter/ops/triton/rope/rope.py
   - https://github.com/vllm-project/vllm/blob/main/csrc/pos_encoding.cu
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: positional
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # rope  (rotary position embedding: rotate Q/K by position-dependent angles)

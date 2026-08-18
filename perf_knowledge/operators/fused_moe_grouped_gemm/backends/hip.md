@@ -12,6 +12,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/fused_moe_bf16_asm.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/configs/tuned_fmoe.csv
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.grouped_moe
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # fused_moe_grouped_gemm × HIP/asm

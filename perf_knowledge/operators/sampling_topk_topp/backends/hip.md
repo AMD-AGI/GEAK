@@ -12,6 +12,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/cpp_itfs/sampling/sampling.cuh
   - https://flashinfer.ai/2025/03/10/sampling.html
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # sampling_topk_topp × hip

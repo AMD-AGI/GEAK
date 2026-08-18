@@ -12,6 +12,13 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/triton/softmax.py
   - /sgl-workspace/aiter/aiter/ops/topk.py
   - /sgl-workspace/aiter/aiter/ops/mha.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # softmax × aiter

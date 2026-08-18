@@ -11,6 +11,13 @@ sources:
   - https://arxiv.org/pdf/2310.10537
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://salykova.github.io/matrix-cores-cdna
+layer: reference
+platforms: [gfx950]
+lifecycle: active
+cost: L3
+levers: [dtype.microscale]
+risk: numerics-affecting
+bound_type: [mfma_compute]
 ---
 
 # Block scaling / microscaling (MXFP)

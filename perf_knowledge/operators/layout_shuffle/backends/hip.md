@@ -12,6 +12,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/shuffle.py
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, l2_locality]
 ---
 
 # layout_shuffle × HIP

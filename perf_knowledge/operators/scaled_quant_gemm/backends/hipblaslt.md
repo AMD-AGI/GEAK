@@ -11,6 +11,13 @@ updated: 2026-06-05
 sources:
   - https://github.com/ROCm/hipBLASLt
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.scaled_quant
+lifecycle: candidate
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # scaled_quant_gemm × hipblaslt

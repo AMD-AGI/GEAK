@@ -6,6 +6,10 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi300-mi200-performance-counters.html
   - https://rocm.blogs.amd.com/software-tools-optimization/profilers/README.html
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+lifecycle: active
+bound_type: [mfma_compute, lds_bank]
 ---
 
 # rocprofv3 hardware counters (MI300 / MI350)

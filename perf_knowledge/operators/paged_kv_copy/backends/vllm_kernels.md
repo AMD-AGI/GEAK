@@ -13,6 +13,13 @@ sources:
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
   - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
   - https://docs.vllm.ai/en/latest/design/paged_attention/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # paged_kv_copy × vLLM kernels

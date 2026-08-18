@@ -11,6 +11,12 @@ updated: 2026-06-05
 sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.grouped_moe
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # grouped_gemm_moe × hip

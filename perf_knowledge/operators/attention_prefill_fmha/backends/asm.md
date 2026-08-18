@@ -13,6 +13,12 @@ sources:
   - https://arxiv.org/abs/2511.08083
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/mla.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, launch_overhead]
 ---
 
 # attention_prefill_fmha × ASM/MFMA

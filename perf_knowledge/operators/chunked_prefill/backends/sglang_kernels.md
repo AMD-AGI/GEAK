@@ -12,6 +12,13 @@ sources:
   - https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/attention_registry.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/unified_attention.py
   - https://docs.sglang.io/platforms/amd_gpu.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, launch_overhead]
 ---
 
 # chunked_prefill × sglang_kernels

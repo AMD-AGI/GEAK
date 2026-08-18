@@ -10,6 +10,13 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang
   - https://llvm.org/docs/AMDGPUUsage.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw, mfma_compute]
 ---
 
 # gather_scatter — tuning

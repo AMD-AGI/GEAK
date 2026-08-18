@@ -12,6 +12,12 @@ sources:
   - https://github.com/vllm-project/vllm/blob/main/csrc/pos_encoding.cu
   - /sgl-workspace/aiter/aiter/ops/pos_encoding.py
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: positional
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # rope × hip

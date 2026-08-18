@@ -11,6 +11,13 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/causal_conv1d_update.cu
   - https://github.com/vllm-project/vllm/pull/17146
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # causal_conv1d — tuning

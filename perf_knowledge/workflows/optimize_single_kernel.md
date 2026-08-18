@@ -10,6 +10,10 @@ sources:
   - GEAK/e2e_workflow/roles/op_benchmarker.md
   - GEAK/kernel_workflow/  (single-kernel kernel_workflow)
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+bound_type: [launch_overhead, host_bound]
 ---
 
 # Optimize a single kernel

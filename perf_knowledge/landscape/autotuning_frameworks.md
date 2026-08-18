@@ -16,6 +16,9 @@ sources:
   - https://github.com/IBM/triton-dejavu
   - https://github.com/vllm-project/vllm/blob/main/benchmarks/kernels/benchmark_moe.py
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+lifecycle: active
 ---
 
 # Autotuning, cost-model, and tuned-config-DB frameworks for GPU kernels

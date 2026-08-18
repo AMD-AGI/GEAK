@@ -12,6 +12,12 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
   - https://rocm.docs.amd.com/projects/rccl/en/develop/how-to/rccl-usage-tips.html
   - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [sync]
 ---
 
 # MoRI + RCCL — the AMD communication backend

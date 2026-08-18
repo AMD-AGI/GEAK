@@ -10,6 +10,10 @@ sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
   - https://github.com/ROCm/HIP/issues/3667
   - https://github.com/llvm/llvm-project/issues/131954
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # HIP — pitfalls & ISA verification

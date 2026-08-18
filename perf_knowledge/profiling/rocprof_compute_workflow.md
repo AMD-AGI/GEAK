@@ -7,6 +7,10 @@ sources:
   - https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/how-to/profile/mode.html
   - https://rocm.docs.amd.com/projects/rocprofiler-compute/en/develop/install/quickstart.html
   - https://rocm.blogs.amd.com/software-tools-optimization/profilers/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # rocprof-compute: profile → analyze → roofline

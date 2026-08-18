@@ -12,6 +12,12 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://blog.vllm.ai/2024/10/23/vllm-serving-amd.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune, env.flag]
+bound_type: [sync]
 ---
 
 # RCCL tuning — the TP/collective backend on Instinct

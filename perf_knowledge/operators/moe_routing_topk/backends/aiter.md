@@ -14,6 +14,13 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/moe_align_block_size_kernels.cu
   - https://github.com/ROCm/aiter/pull/1909
   - https://github.com/ROCm/aiter/issues/2153
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.routing
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [launch_overhead, hbm_bw]
 ---
 
 # moe_routing_topk × aiter

@@ -12,6 +12,13 @@ sources:
   - https://github.com/sgl-project/sglang/issues/16027
   - https://github.com/sgl-project/sglang/blob/main/docs/platforms/amd_gpu.md
   - https://rocm.blogs.amd.com/artificial-intelligence/ssd_mi300x/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.spec_decode
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # speculative_decode_verify × SGLang kernels

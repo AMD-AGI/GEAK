@@ -17,7 +17,10 @@ It has two jobs:
 2. **Be a SOTA registry** — for **every `operator × backend` cell**, point at the *best known
    implementation(s)* with source, measured performance, applicability, knobs, and pitfalls.
 
-> **~586 docs · ~43,900 lines · 0 broken links · every content file ends with `## Sources`.**
+> **656 docs · ~59,750 lines · 646 indexed in [`index/kb_manifest.yaml`](index/kb_manifest.yaml) ·
+> 0 broken links · every content file ends with `## Sources`.**
+> (Doc/line counts exclude the ~60 generated files under `index/views/`; the only unresolved relative
+> links left in the tree are the deliberate placeholders in `index/_templates/`.)
 > 14× the file count of the original `perf_knowledge`. Built P0→P4 + hot-path enrichment, 2026-06-08
 > (see [`index/changelog.md`](index/changelog.md)).
 
@@ -45,25 +48,26 @@ It has two jobs:
 
 ```
 perf_knowledge/
-├── index/         (10)  navigation + SOTA registry + taxonomy + sourcing rules + templates + generator
+├── index/         (11)  navigation + SOTA registry + taxonomy + sourcing rules + templates + generator
+│                       (+ generated views/ — not counted above)
 ├── hardware/      (27)  CDNA1–4 deep dives + shared (matrix core, memory, numerics)
-├── languages/     (42)  triton · flydsl · hip · ck · asm · tilelang · rocwmma · hipkittens · mojo · cutlass
+├── languages/     (49)  triton · flydsl · hip · ck · asm · tilelang · rocwmma · hipkittens · mojo · cutlass
 ├── backends/      (35)  aiter · hipblaslt · ck_lib · rocblas/tunableop · fa_rocm · mori/rccl · miopen
-│                        · pytorch_inductor · sglang · vllm
-├── operators/    (420)  ★ THE CARTESIAN CORE — 54 operators ×
-│                        {overview, tuning, numerics, fusion} + backends/<backend>.md (204 SOTA cards)
+│                       · pytorch_inductor · sglang · vllm
+├── operators/    (441)  ★ THE CARTESIAN CORE — 54 operators ×
+│                       {overview, tuning, numerics, fusion} + backends/<backend>.md (225 SOTA cards)
 ├── optimization/  (12)  occupancy · LDS/bank-conflicts · MFMA scheduling · pipelining · vectorization
-│                        · XCD/L2 locality · grid sizing · autotuning · roofline · fusion · numerics
+│                       · XCD/L2 locality · grid sizing · autotuning · roofline · fusion · numerics
 ├── quantization/  (10)  formats · FNUZ-vs-OCP · MXFP block-scaling · scaling strategies · Quark
-│                        · accuracy gates · HW support matrix · KV quant · deployment recipes
+│                       · accuracy gates · HW support matrix · KV quant · deployment recipes
 ├── profiling/     (10)  rocprofv3 / rocprof-compute / rocprof-sys · counters · bottleneck triage
-│                        · roofline · traces · benchmarking · engagement verification · pitfalls
+│                       · roofline · traces · benchmarking · engagement verification · pitfalls
 ├── workflows/      (9)  single-kernel ladder · e2e model flow · GEMM tuning recipe · backend selection
-│                        · kernel integration · GEAK authoring · backend choice · bring-up checklist
-├── case_studies/   (8)  by_model (Qwen3.5-27B, DeepSeek-MLA, Llama-fp8) + by_kernel
+│                       · kernel integration · GEAK authoring · backend choice · bring-up checklist
+├── case_studies/  (10)  by_model (Qwen3.5-27B, DeepSeek-MLA, Llama-fp8) + by_kernel
 ├── landscape/      (7)  ecosystem survey + "what to borrow" (multi-backend libs, DSLs, AI agents,
-│                        autotuning, AMD SOTA 2026, serving registries)
-└── reference/      (3)  repo_index · env_vars dictionary · benchmarks_and_agents
+│                       autotuning, AMD SOTA 2026, serving registries)
+└── reference/      (5)  repo_index · env_vars dictionary · benchmarks_and_agents
 ```
 
 `★ operators/` is the heart: a Cartesian map of **54 operators × backends**. The most relevant SOTA

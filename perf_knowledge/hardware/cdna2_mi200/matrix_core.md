@@ -9,6 +9,10 @@ sources:
   - https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi250.html
   - https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna2-white-paper.pdf
+layer: reference
+platforms: [gfx90a]
+lifecycle: active
+bound_type: [mfma_compute]
 ---
 
 # CDNA2 / MI250X / MI210 (gfx90a) — Matrix Core / MFMA

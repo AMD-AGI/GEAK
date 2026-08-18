@@ -11,6 +11,11 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://arxiv.org/abs/2205.14135
   - https://github.com/Dao-AILab/flash-attention
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # attention_prefill_fmha — numerics

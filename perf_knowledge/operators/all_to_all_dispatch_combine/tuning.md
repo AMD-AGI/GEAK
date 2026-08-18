@@ -12,6 +12,13 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
   - https://github.com/ROCm/mori
   - https://www.lmsys.org/blog/2026-05-28-mori/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # all_to_all_dispatch_combine — tuning

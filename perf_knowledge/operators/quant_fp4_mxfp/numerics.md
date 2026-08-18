@@ -11,6 +11,11 @@ sources:
   - https://arxiv.org/pdf/2310.10537
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/quant.py
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx950]
+kernel_class: quant
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # quant_fp4_mxfp — numerics

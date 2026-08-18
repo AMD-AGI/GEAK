@@ -12,6 +12,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/causal_conv1d_update.cu
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/causal_conv1d.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/include/causal_conv1d.h
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # causal_conv1d × HIP/C++

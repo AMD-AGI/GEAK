@@ -10,6 +10,10 @@ sources:
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://github.com/pytorch/pytorch/pull/143286
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # Triton on AMD — knobs & autotune

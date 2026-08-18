@@ -10,6 +10,11 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/unified_attention.py
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://arxiv.org/abs/2205.14135
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # chunked_prefill — numerics

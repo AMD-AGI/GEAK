@@ -10,6 +10,11 @@ sources:
   - GEAK/e2e_workflow/PLAN.md
   - GEAK/e2e_workflow/roles/e2e_integrator.md
   - GEAK/e2e_workflow/roles/op_benchmarker.md
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+levers: [env.flag]
+bound_type: [host_bound]
 ---
 
 # Optimize an e2e model (serving throughput)

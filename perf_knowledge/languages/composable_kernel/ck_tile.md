@@ -11,6 +11,10 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/ck-tile-flash/README.html
   - https://github.com/ROCm/composable_kernel/blob/develop/include/ck_tile/README.md
   - https://github.com/ROCm/composable_kernel/issues/1727
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # CK-Tile

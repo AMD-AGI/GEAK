@@ -11,6 +11,13 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
   - https://github.com/ROCm/MIOpen/blob/develop/CHANGELOG.md
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # layernorm × miopen

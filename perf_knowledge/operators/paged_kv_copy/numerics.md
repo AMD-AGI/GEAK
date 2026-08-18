@@ -9,6 +9,11 @@ updated: 2026-06-08
 sources:
   - https://vllm.ai/blog/2026-04-22-fp8-kvcache
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/cache.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: candidate
+risk: numerics-affecting
 ---
 
 # paged_kv_copy — numerics

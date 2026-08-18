@@ -9,6 +9,8 @@ sources:
   - https://docs.sglang.io/platforms/amd_gpu.html
   - https://rocm.docs.amd.com/projects/hipBLASLt/en/develop/reference/env-variables.html
   - https://rocm.docs.amd.com/en/latest/reference/env-variables.html
+layer: reference
+lifecycle: active
 ---
 
 # Environment-variable dictionary

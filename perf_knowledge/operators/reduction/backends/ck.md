@@ -12,6 +12,13 @@ sources:
   - https://github.com/ROCmSoftwarePlatform/composable_kernel/pull/82
   - https://rocm.docs.amd.com/projects/composable_kernel/en/latest/
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # reduction × composable_kernel

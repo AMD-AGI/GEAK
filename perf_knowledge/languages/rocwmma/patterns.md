@@ -10,6 +10,10 @@ sources:
   - ROCm/rocWMMA@develop:samples/simple_hgemm.cpp
   - ROCm/rocWMMA@develop:samples/perf_hgemm.cpp
   - https://rocm.docs.amd.com/projects/rocWMMA/en/develop/api-reference/api-reference-guide.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # rocWMMA patterns

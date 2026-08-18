@@ -11,6 +11,13 @@ updated: 2026-06-08
 sources:
   - /sgl-workspace/aiter/aiter/ops/fused_qk_norm_mrope_cache_quant.py
   - https://github.com/sgl-project/sglang/issues/18466
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: positional
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # mrope × aiter

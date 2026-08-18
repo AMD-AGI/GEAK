@@ -10,6 +10,13 @@ sources:
   - https://github.com/sgl-project/sglang/issues/22223
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # context_parallel_attention — tuning

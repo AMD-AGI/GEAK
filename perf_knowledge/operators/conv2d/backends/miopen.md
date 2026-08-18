@@ -13,6 +13,13 @@ sources:
   - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/use-fusion-api.html
   - https://github.com/ROCm/MIOpen/blob/develop/CHANGELOG.md
   - https://github.com/ROCm/MIOpen/issues/2001
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, lds_bank]
 ---
 
 # conv2d × MIOpen

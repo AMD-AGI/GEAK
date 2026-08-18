@@ -14,6 +14,12 @@ sources:
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/__init__.py
   - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
   - https://www.lmsys.org/blog/2026-05-28-mori/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.grouped_moe
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # grouped_gemm_moe × FlyDSL

@@ -10,6 +10,12 @@ sources:
   - https://github.com/pytorch/pytorch/blob/main/torch/_inductor/config.py
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # elementwise — fusion

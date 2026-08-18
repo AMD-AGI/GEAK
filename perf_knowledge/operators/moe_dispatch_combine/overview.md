@@ -10,6 +10,11 @@ sources:
   - https://github.com/ROCm/mori/blob/main/docs/MORI-EP-GUIDE.md
   - https://gau-nernst.github.io/amd-a2a/
   - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.dispatch
+lifecycle: active
+bound_type: [sync, hbm_bw]
 ---
 
 # moe_dispatch_combine  (token permute/scatter to experts + un-permute/combine)

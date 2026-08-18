@@ -9,6 +9,12 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
+levers: [fusion.epilogue, fusion.prologue, fusion.norm-quant]
+bound_type: [hbm_bw]
 ---
 
 # kernel fusion strategy

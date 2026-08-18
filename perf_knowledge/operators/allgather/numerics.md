@@ -8,6 +8,11 @@ regimes: [prefill, decode, both]
 updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/projects/rccl/en/develop/how-to/rccl-usage-tips.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: collective
+lifecycle: candidate
+risk: numerics-affecting
 ---
 
 # allgather — numerics & parity

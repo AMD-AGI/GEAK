@@ -10,6 +10,13 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/paged_attn.py
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.gqa_mqa
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # gqa_mqa_attention — tuning

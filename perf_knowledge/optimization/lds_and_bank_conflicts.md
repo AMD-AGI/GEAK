@@ -9,6 +9,12 @@ sources:
   - https://rocm.docs.amd.com/projects/composable_kernel/en/latest/conceptual/ck_tile/hardware/lds_bank_conflicts.html
   - https://rocm.blogs.amd.com/software-tools-optimization/lds-bank-conflict/README.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
+levers: [layout.swizzle]
+bound_type: [lds_bank]
 ---
 
 # LDS sizing and bank conflicts

@@ -10,6 +10,13 @@ sources:
   - https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang
   - https://www.amd.com/en/blogs/2025/revolutionizing-mixture-of-experts-performance-10.html
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/moe_align_block_size_kernels.cu
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.routing
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [launch_overhead, hbm_bw]
 ---
 
 # moe_routing_topk — tuning

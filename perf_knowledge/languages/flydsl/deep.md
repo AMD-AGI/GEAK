@@ -10,6 +10,10 @@ sources:
   - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
   - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/splitk_hgemm.py
   - /opt/venv/lib/python3.10/site-packages/flydsl/expr/rocdl/
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # FlyDSL — deep dive

@@ -13,6 +13,13 @@ sources:
   - ROCm/aiter@a6bb4993:aiter/ops/triton/normalization/rmsnorm.py
   - ROCm/aiter@a6bb4993:aiter/ops/triton/_triton_kernels/normalization/rmsnorm.py
   - https://github.com/vllm-project/vllm/pull/14959
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # fused_add_rmsnorm × aiter

@@ -1,0 +1,87 @@
+# watchlist.yaml — sources the weekly KB ingest polls (plan Part 2.4).
+#
+# _ingest_web.py reads this, detects what changed since the last run, and emits
+# kb_inbox/<date>/candidates.yaml. It NEVER writes the KB directly — the kb_curator
+# agent turns candidates into a reviewed PR, and every ingested item lands as
+# `lifecycle: candidate` + `verified_on: null` until an on-box run promotes it
+# (measurement is always the judge; web only widens the candidate set — ADD-only).
+#
+# type:
+#   git         watch specific paths in a repo for new commits / release tags (GitHub API)
+#   blog_index  fetch an index page, diff out newly-listed article URLs
+#   doc         a single document (e.g. PDF/ISA guide) tracked by content-hash
+#   search      a standing query (arXiv etc.) whose new hits become candidates
+#   url_set     re-hash URLs already cited across the KB (drift detection; reuses
+#               _gen_sources.py's aggregated URL set — see sources_index.md)
+
+sources:
+  - id: rocm-blogs-opt
+    type: blog_index
+    urls:
+      - https://rocm.blogs.amd.com/blog/tag/software-tools-optimization.html
+      - https://rocm.blogs.amd.com/blog/tag/ai-ml.html
+
+  - id: aiter
+    type: git
+    repo: ROCm/aiter
+    watch: [aiter/configs/, aiter/ops/, csrc/]
+
+  - id: rocm-libraries-ck
+    type: git
+    repo: ROCm/rocm-libraries
+    watch: [projects/composablekernel/]
+
+  - id: hipblaslt
+    type: git
+    repo: ROCm/hipBLASLt
+    watch: [library/, clients/]
+
+  - id: rocwmma
+    type: git
+    repo: ROCm/rocWMMA
+    watch: [library/include/]
+
+  - id: flash-attention-rocm
+    type: git
+    repo: ROCm/flash-attention
+    watch: [csrc/, flash_attn/]
+
+  - id: triton
+    type: git
+    repo: triton-lang/triton
+    watch: [third_party/amd/, python/triton/]
+
+  - id: tilelang
+    type: git
+    repo: tile-ai/tilelang
+    watch: [tilelang/, examples/]
+
+  - id: vllm
+    type: git
+    repo: vllm-project/vllm
+    watch: [vllm/model_executor/layers/, vllm/attention/]
+
+  - id: sglang
+    type: git
+    repo: sgl-project/sglang
+    watch: [python/sglang/srt/layers/]
+
+  - id: cdna-isa
+    type: doc
+    # AMD CDNA ISA references, content-hashed. These are the exact assets hardware/ already cites in
+    # its `## Sources`, so a revision here means a hardware/ page may now be describing the old ISA.
+    # amd.com is not reachable from every runner (some CDNs block datacenter egress); when it is not,
+    # detect_hash records `status: unreachable` as a candidate row and the run carries on — visible,
+    # never fatal. Do NOT set this back to `urls: []`: an empty doc source detects nothing SILENTLY.
+    urls:
+      - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
+      - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
+
+  - id: arxiv-mi-kernels
+    type: search
+    query: "AMD Instinct MI300 MI350 MI355 kernel optimization"
+
+  # Drift detection over URLs the KB already cites (populated from _gen_sources.py output).
+  - id: cited-urls
+    type: url_set
+    from: sources_index.md

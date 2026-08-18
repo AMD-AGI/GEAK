@@ -4,6 +4,8 @@ updated: 2026-06-09
 hardware: [MI300X (gfx942, CDNA3), MI325X (gfx942, CDNA3), MI350X/MI355X (gfx950, CDNA4)]
 scope: per-operator current SOTA kernel + best backend on AMD Instinct, 2025-2026 evidence
 sourcing: numbers tagged vendor/third-party + hardware + version; see ## Sources
+layer: reference
+lifecycle: active
 ---
 
 # AMD Instinct SOTA kernels per operator (2025-2026)

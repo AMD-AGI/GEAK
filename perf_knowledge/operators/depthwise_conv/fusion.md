@@ -10,6 +10,12 @@ sources:
   - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/use-fusion-api.html
   - https://github.com/ROCm/MIOpen/blob/develop/CHANGELOG.md
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # depthwise_conv — fusion

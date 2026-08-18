@@ -13,6 +13,13 @@ sources:
   - GEAK/perf_knowledge/backends/aiter/tuned_gemm.md
   - ROCm/aiter@a6bb499:aiter/tuned_gemm.py
   - ROCm/aiter@a6bb499:gradlib/gradlib/gemm_tuner.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune, tile.autotune-db]
+bound_type: [mfma_compute]
 ---
 
 # GEMM tuning workflow (aiter per-shape DB)

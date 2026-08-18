@@ -11,6 +11,12 @@ sources:
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+cost: L0
+levers: [env.flag, backend.swap]
 ---
 
 # Attention backend selection

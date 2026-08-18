@@ -9,6 +9,12 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
   - ROCm/aiter@HEAD:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.batched
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [mfma_compute, occupancy]
 ---
 
 # batched_gemm — fusion

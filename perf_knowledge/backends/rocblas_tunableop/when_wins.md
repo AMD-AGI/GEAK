@@ -10,6 +10,11 @@ sources:
   - https://github.com/pytorch/pytorch/tree/main/aten/src/ATen/cuda/tunable
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - ROCm/aiter@HEAD:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # rocBLAS / TunableOp — when it wins

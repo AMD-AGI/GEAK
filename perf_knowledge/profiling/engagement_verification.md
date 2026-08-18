@@ -6,6 +6,9 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.blogs.amd.com/software-tools-optimization/profilers/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
 ---
 
 # Engagement verification: is your kernel/config even running?

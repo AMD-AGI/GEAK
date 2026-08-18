@@ -13,6 +13,13 @@ sources:
   - ROCm/composable_kernel:example/ck_tile/01_fmha
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/mha.py
   - https://github.com/Dao-AILab/flash-attention
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, launch_overhead]
 ---
 
 # attention_prefill_fmha × CK-Tile

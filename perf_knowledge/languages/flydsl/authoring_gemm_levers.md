@@ -6,6 +6,10 @@ updated: 2026-06-01
 source_commit: AMD-AGI/GEAK@c0a1f937
 sources:
   - AMD-AGI/GEAK@c0a1f937:src/minisweagent/skills/flydsl/docs/flydsl_gemm_optimization.md
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 > **Reference (how-to), not a verdict.** Ingested from the FlyDSL authoring skill. GEMM-specific

@@ -12,6 +12,12 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
   - https://rocm.blogs.amd.com/software-tools-optimization/lds-bank-conflict/README.html
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, lds_bank]
 ---
 
 # transpose × Triton

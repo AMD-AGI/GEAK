@@ -9,6 +9,12 @@ updated: 2026-06-08
 sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/comms/fused/reduce_scatter_rmsnorm_quant_all_gather.py
   - https://docs.vllm.ai/en/latest/design/fusions/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: collective
+lifecycle: candidate
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [sync, hbm_bw]
 ---
 
 # reduce_scatter — fusion

@@ -11,6 +11,10 @@ sources:
   - https://github.com/llvm/llvm-project/issues/131954
   - https://github.com/iree-org/iree/issues/23765
   - https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # ASM / MFMA pitfalls

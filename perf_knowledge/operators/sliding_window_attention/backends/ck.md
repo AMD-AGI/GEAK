@@ -12,6 +12,13 @@ sources:
   - https://github.com/Dao-AILab/flash-attention
   - https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
   - ROCm/composable_kernel:example/ck_tile/01_fmha/mask.hpp
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.sparse
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, l2_locality]
 ---
 
 # sliding_window_attention × CK-Tile

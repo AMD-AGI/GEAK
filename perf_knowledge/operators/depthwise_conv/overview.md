@@ -11,6 +11,11 @@ sources:
   - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
   - https://github.com/Dao-AILab/causal-conv1d
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # depthwise_conv  (`groups == in_channels`, one filter per channel)

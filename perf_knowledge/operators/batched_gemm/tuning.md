@@ -10,6 +10,13 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - ROCm/aiter@HEAD:gradlib/gradlib/gemm_tuner.py
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.batched
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [mfma_compute, occupancy]
 ---
 
 # batched_gemm — tuning

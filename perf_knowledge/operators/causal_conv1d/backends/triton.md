@@ -12,6 +12,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/causal_conv1d.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/_triton_kernels/causal_conv1d.py
   - https://docs.vllm.ai/en/stable/api/vllm/model_executor/layers/mamba/ops/causal_conv1d/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # causal_conv1d × Triton

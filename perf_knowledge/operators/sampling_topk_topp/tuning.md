@@ -11,6 +11,13 @@ sources:
   - https://flashinfer.ai/2025/03/10/sampling.html
   - https://github.com/vllm-project/vllm/blob/main/vllm/v1/sample/ops/topk_topp_sampler.py
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # sampling_topk_topp — tuning

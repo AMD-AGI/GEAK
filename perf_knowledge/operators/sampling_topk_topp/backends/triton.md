@@ -13,6 +13,12 @@ sources:
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
   - https://flashinfer.ai/2025/03/10/sampling.html
   - https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/sampler.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # sampling_topk_topp × triton

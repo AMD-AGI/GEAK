@@ -11,6 +11,11 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/triton/normalization/rmsnorm.py
   - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
   - https://github.com/vllm-project/vllm/pull/14959
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # fused_add_rmsnorm  (`r' = x + r; y = rmsnorm(r')` in one kernel)

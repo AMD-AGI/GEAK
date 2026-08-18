@@ -10,6 +10,11 @@ updated: 2026-06-05
 sources:
   - https://github.com/ROCm/composable_kernel
   - https://github.com/sgl-project/sglang/issues/16025
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # CK instances — traits, coverage, selection

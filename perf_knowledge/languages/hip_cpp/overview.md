@@ -10,6 +10,10 @@ sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
   - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/programming_model.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # HIP / C++ on AMD Instinct — overview

@@ -9,6 +9,12 @@ sources:
   - https://github.com/ROCm/aiter/tree/main/gradlib
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.blogs.amd.com/software-tools-optimization/hipblaslt-offline-tuning-part1/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune, tile.autotune-db]
+bound_type: [mfma_compute]
 ---
 
 # autotuning methodology

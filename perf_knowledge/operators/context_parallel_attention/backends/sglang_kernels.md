@@ -12,6 +12,13 @@ sources:
   - https://github.com/sgl-project/sglang/issues/22223
   - https://github.com/sgl-project/sglang/blob/main/docs/platforms/amd_gpu.md
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # context_parallel_attention × SGLang kernels

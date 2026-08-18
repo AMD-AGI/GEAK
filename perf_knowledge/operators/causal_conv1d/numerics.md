@@ -10,6 +10,11 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/causal_conv1d_update.cu
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:op_tests/triton_tests/test_causal_conv1d.py
   - https://github.com/Dao-AILab/causal-conv1d
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # causal_conv1d — numerics

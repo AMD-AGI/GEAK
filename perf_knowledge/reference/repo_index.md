@@ -2,6 +2,8 @@
 title: Repo index — pinned sources
 kind: reference
 updated: 2026-06-08
+layer: reference
+lifecycle: active
 ---
 
 # Repo index — pinned sources

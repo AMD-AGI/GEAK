@@ -10,6 +10,12 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/topk.py
   - /sgl-workspace/aiter/aiter/ops/triton/softmax.py
   - https://github.com/vllm-project/vllm/pull/16752
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: candidate
+levers: [fusion.norm-quant, fusion.epilogue]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # softmax — fusion

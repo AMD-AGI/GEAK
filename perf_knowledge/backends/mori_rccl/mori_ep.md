@@ -12,6 +12,12 @@ sources:
   - https://github.com/ROCm/mori
   - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
   - https://gau-nernst.github.io/amd-a2a/
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [sync]
 ---
 
 # MoRI-EP — expert-parallel all-to-all (dispatch / combine)

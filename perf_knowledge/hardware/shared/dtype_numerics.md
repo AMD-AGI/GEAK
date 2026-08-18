@@ -9,6 +9,10 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://arxiv.org/html/2511.10909v1
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # Datatype numerics across CDNA

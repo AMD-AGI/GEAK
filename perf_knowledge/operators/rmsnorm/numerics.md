@@ -10,6 +10,11 @@ sources:
   - https://github.com/vllm-project/vllm/issues/42325
   - /sgl-workspace/aiter/aiter/ops/triton/normalization/rmsnorm.py
   - https://github.com/ROCm/aiter/issues/1972
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # rmsnorm — numerics & parity

@@ -11,6 +11,13 @@ sources:
   - https://github.com/ROCm/MIOpen/blob/develop/CHANGELOG.md
   - https://rocm.docs.amd.com/projects/MIOpen/en/develop/doxygen/html/group__convolutions.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # depthwise_conv — tuning

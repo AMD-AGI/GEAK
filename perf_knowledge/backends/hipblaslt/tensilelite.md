@@ -10,6 +10,11 @@ updated: 2026-06-05
 sources:
   - https://rocm.blogs.amd.com/artificial-intelligence/hipblaslt-tensilelite-tuning/README.html
   - https://github.com/ROCm/hipBLASLt
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L1
+levers: [tile.autotune-db]
 ---
 
 # hipBLASLt TensileLite

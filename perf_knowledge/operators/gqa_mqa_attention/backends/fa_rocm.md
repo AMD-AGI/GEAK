@@ -12,6 +12,13 @@ sources:
   - https://github.com/Dao-AILab/flash-attention
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.gqa_mqa
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # gqa_mqa_attention × flash_attention_rocm (`fa_rocm`)

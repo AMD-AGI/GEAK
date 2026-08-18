@@ -12,6 +12,13 @@ sources:
   - https://github.com/vllm-project/vllm/blob/main/vllm/v1/sample/ops/topk_topp_sampler.py
   - https://github.com/vllm-project/vllm/blob/main/vllm/v1/sample/sampler.py
   - https://github.com/vllm-project/vllm/blob/main/vllm/platforms/rocm.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # sampling_topk_topp × vllm_kernels

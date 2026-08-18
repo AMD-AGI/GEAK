@@ -9,6 +9,10 @@ sources:
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
   - https://chipsandcheese.com/p/amds-cdna-4-architecture-announcement
   - https://www.servethehome.com/amd-mi350-and-cdna-4-architecture-launched-with-rocm-7/
+layer: reference
+platforms: [gfx950]
+lifecycle: active
+bound_type: [occupancy, l2_locality]
 ---
 
 # CDNA4 / MI350X / MI355X (gfx950) — architecture overview

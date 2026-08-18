@@ -12,6 +12,11 @@ sources:
   - https://github.com/vllm-project/vllm/blob/main/vllm/platforms/rocm.py
   - https://github.com/vllm-project/vllm/tree/main/csrc/rocm
   - https://rocm.blogs.amd.com/software-tools-optimization/vllm-omni/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # vLLM kernels on ROCm / MI300X (V1)

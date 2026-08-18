@@ -10,6 +10,11 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/fused_qk_norm_mrope_cache_quant.py
   - https://github.com/vllm-project/vllm/pull/22593
   - https://github.com/vllm-project/vllm/pull/22593
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: positional
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # mrope  (multimodal / 3D rotary position embedding, e.g. Qwen2.5-VL)

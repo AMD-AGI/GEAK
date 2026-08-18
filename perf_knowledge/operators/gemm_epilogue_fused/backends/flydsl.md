@@ -13,6 +13,12 @@ sources:
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/mfma_preshuffle_pipeline.py
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/preshuffle_gemm.py
   - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.epilogue_fused
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # gemm_epilogue_fused × FlyDSL

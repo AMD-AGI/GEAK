@@ -9,6 +9,12 @@ updated: 2026-06-08
 sources:
   - https://github.com/sgl-project/sglang/issues/22223
   - https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: candidate
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # context_parallel_attention — fusion

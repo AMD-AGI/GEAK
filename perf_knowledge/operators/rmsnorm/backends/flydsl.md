@@ -12,6 +12,12 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/reduce.py
   - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/silu_and_mul_fq.py
   - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # rmsnorm × flydsl

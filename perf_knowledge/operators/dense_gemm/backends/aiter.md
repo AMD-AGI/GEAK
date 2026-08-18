@@ -14,6 +14,13 @@ sources:
   - ROCm/aiter@a6bb4993:aiter/jit/core.py
   - ROCm/aiter@a6bb4993:csrc/py_itfs_cu/gemm_common.cu
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute]
 ---
 
 # dense_gemm × aiter

@@ -12,6 +12,13 @@ sources:
   - vllm-project/vllm@HEAD:csrc/cache_kernels.cu
   - vllm-project/vllm@HEAD:csrc/quantization/fp8/amd/quant_utils.cuh
   - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw]
 ---
 
 # kv_cache_quant × vllm_kernels

@@ -9,6 +9,10 @@ sources:
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
   - https://chipsandcheese.com/p/amds-cdna-4-architecture-announcement
   - https://github.com/llvm/llvm-project/pull/116309
+layer: reference
+platforms: [gfx950]
+lifecycle: active
+bound_type: [hbm_bw, lds_bank]
 ---
 
 # CDNA4 / MI350 (gfx950) — memory hierarchy & LDS

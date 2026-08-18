@@ -13,6 +13,13 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/sampling.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/sample.py
   - https://flashinfer.ai/2025/03/10/sampling.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # sampling_topk_topp × aiter

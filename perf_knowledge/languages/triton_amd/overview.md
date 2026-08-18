@@ -11,6 +11,10 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
   - https://arxiv.org/abs/2511.08083
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # Triton on AMD — overview

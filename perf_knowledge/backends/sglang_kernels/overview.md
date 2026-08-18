@@ -12,6 +12,11 @@ sources:
   - https://github.com/sgl-project/sglang/blob/main/docker/rocm.Dockerfile
   - https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/attention_registry.py
   - https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # SGLang kernels on ROCm / MI300X

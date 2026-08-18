@@ -12,6 +12,13 @@ sources:
   - GEAK/e2e_workflow/knowledge/gemm_attention_backends.md
   - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
   - https://www.amd.com/en/developer/resources/technical-articles/2026/day-0-support-for-qwen-3-5-on-amd-instinct-gpus.html
+layer: reference
+platforms: [gfx942]
+kernel_class: attn.linear
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw]
 ---
 
 # Gated-delta hybrid: the `--attention-backend triton` win

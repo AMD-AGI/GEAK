@@ -9,6 +9,10 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
   - https://rocm.github.io/rocprofiler-compute/performance_model.html
+layer: reference
+platforms: [gfx942]
+lifecycle: active
+bound_type: [occupancy]
 ---
 
 # CDNA3 / MI300X (gfx942) — occupancy math & tuning

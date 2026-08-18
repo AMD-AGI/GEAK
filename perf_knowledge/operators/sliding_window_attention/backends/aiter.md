@@ -12,6 +12,13 @@ sources:
   - https://github.com/ROCm/aiter
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
   - https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.sparse
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, l2_locality]
 ---
 
 # sliding_window_attention × aiter

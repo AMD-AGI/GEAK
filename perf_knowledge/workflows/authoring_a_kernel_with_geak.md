@@ -9,6 +9,10 @@ sources:
   - GEAK (AMD-AGI/GEAK) README
   - GEAK/kernel_workflow/roles/author_engineer.md
   - GEAK/e2e_workflow/roles/op_benchmarker.md
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # Authoring a kernel with GEAK / kernel_workflow

@@ -13,6 +13,12 @@ sources:
   - https://www.amd.com/en/developer/resources/technical-articles/2026/day-0-support-for-qwen-3-5-on-amd-instinct-gpus.html
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
   - https://vllm.ai/blog/2025-09-11-qwen3-next
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.linear
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # linear_attention_gated_delta × Triton

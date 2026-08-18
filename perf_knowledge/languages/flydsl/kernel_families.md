@@ -9,6 +9,10 @@ updated: 2026-06-08
 sources:
   - /sgl-workspace/aiter/aiter/ops/flydsl/
   - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # FlyDSL — kernel families

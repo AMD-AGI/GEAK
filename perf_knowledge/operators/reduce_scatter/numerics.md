@@ -9,6 +9,11 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/projects/rccl/en/develop/how-to/rccl-usage-tips.html
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/comms/fused/reduce_scatter_rmsnorm_quant_all_gather.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: collective
+lifecycle: candidate
+risk: numerics-affecting
 ---
 
 # reduce_scatter — numerics & parity

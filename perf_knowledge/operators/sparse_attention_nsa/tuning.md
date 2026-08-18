@@ -10,6 +10,13 @@ sources:
   - https://github.com/fla-org/native-sparse-attention
   - https://arxiv.org/html/2508.18224v1
   - https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.sparse
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw, l2_locality]
 ---
 
 # sparse_attention_nsa — tuning

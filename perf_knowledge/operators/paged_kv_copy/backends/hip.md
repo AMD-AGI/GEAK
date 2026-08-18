@@ -12,6 +12,12 @@ sources:
   - https://github.com/vllm-project/vllm/tree/main/csrc/rocm
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/cache.py
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # paged_kv_copy × HIP

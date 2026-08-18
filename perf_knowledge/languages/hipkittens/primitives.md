@@ -9,6 +9,10 @@ updated: 2026-06-08
 sources:
   - https://arxiv.org/html/2511.08083v1
   - https://github.com/HazyResearch/HipKittens
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # HipKittens primitives

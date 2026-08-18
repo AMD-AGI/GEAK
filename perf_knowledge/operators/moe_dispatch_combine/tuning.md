@@ -11,6 +11,13 @@ sources:
   - https://github.com/ROCm/mori/blob/main/docs/MORI-EP-GUIDE.md
   - https://github.com/ROCm/mori
   - https://www.lmsys.org/blog/2026-05-28-mori/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.dispatch
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [sync, hbm_bw]
 ---
 
 # moe_dispatch_combine — tuning

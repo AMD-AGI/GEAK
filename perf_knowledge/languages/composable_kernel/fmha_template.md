@@ -9,6 +9,10 @@ updated: 2026-06-08
 sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/ck-tile-flash/README.html
   - https://github.com/ROCm/composable_kernel/tree/develop/example/ck_tile/01_fmha
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # CK-Tile FMHA template

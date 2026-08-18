@@ -10,6 +10,11 @@ sources:
   - https://github.com/fla-org/native-sparse-attention
   - https://arxiv.org/abs/2502.11089
   - https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.sparse
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # sparse_attention_nsa — numerics

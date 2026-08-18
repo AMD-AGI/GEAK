@@ -12,6 +12,12 @@ sources:
   - https://github.com/vllm-project/vllm/tree/main/vllm/v1/attention/backends/mla
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/mla.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.mla
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # mla_attention × HIP

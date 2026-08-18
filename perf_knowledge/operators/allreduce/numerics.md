@@ -9,6 +9,11 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
   - https://rocm.docs.amd.com/projects/rccl/en/develop/how-to/rccl-usage-tips.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: collective
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # allreduce — numerics & parity

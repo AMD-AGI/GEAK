@@ -12,6 +12,12 @@ sources:
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/small_m_hgemm.py
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/gemm_kernels.py
   - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx950]
+kernel_class: gemm.skinny_decode
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw]
 ---
 
 # skinny_gemv_decode × FlyDSL

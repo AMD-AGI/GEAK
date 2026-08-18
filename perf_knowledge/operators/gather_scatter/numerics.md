@@ -9,6 +9,11 @@ updated: 2026-06-08
 sources:
   - https://llvm.org/docs/AMDGPUUsage.html
   - https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: candidate
+risk: numerics-affecting
 ---
 
 # gather_scatter — numerics

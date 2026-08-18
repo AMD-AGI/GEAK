@@ -12,6 +12,12 @@ sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
   - https://docs.nvidia.com/cutlass/latest/media/docs/cpp/implicit_gemm_convolution.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, lds_bank]
 ---
 
 # conv2d × HIP/C++

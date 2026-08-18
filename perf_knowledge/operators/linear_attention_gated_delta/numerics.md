@@ -10,6 +10,11 @@ sources:
   - https://github.com/fla-org/flash-linear-attention
   - https://arxiv.org/abs/2412.06464
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.linear
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # linear_attention_gated_delta — numerics

@@ -15,6 +15,12 @@ sources:
   - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
   - https://www.lmsys.org/blog/2026-05-28-mori/
   - https://rocm.blogs.amd.com/artificial-intelligence/mlperf-inference-v6.0/README.html
+layer: reference
+platforms: [gfx950]
+kernel_class: gemm.grouped_moe
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # fused_moe_grouped_gemm × FlyDSL (fp4 a4w4)

@@ -6,6 +6,10 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/how-to/profile/mode.html
   - https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi300-mi200-performance-counters.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # Reading a kernel bottleneck: compute / BW / latency / occupancy

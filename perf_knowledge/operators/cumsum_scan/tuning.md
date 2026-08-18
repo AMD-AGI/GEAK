@@ -10,6 +10,13 @@ sources:
   - https://moderngpu.github.io/scan.html
   - https://srush.github.io/annotated-mamba/hard.html
   - https://github.com/proger/accelerated-scan
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # cumsum_scan — tuning

@@ -12,6 +12,12 @@ sources:
   - https://triton-lang.org/main/getting-started/tutorials/10-block-scaled-matmul.html
   - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.scaled_quant
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # scaled_quant_gemm × triton

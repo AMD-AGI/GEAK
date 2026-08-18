@@ -11,6 +11,11 @@ sources:
   - https://github.com/ROCm/flash-attention
   - https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # FlashAttention-ROCm (`fa_rocm`)

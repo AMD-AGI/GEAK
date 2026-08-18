@@ -10,6 +10,12 @@ sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
   - https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_runtime_api/cooperative_groups.html
   - https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
+levers: [graph.cudagraph-safe]
+bound_type: [launch_overhead]
 ---
 
 # HIP — kernel patterns

@@ -12,6 +12,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/mha.py
   - https://github.com/Dao-AILab/flash-attention
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.gqa_mqa
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # gqa_mqa_attention × Triton

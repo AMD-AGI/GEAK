@@ -11,6 +11,10 @@ sources:
   - https://rocm.docs.amd.com/projects/composable_kernel/en/docs-6.4.2/doxygen/html/structck_1_1tensor__operation_1_1device_1_1_device_gemm.html
   - https://github.com/ROCm/composable_kernel/issues/1727
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # Classic CK (the `DeviceGemm*` model)

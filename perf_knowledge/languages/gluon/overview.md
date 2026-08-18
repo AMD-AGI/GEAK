@@ -10,6 +10,10 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
   - https://github.com/ROCm/gfx950-gluon-tutorials
   - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # Gluon on AMD — overview

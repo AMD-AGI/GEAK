@@ -10,6 +10,10 @@ sources:
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
   - https://arxiv.org/pdf/2510.27583
   - https://rocm.blogs.amd.com/artificial-intelligence/mlperf-inference-v6.0/README.html
+layer: reference
+platforms: [gfx950]
+lifecycle: active
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # CDNA4 / MI350X / MI355X (gfx950) — peak throughput tables

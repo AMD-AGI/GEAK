@@ -10,6 +10,10 @@ sources:
   - https://github.com/nvidia/cutlass
   - https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_porting_guide.html
   - https://rocm.blogs.amd.com/software-tools-optimization/flydsl-python-native/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # CUTLASS / CuTe on ROCm

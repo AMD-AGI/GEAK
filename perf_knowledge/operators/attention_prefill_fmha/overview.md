@@ -9,6 +9,11 @@ updated: 2026-06-08
 sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/ck-tile-flash/README.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+bound_type: [mfma_compute, launch_overhead]
 ---
 
 # attention_prefill_fmha  (FlashAttention forward, prefill / paged-KV)

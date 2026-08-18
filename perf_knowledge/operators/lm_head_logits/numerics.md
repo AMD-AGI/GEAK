@@ -10,6 +10,11 @@ sources:
   - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/logits_processor.py
   - https://github.com/vllm-project/vllm/blob/main/vllm/v1/sample/sampler.py
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # lm_head_logits — numerics

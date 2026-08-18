@@ -8,6 +8,10 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi250.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/data-sheets/amd-instinct-mi250x-datasheet.pdf
+layer: reference
+platforms: [gfx90a]
+lifecycle: active
+bound_type: [occupancy]
 ---
 
 # CDNA2 / MI250X / MI210 (gfx90a) — architecture overview

@@ -12,6 +12,13 @@ sources:
   - https://github.com/vllm-project/vllm/pull/17955
   - https://github.com/vllm-project/vllm/pull/16752
   - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.routing
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [launch_overhead, hbm_bw]
 ---
 
 # moe_routing_topk × vllm_kernels

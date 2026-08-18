@@ -13,6 +13,13 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
   - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
   - https://arxiv.org/abs/2511.08083
+layer: reference
+platforms: [gfx950]
+kernel_class: quant
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw]
 ---
 
 # quant_fp4_mxfp — tuning

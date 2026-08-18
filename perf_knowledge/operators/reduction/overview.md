@@ -10,6 +10,11 @@ sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://moderngpu.github.io/scan.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # reduction  (`out = ⊕_i x[i]` along an axis — sum/mean/max/min/L2)

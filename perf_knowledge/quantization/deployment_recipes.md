@@ -11,6 +11,12 @@ sources:
   - https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/quantization.md
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
   - https://docs.vllm.ai/en/stable/features/quantization/quark/
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L0
+levers: [env.flag, dtype.downcast]
+risk: numerics-affecting
 ---
 
 # Deployment recipes — serving quantized models on AMD

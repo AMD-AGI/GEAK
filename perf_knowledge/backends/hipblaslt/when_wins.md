@@ -10,6 +10,11 @@ updated: 2026-06-05
 sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.docs.amd.com/projects/rocBLAS/en/latest/how-to/what-is-rocblas.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # hipBLASLt vs rocBLAS — when each wins

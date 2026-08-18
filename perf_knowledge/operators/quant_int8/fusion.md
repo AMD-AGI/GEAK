@@ -10,6 +10,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/include/smoothquant.h
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/moe/moe_op_gemm_int8_smoothquant.py
   - https://arxiv.org/abs/2211.10438
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [hbm_bw]
 ---
 
 # quant_int8 — fusion

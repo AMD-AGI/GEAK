@@ -11,6 +11,11 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/chunked_pa_prefill.py
   - https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/attention_registry.py
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+bound_type: [mfma_compute, launch_overhead]
 ---
 
 # chunked_prefill  (mixed prefill+decode / unified attention)

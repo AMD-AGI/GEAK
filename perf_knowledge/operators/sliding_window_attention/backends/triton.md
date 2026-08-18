@@ -12,6 +12,12 @@ sources:
   - https://github.com/Dao-AILab/flash-attention
   - https://github.com/ROCm/aiter
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.sparse
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, l2_locality]
 ---
 
 # sliding_window_attention × Triton

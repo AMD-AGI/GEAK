@@ -10,6 +10,11 @@ sources:
   - GEAK/perf_knowledge/index/sota_matrix.md
   - GEAK/perf_knowledge/index/decision_trees.md
   - GEAK/e2e_workflow/roles/op_benchmarker.md
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # Choosing a backend

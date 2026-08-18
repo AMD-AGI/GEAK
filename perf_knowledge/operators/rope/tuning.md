@@ -9,6 +9,13 @@ updated: 2026-06-09
 sources:
   - /sgl-workspace/aiter/aiter/ops/triton/rope/rope.py
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: positional
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # rope — tuning

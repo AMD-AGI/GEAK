@@ -11,6 +11,13 @@ sources:
   - https://github.com/vllm-project/vllm/tree/main/csrc/rocm
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.decode_paged
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # attention_decode_paged — tuning

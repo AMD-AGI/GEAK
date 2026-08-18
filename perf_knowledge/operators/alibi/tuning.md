@@ -9,6 +9,13 @@ updated: 2026-06-08
 sources:
   - https://arxiv.org/abs/2108.12409
   - https://github.com/vllm-project/vllm/blob/main/csrc/rocm/attention.cu
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: positional
+lifecycle: candidate
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # alibi — tuning

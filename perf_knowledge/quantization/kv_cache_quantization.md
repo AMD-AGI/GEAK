@@ -11,6 +11,13 @@ sources:
   - https://rocm.blogs.amd.com/artificial-intelligence/vllm-optimize/README.html
   - https://rocm.docs.amd.com/projects/ai-developer-hub/en/latest/notebooks/gpu_dev_optimize/fp8_quantization_quark_vllm.html
   - https://rocm.blogs.amd.com/software-tools-optimization/vllm-omni/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L0
+levers: [env.flag, dtype.downcast]
+risk: numerics-affecting
+bound_type: [hbm_bw]
 ---
 
 # KV-cache quantization

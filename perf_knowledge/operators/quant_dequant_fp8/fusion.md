@@ -11,6 +11,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/rmsnorm_quant_kernels.cu
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/gated_rmsnorm_quant_kernels.cu
   - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # quant_dequant_fp8 — fusion

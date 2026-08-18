@@ -11,6 +11,12 @@ updated: 2026-06-05
 sources:
   - https://triton-lang.org/main/getting-started/tutorials/09-persistent-matmul.html
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.skinny_decode
+lifecycle: candidate
+cost: L3
+bound_type: [hbm_bw]
 ---
 
 # skinny_gemv_decode × triton

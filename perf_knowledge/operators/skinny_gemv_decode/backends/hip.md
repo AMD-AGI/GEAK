@@ -11,6 +11,12 @@ updated: 2026-06-05
 sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.skinny_decode
+lifecycle: candidate
+cost: L3
+bound_type: [hbm_bw]
 ---
 
 # skinny_gemv_decode × hip

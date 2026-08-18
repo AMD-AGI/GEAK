@@ -10,6 +10,13 @@ sources:
   - vllm-project/vllm@HEAD:csrc/cache_kernels.cu
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/fused_qk_norm_rope_cache_quant.py
   - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw]
 ---
 
 # kv_cache_quant — tuning

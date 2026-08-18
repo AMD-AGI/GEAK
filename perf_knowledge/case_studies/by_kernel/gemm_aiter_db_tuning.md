@@ -12,6 +12,13 @@ sources:
   - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
   - GEAK/e2e_workflow/knowledge/gemm_attention_backends.md
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx942]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune, tile.autotune-db]
+bound_type: [mfma_compute]
 ---
 
 # aiter per-shape GEMM DB tuning (the +2.23% win, and the bias trap)

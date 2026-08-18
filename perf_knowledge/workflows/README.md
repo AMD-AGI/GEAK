@@ -8,6 +8,9 @@ sources:
   - GEAK/e2e_workflow/roles/op_benchmarker.md
   - GEAK/e2e_workflow/roles/e2e_integrator.md
   - GEAK/perf_knowledge/index/decision_trees.md
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
 ---
 
 # Workflows

@@ -10,6 +10,11 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://developer.nvidia.com/blog/cuda-pro-tip-increase-performance-with-vectorized-memory-access/
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # cast_fill_copy  (dtype cast · memset/fill · strided copy/contiguous — DMA-ish)

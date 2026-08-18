@@ -10,6 +10,11 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/fused_moe_dp_shared_expert.py
   - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
   - https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.dispatch
+lifecycle: active
+bound_type: [sync, hbm_bw]
 ---
 
 # shared_expert_fusion  (shared-expert + routed-expert overlap/fusion)

@@ -10,6 +10,13 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
   - ROCm/aiter@HEAD:gradlib/gradlib/gemm_tuner.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.epilogue_fused
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # gemm_epilogue_fused — tuning

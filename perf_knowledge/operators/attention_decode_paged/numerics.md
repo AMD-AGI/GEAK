@@ -10,6 +10,11 @@ sources:
   - https://arxiv.org/abs/2205.14135
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.decode_paged
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # attention_decode_paged — numerics

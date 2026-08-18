@@ -14,6 +14,13 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:op_tests/multigpu_tests/test_mori_all2all.py
   - https://github.com/ROCm/mori/blob/main/docs/MORI-EP-GUIDE.md
   - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.dispatch
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [sync, hbm_bw]
 ---
 
 # moe_dispatch_combine × aiter

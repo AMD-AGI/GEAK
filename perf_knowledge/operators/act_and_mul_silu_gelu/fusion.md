@@ -10,6 +10,12 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/triton/activation.py
   - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/silu_and_mul_fq.py
   - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/moe_gemm_2stage.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+levers: [fusion.norm-quant, fusion.epilogue]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # act_and_mul_silu_gelu — fusion

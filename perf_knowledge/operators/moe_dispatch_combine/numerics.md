@@ -9,6 +9,11 @@ updated: 2026-06-08
 sources:
   - https://github.com/ROCm/mori/blob/main/docs/MORI-EP-GUIDE.md
   - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.dispatch
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # moe_dispatch_combine — numerics & parity

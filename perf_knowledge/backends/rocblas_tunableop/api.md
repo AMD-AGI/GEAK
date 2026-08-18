@@ -10,6 +10,11 @@ sources:
   - https://rocm.docs.amd.com/projects/rocBLAS/en/latest/
   - https://rocm.docs.amd.com/projects/rocBLAS/en/docs-6.2.1/reference/enumerations.html
   - https://github.com/ROCm/rocBLAS
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # rocBLAS (Tensile GEMM API)

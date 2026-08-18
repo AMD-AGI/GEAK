@@ -10,6 +10,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/fused_moe.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/configs/tuned_fmoe.csv
   - https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.grouped_moe
+lifecycle: active
+bound_type: [mfma_compute, hbm_bw]
+levers: [graph.cudagraph-safe]
 ---
 
 # fused_moe_grouped_gemm  (the fused MoE up/gate/down grouped-GEMM mega-kernel)

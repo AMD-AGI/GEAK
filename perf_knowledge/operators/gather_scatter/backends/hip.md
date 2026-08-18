@@ -12,6 +12,12 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://llvm.org/docs/AMDGPUUsage.html
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, mfma_compute]
 ---
 
 # gather_scatter × HIP

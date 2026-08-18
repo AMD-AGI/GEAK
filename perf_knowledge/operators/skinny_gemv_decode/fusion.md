@@ -8,6 +8,12 @@ regimes: [decode]
 updated: 2026-06-05
 sources:
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.skinny_decode
+lifecycle: candidate
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [hbm_bw]
 ---
 
 # skinny_gemv_decode — fusion

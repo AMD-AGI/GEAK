@@ -14,6 +14,13 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://triton-lang.org/main/getting-started/tutorials/10-block-scaled-matmul.html
+layer: reference
+platforms: [gfx950]
+kernel_class: quant
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw]
 ---
 
 # quant_fp4_mxfp × ck

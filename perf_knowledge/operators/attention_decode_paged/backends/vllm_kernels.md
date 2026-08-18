@@ -12,6 +12,13 @@ sources:
   - https://github.com/vllm-project/vllm/blob/main/vllm/platforms/rocm.py
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
   - https://github.com/vllm-project/vllm/tree/main/csrc/rocm
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.decode_paged
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # attention_decode_paged × vllm_kernels

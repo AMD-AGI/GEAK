@@ -9,6 +9,12 @@ updated: 2026-06-05
 sources:
   - https://github.com/ROCm/aiter
   - https://rocm.blogs.amd.com/artificial-intelligence/aiter-intergration-s/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.grouped_moe
+lifecycle: candidate
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # grouped_gemm_moe — fusion

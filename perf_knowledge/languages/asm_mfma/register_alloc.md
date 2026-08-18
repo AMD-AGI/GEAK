@@ -11,6 +11,10 @@ sources:
   - https://arxiv.org/abs/2511.08083
   - https://github.com/llvm/llvm-project/issues/131954
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # Register allocation (VGPR / AGPR)

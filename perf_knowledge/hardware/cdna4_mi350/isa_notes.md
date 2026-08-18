@@ -9,6 +9,10 @@ sources:
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
   - https://llvm.org/docs/AMDGPUUsage.html
   - https://github.com/llvm/llvm-project/pull/116680
+layer: reference
+platforms: [gfx950]
+lifecycle: active
+bound_type: [mfma_compute]
 ---
 
 # CDNA4 / MI350 (gfx950) — ISA notes for kernel authors

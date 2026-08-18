@@ -13,6 +13,13 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/hipblaslt-offline-tuning-part1/README.html
   - https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html
   - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute]
 ---
 
 # dense_gemm × hipBLASLt

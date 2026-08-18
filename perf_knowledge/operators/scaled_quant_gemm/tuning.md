@@ -12,6 +12,13 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
   - https://rocm.blogs.amd.com/software-tools-optimization/4wave-fp8gemm/README.html
   - https://arxiv.org/abs/2511.08083
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.scaled_quant
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # scaled_quant_gemm — tuning

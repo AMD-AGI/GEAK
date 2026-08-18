@@ -10,6 +10,11 @@ sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
   - https://github.com/triton-lang/triton/issues/3017
   - https://arxiv.org/pdf/2510.27583
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # reduction — numerics & parity

@@ -12,6 +12,13 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/mla.py
   - https://rocm.blogs.amd.com/software-tools-optimization/aiter-mla/README.html
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.mla
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # mla_attention × aiter

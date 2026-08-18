@@ -11,6 +11,11 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/gated_rmsnorm_fp8_group_quant.py
   - /sgl-workspace/aiter/aiter/ops/triton/normalization/rmsnorm.py
   - https://github.com/sgl-project/sglang/issues/18466
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # fused_norm_quant  (`y_q, scale = quant(rmsnorm(x))` in one kernel)

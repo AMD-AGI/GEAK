@@ -14,6 +14,12 @@ sources:
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/gdr_decode_tuned.jsonl
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/test_flydsl_linear_attention.py
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/__init__.py
+layer: reference
+platforms: [gfx950]
+kernel_class: attn.linear
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # linear_attention_gated_delta × FlyDSL (gdr_decode)

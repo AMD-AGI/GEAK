@@ -9,6 +9,11 @@ updated: 2026-06-08
 sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/shuffle.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: candidate
+risk: numerics-affecting
 ---
 
 # layout_shuffle — numerics

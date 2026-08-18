@@ -17,6 +17,13 @@ sources:
   - https://www.lmsys.org/blog/2026-05-28-mori/
   - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
   - https://github.com/ROCm/aiter/issues/915
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.grouped_moe
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # grouped_gemm_moe × aiter

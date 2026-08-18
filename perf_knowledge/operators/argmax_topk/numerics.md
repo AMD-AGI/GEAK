@@ -11,6 +11,11 @@ sources:
   - https://github.com/triton-lang/triton/issues/6635
   - https://github.com/openai/triton/issues/802
   - https://github.com/triton-lang/triton/issues/1846
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # argmax_topk — numerics & parity

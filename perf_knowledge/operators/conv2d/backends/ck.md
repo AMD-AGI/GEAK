@@ -13,6 +13,13 @@ sources:
   - https://github.com/ROCm/composable_kernel
   - https://docs.nvidia.com/cutlass/latest/media/docs/cpp/implicit_gemm_convolution.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, lds_bank]
 ---
 
 # conv2d × Composable Kernel

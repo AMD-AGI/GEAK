@@ -10,6 +10,11 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/lds-bank-conflict/README.html
   - https://rocm.docs.amd.com/projects/composable_kernel/en/latest/conceptual/ck_tile/hardware/lds_bank_conflicts.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+bound_type: [hbm_bw, lds_bank]
 ---
 
 # transpose  (`B[j,i] = A[i,j]`)

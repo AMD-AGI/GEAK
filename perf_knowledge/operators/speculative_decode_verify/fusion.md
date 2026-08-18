@@ -9,6 +9,12 @@ updated: 2026-06-08
 sources:
   - https://rocm.blogs.amd.com/artificial-intelligence/ssd_mi300x/README.html
   - https://docs.vllm.ai/en/latest/features/speculative_decoding/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.spec_decode
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # speculative_decode_verify — fusion

@@ -3,6 +3,8 @@ title: The ROCm kernel ecosystem for LLM inference (beyond aiter/sglang/vllm)
 kind: reference
 updated: 2026-06-09
 note: migrated from perf_knowledge v1 (02_libraries/rocm_ecosystem.md)
+layer: reference
+lifecycle: active
 ---
 
 # The ROCm Kernel Ecosystem for LLM Inference on MI300X (gfx942)

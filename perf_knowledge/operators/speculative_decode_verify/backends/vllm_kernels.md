@@ -13,6 +13,13 @@ sources:
   - https://rocm.blogs.amd.com/artificial-intelligence/spec_decode_mi300x/README.html
   - https://www.amd.com/en/developer/resources/technical-articles/vllm-x-amd-highly-efficient-llm-inference-on-amd-instinct-mi300x-gpus.html
   - https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.spec_decode
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # speculative_decode_verify × vLLM kernels

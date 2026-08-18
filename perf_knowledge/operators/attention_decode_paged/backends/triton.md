@@ -13,6 +13,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/unified_attention.py
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.decode_paged
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # attention_decode_paged × Triton

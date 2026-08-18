@@ -10,6 +10,13 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://developer.nvidia.com/blog/cuda-pro-tip-increase-performance-with-vectorized-memory-access/
   - https://github.com/ROCm/ROCm/issues/341
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # elementwise — tuning

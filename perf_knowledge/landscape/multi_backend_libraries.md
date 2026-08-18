@@ -29,6 +29,8 @@ sources:
   - https://github.com/huggingface/kernels
   - https://huggingface.co/docs/kernels/index
   - https://unsloth.ai/docs/blog/unleash-the-power-of-amd-official-support-for-unsloth-is-here
+layer: reference
+lifecycle: active
 ---
 
 # Multi-backend kernel libraries & dispatchers

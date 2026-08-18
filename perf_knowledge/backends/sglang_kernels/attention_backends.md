@@ -12,6 +12,12 @@ sources:
   - https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/attention_registry.py
   - https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/attention_backend.md
   - https://docs.sglang.io/platforms/amd_gpu.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.decode_paged
+lifecycle: active
+cost: L0
+levers: [env.flag, backend.swap]
 ---
 
 # SGLang attention backends (ROCm)

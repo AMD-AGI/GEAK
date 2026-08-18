@@ -12,6 +12,13 @@ sources:
   - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [mfma_compute, launch_overhead]
 ---
 
 # attention_prefill_fmha — tuning

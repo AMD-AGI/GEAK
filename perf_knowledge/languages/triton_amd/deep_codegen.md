@@ -10,6 +10,10 @@ sources:
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://medium.com/@nzhangnju/a-deep-dive-into-amd-triton-compilation-912d96e68e45
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # Triton on AMD — codegen deep dive

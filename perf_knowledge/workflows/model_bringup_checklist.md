@@ -11,6 +11,11 @@ sources:
   - https://rocm.blogs.amd.com/artificial-intelligence/scaling-ai-inference/README.html
   - https://github.com/vllm-project/vllm/issues/36337
   - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L0
+levers: [env.flag]
 ---
 
 # Model bring-up checklist (MI300X / MI350X)

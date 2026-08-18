@@ -11,6 +11,12 @@ updated: 2026-06-05
 sources:
   - https://github.com/ROCm/aiter
   - https://arxiv.org/abs/2301.03598
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.splitk_streamk
+lifecycle: candidate
+cost: L3
+bound_type: [mfma_compute, occupancy]
 ---
 
 # splitk_streamk_gemm × asm

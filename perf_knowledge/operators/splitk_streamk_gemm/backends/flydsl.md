@@ -13,6 +13,12 @@ sources:
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/splitk_hgemm.py
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/test_flydsl_splitk_hgemm.py
   - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.splitk_streamk
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, occupancy]
 ---
 
 # splitk_streamk_gemm × FlyDSL

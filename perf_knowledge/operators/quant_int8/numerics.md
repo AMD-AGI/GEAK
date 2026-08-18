@@ -10,6 +10,11 @@ sources:
   - vllm-project/vllm@HEAD:csrc/quantization/compressed_tensors/int8_quant_kernels.cu
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/quant.py
   - https://arxiv.org/abs/2211.10438
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # quant_int8 — numerics

@@ -11,6 +11,11 @@ sources:
   - https://flashinfer.ai/2025/03/10/sampling.html
   - https://github.com/vllm-project/vllm/blob/main/vllm/v1/sample/ops/topk_topp_sampler.py
   - https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/sampler.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # sampling_topk_topp — numerics

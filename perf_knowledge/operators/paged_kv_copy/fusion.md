@@ -10,6 +10,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/fused_qk_norm_rope_cache_quant.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/cache.py
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: candidate
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # paged_kv_copy — fusion

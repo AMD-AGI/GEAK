@@ -11,6 +11,12 @@ updated: 2026-06-08
 sources:
   - https://github.com/vllm-project/vllm/blob/main/csrc/activation.cu
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # act_and_mul_silu_gelu × hip

@@ -10,6 +10,11 @@ sources:
   - https://github.com/triton-lang/triton/issues/2359
   - https://github.com/triton-lang/triton/issues/3017
   - https://triton-lang.org/main/python-api/generated/triton.language.cumsum.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # cumsum_scan — numerics & parity

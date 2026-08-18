@@ -12,6 +12,12 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/gated_rmsnorm_fp8_group_quant.py
   - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # fused_norm_quant × hip

@@ -12,6 +12,12 @@ sources:
   - https://github.com/pytorch/pytorch/pull/143286
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, sync]
 ---
 
 # embedding × triton

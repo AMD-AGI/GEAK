@@ -10,6 +10,11 @@ sources:
   - https://github.com/pytorch/pytorch/tree/main/aten/src/ATen/cuda/tunable
   - https://rocm.blogs.amd.com/artificial-intelligence/pytorch-tunableop/README.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune, env.flag]
 ---
 
 # PyTorch TunableOp

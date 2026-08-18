@@ -12,6 +12,12 @@ sources:
   - ROCm/aiter@a6bb4993:aiter/ops/triton/normalization/rmsnorm.py
   - ROCm/aiter@a6bb4993:aiter/ops/triton/_triton_kernels/normalization/rmsnorm.py
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # rmsnorm × triton

@@ -10,6 +10,11 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
   - https://blog.vllm.ai/2025/02/24/ptpc-fp8-rocm.html
   - https://rocm.blogs.amd.com/software-tools-optimization/optimizing-with-composable-kernel.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.epilogue_fused
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # gemm_epilogue_fused — numerics

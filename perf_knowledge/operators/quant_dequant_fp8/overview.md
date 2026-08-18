@@ -11,6 +11,11 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/quant_kernels.cu
   - vllm-project/vllm@HEAD:csrc/quantization/fp8/common.cu
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # quant_dequant_fp8  (`x_fp8 = round(x / s)`, `x ≈ x_fp8 · s`)

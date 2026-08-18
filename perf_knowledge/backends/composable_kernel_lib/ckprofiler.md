@@ -10,6 +10,11 @@ updated: 2026-06-05
 sources:
   - https://github.com/ROCm/composable_kernel/blob/develop/profiler/README.md
   - https://rocm.blogs.amd.com/software-tools-optimization/building-efficient-gemm-kernels-with-ck-tile-vendo/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
 ---
 
 # ckProfiler

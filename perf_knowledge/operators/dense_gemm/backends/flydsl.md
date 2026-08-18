@@ -12,6 +12,12 @@ sources:
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/gemm_kernels.py
   - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
   - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute]
 ---
 
 # dense_gemm × FlyDSL

@@ -11,6 +11,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/_triton_kernels/gated_delta_rule/prefill/causal_conv1d_fwd_split_qkv.py
   - https://www.alibabacloud.com/blog/602580
   - https://github.com/Dao-AILab/causal-conv1d
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # causal_conv1d — fusion

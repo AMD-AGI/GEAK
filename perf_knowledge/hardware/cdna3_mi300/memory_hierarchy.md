@@ -9,6 +9,10 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-3-white-paper.pdf
   - https://chipsandcheese.com/p/testing-amds-giant-mi300x
+layer: reference
+platforms: [gfx942]
+lifecycle: active
+bound_type: [hbm_bw, lds_bank]
 ---
 
 # CDNA3 / MI300X (gfx942) — memory hierarchy & load/store

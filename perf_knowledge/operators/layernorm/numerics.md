@@ -10,6 +10,11 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/triton/normalization/norm.py
   - https://github.com/vllm-project/vllm/issues/42325
   - https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # layernorm — numerics & parity

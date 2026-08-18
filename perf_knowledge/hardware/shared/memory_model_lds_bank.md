@@ -10,6 +10,10 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://github.com/llvm/llvm-project/pull/116309
   - https://chipsandcheese.com/p/amds-cdna-4-architecture-announcement
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+lifecycle: active
+bound_type: [lds_bank]
 ---
 
 # LDS (Local Data Share) memory model & bank conflicts

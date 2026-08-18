@@ -14,6 +14,13 @@ sources:
   - ROCm/aiter@a6bb4993:aiter/ops/gemm_op_a4w4.py
   - ROCm/aiter@a6bb4993:aiter/jit/core.py
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.scaled_quant
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # scaled_quant_gemm × aiter

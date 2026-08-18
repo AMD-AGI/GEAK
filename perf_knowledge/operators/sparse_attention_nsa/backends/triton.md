@@ -13,6 +13,12 @@ sources:
   - https://arxiv.org/html/2508.18224v1
   - https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.sparse
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, l2_locality]
 ---
 
 # sparse_attention_nsa × Triton

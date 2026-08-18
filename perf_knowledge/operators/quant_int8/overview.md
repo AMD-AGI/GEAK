@@ -11,6 +11,11 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/quant.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/include/smoothquant.h
   - https://arxiv.org/abs/2211.10438
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+bound_type: [hbm_bw]
 ---
 
 # quant_int8  (`x_i8 = round(x / s) [+ zp]`, SmoothQuant W8A8)

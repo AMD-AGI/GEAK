@@ -12,6 +12,12 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/lds-bank-conflict/README.html
   - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, lds_bank]
 ---
 
 # transpose × HIP

@@ -12,6 +12,12 @@ sources:
   - vllm-project/vllm@HEAD:csrc/cache_kernels.cu
   - vllm-project/vllm@HEAD:csrc/quantization/fp8/amd/quant_utils.cuh
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw]
 ---
 
 # kv_cache_quant × hip

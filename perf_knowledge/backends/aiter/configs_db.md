@@ -10,6 +10,11 @@ updated: 2026-06-05
 sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/configs/
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/jit/core.py
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L1
+levers: [tile.autotune-db, config.per-shape-tune]
 ---
 
 # aiter configs DB

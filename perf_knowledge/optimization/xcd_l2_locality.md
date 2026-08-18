@@ -9,6 +9,12 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-3-white-paper.pdf
   - https://hc2024.hotchips.org/assets/program/conference/day1/23_HC2024.AMD.MI300X.ASmith(MI300X).v1.Final.20240817.pdf
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
+levers: [layout.xcd-l2, layout.swizzle]
+bound_type: [l2_locality]
 ---
 
 # XCD / L2 locality

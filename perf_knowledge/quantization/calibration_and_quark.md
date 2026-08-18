@@ -11,6 +11,12 @@ sources:
   - https://rocm.docs.amd.com/projects/ai-developer-hub/en/latest/notebooks/gpu_dev_optimize/fp8_quantization_quark_vllm.html
   - https://rocm.blogs.amd.com/artificial-intelligence/quark/README.html
   - https://arxiv.org/pdf/2211.10438
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [dtype.downcast]
+risk: numerics-affecting
 ---
 
 # Calibration & AMD Quark

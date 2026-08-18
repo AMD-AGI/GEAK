@@ -11,6 +11,11 @@ sources:
   - https://github.com/Dao-AILab/flash-attention
   - https://arxiv.org/abs/2305.13245
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.gqa_mqa
+lifecycle: active
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # gqa_mqa_attention  (grouped-query / multi-query attention)

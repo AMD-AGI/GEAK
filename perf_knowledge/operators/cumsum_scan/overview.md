@@ -11,6 +11,11 @@ sources:
   - https://triton-lang.org/main/python-api/generated/triton.language.cumsum.html
   - https://moderngpu.github.io/scan.html
   - https://srush.github.io/annotated-mamba/hard.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # cumsum_scan  (`out[i] = ⊕_{j≤i} x[j]` — prefix sum / scan)

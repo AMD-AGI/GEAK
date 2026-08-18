@@ -10,6 +10,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/fused_qk_norm_rope_cache_quant.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/fused_qk_norm_mrope_cache_quant.py
   - vllm-project/vllm@HEAD:csrc/cache_kernels.cu
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [hbm_bw]
 ---
 
 # kv_cache_quant — fusion

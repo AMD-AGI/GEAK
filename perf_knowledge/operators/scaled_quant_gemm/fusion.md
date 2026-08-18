@@ -9,6 +9,12 @@ updated: 2026-06-05
 sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.scaled_quant
+lifecycle: candidate
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # scaled_quant_gemm — fusion

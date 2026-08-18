@@ -10,6 +10,11 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/moe_sorting.py
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+bound_type: [hbm_bw, mfma_compute]
 ---
 
 # gather_scatter  (`out[i] = in[idx[i]]` / `out[idx[i]] += in[i]`)

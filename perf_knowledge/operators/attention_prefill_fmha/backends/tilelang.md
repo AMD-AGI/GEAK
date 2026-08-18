@@ -12,6 +12,12 @@ sources:
   - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
   - https://github.com/tile-ai/tilelang
   - https://arxiv.org/abs/2511.08083
+layer: reference
+platforms: [gfx90a, gfx942]
+kernel_class: attn.prefill
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, launch_overhead]
 ---
 
 # attention_prefill_fmha × TileLang

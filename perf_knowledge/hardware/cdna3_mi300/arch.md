@@ -9,6 +9,10 @@ sources:
   - https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi300.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-3-white-paper.pdf
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/data-sheets/amd-instinct-mi300x-data-sheet.pdf
+layer: reference
+platforms: [gfx942]
+lifecycle: active
+bound_type: [occupancy, l2_locality]
 ---
 
 # CDNA3 / MI300X (gfx942) — architecture overview

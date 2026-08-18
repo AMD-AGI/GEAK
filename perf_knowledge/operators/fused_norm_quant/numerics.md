@@ -10,6 +10,11 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/gated_rmsnorm_fp8_group_quant.py
   - /sgl-workspace/aiter/aiter/ops/triton/normalization/rmsnorm.py
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # fused_norm_quant — numerics & parity

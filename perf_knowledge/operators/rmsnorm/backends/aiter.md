@@ -16,6 +16,13 @@ sources:
   - https://blog.vllm.ai/2025/02/24/ptpc-fp8-rocm.html
   - https://docs.vllm.ai/en/latest/design/fusions/
   - https://github.com/ROCm/aiter/releases
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # rmsnorm × aiter

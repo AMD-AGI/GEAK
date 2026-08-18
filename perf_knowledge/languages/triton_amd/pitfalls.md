@@ -10,6 +10,10 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
   - https://github.com/sgl-project/sglang/pull/2601
   - https://arxiv.org/abs/2511.08083
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # Triton on AMD — pitfalls

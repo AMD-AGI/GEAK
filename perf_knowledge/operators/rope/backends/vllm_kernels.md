@@ -12,6 +12,13 @@ sources:
   - https://github.com/vllm-project/vllm/blob/main/csrc/pos_encoding.cu
   - https://github.com/vllm-project/vllm/pull/16457
   - https://docs.vllm.ai/en/stable/api/vllm/model_executor/layers/rotary_embedding.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: positional
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # rope × vllm_kernels

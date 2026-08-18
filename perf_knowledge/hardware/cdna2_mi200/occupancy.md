@@ -9,6 +9,10 @@ sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna2-white-paper.pdf
   - https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi250.html
+layer: reference
+platforms: [gfx90a]
+lifecycle: active
+bound_type: [occupancy]
 ---
 
 # CDNA2 / MI250X / MI210 (gfx90a) — occupancy math

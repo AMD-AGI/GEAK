@@ -9,6 +9,11 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
+layer: reference
+platforms: [gfx950]
+lifecycle: active
+risk: numerics-affecting
+bound_type: [mfma_compute]
 ---
 
 # CDNA4 / MI350 (gfx950) — FP4 / FP6 / MXFP microscaling

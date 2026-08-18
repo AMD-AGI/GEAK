@@ -12,6 +12,13 @@ sources:
   - ROCm/aiter@HEAD:aiter/tuned_gemm.py
   - ROCm/aiter@HEAD:gradlib/gradlib/gemm_tuner.py
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.batched
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, occupancy]
 ---
 
 # batched_gemm × aiter

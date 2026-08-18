@@ -8,6 +8,11 @@ regimes: [both]
 updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # transpose — numerics

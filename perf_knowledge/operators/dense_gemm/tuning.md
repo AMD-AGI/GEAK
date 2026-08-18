@@ -14,6 +14,13 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/4wave-fp8gemm/README.html
   - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
   - https://arxiv.org/abs/2511.08083
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [mfma_compute]
 ---
 
 # dense_gemm — tuning

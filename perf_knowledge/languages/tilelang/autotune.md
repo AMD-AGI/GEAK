@@ -9,6 +9,10 @@ updated: 2026-06-08
 sources:
   - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
   - https://github.com/tile-ai/tilelang
+layer: reference
+platforms: [gfx90a, gfx942]
+lifecycle: active
+cost: L3
 ---
 
 # TileLang autotuning

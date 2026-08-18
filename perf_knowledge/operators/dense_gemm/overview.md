@@ -10,6 +10,11 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - ROCm/aiter@HEAD:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+bound_type: [mfma_compute]
 ---
 
 # dense_gemm  (`C = A · Bᵀ [+ bias] [+ act]`)

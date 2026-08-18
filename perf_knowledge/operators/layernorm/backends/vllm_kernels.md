@@ -11,6 +11,13 @@ updated: 2026-06-08
 sources:
   - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
   - https://github.com/vllm-project/vllm/blob/main/csrc/torch_bindings.cpp
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # layernorm × vllm_kernels

@@ -11,6 +11,12 @@ updated: 2026-06-09
 sources:
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/silu_and_mul_fq.py
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/moe_kernels.py
+layer: reference
+platforms: [gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # act_and_mul_silu_gelu × FlyDSL (silu_and_mul_fq)

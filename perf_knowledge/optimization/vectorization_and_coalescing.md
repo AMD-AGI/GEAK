@@ -9,6 +9,12 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
   - https://gpuopen.com/learn/optimizing-gpu-occupancy-resource-usage-large-thread-groups/
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
+levers: [vectorize.coalesce]
+bound_type: [hbm_bw]
 ---
 
 # vectorization and coalescing

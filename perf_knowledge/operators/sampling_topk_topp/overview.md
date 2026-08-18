@@ -11,6 +11,11 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/cpp_itfs/sampling/sampling.cuh
   - https://github.com/vllm-project/vllm/blob/main/vllm/v1/sample/ops/topk_topp_sampler.py
   - https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/sampler.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # sampling_topk_topp  (logits → temperature → softmax → top-k/top-p/min-p → token)

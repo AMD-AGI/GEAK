@@ -11,6 +11,12 @@ updated: 2026-06-05
 sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://arxiv.org/abs/2301.03598
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.splitk_streamk
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, occupancy]
 ---
 
 # splitk_streamk_gemm × hip

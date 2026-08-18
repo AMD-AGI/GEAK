@@ -10,6 +10,12 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/ck-tile-flash/README.html
   - https://github.com/ROCm/aiter
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [mfma_compute, launch_overhead]
 ---
 
 # attention_prefill_fmha — fusion

@@ -11,6 +11,11 @@ sources:
   - https://arxiv.org/html/2511.10909v1
   - vllm-project/vllm@HEAD:csrc/quantization/fp8/common.cu
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/quant.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # quant_dequant_fp8 — numerics

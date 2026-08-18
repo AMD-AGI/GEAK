@@ -12,6 +12,12 @@ sources:
   - https://arxiv.org/abs/2108.12409
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
   - https://github.com/vllm-project/vllm/blob/main/csrc/rocm/attention.cu
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: positional
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # alibi × triton

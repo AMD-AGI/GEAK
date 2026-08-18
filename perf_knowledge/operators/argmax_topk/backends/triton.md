@@ -13,6 +13,12 @@ sources:
   - https://triton-lang.org/main/python-api/generated/triton.language.max.html
   - https://github.com/triton-lang/triton/issues/6635
   - https://github.com/openai/triton/issues/802
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # argmax_topk × triton

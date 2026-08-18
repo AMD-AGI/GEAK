@@ -12,6 +12,12 @@ sources:
   - https://github.com/sgl-project/sglang/issues/22223
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # context_parallel_attention × Triton

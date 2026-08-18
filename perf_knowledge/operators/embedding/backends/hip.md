@@ -12,6 +12,12 @@ sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/vocab_parallel_embedding.py
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, sync]
 ---
 
 # embedding × hip

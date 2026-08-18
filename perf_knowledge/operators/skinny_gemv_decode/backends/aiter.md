@@ -13,6 +13,13 @@ sources:
   - ROCm/aiter@a6bb4993:csrc/kernels/custom_kernels.cu
   - https://github.com/ROCm/aiter
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.skinny_decode
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw]
 ---
 
 # skinny_gemv_decode × aiter

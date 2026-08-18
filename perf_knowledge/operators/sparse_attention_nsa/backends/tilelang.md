@@ -13,6 +13,12 @@ sources:
   - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
   - ROCm/composable_kernel:example/ck_tile/50_sparse_attn
   - https://arxiv.org/abs/2511.08083
+layer: reference
+platforms: [gfx90a, gfx942]
+kernel_class: attn.sparse
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, l2_locality]
 ---
 
 # sparse_attention_nsa × TileLang

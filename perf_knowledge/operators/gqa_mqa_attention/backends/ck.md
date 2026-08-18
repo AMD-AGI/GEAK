@@ -12,6 +12,13 @@ sources:
   - https://github.com/ROCm/composable_kernel/tree/develop/example/ck_tile/01_fmha
   - https://rocm.blogs.amd.com/software-tools-optimization/ck-tile-flash/README.html
   - https://github.com/Dao-AILab/flash-attention
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.gqa_mqa
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # gqa_mqa_attention × CK

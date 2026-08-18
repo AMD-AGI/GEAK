@@ -12,6 +12,12 @@ sources:
   - https://github.com/fla-org/flash-linear-attention
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.linear
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # linear_attention_gated_delta × HIP/C++

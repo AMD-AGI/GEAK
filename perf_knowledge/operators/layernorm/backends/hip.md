@@ -12,6 +12,12 @@ sources:
   - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
   - https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # layernorm × hip

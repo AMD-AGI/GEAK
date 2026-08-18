@@ -10,6 +10,13 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/lds-bank-conflict/README.html
   - https://rocm.docs.amd.com/projects/composable_kernel/en/latest/conceptual/ck_tile/hardware/lds_bank_conflicts.html
   - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw, lds_bank]
 ---
 
 # transpose — tuning

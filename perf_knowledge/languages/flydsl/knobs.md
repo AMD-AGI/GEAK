@@ -10,6 +10,10 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/flydsl/gemm_kernels.py
   - /opt/venv/lib/python3.10/site-packages/flydsl/autotune.py
   - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/splitk_hgemm.py
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # FlyDSL — knobs

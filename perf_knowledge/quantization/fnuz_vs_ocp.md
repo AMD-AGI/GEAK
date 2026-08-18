@@ -11,6 +11,10 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/
   - https://github.com/ROCm/AMDMIGraphX/issues/2717
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # FNUZ vs OCP FP8 — the dialect split that bites

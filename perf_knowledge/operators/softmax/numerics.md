@@ -9,6 +9,11 @@ updated: 2026-06-08
 sources:
   - /sgl-workspace/aiter/aiter/ops/triton/_triton_kernels/softmax.py
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: candidate
+risk: numerics-affecting
 ---
 
 # softmax — numerics & parity

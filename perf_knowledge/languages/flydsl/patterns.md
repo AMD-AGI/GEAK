@@ -10,6 +10,10 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/flydsl/gemm_kernels.py
   - /sgl-workspace/aiter/aiter/tuned_gemm.py
   - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # FlyDSL — usage patterns

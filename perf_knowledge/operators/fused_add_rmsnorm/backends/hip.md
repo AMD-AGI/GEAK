@@ -12,6 +12,12 @@ sources:
   - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
   - https://github.com/vllm-project/vllm/pull/22602
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # fused_add_rmsnorm × hip

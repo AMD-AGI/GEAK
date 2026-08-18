@@ -10,6 +10,11 @@ sources:
   - https://docs.vllm.ai/en/latest/design/fusions/
   - https://github.com/vllm-project/vllm/issues/26768
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/comms/fused/reduce_scatter_rmsnorm_quant_all_gather.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: collective
+lifecycle: active
+bound_type: [sync, hbm_bw]
 ---
 
 # fused_allreduce_rmsnorm  (comm + norm overlap/fusion)

@@ -9,6 +9,10 @@ sources:
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/data-sheets/amd-instinct-mi300x-data-sheet.pdf
   - https://chipsandcheese.com/p/testing-amds-giant-mi300x
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+lifecycle: active
+bound_type: [hbm_bw, sync]
 ---
 
 # HBM, Infinity Fabric & Infinity Cache

@@ -10,6 +10,11 @@ sources:
   - https://github.com/Dao-AILab/flash-attention
   - https://github.com/ROCm/aiter
   - https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # FlashAttention-ROCm — Triton backend

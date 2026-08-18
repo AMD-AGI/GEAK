@@ -12,6 +12,13 @@ sources:
   - https://github.com/sgl-project/sglang/issues/18466
   - /sgl-workspace/aiter/aiter/ops/rmsnorm.py
   - /sgl-workspace/aiter/aiter/ops/gated_rmsnorm_fp8_group_quant.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L3
+levers: [fusion.norm-quant]
+bound_type: [hbm_bw]
 ---
 
 # RMSNorm + fp8 dynamic-quant fusion

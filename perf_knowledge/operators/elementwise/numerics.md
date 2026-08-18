@@ -10,6 +10,11 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://pytorch.org/docs/stable/generated/torch.clamp.html
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # elementwise — numerics & parity

@@ -10,6 +10,11 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/activation.py
   - /sgl-workspace/aiter/aiter/ops/triton/activation.py
   - https://github.com/vllm-project/vllm/blob/main/csrc/activation.cu
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # act_and_mul_silu_gelu  (`y = act(x[:d]) · x[d:]`, the gated MLP/MoE activation)

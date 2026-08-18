@@ -11,6 +11,11 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/model-quantization.html
   - https://docs.vllm.ai/en/stable/features/quantization/quark/
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+levers: [dtype.downcast]
+risk: numerics-affecting
 ---
 
 # Scaling strategies

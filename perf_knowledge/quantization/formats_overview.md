@@ -11,6 +11,10 @@ sources:
   - https://arxiv.org/pdf/2310.10537
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/fp8_numbers.html
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx906, gfx90a, gfx942, gfx950]
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # Quantization formats overview

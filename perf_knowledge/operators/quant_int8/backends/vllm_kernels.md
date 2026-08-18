@@ -11,6 +11,13 @@ updated: 2026-06-08
 sources:
   - vllm-project/vllm@HEAD:csrc/quantization/compressed_tensors/int8_quant_kernels.cu
   - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw]
 ---
 
 # quant_int8 × vllm_kernels

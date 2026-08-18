@@ -3,6 +3,11 @@ title: DeepSeek V3 / V3.2 / V4 attention on MI300X — bring-up & sparse-MLA cas
 kind: case_study
 updated: 2026-06-09
 note: migrated from perf_knowledge v1; cross-refs repointed to perf_knowledge operator dirs
+layer: reference
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, mfma_compute]
 ---
 
 # DeepSeek-V3 / V3.2 / V4 Attention at Scale on AMD MI300X (CDNA3 / gfx942)

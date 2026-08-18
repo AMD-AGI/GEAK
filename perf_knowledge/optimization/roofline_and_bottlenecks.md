@@ -9,7 +9,19 @@ sources:
   - https://rocm.github.io/rocprofiler-compute/performance_model.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: method
+bound_type: [hbm_bw, mfma_compute, l2_locality, launch_overhead]
+lifecycle: active
+supersedes_numbers_by: e2e_workflow/knowledge/analysis_skills/roofline/
 ---
+
+> **Theory card.** The executable roofline home is
+> `e2e_workflow/knowledge/analysis_skills/roofline/` (`SKILL.md` + `roofline_tools.py` + `peaks.md`).
+> That skill owns all hardware denominators and the `bound_type` verdict; this card explains the
+> *concepts* only and intentionally quotes **no peak numbers**. Once you have a `bound_type` from the
+> skill, route it into `kb_resolve.py --bound <bound_type>` for cost-ordered candidate levers.
 
 # roofline and bottleneck classification
 

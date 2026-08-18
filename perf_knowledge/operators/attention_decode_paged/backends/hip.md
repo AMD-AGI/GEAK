@@ -12,6 +12,12 @@ sources:
   - https://github.com/vllm-project/vllm/tree/main/csrc/rocm
   - https://github.com/vllm-project/vllm/blob/main/csrc/rocm/torch_bindings.cpp
   - https://github.com/vllm-project/vllm/blob/main/vllm/platforms/rocm.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.decode_paged
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # attention_decode_paged × HIP (vLLM custom paged-attn)

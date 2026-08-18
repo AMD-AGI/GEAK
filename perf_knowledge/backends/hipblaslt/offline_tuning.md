@@ -10,6 +10,11 @@ updated: 2026-06-05
 sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/hipblaslt-offline-tuning-part2/README.html
   - https://rocm.docs.amd.com/projects/hipBLASLt/en/develop/how-to/how-to-use-hipblaslt-offline-tuning.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune, tile.autotune-db]
 ---
 
 # hipBLASLt offline tuning

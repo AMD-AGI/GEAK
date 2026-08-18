@@ -11,6 +11,11 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/topk_softmax_kernels_group.cu
   - https://github.com/vllm-project/vllm/pull/17955
   - https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.routing
+lifecycle: active
+bound_type: [launch_overhead, hbm_bw]
 ---
 
 # moe_routing_topk  (router gating → top-k expert select → expert histogram/sort)

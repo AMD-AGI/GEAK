@@ -16,6 +16,13 @@ sources:
   - https://github.com/vllm-project/vllm/pull/19744
   - https://rocm.blogs.amd.com/software-tools-optimization/rocm7.2/README.html
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/comms/fused/reduce_scatter_rmsnorm_quant_all_gather.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: collective
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [sync, hbm_bw]
 ---
 
 # allreduce × RCCL / MSCCL++

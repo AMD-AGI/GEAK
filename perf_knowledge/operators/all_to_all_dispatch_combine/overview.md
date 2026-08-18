@@ -11,6 +11,11 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
   - https://gau-nernst.github.io/amd-a2a/
   - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # all_to_all_dispatch_combine  (EP token routing)

@@ -12,6 +12,12 @@ sources:
   - https://gau-nernst.github.io/amd-a2a/
   - https://github.com/ROCm/mori
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/moe_sorting.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.dispatch
+lifecycle: active
+cost: L3
+bound_type: [sync, hbm_bw]
 ---
 
 # moe_dispatch_combine × HIP/C++

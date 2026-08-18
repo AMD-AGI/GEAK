@@ -11,6 +11,10 @@ sources:
   - https://github.com/tile-ai/tilelang
   - https://arxiv.org/abs/2504.17577
   - https://arxiv.org/abs/2511.08083
+layer: reference
+platforms: [gfx90a, gfx942]
+lifecycle: active
+cost: L3
 ---
 
 # TileLang overview

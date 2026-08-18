@@ -9,6 +9,13 @@ updated: 2026-06-05
 sources:
   - https://github.com/ROCm/aiter
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.skinny_decode
+lifecycle: candidate
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw]
 ---
 
 # skinny_gemv_decode — tuning

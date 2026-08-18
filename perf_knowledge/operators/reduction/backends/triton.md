@@ -12,6 +12,12 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
   - https://triton-lang.org/main/python-api/triton.language.html
   - https://github.com/triton-lang/triton/issues/3017
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # reduction × triton

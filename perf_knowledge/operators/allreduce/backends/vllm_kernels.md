@@ -11,6 +11,13 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
   - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: collective
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [sync, hbm_bw]
 ---
 
 # allreduce × vllm_kernels (Quick Reduce + AITER custom AR)

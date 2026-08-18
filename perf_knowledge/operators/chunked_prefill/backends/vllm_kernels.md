@@ -12,6 +12,13 @@ sources:
   - https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/triton_attn.py
   - https://github.com/vllm-project/vllm/blob/main/vllm/platforms/rocm.py
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, launch_overhead]
 ---
 
 # chunked_prefill × vllm_kernels

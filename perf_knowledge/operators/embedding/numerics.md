@@ -8,6 +8,11 @@ regimes: [both]
 updated: 2026-06-08
 sources:
   - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/vocab_parallel_embedding.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # embedding — numerics

@@ -12,6 +12,12 @@ sources:
   - https://github.com/ROCm/DeepEP
   - https://github.com/uccl-project/uccl
   - https://arxiv.org/html/2512.19849v1
+layer: reference
+platforms: [gfx942]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [sync]
 ---
 
 # DeepEP on AMD (ROCm port) + UCCL-EP

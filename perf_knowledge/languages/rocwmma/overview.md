@@ -10,6 +10,10 @@ sources:
   - https://rocm.docs.amd.com/projects/rocWMMA/en/develop/api-reference/api-reference-guide.html
   - ROCm/rocWMMA@develop:samples/simple_hgemm.cpp
   - https://gpuopen.com/learn/wmma_on_rdna3/
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # rocWMMA

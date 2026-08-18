@@ -7,7 +7,19 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/how-to/profile/mode.html
   - https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi300.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: method
+bound_type: [hbm_bw, mfma_compute, l2_locality]
+lifecycle: active
+supersedes_numbers_by: e2e_workflow/knowledge/analysis_skills/roofline/
 ---
+
+> **Theory card.** The executable roofline home is
+> `e2e_workflow/knowledge/analysis_skills/roofline/` (`SKILL.md` + `roofline_tools.py` + `peaks.md`) —
+> it owns every hardware peak and the `bound_type` verdict. This card explains *how to read/build* a
+> roofline and quotes **no denominators of its own**. Feed the skill's `bound_type` to
+> `kb_resolve.py --bound <bound_type>` to get the cost-ordered lever candidates for that bottleneck.
 
 # Roofline on MI300X / MI350X
 

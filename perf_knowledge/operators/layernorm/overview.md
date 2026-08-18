@@ -11,6 +11,11 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/norm.py
   - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
   - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # layernorm  (`y = (x − μ)/√(σ² + ε) · γ + β`)

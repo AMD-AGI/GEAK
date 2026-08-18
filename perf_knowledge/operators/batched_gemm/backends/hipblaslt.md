@@ -12,6 +12,13 @@ sources:
   - https://github.com/ROCm/hipBLASLt
   - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.batched
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, occupancy]
 ---
 
 # batched_gemm × hipblaslt

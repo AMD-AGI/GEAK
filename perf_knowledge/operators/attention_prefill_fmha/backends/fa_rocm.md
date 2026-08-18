@@ -12,6 +12,13 @@ sources:
   - https://github.com/Dao-AILab/flash-attention
   - https://github.com/ROCm/flash-attention
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, launch_overhead]
 ---
 
 # attention_prefill_fmha × flash_attention_rocm (`fa_rocm`)

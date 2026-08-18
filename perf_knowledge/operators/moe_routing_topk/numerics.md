@@ -10,6 +10,11 @@ sources:
   - https://github.com/ROCm/aiter/issues/2153
   - https://github.com/vllm-project/vllm/pull/17955
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/topk_softmax_kernels_group.cu
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.routing
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # moe_routing_topk — numerics & parity

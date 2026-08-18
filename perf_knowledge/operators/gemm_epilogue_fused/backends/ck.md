@@ -12,6 +12,13 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
   - https://rocm.blogs.amd.com/software-tools-optimization/ck-int8-gemm-sq/README.html
   - https://github.com/ROCm/composable_kernel
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.epilogue_fused
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # gemm_epilogue_fused × ck

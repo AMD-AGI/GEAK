@@ -11,6 +11,13 @@ updated: 2026-06-08
 sources:
   - /sgl-workspace/aiter/aiter/ops/norm.py
   - /sgl-workspace/aiter/aiter/ops/triton/normalization/norm.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # layernorm × aiter

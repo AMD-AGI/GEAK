@@ -13,6 +13,12 @@ sources:
   - https://rocm.docs.amd.com/projects/ai-developer-hub/en/latest/notebooks/gpu_dev_optimize/triton_kernel_dev.html
   - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
   - https://arxiv.org/html/2511.08083v1
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute]
 ---
 
 # dense_gemm × Triton

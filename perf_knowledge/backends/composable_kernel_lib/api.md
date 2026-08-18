@@ -10,6 +10,11 @@ updated: 2026-06-05
 sources:
   - https://github.com/ROCm/composable_kernel
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # Composable Kernel (consumed as a library)

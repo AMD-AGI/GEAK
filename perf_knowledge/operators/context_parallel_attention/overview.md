@@ -11,6 +11,11 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
   - https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # context_parallel_attention  (ring / all-to-all context parallel)

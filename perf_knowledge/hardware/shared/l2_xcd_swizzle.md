@@ -9,6 +9,10 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.blogs.amd.com/software-tools-optimization/compute-memory-modes/README.html
   - https://chipsandcheese.com/p/testing-amds-giant-mi300x
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+bound_type: [l2_locality]
 ---
 
 # L2 / XCD locality, tile swizzle & coalescing

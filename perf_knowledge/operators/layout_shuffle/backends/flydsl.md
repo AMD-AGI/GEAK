@@ -14,6 +14,12 @@ sources:
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/mfma_preshuffle_pipeline.py
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/gemm_kernels.py
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/__init__.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, l2_locality]
 ---
 
 # layout_shuffle × FlyDSL

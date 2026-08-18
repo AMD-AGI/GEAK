@@ -10,6 +10,11 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/configs/tuned_fmoe.csv
   - https://github.com/ROCm/aiter/issues/2421
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.grouped_moe
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # fused_moe_grouped_gemm — numerics & parity

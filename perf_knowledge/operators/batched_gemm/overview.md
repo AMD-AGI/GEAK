@@ -10,6 +10,11 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
   - ROCm/aiter@HEAD:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: gemm.batched
+lifecycle: active
+bound_type: [mfma_compute, occupancy]
 ---
 
 # batched_gemm  (`C[b] = A[b] · B[b]ᵀ [+ bias]`, b = 1..B)

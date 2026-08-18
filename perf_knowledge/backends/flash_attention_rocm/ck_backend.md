@@ -10,6 +10,11 @@ sources:
   - https://github.com/Dao-AILab/flash-attention
   - https://github.com/ROCm/composable_kernel
   - https://rocm.blogs.amd.com/software-tools-optimization/ck-tile-flash/README.html
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # FlashAttention-ROCm — CK backend

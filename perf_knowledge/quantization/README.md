@@ -10,6 +10,9 @@ sources:
   - https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/model-quantization.html
+layer: reference
+platforms: [gfx906, gfx90a, gfx942, gfx950]
+lifecycle: active
 ---
 
 # quantization/ — the strategy layer

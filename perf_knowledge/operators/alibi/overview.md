@@ -10,6 +10,11 @@ sources:
   - https://arxiv.org/abs/2108.12409
   - https://github.com/vllm-project/vllm/blob/main/csrc/rocm/attention.cu
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: positional
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # alibi  (Attention with Linear Biases — positional bias added to attention scores)

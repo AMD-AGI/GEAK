@@ -9,6 +9,10 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/compute-memory-modes/README.html
   - https://instinct.docs.amd.com/projects/amdgpu-docs/en/latest/gpu-partitioning/mi300x/overview.html
   - https://chipsandcheese.com/p/testing-amds-giant-mi300x
+layer: reference
+platforms: [gfx942]
+lifecycle: active
+bound_type: [l2_locality]
 ---
 
 # CDNA3 / MI300X (gfx942) — XCD chiplets & partitioning

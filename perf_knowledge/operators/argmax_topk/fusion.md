@@ -10,6 +10,12 @@ sources:
   - https://github.com/ROCm/aiter
   - https://github.com/triton-lang/triton/issues/1846
   - https://github.com/pytorch/pytorch/blob/main/torch/_inductor/config.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # argmax_topk — fusion

@@ -9,6 +9,11 @@ status: sota
 updated: 2026-06-05
 sources:
   - https://rocm.docs.amd.com/projects/hipBLASLt/en/develop/reference/env-variables.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L0
+levers: [env.flag]
 ---
 
 # hipBLASLt environment variables

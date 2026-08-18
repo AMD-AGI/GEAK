@@ -13,6 +13,14 @@ sources:
   - test_results/kimi_2.6_20260610/director_e2e_validation.json
   - test_results/kimi_2.6_20260610/kernels/moe_int4_tune/tune_report.md
   - GEAK/e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md
+layer: reference
+platforms: [gfx942]
+kernel_class: gemm.grouped_moe
+lifecycle: active
+cost: L2
+levers: [dtype.downcast, backend.swap]
+risk: numerics-affecting
+bound_type: [hbm_bw]
 ---
 
 # Kimi-K2.6 / vLLM / MI300X — int4 fused-MoE config tune (the reproducible +16%)
@@ -97,5 +105,14 @@ identical 口径**, so the +16% relative win holds even when the absolute baseli
 - Operator tuning: [`../../operators/fused_moe_grouped_gemm/tuning.md`](../../operators/fused_moe_grouped_gemm/tuning.md)
 - Head-kernel routing: [`../../../e2e_workflow/roles/op_benchmarker.md`](../../../e2e_workflow/roles/op_benchmarker.md)
 - Reproduce: recipe [`../../../e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md`](../../../e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md) (driver written into `$EVAL_DIR` at runtime; gated by the e2e Integrator)
+
+## Sources
+Every number on this page is **measured by us**, not vendor-reported — the run below is the whole
+evidence base, so the artifacts are internal paths rather than URLs.
+- e2e A/B (514.55 → 598.98 tok/s, +16.4%), TTFT/TPOT, GSM8K parity: `test_results/kimi_2.6_20260610/RESULTS.md`
+- Independent Director-side verification of that A/B: `test_results/kimi_2.6_20260610/director_e2e_validation.json`
+- Per-M-bucket `fused_experts` micro-sweep (the 1.53–1.59× tile table, parity rel<1e-2): `test_results/kimi_2.6_20260610/kernels/moe_int4_tune/tune_report.md`
+- The shape-generic recipe these numbers reproduce through: [`../../../e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md`](../../../e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md)
+- Model/shape facts (`E=384`, `N=256`, `K=7168`, w4a16 `group_size=32`): moonshotai-Kimi-K2.6 `config.json` at TP=8.
 
 <!-- MANIFEST: Kimi-K2.6 int4 w4a16 MoE on MI300X/vLLM — missing VLLM_TUNED_CONFIG_FOLDER int4 fused-MoE Triton config tuned per-M-bucket (1.53-1.59x prefill) + mnbt → +16.4% e2e, parity-preserved, ZERO extra HBM; fp8-fold rewrite OOMs at memory parity. Generic recipe (knowledge, no shipped scripts): e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md, routed by op_benchmarker + gated by e2e_integrator. -->

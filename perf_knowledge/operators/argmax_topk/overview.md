@@ -11,6 +11,11 @@ sources:
   - https://triton-lang.org/main/python-api/generated/triton.language.max.html
   - https://github.com/triton-lang/triton/issues/6635
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # argmax_topk  (`argmax`/`top-k` along an axis — greedy/sampling decode)

@@ -10,6 +10,13 @@ sources:
   - vllm-project/vllm@HEAD:csrc/quantization/compressed_tensors/int8_quant_kernels.cu
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/py_itfs_ck/smoothquant_kernels.cu
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: quant
+lifecycle: candidate
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw]
 ---
 
 # quant_int8 — tuning

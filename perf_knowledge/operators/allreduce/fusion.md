@@ -10,6 +10,12 @@ sources:
   - https://docs.vllm.ai/en/latest/design/fusions/
   - https://github.com/vllm-project/vllm/issues/26768
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/custom_all_reduce.cu
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: collective
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [sync, hbm_bw]
 ---
 
 # allreduce — fusion

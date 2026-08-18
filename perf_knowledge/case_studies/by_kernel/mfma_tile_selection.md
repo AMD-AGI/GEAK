@@ -12,6 +12,13 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L1
+levers: [tile.static-shape]
+bound_type: [mfma_compute]
 ---
 
 # MFMA tile selection: 16×16 vs 32×32 on MI300X GEMM

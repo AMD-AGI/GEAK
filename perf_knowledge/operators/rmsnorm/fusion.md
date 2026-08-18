@@ -11,6 +11,12 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/fused_qk_norm_rope_cache_quant.py
   - https://github.com/vllm-project/vllm/pull/14959
   - https://github.com/sgl-project/sglang/issues/18466
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+levers: [fusion.norm-quant, fusion.epilogue]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # rmsnorm — fusion

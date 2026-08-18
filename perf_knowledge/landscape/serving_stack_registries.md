@@ -10,6 +10,8 @@ sources:
   - https://nvidia.github.io/TensorRT-LLM/
   - https://docs.nvidia.com/cuda/cublas/
   - https://deepwiki.com/NVIDIA/cudnn-frontend/2.5-heuristics-and-engine-configuration
+layer: reference
+lifecycle: active
 ---
 
 # How production serving stacks organize kernel layers & select a backend per op per HW

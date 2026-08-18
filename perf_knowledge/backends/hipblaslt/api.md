@@ -10,6 +10,11 @@ updated: 2026-06-05
 sources:
   - https://rocm.docs.amd.com/projects/hipBLASLt/en/develop/reference/ext-reference.html
   - https://github.com/ROCm/hipBLASLt
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # hipBLASLt API

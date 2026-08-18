@@ -9,6 +9,10 @@ sources:
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
   - https://llvm.org/docs/AMDGPU/AMDGPUAsmGFX940.html
   - https://rocm.blogs.amd.com/software-tools-optimization/amdgcn-isa/README.html
+layer: reference
+platforms: [gfx942]
+lifecycle: active
+bound_type: [mfma_compute]
 ---
 
 # CDNA3 / MI300X (gfx942) — ISA notes for kernel authors

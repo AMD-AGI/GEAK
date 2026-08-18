@@ -13,6 +13,13 @@ sources:
   - https://rocm.blogs.amd.com/artificial-intelligence/quick-reduce-2/README.html
   - https://github.com/vllm-project/vllm/pull/19744
   - https://rocm.blogs.amd.com/software-tools-optimization/rocm7.2/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: collective
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [sync, hbm_bw]
 ---
 
 # allreduce — tuning

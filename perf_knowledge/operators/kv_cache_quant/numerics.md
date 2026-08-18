@@ -11,6 +11,11 @@ sources:
   - vllm-project/vllm@HEAD:csrc/quantization/fp8/amd/quant_utils.cuh
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # kv_cache_quant — numerics

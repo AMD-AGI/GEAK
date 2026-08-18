@@ -11,6 +11,13 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
   - https://github.com/ROCm/composable_kernel
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.batched
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute, occupancy]
 ---
 
 # batched_gemm × ck

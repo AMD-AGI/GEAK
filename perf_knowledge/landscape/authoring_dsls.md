@@ -17,6 +17,8 @@ sources:
   - https://iree.dev/guides/deployment-configurations/gpu-rocm/
   - https://github.com/NVIDIA/cudnn-frontend
   - https://arxiv.org/abs/2507.23194
+layer: reference
+lifecycle: active
 ---
 
 # Kernel-Authoring DSLs & Codegen Frameworks — Landscape

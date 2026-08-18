@@ -9,6 +9,10 @@ sources:
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
   - https://www.servethehome.com/amd-mi350-and-cdna-4-architecture-launched-with-rocm-7/
   - https://www.guru3d.com/story/amd-instinct-mi350-gpus-with-288gb-hbm3e-and-1400w-tdp-announced/
+layer: reference
+platforms: [gfx950]
+lifecycle: active
+bound_type: [mfma_compute]
 ---
 
 # CDNA4 / MI350X / MI355X (gfx950) — clocks, power & thermals

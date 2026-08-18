@@ -11,6 +11,10 @@ sources:
   - https://github.com/ROCm/aiter
   - /sgl-workspace/aiter/aiter/ops/flydsl/gemm_kernels.py
   - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/splitk_hgemm.py
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # FlyDSL — overview

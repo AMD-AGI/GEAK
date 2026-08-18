@@ -11,6 +11,10 @@ sources:
   - https://arxiv.org/html/2511.10909v1
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/model-quantization.html
   - https://arxiv.org/pdf/2310.10537
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # Accuracy evaluation

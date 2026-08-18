@@ -11,6 +11,10 @@ sources:
   - https://github.com/ROCm/amd_matrix_instruction_calculator
   - https://reviews.llvm.org/D128158
   - https://github.com/llvm/llvm-project/issues/131954
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # HIP — low-level AMDGCN intrinsics

@@ -10,6 +10,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/topk.py
   - https://github.com/vllm-project/vllm/pull/17955
   - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.routing
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [launch_overhead, hbm_bw]
 ---
 
 # moe_routing_topk — fusion

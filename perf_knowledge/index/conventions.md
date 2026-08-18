@@ -19,10 +19,32 @@ sources: [<url-or-repo@commit>, ...]
 ---
 ```
 
+## Structured index frontmatter (additive — plan Part 1.3)
+On top of the block above, the structured index layer (`_gen_index.py` / `kb_resolve.py`) consumes these.
+All are OPTIONAL for authoring — `_backfill_kb.py` auto-derives `platforms`/`kernel_class`/`layer`; a human
+fills `levers`/`cost`/`bound_type` over time (empty = validator *warning*, not error).
+```yaml
+layer: reference | learned | artifact   # auto: reference for perf_knowledge/, learned for learned/ cards
+platforms: [gfx942, gfx950]             # auto-derived from `gens:`; [] = platform-independent
+skus: [mi355x]                          # only when SKUs differ materially (see taxonomy.md)
+kernel_class: gemm.dense                # auto from operator map / learned `key:` line
+levers: [config.per-shape-tune]         # the means this file documents
+cost: L1                                # construction cost of that means (L0<L1<L2<L3)
+risk: parity-safe
+bound_type: [mfma_compute]              # roofline routing key(s)
+# lifecycle three clocks (plan Part 2.1-2.2):
+lifecycle: active                       # candidate | active | stale | archived
+verified_on: 2026-07-20                 # last ON-BOX measurement date, or null
+verified_stack: {rocm: "7.1", aiter: a6bb4993}
+upstream_rev: {ROCm/aiter: a6bb4993}
+```
+
 ## Controlled vocabularies
-Operator ids, backend ids, gen ids, dtype ids, and regime ids are defined in
-[`taxonomy.md`](taxonomy.md). Use exactly those ids in frontmatter so `sota_registry.yaml` can be
-generated/validated from the files.
+Operator ids, backend ids, gen ids, dtype ids, regime ids, and the structured axes above
+(`kernel_class`, `lever`, `cost`, `bound_type`, `sku`, `lifecycle`) are defined in
+[`taxonomy.md`](taxonomy.md), with a machine-readable mirror in [`_kb_vocab.py`](_kb_vocab.py) — the single
+source both the generators and the validator import. Use exactly those ids in frontmatter so
+`sota_registry.yaml` + `views/` + `kb_manifest.yaml` can be generated/validated from the files.
 
 ## Section order
 - **operator_overview**: TL;DR → math contract → shape regimes → Amdahl/where-it-matters →

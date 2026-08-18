@@ -13,6 +13,12 @@ sources:
   - https://triton-lang.org/main/python-api/generated/triton.language.cumsum.html
   - https://github.com/triton-lang/triton/issues/2359
   - https://github.com/proger/accelerated-scan
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # cumsum_scan × triton

@@ -11,6 +11,11 @@ sources:
   - https://github.com/vllm-project/vllm/tree/main/csrc/rocm
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
   - https://arxiv.org/abs/2205.14135
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.decode_paged
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # attention_decode_paged  (paged-KV decode attention / flash-decoding)

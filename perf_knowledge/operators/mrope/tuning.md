@@ -10,6 +10,13 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/fused_qk_norm_mrope_cache_quant.py
   - https://github.com/vllm-project/vllm/pull/22593
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: positional
+lifecycle: candidate
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # mrope — tuning

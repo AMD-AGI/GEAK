@@ -12,6 +12,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/unified_attention.py
   - https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/triton_attn.py
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.prefill
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, launch_overhead]
 ---
 
 # chunked_prefill × Triton

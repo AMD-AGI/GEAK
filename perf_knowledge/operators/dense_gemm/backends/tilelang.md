@@ -11,6 +11,12 @@ updated: 2026-06-08
 sources:
   - https://github.com/tile-ai/tilelang
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute]
 ---
 
 # dense_gemm × tilelang

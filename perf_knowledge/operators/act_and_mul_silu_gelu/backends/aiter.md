@@ -13,6 +13,13 @@ sources:
   - ROCm/aiter@a6bb4993:csrc/kernels/activation_kernels.cu
   - ROCm/aiter@a6bb4993:aiter/ops/triton/activation.py
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/silu_and_mul_fq.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # act_and_mul_silu_gelu × aiter

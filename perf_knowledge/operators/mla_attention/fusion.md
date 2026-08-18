@@ -10,6 +10,12 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/mla.py
   - https://rocm.blogs.amd.com/software-tools-optimization/aiter-mla/README.html
   - https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/attention_registry.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.mla
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # mla_attention — fusion

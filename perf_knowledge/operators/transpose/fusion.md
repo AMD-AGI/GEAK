@@ -9,6 +9,12 @@ updated: 2026-06-08
 sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://rocm.blogs.amd.com/software-tools-optimization/lds-bank-conflict/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [hbm_bw, lds_bank]
 ---
 
 # transpose — fusion

@@ -9,6 +9,10 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
   - https://github.com/ROCm/amd_matrix_instruction_calculator
+layer: reference
+platforms: [gfx942]
+lifecycle: active
+bound_type: [mfma_compute]
 ---
 
 # CDNA3 / MI300X (gfx942) — Matrix Core / MFMA

@@ -10,6 +10,10 @@ sources:
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
   - https://github.com/ROCm/amd_matrix_instruction_calculator
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+lifecycle: active
+bound_type: [mfma_compute]
 ---
 
 # Matrix Cores — MFMA / SMFMAC / scaled-MFMA

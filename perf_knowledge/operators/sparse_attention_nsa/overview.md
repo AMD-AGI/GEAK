@@ -11,6 +11,11 @@ sources:
   - https://arxiv.org/abs/2502.11089
   - https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/
   - https://arxiv.org/html/2508.18224v1
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.sparse
+lifecycle: active
+bound_type: [hbm_bw, l2_locality]
 ---
 
 # sparse_attention_nsa  (Native Sparse Attention / block-sparse attention)

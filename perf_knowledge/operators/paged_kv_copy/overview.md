@@ -11,6 +11,11 @@ sources:
   - https://github.com/vllm-project/vllm/tree/main/csrc/rocm
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
   - https://docs.vllm.ai/en/latest/design/paged_attention/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # paged_kv_copy  (reshape_and_cache / block copy / append)

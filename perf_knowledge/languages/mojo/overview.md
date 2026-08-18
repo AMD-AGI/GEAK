@@ -10,6 +10,10 @@ sources:
   - https://www.modular.com/blog/achieving-state-of-the-art-performance-on-amd-mi355----in-just-14-days
   - https://arxiv.org/html/2511.08083v1
   - https://docs.modular.com/mojo/
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # Mojo

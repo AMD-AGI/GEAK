@@ -10,6 +10,11 @@ sources:
   - https://rocm.blogs.amd.com/artificial-intelligence/ssd_mi300x/README.html
   - https://docs.vllm.ai/en/latest/features/speculative_decoding/
   - https://github.com/sgl-project/sglang/issues/16027
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.spec_decode
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # speculative_decode_verify — numerics

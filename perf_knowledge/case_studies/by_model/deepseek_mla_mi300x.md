@@ -12,6 +12,13 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/aiter-mla/README.html
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/mla.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.mla
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, mfma_compute]
 ---
 
 # DeepSeek (MLA) decode on MI300X via aiter

@@ -11,6 +11,12 @@ updated: 2026-06-08
 sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/fused_moe_dp_shared_expert.py
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.dispatch
+lifecycle: active
+cost: L3
+bound_type: [sync, hbm_bw]
 ---
 
 # shared_expert_fusion × HIP/asm

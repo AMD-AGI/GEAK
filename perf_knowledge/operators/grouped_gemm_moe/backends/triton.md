@@ -11,6 +11,12 @@ updated: 2026-06-05
 sources:
   - https://github.com/ROCm/aiter
   - https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.grouped_moe
+lifecycle: candidate
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # grouped_gemm_moe × triton

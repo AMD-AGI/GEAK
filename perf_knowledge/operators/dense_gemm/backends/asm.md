@@ -13,6 +13,12 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
   - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
   - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute]
 ---
 
 # dense_gemm × asm

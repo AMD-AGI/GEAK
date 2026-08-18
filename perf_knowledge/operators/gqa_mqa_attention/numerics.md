@@ -10,6 +10,11 @@ sources:
   - https://arxiv.org/abs/2305.13245
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://github.com/Dao-AILab/flash-attention
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.gqa_mqa
+lifecycle: candidate
+risk: numerics-affecting
 ---
 
 # gqa_mqa_attention — numerics

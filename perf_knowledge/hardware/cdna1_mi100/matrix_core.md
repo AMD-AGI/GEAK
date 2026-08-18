@@ -9,6 +9,10 @@ sources:
   - https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi100.html
   - https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-whitepaper.pdf
+layer: reference
+platforms: [gfx908]
+lifecycle: active
+bound_type: [mfma_compute]
 ---
 
 # CDNA1 / MI100 (gfx908) — Matrix Core / MFMA (first gen)

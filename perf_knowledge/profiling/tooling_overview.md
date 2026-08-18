@@ -7,6 +7,9 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/profilers/README.html
   - https://rocm.docs.amd.com/en/docs-6.3.0/about/release-notes.html
   - https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/how-to/profile/mode.html
+layer: reference
+platforms: [gfx906, gfx90a, gfx942, gfx950]
+lifecycle: active
 ---
 
 # ROCm profiling tooling overview

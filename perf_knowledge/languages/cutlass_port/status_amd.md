@@ -11,6 +11,10 @@ sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_porting_guide.html
   - https://github.com/ROCm/composable_kernel/issues/900
   - https://rocm.blogs.amd.com/software-tools-optimization/flydsl-python-native/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # CUTLASS / CuTe on AMD — status

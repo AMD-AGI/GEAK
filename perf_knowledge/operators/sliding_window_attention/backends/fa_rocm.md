@@ -12,6 +12,13 @@ sources:
   - https://github.com/Dao-AILab/flash-attention
   - https://github.com/ROCm/flash-attention
   - https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: attn.sparse
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, l2_locality]
 ---
 
 # sliding_window_attention × FlashAttention-ROCm (`fa_rocm`)

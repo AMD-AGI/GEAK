@@ -10,6 +10,12 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/rmsnorm.py
   - /sgl-workspace/aiter/aiter/ops/fused_qk_rmsnorm_group_quant.py
   - /sgl-workspace/aiter/aiter/ops/fused_qk_norm_rope_cache_quant.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+levers: [fusion.norm-quant, fusion.epilogue]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # fused_norm_quant — fusion

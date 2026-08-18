@@ -9,6 +9,11 @@ updated: 2026-06-08
 sources:
   - https://github.com/Dao-AILab/flash-attention
   - https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.sparse
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # sliding_window_attention — numerics

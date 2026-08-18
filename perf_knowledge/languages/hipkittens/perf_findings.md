@@ -9,6 +9,10 @@ updated: 2026-06-08
 sources:
   - https://arxiv.org/html/2511.08083v1
   - https://hazyresearch.stanford.edu/blog/2025-11-09-hk
+layer: reference
+platforms: [gfx950, gfx942]
+lifecycle: active
+cost: L3
 ---
 
 # HipKittens perf findings

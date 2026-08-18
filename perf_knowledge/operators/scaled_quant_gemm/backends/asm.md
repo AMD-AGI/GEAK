@@ -12,6 +12,12 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
   - ROCm/aiter@a6bb4993:aiter/ops/gemm_op_a4w4.py
+layer: reference
+platforms: [gfx950, gfx942]
+kernel_class: gemm.scaled_quant
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # scaled_quant_gemm × asm

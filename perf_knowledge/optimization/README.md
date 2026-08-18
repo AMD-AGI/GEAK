@@ -8,6 +8,9 @@ updated: 2026-06-05
 sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
 ---
 
 # optimization — cross-operator performance techniques (MI300X / MI350X)

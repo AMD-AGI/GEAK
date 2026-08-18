@@ -10,6 +10,11 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/rope.py
   - https://github.com/vllm-project/vllm/blob/main/csrc/pos_encoding.cu
   - https://github.com/vllm-project/vllm/pull/22593
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: positional
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # rope — numerics & parity

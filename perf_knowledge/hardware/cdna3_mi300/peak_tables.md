@@ -9,6 +9,10 @@ sources:
   - https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi300.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/data-sheets/amd-instinct-mi300x-data-sheet.pdf
   - https://arxiv.org/pdf/2510.27583
+layer: reference
+platforms: [gfx942]
+lifecycle: active
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # CDNA3 / MI300X (gfx942) — peak throughput tables

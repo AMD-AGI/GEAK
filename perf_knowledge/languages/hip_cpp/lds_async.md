@@ -10,6 +10,10 @@ sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
   - https://llvm.org/docs/AMDGPUUsage.html
   - https://github.com/iree-org/iree/issues/23765
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # HIP — LDS, bank conflicts, direct-to-LDS & barriers

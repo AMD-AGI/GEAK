@@ -8,6 +8,10 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi250.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna2-white-paper.pdf
+layer: reference
+platforms: [gfx90a]
+lifecycle: active
+bound_type: [hbm_bw, lds_bank]
 ---
 
 # CDNA2 / MI250X / MI210 (gfx90a) — memory hierarchy

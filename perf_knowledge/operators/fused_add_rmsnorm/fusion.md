@@ -9,6 +9,12 @@ updated: 2026-06-08
 sources:
   - /sgl-workspace/aiter/aiter/ops/rmsnorm.py
   - https://github.com/sgl-project/sglang/issues/18466
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+levers: [fusion.norm-quant, fusion.epilogue]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # fused_add_rmsnorm — fusion

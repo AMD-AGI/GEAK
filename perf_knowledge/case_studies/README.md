@@ -8,6 +8,9 @@ updated: 2026-06-08
 sources:
   - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
   - GEAK/e2e_workflow/knowledge/gemm_attention_backends.md
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
 ---
 
 # Case studies

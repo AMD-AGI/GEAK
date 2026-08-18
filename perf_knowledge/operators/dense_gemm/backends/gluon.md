@@ -13,6 +13,12 @@ sources:
   - https://github.com/ROCm/gfx950-gluon-tutorials
   - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
   - https://rocm.blogs.amd.com/software-tools-optimization/4wave-fp8gemm/README.html
+layer: reference
+platforms: [gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute]
 ---
 
 # dense_gemm × Gluon

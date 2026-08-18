@@ -9,6 +9,11 @@ updated: 2026-06-08
 sources:
   - https://docs.vllm.ai/en/latest/design/fusions/
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/comms/fused/reduce_scatter_rmsnorm_quant_all_gather.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: collective
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # fused_allreduce_rmsnorm — numerics & parity

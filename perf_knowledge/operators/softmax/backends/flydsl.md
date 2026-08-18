@@ -10,6 +10,12 @@ status: experimental
 updated: 2026-06-09
 sources:
   - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/reduce.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # softmax × flydsl

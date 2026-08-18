@@ -11,6 +11,11 @@ sources:
   - https://github.com/sgl-project/sglang/blob/main/docker/rocm.Dockerfile
   - https://deepwiki.com/sgl-project/sglang
   - https://github.com/sgl-project/sglang/blob/main/docs/platforms/amd_gpu.md
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # Where SGLang's kernels live (ROCm source map)

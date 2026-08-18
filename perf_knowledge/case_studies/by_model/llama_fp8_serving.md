@@ -13,6 +13,14 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
   - https://docs.vllm.ai/en/stable/features/quantization/quark/
   - https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/quantization.md
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L0
+levers: [env.flag, dtype.downcast]
+risk: numerics-affecting
+bound_type: [hbm_bw]
 ---
 
 # Llama-class fp8 serving on MI300X

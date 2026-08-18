@@ -9,6 +9,12 @@ updated: 2026-06-08
 sources:
   - https://arxiv.org/abs/2108.12409
   - https://github.com/vllm-project/vllm/blob/main/csrc/rocm/attention.cu
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: positional
+lifecycle: candidate
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # alibi — fusion

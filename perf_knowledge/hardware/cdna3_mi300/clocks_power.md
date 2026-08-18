@@ -9,6 +9,10 @@ sources:
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/data-sheets/amd-instinct-mi300x-data-sheet.pdf
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/product-briefs/instinct-mi325x-datasheet.pdf
   - https://chipsandcheese.com/p/testing-amds-giant-mi300x
+layer: reference
+platforms: [gfx942]
+lifecycle: active
+bound_type: [mfma_compute]
 ---
 
 # CDNA3 / MI300X (gfx942) — clocks, power & thermals

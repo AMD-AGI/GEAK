@@ -12,6 +12,12 @@ sources:
   - https://arxiv.org/abs/2511.08083
   - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
   - https://rocm.blogs.amd.com/software-tools-optimization/4wave-fp8gemm/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
+levers: [tile.static-shape, env.flag]
+bound_type: [mfma_compute]
 ---
 
 # MFMA scheduling

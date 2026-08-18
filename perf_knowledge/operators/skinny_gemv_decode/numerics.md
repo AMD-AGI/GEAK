@@ -8,6 +8,11 @@ regimes: [decode]
 updated: 2026-06-05
 sources:
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.skinny_decode
+lifecycle: candidate
+risk: numerics-affecting
 ---
 
 # skinny_gemv_decode — numerics

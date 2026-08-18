@@ -12,6 +12,11 @@ sources:
   - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
   - https://github.com/vllm-project/vllm/pull/16752
   - https://docs.vllm.ai/en/stable/design/custom_op/
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # vLLM × AITER integration

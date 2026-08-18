@@ -6,6 +6,9 @@ updated: 2026-06-08
 sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/profilers/README.html
   - https://rocm.docs.amd.com/en/docs-6.3.0/about/release-notes.html
+layer: reference
+platforms: [gfx906, gfx90a, gfx942, gfx950]
+lifecycle: active
 ---
 
 # profiling — how to measure MI-GPU kernels and prove a win

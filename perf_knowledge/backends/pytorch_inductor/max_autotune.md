@@ -13,6 +13,12 @@ sources:
   - https://github.com/pytorch/pytorch/pull/144985
   - https://github.com/pytorch/pytorch/blob/main/torch/_inductor/config.py
   - https://rocm.docs.amd.com/en/docs-6.3.1/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
 ---
 
 # Inductor max-autotune on ROCm

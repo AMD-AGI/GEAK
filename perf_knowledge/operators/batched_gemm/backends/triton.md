@@ -11,6 +11,12 @@ updated: 2026-06-08
 sources:
   - https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.batched
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, occupancy]
 ---
 
 # batched_gemm × triton

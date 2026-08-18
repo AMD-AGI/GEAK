@@ -12,6 +12,10 @@ sources:
   - https://llvm.org/docs/AMDGPU/gfx9_waitcnt.html
   - https://arxiv.org/abs/2511.08083
   - https://github.com/ROCm/aiter
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # Raw GCN assembly

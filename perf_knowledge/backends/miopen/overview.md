@@ -11,6 +11,11 @@ sources:
   - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
   - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/use-fusion-api.html
   - https://github.com/ROCm/MIOpen/blob/develop/CHANGELOG.md
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # MIOpen — the cuDNN analog on ROCm

@@ -11,6 +11,11 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/aiter-mla/README.html
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
   - https://arxiv.org/abs/2405.04434
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.mla
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # mla_attention — numerics

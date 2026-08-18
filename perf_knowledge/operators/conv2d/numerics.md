@@ -10,6 +10,11 @@ sources:
   - https://rocm.docs.amd.com/projects/MIOpen/en/develop/doxygen/html/group__convolutions.html
   - https://rocm.docs.amd.com/projects/composable_kernel/en/docs-6.4.2/doxygen/html/device__grouped__conv__fwd__multiple__d__multiple__r__xdl__cshuffle_8hpp.html
   - https://docs.nvidia.com/cutlass/latest/media/docs/cpp/implicit_gemm_convolution.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # conv2d — numerics

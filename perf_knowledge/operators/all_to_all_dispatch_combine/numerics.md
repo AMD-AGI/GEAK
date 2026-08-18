@@ -9,6 +9,11 @@ updated: 2026-06-08
 sources:
   - https://github.com/ROCm/mori/blob/main/docs/MORI-EP-GUIDE.md
   - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: candidate
+risk: numerics-affecting
 ---
 
 # all_to_all_dispatch_combine — numerics

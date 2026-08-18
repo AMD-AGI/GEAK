@@ -12,6 +12,10 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://github.com/ROCm/amd_matrix_instruction_calculator
   - https://github.com/llvm/llvm-project/pull/116723
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # MFMA intrinsics

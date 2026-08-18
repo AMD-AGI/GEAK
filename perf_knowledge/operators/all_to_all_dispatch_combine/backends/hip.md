@@ -13,6 +13,12 @@ sources:
   - https://github.com/ROCm/mori/blob/main/docs/MORI-EP-GUIDE.md
   - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
   - https://arxiv.org/abs/2506.04667
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: data_movement
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # all_to_all_dispatch_combine × HIP

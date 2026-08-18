@@ -14,6 +14,13 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
   - https://gau-nernst.github.io/amd-a2a/
   - https://www.lmsys.org/blog/2026-05-28-mori/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: moe.dispatch
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [sync, hbm_bw]
 ---
 
 # moe_dispatch_combine × MoRI-EP

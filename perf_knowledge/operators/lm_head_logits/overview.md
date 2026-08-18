@@ -11,6 +11,11 @@ sources:
   - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/vocab_parallel_embedding.py
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # lm_head_logits  (`logits = hidden · Wₑᵀ [+ bias]`, large-N skinny GEMM)

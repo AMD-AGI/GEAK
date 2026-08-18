@@ -8,6 +8,12 @@ regimes: [both]
 updated: 2026-06-08
 sources:
   - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/vocab_parallel_embedding.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: embedding_sampling
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [hbm_bw, sync]
 ---
 
 # embedding — fusion

@@ -9,6 +9,13 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/projects/rccl/en/develop/how-to/rccl-usage-tips.html
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/comms/reduce_scatter.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: collective
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [sync, hbm_bw]
 ---
 
 # reduce_scatter — tuning

@@ -10,6 +10,10 @@ sources:
   - https://github.com/ROCm/composable_kernel/tree/develop/example/ck_tile/01_fmha
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
   - https://github.com/ROCm/composable_kernel/blob/develop/CHANGELOG.md
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # CK codegen & instances

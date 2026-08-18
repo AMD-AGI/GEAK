@@ -12,6 +12,12 @@ sources:
   - https://github.com/tile-ai/tilelang
   - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
   - https://arxiv.org/abs/2511.08083
+layer: reference
+platforms: [gfx90a, gfx942]
+kernel_class: attn.linear
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # linear_attention_gated_delta × TileLang

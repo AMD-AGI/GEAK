@@ -13,6 +13,13 @@ sources:
   - https://github.com/ROCm/composable_kernel
   - https://rocm.blogs.amd.com/software-tools-optimization/ck-int8-gemm-sq/README.html
   - ROCm/aiter@a6bb4993:csrc/ck_gemm_a8w8/gemm_a8w8.cu
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [mfma_compute]
 ---
 
 # dense_gemm × ck

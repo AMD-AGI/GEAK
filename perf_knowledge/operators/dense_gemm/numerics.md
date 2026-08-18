@@ -10,6 +10,11 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
   - https://blog.vllm.ai/2025/02/24/ptpc-fp8-rocm.html
   - ROCm/aiter@HEAD:gradlib/gradlib/gemm_tuner.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # dense_gemm — numerics

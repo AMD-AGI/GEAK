@@ -11,6 +11,10 @@ sources:
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
   - https://rocm.docs.amd.com/en/latest/reference/precision-support.html
   - https://www.koicomputers.com/wp-content/uploads/2025/08/amd-instinct-mi350x-gpu-datasheet.pdf
+layer: reference
+platforms: [gfx906, gfx90a, gfx942, gfx950]
+lifecycle: active
+bound_type: [mfma_compute]
 ---
 
 # Hardware support matrix — CDNA1–4 MFMA dtypes

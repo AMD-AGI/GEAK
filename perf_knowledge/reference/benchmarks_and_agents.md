@@ -6,6 +6,8 @@ sources:
   - e2e_workflow/README.md
   - https://github.com/AMD-AGI/GEAK
   - perf_knowledge/index/sota_registry.yaml
+layer: reference
+lifecycle: active
 ---
 
 # Benchmarks & agents — pointer doc

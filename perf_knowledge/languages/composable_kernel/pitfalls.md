@@ -10,6 +10,10 @@ sources:
   - https://github.com/ROCm/composable_kernel
   - https://github.com/ROCm/composable_kernel/issues/1727
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # CK pitfalls

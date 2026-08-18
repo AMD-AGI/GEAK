@@ -10,6 +10,12 @@ sources:
   - https://triton-lang.org/main/getting-started/tutorials/09-persistent-matmul.html
   - https://arxiv.org/abs/2301.03598
   - https://github.com/ROCm/composable_kernel
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.splitk_streamk
+lifecycle: active
+bound_type: [mfma_compute, occupancy]
+levers: [tile.splitk, tile.streamk]
 ---
 
 # splitk_streamk_gemm

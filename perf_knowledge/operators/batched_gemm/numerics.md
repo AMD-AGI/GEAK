@@ -9,6 +9,11 @@ updated: 2026-06-08
 sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
   - ROCm/aiter@HEAD:gradlib/gradlib/gemm_tuner.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.batched
+lifecycle: candidate
+risk: numerics-affecting
 ---
 
 # batched_gemm — numerics

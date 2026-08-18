@@ -11,6 +11,12 @@ updated: 2026-06-08
 sources:
   - https://github.com/ROCm/rocWMMA
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute]
 ---
 
 # dense_gemm × rocwmma

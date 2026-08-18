@@ -11,6 +11,11 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/tuned_gemm.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:gradlib/gradlib/gemm_tuner.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:gradlib/gradlib/GemmTuner.py
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # aiter tuned_gemm — dispatch + tuning recipe

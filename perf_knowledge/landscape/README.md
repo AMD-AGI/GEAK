@@ -2,6 +2,8 @@
 title: Ecosystem landscape — what to borrow
 kind: landscape
 updated: 2026-06-09
+layer: reference
+lifecycle: active
 ---
 
 # Ecosystem landscape — kernels × backends, and what we borrow

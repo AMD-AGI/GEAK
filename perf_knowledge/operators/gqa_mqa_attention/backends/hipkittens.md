@@ -13,6 +13,12 @@ sources:
   - https://arxiv.org/html/2511.08083v1
   - https://hazyresearch.stanford.edu/blog/2025-11-09-hk
   - https://github.com/HazyResearch/HipKittens
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.gqa_mqa
+lifecycle: active
+cost: L3
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # gqa_mqa_attention × HipKittens

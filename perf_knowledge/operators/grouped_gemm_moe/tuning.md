@@ -9,6 +9,13 @@ updated: 2026-06-09
 sources:
   - https://github.com/ROCm/aiter
   - https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.grouped_moe
+lifecycle: active
+cost: L1
+levers: [config.per-shape-tune]
+bound_type: [mfma_compute, hbm_bw]
 ---
 
 # grouped_gemm_moe — tuning

@@ -10,6 +10,10 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
   - https://llvm.org/docs/AMDGPUUsage.html
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L3
 ---
 
 # Triton on AMD — verify with the ISA

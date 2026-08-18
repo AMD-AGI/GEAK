@@ -6,6 +6,10 @@ updated: 2026-06-08
 sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.blogs.amd.com/software-tools-optimization/profilers/README.html
+layer: reference
+platforms: [gfx906, gfx90a, gfx942, gfx950]
+lifecycle: active
+bound_type: [host_bound, launch_overhead]
 ---
 
 # Common profiling & benchmarking pitfalls on MI GPUs

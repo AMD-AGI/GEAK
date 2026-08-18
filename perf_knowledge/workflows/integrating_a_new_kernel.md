@@ -8,6 +8,11 @@ sources:
   - GEAK/e2e_workflow/roles/e2e_integrator.md
   - GEAK/perf_knowledge/backends/aiter/integration.md
   - https://docs.vllm.ai/en/stable/design/custom_op/
+layer: reference
+platforms: [gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # Integrating a new kernel

@@ -12,6 +12,13 @@ sources:
   - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
   - https://github.com/vllm-project/vllm/pull/14959
   - https://github.com/vllm-project/vllm/pull/22602
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: norm_act
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # rmsnorm × vllm_kernels

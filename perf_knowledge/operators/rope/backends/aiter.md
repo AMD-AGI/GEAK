@@ -13,6 +13,13 @@ sources:
   - /sgl-workspace/aiter/aiter/ops/fused_qk_norm_rope_cache_quant.py
   - https://github.com/sgl-project/sglang/issues/18466
   - https://docs.vllm.ai/en/latest/design/fusions/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: positional
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # rope × aiter

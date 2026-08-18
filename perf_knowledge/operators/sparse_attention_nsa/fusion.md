@@ -9,6 +9,12 @@ updated: 2026-06-08
 sources:
   - https://github.com/fla-org/native-sparse-attention
   - https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.sparse
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [hbm_bw, l2_locality]
 ---
 
 # sparse_attention_nsa — fusion

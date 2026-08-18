@@ -10,6 +10,11 @@ sources:
   - https://rocm.docs.amd.com/projects/MIOpen/en/develop/doxygen/html/group__convolutions.html
   - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/use-fusion-api.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx908, gfx90a, gfx942, gfx950]
+kernel_class: conv
+lifecycle: active
+risk: numerics-affecting
 ---
 
 # depthwise_conv — numerics

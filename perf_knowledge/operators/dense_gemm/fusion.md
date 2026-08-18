@@ -10,6 +10,12 @@ sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/optimizing-with-composable-kernel.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - ROCm/aiter@HEAD:aiter/tuned_gemm.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.dense
+lifecycle: active
+levers: [fusion.epilogue, fusion.prologue]
+bound_type: [mfma_compute]
 ---
 
 # dense_gemm — fusion

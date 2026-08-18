@@ -12,6 +12,12 @@ sources:
   - https://github.com/vllm-project/vllm/pull/22593
   - https://github.com/vllm-project/vllm/pull/16457
   - /sgl-workspace/aiter/aiter/ops/triton/rope/rope.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: positional
+lifecycle: active
+cost: L3
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # mrope × triton

@@ -9,6 +9,11 @@ updated: 2026-06-05
 sources:
   - https://arxiv.org/abs/2301.03598
   - https://triton-lang.org/main/getting-started/tutorials/09-persistent-matmul.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: gemm.splitk_streamk
+lifecycle: candidate
+risk: numerics-affecting
 ---
 
 # splitk_streamk_gemm — numerics

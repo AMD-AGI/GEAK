@@ -11,6 +11,11 @@ sources:
   - https://github.com/pytorch/pytorch/blob/main/torch/_inductor/config.py
   - https://rocm.blogs.amd.com/artificial-intelligence/pytorch-amd-gpus/README.html
   - https://rocm.docs.amd.com/en/docs-6.3.1/how-to/rocm-for-ai/inference-optimization/workload.html
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+lifecycle: active
+cost: L2
+levers: [backend.swap]
 ---
 
 # PyTorch Inductor on ROCm

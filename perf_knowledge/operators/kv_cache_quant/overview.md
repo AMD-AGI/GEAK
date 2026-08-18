@@ -11,6 +11,11 @@ sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/fused_qk_norm_rope_cache_quant.py
   - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: quant
+lifecycle: active
+bound_type: [hbm_bw]
 ---
 
 # kv_cache_quant  (store K/V to the paged cache in FP8/INT8)

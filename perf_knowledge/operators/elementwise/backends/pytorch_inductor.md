@@ -12,6 +12,13 @@ sources:
   - https://github.com/pytorch/pytorch/blob/main/torch/_inductor/config.py
   - https://rocm.blogs.amd.com/artificial-intelligence/pytorch-amd-gpus/README.html
   - https://github.com/pytorch/pytorch/pull/143286
+layer: reference
+platforms: [gfx90a, gfx942, gfx950]
+kernel_class: elementwise_reduction
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # elementwise × pytorch_inductor

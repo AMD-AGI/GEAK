@@ -17,6 +17,12 @@ sources:
   - https://rocm.blogs.amd.com/artificial-intelligence/quick-reduce-2/README.html
   - https://github.com/vllm-project/vllm/pull/19744
   - https://github.com/ROCm/aiter/issues/1542
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: collective
+lifecycle: active
+cost: L3
+bound_type: [sync, hbm_bw]
 ---
 
 # allreduce × HIP (custom all-reduce)

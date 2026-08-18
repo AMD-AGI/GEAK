@@ -13,6 +13,13 @@ sources:
   - https://github.com/sgl-project/sglang/issues/16027
   - https://github.com/ROCm/ATOM
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: attn.spec_decode
+lifecycle: active
+cost: L2
+levers: [backend.swap]
+bound_type: [hbm_bw, launch_overhead]
 ---
 
 # speculative_decode_verify × aiter

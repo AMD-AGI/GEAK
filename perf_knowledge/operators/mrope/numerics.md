@@ -10,6 +10,11 @@ sources:
   - https://github.com/vllm-project/vllm/pull/22593
   - https://github.com/vllm-project/vllm/issues/39625
   - /sgl-workspace/aiter/aiter/ops/fused_qk_norm_mrope_cache_quant.py
+layer: reference
+platforms: [gfx942, gfx950]
+kernel_class: positional
+lifecycle: candidate
+risk: numerics-affecting
 ---
 
 # mrope — numerics & parity

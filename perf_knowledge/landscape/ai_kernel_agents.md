@@ -4,6 +4,8 @@ updated: 2026-06-09
 title: AI/LLM Kernel-Generation Agents & Their Benchmarks
 scope: Systems that automatically write/optimize GPU kernels (CUDA + Triton + ROCm/HIP + NPU)
 audience: perf_knowledge — single-kernel optimization ladder, GEAK, e2e_workflow
+layer: reference
+lifecycle: active
 ---
 
 # AI/LLM Kernel-Generation Agents & Benchmarks — Landscape
