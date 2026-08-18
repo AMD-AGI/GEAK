@@ -15,16 +15,36 @@
 #   adapter_launch                  -> launch the server in background; set global SERVER_PID; write $LOG.
 #                                      Reads: MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS
 #                                             EXTRA_ENV OVERLAY_PYTHONPATH PROFILE PROFILE_DIR
+#                                      MUST launch through the shared prefix:
+#                                        ${SERVER_LAUNCH_PREFIX:-} env ... <server> ... & SERVER_PID=$!
+#                                      That prefix (server_teardown.sh) puts the server in its OWN
+#                                      session, which is the ONLY thing that lets teardown PROVE the
+#                                      process group belongs to this launch and reap the whole tree.
+#                                      An adapter that launches without it still works, but its
+#                                      teardown degrades to pid+descendants. A launcher that cannot
+#                                      control the launch (it delegates to an external script) must
+#                                      instead set SERVER_GROUP_UNVERIFIED=1 unless it can show the
+#                                      pid leads its own group.
 #   adapter_health                  -> return 0 iff $BASE_URL is serving (e.g. curl /health)
 #   adapter_bench  NUMP MAXC PROF   -> run ONE bench (random ISL/OSL), append a result JSON line to
 #                                      $RESULT_JSONL with canonical keys (output_throughput,
 #                                      median_ttft_ms, median_tpot_ms). PROF=1 => also emit a trace
-#                                      into $PROFILE_DIR.
+#                                      into $PROFILE_DIR. Honors optional REQUEST_RATE (req/s; empty=inf)
+#                                      to stagger arrivals.
+#   adapter_profile_window          -> OPTIONAL. Capture a profiler window (record_shapes) on the
+#                                      ALREADY-RUNNING, warm, mid-load server, so the trace is the real
+#                                      steady-state prefill+decode MIX rather than a cold prefill ramp.
+#                                      The window is sized per-backend: sglang by PROFILE_NUM_STEPS (its
+#                                      /start_profile takes num_steps); vllm by PROFILE_WINDOW_SEC (its
+#                                      /start_profile has no step count, so start->sleep->stop). If
+#                                      undefined, the PROFILE step falls back to a (less faithful)
+#                                      saturated PROF=1 bench.
 #
 # KEY OUTPUTS (written to $OUT_DIR):
 #   bench_runs.jsonl       one bench result object per repeat
-#   bench_summary.json     {output_throughput_tok_s_median, ttft_ms_median, tpot_ms_median, spread, runs}
-#   SUMMARY line on stdout: "E2E_SUMMARY output_tok_s=<median> spread=<pct> ttft_ms=<med> tpot_ms=<med>"
+#   bench_summary.json     {throughput_tok_s_median (metric-neutral; see metric_basis), metric_basis,
+#                           ttft_ms_median, tpot_ms_median, spread, runs}  (E2E_METRIC=output default)
+#   SUMMARY line on stdout: "E2E_SUMMARY <metric_basis>=<median> spread=<pct> ttft_ms=<med> tpot_ms=<med>"
 #   profile/                trace (if PROFILE=1)
 set -uo pipefail
 
@@ -50,7 +70,7 @@ done
 # The serving server is always launched by the backend adapter (sglang/vllm).
 # BENCH_CLIENT swaps ONLY the client that drives the benchmark, so a run can use
 # the EXACT same client as another harness. BENCH_CLIENT=inferencex => Hyperloom/
-# Magpie's own InferenceX benchmark_serving.py (口径-identical client). Default
+# Magpie's own InferenceX benchmark_serving.py (measurement-protocol-identical client). Default
 # 'native' keeps each backend's built-in bench (sglang.bench_serving / vllm).
 BENCH_CLIENT=${BENCH_CLIENT:-native}
 copy_function() {  # copy_function SRC DST — clone a shell function under a new name
@@ -71,6 +91,37 @@ if [ "$BENCH_CLIENT" != "native" ]; then
   source "$CLIENT_ADAPTER"   # MUST redefine adapter_bench (the timed client)
   if ! declare -F adapter_bench >/dev/null; then
     echo "!!! Client adapter $CLIENT_ADAPTER must define adapter_bench()" >&2; exit 3
+  fi
+fi
+
+# ---- optional server-LAUNCHER override (align the SERVER launch RECIPE with an
+# external harness, e.g. Hyperloom/Magpie, so the served stack is byte-identical:
+# same --mem-fraction-static / --disable-radix-cache / --trust-remote-code /
+# SGLANG_USE_AITER / firmware-gated envs). The serving STACK is STILL the BACKEND
+# above; this hook only changes WHO runs launch_server. Default 'native' keeps each
+# backend adapter's own adapter_launch (byte-identical to before). BENCH_LAUNCHER=
+# <name> sources adapters/launchers/<name>.sh which MUST redefine adapter_launch;
+# the native launch/health are preserved as adapter_launch_native / adapter_health_native
+# so a launcher adapter can DELEGATE or FALL BACK. The authored-kernel OVERLAY
+# (OVERLAY_PYTHONPATH) is applied BY the launcher (an external harness usually
+# cannot), so overlay + recipe-parity coexist. Only affects a FRESH launch
+# (REUSE_SERVER=0); nothing else in the measurement changes.
+BENCH_LAUNCHER=${BENCH_LAUNCHER:-native}
+if [ "$BENCH_LAUNCHER" != "native" ]; then
+  LAUNCHER_ADAPTER="${LAUNCHER_ADAPTER:-$HERE/adapters/launchers/${BENCH_LAUNCHER}.sh}"
+  if [ ! -f "$LAUNCHER_ADAPTER" ]; then
+    echo "!!! No server launcher '$BENCH_LAUNCHER' at $LAUNCHER_ADAPTER" >&2
+    echo "    Available: $(ls "$HERE/adapters/launchers" 2>/dev/null | sed 's/\.sh$//' | tr '\n' ' ')" >&2
+    exit 3
+  fi
+  # Preserve the backend's native launch/health so the launcher can delegate to
+  # them (e.g. fall back when the external recipe/script is unavailable).
+  copy_function adapter_launch adapter_launch_native
+  copy_function adapter_health adapter_health_native
+  # shellcheck disable=SC1090
+  source "$LAUNCHER_ADAPTER"   # MUST redefine adapter_launch (server lifecycle)
+  if ! declare -F adapter_launch >/dev/null; then
+    echo "!!! Launcher adapter $LAUNCHER_ADAPTER must define adapter_launch()" >&2; exit 3
   fi
 fi
 
@@ -153,32 +204,41 @@ CONC=${CONC:-64}
 # NUM_PROMPTS default.
 #  * native client (standalone GEAK default): keep the original CONC*5 default so
 #    standalone behaviour is byte-identical to before the inferencex integration.
-#  * inferencex client (Hyperloom口径 alignment): mirror Hyperloom's ADAPTIVE
-#    factor — the number of timed prompts scales DOWN as the per-request sequence
-#    cost (ISL+OSL) grows so each repeat stays bounded.
-#    factor = {<=1024:10, <=4096:5, <=16384:3, else 2}.
-# Override NUM_PROMPTS to pin a fixed count regardless of client.
+#  * inferencex client (Hyperloom/Magpie measurement-protocol alignment): default to
+#    Magpie's FIXED CONC*10 (its run_benchmark_serving default is
+#    `--num-prompts $((CONC*10))`), so a GEAK measurement matches the Magpie baseline
+#    prompt count exactly — a differing prompt count changes the saturation regime and
+#    hence the tok/s, so this is a real alignment knob, not cosmetic.
+#    Opt-out: NUM_PROMPTS_ADAPTIVE=1 restores the cost-bounded ADAPTIVE factor that
+#    scales DOWN as per-request seq cost (ISL+OSL) grows {<=1024:10,<=4096:5,<=16384:3,else 2},
+#    for long-sequence standalone runs where CONC*10 is too expensive.
+# An explicit NUM_PROMPTS (e.g. Hyperloom's apply_bench_protocol forwarding its own
+# measured count) ALWAYS wins over both defaults.
 if [ -z "${NUM_PROMPTS:-}" ]; then
   if [ "$BENCH_CLIENT" = "inferencex" ]; then
-    _seq_cost=$((ISL + OSL))
-    if   [ "$_seq_cost" -le 1024 ];  then _factor=10
-    elif [ "$_seq_cost" -le 4096 ];  then _factor=5
-    elif [ "$_seq_cost" -le 16384 ]; then _factor=3
-    else _factor=2; fi
-    NUM_PROMPTS=$(( CONC * _factor > CONC ? CONC * _factor : CONC ))
+    if [ "${NUM_PROMPTS_ADAPTIVE:-0}" = "1" ]; then
+      _seq_cost=$((ISL + OSL))
+      if   [ "$_seq_cost" -le 1024 ];  then _factor=10
+      elif [ "$_seq_cost" -le 4096 ];  then _factor=5
+      elif [ "$_seq_cost" -le 16384 ]; then _factor=3
+      else _factor=2; fi
+      NUM_PROMPTS=$(( CONC * _factor > CONC ? CONC * _factor : CONC ))
+    else
+      NUM_PROMPTS=$(( CONC * 10 ))   # Magpie parity (fixed)
+    fi
   else
     NUM_PROMPTS=$((CONC * 5))
   fi
 fi
-# Client-side warmup prompts (口径 alignment with Hyperloom's materialize default
+# Client-side warmup prompts (measurement-protocol alignment with Hyperloom's materialize default
 # NUM_WARMUPS=min(CONC,8)). Consumed by the inferencex client adapter; the native
 # adapters use their own warmup round instead.
 NUM_WARMUPS=${NUM_WARMUPS:-$(( CONC < 8 ? CONC : 8 ))}
-# RANDOM_RANGE_RATIO / NUM_PROMPTS / NUM_WARMUPS / SEED are the measurement 口径.
+# RANDOM_RANGE_RATIO / NUM_PROMPTS / NUM_WARMUPS / SEED are the measurement protocol.
 # These are STANDALONE defaults: when an external orchestrator (Hyperloom) drives
 # the run it exports its own values (interface/run_e2e.py:apply_bench_protocol from
 # handoff.bench_protocol) and they override these via the env. Do NOT hard-code a
-# value assuming the caller's 口径 — ratio=0 is fixed-length, ratio>0 is variable
+# value assuming the caller's measurement protocol — ratio=0 is fixed-length, ratio>0 is variable
 # (lengths sampled in [(1-ratio)*len, (1+ratio)*len]), and the caller may use
 # either. Standalone default = fixed-length (matches infer.sh --random-range-ratio 0).
 RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0}
@@ -204,7 +264,23 @@ fi
 # ---- modes ----
 REUSE_SERVER=${REUSE_SERVER:-0}       # 1 = a warm server is already up at HOST:PORT; don't launch/kill
 PROFILE=${PROFILE:-0}                 # 1 = also capture a profiler trace
-PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-5}
+# Profile a window mid-load so the trace holds the real prefill+decode steady state, not a cold burst.
+PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-40}          # sglang step count (floor; auto-raised to target below)
+PROFILE_NUM_STEPS_MAX=${PROFILE_NUM_STEPS_MAX:-64}  # step cap: sglang trace is ~MBs/step and its flush blocks the server
+# Step target from the workload: RAMP=ceil(CONC*ISL/chunk) prefill passes + STEADY=max(30,5*ceil(OSL/CONC))
+# decode steps + margin, so a capture bounded to it always spans a decode steady sample. Drives the sglang
+# step count, the vllm time window, and the vllm 0.26+ step cap.
+PROFILE_TARGET_STEPS=$(python3 -c "import math;print(math.ceil($CONC*$ISL/max(${PREFILL_CHUNK:-$ISL},1))+max(30,5*math.ceil($OSL/max($CONC,1)))+10)" 2>/dev/null || echo "$PROFILE_NUM_STEPS_MAX")
+# vllm 0.26+ ProfilerConfig knobs (adapters/vllm.sh), fixed at server launch. max_iterations self-stops the
+# profiler after N worker steps; default to the workload target clamped to the step cap (bounds the buffer).
+PROFILE_MAX_ITERS=${PROFILE_MAX_ITERS:-$(( PROFILE_TARGET_STEPS < PROFILE_NUM_STEPS_MAX ? PROFILE_TARGET_STEPS : PROFILE_NUM_STEPS_MAX ))}
+PROFILE_DELAY_ITERS=${PROFILE_DELAY_ITERS:-0}       # steps to skip before arming; 0 keeps the prefill burst
+PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-0}         # 0 = arm at load start so prefill is captured too
+PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}   # >CONC so the queue stays saturated
+PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}      # optional req/s to stagger arrivals; empty = inf
+PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}      # max wait for the trace file to land
+PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-20}        # vllm time window (floor; auto-scaled below). Sole bound on <0.26
+PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-30}      # cap for the auto-scaled window (bounds trace size)
 OUT_DIR=${OUT_DIR:-$(pwd)/e2e_bench_out}
 LOG=${LOG:-$OUT_DIR/server.log}
 
@@ -213,10 +289,16 @@ PROFILE_DIR="$OUT_DIR/profile"
 BASE_URL="http://${HOST}:${PORT}"
 RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 : > "$RESULT_JSONL"
+# Separate sink for the optional COLD full-round (BENCH_COLD_FINAL=1); kept apart
+# from the timed(hot) repeats so it never pollutes the hot median.
+COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
+: > "$COLD_JSONL"
 
 # export everything the adapter reads
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
+export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
+export PROFILE_MAX_ITERS PROFILE_DELAY_ITERS
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
 export BENCH_TRUST_REMOTE_CODE HF_HUB_TRUST_REMOTE_CODE
 
@@ -232,14 +314,37 @@ echo "Out dir:      $OUT_DIR"
 echo
 
 SERVER_PID=""
-cleanup() {
-  if [ -n "$SERVER_PID" ]; then
-    echo ">>> Shutting down server (pid $SERVER_PID) ..."
-    kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT
+# Server lifecycle: the teardown contract lives in server_teardown.sh so the SAME
+# identity-verified kill is used by this dispatcher and by any role-authored capture
+# script (which previously hand-rolled its own kill). The old cleanup resolved the
+# server's pgid AT KILL TIME and group-killed whenever it differed from ours — a pid
+# that had exited and been recycled resolved to a stranger's group, which is how a
+# teardown can reach the caller's orchestrator / PID 1.
+#
+# This script is COPIED into $EVAL_DIR (roles/director.md) and run from there, so the
+# library has to be found next to the copy. If it is not, the teardown silently becomes
+# a no-op: `source` fails, the EXIT trap resolves to a missing function, and the served
+# model is left running with its VRAM and port held while the serving-GPU lock is
+# released — the next launch then OOMs. So look next to us, then in the ORIGINAL scripts
+# dir when the caller told us where that is, and REFUSE to run otherwise. A benchmark
+# that cannot stop what it starts must not start it.
+TEARDOWN_LIB=""
+for _cand in "$HERE/server_teardown.sh" "${SKILL_DIR:-}/scripts/server_teardown.sh" \
+             "${WORKFLOW_DIR:-}/scripts/server_teardown.sh"; do
+  case "$_cand" in /scripts/server_teardown.sh) continue ;; esac   # unset SKILL_DIR/WORKFLOW_DIR
+  [ -f "$_cand" ] && { TEARDOWN_LIB="$_cand"; break; }
+done
+if [ -z "$TEARDOWN_LIB" ]; then
+  echo "!!! server_teardown.sh not found next to this script ($HERE) or under SKILL_DIR/WORKFLOW_DIR." >&2
+  echo "    It carries the server-kill contract; without it the EXIT trap is a no-op and the" >&2
+  echo "    launched server would be LEAKED (VRAM + port held, serving-GPU lock released)." >&2
+  echo "    Stage it alongside bench_e2e.sh: cp \"\$SKILL_DIR/scripts/server_teardown.sh\" \"\$EVAL_DIR/\"" >&2
+  exit 3
+fi
+[ "$TEARDOWN_LIB" = "$HERE/server_teardown.sh" ] || echo ">>> teardown contract: $TEARDOWN_LIB (not staged next to this copy)"
+# shellcheck disable=SC1090
+source "$TEARDOWN_LIB"
+trap server_teardown EXIT
 
 # ---- serving-GPU mutex ----
 # TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
@@ -265,17 +370,82 @@ if [ "$REUSE_SERVER" != "1" ]; then
   echo ">>> Launching $BACKEND server (log: $LOG) ..."
   adapter_launch
   if [ -z "${SERVER_PID:-}" ]; then echo "!!! adapter_launch did not set SERVER_PID"; exit 2; fi
+  # Freeze the server's process identity NOW (pid, pgid, /proc start time) so the
+  # EXIT teardown never has to ask "who owns this pid?" after the pid may be gone.
+  server_record_identity "$SERVER_PID"
 
   echo ">>> Waiting for server health ..."
-  for i in $(seq 1 180); do
-    if adapter_health >/dev/null 2>&1; then echo ">>> Server up after ~$((i*5))s."; break; fi
+  # An overlaid candidate can wedge: process stays alive but /health 503s forever (JIT deadlock /
+  # cuda-graph capture failure). Don't burn the whole window while holding the serving-GPU lock —
+  # fail fast on a fatal server-log marker, and use a TIGHTER budget when an overlay is active so a
+  # broken candidate is rejected quickly instead of starving the box. Non-overlay runs keep 180*5s.
+  HEALTH_TRIES=${HEALTH_TRIES:-180}
+  [ -n "$OVERLAY_PYTHONPATH" ] && HEALTH_TRIES=${OVERLAY_HEALTH_TRIES:-72}   # ~6min for overlays
+  _up=0
+  for i in $(seq 1 "$HEALTH_TRIES"); do
+    if adapter_health >/dev/null 2>&1; then echo ">>> Server up after ~$((i*5))s."; _up=1; break; fi
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then echo "!!! Server died. Last log:"; tail -n 60 "$LOG"; exit 2; fi
+    if grep -Eq 'CUDA out of memory|HIP out of memory|watchdog timeout|Capturing cuda graph failed|FATAL' "$LOG" 2>/dev/null; then
+      echo "!!! Fatal server-log marker before health; aborting wait. Last log:"; tail -n 60 "$LOG"; exit 2
+    fi
     sleep 5
   done
-  adapter_health >/dev/null 2>&1 || { echo "!!! Server not healthy."; tail -n 60 "$LOG"; exit 2; }
+  [ "$_up" = "1" ] || { echo "!!! Server not healthy within $((HEALTH_TRIES*5))s."; tail -n 60 "$LOG"; exit 2; }
 else
   echo ">>> Reusing warm server at $BASE_URL"
   adapter_health >/dev/null 2>&1 || { echo "!!! No healthy server at $BASE_URL"; exit 2; }
+fi
+
+# ---- overlay resident-memory parity guard (only when an overlay is active) ----
+# An authored kernel that builds a PERSISTENT dequant/shuffle cache inflates resident VRAM beyond the
+# baseline, so a "win" measured with less memory headroom is unfair (and usually OOMs under load anyway).
+# Reject such a candidate BEFORE the timed legs instead of after a full A/B. The integrator records the
+# free-VRAM floor the baseline leg cleared into MEM_HEADROOM_MIN_MB; a candidate below it fails parity.
+# Fail-OPEN on any parse error (missing rocm-smi / unexpected schema) so non-AMD or partial rigs are
+# unaffected — this only ever rejects when it can POSITIVELY prove the headroom regressed.
+if [ -n "$OVERLAY_PYTHONPATH" ] && [ -n "${MEM_HEADROOM_MIN_MB:-}" ]; then
+  _free_mb=$(rocm-smi --showmeminfo vram --json 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    vals = [int(v["VRAM Total Free Memory (B)"]) // (1024*1024)
+            for v in d.values()
+            if isinstance(v, dict) and "VRAM Total Free Memory (B)" in v]
+    print(min(vals) if vals else "")
+except Exception:
+    print("")
+' 2>/dev/null || echo "")
+  if [ -n "$_free_mb" ] && [ "$_free_mb" -lt "$MEM_HEADROOM_MIN_MB" ] 2>/dev/null; then
+    echo "!!! Overlay resident VRAM headroom ${_free_mb}MB < baseline floor ${MEM_HEADROOM_MIN_MB}MB"
+    echo "    -> memory-parity FAIL; rejecting candidate before timed legs."
+    tail -n 30 "$LOG" 2>/dev/null || true
+    exit 2
+  fi
+  echo ">>> overlay memory-parity OK (free ${_free_mb:-?}MB >= floor ${MEM_HEADROOM_MIN_MB}MB)"
+fi
+
+# ---- optional COLD full-round (align with Hyperloom's COLD baseline_tput) ----
+# Hyperloom's leaderboard denominator baseline_tput is a COLD single fresh-server
+# round (first-token / JIT / cuda-graph capture costs INCLUDED, no prior warmup).
+# GEAK's own final is a HOT median (warmup discarded). Comparing GEAK's hot final
+# to Hyperloom's cold baseline mixes thermal states. When BENCH_COLD_FINAL=1 we
+# also measure ONE cold full round (NUM_PROMPTS, no preceding warmup) on the fresh
+# server BEFORE the warmup+timed(hot) rounds, and record it separately, so the
+# caller can compute a fair cold-to-cold speedup (and keep the hot median as a
+# double-check). Default ON (BENCH_COLD_FINAL=1) — set BENCH_COLD_FINAL=0 to skip
+# the cold round (e.g. to save the one extra full round per bench). Only meaningful
+# on a fresh launch (a reused warm server has no cold state to measure).
+if [ "${BENCH_COLD_FINAL:-1}" = "1" ] && [ "$REUSE_SERVER" != "1" ]; then
+  echo ">>> Cold full round (NUM_PROMPTS=$NUM_PROMPTS, no warmup; cold-baseline parity) ..."
+  # adapter_bench is a shell FUNCTION that reads $RESULT_JSONL — a prefix var
+  # assignment on a function has ambiguous persistence in bash, so point
+  # RESULT_JSONL at the cold sink explicitly and restore it afterwards. The
+  # warmup below re-clears the (restored) hot RESULT_JSONL, so the cold round
+  # never touches the timed(hot) results.
+  _saved_result_jsonl="$RESULT_JSONL"
+  RESULT_JSONL="$COLD_JSONL"; export RESULT_JSONL
+  adapter_bench "$NUM_PROMPTS" "$CONC" 0 || echo "!!! cold round failed (continuing)"
+  RESULT_JSONL="$_saved_result_jsonl"; export RESULT_JSONL
 fi
 
 # ---- warmup (one short round; never timed) ----
@@ -290,22 +460,122 @@ for r in $(seq 1 "$REPEATS"); do
   adapter_bench "$NUM_PROMPTS" "$CONC" 0 || echo "!!! bench repeat $r failed (continuing)"
 done
 
-# ---- optional profile trace ----
+# ---- optional profile trace (STEADY-STATE MIX, not a cold prefill burst) ----
+# Real serving is continuous batching: at any instant some sequences are prefilling (chunks) and others
+# decoding, interleaved by the scheduler. A cold burst profiled from step 0 captures only the prefill
+# ramp (TTFT) and misses decode entirely (see knowledge/profile_parse.md). So we instead drive a
+# sustained, saturated load and profile a WINDOW once it has reached the mixed steady state.
 if [ "$PROFILE" = "1" ]; then
-  echo ">>> Profiling bench ($PROFILE_NUM_STEPS steps) ..."
   mkdir -p "$PROFILE_DIR"
-  adapter_bench "$CONC" "$CONC" 1 || echo "!!! profile run failed"
+  # fix #1: if the caller didn't pin TPOT_MS, derive it from the timed bench we JUST ran (RESULT_JSONL
+  # holds one result object per repeat, each with median_tpot_ms). This lets the vLLM time-window auto-
+  # scale to the REAL per-decode-step time of THIS workload (below) instead of sitting at the flat floor.
+  if [ -z "${TPOT_MS:-}" ]; then
+    TPOT_MS=$(python3 - "$RESULT_JSONL" <<'PY' 2>/dev/null || true
+import json, sys, statistics
+vals=[]
+try:
+    for line in open(sys.argv[1]):
+        line=line.strip()
+        if not line: continue
+        try: d=json.loads(line)
+        except Exception: continue
+        for k in ("median_tpot_ms","mean_tpot_ms","p50_tpot_ms"):
+            if isinstance(d.get(k),(int,float)): vals.append(float(d[k])); break
+print(round(statistics.median(vals),3) if vals else "")
+PY
+)
+    case "${TPOT_MS:-}" in ''|*[!0-9.]*) TPOT_MS="" ;; esac   # keep only a clean number
+    [ -n "${TPOT_MS:-}" ] && echo ">>> steady-state sizing: derived TPOT_MS=${TPOT_MS}ms from timed bench (vllm window auto-scale)"
+  fi
+  # Size the single capture to PROFILE_TARGET_STEPS (computed at launch): raise the sglang step count
+  # (clamped to the cap) and scale the vllm window to target*TPOT*1.5. vllm 0.26+ is already step-bounded
+  # by PROFILE_MAX_ITERS; the window is a safety cap there, the sole bound on <0.26.
+  if [ "${PROFILE_NUM_STEPS:-0}" -lt "$PROFILE_TARGET_STEPS" ]; then
+    echo ">>> sizing: PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${PROFILE_TARGET_STEPS}"
+    PROFILE_NUM_STEPS=$PROFILE_TARGET_STEPS
+  fi
+  if [ -n "${PROFILE_NUM_STEPS_MAX:-}" ] && [ "$PROFILE_NUM_STEPS" -gt "$PROFILE_NUM_STEPS_MAX" ]; then
+    echo ">>> sizing: PROFILE_NUM_STEPS capped ${PROFILE_NUM_STEPS}->${PROFILE_NUM_STEPS_MAX}"
+    PROFILE_NUM_STEPS=$PROFILE_NUM_STEPS_MAX
+  fi
+  _NEED_PROMPTS=$(python3 -c "import math;print($CONC + math.ceil($CONC*$PROFILE_NUM_STEPS/max($OSL,1)) + $CONC)" 2>/dev/null || echo "$PROFILE_NUM_PROMPTS")
+  if [ "${PROFILE_NUM_PROMPTS:-0}" -lt "$_NEED_PROMPTS" ]; then
+    echo ">>> sizing: PROFILE_NUM_PROMPTS ${PROFILE_NUM_PROMPTS}->${_NEED_PROMPTS}"
+    PROFILE_NUM_PROMPTS=$_NEED_PROMPTS
+  fi
+  if [ -n "${TPOT_MS:-}" ]; then
+    _WMAX="${PROFILE_WINDOW_SEC_MAX:-30}"
+    _WSEC=$(python3 -c "import math;print(min($_WMAX, max(${PROFILE_WINDOW_SEC:-20}, math.ceil($PROFILE_TARGET_STEPS*$TPOT_MS/1000.0*1.5))))" 2>/dev/null || echo "${PROFILE_WINDOW_SEC:-20}")
+    if [ "$_WSEC" != "${PROFILE_WINDOW_SEC}" ]; then
+      echo ">>> sizing: PROFILE_WINDOW_SEC ${PROFILE_WINDOW_SEC}->${_WSEC}s"
+      PROFILE_WINDOW_SEC=$_WSEC
+    fi
+  fi
+  export PROFILE_NUM_STEPS PROFILE_NUM_PROMPTS PROFILE_WINDOW_SEC
+  if declare -F adapter_profile_window >/dev/null; then
+    echo ">>> Profiling from load start (warmup ${PROFILE_WARMUP_SEC}s) on a saturated load " \
+         "(${PROFILE_NUM_PROMPTS} prompts, conc ${CONC}${PROFILE_REQUEST_RATE:+, rate ${PROFILE_REQUEST_RATE}/s}); " \
+         "SINGLE capture of ${PROFILE_NUM_STEPS} steps / ${PROFILE_WINDOW_SEC}s (adaptive re-capture OFF) ..."
+    # SINGLE deterministic capture (adaptive re-capture is off — see the sizing note above). Start the
+    # sustained, replenishing background load (>CONC prompts, realistic prefill+decode mix; NOT timed, NOT
+    # profiled). With PROFILE_WARMUP_SEC=0 the profiler is armed at load start so the capture includes the
+    # initial prefill burst (prefill shapes stay visible for head selection).
+    REQUEST_RATE="${PROFILE_REQUEST_RATE}" \
+      adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 0 >/dev/null 2>&1 &
+    _bg_load=$!
+    sleep "$PROFILE_WARMUP_SEC"
+    if kill -0 "$_bg_load" 2>/dev/null; then
+      adapter_profile_window || echo "!!! profile window failed"
+    else
+      echo "!!! background load exited before the profile window (load too short?) — falling back"
+      adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"
+    fi
+    kill "$_bg_load" 2>/dev/null || true; wait "$_bg_load" 2>/dev/null || true
+  else
+    # Backend without an HTTP profiler hook: can't profile a mid-stream window, but at least avoid the
+    # pure cold burst — send more prompts so the queue stays full past the prefill ramp and the captured
+    # steps include some decode. (Still less faithful than the windowed path; note it.)
+    echo ">>> Profiling (no window hook for $BACKEND; ${PROFILE_NUM_PROMPTS} prompts, ${PROFILE_NUM_STEPS} steps) ..."
+    REQUEST_RATE="${PROFILE_REQUEST_RATE}" \
+      adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"
+  fi
   echo ">>> Trace(s) in $PROFILE_DIR"
 fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----
-python3 - "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" <<'PY'
-import json, sys, statistics
+python3 - "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL" <<'PY'
+import json, os, sys, statistics
 runs_path, out_path = sys.argv[1], sys.argv[2]
+cold_path = sys.argv[3] if len(sys.argv) > 3 else None
 def pick(d, *keys):
     for k in keys:
         if k in d and isinstance(d[k], (int, float)): return float(d[k])
     return None
+# metric selection: default = OUTPUT-only token throughput (output/s), to match the Hyperloom
+# orchestrator's baseline/explore basis (see collectors/_common.py + collectors/explore.py, both read
+# output_throughput). Set E2E_METRIC=total for total (input+output)/s. Same key is read for
+# baseline+cand so the accept RATIO is consistent; metric_basis records which was used.
+_metric = (os.environ.get("E2E_METRIC") or "output").strip().lower()
+_is_total = _metric in ("total", "total_token", "total_throughput")
+_TPUT_KEYS = (("total_token_throughput", "total_throughput", "total_token_throughput_tok_s")
+              if _is_total else
+              ("output_throughput", "output_token_throughput", "output_throughput_tok_s"))
+def read_tps(path):
+    xs = []
+    if not path: return xs
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line: continue
+                try: d = json.loads(line)
+                except Exception: continue
+                v = pick(d, *_TPUT_KEYS)
+                if v is not None: xs.append(v)
+    except FileNotFoundError:
+        pass
+    return xs
 tps, ttft, tpot = [], [], []
 with open(runs_path) as fh:
     for line in fh:
@@ -313,27 +583,44 @@ with open(runs_path) as fh:
         if not line: continue
         try: d = json.loads(line)
         except Exception: continue
-        v = pick(d, "output_throughput", "output_token_throughput", "output_throughput_tok_s")
+        v = pick(d, *_TPUT_KEYS)
         if v is not None: tps.append(v)
         t = pick(d, "median_ttft_ms", "mean_ttft_ms");   ttft.append(t) if t is not None else None
         p = pick(d, "median_tpot_ms", "mean_tpot_ms");   tpot.append(p) if p is not None else None
+cold_tps = read_tps(cold_path)
 def med(xs): return statistics.median(xs) if xs else None
 def spread(xs):
     if len(xs) < 2: return 0.0
     m = med(xs); return round(100.0 * (max(xs)-min(xs)) / m, 2) if m else 0.0
+_tput_med = round(med(tps), 3) if tps else None
+_tput_spread = spread(tps)
 summ = {
-    "output_throughput_tok_s_median": round(med(tps), 3) if tps else None,
-    "output_throughput_tok_s_spread_pct": spread(tps),
+    # Canonical, metric-neutral throughput of the SELECTED basis (see metric_basis). Downstream should
+    # read this + metric_basis; the accept RATIO is basis-consistent (baseline+cand use the same metric).
+    "throughput_tok_s_median": _tput_med,
+    "throughput_tok_s_spread_pct": _tput_spread,
+    # Legacy output-named alias: populated ONLY in output mode (its literal meaning). In total mode it is
+    # None so nobody silently reads total throughput under an "output" name — read throughput_tok_s_median.
+    "output_throughput_tok_s_median": _tput_med if not _is_total else None,
+    "output_throughput_tok_s_spread_pct": _tput_spread if not _is_total else None,
     "ttft_ms_median": round(med(ttft), 3) if ttft else None,
     "tpot_ms_median": round(med(tpot), 3) if tpot else None,
     "runs": len(tps),
     "all_throughput": tps,
-    # Aggregate output tok/s (NOT divided by TP) — matches Hyperloom/Magpie output_throughput 口径.
-    "metric_basis": "aggregate_output_tok_s",
+    # Optional COLD full-round (BENCH_COLD_FINAL=1): a single fresh-server round with
+    # JIT/graph-capture costs included, for cold-to-cold parity vs Hyperloom's
+    # baseline_tput. None when the cold round was not run (default). The hot median
+    # above stays the primary metric so existing consumers are unaffected. Uses the
+    # SAME metric basis (E2E_METRIC) as the hot median for a consistent comparison.
+    "cold_output_throughput_tok_s": round(med(cold_tps), 3) if cold_tps else None,
+    "cold_runs": len(cold_tps),
+    # Aggregate tok/s (NOT divided by TP). Default matches Hyperloom/Magpie output_throughput protocol;
+    # E2E_METRIC=total switches to total (input+output) token throughput.
+    "metric_basis": ("aggregate_total_token_tok_s" if _is_total else "aggregate_output_tok_s"),
 }
 with open(out_path, "w") as fh: json.dump(summ, fh, indent=2)
-print(f"E2E_SUMMARY output_tok_s={summ['output_throughput_tok_s_median']} "
-      f"spread={summ['output_throughput_tok_s_spread_pct']}% "
+print(f"E2E_SUMMARY {summ['metric_basis']}={summ['throughput_tok_s_median']} "
+      f"spread={summ['throughput_tok_s_spread_pct']}% "
       f"ttft_ms={summ['ttft_ms_median']} tpot_ms={summ['tpot_ms_median']} runs={summ['runs']}")
 PY
 

@@ -9,8 +9,6 @@ regimes: [prefill, decode]
 status: sota
 updated: 2026-06-08
 sources:
-  - GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md
-  - GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_gemm-tuning-win/final_report.md
   - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
   - GEAK/e2e_workflow/knowledge/gemm_attention_backends.md
 ---
@@ -31,7 +29,7 @@ sources:
   accounting and stable A/B).
 - **Hardware:** AMD Instinct MI300X (gfx942), noise band 0.5%.
 - **Workload:** ISL/OSL/conc = **1024/1024/64** — **prefill-dominated**.
-- **Method:** [`../../kernel_workflow/optimize_e2e_model.md`](../../kernel_workflow/optimize_e2e_model.md)
+- **Method:** [`../../workflows/optimize_e2e_model.md`](../../workflows/optimize_e2e_model.md)
   (the `e2e_workflow` flow): baseline → profile → config sweep → head-kernel → milestone
   cluster → combined gate.
 
@@ -149,14 +147,14 @@ accepted. Parity safe (same bf16 math; tuner gated every row at `err_ratio < 0.0
 ## Cross-links
 - The GEMM lever in depth: [`../by_kernel/gemm_aiter_db_tuning.md`](../by_kernel/gemm_aiter_db_tuning.md)
 - The attention flag in depth: [`../by_kernel/gated_delta_backend_swap.md`](../by_kernel/gated_delta_backend_swap.md)
-- GEMM recipe: [`../../kernel_workflow/gemm_tuning_workflow.md`](../../kernel_workflow/gemm_tuning_workflow.md) · e2e flow: [`../../kernel_workflow/optimize_e2e_model.md`](../../kernel_workflow/optimize_e2e_model.md)
-- Attention selection: [`../../kernel_workflow/attention_backend_selection.md`](../../kernel_workflow/attention_backend_selection.md)
+- GEMM recipe: [`../../workflows/gemm_tuning_workflow.md`](../../workflows/gemm_tuning_workflow.md) · e2e flow: [`../../workflows/optimize_e2e_model.md`](../../workflows/optimize_e2e_model.md)
+- Attention selection: [`../../workflows/attention_backend_selection.md`](../../workflows/attention_backend_selection.md)
 - Operators: [`../../operators/dense_gemm/`](../../operators/dense_gemm/) · [`../../operators/linear_attention_gated_delta/`](../../operators/linear_attention_gated_delta/)
 - Backend: [`../../backends/aiter/tuned_gemm.md`](../../backends/aiter/tuned_gemm.md)
 
 ## Sources
-- iter1 (config win +4.15/+4.44%, editable-kernel cluster, the bias-mismatch GEMM reject): `GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md`.
-- iter2 (the +2.23% GEMM win, 246 engagement hits, the process-storm stop): `GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_gemm-tuning-win/final_report.md`.
+- iter1 (config win +4.15/+4.44%, editable-kernel cluster, the bias-mismatch GEMM reject).
+- iter2 (the +2.23% GEMM win, 246 engagement hits, the process-storm stop).
 - Cross-run provenance ledger (+~5% attn, +1.2–2.4% GEMM ceiling, bias-from-server rule): `GEAK/e2e_workflow/knowledge/{gemm_tuning/aiter_gemm_tuning.md,gemm_attention_backends.md}`.
 
 <!-- MANIFEST: Qwen3.5-27B sglang MI300X flagship e2e — measured triton-attn config win (+4.15–4.44%) stacked with bias-correct aiter GEMM DB tune (+2.23%, 246 hits) ≈ +6% cumulative; editable FLA/mamba cluster all carry-forward by Amdahl. -->

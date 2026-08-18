@@ -2,7 +2,7 @@
 """Tests for run_e2e's guaranteed interface-file emission + intermediate-win
 recovery.
 
-CONTRACT under test: as long as PerfSkills produced ANY measured E2E effect on
+CONTRACT under test: as long as GEAK produced ANY measured E2E effect on
 disk, result.json (+ kernel_journey.json) MUST be written — no termination,
 timeout, signal, or exception may leave the interface files missing.
 
@@ -62,7 +62,7 @@ def _make_eval_dir(tmp_path: Path, *, accepted: bool = True,
 
 def _handoff(eval_dir: Path) -> dict:
     return {
-        "schema_version": 1, "model_path": "/models/fake", "framework": "vllm",
+        "schema_version": 2, "model_path": "/models/fake", "framework": "vllm",
         "tp": 8, "workload": {"isl": 8192, "osl": 1024, "conc": 64},
         "exp_root": str(eval_dir.parent), "eval_dir": str(eval_dir),
     }
@@ -273,6 +273,156 @@ def test_recover_redrives_our_own_recovered_persist(tmp_path):
     assert wf["accepted_config"]["flags"] == "--max-num-batched-tokens 16384"
 
 
+def test_normalize_reconciles_crashed_validate_with_accepted_win(tmp_path):
+    """The Kimi-K2.6 20260625T130314Z bug: the workflow ACCEPTED a head (A/B
+    +18.93%) but the final Validate bench CRASHED, so the live return carried
+    final_throughput_tok_s=0 / throughput_speedup=0. result.json must NOT report
+    no_gain — it reconciles from the on-disk accepted integrate A/B."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True, with_validation=False)
+    # Live return: a real accepted head, but degenerate final/speedup (crash).
+    wf = {
+        "eval_dir": str(eval_dir),
+        "baseline_throughput_tok_s": 255.049,
+        "final_throughput_tok_s": 0,
+        "throughput_speedup": 0,
+        "validation_status": "flagged_no_number_used_carried_ab",
+        "accepted_heads": [{
+            "short_name": "fused_moe_kernel_gptq_awq",
+            "op_kind": "gemm", "backend": "triton", "kind": "env",
+            "e2e_delta_pct": 16.049, "isolated": 1.5902,
+        }],
+        "accepted_kernels": [],
+    }
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "ok", "an accepted same-session win must never read as no_gain"
+    assert out["throughput_speedup"] == pytest.approx(535.352 / 461.314)
+    assert out["final_throughput_tok_s"] == pytest.approx(535.352)
+    # Provenance is honest: the number came from the disk intermediate A/B.
+    assert out["result_source"] == "disk_intermediate_win"
+    # The accepted head metadata from the live return is preserved.
+    assert out["accepted_heads"][0]["short_name"] == "fused_moe_kernel_gptq_awq"
+
+
+def test_normalize_does_not_reconcile_genuine_no_gain(tmp_path):
+    """A return that accepted NOTHING (empty heads/kernels) with speedup 1.0 is a
+    legitimate no_gain — the reconciliation guard must leave it untouched."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True, with_validation=False)
+    wf = {
+        "eval_dir": str(eval_dir),
+        "baseline_throughput_tok_s": 255.049,
+        "final_throughput_tok_s": 255.049,
+        "throughput_speedup": 1.0,
+        "accepted_heads": [],
+        "accepted_kernels": [],
+    }
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "no_gain"
+    assert out["result_source"] == "workflow_return"
+
+
+# ── validated-win ATTRIBUTION backfill (the Qwen3.5-27B-FP8 director-override) ─
+
+def test_normalize_backfills_validated_win_attribution_head(tmp_path):
+    """A live return with a Director validated_win (speedup 1.59) but EMPTY
+    accepted_heads AND accepted_kernels: the winning head was ledgered 'dead_end'
+    by the single-head Amdahl guard and the Director's override never wrote it
+    back. normalize_result must recover the attribution into accepted_heads (from
+    the in-run ledger, routed by headQueue), tagged director_override — while
+    accepted_kernels stays [] (it was NOT an authored kernel)."""
+    eval_dir = tmp_path / "e2e_validated_dropped"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "director_e2e_validation.json").write_text(json.dumps({
+        "validation_status": "validated_win",
+        "throughput_speedup": 1.5948,
+        "director_verified_throughput_tok_s": 1684.6,
+        "baseline_throughput_tok_s": 1058.9,
+        "output_parity": "pass",
+    }), encoding="utf-8")
+    wf = {
+        "eval_dir": str(eval_dir),
+        "throughput_speedup": 1.5948,
+        "final_throughput_tok_s": 1684.6,
+        "baseline_throughput_tok_s": 1058.9,
+        "validation_status": "validated_win",
+        "accepted_heads": [],
+        "accepted_kernels": [],
+        "accepted_config": {"flags": "--context-length 6144", "env": "SGLANG_USE_AITER=1"},
+        "state": {
+            "headQueue": [
+                {"id": "h0", "short_name": "fp8 a8w8 blockscale GEMM — up/gate", "pct_gpu_time": 33.74},
+                {"id": "h1", "short_name": "fp8 a8w8 blockscale GEMM — down-proj", "pct_gpu_time": 16.08},
+            ],
+            "kernelQueue": [
+                {"id": "k0", "short_name": "chunk_gated_delta_rule_fwd_kernel", "pct_gpu_time": 2.04},
+            ],
+            "history": {"ledger": [
+                {"direction": "fp8 a8w8 blockscale GEMM — up/gate",
+                 "isolated_speedup": 1.72, "e2e_delta_pct": 58.99, "verdict": "dead_end",
+                 "lesson": "implausible_speedup (+59.0% >> Amdahl ceiling +16.4%)"},
+            ]},
+        },
+    }
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "ok"
+    assert out["result_source"] == "workflow_return"
+    # accepted_kernels stays empty (the win was NOT an authored kernel).
+    assert out["accepted_kernels"] == []
+    # the head win is recovered into accepted_heads, tagged director_override.
+    assert len(out["accepted_heads"]) == 1
+    head = out["accepted_heads"][0]
+    assert head["short_name"] == "fp8 a8w8 blockscale GEMM — up/gate"
+    assert head["accepted_via"] == "director_override"
+    assert head["e2e_delta_pct"] == pytest.approx(58.99)
+
+
+def test_normalize_backfill_routes_kernel_from_kernelqueue(tmp_path):
+    """When the dropped winner matches the kernelQueue (an editable kernel, not a
+    head), the backfill routes it to accepted_kernels — not accepted_heads."""
+    eval_dir = tmp_path / "e2e_validated_kernel"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "director_e2e_validation.json").write_text(json.dumps({
+        "validation_status": "validated_win", "throughput_speedup": 1.2,
+    }), encoding="utf-8")
+    wf = {
+        "eval_dir": str(eval_dir), "throughput_speedup": 1.2,
+        "validation_status": "validated_win",
+        "accepted_heads": [], "accepted_kernels": [],
+        "state": {
+            "headQueue": [{"short_name": "some_gemm_head", "pct_gpu_time": 30}],
+            "kernelQueue": [{"short_name": "fused_recurrent_gated_delta", "pct_gpu_time": 3}],
+            "history": {"ledger": [
+                {"direction": "fused_recurrent_gated_delta", "isolated_speedup": 1.4,
+                 "e2e_delta_pct": 8.0, "verdict": "confirmed"},
+            ]},
+        },
+    }
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["accepted_heads"] == []
+    assert len(out["accepted_kernels"]) == 1
+    assert out["accepted_kernels"][0]["short_name"] == "fused_recurrent_gated_delta"
+    assert out["accepted_kernels"][0]["accepted_via"] == "director_override"
+
+
+def test_normalize_backfill_noop_without_validated_win(tmp_path):
+    """Do-no-harm: a positive-speedup return WITHOUT a Director validated_win must
+    NOT be backfilled (the guard requires the override signal) — empty attribution
+    lists stay empty, never fabricated."""
+    eval_dir = tmp_path / "e2e_no_validated"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "director_e2e_validation.json").write_text(json.dumps({
+        "validation_status": "flagged", "throughput_speedup": 1.3,
+    }), encoding="utf-8")
+    wf = {
+        "eval_dir": str(eval_dir), "throughput_speedup": 1.3,
+        "accepted_heads": [], "accepted_kernels": [],
+        "state": {"headQueue": [{"short_name": "x", "pct_gpu_time": 30}],
+                  "history": {"ledger": [{"direction": "x", "e2e_delta_pct": 20.0}]}},
+    }
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["accepted_heads"] == []
+    assert out["accepted_kernels"] == []
+
+
 def test_result_source_no_gain(tmp_path):
     eval_dir = _make_no_gain_eval_dir(tmp_path)
     wf = rx._recover_workflow_return(eval_dir.parent)
@@ -299,29 +449,51 @@ def test_result_source_live_workflow_return(tmp_path):
 
 # ── guaranteed emit in main() ───────────────────────────────────────────────
 
-def _run_main(monkeypatch, tmp_path, eval_dir, *, invoke):
+def _run_main(monkeypatch, tmp_path, eval_dir, *, invoke, handoff_extra=None):
     monkeypatch.setattr(rx, "invoke_workflow", invoke)
     monkeypatch.setattr(rx, "apply_bench_client", lambda h: "native")
     monkeypatch.setattr(rx, "apply_bench_protocol", lambda h: {})
     hp = tmp_path / "handoff.json"
     rp = tmp_path / "out" / "result.json"
-    hp.write_text(json.dumps(_handoff(eval_dir)), encoding="utf-8")
+    handoff = _handoff(eval_dir)
+    handoff.update(handoff_extra or {})
+    hp.write_text(json.dumps(handoff), encoding="utf-8")
     rc = rx.main([str(hp), str(rp)])
     return rc, rp
 
 
 def test_emit_on_success(monkeypatch, tmp_path):
     eval_dir = _make_eval_dir(tmp_path, with_validation=True)
+    report = eval_dir / "final_report.md"
+    report.write_text("# GEAK final report\n", encoding="utf-8")
 
     def ok_invoke(prompt, t, ed):
         return {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
                 "final_throughput_tok_s": 535.352,
-                "baseline_throughput_tok_s": 461.314}
+                "baseline_throughput_tok_s": 461.314,
+                "report_path": str(report)}
 
-    rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=ok_invoke)
+    rc, rp = _run_main(
+        monkeypatch,
+        tmp_path,
+        eval_dir,
+        invoke=ok_invoke,
+        handoff_extra={
+            "raw_baseline_tput": 430.0,
+            "orchestrator_best_tput_same_config": 460.0,
+        },
+    )
     assert rp.is_file(), "result.json MUST exist on success"
     out = json.loads(rp.read_text())
     assert out["status"] == "ok"
+    assert out["schema_version"] == 2
+    assert out["baseline_alignment"]["status"] == "aligned"
+    assert out["baseline_basis"]["measurement_divergence_pct"] == out[
+        "baseline_basis"
+    ]["current_best_same_config_divergence_pct"]
+    assert "baseline_divergence_pct" not in out["baseline_basis"]
+    rendered = report.read_text(encoding="utf-8")
+    assert rendered.count(rx.BASELINE_ALIGNMENT_BEGIN) == 1
     assert (eval_dir / "kernel_journey.json").is_file()
 
 
@@ -329,16 +501,31 @@ def test_emit_when_workflow_raises_but_disk_has_intermediate(monkeypatch, tmp_pa
     """The killer case: workflow dies before Validate, but an accepted
     intermediate is on disk -> result.json MUST still be ok (not discarded)."""
     eval_dir = _make_eval_dir(tmp_path, accepted=True, with_validation=False)
+    report = eval_dir / "final_report.md"
+    report.write_text("# Recovered GEAK report\n", encoding="utf-8")
 
     def boom(prompt, t, ed):
         raise TimeoutError("budget expired before Validate")
 
-    rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=boom)
+    rc, rp = _run_main(
+        monkeypatch,
+        tmp_path,
+        eval_dir,
+        invoke=boom,
+        handoff_extra={
+            "raw_baseline_tput": 430.0,
+            "orchestrator_best_tput_same_config": 461.0,
+        },
+    )
     assert rp.is_file(), "result.json MUST exist even when workflow raised"
     out = json.loads(rp.read_text())
     assert out["status"] == "ok"
     assert out.get("recovered_from_disk") is True
     assert out["final_throughput_tok_s"] == pytest.approx(535.352)
+    assert out["baseline_alignment"]["status"] == "aligned"
+    assert report.read_text(encoding="utf-8").count(
+        rx.BASELINE_ALIGNMENT_BEGIN
+    ) == 1
     assert (eval_dir / "kernel_journey.json").is_file()
 
 

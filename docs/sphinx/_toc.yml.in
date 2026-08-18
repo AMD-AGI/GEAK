@@ -1,0 +1,47 @@
+# Table of contents for the GEAK documentation site.
+# Processed by rocm-docs-core into sphinx/_toc.yml at build time.
+# https://rocm.docs.amd.com/projects/rocm-docs-core/en/latest/
+
+defaults:
+  numbered: false
+
+root: index
+
+subtrees:
+- entries:
+  - file: what-is-geak
+    title: What is GEAK?
+  - file: release-notes
+    title: Release notes
+  - file: compatibility
+    title: Compatibility matrix
+
+- caption: Install
+  entries:
+    - file: install/install
+      title: Install GEAK
+
+- caption: How to
+  entries:
+    - file: how-to/run-agent
+      title: Run a workflow
+
+- caption: Conceptual
+  entries:
+    - file: conceptual/geak-pipeline
+      title: GEAK pipeline
+
+- caption: Reference
+  entries:
+    - file: reference/api-reference
+      title: API reference
+    - file: reference/run-e2e-contract
+      title: External orchestrator contract
+    - url: https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html
+      title: Hyperloom
+
+- caption: About
+  entries:
+    - file: license
+      title: License
+

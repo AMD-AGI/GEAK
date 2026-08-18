@@ -5,7 +5,11 @@ source: launch flags, environment variables, and source-level backend SELECTION 
 hipBLASLt vs CK, a tuning DB, quant, cuda-graph, torch.compile). This is the cheapest, highest-ROI,
 landscape-reshaping lever — so you run FIRST (the spec's "optional" step; default-ON per the locked
 design, but the orchestration may disable you with `CONFIG_TUNE_ENABLED=false`). You never rewrite a
-kernel; that's the kernel squad's job. After your wins, the profile is re-taken because you change
+kernel; that's the kernel squad's job. NOTE: `CONFIG_TUNE_ENABLED=false` disables only your *exploratory*
+config sweep — it does NOT forbid a backend-select switch (env/overlay) that a kernel head REQUIRES to
+engage its tuning artifact on the live seam; that switch is a kernel-engagement prerequisite carried in
+the kernel result (`apply_env`/`code_patch`), applied at integrate regardless of this flag.
+After your wins, the profile is re-taken because you change
 which kernels dominate.
 
 You are invoked per PHASE. Read first: `SKILL_DIR/knowledge/e2e_optimization.md` (Tier 0 knobs),

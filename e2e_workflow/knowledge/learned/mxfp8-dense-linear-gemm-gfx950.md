@@ -28,4 +28,4 @@ last_seen: 2026-06-22
 - harness: shared op_bench.py MIS-ROUTES (is_blockscale_gemm True) to dense a8w8 fp32-scale path ->
   aiter_blockscale TypeError (dtype= kwarg) + aiter_bpreshuffle 42.99 rel-err = harness mis-route, NOT
   no-win. Repair: drive immutable unittest _build_case/_call directly. Driver: opbench_mxfp8_linear_driver.py
-- source: /shared/amdgpu/home/zihaoan2_qle/kernel_agent/v4/GEAK/worktree/deep/exp/e2e_MiniMax-M3-MXFP8_20260622_063601_1857462_27251 (opbench_result_corrected.json, mxfp8_linear_knob_sweep.json)
+- source: `<EVAL_DIR>/exp/e2e_MiniMax-M3-MXFP8_20260622_063601_1857462_27251` (opbench_result_corrected.json, mxfp8_linear_knob_sweep.json)

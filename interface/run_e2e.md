@@ -4,8 +4,8 @@
 touches. Everything volatile about the e2e workflow (the `e2e_workflow.js` arg
 names, the Claude Code `Workflow` invocation, the `--effort ultracode`
 requirement, the SDK-vs-CLI choice) is hidden behind one command and two JSON
-files. As long as `schema_version` stays `1`, the caller never changes when
-the workflow evolves internally.
+files. The result schema is versioned so callers can distinguish contract
+changes while the workflow evolves internally.
 
 ## Command
 
@@ -19,8 +19,8 @@ python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 * `--dry-run` → print the mapped `e2e_workflow.js` args + the prompt and
   exit `0` (no GPU work). Use this to validate the mapping in CI.
 
-Discovery: the installer should export `PERFSKILLS_E2E_RUNNER` pointing at this
-file (`$PERFSKILLS_ROOT/interface/run_e2e.py`) so the caller has a single
+Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
+file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
 
 The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
@@ -30,7 +30,7 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 
 ```jsonc
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "model_path": "/models/Qwen-Qwen3.5-27B",
   "framework": "sglang",                 // -> backend (sglang|vllm)
   "gpu_type": "MI300X",
@@ -40,8 +40,9 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "accepted_flags": "--attention-backend triton",  // best config from the caller's search
   "accepted_env": "SGLANG_USE_AITER=1",
   "launch_recipe": "/path/baseline_config.with_envs.yaml",  // optional launch script/recipe
-  "raw_baseline_tput": 1485.4,           // caller's official raw baseline (carried for reference)
-  "exp_root": "/work/perfskills_exp",    // where the timestamped run dir is created
+  "raw_baseline_tput": 1485.4,           // caller's pre-change session baseline (audit reference)
+  "orchestrator_best_tput_same_config": 1550.8, // caller best measured with accepted_flags/env
+  "exp_root": "/work/experiment/geak",   // basename MUST be `geak`; the timestamped run dir is created here
   "bench_client": "auto",                // auto|inferencex|native — see口径 alignment below
   "inferencex_path": "/opt/InferenceX",  // optional; else taken from $INFERENCEX_PATH
   "bench_protocol": {                    // optional; caller's measurement 口径 (see below)
@@ -56,7 +57,7 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 Required: `model_path`, `exp_root`. Everything else has a default.
 
 `bench_protocol` is optional and **partial-friendly**: only the keys present are
-applied. Omit it entirely (standalone PerfSkills, no external orchestrator) and
+applied. Omit it entirely (standalone GEAK, no external orchestrator) and
 `bench_e2e.sh` keeps its own defaults unchanged. When the caller (Hyperloom)
 supplies it, those values are the EXACT knobs the caller's official baseline was
 measured with — forwarding them is what makes the workflow's numbers
@@ -78,19 +79,54 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 | `accepted_flags` | `initial_extra_server_args` | seeds the baseline = caller best config |
 | `accepted_env` | `initial_extra_env` | seeds baseline env |
 | `launch_recipe` | `launch_script` | optional |
+| `raw_baseline_tput` | result audit metadata | pre-change session baseline; never used as the measurement-alignment signal |
+| `orchestrator_best_tput_same_config` | result alignment metadata | caller throughput on the accepted config GEAK uses for its baseline |
 | `exp_root` | `exp_root` | run dir root |
+| (derived from `exp_root`) | `tracelens` | auto-discovered upstream TraceLens / kernel-agent artifacts (see below); only non-null paths forwarded; key omitted entirely when none found |
 | `bench_client` / `inferencex_path` | env `BENCH_CLIENT` + `INFERENCEX_PATH` | exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
 | `bench_protocol.{random_range_ratio,num_prompts,num_warmups,seed}` | env `RANDOM_RANGE_RATIO` / `NUM_PROMPTS` / `NUM_WARMUPS` / `SEED` | `run_e2e.py:apply_bench_protocol` exports ONLY the provided keys, overriding `bench_e2e.sh` standalone defaults; absent ⇒ defaults kept (not a JS arg) |
 | — | `config_tune="false"` | caller already did config search; never double-run |
 | — | `apply_to_original="true"` | so `final/final_launch.sh` + overlay are emitted for sweep reuse |
 
+### TraceLens prior auto-discovery (owned by `run_e2e.py:resolve_tracelens_report`)
+
+An upstream orchestrator may have already profiled the SAME baseline workload with
+TraceLens and dropped its artifacts beside the handoff's `geak` dir (i.e.
+under the experiment root = the parent of `geak`). `map_args` resolves them
+by glob (each `**` is a randomly-named nested dir) and forwards the **non-null**
+paths to the workflow as `args.tracelens`:
+
+| key | glob (relative to the experiment root) | what it is |
+|---|---|---|
+| `analysis_md` | `kernel-agent/**/tracelens/analysis.md` | human TraceLens hot-kernel report |
+| `kernel_candidates_json` | `kernel-agent/**/kernel_candidates.json` | machine-readable hot-kernel list (name/category/source_file/launcher/shapes/bound_type/…) |
+| `tracelens_report_json` | `kernel-agent/**/tracelens/tracelens_report.json` | full TraceLens report (same `hot_kernels[]` shape) |
+| `trace_file` | `runs/roofline/**/torch_trace` | the roofline torch-trace **directory** (per-TP-rank `*.pt.trace.json.gz`) |
+
+Resolution prefers the parent of the `geak` segment in `exp_root`; if that
+path is not present on the box it falls back to the on-disk grandparent of the
+handoff file. The same four paths are also surfaced (with nulls) in the human
+`tracelens_report` block of the driver prompt.
+
+**How the workflow uses it (entirely additive — a tracelens-less run is byte-identical):**
+the Profiler reads `args.tracelens` and, **only when `analysis_md` exists, SKIPS its
+own warm-server trace collection** and builds the standardized Top-N from the
+TraceLens artifacts; **when `trace_file` also exists it runs an ADDITIONAL
+`parse_profile.py` pass** on the rank0 serving trace to recover real kernel
+symbols + reliable per-launch shapes and reconcile them (TraceLens `analysis.md`
+shapes are treated as a hint and double-checked). The System Architect uses
+`kernel_candidates.json` as an advisory routing prior (enriching candidates with
+`source_hint`/`launcher_hint`/`bound_type`) without ever overriding the measured
+`%gpu`. When `args.tracelens` is absent (or for any post-config reprofile, where
+the baseline prior is stale) the workflow profiles/strategizes exactly as before.
+
 ## `result.json` (workflow → caller)
 
 ```jsonc
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "ok | no_gain | error",
-  "eval_dir": "/work/perfskills_exp/e2e_<model>_<ts>",
+  "eval_dir": "/work/experiment/geak/e2e_<model>_<ts>",
   "baseline_throughput_tok_s": 1485.4,   // baseline (= caller best config)
   "final_throughput_tok_s": 1551.4,
   "throughput_speedup": 1.044,
@@ -107,11 +143,37 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
   "accepted_kernels": [ /* what was optimized + how (per-kernel) */ ],
   "accepted_heads": [ /* head GEMM/attn winners */ ],
   "accepted_config": { "flags": "...", "env": "..." },
+  "baseline_basis": {
+    "geak_measured_baseline_tok_s": 1551.4,
+    "orchestrator_baseline_tok_s": 1485.4,
+    "raw_session_baseline_divergence_pct": 4.44, // audit only; includes accepted config gain
+    "orchestrator_best_tput_same_config": 1550.8,
+    "current_best_same_config_divergence_pct": 0.04, // primary alignment metric
+    "measurement_divergence_pct": 0.04 // backward-compatible alias
+  },
+  "baseline_alignment": {
+    "status": "aligned | warning | unavailable",
+    "primary_metric": "current_best_same_config_divergence_pct",
+    "divergence_pct": 0.04,
+    "warning_threshold_pct": 3.0,
+    "raw_session_divergence_is_measurement_signal": false
+  },
   "report_path": ".../final_report.md",  // human report: per-kernel optimizations, changed params, TTFT/TPOT
   "kernel_journey_path": ".../kernel_journey.json",  // per-kernel journey contract (see below); absent if nothing accepted
   "recovered_from_disk": true             // present+true only when the handoff was rebuilt from on-disk artifacts
 }
 ```
+
+`raw_session_baseline_divergence_pct` compares GEAK's accepted-config baseline
+with the caller's pre-change session baseline. It is audit-only because it
+includes configuration gains accepted before GEAK started.
+
+`current_best_same_config_divergence_pct` compares the same accepted
+configuration in both harnesses and is the primary alignment metric.
+`measurement_divergence_pct` remains an exact compatibility alias for existing
+callers. If the handoff omits `orchestrator_best_tput_same_config`, both
+same-config fields are `null` and `baseline_alignment.status` is `unavailable`;
+GEAK never falls back to the raw-session divergence as a drift signal.
 
 ## Handoff resilience (the workflow return is never the single point of failure)
 

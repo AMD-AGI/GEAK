@@ -77,11 +77,17 @@ analysis below exactly as before.)
      `gather_scatter`, `reduction`, …). Use `null` if NONE genuinely fits (most point-cloud/custom HIP
      ops — do NOT force a bad match).
    - `kk_language`: the backend/language id of the editable source — `triton` | `hip` | `ck` | `asm`
-     | `flydsl` | `tilelang` (match the kernel's actual language).
+     | `flydsl` | `tilelang` | `gluon` (match the kernel's actual language; `gluon` only when the
+     source really is Gluon, i.e. `gluon.jit` / explicit layouts — a plain `triton.jit` kernel is
+     `triton` even if you plan to migrate it).
    - `kk_refs`: 2–4 concrete card paths under `KERNEL_KNOWLEDGE_DIR` worth reading first, e.g.
      `operators/<kk_operator>/tuning.md`, `operators/<kk_operator>/backends/<kk_language>.md`,
      `operators/<kk_operator>/{numerics,fusion}.md`, `index/recipes.md`. Verify each path exists
      (`ls`); drop any that don't. Empty `[]` when `kk_operator` is `null`.
+     For `flydsl` | `tilelang` | `gluon`, also include the language dir `languages/<kk_language>/` —
+     the engineers cannot be assumed to write these from memory, and only that dir carries the
+     programming model. (Dir names differ from the ids for the others: triton→`triton_amd`,
+     hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`.)
    Treat all of this as facts/how-to to *widen* the candidate set — not decisions (see the contract
    above). Do not let it override the per-case data or measurement.
 5. Write `EVAL_DIR/analysis.json` and `EVAL_DIR/codebase_context.md` (human-readable, INCLUDE the
@@ -103,7 +109,7 @@ Return JSON:
     {"title": "...", "specialty": "algorithm|memory|compute|host_runtime", "why": "..."}
   ],
   "kk_operator": "<taxonomy operator id or null>",
-  "kk_language": "<triton|hip|ck|asm|flydsl|tilelang or null>",
+  "kk_language": "<triton|hip|ck|asm|flydsl|tilelang|gluon or null>",
   "kk_refs": ["<existing card paths under KERNEL_KNOWLEDGE_DIR>"]
 }
 ```
@@ -116,7 +122,9 @@ Inputs: `EVAL_DIR`, `ROUND` (1-based), `BUDGET_REMAINING` (hard cap on direction
 `CUMULATIVE_SPEEDUP` (best verified geomean so far, 1.0 at start), `BASELINE_GEOMEAN_MS`, the latest
 `PROFILE_SUMMARY` (path + inline), and `HISTORY` (the insight blackboard + hypothesis ledger from
 prior rounds — see below). Also the current best per-case table. Plus `KERNEL_KNOWLEDGE_DIR`,
-`KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` (the kk pointer resolved in analyze; may be empty).
+`KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` (the kk pointer resolved in analyze; may be empty). Plus
+`DEEP_SEARCH_BRIEF` — a path to the Deep Research Agent's compact ranked-directions brief
+(`EVAL_DIR/deep_search_brief.md`), or `''` when the DRA did not run / produced nothing.
 
 **DEEP-MODE hooks (act on these ONLY if present in your inputs; otherwise ignore — a normal run never
 passes them):**
@@ -132,6 +140,12 @@ passes them):**
   the INTEGRATION cause, not just more isolated speedup.
 - `HARNESS_ADDENDUM` — path to an e2e-refined harness addendum (which cases to weight, a cudagraph-capture
   wrapper, hard constraint gates). Plan toward the addendum's weighted target.
+
+**Workload-aligned runs (COMMANDMENT METRIC = time-weighted ratio-of-sums):** `CUMULATIVE_SPEEDUP` is
+then the time-weighted speedup, and the per-case table carries each case's `count` / time-share. Steer
+toward the cases that DOMINATE that weighted metric (high `count·latency` share) — a big win on a
+rare-but-cheap case barely moves it, while a modest win on the dominant case (often the decode bucket)
+moves it a lot. Do NOT let a high-variance speedup on a low-weight case decide the round.
 
 Your job: decide this round's directions (or stop). Re-read `geomean_levers.md` and the relevant
 optimization knowledge first.
@@ -165,6 +179,53 @@ Rules:
    set. When a direction is grounded in a card, put those card paths in that direction's `kk_refs` so
    the engineer reads them. Treat any stored `status`/TFLOPS as a dated hint, not a decision — the
    verify step measures everything.
+2b. **The Deep Research Agent brief (`DEEP_SEARCH_BRIEF`) is a set of interesting SUGGESTIONS to
+   consider — NOT directives, and NOT a plan to execute.** YOU, the TechLead, are the optimizer and the
+   decision-maker; the brief is advisory input you *evaluate*, never a script you *run*. Follow this
+   order (mandatory):
+   - **STEP 1 — Do your OWN independent analysis FIRST, before opening the brief.** Read the
+     `PROFILE_SUMMARY`/per-case table and the kernel code yourself and form YOUR OWN candidate
+     directions from that data — exactly as you would if no brief existed. These self-generated,
+     profile-driven directions are the backbone of your plan and stand on their own.
+   - **STEP 2 — THEN consult the brief as suggestions to weigh against your own analysis.** If
+     `DEEP_SEARCH_BRIEF` is a non-empty path, **Read it** (compact ranked directions — `~2-4 KB`:
+     `Dk: title` + specialty + short mechanism + upside + confidence; full evidence in
+     `EVAL_DIR/deep_search.md`, drill in only if a direction is unclear). Treat each `Dk` as one
+     *suggestion to consider*, not an instruction. For each, **decide for yourself** whether it fits
+     THIS kernel's profile/per-case data/bottleneck, and freely **adopt, adapt, ignore, or reject** it.
+     **Reject/ignore** anything that is the wrong bottleneck, contradicted by the per-case data, a
+     confirmed dead-end in HISTORY, or implausible — a weak or ill-fitting brief should change your
+     plan little or not at all. Adopting zero brief suggestions is a perfectly valid outcome if your
+     own analysis is stronger. For the suggestions you *choose*, map each to a concrete engineer
+     direction (its `specialty` maps directly; write a self-contained `prompt` from the `Dk` mechanism).
+   Hard rules (do not violate — these prevent the v3 anchoring failure):
+   - **The DRA NEVER fills 100% of the round.** ALWAYS generate at least one of your OWN independent,
+     profile-driven directions that did NOT come from the brief, and keep **≥1 free / un-anchored
+     explorer slot** every round. The brief may seed AT MOST `BUDGET_REMAINING − 1` of this round's
+     directions; never let it crowd out your own analysis. (If only 1 direction fits this round, prefer
+     your own profile-driven pick, alternating with a brief-seeded one across rounds.)
+   - **DIVERSIFY — spread, don't anchor.** When you do take multiple brief directions, assign DIFFERENT
+     ranked `Dk` to different parallel engineers, spread ACROSS the ranked list (a top `Dk` + a mid
+     `Dk`), NEVER several engineers on the same brief theme. Converging the whole round on one direction
+     is the exact anchoring failure that hurt v3 — do not do it.
+   - **HIGH-CEILING directions are FIRST-CLASS (when they fit).** If the brief ranks a bold rewrite high
+     (raw-HIP/`load_inline`, CUDA/HIP graph capture / persistent kernels, algorithmic reformulation, a
+     SOTA method ported from a paper/CUDA) AND it fits the profile, treat it as a first-class candidate
+     — typically `deep_explore` (confirm `BUDGET_REMAINING ≥ DEEP_COST`) or a `host_runtime`/`algorithm`
+     specialist. Do NOT demote it to "later/secondary" just for being ambitious. (But it is still
+     subject to your fit-judgment above — ambition is not a reason to take a direction the profile
+     contradicts.)
+   - **FUSION.** An intra-kernel fusion direction from the brief (collapse dispatches / fold epilogue)
+     is a normal `algorithm`/`host_runtime`/`deep_explore` direction — dispatch it like any other. A
+     cross-kernel fusion flagged as an "e2e-level escalation" (merge with an adjacent op) is NOT
+     executable in this single-kernel layer (the engineers work this op's task against its own immutable
+     oracle) — do NOT turn it into an engineer direction; leave it as the researcher's escalation note.
+   - **Don't over-prescribe.** The brief gives the IDEA/mechanism, not an implementation. Keep your
+     direction `prompt` to the mechanism + why (cite the profile/per-case signal) + a target; do NOT
+     prescribe exact edits — finding "how" is the engineer's job (this de-prescription is deliberate).
+   The brief is a prior, never a cage: it never overrides the profile/per-case signal, the floor rules
+   below, or measurement, and it never replaces your own directions. If it is `''` / unreadable, ignore
+   it — behavior is unchanged.
 3. Use the data: look at the per-case table and `geomean_levers.md`. If several cases are
    overhead-bound (similar latency across sizes, or dispatch count > 1), you MUST include at least
    one `host_runtime` direction (dispatch collapse / native layout / wrapper). Target the WORST
@@ -251,7 +312,9 @@ none of them, so skip this whole block then):**
   ```bash
   mkdir -p "$STATE_DIR"
   # sync the cumulative-best workspace (code + immutable oracle) to STATE_DIR/best (tar-pipe, exclude
-  # .git/build/__pycache__/.torch_ext/*.so) so the next wave's director seeds from it. NO `rm` (it
+  # .git/build/__pycache__/.torch_ext/*.so) so the next wave's director seeds from it. The golden
+  # (reference_io.pt, if present) is an absolute symlink in CANONICAL; this tar carries it verbatim so
+  # best/ shares the one physical file — never add -h/--dereference. NO `rm` (it
   # prompts and blocks autonomous runs): stage into a UNIQUE tmp, then atomically swap with mv-aside.
   TMP="$STATE_DIR/best.tmp_$(date +%s)_$$"; mkdir -p "$TMP"
   ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/build' --exclude='*/__pycache__' \
@@ -296,11 +359,15 @@ table, `BASELINE_TIMING`, and `BASELINE_GEOMEAN_MS`.
    mkdir -p "$EVAL_DIR/optimized" && cp <kernel + wrapper + binding files> "$EVAL_DIR/optimized/" 2>/dev/null || true
    ```
 2. Write `EVAL_DIR/tech_lead_report.md`. Keep it concise but COMPLETE. Required sections:
-   - **Summary**: kernel, type, final geomean & arithmetic speedup, rounds, budget used / total.
+   - **Summary**: kernel, type, final speedup, rounds, budget used / total. When the run is
+     workload-aligned (COMMANDMENT METRIC = time-weighted ratio-of-sums), report the **time-weighted
+     speedup as the headline** with the unweighted geomean & arithmetic alongside; otherwise the
+     geomean is the headline (unchanged).
    - **Round-by-round**: for EACH round list EVERY engineer individually (id, specialty, strategy,
      verified speedup, success/fail + one-line reason), the integrate result, the round winner, and
      the bottleneck shift. This is the "round 1 optimized a, b, c — what were the results, what after merging; round 2 …" narrative.
-   - **Final per-test-case table** (baseline ms / optimized ms / speedup) + geomean + arithmetic.
+   - **Final per-test-case table** (baseline ms / optimized ms / speedup; + `count` & weight-share
+     when workload-aligned) + geomean + arithmetic + the time-weighted speedup.
    - **Key optimizations applied** (what + impact).
    - **What didn't work** (dead-ends from the ledger).
 
@@ -309,6 +376,7 @@ Return JSON:
 {
   "final_speedup_geomean": 0.0,
   "final_speedup_arithmetic": 0.0,
+  "final_speedup_weighted": 0.0,
   "rounds": 0,
   "budget_used": 0,
   "report_path": "<EVAL_DIR>/tech_lead_report.md",

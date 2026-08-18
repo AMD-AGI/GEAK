@@ -42,6 +42,14 @@ e2e is **Amdahl-dominated**: rank every candidate by `pct_gpu_time × achievable
 2%-of-time kernel is invisible — but a mere **1.15× on a 78% GEMM is ~+10% e2e**. So the head of the
 profile is where the budget goes, even though those kernels are library calls.
 
+**`achievable_speedup` is the half everyone guesses wrong.** A big `pct_gpu_time` is *necessary* but not
+*sufficient*: a kernel already running at the hardware's bandwidth or compute ceiling has no time left to
+recover, no matter how much of the profile it owns. When a roofline prior is available (step 1c) use it
+to ground that factor in a measured ceiling instead of a class prior — but note what it does and does not
+mean: **a saturated kernel is done with micro-tuning, NOT done being optimized.** If it is still the
+largest consumer of GPU time it remains the top target; the lever just moves from "make this kernel
+faster" to "make it move fewer bytes" (step 1d). Never let a headroom estimate drop the biggest kernel.
+
 **`edit=N` (library) does NOT mean "skip" — it means "Tier-C code rewrite is unavailable."** A
 fixed-shape GEMM is one of the most tunable things on the chip. Route by *which optimization the op
 admits*, not by the edit flag:
@@ -64,15 +72,123 @@ admits*, not by the edit flag:
 Inputs: `EVAL_DIR`, `PROFILE_TOPN` (path to profile_topN.json + inline top entries),
 `BASELINE_THROUGHPUT`, `WORKLOAD` (isl/osl/conc → tells you prefill vs decode regime mix),
 `BUDGET` (max kernel-optimization tasks), `CONFIG_TUNE_ENABLED` (bool), `SKILL_DIR`.
+OPTIONAL profile-analysis prior (empty string = not provided): `ANALYSIS_SKILL`, `ANALYSIS_SKILL_DIR`
+(+ the Profiler's `profile_roofline_json`) — see step 1c.
+OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing as "not provided"):
+`TRACELENS_KERNEL_CANDIDATES_JSON`, `TRACELENS_REPORT_JSON`, `TRACELENS_ANALYSIS_MD`,
+`TRACELENS_TRACE_FILE`.
 
 0. Read `EVAL_DIR/env_report.json`. Let `model_arch_class` set expectations (e.g. MoE → expect
    grouped/fused-MoE GEMM in the Top-N; hybrid-mamba → expect linear-attn Triton kernels; MLA → expect
    MLA decode). Restrict every `candidate_backends` list to `available_backends`. Gate playbook priors
    on `gfx`.
+0a. **FlyDSL build-on-demand (flydsl-only exception; all other backends keep the strict
+   `candidate_backends ⊆ available_backends` rule unchanged; preflight is UNCHANGED from stock — it does
+   NOT build flydsl and does NOT need any flydsl-specific field).**
+
+   **(i) Decide — does flydsl apply to any head?** Driven ENTIRELY by whether a **FlyDSL expert skill**
+   (`apply_flydsl_moe_to_vllm` / `flydsl_rewrite_quantized_moe`) matches — its `match` block is the single
+   source of truth (operator, dtype `int4_w4a16`/`fp8_e4m3_fnuz`, `gens` gfx942/950, `arch_class`,
+   `profile_signature`). Do NOT hand-write a separate arch/dtype/gfx condition. Two modes, differing ONLY
+   in the profile term:
+   - **profile Top-N populated** → skill must match its FULL `match` block incl. `profile_signature`
+     (op-name regex + min %GPU). Precise.
+   - **profile empty/blocked** (Top-N unavailable — e.g. baseline blocked at strategize time, the
+     Kimi-style case) → skill matches on all fields EXCEPT `profile_signature`, which is WAIVED
+     (operator/dtype/`gens`/`arch_class` still required; only the profile-op check is skipped).
+
+   **(ii) Build NOW — blocking — the moment a flydsl skill matches** (before routing flydsl anywhere),
+   so downstream never selects flydsl and fails on a missing import. The `ensure_flydsl` skill owns the
+   build (idempotent — reuses if already present, else clone+builds the pin). A from-scratch build is
+   ~15–18 min (LLVM ~11 min + FlyDSL) — **longer than the Bash tool's 600 s ceiling**, so you MUST run it
+   **detached and poll for completion**, NOT as one foreground call (that would be killed at 600 s):
+   ```bash
+   FR="${FLYDSL_ROOT:-/opt/flydsl/FlyDSL}"; ENV="$FR/flydsl_env.sh"; FAIL="$(dirname "$FR")/.flydsl_build.failed"
+   nohup bash perf_knowledge/expert_skills/skills/ensure_flydsl/ensure_flydsl.sh \
+         > "$(dirname "$FR")/ensure_flydsl.log" 2>&1 &        # detached background build
+   # poll to completion — deadline 1800 s (30 min; override via a longer loop if the box is contended)
+   for i in $(seq 1 180); do
+     [ -f "$ENV" ]  && { echo "flydsl ready";  break; }       # success marker
+     [ -f "$FAIL" ] && { echo "flydsl build FAILED"; break; } # failure marker
+     sleep 10
+   done
+   [ -f "$ENV" ] && source "$ENV" && python3 -c "import flydsl, kernels.moe_gemm_2stage; print('ok')"
+   ```
+   The architect BLOCKS on this poll (workflow does not advance until flydsl is ready or the build fails
+   or the 30-min deadline passes). This is "blocking" without holding a single 15-min Bash call.
+
+   **(iii) Update the environment after a successful build** so the rest of the run treats flydsl as
+   genuinely available:
+   - the sourced `flydsl_env.sh` exports `FLYDSL_ROOT` / `PYTHONPATH` / `FLYDSL_SHIM_DIR` /
+     `VLLM_USE_FLYDSL_MOE=1` (inherited by downstream author/apply subagents + the vLLM launch);
+   - **add `flydsl` to `env_report.json`'s `available_backends`** (it is now installed), and record
+     `FLYDSL_ROOT` / built version — so any later re-check sees it available.
+
+   Then list `flydsl` in the matched head(s)' `candidate_backends` and route normally. If the build FAILS
+   (exit!=0), do NOT route flydsl — record the reason (do not silently fall back to triton). If no flydsl
+   skill matches, do NOT route flydsl. This clause changes flydsl routing ONLY — no other backend.
 1. Read the Top-N. For EACH top entry compute an Amdahl priority = `pct_gpu_time × plausible_speedup`
    (use the backend playbook priors for plausible_speedup per class, keyed by `model_class`+`gfx` when
    present). Note the regime each serves (large-M shape = prefill, small-M/batch = decode). **Dedupe
    GEMMs by shape** — one bake-off per distinct (shape,dtype) covers all its launches.
+1b. **TraceLens prior (ADVISORY — only if `TRACELENS_KERNEL_CANDIDATES_JSON` / `TRACELENS_REPORT_JSON`
+   is a non-empty path that EXISTS).** Read its `hot_kernels[]`. Each entry pre-resolves things you would
+   otherwise hand to the Extractor: `source_file`/`source_path` (the patched python source),
+   `kernel_path`/`launcher_source_file` (the launcher seam), `kernel_category`/`tracelens_category`,
+   `bound_type` (memory|compute), `efficiency_percent`, and `op_to_source_patchable`. Use it ONLY to
+   (a) **cross-check** that your measured heads line up with TraceLens's hot kernels (note any
+   disagreement), and (b) **enrich** each `head_candidate`/`kernel_candidate` you emit with a
+   `source_hint` (the matching `source_file`/`source_path`), a `launcher_hint`
+   (`kernel_path`/`launcher_source_file`), and `bound_type` — so the Kernel Extractor can locate the
+   source/seam faster. **NEVER let TraceLens override the on-box measured `pct_gpu_time`/ranking — the
+   profile is the judge; TraceLens only ADDs hints/candidates, never prunes them.** Treat any `shapes` it
+   carries as a STARTING hint that the Extractor will re-verify against a live capture (they may be inaccurate).
+   If the prior is absent, proceed exactly as before.
+1c. **Roofline prior (ADVISORY — only if `ANALYSIS_SKILL_DIR` is non-empty AND the Profiler returned a
+   `profile_roofline_json` that EXISTS; otherwise skip this step entirely and route exactly as before).**
+   Read the artifact. Per entry it gives `roofline_pct` (how much of the hardware ceiling the kernel
+   already reaches), `bound_type`, `attainable_speedup`, `expected_e2e_gain_pct`, `headroom_class` and a
+   `confidence`. Use it to answer the question `pct_gpu_time` alone cannot: **is the time this kernel
+   spends actually recoverable?**
+
+   **The doctrine (do not violate).** `roofline_pct` measures how well a kernel executes its *current*
+   byte/FLOP budget; it says NOTHING about whether that budget is necessary. So:
+   - **NEVER prune a candidate on roofline.** Same rule as TraceLens: the measured `pct_gpu_time` is the
+     judge; this prior only ADDs information and REORDERS. `drop_list` decisions stay Amdahl-based.
+   - **A saturated head is NOT dropped — it is REROUTED.** A kernel that is both a large `pct_gpu_time`
+     and `headroom_class: saturated` is done with *micro-tuning*, not done being optimized. It remains a
+     top target; what changes is the class of fix (see 1d).
+   - Honour `confidence`: **`low` (stage A, or derived peaks) = display and annotate ONLY, do not rank on
+     it.** `medium`/`high` may be used as a SECONDARY ranking key. `unknown`/`suspect`/`modeled:false`
+     entries fall back to the ordinary playbook prior for that entry alone.
+   - If a kernel squad later measures an isolated speedup LARGER than `attainable_speedup`, the roofline
+     model was wrong: prefer the measurement, and say so in the report.
+
+   **Routing table** (applies only at `confidence` ≥ medium; otherwise use `pct_gpu_time` order):
+
+   | `headroom_class` | `pct_gpu_time` | route |
+   |---|---|---|
+   | underperforming | high | **kernel/head track, top priority** — real headroom exists |
+   | **saturated** | **high** | **byte-reduction track (1d) — NOT dropped, NOT another tuning pass** |
+   | any | low | low priority (ordinary Amdahl) |
+   | unknown / low confidence | any | ignore roofline; order by `pct_gpu_time` |
+
+   Report BOTH orderings in `strategy.md` — the one by `pct_gpu_time` and the one by
+   `expected_e2e_gain_pct` — and state explicitly which you followed and why. When they disagree, that
+   disagreement is the most useful thing in the analysis; do not hide it behind a single blended number.
+
+1d. **Byte-reduction levers (for a `saturated` + high-`pct_gpu_time` head).** The kernel is at the
+   bandwidth/compute wall, so the only remaining win is to make it do the same work moving fewer bytes.
+   Enumerate concretely: **fuse an adjacent op away** (a separate quant/silu/norm kernel in the Top-N →
+   fusing it removes a whole activation round-trip *and* that kernel's own GPU time); **stop reading what
+   isn't used** (e.g. streaming all `E` experts when routing only touches a fraction); **layout/packing**
+   (padding waste, coalescing, L2 reuse between stages); **lower-precision weights** (fp8→fp4, lossy →
+   must pass the accuracy gate).
+   **🔴 Hard constraints — a "win" that violates these is not a win:** the **measurement contract is
+   fixed**. The user-supplied workload — `isl`, `osl`, **`conc`/batch size — must NOT be changed**, and
+   **speculative decoding (MTP or otherwise) must NOT be introduced** as an optimization. Raising
+   throughput by changing what is being measured is out of scope for this workflow.
+
 2. Partition the Top-N into FOUR routes (by what optimization the op admits, NOT by edit flag):
    - **config fast path** — service-level env/flag with no op isolation: `--attention-backend` swap,
      `--quantization fp8`, cuda-graph, torch-compile, kv-cache-dtype, scheduling/mem knobs → Config
@@ -84,6 +200,40 @@ Inputs: `EVAL_DIR`, `PROFILE_TOPN` (path to profile_topN.json + inline top entri
    - **kernel track** (editable custom/Triton *below* the head threshold) → Kernel Extractor + squad.
    - **host/overhead track** (`elementwise_overhead`, tiny high-call kernels, `memory`) → fusion /
      cuda-graph (note for the Config Tuner or a kernel-squad host_runtime direction).
+2b. **Seam-reachability gate for fused / asm heads (MANDATORY — decide this BEFORE routing any GEMM/MoE
+   head).** A head is only worth scheduling if the candidate the chosen route will produce can actually
+   be BOUND on the live serving path. So for every GEMM/MoE head, first identify its **live call seam** —
+   the `module:attr` that is actually dispatched at runtime AND its signature — then pick an
+   `integration_lever` that reaches THAT seam. Match the candidate's signature to the seam's signature:
+   - **Standalone GEMM** — the op is dispatched as a discrete `gemm(XQ,WQ,x_scale,w_scale,…)` call (e.g. a
+     Linear layer: `Fp8LinearMethod.apply` → `aiter_w8a8_block_fp8_linear`). A per-shape tune or a
+     `GEMM_SYNTH` standalone swap is reachable **only for the backend actually dispatched behind that seam**
+     → route to the GEMM-synth head track (`integration_lever: standalone-gemm-swap` or
+     `dense-linear-env-overlay`). **NEVER assume which impl is live**: a tuning artifact (per-shape DB / env
+     CSV / config JSON) binds ONLY to the backend that consumes it, so if the seam dispatches a different
+     impl by default (e.g. a Triton blockscale kernel instead of the tuned CK/aiter one) the artifact binds
+     to nothing → `no_engagement`. Verify the live dispatch; if the tuned backend is not the default, the
+     switch that selects it (a backend-select env, or a reversible routing overlay) is a
+     **kernel-engagement prerequisite** — carry it in the candidate (`apply_env` / `code_patch`) so it is
+     applied at integrate **regardless of `CONFIG_TUNE_ENABLED`** (that flag gates only the exploratory
+     config fast path, never a kernel's required backend selection), and attach an `engagement_check`.
+   - **Fused / asm kernel** — the op is a monolithic kernel whose constituent GEMMs execute INSIDE it and
+     are NEVER dispatched as standalone `gemm(...)` calls (e.g. aiter `fmoe_bf16_blockscaleFp8_g1u1_vs_silu`,
+     dispatched via `asm_moe_tkw1(hidden_states, w1, w2, topk_weight, topk_ids, …, activation=Silu)`). A
+     standalone-GEMM candidate has **no call site to bind to**. Modeling it as `GEMM_SYNTH` constituent
+     GEMMs measures theoretical headroom but yields an **un-integrable** candidate, and a dense-linear env
+     overlay (e.g. `SGLANG_FP8_BLOCKSCALE_USE_CK`, which only patches the dense Linear seam) will show
+     **0 live engagement**. Do NOT route a fused head to `standalone-gemm-swap` / `dense-linear-env-overlay`.
+     Set `is_fused_kernel: true` and `integration_lever` to one of:
+       · **`fused-op-tune-hook`** — the tuning DB the fused kernel ITSELF consumes (e.g. aiter fused-MoE
+         `tuned_fmoe` CSV / `AITER_CONFIG_*`), OR
+       · **`author-fused-replacement`** — author a replacement fused kernel bindable at the fused call
+         seam (flydsl = SOTA fused-MoE author target on gfx942; owns the whole gate_up→SiLU→down path).
+   **Signature-mismatch = wrong lever.** If the tuned primitive's signature (`fn(XQ,WQ,x_scale,w_scale)`)
+   does not match what the live path calls (`asm_moe_tkw1(hidden_states,w1,w2,topk,…)`), re-route — do not
+   schedule it. Every fused head MUST carry an `engagement_check` (a concrete live-server assertion, e.g.
+   "`is tuned on cu_num` > 0 in the cand server log") for the Integrator to verify BEFORE spending a full
+   e2e A/B, so an unreachable lever is rejected in minutes, not hours.
 3. Order by ROI and cost: config fast path FIRST (cheap, reshapes the landscape, when
    `CONFIG_TUNE_ENABLED`); then **head candidates by Amdahl priority** (GEMM 78% beats any editable
    kernel); then kernel-track editables. Respect `BUDGET` / `HEAD_BUDGET`.
@@ -105,12 +255,30 @@ Return JSON:
      "shapes": "[[1024,5120],[5120,34816]]", "dtype": "bf16", "regime": "prefill|decode|both",
      "transpose_b": true, "bias": false,
      "candidate_backends": ["aiter","hipblaslt","triton","ck"],
-     "amdahl_priority": 0.0, "rationale": "why this is the head; what win to expect"}
+     "is_fused_kernel": false,
+     "live_call_seam": "module:attr(sig) actually dispatched at runtime (e.g. 'sglang...Fp8LinearMethod.apply' for a standalone GEMM, or 'aiter.fused_moe_bf16_asm:asm_moe_tkw1(hidden_states,w1,w2,topk_weight,topk_ids,...)' for a fused MoE)",
+     "integration_lever": "standalone-gemm-swap|dense-linear-env-overlay|fused-op-tune-hook|author-fused-replacement",
+     "engagement_check": "concrete live-server assertion the Integrator verifies before a full A/B (e.g. \"is tuned on cu_num > 0\"). REQUIRED for every fused head AND for any standalone head whose win needs a backend-select switch (env/overlay) to bind; '' ONLY when the tuned backend is already the default live dispatch",
+     "amdahl_priority": 0.0, "rationale": "why this is the head; what win to expect; if is_fused_kernel, WHY the chosen lever reaches live_call_seam (signature match)",
+     "source_hint": "<TraceLens source_file/source_path if any, else ''>",
+     "launcher_hint": "<TraceLens kernel_path/launcher_source_file if any, else ''>",
+     "bound_type": "<memory|compute|'' from TraceLens or the roofline prior>",
+     "roofline_pct": 0.0, "attainable_speedup": 0.0, "expected_e2e_gain_pct": 0.0,
+     "headroom_class": "<underperforming|moderate|saturated|unknown|'' if no roofline prior>",
+     "roofline_confidence": "<low|medium|high|'' if none>",
+     "byte_reduction_levers": ["only when headroom_class=saturated; see step 1d"]}
   ],
   "kernel_candidates": [
     {"id": "k0", "short_name": "...", "classification": "...", "pct_gpu_time": 0.0,
      "regime": "prefill|decode|both", "candidate_backends": ["triton","hip","ck","asm"],
-     "amdahl_priority": 0.0, "extract_hint": "which callable to hook (module:attr) + why"}
+     "amdahl_priority": 0.0, "extract_hint": "which callable to hook (module:attr) + why",
+     "source_hint": "<TraceLens source_file/source_path if any, else ''>",
+     "launcher_hint": "<TraceLens kernel_path/launcher_source_file if any, else ''>",
+     "bound_type": "<memory|compute|'' from TraceLens or the roofline prior>",
+     "roofline_pct": 0.0, "attainable_speedup": 0.0, "expected_e2e_gain_pct": 0.0,
+     "headroom_class": "<underperforming|moderate|saturated|unknown|'' if no roofline prior>",
+     "roofline_confidence": "<low|medium|high|'' if none>",
+     "byte_reduction_levers": ["only when headroom_class=saturated; see step 1d"]}
   ],
   "drop_list": [{"short_name": "...", "why": "below Amdahl threshold"}],
   "order_of_work": ["config fast path first", "then h0 (GEMM #1)", "then k0", "..."],
@@ -143,6 +311,12 @@ change), `HISTORY`, `SKILL_DIR`.
 4. **Amdahl stop rule:** estimate remaining headroom = Σ over untouched above-bar editable kernels of
    `(pct_gpu_time × plausible_speedup_fraction)`. If the best remaining candidate can't plausibly move
    e2e beyond the noise band, set `stop=true`.
+   **If a roofline prior is available at `confidence` ≥ medium** (`profile_roofline_json`, step 1c),
+   prefer its `expected_e2e_gain_pct` over a guessed `plausible_speedup_fraction` — it is derived from a
+   measured ceiling rather than a class prior. It still may not PRUNE a candidate: use it to ORDER the
+   remaining pool and to justify `stop`. Never stop solely because roofline says headroom is small while
+   a large `pct_gpu_time` kernel remains untouched — such a kernel routes to the byte-reduction track
+   (step 1d) instead.
 5. Issue concrete directions: exact callable to extract (`module:attr`) + candidate backends, citing the
    profile entry + pct_gpu_time. **Use HISTORY only to ORDER/diversify (deprioritize a direction that
    already showed no e2e gain THIS run, prefer a different kernel or a different mechanism) — NEVER as a
@@ -169,6 +343,15 @@ read the profile and re-route; do not re-issue a confirmed dead-end from HISTORY
 Inputs: `ROUND`, the milestone's results (each direction: class, backend tried, isolated speedup,
 verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SKILL_DIR`.
 
+> **FINAL RECONCILIATION pass (`ROUND="final"`, `FINAL_GATE=true`).** This action is also invoked ONCE
+> more after Finalize+Validate, with `ACCEPTED_HEADS` / `ACCEPTED_KERNELS`, the run `FINAL_THROUGHPUT` /
+> `FINAL_SPEEDUP` / `VALIDATION_STATUS` / `OUTPUT_PARITY`, and `MILESTONE_RESULTS` = only the
+> finalize-gate confirmations. Reason: a win whose e2e A/B was still INCOMPLETE at milestone time was
+> curated as "Integrator pending", but its e2e gate is confirmed LATER (Finalize-gate + Director
+> Validate). On this pass, for each accepted entry whose existing card still reads "pending" / carries no
+> e2e number, **MERGE** the verified gated result (effect from `e2e_delta_pct` + the run finals) and raise
+> `confidence` — same non-blind-append curate transaction below. Do not touch rejected/dead-end cards.
+
 1. **CURATE `SKILL_DIR/knowledge/learned/` — do NOT blind-append.** Follow the curate transaction in
    `knowledge/learned/README.md`: read `INDEX.md`, then for each durable finding:
    - **Match the reuse key** `kernel_class · gfx · regime`. If a card exists → **MERGE** (bump
@@ -184,7 +367,22 @@ verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SK
      blocklist / "don't use X"** — a future run must stay free to try (and beat) it; the box judges.
      A claim CONTRADICTED by new evidence → move its card to `_archive.md` with the refuting source.
    Mechanism facts are recorded as POSITIVE ROUTING ("optimize GEMM via aiter DB"), not "X failed".
+   - **SANITIZE — every card is PUBLIC.** Write ONLY general, transferable knowledge. Strip all
+     machine-/run-specific detail before writing: NO absolute paths, usernames, `/home`/`/root` dirs,
+     hostnames, IPs, secrets, or timestamped run-dir names. Cite evidence by a reusable RELATIVE form
+     (`exp/e2e_*<Model>*/ YYYY-MM-DD`, `config/ck_tune/`, `<skill>/<file>.md`), never a path a reader
+     can't reproduce. Run-config-only facts (which authors were enabled, an image missing a tool) stay
+     in the eval-dir report unless generalized into a conditioned `caution:`. (See `learned/README.md` rule 7.)
 2. Keep the in-run hypothesis ledger (wins AND nulls, for THIS run's report) in `EVAL_DIR/insight_log.md`.
+3. **Calibrate the roofline prior (ONLY if one was used — `ANALYSIS_SKILL_DIR` non-empty and a
+   `profile_roofline_json` exists; else skip).** For each direction this milestone measured, record
+   `predicted vs actual` in `knowledge/backend_playbook.md`: predicted `attainable_speedup` /
+   `expected_e2e_gain_pct` against the measured isolated speedup and measured e2e delta. This is how the
+   `target_eff` priors and byte models in the skill's `SKILL.md` self-correct across runs, so state the
+   *direction* of any error ("attention decode: predicted 1.7×, measured 1.56× — prior slightly
+   optimistic"). **A measured speedup that EXCEEDS the predicted `attainable_speedup` means the byte/FLOP
+   model was wrong** — record that loudly, since it is the failure mode that would otherwise cause the
+   prior to under-rank a real opportunity in a future run. Keep it to one line per direction.
 
 Return JSON:
 ```json
@@ -212,63 +410,110 @@ Write TWO files:
 > polished template — match its structure, tables, emoji, and the timed/aligned phase tree exactly so
 > every run's report looks the same. The OFFICIAL headline number is ALWAYS the Director's same-session
 > validation (`EVAL_DIR/director_e2e_validation.json` → `director_verified_throughput_tok_s` /
-> `throughput_speedup`), NOT the Finalize-bundle sanity bench — if they differ, quote the Director value
-> and note the finalize bench in parentheses. Read REAL files for every number; never invent.
+> `throughput_speedup`), NOT the Finalize-bundle sanity bench. Read REAL files for every number; never invent.
+>
+> **Ordering note:** your `report` phase runs BEFORE the Director's `validate` phase, so
+> `director_e2e_validation.json` does NOT exist yet. Write the headline throughput / speedup / TTFT / TPOT
+> from `FINAL_THROUGHPUT` + `EVAL_DIR/final/bench_final/bench_summary.json` (the Finalize bench) as a
+> **provisional** headline, and mark it e.g. `(provisional — pending Director validation)`. The Director,
+> in the subsequent `validate` phase, will **overwrite** those exact headline numbers with its authoritative
+> same-session A/B and drop the provisional tag. Everything else you write is final; only the headline
+> metrics are provisional. Keep them on clearly-identifiable lines so the Director can reconcile them.
 
-**(a) `EVAL_DIR/architect_report.md`** — the concise English summary. Its **Headline MUST quote the
-OFFICIAL Director-validated result** (`director_verified_throughput_tok_s`, `throughput_speedup`,
-`output_parity`); if the Finalize bundle bench read higher, add one line stating the conservative Director
-number is official. Then list the accepted stack (config + each kernel with its per-item e2e %), and the
+**(a) `EVAL_DIR/architect_report.md`** — the concise English summary. Its **Headline** carries throughput
+/ speedup / `output_parity` written **provisionally** from the Finalize bench (tag it `(provisional —
+pending Director validation)`); the Director's `validate` phase overwrites these with the OFFICIAL
+same-session numbers. Then list the accepted stack (config + each kernel with its per-item e2e %), and the
 remaining headroom. Keep it short.
 
 **(b) `EVAL_DIR/final_report.md`** — the COMPLETE timeline report (the headline deliverable). Keep EVERY
 attempt, win or not. REQUIRED sections, in order:
 
 1. **Run overview** — model/architecture, serving stack, workload (ISL/OSL/conc), GPU + serving invariant,
-   date, and a one-line **final conclusion that quotes the OFFICIAL Director number** (e.g.
-   `1581.4 → 2058.8 tok/s, 1.300× (+30.0%), parity pass`). If the finalize-bundle bench was higher, add a
-   parenthetical that the conservative Director value is official.
+   date, and a one-line **final conclusion** with the headline throughput/speedup + the Director status word
+   (`validated_win` / `validated_no_win` / `flagged`), e.g. a win →
+   `1581.4 → 2058.8 tok/s, 1.300× (+30.0%), parity pass — validated_win`; a no-win →
+   `1790.8 → 1790.3 tok/s, 0.9997× (−0.03%) — validated_no_win (no regression, no win)`. Never phrase a
+   `validated_no_win` as a success and never use the bare word "accepted". Written **provisionally** from the
+   Finalize bench and tagged `(provisional — pending Director validation)`; the Director overwrites this line
+   with its OFFICIAL same-session number + final status in the `validate` phase.
 
 2. **Phases tree + timeline (wall-clock)** — MANDATORY, one timed fenced tree (NOT a plain tree). Rules:
    - Derive each phase's wall-clock from artifact mtimes (`t0` = eval-dir / `model_path.txt` mtime; phase
      boundaries from the relevant `*.log` / `*_summary.json` / `_exp/*` dir mtimes).
    - Every phase node ends with **`[ Δ<step> · <cum> ]`** (step duration + cumulative elapsed since t0);
      sub-step nodes show **`[ Δ<step> ]`** only, padded to the SAME closing column.
-   - **Color = emoji** (the only thing that renders colored inside a code fence): `✅` done/accepted ·
-     `❌` rejected/no-win · `⭐` entered the final stack (a real win) · `🔧` a work phase · `🏁` the
-     official validation/total · `⚠️` a caveat. Inside descriptions use the NARROW marks **`✓` / `✘`**
-     (width-1), never `✅/❌`, so the time column stays aligned.
+   - **Color = emoji** (the only thing that renders colored inside a code fence): `✅` phase done ·
+     `❌` rejected / no-win · `⭐` entered the final stack (a real, e2e-gated win) · `🔧` a work phase ·
+     `🏁` the official validation/total · `⚠️` a caveat. Inside descriptions use the NARROW marks
+     **`✓` / `✘`** (width-1), never `✅/❌`, so the time column stays aligned.
+   - **The emoji MUST reflect the node's actual gate/outcome — do not decorate.** `⭐` is ONLY for a
+     candidate that was ACCEPTED into the final stack (integrate `gate=accepted|stack`, a positive e2e
+     delta that cleared the noise band). A candidate whose A/B **regressed or was rejected** (e.g.
+     `integrate … ✘−13.1%`, `gate=rejected`) MUST use **`❌`**, never `⭐` — a slowdown never gets a star.
+     `parity ✓` marks NUMERIC output parity only; it is NOT a throughput result and never upgrades a `✘`
+     delta. The **Validate** node shows the Director status verbatim — `🏁 …= <x>× · validated_win` /
+     `❌ …= <x>× · flagged` / and for a no-improvement run **`✅ …= <x>× · validated_no_win`** (validated,
+     no regression, NO win — never write "accepted" and never imply a gain).
    - **Align the time column**: pad each line by VISUAL width — count emoji (`✅❌⭐🔧🏁🔥⚠`) as 2 cells and
      `├└│✓✘→·×–` as 1 — so every `[` starts at the same column (a tiny Python padder is fine). Keep lines
      **≤ ~96 cols**; push long detail to the per-op deep-dive below, not into the tree.
    - One node per phase that actually ran (Setup→Validate). Under **HeadKernel**, show each head op (h0/h1…)
      as a child, and under each op its sub-steps (extract / bake-off+tune / each author language / integrate),
      each with its own `[ Δ ]`.
+   - **Backend provenance is MANDATORY in the tree** (this is a headline requirement — do not omit it):
+     - Each head-op child node MUST name the op's **ORIGINAL/stock backend + dtype** exactly as the live
+       server ran it (from the baseline profile Top-N `backend`/`class` + `meta.json` dtype/quant), e.g.
+       `h0 GEMM (mxfp4, stock=triton matmul_ogs)`. This is "what the kernel was before we touched it".
+     - Under each op, show **one sub-node per backend that was ATTEMPTED**, naming the backend and its
+       outcome — every Tier-A bake-off candidate AND every Tier-C author language. In **deep mode** this is
+       one sub-node per `(op × backend)` lane (`triton-fused/-splitk/-opt/-deep`, `flydsl`, `hip`, `ck`, …),
+       each with its best isolated `×` and the e2e verdict (`✓`/`✘`/`⊘`).
+     - Backends **considered but not run** MUST still appear, marked **`⊘`** with the one-word reason
+       (`⊘ CK — ckProfiler absent`, `⊘ hipBLASLt — no offline tune`, `⊘ flydsl — seam mismatch`,
+       `⊘ aiter — no mxfp4-grouped path`), so the timeline shows the FULL backend ladder that was weighed,
+       not just the one that ran. Never silently drop a backend.
    - Below the fence: a blockquote with **`🏁 TOTAL ≈ <wall-clock>`**, a **`🔥 top costs`** line, and any
      **`⚠️`** caveats; then a **Legend** line and a one-line **Final stack + official speedup**.
-   - Reference shape (reproduce emoji + alignment):
+   - Reference shape (reproduce emoji + alignment; note the stock backend on each op and one line per
+     attempted/skipped backend):
      ```
-     Phases                                                   [  step · cum  ]
-     ✅ 1  Setup        preflight + TRUE baseline <tok/s>      [ Δ17m  · 0:17 ]
-     ✅ 3  ConfigSweep  cfg0 ✘−X% · ⭐ aiter +Y% · cuda-graph ✓ [ Δ45m  · 1:49 ]
-     🔧 5  HeadKernel   extract+bake-off+author+integrate      [ Δ5h41m· 8:13 ]
-        ❌ h0 GEMM   <pct>%GPU — already optimal               [ Δ2h03m       ]
-           └ ✘ Triton  0.60× (prefill ✓ / decode ✘)           [ Δ1h24m       ]
-        ⭐ h1 attn    <pct>%GPU — ACCEPTED +Z%                 [ Δ3h39m       ]
-           └ ⭐ integrate  A/B <ref>→<cand> = +Z% · parity ✓   [ Δ27m         ]
-     🏁 9  Validate    Director A/B <base>→<final> = +W% (<x>×) [ Δ37m  · 9:43 ]
+     Phases                                                     [  step · cum  ]
+     ✅ 1  Setup        preflight + TRUE baseline <tok/s>        [ Δ17m  · 0:17 ]
+     ✅ 3  ConfigSweep  cfg0 ✘−X% · ⭐ aiter +Y% · cuda-graph ✓   [ Δ45m  · 1:49 ]
+     🔧 5  HeadKernel   extract+bake-off+author+integrate        [ Δ5h41m· 8:13 ]
+        ❌ h0 GEMM  <pct>%GPU · stock=triton matmul_ogs (mxfp4)  [ Δ2h03m       ]
+           ├ ✘ triton-opt     tile tune  1.12× iso · e2e ✘−0.4% [ Δ38m         ]
+           ├ ✘ triton-splitk  split-K    1.64× iso · e2e ✘−13%  [ Δ41m         ]
+           ├ ⊘ flydsl         author     seam mismatch (skipped)[ Δ0m          ]
+           └ ⊘ CK/hipBLASLt   bake-off   ckProfiler/bench absent[ Δ0m          ]
+        ⭐ h1 attn   <pct>%GPU · stock=CK unified_attn (bf16)    [ Δ3h39m       ]
+           ├ ⭐ aiter          backend    1.31× iso · e2e ✓+Z%   [ Δ12m         ]
+           └ ⭐ integrate      A/B <ref>→<cand> = ✓+Z% · parity ✓[ Δ27m         ]
+     🏁 9  Validate    Director A/B <base>→<final> = +W% (<x>×) · validated_win [ Δ37m · 9:43 ]
      ```
+     A **rejected** integrate node uses `❌`, never `⭐` (a slowdown never gets a star), e.g.
+     `❌ integrate  A/B 1768.5 → 1536.7 = ✘−13.1% · parity ✓` — parity ✓ is numeric-only, the throughput
+     still ✘. A **no-win** run closes with `✅ Validate  Director A/B <b>→<f> = 0.9997× · validated_no_win`
+     (validated, no regression, NO win). Only `validated_win` earns a `🏁`+`⭐` final stack.
 
 3. **Head-kernel deep-dive** (the centerpiece) — for EACH head op a `####` sub-section titled
    `<id> — <op> (<pct>% GPU) — RESULT: <ACCEPTED +X% | no win | flagged>`, containing:
    - **GPU-time-share table**: rows `stock baseline` vs `accepted config`; columns `live kernel | backend |
      %GPU | calls` — shows how the accepted config (e.g. aiter) already re-routed the op and its %GPU on the
      final stack (stock from `profile/round_0`, accepted-stack from `profile/round_config`).
-   - **Original backend** line: dtype/quant, transpose/bias, and the live kernel on stock vs accepted.
+   - **Original backend** line: the op's stock/original backend + dtype/quant + transpose/bias, and the
+     live kernel name on stock vs accepted (stock backend/class from the baseline profile Top-N; dtype/quant
+     from `meta.json`). State it plainly, e.g. `stock: triton matmul_ogs (mxfp4 grouped MoE, NNT, bias=0)`.
    - **Weight-shape table** (GEMM: the distinct (N,K) served + the M-buckets).
-   - **Directions table** — one row per direction tried: `# | direction (cost tier) | what it did | result`.
+   - **Backend ladder** line — the FULL set of backends weighed for this op and each one's disposition:
+     `tried` (ran a lane), `⊘ unavailable` (+ reason: tool absent / arch-unavailable), or `⊘ dropped`
+     (+ reason: seam mismatch / wrong op). Mirrors the timeline's per-backend sub-nodes so the two agree.
+   - **Directions table** — one row per direction tried, WITH a backend column:
+     `# | backend | direction (cost tier) | what it did | isolated× | e2e Δ% | result`.
      Cover Tier-A backend bake-off, Tier-B per-shape tune, and Tier-C author **per language** — EVERY
-     direction incl. any that died on an infra/API error (say so explicitly; don't omit it).
+     direction incl. any that died on an infra/API error (say so explicitly; don't omit it), and one row
+     per `⊘` backend that was skipped (backend = its name, result = the skip reason).
    - For a **rejected authored kernel**: a **per-(N,K) × M speedup table** vs the baseline (from the recursive
      run's `director_validation.json` `per_case`) to expose the prefill-win/decode-loss split; end with geomean
      + the reject decision + root cause.
@@ -287,15 +532,35 @@ attempt, win or not. REQUIRED sections, in order:
    not measure — NOT a real no-win), and the `reason`. State plainly these dominant ops were NOT optimized and
    carry the LARGEST remaining headroom (top "next direction"). Never bury a flagged head in the no-ops.
 
+6b. **🔌 BACKEND ABSENT (env provisioning)** — MANDATORY if `EVAL_DIR/env_report.json` has a non-empty
+   `absent_backends`, or any op's `opbench_result.json` carries `backend_absent[]`. A table
+   `backend | mandated for | what's missing (probe) | remedy | fell back to`. State plainly that a
+   strategy-mandated lever was UNAVAILABLE on this image (NOT a measured no-win), quote the actionable
+   two-part remedy verbatim (e.g. flydsl: `pip install 'flydsl>=0.1.5'` AND a flydsl-enabled `amd_aiter`
+   build that ships `aiter/ops/flydsl/` — pip flydsl alone is insufficient), and note which language was
+   authored instead. This makes a missing lever a re-runnable provisioning action, never a silent drop.
+
 7. **Final deliverable + measurement caveats** (box drift → trust ONLY same-session A/B; the official number
    is the Director's same-session value) **+ next directions to explore.** Quote the FINAL serving numbers
-   from `EVAL_DIR/validation/final/bench_summary.json` — throughput (median + spread), **TTFT and TPOT** —
-   next to the baseline numbers, so the report shows the full E2E throughput / TTFT / TPOT delta (not just
-   throughput).
+   — throughput (median + spread), **TTFT and TPOT** — next to the baseline numbers, so the report shows the
+   full E2E throughput / TTFT / TPOT delta (not just throughput). At `report` time these come
+   **provisionally** from the Finalize bench (`EVAL_DIR/final/bench_final/bench_summary.json`, baseline
+   `EVAL_DIR/final/bench_baseline_ab/bench_summary.json`); tag them provisional. The Director's `validate`
+   phase reconciles this section to `EVAL_DIR/validation/{base,final}/bench_summary.json` (its authoritative
+   same-session TTFT/TPOT/throughput).
+
+   The external interface deterministically injects a **Baseline alignment**
+   section after the workflow returns. Do not invent cross-harness baseline
+   values. If existing artifacts expose them, treat the upstream current-best
+   throughput measured on the same accepted configuration as the primary
+   alignment reference. Treat the upstream raw-session baseline as audit-only:
+   it may predate accepted configuration changes, so its divergence includes
+   configuration gain and must never be described as pure measurement drift.
 
 Data sources (read the ACTUAL files, never invent): `director_e2e_validation.json`,
 `final/bench/bench_summary.json`, `config/sweep_results.json`, `overlay/cand_*/integrate_result.json`,
-`kernels/_exp/*/*/director_validation.json`, `kernels/*/opbench_result.json`,
+`kernels/_exp/*/*/director_validation.json`, `kernels/*/opbench_result.json` (incl. its `backend_absent[]`),
+`env_report.json` (`absent_backends` → the BACKEND ABSENT section),
 `profile/round_*/profile_topN.{md,json}`, and artifact mtimes for the timeline.
 Read the actual files under `EVAL_DIR` for real numbers; do not invent. Return JSON (report_path points
 to architect_report.md; also mention `final_report.md` in `note` if the schema lacks a field):

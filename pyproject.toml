@@ -1,0 +1,116 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geak"
+version = "4.0.0"
+description = "GEAK v4 — clones the repo locally and installs the Claude Code CLI its Workflows run inside."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE.md" }
+
+# Runtime deps. Add new packages here (this replaces the old requirements.txt).
+dependencies = [
+    "pyyaml",
+    "requests",
+    "datasets",
+    # AMD GPU profiling helper (pinned git commit).
+    "metrix @ git+https://github.com/AMDResearch/intellikit.git@bcbfa0252df9d55f3aab68c95dd3ce45ccbe5b46#subdirectory=metrix",
+]
+
+[project.optional-dependencies]
+# CI / local mirror of the L0 pytest job: `pip install -e ".[dev]"`.
+dev = ["pytest", "pytest-cov>=5.0", "coverage>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/AMD-AGI/GEAK"
+
+[tool.setuptools]
+packages = ["geak"]
+
+# NOTE: metadata + deps live here (PEP 621). setup.py stays only because a
+# [project] table can't express the build-time bootstrap hook (clone repo +
+# install Claude Code) that runs during `pip install git+...`.
+
+# ---------------------------------------------------------------------------
+# Coverage. Measured by the `pytest` job in .github/workflows/ci-l0-checks.yml,
+# which renders the percentage into the run's Job Summary and then enforces
+# `fail_under` below. Mirrors AMD-AGI/Hyperloom's tests-coverage.yml setup
+# (same knobs, no sharding — this suite runs serially in seconds).
+#
+# Only Python is measured, so the agent-prompt/workflow files (*.js) and the
+# knowledge base (*.md) are outside the denominator by construction.
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+branch = false
+# Record paths relative to the repo root so a report generated on a GitHub
+# runner is comparable to one generated locally (differing absolute checkout
+# paths would otherwise read as distinct files).
+relative_files = true
+# MUST stay an explicit list of trees. `source = ["."]` looks equivalent but is
+# NOT: coverage.py only discovers NEVER-IMPORTED files in directories that are
+# importable packages, and only geak/ has an __init__.py. With ".", the three
+# fully-untested scripts below (op_bench, capture_shapes, overlay_setup — 795
+# statements) are silently absent from the report instead of counting as 0%,
+# which inflates the total by ~14 points and lets a brand-new untested script
+# land without moving the number. Naming the dirs forces them in.
+#
+# SCOPE OF THE HEADLINE NUMBER. The reported percentage is over these three trees
+# only, so state it as such rather than as a repo-wide figure. 913 statements of
+# tracked Python sit outside this denominator, all of them untested; counted
+# repo-wide the number would be ~78%. Deliberately excluded, with counts so the
+# choice stays auditable:
+#
+#   e2e_workflow/knowledge/  (389)  roofline_tools.py + the flydsl overlay
+#                                   sitecustomize template. THE WEAKEST of these
+#                                   exclusions -- closer to runtime code than the
+#                                   others, and the first candidate to fold in.
+#   perf_knowledge/          (358)  contributor scaffolds and registry generators
+#   examples/                (129)  needs a GPU to execute
+#   setup.py + docs/conf.py   (37)  install-time and Sphinx config
+#
+# geak/bootstrap.py IS measured (it is in the `geak` tree below) even though its
+# hook fires at `pip install` time -- its logic is unit-testable without running
+# an install, and it sits at 100%.
+source = [
+    "e2e_workflow/scripts",
+    "interface",
+    "geak",
+]
+omit = [
+    # Tests are not source; counting them flatters the total (they run to
+    # completion by definition) and hides real gaps in the code under test.
+    "*/tests/*",
+    "*/test_*.py",
+]
+
+[tool.coverage.report]
+exclude_also = [
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@overload",
+]
+skip_empty = true
+precision = 2
+# Tolerate a dangling entry in .coverage for a source file a subprocess wrote
+# and then cleaned up, which would otherwise turn coverage.py's `couldnt-parse`
+# warning into a fatal NoSource error in the standalone report step.
+ignore_errors = true
+# RATCHET — raise this, never lower it. Target is 90 (Hyperloom's bar); it is
+# pinned just under the measured total so main stays green while the gap is
+# closed, and every PR that adds tests should bump it. Lowering this value is
+# the one change that should never be approved.
+#
+# Measured 99.67% locally on 3.12 (11 uncovered statements). CI runs 3.11 and
+# coverage's statement count is mildly version-dependent, so this sits ~2.7
+# points low rather than hard against the measurement: a gate that goes red on
+# an interpreter difference instead of a real regression trains people to
+# ignore it. Tighten toward the measured value once a green 3.11 run has
+# reported the real number in the Job Summary.
+#
+# Every measured file is now 98-100%. The 11 remaining statements are documented
+# as unreachable-by-construction or untestable-without-filesystem-litter in the
+# tests that cover their neighbours.
+fail_under = 97

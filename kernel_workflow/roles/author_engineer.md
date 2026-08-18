@@ -20,7 +20,9 @@ from the op task dir). The op's correctness contract is an **IMMUTABLE** unittes
   `b_shape`/`transpose_b`/`bias` (gemm), captured tensor spec (attn), `dtype`, `math_contract`
   (e.g. `C = A·Bᵀ + bias`), `regime` (prefill|decode|both).
 - `WORKSPACE` — the canonical workspace to write your implementation into (a `kernel_src/` lives here).
-- `TASK_DIR` — the op task dir holding the **IMMUTABLE** `unittest.py` + `reference_io.pt` + `meta.json`.
+- `TASK_DIR` — the op task dir holding the **IMMUTABLE** `unittest.py` + `meta.json` + `baseline_src/`
+  (plus `reference_io.pt` **if** the dir came from e2e's `kernel_extractor`; a `oracle_freezer` dir has
+  none — it re-derives operands from `meta.cases[]` seeds and checks parity against `baseline_src/` live).
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path (its CORRECTNESS/BENCHMARK point at the immutable
   unittest), and `KERNEL_KNOWLEDGE_DIR` (the AMD authoring knowledge base, may be empty).
 
@@ -44,9 +46,15 @@ Read, as reference, before writing:
   fusion, knob dictionaries) that don't go stale.
 - **Language skeleton:** `KERNEL_KNOWLEDGE_DIR/languages/<dir>/` — map: triton→`triton_amd`, flydsl→`flydsl`,
   hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`, tilelang→`tilelang`, gluon→`gluon`,
-  hipkittens→`hipkittens` (read `overview.md`/`patterns.md`/`knobs.md`). For **flydsl GEMM**, the simplest
+  hipkittens→`hipkittens`. **The file set differs per language** — `ls` the dir and read what is there
+  (`overview.md` / `patterns.md` / `knobs.md` / `pitfalls.md` / `primitives.md`); only `triton_amd` and
+  `flydsl` carry all three of overview/patterns/knobs. For **flydsl GEMM**, the simplest
   correct baseline is to call aiter's `flydsl_hgemm` — `out = a @ b.T (+bias)` — rather than hand-writing
   layout algebra; commit that, the optimize loop tunes tile/split_k/preshuffle. flydsl is JIT (no build).
+  For **gluon** the dir is facts-only (`overview.md`, `programming_model.md`, `gemm_cookbook.md`); the
+  fuller language surface, the TTGIR→Gluon transcription toolchain and pipeline re-injection live in the
+  `gluon_authoring` expert skill and are only injected when `use_expert_skills` is on. That skill is
+  mechanics only — it carries no search strategy, so it does not compete with your own loop.
 - **Op + per-backend authoring card:** `KERNEL_KNOWLEDGE_DIR/operators/<op>/overview.md` plus
   `operators/<op>/backends/<lang>.md` (the card for your exact language — code skeleton, knobs, pitfalls).
   Op short→dir: gemm→`dense_gemm`, attention_prefill→`attention_prefill_fmha`,
@@ -60,9 +68,24 @@ Read, as reference, before writing:
   `dtype_numerics.md` for MFMA shape/dtype, and `quantization/fnuz_vs_ocp.md` /
   `optimization/mfma_scheduling.md` (prefer `matrix_instr_nonkdim=16` on gfx942).
 
+> **🔴 "Baseline" here means your CORRECT-FIRST SEED for the optimize loop — NOT the speedup
+> denominator.** The reported speedup is ALWAYS measured by the immutable `unittest.py` against the
+> FROZEN REAL ONLINE KERNEL (`meta.baseline_callable` / `TASK_DIR/baseline_src/` — e.g. the production
+> Triton `_gqa_sparse_fwd_kernel`), regardless of your `TARGET_LANGUAGE`. Your from-scratch impl is the
+> optimizer's *starting code*, never the number the win is judged against. Writing a naive same-language
+> impl and letting the optimize loop beat THAT is exactly the fake-win bug (optimized-HIP vs naive-HIP =
+> 15.7× isolated, ~0% e2e). Your seed competes against the live Triton path, not against itself.
+
 ## Rules (NON-NEGOTIABLE)
-1. NEVER modify `TASK_DIR/unittest.py`, `reference_io.pt`, or `meta.json` — they are the immutable
-   oracle (anti-cheating). You only write into `WORKSPACE/kernel_src/`.
+1. NEVER modify `TASK_DIR/unittest.py`, `meta.json`, `baseline_src/`, or `reference_io.pt` if the dir has
+   one — they are the
+   immutable oracle + the frozen real-online-kernel baseline (anti-cheating). You only write into
+   `WORKSPACE/kernel_src/`.
+1a. **The speedup denominator is the frozen REAL ONLINE kernel, not your seed.** The immutable
+   `unittest.py` already binds its baseline leg to `meta.baseline_callable` / `baseline_src/` (the live
+   production kernel). Do NOT author, import, or point the timing baseline at a same-language naive impl.
+   If `TARGET_LANGUAGE` differs from the online kernel's language (e.g. authoring HIP against an online
+   Triton kernel), the baseline STILL stays the online Triton kernel — your HIP competes against it.
 2. Preserve the **callable signature the unittest imports/calls** (read the unittest to learn the exact
    entry point name + argument order it expects). Your implementation must be a drop-in for it.
 3. NEVER set `HIP_VISIBLE_DEVICES` directly — run correctness/benchmark via
@@ -84,13 +107,19 @@ Read, as reference, before writing:
    flydsl compiles to GPU code through its embedded MLIR runtime on first launch).
 4. **Correctness loop**: `cd $WORKSPACE && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID python3
    $TASK_DIR/unittest.py` (or the COMMANDMENT CORRECTNESS cmd). Debug until it PASSES every case.
-5. **Record a baseline number**: once correct, run the unittest's timing once to capture `baseline_ms`
-   (its own geomean/per-case print). This is the starting point the optimize loop / direct tune will
-   improve on.
-6. **Commit** the baseline: `cd $WORKSPACE && git -c user.email=team@workflow -c user.name=team add -A
-   && git -c user.email=team@workflow -c user.name=team commit -q -m "author baseline (<lang>)"`.
-   This makes HEAD the authored baseline, so the subsequent optimize loop diffs against it exactly like
-   a hand-written kernel.
+   Correctness is judged on BOTH the frozen oracle cases AND a random-input parity check that compares
+   your kernel's output to the FROZEN ONLINE baseline on several random in-regime value draws at the same
+   online shapes — so a seed that is correct on the one recorded draw but wrong on other values FAILS.
+5. **Record the numbers**: once correct, run the unittest's timing once. It prints TWO things: the
+   FROZEN-ONLINE `baseline_ms` (the real production kernel via `meta.baseline_callable`/`baseline_src/` —
+   this is the denominator, unchanged by your work) and your seed's own `optimized_ms`/`speedup` vs it.
+   Report your seed's speedup as `seed_speedup` — it is typically **< 1×** (a naive from-scratch impl is
+   slower than the tuned production kernel), and that is FINE: the optimize loop's job is to raise it above
+   1×. Do NOT overwrite or re-point `baseline_ms` at your seed; the win is always vs the online kernel.
+6. **Commit** the seed: `cd $WORKSPACE && git -c user.email=team@workflow -c user.name=team add -A
+   && git -c user.email=team@workflow -c user.name=team commit -q -m "author seed (<lang>)"`.
+   This makes HEAD the optimize loop's CODE starting point (what it diffs its edits against), while the
+   SPEEDUP the loop optimizes remains `baseline_ms(online) / current_ms` — never seed-vs-optimized.
 
 ## Outputs
 Return JSON:

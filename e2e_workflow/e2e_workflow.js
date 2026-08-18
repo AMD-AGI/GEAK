@@ -27,10 +27,45 @@ if (!WORKFLOW_DIR) {
 // The UNCHANGED single-kernel workflow. Default: sibling "kernel_workflow" dir next to this one.
 const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kernel_workflow')).replace(/\/+$/, '');
-const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_workflow.js`;
+// The single-language WORKER lane. kernel_workflow.js is now a dispatcher (mode=optimize/author ->
+// this worker; mode=bakeoff -> multi-language fan-out), so e2e MUST call the worker DIRECTLY
+// (kernel_lane.js) — routing through the dispatcher would add a nesting level (e2e -> dispatcher ->
+// worker = 3 levels) and the runtime forbids it. The worker's behavior/args are unchanged.
+const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
+
+// ---- Profile-analysis skill (OPTIONAL, pluggable; see knowledge/analysis_skills/INDEX.md) ----
+// After parse_profile.py emits the standardized Top-N, the Profiler may run ONE analysis skill to
+// enrich it with a headroom estimate the Architect can route on. Default `roofline`: per-kernel % of
+// the hardware ceiling -> attainable speedup -> expected e2e gain, so budget goes to the kernel with
+// HEADROOM rather than merely the biggest one. STRICTLY ADVISORY: it annotates and suggests an
+// ordering, never prunes a candidate and never overrides the measured pct_gpu_time.
+// `analysis_skill=none` (or a missing/unreadable skill dir) disables the step and the run behaves
+// exactly as it did before the feature existed -> ANALYSIS_SKILL_* are '' and nothing is injected.
+const ANALYSIS_SKILL = String(A.analysis_skill != null ? A.analysis_skill : 'roofline').trim();
+const ANALYSIS_SKILL_ON = !!ANALYSIS_SKILL && ANALYSIS_SKILL !== 'none' && ANALYSIS_SKILL !== 'false';
+const ANALYSIS_SKILL_INPUTS = ANALYSIS_SKILL_ON ? {
+  ANALYSIS_SKILL: ANALYSIS_SKILL,
+  ANALYSIS_SKILL_DIR: `${WORKFLOW_DIR}/knowledge/analysis_skills/${ANALYSIS_SKILL}`,
+} : { ANALYSIS_SKILL: '', ANALYSIS_SKILL_DIR: '' };
+if (ANALYSIS_SKILL_ON) log(`Profile-analysis skill: ${ANALYSIS_SKILL} (advisory; annotates + reorders, never prunes).`);
+
+// ---- Upstream TraceLens / kernel-agent prior (OPTIONAL; forwarded by run_e2e.py as args.tracelens) ----
+// run_e2e.py resolves these paths beside the geak handoff and forwards ONLY the non-null ones.
+// They are a PRIOR for the Profile/Strategize/Extract phases: if analysis_md exists the Profiler skips
+// its own trace collection and builds the Top-N from TraceLens (and runs an EXTRA parse_profile pass on
+// trace_file when present); the Architect uses kernel_candidates as a routing prior. ENTIRELY ADDITIVE:
+// when args.tracelens is absent every TRACELENS_* input is '' and the run is byte-identical.
+const TL = (A.tracelens && typeof A.tracelens === 'object') ? A.tracelens : {};
+const TRACELENS_INPUTS = {
+  TRACELENS_ANALYSIS_MD: String(TL.analysis_md || ''),
+  TRACELENS_KERNEL_CANDIDATES_JSON: String(TL.kernel_candidates_json || ''),
+  TRACELENS_REPORT_JSON: String(TL.tracelens_report_json || ''),
+  TRACELENS_TRACE_FILE: String(TL.trace_file || ''),
+};
+if (TL && Object.keys(TL).length) log(`TraceLens prior present: ${Object.keys(TL).filter(k => TL[k]).join(', ') || '(none non-null)'}.`);
 
 // ---- single-kernel pass-through: if kernel_path (and no model_path), just run the kernel layer ----
 const KERNEL_PATH = A.kernel_path || '';
@@ -52,6 +87,24 @@ const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 const SERVING_TP = parseInt(A.tp != null ? A.tp : (A.serving_tp != null ? A.serving_tp : 1), 10);
 const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
   : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
+// ---- WALL-CLOCK BUDGET (opt-in; default OFF when absent => byte-identical) ---------------------------
+// time_budget_s is the EXTERNAL orchestrator's HARD kill budget (run_e2e.py GEAK_E2E_TIMEOUT_S),
+// forwarded so GEAK can self-pace and FINISH (Finalize/Report/Validate + workflow_return flush) BEFORE
+// the SIGKILL — instead of being torn down mid-flight (the deep 24h-budget-vs-12h-kill failure). This is
+// the SINGLE place the orchestrator budget is interpreted. When the arg is ABSENT (GEAK invoked directly,
+// not via the interface) TIME_BUDGET_MS is null and EVERY budget branch below short-circuits, so the run
+// is byte-identical to a build without this feature. No model/run specifics; pure time arithmetic.
+const TIME_BUDGET_MS = A.time_budget_s != null ? parseInt(A.time_budget_s, 10) * 1000 : null;
+// Reserve a tail for the post-deadline finish: the in-flight wave/head completes, then Finalize + Report +
+// the final Validate bench + the workflow_return write must all land before the hard kill. Carve 8% (min
+// 20min) off the top here, ONCE, so every mode below shares one definition of "effective budget".
+const TIME_BUDGET_EFFECTIVE_MS = TIME_BUDGET_MS != null
+  ? Math.max(60000, TIME_BUDGET_MS - Math.max(1200000, Math.floor(TIME_BUDGET_MS * 0.08)))
+  : null;
+// Cap on the dispatch-deadline TAIL (budget − deadline). A flat 60% deadline reserves 40%, which is wasteful
+// on large budgets (24h → ~9h reserved though a few hours suffice). Deadlines below are max(60%, budget − this
+// cap): the 60% floor keeps small budgets unchanged; the cap bounds the reserve on large ones. Default 3h.
+const TIME_TAIL_CAP_MS = parseInt(A.time_tail_cap_s != null ? A.time_tail_cap_s : 10800, 10) * 1000; // 3h
 // ---- FAST MODE (opt-in, default OFF) ----------------------------------------------------------------
 // A time-boxed run that takes ALL its optimization from the HeadKernel track: it SKIPS ConfigSweep AND
 // the editable-kernel Milestone loop, and completes within a wall-clock budget (default 5h). It exists
@@ -64,12 +117,16 @@ const FAST_MODE = String(A.fast_mode != null ? A.fast_mode : 'false') === 'true'
 // Total wall-clock budget for a fast run (default 5h). Enforced with setTimeout (Date.now() is NOT
 // available in workflow scripts): a global deadline flag stops dispatching NEW head ops, and each nested
 // head author-workflow is independently time-bounded so no single op can overrun the budget.
-const FAST_BUDGET_MS = parseInt(A.fast_budget_ms != null ? A.fast_budget_ms : 18000000, 10); // 5h
+let FAST_BUDGET_MS = parseInt(A.fast_budget_ms != null ? A.fast_budget_ms : 18000000, 10); // 5h
+// When the orchestrator passes a wall-clock budget it is the SOURCE OF TRUTH — use it directly (replace the
+// 5h default) so a fast run fills the granted time and still finalizes before the external SIGKILL. The 5h
+// default (and any explicit fast_budget_ms) applies only when time_budget_s is absent (direct invocation).
+if (TIME_BUDGET_EFFECTIVE_MS != null) FAST_BUDGET_MS = TIME_BUDGET_EFFECTIVE_MS;
 // Stop STARTING new head ops after this point so the in-flight head + Finalize/Report/Validate still land
 // inside FAST_BUDGET_MS. Default 60% of the budget (3h at 5h) leaves ~40% for the last head to finish +
 // the deliverable/validation tail.
 const FAST_HEAD_DEADLINE_MS = parseInt(A.fast_head_deadline_ms != null ? A.fast_head_deadline_ms
-  : Math.floor(FAST_BUDGET_MS * 0.6), 10);
+  : Math.max(Math.floor(FAST_BUDGET_MS * 0.6), FAST_BUDGET_MS - TIME_TAIL_CAP_MS), 10);
 // Per-head nested author/optimize workflow() bound (fast mode only): a single recursive kernel run can't
 // eat the whole budget. Default 90min. (Heads run in PARALLEL on exclusive GPU lanes, so this is a
 // per-lane wall-clock cap, not summed — 90min/lane + serial integrate + Finalize still lands inside the 5h
@@ -104,6 +161,86 @@ const HEAD_AUTHOR_MAX = parseInt(A.head_author_max != null ? A.head_author_max :
 // hits a harness fault / no-win / extraction failure, the orchestrator LOUDLY flags it (and still tries
 // the author route when a plan exists) instead of dropping the biggest lever on the floor. Default 30%.
 const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_pct : 30);
+// Corrective re-author: when a verified-isolated head winner is REJECTED at the e2e gate for a FIXABLE
+// integration reason (it ENGAGED live + beat the isolated oracle, only the integration POSTURE is wrong —
+// e.g. a JIT/DSL kernel lazily compiling in the TP>1 warmup -> NO_BINARY_FOR_GPU / cuda_graph_capture_unsafe,
+// or a host-sync that breaks capture), spend ONE cheap targeted fix-and-retry: optimize the EXISTING kernel
+// (keep the algorithm/iso win, fix only the integration), then re-run the e2e A/B once. This is NOT a new
+// head discovery, so it does NOT consume HEAD_BUDGET; it is bounded per head by HEAD_CORRECTIVE_MAX and is
+// skipped once the kernel-phase wall-clock deadline has fired. head_corrective_max=0 disables it.
+const HEAD_CORRECTIVE_MAX = parseInt(A.head_corrective_max != null ? A.head_corrective_max : 2, 10);
+// SURGICAL-FIX tier (default ON): before escalating a corrective to the HEAVYWEIGHT kernel_workflow
+// re-author (multi-round, multi-engineer, ~hours), first try a LIGHTWEIGHT single-agent targeted patch
+// (the kernel_surgeon role): read the reject diagnosis + the failing kernel + the live call seam, make
+// the SMALLEST edit that fixes the defect, self-verify on the immutable unittest (correctness + isolated
+// win preserved), re-gate. Most integration/correctness rejects are a tiny seam bug (write into y=
+// instead of returning; stop caching a per-call tensor by data_ptr) — minutes, not hours. Escalates to
+// the heavy re-author only when the surgical patch fails. surgical_fix=false => old heavy-only behavior.
+const SURGICAL_FIX = String(A.surgical_fix != null ? A.surgical_fix : 'true') === 'true';
+const FIXABLE_REJECT_RX = /cuda_graph_capture_unsafe|no[_ ]?binary|NO_BINARY_FOR_GPU|hipErrorNoBinaryForGpu|capture[_ ]?(unsafe|hang)|host[_ ]?sync|graph[_ ]?capture|no[_ ]?rebind[_ ]?seam|no[_ ]?engagement|not[_ ]?engaged|signature[_ ]?mismatch|wrong[_ ]?seam/i;
+// ---- CORRECTNESS-class reject (auto-correct) --------------------------------------------------------
+// A SECOND fix-and-retryable class: the candidate ENGAGED and beat the isolated oracle but produces the
+// WRONG output on the LIVE path (parity/accuracy failure) — OR posts an IMPLAUSIBLE e2e speedup (faster
+// only because it computes degenerate/less work). Distinct from the integration-POSTURE class above: the
+// kernel over-fit the single captured snapshot, assuming input-buffer identity / contents / routing are
+// stable across calls (e.g. a cache keyed by data_ptr(), a stale reused index/mask, a persistent-state
+// assumption). A single-snapshot isolated unittest can NEVER catch this (fixed tensors → any such cache
+// is always "correct"), so a blind re-run reproduces the bug; the corrective loop below feeds this
+// diagnosis back so the re-author actually removes the over-fit. GENERIC — no kernel/model specifics.
+const CORRECTNESS_REJECT_RX = /parit|corrupt|mismatch|diverge|garbage|degener|\bnan\b|\binf\b|accuracy[_ ]?regress|wrong[_ ]?output|incorrect|implausible/i;
+// Amdahl ceiling: the MOST e2e speedup an op that is `pct`% of GPU time can yield at isolated speedup S is
+// 1/(1 - (pct/100)(1 - 1/S)). A measured e2e delta far above this ceiling can be the fingerprint of a
+// kernel doing degenerate/less work (corruption). Uses ONLY the profile pct + isolated speedup.
+const IMPLAUSIBLE_SPEEDUP_MARGIN = parseFloat(A.implausible_speedup_margin != null ? A.implausible_speedup_margin : 1.0); // headroom over the theoretical ceiling before flagging (1.0 = must exceed 2x the ceiling)
+function amdahlCeilingPct(pct_gpu_time, isolated) {
+  const p = Math.max(0, Math.min(1, (pct_gpu_time || 0) / 100));
+  const s = (isolated && isolated > 1) ? isolated : 1;
+  if (p <= 0 || s <= 1) return Infinity;   // unknown inputs -> never flag (fail-open)
+  return (1 / (1 - p * (1 - 1 / s)) - 1) * 100;
+}
+// PARITY-AWARE guard (fixes the false-positive that would DROP real wins). The Amdahl ceiling is derived
+// from an imperfect profile `pct_gpu_time`; a genuine win can legitimately exceed it when the profile
+// under-counts the op, or when the change has system-wide effects (memory pressure / batching / a config
+// swap). So the implausible-speedup verdict is applied ONLY when the acceptance rests on the SOFT gate —
+// a sampled task-accuracy probe (quant / `accuracy_gate=gsm8k`), where a degenerate output could squeak
+// past a small sample. A BYTE-EXACT parity pass is a HARD correctness guarantee → its speedup is real
+// even above the ceiling → never flagged. This removes the false-positive on byte-exact (incl. config
+// env/flag) wins while keeping the backstop exactly where byte-parity is waived. Backward-safe: an
+// integrator that doesn't report `parity_kind` only trips the guard when the RUN uses an accuracy gate.
+function parityIsSoft(integ) {
+  const pk = integ && integ.parity_kind;               // 'byte_exact' | 'accuracy' | 'none' (optional)
+  if (pk === 'accuracy') return true;
+  if (pk === 'byte_exact' || pk === 'none') return false;
+  return ACCURACY_GATE !== 'none';                      // unknown -> soft only when the run uses an accuracy gate
+}
+function isImplausibleSpeedup(pct_gpu_time, isolated, integ) {
+  if (!parityIsSoft(integ)) return false;              // hard byte-exact correctness -> trust the speedup
+  const ceilPct = amdahlCeilingPct(pct_gpu_time, isolated);
+  if (!Number.isFinite(ceilPct)) return false;
+  return ((integ && integ.e2e_delta_pct) || 0) > ceilPct * (1 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9;
+}
+// Classify a reject reason into a fix-and-retry class ('' = terminal, not auto-correctable).
+function rejectClass(reason) {
+  const r = reason || '';
+  if (CORRECTNESS_REJECT_RX.test(r)) return 'correctness';
+  if (FIXABLE_REJECT_RX.test(r)) return 'integration';
+  return '';
+}
+// A gate 'accept'/'stack' only counts as a REAL win if the measured e2e delta is not an implausible
+// (corruption) speedup. Centralizes the guard so every integrate site treats a too-good-to-be-true
+// delta as a reject instead of banking it. GENERIC (uses only pct_gpu_time + isolated speedup).
+function integAccepted(integ, pct_gpu_time, isolated) {
+  return !!(integ && (integ.gate === 'accepted' || integ.gate === 'stack')
+    && !isImplausibleSpeedup(pct_gpu_time, isolated, integ));
+}
+// The reason string to feed the corrective loop: if the gate "passed" but the delta is impossible, emit
+// an implausible_speedup verdict (routes to the correctness corrective); else the integrator's own reason.
+function gateRejectReason(integ, pct_gpu_time, isolated) {
+  if (integ && (integ.gate === 'accepted' || integ.gate === 'stack')
+      && isImplausibleSpeedup(pct_gpu_time, isolated, integ))
+    return `implausible_speedup (+${(integ.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pct_gpu_time, isolated).toFixed(1)}% on a soft/accuracy-gated accept — likely corruption/degenerate work)`;
+  return integ ? (integ.reason || integ.gate || '') : '';
+}
 // ---- DEEP MODE (opt-in, default OFF) ----------------------------------------------------------------
 // A long, thorough HeadKernel mode that pursues SOTA per head op via CROSS-BACKEND CO-OPTIMIZATION:
 // N backends optimize the SAME head op in parallel (one exclusive GPU lane each), continuously
@@ -116,7 +253,12 @@ const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_
 // EVERY knob is `DEEP_MODE ? deep : original`-gated; with deep_mode off the whole block is dead code and
 // normal/fast are byte-identical. deep_mode is mutually exclusive with the fast parallel track.
 const DEEP_MODE = String(A.deep_mode != null ? A.deep_mode : 'false') === 'true';
-const DEEP_HEAD_BUDGET_MS = parseInt(A.deep_head_budget_ms != null ? A.deep_head_budget_ms : 86400000, 10); // 24h for the whole HeadKernel module (deep mode does deep exploration)
+let DEEP_HEAD_BUDGET_MS = parseInt(A.deep_head_budget_ms != null ? A.deep_head_budget_ms : 86400000, 10); // 24h for the whole HeadKernel module (deep mode does deep exploration)
+// When the orchestrator passes a wall-clock budget it is the SOURCE OF TRUTH — use it directly (replace the
+// 24h default) so deep fills the granted time and self-finalizes before the external SIGKILL (fixing the
+// deep 24h-budget-vs-real-kill failure where it was torn down mid-wave). The 24h default applies only when
+// time_budget_s is absent (direct invocation) => byte-identical to today.
+if (TIME_BUDGET_EFFECTIVE_MS != null) DEEP_HEAD_BUDGET_MS = TIME_BUDGET_EFFECTIVE_MS;
 const DEEP_HEAD_WF_MS = parseInt(A.deep_head_workflow_ms != null ? A.deep_head_workflow_ms : 4500000, 10); // per-burst nested kernel_workflow time cap (75min) — bounds the per-wave barrier. Harvest+gate run at the TOP of each wave on disk truth, so gate latency is decoupled from this; the cap only bounds how long a burst runs.
 const DEEP_E2E_GAIN_TRIGGER = parseFloat(A.deep_e2e_gain_trigger != null ? A.deep_e2e_gain_trigger : 0.08); // isolated-best improvement since last e2e gate that triggers a new (batched) gate
 const DEEP_E2E_MAX_INTERVAL_MS = parseInt(A.deep_e2e_max_interval_ms != null ? A.deep_e2e_max_interval_ms : 7200000, 10); // force an e2e gate at least this often when a new candidate exists (default 2h)
@@ -199,7 +341,7 @@ const OSL = parseInt(A.osl != null ? A.osl : 1024, 10);
 const CONC = parseInt(A.conc != null ? A.conc : 64, 10);
 const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC };
 // Seed config: when an external orchestrator (e.g. Hyperloom) already did
-// config/param search, it passes its accepted best flags/env so the PerfSkills
+// config/param search, it passes its accepted best flags/env so the GEAK
 // baseline is measured ON that config (fair engagement start), not the stack
 // default. Serving TP/GPU are handled by SERVING_TP / SERVING_GPU above.
 const INIT_FLAGS = String(A.initial_extra_server_args || '');
@@ -239,6 +381,13 @@ const E2E_REPEATS = parseInt(A.e2e_repeats != null ? A.e2e_repeats : 2, 10);
 // This is what guarantees "every A/B runs ref AND cand to completion regardless
 // of pass/fail" — general, not per-kernel. Bump via args.ab_finish_retries.
 const AB_FINISH_RETRIES = parseInt(A.ab_finish_retries != null ? A.ab_finish_retries : 3, 10);
+// A resolvable FROZEN baseline (baseline_src/ frozen OR importable meta.baseline_callable) is the
+// speedup DENOMINATOR and is MANDATORY. If an extraction smoke-passes but froze no baseline, the
+// unittest would silently time the candidate against its own naive same-language scaffold (the
+// "optimized-HIP vs naive-HIP = fake 15.7× isolated, ~0% e2e" bug). When that happens we RE-EXTRACT
+// up to this many times; if still missing, the extraction is treated as a FAILURE (flag dominant /
+// skip others) — never a fake speedup. Bump via args.baseline_extract_retries.
+const BASELINE_EXTRACT_RETRIES = parseInt(A.baseline_extract_retries != null ? A.baseline_extract_retries : 3, 10);
 const TASK = A.task || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
@@ -283,6 +432,7 @@ const SETUP_SCHEMA = obj({
 
 const PROFILE_SCHEMA = obj({
   round: { type: 'number' }, profile_topN_json: { type: 'string' }, profile_topN_md: { type: 'string' },
+  profile_workload_json: { type: 'string' }, // per-(shape,dtype) weighted workload model (optional)
   source: { type: 'string' }, total_gpu_time_ms: { type: 'number' }, top_kernels: arrObj,
   shift_note: { type: 'string' }, notes: { type: 'string' },
 }, ['profile_topN_json', 'top_kernels']);
@@ -292,6 +442,13 @@ const STRATEGY_SCHEMA = obj({
   head_candidates: arrObj, kernel_candidates: arrObj,
   drop_list: arrObj, order_of_work: arrStr, strategy_path: { type: 'string' },
 }, ['kernel_candidates']);
+
+// Result of the ensure_flydsl provisioning gate (build-on-demand). ok=true iff flydsl is importable
+// (flydsl + kernels.moe_gemm_2stage) after sourcing env_file; built distinguishes a fresh build from reuse.
+const FLYDSL_GATE_SCHEMA = obj({
+  ok: { type: 'boolean' }, built: { type: 'boolean' },
+  env_file: { type: 'string' }, version: { type: 'string' }, reason: { type: 'string' },
+}, ['ok']);
 
 const SWEEP_SCHEMA = obj({
   trials: arrObj, accepted_flags: { type: 'string' }, accepted_env: { type: 'string' },
@@ -307,9 +464,12 @@ const PLAN_SCHEMA = obj({
 const EXTRACT_OP_SCHEMA = obj({
   short_name: { type: 'string' }, op_kind: { type: 'string' }, editable: { type: 'boolean' },
   task_dir: { type: 'string' }, shapes: { type: 'object', additionalProperties: true },
+  workload_path: { type: 'string' }, // per-(shape,dtype) weighted workload model for this kernel (optional)
   dtype: { type: 'string' }, synthesized: { type: 'boolean' }, regimes_captured: arrStr,
   candidate_backends: arrStr, reference_io_sha256: { type: 'string' },
   target_callable: { type: 'string' }, // module:attr rebind seam for an authored kernel ('' if none)
+  baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
+  baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
   smoke: { type: 'string' }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
@@ -330,6 +490,8 @@ const EXTRACT_SCHEMA = obj({
   source_path_in_sglang: { type: 'string' }, target_callable: { type: 'string' },
   num_cases: { type: 'number' }, regimes_captured: arrStr, candidate_backends: arrStr,
   build: { type: 'boolean' }, unittest_smoke: { type: 'string' },
+  baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
+  baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
   reference_io_sha256: { type: 'string' }, notes: { type: 'string' },
 }, ['editable', 'task_dir', 'unittest_smoke']);
 
@@ -350,6 +512,10 @@ const INTEGRATE_SCHEMA = obj({
   ref_med: { type: 'number' }, cand_med: { type: 'number' },
   ab_complete: { type: 'boolean' },
   output_parity: { type: 'string' },
+  // How the correctness of an ACCEPT was established: 'byte_exact' (hard greedy byte-parity vs the true
+  // baseline), 'accuracy' (soft sampled task-accuracy probe — quant / accuracy_gate), or 'none'. The
+  // implausible-speedup guard only distrusts an 'accuracy'/soft accept; a byte_exact accept is trusted.
+  parity_kind: { type: 'string' },
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
   accepted_overlay: { type: 'string' }, reason: { type: 'string' },
 }, ['gate', 'e2e_throughput_tok_s']);
@@ -447,7 +613,32 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // it to 45min so a single hung/slow agent can't blow the wall-clock budget (still ample for the director
 // baseline + the head e2e A/B). Default mode keeps 120min → unchanged.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : (FAST_MODE ? 2700000 : 7200000), 10);
-function agentBounded(prompt, opts) {
+// Process-safety rule prepended to EVERY agent prompt. It is injected at this funnel
+// (the one place `agent()` is ever called) rather than in roleAgent(), because several
+// prompts are built inline and would otherwise never see it — and any future call site
+// inherits it automatically instead of having to remember it. Bash-capable agents own
+// server lifecycles, and a pattern-matched kill is indistinguishable from a correct one
+// until it TERMs the caller's orchestrator and fails the whole task.
+const PROCESS_SAFETY = `## PROCESS SAFETY (a violation can kill the caller's orchestrator, failing the whole task)
+This container's PID 1 is the CALLER's orchestrator process, not yours, and it is NOT restartable.
+NEVER run global or pattern-matched process cleanup: no \`pkill -f\` / \`pgrep -f ... | xargs kill\` /
+\`killall\` / \`ps aux | grep ... | xargs kill\`, and never \`kill -- -PGID\` for a group you did not
+create. A pattern as innocent as \`-f vllm\` matches the orchestrator's own command line and TERMs it.
+Manage ONLY processes you started, by the pid you captured at launch. When a script of yours launches a
+server, do NOT hand-roll the shutdown — source the shared teardown contract, which verifies process
+identity (pid, pgid, /proc start time) before signalling anything:
+    source ${WORKFLOW_DIR}/scripts/server_teardown.sh
+    trap server_teardown EXIT
+    \${SERVER_LAUNCH_PREFIX:-} <launch server> &   # own session => pgid == pid
+    SERVER_PID=\$!; server_record_identity "\$SERVER_PID"
+
+`;
+function withProcessSafety(prompt) {
+  return typeof prompt === 'string' ? PROCESS_SAFETY + prompt : prompt;
+}
+
+function agentBounded(rawPrompt, opts) {
+  const prompt = withProcessSafety(rawPrompt);
   if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return agent(prompt, opts);
   let to;
   const guard = new Promise((resolve) => {
@@ -474,6 +665,88 @@ async function safeAgent(prompt, opts, tries = 3) {
   }
   log(`agent[${(opts && opts.label) || '?'}] DEGRADED to null after ${tries} tries (${String(lastErr).slice(0, 120)})`);
   return null;
+}
+
+// --- FlyDSL provisioning gate -------------------------------------------------
+// Design intent (roles/system_architect.md §0a): the MOMENT strategize routes a flydsl backend onto
+// any head/kernel candidate, FlyDSL must be provisioned via the ensure_flydsl expert skill BEFORE any
+// consumer can select it. We enforce it in the ORCHESTRATOR — not by trusting the architect LLM to have
+// run it — so "decide to use flydsl" and "ensure_flydsl" are one inseparable step. The detect->reuse-or-build
+// decision lives ENTIRELY inside ensure_flydsl.sh (its own version gate: import flydsl + kernels.moe_gemm_2stage
+// AND __version__ >= FLYDSL_MIN_VERSION, default 0.2.2). is_flydsl_available() is NOT used to decide anything.
+let flydslProvisioned = false;   // guard so the two call sites (strategize / re-strategize) provision at most once
+const _wantsFlydsl = (c) => ((c && c.candidate_backends) || []).some((b) => String(b).toLowerCase() === 'flydsl');
+const flydslRouted = (...queues) => queues.some((q) => (q || []).some(_wantsFlydsl));
+function stripFlydslFromQueues(...queues) {
+  let n = 0;
+  for (const q of queues) for (const c of (q || [])) {
+    if (_wantsFlydsl(c)) { c.candidate_backends = (c.candidate_backends || []).filter((b) => String(b).toLowerCase() !== 'flydsl'); n++; }
+  }
+  return n;
+}
+async function ensureFlydslGate() {
+  if (flydslProvisioned) return;                      // already provisioned this run
+  if (!flydslRouted(headQueue, kernelQueue)) return;  // strategize did not route flydsl -> nothing to do
+  log('[flydsl-gate] strategize routed a flydsl backend -> running ensure_flydsl (detect -> reuse-or-build) BEFORE any consumer.');
+  const g = await safeAgent(
+    `You are the flydsl provisioner. Run the ensure_flydsl expert skill EXACTLY as ` +
+    `${WORKFLOW_DIR}/../perf_knowledge/expert_skills/skills/ensure_flydsl/skill.md specifies: launch ` +
+    `${WORKFLOW_DIR}/../perf_knowledge/expert_skills/skills/ensure_flydsl/ensure_flydsl.sh DETACHED and poll ` +
+    `(success = flydsl_env.sh written; failure = .flydsl_build.failed). The script's own version gate ` +
+    `(import flydsl AND kernels.moe_gemm_2stage AND __version__ >= FLYDSL_MIN_VERSION, default 0.2.2) is the ` +
+    `SOLE authority: reuse an ambient flydsl if satisfied, else clone+build the pin (~15-18min). Do NOT use ` +
+    `is_flydsl_available() to decide anything. Return {ok,built,env_file,version,reason}; ok=true iff, after ` +
+    `sourcing flydsl_env.sh, "import flydsl, kernels.moe_gemm_2stage" works.`,
+    { phase: 'Strategize', label: 'architect:ensure_flydsl', schema: FLYDSL_GATE_SCHEMA });
+  if (g && g.ok) {
+    flydslProvisioned = true;
+    log(`[flydsl-gate] FlyDSL ready (${g.built ? 'built' : 'reused'} ${g.version || '?'}); env=${g.env_file || '(default /opt/flydsl/FlyDSL/flydsl_env.sh)'}.`);
+  } else {
+    const n = stripFlydslFromQueues(headQueue, kernelQueue);
+    log(`[flydsl-gate] ensure_flydsl FAILED (${(g && g.reason) || 'no result'}) -> stripped 'flydsl' from ${n} candidate backend list(s); those heads fall back to their other backends (no silent flydsl selection).`);
+  }
+}
+
+// A FROZEN baseline is resolvable when the extractor either froze baseline_src/ (baseline_frozen)
+// OR set an importable meta.baseline_callable. That is the language-independent speedup denominator.
+const hasFrozenBaseline = (ext) =>
+  !!(ext && (ext.baseline_frozen === true ||
+             (typeof ext.baseline_callable === 'string' && ext.baseline_callable.trim() !== '')));
+
+// Run a kernel_extractor agent and GUARANTEE it froze a real baseline. safeAgent already retries
+// transient failures; this wraps it to ALSO re-extract when the extraction succeeds (smoke passed,
+// task dir present) but produced NO frozen baseline — re-invoking with a corrective instruction up
+// to BASELINE_EXTRACT_RETRIES times. If a baseline still can't be frozen, we force the caller's
+// existing extract-failure path (smoke/unittest_smoke -> 'fail' + a reason) so the head is flagged
+// (if dominant) or skipped, NEVER timed against its own scaffold. `role`/`phase`/`intro`/`inputs`
+// are the roleAgent args; `opts` is the safeAgent opts (phase/label/schema). Used by every extract
+// site (deep, opt-A, milestone/head extract_op, and the non-op milestone extract).
+async function extractWithBaseline(role, phase, intro, inputs, opts) {
+  const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
+  let ext = await safeAgent(roleAgent(role, phase, intro, inputs), opts);
+  let tries = 0;
+  while (smokeOk(ext) && !hasFrozenBaseline(ext) && tries < BASELINE_EXTRACT_RETRIES) {
+    tries++;
+    log(`  ${(opts && opts.label) || role}: extraction froze NO baseline ` +
+      `(baseline_src/ or meta.baseline_callable) — the speedup denominator would fall back to the ` +
+      `candidate's own scaffold (fake-win). RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
+    ext = await safeAgent(
+      roleAgent(role, phase,
+        intro + ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. You MUST freeze the real online kernel into ' +
+        'an immutable baseline_src/ and set meta.baseline_callable (the speedup denominator), bind the ' +
+        "unittest's baseline leg to it, then return baseline_frozen:true. An extraction with no frozen " +
+        'baseline is INVALID and will be discarded.',
+        inputs),
+      opts);
+  }
+  if (smokeOk(ext) && !hasFrozenBaseline(ext)) {
+    log(`  ${(opts && opts.label) || role}: STILL no frozen baseline after ${BASELINE_EXTRACT_RETRIES} ` +
+      `re-extractions — ABORTING this extraction (refusing a fake speedup vs the candidate's own scaffold).`);
+    return { ...ext, smoke: 'fail', unittest_smoke: 'fail',
+      notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
+        `(baseline_src/ / meta.baseline_callable required as the speedup denominator) — ${ext.notes || ''}` };
+  }
+  return ext;
 }
 
 // abDone == the integrator measured BOTH legs (ref + cand) and emitted a real
@@ -506,6 +779,166 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
       { phase: phaseName, label: `${label} (finish ${tries})`, schema: INTEGRATE_SCHEMA });
   }
   return integ;
+}
+
+// Lightweight SURGICAL FIX (Tier 1 of the corrective). One focused kernel_surgeon agent reads the reject
+// diagnosis + the failing kernel + the live call seam (from the task's meta.json), makes the SMALLEST
+// edit that fixes the defect WITHOUT giving up the isolated win, self-verifies on the IMMUTABLE unittest
+// (correctness PASS + geomean preserved), and emits a final_patch. Returns a fix object shaped like the
+// kernel_workflow result ({final_patch, final_geomean, eval_dir, authored}) so the corrective re-gate path
+// is identical, or null if it could not produce a verified patch (=> escalate to the heavy re-author).
+const SURGEON_SCHEMA = obj({
+  fixed: { type: 'boolean' }, final_patch: { type: 'string' }, final_geomean: { type: 'number' },
+  eval_dir: { type: 'string' }, root_cause: { type: 'string' }, note: { type: 'string' },
+}, ['fixed']);
+async function trySurgicalFix(spec, reason, fixClass, attempt) {
+  if (!SURGICAL_FIX) return null;
+  const intro = `A verified-isolated ${spec.language || 'triton'} kernel winner for op "${spec.short_name}" ` +
+    `(${(spec.isolated || 0).toFixed(2)}x isolated) ENGAGED live but was REJECTED at the e2e gate. ` +
+    `Reject class = ${fixClass}. Reject reason: "${reason}". Make the SMALLEST possible fix that clears it ` +
+    `while KEEPING the algorithm + the isolated win; do NOT re-optimize or re-explore. Self-verify on the ` +
+    `IMMUTABLE unittest, then emit a minimal final_patch.`;
+  const s = await safeAgent(
+    roleAgent('kernel_surgeon', 'surgical_fix', intro, {
+      TASK_DIR: spec.task_dir || '', KERNEL_EVAL_DIR: spec.kernel_eval_dir || '',
+      CURRENT_PATCH: (spec.base_inputs && spec.base_inputs.KERNEL_RESULT &&
+        (spec.base_inputs.KERNEL_RESULT.code_patch || spec.base_inputs.KERNEL_RESULT.final_patch)) || '',
+      REJECT_REASON: reason, FIX_CLASS: fixClass, ISOLATED: spec.isolated || 0,
+      LANGUAGE: spec.language || 'triton', GPU_ID: spec.gpu_id, KERNEL_WF_DIR,
+    }),
+    { phase: spec.phase_name || 'HeadKernel', label: `surgeon ${spec.short_name} (${attempt})`, schema: SURGEON_SCHEMA });
+  if (s && s.fixed && s.final_patch && (s.final_geomean || 0) > 1.0) {
+    return { authored: true, final_patch: s.final_patch, final_geomean: s.final_geomean,
+      eval_dir: s.eval_dir || spec.kernel_eval_dir || '', reason: s.root_cause || 'surgical fix' };
+  }
+  log(`  ${spec.short_name}: surgical fix did not produce a verified patch (${s ? (s.note || s.root_cause || 'not fixed') : 'null'}) — escalating to re-author.`);
+  return null;
+}
+
+// Reusable CORRECTIVE RE-AUTHOR (general; used by every head-integration site, any mode). A head
+// candidate that PASSED the isolated oracle and ENGAGED live but was REJECTED at the e2e gate for a
+// FIXABLE integration reason (JIT/DSL kernel lazily compiling in TP>1 warmup -> NO_BINARY_FOR_GPU /
+// cuda_graph_capture_unsafe / capture hang / host-sync) earns up to HEAD_CORRECTIVE_MAX cheap fix-and-
+// retries: re-OPTIMIZE the EXISTING kernel (keep the algorithm + isolated win; fix only the integration
+// posture), then re-run the both-legs e2e A/B. This is NOT a new head discovery, so it does NOT consume
+// HEAD_BUDGET; it is bounded per head and skipped once the kernel-phase wall-clock deadline has fired.
+// spec: { short_name, op_kind, shapes, dtype, regime, gpu_id, kernel_eval_dir, task_dir, language,
+//         isolated, base_inputs (the integrate inputs template, carries KERNEL_RESULT), reason,
+//         cur:{overlay,flags,env,tput} }.  Returns { banked, integ, isolated } (banked=false if
+// ineligible or still rejected). See knowledge/learned/method-cudagraph-safe-integration.
+async function tryCorrectiveReauthor(spec) {
+  let reason = spec.reason || '';
+  // Which fix-and-retry class is this reject? '' = terminal (not auto-correctable).
+  let fixClass = spec.fix_class || rejectClass(reason);
+  const eligible = HEAD_CORRECTIVE_MAX > 0 && !((FAST_MODE && FAST_DEADLINE_HIT) || TIME_DEADLINE_HIT)
+    && (spec.kernel_eval_dir || spec.task_dir) && (spec.isolated || 0) > 1.0 && fixClass !== '';
+  if (!eligible) return { banked: false };
+  const curTput = (spec.cur && spec.cur.tput) || 0;
+  // The corrective instruction is CLASS-SPECIFIC. `integration` = the posture is wrong (JIT/capture/
+  // host-sync); `correctness` = the output is wrong on the live path (parity/accuracy fail or an
+  // implausible speedup), i.e. the kernel over-fit the single captured snapshot. Both KEEP the
+  // algorithm + isolated win and fix only the defect. GENERIC — the text describes the failure CLASS,
+  // never this specific kernel/model.
+  const INTEGRATION_FIX_TASK =
+    `Fix ONLY the integration posture per knowledge/learned/method-cudagraph-safe-integration: ` +
+    `precompile/register EVERY (shape-bucket × config) the LIVE workload hits — PREFILL buckets AND decode buckets, ` +
+    `every per-bucket tile/config the kernel selects — at WARMUP before capture (an *_overlay_precompile(weights, ` +
+    `scales, buckets) hook the integrator calls once, pre-capture) so ALL TP workers load a prebuilt code object ` +
+    `instead of lazily compiling in the multiproc warmup (the cause of NO_BINARY_FOR_GPU / capture hang). If the cause ` +
+    `is a host-sync (.item()/.cpu()/.sum().item()) on the hot path, remove it and cache weight prep by data_ptr(). ` +
+    `Keep the steady-state hot path host-sync-free. ` +
+    `If the reject is no_rebind_seam / no_engagement (the overlay bound but never ran on the live path): FIND the ` +
+    `method the live server ACTUALLY dispatches (grep the cand server.log for which entry engaged — e.g. the ` +
+    `modular 'TritonExperts.apply'/'invoke_fused_moe_triton_kernel' path, NOT a dead legacy '*_impl'), then rebind ` +
+    `the overlay at THAT seam and MATCH its call signature so the kernel is invoked. Prove it re-engages ` +
+    `(engagement_check > 0) before returning.`;
+  const CORRECTNESS_FIX_TASK =
+    `The kernel is WRONG on the LIVE path (reject: "${reason}") even though it passed the isolated oracle — the ` +
+    `classic single-snapshot OVER-FIT. Live serving calls this op every step with CHANGING contents (routing / ` +
+    `token→expert assignment / gather-scatter indices / masks) while REUSING the same buffers (stable data_ptr, ` +
+    `new contents); the fixed-tensor unittest hides this. Fix the CORRECTNESS without giving up the speedup: ` +
+    `(1) NEVER key a cache on tensor.data_ptr()/id() for any tensor whose CONTENTS vary per call (routing/gather/ ` +
+    `scatter/mask/index) — recompute it each call (cheap, and CUDA-graph-capture-safe) or key on a value hash; ` +
+    `only cache things that depend purely on SHAPE/DTYPE (e.g. tile/occupancy config). (2) Do not carry per-call ` +
+    `state across calls or assume the previous call's indices/mask still apply. (3) If you use atomics/scatter-add ` +
+    `into a reused output, zero it each call inside the captured region. VALIDATE your fix adversarially: call the ` +
+    `kernel on TWO different routing snapshots back-to-back REUSING the same input buffers, and on repeated calls ` +
+    `with fresh contents, asserting bit/tol correctness on EACH — a data_ptr cache or stale reuse must fail this. ` +
+    `An implausible speedup (far above the op's Amdahl ceiling) means it is doing less/degenerate work — treat as wrong.`;
+  for (let cAttempt = 1; cAttempt <= HEAD_CORRECTIVE_MAX; cAttempt++) {
+    log(`  ${spec.short_name}: ${fixClass.toUpperCase()} reject (${reason}) — corrective ${cAttempt}/${HEAD_CORRECTIVE_MAX} (fix-and-retry the iso winner; NOT a new head, NOT charged to head_budget).`);
+    // TIER 1 — lightweight SURGICAL patch (one agent, minutes). Most rejects are a tiny seam bug.
+    let fix = await trySurgicalFix(spec, reason, fixClass, cAttempt);
+    const viaSurgical = !!(fix && fix.final_patch && (fix.final_geomean || 0) > 1.0);
+    // TIER 2 — escalate to the HEAVYWEIGHT kernel_workflow re-author ONLY if the surgical patch failed.
+    if (!viaSurgical) {
+      try {
+        fix = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+          kernel_path: spec.kernel_eval_dir || spec.task_dir, workflow_dir: KERNEL_WF_DIR,
+          mode: 'optimize', target_language: spec.language || 'triton',
+          op_spec: { op_kind: spec.op_kind, shapes: spec.shapes || {}, dtype: spec.dtype || 'bf16', regime: spec.regime || '', cuda_graph_safe: true, ...(spec.workload_path ? { workload_path: spec.workload_path } : {}) },
+          perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
+          use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
+          budget: KERNEL_BUDGET, gpu_ids: spec.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
+          task: `CORRECTIVE FIX — do NOT re-discover the algorithm; KEEP the ${(spec.isolated || 0).toFixed(2)}x isolated win. ` +
+            `This kernel PASSED the isolated oracle and ENGAGED on all live workers but was REJECTED at the e2e serving gate ` +
+            `for: "${reason}". ` + (fixClass === 'correctness' ? CORRECTNESS_FIX_TASK : INTEGRATION_FIX_TASK) +
+            ` Emit a fixed final_patch. ` + GRAPH_REQ + (TASK || ''),
+          apply_to_original: 'false',
+        }, `${spec.short_name}:corrective`);
+      } catch (e) { fix = { authored: false, validation_status: 'error', reason: String(e) }; }
+    }
+    if (!fix || fix.authored === false || !(fix.final_geomean > 1.0) || !fix.final_patch) {
+      log(`  ${spec.short_name}: corrective produced no usable kernel (${fix ? fix.reason || fix.validation_status : 'null'}).`);
+      return { banked: false };
+    }
+    log(`  ${spec.short_name}: fix via ${viaSurgical ? 'SURGICAL patch (light)' : 'kernel_workflow re-author (heavy)'}; iso geomean ${(fix.final_geomean || 0).toFixed(2)}. Re-gating e2e.`);
+    // Re-gate the FIXED kernel. Preserve the caller's KERNEL_RESULT SHAPE (head=authored/code_patch,
+    // milestone=editable/final_patch) and only swap in the corrected patch + eval_dir + iso speedup, so the
+    // helper is track-agnostic. Set BOTH patch fields to the new patch — the integrator reads whichever
+    // matches its apply mode; leaving the other stale would re-apply the broken kernel.
+    const base = spec.base_inputs || {};
+    const fixInputs = { ...base,
+      KERNEL_RESULT: { ...(base.KERNEL_RESULT || {}),
+        code_patch: fix.final_patch, final_patch: fix.final_patch,
+        authored_kernel_eval_dir: fix.eval_dir || spec.kernel_eval_dir || (base.KERNEL_RESULT && base.KERNEL_RESULT.authored_kernel_eval_dir) || '',
+        verified_isolated_speedup: fix.final_geomean,
+        corrective_fix_of: reason } };
+    if (spec.cur) {
+      fixInputs.CURRENT_OVERLAY = spec.cur.overlay; fixInputs.CURRENT_FLAGS = spec.cur.flags;
+      fixInputs.CURRENT_ENV = spec.cur.env; fixInputs.CURRENT_THROUGHPUT = spec.cur.tput;
+    }
+    const integ2 = await runIntegrateBothLegs(
+      'Apply the CORRECTIVELY-FIXED kernel winner; gate on e2e throughput.', fixInputs,
+      `integrate ${spec.short_name} corrective`, spec.phase_name || 'HeadKernel');
+    const ab2 = !!(integ2 && integ2.gate !== 'incomplete' && integ2.ab_complete !== false);
+    const pctForGuard = spec.pct_gpu_time || (spec.base_inputs && spec.base_inputs.KERNEL_RESULT && spec.base_inputs.KERNEL_RESULT.pct_gpu_time) || 0;
+    // Implausible-speedup guard: a "win" whose e2e delta blows past the op's Amdahl ceiling is corruption
+    // masquerading as a win (does less/degenerate work) — never bank it; treat as a correctness reject and
+    // let the next corrective attempt fix it. GENERIC (uses only pct_gpu_time + isolated).
+    const implausible2 = ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack')
+      && isImplausibleSpeedup(pctForGuard, fix.final_geomean, integ2);
+    if (ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack') && integ2.e2e_throughput_tok_s > curTput && !implausible2) {
+      return { banked: true, integ: integ2, isolated: fix.final_geomean };
+    }
+    reason = implausible2
+      ? `implausible_speedup (+${(integ2.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pctForGuard, fix.final_geomean).toFixed(1)}% — corruption)`
+      : ((integ2 && (integ2.reason || integ2.gate)) || reason);
+    // STRUCTURED stop (do NOT re-classify from the prose reason — it may MENTION "corruption" while saying
+    // it was RESOLVED, which would loop wastefully). If this attempt made the kernel CORRECT (parity no
+    // longer failing) and it was not an implausible speedup, the ONLY remaining problem is throughput/
+    // do-no-harm — more re-authoring cannot create Amdahl headroom that isn't there, so STOP now.
+    if (ab2 && integ2.output_parity !== 'fail' && !implausible2) {
+      log(`  ${spec.short_name}: corrective produced a CORRECT kernel with no e2e win (do-no-harm: ${reason}) — stopping; throughput headroom for this op is exhausted.`);
+      break;
+    }
+    log(`  ${spec.short_name}: corrective still rejected (${reason}).`);
+    fixClass = implausible2 ? 'correctness' : rejectClass(reason);
+    if (fixClass === '') break;   // new failure not auto-correctable -> stop retrying
+    // Progressive: the NEXT attempt builds on this attempt's (partially) fixed kernel, not the original.
+    spec.kernel_eval_dir = fix.eval_dir || spec.kernel_eval_dir;
+  }
+  return { banked: false };
 }
 
 // --- FAST-MODE wall-clock control (no-op unless FAST_MODE) -------------------------------------------
@@ -547,6 +980,22 @@ if (DEEP_MODE && typeof setTimeout === 'function' && DEEP_HEAD_BUDGET_MS > 0) {
     DEEP_DEADLINE_HIT = true;
     log(`[deep-mode] HeadKernel budget (${Math.round(DEEP_HEAD_BUDGET_MS / 3600000)}h) reached — no NEW co-opt waves will start; finishing the in-flight wave then proceeding to Finalize/Validate.`);
   }, DEEP_HEAD_BUDGET_MS);
+}
+// --- DEFAULT-MODE wall-clock control (no-op unless time_budget_s passed) -----------------------------
+// fast/deep have their own deadline flags (capped above); the DEFAULT pipeline had NO time awareness at
+// all — its Milestone editable-kernel loop and head bake-off track could run past the orchestrator's kill.
+// Mirror the fast/deep mechanism with ONE general flag: stop STARTING new head/milestone work after 60% of
+// the effective budget (same 60/40 carve as fast — leaves the tail for the in-flight task + Finalize/
+// Report/Validate). Active in ALL modes when time_budget_s is set (harmless for fast/deep, which stop even
+// earlier on their own flags); fully inert (never registered) when time_budget_s is absent => byte-identical.
+let TIME_DEADLINE_HIT = false;
+const TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
+  ? Math.max(Math.floor(TIME_BUDGET_EFFECTIVE_MS * 0.6), TIME_BUDGET_EFFECTIVE_MS - TIME_TAIL_CAP_MS) : null;
+if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HEAD_DEADLINE_MS > 0) {
+  setTimeout(() => {
+    TIME_DEADLINE_HIT = true;
+    log(`[time-budget] dispatch deadline (${Math.round(TIME_HEAD_DEADLINE_MS / 60000)}min of ${Math.round(TIME_BUDGET_MS / 60000)}min budget) reached — no NEW head/milestone work will start; finishing in-flight then proceeding to Finalize/Report/Validate before the hard kill.`);
+  }, TIME_HEAD_DEADLINE_MS);
 }
 function deepBoundedWorkflow(ref, wfArgs, label) {
   const p = workflow(ref, wfArgs);
@@ -634,6 +1083,7 @@ if (want('setup')) {
     roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
       OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+      ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
   log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
@@ -643,11 +1093,32 @@ if (want('setup')) {
     roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
       EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
       WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
+      ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
   headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
-  log(`Strategy: ${headQueue.length} head (GEMM/attn) candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
+  // OP-IDENTITY GUARD — a fused-MoE / grouped-expert GEMM must be optimized AS the fused op at its live
+  // dispatcher seam, never decomposed into standalone dense GEMMs (a dense candidate has no live call site
+  // → no_rebind_seam). So force op_kind='moe' (the grouped-GEMM branch; gemmSynthFor keys on this to keep
+  // dense synth OFF) and preserve the live seam as target_callable, so ANY lever (backend-swap / tune /
+  // author-fused) binds. The head is never SKIPPED — editability is irrelevant, since a non-editable fused
+  // kernel is still backend-swapped at its (editable) dispatcher. GENERIC: detects via the Architect's
+  // is_fused_kernel OR the profile class/name; never keys on a backend name.
+  const _isFusedOp = (c) => (c && c.is_fused_kernel === true) ||
+    /(?:^|[^a-z])moe(?:[^a-z]|$)|group(?:ed)?[_ ]?gemm|ck_moe|expert|fused[_ ]?moe|fmoe|asm_moe|fused_custom/i
+      .test(`${(c && c.op_kind) || ''} ${(c && c.short_name) || ''} ${(c && c.name) || ''} ${(c && c.classification) || ''} ${(c && c.class) || ''} ${(c && c.backend) || ''}`);
+  let _fusedTagged = 0;
+  for (const c of headQueue) {
+    if (!_isFusedOp(c)) continue;
+    c.op_kind = 'moe';                                                                // grouped-GEMM branch (gemmSynthFor → no dense synth)
+    if (!c.target_callable && c.live_call_seam) c.target_callable = c.live_call_seam;  // bind at the live seam
+    _fusedTagged++;
+  }
+  if (_fusedTagged) log(`[op-identity] ${_fusedTagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
+  log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
+  // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
+  await ensureFlydslGate();
 } else {
   // Load carried state from a prior phase invocation (args.state).
   EVAL_DIR = ST.eval_dir || EVAL_DIR_OVERRIDE;
@@ -687,6 +1158,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       roleAgent('profiler', 'reprofile', 'Re-profile after the config sweep.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'config',
         OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Profile', label: 'profiler:post-config', schema: PROFILE_SCHEMA });
     // Re-strategize the kernel queue against the new profile.
@@ -694,10 +1166,13 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       roleAgent('system_architect', 'strategize', 'Re-route after config changed the landscape.', {
         EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
         WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
     if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
     if (restrat && restrat.head_candidates) headQueue = restrat.head_candidates.slice();
+    // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
+    await ensureFlydslGate();
   } else {
     log(`Config sweep found no win above the noise band.`);
   }
@@ -722,14 +1197,22 @@ const flaggedHeads = (ST.flagged_heads || []).slice();   // dominant heads that 
 let headDispatched = 0;
 const history = ST.history || { insights: [], ledger: [], milestones: [], bottleneck_now: '', suggest_next: '' };
 
+// A fused op (op_kind='moe', set by the op-identity guard OR the Architect) is extracted AS the fused op,
+// never decomposed into a standalone dense GEMM — so dense-GEMM synth is off for it.
+function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
+
 // ===========================================================================
 // PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized
 // regardless of edit flag, via the bake-off ladder. This is the lever the old
 // design missed for GEMM (~78% of GPU time). Runs BEFORE the editable-kernel loop.
+// The op-identity guard (see Strategize) has already forced fused/monolithic heads to op_kind=moe with
+// dense-GEMM synth OFF + the live seam preserved, so each head is optimized AS the op the live kernel
+// dispatches (backend-swap / tune / author-fused) — never decomposed into an un-integrable dense GEMM.
 // ===========================================================================
 if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   phase('HeadKernel');
   log(`Head-kernel track: ${headQueue.length} candidate op(s), head_budget=${HEAD_BUDGET}, threshold=${HEAD_THRESHOLD_PCT}%.`);
+  // Head ops are taken in the Architect's Amdahl-ranked order — no forced GEMM-first reordering.
   const heads = headQueue.slice(0, HEAD_BUDGET).map((c, i) => ({
     ...c, idx: i, gpu_id: GPU_LIST[i % GPU_LIST.length],
     short_name: c.short_name || `${c.op_kind || 'op'}${i}`,
@@ -764,13 +1247,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // ---- per-head prep: extract + bake-off + roofline + lane roster (cheap agents on GPU_LIST[0]) ----
     const GLOBAL_KB = `${EVAL_DIR}/deep_head/GLOBAL_KB.md`;
     const prepHead = async (h) => {
-      const ext = await safeAgent(
-        roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
-          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH,
+      const ext = await extractWithBaseline(
+        'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
+          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
+          ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
           CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
           REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
           PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
-        }),
+        },
         { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
       if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
@@ -816,7 +1300,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const liveBaselineMs = (bake && Number.isFinite(bake.best_known_ms) && bake.best_known_ms > 0) ? bake.best_known_ms : 0;
       const deepDir = `${EVAL_DIR}/deep_head/${h.short_name}`;
       const sharedKb = `${deepDir}/SHARED_KB.md`;
-      const opSpec = { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || 'both', cuda_graph_safe: true };
+      const opSpec = { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || 'both', cuda_graph_safe: true, ...(ext.workload_path ? { workload_path: ext.workload_path } : {}) };
       const anchor = await safeAgent(
         `You are the ROOFLINE ANCHOR + shared-KB bootstrapper for DEEP cross-backend optimization of head op ${h.short_name} (${ext.op_kind}). ` +
         `Inputs: OP_TASK_DIR=${ext.task_dir}; shapes=${JSON.stringify(ext.shapes || {})}; dtype=${ext.dtype || '?'}; read ${EVAL_DIR}/env_report.json for the on-box device peak (FLOP/s + HBM bandwidth). ` +
@@ -946,14 +1430,41 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (integ && integ.output_parity === 'fail') {
           log(`  [deep] ${c.uid}: REJECTED — output_parity=fail vs true baseline.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
-        } else if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+        } else if (integAccepted(integ, c.head.pct_gpu_time, c.best) && integ.e2e_throughput_tok_s > curTput) {
           curOverlay = integ.accepted_overlay || curOverlay; curTput = integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
           acceptedHeads.push({ short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', e2e_delta_pct: integ.e2e_delta_pct, isolated: c.best });
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
         } else {
-          log(`  [deep] ${c.uid}: e2e gate ${integ ? integ.gate : 'none'} (${integ ? integ.reason || '' : 'integrate failed'}).`);
-          history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ ? integ.e2e_delta_pct : 0, verdict: 'dead_end', lesson: integ ? integ.reason || 'no e2e gain' : 'integrate failed' });
+          // gateRejectReason converts an implausible "pass" into a corruption reject so it routes to the
+          // correctness corrective (the deep site already calls the corrective helper for every reject).
+          const dreason = gateRejectReason(integ, c.head.pct_gpu_time, c.best);
+          const dcorr = await tryCorrectiveReauthor({
+            short_name: c.head.short_name, op_kind: c.ext.op_kind, shapes: c.ext.shapes, dtype: c.ext.dtype, regime: c.head.regime,
+            gpu_id: SERVING_GPU, kernel_eval_dir: c.lastEval, task_dir: c.ext.task_dir, language: c.lang,
+            isolated: c.best, reason: dreason, fix_class: rejectClass(dreason), pct_gpu_time: c.head.pct_gpu_time,
+            base_inputs: {
+              EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+              KERNEL_RESULT: {
+                short_name: c.head.short_name, task_dir: c.ext.task_dir, op_kind: c.ext.op_kind, lane: c.key,
+                winner_kind: 'patch', winner_backend: c.lang,
+                target_callable: c.ext.target_callable || c.head.target_callable || '',
+                authored_language: c.lang, authored_kernel_eval_dir: c.lastEval, apply_env: '', apply_flags: '',
+                code_patch: c.patch || '', tuning_artifact: '', verified_isolated_speedup: c.best,
+                pct_gpu_time: c.head.pct_gpu_time, parity_note: 'expected_close' },
+              SKILL_DIR: WORKFLOW_DIR, ...ACCURACY_INPUTS,
+            },
+            cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
+          });
+          if (dcorr.banked) {
+            curOverlay = dcorr.integ.accepted_overlay || curOverlay; curTput = dcorr.integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
+            acceptedHeads.push({ short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', e2e_delta_pct: dcorr.integ.e2e_delta_pct, isolated: dcorr.isolated, corrective: true });
+            log(`  [deep] ${c.uid}: ACCEPTED after corrective re-author. e2e now ${curTput} tok/s (+${dcorr.integ.e2e_delta_pct}%).`);
+            history.ledger.push({ direction: c.uid, isolated_speedup: dcorr.isolated, e2e_delta_pct: dcorr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${dreason}` });
+          } else {
+            log(`  [deep] ${c.uid}: e2e gate ${integ ? integ.gate : 'none'} (${integ ? integ.reason || '' : 'integrate failed'}).`);
+            history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ ? integ.e2e_delta_pct : 0, verdict: 'dead_end', lesson: integ ? integ.reason || 'no e2e gain' : 'integrate failed' });
+          }
         }
       }
       const fb = await safeAgent(
@@ -1096,13 +1607,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (FAST_DEADLINE_HIT) return { h, dead: 'deadline' };
       return ISO.with(1, async (g) => {
         const gpu = g[0];
-        const ext = await safeAgent(
-          roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
-            EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH,
+        const ext = await extractWithBaseline(
+          'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
+            EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
+            ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
             CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
             REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
             PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
-          }),
+          },
           { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
         if (!ext || ext.smoke !== 'pass' || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
         const bake = await safeAgent(
@@ -1123,7 +1635,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (!p) continue;
       const h = p.h;
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
-      if (p.dead === 'deadline') { log(`  [fast-mode] ${h.short_name}: skipped (dispatch deadline).`); continue; }
+      if (p.dead === 'deadline') { log(`  [fast-mode] ${h.short_name}: skipped (dispatch deadline).`); continue;
+      }
       if (p.dead === 'extract' || !p.ext || !p.ext.task_dir) {
         const why = p.ext ? p.ext.notes || p.ext.smoke : 'none';
         if (isDominant) { log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head op extraction FAILED (${why}) — flagged, NOT skipped.`);
@@ -1168,7 +1681,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           al = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
             kernel_path: j.ext.task_dir, workflow_dir: KERNEL_WF_DIR,
             mode: j.ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
-            op_spec: { op_kind: j.ext.op_kind, shapes: j.ext.shapes || {}, dtype: j.ext.dtype || 'bf16', regime: j.h.regime || '', cuda_graph_safe: true },
+            op_spec: { op_kind: j.ext.op_kind, shapes: j.ext.shapes || {}, dtype: j.ext.dtype || 'bf16', regime: j.h.regime || '', cuda_graph_safe: true, ...(j.ext.workload_path ? { workload_path: j.ext.workload_path } : {}) },
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
             use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
             budget: KERNEL_BUDGET, gpu_ids: g[0], exp_root: `${EVAL_DIR}/kernels/_exp`,
@@ -1190,10 +1703,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (!r || !r.al) continue;
       const j = r.j, al = r.al, lang = j.ap.language || 'triton';
       const st = headState.get(j.short_name); if (!st) continue;
-      if (al.authored !== false && al.final_geomean > 1.0 && al.final_patch) {
+      // Rank candidates on the WORKLOAD-WEIGHTED speedup (kernel layer's PRIMARY metric, = the env/
+      // direct_light candidate's bake.isolated_speedup), NOT the unweighted geomean. In a decode-bound
+      // serving regime the geomean is dominated by zero/low-weight prefill buckets and buries the decode
+      // bucket that governs throughput — ranking by geomean can drop the truly-best authored kernel.
+      const alIso = al.final_weighted != null ? al.final_weighted : al.final_geomean;
+      if (al.authored !== false && alIso > 1.0 && al.final_patch) {
         st.cands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
-          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: al.final_geomean });
-        log(`  ${j.short_name}: authored ${lang} ${al.final_geomean.toFixed(2)}x (vs its own baseline).`);
+          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
+        log(`  ${j.short_name}: authored ${lang} ${alIso.toFixed(2)}x weighted (vs the frozen online kernel, not the seed).`);
       } else {
         log(`  ${j.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
         history.ledger.push({ direction: `${j.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
@@ -1224,12 +1742,17 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
             code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
             verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time,
+            // Pass the Architect's live seam + a concrete engagement assertion so the Integrator can
+            // VERIFY the overlay actually binds on the live path BEFORE spending a full e2e A/B — an
+            // unreachable lever is then rejected in minutes (no_engagement), not hours.
+            live_call_seam: h.live_call_seam || '', engagement_check: h.engagement_check || '',
             parity_note: cand.parity_note || 'expected_close' },
           CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
           CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
+          ENGAGEMENT_CHECK: h.engagement_check || '',
         },
         `integrate ${h.short_name}`, 'HeadKernel');
-      if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+      if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput) {
         curOverlay = integ.accepted_overlay || curOverlay;
         if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
         if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
@@ -1238,23 +1761,56 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
         history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
       } else {
-        log(`  ${h.short_name}: REJECTED at e2e gate (${integ ? integ.reason || integ.gate : 'none'}).`);
-        history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ ? integ.e2e_delta_pct : 0, verdict: 'dead_end', lesson: integ ? integ.reason || 'no e2e gain' : 'integrate failed' });
+        // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
+        // impossible (corruption) — so a fake win routes to the correctness corrective instead of banking.
+        const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
+        const corr = (cand.kind === 'authored' && rejectClass(reason) !== '')
+          ? await tryCorrectiveReauthor({
+              short_name: h.short_name, op_kind: st.ext.op_kind, shapes: st.ext.shapes, dtype: st.ext.dtype, regime: h.regime,
+              gpu_id: SERVING_GPU, kernel_eval_dir: cand.kernel_eval_dir, task_dir: st.ext.task_dir, language: cand.language,
+              isolated: cand.isolated, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time, phase_name: 'HeadKernel',
+              base_inputs: {
+                EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+                KERNEL_RESULT: { short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
+                  winner_kind: cand.winner_kind, winner_backend: cand.source,
+                  target_callable: st.ext.target_callable || h.target_callable || '',
+                  authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
+                  apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
+                  code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
+                  verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time, parity_note: 'expected_close' },
+                SKILL_DIR: WORKFLOW_DIR,
+              },
+              cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
+            })
+          : { banked: false };
+        if (corr.banked) {
+          curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
+          acceptedHeads.push({ short_name: h.short_name, op_kind: st.ext.op_kind, backend: cand.source, kind: 'authored', e2e_delta_pct: corr.integ.e2e_delta_pct, isolated: corr.isolated, corrective: true });
+          log(`  ${h.short_name}: ACCEPTED after corrective re-author (${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
+          history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
+        } else {
+          log(`  ${h.short_name}: REJECTED at e2e gate (${reason}).`);
+          history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ ? integ.e2e_delta_pct : 0, verdict: 'dead_end', lesson: reason || 'no e2e gain' });
+        }
       }
     }
   } else {
   for (const h of heads) {
-    // Fast-mode budget guard: stop STARTING new head ops once the dispatch deadline has fired, so the
-    // in-flight work + Finalize/Validate still land inside the wall-clock budget. (No-op in default mode.)
-    if (FAST_MODE && FAST_DEADLINE_HIT) {
-      log(`[fast-mode] budget deadline reached — stopping head dispatch before ${h.short_name} (${headDispatched}/${heads.length} heads done).`);
+    // Budget guard: stop STARTING new head ops once a dispatch deadline has fired, so the in-flight work +
+    // Finalize/Validate still land inside the wall-clock budget. FAST_DEADLINE_HIT covers fast mode;
+    // TIME_DEADLINE_HIT covers ALL modes when time_budget_s was passed (inert otherwise => no-op default).
+    if ((FAST_MODE && FAST_DEADLINE_HIT) || TIME_DEADLINE_HIT) {
+      log(`[budget] dispatch deadline reached — stopping head dispatch before ${h.short_name} (${headDispatched}/${heads.length} heads done).`);
       break;
     }
     headDispatched++;
-    // (h1) Extract the op into a standalone immutable unittest (GEMM synth / attn capture).
-    const ext = await safeAgent(
-      roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH,
+    // (h1) Extract the op into a standalone immutable unittest. The op-identity guard already forced a
+    // fused/monolithic head to op_kind=moe with GEMM_SYNTH off (gemmSynthFor) so it is extracted as the
+    // fused op bound at its live seam — never decomposed into a standalone dense GEMM. Nothing is skipped.
+    const ext = await extractWithBaseline(
+      'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
+        EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
+        ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
         // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
@@ -1263,7 +1819,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         REQUIRE_DECODE_BUCKET: true,
         DECODE_M_BUCKETS: [1, CONC],
         PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
-      }),
+      },
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
     const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
     if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
@@ -1278,7 +1834,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
       continue;
     }
-
     // (h2) DISCOVER existing impls + tune cheap levers + DECIDE an author_plan.
     const bake = await safeAgent(
       roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
@@ -1332,7 +1887,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           al = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
             kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
             mode: ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
-            op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '', cuda_graph_safe: true },
+            op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '', cuda_graph_safe: true, ...(ext.workload_path ? { workload_path: ext.workload_path } : {}) },
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
             use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
             budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
@@ -1354,10 +1909,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (!transient || attempt === AUTHOR_TRIES) break;
         log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
       }
-      if (al && al.authored !== false && al.final_geomean > 1.0 && al.final_patch) {
+      // Rank on the WORKLOAD-WEIGHTED speedup (kernel layer's PRIMARY metric, same basis as the
+      // env/direct_light candidate's bake.isolated_speedup) — NOT the unweighted geomean, which in a
+      // decode-bound regime is dragged down by low/zero-weight prefill buckets and can bury the decode
+      // bucket that actually governs serving throughput. Fall back to geomean if no weighted number.
+      const alIso = al && (al.final_weighted != null ? al.final_weighted : al.final_geomean);
+      if (al && al.authored !== false && alIso > 1.0 && al.final_patch) {
         headCands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
-          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: al.final_geomean });
-        log(`  ${h.short_name}: authored ${lang} ${al.final_geomean.toFixed(2)}x (vs its own baseline).`);
+          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
+        log(`  ${h.short_name}: authored ${lang} ${alIso.toFixed(2)}x weighted (vs the frozen online kernel, not the seed).`);
       } else {
         log(`  ${h.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
         history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
@@ -1376,12 +1936,18 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       continue;
     }
     headCands.sort((a, b) => (b.isolated || 0) - (a.isolated || 0));
-    const cand = headCands[0];
-    log(`  ${h.short_name}: best candidate=${cand.source} (${(cand.isolated || 0).toFixed(2)}x, ${cand.kind}). Integrating to e2e.`);
+    log(`  ${h.short_name}: ${headCands.length} candidate(s) [${headCands.map(c => `${c.source} ${(c.isolated || 0).toFixed(2)}x`).join(', ')}] — e2e-testing EACH; reference leg measured ONCE and reused.`);
 
-    // (h3) e2e gate on the chosen candidate. direct_light env/flag → config; authored/patch → overlay.
-    // Build inputs ONCE so Fix C can re-issue the SAME A/B for a pending win at Finalize.
-    const headIntegrateInputs = {
+    // (h3) e2e gate. Test EVERY candidate, not just the top-iso one: isolated speedup is a weak predictor
+    // of e2e (a decode-bound run had an iso-1.055 env tune deliver +14.5% e2e), so the truly-best candidate
+    // can only be found by measuring each on the live server. All of a head's candidates A/B against the
+    // SAME current config, so the REFERENCE leg is identical for all of them — measure it ONCE (first
+    // candidate) and reuse it for the rest via REUSE_REF/SHARED_REF_MED (the integrator then skips the
+    // reference server launch and only benches the candidate leg). CAND_TAG keeps each candidate's cand
+    // bench/overlay in its own dir so they don't clobber each other. Pick the candidate with the highest
+    // MEASURED e2e that clears the gate; only if NONE clears do we fall back to corrective/pending/reject on
+    // the top candidate. Inputs are built per-candidate so Fix C can re-issue the SAME A/B at Finalize.
+    const mkIntegrateInputs = (cand, ci, sharedRefMed) => ({
       EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
       KERNEL_RESULT: { short_name: h.short_name, task_dir: ext.task_dir, op_kind: ext.op_kind,
         winner_kind: cand.winner_kind, winner_backend: cand.source,
@@ -1393,39 +1959,104 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         parity_note: cand.parity_note || 'expected_close' },
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
-    };
-    const integ = await runIntegrateBothLegs(
-      'Apply the head-op winner; gate on e2e throughput.', headIntegrateInputs,
-      `integrate ${h.short_name}`, 'HeadKernel');
+      CAND_TAG: `c${ci}_${cand.source}`,
+      ...(sharedRefMed != null ? { REUSE_REF: true, SHARED_REF_MED: sharedRefMed } : {}),
+    });
 
-    // Three-state gate: an integrate that did NOT complete its A/B (null /
-    // gate:'incomplete' / ab_complete!==true) is NOT a rejection — keep it as a
-    // pending verified-isolated win so Finalize (Fix C) can finish/surface it.
-    // Backward-compatible: treat the return as a COMPLETED A/B unless it is null
-    // (timeout/hang/degrade — the actual incident cause) or EXPLICITLY flags
-    // itself incomplete (gate:'incomplete' or ab_complete===false). A legacy
-    // integrator that omits ab_complete still accepts/rejects exactly as before.
-    const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
-    if (abDone && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
-      // a head winner may be carried as overlay (authored/patch) AND/OR config (env/flag) — capture both.
+    let sharedRefMed = null;      // reference leg measured once per head, then reused by later candidates
+    let bestPick = null;          // { cand, integ } with the highest MEASURED e2e that cleared the gate
+    let top = null;               // top-iso candidate's {cand, inputs, integ, abc} — the corrective fallback target
+    for (let ci = 0; ci < headCands.length; ci++) {
+      const cand = headCands[ci];
+      const inputs = mkIntegrateInputs(cand, ci, sharedRefMed);
+      const integ = await runIntegrateBothLegs(
+        'Apply a head-op candidate; gate on e2e throughput (the reference config is shared across this head\'s candidates — reuse it when REUSE_REF/SHARED_REF_MED are set).',
+        inputs, `integrate ${h.short_name}:${cand.source}`, 'HeadKernel');
+      // A/B completion: gate:'incomplete' / ab_complete:false means a leg is still missing (NOT a rejection).
+      const abc = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
+      if (sharedRefMed == null && abc && integ.ref_med) sharedRefMed = integ.ref_med;   // lock the shared ref
+      if (ci === 0) top = { cand, inputs, integ, abc };
+      const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput;
+      // Persist EVERY candidate's MEASURED e2e (one ledger row per backend, keyed short_name:backend) so the
+      // report + experience library keep the full per-backend picture — not just the winning backend.
+      history.ledger.push({ direction: `${h.short_name}:${cand.source}`, isolated_speedup: cand.isolated || 0,
+        e2e_delta_pct: integ ? (integ.e2e_delta_pct || 0) : 0,
+        verdict: passed ? 'candidate_passed' : (abc ? 'candidate_rejected' : 'candidate_incomplete'),
+        lesson: `${cand.winner_kind} ${cand.source}: ${integ && integ.e2e_throughput_tok_s ? `${integ.e2e_throughput_tok_s.toFixed(0)} tok/s (${(integ.e2e_delta_pct || 0).toFixed(2)}%)` : (integ ? integ.reason || integ.gate : 'null/timeout')}` });
+      if (passed) {
+        if (!bestPick || integ.e2e_throughput_tok_s > bestPick.integ.e2e_throughput_tok_s) bestPick = { cand, integ };
+        log(`  ${h.short_name}: candidate ${cand.source} PASSED e2e gate (${integ.e2e_throughput_tok_s} tok/s, +${integ.e2e_delta_pct}%).`);
+      } else {
+        log(`  ${h.short_name}: candidate ${cand.source} ${abc ? `rejected (${gateRejectReason(integ, h.pct_gpu_time, cand.isolated)})` : `A/B incomplete (${integ ? integ.reason || integ.gate : 'null/timeout'})`}.`);
+      }
+    }
+
+    if (bestPick) {
+      // Best MEASURED e2e among all candidates that cleared the gate. A head winner may be carried as an
+      // overlay (authored/patch) AND/OR config (env/flag) — capture both.
+      const cand = bestPick.cand, integ = bestPick.integ;
       curOverlay = integ.accepted_overlay || curOverlay;
       if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
       if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
       curTput = integ.e2e_throughput_tok_s;
       acceptedHeads.push({ short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: cand.winner_kind, e2e_delta_pct: integ.e2e_delta_pct, isolated: cand.isolated });
-      log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
+      log(`  ${h.short_name}: ACCEPTED best candidate=${cand.source} (${(cand.isolated || 0).toFixed(2)}x iso). e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
       history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
-    } else if (!abDone) {
-      pendingIntegrations.push({ track: 'head', short_name: h.short_name, isolated: cand.isolated || 0,
-        pct_gpu_time: h.pct_gpu_time, inputs: headIntegrateInputs,
-        winner_kind: cand.winner_kind, apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
-        op_kind: ext.op_kind, backend: cand.source,
-        partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
-      log(`  ${h.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
-      history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
     } else {
-      log(`  ${h.short_name}: REJECTED at e2e gate (${integ.reason || integ.gate}).`);
-      history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: integ.reason || 'no e2e gain' });
+      // No candidate cleared the gate. Operate on the TOP (highest-weighted) candidate: corrective re-author
+      // for a fixable reject/crash, else keep an incomplete A/B as PENDING, else a plain reject. Same
+      // three-state handling as before, now applied to the best candidate after testing them all.
+      const cand = top.cand, integ = top.integ, headIntegrateInputs = top.inputs;
+      if (!top.abc) {
+        // A FIXABLE crash-during-warmup (cand server died -> ZERO A/B samples) is the most common corrective
+        // case (cuda_graph_capture_unsafe / host-sync / NO_BINARY_FOR_GPU). Try the corrective re-author
+        // first; only keep PENDING if it is not fixable (a real transient timeout/hang) or the fix didn't land.
+        const reason = integ ? (integ.reason || integ.gate || '') : '';
+        const corr = (cand.kind === 'authored' && FIXABLE_REJECT_RX.test(reason))
+          ? await tryCorrectiveReauthor({
+              short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
+              gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
+              isolated: cand.isolated, base_inputs: headIntegrateInputs, reason,
+              cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
+            })
+          : { banked: false };
+        if (corr.banked) {
+          curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
+          acceptedHeads.push({ short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: 'authored', e2e_delta_pct: corr.integ.e2e_delta_pct, isolated: corr.isolated, corrective: true });
+          log(`  ${h.short_name}: ACCEPTED after corrective re-author (was crash/incomplete: ${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
+          history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed crash: ${reason}` });
+        } else {
+          pendingIntegrations.push({ track: 'head', short_name: h.short_name, isolated: cand.isolated || 0,
+            pct_gpu_time: h.pct_gpu_time, inputs: headIntegrateInputs,
+            winner_kind: cand.winner_kind, apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
+            op_kind: ext.op_kind, backend: cand.source,
+            partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
+          log(`  ${h.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
+          history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
+        }
+      } else {
+        // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
+        // impossible (corruption); rejectClass then routes parity/accuracy/implausible rejects to the
+        // correctness corrective and JIT/capture/host-sync rejects to the integration corrective.
+        const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
+        const corr = (cand.kind === 'authored')
+          ? await tryCorrectiveReauthor({
+              short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
+              gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
+              isolated: cand.isolated, base_inputs: headIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time,
+              cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
+            })
+          : { banked: false };
+        if (corr.banked) {
+          curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
+          acceptedHeads.push({ short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: 'authored', e2e_delta_pct: corr.integ.e2e_delta_pct, isolated: corr.isolated, corrective: true });
+          log(`  ${h.short_name}: ACCEPTED after corrective re-author. e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
+          history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
+        } else {
+          log(`  ${h.short_name}: REJECTED at e2e gate (${reason}).`);
+          history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: reason || 'no e2e gain' });
+        }
+      }
     }
   }
   } // end serial head track (default path; runs for normal mode and fast-mode-single-GPU)
@@ -1435,6 +2066,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       roleAgent('profiler', 'reprofile', 'Re-profile after head-kernel wins.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'head',
         OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Profile', label: 'profiler:post-head', schema: PROFILE_SCHEMA });
   }
@@ -1451,7 +2083,10 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
 // ===========================================================================
 // Floor: keep dispatching until >= MIN_KERNEL_TASKS editable-kernel tasks have run, THEN allow the
 // noImprove early-stop. While below the floor the loop never stops on no-improve / empty plan.
-while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS || noImprove < 2)) {
+// Budget: when time_budget_s was passed, TIME_DEADLINE_HIT stops STARTING new milestones (even below the
+// floor) so the in-flight work + Finalize/Validate finish before the orchestrator's hard kill. The guard
+// is inert when time_budget_s is absent (TIME_DEADLINE_HIT never set) => byte-identical default behavior.
+while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS || noImprove < 2)) {
   milestone++;
   const remaining = BUDGET - dispatched;
   const belowFloor = dispatched < MIN_KERNEL_TASKS;
@@ -1468,6 +2103,7 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
         BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, MILESTONE_MIN_PCT,
         MIN_KERNEL_TASKS, DISPATCHED_SO_FAR: dispatched, BELOW_MIN_FLOOR: belowFloor,
         PROFILE_TOPN: profile ? profile.profile_topN_json : '', HISTORY: history, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Milestone', label: `architect:plan m${milestone}`, schema: PLAN_SCHEMA });
 
@@ -1496,11 +2132,12 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
   // stage MEASURES throughput and COMPOUNDS the overlay, so it must be serial: no two servers benched at
   // once (no timing conflict) and accepted overlays carry forward in order.
   const optimized = await parallel(cands.map((c) => async () => {
-    const ext = await safeAgent(
-      roleAgent('kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
+    const ext = await extractWithBaseline(
+      'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-      }),
+        ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+      },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
     if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
       return { c, skip: true, reason: `extraction failed/non-editable (${ext ? ext.notes || ext.unittest_smoke : 'none'})` };
@@ -1559,22 +2196,43 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
     // Backward-compatible: null (timeout/hang/degrade) or an explicit incomplete
     // flag => not done; a legacy return without ab_complete behaves as before.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
-    if (abDone && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.final_geomean) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       curTput = integ.e2e_throughput_tok_s;
       acceptedKernels.push({ short_name: c.short_name, backend: kl.note || '', e2e_delta_pct: integ.e2e_delta_pct, isolated: kl.final_geomean });
       milestoneImproved = true;
       log(`  ${c.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
       history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
-    } else if (!abDone) {
-      pendingIntegrations.push({ track: 'milestone', short_name: c.short_name, isolated: kl.final_geomean,
-        pct_gpu_time: c.pct_gpu_time, inputs: mileIntegrateInputs, backend: kl.note || '',
-        partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
-      log(`  ${c.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
-      history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
     } else {
-      log(`  ${c.short_name}: REJECTED at e2e gate (${integ.reason || integ.gate}).`);
-      history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: integ.reason || 'no e2e gain' });
+      // Unified reject/incomplete handling (same as the head track): a FIXABLE reject OR fixable
+      // crash-during-warmup (ab_complete=false) of an iso-verified editable kernel earns a corrective
+      // re-author (re-optimize the EXISTING kernel; NOT charged to HEAD_BUDGET); only keep PENDING if the
+      // A/B was merely incomplete for a NON-fixable reason (real transient timeout/hang). See tryCorrectiveReauthor.
+      const reason = gateRejectReason(integ, c.pct_gpu_time, kl.final_geomean);
+      const corr = (rejectClass(reason) !== '')
+        ? await tryCorrectiveReauthor({
+            short_name: c.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: c.regime,
+            gpu_id: c.gpu_id, kernel_eval_dir: kl.kernel_eval_dir, task_dir: ext.task_dir, language: kl.language || '',
+            isolated: kl.final_geomean, base_inputs: mileIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: c.pct_gpu_time, phase_name: 'Milestone',
+            cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
+          })
+        : { banked: false };
+      if (corr.banked) {
+        curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
+        acceptedKernels.push({ short_name: c.short_name, backend: kl.note || '', e2e_delta_pct: corr.integ.e2e_delta_pct, isolated: corr.isolated, corrective: true });
+        milestoneImproved = true;
+        log(`  ${c.short_name}: ACCEPTED after corrective re-author (${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
+        history.ledger.push({ direction: c.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
+      } else if (!abDone) {
+        pendingIntegrations.push({ track: 'milestone', short_name: c.short_name, isolated: kl.final_geomean,
+          pct_gpu_time: c.pct_gpu_time, inputs: mileIntegrateInputs, backend: kl.note || '',
+          partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
+        log(`  ${c.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
+        history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
+      } else {
+        log(`  ${c.short_name}: REJECTED at e2e gate (${reason}).`);
+        history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: reason || 'no e2e gain' });
+      }
     }
   }
 
@@ -1585,6 +2243,7 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
       roleAgent('profiler', 'reprofile', 'Re-profile the new best server.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: milestone,
         OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Profile', label: `profiler:reprofile m${milestone}`, schema: PROFILE_SCHEMA });
   } else {
@@ -1597,6 +2256,7 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
       ROUND: milestone, EVAL_DIR, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
       MILESTONE_RESULTS: history.ledger.slice(-cands.length),
       REPROFILE_SHIFT: profile ? profile.shift_note : '', PRIOR_HISTORY: history,
+      ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Milestone', label: `architect:experience m${milestone}`, schema: EXPERIENCE_SCHEMA });
   if (exp) {
@@ -1614,6 +2274,7 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
 let allAccepted = acceptedHeads.concat(acceptedKernels);
 let finalize = null, report = null, validation = null;
 let finalTput = curTput, finalSpeedup = BASELINE_TPUT ? curTput / BASELINE_TPUT : 1.0;
+let validatedOk = false;   // did the independent Validate produce a usable (positive) number?
 
 // --- Fix C: EVERY incomplete A/B must be finished (both legs) before final ----
 // Completeness guarantee (general, not per-kernel): an A/B that measured only the
@@ -1695,7 +2356,7 @@ if (want('final')) {
       // measured against the latest accepted baseline.
       { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
       `finish-integrate ${p.short_name}`, 'Finalize');
-    if (abDone(integ) && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       if (p.track === 'head') {
         if (p.winner_kind === 'env' && p.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + p.apply_env;
@@ -1738,21 +2399,70 @@ if (want('final')) {
       ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
+      ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Report', label: 'architect:report', schema: REPORT_SCHEMA });
 
   phase('Validate');
   validation = await safeAgent(
-    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate.', {
+    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
       FINAL_FLAGS: { flags: curFlags, env: curEnv },
       CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL, E2E_REPEATS, SKILL_DIR: WORKFLOW_DIR,
+      // The Report phase already wrote these files with the Finalize-bundle bench (the Director had not
+      // run yet). After validation the Director MUST review + rewrite their headline throughput / speedup
+      // / TTFT / TPOT (and status/parity) to its authoritative same-session numbers, so report-vs-director
+      // can never disagree. Paths default to the standard EVAL_DIR names if the report result is absent.
+      ARCHITECT_REPORT: (report && report.report_path) || `${EVAL_DIR}/architect_report.md`,
+      FINAL_REPORT: `${EVAL_DIR}/final_report.md`,
     }),
     { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
-  finalSpeedup = validation ? validation.throughput_speedup : (finalTput / BASELINE_TPUT);
-  log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validation ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
-    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
+  // A Validate that did NOT produce a usable number (e.g. its server crashed in
+  // engine-core init) must NEVER erase the accepted same-session A/B win we
+  // already carry in finalTput/curTput. Trust the Director's independent number
+  // ONLY when it is a real positive measurement; otherwise fall back to the
+  // carried best-accepted throughput so a real, parity-checked win is never
+  // reported as 0 / no_gain downstream.
+  validatedOk = !!(validation && validation.director_verified_throughput_tok_s > 0 && validation.throughput_speedup > 0);
+  finalSpeedup = validatedOk ? validation.throughput_speedup : (BASELINE_TPUT ? finalTput / BASELINE_TPUT : finalSpeedup);
+  log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validatedOk ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
+    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}` +
+    `${validation && !validatedOk ? '; Validate produced no number — using carried accepted A/B win' : ''}). Results in ${EVAL_DIR}`);
+
+  // --- FINAL experience reconciliation (post-gate) -----------------------
+  // The per-milestone update_experience (in the Milestone loop above) is the ONLY
+  // curate step, and it runs on that milestone's ledger. But a head/kernel whose
+  // e2e A/B was still INCOMPLETE at milestone time is recorded as "Integrator
+  // pending", and the Finalize-gate (Fix C) that actually CONFIRMS its e2e win runs
+  // AFTER the last milestone curate — as does the Director's Validate. Without a
+  // pass here, those cards stay frozen at "pending" and never receive the verified
+  // gated number (see the 20260812 Qwen3.5-27B run: the +16.1% head card was left
+  // at "e2e transfer NOT yet gated"). Re-curate ONCE now, with the authoritative
+  // post-Validate numbers, so finalize-gate confirmations are written back.
+  if (allAccepted.length) {
+    const verifiedTput = validatedOk ? validation.director_verified_throughput_tok_s : finalTput;
+    await safeAgent(
+      roleAgent('system_architect', 'update_experience',
+        'FINAL RECONCILIATION (post-gate): re-curate knowledge/learned/ per learned/README.md. For every ' +
+        'entry in ACCEPTED_HEADS / ACCEPTED_KERNELS whose card was written earlier THIS run but still reads ' +
+        '"Integrator pending" / "e2e gate pending" (or carries no e2e number), MERGE the VERIFIED gated ' +
+        'result into that card: set effect from the entry\'s e2e_delta_pct plus the run FINAL_THROUGHPUT / ' +
+        'FINAL_SPEEDUP / VALIDATION_STATUS / OUTPUT_PARITY, and raise confidence per learned/README.md now ' +
+        'that the e2e gate passed. Do NOT blind-append and do NOT touch rejected/dead-end cards.', {
+        ROUND: 'final', FINAL_GATE: true, EVAL_DIR, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
+        ACCEPTED_HEADS: acceptedHeads, ACCEPTED_KERNELS: acceptedKernels,
+        BASELINE_THROUGHPUT: BASELINE_TPUT, FINAL_THROUGHPUT: verifiedTput, FINAL_SPEEDUP: finalSpeedup,
+        VALIDATION_STATUS: validatedOk ? validation.validation_status
+          : (validation ? validation.validation_status || 'flagged' : 'unknown'),
+        OUTPUT_PARITY: validation ? validation.output_parity : 'unknown',
+        MILESTONE_RESULTS: history.ledger.filter((e) => e && e.lesson === 'finished at finalize-gate'),
+        PRIOR_HISTORY: history,
+        ...ANALYSIS_SKILL_INPUTS,
+      }),
+      { phase: 'Validate', label: 'architect:experience final', schema: EXPERIENCE_SCHEMA });
+    log('Finalize: re-curated knowledge/learned/ with verified post-gate numbers (pending -> verified).');
+  }
 } else {
   log(`Phase(s) [${PHASES.join(',')}] done. Carried throughput ${curTput} tok/s. Pass the returned 'state' to the next phase invocation.`);
 }
@@ -1784,9 +2494,15 @@ const wfReturn = {
   eval_dir: EVAL_DIR,
   model_name: MODEL_NAME,
   baseline_throughput_tok_s: BASELINE_TPUT,
-  final_throughput_tok_s: validation ? validation.director_verified_throughput_tok_s : finalTput,
+  // Trust the Director's independent number ONLY when it is a real positive
+  // measurement (validatedOk). A crashed/degenerate Validate falls back to the
+  // carried accepted same-session A/B win — never 0 — so a real, parity-checked
+  // gain is not silently demoted to no_gain by run_e2e.py.
+  final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : finalTput,
   throughput_speedup: finalSpeedup,
-  validation_status: validation ? validation.validation_status : (want('final') ? 'unknown' : 'phase_partial'),
+  validation_status: validatedOk ? validation.validation_status
+    : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
+       : (want('final') ? 'unknown' : 'phase_partial')),
   output_parity: validation ? validation.output_parity : 'unknown',
   accepted_config: { flags: curFlags, env: curEnv },
   accepted_kernels: acceptedKernels,

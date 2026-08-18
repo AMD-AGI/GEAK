@@ -53,8 +53,10 @@ def reindex():
             continue
         fm, _, _ = read_frontmatter(skill_md)
         op = (fm.get("match") or {}).get("operator")
-        if ops is not None and op not in ops:
-            print(f"  WARN: {sub}/skill.md: operator '{op}' not in capability_index.yaml", file=sys.stderr)
+        for one in ([op] if isinstance(op, str) else list(op or [])):
+            if ops is not None and one != "*" and one not in ops:
+                print(f"  WARN: {sub}/skill.md: operator '{one}' not in capability_index.yaml",
+                      file=sys.stderr)
         entries.append({
             "id": fm["id"],
             "file": f"skills/{sub}/skill.md",
