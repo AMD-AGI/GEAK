@@ -377,6 +377,30 @@ path and its constraints.
   is just non-actionable at that shape (the guard verdict handles it).
 - Only the genuine absence of any kernel that does this fusion's compute is
   现成算子=`no` → author-track (C).
+- **现成算子=`yes` is SOURCE-existence, not a guarantee of value.** Two things are
+  verified DOWNSTREAM, not here: (a) whether the kernel is actually **prebuilt** in the
+  image — a source-present-but-not-built variant (e.g. DSR1 MoE `preshuffle_off per_1x128`)
+  crashes at integration and must be routed around (Phase 3.1 `fusion_integrator`); and
+  (b) whether fusing is actually **faster** than the split path — a fused kernel can be
+  slower (e.g. a Triton act+quant losing to split CK/HIP), which the Phase 3.0 单侧 gate
+  rejects. "有现成算子 ≠ 融了就快 ≠ 这镜像能直接接"; do not over-promise on existence alone.
+
+**🔴 already_engaged — do NOT propose a fusion that is ALREADY the live default.** This is
+a candidate-generation rule (fixes a real false-positive). When you see two adjacent ops in
+the trace and find a fused/fast aiter kernel for them, you MUST check whether that kernel is
+**already the kernel producing the traced rows** — i.e. it is the model's live default, not
+an un-realized fusion. Classic case: `aiter biased_grouped_topk` IS the default MoE
+router-topk kernel under `SGLANG_USE_AITER=1`, so a "router+topk fusion" whose 现成算子 you
+matched to `biased_grouped_topk` has **~0 incremental gain — it is already running**. The
+subtle error to avoid: matching 现成算子=`yes` to a MEMBER op's already-live standalone
+kernel and mistaking it for a kernel that FUSES THE WHOLE CHAIN. `现成算子=有` must mean a
+kernel that fuses the proposed chain (removes the inter-member HBM round-trip), NOT "a kernel
+for some op in the chain exists (and is already the live default)". If the cited kernel is
+already the live default for its op, set `readiness` accordingly and mark the candidate
+`already_engaged: true` (put it in `notes` + exclude it from the actionable Top-K, it is a
+0-gain no-op), OR — if the genuine fusion (e.g. folding the router-GEMM epilogue into topk)
+has no existing fused kernel — classify it author-track (C), NOT a ready-B. Verify against
+the baseline trace + installed dispatch defaults, not the mere existence of a symbol.
 
 **Gate B — 现成算子=`no` (C) must be an evidenced search conclusion, not an
 opinion.** Before classifying a fusion as author-track you MUST run an exhaustive

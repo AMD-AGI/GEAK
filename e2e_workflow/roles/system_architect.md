@@ -77,6 +77,9 @@ OPTIONAL profile-analysis prior (empty string = not provided): `ANALYSIS_SKILL`,
 OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing as "not provided"):
 `TRACELENS_KERNEL_CANDIDATES_JSON`, `TRACELENS_REPORT_JSON`, `TRACELENS_ANALYSIS_MD`,
 `TRACELENS_TRACE_FILE`.
+OPTIONAL Phase 2 kernel-fusion prior (may be empty strings — treat empty/missing as "not provided"):
+`FUSION_TOPK_JSON`, `FUSION_CANDIDATES_JSON`, `FUSION_VALIDATION_JSON`,
+`FUSION_UNITSIDE_JSON` (the Phase 3.0 单侧 gate) — see step 1e.
 
 0. Read `EVAL_DIR/env_report.json`. Let `model_arch_class` set expectations (e.g. MoE → expect
    grouped/fused-MoE GEMM in the Top-N; hybrid-mamba → expect linear-attn Triton kernels; MLA → expect
@@ -188,6 +191,63 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    fixed**. The user-supplied workload — `isl`, `osl`, **`conc`/batch size — must NOT be changed**, and
    **speculative decoding (MTP or otherwise) must NOT be introduced** as an optimization. Raising
    throughput by changing what is being measured is out of scope for this workflow.
+
+1e. **Fusion prior (ADVISORY — only if `FUSION_TOPK_JSON` is a non-empty path that EXISTS; otherwise skip
+   this step entirely and route exactly as before).** This is the Phase 2 kernel-fusion menu (2.1/2.2):
+   auditable, per-model fusion opportunities the fusion analyst already validated, each with a difficulty
+   tier and everything needed to apply it. Read `fusion_topk.json` (`topk_actions[]` = actionable A/B rows;
+   `deferred_author[]` = C rows). For seam/API/flag evidence read the referenced `fusion_candidates.json`
+   (`live_call_seam`, `existing_apis[].name`, `flag_routed_signature`, `covers_ops`, `removable_row_ids`,
+   `absence_search`). Fold each row into the tracks you already emit — this ADDs candidates/priors, it
+   never prunes an Amdahl candidate and never overrides the measured `pct_gpu_time`.
+
+   **🎯 OBJECTIVE — maximize fusion width, degrade only on failure.** The goal is to fuse AS MANY
+   adjacent ops into one kernel as possible; a narrower fusion is a FALLBACK, not a target. At a position
+   where several fusions compete (a `✳` group — e.g. `AR+norm+quant` ⊃ `AR+norm` ⊃ `norm+quant`), the
+   PRIMARY nomination is the WIDEST one (most ops merged; break ties by `forward_pct`), regardless of its
+   tier — **a wider B (integrate a fused kernel, code) BEATS a narrower A (flag, zero-code).** Do NOT ship
+   the easy flag when a wider fused kernel exists for the same position. The A-class flag is the LAST rung
+   of the ladder. (This mirrors the author-track rule "prefer the maximal contiguous chain".):
+   Route each fusion by its lever (this is the Phase 3.1 dispatch):
+   - **tier `A` (flag/env, `现成算子=有`)** → add a `config_directions` entry: `axis` names the fusion
+     (e.g. `collective-fusion`), `swaps`=[the flag/env from the row's `handle`/`flag_routed_signature`],
+     `target_kernels`=the covered ops, `expected_pct_gpu`=the row's `forward_pct`, `rationale` cites the
+     fusion recipe + that the flag's routed signature actually fuses these ops. **ConfigSweep** applies +
+     e2e-gates it.
+   - **tier `B` (integrate an existing fused kernel, `现成算子=有`)** → do NOT put it in
+     `head_candidates`/`kernel_candidates` (those go through the extract→bake-off path, which is for
+     optimizing/authoring a kernel — wrong for a fusion). B fusions are handled by the dedicated **Fusion
+     apply-back phase**, which reads the authoritative `fusion_topk.json` + `FUSION_UNITSIDE_JSON` gate
+     directly and drives the **`fusion_integrator` role** (reversible lazy overlay + kernel-availability gate
+     + degrade ladder → HeadKernel `winner_kind=direct_light/code_patch`). Just LIST the B fusions in your
+     rationale/summary (family, seam, `forward_pct`) so the plan is auditable — you do not re-route them.
+     **Caveat:** `现成算子=有` = source-exists; the kernel may be **not prebuilt** in this image (e.g. DSR1
+     MoE `preshuffle_off per_1x128`) → the integrator routes to a prebuilt seam or degrades. Decode-path
+     fusions improve **TPOT/throughput, not TTFT** (prefill-dominated).
+   - **tier `C` (no existing kernel, `现成算子=无`)** → `drop_list` with `why` = "author-track deferred
+     (二期 / Phase 3.1 second wave); see absence_search" (do not nominate for this phase).
+   - **`already_engaged` filter (avoids the router false-positive).** Before nominating, check whether the
+     cited fused kernel is ALREADY the live default in the baseline trace (e.g. aiter `biased_grouped_topk`
+     is the default topk under `SGLANG_USE_AITER=1`). If the "fusion" is already what's running, it has ~0
+     incremental gain — mark it `already_engaged`, put it in `drop_list` (why="already the live default,
+     0 incremental"), and do NOT nominate it. `现成算子=有` on a member op's already-live kernel is NOT a
+     fusion opportunity.
+   - **Mutual exclusion (`✳`) = an ORDERED DEGRADE LADDER, widest→narrowest.** Within a group whose rows
+     share `removable_row_ids`, nominate the WIDEST fusion (most ops merged; `forward_pct` as tiebreak) as
+     the PRIMARY, and attach `fusion_degrade_ladder`: the remaining group members ordered widest→narrowest
+     (each with its `handle`/API/tier). The e2e_integrator MUST try the ladder top-down — integrate the
+     widest; if it fails to wire OR fails the e2e gate, DEGRADE to the next-narrower and retry — and KEEP
+     the widest that passes. Never emit two ACTIVE candidates that consume the same removable rows, and
+     never let the narrowest (e.g. the flag-only AR+norm) be the primary when a wider fused kernel
+     (AR+norm+quant) exists and passed 单侧.
+   - **单侧 gate (only if `FUSION_UNITSIDE_JSON` is a non-empty path that EXISTS).** Read it; it maps each
+     candidate to `unit_side_status ∈ {pass, fail, blocked}` (Phase 3.0 isolated correctness+speedup). Only
+     nominate fusions with `unit_side_status == "pass"`. List `fail`/`blocked` rows in `drop_list` with
+     `why` = "单侧 未过 (<status>): not applied back". This is the "先做单侧, 确认没问题, 再 apply back"
+     discipline — do not apply-back a fusion that has not passed its isolated gate. If `FUSION_UNITSIDE_JSON`
+     is absent, nominate on the Top-K alone (the live e2e A/B gate is then the first correctness check).
+   Cross-check against your measured Top-N: if a fusion targets ops that are not hot in this profile,
+   deprioritize it (annotate why) rather than forcing it. If the prior is absent, proceed exactly as before.
 
 2. Partition the Top-N into FOUR routes (by what optimization the op admits, NOT by edit flag):
    - **config fast path** — service-level env/flag with no op isolation: `--attention-backend` swap,
