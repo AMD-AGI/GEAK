@@ -1349,7 +1349,7 @@ if (want('head') && FUSION_INPUTS.FUSION_TOPK_JSON) {
         FUSION_UNITSIDE_JSON: FUSION_INPUTS.FUSION_UNITSIDE_JSON,
         CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput,
         BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
-        FUSION_BUDGET, FUSION_OVERLAYS_DIR: `${WORKFLOW_DIR}/fusion_overlays`,
+        FUSION_BUDGET, FUSION_OVERLAYS_DIR: `${EVAL_DIR}/fusion/fusion_overlays`,
         ...ACCURACY_INPUTS, SKILL_DIR: WORKFLOW_DIR,
       }),
     { phase: 'FusionApplyBack', label: 'fusion_integrator:apply_back', schema: FUSION_APPLY_SCHEMA });

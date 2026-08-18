@@ -86,8 +86,10 @@ accepted and why the wider ones were rejected (missing-kernel vs gate-fail).
 
 ## Persist + return
 On accept, persist the overlay + a README (seam, engagement proof, TTFT/TPOT/throughput
-deltas, gsm8k base-vs-cand, which branches wired / skipped) to
-`fusion_overlays/<model>/<fusion>/`. Return StructuredOutput: `{fusion, accepted_rung,
+deltas, gsm8k base-vs-cand, which branches wired / skipped) under the **output eval dir**
+(`FUSION_OVERLAYS_DIR`, i.e. `$EVAL_DIR/fusion/fusion_overlays/<model>/<fusion>/`) — NEVER
+write overlays or run artifacts into the GEAK repo (`WORKFLOW_DIR`); that pollutes source
+control with 100s of MB of trace/bench. Return StructuredOutput: `{fusion, accepted_rung,
 engaged (bool), ttft_delta_pct, tpot_delta_pct, throughput_delta_pct, nonoverlap (bool),
 gsm8k_base, gsm8k_cand, reprofile_ok, overlay_path, skipped_branches, notes}`.
 
