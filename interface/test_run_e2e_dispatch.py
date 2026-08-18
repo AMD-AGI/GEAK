@@ -293,6 +293,13 @@ class TestMapArgs(_RunE2ECase):
         self.assertTrue(minted.name.startswith("e2e_fake-8b_"))
         self.assertTrue(minted.name.endswith("Z"))
 
+    def test_two_unpinned_runs_get_distinct_eval_dirs(self):
+        """Concurrent/same-second runs must not share replay/artifact paths."""
+        os.environ.pop("GEAK_EVAL_DIR", None)
+        first = rx.map_args(self._handoff())["eval_dir"]
+        second = rx.map_args(self._handoff())["eval_dir"]
+        self.assertNotEqual(first, second)
+
     def test_env_pinned_eval_dir_wins_over_minting(self):
         os.environ["GEAK_EVAL_DIR"] = str(self.tmp / "e2e_from_env")
         ps = rx.map_args(self._handoff())
@@ -799,6 +806,32 @@ class TestBenchLauncher(_RunE2ECase):
         self.assertEqual(os.environ["RECIPE_ENV_GEAK_OWNED"].split(), ["MODEL", "TP"])
         self.assertNotIn(b"TP=8", Path(os.environ["RECIPE_ENV_FILE"]).read_bytes())
 
+    def test_strict_mode_accepts_an_env_block_containing_only_owned_names(self):
+        """A complete, known override set needs no replay file and is not absent."""
+        recipe = self._recipe_with_envs(
+            "  envs:\n"
+            "    MODEL: /models/reference\n"
+            "    TP: 8\n"
+            "    PORT: 9000\n"
+            "    ROCR_VISIBLE_DEVICES: 7\n"
+        )
+        os.environ["GEAK_STRICT_RECIPE_ENV"] = "1"
+
+        self.assertEqual(
+            rx.apply_bench_launcher(
+                {"launch_recipe": recipe, "framework": "vllm",
+                 "eval_dir": str(self.tmp / "eval")}
+            ),
+            "magpie",
+        )
+        self.assertNotIn("RECIPE_ENV_FILE", os.environ)
+        self.assertEqual(os.environ["RECIPE_ENV_SOURCE"], recipe)
+        self.assertEqual(os.environ["RECIPE_ENV_REPLAYED"], "")
+        self.assertEqual(
+            os.environ["RECIPE_ENV_GEAK_OWNED"].split(),
+            ["MODEL", "PORT", "ROCR_VISIBLE_DEVICES", "TP"],
+        )
+
     def test_a_nested_map_under_envs_contributes_no_variables(self):
         """Its children are keys of a structure, not names any shell exports;
         flattening them would invent variables the orchestrator never set."""
@@ -845,6 +878,19 @@ class TestBenchLauncher(_RunE2ECase):
             )
         self.assertIn("records no envs", str(caught.exception))
 
+    def test_strict_mode_also_applies_when_script_source_is_handoff(self):
+        """An explicit script must not bypass strictness for its launch recipe."""
+        recipe = self._recipe_with_envs("")
+        os.environ["GEAK_STRICT_RECIPE_ENV"] = "1"
+        with self.assertRaises(SystemExit) as caught:
+            rx.apply_bench_launcher({
+                "launch_recipe": recipe,
+                "launch_server_script": "/magpie/explicit.sh",
+                "framework": "vllm",
+                "eval_dir": str(self.tmp / "eval"),
+            })
+        self.assertIn("records no envs", str(caught.exception))
+
     def test_a_script_named_by_the_handoff_is_not_held_to_the_recipe(self):
         # Nothing was derived from a recipe, so there is no recorded env to be
         # missing and fail-closed must not fire.
@@ -868,6 +914,22 @@ class TestBenchLauncher(_RunE2ECase):
         self.assertNotIn("MAX_MODEL_LEN", os.environ)
         self.assertIn(b"MAX_MODEL_LEN=6144",
                       Path(os.environ["RECIPE_ENV_FILE"]).read_bytes())
+
+    def test_replay_file_is_atomically_replaced_without_temp_residue(self):
+        recipe = self._recipe_with_envs("  envs:\n    FOO: new value\n")
+        eval_dir = self.tmp / "eval"
+        eval_dir.mkdir()
+        replay = eval_dir / "recipe_env.nul"
+        replay.write_bytes(b"FOO=old\0")
+
+        rx.apply_bench_launcher({
+            "launch_recipe": recipe,
+            "framework": "vllm",
+            "eval_dir": str(eval_dir),
+        })
+
+        self.assertEqual(replay.read_bytes(), b"FOO=new value\0")
+        self.assertEqual(list(eval_dir.glob(".recipe_env.*.tmp")), [])
 
     def test_a_missing_recipe_file_is_not_an_error(self):
         self.assertEqual(rx._recipe_fields("/nonexistent/recipe.yaml"), {})
@@ -1962,6 +2024,9 @@ class TestMain(_RunE2ECase):
         self.assertEqual(plan["bench_protocol"],
                          {"NUM_PROMPTS": "512", "SEED": "7"})
         self.assertEqual(plan["alignment_flags"], {"BENCH_COLD_FINAL": "0"})
+        self.assertIn("recipe_env_file", plan)
+        self.assertIn("recipe_env_replayed", plan)
+        self.assertIn("recipe_env_geak_owned", plan)
         self.assertEqual(plan["e2e_script"], str(rx.E2E_SCRIPT))
         self.assertIn("Invoke the Workflow tool exactly once", plan["prompt"])
         self.assertFalse(self.result_path.exists())

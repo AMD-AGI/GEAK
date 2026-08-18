@@ -376,37 +376,55 @@ def test_fold_helper_dedup_and_forms() -> None:
     assert out2 == "--context-length 4096 --mem-fraction-static 0.9"
 
 
-def test_cold_speedup_equals_hyperloom_provisional_ratio() -> None:
-    """cold_speedup (what Hyperloom promotes as provisional) == final / orch cold.
+def test_promoted_final_is_hot_and_cold_stays_a_diagnostic(tmp_path: Path) -> None:
+    """The promoted headline is ALWAYS the HOT median; cold is diagnostic only.
 
-    Ground-truth cross-check against the real session artifact: the provisional
-    gain Hyperloom records must be exactly current_best.tput / baseline_tput,
-    i.e. GEAK cold final over the orchestrator COLD baseline — never the hot
-    final over the cold baseline (which would overstate the win).
+    The headline contract is fixed: ``final_throughput_basis == "hot"`` and the
+    promoted final is the hot median (run_e2e.py sets ``final_basis = "hot"``
+    unconditionally; BENCH_COLD_FINAL only adds a diagnostic cold round in
+    alignment_metrics and never switches the headline).
+
+    ``cold_speedup`` remains a SELF-CONSISTENT diagnostic — GEAK's cold final over
+    the orchestrator's COLD baseline (never the hot final over the cold baseline,
+    which would overstate the win) — even though it no longer drives the headline.
+
+    This used to cross-check a real session artifact and was hidden behind a skip
+    when that artifact was absent, so the cold-diagnostic ratio was never
+    continuously exercised. It now builds the cold round synthetically (same shape
+    as TestColdFinalBasis in test_run_e2e_dispatch.py) so it always runs.
     """
-    fixture = Path(
-        "test_results/gemma-4-26B_session/gemma-4-26B-A4B-it"
-        "/result.json"
+    # hot base/final drive the headline; cold rounds are strictly slower (a cold
+    # round pays a cache-fill / JIT cost the hot median never does).
+    eval_dir = tmp_path / "e2e_cold_diag"
+    (eval_dir / "baseline").mkdir(parents=True)
+    (eval_dir / "validation" / "final").mkdir(parents=True)
+    (eval_dir / "baseline" / "bench_summary.json").write_text(
+        json.dumps({"output_throughput_tok_s_median": 450.0,
+                    "cold_output_throughput_tok_s": 460.0}),
+        encoding="utf-8",
     )
-    if not fixture.exists():
-        pytest.skip("session fixture not present")
-    r = json.loads(fixture.read_text(encoding="utf-8"))
+    (eval_dir / "validation" / "final" / "bench_summary.json").write_text(
+        json.dumps({"output_throughput_tok_s_median": 500.0,
+                    "cold_output_throughput_tok_s": 480.0}),
+        encoding="utf-8",
+    )
+    # raw_baseline_tput is the orchestrator's COLD leaderboard anchor.
+    h = {"workload": {"isl": 1024, "osl": 1024, "conc": 64},
+         "raw_baseline_tput": 440.0}
+    r = rx.normalize_result(h, _wf(eval_dir, base=450.0, final=500.0, speedup=1.1111))
     am = r["alignment_metrics"]
 
+    # Headline: hot basis, hot median promoted.
+    assert r["final_throughput_basis"] == "hot"
+    assert r["final_throughput_tok_s"] == 500.0
+    assert r["final_throughput_tok_s"] == pytest.approx(am["geak_hot_final_tok_s"])
+
+    # Cold diagnostic stays internally consistent: cold final over orch cold base,
+    # and strictly below the inflated hot-final-over-cold-baseline ratio.
     geak_cold_final = am["geak_cold_final_tok_s"]
     orch_cold = am["orchestrator_cold_baseline_tok_s"]
-    promoted_final = r["final_throughput_tok_s"]
-
-    # The promoted final IS the cold final (final_throughput_basis == "cold").
-    assert r["final_throughput_basis"] == "cold"
-    assert promoted_final == pytest.approx(geak_cold_final)
-
-    # Hyperloom's provisional gain == cold_speedup == promoted_final / orch_cold.
-    expected_provisional_pct = (promoted_final / orch_cold - 1.0) * 100.0
-    cold_speedup_pct = (am["cold_speedup"] - 1.0) * 100.0
-    assert cold_speedup_pct == pytest.approx(expected_provisional_pct, abs=0.05)
-
-    # And it is STRICTLY below the discarded hot-final-over-cold-baseline ratio
-    # (the inflated number the provisional must NOT use).
-    hot_over_cold_pct = (am["geak_hot_final_tok_s"] / orch_cold - 1.0) * 100.0
-    assert cold_speedup_pct < hot_over_cold_pct
+    assert geak_cold_final == 480.0 and orch_cold == 440.0
+    # cold_speedup is reported rounded (_safe_ratio -> 4 dp), so allow that.
+    assert am["cold_speedup"] == pytest.approx(geak_cold_final / orch_cold, abs=1e-4)
+    hot_over_cold = am["geak_hot_final_tok_s"] / orch_cold
+    assert am["cold_speedup"] < hot_over_cold

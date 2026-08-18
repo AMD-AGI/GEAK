@@ -177,6 +177,34 @@ def test_a_recovered_intermediate_win_is_never_re_based(tmp_path: Path) -> None:
     assert out["baseline_basis"]["baseline_basis_source"] == "recovered_intermediate_ab"
 
 
+def test_a_disk_director_fallback_baseline_is_labelled_not_as_setup(
+    tmp_path: Path,
+) -> None:
+    """A result rebuilt from a disk Director artifact (``recovered_from_disk``)
+    with no more direct same-session source used to fall through to the
+    ``setup_baseline`` label, hiding that the denominator was reconstructed off a
+    crashed session rather than measured at Setup. It must carry its own
+    provenance, mirroring ``result_source == "disk_director_validation"``.
+
+    This is NOT an intermediate win or a no-gain synthesis, so the re-base guard
+    still runs; with no base leg and no drift correction on disk it falls through
+    to the recovered-from-disk arm rather than to Setup."""
+    eval_dir = _eval_dir(tmp_path, setup_base=1000.0)
+    out = rx.normalize_result({}, _wf(
+        eval_dir, base=1000.0, final=1100.0, speedup=1.1,
+        recovered_from_disk=True,
+    ))
+
+    assert out["baseline_throughput_tok_s"] == 1000.0
+    assert (
+        out["baseline_basis"]["baseline_basis_source"]
+        == "disk_director_validation_baseline"
+    )
+    # The Setup number is still kept for audit; it is simply not the label.
+    assert out["baseline_basis"]["setup_baseline_tok_s"] == 1000.0
+    _assert_self_consistent(out)
+
+
 # --------------------------------------------------------------------------- #
 # the published pair has the last word on the published speedup
 # --------------------------------------------------------------------------- #

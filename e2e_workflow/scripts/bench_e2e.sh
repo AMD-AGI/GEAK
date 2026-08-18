@@ -248,15 +248,70 @@ SEED=${SEED:-0}                       # fixed seed for reproducibility / parity
 # ---- client trust-remote-code (general, model-agnostic) ----
 # The benchmark CLIENT loads the model's tokenizer; for custom-tokenizer models
 # transformers raises ValueError unless trust_remote_code is allowed. Mirror the
-# SERVER's trust setting: if the server is launched with --trust-remote-code
-# (via EXTRA_SERVER_ARGS), the client measuring it must trust the same remote
-# code. Stays OFF (no implicit remote-code execution) for models that don't need
-# it, so standalone behaviour is unchanged. An explicit caller value always wins.
+# SERVER's effective trust setting across recipe args and EXTRA_SERVER_ARGS,
+# including a later --no-trust-remote-code override. The client measuring it
+# must use the same state. Stays OFF (no implicit remote-code execution) for
+# models that don't need it. An explicit caller value always wins.
+_args_trust_state() {
+  # Print the effective state contributed by this argument string: "1" for
+  # enable, "0" for disable, or nothing when it carries no trust option. vLLM
+  # exposes argparse.BooleanOptionalAction spellings --trust-remote-code and
+  # --no-trust-remote-code; it rejects `--trust-remote-code=true/false`, so those
+  # lookalikes must not influence the benchmark client. SGLang/Magpie recipes
+  # also use the underscore spelling, whose matching --no_ form is accepted here.
+  #
+  # Keep scanning after a match: argparse applies repeated store-style boolean
+  # options in argv order, so the LAST enable/disable token is authoritative.
+  # `read -ra` splits without pathname expansion.
+  local _args=${1//$'\n'/ } _tok _state=""
+  local -a _toks=()
+  read -ra _toks <<< "$_args"
+  for _tok in "${_toks[@]}"; do
+    case "$_tok" in
+      --trust-remote-code|--trust_remote_code)
+        _state=1 ;;
+      --no-trust-remote-code|--no_trust_remote_code)
+        _state=0 ;;
+    esac
+  done
+  printf '%s' "$_state"
+}
 if [ -z "${BENCH_TRUST_REMOTE_CODE:-}" ]; then
-  case "$EXTRA_SERVER_ARGS" in
-    *trust-remote-code*|*trust_remote_code*) BENCH_TRUST_REMOTE_CODE=1 ;;
-    *) BENCH_TRUST_REMOTE_CODE=0 ;;
-  esac
+  BENCH_TRUST_REMOTE_CODE=0
+  # The server may inherit --trust-remote-code from the REPLAYED recipe env
+  # (EXTRA_<BE>_ARGS recorded by the orchestrator) rather than from
+  # EXTRA_SERVER_ARGS. The client that measures such a server has to trust the
+  # same remote code, so also honor a trust setting recorded in the recipe env
+  # file (NUL-delimited). Parse it BY KEY: a value-blind substring match fails
+  # OPEN -- e.g. `DO_NOT_TRUST_REMOTE_CODE=1` or a disabling `HF_HUB_TRUST_REMOTE_CODE=0`
+  # would both flip trust ON. Enable only when a KNOWN trust control is set to a
+  # truthy value, or when the CURRENT backend's recorded EXTRA_<BE>_ARGS value
+  # carries an actual enable/disable token. Apply layers in the same order as
+  # the launcher: recipe controls -> recipe args -> GEAK EXTRA_SERVER_ARGS.
+  _recipe_trust_control=0
+  _recipe_trust_state=""
+  _trust_extra_name="EXTRA_${BACKEND^^}_ARGS"
+  if [ -n "${RECIPE_ENV_FILE:-}" ] && [ -f "${RECIPE_ENV_FILE}" ]; then
+    while IFS= read -r -d '' _trust_kv; do
+      _trust_name=${_trust_kv%%=*}
+      _trust_val=${_trust_kv#*=}
+      case "$_trust_name" in
+        BENCH_TRUST_REMOTE_CODE|HF_HUB_TRUST_REMOTE_CODE|MAGPIE_TRUST_REMOTE_CODE|TRANSFORMERS_TRUST_REMOTE_CODE)
+          case "${_trust_val,,}" in
+            1|true|yes|on) _recipe_trust_control=1 ;;
+          esac ;;
+        "$_trust_extra_name")
+          _state=$(_args_trust_state "$_trust_val")
+          [ -n "$_state" ] && _recipe_trust_state="$_state" ;;
+      esac
+    done < "$RECIPE_ENV_FILE"
+  fi
+  [ "$_recipe_trust_control" = "1" ] && BENCH_TRUST_REMOTE_CODE=1
+  [ -n "$_recipe_trust_state" ] && BENCH_TRUST_REMOTE_CODE="$_recipe_trust_state"
+  _geak_trust_state=$(_args_trust_state "${EXTRA_SERVER_ARGS:-}")
+  [ -n "$_geak_trust_state" ] && BENCH_TRUST_REMOTE_CODE="$_geak_trust_state"
+  unset _trust_kv _trust_name _trust_val _trust_extra_name _state
+  unset _recipe_trust_control _recipe_trust_state _geak_trust_state
 fi
 # transformers / HF hub honor HF_HUB_TRUST_REMOTE_CODE for tokenizer auto-load.
 [ "$BENCH_TRUST_REMOTE_CODE" = "1" ] && HF_HUB_TRUST_REMOTE_CODE=${HF_HUB_TRUST_REMOTE_CODE:-1}

@@ -14,9 +14,4 @@ last_seen: 2026-06-09
   (extend/prefill_attention.py) — a source-editable surface the kernel track can then optimize.
 - verify: greedy temp=0 parity holds (benign bf16 tie-break only). Confirm total GPU time stays flat
   (it's a scheduling win, not a GPU-time redistribution) so the order-of-bets is unchanged.
-- caution (DECODE-bound runs / gfx950 + aiter paged decode): this is a **prefill/full-attention**
-  lever. Also verify the DECODE leg before spending an e2e slot — on gfx950 sglang+aiter (Qwen3-14B-FP8,
-  page_size=1, GQA 40/8) the Triton `decode_attention_fwd` is 1.27x (M=1) / 1.70x (M=64) SLOWER than the
-  aiter paged kernel at op level, so the flag regresses a decode-dominated workload
-  (see paged-attn-decode-aiter-gfx950-sglang.md).
 - source: exp/e2e_*Qwen3.5-27B*/ 2026-06-05 & 06-09

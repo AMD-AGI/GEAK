@@ -83,6 +83,75 @@ adapter_launch() {
     echo ">>> magpie launcher: replaying ${#_recipe_env[@]} recorded env var(s) from the recipe."
   fi
 
+  # The recipe may record EXTRA_<BACKEND>_ARGS -- the flags that decide kernel
+  # dispatch (--kv-cache-dtype / --moe-runner-backend / --attention-backend /
+  # --quantization / --dtype / --block-size ...). It is the BASE layer, but the
+  # launch line below also passes GEAK's own ${_args_var}=... LATER on the same
+  # `env`, and `env NAME=VALUE` is LAST-WINS, so the recipe copy would be silently
+  # dropped even though RECIPE_ENV_REPLAYED still advertises it. Pull the recipe's
+  # value out here and REMOVE it from _recipe_env (otherwise the var is set twice
+  # on one env line), then merge it UNDER GEAK's accepted flags at _extra_args
+  # init below (recipe first, GEAK covers conflicts by ordering).
+  #
+  # The recipe env array becomes POSITIONAL operands to the same `env` below, so
+  # it carries the identical option/command/mask-injection hazards as EXTRA_ENV
+  # (a recipe-recorded `-SCUDA_VISIBLE_DEVICES=7` or a bare word would be an env
+  # option/command; an ROCR/HIP/CUDA assignment would steal a card). run_e2e.py
+  # already validates the recorded names, but this launcher is also driven
+  # directly by tests and could be reused, so filter here too -- keep ONLY strict
+  # IDENTIFIER=VALUE tokens and drop GPU masks. The `--` on the env line below is
+  # the final backstop.
+  local _recipe_extra=""
+  if ((${#_recipe_env[@]})); then
+    local -a _kept=(); local _kv
+    for _kv in "${_recipe_env[@]}"; do
+      case "$_kv" in
+        "${_args_var}="*) _recipe_extra="${_kv#*=}" ;;
+        ROCR_VISIBLE_DEVICES=*|HIP_VISIBLE_DEVICES=*|CUDA_VISIBLE_DEVICES=*)
+          echo ">>> magpie launcher: dropping GPU-mask override from recipe env:" \
+               "$_kv (GPU pinning is run-scoped)." >&2 ;;
+        *)
+          if [[ "$_kv" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+            _kept+=("$_kv")
+          else
+            echo ">>> magpie launcher: dropping non-assignment recipe env token" \
+                 "(not IDENTIFIER=VALUE; would be an env option/command): $_kv" >&2
+          fi ;;
+      esac
+    done
+    if ((${#_kept[@]})); then _recipe_env=("${_kept[@]}"); else _recipe_env=(); fi
+  fi
+
+  # EXTRA_ENV carries GEAK's accepted env under test. Split every input line with
+  # `read -ra`, which performs shell word splitting but NOT pathname expansion:
+  # an accepted value such as `FOO=*` must reach the child literally even when
+  # matching files exist in the launcher's cwd. Reading line-by-line is required
+  # because a single `read` stops at the first newline. Keep only strict
+  # IDENTIFIER=VALUE assignments; GPU masks are run-scoped and are re-asserted
+  # separately below.
+  local -a _extra_env=() _extra_env_tokens=() _extra_env_line_tokens=()
+  local _tok _extra_env_line
+  if [ -n "${EXTRA_ENV:-}" ]; then
+    while IFS= read -r _extra_env_line; do
+      read -ra _extra_env_line_tokens <<< "$_extra_env_line"
+      _extra_env_tokens+=("${_extra_env_line_tokens[@]}")
+    done <<< "$EXTRA_ENV"
+  fi
+  for _tok in "${_extra_env_tokens[@]}"; do
+    case "$_tok" in
+      ROCR_VISIBLE_DEVICES=*|HIP_VISIBLE_DEVICES=*|CUDA_VISIBLE_DEVICES=*)
+        echo ">>> magpie launcher: dropping GPU-mask override from EXTRA_ENV:" \
+             "$_tok (GPU pinning is run-scoped)." >&2 ;;
+      *)
+        if [[ "$_tok" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+          _extra_env+=("$_tok")
+        else
+          echo ">>> magpie launcher: dropping non-assignment EXTRA_ENV token" \
+               "(not IDENTIFIER=VALUE; would be an env option/command): $_tok" >&2
+        fi ;;
+    esac
+  done
+
   # Magpie's vllm script builds its own --profiler-config.* block but sets no step
   # bound, so the host-side event buffer grows for as long as the load runs --
   # the unbounded growth #398 fixed on the native path by passing max_iterations
@@ -93,12 +162,26 @@ adapter_launch() {
   # reaches vllm without editing the recipe's script. ProfilerConfig is strict
   # (extra=forbid) and an unknown key aborts the server, so emit only what this
   # build declares -- the same probe the native adapter runs. It runs under the
-  # replayed recipe env because that PATH may select a different venv: the
-  # interpreter that answers has to be the one that will serve.
+  # same recipe + accepted env + overlay PYTHONPATH as the final server: the
+  # interpreter/module that answers has to be the exact one that will serve.
+  # recipe extras UNDERNEATH GEAK's accepted flags: recipe first so GEAK's
+  # EXTRA_SERVER_ARGS overrides any conflicting flag by coming later on the CLI
+  # (framework argparse is last-wins); the profiler bound is appended LAST below
+  # so it wins over both. This restores the "recipe = BASE layer" contract that
+  # last-wins was silently violating (see the extraction above). The separator is
+  # inserted only when BOTH layers are non-empty, so neither an empty recipe nor
+  # empty GEAK flags leaves a stray leading/trailing space.
   local _extra_args="${EXTRA_SERVER_ARGS:-}" _bound=""
+  if [ -n "$_recipe_extra" ]; then
+    _extra_args="${_recipe_extra}${_extra_args:+ }${_extra_args}"
+  fi
   if [ "${PROFILE:-0}" = "1" ] && [ "$backend_uc" = "VLLM" ]; then
     local _prof_fields
-    _prof_fields="$(env ${_recipe_env[@]+"${_recipe_env[@]}"} python3 - <<'PY' 2>/dev/null
+    _prof_fields="$(env -- \
+      ${_recipe_env[@]+"${_recipe_env[@]}"} \
+      ${_extra_env[@]+"${_extra_env[@]}"} \
+      PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
+      python3 - <<'PY' 2>/dev/null
 names = set()
 try:
     import dataclasses
@@ -172,11 +255,14 @@ PY
     _env_unset=(-u HIP_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES)
     _gpu_env=(ROCR_VISIBLE_DEVICES="$GPU")
   fi
-  # shellcheck disable=SC2086
-  # ${EXTRA_ENV:-}: callers under `set -u` (bench/CI drive scripts) may leave
-  # EXTRA_ENV unset; empty expansion is fine and keeps word-split of KEY=VAL pairs.
-  env "${_env_unset[@]}" \
-    ${_recipe_env[@]+"${_recipe_env[@]}"} ${EXTRA_ENV:-} \
+  # ${_recipe_env[@]+...}: callers under `set -u` (bench/CI drive scripts) may
+  # leave these arrays empty; the `+` guard keeps empty expansion safe.
+  # `--` terminates env's OWN option parsing: every following token is forced to
+  # be an assignment-or-command operand, so no recipe/EXTRA_ENV value beginning
+  # with `-` can be reparsed as an env option (belt-and-braces with the
+  # allowlists above). `-u` unsets must precede `--`, hence the split.
+  env "${_env_unset[@]}" -- \
+    ${_recipe_env[@]+"${_recipe_env[@]}"} ${_extra_env[@]+"${_extra_env[@]}"} \
     "${_gpu_env[@]}" \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     MAGPIE_RUN_PHASE=server \

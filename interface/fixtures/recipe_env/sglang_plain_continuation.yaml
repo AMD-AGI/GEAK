@@ -1,0 +1,6 @@
+benchmark:
+  framework: sglang
+  envs:
+    EXTRA_SGLANG_ARGS: --context-length 6144 --watchdog-timeout 1800 --page-size 64
+      --kv-cache-dtype fp8_e4m3 --num-continuous-decode-steps 2 --quantization fp8
+    MAGPIE_TRUST_REMOTE_CODE: "1"

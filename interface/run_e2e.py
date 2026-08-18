@@ -29,6 +29,7 @@ import glob
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -36,6 +37,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,9 +53,23 @@ SPEEDUP_SELF_CONSISTENCY_TOL = 1e-3
 # Headroom over an op's theoretical Amdahl ceiling before a measured e2e delta
 # is treated as corruption rather than a win. Mirrors
 # IMPLAUSIBLE_SPEEDUP_MARGIN in e2e_workflow.js (1.0 => must exceed 2x the
-# ceiling); both sides must agree or the recovery path banks what the live path
-# refuses.
-IMPLAUSIBLE_SPEEDUP_MARGIN = 1.0
+# ceiling); both sides MUST agree or the recovery path banks what the live path
+# refuses, so this is the SINGLE source of truth: map_args() forwards it to the
+# JS workflow (A.implausible_speedup_margin) and the recovery path reads the same
+# constant. Overridable via env for tuning; validated finite/non-negative (an
+# accepted nan/inf/negative would silently disable the guard) exactly like
+# SAME_CONFIG_DIVERGENCE_WARN_PCT below.
+try:
+    IMPLAUSIBLE_SPEEDUP_MARGIN = float(
+        os.environ.get("GEAK_IMPLAUSIBLE_SPEEDUP_MARGIN", "1.0")
+    )
+    if (
+        not math.isfinite(IMPLAUSIBLE_SPEEDUP_MARGIN)
+        or IMPLAUSIBLE_SPEEDUP_MARGIN < 0.0
+    ):
+        raise ValueError("implausible-speedup margin must be finite and non-negative")
+except (TypeError, ValueError):
+    IMPLAUSIBLE_SPEEDUP_MARGIN = 1.0
 
 try:
     SAME_CONFIG_DIVERGENCE_WARN_PCT = float(
@@ -308,9 +324,19 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     eval_dir = str(h.get("eval_dir") or os.environ.get("GEAK_EVAL_DIR", "")).strip()
     if not eval_dir:
         model_name = Path(h["model_path"]).name
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        eval_dir = str(Path(h["exp_root"]) / f"e2e_{model_name}_{ts}")
+        # Second-resolution names collide when two dry-runs/jobs start together,
+        # causing their recipe_env.nul files and artifacts to overwrite each
+        # other. Keep the readable UTC stamp but add microseconds + random run id.
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+        run_id = uuid.uuid4().hex[:8]
+        eval_dir = str(Path(h["exp_root"]) / f"e2e_{model_name}_{ts}_{run_id}Z")
     ps_args["eval_dir"] = eval_dir
+    # Keep the JS live-path implausible-speedup guard and THIS runner's recovery
+    # path on ONE margin: forward the (validated) Python value so the workflow's
+    # A.implausible_speedup_margin can never silently drift from the constant the
+    # recovery path applies. See IMPLAUSIBLE_SPEEDUP_MARGIN above. Forwarded
+    # unconditionally (not gated on a handoff key) so both sides always agree.
+    ps_args["implausible_speedup_margin"] = IMPLAUSIBLE_SPEEDUP_MARGIN
     # Bridge the upstream TraceLens / kernel-agent artifacts INTO the workflow args
     # (not just the driver prompt) so the JS Profile/Strategize/Extract phases can
     # use them as a prior. Only non-null paths are forwarded; when nothing is found
@@ -475,10 +501,10 @@ def apply_bench_client(h: dict) -> str:
 # all). Extend this set as Magpie adds backends — never add per-backend code.
 _MAGPIE_BACKENDS = {"sglang", "vllm"}
 
-# The scalars we need out of the orchestrator's launch recipe. Parsed by hand
-# rather than with a YAML library: GEAK carries no yaml dependency, and these
-# four flat scalars under one block do not justify adding one. The nested envs:
-# map is read separately by :func:`_recipe_launch_env`.
+# The flat scalars we need out of the orchestrator's launch recipe. Keep this
+# lightweight scan separate from the BaseLoader parse used for the nested
+# ``envs:`` mapping: these fields are optional launch-discovery hints, whereas
+# malformed environment replay must follow the strict fail-closed path.
 _RECIPE_KEYS = ("inferencex_path", "benchmark_script", "framework", "runner_type")
 
 # Names the recipe may carry that GEAK must nevertheless own, because they
@@ -507,38 +533,150 @@ _RECIPE_ENV_GEAK_OWNED = frozenset({
 })
 
 
+# A shell environment-variable name: a leading letter/underscore then word
+# characters. Anything else (notably a leading-dash token like
+# ``-SCUDA_VISIBLE_DEVICES`` that GNU ``env`` parses as the --split-string
+# OPTION) is NOT an env var and must never reach the replay file.
+_VALID_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class _RecipeYAMLError(Exception):
+    """The launch recipe exists and PyYAML is available, but it does not parse.
+
+    Distinct from "PyYAML absent": a genuine parse error must fail closed rather
+    than be silently reinterpreted by the degraded line scanner.
+    """
+
+
 def _env_flag(name: str) -> bool:
     """Truthiness for an opt-in env switch, matching the spelling used elsewhere."""
     return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _recipe_env_block(recipe_path: str) -> dict[str, str]:
-    """Read the orchestrator's recorded launch environment (the ``envs:`` map).
+def _find_envs_map(node: Any) -> dict | None:
+    """Locate the recipe's ``envs`` mapping in a parsed YAML document.
 
-    This is the block :func:`_recipe_fields` skips. It is the only record of
-    what the orchestrator's server actually inherited, and until it is replayed
-    the two launches agree only where their DEFAULTS happen to agree -- which is
-    agreement by coincidence, not by construction, and silently stops holding
-    the moment the orchestrator sets something explicitly.
-
-    Indentation-scoped rather than regex'd, so it works on both shapes the
-    orchestrator emits: ``envs:`` nested under ``benchmark:`` in the recipe, and
-    ``envs:`` at column 0 in the per-round effective config.
-
-    Returns ``{}`` when the file is unreadable or names no ``envs:`` block --
-    callers distinguish "nothing recorded" from "could not read" via the recipe
-    fields they already hold.
+    The orchestrator emits ``envs:`` either nested under ``benchmark:`` (in the
+    launch recipe) or at the document root (in the per-round effective config).
+    Search depth-first and prefer the first NON-EMPTY mapping: an unrelated
+    metadata ``envs: {}`` must not hide the later launch environment. Return an
+    empty mapping only when at least one empty ``envs`` mapping exists and no
+    non-empty mapping exists anywhere in the document.
     """
-    if not recipe_path:
-        return {}
+    if isinstance(node, dict):
+        cand = node.get("envs")
+        saw_empty = isinstance(cand, dict)
+        if isinstance(cand, dict) and cand:
+            return cand
+        for value in node.values():
+            found = _find_envs_map(value)
+            if found:
+                return found
+            if found is not None:
+                saw_empty = True
+        return {} if saw_empty else None
+    elif isinstance(node, list):
+        saw_empty = False
+        for item in node:
+            found = _find_envs_map(item)
+            if found:
+                return found
+            if found is not None:
+                saw_empty = True
+        return {} if saw_empty else None
+    return None
+
+
+def _stringify_env_value(value: Any) -> str | None:
+    """Render one recipe env value as the string the shell must receive.
+
+    Env vars are strings, but the recipe records typed YAML scalars (an int for
+    ``MAX_MODEL_LEN``, a quoted string for a boolean). Non-scalars -- a nested
+    map or a list -- are not environment variables and are dropped (``None``);
+    ``None`` (a bare ``KEY:`` with no value under a typing loader such as
+    ``safe_load``) is dropped for the same reason. Literal/folded block scalars
+    arrive with a trailing newline the dumper added that carries no meaning once
+    the value is word-split as args, so it is stripped.
+
+    An EXPLICIT empty value (``KEY: ''``) is KEPT as the empty string: the
+    orchestrator recorded ``KEY`` set-but-empty, which is distinct from unset,
+    and dropping it would silently change the replayed environment. (Under the
+    string-preserving ``BaseLoader`` the production path uses, a bare ``KEY:``
+    also arrives as ``''`` rather than ``None``; keeping it errs toward fidelity
+    -- replaying an empty var -- rather than dropping a value the recipe held.)
+    """
+    if value is None or isinstance(value, (dict, list)):
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value.rstrip("\n")
+    return str(value)
+
+
+def _recipe_envs_from_yaml(text: str) -> dict[str, str] | None:
+    """Parse the ``envs:`` map with a real YAML parser (PyYAML).
+
+    Returns the extracted mapping on success (possibly empty when the recipe
+    names no ``envs`` block), or ``None`` only when PyYAML is unavailable so a
+    non-strict caller can fall back to the line scanner. Parse errors raise.
+
+    A real parser is required because replay-warm recipes fold a multi-line
+    ``EXTRA_<BE>_ARGS`` as an IMPLICIT plain scalar (no ``|``/``>`` indicator)
+    whose continuation lines can carry JSON with colons, e.g.
+    ``--speculative-config {"method":"ngram",...}``. A line-oriented scan cannot
+    tell such a folded continuation from a new mapping key without
+    reimplementing YAML, and silently truncates the kernel-dispatch flags.
+
+    Returns ``None`` ONLY when PyYAML is unavailable (``ImportError``) so the
+    caller degrades to the line scanner. When PyYAML IS present but the document
+    does not parse, raises :class:`_RecipeYAMLError`: a malformed recipe must
+    fail closed, not be handed to the degraded scanner (which would happily
+    store a truncated flow scalar as if it were a valid environment).
+
+    Parsed with ``BaseLoader`` so every scalar and key is read as its literal
+    STRING, not YAML 1.1's implicit types -- ``yes``/``on`` stay ``"yes"``/``"on"``
+    (not ``True``), ``0x10`` stays ``"0x10"`` (not ``16``), and a key ``ON`` stays
+    ``"ON"`` (not the boolean ``True``). Environment variables are strings, so
+    whether PyYAML is installed must not change the replayed value; BaseLoader is
+    what keeps this path and the scanner fallback in agreement.
+    """
     try:
-        text = Path(recipe_path).read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+        import yaml
+    except ImportError:
+        return None
+    try:
+        doc = yaml.load(text, Loader=yaml.BaseLoader)
+    except yaml.YAMLError as exc:
+        raise _RecipeYAMLError(str(exc)) from exc
+    envs = _find_envs_map(doc)
+    if envs is None:
         return {}
+    out: dict[str, str] = {}
+    for key, value in envs.items():
+        rendered = _stringify_env_value(value)
+        if rendered is not None:
+            out[str(key)] = rendered
+    return out
+
+
+def _recipe_env_block_scan(text: str) -> dict[str, str]:
+    """Indentation-scoped fallback used only when PyYAML is unavailable.
+
+    Handles the same shapes as the YAML path -- single-line values, explicit
+    ``|``/``>`` block scalars, nested-map skipping, and IMPLICIT plain-scalar
+    continuation (more-indented lines folded into the value with spaces) -- but a
+    hand scan cannot disambiguate every YAML edge, so it is strictly the degraded
+    path taken only when the parser is missing.
+    """
     envs: dict[str, str] = {}
     block_indent: int | None = None
     nested_indent: int | None = None
-    for line in text.splitlines():
+    lines = text.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        i += 1
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         indent = len(line) - len(line.lstrip())
@@ -555,15 +693,152 @@ def _recipe_env_block(recipe_path: str) -> dict[str, str]:
         key, sep, value = line.strip().partition(":")
         if not sep or not key:
             continue
+        key = key.strip()
         value = value.strip()
-        if not value:
-            # A nested map under envs: is not an environment variable, and
-            # neither are its children: skip the whole subtree rather than
-            # flatten it into names the shell would not recognise.
-            nested_indent = indent
+        # Explicit YAML block scalar: `|` (literal) / `>` (folded), optionally
+        # followed by chomping/indent indicators (+, -, digits). Consume the
+        # more-indented block, joining folded scalars with spaces and literal
+        # scalars with newlines (both word-split harmlessly as server args).
+        if value and value[0] in "|>" and (
+            len(value) == 1 or set(value[1:]) <= set("+-0123456789")
+        ):
+            folded = value[0] == ">"
+            block_lines: list[str] = []
+            content_indent: int | None = None
+            while i < n:
+                nxt = lines[i]
+                if not nxt.strip():
+                    block_lines.append("")
+                    i += 1
+                    continue
+                nxt_indent = len(nxt) - len(nxt.lstrip())
+                if content_indent is None:
+                    if nxt_indent <= indent:
+                        break  # nothing more-indented than the key => empty scalar
+                    content_indent = nxt_indent
+                elif nxt_indent < content_indent:
+                    break  # dedented out of the scalar content
+                block_lines.append(nxt[content_indent:])
+                i += 1
+            while block_lines and not block_lines[-1]:
+                block_lines.pop()  # drop trailing padding the dumper may add
+            joined = (" " if folded else "\n").join(block_lines)
+            envs[key] = joined.strip() if folded else joined
             continue
-        envs[key.strip()] = value.strip("'\"")
+        if not value:
+            # BaseLoader represents a bare `KEY:` as an empty string unless the
+            # following significant line is more indented (a nested map). Look
+            # ahead so the fallback preserves that same set-but-empty semantic
+            # while still skipping nested values and their children.
+            j = i
+            while j < n and (
+                not lines[j].strip() or lines[j].lstrip().startswith("#")
+            ):
+                j += 1
+            if j < n and (len(lines[j]) - len(lines[j].lstrip())) > indent:
+                nested_indent = indent
+            else:
+                envs[key] = ""
+            continue
+        # Inline plain scalar. Fold any IMPLICIT continuation: lines indented
+        # deeper than the key with no block indicator are part of this value
+        # (YAML plain-scalar folding), e.g. a multi-line EXTRA_<BE>_ARGS. This is
+        # unambiguous inside envs: a key with an inline value can never be
+        # followed by a nested map, so a deeper line must be a continuation.
+        while i < n:
+            nxt = lines[i]
+            if not nxt.strip():
+                break  # a blank line ends the plain scalar
+            if (len(nxt) - len(nxt.lstrip())) <= indent:
+                break  # dedent -> next key or end of block
+            value = f"{value} {nxt.strip()}"
+            i += 1
+        envs[key] = value.strip("'\"")
     return envs
+
+
+def _recipe_env_block(recipe_path: str) -> dict[str, str]:
+    """Read the orchestrator's recorded launch environment (the ``envs:`` map).
+
+    This is the block :func:`_recipe_fields` skips. It is the only record of
+    what the orchestrator's server actually inherited, and until it is replayed
+    the two launches agree only where their DEFAULTS happen to agree -- which is
+    agreement by coincidence, not by construction, and silently stops holding
+    the moment the orchestrator sets something explicitly.
+
+    Parsed with PyYAML (a declared dependency) so both shapes the orchestrator
+    emits are handled -- ``envs:`` nested under ``benchmark:`` and ``envs:`` at
+    column 0 -- and, critically, so an IMPLICIT plain-scalar continuation of a
+    multi-line ``EXTRA_<BE>_ARGS`` survives intact (a line scan truncates it).
+    Falls back to an indentation scan only if PyYAML is MISSING (ImportError).
+
+    Fail-close semantics: a recipe that PyYAML rejects, or bytes that are not
+    valid UTF-8, are NOT quietly handed to the degraded line scanner (which
+    would store a truncated flow scalar as though it were a valid environment)
+    -- they raise, and this function turns that into a hard stop under
+    ``GEAK_STRICT_RECIPE_ENV`` or a warning + ``{}`` otherwise. Missing PyYAML is
+    the ONLY condition that legitimately reaches the scanner.
+
+    Returns ``{}`` when the file is unreadable or names no ``envs:`` block --
+    callers distinguish "nothing recorded" from "could not read" via the recipe
+    fields they already hold.
+    """
+    if not recipe_path:
+        return {}
+    # No errors="ignore": undecodable bytes mean a corrupt recipe, and silently
+    # dropping them could split a flow scalar mid-token. Fail closed instead.
+    try:
+        text = Path(recipe_path).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    except UnicodeDecodeError as exc:
+        return _recipe_env_fail_closed(
+            recipe_path, f"is not valid UTF-8 ({exc})"
+        )
+    try:
+        parsed = _recipe_envs_from_yaml(text)
+    except _RecipeYAMLError as exc:
+        return _recipe_env_fail_closed(recipe_path, f"is not valid YAML ({exc})")
+    if parsed is not None:
+        return parsed
+    # A strict aligned launch must be independently validated as YAML. The
+    # scanner supports old/offline hosts in non-strict mode, but cannot prove a
+    # malformed document safe, so strict mode refuses when PyYAML is unavailable.
+    if _env_flag("GEAK_STRICT_RECIPE_ENV"):
+        return _recipe_env_fail_closed(
+            recipe_path,
+            "cannot be validated because PyYAML is unavailable",
+        )
+    print(
+        "[run_e2e] WARNING: PyYAML is unavailable; using the degraded recipe "
+        "env scanner. Set GEAK_STRICT_RECIPE_ENV=1 to refuse.",
+        file=sys.stderr,
+    )
+    return _recipe_env_block_scan(text)
+
+
+def _recipe_env_fail_closed(recipe_path: str, why: str) -> dict[str, str]:
+    """React to an unparseable recipe env block.
+
+    Under ``GEAK_STRICT_RECIPE_ENV`` a malformed recipe is a hard stop: the
+    launch env cannot be reconstructed, so serving a coincidentally-defaulted
+    stack would be a silent fidelity break. Otherwise warn loudly and return an
+    empty block so the caller proceeds on script defaults (the same posture as a
+    recipe that records no ``envs:`` at all), never on partial garbage.
+    """
+    msg = f"recipe env block {recipe_path} {why}"
+    if _env_flag("GEAK_STRICT_RECIPE_ENV"):
+        raise SystemExit(
+            f"[run_e2e] {msg}; refusing to launch under GEAK_STRICT_RECIPE_ENV.\n"
+            "    Fix the recipe, or unset GEAK_STRICT_RECIPE_ENV to fall back to\n"
+            "    script defaults with no recorded environment replayed."
+        )
+    print(
+        f"[run_e2e] WARNING: {msg}; replaying NO recorded environment "
+        "(script defaults only). Set GEAK_STRICT_RECIPE_ENV=1 to refuse.",
+        file=sys.stderr,
+    )
+    return {}
 
 
 def _sanitize_replay_path(path_value: str) -> tuple[str | None, list[str]]:
@@ -602,6 +877,25 @@ def _recipe_launch_env(h: dict) -> tuple[dict[str, str], list[str]]:
     (and the whole variable omitted when nothing remains).
     """
     recorded = _recipe_env_block(str(h.get("launch_recipe") or ""))
+    # Every replayed key becomes an `env NAME=VALUE` operand at the shell. A name
+    # that is not a valid POSIX identifier (spaces, `-`, a leading `-` that `env`
+    # would read as an OPTION, an `=` in the name) cannot be a real environment
+    # variable and could smuggle an option/command token onto the launch line.
+    # Drop such names here so the shell only ever sees clean assignments; the
+    # launcher's own allowlist is the second half of this defence in depth.
+    bad = [k for k in recorded if not _VALID_ENV_NAME.match(str(k))]
+    if bad:
+        if _env_flag("GEAK_STRICT_RECIPE_ENV"):
+            raise SystemExit(
+                "[run_e2e] recipe env block records non-identifier name(s) "
+                f"{bad!r}; refusing to launch under GEAK_STRICT_RECIPE_ENV."
+            )
+        print(
+            ">>> recipe alignment: dropping recorded env name(s) that are not "
+            f"valid identifiers: {bad!r}",
+            file=sys.stderr,
+        )
+        recorded = {k: v for k, v in recorded.items() if _VALID_ENV_NAME.match(str(k))}
     replay = {k: v for k, v in recorded.items() if k not in _RECIPE_ENV_GEAK_OWNED}
     owned = sorted(k for k in recorded if k in _RECIPE_ENV_GEAK_OWNED)
     if "PATH" in replay:
@@ -836,14 +1130,32 @@ def _export_recipe_env(
     word-split into two bogus assignments by the unquoted ``env $VAR`` idiom the
     launcher uses for the flags it already had.
 
-    WARNS when the recipe carries no ``envs:`` block, but proceeds on defaults
-    so GEAK runs smoothly even against older orchestrator output that omits
-    the block. Set ``GEAK_STRICT_RECIPE_ENV=1`` to fail-close instead (useful
+    WARNS when the recipe carries no replayable ``envs:`` values, but proceeds
+    on defaults so GEAK runs smoothly even against older orchestrator output
+    that omits the block. A block containing only GEAK-owned run coordinates is
+    fully accounted for and needs no replay file. Set
+    ``GEAK_STRICT_RECIPE_ENV=1`` to fail-close on an absent/empty record (useful
     in CI or when investigating a divergence).
 
     Returns the path written, or "" when there was nothing to write.
     """
-    strict = source == "launch_recipe" and _env_flag("GEAK_STRICT_RECIPE_ENV")
+    # Strictness follows the existence of a recipe alignment attempt, not how
+    # the server script was discovered. An explicit handoff/env script still
+    # launches against h["launch_recipe"] and must not bypass fail-close merely
+    # because `source != "launch_recipe"`.
+    strict = bool(str(h.get("launch_recipe") or "").strip()) and _env_flag(
+        "GEAK_STRICT_RECIPE_ENV"
+    )
+    if not replay and owned:
+        # The recipe did record an environment, but every entry is an explicit
+        # run coordinate GEAK must replace (model/TP/port/GPU mask/etc.). There
+        # is nothing to materialise, yet strict alignment is still satisfied:
+        # the complete difference set is known and reported rather than absent.
+        os.environ.pop("RECIPE_ENV_FILE", None)
+        os.environ["RECIPE_ENV_SOURCE"] = str(h.get("launch_recipe") or "")
+        os.environ["RECIPE_ENV_REPLAYED"] = ""
+        os.environ["RECIPE_ENV_GEAK_OWNED"] = " ".join(owned)
+        return ""
     if not replay:
         if strict:
             raise SystemExit(
@@ -863,14 +1175,44 @@ def _export_recipe_env(
             )
         return ""
 
-    out_dir = str(h.get("eval_dir") or "").strip() or tempfile.gettempdir()
+    # Resolve the eval dir the same way map_args does: h["eval_dir"] first, then
+    # the GEAK_EVAL_DIR main() pins from ps_args (map_args never writes eval_dir
+    # back into h, so on the --dry-run path h["eval_dir"] can be empty even
+    # though the run has a real eval dir). When BOTH are empty there is no run
+    # directory to own, so write a UNIQUE temp file instead of a fixed
+    # gettempdir()/recipe_env.nul that two concurrent runs would clobber -- the
+    # exact fixed-path collision that made a dry-run's .nul land where a later
+    # inspection could not find it.
+    out_dir = (
+        str(h.get("eval_dir") or "").strip()
+        or os.environ.get("GEAK_EVAL_DIR", "").strip()
+    )
+    path = ""
+    tmp_path = ""
     try:
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-        path = str(Path(out_dir) / "recipe_env.nul")
-        with open(path, "wb") as fh:
+        if out_dir:
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            path = str(Path(out_dir) / "recipe_env.nul")
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".recipe_env.", suffix=".tmp", dir=out_dir
+            )
+        else:
+            fd, path = tempfile.mkstemp(prefix="geak_recipe_env_", suffix=".nul")
+            tmp_path = path
+        with os.fdopen(fd, "wb") as fh:
             for key in sorted(replay):
                 fh.write(f"{key}={replay[key]}".encode("utf-8") + b"\0")
+            fh.flush()
+            os.fsync(fh.fileno())
+        if out_dir:
+            os.replace(tmp_path, path)
+            tmp_path = ""
     except OSError as exc:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         if strict:
             raise SystemExit(
                 f"!!! recipe alignment: cannot materialise the replay env ({exc}). "
@@ -1533,24 +1875,32 @@ def _serving_stack_signals(log_path: Path) -> dict[str, Any]:
     Returns ``{}`` when the log is unreadable (leg never ran / was cleaned), so
     the caller can carry the field harmlessly on a standalone run.
     """
+    picks: list[str] = []
+    aiter_mentions = 0
     try:
-        text = log_path.read_text(encoding="utf-8", errors="ignore")
+        # Stream line-by-line: server.log can reach GBs, and the old
+        # read_text()+splitlines()+text.lower() held three full O(n) copies at
+        # once. Iterating the handle keeps at most one line resident (O(1)).
+        with log_path.open(encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                # Whole-log count (semantics unchanged vs the old text.lower().count).
+                aiter_mentions += line.lower().count("aiter")
+                # Check the cap BEFORE appending so _STACK_SIGNAL_MAX_PICKS is a
+                # real bound (the old code appended then checked, so switching the
+                # break to a continue would have let picks grow without limit).
+                if len(picks) < _STACK_SIGNAL_MAX_PICKS and any(
+                    pattern in line for pattern in _STACK_SIGNAL_PATTERNS
+                ):
+                    # Drop the pid / timestamp / module prefix so the pick is legible.
+                    picks.append(line.rsplit("] ", 1)[-1].strip()[:220])
     except OSError:
         return {}
-    picks: list[str] = []
-    for line in text.splitlines():
-        if not any(pattern in line for pattern in _STACK_SIGNAL_PATTERNS):
-            continue
-        # Drop the pid / timestamp / module prefix so the pick itself is legible.
-        picks.append(line.rsplit("] ", 1)[-1].strip()[:220])
-        if len(picks) >= _STACK_SIGNAL_MAX_PICKS:
-            break
     return {
         # A raw count, not a verdict: the accelerated-kernel stack is chatty at
         # startup, so a near-zero count is the signature of a launch that never
         # enabled it. Observed on one 122B session: 5499 mentions on the
         # orchestrator's server vs 4 on GEAK's, for the identical config.
-        "aiter_mentions": text.lower().count("aiter"),
+        "aiter_mentions": aiter_mentions,
         "kernel_picks": picks,
     }
 
@@ -1829,6 +2179,12 @@ def normalize_result(h: dict, wf: dict) -> dict:
             if wf.get("recovered_intermediate")
             else "no_gain_synthesis"
             if wf.get("recovered_no_gain")
+            # A baseline rebuilt from a disk Director artifact (no more direct
+            # same-session source) is NOT a live Setup measurement; label its
+            # provenance for what it is so the A/B basis is auditable, mirroring
+            # result_source == "disk_director_validation" above.
+            else "disk_director_validation_baseline"
+            if wf.get("recovered_from_disk")
             else "setup_baseline"
         )
     geak_final = _positive_finite_float(
@@ -1988,8 +2344,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
 
     # ── speedup self-consistency invariant ───────────────────────────────────
     # Everything above can move the numerator or the denominator independently:
-    # the basis switch replaces the final, the same-session re-base replaces the
-    # baseline, and the reported speedup arrives precomputed from a third place.
+    # the final is pinned to the hot number, the same-session re-base can replace
+    # the baseline, and the reported speedup arrives precomputed from a third place.
     # Whatever the path, the last word belongs to the pair we actually publish —
     # a consumer that recomputes final/baseline must land on the same number we
     # printed. When they disagree the reported ratio is describing some other
@@ -2076,9 +2432,10 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "result_source": result_source,
         "eval_dir": str(eval_dir),
         "baseline_throughput_tok_s": geak_baseline,
-        # Promoted final: the COLD final when it is a real cold win, else the HOT
-        # median (see the final-basis selection above). final_throughput_basis says
-        # which one this is, so a consumer can tell cold-to-cold from hot-to-cold.
+        # Promoted final is ALWAYS the HOT median (see the final-basis selection
+        # above); final_throughput_basis is therefore always "hot". Cold rounds,
+        # when BENCH_COLD_FINAL enables them, live only in alignment_metrics as a
+        # diagnostic and never become the headline.
         "final_throughput_tok_s": float(final_tput_out or 0.0),
         "final_throughput_basis": final_basis,
         "throughput_speedup": speedup,
@@ -3411,6 +3768,10 @@ def main(argv: list[str]) -> int:
                           "bench_launcher": bench_launcher,
                           "magpie_launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
                           "magpie_launch_script_source": os.environ.get("MAGPIE_LAUNCH_SCRIPT_SOURCE", ""),
+                          "recipe_env_file": os.environ.get("RECIPE_ENV_FILE", ""),
+                          "recipe_env_source": os.environ.get("RECIPE_ENV_SOURCE", ""),
+                          "recipe_env_replayed": os.environ.get("RECIPE_ENV_REPLAYED", ""),
+                          "recipe_env_geak_owned": os.environ.get("RECIPE_ENV_GEAK_OWNED", ""),
                           "bench_protocol": bench_protocol,
                           "alignment_flags": alignment_flags,
                           "inferencex_path": os.environ.get("INFERENCEX_PATH", ""),
