@@ -1103,15 +1103,63 @@ class TestColdFinalBasis(_RunE2ECase):
         self.assertIsNone(out["alignment_metrics"]["cold_speedup"])
         self.assertEqual(out["throughput_speedup"], rx._safe_ratio(520.0, 460.0))
 
-    def test_cold_final_without_a_cold_baseline_keeps_the_reported_speedup(self):
-        """Cold basis is adopted for the promoted number, but with no cold
-        baseline there is no self-consistent cold speedup to overwrite with."""
+    def test_cold_final_without_a_cold_baseline_is_not_promoted(self):
+        """A cold final has no cold denominator to be published with, so promoting
+        it would put a cold number over a hot baseline -- the thermal mixing this
+        basis selection exists to remove. Keep hot; the cold final stays visible
+        in alignment_metrics for a reviewer, it is just not the promoted pair."""
         eval_dir = self._eval_dir(cold_final=520.0)
         out = rx.normalize_result({"raw_baseline_tput": 440.0}, self._wf(eval_dir))
-        self.assertEqual(out["final_throughput_basis"], "cold")
-        self.assertEqual(out["final_throughput_tok_s"], 520.0)
-        self.assertEqual(out["throughput_speedup"], 1.1111)
+        self.assertEqual(out["final_throughput_basis"], "hot")
+        self.assertEqual(out["final_throughput_tok_s"], 500.0)
+        self.assertEqual(out["baseline_throughput_tok_s"], 450.0)
+        self.assertEqual(out["throughput_speedup"], rx._safe_ratio(500.0, 450.0))
+        self.assertEqual(out["alignment_metrics"]["geak_cold_final_tok_s"], 520.0)
         self.assertIsNone(out["alignment_metrics"]["cold_geak_speedup"])
+
+    def test_the_published_triple_is_always_one_pair_and_its_ratio(self):
+        """The invariant, over every basis this function can select.
+
+        result.json used to assemble the ratio and the two sides of it from
+        independent reads, so it could publish A, B and a speedup that was
+        neither A/B nor derivable from anything else in the file. 25 of the 62
+        runs on record did. Whatever basis wins, the two published numbers must
+        be the pair the published speedup was taken over."""
+        cases = {
+            "cold win": dict(cold_final=520.0, cold_baseline=460.0),
+            "cold loss": dict(cold_final=380.0, cold_baseline=460.0),
+            "cold final only": dict(cold_final=520.0),
+            "no cold round": dict(),
+        }
+        for name, kw in cases.items():
+            with self.subTest(case=name):
+                out = rx.normalize_result(
+                    {"raw_baseline_tput": 440.0}, self._wf(self._eval_dir(**kw))
+                )
+                self.assertEqual(
+                    out["throughput_speedup"],
+                    rx._safe_ratio(
+                        out["final_throughput_tok_s"], out["baseline_throughput_tok_s"]
+                    ),
+                )
+                # ...and the verdict is that pair's verdict, not another number's.
+                self.assertEqual(
+                    out["status"], "ok" if out["throughput_speedup"] > 1.0 else "no_gain"
+                )
+
+    def test_the_promoted_cold_pair_publishes_the_cold_baseline(self):
+        """The cold branch used to switch the numerator and the ratio to cold and
+        leave the denominator hot. 20 of the 23 cold-basis runs on record publish
+        a pair that does not produce their own speedup because of it."""
+        eval_dir = self._eval_dir(cold_final=520.0, cold_baseline=460.0)
+        out = rx.normalize_result({"raw_baseline_tput": 440.0}, self._wf(eval_dir))
+        self.assertEqual(out["baseline_throughput_tok_s"], 460.0)
+        self.assertEqual(out["final_throughput_tok_s"], 520.0)
+        # GEAK's hot measured baseline is not lost -- the divergence metrics that
+        # compare harnesses still read it from where they always have.
+        self.assertEqual(
+            out["baseline_basis"]["geak_measured_baseline_tok_s"], 450.0
+        )
 
     def test_no_cold_round_is_byte_identical_hot_behaviour(self):
         eval_dir = self._eval_dir()

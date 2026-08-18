@@ -127,9 +127,9 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
   "schema_version": 2,
   "status": "ok | no_gain | error",
   "eval_dir": "/work/experiment/geak/e2e_<model>_<ts>",
-  "baseline_throughput_tok_s": 1485.4,   // baseline (= caller best config)
+  "baseline_throughput_tok_s": 1485.4,   // denominator OF the promoted final, on its basis
   "final_throughput_tok_s": 1551.4,
-  "throughput_speedup": 1.044,
+  "throughput_speedup": 1.044,           // == final / baseline, always (see below)
   "output_parity": "pass | fail | n/a | unknown",
   "ttft_ms": 3598.0,                     // median, aligned with caller's ttft
   "tpot_ms": 39.5,                       // median, aligned with caller's tpot
@@ -174,6 +174,37 @@ configuration in both harnesses and is the primary alignment metric.
 callers. If the handoff omits `orchestrator_best_tput_same_config`, both
 same-config fields are `null` and `baseline_alignment.status` is `unavailable`;
 GEAK never falls back to the raw-session divergence as a drift signal.
+
+
+### The published triple
+
+`baseline_throughput_tok_s`, `final_throughput_tok_s` and `throughput_speedup`
+are one pair and the ratio between them:
+
+```
+throughput_speedup == round(final_throughput_tok_s / baseline_throughput_tok_s, 4)
+```
+
+This holds on every basis, and `status` is that ratio's verdict (`ok` when it is
+above 1.0, else `no_gain`). It is worth stating because it was not always true.
+The three fields used to be read independently — the ratio off the workflow
+return, each side of the pair off the return or the director validation — and
+the cold-basis branch then replaced the ratio and the numerator without
+replacing the denominator. `result.json` could publish a baseline, a final, and
+a speedup that was neither their ratio nor derivable from any other number in
+the file. It did in 25 of the 62 runs of one campaign.
+
+`final_throughput_basis` says which thermal state the pair was measured in.
+Cold is promoted only when a cold **baseline** was measured as well, since
+otherwise there is no cold denominator to publish the cold final against.
+
+The hot measured baseline is not lost when a cold pair is promoted: it stays at
+`baseline_basis.geak_measured_baseline_tok_s`, which is what the cross-harness
+divergence metrics compare against, and both thermal states of both sides remain
+in `alignment_metrics`.
+
+A consumer that recomputes the gain against its own baseline is unaffected by
+which basis was promoted — but it can now check the number it was handed.
 
 ## Handoff resilience (the workflow return is never the single point of failure)
 

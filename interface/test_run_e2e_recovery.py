@@ -295,8 +295,12 @@ def test_normalize_reconciles_crashed_validate_with_accepted_win(tmp_path):
     }
     out = rx.normalize_result(_handoff(eval_dir), wf)
     assert out["status"] == "ok", "an accepted same-session win must never read as no_gain"
-    assert out["throughput_speedup"] == pytest.approx(535.352 / 461.314)
+    # The published speedup is the published pair's ratio, at the 4dp every ratio
+    # in run_e2e.py is published at. It used to be whatever the recovered dict
+    # carried, which is why this once asserted more precision than the file emits.
+    assert out["throughput_speedup"] == rx._safe_ratio(535.352, 461.314)
     assert out["final_throughput_tok_s"] == pytest.approx(535.352)
+    assert out["baseline_throughput_tok_s"] == pytest.approx(461.314)
     # Provenance is honest: the number came from the disk intermediate A/B.
     assert out["result_source"] == "disk_intermediate_win"
     # The accepted head metadata from the live return is preserved.

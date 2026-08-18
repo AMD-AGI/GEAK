@@ -1323,31 +1323,49 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # Otherwise keep the HOT median (today's behaviour). Default (no cold round
     # measured) => HOT, byte-identical to before.
     final_tput_out = geak_final          # hot median (== the pre-change promoted value)
+    baseline_tput_out = geak_baseline    # the denominator that goes out with it
     final_basis = "hot"
     cold_gate = (
         alignment_metrics["cold_speedup"]
         if alignment_metrics["cold_speedup"] is not None
         else alignment_metrics["cold_geak_speedup"]
     )
-    if geak_cold_final and cold_gate is not None and cold_gate >= 1.0:
+    # Promote cold only when a cold BASELINE was measured too. The promoted pair
+    # has to be one pair: a cold final over a hot baseline is the thermal mixing
+    # this block exists to remove, and there is no cold denominator to publish
+    # with it. Every cold-basis run on record measured one, so this refuses
+    # nothing that happens -- it closes a shape the code could otherwise emit.
+    if geak_cold_final and geak_cold_baseline and cold_gate is not None and cold_gate >= 1.0:
         final_tput_out = float(geak_cold_final)
+        baseline_tput_out = float(geak_cold_baseline)
         final_basis = "cold"
-        # Keep GEAK's own speedup field + status consistent with the chosen basis.
-        # (Hyperloom recomputes the promoted gain from final_throughput_tok_s /
-        # baseline_tput itself; this only keeps result.json self-consistent and the
-        # ok/no_gain status gate correct for the number we actually promote.)
-        cold_geak_sp = alignment_metrics["cold_geak_speedup"]
-        if cold_geak_sp is not None:
-            speedup = float(cold_geak_sp)
-            status = "ok" if speedup > 1.0 else "no_gain"
     alignment_metrics["final_basis"] = final_basis
+
+    # ── the published triple is one pair and the ratio between them ──────────
+    # Derive the speedup from the two numbers actually published, once, after the
+    # basis is settled -- never carry a ratio measured against a denominator this
+    # file does not show. The speedup used to arrive from three independent reads
+    # (the workflow return for the ratio, the return-or-validation for each side
+    # of the pair) and the cold branch then replaced the ratio without replacing
+    # the denominator, so result.json could publish A, B and a ratio that was
+    # neither A/B nor derivable from anything in the file. `status` is a verdict
+    # on the promoted number, so it follows from the same pair.
+    derived = _safe_ratio(final_tput_out, baseline_tput_out)
+    if derived is not None:
+        speedup = derived
+    status = "ok" if speedup > 1.0 else "no_gain"
 
     return {
         "schema_version": SCHEMA_VERSION,
         "status": status,
         "result_source": result_source,
         "eval_dir": str(eval_dir),
-        "baseline_throughput_tok_s": geak_baseline,
+        # The denominator of the promoted number, on the promoted basis, so that
+        # final_throughput_tok_s / baseline_throughput_tok_s == throughput_speedup
+        # for every run. GEAK's hot measured baseline stays available unchanged as
+        # baseline_basis.geak_measured_baseline_tok_s, which is what the
+        # cross-harness divergence metrics compare against.
+        "baseline_throughput_tok_s": baseline_tput_out,
         # Promoted final: the COLD final when it is a real cold win, else the HOT
         # median (see the final-basis selection above). final_throughput_basis says
         # which one this is, so a consumer can tell cold-to-cold from hot-to-cold.
