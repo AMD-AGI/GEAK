@@ -466,8 +466,18 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+// EFFORT PASS-THROUGH (opt-in). Absent -> byte-identical to before: no `effort` key is added and
+// every agent inherits the session effort, exactly as it did. Set args.effort when the deployment's
+// GATEWAY caps a single model turn (one observed box kills any turn over ~180s): at high effort a
+// large context — a big kernel plus accumulated insight logs — reliably exceeds that cap, and since
+// the cap kills the turn rather than erroring it, the early rounds succeed and EVERY later round
+// dies identically. agent_timeout_ms cannot catch it (it is far larger). Lowering per-turn reasoning
+// keeps turns inside the cap. Note this changes the (prompt, opts) resume cache key, which only
+// matters for a run started without it.
+const AGENT_EFFORT = (A.effort != null && String(A.effort).trim()) ? String(A.effort).trim() : '';
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
+  if (AGENT_EFFORT) o = { ...(o || {}), effort: AGENT_EFFORT };
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     try {
       if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return await agent(p, o);

@@ -3,7 +3,7 @@
 AUTO-GENERATED from per-card frontmatter (`index/_gen_registry.py`). Each cell links to the SOTA card.
 Legend: 🟢 sota · 🟡 competitive · 🧪 experimental · 🟤 legacy · ⚪ na · `·` no card.
 
-Coverage: **54 operators**, **225 backend cards**.
+Coverage: **54 operators**, **226 backend cards**.
 
 ## GEMM
 | operator | triton | flydsl | hip | ck | asm | tilelang | gluon | hipkittens | rocwmma | aiter | hipblaslt |
@@ -21,7 +21,7 @@ Coverage: **54 operators**, **225 backend cards**.
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | [attention_prefill_fmha](../operators/attention_prefill_fmha/overview.md) | [🟡](../operators/attention_prefill_fmha/backends/triton.md) | · | · | [🟢](../operators/attention_prefill_fmha/backends/ck.md) | [🟢](../operators/attention_prefill_fmha/backends/asm.md) | [🟡](../operators/attention_prefill_fmha/backends/tilelang.md) | [🟢](../operators/attention_prefill_fmha/backends/hipkittens.md) | [🟢](../operators/attention_prefill_fmha/backends/aiter.md) | [🟡](../operators/attention_prefill_fmha/backends/fa_rocm.md) | · | · |
 | [attention_decode_paged](../operators/attention_decode_paged/overview.md) | [🟡](../operators/attention_decode_paged/backends/triton.md) | · | [🟢](../operators/attention_decode_paged/backends/hip.md) | [🟡](../operators/attention_decode_paged/backends/ck.md) | · | · | · | [🟢](../operators/attention_decode_paged/backends/aiter.md) | [🟡](../operators/attention_decode_paged/backends/fa_rocm.md) | · | [🟢](../operators/attention_decode_paged/backends/vllm_kernels.md) |
-| [mla_attention](../operators/mla_attention/overview.md) | [🟡](../operators/mla_attention/backends/triton.md) | · | [🟡](../operators/mla_attention/backends/hip.md) | [🟡](../operators/mla_attention/backends/ck.md) | · | · | · | [🟢](../operators/mla_attention/backends/aiter.md) | [⚪](../operators/mla_attention/backends/fa_rocm.md) | · | · |
+| [mla_attention](../operators/mla_attention/overview.md) | [🟡](../operators/mla_attention/backends/triton.md) | [🟢](../operators/mla_attention/backends/flydsl.md) | [🟡](../operators/mla_attention/backends/hip.md) | [🟡](../operators/mla_attention/backends/ck.md) | · | · | · | [🟢](../operators/mla_attention/backends/aiter.md) | [⚪](../operators/mla_attention/backends/fa_rocm.md) | · | · |
 | [gqa_mqa_attention](../operators/gqa_mqa_attention/overview.md) | [🟡](../operators/gqa_mqa_attention/backends/triton.md) | · | · | [🟡](../operators/gqa_mqa_attention/backends/ck.md) | · | · | [🟢](../operators/gqa_mqa_attention/backends/hipkittens.md) | [🟢](../operators/gqa_mqa_attention/backends/aiter.md) | [🟡](../operators/gqa_mqa_attention/backends/fa_rocm.md) | · | · |
 | [sliding_window_attention](../operators/sliding_window_attention/overview.md) | [🟡](../operators/sliding_window_attention/backends/triton.md) | · | · | [🟢](../operators/sliding_window_attention/backends/ck.md) | · | · | · | [🟡](../operators/sliding_window_attention/backends/aiter.md) | [🟡](../operators/sliding_window_attention/backends/fa_rocm.md) | · | · |
 | [chunked_prefill](../operators/chunked_prefill/overview.md) | [🟢](../operators/chunked_prefill/backends/triton.md) | · | · | · | · | · | · | [🟢](../operators/chunked_prefill/backends/aiter.md) | · | [🟢](../operators/chunked_prefill/backends/sglang_kernels.md) | [🟢](../operators/chunked_prefill/backends/vllm_kernels.md) |

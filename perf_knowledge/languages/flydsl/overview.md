@@ -82,6 +82,7 @@ gfx (`..._gfx942`). Key arch behavior baked into aiter's wrappers:
 - [authoring_tile_programming.md](authoring_tile_programming.md) — write a first correct kernel (CuTe-style tile model, the 4 patterns, MFMA reference).
 - [authoring_optimization.md](authoring_optimization.md) — structure-first optimization workflow (fusion → LDS → MFMA-loop → tuning).
 - [authoring_gemm_levers.md](authoring_gemm_levers.md) — GEMM-specific levers (tiling / LDS staging / swizzle / epilogue).
+- [authoring_attention_levers.md](authoring_attention_levers.md) — fused multi-GEMM attention levers (fusion boundary, MFMA fragment orientation, which output goes on atomics, wave count vs the register cap).
 - [debugging.md](debugging.md) — correctness/stability/hang triage (NaN / zeros / mismatch / compile / hang).
 
 ## Sources

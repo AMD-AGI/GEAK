@@ -65,6 +65,33 @@ skills:
     e2e_delta_min_pct: 1.0
     parity: required
   validation_status: validated
+- id: flydsl_fused_attention_backward
+  file: skills/flydsl_fused_attention_backward/skill.md
+  scope: kernel
+  match:
+    operator:
+    - attention_prefill_fmha
+    - gqa_mqa_attention
+    - mla_attention
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - bf16
+    - fp16
+    regimes:
+    - training
+    from_backend: ''
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: fmha_bwd|mha_bwd|_bwd_kernel|flash.*bwd|attn.*backward
+      min_pct_gpu: 15.0
+  expects:
+    isolated_speedup_min: 1.1
+    parity: required
+  validation_status: draft
 - id: flydsl_rewrite_quantized_moe
   file: skills/flydsl_rewrite_quantized_moe/skill.md
   scope: kernel

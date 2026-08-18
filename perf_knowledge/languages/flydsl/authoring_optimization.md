@@ -216,6 +216,33 @@ Always verify after each patch — violations often cause silent corruption:
 6. If the generated form did not change, assume the optimization did not land yet, even if the Python source looks right
 7. If speedup is marginal or absolute time regresses, move to the next structural strategy rather than re-tuning the same approach
 
+### The register-allocation gate (run this at every step, not at the end)
+
+On register-heavy kernels this is the dominant failure mode and it is **invisible from timings**. Make a
+one-config ISA probe part of the harness from the start, then check three numbers together:
+
+```bash
+FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=/tmp/isa python isa_probe.py "<config string>"
+grep -E 'vgpr_count|agpr_count|private_seg_size' /tmp/isa/<kernel>/21_final_isa.s
+grep -c v_accvgpr /tmp/isa/<kernel>/21_final_isa.s        # the discriminating number
+```
+
+- **Count `v_accvgpr` moves, not scratch.** When arch VGPRs run out the compiler first parks values in the
+  accumulator file, which costs issue slots but never shows up as `private_seg_size`/`scratch_`. A build
+  can report *lower* scratch than its rival and be 15% slower. See
+  [[optimization/occupancy_and_registers]].
+- A small non-zero `private_seg_size` (e.g. 16 B) is often a fixed prologue slot — confirm there is no
+  `scratch_`/`buffer_store` targeting it before calling it spill.
+- **A step that cuts instruction count but spills is a regression.** Before any change that lengthens a
+  live range, predict its effect on the live set and check the ISA — measured examples where it lost:
+  hoisting invariant address math out of the hot loop (**−8.6%**, `private_seg_size` 16 → 48 B), and
+  merging a second compute phase into the main region to remove a barrier (**−36%**, 16 → 60 B).
+- Related: `s_barrier` **ends an instruction scheduling region**, so a global load and the MFMA chain you
+  want it hidden behind must sit in the same region with no barrier between them. Keep staging
+  branch-free (clamp indices instead of guarding) — a guard issues the same instructions under exec mask
+  but ends the basic block and splits the region, which is why removing bounds-check VALU by splitting on
+  a block-uniform condition can measure *slower*. See [[optimization/memory_pipelining]].
+
 ## Key FlyDSL APIs
 
 - Device kernel: `@flyc.kernel` | Host launcher: `@flyc.jit`
@@ -232,4 +259,8 @@ Always verify after each patch — violations often cause silent corruption:
 - AMD CDNA3 ISA (LDS banks, `s_waitcnt`/`lgkmcnt`, MFMA variants): https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
 - AMD CDNA4 ISA (gfx950 LDS/bank changes, scaled MFMA): https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
 - Matrix Cores on CDNA (MFMA programming): https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+- Register-allocation gate (`v_accvgpr`-vs-scratch, the two measured spill regressions, barrier-ends-region):
+  first-party on-box gfx942 MI300X, ROCm 7.1.0, mirrored in
+  [[operators/mla_attention/backends/flydsl]] and
+  [`expert_skills/skills/flydsl_fused_attention_backward`](../../expert_skills/skills/flydsl_fused_attention_backward/skill.md).
 - Cross-refs: [`authoring_gemm_levers.md`](authoring_gemm_levers.md) · [`debugging.md`](debugging.md) · [`knobs.md`](knobs.md)
