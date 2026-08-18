@@ -613,7 +613,32 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // it to 45min so a single hung/slow agent can't blow the wall-clock budget (still ample for the director
 // baseline + the head e2e A/B). Default mode keeps 120min → unchanged.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : (FAST_MODE ? 2700000 : 7200000), 10);
-function agentBounded(prompt, opts) {
+// Process-safety rule prepended to EVERY agent prompt. It is injected at this funnel
+// (the one place `agent()` is ever called) rather than in roleAgent(), because several
+// prompts are built inline and would otherwise never see it — and any future call site
+// inherits it automatically instead of having to remember it. Bash-capable agents own
+// server lifecycles, and a pattern-matched kill is indistinguishable from a correct one
+// until it TERMs the caller's orchestrator and fails the whole task.
+const PROCESS_SAFETY = `## PROCESS SAFETY (a violation can kill the caller's orchestrator, failing the whole task)
+This container's PID 1 is the CALLER's orchestrator process, not yours, and it is NOT restartable.
+NEVER run global or pattern-matched process cleanup: no \`pkill -f\` / \`pgrep -f ... | xargs kill\` /
+\`killall\` / \`ps aux | grep ... | xargs kill\`, and never \`kill -- -PGID\` for a group you did not
+create. A pattern as innocent as \`-f vllm\` matches the orchestrator's own command line and TERMs it.
+Manage ONLY processes you started, by the pid you captured at launch. When a script of yours launches a
+server, do NOT hand-roll the shutdown — source the shared teardown contract, which verifies process
+identity (pid, pgid, /proc start time) before signalling anything:
+    source ${WORKFLOW_DIR}/scripts/server_teardown.sh
+    trap server_teardown EXIT
+    \${SERVER_LAUNCH_PREFIX:-} <launch server> &   # own session => pgid == pid
+    SERVER_PID=\$!; server_record_identity "\$SERVER_PID"
+
+`;
+function withProcessSafety(prompt) {
+  return typeof prompt === 'string' ? PROCESS_SAFETY + prompt : prompt;
+}
+
+function agentBounded(rawPrompt, opts) {
+  const prompt = withProcessSafety(rawPrompt);
   if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return agent(prompt, opts);
   let to;
   const guard = new Promise((resolve) => {
@@ -2404,6 +2429,40 @@ if (want('final')) {
   log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validatedOk ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
     `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}` +
     `${validation && !validatedOk ? '; Validate produced no number — using carried accepted A/B win' : ''}). Results in ${EVAL_DIR}`);
+
+  // --- FINAL experience reconciliation (post-gate) -----------------------
+  // The per-milestone update_experience (in the Milestone loop above) is the ONLY
+  // curate step, and it runs on that milestone's ledger. But a head/kernel whose
+  // e2e A/B was still INCOMPLETE at milestone time is recorded as "Integrator
+  // pending", and the Finalize-gate (Fix C) that actually CONFIRMS its e2e win runs
+  // AFTER the last milestone curate — as does the Director's Validate. Without a
+  // pass here, those cards stay frozen at "pending" and never receive the verified
+  // gated number (see the 20260812 Qwen3.5-27B run: the +16.1% head card was left
+  // at "e2e transfer NOT yet gated"). Re-curate ONCE now, with the authoritative
+  // post-Validate numbers, so finalize-gate confirmations are written back.
+  if (allAccepted.length) {
+    const verifiedTput = validatedOk ? validation.director_verified_throughput_tok_s : finalTput;
+    await safeAgent(
+      roleAgent('system_architect', 'update_experience',
+        'FINAL RECONCILIATION (post-gate): re-curate knowledge/learned/ per learned/README.md. For every ' +
+        'entry in ACCEPTED_HEADS / ACCEPTED_KERNELS whose card was written earlier THIS run but still reads ' +
+        '"Integrator pending" / "e2e gate pending" (or carries no e2e number), MERGE the VERIFIED gated ' +
+        'result into that card: set effect from the entry\'s e2e_delta_pct plus the run FINAL_THROUGHPUT / ' +
+        'FINAL_SPEEDUP / VALIDATION_STATUS / OUTPUT_PARITY, and raise confidence per learned/README.md now ' +
+        'that the e2e gate passed. Do NOT blind-append and do NOT touch rejected/dead-end cards.', {
+        ROUND: 'final', FINAL_GATE: true, EVAL_DIR, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
+        ACCEPTED_HEADS: acceptedHeads, ACCEPTED_KERNELS: acceptedKernels,
+        BASELINE_THROUGHPUT: BASELINE_TPUT, FINAL_THROUGHPUT: verifiedTput, FINAL_SPEEDUP: finalSpeedup,
+        VALIDATION_STATUS: validatedOk ? validation.validation_status
+          : (validation ? validation.validation_status || 'flagged' : 'unknown'),
+        OUTPUT_PARITY: validation ? validation.output_parity : 'unknown',
+        MILESTONE_RESULTS: history.ledger.filter((e) => e && e.lesson === 'finished at finalize-gate'),
+        PRIOR_HISTORY: history,
+        ...ANALYSIS_SKILL_INPUTS,
+      }),
+      { phase: 'Validate', label: 'architect:experience final', schema: EXPERIENCE_SCHEMA });
+    log('Finalize: re-curated knowledge/learned/ with verified post-gate numbers (pending -> verified).');
+  }
 } else {
   log(`Phase(s) [${PHASES.join(',')}] done. Carried throughput ${curTput} tok/s. Pass the returned 'state' to the next phase invocation.`);
 }

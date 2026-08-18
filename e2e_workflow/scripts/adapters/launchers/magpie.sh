@@ -92,5 +92,29 @@ adapter_launch() {
     tail -n 60 "$LOG" 2>/dev/null || true
     return 2
   fi
-  echo ">>> magpie launcher: $BACKEND server up (pid $SERVER_PID) via $(basename "$script")."
+  # This pid came from an EXTERNAL script's pid file, so we cannot assume it leads its
+  # own group, and a stale file can name a pid that now belongs to someone else
+  # entirely (worst case: the caller's orchestrator). Either case must DISABLE group
+  # teardown here, at launch, rather than be discovered by a kill that already fired.
+  local _mp_pgid _mp_args
+  _mp_pgid="$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')"
+  _mp_args="$(ps -o args= -p "$SERVER_PID" 2>/dev/null)"
+  if [ "$_mp_pgid" != "$SERVER_PID" ]; then
+    SERVER_GROUP_UNVERIFIED=1
+    echo "!!! magpie launcher: pid $SERVER_PID does not lead its own group (pgid=${_mp_pgid:-?});" \
+         "group teardown disabled for this launch." >&2
+  fi
+  # The "is this actually our server?" test is DERIVED from this run's own config
+  # ($BACKEND, $PORT) — never a hard-coded backend list, which would silently
+  # mis-judge every future Magpie backend the same way it mis-judges a stale pid.
+  case "$_mp_args" in
+    *"$BACKEND"*|*"$PORT"*) : ;;
+    *)
+      SERVER_GROUP_UNVERIFIED=1
+      echo "!!! magpie launcher: pid $SERVER_PID matches neither BACKEND='$BACKEND' nor" \
+           "PORT='$PORT' (args='$(printf '%s' "$_mp_args" | cut -c1-120)') — stale pid file?" \
+           "group teardown disabled for this launch." >&2 ;;
+  esac
+  export SERVER_GROUP_UNVERIFIED
+  echo ">>> magpie launcher: $BACKEND server up (pid $SERVER_PID, pgid=${_mp_pgid:-?}) via $(basename "$script")."
 }
