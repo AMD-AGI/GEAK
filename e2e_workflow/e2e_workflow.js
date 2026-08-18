@@ -375,6 +375,27 @@ const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
 const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
+// Warm start = the kernel layer's LOCAL experience reuse: before round 1 a lane resolves this kernel's
+// own history in kb_artifacts/ and re-validates the top stored patches through the same verify gate as
+// a fresh candidate. The knobs live in the kernel layer; e2e only forwards them, so that (a) one store
+// is shared by every recursive lane in a run and (b) an orchestrator-supplied store reaches them at all
+// (a lane's own default resolves next to its workflow dir and would ignore the e2e arg). The forwarded
+// values equal the lane defaults when nothing is passed, so an unparameterized run is unchanged.
+const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
+  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts')).replace(/\/+$/, '');
+const KB_ARGS = {
+  kb_artifacts_dir: KB_ARTIFACTS_DIR,
+  warm_start: String(A.warm_start != null ? A.warm_start : 'on'),
+  ...(A.warm_start_match != null ? { warm_start_match: String(A.warm_start_match) } : {}),
+  ...(A.warm_start_min_speedup != null ? { warm_start_min_speedup: A.warm_start_min_speedup } : {}),
+  // Which plane the lanes read and write. Forwarded like the rest so one run uses one plane; omitted
+  // when unset, which leaves each lane on its own `local` default.
+  ...(A.kb_mode != null ? { kb_mode: String(A.kb_mode) } : {}),
+  ...(A.kb_store_dir != null ? { kb_store_dir: String(A.kb_store_dir) } : {}),
+  ...(A.kb_framework_version != null ? { kb_framework_version: String(A.kb_framework_version) } : {}),
+};
+// Same off-spelling set the kernel layer accepts; an off run must stay off everywhere.
+const WARM_START_OFF = ['off', 'false', 'none'].includes(KB_ARGS.warm_start.trim().toLowerCase());
 // Expert skills = human-authored, validated optimization recipes (perf_knowledge/expert_skills/). They
 // are ADVISORY priors: a matched `validated` skill is a HIGH-PRIOR candidate that routing/integration
 // roles reproduce, then gate by the usual on-box A/B — it NEVER overrides measurement and NEVER reduces
@@ -1236,6 +1257,9 @@ async function tryCorrectiveReauthor(spec) {
           op_spec: { op_kind: spec.op_kind, shapes: spec.shapes || {}, dtype: spec.dtype || 'bf16', regime: spec.regime || '', cuda_graph_safe: true, ...(spec.workload_path ? { workload_path: spec.workload_path } : {}) },
           perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
           use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
+          // A corrective must KEEP the isolated win; adopting a stored patch over it would be exactly the
+          // re-discovery the task forbids. History is still readable, just never auto-applied.
+          ...KB_ARGS, warm_start: WARM_START_OFF ? KB_ARGS.warm_start : 'reference',
           budget: KERNEL_BUDGET, gpu_ids: spec.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
           task: `CORRECTIVE FIX — do NOT re-discover the algorithm; KEEP the ${(spec.isolated || 0).toFixed(2)}x isolated win. ` +
             `This kernel PASSED the isolated oracle and ENGAGED on all live workers but was REJECTED at the e2e serving gate ` +
@@ -1395,7 +1419,11 @@ if (!MODEL_PATH && KERNEL_PATH) {
   try {
     const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
       kernel_path: KERNEL_PATH, workflow_dir: KERNEL_WF_DIR,
+      // The lane defaults to triton; a pass-through caller naming another backend must reach that
+      // backend's own warm-start page (the slug is per-language), not triton's.
+      ...(A.target_language ? { target_language: String(A.target_language) } : {}),
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
+      ...KB_ARGS,
       budget: KERNEL_BUDGET, gpu_ids: GPU_IDS, task: TASK, exp_root: EXP_ROOT,
       apply_to_original: APPLY_TO_ORIGINAL,
     }));
@@ -1911,6 +1939,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         await deepBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
           kernel_path: l.ext.task_dir, workflow_dir: KERNEL_WF_DIR, mode: l.mode, target_language: l.lang, op_spec: l.opSpec,
           perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR, use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
+          ...KB_ARGS,
           budget: DEEP_WAVE_BUDGET, max_no_improve: DEEP_WAVE_BUDGET, gpu_ids: g[0],
           state_dir: l.state_dir, shared_kb: l.sharedKb, global_kb: GLOBAL_KB,
           incremental_analyze: l.ran > 1 ? 'true' : 'false',   // P2: 2nd+ burst of a lane = continuation -> skip cold re-analysis
@@ -2041,6 +2070,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             op_spec: { op_kind: j.ext.op_kind, shapes: j.ext.shapes || {}, dtype: j.ext.dtype || 'bf16', regime: j.h.regime || '', cuda_graph_safe: true, ...(j.ext.workload_path ? { workload_path: j.ext.workload_path } : {}) },
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
             use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
+            ...KB_ARGS,
             budget: KERNEL_BUDGET, gpu_ids: g[0], exp_root: `${EVAL_DIR}/kernels/_exp`,
             task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${j.best_known_ms || '?'} ms). ` +
               `This kernel will be overlaid onto the LIVE decode path (CUDA-graph captured): its STEADY-STATE hot path MUST be ` +
@@ -2247,6 +2277,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '', cuda_graph_safe: true, ...(ext.workload_path ? { workload_path: ext.workload_path } : {}) },
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
             use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
+            ...KB_ARGS,
             budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
             task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${bake.best_known_ms || '?'} ms). ` +
               `This kernel will be overlaid onto the LIVE sglang decode path, which is CUDA-graph captured: its STEADY-STATE hot ` +
@@ -2505,6 +2536,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
+        ...KB_ARGS,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),

@@ -81,6 +81,13 @@ const EXPERT_SKILL_ROLES = new Set(['op_benchmarker']);
 const WARM_START = String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on';
 const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts')).replace(/\/+$/, '');
+// Plane selection, forwarded the same way and for the same reason: every bakeoff lane must read and
+// write the plane the run was launched with, not each its own default.
+const KB_PLANE_ARGS = {
+  ...(A.kb_mode != null ? { kb_mode: String(A.kb_mode) } : {}),
+  ...(A.kb_store_dir != null ? { kb_store_dir: String(A.kb_store_dir) } : {}),
+  ...(A.kb_framework_version != null ? { kb_framework_version: String(A.kb_framework_version) } : {}),
+};
 
 // ---------------------------------------------------------------------------
 // Schema helpers.
@@ -380,7 +387,7 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
       // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
       update_experience: 'off',
-      warm_start: WARM_START, kb_artifacts_dir: KB_ARTIFACTS_DIR,
+      warm_start: WARM_START, kb_artifacts_dir: KB_ARTIFACTS_DIR, ...KB_PLANE_ARGS,
     });
     const speedup = primSpeedup(r);
     log(`lane ${l.key}:${l.mode} -> ${speedup ? speedup.toFixed(2) + 'x' : 'no result'} (${r ? r.validation_status : 'null'})`);
