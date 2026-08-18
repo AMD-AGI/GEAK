@@ -120,7 +120,7 @@ def test_a_cold_identity_is_empty_not_an_error(tmp_path):
     assert store.champion(CID) == {}
     assert store.champion_speedup(CID) is None
     assert store.get_session(CID, "sid-missing") is None
-    assert store.read_bytes(CID, "sid-missing", "patch.diff") == b""
+    assert store.session_files(CID, "sid-missing") == []
 
 
 def test_a_half_written_document_is_a_miss_not_a_crash(tmp_path):
@@ -157,7 +157,9 @@ def test_the_same_session_id_updates_one_candidate(tmp_path):
     store.write(CID, "sid-1", knowledge(speedup=2.4), artifacts(tmp_path, "a2", "second\n"))
     ranked = store.candidates(CID, limit=0)
     assert len(ranked) == 1 and ranked[0].speedup == 2.4
-    assert store.read_bytes(CID, "sid-1", "patch.diff") == b"second\n"
+    landed = store.materialize(CID, ranked[0], str(tmp_path / "out"))
+    with open(os.path.join(landed, "files", "patch.diff")) as handle:
+        assert handle.read() == "second\n"
 
 
 def test_a_different_session_id_appends_under_the_same_key(tmp_path):

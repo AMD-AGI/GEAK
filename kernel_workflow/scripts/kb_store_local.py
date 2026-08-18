@@ -116,10 +116,6 @@ class Candidate(object):
         v = self.knowledge.get("value")
         return v if isinstance(v, dict) else {}
 
-    def as_dict(self):
-        return {"session_id": self.session_id, "speedup": self.speedup,
-                "is_champion": self.is_champion, "knowledge": self.knowledge}
-
 
 def _write_json(path: str, document) -> None:
     _atomic_bytes(path, json.dumps(document, ensure_ascii=False, indent=2,
@@ -185,10 +181,6 @@ class LocalKBStore(object):
     def __init__(self, root: str):
         self.root = os.path.abspath(os.path.expanduser(str(root)))
 
-    @property
-    def configured(self) -> bool:
-        return True
-
     # -- addressing ----------------------------------------------------------------------
 
     def identity_dir(self, canonical_id: str) -> str:
@@ -249,15 +241,6 @@ class LocalKBStore(object):
         except (OSError, ValueError):
             return None
         return loaded if isinstance(loaded, dict) else None
-
-    def read_bytes(self, canonical_id: str, session_id: str, rel_path: str) -> bytes:
-        path = os.path.join(self.session_dir(canonical_id, session_id), "files",
-                            *safe_rel_path(rel_path).split("/"))
-        try:
-            with open(path, "rb") as handle:
-                return handle.read()
-        except OSError:
-            return b""
 
     def session_files(self, canonical_id: str, session_id: str):
         """Relative paths of one session's artifacts, without reading them."""
