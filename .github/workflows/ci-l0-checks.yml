@@ -281,8 +281,9 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
-      # Proves drop_gate=off is inert, dryrun records but drops nothing, and a
-      # candidate at or above HEAD_PROTECT_PCT is never dropped in any mode.
+      # Proves drop_gate ships as 'on', that 'off' is inert, and that a drop is refused
+      # unless it resolves to exactly one candidate of a KNOWN size below HEAD_PROTECT_PCT
+      # from a list that is not taking out more than DROP_MAX_FRACTION of the queue.
       - name: drop_gate relevance-gate regression
         run: node e2e_workflow/scripts/test_drop_gate.js
 
@@ -300,10 +301,6 @@ jobs:
       # Stdlib only; no GPU, no network.
       - name: verify vendored tree against manifest
         run: python3 e2e_workflow/scripts/tuning_skillset_sync.py --verify
-      # Proves drop_gate=off is inert, dryrun records but drops nothing, and a
-      # candidate at or above HEAD_PROTECT_PCT is never dropped in any mode.
-      - name: drop_gate relevance-gate regression
-        run: node e2e_workflow/scripts/test_drop_gate.js
 
   dry-run:
     name: run_e2e dry-run mapping
