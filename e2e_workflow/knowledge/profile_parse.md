@@ -21,6 +21,25 @@ are given, HW durations come from rocprofv3 and shapes are enriched from the tor
                    shapes[], dtypes[], classification, backend_guess, editable, opt_hint } ] }
 ```
 
+`profile_topN.json` is a ranking artifact. Its `name`/`short_name` fields are display labels and MUST
+NOT be treated as executable task identities. When TraceLens candidates are available, run
+`scripts/op_identity.py` and emit `profile_identity.json` with:
+
+```
+{ schema: "op-identity-v1",
+  profiling_entities: [ { entity_id, display_name, pct_gpu_time, execution_scope,
+                           device_kernel_names[] } ],
+  executable_task_candidates: [ { stable_task_key, profiling_entity_id, short_name,
+                                  device_kernel_names[], served_regimes[],
+                                  consumer_callable, rebind_callable, resolution_status } ],
+  blocked_entities: [ { profiling_entity_id, execution_scope, reason } ] }
+```
+
+Profiling entities own Amdahl accounting and may be aggregate framework operations. Only executable
+task candidates may enter `extract_op`. A fused operation may intentionally remain one
+`execution_scope:"executable_op"` task; an attention/dispatcher aggregate can use
+`execution_scope:"expand_leaves"`; library/config-only entities produce no extraction task.
+
 ## The classification field (this is the triage signal the Architect routes on)
 - `library_gemm` — hipBLASLt/Tensile/rocBLAS GEMM. **Not source-editable.** Route to Config Tuner
   (backend/env/heuristics swap: aiter vs hipBLASLt vs CK GEMM, tuning DB) — NOT to the kernel squad.

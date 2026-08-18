@@ -94,14 +94,28 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   entry: `name`, `gpu_pct`, `call_count`, `duration_us`, `efficiency_percent`, `bound_type`,
   `kernel_category`/`tracelens_category`, `source_file`/`source_path`, `kernel_path`/
   `launcher_source_file`, `shapes`/`input_shapes` (a `<br>`-joined "(dims) dtype" list), and
-  `op_to_source_patchable`. Map them into the canonical `profile_topN.json` schema (same fields the
-  parser emits): `short_name`←name, `pct_gpu_time`←gpu_pct, `calls`←call_count,
+  `op_to_source_patchable`. **Before building the display/ranking table, deterministically separate
+  profiling aggregates from executable task identities:**
+  ```bash
+  python3 "$SKILL_DIR/scripts/op_identity.py" \
+    --input "$TRACELENS_KERNEL_CANDIDATES_JSON" \
+    --output "$EVAL_DIR/profile/round_${ROUND}/profile_identity.json"
+  ```
+  Read that output and return its `profiling_entities`, `executable_task_candidates`, and
+  `blocked_entities` unchanged. An aggregate framework operation may remain ONE Top-N row for Amdahl
+  accounting, but it MUST NOT become an extraction task name. `short_name` is display-only; executable
+  identities come exclusively from `executable_task_candidates[].stable_task_key`.
+  Map the remaining fields into the canonical `profile_topN.json` schema (same fields the parser emits):
+  `short_name`←name, `pct_gpu_time`←gpu_pct, `calls`←call_count,
   `total_ms`←duration_us/1000, `avg_us`←duration_us/call_count, `shapes`/`dtypes`←parsed from the
   `<br>` args, `classification`←map from `kernel_category`/`bound_type` (MoE/grouped-GEMM→library_gemm
   or triton per `kernel_kind`; attention→library_attn; etc.), `editable`←`op_to_source_patchable`. Carry
   `source_file`/`kernel_path` into each entry's `notes` (the Architect/Extractor reuse them). Write
   `profile_topN.json` + `.md` via your own Write (you may shell out to `parse_profile.py` only if you
-  also have a trace; otherwise assemble the JSON yourself) and set `source:"tracelens"`.
+  also have a trace; otherwise assemble the JSON yourself) and set `source:"tracelens"`. If identity
+  normalization fails, do not fabricate executable tasks: keep the aggregate Top-N for reporting,
+  return an empty task catalog, and note the failure so it is routed configuration-only rather than
+  extracted.
 - **If `TRACELENS_TRACE_FILE` is also a non-empty path that EXISTS → run an ADDITIONAL trace-analysis
   pass on top of analysis.md to sharpen the picture** (this is required by contract when the trace is
   present). `TRACELENS_TRACE_FILE` is a `torch_trace` **directory** that holds one steady-state serving
@@ -230,12 +244,24 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    skill errors out at any point, note it and return the Top-N anyway — a failed analysis skill must
    never fail or block the profile.**
 
+**Identity finalization (MANDATORY for every round).** If the TraceLens fast-path already produced
+`profile_identity.json`, keep it. Otherwise normalize the final parser-produced Top-N:
+```bash
+python3 "$SKILL_DIR/scripts/op_identity.py" \
+  --input "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json" \
+  --output "$EVAL_DIR/profile/round_${ROUND}/profile_identity.json"
+```
+`parse_profile.py` marks its rows `profiling_kind:"device_leaf"`, so re-profile preserves executable
+leaf identities without reusing the stale baseline TraceLens catalog. Return all three identity arrays
+from this artifact unchanged.
+
 Return JSON:
 ```json
 {
   "round": 0,
   "profile_topN_json": "<EVAL_DIR>/profile/round_0/profile_topN.json",
   "profile_topN_md": "<EVAL_DIR>/profile/round_0/profile_topN.md",
+  "profile_identity_json": "<EVAL_DIR>/profile/round_0/profile_identity.json (\"\" when unavailable)",
   "profile_roofline_json": "<EVAL_DIR>/profile/round_0/profile_roofline.json  (\"\" if no analysis skill ran)",
   "source": "torch-trace|merged|tracelens|tracelens+trace",
   "total_gpu_time_ms": 0.0,
@@ -243,6 +269,9 @@ Return JSON:
     {"rank": 1, "short_name": "...", "classification": "...", "pct_gpu_time": 0.0,
      "calls": 0, "avg_us": 0.0, "shapes": [[...]], "editable": true, "regime_note": "prefill|decode|both"}
   ],
+  "profiling_entities": [{"entity_id": "...", "display_name": "...", "execution_scope": "executable_op|expand_leaves|config_only|blocked", "device_kernel_names": ["..."]}],
+  "executable_task_candidates": [{"stable_task_key": "...", "profiling_entity_id": "...", "short_name": "<device leaf or full fused op>", "resolution_status": "needs_seam|verified"}],
+  "blocked_entities": [{"profiling_entity_id": "...", "execution_scope": "config_only|blocked", "reason": "..."}],
   "shift_note": "for reprofile: how the bottleneck moved vs previous round",
   "notes": "resolved 'other' entries, rocprof availability, anything unusual"
 }

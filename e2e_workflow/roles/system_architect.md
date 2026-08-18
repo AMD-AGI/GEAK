@@ -70,6 +70,9 @@ admits*, not by the edit flag:
 ## PHASE=strategize  (after baseline profile, before any optimization)
 
 Inputs: `EVAL_DIR`, `PROFILE_TOPN` (path to profile_topN.json + inline top entries),
+`PROFILE_IDENTITY` (path to profile_identity.json when available),
+`EXECUTABLE_TASK_CANDIDATES` (the same identity catalog inline),
+`RUNTIME_TRUTH` (requested vs observed/effective serving backends),
 `BASELINE_THROUGHPUT`, `WORKLOAD` (isl/osl/conc → tells you prefill vs decode regime mix),
 `BUDGET` (max kernel-optimization tasks), `CONFIG_TUNE_ENABLED` (bool), `SKILL_DIR`.
 OPTIONAL profile-analysis prior (empty string = not provided): `ANALYSIS_SKILL`, `ANALYSIS_SKILL_DIR`
@@ -131,6 +134,22 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    (use the backend playbook priors for plausible_speedup per class, keyed by `model_class`+`gfx` when
    present). Note the regime each serves (large-M shape = prefill, small-M/batch = decode). **Dedupe
    GEMMs by shape** — one bake-off per distinct (shape,dtype) covers all its launches.
+1a. **Executable identity contract (MANDATORY when `PROFILE_IDENTITY` exists).** Read
+   `PROFILE_IDENTITY` and treat its two layers differently:
+   - `profiling_entities[]` own `pct_gpu_time` and Amdahl ranking. They may be aggregate framework ops.
+   - `executable_task_candidates[]` are the ONLY identities eligible for `extract_op`.
+   Select an entity for ROI, then copy its executable task `stable_task_key` values into
+   `head_candidates[].selected_task_keys`. Never manufacture a task from the entity's display name.
+   Leaf tasks carry `pct_gpu_time` plus `parent_pct_gpu_time`; leaf percentages are allocated to sum to
+   the parent and MUST NOT each be replaced with the full parent percentage. A
+   `pct_gpu_time_source:"unattributed_leaf"` task is a real identity with unknown individual weight,
+   not an extra copy of the parent's Amdahl time.
+   `execution_scope=config_only|blocked` has no head task: route config-only or put it in `drop_list`
+   with the identity reason. `execution_scope=expand_leaves` must select one or more leaf task keys;
+   preserve `profiling_entity_id`, `device_kernel_names`, `served_regimes`, `capture_policy`, and
+   `baseline_policy` from the catalog unchanged. If the identity catalog is absent, use the legacy
+   path, but mark any known aggregate as `profiling_kind:"aggregate"` so the workflow blocks it rather
+   than guessing an executable identity.
 1b. **TraceLens prior (ADVISORY — only if `TRACELENS_KERNEL_CANDIDATES_JSON` / `TRACELENS_REPORT_JSON`
    is a non-empty path that EXISTS).** Read its `hot_kernels[]`. Each entry pre-resolves things you would
    otherwise hand to the Extractor: `source_file`/`source_path` (the patched python source),
@@ -142,7 +161,8 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    (`kernel_path`/`launcher_source_file`), and `bound_type` — so the Kernel Extractor can locate the
    source/seam faster. **NEVER let TraceLens override the on-box measured `pct_gpu_time`/ranking — the
    profile is the judge; TraceLens only ADDs hints/candidates, never prunes them.** Treat any `shapes` it
-   carries as a STARTING hint that the Extractor will re-verify against a live capture (they may be inaccurate).
+   carries as a STARTING hint that the Extractor will re-verify against a live capture (they may be
+   inaccurate). Raw TraceLens names must never override the task identities from step 1a.
    If the prior is absent, proceed exactly as before.
 1c. **Roofline prior (ADVISORY — only if `ANALYSIS_SKILL_DIR` is non-empty AND the Profiler returned a
    `profile_roofline_json` that EXISTS; otherwise skip this step entirely and route exactly as before).**
@@ -234,6 +254,16 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    schedule it. Every fused head MUST carry an `engagement_check` (a concrete live-server assertion, e.g.
    "`is tuned on cu_num` > 0 in the cand server log") for the Integrator to verify BEFORE spending a full
    e2e A/B, so an unreachable lever is rejected in minutes, not hours.
+2c. **Attention identity + production-contract gate (MANDATORY before routing an attention head).**
+   Attention profiling commonly aggregates prefill/decode device kernels under one framework op.
+   Preserve the aggregate for Amdahl, but route only task keys supplied by step 1a. For each selected
+   leaf, resolve the real backend consumer callable and rebind callable separately; they may differ.
+   The task is authorable only when live capture can record q/k/v, paged-KV state, metadata, and output
+   through that consumer, and a call-counter probe proves the rebind seam is reached. Otherwise use
+   `integration_lever:"config-attention-backend"` with no selected task key. Never create an attention
+   task from an aggregate display name and never use a synthetic attention oracle. Resolve the seam
+   against `RUNTIME_TRUTH.attention_backend.effective`, not the requested flag. If requested and observed
+   differ, carry the complete runtime truth into the candidate and explain the reroute.
 3. Order by ROI and cost: config fast path FIRST (cheap, reshapes the landscape, when
    `CONFIG_TUNE_ENABLED`); then **head candidates by Amdahl priority** (GEMM 78% beats any editable
    kernel); then kernel-track editables. Respect `BUDGET` / `HEAD_BUDGET`.
@@ -251,12 +281,22 @@ Return JSON:
      "expected_pct_gpu": 0.0, "rationale": "playbook prior + which Top-N entry it targets"}
   ],
   "head_candidates": [
-    {"id": "h0", "short_name": "...", "op_kind": "gemm|attn", "pct_gpu_time": 0.0,
+    {"id": "h0", "short_name": "<executable leaf/full-op display name>", "op_kind": "gemm|attn", "pct_gpu_time": 0.0,
+     "profiling_entity_id": "...",
+     "profiling_entity_name": "<aggregate display name retained for Amdahl/reporting>",
+     "selected_task_keys": ["<stable_task_key copied from PROFILE_IDENTITY>"],
+     "stable_task_key": "<set when exactly one task is selected>",
+     "execution_scope": "executable_op|expand_leaves",
+     "device_kernel_names": ["<selected device leaves>"],
+     "profiling_kind": "aggregate|device_leaf|executable_op",
      "shapes": "[[1024,5120],[5120,34816]]", "dtype": "bf16", "regime": "prefill|decode|both",
      "transpose_b": true, "bias": false,
      "candidate_backends": ["aiter","hipblaslt","triton","ck"],
      "is_fused_kernel": false,
      "live_call_seam": "module:attr(sig) actually dispatched at runtime (e.g. 'sglang...Fp8LinearMethod.apply' for a standalone GEMM, or 'aiter.fused_moe_bf16_asm:asm_moe_tkw1(hidden_states,w1,w2,topk_weight,topk_ids,...)' for a fused MoE)",
+     "consumer_callable": "module:attr used for live capture",
+     "rebind_callable": "module:attr replaced by the authored candidate",
+     "runtime_backend": {"requested": "", "observed": "", "effective": "", "match": null, "verified": false, "confidence": "unknown"},
      "integration_lever": "standalone-gemm-swap|dense-linear-env-overlay|fused-op-tune-hook|author-fused-replacement",
      "engagement_check": "concrete live-server assertion the Integrator verifies before a full A/B (e.g. \"is tuned on cu_num > 0\"). REQUIRED for every fused head AND for any standalone head whose win needs a backend-select switch (env/overlay) to bind; '' ONLY when the tuned backend is already the default live dispatch",
      "amdahl_priority": 0.0, "rationale": "why this is the head; what win to expect; if is_fused_kernel, WHY the chosen lever reaches live_call_seam (signature match)",

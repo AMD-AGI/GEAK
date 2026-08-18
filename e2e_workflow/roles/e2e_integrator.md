@@ -109,9 +109,15 @@ or starve KV), `decode_regressed` (bool + which buckets), `parity`, `e2e_delta_p
 `root_cause` of any isolated-win-but-no-e2e-gain. This is additive — your gate logic and return JSON are
 unchanged; you just also persist the diagnostics the deep feedback/harness-refine step reads.
 
-1. **Verify provenance**: re-compute the oracle checksum and confirm `unittest.py` is unchanged from
-   extraction (anti-cheating). If tampered → REJECT. (For a synthesized-GEMM op task with no
-   `reference_io.pt`, instead confirm `meta.json` shapes/dtype are unchanged.)
+1. **Verify identity + provenance**: require a `stable_task_key` and its parent
+   `profiling_entity_id` when the profile identity catalog was present. The integration target is the
+   executable task, never the aggregate profiling display name. Re-compute the oracle checksum and
+   confirm `unittest.py` is unchanged from extraction (anti-cheating). If tampered → REJECT. For
+   attention, additionally require `oracle_provenance:"captured_live"`, `oracle_complete:true`,
+   `baseline_provenance:"live_online"`, `baseline_verified:true`, and `contract_verified:true`; any
+   missing/false field is `invalid_task_contract` and is rejected before authoring/timed A/B. (For a
+   synthesized value-independent GEMM op task with no `reference_io.pt`, instead confirm `meta.json`
+   shapes/dtype are unchanged.)
 2. **Build the candidate config/overlay** = current accepted + this ONE change, by `winner_kind`:
    - **env** (TunableOp CSV, `HIPBLASLT_TUNING_FILE`, …): candidate env = `CURRENT_ENV +
      KERNEL_RESULT.apply_env`. Keep the tuning artifact under `$EVAL_DIR/config/` so it's reproducible.
@@ -223,11 +229,24 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      EXTRA_SERVER_ARGS="<cur flags>" EXTRA_ENV="<cur env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
    # candidate block: + this one change, E2E_REPEATS timed repeats on one server (SAME TP/GPU)
-   BACKEND="<backend>" OUT_DIR="$CB/cand" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
+   CAND_DIR="$CB/cand${CAND_TAG:+_$CAND_TAG}"
+   BACKEND="<backend>" OUT_DIR="$CAND_DIR" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
      REPEATS="${E2E_REPEATS:-7}" PROFILE=0 OVERLAY_PYTHONPATH="<CAND or empty>" \
      EXTRA_SERVER_ARGS="<cand flags>" EXTRA_ENV="<cand env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
    ```
+   After the candidate server has started, parse its effective attention backend:
+   ```bash
+   CAND_DIR="$CB/cand${CAND_TAG:+_$CAND_TAG}"
+   python3 "$SKILL_DIR/scripts/parse_runtime_truth.py" \
+     --server-log "$CAND_DIR/server.log" \
+     --requested "<attention backend requested by cand flags/env, or empty>" \
+     --framework "<vllm|sglang|other>" \
+     --output "$CAND_DIR/runtime_truth.json"
+   ```
+   Return the parsed object as `runtime_truth` on every result, including rejected/incomplete results.
+   This is the new current runtime truth if an env/flag candidate is accepted; requested config alone is
+   never authoritative.
    **Do NOT set the measurement-口径 knobs (`RANDOM_RANGE_RATIO` / `NUM_PROMPTS` /
    `NUM_WARMUPS` / `SEED`) in these blocks.** When an external orchestrator drives the run it has
    already exported its exact 口径 into the environment (`run_e2e.py:apply_bench_protocol` from
@@ -235,13 +254,16 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    otherwise. Hard-coding them here would silently override the caller's 口径 and make the A/B
    incomparable to the caller's baseline (e.g. fixed vs variable sequence lengths). Only vary
    `OVERLAY_PYTHONPATH` / `EXTRA_SERVER_ARGS` / `EXTRA_ENV` between the two legs.
-   Read ALL per-repeat throughputs from `$CB/ref/bench_runs.jsonl` and `$CB/cand/bench_runs.jsonl`
+   Read ALL per-repeat throughputs from `$CB/ref/bench_runs.jsonl` and `$CAND_DIR/bench_runs.jsonl`
    (each has E2E_REPEATS rows). Compute `ref_med`, `cand_med`, `ref_max`, `cand_min`, and
    `delta% = (cand_med - ref_med)/ref_med*100`.
    **MANDATORY — measure BOTH legs before returning a verdict. Completing only the reference leg is NOT
    an acceptable stopping point and is NOT a valid result.** Checkpoint each leg as it finishes (for crash
    recovery only): after the reference block completes write a partial
    `$CB/integrate_result.json` (at minimum `{short_name, ref_med, gate:"incomplete", ab_complete:false}`),
+   and copy the task-contract fields from `KERNEL_RESULT` unchanged (`task_dir`, `stable_task_key`,
+   `profiling_entity_id`, oracle/baseline provenance and verification fields, checksum, synthesized,
+   `op_kind`, and `target_callable`) so disk recovery can re-validate the same task,
    then **ALWAYS run the candidate block** and update it (adding `cand_med`, the final `gate`,
    `ab_complete:true`, `e2e_throughput_tok_s`, `e2e_delta_pct`). The checkpoint exists ONLY so a CRASH is
    recoverable — it is NOT a licence to stop after the reference leg. If wall-clock is tight, SHRINK the
@@ -299,6 +321,7 @@ Return JSON:
 ```json
 {
   "short_name": "<short_name>",
+  "task_dir": "<immutable extracted task dir>",
   "provenance_ok": true,
   "isolated_speedup": 0.0,
   "pct_gpu_time": 0.0,
@@ -309,6 +332,8 @@ Return JSON:
   "ab_complete": true,
   "output_parity": "pass|fail",
   "parity_kind": "byte_exact|accuracy|none",
+  "runtime_truth_json": "<candidate dir>/runtime_truth.json",
+  "runtime_truth": {"attention_backend": {"requested": "", "observed": "", "effective": "", "match": null, "verified": false, "confidence": "unknown", "evidence": []}},
   "gate": "accepted|stack|rejected|incomplete",
   "accepted_overlay": "<path to the overlay to carry forward>",
   "reason": "why accepted/rejected/incomplete (cite Amdahl + measured delta vs noise band)"

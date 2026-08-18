@@ -92,10 +92,19 @@ Steps:
    key; `metric_basis` says whether it is output or total tok/s — falls back to
    `output_throughput_tok_s_median` on older summaries). Baseline and candidate share the same basis, so
    the accept ratio is consistent.
-   **Prove engagement**: grep `EVAL_DIR/logs/baseline_bench.log` / `server.log` to confirm the seed
-   flags/env actually took effect (e.g. the chosen attention backend / env var appears in the server
-   banner). If a seed flag did not engage, record it loudly in `notes` — a baseline measured on a
-   silently-ignored config corrupts every later gain.
+   **Prove engagement**: parse the server's runtime backend decision rather than trusting requested
+   flags/env. Resolve the requested attention backend from `INIT_FLAGS`/`INIT_ENV` (empty if none), then:
+   ```bash
+   python3 "$SKILL_DIR/scripts/parse_runtime_truth.py" \
+     --server-log "$EVAL_DIR/baseline/server.log" \
+     --requested "<requested attention backend or empty>" \
+     --framework "<vllm|sglang|other>" \
+     --output "$EVAL_DIR/baseline/runtime_truth.json"
+   ```
+   Return that JSON as `runtime_truth`. `verified:false` / `match:null` means the log did not prove
+   engagement; do not report it as a match. If requested and observed differ, the observed/effective backend
+   is authoritative for extraction and seam resolution. Record the mismatch loudly in `notes`; a
+   baseline measured on a silently-ignored config corrupts every later gain.
 6. If baseline spread > ~5%, re-run — a noisy baseline poisons every later comparison. Set
    `noise_band_pct = 0.5` (the default accept threshold): the Integrator gates with a TIGHT protocol
    (interleaved A/B, E2E_REPEATS per leg, non-overlap + engagement proof) that makes 0.5% trustworthy.
@@ -111,6 +120,8 @@ Return JSON:
   "baseline_spread_pct": 0.0,
   "noise_band_pct": 0.5,
   "baseline_summary_path": "<EVAL_DIR>/baseline/bench_summary.json",
+  "runtime_truth_json": "<EVAL_DIR>/baseline/runtime_truth.json",
+  "runtime_truth": {"attention_backend": {"requested": "", "observed": "", "effective": "", "match": null, "verified": false, "confidence": "unknown", "evidence": []}},
   "server_flags": {"extra": "<resolved server flags, incl. INIT_FLAGS>"},
   "server_env": "<resolved KEY=VAL env, incl. INIT_ENV>",
   "tp": 1,

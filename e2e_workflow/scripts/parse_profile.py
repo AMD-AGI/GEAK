@@ -403,6 +403,12 @@ def build_summary(agg, total_us, launches, source, top_n, enrich=None,
             "rank": rank,
             "name": name,
             "short_name": short_name(name),
+            # parse_profile consumes GPU launch events, so this row is a device leaf rather than an
+            # aggregate framework operation.  The identity normalizer uses these structural fields
+            # during re-profile, where no baseline TraceLens catalog is available.
+            "profiling_kind": "device_leaf",
+            "device_kernel_name": short_name(name),
+            "device_kernel_names": [short_name(name)],
             "calls": d["calls"],
             "total_ms": round(d["total_us"] / 1000.0, 4),
             "avg_us": round(d["total_us"] / max(d["calls"], 1), 3),
@@ -498,6 +504,9 @@ def build_workload(agg, total_us, top_n, target=""):
         kentry = {
             "name": name,
             "short_name": short_name(name),
+            "profiling_kind": "device_leaf",
+            "device_kernel_name": short_name(name),
+            "device_kernel_names": [short_name(name)],
             "classification": cls,
             "backend_guess": backend,
             "editable": editable,

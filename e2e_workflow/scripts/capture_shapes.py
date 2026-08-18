@@ -288,6 +288,8 @@ def _flush(write_oracle=True):
         "reference_io": "reference_io.pt",
         "reference_io_sha256": s["oracle_sha"],   # None until the oracle file is written (partial flush)
         "oracle_complete": bool(s["oracle_written"]),
+        "oracle_provenance": "captured_live" if s["oracle_written"] else "incomplete",
+        "consumer_callable": s["target"],
         "build": False,  # default: pure-python/triton; Extractor flips to True for HIP/CK/asm tasks
         "note": "Oracle captured from baseline. Do NOT edit unittest.py or reference_io.pt during opt.",
     }

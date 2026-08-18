@@ -669,6 +669,9 @@ class TestBuildSummary(_TmpMixin, unittest.TestCase):
                                conc=4, isl=512, osl=8, chunk=256,
                                capture_sizes=[1, 2, 4, 8])["top_kernels"][0]
         self.assertEqual(top["name"], GEMM)
+        self.assertEqual(top["profiling_kind"], "device_leaf")
+        self.assertEqual(top["device_kernel_name"], "gemm_kernel")
+        self.assertEqual(top["device_kernel_names"], ["gemm_kernel"])
         self.assertEqual(top["calls"], 2)
         self.assertEqual(top["total_ms"], 0.3)
         self.assertEqual(top["avg_us"], 150.0)

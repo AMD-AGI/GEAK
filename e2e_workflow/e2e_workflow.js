@@ -425,17 +425,21 @@ const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, model_name: { type: 'string' },
   baseline_throughput_tok_s: { type: 'number' }, baseline_spread_pct: { type: 'number' },
   noise_band_pct: { type: 'number' }, baseline_summary_path: { type: 'string' },
+  runtime_truth_json: { type: 'string' }, runtime_truth: { type: 'object', additionalProperties: true },
   server_flags: { type: 'object', additionalProperties: true }, server_env: { type: 'string' },
   tp: { type: 'number' }, workload: { type: 'object', additionalProperties: true },
   bench_script: { type: 'string' }, notes: { type: 'string' },
-}, ['eval_dir', 'baseline_throughput_tok_s']);
+}, ['eval_dir', 'baseline_throughput_tok_s', 'runtime_truth']);
 
 const PROFILE_SCHEMA = obj({
   round: { type: 'number' }, profile_topN_json: { type: 'string' }, profile_topN_md: { type: 'string' },
   profile_workload_json: { type: 'string' }, // per-(shape,dtype) weighted workload model (optional)
+  profile_identity_json: { type: 'string' }, // profiling aggregates separated from executable task identities
+  profiling_entities: arrObj, executable_task_candidates: arrObj, blocked_entities: arrObj,
   source: { type: 'string' }, total_gpu_time_ms: { type: 'number' }, top_kernels: arrObj,
   shift_note: { type: 'string' }, notes: { type: 'string' },
-}, ['profile_topN_json', 'top_kernels']);
+}, ['profile_topN_json', 'top_kernels', 'profile_identity_json',
+    'profiling_entities', 'executable_task_candidates']);
 
 const STRATEGY_SCHEMA = obj({
   regime_summary: { type: 'string' }, config_directions: arrObj,
@@ -452,9 +456,10 @@ const FLYDSL_GATE_SCHEMA = obj({
 
 const SWEEP_SCHEMA = obj({
   trials: arrObj, accepted_flags: { type: 'string' }, accepted_env: { type: 'string' },
+  runtime_truth_json: { type: 'string' }, runtime_truth: { type: 'object', additionalProperties: true },
   best_throughput_tok_s: { type: 'number' }, throughput_speedup_vs_baseline: { type: 'number' },
   summary: { type: 'string' },
-}, ['accepted_flags', 'best_throughput_tok_s']);
+}, ['accepted_flags', 'best_throughput_tok_s', 'runtime_truth']);
 
 const PLAN_SCHEMA = obj({
   stop: { type: 'boolean' }, reasoning: { type: 'string' },
@@ -463,13 +468,18 @@ const PLAN_SCHEMA = obj({
 
 const EXTRACT_OP_SCHEMA = obj({
   short_name: { type: 'string' }, op_kind: { type: 'string' }, editable: { type: 'boolean' },
+  stable_task_key: { type: 'string' }, profiling_entity_id: { type: 'string' },
   task_dir: { type: 'string' }, shapes: { type: 'object', additionalProperties: true },
   workload_path: { type: 'string' }, // per-(shape,dtype) weighted workload model for this kernel (optional)
   dtype: { type: 'string' }, synthesized: { type: 'boolean' }, regimes_captured: arrStr,
   candidate_backends: arrStr, reference_io_sha256: { type: 'string' },
+  oracle_provenance: { type: 'string' }, oracle_complete: { type: 'boolean' },
   target_callable: { type: 'string' }, // module:attr rebind seam for an authored kernel ('' if none)
+  consumer_callable: { type: 'string' }, rebind_callable: { type: 'string' },
   baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
   baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
+  baseline_provenance: { type: 'string' }, baseline_verified: { type: 'boolean' },
+  contract_verified: { type: 'boolean' },
   smoke: { type: 'string' }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
@@ -502,7 +512,7 @@ const KERNEL_LAYER_SCHEMA = obj({
 }, ['ran', 'final_patch', 'final_geomean']);
 
 const INTEGRATE_SCHEMA = obj({
-  short_name: { type: 'string' }, provenance_ok: { type: 'boolean' },
+  short_name: { type: 'string' }, task_dir: { type: 'string' }, provenance_ok: { type: 'boolean' },
   isolated_speedup: { type: 'number' }, pct_gpu_time: { type: 'number' },
   e2e_throughput_tok_s: { type: 'number' }, e2e_delta_pct: { type: 'number' },
   // A/B completion signals: the integrator MUST set ab_complete=true ONLY when
@@ -516,9 +526,11 @@ const INTEGRATE_SCHEMA = obj({
   // baseline), 'accuracy' (soft sampled task-accuracy probe — quant / accuracy_gate), or 'none'. The
   // implausible-speedup guard only distrusts an 'accuracy'/soft accept; a byte_exact accept is trusted.
   parity_kind: { type: 'string' },
+  runtime_truth_json: { type: 'string' },
+  runtime_truth: { type: 'object', additionalProperties: true },
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
   accepted_overlay: { type: 'string' }, reason: { type: 'string' },
-}, ['gate', 'e2e_throughput_tok_s']);
+}, ['gate', 'e2e_throughput_tok_s', 'runtime_truth']);
 
 const FINALIZE_SCHEMA = obj({
   final_overlay: { type: 'string' }, final_patch: { type: 'string' }, final_launch_script: { type: 'string' },
@@ -707,47 +719,108 @@ async function ensureFlydslGate() {
   }
 }
 
-// A FROZEN baseline is resolvable when the extractor either froze baseline_src/ (baseline_frozen)
-// OR set an importable meta.baseline_callable. That is the language-independent speedup denominator.
+// A FROZEN baseline is resolvable only after the extractor has verified it.  A non-empty callable
+// string alone proves neither importability nor that it is the real online speedup denominator.
 const hasFrozenBaseline = (ext) =>
   !!(ext && (ext.baseline_frozen === true ||
-             (typeof ext.baseline_callable === 'string' && ext.baseline_callable.trim() !== '')));
+             (ext.baseline_verified === true &&
+              typeof ext.baseline_callable === 'string' && ext.baseline_callable.trim() !== '')));
 
-// Run a kernel_extractor agent and GUARANTEE it froze a real baseline. safeAgent already retries
-// transient failures; this wraps it to ALSO re-extract when the extraction succeeds (smoke passed,
-// task dir present) but produced NO frozen baseline — re-invoking with a corrective instruction up
-// to BASELINE_EXTRACT_RETRIES times. If a baseline still can't be frozen, we force the caller's
-// existing extract-failure path (smoke/unittest_smoke -> 'fail' + a reason) so the head is flagged
-// (if dominant) or skipped, NEVER timed against its own scaffold. `role`/`phase`/`intro`/`inputs`
-// are the roleAgent args; `opts` is the safeAgent opts (phase/label/schema). Used by every extract
-// site (deep, opt-A, milestone/head extract_op, and the non-op milestone extract).
+// Value/layout-dependent operations must never pass extraction with a fabricated oracle or an
+// unverified production contract.  GEMM keeps its explicitly value-independent synthesis path.
+const extractContractErrors = (kernel, ext) => {
+  const errors = [];
+  if (!ext) return ['extractor returned no result'];
+  const taskKind = String((kernel && kernel.op_kind) || '').toLowerCase();
+  const extKind = String((ext && ext.op_kind) || '').toLowerCase();
+  const attentionTask = /^(attn|attention)$/.test(taskKind) ||
+    /^(attn|attention)$/.test(extKind) ||
+    /attention|attn|paged|flash|fmha|mha|mla/i.test(
+      `${(kernel && kernel.classification) || ''} ${(kernel && kernel.short_name) || ''} ` +
+      `${(kernel && kernel.profiling_entity_name) || ''}`);
+  if (ext.baseline_verified === false) errors.push('baseline callable was not verified');
+  if (ext.baseline_provenance && ext.baseline_provenance !== 'live_online') {
+    errors.push(`invalid baseline provenance: ${ext.baseline_provenance}`);
+  }
+  if (attentionTask) {
+    if (ext.synthesized === true) errors.push('attention oracle is synthetic');
+    if (ext.oracle_provenance !== 'captured_live') {
+      errors.push(`attention oracle provenance must be captured_live (got ${ext.oracle_provenance || 'missing'})`);
+    }
+    if (ext.oracle_complete !== true) errors.push('attention oracle is incomplete');
+    if (!ext.reference_io_sha256) errors.push('attention reference_io checksum is missing');
+    if (ext.baseline_provenance !== 'live_online') {
+      errors.push(`attention baseline provenance must be live_online (got ${ext.baseline_provenance || 'missing'})`);
+    }
+    if (ext.baseline_verified !== true) errors.push('attention baseline was not verified');
+    if (ext.contract_verified !== true) errors.push('attention production ABI was not verified');
+  }
+  return errors;
+};
+
+// Run a kernel_extractor agent and GUARANTEE a real baseline plus a valid value-dependent contract.
+// Re-extract a smoke-passing task when either invariant is missing; no authoring budget is spent on
+// an attention task with a synthetic/partial oracle or an unverified production ABI.
 async function extractWithBaseline(role, phase, intro, inputs, opts) {
   const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
   let ext = await safeAgent(roleAgent(role, phase, intro, inputs), opts);
   let tries = 0;
-  while (smokeOk(ext) && !hasFrozenBaseline(ext) && tries < BASELINE_EXTRACT_RETRIES) {
+  let contractErrors = extractContractErrors(inputs && inputs.KERNEL, ext);
+  while (smokeOk(ext) && (!hasFrozenBaseline(ext) || contractErrors.length) &&
+         tries < BASELINE_EXTRACT_RETRIES) {
     tries++;
-    log(`  ${(opts && opts.label) || role}: extraction froze NO baseline ` +
-      `(baseline_src/ or meta.baseline_callable) — the speedup denominator would fall back to the ` +
-      `candidate's own scaffold (fake-win). RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
+    const defects = [
+      ...(!hasFrozenBaseline(ext) ? ['no verified frozen baseline'] : []),
+      ...contractErrors,
+    ];
+    log(`  ${(opts && opts.label) || role}: invalid extraction contract (${defects.join('; ')}) — ` +
+      `RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
     ext = await safeAgent(
       roleAgent(role, phase,
-        intro + ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. You MUST freeze the real online kernel into ' +
+        intro + ` PRIOR ATTEMPT FAILED THE EXTRACTION CONTRACT: ${defects.join('; ')}. ` +
+        'You MUST freeze the real online kernel into ' +
         'an immutable baseline_src/ and set meta.baseline_callable (the speedup denominator), bind the ' +
-        "unittest's baseline leg to it, then return baseline_frozen:true. An extraction with no frozen " +
-        'baseline is INVALID and will be discarded.',
+        "unittest's baseline leg to it, then return baseline_frozen:true, baseline_verified:true, and " +
+        "baseline_provenance:'live_online'. Attention additionally requires a complete captured-live " +
+        "oracle and a verified production ABI; synthetic attention is INVALID.",
         inputs),
       opts);
+    contractErrors = extractContractErrors(inputs && inputs.KERNEL, ext);
   }
-  if (smokeOk(ext) && !hasFrozenBaseline(ext)) {
-    log(`  ${(opts && opts.label) || role}: STILL no frozen baseline after ${BASELINE_EXTRACT_RETRIES} ` +
-      `re-extractions — ABORTING this extraction (refusing a fake speedup vs the candidate's own scaffold).`);
+  if (smokeOk(ext) && (!hasFrozenBaseline(ext) || contractErrors.length)) {
+    const defects = [
+      ...(!hasFrozenBaseline(ext) ? ['no verified frozen baseline'] : []),
+      ...contractErrors,
+    ];
+    log(`  ${(opts && opts.label) || role}: extraction contract still invalid after ` +
+      `${BASELINE_EXTRACT_RETRIES} re-extractions (${defects.join('; ')}) — ABORTING.`);
     return { ...ext, smoke: 'fail', unittest_smoke: 'fail',
-      notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
-        `(baseline_src/ / meta.baseline_callable required as the speedup denominator) — ${ext.notes || ''}` };
+      notes: `invalid extraction contract after ${BASELINE_EXTRACT_RETRIES} re-extractions: ` +
+        `${defects.join('; ')} — ${ext.notes || ''}` };
   }
   return ext;
 }
+
+// Preserve extraction identity/provenance all the way to the Integrator. Keeping this in one helper
+// prevents one of the deep/fast/normal/milestone paths from silently dropping hard-gate fields.
+const integrationTaskContract = (head, ext) => ({
+  stable_task_key: (ext && ext.stable_task_key) || (head && head.stable_task_key) || '',
+  profiling_entity_id: (ext && ext.profiling_entity_id) || (head && head.profiling_entity_id) || '',
+  profiling_entity_name: (head && head.profiling_entity_name) || '',
+  device_kernel_names: (head && head.device_kernel_names) || [],
+  consumer_callable: (ext && ext.consumer_callable) || (head && head.consumer_callable) || '',
+  rebind_callable: (ext && ext.rebind_callable) || (head && head.rebind_callable) || '',
+  oracle_provenance: (ext && ext.oracle_provenance) || '',
+  oracle_complete: !!(ext && ext.oracle_complete === true),
+  reference_io_sha256: (ext && ext.reference_io_sha256) || '',
+  synthesized: !!(ext && ext.synthesized === true),
+  baseline_callable: (ext && ext.baseline_callable) || '',
+  baseline_frozen: !!(ext && ext.baseline_frozen === true),
+  baseline_provenance: (ext && ext.baseline_provenance) || '',
+  baseline_verified: !!(ext && ext.baseline_verified === true),
+  contract_verified: !!(ext && ext.contract_verified === true),
+  runtime_backend: (head && head.runtime_backend) || {},
+});
 
 // abDone == the integrator measured BOTH legs (ref + cand) and emitted a real
 // verdict. gate:'incomplete' or ab_complete:false means a leg is still missing.
@@ -1058,7 +1131,156 @@ if (!MODEL_PATH && KERNEL_PATH) {
 // ===========================================================================
 // PHASE: Setup + Baseline profile + Strategize  (gated; else load carried state)
 // ===========================================================================
-let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, profile, strategy, kernelQueue, headQueue;
+let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, runtimeTruth;
+let profile, strategy, kernelQueue, headQueue;
+const identityBlockedHeads = [];
+
+const identitySlug = (value) => String(value || 'unknown')
+  .replace(/^void\s+/, '').replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '')
+  .toLowerCase().slice(0, 80) || 'unknown';
+const identityHash = (value) => {
+  // Deterministic FNV-1a is sufficient here: the readable leaf name remains in the key and the hash
+  // only prevents collisions after filesystem slugging.  Python-generated catalog keys are preferred.
+  let h = 0x811c9dc5;
+  for (const ch of String(value || '')) {
+    h ^= ch.charCodeAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+};
+const fallbackTaskKey = (entityId, leaf) =>
+  `task_${identitySlug(leaf)}_${identityHash(`${entityId || ''}|${leaf || ''}`)}`;
+const deviceNames = (head) => {
+  const raw = head && head.device_kernel_names;
+  const xs = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+  if (head && head.device_kernel_name) xs.push(head.device_kernel_name);
+  return [...new Set(xs.map(x => String(x || '').trim()).filter(Boolean))];
+};
+const isAttentionHead = (head) =>
+  /attention|attn|paged|flash|fmha|mha|mla/i.test(
+    `${(head && head.op_kind) || ''} ${(head && head.classification) || ''} ` +
+    `${(head && head.short_name) || ''} ${(head && head.profiling_entity_name) || ''}`);
+
+// Convert Amdahl-ranked profiling entities into executable tasks.  The catalog is produced by the
+// deterministic op_identity.py normalizer.  Legacy strategy payloads degrade safely: structurally
+// aggregated attention with named device leaves is expanded; an explicitly aggregate/config-only
+// entity with no executable leaf is blocked before extract_op.
+function materializeHeadCandidates(heads, catalog) {
+  const byKey = new Map((catalog || [])
+    .filter(t => t && t.stable_task_key)
+    .map(t => [t.stable_task_key, t]));
+  const tasks = [];
+  const blocked = [];
+  const numeric = (value, fallback = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  for (const head of heads || []) {
+    const selected = Array.isArray(head.selected_task_keys) ? head.selected_task_keys : [];
+    if (selected.length) {
+      for (const key of selected) {
+        const task = byKey.get(key);
+        if (!task) {
+          blocked.push({ ...head, stage: 'identity', gate: 'unknown_task_key',
+            reason: `strategy selected executable task key '${key}' absent from the profile identity catalog` });
+          continue;
+        }
+        tasks.push({
+          ...head, ...task,
+          // Catalog identity is authoritative; Architect-resolved live seams are the enrichment.
+          short_name: task.short_name,
+          stable_task_key: task.stable_task_key,
+          profiling_entity_id: task.profiling_entity_id,
+          consumer_callable: head.consumer_callable || task.consumer_callable || '',
+          rebind_callable: head.rebind_callable || task.rebind_callable || '',
+          target_callable: head.target_callable || head.rebind_callable || task.rebind_callable || '',
+          resolution_status: head.resolution_status || task.resolution_status,
+          parent_pct_gpu_time: numeric(task.parent_pct_gpu_time, numeric(head.pct_gpu_time)),
+          pct_gpu_time: numeric(task.pct_gpu_time),
+        });
+      }
+      continue;
+    }
+    if (Array.isArray(head.executable_tasks) && head.executable_tasks.length) {
+      for (const task of head.executable_tasks) {
+        tasks.push({
+          ...head, ...task,
+          short_name: task.short_name,
+          stable_task_key: task.stable_task_key || head.stable_task_key,
+          profiling_entity_id: task.profiling_entity_id || head.profiling_entity_id,
+          consumer_callable: head.consumer_callable || task.consumer_callable || '',
+          rebind_callable: head.rebind_callable || task.rebind_callable || '',
+          target_callable: head.target_callable || head.rebind_callable || task.rebind_callable || '',
+          resolution_status: head.resolution_status || task.resolution_status,
+          parent_pct_gpu_time: numeric(task.parent_pct_gpu_time, numeric(head.pct_gpu_time)),
+          pct_gpu_time: numeric(task.pct_gpu_time),
+        });
+      }
+      continue;
+    }
+
+    const scope = String(head.execution_scope || '');
+    const leaves = deviceNames(head);
+    const implicitAttentionAggregate = !scope && isAttentionHead(head) && leaves.length > 0 &&
+      !leaves.includes(String(head.short_name || ''));
+    if (scope === 'expand_leaves' || implicitAttentionAggregate) {
+      if (!leaves.length) {
+        blocked.push({ ...head, stage: 'identity', gate: 'no_executable_leaf',
+          reason: 'aggregate profiling entity has no executable device leaf' });
+        continue;
+      }
+      for (const leaf of leaves) {
+        const regimes = Array.isArray(head.served_regimes) && head.served_regimes.length
+          ? head.served_regimes.slice() : ['prefill', 'decode'];
+        tasks.push({
+          ...head,
+          short_name: leaf,
+          stable_task_key: fallbackTaskKey(
+            head.profiling_entity_id || head.id || head.short_name, leaf, regimes),
+          profiling_entity_name: head.profiling_entity_name || head.short_name || '',
+          device_kernel_names: [leaf],
+          served_regimes: regimes,
+          parent_pct_gpu_time: numeric(head.pct_gpu_time),
+          pct_gpu_time: numeric(head.pct_gpu_time) / leaves.length,
+          pct_gpu_time_source: 'equal_split_parent',
+          execution_scope: 'expand_leaves',
+          resolution_status: head.resolution_status || 'needs_seam',
+        });
+      }
+      continue;
+    }
+    if (['profile_only', 'config_only', 'blocked'].includes(scope)) {
+      blocked.push({ ...head, stage: 'identity', gate: 'not_executable',
+        reason: `profiling entity execution_scope=${scope}` });
+      continue;
+    }
+    if (head.profiling_kind === 'aggregate' && !head.stable_task_key) {
+      blocked.push({ ...head, stage: 'identity', gate: 'aggregate_without_task',
+        reason: 'aggregate profiling entity cannot enter extract_op without an executable task identity' });
+      continue;
+    }
+    tasks.push({
+      ...head,
+      stable_task_key: head.stable_task_key || fallbackTaskKey(
+        head.profiling_entity_id || head.id || '', head.short_name,
+        head.served_regimes || [head.regime || 'unknown']),
+    });
+  }
+  return { tasks, blocked };
+}
+
+function applyHeadIdentityMaterialization(heads, profileResult, replaceBlocked = false) {
+  const resolved = materializeHeadCandidates(
+    heads, (profileResult && profileResult.executable_task_candidates) || []);
+  if (replaceBlocked) identityBlockedHeads.length = 0;
+  identityBlockedHeads.push(...resolved.blocked);
+  if (resolved.blocked.length) {
+    log(`[op-identity] blocked ${resolved.blocked.length} profiling entit${resolved.blocked.length === 1 ? 'y' : 'ies'} ` +
+      `without an executable task; they will be reported as flagged, never extracted.`);
+  }
+  return resolved.tasks;
+}
+
 if (want('setup')) {
   phase('Setup');
   const setup = await safeAgent(
@@ -1076,6 +1298,7 @@ if (want('setup')) {
   // back to whatever the director resolved.
   curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
   curEnv = INIT_ENV || (setup.server_env || '');
+  runtimeTruth = setup.runtime_truth || {};
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
 
   phase('Profile');
@@ -1092,12 +1315,16 @@ if (want('setup')) {
   strategy = await safeAgent(
     roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
       EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
+      PROFILE_IDENTITY: profile ? profile.profile_identity_json || '' : '',
+      EXECUTABLE_TASK_CANDIDATES: profile ? profile.executable_task_candidates || [] : [],
+      RUNTIME_TRUTH: runtimeTruth,
       WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
       ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
-  headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
+  headQueue = applyHeadIdentityMaterialization(
+    (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [], profile, true);
   // OP-IDENTITY GUARD — a fused-MoE / grouped-expert GEMM must be optimized AS the fused op at its live
   // dispatcher seam, never decomposed into standalone dense GEMMs (a dense candidate has no live call site
   // → no_rebind_seam). So force op_kind='moe' (the grouped-GEMM branch; gemmSynthFor keys on this to keep
@@ -1128,10 +1355,23 @@ if (want('setup')) {
   NOISE_BAND = ST.noise_band_pct || NOISE_BAND_DEFAULT;
   curFlags = ST.flags || '';
   curEnv = ST.env || '';
-  profile = { profile_topN_json: ST.profile_topn_json || '' };
+  runtimeTruth = ST.runtime_truth || {};
+  profile = {
+    profile_topN_json: ST.profile_topn_json || '',
+    profile_identity_json: ST.profile_identity_json || '',
+    profiling_entities: ST.profiling_entities || [],
+    executable_task_candidates: ST.executable_task_candidates || [],
+  };
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
-  headQueue = ST.headQueue || [];
+  headQueue = applyHeadIdentityMaterialization(ST.headQueue || [], profile, true);
+  for (const carried of (ST.flagged_heads || []).filter(f => f && f.stage === 'identity')) {
+    if (!identityBlockedHeads.some(f =>
+      f.short_name === carried.short_name && f.gate === carried.gate &&
+      f.profiling_entity_id === carried.profiling_entity_id)) {
+      identityBlockedHeads.push(carried);
+    }
+  }
   log(`Loaded carried state: EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT}, flags='${curFlags}', env='${curEnv}', ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
 }
 
@@ -1145,12 +1385,14 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
     roleAgent('config_tuner', 'sweep', 'Sweep the ranked config axes one at a time; keep wins.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, BASELINE_THROUGHPUT: BASELINE_TPUT,
       NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS, CONFIG_DIRECTIONS: strategy.config_directions,
-      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_RUNTIME_TRUTH: runtimeTruth,
+      SKILL_DIR: WORKFLOW_DIR,
     }),
     { phase: 'ConfigSweep', label: 'config_tuner:sweep', schema: SWEEP_SCHEMA });
   if (sweep && sweep.best_throughput_tok_s > curTput) {
     curFlags = sweep.accepted_flags || curFlags;
     curEnv = sweep.accepted_env || curEnv;
+    runtimeTruth = sweep.runtime_truth || runtimeTruth;
     curTput = sweep.best_throughput_tok_s;
     log(`Config sweep accepted. throughput ${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x). Re-profiling.`);
     // Re-profile: config changed which kernels dominate.
@@ -1165,12 +1407,17 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
     const restrat = await safeAgent(
       roleAgent('system_architect', 'strategize', 'Re-route after config changed the landscape.', {
         EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
+        PROFILE_IDENTITY: profile ? profile.profile_identity_json || '' : '',
+        EXECUTABLE_TASK_CANDIDATES: profile ? profile.executable_task_candidates || [] : [],
+        RUNTIME_TRUTH: runtimeTruth,
         WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
         ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
     if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
-    if (restrat && restrat.head_candidates) headQueue = restrat.head_candidates.slice();
+    if (restrat && restrat.head_candidates) {
+      headQueue = applyHeadIdentityMaterialization(restrat.head_candidates.slice(), profile, true);
+    }
     // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
     await ensureFlydslGate();
   } else {
@@ -1193,7 +1440,12 @@ const acceptedHeads = (ST.accepted_heads || []).slice();
 // so Finalize can finish the best one's A/B (Fix C) and so a real isolated win
 // is surfaced (return.pending_integrations) instead of being silently dropped.
 const pendingIntegrations = (ST.pending_integrations || []).slice();
-const flaggedHeads = (ST.flagged_heads || []).slice();   // dominant heads that could NOT be optimized (loudly surfaced, never silently skipped)
+const flaggedHeads = [
+  ...(ST.flagged_heads || []).filter(f => f && f.stage !== 'identity'),
+  ...identityBlockedHeads,
+];
+// Dominant heads that could NOT be optimized are surfaced loudly, including profiling aggregates
+// rejected by the executable-task identity gate; none are silently skipped.
 let headDispatched = 0;
 const history = ST.history || { insights: [], ledger: [], milestones: [], bottleneck_now: '', suggest_next: '' };
 
@@ -1414,6 +1666,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           roleAgent('e2e_integrator', 'integrate', 'Apply a deep head candidate; gate on e2e throughput; report engagement/cudagraph/mem/decode for feedback.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
             KERNEL_RESULT: {
+              ...integrationTaskContract(c.head, c.ext),
               short_name: c.head.short_name, task_dir: c.ext.task_dir, op_kind: c.ext.op_kind, lane: c.key,
               winner_kind: 'patch', winner_backend: c.lang,
               target_callable: c.ext.target_callable || c.head.target_callable || '',
@@ -1446,6 +1699,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             base_inputs: {
               EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
               KERNEL_RESULT: {
+                ...integrationTaskContract(c.head, c.ext),
                 short_name: c.head.short_name, task_dir: c.ext.task_dir, op_kind: c.ext.op_kind, lane: c.key,
                 winner_kind: 'patch', winner_backend: c.lang,
                 target_callable: c.ext.target_callable || c.head.target_callable || '',
@@ -1476,14 +1730,20 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       // re-profile if the stack moved enough — chase the new dominant bottleneck (Amdahl shifted).
       if (want('profile') && curTput > lastReprofileTput * (1 + DEEP_REPROFILE_GAIN)) {
         log(`[deep] e2e +${((curTput / lastReprofileTput - 1) * 100).toFixed(1)}% since last profile — re-profiling to chase the moving bottleneck.`);
+        const deepProfileRound = 1000 + e2eGateCount;
         const rp = await safeAgent(
           roleAgent('profiler', 'reprofile', 'Re-profile the CURRENT overlaid server; return refreshed head pct_gpu_time so EV re-weights toward the new bottleneck.', {
-            EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+            EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, ROUND: deepProfileRound,
+            OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv,
+            RUNTIME_TRUTH: runtimeTruth, SKILL_DIR: WORKFLOW_DIR,
           }),
-          { phase: 'HeadKernel', label: `reprofile g${e2eGateCount}`, schema: { type: 'object', additionalProperties: true, properties: { heads: { type: 'array', items: { type: 'object', additionalProperties: true } } } } });
-        if (rp && Array.isArray(rp.heads)) {
-          for (const nh of rp.heads) {
-            const tgt = allLanes.filter(l => l.head.short_name === (nh.short_name || nh.name));
+          { phase: 'HeadKernel', label: `reprofile g${e2eGateCount}`, schema: PROFILE_SCHEMA });
+        const refreshedTasks = (rp && rp.executable_task_candidates) || [];
+        if (refreshedTasks.length) {
+          for (const nh of refreshedTasks) {
+            const tgt = allLanes.filter(l =>
+              (nh.stable_task_key && l.head.stable_task_key === nh.stable_task_key) ||
+              l.head.short_name === (nh.short_name || nh.name));
             for (const l of tgt) if (Number.isFinite(nh.pct_gpu_time)) l.head.pct_gpu_time = nh.pct_gpu_time;
           }
           log(`[deep] re-profile updated head Amdahl weights.`);
@@ -1735,7 +1995,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const integ = await runIntegrateBothLegs(
         'Apply the head-op winner; gate on e2e throughput.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
-          KERNEL_RESULT: { short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
+          KERNEL_RESULT: { ...integrationTaskContract(h, st.ext),
+            short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
             winner_kind: cand.winner_kind, winner_backend: cand.source,
             target_callable: st.ext.target_callable || h.target_callable || '',
             authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
@@ -1756,6 +2017,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         curOverlay = integ.accepted_overlay || curOverlay;
         if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
         if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
+        runtimeTruth = integ.runtime_truth || runtimeTruth;
         curTput = integ.e2e_throughput_tok_s;
         acceptedHeads.push({ short_name: h.short_name, op_kind: st.ext.op_kind, backend: cand.source, kind: cand.winner_kind, e2e_delta_pct: integ.e2e_delta_pct, isolated: cand.isolated });
         log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
@@ -1771,7 +2033,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               isolated: cand.isolated, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time, phase_name: 'HeadKernel',
               base_inputs: {
                 EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
-                KERNEL_RESULT: { short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
+                KERNEL_RESULT: { ...integrationTaskContract(h, st.ext),
+                  short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
                   winner_kind: cand.winner_kind, winner_backend: cand.source,
                   target_callable: st.ext.target_callable || h.target_callable || '',
                   authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
@@ -1949,7 +2212,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // the top candidate. Inputs are built per-candidate so Fix C can re-issue the SAME A/B at Finalize.
     const mkIntegrateInputs = (cand, ci, sharedRefMed) => ({
       EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
-      KERNEL_RESULT: { short_name: h.short_name, task_dir: ext.task_dir, op_kind: ext.op_kind,
+      KERNEL_RESULT: { ...integrationTaskContract(h, ext),
+        short_name: h.short_name, task_dir: ext.task_dir, op_kind: ext.op_kind,
         winner_kind: cand.winner_kind, winner_backend: cand.source,
         target_callable: ext.target_callable || h.target_callable || '',
         authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
@@ -1998,6 +2262,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       curOverlay = integ.accepted_overlay || curOverlay;
       if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
       if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
+      runtimeTruth = integ.runtime_truth || runtimeTruth;
       curTput = integ.e2e_throughput_tok_s;
       acceptedHeads.push({ short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: cand.winner_kind, e2e_delta_pct: integ.e2e_delta_pct, isolated: cand.isolated });
       log(`  ${h.short_name}: ACCEPTED best candidate=${cand.source} (${(cand.isolated || 0).toFixed(2)}x iso). e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
@@ -2182,7 +2447,8 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // Build inputs ONCE so Fix C can re-issue the SAME A/B for a pending win at Finalize.
     const mileIntegrateInputs = {
       EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
-      KERNEL_RESULT: { short_name: c.short_name, task_dir: ext.task_dir,
+      KERNEL_RESULT: { ...integrationTaskContract(c, ext),
+        short_name: c.short_name, task_dir: ext.task_dir,
         source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
         final_patch: kl.final_patch, verified_isolated_speedup: kl.final_geomean, pct_gpu_time: c.pct_gpu_time },
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
@@ -2296,8 +2562,14 @@ if (want('final')) {
   // agent enumerates the overlay layout and reports which A/Bs never completed.
   const RECON_SCHEMA = obj({ incomplete: { type: 'array', items: obj({
     short_name: { type: 'string' }, overlay_dir: { type: 'string' },
+    task_dir: { type: 'string' },
     winner_kind: { type: 'string' }, apply_env: { type: 'string' }, apply_flags: { type: 'string' },
     op_kind: { type: 'string' }, target_callable: { type: 'string' },
+    stable_task_key: { type: 'string' }, profiling_entity_id: { type: 'string' },
+    oracle_provenance: { type: 'string' }, oracle_complete: { type: 'boolean' },
+    reference_io_sha256: { type: 'string' }, synthesized: { type: 'boolean' },
+    baseline_provenance: { type: 'string' }, baseline_verified: { type: 'boolean' },
+    contract_verified: { type: 'boolean' },
     isolated: { type: 'number' }, pct_gpu_time: { type: 'number' },
     ref_present: { type: 'boolean' }, cand_present: { type: 'boolean' },
   }, ['short_name', 'overlay_dir']) } }, ['incomplete']);
@@ -2312,7 +2584,9 @@ if (want('final')) {
     `For each INCOMPLETE dir, emit one object with: short_name (the dir name minus the ` +
     `"cand_" prefix), overlay_dir (absolute path), and from integrate_result.json (use "" / ` +
     `null when absent): winner_kind, apply_env, apply_flags, op_kind, ` +
-    `target_callable (or target_file), isolated (= isolated_speedup), pct_gpu_time, plus ` +
+    `task_dir, target_callable (or target_file), stable_task_key, profiling_entity_id, oracle_provenance, ` +
+    `oracle_complete, reference_io_sha256, synthesized, baseline_provenance, baseline_verified, ` +
+    `contract_verified, isolated (= isolated_speedup), pct_gpu_time, plus ` +
     `ref_present (true if ref/bench_runs.jsonl exists) and cand_present (true if ` +
     `cand/bench_runs.jsonl exists). Return ONLY compact JSON {"incomplete":[...]} (empty array if none).`,
     { phase: 'Finalize', label: 'scan-incomplete-ab', schema: RECON_SCHEMA });
@@ -2324,9 +2598,16 @@ if (want('final')) {
       short_name: it.short_name, track: 'head', winner_kind: it.winner_kind || '',
       apply_env: it.apply_env || '', apply_flags: it.apply_flags || '',
       op_kind: it.op_kind || '', backend: '', isolated: it.isolated || 0,
+      pct_gpu_time: it.pct_gpu_time || 0,
       inputs: {
         EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
         KERNEL_RESULT: {
+          task_dir: it.task_dir || '',
+          stable_task_key: it.stable_task_key || '', profiling_entity_id: it.profiling_entity_id || '',
+          oracle_provenance: it.oracle_provenance || '', oracle_complete: it.oracle_complete === true,
+          reference_io_sha256: it.reference_io_sha256 || '', synthesized: it.synthesized === true,
+          baseline_provenance: it.baseline_provenance || '', baseline_verified: it.baseline_verified === true,
+          contract_verified: it.contract_verified === true,
           short_name: it.short_name, op_kind: it.op_kind || '', winner_kind: it.winner_kind || '',
           target_callable: it.target_callable || '', apply_env: it.apply_env || '',
           apply_flags: it.apply_flags || '', code_patch: '', tuning_artifact: '',
@@ -2361,6 +2642,7 @@ if (want('final')) {
       if (p.track === 'head') {
         if (p.winner_kind === 'env' && p.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + p.apply_env;
         if (p.winner_kind === 'flag' && p.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + p.apply_flags;
+        runtimeTruth = integ.runtime_truth || runtimeTruth;
         acceptedHeads.push({ short_name: p.short_name, op_kind: p.op_kind, backend: p.backend, kind: p.winner_kind, e2e_delta_pct: integ.e2e_delta_pct, isolated: p.isolated });
       } else {
         acceptedKernels.push({ short_name: p.short_name, backend: p.backend || '', e2e_delta_pct: integ.e2e_delta_pct, isolated: p.isolated });
@@ -2473,6 +2755,10 @@ const carryState = {
   eval_dir: EVAL_DIR, model_name: MODEL_NAME, baseline_throughput_tok_s: BASELINE_TPUT,
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
+  profile_identity_json: profile ? profile.profile_identity_json || '' : '',
+  profiling_entities: profile ? profile.profiling_entities || [] : [],
+  executable_task_candidates: profile ? profile.executable_task_candidates || [] : [],
+  runtime_truth: runtimeTruth || {},
   config_directions: (strategy && strategy.config_directions) || [],
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
   // Carry pending (verified-isolated, A/B-incomplete) wins WITH their inputs so a

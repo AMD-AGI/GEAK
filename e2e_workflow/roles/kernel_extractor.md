@@ -374,18 +374,27 @@ Return JSON:
 ```json
 {
   "short_name": "<short_name>",
+  "stable_task_key": "<stable task key copied from KERNEL>",
+  "profiling_entity_id": "<parent profiling entity id copied from KERNEL>",
   "editable": true,
-  "task_dir": "<EVAL_DIR>/kernels/<short_name>_task",
+  "task_dir": "<EVAL_DIR>/kernels/<stable_task_key>_task (fall back to short_name only for legacy non-catalog tasks)",
   "source_path_in_sglang": "<abs path under site-packages>",
   "target_callable": "<module:attr>",
+  "consumer_callable": "<module:attr hooked for the live oracle>",
+  "rebind_callable": "<module:attr replaced by the candidate>",
   "baseline_callable": "<module:attr of the frozen real online kernel>",
   "baseline_frozen": true,
+  "baseline_provenance": "live_online",
+  "baseline_verified": true,
+  "contract_verified": true,
   "num_cases": 0,
   "regimes_captured": ["prefill","decode"],
   "candidate_backends": ["triton","hip","ck"],
   "build": false,
   "unittest_smoke": "pass|fail",
   "reference_io_sha256": "...",
+  "oracle_provenance": "captured_live",
+  "oracle_complete": true,
   "workload_path": "<task_dir>/workload.json",
   "notes": "granularity choice, hidden state captured, anything unusual"
 }
@@ -535,8 +544,9 @@ needs an op task dir the **Op Benchmarker** can bake-off across backends. `edit=
 >   reduce, one dispatcher call), NOT per-GEMM stages timed in isolation — the fusion boundary, the
 >   intermediate-activation residency, and the reduce are part of the op being optimized/measured.
 
-Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (Architect head candidate: short_name,
-op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for attn, and OPTIONAL
+Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (materialized executable task:
+`stable_task_key`, `profiling_entity_id`, short_name, op_kind=gemm|attn, device leaf names, the profiled
+`shapes`, dtype, regime, `consumer_callable`/`rebind_callable` for attn, and OPTIONAL
 TraceLens `source_hint`/`launcher_hint`/`bound_type`), `GEMM_SYNTH` (bool, default true),
 `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, and OPTIONAL `PROFILE_WORKLOAD_JSON` (the profiler's
 per-(shape,dtype) weighted workload model — slice this kernel's cases into `workload_path`, see below).
@@ -718,22 +728,37 @@ force real compact-operand compute:
 > those M values for every (N,K) — these are non-negotiable; the smoke-test and downstream gate depend on
 > them.** Combine with the prefill M per `PREFILL_M_NOTE`.
 
+For `op_kind:"attn"` the returned contract is strict: `synthesized:false`,
+`oracle_provenance:"captured_live"`, `oracle_complete:true`,
+`baseline_provenance:"live_online"`, `baseline_verified:true`, and
+`contract_verified:true`. If any of those claims cannot be proven, return `smoke:"fail"`; do not emit a
+placeholder value just to satisfy the schema.
+
 Return JSON:
 ```json
 {
   "short_name": "<short_name>",
+  "stable_task_key": "<stable task key copied from KERNEL>",
+  "profiling_entity_id": "<parent profiling entity id copied from KERNEL>",
   "op_kind": "gemm|attn",
   "editable": true,
-  "task_dir": "<EVAL_DIR>/kernels/<short_name>_task",
+  "task_dir": "<EVAL_DIR>/kernels/<stable_task_key>_task (legacy fallback: short_name)",
   "shapes": {"a_shape": [], "b_shape": [], "transpose_b": true, "bias": false},
   "dtype": "bf16",
   "synthesized": true,
+  "oracle_provenance": "captured_live|synthetic_value_independent",
+  "oracle_complete": true,
   "regimes_captured": ["prefill"],
   "candidate_backends": ["aiter","hipblaslt","triton","ck"],
   "reference_io_sha256": "<or '' if synthesized>",
   "target_callable": "<module:attr rebind seam if one exists, else ''>",
+  "consumer_callable": "<module:attr used for live capture>",
+  "rebind_callable": "<module:attr replaced by the candidate>",
   "baseline_callable": "<module:attr of the frozen real online kernel / default backend>",
   "baseline_frozen": true,
+  "baseline_provenance": "live_online",
+  "baseline_verified": true,
+  "contract_verified": true,
   "smoke": "pass|fail",
   "notes": "transpose/bias inference, regime, whether oracle was synthesized vs captured"
 }

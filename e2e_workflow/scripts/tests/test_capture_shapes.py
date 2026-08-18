@@ -534,6 +534,8 @@ class TestFlush(_RecorderTestCase):
         self.assertEqual(meta["in_graph_calls"], 0)
         self.assertEqual(meta["reference_io"], "reference_io.pt")
         self.assertTrue(meta["oracle_complete"])
+        self.assertEqual(meta["oracle_provenance"], "captured_live")
+        self.assertEqual(meta["consumer_callable"], "fake_serving_layer:op")
         self.assertFalse(meta["build"])
         self.assertIn("Do NOT edit", meta["note"])
         self.assertIn("flushed 2 case(s)", err.getvalue())
@@ -612,6 +614,7 @@ class TestFlush(_RecorderTestCase):
         self.assertEqual(meta["num_cases"], 1)
         self.assertIsNone(meta["reference_io_sha256"])
         self.assertFalse(meta["oracle_complete"])
+        self.assertEqual(meta["oracle_provenance"], "incomplete")
         self.assertFalse(os.path.exists(os.path.join(self.out_dir, "reference_io.pt")))
         self.assertEqual(self.torch.saved, [])
 

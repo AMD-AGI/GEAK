@@ -36,7 +36,7 @@ e.g. `--attention-backend triton`).
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `GPU_ID`, `WORKLOAD`,
 `BASELINE_THROUGHPUT`, `NOISE_BAND_PCT`, `CONFIG_DIRECTIONS` (the Architect's ranked axes + swaps,
 each with target kernels + rationale), `CURRENT_FLAGS`/`CURRENT_ENV` (the accepted config so far),
-`ENABLE_FP8` (bool; gates the FP8 axis), `SKILL_DIR`.
+`CURRENT_RUNTIME_TRUTH`, `ENABLE_FP8` (bool; gates the FP8 axis), `SKILL_DIR`.
 
 > The exact flags/env are **backend-specific** (e.g. sglang `--attention-backend` + `SGLANG_USE_AITER`
 > vs vllm `--attention-backend` enum + `VLLM_ROCM_USE_AITER`). The Architect's `CONFIG_DIRECTIONS`
@@ -62,6 +62,10 @@ For EACH direction, in the Architect's order:
 6. (GEMM tuning is NOT a config axis — it lives in the head-kernel track now.)
 
 Record every trial (kept + rejected) in `EVAL_DIR/config/sweep_results.json`.
+After the final kept configuration is known, run `scripts/parse_runtime_truth.py` against that kept
+trial's `server.log` and return the result as `runtime_truth`. If no trial is kept, return
+`CURRENT_RUNTIME_TRUTH` unchanged. This prevents re-profile/re-strategize from resolving seams against
+the old backend after an attention-backend sweep.
 
 ### Scope: service-level switches ONLY (GEMM tuning is NOT done here)
 You handle pure server-level env/flags that need NO op isolation. **GEMM tuning (aiter per-shape DB,
@@ -91,6 +95,8 @@ Return JSON:
   ],
   "accepted_flags": "<final kept extra server flags>",
   "accepted_env": "<final kept extra env KEY=VAL ...>",
+  "runtime_truth_json": "<kept config>/runtime_truth.json",
+  "runtime_truth": {"attention_backend": {"requested": "", "observed": "", "effective": "", "match": null, "verified": false, "confidence": "unknown", "evidence": []}},
   "best_throughput_tok_s": 0.0,
   "throughput_speedup_vs_baseline": 1.0,
   "summary": "what worked, what didn't, what to re-profile against"
