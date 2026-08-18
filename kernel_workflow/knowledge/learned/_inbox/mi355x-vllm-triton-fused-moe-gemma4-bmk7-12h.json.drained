@@ -1,0 +1,150 @@
+{
+  "run_id": "mi355x_vllm_triton_fused_moe_gemma4-bmk7-12h",
+  "date": "2026-08-17",
+  "kernel_names": [
+    "mi355x_vllm_triton_fused_moe_gemma4"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "cache-policy-is-a-per-buffer-per-bucket-decision-on-a-bf16-triton-fused-moe-moe-grouped-gemm-gfx950-both",
+      "description": "bf16 Triton fused MoE: bypass hint on the first GEMM's streamed weight load plus write-through on write-once outputs; sign flips per GEMM and per M bucket",
+      "keywords": [
+        "cache-modifier",
+        "non-temporal-store",
+        "moe-grouped-gemm",
+        "bf16",
+        "triton",
+        "gfx950",
+        "l2-residency",
+        "m-bucket",
+        "gated-lever",
+        "bit-exact"
+      ],
+      "kernels": [
+        "fused_moe_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "bf16 vLLM Triton fused MoE (gate/up + down grouped GEMMs plus align/activation/reduce periphery) on gfx950, cache-policy hints on the weight loads and the write-once buffers",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "mem.load-cache-policy",
+        "mem.store-cache-policy"
+      ],
+      "cost": "L1",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "weighted 1.22x -> 1.29x from a vL1D-bypass hint on the first grouped GEMM's weight load (58% of that gain landed in the untouched second GEMM), +5.2% more on the mid prefill case when the gate widened to BLOCK_M=128; write-through on write-once outputs cut those dispatches 4-15% isolated per case and -1.26% +/-0.10 in situ on the mid prefill case, all bit-identical",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-17",
+      "roofline": "decode ends at ~0.9 of the MEASURED achievable roof (the nameplate roof over-states it by ~13%)",
+      "last_seen": "2026-08-17",
+      "title": "Cache policy is a per-buffer, per-bucket decision on a bf16 fused MoE",
+      "lever": "Try a vL1D-bypass cache_modifier on the streamed weight operand of the gate/up grouped GEMM, and a write-through store hint on every buffer that is written once and never re-read (activation output, top-k reduce output); both are one argument, output stays bit-identical.",
+      "apply": "Gate each hint on the M bucket AND on which grouped GEMM it is applied to, in the host config or a constexpr, so decode and prefill can carry different policies on the same source.",
+      "verify": "A/B per case against the frozen baseline and also profile the dispatches you did NOT edit: most of the gain here appeared in the untouched second GEMM via L2/MALL spillover, so an edited-dispatch-only measurement under-reads the lever.",
+      "pitfall": "The same bypass hint on the second GEMM's weight load lost 5-16% depending on M bucket despite a correct tile-reuse premise -> its reuse distance differs from the first GEMM's -> gate per GEMM, not per file.\nStore hints on the GEMM epilogue accumulator were double-digit losses (streaming -23%, write-through -11% at the largest prefill) -> that buffer is not write-once -> apply store hints only where write-once is proven.",
+      "caution": "Also verify the hint actually engaged (ISA or a null arm with byte-identical metadata), and also verify per case: the sign of the same hint flipped with the M bucket here.",
+      "source": "run mi355x_vllm_triton_fused_moe_gemma4-bmk7-12h, 2026-08-17, 15-round campaign rounds 2/5/14/15, director-validated (weighted 1.33x, correctness pass)"
+    },
+    {
+      "name": "axes-that-stayed-closed-on-a-bf16-triton-fused-moe-with-a-decode-weighted-case-mix-moe-grouped-gemm-gfx950-both",
+      "description": "bf16 Triton fused MoE, decode-weighted mix: MFMA-layout knobs, XCD swizzle, atomic epilogues, decode fusion and work-removing edits all priced ~1.00x or worse",
+      "keywords": [
+        "anti-pattern",
+        "closed-axis",
+        "moe-grouped-gemm",
+        "bf16",
+        "triton",
+        "gfx950",
+        "mfma-nonkdim",
+        "xcd-swizzle",
+        "atomics",
+        "kernel-fusion",
+        "roofline",
+        "launch-overhead"
+      ],
+      "kernels": [
+        "fused_moe_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "bf16 vLLM Triton fused MoE on gfx950 whose graded mix is dominated by a small-M decode case, after per-bucket tile tuning has already landed",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L1",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "over 15 rounds and 38 direction slots: MFMA layout / kpack / waves-per-eu / num_stages all within +/-0.3% at decode and at the large prefill; large BLOCK_K 2-8% slower at every tile; XCD swizzle ~1.00x in both directions; fp32 and bf16 atomic epilogues 2.2-3.8x slower than the round trip they remove, at every size; two edits that strictly REMOVE inner-loop work each lost 6-8%; decode ends at ~0.9 of the measured achievable roof",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-17",
+      "last_seen": "2026-08-17",
+      "title": "Axes that stayed closed on a bf16 fused MoE with a decode-weighted mix",
+      "lever": "Treat these as low-prior once per-bucket tile configs are tuned: MFMA layout knobs, larger BLOCK_K, XCD swizzle, atomic epilogues, and any fusion at decode; the live axes here were cache policy, dispatch count in the periphery, and per-shape launch configs.",
+      "apply": "Price a fusion candidate by grid arithmetic first (M-blocks vs CUs: less than one wave means the N-loop it eats is already free) and a gate/up pairing by hidden-dim arithmetic (an intermediate dim that is not a multiple of BLOCK_N bought +9.1% MACs to delete one dispatch).",
+      "verify": "Measure the achievable roof with your own sweep before sizing headroom, and measure the launch floor with an empty kernel at the real grid: ~70% of this periphery was pure launch floor, so a free body in every periphery kernel was worth only ~1.2% weighted.",
+      "pitfall": "Deleting an even-K mask and replacing a modulo N-wraparound with a masked tail both removed real inner-loop work and both lost 6-8% -> the removed work was hidden under memory latency while the new control flow was not -> price a work-removal edit against the same A/B as any other candidate.\nA closure taken with the large-prefill launch config held for ten rounds at decode and was worth -22% on that dispatch when re-swept at the decode shape -> record the shape a closure was measured at.",
+      "caution": "Also verify the roofline you are quoting is measured rather than nameplate: the nameplate figure over-stated the achievable roof by ~13% here and made a dead-end direction look funded.",
+      "source": "run mi355x_vllm_triton_fused_moe_gemma4-bmk7-12h, 2026-08-17, rounds 1-15 closed-lane ledger, director-validated"
+    },
+    {
+      "name": "scope-a-closure-a-gate-and-a-stack-by-case-regime-method-gfx950-n-a",
+      "description": "On a weighted multi-shape mix, a closure inherits the shape it was measured at and two winners compose only when gated to disjoint cases",
+      "keywords": [
+        "method",
+        "measurement",
+        "closed-axis",
+        "size-gating",
+        "stacking",
+        "launch-config",
+        "frozen-baseline",
+        "negative-control",
+        "gfx950",
+        "triton"
+      ],
+      "kernels": [],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "n/a",
+      "key": "search and integration discipline for a kernel graded by a weighted mix of decode and prefill shapes, where one case carries most of the weight",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L0",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "a lane recorded closed on the large-prefill launch config re-opened at -22% on its own dispatch when re-swept at the decode shape ten rounds later; the one integrate whose sign did not flip across three batches was the one whose two directions were gated to disjoint cases, while two clean non-overlapping patches that monetised the same dispatch integrated below either alone",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-17",
+      "last_seen": "2026-08-17",
+      "title": "Scope a closure, a gate and a stack by case regime",
+      "lever": "Record every closure together with the shape and launch config it was measured under, re-price it per case regime, and predict a stack from case-disjoint gating rather than from how cleanly the patches merge.",
+      "apply": "Gate each landed patch on the regime it won on (a host-side size or element-count gate), and when a win needs a new constexpr on a jit helper shared with the dominant case, fork a separate entry so that case's specialization stays byte-identical.",
+      "verify": "After an integrate, check the sign per case, not only the aggregate, and carry a byte-identical null arm in the same pool; pool both orders, because a null seated only at the ends of a sextet says nothing about the middle slots the treated arm occupies.",
+      "pitfall": "The round gate returned no-improvement six rounds running while three separately reproduced wins were real -> its stored reference was measured in an earlier session and five sessions bracketed it by -2.7% to +1.1% -> re-measure a reference arm every session instead of carrying the number.\nA direction reporting no result still held the run's last real win -> the status field was written before the pooled files finished -> check the directory and file sizes, not the field.",
+      "caution": "Also verify a gate before widening it: a fused path that paid on the small decode case was roughly a 2x loss when its gate was widened to the mid prefill case, because its cost is linear in element count.",
+      "source": "run mi355x_vllm_triton_fused_moe_gemma4-bmk7-12h, 2026-08-17, rounds 3/5/10/12/13/15 plus the report-phase pooled re-measurement"
+    }
+  ]
+}

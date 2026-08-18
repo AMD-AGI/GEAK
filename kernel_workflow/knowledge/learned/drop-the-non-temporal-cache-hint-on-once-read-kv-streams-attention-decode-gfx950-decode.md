@@ -3,16 +3,16 @@ key: paged bf16 KV attention decode in Triton on gfx950, where each KV tile is l
 type: lever
 confidence: ★★
 effect: +8.2% geomean isolated vs frozen baseline, bit-identical; per-case +15% and +8% on the two bandwidth-bound cases, ~0% on the latency-floored small-batch case
-confirms_cited: 1
+confirms_cited: 2
 confirms_blind: 0
 losses: 0
-attempts: 1
+attempts: 5
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-17
 name: drop-the-non-temporal-cache-hint-on-once-read-kv-streams-attention-decode-gfx950-decode
-description: Clearing the .cg non-temporal hint on once-read KV tile loads in paged attention decode: bit-identical, +8.2% geomean, carried by bandwidth-bound cases.
-keywords: ['attention', 'decode', 'paged-attention', 'cache-modifier', 'kv-cache', 'memory-bound', 'triton']
-kernels: ['kernel_unified_attention_2d']
+description: The non-temporal KV hint is a per-call decision: predicate it on KV element width and tile-loop trip count; a blanket drop or keep each loses a case.
+keywords: ['attention', 'cache-modifier', 'decode', 'fp8-kv', 'kv-cache', 'memory-bound', 'paged-attention', 'size-gating', 'triton']
+kernels: ['kernel_unified_attention_2d', 'kernel_unified_attention_3d']
 platforms: ['gfx950']
 kernel_class: attention_decode
 regime: decode
@@ -28,3 +28,5 @@ verified_on: 2026-07-29
 - pitfall: The geomean read as a uniform win -> it is entirely carried by the two bandwidth-bound cases -> attribute per case before claiming the lever transfers to short contexts.
 - caution: Also verify the tiles really are read once under your blocking; a tile re-read across iterations may genuinely prefer the streaming hint.
 - source: run kernel_unified_attention_2d-ch16h, 2026-07-29, 16h time-budget campaign, direction r1_d0_cache_modifier
+
+- source: GEAK 12h per-kernel time-budget campaign, run mi355x_vllm_triton_unified_attention-bmk7-12h, 2026-08-17, rounds 3/4/14/15, director-validated accepted, correctness PASS
