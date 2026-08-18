@@ -410,7 +410,21 @@ table, `BASELINE_TIMING`, and `BASELINE_GEOMEAN_MS`.
    - **Final per-test-case table** (baseline ms / optimized ms / speedup; + `count` & weight-share
      when workload-aligned) + geomean + arithmetic + the time-weighted speedup.
    - **Key optimizations applied** (what + impact).
-   - **What didn't work** (dead-ends from the ledger).
+   - **What didn't work** (dead-ends from the ledger). End this section with the machine-readable
+     block below, in ADDITION to your prose — it is what the experience store keeps, so the next run
+     on this kernel does not spend a round re-funding a direction you already closed. One entry per
+     closed direction; `measured` is the number you actually observed, and if you did not measure it,
+     say so in `mechanism` instead of inventing a figure. Omit the block entirely if nothing was
+     closed with evidence — an empty block is worse than none.
+
+     ````
+     <!-- dead-ends:yaml -->
+     ```yaml
+     - idea: use_buffer_ops=OFF negative control
+       measured: 0.883x
+       mechanism: the ambient default is load-bearing, -11.7%
+     ```
+     ````
 
 Return JSON:
 ```json
