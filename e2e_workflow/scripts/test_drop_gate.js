@@ -1,19 +1,25 @@
 #!/usr/bin/env node
 // Regression guard for normalizeQueues + the `drop_gate` relevance gate (no GPU, no model needed).
 //
-// Invariants under test:
-//   (a) drop_gate=off leaves the queues exactly as the Architect returned them (feature is inert),
-//   (b) drop_gate=dryrun records what it WOULD drop and drops nothing,
-//   (c) drop_gate=on drops, but NEVER a candidate at or above HEAD_PROTECT_PCT, in any mode,
-//   (d) matching is strict: an id we invented ourselves can never satisfy a drop_list entry, and a
-//       drop_list entry that matches nothing is recorded rather than silently ignored,
-//   (e) the op-identity guard runs inside normalizeQueues, so it survives a re-strategize,
-//   (f) inputs are deep-copied — the Architect's own candidate objects are never mutated,
-//   (g) every queue-assignment site routes through normalizeQueues,
-//   (h) no schema gained a `required` entry (obj() emits additionalProperties:true and nothing validates
+// The gate is ON by default, so these are the checks that make that safe. A drop must clear ALL of:
+// exactly one match, a KNOWN size, a size under HEAD_PROTECT_PCT, and a list that is not eating the
+// queue. Invariants under test:
+//   (a) drop_gate=off leaves the queues exactly as the Architect returned them (kill switch works),
+//   (b) drop_gate defaults to 'on' — merging this changes behaviour, which is the point,
+//   (c) a candidate at or above HEAD_PROTECT_PCT is never dropped,
+//   (d) matching is strict: an id we invented ourselves can never satisfy a drop_list entry; an entry
+//       that carries an id matches on that id ALONE (no silent fallback to the name); an entry that
+//       matches two candidates is refused rather than guessed at; and a no-match is recorded loudly,
+//   (e) a candidate whose pct_gpu_time is missing/blank/NaN is NOT dropped — "too small to matter" is
+//       unprovable without a size, and Number(undefined)||0 would have read it as 0%,
+//   (f) a drop_list resolving to more than DROP_MAX_FRACTION of the queue is refused WHOLE,
+//   (g) the op-identity guard runs inside normalizeQueues, so it survives a re-strategize,
+//   (h) inputs are deep-copied — the Architect's own candidate objects are never mutated,
+//   (i) every queue-assignment site routes through normalizeQueues,
+//   (j) no schema gained a `required` entry (obj() emits additionalProperties:true and nothing validates
 //       locally, so a `required` entry would change LLM generation on every run regardless of the flag).
 //
-// We prove (a)-(f) behaviorally by extracting the ACTUAL normalizeQueues block from the workflow script
+// We prove (a)-(h) behaviorally by extracting the ACTUAL normalizeQueues block from the workflow script
 // and running it with controlled module-scope deps.
 //
 // Run:  node e2e_workflow/scripts/test_drop_gate.js
@@ -36,12 +42,19 @@ const src = fs.readFileSync(FILE, 'utf8');
 const m = src.match(/const dropDecisions = \(ST\.drop_decisions[\s\S]*?\n\}\n(?=\nasync function ensureFlydslGate)/);
 ok(!!m, 'normalizeQueues block found');
 
+// ---- (b) the shipped default is `on` --------------------------------------------------------------
+// A gate that defaults to inert changes nothing on merge. This pins the default so it cannot drift back.
+ok(/A\.drop_gate != null \? A\.drop_gate : 'on'/.test(src), "drop_gate defaults to 'on'");
+ok(!/dryrun/i.test(src), "'dryrun' is gone — the only two settings are 'on' and 'off'");
+ok(/const DROP_MAX_FRACTION = 0\.5;/.test(src), 'the bulk-drop circuit breaker exists and is 50%');
+
 if (m) {
-  const make = (dropGate, protectPct, st) => {
+  const make = (dropGate, protectPct, st, maxFraction) => {
     const lines = [];
-    const fn = new Function('ST', 'DROP_GATE', 'HEAD_PROTECT_PCT', 'log',
+    const fn = new Function('ST', 'DROP_GATE', 'HEAD_PROTECT_PCT', 'DROP_MAX_FRACTION', 'log',
       m[0] + '\nreturn { normalizeQueues, dropDecisions };');
-    const api = fn(st || {}, dropGate, protectPct, (s) => lines.push(String(s)));
+    const api = fn(st || {}, dropGate, protectPct,
+      maxFraction == null ? 0.5 : maxFraction, (s) => lines.push(String(s)));
     return { ...api, lines };
   };
 
@@ -77,16 +90,7 @@ if (m) {
     eq({ head: inp.head, kernel: inp.kernel }, before, 'OFF: the Architect\'s own objects are untouched');
   }
 
-  // ---- (b) DRY RUN records but does not drop ----------------------------------------------------
-  {
-    const { normalizeQueues, dropDecisions } = make('dryrun', 30);
-    const out = normalizeQueues(architect());
-    ok(out.head.length === 4 && out.kernel.length === 2, 'DRYRUN: every candidate survives');
-    const outcomes = dropDecisions.map((d) => d.outcome).sort();
-    eq(outcomes, ['would_drop', 'would_drop'], 'DRYRUN: both matches recorded as would_drop');
-  }
-
-  // ---- (c) ON drops, and protection wins in every mode ------------------------------------------
+  // ---- (c) ON drops, and the dominant head is refused -------------------------------------------
   {
     const { normalizeQueues, dropDecisions } = make('on', 30);
     const out = normalizeQueues(architect());
@@ -96,16 +100,14 @@ if (m) {
     ok(dropDecisions.filter((d) => d.outcome === 'dropped').length === 2, 'ON: two drops recorded');
   }
   {
-    // The dominant head is on the drop list: refused in EVERY mode.
-    for (const mode of ['dryrun', 'on']) {
-      const { normalizeQueues, dropDecisions } = make(mode, 30);
-      const inp = architect();
-      inp.dropList = [{ id: 'h0', short_name: 'fp8_gemm', why: 'architect changed its mind' }];
-      const out = normalizeQueues(inp);
-      ok(out.head.some((c) => c.id === 'h0'), `${mode}: 57%-GPU head is NOT dropped`);
-      ok(dropDecisions.length === 1 && dropDecisions[0].outcome === 'protected',
-        `${mode}: the refusal is recorded as 'protected'`);
-    }
+    // The dominant head is on the drop list. This is the check that makes ON-by-default defensible.
+    const { normalizeQueues, dropDecisions } = make('on', 30);
+    const inp = architect();
+    inp.dropList = [{ id: 'h0', short_name: 'fp8_gemm', why: 'architect changed its mind' }];
+    const out = normalizeQueues(inp);
+    ok(out.head.some((c) => c.id === 'h0'), 'ON: the 57%-GPU head is NOT dropped');
+    ok(dropDecisions.length === 1 && dropDecisions[0].outcome === 'protected',
+      "ON: the refusal is recorded as 'protected'");
   }
 
   // ---- (d) strict matching ----------------------------------------------------------------------
@@ -120,6 +122,29 @@ if (m) {
     ok(lines.some((l) => /NO MATCH/.test(l)), 'the miss is logged loudly, not swallowed');
   }
   {
+    // An entry that CARRIES an id is matched on that id alone. A stale id must not quietly fall
+    // through to the short_name and take out a candidate the Architect did not name.
+    const { normalizeQueues, dropDecisions } = make('on', 30);
+    const inp = architect();
+    inp.dropList = [{ id: 'h47', short_name: 'rmsnorm', why: 'stale id, real name' }];
+    const out = normalizeQueues(inp);
+    ok(out.head.some((c) => c.id === 'h2'),
+      'an entry with an id does NOT fall back to short_name when the id misses');
+    ok(dropDecisions[0].outcome === 'no_match', 'the stale-id entry is recorded as a miss');
+  }
+  {
+    // Two candidates answer to the same name: refuse rather than guess.
+    const { normalizeQueues, dropDecisions, lines } = make('on', 30);
+    const inp = architect();
+    inp.kernel.push({ id: 'k2', short_name: 'rmsnorm', classification: 'norm', pct_gpu_time: 0.4 });
+    inp.dropList = [{ short_name: 'rmsnorm', why: 'which one?' }];
+    const out = normalizeQueues(inp);
+    ok(out.head.some((c) => c.id === 'h2') && out.kernel.some((c) => c.id === 'k2'),
+      'an ambiguous entry drops NEITHER candidate');
+    ok(dropDecisions[0].outcome === 'ambiguous', "the ambiguity is recorded as 'ambiguous'");
+    ok(lines.some((l) => /AMBIGUOUS/.test(l)), 'the ambiguity is logged');
+  }
+  {
     // Seam match, ignoring the advisory signature.
     const { normalizeQueues } = make('on', 30);
     const inp = architect();
@@ -129,7 +154,71 @@ if (m) {
     ok(!out.head.some((c) => c.id === 'h1'), 'seam match ignores the signature after "("');
   }
 
-  // ---- (e) op-identity guard runs here ----------------------------------------------------------
+  // ---- (e) an unknown size is never dropped -----------------------------------------------------
+  // `Number(c.pct_gpu_time) || 0` would read a missing field as 0% — i.e. as the most droppable value
+  // possible. A candidate we cannot size is a candidate we cannot justify dropping.
+  {
+    for (const bad of [undefined, null, '', 'n/a', NaN]) {
+      const { normalizeQueues, dropDecisions } = make('on', 30);
+      const inp = architect();
+      inp.head = [{ id: 'h0', short_name: 'mystery', op_kind: 'gemm', pct_gpu_time: bad }];
+      inp.kernel = [{ id: 'k0', short_name: 'filler', pct_gpu_time: 1.0 },
+                    { id: 'k1', short_name: 'filler2', pct_gpu_time: 1.0 }];
+      inp.dropList = [{ id: 'h0', why: 'looks small to me' }];
+      const out = normalizeQueues(inp);
+      ok(out.head.length === 1, `pct_gpu_time=${JSON.stringify(bad)}: not dropped (size unknown)`);
+      ok(dropDecisions[0].outcome === 'unverified', `pct_gpu_time=${JSON.stringify(bad)}: recorded as unverified`);
+    }
+  }
+  {
+    // An explicit 0 is a statement, not a gap: it means "measured, negligible". That one IS droppable.
+    const { normalizeQueues, dropDecisions } = make('on', 30);
+    const inp = architect();
+    inp.head = [{ id: 'h0', short_name: 'genuinely_tiny', pct_gpu_time: 0 }];
+    inp.kernel = [{ id: 'k0', short_name: 'filler', pct_gpu_time: 1.0 },
+                  { id: 'k1', short_name: 'filler2', pct_gpu_time: 1.0 }];
+    inp.dropList = [{ id: 'h0', why: 'measured at 0.0%' }];
+    const out = normalizeQueues(inp);
+    ok(out.head.length === 0, 'an explicit pct_gpu_time of 0 IS droppable');
+    ok(dropDecisions[0].outcome === 'dropped', 'and is recorded as a real drop');
+  }
+  {
+    // The entry may carry the size even when the candidate does not.
+    const { normalizeQueues } = make('on', 30);
+    const inp = architect();
+    inp.head = [{ id: 'h0', short_name: 'sizeless' }];
+    inp.kernel = [{ id: 'k0', short_name: 'filler', pct_gpu_time: 1.0 },
+                  { id: 'k1', short_name: 'filler2', pct_gpu_time: 1.0 }];
+    inp.dropList = [{ id: 'h0', pct_gpu_time: 0.7, why: 'sized by the drop entry' }];
+    ok(normalizeQueues(inp).head.length === 0,
+      "the drop entry's own pct_gpu_time is accepted when the candidate has none");
+  }
+
+  // ---- (f) a drop_list that eats the queue is refused WHOLE --------------------------------------
+  {
+    const { normalizeQueues, dropDecisions, lines } = make('on', 30);
+    const inp = architect();                       // 4 heads + 2 kernels = 6, cap = floor(6*0.5) = 3
+    inp.dropList = [
+      { id: 'h1', why: 'no' }, { id: 'h2', why: 'no' },
+      { short_name: 'silu_mul', why: 'no' }, { short_name: 'rope', why: 'no' },
+    ];
+    const out = normalizeQueues(inp);
+    ok(out.head.length === 4 && out.kernel.length === 2,
+      '4 drops out of 6 candidates exceeds the 50% cap -> nothing is dropped');
+    ok(dropDecisions.every((d) => d.outcome === 'refused_bulk'),
+      "every entry is recorded as 'refused_bulk', not silently half-applied");
+    ok(lines.some((l) => /REFUSING THE WHOLE drop_list/.test(l)), 'the bulk refusal is logged');
+  }
+  {
+    // Exactly at the cap is allowed; the breaker is for runaway lists, not ordinary pruning.
+    const { normalizeQueues } = make('on', 30);
+    const inp = architect();
+    inp.dropList = [{ id: 'h1', why: 'ok' }, { id: 'h2', why: 'ok' }, { short_name: 'silu_mul', why: 'ok' }];
+    const out = normalizeQueues(inp);
+    ok(out.head.length + out.kernel.length === 3, 'a list exactly at the cap (3 of 6) still applies');
+  }
+
+  // ---- (g) op-identity guard runs here ----------------------------------------------------------
   {
     const { normalizeQueues } = make('off', 30);
     const out = normalizeQueues(architect());
@@ -150,7 +239,7 @@ if (m) {
     eq(twice, once, 'normalizeQueues is idempotent (safe at the re-strategize and resume sites)');
   }
 
-  // ---- (f) short_name is never invented ----------------------------------------------------------
+  // ---- (h) short_name is never invented; an invented id is marked ----------------------------------
   {
     const { normalizeQueues } = make('off', 30);
     const out = normalizeQueues({ head: [{ op_kind: 'gemm', pct_gpu_time: 3 }], kernel: [], dropList: [], origin: 't' });
@@ -160,7 +249,7 @@ if (m) {
   }
 }
 
-// ---- (g) every queue-assignment site routes through normalizeQueues -------------------------------
+// ---- (i) every queue-assignment site routes through normalizeQueues -------------------------------
 // `= normalizeQueues({`, so the function's own declaration is not counted as a call.
 const callSites = (src.match(/= normalizeQueues\(\{/g) || []).length;
 ok(callSites === 3, `all three queue-assignment sites call normalizeQueues (found ${callSites})`);
@@ -170,7 +259,7 @@ for (const origin of ['strategize', 'carried-state', 're-strategize']) {
 ok(!/(kernelQueue|headQueue) = \(?(strategy|restrat|ST)\b/.test(src),
   'no queue-assignment site bypasses normalizeQueues');
 
-// ---- (h) no schema gained a `required` entry ------------------------------------------------------
+// ---- (j) no schema gained a `required` entry ------------------------------------------------------
 // obj() emits additionalProperties:true and nothing validates locally, so `required` only shapes LLM
 // generation — it would fire on every run regardless of drop_gate, breaking "off behaves like today".
 ok(/drop_list: arrObj[\s\S]{0,200}?\}, \['kernel_candidates'\]\);/.test(src),
@@ -183,6 +272,6 @@ ok(/"drop_list": \[\{"id":/.test(arch), 'roles/system_architect.md asks for an i
 ok(/drop_list[\s\S]{0,300}pct_gpu_time/.test(arch), 'roles/system_architect.md asks for pct_gpu_time on each drop_list entry');
 
 console.log(failures === 0
-  ? '\nPASS: drop_gate is inert when off, auditable when on, and never drops a dominant head.'
+  ? '\nPASS: drop_gate is on by default and refuses any drop it cannot fully justify; off is inert.'
   : `\nFAILED: ${failures} assertion(s).`);
 process.exit(failures === 0 ? 0 : 1);

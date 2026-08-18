@@ -245,14 +245,20 @@ const HEAD_AUTHOR_MAX = parseInt(A.head_author_max != null ? A.head_author_max :
 const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_pct : 30);
 // Relevance gate: consume the Architect's drop_list (the candidates it judged not worth the time).
 // Until now drop_list was written by the Architect on every run and read by NOTHING — not code, not a
-// log, not a report, not another role's prompt. Modes:
-//   off    ignore drop_list completely; the queues are exactly what the Architect returned
-//   dryrun match entries and LOG what WOULD be dropped, but drop nothing            (default)
-//   on     actually drop
-// Default is dryrun because this list has never been acted on before: the first runs prove the matching
-// is sound before it is allowed to remove work. A candidate at or above HEAD_PROTECT_PCT is refused as a
-// drop in EVERY mode — the Amdahl-dominant op is never dropped on an LLM's say-so.
-const DROP_GATE = String(A.drop_gate != null ? A.drop_gate : 'dryrun').toLowerCase();
+// log, not a report, not another role's prompt. Two settings, on by default:
+//   on   drop the candidates the Architect rejected                                 (default)
+//   off  ignore drop_list completely; the queues are exactly what the Architect returned
+// `off` is a kill switch, not a workflow: every decision is logged either way, so there is no
+// observe-only mode to graduate from. What makes `on` safe to default is that a drop is REFUSED
+// unless it clears all four checks in normalizeQueues step (3): the entry resolves to exactly one
+// candidate, that candidate's GPU-time share is actually known, the share is below
+// HEAD_PROTECT_PCT, and the list as a whole is not trying to remove most of the queue.
+const DROP_GATE = String(A.drop_gate != null ? A.drop_gate : 'on').toLowerCase();
+// Bulk-drop circuit breaker. A drop_list that would remove more than this fraction of the combined
+// queue is a planning or matching failure, not a profile in which most work is worthless — so the
+// WHOLE list is refused and logged rather than partially applied in arbitrary order. Deliberately a
+// constant and not an arg: it is a sanity backstop, not a tuning knob.
+const DROP_MAX_FRACTION = 0.5;
 // Corrective re-author: when a verified-isolated head winner is REJECTED at the e2e gate for a FIXABLE
 // integration reason (it ENGAGED live + beat the isolated oracle, only the integration POSTURE is wrong —
 // e.g. a JIT/DSL kernel lazily compiling in the TP>1 warmup -> NO_BINARY_FOR_GPU / cuda_graph_capture_unsafe,
@@ -1188,7 +1194,10 @@ function stripFlydslFromQueues(...queues) {
 //   (2) OP-IDENTITY GUARD — the fused-MoE rule. It used to sit inline after the FIRST strategize only, so
 //                    a post-config re-strategize replaced the queue with fresh untagged candidates and
 //                    silently lost the protection the rule's own comment promises ("never SKIPPED").
-//   (3) RELEVANCE DROP — consume the Architect's drop_list (see DROP_GATE).
+//   (3) RELEVANCE DROP — consume the Architect's drop_list (see DROP_GATE). A drop is refused unless
+//                    the entry resolves to exactly ONE candidate, that candidate's GPU-time share is
+//                    KNOWN, the share is below HEAD_PROTECT_PCT, and the list is not trying to take out
+//                    more than DROP_MAX_FRACTION of the queue. Every refusal is logged and recorded.
 // Order matters: (3) can match on the live seam, and (2) is what fills that in.
 // Inputs are DEEP-copied. These queues used to be shallow .slice()s, so steps (2)/(3) and the flydsl
 // strip wrote straight through into the Architect's own candidate objects and into carried state.
@@ -1197,6 +1206,18 @@ const _clone = (o) => JSON.parse(JSON.stringify(o == null ? {} : o));
 const _norm = (s) => String(s == null ? '' : s).trim().toLowerCase();
 // A seam is "module:attr(sig)"; the signature is advisory, so compare on "module:attr" only.
 const _seamKey = (c) => _norm(String((c && (c.live_call_seam || c.target_callable)) || '').split('(')[0]);
+// GPU-time share, or null when it is genuinely unknown. `Number(x) || 0` will not do here: it maps a
+// missing field to 0, i.e. to "vanishingly small", which is exactly the reading that makes a candidate
+// look safe to drop. An explicit 0 is a statement and is kept as 0; absent/blank/NaN becomes null.
+const _pct = (o) => {
+  const v = o == null ? undefined : o.pct_gpu_time;
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+// NOTE: _isFusedOp is NOT redeclared here. main grew its own module-scoped copy alongside
+// applyOpIdentityGuard; a second `const` of the same name at module scope is a hard SyntaxError, and
+// step (2) above delegates to that function rather than re-implementing the rule.
 
 function normalizeQueues({ head, kernel, dropList, origin }) {
   let H = (head || []).map(_clone);
@@ -1239,45 +1260,85 @@ function normalizeQueues({ head, kernel, dropList, origin }) {
     if (drops.length) log(`[drop-gate] (${origin}) OFF — ignoring ${drops.length} drop_list entr(ies).`);
     return { head: H, kernel: K };
   }
-  const doomed = new Set();
-  let wouldDrop = 0, dropped = 0, protectedN = 0, unmatched = 0;
+  // Resolve every entry FIRST and commit nothing, so the bulk-drop breaker below can weigh the whole
+  // list before any of it takes effect.
+  const pool = [...H, ...K];
+  const planned = [];                       // entries that cleared every check
+  let protectedN = 0, unmatched = 0, ambiguous = 0, unverified = 0;
+
   for (const d of drops) {
-    // Match strictly, most specific first. Never match on a field we invented in step (1).
-    const matches = [...H, ...K].filter((c) => {
-      if (_norm(d.id) && !c.id_synthesized && _norm(d.id) === _norm(c.id)) return true;
-      if (_norm(d.short_name) && _norm(d.short_name) === _norm(c.short_name)) return true;
-      const dk = _norm(String(d.live_call_seam || d.target_callable || '').split('(')[0]);
-      return !!dk && dk === _seamKey(c);
-    });
     const label = d.id || d.short_name || JSON.stringify(d);
+    const note = d.why || 'no reason given';
+
+    // An id is the Architect's own handle on a candidate, so when it supplies one we match on THAT
+    // ALONE. Falling back to the name after an id miss would let a stale or hallucinated id quietly
+    // land on some other candidate. An id we invented in step (1) is never matchable.
+    const byId = _norm(d.id);
+    const matches = byId
+      ? pool.filter((c) => !c.id_synthesized && _norm(c.id) === byId)
+      : pool.filter((c) => {
+        if (_norm(d.short_name) && _norm(d.short_name) === _norm(c.short_name)) return true;
+        const dk = _norm(String(d.live_call_seam || d.target_callable || '').split('(')[0]);
+        return !!dk && dk === _seamKey(c);
+      });
+
     if (!matches.length) {
       // Loud on purpose: a silent no-match is indistinguishable from a working filter.
       unmatched++;
       log(`  [drop-gate] (${origin}) NO MATCH for drop_list entry "${label}" — nothing dropped for it.`);
-      dropDecisions.push({ origin, entry: label, why: d.why || '', outcome: 'no_match' });
+      dropDecisions.push({ origin, entry: label, why: note, outcome: 'no_match' });
       continue;
     }
-    for (const c of matches) {
-      const pct = Number(c.pct_gpu_time) || 0;
-      if (pct >= HEAD_PROTECT_PCT) {
-        protectedN++;
-        log(`  ⚠️ [drop-gate] (${origin}) REFUSING to drop "${c.short_name}" (${pct.toFixed(1)}% GPU >= HEAD_PROTECT_PCT ${HEAD_PROTECT_PCT}%) — Architect said "${d.why || 'no reason given'}". Keeping it in the queue.`);
-        dropDecisions.push({ origin, entry: label, matched: c.short_name, pct_gpu_time: pct, why: d.why || '', outcome: 'protected' });
-        continue;
-      }
-      if (DROP_GATE === 'dryrun') {
-        wouldDrop++;
-        log(`  [drop-gate] (${origin}) DRY RUN — would drop "${c.short_name}" (${pct.toFixed(1)}% GPU): ${d.why || 'no reason given'}`);
-        dropDecisions.push({ origin, entry: label, matched: c.short_name, pct_gpu_time: pct, why: d.why || '', outcome: 'would_drop' });
-        continue;
-      }
-      doomed.add(c);
-      dropped++;
-      log(`  [drop-gate] (${origin}) DROP "${c.short_name}" (${pct.toFixed(1)}% GPU): ${d.why || 'no reason given'}`);
-      dropDecisions.push({ origin, entry: label, matched: c.short_name, pct_gpu_time: pct, why: d.why || '', outcome: 'dropped' });
+    if (matches.length > 1) {
+      // Two candidates answer to the same name. Which one the Architect meant is a guess, and a drop
+      // is not reversible, so refuse and say so.
+      ambiguous++;
+      log(`  ⚠️ [drop-gate] (${origin}) AMBIGUOUS drop_list entry "${label}" matches ${matches.length} candidates (${matches.map((c) => c.id).join(', ')}) — refusing to guess, dropping none of them.`);
+      dropDecisions.push({ origin, entry: label, matched: matches.map((c) => c.id).join(','), why: note, outcome: 'ambiguous' });
+      continue;
     }
+
+    const c = matches[0];
+    // The whole justification for a drop is "this is too small to be worth the time", so a candidate
+    // whose share we cannot read is one we cannot justify dropping. An explicit 0 is a statement and
+    // counts as known; a missing or unparseable field does not. Fall back to the share the Architect
+    // put on the drop entry itself before giving up.
+    const pct = _pct(c) != null ? _pct(c) : _pct(d);
+    if (pct == null) {
+      unverified++;
+      log(`  ⚠️ [drop-gate] (${origin}) REFUSING to drop "${c.short_name || c.id}" — no pct_gpu_time on either the candidate or the drop_list entry, so its size is unknown. Architect said "${note}".`);
+      dropDecisions.push({ origin, entry: label, matched: c.id, why: note, outcome: 'unverified' });
+      continue;
+    }
+    if (pct >= HEAD_PROTECT_PCT) {
+      protectedN++;
+      log(`  ⚠️ [drop-gate] (${origin}) REFUSING to drop "${c.short_name || c.id}" (${pct.toFixed(1)}% GPU >= HEAD_PROTECT_PCT ${HEAD_PROTECT_PCT}%) — Architect said "${note}". Keeping it in the queue.`);
+      dropDecisions.push({ origin, entry: label, matched: c.id, pct_gpu_time: pct, why: note, outcome: 'protected' });
+      continue;
+    }
+    planned.push({ c, label, pct, note });
   }
-  log(`[drop-gate] (${origin}) mode=${DROP_GATE}: ${drops.length} drop_list entr(ies) -> ${dropped} dropped, ${wouldDrop} would-drop, ${protectedN} protected, ${unmatched} unmatched.`);
+
+  // Bulk-drop circuit breaker. Refuse the WHOLE list rather than apply an arbitrary half of it: if the
+  // Architect wants most of the queue gone, the useful signal is "the plan is wrong", not "here are
+  // some kernels".
+  const cap = Math.floor(pool.length * DROP_MAX_FRACTION);
+  if (planned.length > cap) {
+    log(`  ⚠️ [drop-gate] (${origin}) REFUSING THE WHOLE drop_list: it resolves to ${planned.length} of ${pool.length} candidate(s), over the ${Math.round(DROP_MAX_FRACTION * 100)}% cap (${cap}). A list that large is a planning or matching failure, not a profile where most work is worthless. Nothing dropped.`);
+    for (const p of planned) {
+      dropDecisions.push({ origin, entry: p.label, matched: p.c.id, pct_gpu_time: p.pct, why: p.note, outcome: 'refused_bulk' });
+    }
+    log(`[drop-gate] (${origin}) mode=${DROP_GATE}: ${drops.length} drop_list entr(ies) -> 0 dropped (${planned.length} refused in bulk), ${protectedN} protected, ${unverified} unverified, ${ambiguous} ambiguous, ${unmatched} unmatched.`);
+    return { head: H, kernel: K };
+  }
+
+  const doomed = new Set();
+  for (const p of planned) {
+    doomed.add(p.c);
+    log(`  [drop-gate] (${origin}) DROP "${p.c.short_name || p.c.id}" (${p.pct.toFixed(1)}% GPU): ${p.note}`);
+    dropDecisions.push({ origin, entry: p.label, matched: p.c.id, pct_gpu_time: p.pct, why: p.note, outcome: 'dropped' });
+  }
+  log(`[drop-gate] (${origin}) mode=${DROP_GATE}: ${drops.length} drop_list entr(ies) -> ${doomed.size} dropped, ${protectedN} protected, ${unverified} unverified, ${ambiguous} ambiguous, ${unmatched} unmatched.`);
   return { head: H.filter((c) => !doomed.has(c)), kernel: K.filter((c) => !doomed.has(c)) };
 }
 
@@ -4770,8 +4831,7 @@ if (want('final')) {
 if (dropDecisions.length) {
   const tally = dropDecisions.reduce((m, d) => (m[d.outcome] = (m[d.outcome] || 0) + 1, m), {});
   log(`[drop-gate] mode=${DROP_GATE}; ${dropDecisions.length} drop_list decision(s): ` +
-    Object.keys(tally).map((k) => `${k}=${tally[k]}`).join(', ') +
-    (DROP_GATE === 'dryrun' ? '. DRY RUN — nothing was actually dropped; re-run with drop_gate=on once the matching looks right.' : '.'));
+    Object.keys(tally).map((k) => `${k}=${tally[k]}`).join(', ') + '.');
 }
 
 const carryState = {
@@ -4784,7 +4844,8 @@ const carryState = {
   // Full tuning-phase result, so a phase-by-phase resume does not re-run the tuning loop and the Report
   // phase still has the attribution numbers when it runs in a later invocation.
   ...(tuning ? { tuning } : {}),
-  drop_decisions: dropDecisions,   // every drop_list entry and what became of it (dropped/protected/unverified/ambiguous/no_match)
+  drop_decisions: dropDecisions,   // every drop_list entry and what became of it
+                                   // (dropped/protected/unverified/ambiguous/refused_bulk/no_match)
   // Carry pending (verified-isolated, A/B-incomplete) wins WITH their inputs so a
   // resumed phase run can finish their A/B instead of re-discovering them.
   pending_integrations: pendingIntegrations,
