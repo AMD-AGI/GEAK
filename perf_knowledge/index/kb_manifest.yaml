@@ -2,7 +2,7 @@
 # index/_gen_index.py). This is the SINGLE data source kb_resolve.py consumes. Do not hand-edit;
 # edit file frontmatter and re-run the generator.
 
-# files: 646
+# files: 647
 records:
   - path: e2e_workflow/knowledge/learned/aiter-bf16-tuned-gemm-gfx942.md
     title: ""
@@ -46,6 +46,21 @@ records:
     verified_on: null
     hook: "Editable Triton linear-attn cluster → STACK-and-compound, don't expect a solo e2e pass"
     platforms: [gfx942]
+    skus: []
+    levers: []
+    bound_type: []
+  - path: e2e_workflow/knowledge/learned/fp8-a8w8-blockscale-ck-tune-gfx950-vllm.md
+    title: ""
+    layer: learned
+    kind: ""
+    kernel_class: ""
+    cost: ""
+    risk: ""
+    lifecycle: active
+    status: ""
+    verified_on: null
+    hook: gfx950 vLLM fp8 a8w8 blockscale — CK per-shape tune DB (no overlay needed)
+    platforms: [gfx950]
     skus: []
     levers: []
     bound_type: []
