@@ -588,6 +588,9 @@ if (MODE === 'author') {
     roleAgent('author_engineer', 'author', 'Write the simplest correct baseline in the target language.', {
       TARGET_LANGUAGE, OP_SPEC, WORKSPACE: CANONICAL, TASK_DIR: KERNEL_PATH_ORIG,
       GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, KERNEL_KNOWLEDGE_DIR,
+      // The author engineer reads the learned index too, so the switch has to reach it. It is the
+      // second reader; a switch that covers one of two readers is not a switch.
+      LEARNED_KB: USE_LEARNED_READ ? 'on' : 'off',
     }),
     { phase: 'Author', label: `author:${TARGET_LANGUAGE}`, schema: AUTHOR_SCHEMA });
   if (!authored || !authored.authored || !says(authored.correctness, 'pass')) {
@@ -706,8 +709,12 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
     ...KB_INPUTS,
-    // Stated to the planner, because this is where behaviour actually changes — the strip below only
-    // makes a violation visible. Absent when the KB is off, so the prompt stays byte-identical then.
+    // Stated UNCONDITIONALLY, in both directions. `use_learned_kb=false` used to omit the budget and
+    // nothing else, while roles/tech_lead.md still listed knowledge/learned/INDEX.md among the files
+    // to read — so the off switch removed the budget that CONSTRAINS the KB and left the instruction
+    // that USES it, i.e. the arm it exists to produce (a clean KB-off control) was never clean. The
+    // role now gates on this value, so it has to be present whichever way it points.
+    LEARNED_KB: USE_LEARNED_READ ? 'on' : 'off',
     ...(USE_LEARNED_READ ? { LEARNED_KB_BUDGET:
       `At most ${KB_DIR_CAP} of this round's directions may draw on learned cards, and you must cite ` +
       `the cards you used in that direction's \`learned_refs\`. ` +

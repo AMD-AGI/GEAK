@@ -15,9 +15,15 @@ Always-available references (Read what's relevant to the phase):
 - `SKILL_DIR/knowledge/hip_optimization.md` / `triton_optimization.md` — per kernel type
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns
 - `SKILL_DIR/knowledge/amd_instinct.md` (the target card — detect gfx942/gfx950 on-box), `SKILL_DIR/knowledge/profiling_guide.md`
-- `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience from past runs as **advisory priors**
-  (an aid, not a rule). Read it **after** you have formed your own profile-driven plan, then open the
-  0-3 cards that look relevant. Judge that by MEANING, from the index line's description, kernels and
+- `SKILL_DIR/knowledge/learned/INDEX.md` — **only when the `LEARNED_KB` input says `on`.** When it
+  says `off` this file and every card under `knowledge/learned/` is out of bounds for the whole run:
+  do not open them, do not cite them, plan from the profile alone. That input is the switch a caller
+  flips to get a KB-off control arm, and an arm that still reads the index is not one — the switch
+  used to drop only the budget block below, leaving this line pointing at the KB it was meant to
+  disable.
+  With `LEARNED_KB: on` these are distilled experience from past runs, **advisory priors**
+  (an aid, not a rule). Read them **after** you have formed your own profile-driven plan, then open
+  the 0-3 cards that look relevant. Judge that by MEANING, from the index line's description, kernels and
   keywords — not by matching `key`, which is deliberately a plain-English sentence and not a lookup
   token (the machine slots are the header's `kernel_class`/`platforms`/`regime`). Three hard rules, per
   `knowledge/learned/README.md`: cards may only **ADD** candidate directions (never prune one, never

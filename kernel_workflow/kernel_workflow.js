@@ -364,6 +364,10 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       exp_root: `${EVAL_DIR}/bakeoff/${l.key}`,
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
+      // Forward the KB switch. This arg object is explicit (the optimize/author path spreads {...A},
+      // this one does not), so anything omitted here silently reverts to the lane's default — a
+      // caller asking for a KB-off bakeoff would have got eight KB-on lanes and no error.
+      use_learned_kb: A.use_learned_kb != null ? String(A.use_learned_kb) : 'true',
       // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
       // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
       update_experience: 'off',

@@ -39,7 +39,9 @@ never by the knowledge base. Rules (these guarantee the KB can only help, never 
   evidence* — a weak hint at most. Don't pick based on it; measure.
 - If `KERNEL_KNOWLEDGE_DIR` is empty/missing, use the canonical algorithm — no behavior change.
 
-`SKILL_DIR/knowledge/learned/INDEX.md` is the *local* twin of that contract: distilled cards from past
+`SKILL_DIR/knowledge/learned/INDEX.md` — **only when the `LEARNED_KB` input says `on`**; when it says
+`off`, that file and every card under `knowledge/learned/` is out of bounds and you author from the op
+spec alone. It is the *local* twin of that contract: distilled cards from past
 runs on this box. Same three rules (`knowledge/learned/README.md`) — a card may only **ADD** a candidate
 to try, the unittest + benchmark is always the judge, and a `caution:` is "also verify X", never a ban.
 Open the cards whose key matches your `(kernel_class, gfx, regime)`; if there are none, nothing changes.
