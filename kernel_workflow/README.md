@@ -36,7 +36,7 @@ by an agent returning **structured JSON**.
   `verify_engineer`, and `integrator`.
 
 ## Pipeline
-`Setup → Analyze+Roadmap → Benchmark(COMMANDMENT+baseline) → Baseline Profile →`
+`Setup → Analyze+Roadmap → Benchmark(COMMANDMENT+baseline) → Baseline Profile → [Research (opt-in)] →`
 `LOOP[ Plan round → (Optimize ‖ Verify, pipelined) → Integrate → Commit winner → Re-profile → Update memory ] →`
 `Final Report → Director Validation`.
 
@@ -94,6 +94,13 @@ Workflow({
                                //   unweighted geomean is kept as a secondary diagnostic). Correctness is
                                //   unaffected (it stays on the frozen immutable oracle).
                                //   Also accepted as op_spec.workload_path, or op_spec.workload (inline).
+    // --- Deep Research Agent (DRA) — opt-in web-grounded research phase before the optimize loop ---
+    dra_enabled: "false",      // optional, default "false" (OFF → behavior byte-identical). "true" runs
+                               //   the Research phase after Profile / before the optimize loop.
+    dra_max_questions: 8,      // optional, default 8: max research questions fanned out in parallel
+    dra_blindspot: "false",    // optional, default "false": run an extra blindspot-critique + 2nd
+                               //   parallel research wave (Stage 5/6) — budget-permitting
+    dra_max_blindspots: 4      // optional, default 4: cap on blindspots / 2nd-wave follow-ups
   }
 })
 ```
@@ -120,6 +127,36 @@ writes the simplest correct implementation in `target_language` (correctness-jud
 oracle), commits it as the baseline, and then the **same optimize loop** improves it. Returns
 `authored:false` / `validation_status:"author_failed"` if no correct baseline can be produced (the
 caller drops that language). `mode="optimize"` (default) is unchanged and fully backward compatible.
+
+### Deep Research Agent / Research phase (NEW, opt-in)
+`dra_enabled="true"` inserts a **`Research` phase AFTER Profile and BEFORE the optimize loop** (so the
+COMMANDMENT + baseline profile + analysis already exist). It lives in the `kernel_lane.js` worker
+alongside the rest of the pipeline, and the dispatcher forwards `dra_*` through unchanged. The
+**`researcher`** persona (`roles/researcher.md`) runs a v4-native deep-research pass:
+1. **Stage 0 + 1/2** (`research_plan`, one agent): extract facts from the kernel source +
+   `profiling_summary.md` + `analysis.json` + the `COMMANDMENT`, then generate & rank research
+   QUESTIONS spanning BOTH grounded bottleneck questions AND design-space / "is there a fundamentally
+   faster algorithm or execution strategy?" questions.
+2. **Stages 3/4** (`research_question`, fanned out in **parallel** — one agent per question): each
+   researches its question on the live web via **native `WebSearch`/`WebFetch`** and synthesizes one
+   judgment. Every research agent is wrapped in the `agentT()` hang-guard, so a hung research agent
+   resolves to `null` and the parallel round-barrier still proceeds (it cannot wedge the run).
+3. **Stage 5/6** (`research_blindspot`, optional, `dra_blindspot="true"`): a blindspot critique + a
+   second parallel research wave on the follow-ups.
+4. **Stage 7** (`research_synthesize`, one agent): a ranked **portfolio of optimization directions**,
+   written as `deep_search.md` (full evidence), `deep_search_brief.md` (compact, ~2-4 KB ranked
+   directions only — what the planner reads), and `deep_search.json` (structured).
+
+The TechLead's `plan_round` then **Reads `EVAL_DIR/deep_search_brief.md` (if present)** and seeds
+`directions[]` from the ranked DRA directions — **diversifying** them across parallel engineers (with
+≥1 free explorer slot, never anchoring all engineers on one theme) and treating **high-ceiling
+rewrites (raw-HIP/`load_inline`, HIP/CUDA graph capture, algorithmic reformulation) as first-class**,
+not secondary. The brief is a prior, never a cage: profile/per-case data and measurement still rule.
+
+**Web tools:** the research agents need `WebSearch`/`WebFetch`. They are on the e2e allowlist
+(`interface/run_e2e.py` `ALLOWED_TOOLS`). For a standalone `claude -p` invocation of this workflow
+with `dra_enabled`, pass them on the allowlist too (`--allowed-tools Workflow,Bash,Read,Write,WebSearch,WebFetch`).
+With `dra_enabled` off (the default) nothing opts into the web tools and behavior is unchanged.
 
 ### Bake-off mode (NEW) — one kernel, many backend languages, keep the fastest
 `kernel_workflow.js` is now the single **ENTRY POINT / dispatcher**; the single-language pipeline lives
@@ -181,6 +218,9 @@ Everything lands under `<exp_root>/team_<kernel>_<timestamp>/<kernel>/` (default
 the `exp/` folder sibling to `workflow_dir`):
 - `COMMANDMENT.md`, `baseline_timing.json`, `analysis.json`, `codebase_context.md`, `roadmap.md`
 - `baseline_metrics.json`, `profiling_summary.md`
+- (DRA, when `dra_enabled`) `deep_search.md` (full research), `deep_search_brief.md` (compact ranked
+  directions — the planner's input), `deep_search.json` (structured portfolio), and
+  `research/{facts.json, questions.json, answers/<id>.json, blindspots.json}` (the research trail)
 - `round_N/engineer_i/{worker_result.json, report.md, best_patch.diff}` — each engineer's mini-report
 - `round_N/integrate/`, `insight_log.md`, `current_best.diff`
 - `tech_lead_report.md` — round-by-round narrative + final per-case table (the TechLead summary)
@@ -200,7 +240,8 @@ kernel_lane.js         single-language WORKER (the deterministic optimize/author
 kernel_workflow_bmk.js batch orchestrator (runs kernel_lane on a list of kernels, one batch per GPU)
 roles/               director, tech_lead, engineer, deep_engineer (deep_explore),
                      author_engineer, benchmark_engineer, profile_engineer,
-                     verify_engineer, integrator, oracle_freezer (bake-off freeze)
+                     verify_engineer, integrator, oracle_freezer (bake-off freeze),
+                     researcher (DRA, opt-in)
 knowledge/           optimization_strategies, hip/triton/wrapper, profiling_guide,
                      amd_instinct (multi-card: gfx942/gfx950), self_monitoring, geomean_levers
 scripts/             gpu_lock.sh, profile_kernel.sh,

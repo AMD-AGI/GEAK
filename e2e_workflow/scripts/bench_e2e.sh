@@ -15,6 +15,16 @@
 #   adapter_launch                  -> launch the server in background; set global SERVER_PID; write $LOG.
 #                                      Reads: MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS
 #                                             EXTRA_ENV OVERLAY_PYTHONPATH PROFILE PROFILE_DIR
+#                                      MUST launch through the shared prefix:
+#                                        ${SERVER_LAUNCH_PREFIX:-} env ... <server> ... & SERVER_PID=$!
+#                                      That prefix (server_teardown.sh) puts the server in its OWN
+#                                      session, which is the ONLY thing that lets teardown PROVE the
+#                                      process group belongs to this launch and reap the whole tree.
+#                                      An adapter that launches without it still works, but its
+#                                      teardown degrades to pid+descendants. A launcher that cannot
+#                                      control the launch (it delegates to an external script) must
+#                                      instead set SERVER_GROUP_UNVERIFIED=1 unless it can show the
+#                                      pid leads its own group.
 #   adapter_health                  -> return 0 iff $BASE_URL is serving (e.g. curl /health)
 #   adapter_bench  NUMP MAXC PROF   -> run ONE bench (random ISL/OSL), append a result JSON line to
 #                                      $RESULT_JSONL with canonical keys (output_throughput,
@@ -254,43 +264,23 @@ fi
 # ---- modes ----
 REUSE_SERVER=${REUSE_SERVER:-0}       # 1 = a warm server is already up at HOST:PORT; don't launch/kill
 PROFILE=${PROFILE:-0}                 # 1 = also capture a profiler trace
-# Profiling is meant to capture the REAL continuous-batching steady state — prefill chunks and decode
-# steps interleaved as the scheduler actually runs them — NOT a cold prefill burst. So we profile a
-# WINDOW in the middle of a sustained, saturated load (see the PROFILE block below). Tunables:
-PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-40}   # forward steps to capture (sglang; step-controlled). Floor;
-                                             # auto-sizing below raises it to TARGET_STEPS (RAMP+STEADY+10)
-                                             # from ISL/OSL/CONC, then CLAMPS to PROFILE_NUM_STEPS_MAX.
-PROFILE_NUM_STEPS_MAX=${PROFILE_NUM_STEPS_MAX:-64}  # CAP on captured steps (sglang). At low conc STEADY
-                                             # = 5*ceil(OSL/CONC) explodes (e.g. 172 at conc2/osl64), and
-                                             # the sglang/ROCm trace is ~MBs PER STEP -> a multi-hundred-MB
-                                             # trace whose roctracer flush takes minutes AND BLOCKS the
-                                             # server (health drops, requests time out). 64 steps still
-                                             # spans the prefill ramp + a decode sample. Raise if needed.
-PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-0}  # 0 = arm the profiler AT load start so the capture INCLUDES
-                                             # the initial prefill burst. A non-zero warmup lets the load
-                                             # pass the prefill ramp first, so the window lands in decode
-                                             # only and prefill kernels are NEVER captured (Bug 1). The
-                                             # window is sized (below) to span the prefill ramp AND decode.
-PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}  # >CONC so the queue stays full and short
-                                             # (range-ratio>0) requests get replaced -> phases de-sync.
-PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}            # optional req/s to stagger arrivals; empty
-                                             # = inf (max_concurrency still caps in-flight at CONC).
-PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}     # max wait for the trace file to appear.
-PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-40}             # capture DURATION FLOOR for time-windowed
-                                             # backends (vllm: /start_profile has no num_steps, so the
-                                             # window is controlled by start -> sleep this long ->
-                                             # /stop_profile). sglang ignores this (uses PROFILE_NUM_STEPS).
-                                             # This is a FLOOR: when TPOT_MS is known (auto-derived from
-                                             # the timed bench below) the window auto-scales to
-                                             # TARGET_STEPS*TPOT*1.5 so it spans the prefill ramp (warmup=0)
-                                             # AND a steady decode sample, then is CLAMPED to
-                                             # [40, PROFILE_WINDOW_SEC_MAX]. Longer is NOT free: a torch
-                                             # trace grows ~linearly with the window (must stay <
-                                             # PROFILE_WINDOW_TIMEOUT, and can OOM the profiler buffer).
-PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-60}     # CAP for the auto-scaled vllm window. Bounds
-                                             # trace size: with warmup=0 the whole prefill ramp is recorded,
-                                             # so a heavy/low-TPOT workload could otherwise size a multi-GB
-                                             # trace that fails to flush. Raise if you need a longer window.
+# Profile a window mid-load so the trace holds the real prefill+decode steady state, not a cold burst.
+PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-40}          # sglang step count (floor; auto-raised to target below)
+PROFILE_NUM_STEPS_MAX=${PROFILE_NUM_STEPS_MAX:-64}  # step cap: sglang trace is ~MBs/step and its flush blocks the server
+# Step target from the workload: RAMP=ceil(CONC*ISL/chunk) prefill passes + STEADY=max(30,5*ceil(OSL/CONC))
+# decode steps + margin, so a capture bounded to it always spans a decode steady sample. Drives the sglang
+# step count, the vllm time window, and the vllm 0.26+ step cap.
+PROFILE_TARGET_STEPS=$(python3 -c "import math;print(math.ceil($CONC*$ISL/max(${PREFILL_CHUNK:-$ISL},1))+max(30,5*math.ceil($OSL/max($CONC,1)))+10)" 2>/dev/null || echo "$PROFILE_NUM_STEPS_MAX")
+# vllm 0.26+ ProfilerConfig knobs (adapters/vllm.sh), fixed at server launch. max_iterations self-stops the
+# profiler after N worker steps; default to the workload target clamped to the step cap (bounds the buffer).
+PROFILE_MAX_ITERS=${PROFILE_MAX_ITERS:-$(( PROFILE_TARGET_STEPS < PROFILE_NUM_STEPS_MAX ? PROFILE_TARGET_STEPS : PROFILE_NUM_STEPS_MAX ))}
+PROFILE_DELAY_ITERS=${PROFILE_DELAY_ITERS:-0}       # steps to skip before arming; 0 keeps the prefill burst
+PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-0}         # 0 = arm at load start so prefill is captured too
+PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}   # >CONC so the queue stays saturated
+PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}      # optional req/s to stagger arrivals; empty = inf
+PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}      # max wait for the trace file to land
+PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-20}        # vllm time window (floor; auto-scaled below). Sole bound on <0.26
+PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-30}      # cap for the auto-scaled window (bounds trace size)
 OUT_DIR=${OUT_DIR:-$(pwd)/e2e_bench_out}
 LOG=${LOG:-$OUT_DIR/server.log}
 
@@ -308,6 +298,7 @@ COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
 export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
+export PROFILE_MAX_ITERS PROFILE_DELAY_ITERS
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
 export BENCH_TRUST_REMOTE_CODE HF_HUB_TRUST_REMOTE_CODE
 
@@ -323,32 +314,37 @@ echo "Out dir:      $OUT_DIR"
 echo
 
 SERVER_PID=""
-cleanup() {
-  [ -n "${SERVER_PID:-}" ] || return 0
-  echo ">>> Shutting down server (pid $SERVER_PID) ..."
-  # A launcher that starts the server in its OWN process group / session (e.g.
-  # the Magpie launcher uses `setsid`) leaves the worker/child procs OUTSIDE
-  # $SERVER_PID, so a bare `kill $SERVER_PID` orphans them (leaked VRAM, ghost
-  # listeners on the port). When the server's process group differs from OURS,
-  # reap the WHOLE group (TERM, then KILL after a grace window). The own-group
-  # guard is critical: for a NATIVE launch the server shares our group, so we
-  # must NOT group-kill (that would kill bench_e2e.sh itself) — fall back to the
-  # single-pid kill, byte-identical to before.
-  local _pgid _self
-  _pgid="$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')"
-  _self="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
-  if [ -n "$_pgid" ] && [ "$_pgid" != "$_self" ]; then
-    kill -TERM "-$_pgid" 2>/dev/null || kill -TERM "$SERVER_PID" 2>/dev/null || true
-    for _i in $(seq 1 "${SERVER_STOP_GRACE_S:-10}"); do
-      kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 1
-    done
-    kill -0 "$SERVER_PID" 2>/dev/null && kill -KILL "-$_pgid" 2>/dev/null || true
-  else
-    kill "$SERVER_PID" 2>/dev/null || true
-  fi
-  wait "$SERVER_PID" 2>/dev/null || true
-}
-trap cleanup EXIT
+# Server lifecycle: the teardown contract lives in server_teardown.sh so the SAME
+# identity-verified kill is used by this dispatcher and by any role-authored capture
+# script (which previously hand-rolled its own kill). The old cleanup resolved the
+# server's pgid AT KILL TIME and group-killed whenever it differed from ours — a pid
+# that had exited and been recycled resolved to a stranger's group, which is how a
+# teardown can reach the caller's orchestrator / PID 1.
+#
+# This script is COPIED into $EVAL_DIR (roles/director.md) and run from there, so the
+# library has to be found next to the copy. If it is not, the teardown silently becomes
+# a no-op: `source` fails, the EXIT trap resolves to a missing function, and the served
+# model is left running with its VRAM and port held while the serving-GPU lock is
+# released — the next launch then OOMs. So look next to us, then in the ORIGINAL scripts
+# dir when the caller told us where that is, and REFUSE to run otherwise. A benchmark
+# that cannot stop what it starts must not start it.
+TEARDOWN_LIB=""
+for _cand in "$HERE/server_teardown.sh" "${SKILL_DIR:-}/scripts/server_teardown.sh" \
+             "${WORKFLOW_DIR:-}/scripts/server_teardown.sh"; do
+  case "$_cand" in /scripts/server_teardown.sh) continue ;; esac   # unset SKILL_DIR/WORKFLOW_DIR
+  [ -f "$_cand" ] && { TEARDOWN_LIB="$_cand"; break; }
+done
+if [ -z "$TEARDOWN_LIB" ]; then
+  echo "!!! server_teardown.sh not found next to this script ($HERE) or under SKILL_DIR/WORKFLOW_DIR." >&2
+  echo "    It carries the server-kill contract; without it the EXIT trap is a no-op and the" >&2
+  echo "    launched server would be LEAKED (VRAM + port held, serving-GPU lock released)." >&2
+  echo "    Stage it alongside bench_e2e.sh: cp \"\$SKILL_DIR/scripts/server_teardown.sh\" \"\$EVAL_DIR/\"" >&2
+  exit 3
+fi
+[ "$TEARDOWN_LIB" = "$HERE/server_teardown.sh" ] || echo ">>> teardown contract: $TEARDOWN_LIB (not staged next to this copy)"
+# shellcheck disable=SC1090
+source "$TEARDOWN_LIB"
+trap server_teardown EXIT
 
 # ---- serving-GPU mutex ----
 # TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
@@ -374,6 +370,9 @@ if [ "$REUSE_SERVER" != "1" ]; then
   echo ">>> Launching $BACKEND server (log: $LOG) ..."
   adapter_launch
   if [ -z "${SERVER_PID:-}" ]; then echo "!!! adapter_launch did not set SERVER_PID"; exit 2; fi
+  # Freeze the server's process identity NOW (pid, pgid, /proc start time) so the
+  # EXIT teardown never has to ask "who owns this pid?" after the pid may be gone.
+  server_record_identity "$SERVER_PID"
 
   echo ">>> Waiting for server health ..."
   # An overlaid candidate can wedge: process stays alive but /health 503s forever (JIT deadlock /
@@ -489,43 +488,27 @@ PY
     case "${TPOT_MS:-}" in ''|*[!0-9.]*) TPOT_MS="" ;; esac   # keep only a clean number
     [ -n "${TPOT_MS:-}" ] && echo ">>> steady-state sizing: derived TPOT_MS=${TPOT_MS}ms from timed bench (vllm window auto-scale)"
   fi
-  # ---- workload-aware steady-state window sizing (this is the ONLY sizing; adaptive re-capture is off) ----
-  # Reaching batch≈CONC = clear the prefill ramp, then sample steady decode:
-  #   RAMP   = ceil(CONC*ISL / chunk)     forward passes to prefill all CONC in-flight requests
-  #   STEADY = max(30, 5*ceil(OSL/CONC))  decode steps for a stable, representative sample
-  # TARGET = RAMP + STEADY + margin. Sized deterministically UP FRONT for BOTH backends (the old reactive
-  # re-capture gate is DISABLED — no reliable per-step signal without annotations). The ISL/OSL/CONC/prompts
-  # math is the guarantee: PROFILE_NUM_STEPS -> TARGET (sglang, step-controlled), and PROFILE_WINDOW_SEC is
-  # auto-scaled from the derived TPOT and clamped to [40, PROFILE_WINDOW_SEC_MAX] (vllm, time-controlled),
-  # so the single window spans the prefill ramp (warmup=0) + a steady decode sample.
-  # Assumes a saturated queue + KV headroom for CONC concurrent decodes (else batch can't reach CONC).
-  _CHUNK="${PREFILL_CHUNK:-$ISL}"
-  _RAMP=$(python3 -c "import math;print(math.ceil($CONC*$ISL/max($_CHUNK,1)))" 2>/dev/null || echo "$CONC")
-  _STEADYN=$(python3 -c "import math;print(max(30,5*math.ceil($OSL/max($CONC,1))))" 2>/dev/null || echo 30)
-  _TARGET_STEPS=$(( _RAMP + _STEADYN + 10 ))
-  if [ "${PROFILE_NUM_STEPS:-0}" -lt "$_TARGET_STEPS" ]; then
-    echo ">>> steady-state sizing: RAMP=${_RAMP}+STEADY=${_STEADYN}+10 -> PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${_TARGET_STEPS}"
-    PROFILE_NUM_STEPS=$_TARGET_STEPS
+  # Size the single capture to PROFILE_TARGET_STEPS (computed at launch): raise the sglang step count
+  # (clamped to the cap) and scale the vllm window to target*TPOT*1.5. vllm 0.26+ is already step-bounded
+  # by PROFILE_MAX_ITERS; the window is a safety cap there, the sole bound on <0.26.
+  if [ "${PROFILE_NUM_STEPS:-0}" -lt "$PROFILE_TARGET_STEPS" ]; then
+    echo ">>> sizing: PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${PROFILE_TARGET_STEPS}"
+    PROFILE_NUM_STEPS=$PROFILE_TARGET_STEPS
   fi
-  # CLAMP steps (sglang: ~MBs/step -> avoid a huge trace + server-blocking flush at low conc).
   if [ -n "${PROFILE_NUM_STEPS_MAX:-}" ] && [ "$PROFILE_NUM_STEPS" -gt "$PROFILE_NUM_STEPS_MAX" ]; then
-    echo ">>> steady-state sizing: PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${PROFILE_NUM_STEPS_MAX} (capped at PROFILE_NUM_STEPS_MAX)"
+    echo ">>> sizing: PROFILE_NUM_STEPS capped ${PROFILE_NUM_STEPS}->${PROFILE_NUM_STEPS_MAX}"
     PROFILE_NUM_STEPS=$PROFILE_NUM_STEPS_MAX
   fi
   _NEED_PROMPTS=$(python3 -c "import math;print($CONC + math.ceil($CONC*$PROFILE_NUM_STEPS/max($OSL,1)) + $CONC)" 2>/dev/null || echo "$PROFILE_NUM_PROMPTS")
   if [ "${PROFILE_NUM_PROMPTS:-0}" -lt "$_NEED_PROMPTS" ]; then
-    echo ">>> steady-state sizing: PROFILE_NUM_PROMPTS ${PROFILE_NUM_PROMPTS}->${_NEED_PROMPTS} (keep the queue full through the window)"
+    echo ">>> sizing: PROFILE_NUM_PROMPTS ${PROFILE_NUM_PROMPTS}->${_NEED_PROMPTS}"
     PROFILE_NUM_PROMPTS=$_NEED_PROMPTS
   fi
-  # vLLM time-window auto-scale (needs TPOT_MS, derived above): size the window to span the prefill ramp
-  # + a steady decode sample = TARGET_STEPS * per-step time, x1.5 margin, then CLAMP to
-  # [PROFILE_WINDOW_SEC floor, PROFILE_WINDOW_SEC_MAX cap]. The cap bounds trace size (warmup=0 records the
-  # whole ramp, so a heavy/low-TPOT workload could otherwise size a multi-GB trace that fails to flush).
   if [ -n "${TPOT_MS:-}" ]; then
-    _WMAX="${PROFILE_WINDOW_SEC_MAX:-60}"
-    _WSEC=$(python3 -c "import math;print(min($_WMAX, max(${PROFILE_WINDOW_SEC:-40}, math.ceil($_TARGET_STEPS*$TPOT_MS/1000.0*1.5))))" 2>/dev/null || echo "${PROFILE_WINDOW_SEC:-40}")
+    _WMAX="${PROFILE_WINDOW_SEC_MAX:-30}"
+    _WSEC=$(python3 -c "import math;print(min($_WMAX, max(${PROFILE_WINDOW_SEC:-20}, math.ceil($PROFILE_TARGET_STEPS*$TPOT_MS/1000.0*1.5))))" 2>/dev/null || echo "${PROFILE_WINDOW_SEC:-20}")
     if [ "$_WSEC" != "${PROFILE_WINDOW_SEC}" ]; then
-      echo ">>> steady-state sizing: PROFILE_WINDOW_SEC ${PROFILE_WINDOW_SEC}->${_WSEC}s (TPOT=${TPOT_MS}ms x ${_TARGET_STEPS} steps x1.5, clamped [${PROFILE_WINDOW_SEC:-40},${_WMAX}]s)"
+      echo ">>> sizing: PROFILE_WINDOW_SEC ${PROFILE_WINDOW_SEC}->${_WSEC}s"
       PROFILE_WINDOW_SEC=$_WSEC
     fi
   fi

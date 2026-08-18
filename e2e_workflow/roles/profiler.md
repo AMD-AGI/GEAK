@@ -35,18 +35,28 @@ classification semantics) and `SKILL_DIR/knowledge/sglang_internals.md` (profile
     `execute_context_*_generation_*` step spans ARE real torch `record_function` ranges that DO appear as
     `gpu_user_annotation` in the ROCm torch trace (verified in real AMD traces — a steady conc64 decode
     trace shows `generation_64(64)`), and `parse_profile` CAN split prefill/decode + verify decode batch ≈
-    CONC from them. They are OFF only because THIS vLLM build's strict `ProfilerConfig` (pydantic
-    `extra=forbid`) ABORTS the server on `detailed_trace_annotation`, so the adapter stopped passing it →
-    the trace has no step spans. sglang uses a different profiler and does NOT emit that vLLM-specific
-    `execute_context_*` format. Two gotchas when annotations ARE present: (i) `parse_profile` reads them
-    only from the `gpu_user_annotation` category — some captures put `execute_*` in `user_annotation` (CPU)
-    only, and those are silently missed; (ii) parse the rank0 WORKER trace (`dp0_pp0_tp0..._rank0`), NOT
-    the `*.async_llm.*` engine-process trace (python_function only, no kernels).
-  - Consequence on the current build: `parse_profile` CANNOT measure the decode batch or a per-kernel
-    `phase` from the trace (no `serving` block, no per-kernel `phase`), and the decode-step count is only a
-    COARSE shape-visibility proxy. Do NOT expect to verify steadiness from the trace — trust the up-front
-    analytic sizing + the saturated load. The prefill/decode split is recovered downstream ANALYTICALLY
-    (parse_profile's `analytic_calls` / `est_shape`), not from the trace.
+    CONC from them. On vLLM **0.26+** the adapter now emits `detailed_trace_annotation` again (see below):
+    the field is FIELD-GATED — `adapter_launch` probes `ProfilerConfig` for it and only passes it when the
+    installed build declares it, so the strict schema (pydantic `extra=forbid`) that used to ABORT the
+    server on an unknown key can no longer be tripped. On builds that lack the field the trace still has no
+    step spans and the split falls back to the analytic path (below). sglang uses a different profiler and
+    does NOT emit that vLLM-specific `execute_context_*` format. Two gotchas when annotations ARE present:
+    (i) `parse_profile` reads them only from the `gpu_user_annotation` category — some captures put
+    `execute_*` in `user_annotation` (CPU) only, and those are silently missed; (ii) parse the rank0 WORKER
+    trace (`dp0_pp0_tp0..._rank0`), NOT the `*.async_llm.*` engine-process trace (python_function only, no
+    kernels). With TP>1 the dir holds one trace per rank; the parser already selects `*rank0*` (see the
+    `TLT=$(ls ... *rank0* ...)` selection below), so the extra per-rank files are harmless, just unused.
+  - Consequence on a build WITHOUT `detailed_trace_annotation`: `parse_profile` CANNOT measure the decode
+    batch or a per-kernel `phase` from the trace (no `serving` block, no per-kernel `phase`), and the
+    decode-step count is only a COARSE shape-visibility proxy. Do NOT expect to verify steadiness from the
+    trace — trust the up-front analytic sizing + the saturated load. The prefill/decode split is recovered
+    downstream ANALYTICALLY (parse_profile's `analytic_calls` / `est_shape`), not from the trace.
+  - Profiler memory bound: the torch profiler event buffer drove the host-RAM OOMs. `adapter_launch` now
+    sets `torch_profiler_with_stack=false` (drops the biggest per-event cost; sglang already did) and, on
+    0.26+, `max_iterations` (`PROFILE_MAX_ITERS`, derived from the ISL/OSL/CONC step target and clamped to
+    `PROFILE_NUM_STEPS_MAX`) so the profiler SELF-STOPS after N worker steps — step-bounded by construction,
+    not just by the `PROFILE_WINDOW_SEC` sleep (20–30s band). On <0.26 the shorter time window is the only
+    bound. Grep server.log for `Max profiling iterations reached` to confirm the self-stop fired.
   - The old adaptive "enlarge window + re-capture until N decode steps" gate is DISABLED — that proxy loop
     used to double the window until the trace bloated / OOMed the profiler buffer. `bench_e2e.sh` now
     captures ONCE with the up-front-sized window; trust the sizing.
@@ -142,7 +152,16 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    - rocprofv3 finalization is SLOW on multi-rank serving (TP>1): on shutdown the multiprocessing
      `resource_tracker` reaps the vLLM TP workers' leaked shm/semaphores, and the CSV is flushed only
      AFTER that — this routinely takes **8–20 min. That is normal, not a hang.**
-   - So after the bench: stop the server with SIGINT/`kill` (NEVER `kill -9` the rocprofv3 parent) and
+   - So after the bench: **stop nothing yourself.** `bench_e2e.sh` has already torn the server down
+     through the shared teardown contract (`scripts/server_teardown.sh`) in its EXIT trap by the time
+     the command in step 1 returns, so there is no server left for you to stop, and a `pgrep`/`pkill`
+     hunt for the "leftover" rocprofv3 or server process is the exact banned action (see PROCESS
+     SAFETY in your prompt) — never a hand-rolled or pattern-matched kill, and NEVER `kill -9` the
+     rocprofv3 parent. If you ever launch a long-lived server YOURSELF rather than through
+     `bench_e2e.sh`, you must launch it through that same contract
+     (`source "$EVAL_DIR/server_teardown.sh"; trap server_teardown EXIT; ${SERVER_LAUNCH_PREFIX:-}
+     <launch> & server_record_identity "$!"`) — sourcing it in a shell that did not launch the server
+     is a no-op by design. Then
      **WAIT PATIENTLY for the CSV to flush — poll for `*kernel*trace*.csv` / `*kernel*stats*.csv` to
      appear, up to ~25 min, and only then continue. Do NOT abandon at 3–5 min.** (The instrumented
      server's health-wait may stay bounded at ~10 min, since a genuinely stuck load is a real failure;

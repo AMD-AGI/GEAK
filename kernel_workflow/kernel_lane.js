@@ -1,13 +1,14 @@
 export const meta = {
   name: 'kernel-lane',
   description: 'SINGLE-LANGUAGE kernel optimization worker (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes ONE kernel in ONE language (mode=optimize) or authors a fresh seed then optimizes it (mode=author). This is the worker invoked per lane by the kernel-workflow dispatcher (kernel_workflow.js) and by e2e_workflow; prefer calling kernel-workflow directly unless you specifically want one unchanged lane. Target: AMD Instinct MI-series GPUs (MI300X/300A/308X/325X on CDNA3 gfx942, MI350X/355X on CDNA4 gfx950 — the target card is auto-detected on-box).',
-  whenToUse: 'Internal single-language worker. Prefer the kernel-workflow dispatcher (kernel_workflow.js) as the entry point; invoke this directly only to run one unchanged lane. Pass args.kernel_path (required), args.mode, args.target_language, args.budget, args.gpu_ids, args.task.',
+  whenToUse: 'Internal single-language worker. Prefer the kernel-workflow dispatcher (kernel_workflow.js) as the entry point; invoke this directly only to run one unchanged lane. Pass args.kernel_path (required), args.mode, args.target_language, args.budget, args.gpu_ids, args.gpu_mode, args.task.',
   phases: [
     { title: 'Setup', detail: 'director builds the isolated eval dir + canonical workspace' },
     { title: 'Author', detail: 'author_engineer writes a fresh optimize-loop seed (only when mode=author); speedup denominator stays the frozen online kernel' },
     { title: 'Analyze', detail: 'tech_lead analyzes kernel + writes roadmap' },
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
     { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
+    { title: 'Research', detail: 'OPT-IN (args.dra_enabled): researcher fans research questions out in parallel via native WebSearch/WebFetch, writes a ranked-directions brief the planner seeds from' },
     { title: 'Optimize', detail: 'budget loop: tech_lead plans, specialist OR deep_explore engineers optimize, reprofile' },
     { title: 'Verify', detail: 'each candidate patch independently re-benchmarked' },
     { title: 'Merge', detail: 'integrator combines the round winners' },
@@ -79,6 +80,20 @@ const DEEP_COST = (() => {
 })();
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
+// Every GPU consumer gets the WHOLE pool rather than a pinned lane. gpu_lock.sh
+// resolves a comma spec by flocking whichever lane is free AND idle at acquire
+// time, so placement follows what work actually costs instead of an index fixed
+// before the cost is known. Measured task costs span 23x on campaign20, and a
+// pinned round ends with the slowest LANE, not the slowest task -- at 4-way that
+// idles ~43% of lane time. Pinning is also fragile on a shared box: GPU_LIST[0]
+// has no fallback when lane 0 has a foreign tenant.
+// gpu_mode='pin' restores the pre-scheduler behavior (direction i pinned to GPU_LIST[i % n]).
+// It exists ONLY so the scheduler can be A/B'd as a single-variable change against the arm it
+// replaced; leaving it out would make the "before" arm unreachable and force the comparison to be
+// made across two different scripts, where any other drift would be indistinguishable from the
+// scheduler's effect. Default 'pool'.
+const GPU_MODE = String(A.gpu_mode || 'pool') === 'pin' ? 'pin' : 'pool';
+const GPU_POOL = GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(',');
 const TASK = A.task || '';
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
@@ -142,6 +157,26 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only planning + authoring roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
+
+// --- Deep Research Agent (DRA) -------------------------------------------------------------------
+// OPT-IN: a v4-native research phase that runs AFTER Profile and BEFORE the optimize loop (so the
+// COMMANDMENT + baseline profile + analysis exist). The `researcher` persona extracts facts and a
+// ranked set of research QUESTIONS; the script fans those out in PARALLEL (each question = one
+// hang-guarded agent using native WebSearch/WebFetch), then a synthesis pass writes a ranked
+// directions portfolio (deep_search.md / deep_search_brief.md / deep_search.json) into EVAL_DIR that
+// the TechLead's plan_round seeds from. DEFAULT OFF: when dra_enabled is not "true" NOTHING runs and
+// behavior is byte-identical to a build without this feature (existing runs unchanged).
+const DRA_ENABLED = String(A.dra_enabled != null ? A.dra_enabled : 'false') === 'true';
+const DRA_MAX_QUESTIONS = (() => {
+  const v = parseInt(A.dra_max_questions != null ? A.dra_max_questions : 8, 10);
+  return Number.isFinite(v) && v >= 1 ? v : 8;
+})();
+// Optional Stage 5/6 blindspot-critique pass (one more parallel research wave). Default OFF (budget).
+const DRA_BLINDSPOT = String(A.dra_blindspot != null ? A.dra_blindspot : 'false') === 'true';
+const DRA_MAX_BLINDSPOTS = (() => {
+  const v = parseInt(A.dra_max_blindspots != null ? A.dra_max_blindspots : 4, 10);
+  return Number.isFinite(v) && v >= 1 ? v : 4;
+})();
 
 // ---------------------------------------------------------------------------
 // DEEP-MODE continuation + cross-backend / e2e-feedback hooks. ALL OPTIONAL.
@@ -274,6 +309,63 @@ const PROFILE_SCHEMA = obj({
   top_opportunities: { type: 'array', items: { type: 'string' } },
   summary_path: { type: 'string' }, shift_note: { type: 'string' },
 }, ['bottleneck', 'top_opportunities']);
+
+// --- Deep Research Agent (DRA) schemas (opt-in via args.dra_enabled) -------
+// Stage 0+1/2: the researcher extracts facts and returns a ranked set of research QUESTIONS the
+// script then fans out in parallel. Stages 3/4: one answer per question (run concurrently). Stage 5:
+// optional blindspot critique. Stage 7: the ranked-directions portfolio + brief the planner consumes.
+const RESEARCH_PLAN_SCHEMA = obj({
+  facts: { type: 'object', additionalProperties: true },
+  questions: {
+    type: 'array',
+    items: obj({
+      id: { type: 'string' }, question: { type: 'string' },
+      search_queries: { type: 'array', items: { type: 'string' } },
+      rationale: { type: 'string' }, tests_hypothesis: { type: 'string' },
+      mode: { type: 'string', enum: ['bottleneck', 'design_space'] },
+      rank_score: { type: 'number' },
+    }, ['question']),
+  },
+  notes: { type: 'string' },
+}, ['questions']);
+
+const RESEARCH_QUESTION_SCHEMA = obj({
+  question_id: { type: 'string' }, question: { type: 'string' },
+  mode: { type: 'string' }, tests_hypothesis: { type: 'string' },
+  answer: { type: 'string' },
+  status: { type: 'string', enum: ['prefer', 'deprioritize', 'reject', 'open'] },
+  affected: { type: 'array', items: { type: 'string' } },
+  evidence: { type: 'array', items: { type: 'object', additionalProperties: true } },
+  taskgen_implications: { type: 'string' }, notes: { type: 'string' },
+}, ['answer', 'status']);
+
+const RESEARCH_BLINDSPOT_SCHEMA = obj({
+  blindspots: {
+    type: 'array',
+    items: obj({
+      description: { type: 'string' }, why_it_matters: { type: 'string' },
+      follow_up_question: { type: 'string' },
+    }, ['description']),
+  },
+}, ['blindspots']);
+
+// Stage 7 final portfolio. `directions` is kept COMPACT here (mirrors deep_search_brief.md): the
+// planner reads the brief on disk, so this structured echo is just for logging/validation.
+const RESEARCH_SCHEMA = obj({
+  num_questions: { type: 'number' }, num_directions: { type: 'number' },
+  brief_path: { type: 'string' }, full_path: { type: 'string' }, json_path: { type: 'string' },
+  directions: {
+    type: 'array',
+    items: obj({
+      id: { type: 'string' }, title: { type: 'string' },
+      specialty: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime', 'deep_explore'] },
+      mechanism: { type: 'string' }, expected_upside: { type: 'string' },
+      confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+      rank_score: { type: 'number' },
+    }, ['title']),
+  },
+  notes: { type: 'string' },
+}, ['num_directions', 'brief_path']);
 
 const PLAN_SCHEMA = obj({
   stop: { type: 'boolean' }, reasoning: { type: 'string' },
@@ -486,7 +578,7 @@ if (MODE === 'author') {
   const authored = await agentT(
     roleAgent('author_engineer', 'author', 'Write the simplest correct baseline in the target language.', {
       TARGET_LANGUAGE, OP_SPEC, WORKSPACE: CANONICAL, TASK_DIR: KERNEL_PATH_ORIG,
-      GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, KERNEL_KNOWLEDGE_DIR,
+      GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, KERNEL_KNOWLEDGE_DIR,
     }),
     { phase: 'Author', label: `author:${TARGET_LANGUAGE}`, schema: AUTHOR_SCHEMA });
   if (!authored || !authored.authored || !says(authored.correctness, 'pass')) {
@@ -527,7 +619,7 @@ const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs
 phase('Benchmark');
 const bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
-    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0],
+    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     ANALYSIS: analysis,
     ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
     ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
@@ -545,12 +637,101 @@ log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, 
 phase('Profile');
 let profileSummary = await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
-    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: 0,
+    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
     COMMANDMENT,
     ...RESUME_INPUT,
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
 log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
+
+// ===========================================================================
+// PHASE: Research (Deep Research Agent — OPT-IN via args.dra_enabled)
+// Runs AFTER Profile / BEFORE the optimize loop: profile + COMMANDMENT + analysis exist by now, so
+// the researcher has the facts it needs. It produces EVAL_DIR/deep_search_brief.md (compact, ranked
+// directions) which the TechLead's plan_round seeds directions from. The per-question research is
+// fanned out with parallel() and EVERY research agent is wrapped in the agentT() hang-guard, so a
+// hung research agent resolves to null and the parallel round-barrier still proceeds (it never wedges
+// the run — the known v4 failure mode the hang-guard was built for). DEFAULT OFF → no behavior change.
+// ===========================================================================
+let researchBriefPath = '';   // EVAL_DIR/deep_search_brief.md when the DRA produced one; '' otherwise
+if (DRA_ENABLED) {
+  phase('Research');
+  const RESEARCH_DIR = `${EVAL_DIR}/research`;
+
+  // --- Stage 0 + 1/2: extract facts, generate + rank research questions (one agent) -------------
+  const plan = await agentT(
+    roleAgent('researcher', 'research_plan', 'Extract facts and propose ranked research questions.', {
+      WORKSPACE: CANONICAL, EVAL_DIR, RESEARCH_DIR, COMMANDMENT, SKILL_DIR: WORKFLOW_DIR,
+      ANALYSIS_JSON: `${EVAL_DIR}/analysis.json`, CODEBASE_CONTEXT: `${EVAL_DIR}/codebase_context.md`,
+      PROFILING_SUMMARY: profileSummary ? profileSummary.summary_path : '',
+      BOTTLENECK: profileSummary ? profileSummary.bottleneck : 'unknown',
+      BASELINE_PER_CASE, MAX_QUESTIONS: DRA_MAX_QUESTIONS, TASK,
+      KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
+    }),
+    { phase: 'Research', label: 'researcher:plan', schema: RESEARCH_PLAN_SCHEMA });
+
+  const facts = (plan && plan.facts) || {};
+  let questions = (plan && Array.isArray(plan.questions) ? plan.questions : [])
+    .slice(0, DRA_MAX_QUESTIONS)
+    .map((q, i) => ({ ...q, id: q.id || `q${i}` }));
+  log(`Research: ${questions.length} question(s) planned, bottleneck=${facts.bottleneck_type || '?'}`);
+
+  // --- Stages 3/4: research each question IN PARALLEL (native WebSearch/WebFetch), hang-guarded ---
+  // parallel() takes an array of zero-arg async thunks and runs them concurrently; each thunk's
+  // agentT() bounds the research agent so a hang resolves null instead of blocking the barrier.
+  const researchQuestion = (q, stageLabel) => agentT(
+    roleAgent('researcher', 'research_question',
+      'Research THIS ONE question on the live web and synthesize one judgment.', {
+        QUESTION: q, FACTS: facts, RESEARCH_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR,
+        ANSWER_OUT: `${RESEARCH_DIR}/answers/${q.id}.json`,
+        CODEBASE_CONTEXT: `${EVAL_DIR}/codebase_context.md`,
+        PROFILING_SUMMARY: profileSummary ? profileSummary.summary_path : '',
+        KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
+      }),
+    { phase: 'Research', label: `researcher:q ${q.id}${stageLabel ? ' ' + stageLabel : ''}`, schema: RESEARCH_QUESTION_SCHEMA });
+
+  let answers = (await parallel(questions.map((q) => () => researchQuestion(q))))
+    .filter(Boolean);
+  log(`Research: ${answers.length}/${questions.length} first-pass answers returned`);
+
+  // --- Stages 5/6 (optional): blindspot critique + a second parallel research wave --------------
+  if (DRA_BLINDSPOT && answers.length) {
+    const crit = await agentT(
+      roleAgent('researcher', 'research_blindspot', 'Critique the research and surface new blindspots.', {
+        FACTS: facts, RESEARCH_DIR, ANSWERS: answers, MAX_BLINDSPOTS: DRA_MAX_BLINDSPOTS,
+        SKILL_DIR: WORKFLOW_DIR,
+      }),
+      { phase: 'Research', label: 'researcher:blindspot', schema: RESEARCH_BLINDSPOT_SCHEMA });
+    const followups = (crit && Array.isArray(crit.blindspots) ? crit.blindspots : [])
+      .filter(b => b && b.follow_up_question)
+      .slice(0, DRA_MAX_BLINDSPOTS)
+      .map((b, i) => ({ id: `b${i}`, question: b.follow_up_question, mode: 'bottleneck',
+        tests_hypothesis: '', search_queries: [] }));
+    if (followups.length) {
+      const more = (await parallel(followups.map((q) => () => researchQuestion(q, 'blindspot'))))
+        .filter(Boolean);
+      answers = answers.concat(more);
+      log(`Research: blindspot pass added ${more.length} answer(s) from ${followups.length} follow-up(s)`);
+    }
+  }
+
+  // --- Stage 7: synthesize the ranked-directions portfolio + the compact planner brief -----------
+  const synth = await agentT(
+    roleAgent('researcher', 'research_synthesize',
+      'Synthesize the ranked portfolio of optimization directions and the compact brief.', {
+        FACTS: facts, RESEARCH_DIR, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR,
+        BRIEF_OUT: `${EVAL_DIR}/deep_search_brief.md`, FULL_OUT: `${EVAL_DIR}/deep_search.md`,
+        JSON_OUT: `${EVAL_DIR}/deep_search.json`,
+      }),
+    { phase: 'Research', label: 'researcher:synthesize', schema: RESEARCH_SCHEMA });
+
+  if (synth && synth.brief_path) {
+    researchBriefPath = synth.brief_path;
+    log(`Research done. ${synth.num_directions || (synth.directions ? synth.directions.length : 0)} ranked direction(s) → ${researchBriefPath}`);
+  } else {
+    log('Research produced no brief (degraded) — plan_round proceeds without a DRA brief.');
+  }
+}
 
 // ===========================================================================
 // PHASE: Optimization loop (budget-controlled)
@@ -590,6 +771,11 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
       KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
       ...KB_INPUTS,
+      // DRA brief (REFERENCE). plan_round Reads it and seeds directions[] from the ranked DRA
+      // directions — see tech_lead.md plan_round. Spread conditionally, so when dra_enabled was off
+      // (or the research degraded) the key is absent and the prompt is byte-identical to a build
+      // without this feature.
+      ...(researchBriefPath ? { DEEP_SEARCH_BRIEF: researchBriefPath } : {}),
     }),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
 
@@ -602,7 +788,7 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     ...d,
     idx: i,
     id: d.id || `r${round}_d${i}`,
-    gpu_id: GPU_LIST[i % GPU_LIST.length],
+    gpu_id: GPU_MODE === 'pin' ? GPU_LIST[i % GPU_LIST.length] : GPU_POOL,
     out_dir: `${EVAL_DIR}/round_${round}/engineer_${i}`,
   }));
   // deep_explore is a DEDICATED-ROUND, heavyweight mandate: if the plan includes one, run ONLY it this
@@ -728,7 +914,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     integrate = await agentT(
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
         CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
-        GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+        GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
@@ -790,7 +976,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     // --- (f) Re-profile the new best ------------------------------------
     profileSummary = await agentT(
       roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
-        WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: round,
+        WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
         COMMANDMENT, PREVIOUS_METRICS: profileSummary,
       }),
       { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
@@ -850,7 +1036,7 @@ const report = await agentT(
 phase('Validate');
 const validation = await agentT(
   roleAgent('director', 'validate', 'Independently validate the final patch vs the TRUE baseline.', {
-    KERNEL_PATH_ORIG, EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0],
+    KERNEL_PATH_ORIG, EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     APPLY_TO_ORIGINAL, COMMANDMENT,
     FINAL_PATCH: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
     TECH_LEAD_REPORTED_GEOMEAN: report ? report.final_speedup_geomean : cumulative,
