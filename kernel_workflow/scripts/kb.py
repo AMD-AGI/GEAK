@@ -63,6 +63,19 @@ CLASS_CAP = int(os.environ.get("KB_CLASS_CAP", "32"))
 # limit eventually costs recall — but the next value should be chosen from a measurement, not from a
 # tidiness instinct, and it should be raised before it is allowed to bind. Overridable via
 # KB_CLASS_CAP so an operator can test a different budget without editing code.
+def class_of(card):
+    """The eviction/index bucket for a card. ONE definition, because three call sites had three.
+
+    `drain`'s eviction, the index generator and `doctor` each derived this inline and they had
+    already drifted: two mapped a missing OR empty kernel_class to "other", the third mapped empty
+    to a bucket named "" that only ever held the malformed cards, and `doctor` grouped by `key`
+    instead — a sentence unique per card, so its buckets held one card each and its cap warning
+    could never fire. Accepts either a raw meta mapping or a card dict wrapping one.
+    """
+    meta = card.get("meta", card) if hasattr(card, "get") else card
+    return str(meta.get("kernel_class") or "other").strip() or "other"
+
+
 STARS = {"★": 1, "★★": 2, "★★★": 3}
 STAR_OF = {1: "★", 2: "★★", 3: "★★★"}
 
@@ -602,7 +615,7 @@ def build_index(kb_dir):
             "description": m.get("description") or m.get("effect") or "(no description)",
             "keywords": list(dict.fromkeys(filter(None, (_kw_normalize(k) for k in arr(m.get("keywords")))))),
             "kernels": arr(m.get("kernels")), "platforms": arr(m.get("platforms")),
-            "kernel_class": m.get("kernel_class") or "other", "regime": m.get("regime") or "",
+            "kernel_class": class_of(m), "regime": m.get("regime") or "",
             "confidence": st.group(0) if st else "★",
         })
 
@@ -835,7 +848,7 @@ def cmd_drain(kb, a):
     live, evicted = [], []
     by_class = {}
     for c in cards.values():
-        by_class.setdefault(str(c["meta"].get("kernel_class", "other")).strip(), []).append(c)
+        by_class.setdefault(class_of(c), []).append(c)
     for _key, group in sorted(by_class.items()):
         group.sort(key=lambda c: -rank(c))
         keep, drop = [], []
@@ -907,10 +920,16 @@ def cmd_doctor(kb, a):
         # index outgrew the old flat cap and told the operator the KB was 38 cards over budget when
         # in fact only one class was full — a derived number reported against a rule that no longer
         # decides anything is worse than no number.
+        # Group by kernel_class, the axis `drain` actually evicts on. This read `key` — a
+        # plain-English sentence unique to each card — so every bucket held one card, headroom was
+        # CLASS_CAP-1 for everything and `classes_at_cap` was structurally empty. The tree reached
+        # attention_decode 32/32 while doctor reported 31 free, i.e. the monitor for the one failure
+        # that has already cost this project a regression (a cap of 8 archiving half the KB, and the
+        # worst-hit class was the one carrying the biggest win) could never fire.
         "class_headroom": {k: CLASS_CAP - n for k, n in sorted(
-            Counter(str(c["meta"].get("key", "")).strip() for c in cs).items())},
+            Counter(class_of(c) for c in cs).items())},
         "classes_at_cap": [k for k, n in Counter(
-            str(c["meta"].get("key", "")).strip() for c in cs).items() if n >= CLASS_CAP],
+            class_of(c) for c in cs).items() if n >= CLASS_CAP],
         # A card only ever confirmed by runs it steered. Capped at ★★ by the lint, listed here so the
         # cap is visible rather than merely enforced.
         "self_confirmed_only": [base(c) for c in cs if int(c["meta"].get("confirms_blind", 0)) == 0],

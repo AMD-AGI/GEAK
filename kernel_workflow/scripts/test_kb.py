@@ -227,6 +227,26 @@ check("the per-class cap binds on the axis the index groups by",
       active == kb.CLASS_CAP, f"{active} active of {N} written, cap {kb.CLASS_CAP}")
 shutil.rmtree(dd)
 
+# `doctor` must report the cap on the axis `drain` ENFORCES it. It grouped by `key` instead, and a
+# key is a plain-English sentence unique to each card, so every bucket held exactly one card:
+# headroom read CLASS_CAP-1 forever and `classes_at_cap` was permanently empty. The one failure this
+# check exists to catch — a class quietly at its budget, the next card in it evicting a sibling — was
+# the failure it could never report. Fill one class to the cap and require doctor to say so.
+dd = fresh()
+for i in range(kb.CLASS_CAP):
+    write(dd, f"full{i}.md", card(f"full{i}", key=f"a distinct plain-English situation number {i}"))
+write(dd, "other.md", card("other", kernel_class="dense_gemm", key="some other situation entirely"))
+_, out, _ = run(dd, "doctor")
+rep = json.loads(out)
+check("doctor reports a class at its cap",
+      "moe_grouped_gemm" in rep["classes_at_cap"],
+      f"classes_at_cap={rep['classes_at_cap']}")
+check("doctor's headroom is counted per kernel_class, not per card",
+      rep["class_headroom"].get("moe_grouped_gemm") == 0
+      and rep["class_headroom"].get("dense_gemm") == kb.CLASS_CAP - 1,
+      json.dumps(rep["class_headroom"]))
+shutil.rmtree(dd)
+
 # A well-formed card must pass: a gate that rejects everything is not a gate.
 dd = fresh()
 write(dd, "c.md", card("c"))
