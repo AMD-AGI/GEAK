@@ -735,6 +735,103 @@ def _rank_key(md):
     return (-_speedup_of(meta), -reps, os.path.basename(exp_dir))
 
 
+def _collapse_by_direction(ordered, direction_of, unique_of, top_n):
+    """One rank per IDEA, best first. Input must already be in rank order.
+
+    Three implementations of one direction verify — or fail to apply — together, and every attempt
+    costs a full on-box measurement, so the runners-up ride along as `alternates` instead of taking
+    a slot. An entry with no direction is its own: unlabeled is honest, not a group.
+
+    Returns (chosen, alternates-per-chosen, how many were collapsed).
+    """
+    groups, order = {}, []
+    for item in ordered:
+        key = str(direction_of(item) or "").strip().lower() or "__undirected__" + unique_of(item)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(item)
+    chosen = order[: max(1, int(top_n or 3))]
+    return ([groups[k][0] for k in chosen], [groups[k][1:] for k in chosen],
+            sum(len(groups[k]) - 1 for k in chosen))
+
+
+def _render_references(refs_dir: str, address: str, summary: str, views):
+    """Mirror the offered candidates' prose into `refs_dir` and index it, one prose path per view.
+
+    Written up front, before any verdict, so a warm start that is later rejected stays auditable.
+    Both planes render the same page — a reference reads the same whether the entry came out of a
+    directory or from behind a KB Store key — so only `address` and each view's `origin` line
+    differ between them. A page that cannot be written is reported as "" rather than failing the
+    read: the patch is still adoptable without its prose.
+    """
+    views = list(views)
+    key = "|".join(v["key"] for v in views).encode("utf-8", "replace")
+    set_dir = os.path.join(refs_dir, "sets", hashlib.sha1(key).hexdigest()[:7])
+    top_bench = views[0]["bench_key"] if views else ""
+    index_lines = [
+        f"# Warm-start references — {address}", "", summary,
+        f"Speedups compare only within one bench key; rank 1's is `{top_bench or 'none'}`.", "",
+    ]
+    paths = []
+    for rank, v in enumerate(views, start=1):
+        meta = v["meta"]
+        prose_path = os.path.join(set_dir, f"reference_{rank:02d}.md")
+        try:
+            body = ""
+            if os.path.isfile(v["report_path"]):
+                with open(v["report_path"], "r", errors="replace") as f:
+                    body = f.read()
+            _atomic_write(prose_path, (
+                f"# Reference {rank:02d} — {address}\n\n"
+                f"- speedup: {v['speedup']:.4f}x ({v['metric_kind'] or 'unknown metric'}, "
+                f"bench `{v['bench_key'] or 'none'}`)\n"
+                f"- direction: {v['direction'] or 'unlabeled'}\n"
+                + _techniques_md(_techniques(meta))
+                + f"- strategy: {meta.get('strategy', '')}\n"
+                + v["origin"]
+                + f"- verified_on: {meta.get('verified_on', '')}\n"
+                f"- verified_stack: {_stack_str(meta)}\n"
+                + _alternates_md(v["alts"])
+                + f"\n---\n\n{_prose_body(meta, body)}\n"
+            ))
+        except OSError:
+            prose_path = ""
+        paths.append(prose_path)
+        index_lines.append(
+            f"- Rank {rank}: `{prose_path}` | speedup {v['speedup']:.4f}x | direction "
+            f"`{v['direction'] or 'unlabeled'}` | bench `{v['bench_key'] or 'none'}` | "
+            f"patch `{v['patch_path']}` | {len(v['alts'])} alternate(s) | status `read`"
+        )
+    try:
+        _atomic_write(os.path.join(refs_dir, "index.md"), "\n".join(index_lines) + "\n")
+    except OSError:
+        pass
+    return paths
+
+
+def _candidate(rank: int, v: dict, gfx: str, prose_path: str, top_bench: str) -> dict:
+    """The candidate record both planes hand the lane. Extra keys ride in `v['extra']`."""
+    return dict({
+        "rank": rank,
+        "exp_dir": v["exp_dir"],
+        "speedup": round(v["speedup"], 4),
+        "arch": gfx,
+        "patch_path": v["patch_path"],
+        "prose_path": prose_path,
+        "strategy": str(v["meta"].get("strategy") or ""),
+        "direction": v["direction"],
+        "techniques": _techniques(v["meta"]),
+        "bench_key": v["bench_key"],
+        "metric_kind": v["metric_kind"],
+        # False = ranked against rank 1 on a DIFFERENT case set, so their ordering is a prior only.
+        # Adoption is decided by this run's own measurement either way.
+        "comparable": bool(v["bench_key"]) and v["bench_key"] == top_bench,
+        "alternates": v["alts"],
+        "status": "read",
+    }, **v["extra"])
+
+
 def cmd_resolve(a) -> dict:
     gfx = _norm_gfx(a.gfx)
     if not gfx:
@@ -782,101 +879,41 @@ def cmd_resolve(a) -> dict:
         return dict(base_out, filtered=stats,
                     read_reason="all_retired" if not servable else "below_min_speedup")
 
-    # --- one rank per DIRECTION -------------------------------------------------------------
-    # Three impls of one idea verify (or fail to apply) together and each attempt costs a full
-    # on-box measurement, so the runners-up ride along as `alternates` instead of taking a slot.
-    by_direction, order = {}, []
-    for (m, d) in sorted(above, key=_rank_key):
-        key = str(m.get("direction") or "").strip().lower() or f"__undirected__{d}"
-        if key not in by_direction:
-            by_direction[key] = []
-            order.append(key)
-        by_direction[key].append((m, d))
-    top_keys = order[: max(1, int(a.top_n or 3))]
-    top = [by_direction[k][0] for k in top_keys]
-    alternates_of = {by_direction[k][0][1]: by_direction[k][1:] for k in top_keys}
-    stats["same_direction_collapsed"] = sum(len(by_direction[k]) - 1 for k in top_keys)
+    top, alternates, collapsed = _collapse_by_direction(
+        sorted(above, key=_rank_key), lambda md: md[0].get("direction"), lambda md: md[1], a.top_n)
+    stats["same_direction_collapsed"] = collapsed
 
-    # Mirror each candidate's prose into kb_references/ up front, so a rejected warm start stays
-    # auditable. Seed every index entry with status "read"; the verify loop rewrites it later.
-    refs_dir = a.refs_dir
-    set_hash = hashlib.sha1(("|".join(d for _, d in top)).encode("utf-8", "replace")).hexdigest()[:7]
-    set_dir = os.path.join(refs_dir, "sets", set_hash)
-    candidates = []
-    top_bench = str((top[0][0].get("metric") or {}).get("bench_key") or "")
-    index_lines = [
-        f"# Warm-start references — slug `{slug}` (gfx {gfx})", "",
-        f"Matched `{requested_slug}` -> `{slug}` ({match_tier}). {len(top)} direction(s) offered from "
-        f"{total} recorded run(s): {retired_n} retired by curation, {below_n} below {min_speedup:g}x, "
-        f"{stats['same_direction_collapsed']} same-direction re-discoveries moved to `alternates`.",
-        f"Speedups compare only within one bench key; rank 1's is `{top_bench or 'none'}`.", "",
-    ]
-    for rank, (meta, exp_dir) in enumerate(top, start=1):
-        patch_path = os.path.join(exp_dir, "patch.diff")
-        speedup = _speedup_of(meta)
+    views = []
+    for (meta, exp_dir), alt_of in zip(top, alternates):
         metric = meta.get("metric") or {}
-        bench_key = str(metric.get("bench_key") or "")
-        direction = meta.get("direction") or ""
-        ref_name = f"reference_{rank:02d}.md"
-        prose_path = os.path.join(set_dir, ref_name)
-        alts = [{
-            "exp_dir": d,
-            "patch_path": os.path.join(d, "patch.diff"),
-            "speedup": round(_speedup_of(m), 4),
-            "bench_key": str((m.get("metric") or {}).get("bench_key") or ""),
-            "techniques": _techniques(m),
-        } for (m, d) in alternates_of.get(exp_dir, [])]
-        try:
-            report_path = os.path.join(exp_dir, "report.md")
-            body = ""
-            if os.path.isfile(report_path):
-                with open(report_path, "r", errors="replace") as f:
-                    body = f.read()
-            prose = (
-                f"# Reference {rank:02d} — {slug}\n\n"
-                f"- speedup: {speedup:.4f}x ({metric.get('metric_kind') or 'unknown metric'}, "
-                f"bench `{bench_key or 'none'}`)\n"
-                f"- direction: {direction or 'unlabeled'}\n"
-                + _techniques_md(_techniques(meta))
-                + f"- strategy: {meta.get('strategy', '')}\n"
-                f"- source: {meta.get('source_eval_dir', '')}\n"
-                f"- verified_on: {meta.get('verified_on', '')}\n"
-                f"- verified_stack: {_stack_str(meta)}\n"
-                + _alternates_md(alts)
-                + f"\n---\n\n{_prose_body(meta, body)}\n"
-            )
-            _atomic_write(prose_path, prose)
-        except OSError:
-            prose_path = ""
-        candidates.append({
-            "rank": rank,
-            "slug": slug,
+        views.append({
+            "key": exp_dir,
+            "meta": meta,
             "exp_dir": exp_dir,
-            "speedup": round(speedup, 4),
-            "arch": gfx,
-            "patch_path": patch_path,
-            "prose_path": prose_path,
-            "strategy": meta.get("strategy", ""),
-            "direction": direction,
-            "techniques": _techniques(meta),
-            "bench_key": bench_key,
+            "patch_path": os.path.join(exp_dir, "patch.diff"),
+            "report_path": os.path.join(exp_dir, "report.md"),
+            "speedup": _speedup_of(meta),
+            "direction": str(meta.get("direction") or ""),
+            "bench_key": str(metric.get("bench_key") or ""),
             "metric_kind": str(metric.get("metric_kind") or ""),
-            # False = ranked against rank 1 on a DIFFERENT case set, so their ordering is a prior
-            # only. Adoption is decided by this run's own measurement either way.
-            "comparable": bool(bench_key) and bench_key == top_bench,
-            "alternates": alts,
-            "status": "read",
+            "origin": f"- source: {meta.get('source_eval_dir', '')}\n",
+            "alts": [{
+                "exp_dir": d,
+                "patch_path": os.path.join(d, "patch.diff"),
+                "speedup": round(_speedup_of(m), 4),
+                "bench_key": str((m.get("metric") or {}).get("bench_key") or ""),
+                "techniques": _techniques(m),
+            } for (m, d) in alt_of],
+            "extra": {"slug": slug},
         })
-        index_lines.append(
-            f"- Rank {rank}: `{prose_path}` | speedup {speedup:.4f}x | direction "
-            f"`{direction or 'unlabeled'}` | bench `{bench_key or 'none'}` | patch `{patch_path}` | "
-            f"{len(alts)} alternate(s) | status `read`"
-        )
-    try:
-        _atomic_write(os.path.join(refs_dir, "index.md"), "\n".join(index_lines) + "\n")
-    except OSError:
-        pass
 
+    summary = (f"Matched `{requested_slug}` -> `{slug}` ({match_tier}). {len(top)} direction(s) "
+               f"offered from {total} recorded run(s): {retired_n} retired by curation, "
+               f"{below_n} below {min_speedup:g}x, {collapsed} same-direction re-discoveries "
+               f"moved to `alternates`.")
+    prose = _render_references(a.refs_dir, f"slug `{slug}` (gfx {gfx})", summary, views)
+    candidates = [_candidate(rank, v, gfx, p, views[0]["bench_key"])
+                  for rank, (v, p) in enumerate(zip(views, prose), start=1)]
     return dict(base_out, read_reason="read", candidates=candidates, filtered=stats)
 
 
@@ -1400,104 +1437,53 @@ def cmd_resolve_remote(a) -> dict:
     if not above:
         return dict(base_out, filtered=stats, read_reason="below_min_speedup")
 
-    # One rank per DIRECTION, as `resolve` does: three impls of one idea verify or fail together,
-    # and every attempt costs a full on-box measurement.
-    by_direction, order = {}, []
-    for c in above:                                    # already speedup-ordered by the store
-        key = str(c.value.get("direction") or "").strip().lower() or "__undirected__" + c.session_id
-        if key not in by_direction:
-            by_direction[key] = []
-            order.append(key)
-        by_direction[key].append(c)
-    top_keys = order[: max(1, int(a.top_n or 3))]
-    top = [by_direction[k][0] for k in top_keys]
-    stats["same_direction_collapsed"] = sum(len(by_direction[k]) - 1 for k in top_keys)
+    # `above` is already speedup-ordered by the store.
+    top, alternates, collapsed = _collapse_by_direction(
+        above, lambda c: c.value.get("direction"), lambda c: c.session_id, a.top_n)
+    stats["same_direction_collapsed"] = collapsed
 
     cache_dir = a.cache_dir or os.path.join(os.path.dirname(os.path.abspath(a.refs_dir)), "kb_cache")
-    set_hash = hashlib.sha1("|".join(c.session_id for c in top).encode("utf-8", "replace")).hexdigest()[:7]
-    set_dir = os.path.join(a.refs_dir, "sets", set_hash)
-    top_bench = str((top[0].value.get("metric") or {}).get("bench_key") or "")
-    index_lines = [
-        f"# Warm-start references — `{cid}`", "",
-        f"{len(top)} direction(s) offered from {stats['total']} recorded candidate(s): "
-        f"{stats['below_min_speedup']} below {min_speedup:g}x, "
-        f"{stats['same_direction_collapsed']} same-direction re-discoveries moved to `alternates`."
-        + (f" Served from `{cid}` — no record under this box's own stack version."
-           if match_tier == "other_version" else ""),
-        f"Speedups compare only within one bench key; rank 1's is `{top_bench or 'none'}`.", "",
-    ]
-
-    candidates = []
-    for rank, c in enumerate(top, start=1):
+    views = []
+    for c, alt_of in zip(top, alternates):
         meta = _value_as_meta(c.value, gfx)
         metric = meta.get("metric") or {}
-        bench = str(metric.get("bench_key") or "")
-        direction = str(meta.get("direction") or "")
         # Only now do artifact bytes move: the ranking above read knowledge documents alone.
         bundle = store.materialize(cid, c, cache_dir)
-        patch_path = os.path.join(bundle, "files", "patch.diff")
-        report_path = os.path.join(bundle, "files", "report.md")
-        # Alternates are materialized too. They are same-direction runners-up, so there are few of
-        # them, and a candidate listed with a path that resolves to nothing is worse than not
-        # listing it: the next reader cannot tell a missing file from a broken export.
-        alts = [{
-            "session_id": alt.session_id,
-            "patch_path": os.path.join(store.materialize(cid, alt, cache_dir), "files", "patch.diff"),
-            "speedup": round(alt.speedup or 0.0, 4),
-            "bench_key": str((alt.value.get("metric") or {}).get("bench_key") or ""),
-            "techniques": _techniques(alt.value),
-        } for alt in by_direction[top_keys[rank - 1]][1:]]
-        prose_path = os.path.join(set_dir, f"reference_{rank:02d}.md")
-        try:
-            body = ""
-            if os.path.isfile(report_path):
-                with open(report_path, "r", errors="replace") as f:
-                    body = f.read()
-            prose = (
-                f"# Reference {rank:02d} — {cid}\n\n"
-                f"- speedup: {(c.speedup or 0.0):.4f}x ({metric.get('metric_kind') or 'unknown metric'}, "
-                f"bench `{bench or 'none'}`)\n"
-                f"- direction: {direction or 'unlabeled'}\n"
-                + _techniques_md(_techniques(meta))
-                + f"- strategy: {meta.get('strategy', '')}\n"
-                f"- session: {c.session_id}{' (champion)' if c.is_champion else ''}\n"
-                f"- verified_on: {meta.get('verified_on', '')}\n"
-                f"- verified_stack: {_stack_str(meta)}\n"
-                + _alternates_md(alts)
-                + f"\n---\n\n{_prose_body(meta, body)}\n"
-            )
-            _atomic_write(prose_path, prose)
-        except OSError:
-            prose_path = ""
-        candidates.append({
-            "rank": rank,
-            "slug": requested_slug,
-            "canonical_id": cid,
-            "session_id": c.session_id,
-            "is_champion": c.is_champion,
+        views.append({
+            "key": c.session_id,
+            "meta": meta,
             "exp_dir": bundle,
-            "speedup": round(c.speedup or 0.0, 4),
-            "arch": gfx,
-            "patch_path": patch_path,
-            "prose_path": prose_path,
-            "strategy": str(meta.get("strategy") or ""),
-            "direction": direction,
-            "techniques": _techniques(meta),
-            "bench_key": bench,
+            "patch_path": os.path.join(bundle, "files", "patch.diff"),
+            "report_path": os.path.join(bundle, "files", "report.md"),
+            "speedup": c.speedup or 0.0,
+            "direction": str(meta.get("direction") or ""),
+            "bench_key": str(metric.get("bench_key") or ""),
             "metric_kind": str(metric.get("metric_kind") or ""),
-            "comparable": bool(bench) and bench == top_bench,
-            "alternates": alts,
-            "status": "read",
+            "origin": f"- session: {c.session_id}{' (champion)' if c.is_champion else ''}\n",
+            # Alternates are materialized too. They are same-direction runners-up, so there are few
+            # of them, and a candidate listed with a path that resolves to nothing is worse than not
+            # listing it: the next reader cannot tell a missing file from a broken export.
+            "alts": [{
+                "session_id": alt.session_id,
+                "patch_path": os.path.join(store.materialize(cid, alt, cache_dir),
+                                           "files", "patch.diff"),
+                "speedup": round(alt.speedup or 0.0, 4),
+                "bench_key": str((alt.value.get("metric") or {}).get("bench_key") or ""),
+                "techniques": _techniques(alt.value),
+            } for alt in alt_of],
+            "extra": {"slug": requested_slug, "canonical_id": cid,
+                      "session_id": c.session_id, "is_champion": c.is_champion},
         })
-        index_lines.append(
-            f"- Rank {rank}: `{prose_path}` | speedup {(c.speedup or 0.0):.4f}x | direction "
-            f"`{direction or 'unlabeled'}` | bench `{bench or 'none'}` | patch `{patch_path}` | "
-            f"{len(alts)} alternate(s) | status `read`"
-        )
-    try:
-        _atomic_write(os.path.join(a.refs_dir, "index.md"), "\n".join(index_lines) + "\n")
-    except OSError:
-        pass
+
+    summary = (
+        f"{len(top)} direction(s) offered from {stats['total']} recorded candidate(s): "
+        f"{stats['below_min_speedup']} below {min_speedup:g}x, "
+        f"{collapsed} same-direction re-discoveries moved to `alternates`."
+        + (f" Served from `{cid}` — no record under this box's own stack version."
+           if match_tier == "other_version" else ""))
+    prose = _render_references(a.refs_dir, f"`{cid}`", summary, views)
+    candidates = [_candidate(rank, v, gfx, p, views[0]["bench_key"])
+                  for rank, (v, p) in enumerate(zip(views, prose), start=1)]
     return dict(base_out, read_reason="read", candidates=candidates, filtered=stats)
 
 
