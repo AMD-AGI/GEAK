@@ -3,12 +3,12 @@ key: ragged/mixed-batch paged attention in HIP C++ on gfx950/CDNA4, where the bf
 type: lever
 confidence: ★★
 effect: 1.066x weighted geomean isolated vs frozen baseline, non-overlapping, bit-gate correct; every case improved: +2.6% on the long-context prefill-shaped case up to +7.6% on the short decode-shaped cases
-confirms_cited: 1
+confirms_cited: 2
 confirms_blind: 0
 losses: 0
-attempts: 1
+attempts: 2
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-17
 name: get-the-nt-bit-onto-kv-loads-by-loading-one-native-128-bit-v-attention-decode-gfx950-both
 description: Read-once paged KV on gfx950: the shipped 16-byte non-temporal helper drops the nt bit; one 128-bit vector builtin load restores it for ~1.07x, all cases up.
 keywords: ['attention-decode', 'paged-kv', 'non-temporal-loads', 'cache-modifier', 'kv-cache', 'memory-bound', 'isa-inspection', 'gfx950']

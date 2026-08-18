@@ -5,8 +5,8 @@ confidence: ★★
 effect: the shared-binary control (one kernel, runtime branch) is 4.9% slower on the small-M arm (M=2048) than two specialized entries; per-arm launch constants that only the shim can set add +3.0-3.4% on M=32768/65536, all non-overlapping vs frozen baseline
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 4
+losses: 1
+attempts: 5
 toolchain: unknown
 last_seen: 2026-08-12
 name: one-binary-per-shape-arm-selected-by-a-host-launcher-shim-moe-grouped-gemm-gfx950-prefill

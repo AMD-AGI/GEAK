@@ -6,9 +6,9 @@ effect: ≈1.65x on top of the de-duplicated head (frozen-baseline geomean 17.4x
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 12
+attempts: 13
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-17
 name: shorten-the-load-to-dot-chain-before-chasing-bytes-linear-attention-gfx950-prefill
 description: Chunked linear-attention gfx950: hoist scales out of the contraction, share the Gram matrix across the GQA group, write-through the stores — ~1.65x stacked
 keywords: ['linear-attention', 'dependency-chain', 'gqa-head-sharing', 'cache-modifier', 'loop-hoisting', 'mfma-tiling', 'gfx950']

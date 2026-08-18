@@ -6,9 +6,9 @@ effect: +9.5% over the host-optimized incumbent for the fusion itself (all three
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 1
+attempts: 4
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-17
 name: one-dispatch-for-split-kv-decode-and-the-protocol-that-pays--attention-decode-gfx950-decode
 description: Fuse the split-KV reduce into the attention kernel behind a padded arrival counter with arch-cheap release bits: +9.5%, then +3.0% of epilogue protocol tuning.
 keywords: ['decode', 'paged-attention', 'split-kv', 'dispatch-collapse', 'cross-workgroup', 'arrival-counter', 'coherence']

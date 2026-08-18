@@ -5,8 +5,8 @@ confidence: ★★
 effect: 2.61x geomean isolated vs frozen baseline, non-overlapping (per-case 2.04x at M=2048, 2.93x at M=32768, 2.99x at M=65536; bit-exact vs golden; reproduced under a cold compiler cache)
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 1
+losses: 1
+attempts: 3
 toolchain: unknown
 last_seen: 2026-08-12
 name: amortize-int4-dequant-across-m-blocks-instead-of-shrinking-i-moe-grouped-gemm-gfx950-both

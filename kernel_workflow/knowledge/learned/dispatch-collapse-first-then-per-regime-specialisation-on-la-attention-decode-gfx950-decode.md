@@ -6,9 +6,9 @@ effect: 1.58x geomean isolated vs frozen baseline, director-verified x3 repeats,
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 1
+attempts: 2
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-17
 name: dispatch-collapse-first-then-per-regime-specialisation-on-la-attention-decode-gfx950-decode
 description: Collapse host dispatch first, then per-grid-density launch tuning, mask hoisting and per-regime constexpr clones: ~1.58x geomean on paged decode attention
 keywords: ['launch-overhead', 'host-dispatch', 'decode', 'constexpr-promotion', 'paged-attention', 'triton', 'launch-tuning']

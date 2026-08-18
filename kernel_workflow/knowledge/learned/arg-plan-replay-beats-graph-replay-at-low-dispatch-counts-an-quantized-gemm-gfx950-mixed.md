@@ -6,9 +6,9 @@ effect: host lane worth 13.5% of the final geomean on all three cases (M=2048/32
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 4
+attempts: 5
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-17
 name: arg-plan-replay-beats-graph-replay-at-low-dispatch-counts-an-quantized-gemm-gfx950-mixed
 description: Arg-plan replay beats device-graph capture at low dispatch counts (13.5% of geomean); its free extra dispatch funds a host restage of a scale operand
 keywords: ['launch-overhead', 'host-runtime', 'graph-replay', 'quantized-gemm', 'scale-operand', 'block-scale', 'cache-line']

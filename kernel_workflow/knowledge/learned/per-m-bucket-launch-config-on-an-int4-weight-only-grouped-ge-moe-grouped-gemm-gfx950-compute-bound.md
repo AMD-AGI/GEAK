@@ -6,7 +6,7 @@ effect: 3.33x weighted geomean vs frozen baseline, non-overlapping; per-case 2.5
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 14
+attempts: 15
 toolchain: unknown
 last_seen: 2026-08-12
 name: per-m-bucket-launch-config-on-an-int4-weight-only-grouped-ge-moe-grouped-gemm-gfx950-compute-bound

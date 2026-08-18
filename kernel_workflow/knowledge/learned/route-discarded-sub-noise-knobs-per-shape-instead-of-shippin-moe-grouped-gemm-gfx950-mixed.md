@@ -5,8 +5,8 @@ confidence: ★★
 effect: +1.44% over the pre-routing tree, reproduced five times; per-case the large tile is +1.4% at 65536 tokens but -2.2..-2.4% at 2048, and the epilogue-fusion threshold is +1.5% at 2048 and inert above it — shipped globally the pair nets ~1.00x
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 1
+losses: 1
+attempts: 3
 toolchain: unknown
 last_seen: 2026-08-12
 name: route-discarded-sub-noise-knobs-per-shape-instead-of-shippin-moe-grouped-gemm-gfx950-mixed

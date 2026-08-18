@@ -6,9 +6,9 @@ effect: closed axis across three split factors at batch B=2: gate max_rel_err 1.
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 1
+attempts: 2
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-17
 name: a-single-partition-control-separates-a-rejected-kv-split-fro-attention-decode-gfx950-decode
 description: KV-split parallelism on decode attention fails the elementwise oracle for reduction reorder, not kernel error; a single-partition control shows which it is
 keywords: ['split-kv', 'flash-decoding', 'oracle-parity', 'reduction-order', 'decode', 'anti-pattern', 'paged-attention']

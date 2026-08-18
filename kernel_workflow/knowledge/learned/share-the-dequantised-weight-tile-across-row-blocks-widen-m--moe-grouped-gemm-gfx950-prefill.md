@@ -5,8 +5,8 @@ confidence: ★★
 effect: +24.4% at fusion width 2 and a further +23.8% widening 2 to 4, both non-overlapping vs frozen baseline; the gain lands on the large-M cases (M=32768/65536), the small-M case (M=2048) stays flat because it is memory-latency bound
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 5
+losses: 2
+attempts: 8
 toolchain: unknown
 last_seen: 2026-08-12
 name: share-the-dequantised-weight-tile-across-row-blocks-widen-m--moe-grouped-gemm-gfx950-prefill

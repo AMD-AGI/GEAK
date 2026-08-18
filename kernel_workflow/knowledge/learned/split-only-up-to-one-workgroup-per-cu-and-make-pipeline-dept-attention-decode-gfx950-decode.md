@@ -6,9 +6,9 @@ effect: 1.63x isolated geomean, director-verified over two independent runs agre
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 1
+attempts: 3
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-17
 name: split-only-up-to-one-workgroup-per-cu-and-make-pipeline-dept-attention-decode-gfx950-decode
 description: Cap the parallelism split at one workgroup per CU and make pipeline depth a function of launched WGs: 1.63x geomean on paged split-KV decode attention.
 keywords: ['paged-decode', 'attention-decode', 'split-kv', 'num-stages', 'waves-per-eu', 'launch-shape', 'occupancy', 'gfx950', 'triton']
@@ -33,5 +33,5 @@ roofline: per-program compute-efficiency bound -> memory-bound at ~104% (batch=6
 - verify: Re-time every shape against the frozen baseline and sweep the split per shape: the peak sat exactly at the CU line (batch=32 split 1/2/4 = 1.63/1.69/1.59, batch=64 split 1/2 = 1.54/1.39, batch=2 split 4/8/16 = 1.60/1.66/1.62).
 - pitfall: The assigned hypothesis said the largest batch wanted more split -> it over-split a bus that was already saturated and cost ~10% -> derive the cap from CU count, and note attainable bandwidth is itself a function of WG count (a gather probe held its full rate at 256 WGs but only ~55% of it at 128).
 Retiling the KV block or swapping in exp2 re-rounded the online softmax -> parity gate blew up golden-vs-golden (max_rel 46.9 for one retile, 2.1e-2 for exp2) -> only math-preserving knobs (warps, pipeline depth, waves_per_eu, split) clear this gate.
-- caution: Inherited backend guidance for this decode family claimed deeper pipelining hurts and single-warp launches win; here the opposite measured best and single-warp was the worst point at 0.660x - also verify pipeline depth and warp count on your own box before carrying that guidance over.
+- caution: Inherited backend guidance for this decode family claimed deeper pipelining hurts and single-warp launches win; here the opposite measured best and single-warp was the worst point at 0.660x - also verify pipeline depth and warp count on your own box before carrying that guidance over. Also verify the cap above one WG/CU: a two-dispatch paged-decode family on the same arch measured a flat 4-6 WG/CU plateau (2 waves/SIMD) and only collapsed past 8, so sweep the target rather than assuming the CU line is the peak.
 - source: run _fwd_grouped_kernel_stage1-own16h, 2026-08-08, director-validated geomean 1.6337

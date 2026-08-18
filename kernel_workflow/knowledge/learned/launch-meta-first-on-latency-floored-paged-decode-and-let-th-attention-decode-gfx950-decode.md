@@ -5,10 +5,10 @@ confidence: ★★
 effect: ~1.21x isolated geomean on decode from launch-meta alone (per-case: mid and large KV-context cases carry it, the tiny-grid case ~1.00x); unpinning waves_per_eu then adds ~+0.7% geomean, carried entirely by the mid case at ~+1.9% with the other two tied; banked total ~1.23x vs frozen baseline
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 3
+losses: 1
+attempts: 5
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-17
 name: launch-meta-first-on-latency-floored-paged-decode-and-let-th-attention-decode-gfx950-decode
 description: Launch-meta is the primary lever on latency-bound paged grouped-attention decode; unpinning waves_per_eu beats a pinned hint, numerically exact.
 keywords: ['launch-meta', 'num-stages', 'waves-per-eu', 'occupancy', 'attention-decode', 'paged-kv', 'latency-bound', 'gfx950']

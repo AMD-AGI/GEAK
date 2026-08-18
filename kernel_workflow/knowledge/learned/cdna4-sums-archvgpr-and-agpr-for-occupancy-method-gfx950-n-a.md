@@ -5,10 +5,10 @@ confidence: ★★
 effect: 1.00x: a raw-HIP AGPR-accumulator rewrite aimed at occupancy 3 returned no advance on either large-M case, and occupancy stayed 2 because waves = 512/(ArchVGPR+AGPR) with a 64-register-per-lane accumulator putting the total at ~242
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 2
+losses: 1
+attempts: 3
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-08-17
 name: cdna4-sums-archvgpr-and-agpr-for-occupancy-method-gfx950-n-a
 description: On gfx950/CDNA4 occupancy divides one summed ArchVGPR+AGPR pool, so an AGPR-accumulator occupancy escape on an fp32-accum MFMA GEMM cannot exist
 keywords: ['occupancy', 'agpr', 'vgpr', 'mfma', 'accumulator', 'raw-hip', 'anti-pattern', 'gfx950', 'grouped-gemm']

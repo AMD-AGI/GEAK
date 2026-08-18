@@ -6,7 +6,7 @@ effect: largest single item of the campaign: first-stage HBM read traffic -47% a
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 1
+attempts: 2
 toolchain: unknown
 last_seen: 2026-08-12
 name: invert-the-xcd-round-robin-with-a-chunk-interleaved-workgrou-moe-grouped-gemm-gfx950-mixed
