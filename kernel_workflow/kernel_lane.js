@@ -1119,6 +1119,35 @@ if (!kbGate && UPDATE_EXPERIENCE_ON && validation && Number.isFinite(finalPrimar
   } catch (e) {
     log(`[kb] update_experience skipped: ${e && e.message ? e.message : e}`);
   }
+
+  // FILE THE CITATION LEDGER. This is the loss half of the loop and it had no producer: `drain`
+  // could apply citations but nothing ever handed it any, while the same arithmetic sat in
+  // roles/update_experience.md for the curator to do by hand. Across the 2h and 8h campaigns that
+  // produced 292 citations, 126 of them verified at or below the frozen baseline, and 7 recorded
+  // losses — so in practice a card could only ever gain standing.
+  // A workflow script has no filesystem, hence the one-line agent; the JSON is assembled by
+  // `kb.py cite` rather than by the agent, because a proposal hand-written by a model is one more
+  // place for the schema to drift.
+  if (citations.length) {
+    try {
+      await agentT(
+        `Run EXACTLY this command and nothing else. Do NOT edit any file.
+\`\`\`bash
+cat <<'CITEJSON' | python3 ${WORKFLOW_DIR}/scripts/kb.py --kb-dir ${LEARNED_DIR} cite \\
+  --run-id ${JSON.stringify(KERNEL_NAME)} \\
+  --kernel ${JSON.stringify(KERNEL_NAME)} --citations -
+${JSON.stringify(citations)}
+CITEJSON
+\`\`\`
+Return {"filed": <the "citations" number the command printed, or 0>}.`,
+        { phase: 'Validate', label: 'kb:cite', effort: 'low',
+          schema: { type: 'object', properties: { filed: { type: 'number' } },
+                    required: ['filed'], additionalProperties: true } });
+      log(`[kb] citation ledger filed: ${citations.length} row(s) for the next drain`);
+    } catch (e) {
+      log(`[kb] citation ledger NOT filed: ${e && e.message ? e.message : e}`);
+    }
+  }
 }
 
 return {

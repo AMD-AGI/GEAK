@@ -10,6 +10,7 @@
     kb.py --kb-dir <tree> lint    --file <proposal.json>        # validate a proposal
     kb.py --kb-dir <tree> lint    --cards                       # audit the cards already in the tree
     kb.py --kb-dir <tree> propose --file <proposal.json>        # validate + place in _inbox/
+    kb.py --kb-dir <tree> cite    --run-id R --kernel K [--date D] --citations -   # loss half
     kb.py --kb-dir <tree> drain   [--apply] [--validated-runs N]
     kb.py --kb-dir <tree> doctor  [--toolchain <fingerprint>]
     kb.py --kb-dir <tree> stats
@@ -211,8 +212,16 @@ CARD_BODY_FIELDS = ("title", "lever", "apply", "stack", "verify", "pitfall", "ca
 MAX_CARD_LINES = 20                  # README: ">20 lines means you're storing narrative"
 
 
-def lint_card(card, kernel_names=(), strict_source=True):
-    """Return a list of rejection reasons; empty == accepted."""
+def lint_card(card, kernel_names=(), strict_source=True, is_new=True):
+    """Return a list of rejection reasons; empty == accepted.
+
+    `is_new` distinguishes a PROPOSAL from a card already in the tree. They are not the same
+    document: a proposal must start with zero confirmations because it has never been cited, while a
+    stored card is expected to carry the counters `drain` has since applied to it. Auditing stored
+    cards under the proposal rule turned `lint --cards` red on 130 of 135 the moment that rule
+    landed — the audit and the admission gate share an implementation, which is right, but they do
+    not share every clause.
+    """
     errs = []
     text = "\n".join(str(card.get(f, "")) for f in CARD_BODY_FIELDS)
     # `source` is PROVENANCE, and provenance is exempt from the class-level rule below. Those two
@@ -309,6 +318,16 @@ def lint_card(card, kernel_names=(), strict_source=True):
     # at two stars however many times it 'reproduces'.
     if STARS.get(conf, 0) >= 3 and int(card.get("confirms_blind", 0) or 0) < 1:
         errs.append("★★★ requires confirms_blind >= 1 (self-confirmation cannot promote)")
+    # A brand-new card has not been cited yet, so its confirm counters start at zero BY DEFINITION —
+    # they are the citation loop's output, not the author's claim. Curators kept writing
+    # `confirms_cited: 1` at creation and the lint accepted it: 129 of 135 cards in this tree carry
+    # exactly 1, which is why `rank`'s standing term returns the same value for almost every card and
+    # cannot order anything. Measured against reality, 112 confirm-points are recorded where the
+    # citation join saw 49 wins.
+    for fld in ("confirms_cited", "confirms_blind") if is_new else ():
+        if int(card.get(fld, 0) or 0) != 0:
+            errs.append(f"{fld} must be 0 on a NEW card — confirmations are earned by citations, "
+                        f"applied by `drain`, never asserted by the author")
 
     body_lines = sum(len(str(card.get(f, "")).splitlines()) or 1 for f in CARD_BODY_FIELDS)
     if body_lines > MAX_CARD_LINES:
@@ -485,7 +504,7 @@ def cmd_lint(kb, a):
                     card[f] = m.group(1)
             if "attempts" not in c["meta"] or not c["meta"].get("attempts"):
                 card["attempts"] = 1  # older schema had no attempts; don't report that 17 times
-            e = lint_card(card, strict_source=False)
+            e = lint_card(card, strict_source=False, is_new=False)
             if e:
                 bad[os.path.basename(c["path"])] = e
         # Count what was actually audited. Reporting len(all_cards(kb)) here counted ACTIVE cards
@@ -505,6 +524,61 @@ def cmd_lint(kb, a):
     errs = {k: v for k, v in errs.items() if v}
     print(json.dumps({"ok": not errs, "rejections": errs}, ensure_ascii=False, indent=2))
     return 1 if errs else 0
+
+
+def cmd_cite(kb, a):
+    """File a run's citation ledger — the LOSS half of the loop, which nothing else produces.
+
+    `drain` has always known how to apply citations, but nothing ever handed it any: the lane only
+    ever passed CITATIONS into the curator's prompt, and the same arithmetic was ALSO written out as
+    prose in roles/update_experience.md for an agent to do by hand. One rule, two implementations,
+    and the one that ran was the one that forgets — measured across two campaigns, 292 citations of
+    which 126 verified at or below the frozen baseline produced 7 recorded losses.
+
+    So this is the producer. A workflow script has no filesystem, so the lane cannot write the file
+    itself; it pipes the citation array here and the JSON is assembled in code, because an agent
+    hand-assembling a proposal is one more place for the schema to drift.
+    """
+    raw = sys.stdin.read() if a.citations == "-" else open(a.citations).read()
+    try:
+        cites = json.loads(raw or "[]")
+    except json.JSONDecodeError as e:
+        print(f"REJECTED — citations is not JSON: {e}", file=sys.stderr)
+        return 1
+    if not isinstance(cites, list):
+        print("REJECTED — citations must be a JSON array", file=sys.stderr)
+        return 1
+    if not cites:
+        print(json.dumps({"written": None, "citations": 0, "note": "no citations, nothing to file"}))
+        return 0
+    prop = {
+        "run_id": f"{a.run_id}-citations",
+        "date": a.date or str(date.today()),
+        "kernel_names": [a.kernel] if a.kernel else [],
+        "validation_status": "accepted",
+        "box_quiet": True, "held_out": False,
+        "cards": [],                 # a ledger, not a contribution: it may never add a card
+        "citations": cites,
+    }
+    os.makedirs(kb.inbox, exist_ok=True)
+    # A ledger is per-RUN, and the same kernel is re-run across arms and after crashes, so the run id
+    # is not unique the way a card proposal's is. `propose` opens "x" and lets a collision throw,
+    # which for a ledger would mean silently dropping the losses of whichever run came second — the
+    # exact bias this whole change is removing. Take the next free suffix instead.
+    base = slugify(prop["run_id"])
+    for n in range(1, 1000):
+        dest = os.path.join(kb.inbox, base + (".json" if n == 1 else f"-{n}.json"))
+        try:
+            with open(dest, "x") as f:
+                json.dump(prop, f, ensure_ascii=False, indent=2)
+            break
+        except FileExistsError:
+            continue
+    else:
+        print("REJECTED — 1000 ledgers already filed under this run id", file=sys.stderr)
+        return 1
+    print(json.dumps({"written": dest, "citations": len(cites)}))
+    return 0
 
 
 def cmd_propose(kb, a):
@@ -767,6 +841,11 @@ def cmd_drain(kb, a):
                     "confidence": card.get("confidence"), "effect": card.get("effect"),
                     "confirms_cited": cited, "confirms_blind": blind, "losses": 0,
                     "attempts": int(card.get("attempts", 1)),
+                    # The kernels whose run produced this card. A later citation from one of THESE
+                    # is the card recognising its own homework; a citation from any other kernel is
+                    # the transfer claim the KB exists to make. Without this the two are
+                    # indistinguishable and `confirms_blind` can never be earned.
+                    "origin_kernels": list(names),
                     "toolchain": prop.get("toolchain", "unknown"),
                     "last_seen": prop.get("date", str(date.today())),
                 }
@@ -809,7 +888,20 @@ def cmd_drain(kb, a):
             # number to gain standing, and the ambiguous middle never inflates it.
             v = float(cite.get("cited_then_verified") or 0)
             if cite.get("became_winner"):
-                m["confirms_cited"] = int(m.get("confirms_cited", 0)) + 1
+                # Which counter depends on WHO cited it. ★★★ requires `confirms_blind`, and every
+                # arm runs with the KB on, so under the old reading — any cited win is a "cited"
+                # confirm — no card in this tree could ever reach ★★★: doctor reported all 135 as
+                # self-confirmed-only. That made the top tier unreachable by construction rather
+                # than unearned.
+                # The distinction that actually matters for leakage is not KB-on vs KB-off, it is
+                # same-kernel vs cross-kernel. A card distilled from kernel A and cited by a later
+                # run of A is memorisation; the same card winning on kernel B is the transfer the
+                # KB is for. `origin_kernels` is unknown for cards written before it existed, and
+                # unknown resolves to `cited` — the direction that withholds credit.
+                origin = [str(x) for x in (m.get("origin_kernels") or [])]
+                blind_now = bool(origin) and bool(names) and not (set(names) & set(origin))
+                fld = "confirms_blind" if blind_now else "confirms_cited"
+                m[fld] = int(m.get(fld, 0)) + 1
             elif v <= 1.0:
                 m["losses"] = int(m.get("losses", 0)) + 1
             m["last_seen"] = prop.get("date", str(date.today()))
@@ -1000,6 +1092,12 @@ def main():
     ix.add_argument("--check", action="store_true",
                     help="exit 1 if INDEX.md is stale and write nothing (for CI)")
 
+    ct = sub.add_parser("cite", help="file a run's citation ledger into _inbox (the loss half)")
+    ct.add_argument("--run-id", required=True)
+    ct.add_argument("--kernel", default="")
+    ct.add_argument("--date", default="")
+    ct.add_argument("--citations", default="-", help="path to a JSON array, or - for stdin")
+    ct.set_defaults(fn=cmd_cite)
     doc = sub.add_parser("doctor"); doc.set_defaults(fn=cmd_doctor)
     doc.add_argument("--toolchain", default="", help="current stack fingerprint to compare against")
 

@@ -67,6 +67,13 @@ def run(d, *args):
     return r.returncode, r.stdout, r.stderr
 
 
+def cite(d, run_id, kernel, payload):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "kb.py"), "--kb-dir", d, "cite",
+                        "--run-id", run_id, "--kernel", kernel, "--citations", "-"],
+                       input=payload, capture_output=True, text=True, timeout=120)
+    return r.returncode, r.stdout, r.stderr
+
+
 def fresh():
     d = tempfile.mkdtemp(prefix="kbtest-")
     os.makedirs(os.path.join(d, "_inbox"), exist_ok=True)
@@ -245,6 +252,75 @@ check("doctor's headroom is counted per kernel_class, not per card",
       rep["class_headroom"].get("moe_grouped_gemm") == 0
       and rep["class_headroom"].get("dense_gemm") == kb.CLASS_CAP - 1,
       json.dumps(rep["class_headroom"]))
+shutil.rmtree(dd)
+
+# The citation ledger must actually reach the counters. `drain` has always known how to apply
+# citations and nothing ever handed it any — the lane passed them to a curator prompt, and the same
+# arithmetic sat in roles/update_experience.md as prose. Measured result across two campaigns: 292
+# citations, 126 of them at or below the frozen baseline, 7 recorded losses. `kb.py cite` is the
+# producer; this checks the whole path, ledger -> drain -> counters.
+dd = fresh()
+write(dd, "cited.md", card("cited", confirms_cited=0, confirms_blind=0, losses=0, attempts=1,
+                           origin_kernels="[kern_a]"))
+cites = json.dumps([
+    {"card": "cited.md", "cited_then_verified": 0.0, "became_winner": False},      # a real loss
+    {"card": "cited.md", "cited_then_verified": 1.4, "became_winner": False},      # neutral
+])
+rc, out, err = cite(dd, "r1", "kern_a", cites)
+check("cite files a ledger into the inbox", rc == 0 and "citations" in out, err)
+run(dd, "drain", "--apply", "--validated-runs", "1")
+meta = open(os.path.join(dd, "cited.md")).read()
+check("a failed citation is recorded as a loss",
+      "losses: 1" in meta, meta.split("---")[1])
+check("a neutral citation is an attempt and nothing more",
+      "attempts: 3" in meta and "confirms_cited: 0" in meta, meta.split("---")[1])
+shutil.rmtree(dd)
+
+# ★★★ has to be reachable or the tier is decoration. It was not: `confirms_blind` was only ever
+# granted by a run with the KB off, and every arm runs with it on, so doctor reported all 135 cards
+# self-confirmed-only. The distinction that matters for leakage is same-kernel vs cross-kernel — a
+# card winning on the kernel it was distilled from is memorisation; winning on another is transfer.
+dd = fresh()
+write(dd, "xfer.md", card("xfer", confirms_cited=0, confirms_blind=0, attempts=1,
+                          origin_kernels="[kern_a]"))
+win = json.dumps([{"card": "xfer.md", "cited_then_verified": 2.0, "became_winner": True}])
+cite(dd, "r2", "kern_b", win)
+run(dd, "drain", "--apply", "--validated-runs", "1")
+meta = open(os.path.join(dd, "xfer.md")).read()
+check("a win on a DIFFERENT kernel is a blind confirmation",
+      "confirms_blind: 1" in meta and "confirms_cited: 0" in meta, meta.split("---")[1])
+shutil.rmtree(dd)
+
+dd = fresh()
+write(dd, "self.md", card("self", confirms_cited=0, confirms_blind=0, attempts=1,
+                          origin_kernels="[kern_a]"))
+cite(dd, "r3", "kern_a", json.dumps([{"card": "self.md", "cited_then_verified": 2.0,
+                                       "became_winner": True}]))
+run(dd, "drain", "--apply", "--validated-runs", "1")
+meta = open(os.path.join(dd, "self.md")).read()
+check("a win on the card's OWN kernel is not blind",
+      "confirms_blind: 0" in meta and "confirms_cited: 1" in meta, meta.split("---")[1])
+shutil.rmtree(dd)
+
+# Confirmations are earned, never asserted. 129 of 135 cards in the tree carry `confirms_cited: 1`
+# written by their author at creation, which is why `rank`'s standing term cannot order anything.
+dd = fresh()
+prop = {"run_id": "assert1", "date": "2026-08-18", "kernel_names": ["k"],
+        "validation_status": "accepted", "box_quiet": True, "held_out": False, "citations": [],
+        "cards": [{"title": "T", "key": "a plainly worded gfx950 situation with an op and a regime",
+                   "type": "lever", "confidence": "★★", "effect": "+11% geomean over 4 shapes",
+                   "attempts": 3, "confirms_cited": 1, "confirms_blind": 0, "losses": 0,
+                   "description": "a lever on an op: +11% on the large shapes",
+                   "keywords": ["tiling"], "kernels": [], "platforms": ["gfx950"],
+                   "kernel_class": "dense_gemm", "regime": "decode", "lifecycle": "active",
+                   "source": "campaign 2026-08-18", "last_seen": "2026-08-18",
+                   "lever": "x", "verify": "y"}]}
+pf = os.path.join(dd, "p.json")
+with open(pf, "w") as f:
+    json.dump(prop, f)
+_, out, _ = run(dd, "lint", "--file", pf)
+check("a new card may not assert its own confirmations",
+      "confirms_cited must be 0" in out, out[:300])
 shutil.rmtree(dd)
 
 # A well-formed card must pass: a gate that rejects everything is not a gate.

@@ -118,23 +118,21 @@ fraction before it reaches the card), `CANDIDATES` (bake-off only), `OP_SPEC` (b
    Then **read the regenerated index once**: if it now shows a ⚠ near-duplicate keyword block naming a
    term you just used, fix your card to the established spelling and regenerate again.
 
-## Merge `CITATIONS` before you write anything new
+## Do NOT touch the cited cards' counters
 
-`CITATIONS` is one row per direction this run's plan seeded from a card: `{card, round, direction,
-cited_then_verified, became_winner}`. Apply it to the CITED cards, not to the card you are writing:
+`CITATIONS` is shown to you as CONTEXT — which of your directions a card seeded, and what the
+verifier then measured. Read it to judge whether the card you are about to write says anything new.
 
-- `attempts` += 1 for every row naming that card.
-- `became_winner: true` -> `confirms_cited` += 1. That, and only that, is a confirmation.
-- `cited_then_verified <= 1.0` -> `losses` += 1.
-- Anything between — verified above the frozen baseline but not the round winner — counts as an
-  attempt and nothing else. `verified_geomean` is measured against the FROZEN baseline, so once a
-  kernel sits at 2.5x cumulative *every* non-regressing direction clears 1.0; scoring those as wins
-  would let a card bank credit for advancing nothing. Observed: a card cited twice at 2.548x and
-  2.555x, winner neither time.
-- A card whose `losses` reach 3 and exceed its `confirms_cited` drops one confidence star and gains a
-  `caution:` naming the base rate. Demote, never delete, and never write a blocklist.
+Do not apply it. `attempts`, `confirms_cited`, `confirms_blind` and `losses` on the CITED cards are
+now written by `kb.py drain` from the ledger the lane files, and a second writer doing the same
+arithmetic by hand is how this went wrong: the same rule lived here as prose and in `kb.py` as code,
+the code path was never fed, and across two campaigns 292 citations — 126 of which verified at or
+below the frozen baseline — produced 7 recorded losses. Every card ended up at
+`losses: 0, confirms_cited: 1`, so the ranking function could not tell any two apart.
 
-This is the only downward pressure in the design. Skip it and confidence only ever rises.
+Your own new card must be written with `confirms_cited: 0` and `confirms_blind: 0`. The lint rejects
+anything else: a card that has never been cited cannot have been confirmed, and the counters are the
+citation loop's output, not the author's claim.
 
 ## LINT WHAT YOU WROTE — the write path is not exempt
 
