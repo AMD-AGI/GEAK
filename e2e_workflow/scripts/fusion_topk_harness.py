@@ -413,11 +413,11 @@ def render_markdown(result, actions):
     lines = ["# Kernel Fusion Top-K (Phase 2.2)", ""]
     fwd = result["phase_total_forward_us"]
     lines.append(
-        "一张合并 Top-K（prefill/decode 用「阶段」列区分）。按**优先级 A→B** 排序"
-        "（先摘低垂果实），同优先级内按整-forward 收益占比排。C（需自写 kernel）见文末"
+        "一张合并 Top-K（prefill/decode 用「阶段」列区分）。按**实现难度 A→B** 排序"
+        "（先摘低垂果实），同实现难度内按整-forward 收益占比排。C（需自写 kernel）见文末"
         "同格式表，暂缓。**收益均为 roofline 工程估算，落地前以 benchmark 确认。**")
     lines.append("")
-    lines.append("优先级 = 落地工作量：**A** = 配置开启（翻 flag / 确认已启用，零代码）；"
+    lines.append("实现难度 = 落地工作量：**A** = 配置开启（翻 flag / 确认已启用，零代码）；"
                  "**B** = 接入现成算子（改代码把已存在的 fused kernel 接进来）；"
                  "**C** = 没有现成算子，需自写 kernel。")
     lines.append("**现成算子** = 有没有可用的现成 fused kernel：**有** = A/B（kernel 已存在）；"
@@ -427,7 +427,7 @@ def render_markdown(result, actions):
     lines.append("互斥（✳）的融合方案（同批算子、每处只落一个）都列出、标注供你/3.2 选，不替你择优。")
     lines.append("")
     _HEADER = (
-        "| 排名 | 优先级 | 阶段 | 优先行动（集成什么） | 覆盖范围 | "
+        "| 排名 | 实现难度 | 阶段 | 优先行动（集成什么） | 覆盖范围 | "
         "对应 Kernel / API（怎么开）| 预期整-forward 收益 | 现成算子 | 互斥 |")
     _SEP = "|---:|:--:|:--:|---|---|---|---:|:--:|:--:|"
 

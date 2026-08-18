@@ -714,7 +714,7 @@ python3 "$SKILL_DIR/scripts/fusion_topk_harness.py" \
 
 The ranker is deterministic and encodes these rules — do not hand-rank:
 
-- **Priority tier** — three levels by realization cost (authoritative), keyed by
+- **实现难度 tier** — three levels by realization cost (authoritative), keyed by
   `implementation_class` (现成算子 follows: A/B=有, C=无):
   - `A` — **env var / flag only, no code** (`existing_flag_or_env`) →
     ConfigSweep.
@@ -742,7 +742,7 @@ The ranker is deterministic and encodes these rules — do not hand-rank:
 - **One merged action table** with a 阶段 (phase) column — prefill and decode
   are different forwards so their `整-forward 占比` uses each phase's own total
   (never summed), but they share one ranked list. Each row is an actionable
-  `(recipe, phase)`: 优先级 / 阶段 / 优先行动（集成什么）/ 覆盖范围 (`pattern×层数`)
+  `(recipe, phase)`: 实现难度 / 阶段 / 优先行动（集成什么）/ 覆盖范围 (`pattern×层数`)
   / 对应 flag 或 API / 预期整-forward 收益 / 现成算子 / 互斥.
 - **Ordered by difficulty A→B→C, then by 整-forward 占比 within a tier**
   (quick wins first). The main table lists **A and B** (`--tiers A,B`); C
