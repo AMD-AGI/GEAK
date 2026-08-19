@@ -791,13 +791,24 @@ def main():
     ran_any = any(r.get("ms") for r in results)
     raised = [r for r in results if r.get("raised") or r.get("backend") == "ERROR"
               or "raised" in str(r.get("note", "")) or "failed:" in str(r.get("note", ""))]
-    harness_suspect = bool(results) and (not ran_any) and len(raised) > 0
+    # A row that claims it was AVAILABLE and CORRECT while carrying no ``ms`` contradicts
+    # itself: it reports a verdict on a timing it never took. Requiring an exception missed
+    # this quiet form, and the quiet form is the common one. A recorded skip
+    # (``available: False``) asserts nothing and stays out of the fault signal.
+    unmeasured_claim = [r for r in results
+                        if r.get("available") and r.get("correct") and r.get("ms") is None]
+    harness_suspect = bool(results) and (not ran_any) and bool(raised or unmeasured_claim)
     harness_error = ""
     if harness_suspect:
-        r0 = raised[0]
-        harness_error = str(r0.get("note") or r0.get("trace") or "unknown harness error")[:400]
-    speedup = (baseline["ms"] / winner["ms"]) if (winner and baseline and winner["ms"]) else (
-        1.0 if winner else 0.0)
+        r0 = (raised or unmeasured_claim)[0]
+        harness_error = str(r0.get("note") or r0.get("trace")
+                            or "backend reported available+correct but produced no timing")[:400]
+    # A speedup is a MEASUREMENT, so absent a measurement there is no number to publish.
+    # Reporting 0.0 for "never timed" made it indistinguishable from "timed, not faster",
+    # and the acceptance gate cannot tell a kernel it declined from one it never ran.
+    measured = bool(ran_any)
+    speedup = ((baseline["ms"] / winner["ms"]) if (winner and baseline and winner["ms"])
+               else (1.0 if winner else (0.0 if measured else None)))
     wb = winner["backend"] if winner else None
     # Only triton/hip are source-editable (-> Tier-C kernel-squad rewrite). ck is a library backend.
     editable = bool(wb in ("triton", "hip"))
@@ -838,7 +849,8 @@ def main():
         "winner_ms": winner["ms"] if winner else None,
         "baseline_backend": baseline["backend"] if baseline else None,
         "baseline_ms": baseline["ms"] if baseline else None,
-        "isolated_speedup": round(speedup, 4),
+        "measured": measured,
+        "isolated_speedup": round(speedup, 4) if speedup is not None else None,
         "pct_gpu_time": pct_gpu,
         "amdahl_ceiling_e2e_pct": amdahl_ceiling_pct,
         "winner_editable": editable,

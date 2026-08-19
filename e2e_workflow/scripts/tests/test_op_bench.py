@@ -1856,5 +1856,66 @@ def _swm_meta_ob(**kw):
     return meta
 
 
+class TestUnmeasuredIsNotZero(unittest.TestCase):
+    """``isolated_speedup`` is a measurement, so an unmeasured bake-off publishes none.
+
+    Reporting ``0.0`` for "never timed" made it read exactly like "timed, and not
+    faster". Every attention bake-off in the campaign took that path, so the gate
+    declined kernels it had never benched. Regression cover for that whole class.
+    """
+
+    def setUp(self):
+        self.h = TestMainSummary()
+        self.h.setUp()
+        self._run_main = self.h._run_main
+
+    def tearDown(self):
+        self.h.tearDown()
+
+    @staticmethod
+    def _claims_ran(backend, note=""):
+        """A row asserting available+correct while carrying no timing (bench_attn)."""
+        return {"backend": backend, "available": True, "correct": True, "ms": None, "note": note}
+
+    def test_a_bakeoff_that_timed_nothing_publishes_a_null_speedup(self):
+        summary, _ = self._run_main(
+            {"op_kind": "attn"},
+            results=[self._claims_ran("current", "delegated to the Config Tuner fast path")])
+        self.assertIsNone(summary["isolated_speedup"])
+        self.assertFalse(summary["measured"])
+
+    def test_a_row_claiming_it_ran_without_a_timing_is_a_harness_fault(self):
+        summary, _ = self._run_main(
+            {"op_kind": "attn"}, results=[self._claims_ran("current")])
+        self.assertTrue(summary["harness_suspect"])
+        self.assertIn("no timing", summary["harness_error"])
+
+    def test_a_recorded_skip_still_is_not_a_harness_fault(self):
+        """``available: False`` asserts nothing; only a self-contradicting row does."""
+        summary, _ = self._run_main(
+            {"op_kind": "gemm"},
+            results=[{"backend": "grouped_quant_gemm", "available": False,
+                      "correct": False, "ms": None, "note": "not a candidate"}])
+        self.assertFalse(summary["harness_suspect"])
+
+    def test_a_measured_bakeoff_with_no_correct_backend_still_reports_zero(self):
+        """Timed but all-incorrect is a real verdict and must keep its 0.0."""
+        summary, _ = self._run_main(
+            {"op_kind": "gemm"},
+            results=[{"backend": "triton", "available": True, "correct": False, "ms": 1.5}])
+        self.assertEqual(summary["isolated_speedup"], 0.0)
+        self.assertTrue(summary["measured"])
+        self.assertFalse(summary["harness_suspect"])
+
+    def test_a_real_win_is_unchanged(self):
+        summary, _ = self._run_main(
+            {"op_kind": "gemm"},
+            results=[{"backend": "hipblaslt", "available": True, "correct": True, "ms": 2.0},
+                     {"backend": "triton", "available": True, "correct": True, "ms": 1.0}])
+        self.assertEqual(summary["isolated_speedup"], 2.0)
+        self.assertTrue(summary["measured"])
+        self.assertFalse(summary["harness_suspect"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
