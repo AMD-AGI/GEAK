@@ -355,8 +355,25 @@ trap server_teardown EXIT
 if [ "${SERVING_GPU_LOCK_DISABLE:-0}" != "1" ] && [ "${REUSE_SERVER:-0}" != "1" ]; then
   _gpu_key="${GPU:-0}"; _gpu_key="${_gpu_key//,/_}"
   SERVING_LOCK="${SERVING_GPU_LOCK:-/tmp/geak_serving_gpu_${_gpu_key}.lock}"
-  exec {SERVING_LOCK_FD}>"$SERVING_LOCK"
+  # The lock file is SHARED on purpose -- the GPUs are shared, so a per-user lock would hand two
+  # users the same cards and defeat the mutex. Shared means whoever creates it first must leave it
+  # openable by the next user, hence the group/other write bit. Failure to widen it is not fatal
+  # (a single-tenant box never needs it); failure to OPEN it is.
+  if [ ! -e "$SERVING_LOCK" ]; then
+    (umask 000; : > "$SERVING_LOCK") 2>/dev/null || true
+  fi
   echo ">>> Acquiring serving-GPU lock ($SERVING_LOCK) for GPU=$GPU ..."
+  # Append, never truncate: `>` on a lock another process holds gains nothing and needs the same
+  # write bit. And this open MUST be tested. A failed `exec {FD}>` does not stop the shell, so the
+  # script used to print "Acquiring ..." with no fd assigned, then die on the next line with
+  # `SERVING_LOCK_FD: unbound variable` under `set -u` -- flock never ran, and the only line naming
+  # the cause went to stderr, which the caller does not read.
+  if ! exec {SERVING_LOCK_FD}>>"$SERVING_LOCK"; then
+    echo "!!! cannot open serving-GPU lock ($SERVING_LOCK): $(ls -ld "$SERVING_LOCK" 2>&1)" >&2
+    echo "!!! it is shared across users by design; make it group/other writable, or set" >&2
+    echo "!!!   SERVING_GPU_LOCK=<path> (a different lock)  /  SERVING_GPU_LOCK_DISABLE=1 (no mutex)" >&2
+    exit 4
+  fi
   if ! flock -w "${SERVING_LOCK_WAIT:-7200}" "$SERVING_LOCK_FD"; then
     echo "!!! serving-GPU lock timeout (${SERVING_LOCK_WAIT:-7200}s) on GPU=$GPU" >&2
     exit 4

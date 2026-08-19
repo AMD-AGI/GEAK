@@ -15,7 +15,9 @@ start it -- and that refusal is on the launch path of EVERY server in the produc
 it is asserted here rather than trusted.
 
 The gate sits before the serving-GPU lock and before any launch, so these tests need
-neither a GPU nor a model: they assert the exit code and the stderr remedy.
+neither a GPU nor a model: they assert the exit code and the stderr remedy. The two that
+run PAST the gate do reach the lock, so they are given their own lock path -- a unit test
+must not contend for the host's real GPU mutex.
 """
 import os
 import shutil
@@ -71,6 +73,12 @@ class BenchTeardownLookupTest(unittest.TestCase):
             OUT_DIR=os.path.join(self.tmp, "out"),
             REPEATS="1",
             PROFILE="0",
+            # A unit test must not take the machine's real serving-GPU mutex. The default
+            # /tmp/geak_serving_gpu_<gpu>.lock is one shared path for every user on the host, so
+            # these two tests either blocked on another tenant's benchmark (up to SERVING_LOCK_WAIT,
+            # 7200s) or could not open the file at all when another user created it first. Give the
+            # test its own lock; the mutex itself is exercised where it belongs, on a real launch.
+            SERVING_GPU_LOCK=os.path.join(self.tmp, "serving_gpu.lock"),
         )
         run_env.update(env)
         return subprocess.run(
@@ -95,6 +103,38 @@ class BenchTeardownLookupTest(unittest.TestCase):
         self.assertNotEqual(proc.returncode, MISSING_LIB_RC, proc.stderr[-2000:])
         self.assertNotIn("server_teardown.sh not found", proc.stderr)
         self.assertIn("STUB_LAUNCH_REACHED", proc.stdout, "never reached the launch")
+
+    @unittest.skipIf(os.geteuid() == 0, "root can open any lock, so the denial cannot be staged")
+    def test_an_unopenable_lock_fails_loudly_instead_of_silently(self):
+        """The serving-GPU lock is one shared path per GPU set, so on a multi-tenant host the
+        second user cannot always open it. That has to be a legible refusal.
+
+        It was not. `exec {FD}>"$LOCK"` does not stop the shell when the open fails, so the run
+        printed ">>> Acquiring serving-GPU lock ..." with no fd assigned and then died on the next
+        line with `SERVING_LOCK_FD: unbound variable` -- flock never ran, and the only line naming
+        the cause went to stderr, which the caller does not read."""
+        self.stage_lib(self.eval_dir)
+        lock = os.path.join(self.tmp, "unopenable.lock")
+        with open(lock, "w", encoding="utf-8"):
+            pass
+        os.chmod(lock, 0o400)
+        self.addCleanup(os.chmod, lock, 0o600)
+        proc = self.run_bench(SERVING_GPU_LOCK=lock)
+        self.assertEqual(proc.returncode, 4, (proc.stdout + proc.stderr)[-2000:])
+        self.assertIn("cannot open serving-GPU lock", proc.stderr)
+        self.assertIn("SERVING_GPU_LOCK", proc.stderr)          # names the way out
+        self.assertNotIn("unbound variable", proc.stderr)
+        self.assertNotIn("STUB_LAUNCH_REACHED", proc.stdout)    # and never launches
+
+    def test_a_shared_lock_is_left_openable_by_the_next_user(self):
+        """Shared is deliberate -- the GPUs are shared, so a per-user lock would hand two users
+        the same cards. Shared then requires that whoever creates it first does not lock the next
+        user out."""
+        self.stage_lib(self.eval_dir)
+        lock = os.path.join(self.tmp, "fresh.lock")
+        self.run_bench(SERVING_GPU_LOCK=lock)
+        self.assertTrue(os.path.exists(lock))
+        self.assertTrue(os.stat(lock).st_mode & 0o022, "another user could not open this lock")
 
     def test_skill_dir_fallback_is_used_and_announced(self):
         """A caller that exports SKILL_DIR keeps working from an unstaged copy -- but
