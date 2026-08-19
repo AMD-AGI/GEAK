@@ -1,0 +1,36 @@
+skill_id: flydsl_decode_moe_stage1_blkmap
+date: '2026-08-05'
+flydsl_version: 0.2.2
+provider: aiter_vendored_flydsl
+gpu: gfx950 / MI355X
+scope: stage-1 segment = mfma_moe1 + descriptor producer
+method: torch profiler device time, 3 paired full-benchmark runs
+samples_per_run: 30
+warmup_per_run: 10
+baseline_latency_ms:
+- 0.193393400
+- 0.192645367
+- 0.192705500
+skill_latency_ms:
+- 0.174233633
+- 0.174497633
+- 0.175070900
+baseline_median_ms: 0.192705500
+skill_median_ms: 0.174497633
+speedup: 1.1043445
+latency_reduction_pct: 9.4485
+components:
+  baseline_mfma_median_us: 192.705500
+  skill_mfma_median_us: 171.370600
+  descriptor_median_us: 3.157733
+  gemm_only_speedup: 1.1244957
+parity:
+  baseline_logits_diff_median: 0.0010681589
+  skill_logits_diff_median: 0.0010667301
+  baseline_cos_sim_median: 0.998933
+  skill_cos_sim_median: 0.998935
+runtime_signature:
+  gemm: _am2
+  descriptor: _blkmap_kernel
+  descriptor_dispatches_per_run: 30
+raw_logs: external perf_results_20260805_flydsl022/decode_{baseline,skill}_{1,2,3}.log
