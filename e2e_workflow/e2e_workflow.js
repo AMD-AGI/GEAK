@@ -382,7 +382,8 @@ const E2E_REPEATS = parseInt(A.e2e_repeats != null ? A.e2e_repeats : 2, 10);
 // of pass/fail" — general, not per-kernel. Bump via args.ab_finish_retries.
 const AB_FINISH_RETRIES = parseInt(A.ab_finish_retries != null ? A.ab_finish_retries : 3, 10);
 // A resolvable FROZEN baseline (a seeded baseline_overlay/ + a declared meta.candidate_bind, or an
-// importable meta.baseline_callable on the op track) is the speedup DENOMINATOR and is MANDATORY. If an extraction smoke-passes but froze no baseline, the
+// importable meta.baseline_callable on the op track) is the speedup DENOMINATOR and is MANDATORY.
+// If an extraction smoke-passes but froze no baseline, the
 // unittest would silently time the candidate against its own naive same-language scaffold (the
 // "optimized-HIP vs naive-HIP = fake 15.7× isolated, ~0% e2e" bug). When that happens we RE-EXTRACT
 // up to this many times; if still missing, the extraction is treated as a FAILURE (flag dominant /

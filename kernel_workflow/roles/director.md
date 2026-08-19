@@ -61,7 +61,6 @@ Do this instead of the optimize-mode steps below:
    # This INCLUDES baseline_overlay/ + harness_lib.py: the frozen live serving stack IS the timing-baseline
    # denominator regardless of TARGET_LANGUAGE — it must ride along, immutable, so the unittest can time
    # the authored seed against the live online path (never against the seed's own language scaffold).
-   # (baseline_src/ is the oracle_freezer-era equivalent; the guards below cover whichever the task dir has.)
    # reference_io.pt is OPTIONAL and usually ABSENT: only e2e's kernel_extractor records a golden (it
    # captures unsynthesizable real routing / paged-KV metadata off a live server). An oracle_freezer dir
    # has no golden — it re-derives operands from meta.cases[] seeds and checks parity against the

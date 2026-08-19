@@ -156,13 +156,6 @@ EXTRA_SERVER_ARGS=${EXTRA_SERVER_ARGS:-}    # e.g. "--attention-backend triton"
 EXTRA_ENV=${EXTRA_ENV:-}
 # OVERLAY_PYTHONPATH: prepend an overlay dir so a patched subtree / monkeypatch loads first.
 OVERLAY_PYTHONPATH=${OVERLAY_PYTHONPATH:-}
-# OVERLAY_KIND: candidate|capture — a PROVENANCE LABEL only (recorded in server_start.json). It no
-# longer selects a health-wait budget: the wait is progress-based, so capture and candidate need no
-# separate budgets and a caller that forgets to set it is not penalized.
-OVERLAY_KIND=${OVERLAY_KIND:-candidate}
-# Health wait (see the launch block): STALL_WINDOW_SEC = how long with NO log growth counts as wedged
-# (default 600). SERVER_STARTUP_TIMEOUT_SEC overrides the 7200s backstop on total startup time.
-SERVER_STARTUP_TIMEOUT_SEC=${SERVER_STARTUP_TIMEOUT_SEC:-}
 
 # ---- port: auto-allocate a free one if not pinned (avoids 30000 collisions on shared boxes) ----
 # Constrained auto-allocation: pick a free port inside [PORT_BASE, PORT_BASE+PORT_SPAN) so a run can be
@@ -305,7 +298,7 @@ COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
 : > "$COLD_JSONL"
 
 # export everything the adapter reads
-export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH OVERLAY_KIND
+export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
 export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
 export PROFILE_MAX_ITERS PROFILE_DELAY_ITERS
@@ -375,19 +368,12 @@ if [ "${SERVING_GPU_LOCK_DISABLE:-0}" != "1" ] && [ "${REUSE_SERVER:-0}" != "1" 
 fi
 
 # ---- launch (unless reusing a warm server) ----
-# A server is declared dead when it stops MAKING PROGRESS, not when it has taken "too long".
-# The tight fail-fast budget this replaces existed to reject a wedged candidate overlay (process alive,
-# /health 503s forever) before it starves the box — but "wedged" shows up as SILENCE, not as elapsed
-# time, and using time as the proxy also killed legitimately slow cold starts (large TP4 checkpoint +
-# AITER compile + capture-overlay imports). That is how issue #389's MoE shape capture died at 360s and
-# the kernel was never authored. So: keep waiting while the server log keeps growing; give up after
-# STALL_WINDOW_SEC with no growth (which rejects a wedged candidate SOONER, and on the right evidence).
-# CEILING is only a backstop against a server that spins printing forever, so it is one generous
-# constant rather than a per-purpose (or per-model) budget nobody can pick correctly.
+# A server is declared dead when it stops MAKING PROGRESS, not when it has taken "too long": wedged
+# shows up as SILENCE, while a legitimately slow cold start keeps printing. CEILING is only a backstop
+# against a server that spins printing forever, not a per-purpose budget.
 if [ "$REUSE_SERVER" != "1" ]; then
   mkdir -p "$PROFILE_DIR"
   STALL_WINDOW_SEC=${STALL_WINDOW_SEC:-600}
-  HEALTH_POLL_SEC=${HEALTH_POLL_SEC:-5}
   case "${SERVER_STARTUP_TIMEOUT_SEC:-}" in ''|*[!0-9]*) CEILING=7200 ;; *) CEILING="$SERVER_STARTUP_TIMEOUT_SEC" ;; esac
 
   _up=0; _reason=""
@@ -407,8 +393,6 @@ if [ "$REUSE_SERVER" != "1" ]; then
     if grep -Eq 'watchdog timeout|Capturing cuda graph failed|FATAL' "$LOG" 2>/dev/null; then
       _reason="fatal_marker"; break
     fi
-    # Progress token = log byte count. Both backends print continuously through dist init, shard
-    # load and graph capture, so "no new bytes for a long time" IS the observable form of wedged.
     _tok=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
     if [ "$_tok" != "$_last_tok" ]; then
       _last_tok="$_tok"; _last_change=$SECONDS
@@ -416,13 +400,12 @@ if [ "$REUSE_SERVER" != "1" ]; then
       _reason="stalled"; break
     fi
     if [ $((SECONDS-_t0)) -ge "$CEILING" ]; then _reason="ceiling_exceeded"; break; fi
-    sleep "$HEALTH_POLL_SEC"
+    sleep 5
   done
   _waited=$((SECONDS-_t0))
   if [ "$_up" = "1" ]; then
     echo ">>> Server up after ~${_waited}s."
   else
-    # Refine the reason so the caller can tell a flaky rendezvous apart from a real wedge/OOM.
     case "$_reason" in
       died_early|ceiling_exceeded|stalled)
         if grep -Eq 'ngine ?[Cc]ore.*([Tt]imed out|TimeoutError)|frontend.*handshake.*timed out' "$LOG" 2>/dev/null; then
@@ -437,9 +420,9 @@ if [ "$REUSE_SERVER" != "1" ]; then
   # Structured outcome, ALWAYS written (success too), so a failed start is a REASON downstream can
   # read rather than an empty task dir that looks like "authored and found no gain".
   _phase=$(tail -n 1 "$LOG" 2>/dev/null | tr -d '\r\\' | tr '"' "'" | cut -c1-200)
-  printf '{"status":"%s","reason":"%s","phase_hint":"%s","wait_sec":%d,"ceiling_sec":%d,"stall_window_sec":%d,"port":"%s","backend":"%s","overlay_kind":"%s","log":"%s"}\n' \
+  printf '{"status":"%s","reason":"%s","phase_hint":"%s","wait_sec":%d,"ceiling_sec":%d,"stall_window_sec":%d,"port":"%s","backend":"%s","log":"%s"}\n' \
     "$([ "$_up" = "1" ] && echo ok || echo failed)" "${_reason:-none}" "$_phase" \
-    "$_waited" "$CEILING" "$STALL_WINDOW_SEC" "$PORT" "$BACKEND" "$OVERLAY_KIND" "$LOG" \
+    "$_waited" "$CEILING" "$STALL_WINDOW_SEC" "$PORT" "$BACKEND" "$LOG" \
     > "$OUT_DIR/server_start.json"
   if [ "$_up" != "1" ]; then
     echo "!!! Server start FAILED (reason=$_reason) — see $OUT_DIR/server_start.json" >&2

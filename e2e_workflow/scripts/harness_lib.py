@@ -638,9 +638,9 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
 
     `baseline_outputs` (PREFERRED) = the dict `baseline_random_outputs(...)` recorded by the BASELINE
         leg in its OWN subprocess (`leg_runner.py --mode oracle` under `baseline_overlay/`), keyed
-        `"<sig>|<draw>"`. Same seed => same inputs, so the two legs never have to be co-resident and no
-        `baseline_call` closure — the thing an inverted binding used to hide in — exists at all. When it
-        is given, `baseline_call` is ignored and `speedup` is None here (timing comes from `measure_legs`).
+        `"<sig>|<draw>"`. Same seed => same inputs, so the two legs never have to be co-resident. When
+        it is given, `baseline_call` is ignored and `speedup` is None here (timing comes from
+        `measure_legs`).
     `baseline_call(args) -> out` is the LEGACY in-process form, kept for op_bench / single-process tasks.
         `current_call(args) -> out` invokes the candidate in kernel_src/.
     `shapes` is a list of {"sig": <label>, "make_inputs": callable(rng) -> args}. `make_inputs` builds a
@@ -1004,18 +1004,10 @@ def shuffled_block_table(num_seqs, blocks_per_seq, pool_blocks=0, seed=0, torch=
 
 
 # --------------------------------------------------------------------------- (d) two-leg measurement
-# WHY: the baseline used to be a SECOND copy of the source inside the task dir, selected by a
-# `meta.baseline_callable` string that the generated harness bound by hand. Both trees held byte-
-# identical, identically-named code, so "which one is the baseline" was a coin flip the harness could
-# lose SILENTLY — both legs are correct implementations, so correctness still passed and only the ratio
-# inverted. It also made `mode=author` time optimized-HIP against its own naive-HIP seed.
-#
-# Here the baseline is not a copy at all: it is the LIVE SERVING STACK (install + every accepted
-# kernel = the e2e gate's ref leg), reached by running the SAME leg_runner.py + cases.py under
-# `baseline_overlay/` on PYTHONPATH. The candidate is that same stack plus ONE entry generated from
-# kernel_src/. Direction is a property of the environment, not of a name the harness picks, and
-# `assert_legs_differ` refuses to measure anything until it has PROVEN the two legs import different
-# code and that the baseline resolves OUTSIDE the task dir (so nothing the optimizer can edit).
+# The baseline is the LIVE SERVING STACK (install + every accepted kernel), reached by running the
+# SAME leg_runner.py + cases.py under `baseline_overlay/` on PYTHONPATH; the candidate is that stack
+# plus ONE entry generated from kernel_src/. Leg direction is therefore a property of the environment,
+# not of a name string the harness binds by hand.
 def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
@@ -1040,8 +1032,7 @@ def build_candidate_overlay(task_dir, meta):
     """Rebuild `<task>/_cand_overlay` = baseline_overlay + ONE entry from kernel_src/ (meta.candidate_bind).
 
     Rebuilt on EVERY measurement because kernel_src/ is the optimizer's live workspace. `candidate_bind`
-    is the same {kind, module|target, file} the e2e Integrator uses to wire the accepted kernel, so an
-    isolated win is rebindable e2e by construction (no `no_rebind_seam` surprise)."""
+    is the same {kind, module|target, file} the e2e Integrator uses to wire the accepted kernel."""
     task = os.path.abspath(task_dir)
     base = os.path.join(task, "baseline_overlay")
     cand = os.path.join(task, "_cand_overlay")
@@ -1064,8 +1055,7 @@ def build_candidate_overlay(task_dir, meta):
 
 def assert_legs_differ(task_dir, base, cand, meta, timeout=600):
     """Refuse to measure unless the two legs provably import DIFFERENT code AND the baseline leg
-    resolves OUTSIDE the task dir. This is the single check that makes an inverted or self-referential
-    baseline impossible rather than merely discouraged."""
+    resolves OUTSIDE the task dir."""
     task = os.path.abspath(task_dir)
     target = meta["target_callable"]
     bi = _run_leg(task, base, "resolve", timeout=timeout)

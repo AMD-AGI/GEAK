@@ -107,9 +107,8 @@ def module_file(dotted):
 
 
 def _ensure_overlay(overlay, base=""):
-    # --from BASE seeds a NEW overlay from an existing one, so a candidate overlay is literally
-    # "the live stack + one entry". Two overlay dirs on PYTHONPATH do NOT compound (only the first
-    # sitecustomize is imported) — seeding by copy is the only correct way to stack.
+    # Two overlay dirs on PYTHONPATH do NOT compound (only the first sitecustomize is imported), so
+    # --from BASE stacks by seeding a copy.
     if base and not os.path.exists(os.path.join(overlay, "_overlay_manifest.json")):
         if os.path.isdir(base):
             shutil.copytree(base, overlay, dirs_exist_ok=True)

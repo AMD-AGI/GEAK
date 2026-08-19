@@ -56,9 +56,7 @@ must not fight:
   to different code AND the baseline resolves OUTSIDE the task dir. A `no_rebind_seam` candidate is
   therefore caught at smoke, not after authoring.
 * **The denominator is the same one the e2e gate uses**, so isolated speedup and `e2e_delta_pct` are
-  finally the same 口径 and the Amdahl cross-check is meaningful.
-* Two accepted kernels in the SAME module now COMPOUND instead of the second reverting the first, since
-  `kernel_src/` starts from the module as the *current stack* resolves it, not from the pristine install.
+  measured on the same basis and the Amdahl cross-check is meaningful.
 
 **`cases.py` — the one file you author, and the only thing the two legs share besides the runner.**
 It must import NOTHING from the task dir except `harness_lib` (passed in as `h`), and must reach the op
@@ -161,7 +159,7 @@ freeze an out-of-regime oracle nobody should trust.
 
    BACKEND="<backend>" OUT_DIR="$TASK/_capture" GPU="$GPU_ID" MODEL="$MODEL_PATH" \
    ISL=<WORKLOAD.isl> OSL=<WORKLOAD.osl> CONC=<WORKLOAD.conc> REPEATS=0 PROFILE=0 \
-   OVERLAY_PYTHONPATH="$TASK/_capture_overlay" OVERLAY_KIND=capture \
+   OVERLAY_PYTHONPATH="$TASK/_capture_overlay" \
    EXTRA_ENV="CAPTURE_TARGET=<module:attr> CAPTURE_OUT=$TASK CAPTURE_MAX=5" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/capture_<short_name>.log"
    ```
@@ -176,10 +174,6 @@ freeze an out-of-regime oracle nobody should trust.
    moving; only `STALL_WINDOW_SEC` (default 600s) of total silence ends the wait. If it does fail,
    read `$OUT_DIR/server_start.json` — `reason` distinguishes `stalled` / `oom` / `died_early` /
    `ceiling_exceeded` (the last one names `SERVER_STARTUP_TIMEOUT_SEC` as the override).
-
-   🔴 **ISL/OSL/CONC MUST be the deployment `WORKLOAD` values.** Shrinking OSL captures a decode
-   regime the deployment never runs, so every downstream speedup is measured on the wrong shapes.
-   Shorten the window with `REPEATS`/`CAPTURE_MAX` instead.
 
    (REPEATS=0 → just warmup drives a short window; capture flushes incrementally + on server exit.) Verify
    `reference_io.pt` + `meta.json` exist and `num_cases` ≥ 1. For a head GEMM that serves both regimes
@@ -298,8 +292,7 @@ freeze an out-of-regime oracle nobody should trust.
          random_shapes=cases.random_shapes(h, meta), tol=tol, baseline_outputs=base_out,
          draws=meta.get("random_draws", 3), replay=replay_bundle)   # replay_bundle REQUIRED if graph-deploy
      ```
-     Pass `baseline_outputs=`, never a `baseline_call` closure — that closure is the one place an
-     inverted baseline could still hide, and it does not exist in this process at all.
+     Pass `baseline_outputs=`, never a `baseline_call` closure.
      Build `replay_bundle` with **≥2 BOUNDARY shapes** (single-shape replay cannot expose static-buffer
      reuse). For attention: ragged `seq_lens` from `h.boundary_decode_seq_lens(meta["geometry"], ISL+OSL)`
      (spans block_size / partition_size boundaries + min/max) and a NON-contiguous paged layout from
@@ -317,10 +310,9 @@ freeze an out-of-regime oracle nobody should trust.
      launches TWO fresh subprocesses of `leg_runner.py --mode time --bucket <sig>` — same file, same
      `cases.py`, differing only in `PYTHONPATH` (`baseline_overlay` vs `_cand_overlay`) — and returns
      `[{sig, regime, m, baseline_ms, optimized_ms, speedup}]` with `speedup = baseline_ms/optimized_ms`.
-     Three classes of strawman are structurally impossible as a result: the baseline is the live stack
-     (not a copy you can edit), both legs get the SAME `graph=h.deployment_graph_mode(regime)` and the
-     SAME `h.compiled_op` wrap (applied inside `leg_runner`, so parity is not yours to forget), and each
-     bucket is a cold interpreter so warm-JIT/autotune state cannot leak between legs.
+     Both legs get the SAME `graph=h.deployment_graph_mode(regime)` and the SAME `h.compiled_op` wrap
+     (applied inside `leg_runner`, so graph/compile parity is not yours to forget), and each bucket is a
+     cold interpreter so warm-JIT/autotune state cannot leak between legs.
      > `h.time_op` is the CUDA-EVENT DEVICE-time timer (`inner=1`; device time already EXCLUDES host
      > dispatch, so no amortization is needed — raise `inner` only for sub-microsecond kernels).
      > `deployment_graph_mode` is True whenever the live server replays this op under a CUDA/HIP graph

@@ -1,20 +1,10 @@
 #!/usr/bin/env python3
 """Unit tests for leg_runner.py -- the ONE executable both measurement legs run (stdlib only).
 
-leg_runner is the fix for the inverted-speedup bug: baseline and candidate execute the SAME file and
-the SAME cases.py, and WHICH leg you get is decided only by the overlay on PYTHONPATH. Nothing in the
-task dir can bind the two legs to different code, and `speedup = baseline_ms / candidate_ms` cannot
-silently invert. That guarantee rests on a handful of behaviours, pinned here:
-
-  - the sys.path scrub : the task dir holds a file literally named unittest.py, so it MUST be off
-                         sys.path before torch imports stdlib unittest
-  - _resolve/_identity : how a leg reports WHERE its callable came from. h.assert_legs_differ refuses
-                         to measure until the two legs report different tuples, so an identity that
-                         reports the same module/file for both legs, or that raises instead of
-                         returning an {"error": ...} record, disarms the whole precondition
-  - the four modes     : list / resolve / time / oracle -- including that `time` honours --bucket,
-                         reports the identity alongside the numbers, and applies the deployment's
-                         compile/graph mode; and that `oracle` writes one entry per (shape, draw)
+Pinned here: the sys.path scrub (the task dir holds a file literally named unittest.py, so it MUST be
+off sys.path before torch imports stdlib unittest); _resolve/_identity, which h.assert_legs_differ
+depends on to prove the two legs import different code; and the four modes list / resolve / time /
+oracle.
 
 torch, harness_lib and cases.py are all stubbed: the module imports them lazily/by path, so every
 mode runs on CPU against fake tensors. Nothing here needs a GPU.

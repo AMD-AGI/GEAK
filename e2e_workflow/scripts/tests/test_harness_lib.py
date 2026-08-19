@@ -1992,19 +1992,7 @@ class TestShuffledBlockTable(_HarnessTestCase):
 
 
 # --------------------------------------------------------------------------- #
-# (d) two-leg measurement -- the anti-inversion machinery
-#
-# The baseline is NOT a copy of the source inside the task dir any more; it is the LIVE SERVING STACK,
-# reached by running the SAME leg_runner.py under `baseline_overlay/` on PYTHONPATH. Direction is a
-# property of the environment, so the only way to invert a speedup is to break one of these four:
-#
-#   _run_leg               -- the overlay must go FIRST on PYTHONPATH (else it shadows nothing) and a
-#                             leg that failed must raise, never return a stale/partial number
-#   build_candidate_overlay-- the candidate is baseline_overlay + exactly ONE kernel_src/ entry
-#   assert_legs_differ     -- refuses to measure until the two legs PROVE they import different code
-#                             and the baseline resolves OUTSIDE the task dir
-#   measure_legs           -- one FRESH subprocess per (bucket, leg): a warm interpreter shares
-#                             JIT/autotune state between the legs and reports a fake 1.0x
+# (d) two-leg measurement
 #
 # Every leg is a subprocess, so `subprocess` is swapped for a recorder that answers by mode. No GPU,
 # no real leg_runner.py -- these tests pin the ORCHESTRATION, not the timing.
@@ -2272,7 +2260,7 @@ class TestMeasureLegs(_LegTestCase):
                                             "time", "time", "time", "time"])
 
     def test_measurement_is_refused_before_the_legs_are_proven_different(self):
-        """assert_legs_differ runs BEFORE any timing, so an inverted setup costs nothing."""
+        """assert_legs_differ runs BEFORE any timing."""
         self._legs(cand_ident=self.BASE_IDENT)
         with self.assertRaises(RuntimeError):
             hl.measure_legs(self.task, self.meta)
@@ -2292,7 +2280,7 @@ class TestMeasureLegs(_LegTestCase):
 
 class TestBaselineRandomOutputs(_LegTestCase):
     def test_the_oracle_is_recorded_by_the_baseline_leg_in_its_own_process(self):
-        """Same seed => same inputs on both sides, so no baseline closure has to survive in-process."""
+        """Same seed => same inputs on both sides, so the legs never have to be co-resident."""
         loaded = []
         self.torch.load = lambda path, map_location=None: loaded.append((path, map_location)) or {
             "decode|0": _T((2,), [1.0, 2.0])}
@@ -2313,8 +2301,8 @@ class TestBaselineRandomOutputs(_LegTestCase):
 # The recorded-oracle arm of check_random_vs_baseline / run_correctness
 # --------------------------------------------------------------------------- #
 class TestCheckRandomVsBaselineRecorded(_HarnessTestCase):
-    """`baseline_outputs=` replaces the in-process `baseline_call` closure entirely -- the thing an
-    inverted binding used to hide in. Timing then belongs to measure_legs, so speedup must be None."""
+    """`baseline_outputs=` replaces the in-process `baseline_call` closure entirely. Timing then
+    belongs to measure_legs, so speedup must be None."""
 
     def _shape(self, sig="m1"):
         return {"sig": sig, "make_inputs": lambda rng: (1.0, 2.0)}

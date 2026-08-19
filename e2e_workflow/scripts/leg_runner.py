@@ -6,10 +6,8 @@
   candidate leg  PYTHONPATH=<task>/_cand_overlay       -> that SAME stack + exactly ONE entry built
                  from kernel_src/ (meta.candidate_bind).
 
-Both legs execute THIS file and the task's OWN cases.py, so there is no second callable name, no
-second source tree, and no way for a generated harness to bind the two legs to different code or to
-swap them. `speedup = baseline_ms / candidate_ms` is therefore always measured against the live path,
-whatever LANGUAGE the candidate is written in.
+Both legs execute THIS file and the task's OWN cases.py, so `speedup = baseline_ms / candidate_ms` is
+always measured against the live path, whatever LANGUAGE the candidate is written in.
 
 Modes: list (bucket sigs) | resolve (leg identity, for the direction assert) | time | oracle.
 Driven by harness_lib.measure_legs — a unittest.py should not invoke it directly.
@@ -107,8 +105,6 @@ def main():
         print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"])}))
         return
 
-    # oracle: record this leg's outputs for every random draw, so the OTHER leg (a separate process)
-    # can check value parity against the live baseline without both legs ever being co-resident.
     torch = h._torch()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     draws = a.draws or int(meta.get("random_draws", 3))

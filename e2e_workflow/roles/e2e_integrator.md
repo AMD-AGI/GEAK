@@ -116,9 +116,8 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    > **🔴 If the task dir declares `meta.candidate_bind`, REPLAY IT VERBATIM — do not improvise a seam.**
    > That is the exact overlay entry the isolated unittest measured its win with (`kind:"module"` →
    > `add-module --module <module> --patched-file <task>/<file>`; `kind:"rebind"` → `add-rebind --target
-   > <target> --impl-module/--impl-attr`), always seeded `--from "$CURRENT_OVERLAY"`. Building a
-   > DIFFERENT seam here is what makes an isolated win unreproducible e2e; the branches below are for
-   > tasks that carry no `candidate_bind`.
+   > <target> --impl-module/--impl-attr`), always seeded `--from "$CURRENT_OVERLAY"`. The branches below
+   > are for tasks that carry no `candidate_bind`.
    - **env** (TunableOp CSV, `HIPBLASLT_TUNING_FILE`, …): candidate env = `CURRENT_ENV +
      KERNEL_RESULT.apply_env`. Keep the tuning artifact under `$EVAL_DIR/config/` so it's reproducible.
      **Backend-engagement prerequisite:** a tuning artifact only binds if the backend that consumes it is
