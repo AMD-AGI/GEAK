@@ -18,6 +18,7 @@ kernel_class: dense_gemm
 regime: compute-bound
 layer: learned
 lifecycle: active
+origin_kernels: ['_gemm_a16_w16_kernel']
 ---
 # The in-source ceiling of an MFMA-bound dense GEMM
 - lever: Roofline the incumbent before planning more rounds: at roughly 65% of the MFMA roof (ceiling ~99% of peak) with one dispatch per call and the host launch fully hidden, the residual gap is the async global->LDS software pipeline, and host, swizzle, epilogue and split-K rounds all return ~1.00x.

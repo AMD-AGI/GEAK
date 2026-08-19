@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-07-29
 roofline: compute-bound 0.26 -> compute-bound 0.98 of its own empirical roof
+origin_kernels: ['fused_moe_int4_w4a16']
 ---
 # Per-M-bucket launch config on an int4 weight-only grouped GEMM
 - lever: When the kernel body is M-independent (cost dominated by int4 dequant per output tile), stop tuning one global launch config and pick a separate config per M bucket: tile M x N, BLOCK_K, group-size-M, num_warps, num_stages.

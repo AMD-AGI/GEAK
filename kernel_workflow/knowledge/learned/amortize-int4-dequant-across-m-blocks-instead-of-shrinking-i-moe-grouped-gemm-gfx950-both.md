@@ -21,6 +21,7 @@ lifecycle: active
 cost: L3
 verified_on: 2026-08-12
 levers: ['compute.dequant-amortization', 'mem.nibble-split', 'host.two-specialisation-dispatch']
+origin_kernels: ['fused_moe_kernel_gptq_awq']
 ---
 # Amortize int4 dequant across M-blocks instead of shrinking it
 - lever: Make one dequantized weight tile serve more MFMA work: fuse several M blocks of the same expert behind one dequant pass, round a short expert tail UP into a padded merge, and express an odd rung as two accumulators (2+1) in one K loop rather than padding to the next power of two; on top of that a magic-number nibble->fp32 conversion that is bit-exact and removes every in-loop int->float convert.

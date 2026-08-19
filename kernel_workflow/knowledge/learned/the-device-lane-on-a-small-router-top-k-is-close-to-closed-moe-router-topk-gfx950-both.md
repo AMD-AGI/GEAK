@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L3
 verified_on: 2026-08-12
+origin_kernels: ['_topk_forward']
 ---
 # The device lane on a small router top-k is close to closed
 - lever: screen device candidates with a static v_* count per region before benchmarking, and spend the freed rounds on dispatch; on this op shape the merge-tree top-k networks were ~61% of static VALU and the bitmatrix pack ~5%.

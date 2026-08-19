@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-14
+origin_kernels: ['mi355x_vllm_hip_dynamic_per_tensor_quant']
 ---
 # Axes that stay closed once a quant-cast graph sits at two nodes
 - lever: before funding fusion, cache-policy or launch-parameter rounds on a small graph-captured op, price the graph node itself: a node dependency here is simultaneously the cheapest grid-wide sync available and an irreducible floor, and one cheap measurement decides both axes

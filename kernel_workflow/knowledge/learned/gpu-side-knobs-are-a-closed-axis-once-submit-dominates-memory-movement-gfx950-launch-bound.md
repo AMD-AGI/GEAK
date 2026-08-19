@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-07-30
+origin_kernels: ['write_req_to_token_pool_triton']
 ---
 # GPU-side knobs are a closed axis once submit dominates
 - lever: Cheap first check on a tiny op: compare its measured window against an empty launch bracket; when the two are close, occupancy/tile/warp knobs have little room and the round is better spent on the submit path.

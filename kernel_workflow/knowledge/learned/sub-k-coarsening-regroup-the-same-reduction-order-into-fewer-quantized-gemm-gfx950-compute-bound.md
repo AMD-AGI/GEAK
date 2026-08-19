@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-12
+origin_kernels: ['_w8a8_triton_block_scaled_mm']
 ---
 # Sub-K coarsening: regroup the same reduction order into fewer wider dots
 - lever: Sweep the inner sub-K split (SUB_K a multiple of the MFMA K, so only a few values are legal) while keeping ONE linear fp32 accumulator: it regroups the identical summation order, so a bit-exact parity gate stays satisfied.

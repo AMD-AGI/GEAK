@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-12
+origin_kernels: ['gemm_a8w8_blockscale']
 ---
 # Reinterpret legacy fp8 bits to the arch-native fp8 type to reach the matrix core
 - lever: When a quantized GEMM's operands carry the previous arch's fp8 flavour, the compiler may emulate the format (per-element upcast to fp16, then the fp16 MFMA) and never touch the native fp8 matrix core; a zero-copy bit reinterpretation to the native type is worth trying before any tile or occupancy work.

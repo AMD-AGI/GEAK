@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-17
+origin_kernels: ['mi355x_vllm_triton_sparse_attn_prefill_ragged']
 ---
 # Six axes that stayed closed on a graph-replay-timed sparse prefill attention op
 - lever: Price these six axes before staffing a round on them - each measured closed with a mechanism across 16 rounds here: host/runtime; occupancy via a lower VGPR ceiling; prefetch in four forms; statement-order steering of LDS; launcher knobs; and trading LDS traffic for global bandwidth.

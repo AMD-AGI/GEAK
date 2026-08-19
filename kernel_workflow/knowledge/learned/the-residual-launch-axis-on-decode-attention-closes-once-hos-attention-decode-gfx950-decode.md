@@ -21,6 +21,7 @@ lifecycle: active
 cost: L1
 verified_on: 2026-08-12
 levers: ['host.launch-overhead']
+origin_kernels: ['kernel_unified_attention_2d']
 ---
 # The residual launch axis on decode attention closes once host time is far under GPU time
 - lever: Before funding another launch-path round, compare host time per call against pure-GPU time per call; when host is not within a small multiple of binding, a round spent in the kernel body pays and one spent on the launch path does not.

@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-12
+origin_kernels: ['_topk_forward']
 ---
 # Graph capture loses to a direct launch when the graph holds one tiny kernel
 - lever: Graph capture pays only when it amortises many launches; with a single tiny kernel the command-processor dispatch of a replay already exceeds a whole direct launch, so treat this axis as closed and spend the round elsewhere.

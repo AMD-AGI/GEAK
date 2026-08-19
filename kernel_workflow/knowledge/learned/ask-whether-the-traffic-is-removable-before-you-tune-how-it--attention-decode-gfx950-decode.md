@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-12
+origin_kernels: ['paged_attention_large']
 ---
 # Ask whether the traffic is removable before you tune how it is cached
 - lever: split the candidate streams into removable and irreducible first; spend the cache-policy direction only on the irreducible one, and host-select the hint per call on a working-set threshold via a template bool rather than baking it in

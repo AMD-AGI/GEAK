@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L3
 verified_on: 2026-08-12
+origin_kernels: ['_gemm_a16_w16_kernel']
 ---
 # Once it routes to tuned vendor assembly, out-generating it is a closed axis
 - lever: Spend the round elsewhere: after a tuned library backend is in place and the op sits at high MFMA duty, the remaining named lanes here (rewriting the kernel in another generator, decomposition, fill/occupancy, tile padding) each returned ~1.00x or worse.

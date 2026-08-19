@@ -21,6 +21,7 @@ lifecycle: active
 cost: L0
 verified_on: 2026-08-12
 levers: ['method.measurement']
+origin_kernels: ['paged_attention_ragged']
 ---
 # Test the allocator before designing a kernel fix for a periodic per-case split
 - lever: When per-case timings fall into two groups with period 2 along a parameter the fixture happens to list in order, test the allocator hypothesis first: re-time with the large buffer re-allocated and see whether the timing follows the pointer or the parameter. Only the second one is a kernel property worth a direction.

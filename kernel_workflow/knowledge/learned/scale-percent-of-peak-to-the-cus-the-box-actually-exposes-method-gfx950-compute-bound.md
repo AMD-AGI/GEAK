@@ -18,6 +18,7 @@ kernel_class: method
 regime: compute-bound
 layer: learned
 lifecycle: active
+origin_kernels: ['gemm_a8w8_blockscale']
 ---
 # Scale percent-of-peak to the CUs the box actually exposes
 - lever: Before treating a low percent-of-peak as headroom, take the CU count the runtime reports and divide the marketing peak by the fraction of the physical part you were given.

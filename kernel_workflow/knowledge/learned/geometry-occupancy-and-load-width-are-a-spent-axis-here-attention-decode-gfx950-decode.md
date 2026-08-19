@@ -18,6 +18,7 @@ kernel_class: attention_decode
 regime: decode
 layer: learned
 lifecycle: active
+origin_kernels: ['paged_attention_decode']
 ---
 # Geometry, occupancy and load width are a spent axis here
 - lever: - lever: on a decode attention kernel that is already grid-limited and co-resident, consider the geometry family (workgroup fatness, waves/SIMD, grid order, LDS staggering) closed and spend the round on the per-workgroup dependent chain instead.

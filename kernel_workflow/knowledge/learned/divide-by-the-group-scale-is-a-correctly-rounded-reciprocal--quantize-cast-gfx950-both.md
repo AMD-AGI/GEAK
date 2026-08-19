@@ -21,6 +21,7 @@ lifecycle: active
 cost: L3
 verified_on: 2026-08-12
 levers: ['compute.exact-reciprocal']
+origin_kernels: ['_per_token_group_quant_fp8']
 ---
 # Divide by the group scale is a correctly-rounded reciprocal, not a division
 - lever: replace the per-element divide with a correctly-rounded reciprocal plus two FMAs, and fold any constant format factor (here a x2 from the fp8 flavour) into the divisor so it is free; where surrounding code already excludes overflow/underflow, a 3-op rcp + one Newton step is enough

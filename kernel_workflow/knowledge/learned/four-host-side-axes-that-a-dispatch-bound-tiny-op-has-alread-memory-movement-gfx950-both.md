@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-08-12
 levers: ['host.launch-overhead']
+origin_kernels: ['write_req_to_token_pool_triton']
 ---
 # Four host-side axes that a dispatch-bound tiny op has already paid for
 - lever: spend the round elsewhere unless a probe shows a mechanism different from these four; each was root-caused here rather than merely measured slow.

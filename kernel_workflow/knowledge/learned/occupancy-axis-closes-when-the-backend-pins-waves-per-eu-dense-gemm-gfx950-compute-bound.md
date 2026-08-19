@@ -18,6 +18,7 @@ kernel_class: dense_gemm
 regime: compute-bound
 layer: learned
 lifecycle: active
+origin_kernels: ['_gemm_a16_w16_kernel']
 ---
 # Occupancy axis closes when the backend pins waves-per-eu
 - lever: Before budgeting rounds on occupancy for an MFMA-bound GEMM, check whether the AMD backend emits an unconditional amdgpu-waves-per-eu attribute at the end of LLIR generation; if it does, no in-body primitive raises occupancy and the whole axis can be probed with one cheap test instead of four rounds.

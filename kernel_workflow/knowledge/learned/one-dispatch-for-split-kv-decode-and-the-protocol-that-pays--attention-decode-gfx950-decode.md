@@ -18,6 +18,7 @@ kernel_class: attention_decode
 regime: decode
 layer: learned
 lifecycle: active
+origin_kernels: ['paged_attention_decode']
 ---
 # One dispatch for split-KV decode, and the protocol that pays for it
 - lever: - lever: collapse the two-kernel split-KV decode into one dispatch — decouple tile size from partition size so one workgroup owns several partitions, then let the last arriver run the combine behind a global arrival counter.

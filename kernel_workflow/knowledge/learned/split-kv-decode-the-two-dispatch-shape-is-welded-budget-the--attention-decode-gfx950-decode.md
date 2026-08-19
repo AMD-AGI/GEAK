@@ -21,6 +21,7 @@ lifecycle: active
 cost: L3
 verified_on: 2026-08-12
 levers: ['host.dispatch-count', 'algo.fusion']
+origin_kernels: ['paged_attention_decode']
 ---
 # Split-KV decode: the two-dispatch shape is welded, budget the round elsewhere
 - lever: Before planning a fusion round, price the second dispatch as a fraction of the case it sits in: here the reduce dispatch is almost entirely launch overhead and moves a tiny fraction of the bytes the main kernel does, so even perfect removal caps the axis in the low single-digit percent.

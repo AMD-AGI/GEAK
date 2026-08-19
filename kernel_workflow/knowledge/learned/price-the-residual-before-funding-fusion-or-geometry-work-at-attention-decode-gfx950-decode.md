@@ -22,6 +22,7 @@ cost: L2
 verified_on: 2026-08-12
 roofline: main dispatch at ~99.8% of a re-measured blended DRAM roof; registers 124/128 unified, LDS 100% allocated, waves held at 4/SIMD
 levers: ['host.dispatch-structure', 'compute.occupancy']
+origin_kernels: ['paged_attention_ragged']
 ---
 # Price the residual before funding fusion or geometry work at the roof
 - lever: Before spending a direction on fusing the split-KV reduce, right-sizing the grid, chasing occupancy or steering last-level-cache residency, price what is left: measure the fraction of the re-measured blended DRAM roof the main dispatch already reaches, and convert the residual into a ceiling on the weighted metric. Near the roof these axes were arithmetic dead ends here, and the number tells you that in one hour instead of three rounds.

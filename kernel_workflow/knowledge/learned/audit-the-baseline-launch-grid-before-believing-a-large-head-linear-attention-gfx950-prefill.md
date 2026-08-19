@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-12
+origin_kernels: ['chunk_scaled_dot_kkt_fwd_kernel']
 ---
 # Audit the baseline launch grid before believing a large headline
 - lever: when varlen packing puts everything in batch=1 tensors but the launcher still issues grid_y = B*H, the batch index is dead and B-fold bitwise-identical programs execute; clamping grid_y to the distinct-work dimension is the single largest lever available.

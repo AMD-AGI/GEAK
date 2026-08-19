@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L3
 verified_on: 2026-07-29
+origin_kernels: ['moe_stage1']
 ---
 # Count the blocks before you attribute a dependency stall to grid underfill
 - lever: Before spending a round on split-K/KBatch, compute the real block count — (sorted token-id length / block_m) x N-tiles — and compare it to the CU count.

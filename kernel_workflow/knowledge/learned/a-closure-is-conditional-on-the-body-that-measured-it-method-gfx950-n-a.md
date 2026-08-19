@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L0
 verified_on: 2026-08-17
+origin_kernels: ['mi355x_vllm_triton_sparse_attn_prefill_ragged']
 ---
 # A closure is conditional on the body that measured it
 - lever: Treat every 'closed' verdict as conditional on the structural constants of the body that measured it, and re-open the list whenever one of them - trip count, tile shape, dispatch target - moves.

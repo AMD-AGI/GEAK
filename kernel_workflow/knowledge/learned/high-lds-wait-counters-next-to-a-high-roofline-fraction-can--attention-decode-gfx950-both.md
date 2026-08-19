@@ -22,6 +22,7 @@ cost: L3
 verified_on: 2026-08-12
 roofline: memory-bound at roughly 0.8 of achievable HBM bandwidth before and after; the residual is ramp-up/down, not an attackable stall
 levers: ['mem.lds-tiling', 'compute.occupancy', 'algo.split-kv-granularity']
+origin_kernels: ['paged_attention_ragged']
 ---
 # High LDS-wait counters next to a high roofline fraction can be a compute tail
 - lever: Classify with the VALU:VMEM issue ratio and the memory-stall percentage before planning a bandwidth, LDS-padding or occupancy attack: a high fraction of achievable bandwidth alongside a near-zero memory-stall percentage means the residual is a compute/ramp tail rather than headroom.

@@ -19,6 +19,7 @@ regime: decode
 layer: learned
 lifecycle: active
 verified_on: 2026-08-12
+origin_kernels: ['_fwd_grouped_kernel_stage1']
 ---
 # Four axes that stayed closed on a latency-floored paged decode kernel
 - lever: When the profile says latency-floored at ~1 workgroup/CU and the ISA already shows 128-bit vector loads, the KV-load region and host dispatch are the axes most likely to return ~1.00x; spending the round on launcher metadata and occupancy paid instead.

@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-07-30
 roofline: stayed compute-bound at ~0.37 of the empirical roof through every direction listed here
+origin_kernels: ['moe_gemm_fp8_blockscale']
 ---
 # Where a native-MFMA block-scaled MoE GEMM has no headroom left
 - lever: When the disassembly shows the native f8f6f4 MFMA is already being emitted and the profile says the stall is dependency wait rather than a schedulable gap, the remaining headroom is in the per-128-K fp32 rescale that co-issues with the MFMA — an axis the frozen pipeline does not expose — so the classic memory/epilogue/graph axes are worth at most one cheap probe each.

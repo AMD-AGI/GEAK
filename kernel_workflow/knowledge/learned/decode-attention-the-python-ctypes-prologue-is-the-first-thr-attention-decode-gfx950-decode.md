@@ -18,6 +18,7 @@ kernel_class: attention_decode
 regime: decode
 layer: learned
 lifecycle: active
+origin_kernels: ['paged_attention_decode']
 ---
 # Decode attention: the Python/ctypes prologue is the first three rounds
 - lever: - lever: when a decode attention op is dispatched through a JIT + ctypes wrapper, memoize the ENTIRE per-call prologue as one unit (resolved function handle, device props, derived ints, boxed argv) before touching the device.

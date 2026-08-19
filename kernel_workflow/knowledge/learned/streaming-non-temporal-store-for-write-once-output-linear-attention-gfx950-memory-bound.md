@@ -22,6 +22,7 @@ cost: L1
 verified_on: 2026-08-12
 roofline: store-byte-bound -> store-bandwidth-bound at ~0.8-0.97 of the achievable store roof
 levers: ['mem.store-cache-policy']
+origin_kernels: ['chunk_scaled_dot_kkt_fwd_kernel']
 ---
 # Streaming non-temporal store for write-once output
 - lever: When the output tile is written once and never re-read, try a write-combining cache_modifier ('.cs', '.wt' equivalent) on the output store: on gfx950 it lowers to a non-temporal buffer store that skips the L2 write-allocate / read-for-ownership path.

@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-12
+origin_kernels: ['_w8a8_triton_block_scaled_mm']
 ---
 # Collapse the fp8 dequant chain into one scaled convert
 - lever: Fold the exact power-of-two format-recovery factor into the fp32 scale operand of the native scaled-convert, derive magnitude from that single convert and the sign from the byte's sign bit, and feed it with int32-packed 4-bytes-per-dword loads.

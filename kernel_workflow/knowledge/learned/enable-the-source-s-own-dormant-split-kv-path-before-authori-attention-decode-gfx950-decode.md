@@ -22,6 +22,7 @@ cost: L2
 verified_on: 2026-08-13
 roofline: the low-parallelism geometry sat at ~22% of achievable HBM with only 64 real workgroups against 256 CUs (a parallelism wall, not a bandwidth wall); after the split the dominant geometry runs at ~90% and later ~98% of the measured streaming roof
 levers: ['algo.split-kv', 'host.launch-shape']
+origin_kernels: ['mi355x_vllm_triton_unified_attention_gemma4']
 ---
 # Enable the source's own dormant split-KV path before authoring a new one
 - lever: Before authoring new KV parallelism, read the op's source for a partition/reduce path the public wrapper never reaches because it allocates no scratch and passes no segment count; enabling it needs no signature change and can be the largest single step of the campaign.

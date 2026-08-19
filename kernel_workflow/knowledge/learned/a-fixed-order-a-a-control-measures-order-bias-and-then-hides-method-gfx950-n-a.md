@@ -21,6 +21,7 @@ lifecycle: active
 cost: L1
 verified_on: 2026-08-15
 levers: ['method.ab-protocol']
+origin_kernels: ['mi355x_vllm_triton_unified_attention_gemma4']
 ---
 # A fixed-order A/A control measures order bias and then hides it
 - lever: Balance arm order (ABBA) rather than only interleaving, and run the A/A null in the same balanced order; a fixed-order A/A folds slot bias into what it reports as the noise floor, so the bias survives the control that exists to catch it.

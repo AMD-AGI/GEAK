@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L3
 verified_on: 2026-07-30
+origin_kernels: ['fused_moe_kernel']
 ---
 # Activation narrowing is gated by parity and by the benchmark's input distribution
 - lever: Narrow the operand that dominates traffic (weights, when they are streamed) and treat the activation side as a separate, parity-gated question rather than a symmetric follow-up; its payoff is small because it is the minority traffic.

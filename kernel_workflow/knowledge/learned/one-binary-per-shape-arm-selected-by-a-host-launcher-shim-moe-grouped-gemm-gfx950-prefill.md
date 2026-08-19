@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-12
+origin_kernels: ['fused_moe_int4_w4a16']
 ---
 # One binary per shape arm, selected by a host launcher shim
 - lever: give each n-width shape arm its own @triton.jit entry chosen on the host, rather than one kernel with a runtime branch: VGPR allocation and I-cache footprint are whole-binary properties, so a shared binary taxes whichever arm takes the narrow path.

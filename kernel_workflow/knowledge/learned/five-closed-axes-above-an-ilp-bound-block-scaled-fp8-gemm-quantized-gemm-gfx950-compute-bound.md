@@ -18,6 +18,7 @@ kernel_class: quantized_gemm
 regime: compute-bound
 layer: learned
 lifecycle: active
+origin_kernels: ['_gemm_a8w8_blockscale_kernel']
 ---
 # Five closed axes above an ILP-bound block-scaled fp8 GEMM
 - lever: Before spending a round on occupancy or host-side capture for a quantized GEMM whose profile is compute-bound, test whether the compiler's natural high-VGPR / 2-wave pick is already the register-for-ILP optimum: here reaching a higher occupancy class needed either more warps (which halves per-warp ILP and breaks the second-MFMA/dequant overlap) or a forced register cap (which spills), and both net-lose.

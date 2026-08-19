@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-08-14
 levers: ['host.launch-overhead', 'algo.kernel-fusion', 'mem.grid-stride']
+origin_kernels: ['mi355x_vllm_hip_dynamic_per_tensor_quant']
 ---
 # Collapse the graph nodes first, then shape-gate a single-workgroup fusion
 - lever: on a graph-captured multi-kernel quantize/cast, count the dispatch nodes before touching any device body: a node costs a flat amount that is independent of the work inside it, so deleting a node outranks every per-node lever until the count stops falling

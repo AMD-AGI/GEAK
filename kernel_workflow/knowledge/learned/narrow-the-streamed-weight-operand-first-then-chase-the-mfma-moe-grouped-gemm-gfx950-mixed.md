@@ -21,6 +21,7 @@ lifecycle: active
 cost: L3
 verified_on: 2026-07-30
 roofline: latency-bound at ~0.02 of achievable peak -> compute-bound at ~0.51
+origin_kernels: ['fused_moe_kernel']
 ---
 # Narrow the streamed weight operand first, then chase the MFMA shape
 - lever: When one operand of a grouped GEMM is streamed and the other is minority traffic, store the streamed one as e2m1 fp4 with per-block scales folded into the epilogue so the dot-scaled MFMA consumes it natively; this breaks the HBM roofline before any tiling work.

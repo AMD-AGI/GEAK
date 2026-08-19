@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-12
+origin_kernels: ['_gemm_a8w8_blockscale_kernel']
 ---
 # Re-measure shelved partials after the bound class moves
 - lever: after a change that moves the bound class or frees registers, re-run the directions that previously measured near 1.00x instead of treating them as closed

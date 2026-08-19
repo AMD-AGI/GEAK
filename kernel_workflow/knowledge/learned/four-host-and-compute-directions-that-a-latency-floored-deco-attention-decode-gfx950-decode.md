@@ -19,6 +19,7 @@ regime: decode
 layer: learned
 lifecycle: active
 verified_on: 2026-07-29
+origin_kernels: ['kernel_unified_attention_2d']
 ---
 # Four host and compute directions that a latency-floored decode kernel gives back
 - lever: Read the ISA before restructuring: register count with zero spills says whether occupancy is even the constraint, and the MFMA variant says whether tuning its shape can pay at all.

@@ -18,6 +18,7 @@ kernel_class: quantized_gemm
 regime: small-batch
 layer: learned
 lifecycle: active
+origin_kernels: ['_gemm_a8w8_blockscale_kernel']
 ---
 # Split K by 2 to fill the grid on the tiny-M case
 - lever: When the small-M shape launches roughly one CTA per CU, split K by 2: CTA count doubles, the per-CTA K loop halves (48->24 iterations here), and the best body config inverts toward fewer warps and more stages.

@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-09
+origin_kernels: ['moe_gemm_fp8_blockscale']
 ---
 # Route discarded sub-noise knobs per shape instead of shipping them globally
 - lever: re-score candidates already discarded as sub-variance: a knob that helps one shape and hurts another is a routing-table entry, not a global default.

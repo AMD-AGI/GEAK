@@ -21,6 +21,7 @@ lifecycle: active
 cost: L1
 verified_on: 2026-07-30
 roofline: compute-bound 0.37 -> 0.52 of the empirical roof
+origin_kernels: ['moe_gemm_fp8_blockscale']
 ---
 # Pick the pipeline variant per stage, then shrink the CShuffle cluster
 - lever: The two grouped-GEMM stages of an MoE layer want different instance shapes: routing the narrow-N down-proj stage from the wide V3 pipeline to the V1 256x64 instance buys a 32x32 MFMA there, and a second, cheap pass shrinking the CShuffle per-shuffle M-cluster to one XDL per wave pays on top of it.

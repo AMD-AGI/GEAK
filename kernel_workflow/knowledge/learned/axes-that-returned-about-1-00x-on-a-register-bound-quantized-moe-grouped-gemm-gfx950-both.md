@@ -21,6 +21,7 @@ lifecycle: active
 cost: L1
 verified_on: 2026-08-12
 levers: ['compute.valu-reduction', 'compute.occupancy', 'compute.split-k', 'host.grid-compaction']
+origin_kernels: ['fused_moe_kernel_gptq_awq']
 ---
 # Axes that returned about 1.00x on a register-bound quantized MoE GEMM
 - lever: Price the ceiling before funding a round: run the free upper-bound oracle first (delete the candidate work while holding operand traffic constant) and do the register arithmetic (accumulator registers vs the budget the next occupancy step needs) before writing any variant.

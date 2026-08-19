@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-08-12
 levers: ['host.launch-overhead', 'host.graph-capture']
+origin_kernels: ['paged_attention_ragged']
 ---
 # Price the host fraction before spending a round on the launch floor
 - lever: Before planning a launch-overhead round, express per-call GPU work as a multiple of host plus dispatch cost; here GPU work was several times larger, and both host-side directions returned about 1.00x even though each was implemented correctly.

@@ -386,6 +386,37 @@ rc, _, _ = run(dd, "lint", "--cards")
 check("lint --cards still exits 0 on a clean tree", rc == 0, f"exit {rc}")
 shutil.rmtree(dd)
 
+# The cross-kernel rule is worthless to the cards already in the tree unless their provenance is
+# recovered, and it must be RECOVERED, not invented: a guessed origin hands out blind credit nobody
+# earned. `backfill-origins` derives it from the drained proposals, and reports what it cannot.
+dd = fresh()
+write(dd, "known.md", card("known", key="a situation the drained proposal also names",
+                           confirms_blind=0))
+write(dd, "orphan.md", card("orphan", key="a situation no proposal accounts for"))
+with open(os.path.join(dd, "_inbox", "p.json.drained"), "w") as f:
+    json.dump({"run_id": "p", "date": "2026-08-19", "kernel_names": ["kern_origin"],
+               "validation_status": "accepted", "citations": [],
+               "cards": [{"name": "known", "title": "known",
+                          "key": "a situation the drained proposal also names"}]}, f)
+_, out, _ = run(dd, "backfill-origins", "--apply")
+rep = json.loads(out)
+check("backfill attributes a card from its drained proposal",
+      rep["backfilled"] == 1 and "origin_kernels: ['kern_origin']" in
+      open(os.path.join(dd, "known.md")).read(), out[:300])
+check("backfill leaves an unattributable card alone and NAMES it",
+      rep["no_provenance"] == ["orphan.md"]
+      and "origin_kernels" not in open(os.path.join(dd, "orphan.md")).read(),
+      f"no_provenance={rep['no_provenance']}")
+
+# ...and the recovered provenance actually unlocks the thing it was recovered for.
+cite(dd, "later", "a_different_kernel",
+     json.dumps([{"card": "known.md", "cited_then_verified": 2.0, "became_winner": True}]))
+run(dd, "drain", "--apply", "--validated-runs", "1")
+check("a backfilled card can now earn a blind confirmation",
+      "confirms_blind: 1" in open(os.path.join(dd, "known.md")).read(),
+      open(os.path.join(dd, "known.md")).read().split("---")[1])
+shutil.rmtree(dd)
+
 # A well-formed card must pass: a gate that rejects everything is not a gate.
 dd = fresh()
 write(dd, "c.md", card("c"))

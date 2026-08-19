@@ -19,6 +19,7 @@ regime: n/a
 layer: learned
 lifecycle: active
 verified_on: 2026-07-30
+origin_kernels: ['paged_attention_large']
 ---
 # A/B in the graded case mix, and price a direction against the noise floor first
 - lever: Run each candidate A/B in the same case mix and same session as the graded number, and treat launch-floor cases as a noise channel rather than as recoverable geomean.

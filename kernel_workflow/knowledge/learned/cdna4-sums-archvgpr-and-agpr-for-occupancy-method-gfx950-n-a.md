@@ -21,6 +21,7 @@ lifecycle: active
 cost: L3
 verified_on: 2026-08-12
 levers: ['compute.occupancy', 'compute.agpr-accumulator']
+origin_kernels: ['fused_moe_kernel_gptq_awq']
 ---
 # CDNA4 sums ArchVGPR and AGPR for occupancy
 - lever: Before planning an occupancy escape by moving an MFMA accumulator into AGPRs, do the arithmetic for this arch: the two files share one budget here, so the move is register-neutral.

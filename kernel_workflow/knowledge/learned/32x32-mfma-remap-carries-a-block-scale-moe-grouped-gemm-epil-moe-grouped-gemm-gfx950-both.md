@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-07-29
 roofline: memory-bound at ~0.40 of its roof -> compute-bound at ~0.53 of its roof
+origin_kernels: ['moe_stage1']
 ---
 # 32x32 MFMA remap carries a block-scale MoE grouped GEMM; epilogue and LDS pad are thin
 - lever: Switch the grouped-GEMM pipeline variant from 16x16 to 32x32 MFMA with a matching host-side wave shuffle, then add a CShuffle write-out epilogue and one row of A-LDS padding.

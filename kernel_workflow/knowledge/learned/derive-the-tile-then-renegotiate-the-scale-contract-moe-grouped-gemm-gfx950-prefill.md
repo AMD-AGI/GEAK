@@ -21,6 +21,7 @@ lifecycle: active
 cost: L3
 verified_on: 2026-08-12
 roofline: memory / B-tile-traffic bound before -> MFMA/global-load interlock after, at ~54% of the achievable fp8 MFMA peak
+origin_kernels: ['fused_moe_kernel']
 ---
 # Derive the tile, then renegotiate the scale contract
 - lever: A small BLOCK_M fixed by the caller is often a producer-side data-layout constraint, not a consumer tile constraint: let the file derive its own tile. Pair it with sizing num_warps from accumulator elements per lane instead of maximising occupancy, and with renegotiating the fp8 A-scale granularity so the in-loop rescale disappears.

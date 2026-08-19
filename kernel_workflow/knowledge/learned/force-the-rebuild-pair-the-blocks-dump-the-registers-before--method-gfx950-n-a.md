@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-11
+origin_kernels: ['moe_stage2']
 ---
 # Force the rebuild, pair the blocks, dump the registers before stacking
 - lever: Adjudicate candidates against a measured run-to-run floor using paired, rotated A/B blocks over freshly rebuilt objects, and re-measure the current head in the same session rather than comparing to a stored cross-session number.

@@ -19,6 +19,7 @@ regime: decode
 layer: learned
 lifecycle: active
 verified_on: 2026-08-15
+origin_kernels: ['mi355x_vllm_hip_paged_attention_decode']
 ---
 # Axes that close once decode attention sits on its read roof
 - lever: Once an affine fit of time against partition count shows the marginal byte cost near the read roof, treat LLC residency, further occupancy, backend codegen flags and byte-count reduction as the low-yield families and spend the round on the fitted intercept, the per-call head, instead.

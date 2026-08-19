@@ -18,6 +18,7 @@ kernel_class: dense_gemm
 regime: decode
 layer: learned
 lifecycle: active
+origin_kernels: ['wvSplitK']
 ---
 # Measure the launch floor before buying a device-side round on a tiny decode op
 - lever: compare profiled device time against the scored wall before spending rounds on device-side levers; when the wall floor sits above device time, redirect the round to host/launch-path work

@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L3
 verified_on: 2026-08-12
+origin_kernels: ['fused_moe_int4_w4a16']
 ---
 # Share the dequantised weight tile across row-blocks, widen M first
 - lever: reuse ONE dequantised weight tile across a group of row-blocks so the dequant cost is paid once per group; the dequant tile is shared across M and replicated across N, so widening along M buys more than widening along N at the same product.

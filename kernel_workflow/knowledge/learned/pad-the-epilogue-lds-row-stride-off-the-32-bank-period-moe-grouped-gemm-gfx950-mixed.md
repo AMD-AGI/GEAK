@@ -22,6 +22,7 @@ cost: L1
 verified_on: 2026-08-11
 roofline: issue-wait share of wall time -27.8%; still 31-44% of the achievable HBM roof, so no bandwidth wall is near
 levers: ['mem.lds-bank-phase']
+origin_kernels: ['moe_stage2']
 ---
 # Pad the epilogue LDS row stride off the 32-bank period
 - lever: When an LDS staging tile's row stride is congruent to 0 mod the 32-bank period, every row starts on bank 0; add one pad element to the row so consecutive rows land on different banks.

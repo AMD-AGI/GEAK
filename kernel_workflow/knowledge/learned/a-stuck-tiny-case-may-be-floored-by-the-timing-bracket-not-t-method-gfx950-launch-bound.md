@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-07-30
+origin_kernels: ['_per_token_group_quant_fp8']
 ---
 # A stuck tiny case may be floored by the timing bracket, not the GPU
 - lever: before spending rounds on dispatch levers for a small shape, measure it twice - once inside the scored bracket and once as pure back-to-back throughput; if the two disagree, the floor is host-side per-call overhead in the bracket and it bounds the best geomean the weighting can ever reach, which is worth knowing at plan time.

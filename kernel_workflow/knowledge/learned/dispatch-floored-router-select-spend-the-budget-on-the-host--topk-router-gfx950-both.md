@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-12
+origin_kernels: ['_topk_forward']
 ---
 # Dispatch-floored router select: spend the budget on the host lane first
 - lever: When per-case time barely moves across a 32x spread in row count, the floor is host per-call marshaling, not the GPU body — attack the launch path before any tile tuning.

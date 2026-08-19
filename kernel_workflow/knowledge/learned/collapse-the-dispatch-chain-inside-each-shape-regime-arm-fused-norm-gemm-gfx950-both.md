@@ -22,6 +22,7 @@ cost: L2
 verified_on: 2026-08-14
 roofline: prefill phase 1 ends at ~94% of the measured HBM read roof; decode ends at the graph-dispatch floor
 levers: ['host.dispatch-collapse', 'compute.kernel-fusion']
+origin_kernels: ['mi355x_vllm_tilelang_mhc_fused_post_pre']
 ---
 # Collapse the dispatch chain inside each shape-regime arm
 - lever: When one fused op dispatches a chain of three kernels per call, have each kernel also emit the partials the next one needs (residual plus the dot/sqrsum partials) so the chain collapses 3 to 2 to 1, and give each shape regime its own arm of the host if/elif so the two collapses are orthogonal by construction.

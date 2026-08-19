@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-08-11
 levers: ['mem.workgroup-mapping']
+origin_kernels: ['mi355x_vllm_hip_paged_attention_decode']
 ---
 # Collapse the co-resident sequence set to break the KV address phase
 - lever: When each sequence's KV span is a power of two, the base addresses of all live sequences share a cache-set phase; try reindexing the launch grid sequence-major so every workgroup of one sequence is consecutive, shrinking the set of sequences resident at once.

@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-08-08
 roofline: per-program compute-efficiency bound -> memory-bound at ~104% (batch=64) and ~93% (batch=32) of measured achievable DRAM read rate; small batch stays parallelism-starved at ~26%
+origin_kernels: ['_fwd_grouped_kernel_stage1']
 ---
 # Split only up to one workgroup per CU, and make pipeline depth a function of launched WGs
 - lever: Cap the extra-parallelism split (bit-exact partial-output column split) at one workgroup per CU instead of a fixed multiple of CU count, and select pipeline depth from the launched WG count rather than pinning it as a constant.

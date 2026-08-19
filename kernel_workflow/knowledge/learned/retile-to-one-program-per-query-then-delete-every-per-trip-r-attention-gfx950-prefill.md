@@ -22,6 +22,7 @@ cost: L3
 verified_on: 2026-08-17
 roofline: issue/rendezvous-bound at a few percent of achievable bf16 matrix peak -> latency/dependency-bound after the retile; the gathered latent is last-level-cache resident, so bytes were never the wall
 levers: ['mem.lds-tiling', 'compute.trip-count', 'compute.rendezvous-deletion']
+origin_kernels: ['mi355x_vllm_triton_sparse_attn_prefill_ragged']
 ---
 # Retile to one program per query, then delete every per-trip rendezvous
 - lever: Give one program all query heads of one query position and raise the k-block until the loop is a handful of trips; then delete the per-k-trip cross-warp rendezvous one at a time - that count, not instruction count, is what moved wall clock here.

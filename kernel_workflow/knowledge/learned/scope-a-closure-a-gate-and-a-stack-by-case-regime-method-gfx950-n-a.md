@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L0
 verified_on: 2026-08-17
+origin_kernels: ['mi355x_vllm_triton_fused_moe_gemma4']
 ---
 # Scope a closure, a gate and a stack by case regime
 - lever: Record every closure together with the shape and launch config it was measured under, re-price it per case regime, and predict a stack from case-disjoint gating rather than from how cleanly the patches merge.

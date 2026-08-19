@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-08
+origin_kernels: ['_fwd_grouped_kernel_stage1']
 ---
 # Hand-count the bytes and build a read-only twin before staffing a memory round
 - lever: Derive the traffic by hand from the problem (batch x tokens x (key_dim + value_dim) x dtype width, times how often each byte is actually read) and reconcile it with the profiler before believing any headroom estimate built on the counter.

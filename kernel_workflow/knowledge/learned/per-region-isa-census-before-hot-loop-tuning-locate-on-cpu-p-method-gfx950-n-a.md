@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-12
+origin_kernels: ['moe_stage1']
 ---
 # Per-region ISA census before hot-loop tuning; locate on CPU, price on GPU
 - lever: Build a per-region static-ISA census - instruction and full-wait counts for prologue, main loop and epilogue - and fund the region by its share of instructions and serialised waits rather than by intuition about where a GEMM spends time.

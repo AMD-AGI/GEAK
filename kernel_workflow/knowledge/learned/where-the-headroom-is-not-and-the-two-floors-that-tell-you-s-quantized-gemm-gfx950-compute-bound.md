@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-12
+origin_kernels: ['gemm_a8w8_blockscale']
 ---
 # Where the headroom is not, and the two floors that tell you so
 - lever: Before funding loop-schedule rounds, measure two floors on the same box: the vendor library at your shape, and the best implementation in your own language with the quantization/scale machinery deleted. When the library sits below your language's scale-free floor, the in-language axis set is closed and the remaining rounds are better spent on correctness or on leaving the language.

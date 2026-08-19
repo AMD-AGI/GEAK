@@ -22,6 +22,7 @@ cost: L1
 verified_on: 2026-08-14
 roofline: prefill phase 1 at ~94% of the measured HBM read roof with zero removable bytes; prefill phase 2 at ~91% of the packed-dot issue roof; decode at the graph-dispatch floor
 levers: ['compute.mfma', 'compute.software-pipelining', 'compute.occupancy', 'mem.non-temporal']
+origin_kernels: ['mi355x_vllm_tilelang_mhc_fused_post_pre']
 ---
 # Axes that stayed closed on a roof-bound fused norm-GEMM path
 - lever: Before funding a structural round on an arm already near a roof, price the ceiling: measure bandwidth elasticity (perturb traffic and read the runtime response) and delete the candidate work entirely to get a free upper bound; here elasticity measured ~0.1, so the gap above the byte floor was never serialisation and every overlap/skew/double-buffer variant was paying for a cure to a bound the op does not have.

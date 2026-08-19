@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-17
+origin_kernels: ['mi355x_vllm_triton_fused_moe_gemma4']
 ---
 # Axes that stayed closed on a bf16 fused MoE with a decode-weighted mix
 - lever: Treat these as low-prior once per-bucket tile configs are tuned: MFMA layout knobs, larger BLOCK_K, XCD swizzle, atomic epilogues, and any fusion at decode; the live axes here were cache policy, dispatch count in the periphery, and per-shape launch configs.

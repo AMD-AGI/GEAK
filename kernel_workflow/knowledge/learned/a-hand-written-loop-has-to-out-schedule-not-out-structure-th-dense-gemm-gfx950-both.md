@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L3
 verified_on: 2026-08-12
+origin_kernels: ['_gemm_a8w8_blockscale_kernel']
 ---
 # A hand-written loop has to out-schedule, not out-structure, the compiler
 - lever: when the loop is latency-bound with zero bank conflicts and LDS traffic already at its derived minimum, treat structure as a closed axis and spend the round on a different algorithm or a compiler with scheduling controls

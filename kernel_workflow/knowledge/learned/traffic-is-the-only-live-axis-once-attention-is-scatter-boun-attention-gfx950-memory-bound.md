@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 verified_on: 2026-07-30
 roofline: 52-62% of the achievable scatter-limited HBM roofline before and after; the residual gap is inherent read-once random-block scatter with ~zero L2 reuse
+origin_kernels: ['paged_attention_large']
 ---
 # Traffic is the only live axis once attention is scatter-bound on HBM
 - lever: When the profile puts the op at a scatter-limited HBM roofline, rank traffic-reducing directions first and cap compute-precision / occupancy / launch-fusion at a single cheap probe round each.

@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-12
+origin_kernels: ['fused_moe_kernel']
 ---
 # Host dispatch and backend swap closed on a saturated grouped GEMM
 - lever: Price the host-side axis before opening it: compare enqueue cost against the SHORTEST case's GPU time, and price a vendor kernel on the grouped problem you actually have rather than on the dense shape its benchmark reports.

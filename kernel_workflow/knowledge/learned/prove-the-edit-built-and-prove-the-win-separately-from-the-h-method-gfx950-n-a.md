@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L0
 verified_on: 2026-07-30
+origin_kernels: ['moe_gemm_fp8_blockscale']
 ---
 # Prove the edit built and prove the win separately from the harness flag
 - lever: In a JIT-compiled vendor stack, three independent things can each make a real win invisible — the edit not rebuilding, the diff not being visible to git, and the harness verdict flag reading false — so confirm build, patch and timing by three separate means before declaring an axis dead.

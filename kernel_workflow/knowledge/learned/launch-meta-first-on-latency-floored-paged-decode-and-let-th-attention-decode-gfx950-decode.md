@@ -21,6 +21,7 @@ lifecycle: active
 cost: L1
 verified_on: 2026-08-12
 roofline: memory/latency-bound at ~0.18 of empirical roofline before -> ~0.39 and compute-bound after
+origin_kernels: ['_fwd_grouped_kernel_stage1']
 ---
 # Launch-meta first on latency-floored paged decode, and let the backend pick occupancy
 - lever: On a decode attention kernel whose profile says latency-floored at ~1 workgroup/CU, put the round into launcher metadata (num_warps, num_stages, matrix-instr dim) and treat a pinned waves_per_eu hint as one more ablatable field rather than part of the winning set.

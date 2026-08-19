@@ -21,6 +21,7 @@ lifecycle: active
 cost: L1
 verified_on: 2026-08-12
 roofline: compute-bound 0.24 -> 0.31 of the empirical roof
+origin_kernels: ['moe_stage2']
 ---
 # MFMA-32 plus A-LDS pad on a frozen-gridwise CK block-scale MoE GEMM
 - lever: On the V1 (M64/N128/K128) block-scale instance, widen the XDL/MFMA shape from 16x16 to 32x32, then de-conflict A-side LDS reads with one extra row of A-block LDS padding.

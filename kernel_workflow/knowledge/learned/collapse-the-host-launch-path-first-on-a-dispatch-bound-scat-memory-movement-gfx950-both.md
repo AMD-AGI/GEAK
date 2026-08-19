@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-08-12
 levers: ['host.launch-overhead', 'device.grid-fill']
+origin_kernels: ['write_req_to_token_pool_triton']
 ---
 # Collapse the host launch path first on a dispatch-bound scatter, then re-grid
 - lever: cache a direct-launch dispatch object that skips the JIT wrapper and the Python launcher down to the compiled C launch entry (raw int pointers, no launch metadata), then re-grid the device side so the machine actually fills.

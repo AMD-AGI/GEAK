@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-07-30
+origin_kernels: ['fused_moe_kernel']
 ---
 # Diagnose dependency chain vs load latency before spending a round on pipelining
 - lever: Cheap discriminator: software double-buffer the operand you believe is on the critical path. If that REGRESSES, the residual is a dependency chain (dequant/scale -> dot_scaled), not exposed load latency, and the whole pipeline-depth / occupancy / cache-hint axis is closed for that body.

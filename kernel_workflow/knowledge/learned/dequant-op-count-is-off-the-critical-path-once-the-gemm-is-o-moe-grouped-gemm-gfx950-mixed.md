@@ -21,6 +21,7 @@ lifecycle: active
 cost: L1
 verified_on: 2026-08-12
 levers: ['compute.dequant-opcount', 'mem.cache-modifier', 'compute.pipeliner']
+origin_kernels: ['fused_moe_kernel_gptq_awq']
 ---
 # Dequant op-count is off the critical path once the GEMM is occupancy-pinned
 - lever: When an int4-weight GEMM is already at occupancy 2 with zero spill, budget the round elsewhere than the dequant feed path: its VALU work already overlaps the MFMA pipeline.

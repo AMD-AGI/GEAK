@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L0
 verified_on: 2026-08-12
+origin_kernels: ['_topk_forward']
 ---
 # Per-rep geomean plus a two-sided negative control
 - lever: compute the geomean per rep and keep the distribution, rather than pooling the min across reps into a single number.

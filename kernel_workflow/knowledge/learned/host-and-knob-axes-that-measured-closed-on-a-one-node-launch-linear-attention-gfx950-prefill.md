@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-12
+origin_kernels: ['chunk_scaled_dot_kkt_fwd_kernel']
 ---
 # Host and knob axes that measured closed on a one-node launch
 - lever: treat these as already-measured null axes and price a round accordingly: wrapper-level graph capture for a single-node launch, occupancy/register buys, the config ladder, cache-policy hints, partial-sector read-modify-write, and hand k-loop restructuring.

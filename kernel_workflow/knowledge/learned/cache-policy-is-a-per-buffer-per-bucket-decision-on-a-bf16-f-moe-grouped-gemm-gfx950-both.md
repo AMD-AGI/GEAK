@@ -22,6 +22,7 @@ cost: L1
 verified_on: 2026-08-17
 roofline: decode ends at ~0.9 of the MEASURED achievable roof (the nameplate roof over-states it by ~13%)
 levers: ['mem.load-cache-policy', 'mem.store-cache-policy']
+origin_kernels: ['mi355x_vllm_triton_fused_moe_gemma4']
 ---
 # Cache policy is a per-buffer, per-bucket decision on a bf16 fused MoE
 - lever: Try a vL1D-bypass cache_modifier on the streamed weight operand of the gate/up grouped GEMM, and a write-through store hint on every buffer that is written once and never re-read (activation output, top-k reduce output); both are one argument, output stays bit-identical.

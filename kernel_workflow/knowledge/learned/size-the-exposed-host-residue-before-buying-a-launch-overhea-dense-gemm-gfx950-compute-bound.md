@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-12
+origin_kernels: ['_gemm_a16_w16_kernel']
 ---
 # Size the exposed host residue before buying a launch-overhead round
 - lever: Estimate residue first as (per-call host cost) / (kernel duration) on the smallest case plus the measured inter-kernel gap; when host cost is a small fraction of the kernel and the queue never starves, the exposed residue is 0 and the lane cannot pay whatever the profile suggests.

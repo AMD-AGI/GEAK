@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-08
+origin_kernels: ['_fwd_grouped_kernel_stage1']
 ---
 # Positive cache counters and a cheaper launcher can both buy zero clock
 - lever: Classify each shape first - its fraction of achievable DRAM read rate, and its per-call host cost against the measured dispatch knee - and treat cache placement and host/dispatch as candidates only for shapes that classification says are actually held there.

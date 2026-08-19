@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L3
 verified_on: 2026-08-12
+origin_kernels: ['_gemm_a16_w16_kernel']
 ---
 # Own the dispatch layer, then race backends behind it
 - lever: When the editable file owns the launcher, treat the frozen launch config as the defect first, then reuse that shim as a per-shape backend selector (in-tree kernel / hand-authored HIP / tuned vendor library) chosen by measured argmin, not by reasoning.

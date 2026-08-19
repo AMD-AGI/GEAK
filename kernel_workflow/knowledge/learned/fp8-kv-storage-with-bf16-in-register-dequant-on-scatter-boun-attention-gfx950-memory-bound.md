@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 verified_on: 2026-07-30
 roofline: HBM-bound at the paged-scatter roofline before and after; the win is halved bytes moved, not a bound-class change
+origin_kernels: ['paged_attention_large']
 ---
 # fp8 KV storage with bf16 in-register dequant on scatter-bound paged attention
 - lever: Keep the cache in e4m3 fp8 and dequantise to bf16 in registers at point of use, leaving both dots on bf16 MFMA — the win is halved KV bytes from HBM, not cheaper math.

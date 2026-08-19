@@ -18,6 +18,7 @@ kernel_class: quantized_gemm
 regime: compute-bound
 layer: learned
 lifecycle: active
+origin_kernels: ['gemm_a8w8_blockscale']
 ---
 # The operand-feed residual of a scale-free fp8 GEMM is a closed axis
 - lever: Price the occupancy and pipelining walls arithmetically before spending a round on them: both are computable from the tile before any candidate is authored.

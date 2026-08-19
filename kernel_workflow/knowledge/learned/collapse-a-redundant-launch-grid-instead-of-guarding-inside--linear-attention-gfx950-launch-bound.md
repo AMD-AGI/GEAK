@@ -22,6 +22,7 @@ cost: L2
 verified_on: 2026-08-12
 roofline: dispatch/overhead-bound -> memory-bound once the empty workgroups stop being launched
 levers: ['host.launch-overhead', 'host.grid-geometry']
+origin_kernels: ['chunk_scaled_dot_kkt_fwd_kernel']
 ---
 # Collapse a redundant launch grid instead of guarding inside the kernel
 - lever: If a varlen op's caller builds a quadratic grid and the kernel's first statement is an index guard that returns, the guarded dispatches are still launched: wrap the launch in a host-side shim that rewrites that grid dimension to the set of indices that survive the guard.

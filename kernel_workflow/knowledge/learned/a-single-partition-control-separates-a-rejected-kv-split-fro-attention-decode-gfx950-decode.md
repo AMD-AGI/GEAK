@@ -21,6 +21,7 @@ lifecycle: active
 cost: L3
 verified_on: 2026-08-12
 levers: ['algo.split-kv']
+origin_kernels: ['kernel_unified_attention_2d']
 ---
 # A single-partition control separates a rejected KV split from a wrong KV split
 - lever: When the structural lever left is more parallelism over KV, run the split-and-combine path at one partition first as a control; bit-exact there says the kernels are correct and the parity gate is rejecting the reduction reorder, which is a cheap way to price the rest of the lane.

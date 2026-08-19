@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L3
 verified_on: 2026-08-17
+origin_kernels: ['paged_attention_large']
 ---
 # Collapse the partition grid instead of optimizing the round trip it creates
 - lever: one workgroup walks all partitions of a sequence with gridDim.y -> 1, carrying online-softmax max/sum/accumulator in registers and writing the final output directly

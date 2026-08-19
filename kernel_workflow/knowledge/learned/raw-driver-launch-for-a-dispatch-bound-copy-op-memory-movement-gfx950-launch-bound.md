@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-07-30
+origin_kernels: ['write_req_to_token_pool_triton']
 ---
 # Raw driver launch for a dispatch-bound copy op
 - lever: When the measured window is mostly host submit, call the already-compiled module through a raw ctypes driver launch instead of the framework's Python launch wrapper.

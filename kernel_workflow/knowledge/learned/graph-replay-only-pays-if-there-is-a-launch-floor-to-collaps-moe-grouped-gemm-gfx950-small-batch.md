@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-07-29
+origin_kernels: ['moe_stage1']
 ---
 # Graph replay only pays if there is a launch floor to collapse
 - lever: Measure the host-enqueue share of the timed region first; if it is a few percent and already overlapped with GPU work, graph capture has nothing to collapse and replay enqueue costs more than eager.

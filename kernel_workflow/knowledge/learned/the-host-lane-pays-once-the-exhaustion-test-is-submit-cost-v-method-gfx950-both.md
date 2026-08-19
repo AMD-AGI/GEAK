@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-08-12
 levers: ['host.launch-overhead']
+origin_kernels: ['_per_token_group_quant_fp8']
 ---
 # The host lane pays once; the exhaustion test is submit cost versus the smallest case's kernel time
 - lever: prebind the dispatch once — cache the compiled handle and the argument binding inside the timed region, refining the JIT's own specialization key so a wrong binary can never be selected — then treat submit-cost-below-smallest-case-GPU-time as the signal that the lane has paid out and later rounds are better spent in the kernel

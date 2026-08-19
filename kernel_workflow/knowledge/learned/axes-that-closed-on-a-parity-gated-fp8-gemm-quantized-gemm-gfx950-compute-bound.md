@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-12
+origin_kernels: ['_w8a8_triton_block_scaled_mm']
 ---
 # Axes that closed on a parity-gated fp8 GEMM
 - lever: Spend rounds on order-preserving compute restructuring first; these five axes were each measured to ~1.00x or worse here, so they are low-yield seeds on a similar op.

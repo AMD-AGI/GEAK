@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-12
+origin_kernels: ['paged_attention_large']
 ---
 # Measure the empty-graph replay floor before funding a capture round
 - lever: before spending a direction on graph capture, time an empty capture-and-replay on the same box and compare it to the op's own per-call baseline as a ratio; if replay costs more than the op, the axis is decided in minutes instead of two rounds

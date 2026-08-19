@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L3
 verified_on: 2026-08-12
+origin_kernels: ['chunk_scaled_dot_kkt_fwd_kernel']
 ---
 # Shorten the load-to-dot chain before chasing bytes
 - lever: the limiter of this class was the load→dot dependency chain, not bytes moved: any per-row scale that factors out of the contraction can be hoisted past the k-loop, and heads sharing a K tile can share one set of MFMAs with the epilogue replayed per member head.

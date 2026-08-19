@@ -22,6 +22,7 @@ cost: L3
 verified_on: 2026-08-12
 roofline: memory-bound throughout; the main dispatch ends at ~99.8% of a re-measured blended DRAM roof, and the occupancy limiter moves VGPR -> LDS once the DMA staging lands
 levers: ['mem.lds-staging', 'mem.load-cache-policy', 'compute.launch-bounds']
+origin_kernels: ['paged_attention_ragged']
 ---
 # Buy prefetch depth with a global-to-LDS DMA on bandwidth-bound decode attention
 - lever: On a bandwidth-bound HIP decode attention kernel, stage the V tile through the arch's global-to-LDS DMA and hoist the whole first-group prefetch above the QK phase; the DMA on its own is worth ~0, the prefetch depth it frees registers for is the value. Around it, choose the non-temporal hint per tensor and replace the V transpose scalar gather with a transposing LDS read.

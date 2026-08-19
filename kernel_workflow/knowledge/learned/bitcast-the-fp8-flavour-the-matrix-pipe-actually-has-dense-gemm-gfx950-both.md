@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L3
 verified_on: 2026-08-12
+origin_kernels: ['_gemm_a8w8_blockscale_kernel']
 ---
 # Bitcast the fp8 flavour the matrix pipe actually has
 - lever: when an operand dtype is an fp8 variant the ISA has no MFMA for, bitcast both operands to the native fp8 type and fold the constant exponent-bias ratio into the epilogue scale

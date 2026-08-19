@@ -22,6 +22,7 @@ cost: L2
 verified_on: 2026-08-12
 roofline: store-bandwidth-bound at ~0.8-0.97 of achievable store roof before and after all four attempts
 levers: ['compute.occupancy', 'host.persistent-grid', 'host.graph-replay']
+origin_kernels: ['chunk_scaled_dot_kkt_fwd_kernel']
 ---
 # Axes that stay closed once the store pipe is saturated
 - lever: When the dominant case is already near its store roofline, rank occupancy/VGPR lift, persistent grid-stride workgroup collapse, finer triangular store-skip granularity and per-call graph replay as low-prior seeds - all four were measured out here - and spend the round on store bytes and store cache policy instead.

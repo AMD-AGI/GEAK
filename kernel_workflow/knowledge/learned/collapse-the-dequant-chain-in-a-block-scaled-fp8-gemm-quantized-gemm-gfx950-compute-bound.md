@@ -18,6 +18,7 @@ kernel_class: quantized_gemm
 regime: compute-bound
 layer: learned
 lifecycle: active
+origin_kernels: ['_gemm_a8w8_blockscale_kernel']
 ---
 # Collapse the dequant chain in a block-scaled fp8 GEMM
 - lever: Three co-levers on the dequant path, not on occupancy: (a) hardware-cvt fp8 upcast (fnuz->OCP) instead of VALU-emulated conversion, which is the real few-percent-of-peak wall; (b) when the per-1x128 B scale is uniform across the N tile, collapse it to a scalar and dequantize as a rank-1 per-row FMA instead of a full [M,N] outer product every K iteration; (c) unroll K by 2 into two independent dots so the second MFMA issues while the first tile's dequant occupies the VALU.

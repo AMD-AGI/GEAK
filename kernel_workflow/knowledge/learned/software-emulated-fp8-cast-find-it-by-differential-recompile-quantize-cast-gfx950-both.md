@@ -22,6 +22,7 @@ cost: L3
 verified_on: 2026-08-12
 roofline: VALU-issue bound (>100% of device VALU issue on the two large cases) -> HBM bound at 94-99% of the measured no-math bandwidth roof
 levers: ['compute.native-convert']
+origin_kernels: ['_per_token_group_quant_fp8']
 ---
 # Software-emulated fp8 cast: find it by differential recompile, kill it with the native convert
 - lever: when an elementwise cast shows a ~200:1 VALU:memory instruction ratio, suspect the dtype is emulated; emit the hardware's own packed convert and bitcast into the target flavour (biases differing by a constant are bit-exact over the clamped range), then fix -0 in the fp32 domain

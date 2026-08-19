@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-08
+origin_kernels: ['_w8a8_triton_block_scaled_mm']
 ---
 # Re-price the dead list when the operating point moves
 - lever: Treat the dead list as valid only at the operating point that produced it: whenever a structural change alters register pressure, LDS bytes or per-MFMA work, re-run the previously rejected knobs, and move the tile shape jointly with the decode/layout plan instead of one knob per direction.

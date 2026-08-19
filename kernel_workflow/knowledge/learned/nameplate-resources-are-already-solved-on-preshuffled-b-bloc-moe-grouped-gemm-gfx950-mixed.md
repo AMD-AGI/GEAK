@@ -21,6 +21,7 @@ lifecycle: active
 cost: L1
 verified_on: 2026-08-11
 roofline: at stop: ~18-21% active, 53-61% dependency wait, 21-27% issue wait; 31-44% of the achievable HBM roof with occupancy unchanged from baseline
+origin_kernels: ['moe_stage2']
 ---
 # Nameplate resources are already solved on preshuffled-B blockscale MoE GEMM
 - lever: Spend early rounds on instruction issue, dependency structure and LDS bank phase; treat occupancy, spill count, LDS capacity, atomic write amplification and code size as axes to PRICE cheaply rather than to patch.

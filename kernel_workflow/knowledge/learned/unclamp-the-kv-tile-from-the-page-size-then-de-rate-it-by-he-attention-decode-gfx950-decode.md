@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-17
+origin_kernels: ['mi355x_vllm_triton_unified_attention']
 ---
 # Unclamp the KV tile from the page size, then de-rate it by head width
 - lever: Before touching the body, print the grid the wrapper actually launches: a tile clamped to the paged block size plus a split-count floor can put thousands of near-empty workgroups against a few hundred CUs.

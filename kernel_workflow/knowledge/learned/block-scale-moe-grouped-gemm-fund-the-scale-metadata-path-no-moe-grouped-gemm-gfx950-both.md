@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-12
+origin_kernels: ['moe_stage1']
 ---
 # Block-scale MoE grouped GEMM: fund the scale-metadata path, not the MFMA loop
 - lever: Try the pipeline-version row of the template instance first, then attack the per-block scale metadata path - gather packing, LDS staging of the scale slabs, batching the prologue fill - before tuning the MFMA loop.

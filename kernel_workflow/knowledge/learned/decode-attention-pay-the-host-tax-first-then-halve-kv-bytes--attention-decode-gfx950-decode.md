@@ -22,6 +22,7 @@ cost: L2
 verified_on: 2026-08-12
 roofline: large-ctx case moves from an apparent ~0.5 of achievable HBM roof to VALU+LDS bound
 levers: ['host.alloc-cache', 'mem.storage-dtype', 'mem.non-temporal', 'compute.occupancy']
+origin_kernels: ['paged_attention_decode']
 ---
 # Decode attention: pay the host tax first, then halve KV bytes, then re-tune occupancy
 - lever: Order the round set host-wrapper overhead -> HBM byte count -> occupancy/load policy: a per-call allocation + scale-recompute cache in the python wrapper was worth ~2.08x alone, far more than any in-kernel axis that followed.

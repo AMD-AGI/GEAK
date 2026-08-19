@@ -18,6 +18,7 @@ kernel_class: dense_gemm
 regime: compute-bound
 layer: learned
 lifecycle: active
+origin_kernels: ['_gemm_a16_w16_kernel']
 ---
 # Gluon register-staged wide-K MFMA for fp16 dense GEMM
 - lever: Three stacked moves on an MFMA-bound fp16 GEMM: drop num_stages to 1 (frees most of the per-workgroup LDS), coarsen M inside the body to overturn a frozen BLOCK_M, then rewrite the loop in Gluon (@gluon.jit, arch buffer_load + mfma) as a register-staged wide-K MFMA with BM=256, BN=128, instr_shape 16x16x32, warps_per_cta [4,1], k_width=16.

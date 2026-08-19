@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-08
+origin_kernels: ['_w8a8_triton_block_scaled_mm']
 ---
 # The residual axes on a decoded fp8 GEMM are already closed
 - lever: Before committing rounds to LDS round-trip removal, barrier reduction, graph capture, pre-pass fusion or a third workgroup on such a kernel, price each ceiling arithmetically first — here all four closed at roughly parity, and the remaining >10% idea (a preshuffled MFMA-fragment operand buffer) is not expressible through tile-language loads at all.

@@ -22,6 +22,7 @@ cost: L3
 verified_on: 2026-08-14
 roofline: memory-bound throughout: ~98% of the measured streaming roof on the dominant geometry, and issue slots per tile are ~2% of elapsed cycles per tile
 levers: ['compute.instruction-count', 'mem.lds-staging']
+origin_kernels: ['mi355x_vllm_triton_unified_attention_gemma4']
 ---
 # Instructions and registers are not currency at near-total memory stall
 - lever: Price the stall fraction before funding an instruction-count or register-pressure round: here issue slots per tile were about 2% of elapsed cycles per tile, so the loop is ~98% memory stall and issue slots are not what the case is spending.

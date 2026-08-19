@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-08-12
 levers: ['method.ab-protocol', 'method.upper-bound-oracle']
+origin_kernels: ['fused_moe_kernel_gptq_awq']
 ---
 # A/B protocol and oracle confounds on a power-capped GPU
 - lever: Time one event pair per launch, alternating candidate and control inside a single locked process with a duplicate control in every batch; in any 'delete the work' oracle hold the operand VALUES and the address spread fixed and change only the thing under test.

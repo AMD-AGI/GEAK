@@ -21,6 +21,7 @@ lifecycle: active
 cost: L1
 verified_on: 2026-08-11
 levers: ['mem.non-temporal-load']
+origin_kernels: ['mi355x_vllm_hip_paged_attention_decode']
 ---
 # Choose the non-temporal hint per operand, not per kernel
 - lever: Split the cache-policy decision per operand instead of per kernel: mark non-temporal only the stream that is genuinely single-touch, and A/B each of K, V, Q and the partial-output stores on its own.

@@ -18,6 +18,7 @@ kernel_class: quantized_gemm
 regime: compute-bound
 layer: learned
 lifecycle: active
+origin_kernels: ['gemm_a8w8_blockscale']
 ---
 # De-scale the fp8 GEMM K-loop, then feed the native non-scaled MFMA
 - lever: Move every block-scale operation out of the accumulate loop so the K-loop reduces to the widest native non-scaled fp8 MFMA, and apply the scales once in fp32 on the epilogue accumulator.

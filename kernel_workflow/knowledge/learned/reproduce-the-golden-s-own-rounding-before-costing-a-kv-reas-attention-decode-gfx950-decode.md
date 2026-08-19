@@ -19,6 +19,7 @@ regime: decode
 layer: learned
 lifecycle: active
 verified_on: 2026-07-29
+origin_kernels: ['kernel_unified_attention_2d']
 ---
 # Reproduce the golden's own rounding before costing a KV reassociation
 - lever: Before spending a round on split-KV/flash-decode or a lower-precision KV cache, recompute the golden against a true-fp32 reference and see how much error budget is already spent.

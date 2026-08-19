@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L0
 verified_on: 2026-07-30
+origin_kernels: ['write_req_to_token_pool_triton']
 ---
 # Gate a tiny-kernel win on a median or a paired A/B
 - lever: For an op whose window is near the timer floor, judge a candidate on a median over at least ten back-to-back samples, or an interleaved eight-pair same-session A/B, rather than one single-shot verify.

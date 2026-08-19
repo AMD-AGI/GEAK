@@ -22,6 +22,7 @@ cost: L2
 verified_on: 2026-08-14
 roofline: the arm moves from issue-bound to ~91% of the packed-dot issue roof
 levers: ['compute.valu-reduction', 'compute.packed-dot']
+origin_kernels: ['mi355x_vllm_tilelang_mhc_fused_post_pre']
 ---
 # Cut VALU on the prefill arm with native casts and packed dot
 - lever: On a bf16 arm whose pipe is issue-bound rather than byte-bound, four cheap edits compound: cast through the compiler's native scalar bf16 type instead of the library wrapper (whose constructor expands into a software round-to-nearest-even), feed a packed two-lane bf16 dot against a packed mirror of the weight operand, keep the row sum-of-squares in a scalar accumulator, and re-pick the unroll factor.

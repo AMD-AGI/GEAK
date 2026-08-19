@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-09
+origin_kernels: ['moe_gemm_fp8_blockscale']
 ---
 # Invert the XCD round-robin with a chunk-interleaved workgroup remap
 - lever: the hardware distributes workgroups across XCDs on the LINEAR id, so tiles sharing an operand scatter; remap the id in chunks so a run of tiles sharing weights lands on one XCD's L2 slice.

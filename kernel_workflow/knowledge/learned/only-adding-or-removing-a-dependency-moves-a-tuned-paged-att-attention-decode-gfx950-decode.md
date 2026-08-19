@@ -19,6 +19,7 @@ regime: decode
 layer: learned
 lifecycle: active
 verified_on: 2026-08-17
+origin_kernels: ['mi355x_vllm_triton_unified_attention']
 ---
 # Only adding or removing a dependency moves a tuned paged attention
 - lever: Once the heavy case sits near its achievable bandwidth, price any direction phrased as re-scheduling with a static assembly diff before booking a measurement session, and spend the round on arms that add or remove work instead - cutting the arity of a per-lane division in the split-K reduce dispatch was the one late arm that paid.

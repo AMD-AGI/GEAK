@@ -19,6 +19,7 @@ regime: compute-bound
 layer: learned
 lifecycle: active
 verified_on: 2026-07-29
+origin_kernels: ['fused_moe_int4_w4a16']
 ---
 # Axes that closed on a dequant-latency-bound quantized grouped GEMM
 - lever: Give these a low prior once the body is dequant-VALU/dependency-latency bound: MFMA nonkdim x kpack, num_warps, BLOCK_K x num_stages, split-K, a narrower dequant intermediate dtype, lop3/bitcast dequant tricks, host-side graph capture, and full kernel rewrites - each was swept here and none beat the tuned host config.

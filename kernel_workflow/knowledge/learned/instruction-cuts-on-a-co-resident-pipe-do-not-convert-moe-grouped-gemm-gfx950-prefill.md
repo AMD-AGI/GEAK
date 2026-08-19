@@ -21,6 +21,7 @@ lifecycle: active
 cost: L1
 verified_on: 2026-08-12
 roofline: LDS at 56% of speed-of-light co-resident with MFMA at 54%, i.e. not serialised in front of it
+origin_kernels: ['fused_moe_kernel']
 ---
 # Instruction cuts on a co-resident pipe do not convert
 - lever: When the profile shows the secondary pipe co-resident with MFMA rather than serialised ahead of it, an axis that only removes instructions from that pipe is a cheap thing to price out early: on this shape it closed across three directions, so the round is better spent on the schedule itself.

@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L3
 verified_on: 2026-08-08
+origin_kernels: ['_w8a8_triton_block_scaled_mm']
 ---
 # Bit-exact integer re-encode of the fp8-FNUZ upcast
 - lever: When the compiler emits a software per-element FNUZ fp8 -> fp16 upcast inside the K loop (Triton warns about it), hand-write the same upcast as an integer bit shuffle on packed dwords; the dequant VALU chain is then the thing you delete, not the thing you tune.

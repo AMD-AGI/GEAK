@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-07-29
 levers: ['mem.non-temporal-load']
+origin_kernels: ['paged_attention_ragged']
 ---
 # Get the nt bit onto KV loads by loading one native 128-bit vector
 - lever: Issue a single non-temporal builtin load on a native 128-bit vector type (a 4-wide int ext_vector) for each KV chunk so the compiler emits one 16-byte global load carrying the nt modifier.

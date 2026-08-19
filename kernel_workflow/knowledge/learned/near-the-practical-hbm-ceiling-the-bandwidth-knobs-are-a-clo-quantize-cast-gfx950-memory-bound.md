@@ -21,6 +21,7 @@ lifecycle: active
 cost: L1
 verified_on: 2026-07-30
 roofline: ~62-63% of nameplate HBM bandwidth, i.e. at the practical ceiling for a 3-pass traffic mix (bf16 read + fp8 write + fp32 scale)
+origin_kernels: ['_per_token_group_quant_fp8']
 ---
 # Near the practical HBM ceiling the bandwidth knobs are a closed axis
 - lever: compute fraction-of-nameplate bandwidth from the traffic the op has to move before planning a memory round; once it sits around 60%+, the remaining gap is read/write turnaround plus the fixed traffic mix, so a knob sweep is a low-yield place to spend a round and the budget is better aimed at the launch/host side.

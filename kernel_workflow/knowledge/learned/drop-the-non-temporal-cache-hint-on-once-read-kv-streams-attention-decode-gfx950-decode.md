@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-07-29
+origin_kernels: ['kernel_unified_attention_2d', 'mi355x_vllm_triton_unified_attention']
 ---
 # Drop the non-temporal cache hint on once-read KV streams
 - lever: On the K/V tile loads inside the KV loop, try clearing the '.cg' cache_modifier so the streaming reads go through the normal cache path instead of the non-temporal one.

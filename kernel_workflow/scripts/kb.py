@@ -590,6 +590,84 @@ def cmd_cite(kb, a):
     return 0
 
 
+def cmd_backfill_origins(kb, a):
+    """Retroactively attribute existing cards to the runs that produced them.
+
+    `origin_kernels` was added with the cross-kernel confirmation rule, and every card already in the
+    tree predates it. Without the field the blind test can never pass, so those cards were frozen out
+    of ★★★ permanently — a migration, not a "from here on" change, is what the rule actually needs.
+
+    The attribution is DERIVED, never hand-written: `_inbox/*.json.drained` holds the proposals drain
+    consumed, each carrying the `kernel_names` of the run that wrote it. A card merged from several
+    runs gets the union. Cards no drained proposal accounts for are reported, not guessed — an
+    invented origin would hand out blind credit that was never earned, which is worse than the gap
+    it fills.
+    """
+    props = []
+    for f in sorted(globmod.glob(os.path.join(kb.inbox, "*.json.drained"))
+                    + globmod.glob(os.path.join(kb.inbox, "*.json"))):
+        try:
+            props.append(json.load(open(f)))
+        except Exception as e:
+            print(f"  skipped unreadable {os.path.basename(f)}: {e}", file=sys.stderr)
+
+    cards = {os.path.basename(c["path"]): c for c in all_cards(kb, include_archived=True)}
+    by_key, by_name = {}, {}
+    for base, c in cards.items():
+        k = re.sub(r"\s+", " ", str(c["meta"].get("key") or "")).strip().lower()
+        if k:
+            by_key.setdefault(k, base)
+        n = str(c["meta"].get("name") or "").strip()
+        if n:
+            by_name.setdefault(n, base)
+
+    origins, unmatched_cards = {}, []
+    for prop in props:
+        names = prop.get("kernel_names") or ([prop["kernel_name"]] if prop.get("kernel_name") else [])
+        names = [str(n) for n in names if n]
+        if not names:
+            continue
+        for card in prop.get("cards", []):
+            key = re.sub(r"\s+", " ", str(card.get("key") or "")).strip().lower()
+            fn_scope = "-".join(x for x in [card.get("kernel_class", ""),
+                                            "-".join(card.get("platforms") or []),
+                                            card.get("regime", "")] if x)
+            guess = f"{slugify(card.get('title'))}-{slugify(fn_scope or key)}.md"
+            target = (by_key.get(key) or by_name.get(str(card.get("name") or "").strip())
+                      or (guess if guess in cards else None))
+            if not target:
+                unmatched_cards.append({"run": prop.get("run_id"), "title": card.get("title")})
+                continue
+            origins.setdefault(target, set()).update(names)
+
+    changed, already = [], []
+    for base, names in sorted(origins.items()):
+        m = cards[base]["meta"]
+        if m.get("origin_kernels"):
+            already.append(base)
+            continue
+        m["origin_kernels"] = sorted(names)
+        changed.append({"card": base, "origin_kernels": sorted(names)})
+
+    covered = set(origins)
+    no_provenance = sorted(b for b in cards if b not in covered and not cards[b]["meta"].get("origin_kernels"))
+
+    if a.apply:
+        for base in [c["card"] for c in changed]:
+            write_card(cards[base]["path"], cards[base]["meta"], cards[base]["body"])
+    print(json.dumps({
+        "kb_dir": kb.root, "dry_run": not a.apply,
+        "drained_proposals": len(props), "cards": len(cards),
+        "backfilled": len(changed), "already_had_origins": len(already),
+        # Left alone on purpose. These keep behaving exactly as before the migration: no blind
+        # credit, because nothing in the tree says which run they came from.
+        "no_provenance": no_provenance,
+        "proposal_cards_matching_no_card": unmatched_cards,
+        "detail": changed if not a.apply else [],
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_propose(kb, a):
     prop = json.load(open(a.file))
     if cmd_lint(kb, a):
@@ -1144,6 +1222,10 @@ def main():
     ct.add_argument("--date", default="")
     ct.add_argument("--citations", default="-", help="path to a JSON array, or - for stdin")
     ct.set_defaults(fn=cmd_cite)
+    bo = sub.add_parser("backfill-origins",
+                        help="derive origin_kernels for pre-existing cards from the drained proposals")
+    bo.add_argument("--apply", action="store_true")
+    bo.set_defaults(fn=cmd_backfill_origins)
     doc = sub.add_parser("doctor"); doc.set_defaults(fn=cmd_doctor)
     doc.add_argument("--toolchain", default="", help="current stack fingerprint to compare against")
 

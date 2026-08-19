@@ -21,6 +21,7 @@ lifecycle: active
 cost: L1
 verified_on: 2026-08-12
 levers: ['method.ab-protocol']
+origin_kernels: ['write_req_to_token_pool_triton']
 ---
 # Measure a tiny op with the harness's own protocol, rotated, against an A/A null
 - lever: build the probe around one dispatch sandwiched between the harness's own barrier packets, rotate variant position every round, and carry an identical-body A/A pair plus an exact-equality parity gate in every generation.

@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L2
 verified_on: 2026-08-12
+origin_kernels: ['gemm_a8w8_blockscale']
 ---
 # Arg-plan replay beats graph replay at low dispatch counts, and pays a second time
 - lever: Memoize and replay the Triton launcher's argument plan (keyed on the callable identity) instead of capturing a device graph: at these dispatch counts the plan replay's CPU cost was well under half the graph's. The plan captures N launches, so an additional small dispatch inside the captured region is nearly free -- which funds a host-side restage the kernel could not do for itself.

@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-07-30
 roofline: memory-bound ~22% -> memory-bound ~62% of nameplate HBM bandwidth
+origin_kernels: ['_per_token_group_quant_fp8']
 ---
 # Reinterpret a frozen launch through an exported wrapper object
 - lever: when the runner resolves an exported symbol and calls it as kern[grid](args), the launch config is reachable: export a wrapper OBJECT whose __getitem__(grid) returns a callable with the identical signature, and have it relaunch an inner jit kernel under your own grid, tile, num_warps and num_stages.

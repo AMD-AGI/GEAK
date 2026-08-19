@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-08-12
 levers: ['host.launch-overhead']
+origin_kernels: ['_topk_forward']
 ---
 # Bypass the JIT launcher for a dispatch-bound Triton op
 - lever: memoize compile+bind once, bake the launch options into the cached handle, then call the compiled kernel's C launch entry with pre-resolved device pointers and a 1-slot monomorphic inline cache in closure cells.

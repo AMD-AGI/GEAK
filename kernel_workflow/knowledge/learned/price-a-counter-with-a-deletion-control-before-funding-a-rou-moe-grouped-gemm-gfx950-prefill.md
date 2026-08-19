@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-12
+origin_kernels: ['fused_moe_int4_w4a16']
 ---
 # Price a counter with a deletion control before funding a round on it
 - lever: before funding a direction aimed at a large counter, build the cheapest control that DELETES that counter and time it - across 24 rounds only dependency-chain depth, SLP packing width and K-loop schedule perturbation ever moved the clock on this class.

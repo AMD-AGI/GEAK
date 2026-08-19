@@ -18,6 +18,7 @@ kernel_class: dense_gemm
 regime: decode
 layer: learned
 lifecycle: active
+origin_kernels: ['wvSplitK']
 ---
 # Cache the per-call host work when the host owns a large share of a tiny op's wall
 - lever: reuse allocations across calls and add a thread_local last-hit shortcut that skips the mutex and the table scan on the binding hit path

@@ -20,6 +20,7 @@ layer: learned
 lifecycle: active
 cost: L1
 verified_on: 2026-08-09
+origin_kernels: ['moe_gemm_fp8_blockscale']
 ---
 # A contract-fixed short K loop closes the inner-loop axes
 - lever: price the loop before funding a round inside it: when trip count is fixed by the operator contract and the arch's full-rate MFMA is already emitted, reordering, deleting, retiling, deeper prefetch and cross-stage fusion each measured ~1.00x, while grid-to-cache mapping and host routing still paid.

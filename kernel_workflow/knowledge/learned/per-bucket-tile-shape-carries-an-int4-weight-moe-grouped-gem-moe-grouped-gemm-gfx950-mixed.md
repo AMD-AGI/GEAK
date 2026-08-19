@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-08-12
 levers: ['mem.tile-shape', 'compute.mfma-nonkdim16', 'mem.dequant-reuse']
+origin_kernels: ['fused_moe_kernel_gptq_awq']
 ---
 # Per-bucket tile shape carries an int4-weight MoE grouped GEMM
 - lever: Treat each token-count bucket as its own tuning problem, and pay the int4 unpack once per byte instead of once per nibble.

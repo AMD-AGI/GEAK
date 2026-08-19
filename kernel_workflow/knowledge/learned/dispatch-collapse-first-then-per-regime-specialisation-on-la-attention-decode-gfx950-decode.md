@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-08-12
 levers: ['host.launch-overhead', 'compute.launch-tuning', 'compute.constexpr-promotion']
+origin_kernels: ['kernel_unified_attention_2d']
 ---
 # Dispatch collapse first, then per-regime specialisation, on latency-bound decode attention
 - lever: On small-grid decode attention the host dispatch path is worth attacking before the tile loop; afterwards specialise the body per grid-density regime rather than globally.

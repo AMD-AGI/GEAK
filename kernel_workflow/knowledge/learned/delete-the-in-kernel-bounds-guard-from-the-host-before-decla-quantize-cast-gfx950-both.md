@@ -21,6 +21,7 @@ lifecycle: active
 cost: L2
 verified_on: 2026-08-14
 levers: ['host.launch-shape', 'compute.software-pipelining']
+origin_kernels: ['mi355x_vllm_hip_dynamic_per_tensor_quant']
 ---
 # Delete the in-kernel bounds guard from the host before declaring a scheduling transform unprofitable
 - lever: when a latency-hiding or phase-split transform measures as a loss, ask what the surrounding bounds guard forces the compiler to materialise before writing the transform off; then delete the guard by constructing the launch so its predicate is compile-time dead
