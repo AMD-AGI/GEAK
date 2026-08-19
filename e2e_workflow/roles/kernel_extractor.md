@@ -175,6 +175,10 @@ freeze an out-of-regime oracle nobody should trust.
    read `$OUT_DIR/server_start.json` — `reason` distinguishes `stalled` / `oom` / `died_early` /
    `ceiling_exceeded` (the last one names `SERVER_STARTUP_TIMEOUT_SEC` as the override).
 
+   🔴 **ISL/OSL/CONC MUST be the deployment `WORKLOAD` values** — shrinking OSL to speed the capture up
+   freezes a decode regime the deployment never runs, so every downstream speedup is measured on the
+   wrong shapes. Shorten the window with `REPEATS`/`CAPTURE_MAX` instead.
+
    (REPEATS=0 → just warmup drives a short window; capture flushes incrementally + on server exit.) Verify
    `reference_io.pt` + `meta.json` exist and `num_cases` ≥ 1. For a head GEMM that serves both regimes
    you MUST capture/synthesize BOTH a decode case (M ≈ `WORKLOAD.conc`) and a prefill case (large M) —
