@@ -21,14 +21,14 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kb_store_local import KBStoreError, LocalKBStore  # noqa: E402
 
-CID = "kernel:geak:fused_moe_kernel:rocm:7.2:triton:mi355x"
+CID = "geak:kernel:geak:fused_moe_kernel:rocm:7.2:triton:gfx950"
 
 
 def knowledge(speedup=2.0, direction="tile-retune", name="fused_moe_kernel"):
     """The four-key document upstream writes; `value` is the producer's own and opaque here."""
     return {"producer": "geak", "speedup": speedup,
             "identity": {"producer": "geak", "kernel_name": name, "framework": "rocm",
-                         "framework_version": "7.2", "backend": "triton", "gpu": "mi355x"},
+                         "framework_version": "7.2", "backend": "triton", "gpu": "gfx950"},
             "value": {"direction": direction, "kernel_name": name}}
 
 
@@ -45,8 +45,8 @@ def artifacts(tmp_path, tag="a", text="patch body\n"):
 def test_the_canonical_id_is_the_path(tmp_path):
     store = LocalKBStore(tmp_path / "store")
     store.write(CID, "geak-fused_moe_kernel-aaaa-bbbb", knowledge(), artifacts(tmp_path))
-    session = (tmp_path / "store" / "kernel" / "geak" / "fused_moe_kernel" / "rocm" / "7.2"
-               / "triton" / "mi355x" / "sessions" / "geak-fused_moe_kernel-aaaa-bbbb")
+    session = (tmp_path / "store" / "geak" / "kernel" / "geak" / "fused_moe_kernel" / "rocm" / "7.2"
+               / "triton" / "gfx950" / "sessions" / "geak-fused_moe_kernel-aaaa-bbbb")
     assert (session / "knowledge.json").is_file()
     assert sorted(os.listdir(session / "files")) == ["patch.diff", "report.md"]
     document = json.loads((session / "knowledge.json").read_text())
@@ -127,8 +127,8 @@ def test_a_half_written_document_is_a_miss_not_a_crash(tmp_path):
     store = LocalKBStore(tmp_path / "store")
     store.write(CID, "sid-ok", knowledge(speedup=3.0), {})
     store.write(CID, "sid-broken", knowledge(speedup=9.0), {})
-    (tmp_path / "store" / "kernel" / "geak" / "fused_moe_kernel" / "rocm" / "7.2" / "triton"
-     / "mi355x" / "sessions" / "sid-broken" / "knowledge.json").write_text("{not json")
+    (tmp_path / "store" / "geak" / "kernel" / "geak" / "fused_moe_kernel" / "rocm" / "7.2" / "triton"
+     / "gfx950" / "sessions" / "sid-broken" / "knowledge.json").write_text("{not json")
     assert [c.session_id for c in store.candidates(CID, limit=0)] == ["sid-ok"]
 
 

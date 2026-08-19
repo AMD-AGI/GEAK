@@ -116,9 +116,20 @@ Return JSON:
   "tp": 1,
   "workload": {"isl": 1024, "osl": 1024, "conc": 64},
   "bench_script": "<EVAL_DIR>/bench_e2e.sh",
+  "gfx": "<gfx target, e.g. gfx950 — from step 4, or \"\" if you could not detect it>",
+  "precision": "<serving precision, e.g. mxfp8 | fp8 | bf16 — or \"\" if not established>",
+  "framework_version": "<BACKEND version, e.g. 0.26.0 — or \"\" if not established>",
+  "rocm_version": "<ROCm <major>.<minor>, e.g. 7.2 — or \"\" if not established>",
   "notes": "sglang version, anything unusual"
 }
 ```
+
+The last four are the dimensions the deployment knowledge base addresses a record by, and you have
+already established every one of them in step 4 to launch the server at all. **Never guess one.**
+An empty string files this run under a deliberately coarse `unknown` page, which is honest and
+recoverable; a plausible-looking wrong value files it under an authoritative page, and the store has
+no delete — a bad record there can only be outranked, never removed. If a value is genuinely
+unknown, `""` is the correct answer.
 
 ---
 

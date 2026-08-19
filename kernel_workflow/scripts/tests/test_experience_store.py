@@ -616,7 +616,7 @@ def test_canonical_id_is_seven_ordered_segments(tmp_path):
     stacked(root, "20260101_000000_a", kernel="moe_stage1", lang="ck", kclass="ck")
     recs, summary = export(root)
     assert summary["emitted"] == 1
-    assert recs[0]["canonical_id"] == "kernel:geak:moe_stage1:rocm:7.2:ck:mi355x"
+    assert recs[0]["canonical_id"] == "geak:kernel:geak:moe_stage1:rocm:7.2:ck:gfx950"
     # and the echoed identity must reconstruct it, or a reader validating the envelope rejects it
     ident = recs[0]["knowledge"]["identity"]
     assert ":".join(["kernel", ident["producer"], ident["kernel_name"], ident["framework"],
@@ -773,7 +773,7 @@ def test_export_filters_and_overrides(tmp_path):
     assert export(root, "--gfx", "gfx942")[1]["emitted"] == 0
     rec = export(root, "--kernel-name", "k1", "--producer", "forge-loop", "--gpu", "MI300X")[0][0]
     assert rec["canonical_id"].startswith("kernel:forge-loop:k1:")
-    assert rec["canonical_id"].endswith(":mi300x")
+    assert rec["canonical_id"].endswith(":gfx942")
     assert rec["session_id"].startswith("geak-")   # the id prefix is ours, not the producer arg
 
 
@@ -819,7 +819,7 @@ def test_both_planes_offer_the_same_candidates(tmp_path):
     assert [{k: c.get(k) for k in keys} for c in remote["candidates"]] == \
            [{k: c.get(k) for k in keys} for c in local["candidates"]]
     assert remote["filtered"]["below_min_speedup"] == local["filtered"]["below_min_speedup"] == 1
-    assert remote["canonical_id"] == "kernel:geak:fused_moe_kernel:rocm:7.2:triton:mi355x"
+    assert remote["canonical_id"] == "geak:kernel:geak:fused_moe_kernel:rocm:7.2:triton:gfx950"
 
 
 def test_the_store_plane_curates_what_the_store_itself_cannot(tmp_path):
@@ -902,7 +902,7 @@ def test_a_write_records_both_planes(tmp_path):
             "--framework-version", "7.2")
     assert w["written"] is True and os.path.isfile(os.path.join(w["dir"], "meta.yaml"))
     assert w["remote"]["written"] is True
-    assert w["remote"]["canonical_id"] == "kernel:geak:fused_moe_kernel:rocm:7.2:triton:mi355x"
+    assert w["remote"]["canonical_id"] == "geak:kernel:geak:fused_moe_kernel:rocm:7.2:triton:gfx950"
     assert w["remote"]["champion"] is True and w["remote"]["replaced"] is False
     out = resolve_remote(store, str(tmp_path / "refs"))
     assert [c["speedup"] for c in out["candidates"]] == [2.0]

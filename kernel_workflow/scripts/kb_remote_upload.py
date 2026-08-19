@@ -98,6 +98,15 @@ def read_records(path: str):
 def upload_one(store, rec: dict, *, apply: bool, quiet: bool) -> dict:
     cid, sid = rec["canonical_id"], rec["session_id"]
     files = rec.get("files") or []
+    # EVERY rung gets its own put_files, including the coarse ones that share a session id with the
+    # exact rung. The S3 prefix really is `kb/<producer>/<session_id>/` and is therefore shared, but
+    # the file MANIFEST is per (canonical_id, session_id): committing only under the exact id leaves
+    # the coarse page reporting file_count 0, and a reader that falls back to it materializes a
+    # bundle with no patch.diff in it. Verified against the service, not assumed — the first cut of
+    # this skipped rungs > 0 and produced exactly that.
+    #
+    # The cost is re-PUTting identical bytes to a key that already holds them, once per extra rung.
+    # That is the ladder's real price: transfer scales with depth even though storage does not.
     missing = [f["local_path"] for f in files if not os.path.isfile(f.get("local_path") or "")]
     if missing:
         return {"canonical_id": cid, "session_id": sid, "ok": False,
@@ -147,7 +156,7 @@ def main(argv=None):
             raise SystemExit("KB_STORE_URL is not set; refusing to --apply")
         store = KBStoreClient.from_env()
 
-    ok = failed = 0
+    ok = failed = sent_bytes = 0
     failures = []
     for rec in records:
         try:
@@ -157,6 +166,7 @@ def main(argv=None):
                       "ok": False, "reason": f"{type(e).__name__}: {str(e)[:200]}"}
         if result.get("ok"):
             ok += 1
+            sent_bytes += int(result.get("bytes") or 0)
             if not a.apply and not a.quiet:
                 print(json.dumps(result, ensure_ascii=False))
         else:
@@ -170,8 +180,12 @@ def main(argv=None):
                       "candidates": len(records), "ok": ok, "failed": failed,
                       "champions": sum(1 for r in records if r.get("champion")),
                       "identities": len({r["canonical_id"] for r in records}),
-                      "bytes": sum(int(f.get("size") or 0) for r in records
-                                   for f in (r.get("files") or []))}, ensure_ascii=False))
+                      "sessions": len({r.get("session_id") for r in records}),
+                      # What actually goes over the wire, ladder depth included: every rung commits
+                      # its own manifest, so N rungs really do send the artifacts N times. Reported
+                      # from the plans rather than the records so a skipped or failed candidate is
+                      # not counted as transferred.
+                      "bytes": sent_bytes}, ensure_ascii=False))
     return 1 if failures else 0
 
 
