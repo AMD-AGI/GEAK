@@ -11,6 +11,7 @@ mode runs on CPU against fake tensors. Nothing here needs a GPU.
 
 Run: python3 -m pytest e2e_workflow/scripts/tests/test_leg_runner.py -v
 """
+import collections
 import contextlib
 import importlib
 import importlib.util
@@ -396,6 +397,79 @@ class ModeOracle(_LegRunnerTestCase):
                 self._main("--task", self.task, "--mode", "oracle",
                            "--out", os.path.join(self.task, "o.pt"), "--draws", "1")
                 self.assertEqual(sys.modules["cases"].seen[-1]["device"], want)
+
+
+class OracleSnapshot(_LegRunnerTestCase):
+    """What the oracle can record.
+
+    `out.detach()` on a bare return value assumes every op returns ONE tensor. Attention entries
+    routinely return `(out, lse)`; that raised AttributeError inside the leg and reached the caller
+    through `_run_leg` as an anonymous non-zero-exit RuntimeError, which names neither the op nor the
+    real problem."""
+
+    class _T:
+        """Duck-typed tensor: records that the full detach/clone/cpu chain ran."""
+        def __init__(self, tag):
+            self.tag = tag
+            self.detached = False
+        def detach(self):
+            self.detached = True
+            return self
+        def clone(self):
+            return self
+        def cpu(self):
+            return self
+
+    def test_a_bare_tensor_is_detached_cloned_and_moved_to_host(self):
+        t = self._T("out")
+        got = lr._snapshot(t)
+        self.assertIs(got, t)
+        self.assertTrue(t.detached)
+
+    def test_a_tuple_return_is_recorded_elementwise(self):
+        """The #416 review case: attention returning (out, lse)."""
+        out, lse = self._T("out"), self._T("lse")
+        got = lr._snapshot((out, lse))
+        self.assertEqual([x.tag for x in got], ["out", "lse"])
+        self.assertTrue(all(x.detached for x in got))
+
+    def test_a_list_return_keeps_its_type(self):
+        got = lr._snapshot([self._T("a")])
+        self.assertIsInstance(got, list)
+
+    def test_a_namedtuple_return_keeps_its_fields(self):
+        """type(out)(genexpr) would build a namedtuple with ONE positional arg and raise."""
+        Attn = collections.namedtuple("Attn", "out lse")
+        got = lr._snapshot(Attn(self._T("out"), self._T("lse")))
+        self.assertIsInstance(got, Attn)
+        self.assertEqual(got.lse.tag, "lse")
+
+    def test_a_dict_return_is_recorded_by_key(self):
+        got = lr._snapshot({"out": self._T("out"), "lse": self._T("lse")})
+        self.assertEqual(sorted(got), ["lse", "out"])
+
+    def test_nesting_is_recorded_all_the_way_down(self):
+        got = lr._snapshot({"pair": [(self._T("deep"),)]})
+        self.assertTrue(got["pair"][0][0].detached)
+
+    def test_a_scalar_alongside_a_tensor_survives(self):
+        """Some entries return (out, num_tokens); dropping the int would corrupt the blob."""
+        self.assertEqual(lr._snapshot((self._T("out"), 7))[1], 7)
+
+    def test_an_unrecordable_return_names_the_type_it_got(self):
+        with self.assertRaises(TypeError) as cm:
+            lr._snapshot(object())
+        self.assertIn("object", str(cm.exception))
+        self.assertIn("cases.call", str(cm.exception))
+
+    def test_the_oracle_mode_records_a_tuple_returning_op_end_to_end(self):
+        self._task_dir(cases=_CASES_STUB.replace("return _Out()", "return (_Out(), _Out())"))
+        self._target_module()
+        out = json.loads(self._main("--task", self.task, "--mode", "oracle",
+                                    "--out", os.path.join(self.task, "o.pt"), "--draws", "1"))
+        self.assertEqual(out["n"], 1)
+        blob, _ = self.torch.saved[-1]
+        self.assertEqual(len(blob["decode|0"]), 2)
 
 
 class Cli(_LegRunnerTestCase):

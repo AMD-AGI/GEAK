@@ -63,6 +63,28 @@ def _identity(target_callable):
             "qualname": getattr(fn, "__qualname__", repr(fn))}
 
 
+def _snapshot(out):
+    """Detach one op's output for the oracle blob.
+
+    Attention entries commonly return `(out, lse)` and some return a dict, so a bare `out.detach()`
+    raises AttributeError and — through `_run_leg` — surfaces as a generic non-zero-exit RuntimeError
+    instead of naming the shape of the return value. Recurse over the container instead. Containers
+    are matched BEFORE the tensor duck-check: a namedtuple carries both."""
+    if isinstance(out, tuple) and hasattr(out, "_fields"):
+        return type(out)(*(_snapshot(o) for o in out))
+    if isinstance(out, (tuple, list)):
+        return type(out)(_snapshot(o) for o in out)
+    if isinstance(out, dict):
+        return {k: _snapshot(v) for k, v in out.items()}
+    if hasattr(out, "detach"):
+        return out.detach().clone().cpu()
+    if out is None or isinstance(out, (int, float, bool, str)):
+        return out
+    raise TypeError(
+        f"oracle cannot record a {type(out).__name__} returned by the op — cases.call must return a "
+        "tensor, or a tuple/list/dict of tensors")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True)
@@ -113,7 +135,7 @@ def main():
         for i in range(max(1, draws)):
             rng = torch.Generator(device=device).manual_seed(int(a.seed) + i)
             out = call(shape["make_inputs"](rng))
-            blob[f"{shape['sig']}|{i}"] = out.detach().clone().cpu()
+            blob[f"{shape['sig']}|{i}"] = _snapshot(out)
     torch.save(blob, a.out)
     print(json.dumps({"out": a.out, "n": len(blob)}))
 

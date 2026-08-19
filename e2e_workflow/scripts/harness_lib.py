@@ -40,6 +40,7 @@ import json
 import math
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -461,8 +462,38 @@ def _time_graph(torch, g, warmup, repeats, flush):
 
 
 # --------------------------------------------------------------------------- (b) correctness
+def flatten_outputs(out):
+    """Deterministic tensor list from an op's return value: tensor, tuple/list, dict, or nesting.
+
+    Attention entries return `(out, lse)`; a bare-tensor assumption does not merely raise here, it
+    makes `correct()` fall into its except and report the candidate INCORRECT — a correct kernel
+    rejected for the shape of its return value. Dict order is by sorted key so the two legs pair up."""
+    if isinstance(out, dict):
+        return [t for k in sorted(out) for t in flatten_outputs(out[k])]
+    if isinstance(out, (tuple, list)):
+        return [t for o in out for t in flatten_outputs(o)]
+    if hasattr(out, "shape"):
+        return [out]
+    return []      # scalars/None carry no tolerance semantics and are not compared
+
+
+def to_device_like(ref, dev):
+    """Move a recorded oracle entry (tensor or container of tensors) onto `dev`."""
+    if isinstance(ref, dict):
+        return {k: to_device_like(v, dev) for k, v in ref.items()}
+    if isinstance(ref, tuple) and hasattr(ref, "_fields"):
+        return type(ref)(*(to_device_like(o, dev) for o in ref))
+    if isinstance(ref, (tuple, list)):
+        return type(ref)(to_device_like(o, dev) for o in ref)
+    return ref.to(dev) if hasattr(ref, "to") else ref
+
+
 def correct(out, ref, tol):
     """Per-element mixed-tolerance check `|out-ref| <= atol + tol*|ref|`, returns (ok, max_rel_err).
+
+    A multi-tensor return (e.g. attention's `(out, lse)`) is compared component-wise: ALL components
+    must pass, and the reported error is the worst of them. A count mismatch between the two sides is
+    a failure, never a silent comparison of the first component only.
 
     The absolute floor `atol` exists ONLY to keep near-zero reference elements from blowing up the pure
     relative term — it is set to the computation's NOISE level `tol * RMS(ref)`, NOT `tol * max(|ref|)`.
@@ -471,6 +502,20 @@ def correct(out, ref, tol):
     on the small elements the value-parity gate is meant to catch. RMS tracks the bulk magnitude, so for
     a uniform-magnitude tensor RMS≈max (behavior unchanged) but for a spiky tensor RMS≪max (the floor
     tightens and the small-element error is no longer masked)."""
+    po, pr = flatten_outputs(out), flatten_outputs(ref)
+    if len(po) != 1 or len(pr) != 1:
+        if not po or len(po) != len(pr):
+            return False, float("inf")
+        ok_all, worst = True, 0.0
+        for o, r in zip(po, pr):
+            ok, err = _correct_one(o, r, tol)
+            ok_all = ok_all and ok
+            worst = max(worst, err)
+        return ok_all, worst
+    return _correct_one(po[0], pr[0], tol)
+
+
+def _correct_one(out, ref, tol):
     torch = _torch()
     try:
         if tuple(out.shape) != tuple(ref.shape):
@@ -664,10 +709,14 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
                     if ref is None:
                         raise KeyError(f"no recorded baseline output for {sig}|{i}")
                     cand_out = current_call(args)
-                    base_snap = ref.to(cand_out.device)
+                    parts = flatten_outputs(cand_out)
+                    if not parts:
+                        raise TypeError(f"candidate returned no tensor for {sig}|{i}")
+                    base_snap = to_device_like(ref, parts[0].device)
                 else:
                     base_out = baseline_call(args)
-                    base_snap = base_out.detach().clone()  # snapshot BEFORE current runs (anti-alias)
+                    # snapshot BEFORE current runs (anti-alias)
+                    base_snap = [t.detach().clone() for t in flatten_outputs(base_out)]
                     cand_out = current_call(args)
             except Exception as e:
                 all_ok = False
@@ -1008,6 +1057,30 @@ def shuffled_block_table(num_seqs, blocks_per_seq, pool_blocks=0, seed=0, torch=
 # SAME leg_runner.py + cases.py under `baseline_overlay/` on PYTHONPATH; the candidate is that stack
 # plus ONE entry generated from kernel_src/. Leg direction is therefore a property of the environment,
 # not of a name string the harness binds by hand.
+def _kill_process_group(proc, grace=5.0):
+    """SIGTERM then SIGKILL the leg's whole process group, so nothing it spawned keeps the GPU.
+
+    Reaping is what proves death: `os.kill(pid, 0)` still succeeds on a zombie, so wait() on the
+    child is what confirms the signal took."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        return
+    if pgid == os.getpgid(0):      # start_new_session did not take — never signal our own group
+        proc.kill()
+        return
+    for sig, wait_for in ((signal.SIGTERM, grace), (signal.SIGKILL, 1.0)):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, OSError):
+            return
+        try:
+            proc.wait(timeout=wait_for)   # wait(), not kill(pid, 0): a zombie still answers signal 0
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
 def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
@@ -1019,12 +1092,22 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
         cmd += ["--out", out]
     if draws:
         cmd += ["--draws", str(int(draws))]
-    r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
-    if r.returncode != 0:
-        raise RuntimeError(f"leg({mode}) under {overlay} exited {r.returncode}: {r.stderr[-800:]}")
-    lines = [ln for ln in r.stdout.strip().splitlines() if ln.startswith("{")]
+    # Own process GROUP, not just a child: on timeout the leg may be mid-kernel or may have spawned
+    # helpers, and killing only the direct child leaves those holding the GPU allocation. The NEXT leg
+    # then times against a busy device and reads as a slowdown attributable to nothing.
+    p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         start_new_session=True)
+    try:
+        stdout, stderr = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(p)
+        stdout, stderr = p.communicate()
+        raise
+    if p.returncode != 0:
+        raise RuntimeError(f"leg({mode}) under {overlay} exited {p.returncode}: {stderr[-800:]}")
+    lines = [ln for ln in stdout.strip().splitlines() if ln.startswith("{")]
     if not lines:
-        raise RuntimeError(f"leg({mode}) under {overlay} produced no JSON: {r.stdout[-800:]}")
+        raise RuntimeError(f"leg({mode}) under {overlay} produced no JSON: {stdout[-800:]}")
     return json.loads(lines[-1])
 
 

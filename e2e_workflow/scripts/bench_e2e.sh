@@ -390,7 +390,9 @@ if [ "$REUSE_SERVER" != "1" ]; then
     if adapter_health >/dev/null 2>&1; then _up=1; break; fi
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then _reason="died_early"; break; fi
     if grep -Eq 'CUDA out of memory|HIP out of memory' "$LOG" 2>/dev/null; then _reason="oom"; break; fi
-    if grep -Eq 'watchdog timeout|Capturing cuda graph failed|FATAL' "$LOG" 2>/dev/null; then
+    # FATAL must look like an EMITTED record ('[FATAL]' or a 'FATAL:' prefix), not the bare word:
+    # unanchored, it also matches a --log-level legend or a help line and kills a healthy start.
+    if grep -Eq 'watchdog timeout|Capturing cuda graph failed|\[FATAL\]|(^|[[:space:]])FATAL:' "$LOG" 2>/dev/null; then
       _reason="fatal_marker"; break
     fi
     _tok=$(stat -c %s "$LOG" 2>/dev/null || echo 0)

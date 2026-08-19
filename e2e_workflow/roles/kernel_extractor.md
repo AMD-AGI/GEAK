@@ -258,7 +258,10 @@ freeze an out-of-regime oracle nobody should trust.
      Build a `cases` list of
      `{"args": <args for one call>, "ref": <golden out>, "sig": <label>}` and pass a `call(args) -> out`
      closure that invokes the CURRENT kernel entry point (import by the meta `module:attr`, or the copied
-     `kernel_src`). Tolerance is dtype-appropriate (bf16/fp16 rtol=atol=2e-2; fp8 looser; fp32 tight).
+     `kernel_src`). **Return the entry point's output WHOLE** — if it returns `(out, lse)` or a dict,
+     hand that back unchanged. `correct`/the oracle compare multi-tensor returns component-wise; unwrapping
+     to just the first tensor drops the rest from every correctness gate, silently.
+     Tolerance is dtype-appropriate (bf16/fp16 rtol=atol=2e-2; fp8 looser; fp32 tight).
      `check_correct_multi` keeps all outputs live before comparing AND runs the output-independence
      check — so a candidate that returns a shared/persistent buffer FAILS. Print PASS/FAIL per case.
      This set is NEVER re-weighted.

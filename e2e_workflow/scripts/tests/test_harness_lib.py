@@ -39,8 +39,11 @@ import json
 import math
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 
@@ -77,6 +80,19 @@ def _env(**kw):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+@contextlib.contextmanager
+def _patched(obj, **kw):
+    """Swap attributes on a module/object for the duration of the block."""
+    old = {k: getattr(obj, k) for k in kw}
+    try:
+        for k, v in kw.items():
+            setattr(obj, k, v)
+        yield
+    finally:
+        for k, v in old.items():
+            setattr(obj, k, v)
 
 
 # --------------------------------------------------------------------------- #
@@ -1127,6 +1143,55 @@ class TestCorrect(_HarnessTestCase):
         self.assertAlmostEqual(err, 2.0 / 3.0, places=12)
 
 
+class TestCorrectOnMultiTensorReturns(_HarnessTestCase):
+    """Attention entries return `(out, lse)`.
+
+    Comparing only the first component would let a candidate corrupt `lse` and still pass; falling
+    into the except would report a CORRECT candidate as incorrect. Both are silent, so both are
+    tested here rather than left to the shape of whatever the op happens to return."""
+
+    def test_a_tuple_passes_only_when_every_component_passes(self):
+        ref = (_T((2,), [2.0, 2.0]), _T((2,), [1.0, 1.0]))
+        ok, err = hl.correct((_T((2,), [2.0, 2.0]), _T((2,), [1.0, 1.0])), ref, 0.5)
+        self.assertTrue(ok)
+        self.assertEqual(err, 0.0)
+
+    def test_a_corrupt_second_component_fails_the_whole_comparison(self):
+        """The first component matching exactly must not carry the verdict."""
+        ref = (_T((2,), [2.0, 2.0]), _T((2,), [2.0, 2.0]))
+        ok, err = hl.correct((_T((2,), [2.0, 2.0]), _T((2,), [2.0, 9.0])), ref, 0.5)
+        self.assertFalse(ok)
+        self.assertGreater(err, 1.0)
+
+    def test_the_reported_error_is_the_worst_component(self):
+        ref = (_T((2,), [2.0, 2.0]), _T((2,), [2.0, 2.0]))
+        ok, err = hl.correct((_T((2,), [2.0, 4.0]), _T((2,), [2.0, 2.0])), ref, 0.5)
+        self.assertTrue(ok)
+        self.assertAlmostEqual(err, 2.0 / 3.0, places=12)
+
+    def test_a_component_count_mismatch_is_incorrect(self):
+        """Zipping the shorter side would compare a 2-tuple against a 3-tuple and pass."""
+        ok, err = hl.correct((_T((1,), [1.0]),), (_T((1,), [1.0]), _T((1,), [1.0])), 0.5)
+        self.assertFalse(ok)
+        self.assertEqual(err, float("inf"))
+
+    def test_a_dict_return_is_paired_by_key_not_by_insertion_order(self):
+        a = {"lse": _T((1,), [1.0]), "out": _T((1,), [8.0])}
+        b = {"out": _T((1,), [8.0]), "lse": _T((1,), [1.0])}
+        self.assertEqual(hl.correct(a, b, 0.5), (True, 0.0))
+
+    def test_a_scalar_riding_along_with_a_tensor_is_not_compared(self):
+        """(out, num_tokens) must not fail because an int has no .shape."""
+        ok, _ = hl.correct((_T((1,), [1.0]), 7), (_T((1,), [1.0]), 7), 0.5)
+        self.assertTrue(ok)
+
+    def test_an_empty_return_is_incorrect_rather_than_vacuously_correct(self):
+        self.assertEqual(hl.correct((), (), 0.5), (False, float("inf")))
+
+    def test_flatten_is_stable_across_nesting(self):
+        self.assertEqual(len(hl.flatten_outputs([{"a": _T((1,), [1.0])}, (_T((1,), [2.0]),)])), 2)
+
+
 # --------------------------------------------------------------------------- #
 # assert_independent_outputs -- catching the shared/persistent `static_out`
 # --------------------------------------------------------------------------- #
@@ -2004,16 +2069,59 @@ class _Proc:
         self.stderr = stderr
 
 
+class _FakePopen:
+    """The handle `_run_leg` drives: communicate() delivers the scripted _Proc, or raises a timeout."""
+
+    def __init__(self, proc, call, timeout_once=False):
+        self._proc = proc
+        self._call = call
+        self._timeout_once = timeout_once
+        self.pid = os.getpid()          # a real pid, so os.getpgid() in the killer resolves
+        self.returncode = None
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        self._call["timeout"] = timeout
+        if self._timeout_once:
+            self._timeout_once = False
+            raise subprocess.TimeoutExpired(self._call["cmd"], timeout)
+        self.returncode = self._proc.returncode
+        return self._proc.stdout, self._proc.stderr
+
+    def wait(self, timeout=None):
+        """Reaped only if a signal actually took; the killpg fake is what decides that."""
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired(self._call["cmd"], timeout)
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
 class _FakeSubprocess:
     """Stands in for the `subprocess` module inside harness_lib; records every leg invocation."""
 
-    def __init__(self, handler):
+    PIPE = subprocess.PIPE
+    TimeoutExpired = subprocess.TimeoutExpired
+
+    def __init__(self, handler, timeout_once=False):
         self._handler = handler
+        self._timeout_once = timeout_once
         self.calls = []
+        self.procs = []
 
     def run(self, cmd, env=None, capture_output=False, text=False, timeout=None):
         self.calls.append({"cmd": list(cmd), "env": env or {}, "timeout": timeout})
         return self._handler(list(cmd), env or {})
+
+    def Popen(self, cmd, env=None, stdout=None, stderr=None, text=False, start_new_session=False):
+        call = {"cmd": list(cmd), "env": env or {}, "timeout": None,
+                "start_new_session": start_new_session}
+        self.calls.append(call)
+        p = _FakePopen(self._handler(list(cmd), env or {}), call, self._timeout_once)
+        self.procs.append(p)
+        return p
 
     def flag(self, name, call=-1):
         """The value the recorded call passed for `--name`, or None if it was omitted."""
@@ -2143,6 +2251,94 @@ class TestRunLeg(_LegTestCase):
         with self.assertRaises(RuntimeError) as cm:
             hl._run_leg(self.task, self.base, "list")
         self.assertIn("produced no JSON", str(cm.exception))
+
+
+class TestLegTimeoutReleasesTheGpu(_LegTestCase):
+    """A timed-out leg must take everything it spawned with it.
+
+    Killing only the direct child leaves a helper holding the GPU allocation, and the NEXT leg then
+    times against a busy device -- a slowdown attributable to nothing, in the one code path whose
+    whole purpose is to compare two legs fairly."""
+
+    def test_the_leg_is_started_in_its_own_session(self):
+        """No new session => the pgid is OURS, and there is no group to kill but our own."""
+        self._script(lambda cmd, env: _Proc(0, "{}"))
+        hl._run_leg(self.task, self.base, "list")
+        self.assertTrue(self.sub.calls[0]["start_new_session"])
+
+    def _timing_out_leg(self):
+        self.sub = _FakeSubprocess(lambda cmd, env: _Proc(0, "{}"), timeout_once=True)
+        hl.subprocess = self.sub
+        return self.sub
+
+    def test_a_timeout_signals_the_whole_group_and_still_raises(self):
+        killed = []
+        sub = self._timing_out_leg()
+
+        def _killpg(pgid, sig):
+            killed.append((pgid, sig))
+            sub.procs[0].returncode = -int(sig)      # SIGTERM is honoured
+        with _patched(os, killpg=_killpg, getpgid=lambda pid: 999 if pid else 1):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                hl._run_leg(self.task, self.base, "time", timeout=1)
+        self.assertEqual(killed, [(999, signal.SIGTERM)])
+
+    def test_a_group_that_ignores_sigterm_is_escalated_to_sigkill(self):
+        """A leg wedged in a kernel launch will not act on SIGTERM; the GPU is freed by SIGKILL."""
+        killed = []
+        sub = self._timing_out_leg()
+
+        def _killpg(pgid, sig):
+            killed.append((pgid, sig))
+            if sig == signal.SIGKILL:
+                sub.procs[0].returncode = -9
+        with _patched(os, killpg=_killpg, getpgid=lambda pid: 999 if pid else 1):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                hl._run_leg(self.task, self.base, "time", timeout=1)
+        self.assertEqual([s for _, s in killed], [signal.SIGTERM, signal.SIGKILL])
+        self.assertEqual({pgid for pgid, _ in killed}, {999})
+
+    def test_our_own_group_is_never_signalled(self):
+        """If start_new_session did not take, killpg would take the harness down with the leg."""
+        killed = []
+        self._timing_out_leg()
+        with _patched(os, killpg=lambda pgid, sig: killed.append((pgid, sig)),
+                      getpgid=lambda pid: 4242):     # child's group == our own
+            with self.assertRaises(subprocess.TimeoutExpired):
+                hl._run_leg(self.task, self.base, "time", timeout=1)
+        self.assertEqual(killed, [])
+        self.assertTrue(self.sub.procs[0].killed)
+
+    def test_a_group_that_is_already_gone_is_not_an_error(self):
+        self._timing_out_leg()
+
+        def _gone(pid):
+            raise ProcessLookupError(pid)
+        with _patched(os, getpgid=_gone):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                hl._run_leg(self.task, self.base, "time", timeout=1)
+
+    def test_a_real_grandchild_does_not_outlive_the_timeout(self):
+        """The end-to-end claim, against the real OS: reaped, not merely signalled."""
+        marker = os.path.join(self.task, "grandchild.pid")
+        with open(os.path.join(self.task, "leg_runner.py"), "w") as fh:
+            fh.write(
+                "import os, subprocess, sys, time\n"
+                "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+                f"open({marker!r}, 'w').write(str(p.pid))\n"
+                "time.sleep(120)\n")
+        with self.assertRaises(subprocess.TimeoutExpired):
+            hl._run_leg(self.task, self.base, "list", timeout=5)
+        with open(marker) as fh:
+            gpid = int(fh.read())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(gpid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail(f"grandchild {gpid} survived the leg timeout and still holds the device")
 
 
 class TestBuildCandidateOverlay(_LegTestCase):
@@ -2341,6 +2537,32 @@ class TestCheckRandomVsBaselineRecorded(_HarnessTestCase):
         self.assertTrue(per[0]["correct"])
         self.assertFalse(per[1]["correct"])
         self.assertIn("no recorded baseline output for m1|1", per[1]["note"])
+
+    def test_a_tuple_returning_op_is_compared_component_wise_end_to_end(self):
+        """The oracle now records `(out, lse)` as a tuple; the parity leg must pair it up, not
+        report the candidate incorrect because the return value is not one tensor."""
+        ok, per = hl.check_random_vs_baseline(
+            None, lambda args: (_T((2,), list(args)), _T((1,), [9.0])), [self._shape()], 0.01,
+            draws=1, baseline_outputs={"m1|0": (_T((2,), [1.0, 2.0]), _T((1,), [9.0]))})
+        self.assertTrue(ok, per[0].get("note"))
+        self.assertEqual(per[0]["max_rel_err"], 0.0)
+
+    def test_every_component_of_a_recorded_tuple_is_moved_onto_the_candidates_device(self):
+        """Moving only the first would raise a cross-device compare on the second."""
+        ref = (_T((2,), [1.0, 2.0], device="cpu"), _T((1,), [9.0], device="cpu"))
+        ok, per = hl.check_random_vs_baseline(
+            None, lambda args: (_T((2,), list(args), device="cuda"),
+                                _T((1,), [9.0], device="cuda")),
+            [self._shape()], 0.01, draws=1, baseline_outputs={"m1|0": ref})
+        self.assertTrue(ok, per[0].get("note"))
+        self.assertEqual([t.device for t in ref], ["cpu", "cpu"])   # oracle not mutated
+
+    def test_a_candidate_that_returns_no_tensor_is_named_rather_than_compared(self):
+        ok, per = hl.check_random_vs_baseline(
+            None, lambda args: None, [self._shape()], 0.01,
+            draws=1, baseline_outputs={"m1|0": _T((2,), [1.0, 2.0])})
+        self.assertFalse(ok)
+        self.assertIn("no tensor", per[0]["note"])
 
 
 class TestRunCorrectnessNeedsABaseline(_HarnessTestCase):
