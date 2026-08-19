@@ -33,6 +33,21 @@ const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
 // worker = 3 levels) and the runtime forbids it. The worker's behavior/args are unchanged.
 const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 
+// The kernel workflow's learned KB is OFF by default for lanes launched from here, and ON by default
+// when kernel_workflow is driven directly. Same worker, different prior: a kernel_workflow campaign
+// re-optimizes a fixed benchmark set, where a card distilled from a past run of the same kernel is
+// the point; e2e extracts whatever the profiler happens to surface from a live server, and a card
+// carrying another run's conclusions about a superficially similar op is a prior nobody asked for.
+// Off is also the conservative default for the layer that has never been measured with it on.
+// Override per run with args.use_learned_kb=true.
+const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb : 'false');
+
+// EVERY nested lane invocation goes through here. Setting the flag at each call site instead would
+// be the defect this repo keeps re-making — there are seven call sites today, and the eighth would
+// silently take the lane's own default (on) with nothing to catch it. test_e2e_lane_defaults.py
+// fails if a `scriptPath: KERNEL_WF_SCRIPT` call is added that does not route through this.
+const laneArgs = (wfArgs) => ({ use_learned_kb: LANE_USE_LEARNED_KB, ...wfArgs });
+
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
@@ -957,7 +972,7 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
 // workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
 // existing null-guards treat it as "no kernel" and continue.
 function fastBoundedWorkflow(ref, wfArgs, label) {
-  const p = workflow(ref, wfArgs);
+  const p = workflow(ref, laneArgs(wfArgs));
   if (!FAST_MODE || typeof setTimeout !== 'function' || !(FAST_HEAD_WF_MS > 0)) return p;
   let to;
   const guard = new Promise((resolve) => {
@@ -998,7 +1013,7 @@ if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HE
   }, TIME_HEAD_DEADLINE_MS);
 }
 function deepBoundedWorkflow(ref, wfArgs, label) {
-  const p = workflow(ref, wfArgs);
+  const p = workflow(ref, laneArgs(wfArgs));
   if (!DEEP_MODE || typeof setTimeout !== 'function' || !(DEEP_HEAD_WF_MS > 0)) return p;
   let to;
   const guard = new Promise((resolve) => {
@@ -1038,12 +1053,12 @@ if (!MODEL_PATH && KERNEL_PATH) {
   // nesting). kernel_workflow.js returns {eval_dir, final_geomean, final_patch, validation_status, ...}.
   let passthru;
   try {
-    const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+    const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
       kernel_path: KERNEL_PATH, workflow_dir: KERNEL_WF_DIR,
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       budget: KERNEL_BUDGET, gpu_ids: GPU_IDS, task: TASK, exp_root: EXP_ROOT,
       apply_to_original: APPLY_TO_ORIGINAL,
-    });
+    }));
     passthru = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
       final_geomean: r.final_geomean, validation_status: r.validation_status,
       note: (r.winner && r.winner.source) || '' };
@@ -2145,14 +2160,14 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
     let kl;
     try {
-      const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+      const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
-      });
+      }));
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
         final_geomean: r.final_geomean, validation_status: r.validation_status,
         note: (r.winner && r.winner.source) || '' };
