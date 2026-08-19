@@ -1,0 +1,9 @@
+diff --git a/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_qwen3_8b.csv b/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_qwen3_8b.csv
+new file mode 100644
+index 000000000..5f0553211
+--- /dev/null
++++ b/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_qwen3_8b.csv
+@@ -0,0 +1,3 @@
++gfx,cu_num,M,N,K,q_dtype_w,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio
++gfx950,256,64,4096,12288,torch.float8_e4m3fn,ck,11,0,18.7774,a8w8_bpreshuffle_256x16x64x512_16x16_16x16_32x8x1_32x8x1_1x16x1x16_4x4x1_1x1_intrawave_v1,343.1,2750.24,0.0
++gfx950,256,64,24576,4096,torch.float8_e4m3fn,flydsl,210,0,22.1105,flydsl_bpreshuflle_64x128x256_F8_F8_B16_1x0x4x2_default,582.75,4706.87,0.0

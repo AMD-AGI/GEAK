@@ -1,0 +1,217 @@
+#!/usr/bin/env node
+// Regression guard for the standalone TuningSkillset phase (no GPU, no model, no agent needed).
+//
+// Five invariants, all of which the integration depends on and none of which is obvious from reading
+// one file:
+//
+//   A. WHOLE — the skillset is vendored as one intact tree with its own entry points, and its method is
+//      NOT copied/scattered into GEAK's own knowledge/ files. It is validated standalone, so GEAK must
+//      run the copy that was validated; a scattered paraphrase silently voids that validation.
+//   B. STANDALONE + BEFORE HeadKernel — it is its own gated phase (`want('tune')`) whose block appears
+//      after ConfigSweep and before HeadKernel in BOTH the declared phase list and the source order.
+//      This is what lets it run its complete loop and own an attributable pre/post A/B.
+//   C. ADDITIVE OFF — `tuning_skillset:"false"` injects nothing anywhere, so the run is byte-identical
+//      to a build without the feature.
+//   D. THIN ADAPTER — the role routes into the skillset instead of paraphrasing its method.
+//   E. REACHES PRODUCTION — the win travels through the EXISTING deliverable handles (final_patch.diff,
+//      final_launch.sh) rather than dying in the eval dir. GEAK's overlay is a PYTHONPATH mechanism for
+//      code, but a tuned artifact is usually data plus a cache invalidation, so without this the run
+//      reports a gain that the shipped bundle does not reproduce. result.json gains its block additively.
+//
+// Run:  node e2e_workflow/scripts/test_tuning_skillset_phase.js
+'use strict';
+const fs = require('fs');
+const path = require('path');
+
+const ROOT = path.resolve(__dirname, '..', '..');            // .../GEAK
+const FILE = path.join(ROOT, 'e2e_workflow', 'e2e_workflow.js');
+const ROLE = path.join(ROOT, 'e2e_workflow', 'roles', 'tuning_specialist.md');
+const SKILLSET = path.join(ROOT, 'tuning_skillset');
+
+let failures = 0;
+const ok = (cond, msg) => { if (!cond) { console.error('  FAIL:', msg); failures++; } else console.log('  ok:', msg); };
+
+console.log(`\n# ${path.relative(ROOT, FILE)}`);
+const src = fs.readFileSync(FILE, 'utf8');
+
+// ---------------------------------------------------------------------------
+// A. The skillset is vendored WHOLE, with its own entry points intact.
+// ---------------------------------------------------------------------------
+console.log('\n## A. vendored whole');
+ok(fs.existsSync(SKILLSET), 'tuning_skillset/ is vendored into the repo');
+for (const rel of ['README.md', 'tuning-core/SKILL.md', 'validate/claims.py', 'tuning-kb/README.md']) {
+  ok(fs.existsSync(path.join(SKILLSET, rel)), `vendored tree keeps its own entry point: ${rel}`);
+}
+// Every skill directory keeps its SKILL.md — the unit of invocation stays whole.
+const skillDirs = fs.readdirSync(SKILLSET, { withFileTypes: true })
+  .filter((d) => d.isDirectory() && d.name.startsWith('tuning-') && d.name !== 'tuning-kb')
+  .map((d) => d.name);
+ok(skillDirs.length >= 8, `vendored tree keeps its per-backend skills (${skillDirs.length} found)`);
+for (const d of skillDirs) {
+  ok(fs.existsSync(path.join(SKILLSET, d, 'SKILL.md')), `${d}/SKILL.md present (independently invocable)`);
+}
+// NOT scattered: no SKILL.md from the skillset was copied into GEAK's own knowledge tree.
+const knowledgeDir = path.join(ROOT, 'e2e_workflow', 'knowledge');
+const walk = (dir, out = []) => {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) walk(p, out); else out.push(p);
+  }
+  return out;
+};
+const scattered = walk(knowledgeDir).filter((p) => /tuning-(core|aiter|triton|ck|hip|hipblaslt|flydsl|in-vllm|in-sglang)/.test(path.basename(p)));
+ok(scattered.length === 0,
+  `skillset method is NOT copied into e2e_workflow/knowledge/ (found ${scattered.length} stray copies) ` +
+  `-> the standalone validation still describes what GEAK runs`);
+// The integrity manifest is the enforcement point for "whole and unmodified".
+ok(fs.existsSync(path.join(knowledgeDir, 'tuning_skillset.manifest.sha256')), 'vendored tree is hash-pinned by a manifest');
+ok(fs.existsSync(path.join(ROOT, 'e2e_workflow', 'scripts', 'tuning_skillset_sync.py')), 'a verify/re-sync tool ships with it');
+
+// ---------------------------------------------------------------------------
+// B. Standalone phase, positioned after ConfigSweep and before HeadKernel.
+// ---------------------------------------------------------------------------
+console.log('\n## B. standalone, before HeadKernel');
+const phaseList = src.match(/phases:\s*\[[\s\S]*?\n  \],/);
+ok(!!phaseList, 'meta.phases list found');
+if (phaseList) {
+  const order = (title) => phaseList[0].indexOf(`title: '${title}'`);
+  ok(order('TuningSkillset') > 0, "meta.phases declares 'TuningSkillset'");
+  ok(order('ConfigSweep') < order('TuningSkillset'), 'declared AFTER ConfigSweep');
+  ok(order('TuningSkillset') < order('HeadKernel'), 'declared BEFORE HeadKernel');
+}
+// Source order is what actually runs — assert the gated blocks are in the same sequence.
+const at = (re) => src.search(re);
+const iConfig = at(/if \(want\('config'\)/);
+const iTune = at(/if \(want\('tune'\) && TUNING_SKILLSET_ENABLED\)/);
+const iHead = at(/if \(want\('head'\)/);
+ok(iTune > 0, "a gated `want('tune')` block exists");
+ok(iConfig > 0 && iConfig < iTune, 'the tune block runs AFTER the ConfigSweep block');
+ok(iTune < iHead, 'the tune block runs BEFORE the HeadKernel block');
+ok(/phase\('TuningSkillset'\)/.test(src), 'the block announces itself as its own phase');
+ok(/roleAgent\('tuning_specialist', 'tune'/.test(src), 'it dispatches ONE dedicated role (not a fragment on another role)');
+// It must NOT be injected into any OTHER role's prompt — spraying it around is the scattering failure
+// mode this whole design avoids. Walk every roleAgent() call site (each ends at its `{ phase:` options
+// object) and assert the skillset inputs appear in exactly one: tuning_specialist's.
+const consumers = [];
+for (let i = src.indexOf("roleAgent('"); i !== -1; i = src.indexOf("roleAgent('", i + 1)) {
+  const end = src.indexOf('{ phase:', i);
+  const call = src.slice(i, end === -1 ? i + 2000 : end);
+  const role = (call.match(/roleAgent\('([a-z_]+)'/) || [])[1] || '?';
+  if (/TUNING_(SKILLSET_DIR|KB_ENABLED|BUDGET|TARGETS)/.test(call)) consumers.push(role);
+}
+ok(consumers.length === 1 && consumers[0] === 'tuning_specialist',
+  `skillset inputs reach exactly ONE role prompt — tuning_specialist (got: ${consumers.join(', ') || 'none'}) ` +
+  `-> it is run whole by its owner, never sprayed across other roles`);
+
+// Attribution: it takes its own pre/post legs and folds the accept into the carried config.
+ok(/pre_tune_throughput_tok_s/.test(src) && /post_tune_throughput_tok_s/.test(src),
+  'the phase reports its OWN pre/post throughput (attributable delta)');
+ok(/share_of_total_gain_pct/.test(src), "the return exposes tuning's share of the run's total gain");
+ok(/curEnv = \(curEnv \? curEnv \+ ' ' : ''\) \+ tuning\.apply_env/.test(src),
+  'an accepted deploy folds its required env into the carried config (downstream phases inherit the tuning)');
+ok(/profiler', 'reprofile'[\s\S]{0,400}ROUND: 'tuning'/.test(src),
+  'an accepted tuning triggers a re-profile (tuning reshapes which kernels dominate)');
+// The skillset's own thesis, enforced by the orchestrator rather than trusted from the agent.
+ok(/engagement_verified === true/.test(src),
+  'an accept is refused unless engagement was PROVEN (the skillset\'s central claim, enforced in code)');
+
+// ---------------------------------------------------------------------------
+// C. OFF is additive-free.
+// ---------------------------------------------------------------------------
+console.log('\n## C. additive when off');
+const gate = src.match(/const TUNING_SKILLSET_ENABLED = [\s\S]*?const TUNING_KB_ENABLED = [^\n]*\n/);
+ok(!!gate, 'TUNING_* gating block found');
+if (gate) {
+  const make = new Function('A', 'WORKFLOW_DIR',
+    gate[0] + '\nreturn { TUNING_SKILLSET_ENABLED, TUNING_SKILLSET_DIR, TUNING_KB_ENABLED };');
+  const off = make({ tuning_skillset: 'false' }, '/repo/e2e_workflow');
+  ok(off.TUNING_SKILLSET_ENABLED === false, 'tuning_skillset:"false" disables the phase');
+  const on = make({}, '/repo/e2e_workflow');
+  ok(on.TUNING_SKILLSET_ENABLED === true, 'default is ON');
+  ok(on.TUNING_SKILLSET_DIR === '/repo/tuning_skillset',
+    'skillset dir defaults to the vendored tree beside the workflow dir');
+  ok(make({ tuning_skillset_dir: '/elsewhere/skillset/' }, '/repo/e2e_workflow').TUNING_SKILLSET_DIR === '/elsewhere/skillset',
+    'the vendored tree can be overridden (e.g. point at an upstream checkout to re-verify standalone)');
+  ok(on.TUNING_KB_ENABLED === true && make({ tuning_kb: 'false' }, '/wf').TUNING_KB_ENABLED === false,
+    'tuning-kb (the answer key) is ON by default and gateable for blind evaluation runs');
+}
+// The tuning loop is uncapped by design: tuning ops are cheap and cumulative, unlike head ops.
+ok(!/TUNING_BUDGET/.test(src), 'no op budget caps the tuning loop');
+// The report inputs must be an EMPTY spread when off, so the Report prompt is unchanged.
+ok(/const TUNING_REPORT_INPUTS = \(TUNING_SKILLSET_ENABLED && tuning\) \? \{ TUNING_RESULT: tuning \} : \{\};/.test(src),
+  'report inputs are an empty object when the phase is off/absent (Report prompt byte-identical)');
+ok((src.match(/\.\.\.TUNING_REPORT_INPUTS/g) || []).length === 1,
+  'the report spread appears exactly once (Report phase only)');
+// Fast mode's contract is HeadKernel-only, so 'tune' must join its skip set.
+ok(/FAST_SKIP = FAST_MODE \? new Set\(\['config', 'tune', 'kernel'\]\)/.test(src),
+  "fast mode skips 'tune' (its budget is reserved for the head track)");
+
+// ---------------------------------------------------------------------------
+// D. The role delegates to the skillset instead of restating it.
+// ---------------------------------------------------------------------------
+console.log('\n## D. role is a thin adapter');
+ok(fs.existsSync(ROLE), 'roles/tuning_specialist.md exists');
+const role = fs.existsSync(ROLE) ? fs.readFileSync(ROLE, 'utf8') : '';
+if (role) {
+  ok(/## PHASE=tune/.test(role), 'role defines PHASE=tune');
+  for (const key of ['TUNING_SKILLSET_DIR', 'TUNING_KB_ENABLED', 'CURRENT_THROUGHPUT']) {
+    ok(role.includes(key), `role consumes ${key}`);
+  }
+  ok(/never edit anything inside it/i.test(role), 'role forbids editing the vendored tree');
+  ok(/engagement/i.test(role) && /[Ii]nterleave/i.test(role),
+    'role carries the two rules the skillset says results die on (engagement proof + interleaved A/B)');
+  // The point of vendoring whole is that the METHOD stays in the skillset. The role must route into it
+  // and must not grow into a paraphrase of the loop, which is the failure mode this guards.
+  ok(/[Rr]ead them and use them/.test(role),
+    'role routes into the skillset rather than restating it');
+  ok(!/TUNING_BUDGET/.test(role), 'role imposes no op budget');
+  const words = role.split(/\s+/).length;
+  ok(words < 1600, `role stays a thin adapter, not a manual (${words} words < 1600)`);
+}
+
+// ---------------------------------------------------------------------------
+// E. The win reaches production. A tuned DATA artifact cannot ride the PYTHONPATH overlay, so it must
+//    travel through final_patch.diff + final_launch.sh or the reported gain will not reproduce.
+// ---------------------------------------------------------------------------
+console.log('\n## E. tuning reaches the final bundle');
+ok(/deploy_bundle: \{ type: 'string' \}/.test(src), 'TUNING_SCHEMA accepts a deploy bundle');
+ok(/const TUNING_FINALIZE_INPUTS = \(TUNING_SKILLSET_ENABLED && tuning && tuning\.gate === 'accepted'\)/.test(src),
+  'the deploy bundle is handed to Finalize only when tuning actually banked a win');
+ok(/\.\.\.TUNING_FINALIZE_INPUTS,/.test(src)
+  && (src.match(/\.\.\.TUNING_FINALIZE_INPUTS/g) || []).length === 1,
+  'the finalize spread appears exactly once (Finalize phase only, empty otherwise)');
+ok(/tuning_in_bundle: \{ type: 'boolean' \}/.test(src),
+  'Finalize reports whether the tuning made it into the shipped bundle');
+const integrator = fs.readFileSync(path.join(ROOT, 'e2e_workflow', 'roles', 'e2e_integrator.md'), 'utf8');
+ok(/TUNING_DEPLOY_BUNDLE/.test(integrator), 'the integrator knows how to fold the deploy bundle in');
+ok(/final_patch\.diff/.test(integrator) && /deploy\.sh/.test(integrator),
+  'the bundle travels through the EXISTING handles: concatenated into final_patch.diff, run from final_launch.sh');
+ok(/before[\s\S]{0,40}the server launch/i.test(integrator),
+  'deploy.sh runs BEFORE launch (a config applied to a running server does nothing)');
+// The live-tree carve-out. GEAK forbids editing installed packages and asserts the tree is pristine
+// before/after every A/B leg, but an accepted tuning deploy legitimately writes into it. Without the
+// carve-out the head track cleans the tuning away mid-run and every later delta is measured against a
+// reference leg that quietly lost it.
+ok(/live_tree_files: arrStr/.test(src), 'TUNING_SCHEMA carries the live-tree paths the deploy owns');
+ok(/function tuningIntegrateInputs\(\)/.test(src)
+  && /if \(!\(TUNING_SKILLSET_ENABLED && tuning && tuning\.gate === 'accepted'\)\) return \{\};/.test(src),
+  'the carve-out is empty unless an accept was banked (integrate prompt unchanged without tuning)');
+ok((src.match(/\.\.\.tuningIntegrateInputs\(\)/g) || []).length === 2,
+  'every integrate path gets the carve-out: runIntegrateBothLegs (covers head/milestone/corrective) + the deep lane');
+ok(/TUNING_LIVE_TREE_FILES/.test(integrator),
+  'the integrator honours the carve-out in its never-mutate-site-packages rule');
+ok(/any OTHER dirty path is still a hard failure/.test(integrator),
+  'the carve-out is scoped to the declared list — it does not blunt the rule');
+ok(/live_tree_files/.test(role), 'the role is told to declare every live-tree path it writes');
+// result.json must gain the tuning block WITHOUT any existing key changing.
+const runE2e = fs.readFileSync(path.join(ROOT, 'interface', 'run_e2e.py'), 'utf8');
+ok(/def _tuning_skillset_section\(/.test(runE2e), 'run_e2e.py builds an additive tuning_skillset block');
+ok(/if tuning_section is not None:\n\s+result\["tuning_skillset"\] = tuning_section/.test(runE2e),
+  'the block is appended after the result dict is complete, so no existing key is touched');
+ok(/reaches_production_via/.test(runE2e),
+  'result.json tells the caller that final_patch/final_launch_script now carry the tuning');
+
+console.log(failures === 0
+  ? '\nPASS: tuning skillset is vendored whole and runs standalone before HeadKernel.'
+  : `\nFAILED: ${failures} assertion(s).`);
+process.exit(failures === 0 ? 0 : 1);

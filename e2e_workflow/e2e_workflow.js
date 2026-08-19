@@ -7,6 +7,7 @@ export const meta = {
     { title: 'Profile', detail: 'Profiler captures a warm trace -> standardized Top-N' },
     { title: 'Strategize', detail: 'System Architect routes kernels by Amdahl (config vs kernel vs host)' },
     { title: 'ConfigSweep', detail: 'Config Tuner sweeps flags/env/backends FIRST (default ON)' },
+    { title: 'TuningSkillset', detail: 'Tuning Specialist runs the VENDORED tuning skillset whole + standalone (its own pre/post A/B) BEFORE HeadKernel, so its share of the gain is attributable' },
     { title: 'HeadKernel', detail: 'highest-%GPU ops (GEMM/attn): extract_op -> backend bake-off (incl. FlyDSL) + aiter-DB/author tune -> e2e gate' },
     { title: 'Milestone', detail: 'loop over editable kernels ABOVE milestone_min_pct% GPU (default 5): plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
     { title: 'Finalize', detail: 'e2e Integrator assembles the overlay + patch + launch bundle' },
@@ -159,6 +160,28 @@ const MIN_KERNEL_TASKS = Math.min(parseInt(A.min_kernel_tasks != null ? A.min_ke
 const MILESTONE_MIN_PCT = parseFloat(A.milestone_min_pct != null ? A.milestone_min_pct : 5);
 const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : (FAST_MODE ? 3 : 6), 10); // budget passed DOWN per kernel (fewer rounds in fast mode)
 const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true') === 'true';
+// ---- TUNING SKILLSET phase (default ON) --------------------------------------------------------------
+// The tuning skillset is vendored WHOLE into this repo (default <repo>/tuning_skillset, hash-pinned by
+// e2e_workflow/scripts/tuning_skillset_sync.py) and is run by ONE role (tuning_specialist) as ONE phase
+// that sits AFTER ConfigSweep and BEFORE HeadKernel. It is deliberately a standalone phase rather than a
+// prompt fragment sprinkled into the head bake-off: (a) the skillset is a complete six-step loop
+// (scope -> baseline -> search -> correctness -> deploy -> engagement verify) and only runs to completion
+// when it owns a phase; (b) taking its own pre/post e2e A/B is what makes "how much did tuning buy us"
+// an attributable number in the final report instead of an unsplittable blob of total gain. Whatever it
+// accepts is folded into curFlags/curEnv, so HeadKernel optimizes ON TOP of a tuned stack and its own
+// A/B reference leg already contains the tuning.
+// tuning_skillset="false" disables the phase entirely: no prompt injection, no report inputs, no state
+// keys -> the run is byte-identical to a build without this feature.
+const TUNING_SKILLSET_ENABLED = String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
+const TUNING_SKILLSET_DIR = String(A.tuning_skillset_dir ||
+  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/tuning_skillset')).replace(/\/+$/, '');
+// tuning-kb/ is the skillset's per-model ANSWER KEY (verified wins + deployable artifacts). Useful in
+// production, contaminating in a blind evaluation — the skillset says so itself. Default ON; pass
+// tuning_kb="false" for eval runs and the role is told not to read it.
+const TUNING_KB_ENABLED = String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
+// NOTE: there is deliberately NO op budget here. The head track caps its ops because each one spends a
+// recursive kernel-authoring run; tuning ops are cheap by comparison and their value is cumulative, so
+// a cap would just leave measurable wins on the table. The role decides where the returns stop.
 // Head-kernel track (GEMM/attention) — the highest-pct_gpu_time ops, optimized regardless of edit flag.
 const HEAD_THRESHOLD_PCT = parseFloat(A.head_threshold_pct != null ? A.head_threshold_pct : 5);
 // max head-op bake-offs. FAST MODE: the head track is parallelized across the GPU pool (one exclusive
@@ -420,19 +443,22 @@ const MODEL_NAME_HINT = (MODEL_PATH || KERNEL_PATH).replace(/\/+$/, '').split('/
 // ---------------------------------------------------------------------------
 // Phase-scoped driving (robustness): a long single background run can be orphaned if the host session
 // context compacts mid-run. To avoid that, the orchestration can be driven phase-by-phase: invoke with
-// args.phases = subset of {setup,config,head,kernel,final} (default 'all' = run everything in one go).
+// args.phases = subset of {setup,config,tune,head,kernel,final} (default 'all' = run everything in one go).
 // Cross-phase state flows through the RETURN value (the script has no fs); pass the prior return back as
 // args.state for the next phase. Each phase only RUNS if requested; otherwise it loads carried state.
 // ---------------------------------------------------------------------------
 const PHASES = String(A.phases || 'all').split(',').map(s => s.trim()).filter(Boolean);
 const RUN_ALL = PHASES.includes('all');
-// Fast mode SKIPS ConfigSweep ('config') and the editable-kernel Milestone ('kernel') so all optimization
-// comes from HeadKernel within the wall-clock budget. Default mode: FAST_SKIP is null → want() is the
-// original `RUN_ALL || PHASES.includes(p)`, unchanged.
-const FAST_SKIP = FAST_MODE ? new Set(['config', 'kernel']) : null;
+// Fast mode SKIPS ConfigSweep ('config'), the tuning skillset ('tune') and the editable-kernel Milestone
+// ('kernel') so all optimization comes from HeadKernel within the wall-clock budget. ('tune' joins the
+// skip set for the same reason 'config' does: fast mode's contract is "best head-kernel wins in N hours",
+// and the tuning loop's tuner sweeps + its own pre/post A/B do not fit that budget.) Default mode:
+// FAST_SKIP is null → want() is the original `RUN_ALL || PHASES.includes(p)`, unchanged.
+const FAST_SKIP = FAST_MODE ? new Set(['config', 'tune', 'kernel']) : null;
 // Deep mode concentrates its (20h) HeadKernel budget on cross-backend co-opt: skip the editable-kernel
-// Milestone ('kernel') but KEEP ConfigSweep ('config' — cheap and it stabilizes the baseline). Null in
-// every other mode, so normal + fast are unchanged.
+// Milestone ('kernel') but KEEP ConfigSweep ('config' — cheap and it stabilizes the baseline) and KEEP
+// the tuning skillset ('tune' — same rationale, and a tuned stack is a strictly better starting point
+// for the co-opt lanes). Null in every other mode, so normal + fast are unchanged.
 const DEEP_SKIP = DEEP_MODE ? new Set(['kernel']) : null;
 const want = (p) => (RUN_ALL || PHASES.includes(p)) && !(FAST_SKIP && FAST_SKIP.has(p)) && !(DEEP_SKIP && DEEP_SKIP.has(p));
 const ST = A.state || {};   // carried state from a prior phase invocation
@@ -479,6 +505,36 @@ const SWEEP_SCHEMA = obj({
   best_throughput_tok_s: { type: 'number' }, throughput_speedup_vs_baseline: { type: 'number' },
   summary: { type: 'string' },
 }, ['accepted_flags', 'best_throughput_tok_s']);
+
+// Result of the standalone tuning-skillset phase. pre/post are ITS OWN in-session interleaved A/B legs
+// (NOT the run baseline), which is what makes tuning_delta_pct an attributable share of the total gain.
+// engagement_verified is load-bearing: the skillset's own thesis is that an unproven artifact is not a
+// win, so the orchestrator refuses to bank an accept without it.
+const TUNING_SCHEMA = obj({
+  ran: { type: 'boolean' }, mode: { type: 'string' }, skills_used: arrStr,
+  preflight: { type: 'object', additionalProperties: true },
+  ops_tuned: arrObj, artifacts: arrStr,
+  // Deploy bundle: how a tuned DATA artifact reaches production. GEAK's overlay is a PYTHONPATH
+  // mechanism for code, but tuned config tables are data a library reads from its own package dir, and
+  // some need a derived cache dropped before they take effect. Neither travels in the overlay — so the
+  // role writes EVAL_DIR/tuning/deploy/{MANIFEST.json,tuning_patch.diff,files/,deploy.sh} and Finalize
+  // folds it into EVAL_DIR/final/ (diff concatenated, deploy.sh invoked from final_launch.sh).
+  deploy_bundle: { type: 'string' }, deploy_verified: { type: 'boolean' },
+  cache_invalidation: arrStr,
+  // Paths the deploy writes INSIDE an installed package tree (e.g. aiter/configs/model_configs/*.csv).
+  // The Integrator forbids live-tree edits and asserts `git status --porcelain` is empty before/after
+  // every A/B leg; this list is the carve-out that keeps a banked tuning from being cleaned away.
+  live_tree_files: arrStr,
+  apply_env: { type: 'string' }, apply_flags: { type: 'string' },
+  correctness_gate: { type: 'string' }, accuracy_note: { type: 'string' },
+  engagement_verified: { type: 'boolean' }, engagement_evidence: { type: 'string' },
+  pre_tune_throughput_tok_s: { type: 'number' }, post_tune_throughput_tok_s: { type: 'number' },
+  noise_floor_pct: { type: 'number' }, tuning_delta_pct: { type: 'number' },
+  tuning_speedup: { type: 'number' },
+  ab_interleaved: { type: 'boolean' }, ab_complete: { type: 'boolean' },
+  gate: { type: 'string', enum: ['accepted', 'no_win', 'rejected', 'incomplete', 'skipped'] },
+  report_path: { type: 'string' }, summary: { type: 'string' }, reason: { type: 'string' },
+}, ['gate']);
 
 const PLAN_SCHEMA = obj({
   stop: { type: 'boolean' }, reasoning: { type: 'string' },
@@ -560,6 +616,10 @@ const FINALIZE_SCHEMA = obj({
   final_overlay: { type: 'string' }, final_patch: { type: 'string' }, final_launch_script: { type: 'string' },
   final_throughput_tok_s: { type: 'number' }, throughput_speedup: { type: 'number' },
   accepted_kernels: arrStr, accepted_config: { type: 'object', additionalProperties: true }, note: { type: 'string' },
+  // Did the tuning deploy bundle make it into final/ AND still engage on the assembled bundle? Reported
+  // rather than assumed: a data artifact that silently fails to install would leave a bundle that looks
+  // complete and reproduces none of the tuning gain.
+  tuning_in_bundle: { type: 'boolean' }, tuning_engagement_recheck: { type: 'string' },
 }, ['final_throughput_tok_s']);
 
 const EXPERIENCE_SCHEMA = obj({
@@ -1061,8 +1121,10 @@ const abDone = (integ) => !!(integ && integ.gate !== 'incomplete' && integ.ab_co
 // (head, milestone, finalize-gate, disk-recovered): an A/B never ends after the
 // reference leg alone — it is driven to a complete ref+cand measurement.
 async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
+  // Caller inputs win; the tuning carve-out only ever ADDS keys (and is {} when no tuning was banked).
+  const withTuning = { ...tuningIntegrateInputs(), ...inputs };
   let integ = await safeAgent(
-    roleAgent('e2e_integrator', 'integrate', intro, inputs),
+    roleAgent('e2e_integrator', 'integrate', intro, withTuning),
     { phase: phaseName, label, schema: INTEGRATE_SCHEMA });
   let tries = 0;
   while (!abDone(integ) && tries < AB_FINISH_RETRIES) {
@@ -1076,7 +1138,7 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
         'accepted/stack/rejected with ab_complete:true. Do NOT return gate:"incomplete" unless a hard ' +
         'hardware/harness fault persists after this retry. If short on time, shrink E2E_REPEATS toward 1 ' +
         'so BOTH legs still run.',
-        { ...inputs, RESUME_AB: true }),
+        { ...withTuning, RESUME_AB: true }),
       { phase: phaseName, label: `${label} (finish ${tries})`, schema: INTEGRATE_SCHEMA });
   }
   return integ;
@@ -1356,6 +1418,30 @@ if (!MODEL_PATH && KERNEL_PATH) {
   return { mode: 'single_kernel', kernel_path: KERNEL_PATH, ...(passthru || {}) };
 }
 
+// OP-IDENTITY GUARD — a fused-MoE / grouped-expert GEMM must be optimized AS the fused op at its live
+// dispatcher seam, never decomposed into standalone dense GEMMs (a dense candidate has no live call site
+// → no_rebind_seam). So force op_kind='moe' (the grouped-GEMM branch; gemmSynthFor keys on this to keep
+// dense synth OFF). The head is never SKIPPED — editability is irrelevant, since a non-editable fused
+// kernel is still backend-swapped at its (editable) dispatcher. GENERIC: detects via the Architect's
+// is_fused_kernel OR the profile class/name; never keys on a backend name.
+// Module-scoped so EVERY strategize/re-strategize call site applies it identically — the initial
+// Strategize, the post-config re-strategize, and the post-tuning one — instead of only the first.
+// Admission runs here too, so a call site cannot tag identity and then forget to admit.
+const _isFusedOp = (c) => (c && c.is_fused_kernel === true) ||
+  /(?:^|[^a-z])moe(?:[^a-z]|$)|group(?:ed)?[_ ]?gemm|ck_moe|expert|fused[_ ]?moe|fmoe|asm_moe|fused_custom/i
+    .test(`${(c && c.op_kind) || ''} ${(c && c.short_name) || ''} ${(c && c.name) || ''} ${(c && c.classification) || ''} ${(c && c.class) || ''} ${(c && c.backend) || ''}`);
+function applyOpIdentityGuard(queue, stage) {
+  let tagged = 0;
+  for (const c of (queue || [])) {
+    if (!_isFusedOp(c)) continue;
+    c.op_kind = 'moe';                                                                // grouped-GEMM branch (gemmSynthFor → no dense synth)
+    tagged++;
+  }
+  const admitted = admitHeads(queue, stage);
+  if (tagged) log(`[op-identity] ${tagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
+  return admitted;
+}
+
 // ===========================================================================
 // PHASE: Setup + Baseline profile + Strategize  (gated; else load carried state)
 // ===========================================================================
@@ -1399,23 +1485,7 @@ if (want('setup')) {
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
   headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
-  // OP-IDENTITY GUARD — a fused-MoE / grouped-expert GEMM must be optimized AS the fused op at its live
-  // dispatcher seam, never decomposed into standalone dense GEMMs (a dense candidate has no live call site
-  // → no_rebind_seam). So force op_kind='moe' (the grouped-GEMM branch; gemmSynthFor keys on this to keep
-  // dense synth OFF). The head is never SKIPPED — editability is irrelevant, since a non-editable fused
-  // kernel is still backend-swapped at its (editable) dispatcher. GENERIC: detects via the Architect's
-  // is_fused_kernel OR the profile class/name; never keys on a backend name.
-  const _isFusedOp = (c) => (c && c.is_fused_kernel === true) ||
-    /(?:^|[^a-z])moe(?:[^a-z]|$)|group(?:ed)?[_ ]?gemm|ck_moe|expert|fused[_ ]?moe|fmoe|asm_moe|fused_custom/i
-      .test(`${(c && c.op_kind) || ''} ${(c && c.short_name) || ''} ${(c && c.name) || ''} ${(c && c.classification) || ''} ${(c && c.class) || ''} ${(c && c.backend) || ''}`);
-  let _fusedTagged = 0;
-  for (const c of headQueue) {
-    if (!_isFusedOp(c)) continue;
-    c.op_kind = 'moe';                                                                // grouped-GEMM branch (gemmSynthFor → no dense synth)
-    _fusedTagged++;
-  }
-  headQueue = admitHeads(headQueue, 'strategize');
-  if (_fusedTagged) log(`[op-identity] ${_fusedTagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
+  headQueue = applyOpIdentityGuard(headQueue, 'strategize');
   log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
   // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
   await ensureFlydslGate();
@@ -1471,7 +1541,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
     if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
     if (restrat && restrat.head_candidates)
-      headQueue = admitHeads(restrat.head_candidates.slice(), 're-strategize');
+      headQueue = applyOpIdentityGuard(restrat.head_candidates.slice(), 're-strategize');
     // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
     await ensureFlydslGate();
   } else {
@@ -1501,6 +1571,150 @@ const history = ST.history || { insights: [], ledger: [], milestones: [], bottle
 // A fused op (op_kind='moe', set by the op-identity guard OR the Architect) is extracted AS the fused op,
 // never decomposed into a standalone dense GEMM — so dense-GEMM synth is off for it.
 function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
+
+// ===========================================================================
+// PHASE: TuningSkillset — the VENDORED tuning skillset, run WHOLE and STANDALONE, BEFORE HeadKernel.
+//
+// The skillset lives at TUNING_SKILLSET_DIR as one intact, hash-pinned tree (it is validated standalone,
+// so GEAK must run the copy that was validated — see e2e_workflow/scripts/tuning_skillset_sync.py). It is
+// NOT decomposed into knowledge/ files and NOT injected as an advisory fragment into other roles: ONE role
+// (tuning_specialist) runs its complete six-step loop as ONE phase.
+//
+// Position is deliberate — after ConfigSweep, before HeadKernel:
+//   * BEFORE HeadKernel, because tuning is the cheap lever that reshapes which kernels dominate. Running
+//     it first means the head track spends its (expensive) budget on the ops that are still hot AFTER
+//     tuning, and every head A/B measures against a reference leg that already contains the tuning.
+//   * STANDALONE, because a tuning loop folded into the head bake-off never runs to completion (it
+//     collapses into "one more candidate config") and its contribution becomes unattributable. With its
+//     own in-session pre/post interleaved A/B, the final report can state tuning's share of the gain.
+//
+// An accept is folded into curFlags/curEnv (the deploy's required env IS the engagement mechanism), then
+// the profile is re-taken exactly as it is after a config win, because tuning changes the landscape too.
+// ===========================================================================
+let tuning = ST.tuning || null;
+if (want('tune') && TUNING_SKILLSET_ENABLED) {
+  phase('TuningSkillset');
+  log(`Tuning skillset: ${TUNING_SKILLSET_DIR} (whole, standalone, pre-HeadKernel); ` +
+    `no op cap, tuning-kb ${TUNING_KB_ENABLED ? 'ENABLED' : 'DISABLED (blind eval)'}.`);
+  tuning = await safeAgent(
+    roleAgent('tuning_specialist', 'tune',
+      'Tune the live stack with the skillset, measure your OWN in-session interleaved pre/post A/B, ' +
+      'prove engagement, and hand back a deploy bundle that reaches production through EVAL_DIR/final/.', {
+      EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD,
+      BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: curTput,
+      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+      NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS, ACCURACY_GATE,
+      PROFILE_TOPN: profile ? profile.profile_topN_json : '',
+      TUNING_TARGETS: (strategy && strategy.head_candidates) || headQueue || [],
+      TUNING_SKILLSET_DIR, TUNING_KB_ENABLED, SKILL_DIR: WORKFLOW_DIR,
+    }),
+    { phase: 'TuningSkillset', label: 'tuning_specialist:tune', schema: TUNING_SCHEMA });
+
+  // An accept must clear EVERY bar the skillset itself sets. Engagement is the load-bearing one: its
+  // stated thesis is that a speedup whose artifact was never proven live has proven nothing, and that
+  // failure mode is silent (the artifact lands where nothing reads it and the timing still moves). A
+  // completed BOTH-leg A/B is required for the same reason it is on the head track — a post-only number
+  // is not a measurement.
+  const tuned = tuning && tuning.gate === 'accepted';
+  const tuneOk = tuned && tuning.engagement_verified === true && tuning.ab_complete !== false &&
+    tuning.correctness_gate !== 'fail' && tuning.post_tune_throughput_tok_s > 0 &&
+    tuning.post_tune_throughput_tok_s > (tuning.pre_tune_throughput_tok_s || 0);
+  if (tuneOk) {
+    if (tuning.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + tuning.apply_env;
+    if (tuning.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + tuning.apply_flags;
+    curTput = tuning.post_tune_throughput_tok_s;
+    log(`Tuning skillset ACCEPTED: ${tuning.pre_tune_throughput_tok_s} -> ${curTput} tok/s ` +
+      `(+${(tuning.tuning_delta_pct || 0).toFixed(2)}% attributable to tuning; ` +
+      `${(tuning.ops_tuned || []).length} op(s), engagement proven). Re-profiling.`);
+    // A missing/unverified deploy bundle does NOT withhold the accept: the gain was measured and proven
+    // live, and the artifacts are already installed in this container, so every in-run number stays
+    // valid. What breaks is DELIVERY — final_launch.sh would reproduce less than the headline. Finalize
+    // re-checks and reports it, but warn here too, because this is the point at which it is still cheap
+    // to fix and the easiest failure in this phase to not notice.
+    if (tuning.deploy_verified !== true) {
+      log(`WARNING: tuning accepted WITHOUT a verified deploy bundle (deploy_bundle=` +
+        `${tuning.deploy_bundle || '<none>'}). The in-run measurements stand, but this win may not ` +
+        `reproduce from EVAL_DIR/final/ — Finalize will re-check and report tuning_in_bundle.`);
+    }
+    history.ledger.push({
+      direction: 'tuning_skillset', verdict: 'confirmed',
+      e2e_delta_pct: tuning.tuning_delta_pct || 0,
+      lesson: `tuning skillset (standalone, pre-head): ${tuning.summary || 'accepted'}`,
+    });
+
+    // Tuning changed which kernels dominate — re-profile + re-strategize so the head track works the
+    // POST-tuning landscape, not the pre-tuning one. Same contract as the post-ConfigSweep re-profile.
+    profile = await safeAgent(
+      roleAgent('profiler', 'reprofile', 'Re-profile after the tuning skillset deployed its artifacts.', {
+        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'tuning',
+        OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
+      }),
+      { phase: 'Profile', label: 'profiler:post-tuning', schema: PROFILE_SCHEMA });
+    const retune = await safeAgent(
+      roleAgent('system_architect', 'strategize', 'Re-route after tuning changed the landscape.', {
+        EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
+        WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
+      }),
+      { phase: 'Strategize', label: 'architect:post-tuning-strategize', schema: STRATEGY_SCHEMA });
+    if (retune && retune.kernel_candidates) kernelQueue = retune.kernel_candidates.slice();
+    if (retune && retune.head_candidates)
+      headQueue = applyOpIdentityGuard(retune.head_candidates.slice(), 'post-tuning re-strategize');
+    if (retune) await ensureFlydslGate();
+  } else if (tuned) {
+    // Claimed accepted but failed a hard bar. Do NOT bank it — an unproven artifact silently poisons
+    // every downstream A/B, which is the exact failure the skillset exists to prevent.
+    log(`Tuning skillset claimed ACCEPTED but did not clear the bar ` +
+      `(engagement_verified=${tuning.engagement_verified}, ab_complete=${tuning.ab_complete}, ` +
+      `correctness=${tuning.correctness_gate}, pre=${tuning.pre_tune_throughput_tok_s}, ` +
+      `post=${tuning.post_tune_throughput_tok_s}) — NOT banked; continuing on the pre-tuning config.`);
+    history.ledger.push({ direction: 'tuning_skillset', verdict: 'flagged',
+      lesson: 'tuning claimed a win it could not prove (engagement/A-B/correctness) — not banked' });
+    tuning = { ...tuning, gate: 'no_win', reason: (tuning.reason || '') + ' [orchestrator: accept withheld — unproven]' };
+  } else {
+    log(`Tuning skillset produced no banked win (gate=${tuning ? tuning.gate : 'null/degraded'}` +
+      `${tuning && tuning.reason ? `: ${tuning.reason}` : ''}).`);
+    history.ledger.push({ direction: 'tuning_skillset', verdict: tuning && tuning.gate === 'skipped' ? 'skipped' : 'dead_end',
+      lesson: (tuning && (tuning.reason || tuning.summary)) || 'tuning phase produced no result' });
+  }
+} else if (want('tune') && !TUNING_SKILLSET_ENABLED) {
+  log('Tuning skillset DISABLED (tuning_skillset=false) — skipping the phase entirely.');
+}
+// Report inputs for the tuning phase. Empty object when the phase is off/absent, so the Report prompt is
+// byte-identical to a build without this feature.
+const TUNING_REPORT_INPUTS = (TUNING_SKILLSET_ENABLED && tuning) ? { TUNING_RESULT: tuning } : {};
+// Finalize inputs. A tuned DATA artifact cannot ride the PYTHONPATH overlay, so the ONLY way it reaches
+// production is for Finalize to fold this bundle into EVAL_DIR/final/ (concatenate its diff into
+// final_patch.diff, copy its files, and invoke its deploy.sh from final_launch.sh before the server
+// starts). Passed only when the tuning phase actually banked a win, so an unaccepted/absent tuning
+// leaves the Finalize prompt byte-identical.
+const TUNING_FINALIZE_INPUTS = (TUNING_SKILLSET_ENABLED && tuning && tuning.gate === 'accepted')
+  ? {
+    TUNING_DEPLOY_BUNDLE: tuning.deploy_bundle || `${EVAL_DIR}/tuning/deploy`,
+    TUNING_APPLY_ENV: tuning.apply_env || '',
+    TUNING_CACHE_INVALIDATION: tuning.cache_invalidation || [],
+    TUNING_ARTIFACTS: tuning.artifacts || [],
+    TUNING_LIVE_TREE_FILES: tuning.live_tree_files || [],
+  }
+  : {};
+
+// The live-tree carve-out, handed to EVERY integrate leg (see roles/e2e_integrator.md, "never mutate
+// site-packages"). That rule asserts `git status --porcelain` is EMPTY in the installed tree before and
+// after every gate leg — but an accepted tuning deploy legitimately writes into that tree, because a
+// config table only takes effect from inside the package that reads it. Without this list the head track
+// sees a dirty tree and either fails the assertion or "restores" it, silently deleting the banked tuning
+// out from under the reference leg of every later A/B. The rule's rationale does not apply to these
+// paths: they are recorded, reproducible from the deploy bundle, and INTENDED to be in both legs, exactly
+// like accepted env. A function, not a const, so it reflects a downgrade-to-no_win and so a resumed run
+// picks the carve-out up from carried state. Returns {} otherwise => prompt byte-identical without tuning.
+function tuningIntegrateInputs() {
+  if (!(TUNING_SKILLSET_ENABLED && tuning && tuning.gate === 'accepted')) return {};
+  return {
+    TUNING_LIVE_TREE_FILES: tuning.live_tree_files || [],
+    TUNING_DEPLOY_BUNDLE: tuning.deploy_bundle || `${EVAL_DIR}/tuning/deploy`,
+  };
+}
 
 // ===========================================================================
 // PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized
@@ -1724,7 +1938,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             },
             CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
             CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
-            ...ACCURACY_INPUTS,
+            ...tuningIntegrateInputs(), ...ACCURACY_INPUTS,
             ...(opts.final && ACCURACY_GATE !== 'none' ? { ACCURACY_LIMIT: DEEP_FINAL_ACCURACY_LIMIT } : {}),   // de-noise the finalize accuracy decision
           }),
           { phase: 'HeadKernel', label: `integrate ${c.uid} g${e2eGateCount}`, schema: INTEGRATE_SCHEMA });
@@ -2689,6 +2903,7 @@ if (want('final')) {
     roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.', {
       EVAL_DIR, FINAL_OVERLAY: curOverlay, ACCEPTED_FLAGS: curFlags, ACCEPTED_ENV: curEnv,
       ACCEPTED_KERNELS: allAccepted, BASELINE_THROUGHPUT: BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
+      ...TUNING_FINALIZE_INPUTS,
     }),
     { phase: 'Finalize', label: 'e2e_integrator:finalize', schema: FINALIZE_SCHEMA });
   finalTput = (finalize && finalize.final_throughput_tok_s) || curTput;
@@ -2700,7 +2915,7 @@ if (want('final')) {
       ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
-      ...ANALYSIS_SKILL_INPUTS,
+      ...ANALYSIS_SKILL_INPUTS, ...TUNING_REPORT_INPUTS,
     }),
     { phase: 'Report', label: 'architect:report', schema: REPORT_SCHEMA });
 
@@ -2776,11 +2991,65 @@ const carryState = {
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
+  // Full tuning-phase result, so a phase-by-phase resume does not re-run the tuning loop and the Report
+  // phase still has the attribution numbers when it runs in a later invocation.
+  ...(tuning ? { tuning } : {}),
   // Carry pending (verified-isolated, A/B-incomplete) wins WITH their inputs so a
   // resumed phase run can finish their A/B instead of re-discovering them.
   pending_integrations: pendingIntegrations,
   history,
 };
+
+// Attribution block for the standalone tuning phase. Because the phase measured its OWN interleaved
+// pre/post legs, its contribution can be expressed both absolutely (delta%) and as a SHARE of the run's
+// total gain — which is the number "how much did the tuning actually help?" is asking for. share is null
+// (not 0) when the run had no net gain to apportion, so a caller never divides by a meaningless total.
+function tuningReturn() {
+  if (!TUNING_SKILLSET_ENABLED) return { enabled: false };
+  const base = {
+    enabled: true, skillset_dir: TUNING_SKILLSET_DIR, kb_enabled: TUNING_KB_ENABLED, ran: !!tuning,
+  };
+  if (!tuning) return { ...base, gate: want('tune') ? 'not_run' : 'phase_not_selected' };
+  const finalT = validatedOk ? validation.director_verified_throughput_tok_s : finalTput;
+  const totalGain = (finalT || 0) - (BASELINE_TPUT || 0);
+  const tuningGain = (tuning.post_tune_throughput_tok_s || 0) - (tuning.pre_tune_throughput_tok_s || 0);
+  const banked = tuning.gate === 'accepted';
+  return {
+    ...base,
+    gate: tuning.gate,
+    mode: tuning.mode || '',
+    skills_used: tuning.skills_used || [],
+    ops_tuned: (tuning.ops_tuned || []).map((o) => ({
+      op: o.op || o.short_name || '', backend: o.backend || '',
+      isolated_speedup: o.isolated_speedup || 0, engaged: o.engaged === true, artifact: o.artifact || '',
+    })),
+    artifacts: tuning.artifacts || [],
+    // How the win reaches production. Consumers that need to reproduce the tuning outside this run read
+    // deploy_bundle (its deploy.sh is idempotent); final_launch.sh already invokes it.
+    deploy_bundle: tuning.deploy_bundle || '', deploy_verified: tuning.deploy_verified === true,
+    cache_invalidation: tuning.cache_invalidation || [], live_tree_files: tuning.live_tree_files || [],
+    // Finalize's independent answer to "did the tuning actually make it into the shipped bundle, and
+    // does it still engage there?". null when Finalize did not run (a phase-scoped invocation).
+    in_final_bundle: finalize ? (finalize.tuning_in_bundle === true) : null,
+    final_bundle_engagement_recheck: (finalize && finalize.tuning_engagement_recheck) || '',
+    apply_env: tuning.apply_env || '', apply_flags: tuning.apply_flags || '',
+    correctness_gate: tuning.correctness_gate || 'unknown',
+    engagement_verified: tuning.engagement_verified === true,
+    engagement_evidence: tuning.engagement_evidence || '',
+    pre_tune_throughput_tok_s: tuning.pre_tune_throughput_tok_s || 0,
+    post_tune_throughput_tok_s: tuning.post_tune_throughput_tok_s || 0,
+    noise_floor_pct: tuning.noise_floor_pct || 0,
+    tuning_delta_pct: tuning.tuning_delta_pct || 0,
+    tuning_speedup: tuning.tuning_speedup ||
+      (tuning.pre_tune_throughput_tok_s ? (tuning.post_tune_throughput_tok_s / tuning.pre_tune_throughput_tok_s) : 1.0),
+    ab_interleaved: tuning.ab_interleaved === true,
+    ab_complete: tuning.ab_complete !== false,
+    // Share of the run's TOTAL gain attributable to the tuning phase (banked wins only).
+    share_of_total_gain_pct: (banked && totalGain > 0) ? +((tuningGain / totalGain) * 100).toFixed(2) : null,
+    report_path: tuning.report_path || `${EVAL_DIR}/tuning/tuning_report.md`,
+    summary: tuning.summary || '', reason: tuning.reason || '',
+  };
+}
 
 const wfReturn = {
   // schema_version pins the CONTRACT shape run_e2e.py reads. Bump only on a
@@ -2808,6 +3077,10 @@ const wfReturn = {
   accepted_config: { flags: curFlags, env: curEnv },
   accepted_kernels: acceptedKernels,
   accepted_heads: acceptedHeads,
+  // Standalone tuning-skillset phase: its own measured pre/post legs plus the share of the run's TOTAL
+  // gain those legs account for. Reported separately from accepted_heads/accepted_kernels precisely
+  // because the phase is standalone — "how much did tuning buy" is answerable, not folded into the total.
+  tuning_skillset: tuningReturn(),
   // Verified-isolated wins whose e2e A/B never completed (timeout/hang mid-gate).
   // A REAL isolated speedup that simply ran out of A/B time — surfaced (slim) so
   // the caller can resume/finish it, never silently discarded as a rejection.

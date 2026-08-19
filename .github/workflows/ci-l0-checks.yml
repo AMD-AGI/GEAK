@@ -75,6 +75,7 @@ jobs:
         run: |
           python -m pytest -q --cov --cov-report=term --cov-fail-under=0 \
             interface/test_run_e2e_recovery.py \
+            interface/test_run_e2e_tuning_result.py \
             interface/test_run_e2e_alignment.py \
             interface/test_run_e2e_dispatch.py \
             interface/test_run_e2e_recipe_env.py \
@@ -97,6 +98,7 @@ jobs:
             e2e_workflow/scripts/tests/test_leg_runner.py \
             e2e_workflow/scripts/tests/test_server_teardown.py \
             e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
+            e2e_workflow/scripts/tests/test_tuning_skillset_sync.py \
             ci/node/test_run_model_material_audit.py \
             geak/test_bootstrap.py
 

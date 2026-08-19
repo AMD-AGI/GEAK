@@ -152,6 +152,17 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      after every gate leg, assert the install is clean: `git -C /sgl-workspace/aiter status --porcelain`
      (ignoring `*/flydsl_cache/`) MUST be empty. If you edited it while exploring, `git -C /sgl-workspace/aiter
      checkout -- <file>` to restore before measuring. A win that only exists as a live-tree edit is `rejected`.
+
+     **One carve-out: `TUNING_LIVE_TREE_FILES`** (present only when the tuning phase banked an accept).
+     Those exact paths are expected to be dirty and **must be left alone** — treat the assertion as "clean
+     apart from this list", and never `checkout`/`clean` them. They are an accepted tuning deploy: a config
+     table only takes effect from inside the package that reads it, so unlike a code patch it cannot be
+     expressed as an overlay. The rule's three reasons do not apply to them — they are recorded in
+     `TUNING_DEPLOY_BUNDLE` and reproducible from it, and they are *supposed* to be present in **both**
+     legs, exactly like the accepted env. Deleting them would not clean up a stray edit; it would silently
+     remove a banked win from your own reference leg and quietly inflate every delta you then measure.
+     The carve-out is that list and nothing else: any OTHER dirty path is still a hard failure, and if a
+     listed path is unexpectedly *missing* or reverted, say so in `note` rather than measuring past it.
    - **authored** (a from-scratch NEW implementation written by the kernel layer's author mode — there
      is NO installed source file to patch; instead we REBIND the op's call site to the new kernel):
      the authored implementation + its final patch live under
@@ -325,12 +336,45 @@ Return JSON:
 ## PHASE=finalize
 
 Inputs: `EVAL_DIR`, the final accepted overlay, accepted config (flags/env), all accepted kernel
-patches, `BASELINE_THROUGHPUT`, `SKILL_DIR`.
+patches, `BASELINE_THROUGHPUT`, `SKILL_DIR`. Plus, **only when the standalone tuning phase banked a
+win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, `TUNING_ARTIFACTS`
+(see step 1b — omit that step entirely when they are absent).
 
 1. Assemble the deliverable bundle in `EVAL_DIR/final/`: the accepted overlay dir, a concatenated
    `final_patch.diff` (all accepted kernel patches), and a `final_launch.sh` that reproduces the
    optimized server (sets `BACKEND=<backend>`, `PYTHONPATH=<overlay>`, the accepted flags/env, and runs
    the bench via bench_e2e.sh + its adapter). This is the spec deliverable: "complete patch + launch/benchmark script".
+
+1b. **Fold in the tuning deploy bundle** (only when `TUNING_DEPLOY_BUNDLE` is present).
+
+   The overlay is a `PYTHONPATH` mechanism and it carries **code**. The tuning phase's win is usually
+   **data** — a config table a library reads from inside its own installed package, often with a derived
+   cache that must be dropped or the new rows are silently ignored. That cannot ride the overlay, so if
+   you do nothing here the run's reported gain will not reproduce from the bundle. Do all four:
+
+   - **Copy** `TUNING_DEPLOY_BUNDLE` into `EVAL_DIR/final/tuning/` so the bundle is self-contained and
+     survives the eval dir being archived or moved.
+   - **Concatenate** its `tuning_patch.diff` into `final_patch.diff`, under a clear
+     `# --- tuning skillset ---` banner so a reader can tell the data change from the kernel patches.
+   - **Invoke** its `deploy.sh` from `final_launch.sh` **before** the server launch, guarded so a missing
+     bundle is loud rather than silent, e.g.:
+     ```bash
+     # Tuning-skillset artifacts: data configs + cache invalidation. Idempotent; must run BEFORE launch.
+     TUNING_DEPLOY="$E/final/tuning/deploy.sh"
+     if [ -x "$TUNING_DEPLOY" ]; then bash "$TUNING_DEPLOY" || { echo "TUNING_DEPLOY_FAILED" >&2; exit 1; }
+     else echo "WARNING: tuning deploy bundle missing at $TUNING_DEPLOY — tuned configs will NOT be applied" >&2; fi
+     ```
+     Order matters: `deploy.sh` runs first, the server launch second. Applying a config to an
+     already-running server does nothing, and for graph-captured decode paths the config is read at
+     capture time, so a restart is mandatory.
+   - **Merge** `TUNING_APPLY_ENV` into the `FINAL_ENV` you bake in (it is already in `ACCEPTED_ENV`;
+     confirm it survived rather than assuming). Keep artifact paths absolute and under `EVAL_DIR`.
+
+   Then **verify it, do not assume it**: the final bench in step 2 must show the tuning still engaged.
+   Run the bundle's `engagement_check` (from its `MANIFEST.json`) against the final server and record the
+   result. If the check fails, the bundle is broken — say so in `note` and set `tuning_in_bundle:false`
+   rather than shipping a bundle that silently drops the tuning.
+
 2. Do a final warm-server bench of the assembled bundle to confirm the combined result matches the
    sum of accepted milestones (combined effects can interact). Record it.
 
@@ -344,6 +388,8 @@ Return JSON:
   "throughput_speedup": 1.0,
   "accepted_kernels": ["short_name", "..."],
   "accepted_config": {"flags": "...", "env": "..."},
+  "tuning_in_bundle": true,
+  "tuning_engagement_recheck": "pass|fail|n/a — the evidence, quoted",
   "note": "any interaction effects observed when combining"
 }
 ```

@@ -232,6 +232,25 @@ def _fold_serving_fidelity_flags(
 # ---------------------------------------------------------------------------
 # handoff (stable)  ->  e2e_workflow.js args (volatile, owned here)
 # ---------------------------------------------------------------------------
+def _as_bool(v) -> bool:
+    """Coerce a handoff value to a bool.
+
+    Callers hand us real JSON booleans, the strings "true"/"false"/"1"/"0"/"yes"/"no", or numbers.
+    The workflow args are string-typed ("true"/"false"), so normalise here rather than at each site;
+    an unrecognised value is truthy-tested, which keeps a default-ON knob ON rather than silently
+    disabling a phase on a typo.
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("false", "0", "no", "off", ""):
+            return False
+        if s in ("true", "1", "yes", "on"):
+            return True
+    return bool(v)
+
+
 def map_args(h: dict, timeout_s: int | None = None) -> dict:
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
@@ -304,13 +323,27 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # Finalize gate against a pinned eval_dir, which (with the disk-reconstruct +
     # finish-all-pending logic) drives every incomplete A/B on disk to a complete
     # ref+cand measurement WITHOUT re-running Setup/Profile/Kernel. General: any
-    # subset of {setup,profile,config,head,kernel,final} (default unset => "all").
+    # subset of {setup,profile,config,tune,head,kernel,final} (default unset => "all").
     if h.get("phases"):
         ps_args["phases"] = str(h["phases"])
     # Optional A/B repeat count override (bounds the cost of a resume / finalize
     # A/B — e.g. 1 repeat per leg is enough to PROVE both legs ran). General.
     if h.get("e2e_repeats") is not None:
         ps_args["e2e_repeats"] = int(h["e2e_repeats"])
+    # Standalone tuning-skillset phase (workflow default ON). This is NOT the
+    # config_tune sweep disabled above: Hyperloom's EXPLORE searched server
+    # flags/env, whereas this phase runs the vendored tuning skillset's own loop
+    # (per-op tuners -> tuned artifacts -> engagement proof), which upstream did
+    # not do. So it stays enabled by default and is only overridden on request.
+    # Omitted keys => the workflow's own defaults, byte-identical to a direct call.
+    if h.get("tuning_skillset") is not None:
+        ps_args["tuning_skillset"] = "true" if _as_bool(h["tuning_skillset"]) else "false"
+    # tuning-kb is the skillset's per-model ANSWER KEY: right for production, but it
+    # must be off for a blind evaluation or the agent can look the result up instead
+    # of deriving it.
+    if h.get("tuning_kb") is not None:
+        ps_args["tuning_kb"] = "true" if _as_bool(h["tuning_kb"]) else "false"
+    # No op budget is forwarded: the tuning loop is uncapped by design (see e2e_workflow.js).
     # Carried cross-phase state (the prior workflow return's `state`), so a
     # resume continues from where a previous phase invocation left off.
     if h.get("state"):
@@ -2426,7 +2459,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "recovery": wf.get("recovery_evidence") or None,
     }
 
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
         "result_source": result_source,
@@ -2495,6 +2528,120 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "alignment_metrics": alignment_metrics,
         "report_path": wf.get("report_path") or str(eval_dir / "final_report.md"),
     }
+    # ADDITIVE ONLY. Appended after the dict above is complete so it is self-evident at review time that
+    # no existing key is touched, and omitted entirely when the phase did not run.
+    tuning_section = _tuning_skillset_section(wf, eval_dir)
+    if tuning_section is not None:
+        result["tuning_skillset"] = tuning_section
+    return result
+
+
+def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
+    """Build the ADDITIVE ``tuning_skillset`` block for result.json.
+
+    Contract: this is the ONLY thing the tuning phase adds to result.json. Every pre-existing key keeps
+    its name, type and meaning — downstream consumers that do not know about tuning are unaffected, and
+    a run without the phase produces a byte-identical result.json (we return None and the key is omitted).
+
+    The tuning gain is ALREADY inside the headline ``final_throughput_tok_s`` / ``throughput_speedup``:
+    the phase runs mid-pipeline and its accepted config is inherited by every later measurement. This
+    block does not restate the headline, it ATTRIBUTES part of it — which is the question the headline
+    cannot answer on its own.
+
+    ``reaches_production_via`` is the load-bearing field. The tuning win is usually a data artifact
+    (a config table read from inside a library's package dir, plus a cache that must be dropped), which
+    cannot travel in the PYTHONPATH overlay. Finalize folds it into the same ``final_patch`` /
+    ``final_launch_script`` the caller already uses, so no new deployment path is introduced — but a
+    caller that reproduces the bundle by hand needs to know the deploy step exists.
+    """
+    t = wf.get("tuning_skillset")
+    if not isinstance(t, dict) or not t.get("enabled"):
+        return None
+    if not t.get("ran"):
+        # Enabled but never executed (e.g. a phase-scoped invocation that skipped it). Record that
+        # plainly rather than implying a measured no-win.
+        return {
+            "phase": "TuningSkillset",
+            "ran": False,
+            "gate": t.get("gate") or "not_run",
+            "explanation": "The standalone tuning-skillset phase was enabled but did not run in this invocation.",
+        }
+
+    gate = t.get("gate") or "unknown"
+    accepted = gate == "accepted"
+    delta = t.get("tuning_delta_pct") or 0.0
+    share = t.get("share_of_total_gain_pct")
+
+    if accepted:
+        explanation = (
+            f"The standalone tuning-skillset phase ran before the head-kernel track and measured its own "
+            f"interleaved pre/post A/B on the serving config accepted at that point: "
+            f"{t.get('pre_tune_throughput_tok_s')} -> {t.get('post_tune_throughput_tok_s')} tok/s "
+            f"({delta:+.2f}%). Engagement was verified, so the tuned artifacts were folded into the "
+            f"accepted config and every later phase was measured on top of them. This delta is part of "
+            f"the headline throughput_speedup, not additional to it"
+            + (f"; it accounts for ~{share}% of the run's total gain." if share is not None
+               else " (the run had no net gain to apportion).")
+        )
+    else:
+        explanation = (
+            f"The standalone tuning-skillset phase ran before the head-kernel track and did not bank a "
+            f"win (gate={gate}). Nothing from it was folded into the accepted config, so the headline "
+            f"result is unaffected by it. Reason: {t.get('reason') or t.get('summary') or 'not stated'}."
+        )
+
+    section: dict[str, Any] = {
+        "phase": "TuningSkillset",
+        "ran": True,
+        "gate": gate,
+        "explanation": explanation,
+        "mode": t.get("mode") or "",
+        "skills_used": t.get("skills_used") or [],
+        "ops_tuned": t.get("ops_tuned") or [],
+        # Attribution — measured by the phase itself, NOT re-derived from the run baseline.
+        "pre_tune_throughput_tok_s": t.get("pre_tune_throughput_tok_s"),
+        "post_tune_throughput_tok_s": t.get("post_tune_throughput_tok_s"),
+        "tuning_delta_pct": t.get("tuning_delta_pct"),
+        "tuning_speedup": t.get("tuning_speedup"),
+        "share_of_total_gain_pct": share,
+        "noise_floor_pct": t.get("noise_floor_pct"),
+        "ab_interleaved": t.get("ab_interleaved"),
+        "ab_complete": t.get("ab_complete"),
+        "correctness_gate": t.get("correctness_gate"),
+        "engagement_verified": t.get("engagement_verified"),
+        "engagement_evidence": t.get("engagement_evidence") or "",
+        "report_path": t.get("report_path") or str(eval_dir / "tuning" / "tuning_report.md"),
+    }
+
+    if accepted:
+        section["artifacts"] = t.get("artifacts") or []
+        section["apply_env"] = t.get("apply_env") or ""
+        section["apply_flags"] = t.get("apply_flags") or ""
+        section["cache_invalidation"] = t.get("cache_invalidation") or []
+        # Paths the deploy owns inside an installed package tree. Surfaced because a consumer diffing the
+        # image against a pristine one would otherwise read these as contamination.
+        section["live_tree_files"] = t.get("live_tree_files") or []
+        section["deploy_bundle"] = t.get("deploy_bundle") or str(eval_dir / "tuning" / "deploy")
+        section["in_final_bundle"] = t.get("in_final_bundle")
+        section["final_bundle_engagement_recheck"] = t.get("final_bundle_engagement_recheck") or ""
+        section["reaches_production_via"] = {
+            "note": (
+                "Tuned artifacts are DATA (config tables a library reads from its own package dir, plus "
+                "caches that must be invalidated), so they do not travel in final_overlay, which is a "
+                "PYTHONPATH overlay for code. They ship through the SAME two handles as everything else: "
+                "the tuning diff is concatenated into final_patch, and final_launch_script runs the "
+                "bundle's idempotent deploy.sh before starting the server. Reusing final_launch_script "
+                "needs no extra steps; applying final_patch by hand also requires the cache_invalidation "
+                "commands."
+            ),
+            "final_patch_includes_tuning": t.get("in_final_bundle"),
+            "final_launch_runs_deploy": t.get("in_final_bundle"),
+            "deploy_script": (
+                str(Path(t["deploy_bundle"]) / "deploy.sh") if t.get("deploy_bundle")
+                else str(eval_dir / "final" / "tuning" / "deploy.sh")
+            ),
+        }
+    return section
 
 
 def _format_optional_number(
