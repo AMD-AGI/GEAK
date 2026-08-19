@@ -1036,96 +1036,109 @@ def cmd_backfill_content(a) -> dict:
 
 
 # --- remote KB export -------------------------------------------------------------------------
-# Mirrors KernelForge's `kernel:` canonical id and record shape (knowledge/kernel_identity.py and
-# rewrite_by_flydsl/{identity,agent_kb,record_store}.py @ baabdae). Read and write must both go
-# through remote_canonical_id(): the store finds nothing if the two sides disagree by one segment,
-# and there is no error to notice — a mistyped dimension just reads as a cold start.
+# Record shape mirrors KernelForge's (knowledge/kernel_identity.py and
+# rewrite_by_flydsl/{identity,agent_kb,record_store}.py @ baabdae); the ADDRESS does not, and
+# kb_identity.py owns it for both workflows and says why. Read and write must both go through it:
+# the store finds nothing if the two sides disagree by one segment, and there is no error to notice
+# — a mistyped dimension just reads as a cold start.
 #
-# framework/framework_version are `rocm/<version>` for ALL THREE languages, not each language's own
-# toolchain. Upstream means "the package that owns the source being patched" (vllm, sglang) and our
-# kernels are standalone, so that reading gives us nothing. What actually moves our stack is the
-# container image: triton, hip and ck all ship in the same one, so its ROCm version is the single
-# number that says whether two speedups were measured on the same thing. The language goes in
-# `backend`, which is what upstream means by it (`backend="ck"/"triton"/"flydsl"` in their seeds).
-REMOTE_SCHEME = "kernel"
+# The scheme is `geak:`, not `kernel:`, because our credential is scoped to `geak` identities and
+# 403s on both `kernel:` and `inference:`. That scheme is client-defined and exact-lookup only, so
+# every dimension has to be something the READ side can recompute from what it already knows;
+# nothing may be derived from run-local state. Two consequences worth having in view here:
+#
+#   * the serving framework (vllm / sglang), its version and the numeric precision are NOT
+#     dimensions, even though an e2e run knows all three. kernel_lane.js does not — it has no
+#     upstream awareness at all, and pass-through from e2e forwards only `target_language`. A
+#     dimension the reader cannot reconstruct is a permanent silent 404. They ride in
+#     `value.upstream` instead, where a client can filter on them; precision is additionally
+#     already spelled into most kernel names (`fused_moe_int4_w4a16`, `_w8a8_triton_block_scaled_mm`)
+#     so keying on it would double-encode and split those pages.
+#   * every write publishes to BOTH rungs of kernel_canonical_ids(). The service does no prefix
+#     aggregation, so the version-agnostic page exists only because we put records there.
 REMOTE_PRODUCER = "geak"
-REMOTE_FRAMEWORK = "rocm"
 REMOTE_ARTIFACT_KIND = "rewrite"        # upstream ARTIFACT_KIND for a recipe bundle
-REMOTE_UNKNOWN_VERSION = "unspecified"  # upstream's literal for "framework known, version not observed"
-# `gpu` is the product model; the compile target (gfx950) is a different dimension upstream keeps
-# out of the identity. Unmapped arch falls through to the arch itself rather than guessing a model.
-REMOTE_GPU_BY_GFX = {"gfx950": "mi355x", "gfx942": "mi300x"}
 
-_REMOTE_DISALLOWED = re.compile(r"[^a-z0-9._+-]+")
-_REMOTE_LEADING = re.compile(r"^[^a-z0-9_]+")
-_REMOTE_UNSAFE_IN_SESSION = re.compile(r"[^A-Za-z0-9._-]+")
-_REMOTE_NAME_BUDGET = 48        # upstream _NAME_BUDGET; a dimension may be longer than a whole id
-_REMOTE_FINGERPRINT = 12        # upstream _FINGERPRINT_LEN
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import kb_identity as _kbid
+except ImportError:                     # resolve/write stay usable; only the remote pair needs it
+    _kbid = None
+
+REMOTE_SCHEME = "geak"
+REMOTE_DOMAIN = "kernel"
+REMOTE_FRAMEWORK = "rocm"
+REMOTE_UNKNOWN_VERSION = "unspecified"
+
+
+def _identity_module():
+    if _kbid is None:
+        raise RuntimeError("kb_identity_unavailable: kb_identity.py must sit beside this script")
+    return _kbid
 
 
 def remote_segment(value, fallback: str) -> str:
-    """Fold a free-form value into one identity dimension, byte-for-byte as upstream's segment()."""
-    folded = _REMOTE_DISALLOWED.sub("-", str(value or "").strip().lower())
-    folded = _REMOTE_LEADING.sub("", folded).strip("-")
-    if not folded:
-        folded = fallback
-    return folded.encode("ascii", "ignore").decode("ascii")[:256] or fallback
+    """Fold a free-form value into one identity dimension. Delegates so there is one folding rule."""
+    return _identity_module().segment(value, fallback)
 
 
 def remote_gpu(gfx: str, override: str = "") -> str:
-    if override:
-        return remote_segment(override, fallback="unknown")
-    arch = _norm_gfx(gfx)
-    return REMOTE_GPU_BY_GFX.get(arch) or remote_segment(arch, fallback="unknown")
+    """The compile target (`gfx950`), NOT the product model, and the LEADING dimension.
+
+    Upstream keys this on the marketing name (`mi355x`) and leaves gfx out of the identity. We
+    diverge on both counts. gfx is what every producer and consumer on our side already holds — off
+    the box, out of meta.yaml, out of the e2e harness — whereas the product model exists only as a
+    lookup table someone has to keep current, and an unmapped arch would file half a kernel's
+    history under a name nothing looks up. It leads because an arch mismatch is the quietest way to
+    waste a round: a gfx942-tuned patch compiles clean on gfx950 and is merely slower, where a
+    wrong kernel_name or language at least fails to apply.
+    """
+    return remote_segment(override or _norm_gfx(gfx), fallback="unknown")
 
 
 def remote_framework_version(meta: dict, override: str = "") -> str:
     """The ROCm version this entry was measured on, cut to `<major>.<minor>` for the address.
 
-    Coarse on purpose. detect_stack() observes whatever /opt/rocm/.info/version says, which is a
-    full build string on some images (`7.2.0-98765`), while the recovered backlog only knows `7.2`.
-    Keyed verbatim, those two land on different identities and a warm start stops seeing half its
-    own history over a patch release. The exact string still travels in value.verified_stack, so
-    nothing is lost — only the address is coarse.
+    Coarse on purpose, and now additionally droppable: it is the last segment precisely because
+    7.2 -> 7.3 usually keeps a patch applicable, so the second rung of the ladder is the one that
+    keeps 20 kernels warm through an image upgrade instead of cold-starting all of them at once.
 
-    Never guessed: no rocm key exports as `unspecified`, which files the entry apart from the
-    versioned ones. That is the honest outcome — its speedup genuinely cannot be placed on a stack.
+    Never guessed: no rocm key exports as `unspecified`. That entry still gets both rungs, so the
+    version-agnostic page sees it even though its exact page is one nobody will construct.
     """
     stack = meta.get("verified_stack")
     raw = str(override or "").strip()
     if not raw:
         raw = str((stack or {}).get("rocm") or "").strip() if isinstance(stack, dict) else ""
-    if not raw:
-        return REMOTE_UNKNOWN_VERSION
-    m = re.match(r"\s*(\d+(?:\.\d+)?)", raw)
-    return remote_segment(m.group(1) if m else raw, fallback=REMOTE_UNKNOWN_VERSION)
+    return _identity_module()._short_version(raw)
 
 
 def remote_identity(meta: dict, producer: str = REMOTE_PRODUCER, gpu: str = "",
                     version: str = "") -> dict:
-    """The six dimensions of the address.
+    """The four dimensions of the address.
 
-    `version` overrides only the key dimension, never the record: a box whose ROCm this script
-    cannot detect (no /opt/rocm on the host side of a run) would otherwise file its result at
-    `:unspecified:` and split one kernel's history in two, while `value.verified_stack` keeps
-    saying — correctly — that nothing was observed.
+    `producer` is accepted and recorded but is no longer a dimension: it has one value here, the
+    service stamps it on every record, and artifacts are already partitioned under
+    `kb/<producer>/<session_id>/`. `version` overrides only the key, never the record — a box whose
+    ROCm this script cannot detect would otherwise file at `:unspecified` and split one kernel's
+    history in two while `value.verified_stack` keeps saying, correctly, that nothing was observed.
     """
-    return {
-        "producer": remote_segment(producer, fallback=REMOTE_PRODUCER),
-        "kernel_name": remote_segment(meta.get("kernel_name"), fallback="unknown"),
-        "gpu": remote_gpu(meta.get("gfx") or (meta.get("metric") or {}).get("gpu_arch") or "", gpu),
-        "framework": REMOTE_FRAMEWORK,
-        "framework_version": remote_framework_version(meta, version),
-        "backend": remote_segment(meta.get("language"), fallback="unknown"),
-    }
+    return _identity_module().kernel_identity(
+        gfx=remote_gpu(meta.get("gfx") or (meta.get("metric") or {}).get("gpu_arch") or "", gpu),
+        kernel_name=meta.get("kernel_name"),
+        backend=meta.get("language"),
+        rocm_version=remote_framework_version(meta, version),
+    )
+
+
+def remote_canonical_ids(identity: dict):
+    """Every address this entry is published at, most specific first. Never a subset."""
+    return _identity_module().kernel_canonical_ids(identity)
 
 
 def remote_canonical_id(identity: dict) -> str:
-    """scheme + the six ordered dimensions. Order is upstream's KERNEL_CANONICAL_DIMENSIONS."""
-    return ":".join([REMOTE_SCHEME] + [
-        identity[name] for name in
-        ("producer", "kernel_name", "framework", "framework_version", "backend", "gpu")
-    ])
+    """The exact address — rung 1. The one a fresh write is fingerprinted from."""
+    return remote_canonical_ids(identity)[0]
 
 
 def _remote_digest(meta: dict, exp_dir: str) -> str:
@@ -1143,14 +1156,14 @@ def _remote_digest(meta: dict, exp_dir: str) -> str:
 
 
 def remote_session_id(canonical_id: str, kernel_name: str, digest: str) -> str:
-    """`<producer>-<name>-<identity fp>-<port digest>`, upstream's shape. The identity fingerprint
-    is load-bearing: artifacts are partitioned by session id alone, so an id repeated across two
-    identities would let them collide on a shared artifact path."""
-    name = _REMOTE_UNSAFE_IN_SESSION.sub("-", str(kernel_name or "")).strip("-.")
-    legible = name[:_REMOTE_NAME_BUDGET].strip("-.") or "unknown"
-    fp = hashlib.sha256(str(canonical_id or "").encode()).hexdigest()[:_REMOTE_FINGERPRINT]
-    port = _REMOTE_UNSAFE_IN_SESSION.sub("", str(digest or ""))[:_REMOTE_FINGERPRINT]
-    return f"{REMOTE_PRODUCER}-{legible}-{fp}-{port}".strip("-")
+    """`<producer>-<name>-<identity fp>-<port digest>`, upstream's shape.
+
+    Pass the EXACT rung: the id is reused verbatim on the coarser one, which is what lets the two
+    share uploaded artifacts instead of duplicating a 240KB patch. Fingerprinting each rung on its
+    own would give one measurement two unrelated ids and stop the coarse page from being a
+    reproduction of the exact one.
+    """
+    return _identity_module().session_id(canonical_id, kernel_name, digest, REMOTE_PRODUCER)
 
 
 def _sha256_file(path: str):
@@ -1192,6 +1205,15 @@ def remote_value(meta: dict, digest: str = "") -> dict:
         "reproductions": meta.get("reproductions"),
         "lifecycle": str(meta.get("lifecycle") or ""),
         "retained": meta.get("retained"),
+        # The same two fields the e2e records carry, so one reader can ask "should I believe this"
+        # of either lane without knowing which one wrote it. Derived, not invented: `active` is
+        # earned here only by independent reproduction (see the write path), so it already IS the
+        # validation flag — it was just spelled in a vocabulary nothing outside this file knew.
+        # The basis is named for what actually produced the number rather than mapped onto the
+        # e2e taxonomy: a kernel's speedup comes from its own isolated bench harness, and calling
+        # that a `hot_ab` would claim a serving-level A/B that never ran.
+        "validated": str(meta.get("lifecycle") or "") == "active",
+        "validation_basis": "kernel_bench",
         # The same digest the session id is built from, so a reader that dedups against its own
         # store and the address it was filed under can never disagree about what this patch is.
         "content_signature": ("csha:" + digest) if digest else str(meta.get("content_signature") or ""),
@@ -1205,13 +1227,23 @@ def remote_value(meta: dict, digest: str = "") -> dict:
     return {k: v for k, v in value.items() if v not in ("", None, [], {})}
 
 
-def remote_record(meta: dict, exp_dir: str, producer: str = REMOTE_PRODUCER, gpu: str = "",
-                  version: str = "") -> dict:
-    """One upload-ready candidate: where it goes, what it knows, and which files ride with it."""
+def remote_records(meta: dict, exp_dir: str, producer: str = REMOTE_PRODUCER, gpu: str = "",
+                   version: str = ""):
+    """One measurement as upload-ready candidates — one per rung, most specific first.
+
+    All rungs carry the same session id, the same knowledge and the same files. They are not
+    variants of a result; they are one result filed at every address a reader might construct. That
+    is why the caller must publish all of them or none: a coarse page fed by only some runs ranks
+    worse than an empty one, because a reader cannot tell a thin page from a complete one.
+
+    `rung` is stamped on each record so an uploader can skip re-transferring artifacts for rungs
+    after the first — remotely the bytes are shared via the session id, and re-PUTting them would
+    only burn the presign window.
+    """
     identity = remote_identity(meta, producer, gpu, version)
-    cid = remote_canonical_id(identity)
+    cids = remote_canonical_ids(identity)
     digest = _remote_digest(meta, exp_dir)
-    sid = remote_session_id(cid, identity["kernel_name"], digest)
+    sid = remote_session_id(cids[0], identity["kernel_name"], digest)
     speedup = _speedup_of(meta)
     files = []
     for name in ("patch.diff", "report.md"):
@@ -1221,23 +1253,34 @@ def remote_record(meta: dict, exp_dir: str, producer: str = REMOTE_PRODUCER, gpu
         file_sha, size = _sha256_file(path)
         files.append({"path": name, "local_path": path, "kind": REMOTE_ARTIFACT_KIND,
                       "sha256": file_sha, "size": size})
-    return {
+    # The knowledge document upstream's own writer produces: four keys, everything else under
+    # `value`. `speedup` sits at the top because that is the ranking key the service reads — it
+    # only honours a flat top-level `knowledge.<name>` scalar and rejects a nested path with a 400.
+    knowledge = {
+        "producer": remote_segment(producer, REMOTE_PRODUCER),
+        "speedup": round(speedup, 4) if speedup else None,
+        "identity": identity,
+        "value": remote_value(meta, digest),
+    }
+    return [{
         "canonical_id": cid,
         "session_id": sid,
         "exp_dir": exp_dir,
-        # The knowledge document upstream's own writer produces: four keys, everything else under
-        # `value`. `speedup` sits at the top because that is the ranking key the service reads.
-        "knowledge": {
-            "producer": identity["producer"],
-            "speedup": round(speedup, 4) if speedup else None,
-            "identity": identity,
-            "value": remote_value(meta, digest),
-        },
+        "rung": rung,
+        "knowledge": knowledge,
         "files": files,
         # Upstream's own gate: a candidate is always recorded, the pointer moves only on a real win.
+        # Evaluated per rung, since each address keeps its own champion pointer.
         "champion_eligible": speedup > 1.0,
         "champion": False,
-    }
+    } for rung, cid in enumerate(cids)]
+
+
+def remote_record(meta: dict, exp_dir: str, producer: str = REMOTE_PRODUCER, gpu: str = "",
+                  version: str = "") -> dict:
+    """The exact-rung record alone. Kept for callers that only want the address, never for writing —
+    writing one rung and not the other is the failure mode remote_records() exists to prevent."""
+    return remote_records(meta, exp_dir, producer, gpu, version)[0]
 
 
 def cmd_export_remote(a) -> dict:
@@ -1273,7 +1316,7 @@ def cmd_export_remote(a) -> dict:
         if not os.path.isfile(os.path.join(dirpath, "patch.diff")):
             skipped["no_patch"] += 1
             continue
-        records.append(remote_record(meta, dirpath, a.producer, a.gpu))
+        records.extend(remote_records(meta, dirpath, a.producer, a.gpu))
 
     # One champion per identity, upstream's rule: must beat 1.0x, and highest wins. Ties break on
     # session id so two runs of this exporter promote the same candidate.
@@ -1318,10 +1361,16 @@ def cmd_export_remote(a) -> dict:
     finally:
         if out:
             out.close()
-    return {"ok": True, "scanned": scanned, "emitted": emitted, "identities": len(
-        {r["canonical_id"] for r in records}), "champions": len(best),
-        "deduped": len(dropped), "deduped_dirs": sorted(dropped),
-        "skipped": skipped, "out": a.out or "-"}
+    # `emitted` counts records, not measurements: each entry is published at every rung of its
+    # ladder, so the honest headline is both numbers. `sessions` is how many distinct measurements
+    # went out; emitted/sessions should equal the ladder depth for a healthy export.
+    return {"ok": True, "scanned": scanned, "emitted": emitted,
+            "sessions": len({r["session_id"] for r in records}),
+            "identities": len({r["canonical_id"] for r in records}),
+            "exact_identities": len({r["canonical_id"] for r in records if r["rung"] == 0}),
+            "champions": len(best),
+            "deduped": len(dropped), "deduped_dirs": sorted(dropped),
+            "skipped": skipped, "out": a.out or "-"}
 
 
 def _open_store(root: str, create: bool = False):
@@ -1347,6 +1396,34 @@ def _open_store(root: str, create: bool = False):
     return LocalKBStore(root), ""
 
 
+def _open_plane(a, create: bool = False):
+    """The store this invocation reads or writes: a directory, the service, or both.
+
+    `--plane both` is the one that needs care. It writes locally FIRST and remotely second, and a
+    remote failure is reported without failing the call — the local plane is the source of truth,
+    the run already spent GPU hours producing the measurement, and a network blip must not discard
+    it. A remote-only failure therefore surfaces as `remote_error` in the result rather than as a
+    refusal, which is also why the field exists at all: without it an unreachable service would
+    look exactly like a successful write.
+    """
+    plane = str(getattr(a, "plane", "local") or "local")
+    if plane == "local":
+        store, why = _open_store(a.store, create)
+        return store, None, why
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from kb_store_remote import RemoteKBStore
+    except ImportError as e:
+        return None, None, "store_unavailable: " + str(e)[:120]
+    remote, why = RemoteKBStore.from_env(getattr(a, "scan", 25))
+    if plane == "remote":
+        return remote, None, why
+    local, local_why = _open_store(a.store, create)
+    if local is None:
+        return None, None, local_why
+    return local, remote, ("remote_unavailable: " + why if remote is None else "")
+
+
 def _value_as_meta(value: dict, gfx: str) -> dict:
     """Read a record's `value` back as a meta.
 
@@ -1361,35 +1438,77 @@ def _value_as_meta(value: dict, gfx: str) -> dict:
     return meta
 
 
-def _store_identity(a, gfx: str):
-    """The address to read, plus any near-miss addresses worth naming.
+def _store_ladder(a, gfx: str):
+    """The addresses to try, most specific first, each paired with the tier it represents.
 
     framework_version is the one dimension a reader can get wrong without noticing: the store is
-    keyed on the ROCm the entry was measured on, this box may be on another, and a bare miss looks
-    exactly like a cold start. So resolve the exact id first, and when it holds nothing, fall back
-    to the same kernel/backend under a DIFFERENT version and say so — adoption is decided by a
-    fresh measurement here either way.
+    keyed on the ROCm an entry was measured on, this box may be on another, and a bare miss looks
+    exactly like a cold start. The ladder is the answer — but only because the WRITER publishes the
+    version-agnostic rung too. Nothing here derives a page that was never written; each rung is a
+    real address that a `write-remote` on this box would also have filled.
+
+    An explicit --canonical-id is taken as given and gets no ladder. A caller that names an address
+    is usually auditing one page, and silently widening the read would misreport which page
+    answered.
     """
     if a.canonical_id:
-        return a.canonical_id, [], "exact"
+        return [(a.canonical_id, "exact")]
     meta = {"kernel_name": a.kernel_name, "language": a.language,
             "verified_stack": detect_stack(a.language)}
     identity = remote_identity(meta, a.producer, remote_gpu(gfx, getattr(a, "gpu", "")),
                                getattr(a, "framework_version", ""))
-    return remote_canonical_id(identity), [], "exact"
+    return list(zip(remote_canonical_ids(identity), ("exact", "any_version")))
+
+
+def cmd_retract_remote(a) -> dict:
+    """Take back a key-addressed kernel record. The counterpart to `write-remote`.
+
+    The service has no delete, so this rewrites the session in place: `retained: false`, a reason,
+    the ranking scalar zeroed, and the identity's champion re-pointed at the best survivor. See
+    kb_retract for why all three are needed and why any two of them is worse than none.
+
+    Both rungs are visited, because `write-remote` filled both with the SAME session id. Retracting
+    only the exact rung leaves the record live on the version-agnostic page, which is the page a box
+    on a different ROCm reads — i.e. it would survive exactly where it is least verifiable.
+
+    `--canonical-id` addresses one page only, matching `resolve-remote`'s rule: a caller that names
+    an address is auditing it, and quietly widening a WRITE beyond what was asked for is not a
+    behaviour this command should have.
+    """
+    from kb_retract import retract_session, retraction_ok
+    from kb_store_local import CHAMPION_METRIC
+    gfx = _norm_gfx(a.gfx)
+    if not gfx and not a.canonical_id:
+        return {"retracted": False, "reason": "missing_arch"}
+    store, mirror, why = _open_plane(a)
+    planes = [p for p in (store, mirror) if p is not None]
+    if not planes:
+        return {"retracted": False, "reason": why}
+    out = {"applied": bool(a.apply), "session_id": a.session_id, "reason": a.reason,
+           "plane_note": why, "pages": []}
+    for cid, tier in _store_ladder(a, gfx):
+        for plane in planes:
+            report = retract_session(plane, cid, a.session_id, a.reason, CHAMPION_METRIC,
+                                     actor=str(getattr(a, "measured_by", "") or ""),
+                                     scan=int(a.scan), apply=bool(a.apply))
+            out["pages"].append(dict(report, tier=tier))
+    out["retracted"] = retraction_ok(out["pages"], a.apply)
+    return out
 
 
 def _store_near_misses(store, cid: str):
-    """Identities differing from `cid` only in framework_version."""
+    """Identities differing from `cid` only in framework_version, newest-looking last.
+
+    A third tier below the ladder, and only reachable on a store that predates double-writing —
+    once every write fills the version-agnostic rung, that rung answers first and this never runs.
+    Kept because the alternative for such a store is a cold start on a kernel that has history.
+    """
     parts = cid.split(":")
     if len(parts) != 7:
         return []
-    out = []
-    for other in store.identities():
-        segs = other.split(":")
-        if len(segs) == 7 and segs[:4] == parts[:4] and segs[5:] == parts[5:] and segs[4] != parts[4]:
-            out.append(other)
-    return sorted(out)
+    return sorted(other for other in store.identities()
+                  if (lambda s: len(s) == 7 and s[:6] == parts[:6] and s[6] != parts[6])
+                  (other.split(":")))
 
 
 def cmd_resolve_remote(a) -> dict:
@@ -1404,36 +1523,63 @@ def cmd_resolve_remote(a) -> dict:
     gfx = _norm_gfx(a.gfx)
     if not gfx and not a.canonical_id:
         return {"read_reason": "missing_arch", "candidates": []}
-    store, why = _open_store(a.store)
+    # Reading takes ONE plane, never both. Merging two rankings would need a comparability rule
+    # across planes that nothing here has, and silently preferring one would make a stale local
+    # mirror shadow the service without saying so.
+    store, _second, why = _open_plane(a)
     if store is None:
         return {"read_reason": why.split(":", 1)[0], "reason": why, "candidates": []}
 
-    cid, _hints, match_tier = _store_identity(a, gfx)
-    requested_slug = make_slug(a.kernel_name or cid.split(":")[2], a.language or cid.split(":")[5], gfx)
+    ladder = _store_ladder(a, gfx)
+    cid, match_tier = ladder[0]
+    segs = cid.split(":")
+    requested_slug = make_slug(a.kernel_name or (segs[3] if len(segs) > 3 else ""),
+                               a.language or (segs[4] if len(segs) > 4 else ""), gfx)
     base_out = {"slug": requested_slug, "requested_slug": requested_slug, "canonical_id": cid,
-                "match_tier": match_tier, "other_language_pages": [], "ambiguous_pages": [],
-                "candidates": []}
+                "match_tier": match_tier, "tried": [c for c, _t in ladder],
+                "other_language_pages": [], "ambiguous_pages": [], "candidates": []}
 
-    found = store.candidates(cid, limit=0)
+    # Descend the ladder, then the pre-ladder near misses. Stopping at the first rung that holds
+    # anything is deliberate: a coarser page is a superset only if every writer double-wrote, and
+    # `tried` records the descent so a thin answer can be told apart from a lucky one.
+    # Retracted records are dropped as the page is read, not after the rung is chosen. The local
+    # `resolve` has filtered on `_is_retired` since it existed; this path did not, and reported a
+    # hardcoded `"retired": 0` while serving them — so a record someone had explicitly taken back
+    # came straight back out of the service. Filtering here rather than below also means a rung
+    # whose every entry has been retracted correctly reads as EMPTY and the ladder descends, instead
+    # of stopping on a page that turns out to have nothing to offer.
+    def live(canonical_id):
+        rows = store.candidates(canonical_id, limit=0)
+        kept = [c for c in rows if not _is_retired(c.value)]
+        return kept, len(rows) - len(kept)
+
+    found, retired = [], 0
+    for cid, match_tier in ladder:
+        found, retired = live(cid)
+        if found:
+            break
     if not found:
-        near = _store_near_misses(store, cid)
-        if not near:
-            return dict(base_out, read_reason="kernel_page_not_found")
-        # Same kernel, another stack version. Serve it and say which, rather than cold-start.
-        cid, match_tier = near[0], "other_version"
-        found = store.candidates(cid, limit=0)
-        base_out.update({"canonical_id": cid, "match_tier": match_tier,
-                         "other_language_pages": near})
+        near = _store_near_misses(store, ladder[0][0])
+        for other in near:
+            found, retired = live(other)
+            if found:
+                cid, match_tier = other, "other_version"
+                break
+        base_out.update({"other_language_pages": near,
+                         "tried": [c for c, _t in ladder] + near})
         if not found:
             return dict(base_out, read_reason="kernel_page_not_found")
+    base_out.update({"canonical_id": cid, "match_tier": match_tier})
 
     try:
         min_speedup = float(a.min_speedup)
     except (TypeError, ValueError):
         min_speedup = 1.0
     above = [c for c in found if (c.speedup or 0.0) >= min_speedup]
-    stats = {"total": len(found), "retired": 0, "below_min_speedup": len(found) - len(above),
-             "min_speedup": min_speedup}
+    # `total` counts what the page held, `retired` how many of those were taken back — so the two
+    # still sum to the page size even though `found` is already the survivors.
+    stats = {"total": len(found) + retired, "retired": retired,
+             "below_min_speedup": len(found) - len(above), "min_speedup": min_speedup}
     if not above:
         return dict(base_out, filtered=stats, read_reason="below_min_speedup")
 
@@ -1479,8 +1625,10 @@ def cmd_resolve_remote(a) -> dict:
         f"{len(top)} direction(s) offered from {stats['total']} recorded candidate(s): "
         f"{stats['below_min_speedup']} below {min_speedup:g}x, "
         f"{collapsed} same-direction re-discoveries moved to `alternates`."
-        + (f" Served from `{cid}` — no record under this box's own stack version."
-           if match_tier == "other_version" else ""))
+        + ({"any_version": f" Served from `{cid}` — the version-agnostic page; nothing was"
+                           " recorded under this box's own ROCm.",
+            "other_version": f" Served from `{cid}` — a DIFFERENT stack version, and not even the"
+                             " version-agnostic page had it."}.get(match_tier, "")))
     prose = _render_references(a.refs_dir, f"`{cid}`", summary, views)
     candidates = [_candidate(rank, v, gfx, p, views[0]["bench_key"])
                   for rank, (v, p) in enumerate(zip(views, prose), start=1)]
@@ -1500,7 +1648,7 @@ def cmd_write_remote(a) -> dict:
         not a second candidate, which is exactly what the local plane already calls it.
     """
     local = cmd_write(a)
-    store, why = _open_store(a.store, create=True)
+    store, also, why = _open_plane(a, create=True)
     if store is None:
         return dict(local, remote={"written": False, "reason": why})
 
@@ -1512,25 +1660,56 @@ def cmd_write_remote(a) -> dict:
         return dict(local, remote={"written": False,
                                    "reason": local.get("reason") or "no_local_entry"})
 
-    rec = remote_record(meta, exp_dir, a.producer, remote_gpu(_norm_gfx(a.gfx), getattr(a, "gpu", "")),
-                        getattr(a, "framework_version", ""))
-    files = {f["path"]: f["local_path"] for f in rec["files"]}
+    recs = remote_records(meta, exp_dir, a.producer,
+                          remote_gpu(_norm_gfx(a.gfx), getattr(a, "gpu", "")),
+                          getattr(a, "framework_version", ""))
+    files = {f["path"]: f["local_path"] for f in recs[0]["files"]}
     # Asked BEFORE the write: a session that already exists is this same patch measured again, and
     # the caller deserves to know its result replaced one rather than adding one.
-    replaced = store.get_session(rec["canonical_id"], rec["session_id"]) is not None
-    try:
-        store.write(rec["canonical_id"], rec["session_id"], rec["knowledge"], files)
-        promoted = store.maybe_promote(rec["canonical_id"], rec["session_id"],
-                                       rec["knowledge"].get("speedup"))
-    except Exception as e:                       # a KB write must not fail a measured result
-        return dict(local, remote={"written": False, "reason": f"{type(e).__name__}: {str(e)[:160]}"})
-    return dict(local, remote={
-        "written": True, "canonical_id": rec["canonical_id"], "session_id": rec["session_id"],
-        "speedup": rec["knowledge"].get("speedup"), "champion": promoted,
-        "files": sorted(files), "store": store.root,
+    replaced = store.get_session(recs[0]["canonical_id"], recs[0]["session_id"]) is not None
+    written, promoted, error = _publish_ladder(store, recs, files)
+    if error:                                    # a KB write must not fail a measured result
+        return dict(local, remote={"written": False, "partial": written, "reason": error})
+    out = {
+        "written": True, "canonical_id": recs[0]["canonical_id"],
+        "canonical_ids": written, "session_id": recs[0]["session_id"],
+        "speedup": recs[0]["knowledge"].get("speedup"), "champion": bool(promoted),
+        "champion_of": promoted, "files": sorted(files), "store": store.root,
         # true = this measurement landed on a session that already existed, i.e. the same patch.
         "replaced": replaced,
-    })
+    }
+    if also is not None:
+        # The second plane never gates the first. It reports its own outcome so an unreachable
+        # service is visible as a failed mirror rather than as a silent one.
+        mirrored, mirror_promoted, mirror_error = _publish_ladder(also, recs, files)
+        out["mirror"] = {"written": not mirror_error, "store": also.root,
+                         "canonical_ids": mirrored, "champion_of": mirror_promoted,
+                         "reason": mirror_error or ""}
+    elif why:
+        out["mirror"] = {"written": False, "reason": why}
+    return dict(local, remote=out)
+
+
+def _publish_ladder(store, recs, files):
+    """Write one measurement to every rung of its ladder. Returns (written, promoted, error).
+
+    All rungs or none. A partially-filled ladder is the one outcome worth avoiding: the coarse page
+    would hold whichever runs happened to succeed twice and would rank them as if that were the
+    whole history — and because the scheme has no search, no reader could ever tell that page was
+    thin. Stopping at the first failure leaves fewer records than intended but never a page that
+    lies about its own completeness, since the exact rung is written first.
+    """
+    written, promoted = [], []
+    for rec in recs:
+        try:
+            store.write(rec["canonical_id"], rec["session_id"], rec["knowledge"], files)
+            written.append(rec["canonical_id"])
+            if store.maybe_promote(rec["canonical_id"], rec["session_id"],
+                                   rec["knowledge"].get("speedup")):
+                promoted.append(rec["canonical_id"])
+        except Exception as e:
+            return written, promoted, f"{type(e).__name__}: {str(e)[:160]}"
+    return written, promoted, ""
 
 
 def main(argv=None):
@@ -1589,22 +1768,31 @@ def main(argv=None):
     xr.add_argument("--kernel-name", dest="kernel_name", default="", help="only this kernel")
     xr.add_argument("--producer", default=REMOTE_PRODUCER,
                     help="the system that owns this candidate stream and its champion pointer")
-    xr.add_argument("--gpu", default="", help="product model; default is mapped from the entry's gfx")
+    xr.add_argument("--gpu", default="", help="override the gfx dimension; default is the entry's own gfx")
     xr.add_argument("--include-retired", dest="include_retired", action="store_true",
                     help="also export entries the curation retired (they would rank as live wins)")
     xr.add_argument("--out", default="", help="write JSON lines here instead of stdout")
 
     # The key-addressed pair. Same gates, same output shapes as resolve/write — only the plane
     # the records live on changes, so the lane can be pointed at either.
-    rr = sub.add_parser("resolve-remote", help="rank top-N candidates under one canonical id")
-    rr.add_argument("--store", required=True, help="on-disk KB store root")
+    def add_plane_args(w):
+        # `both` writes locally and mirrors to the service; reads always take exactly one plane.
+        w.add_argument("--plane", choices=("local", "remote", "both"), default="local",
+                       help="local dir, the KB Store service (KB_STORE_URL/KB_STORE_TOKEN), or both")
+        w.add_argument("--scan", type=int, default=25,
+                       help="remote only: candidates hydrated before curation (page cap is 200)")
+        return w
+
+    rr = add_plane_args(sub.add_parser("resolve-remote",
+                                       help="rank top-N candidates under one canonical id"))
+    rr.add_argument("--store", default="", help="on-disk KB store root (--plane local/both)")
     rr.add_argument("--canonical-id", dest="canonical_id", default="",
                     help="the key to read; derived from kernel/language/gfx when omitted")
     rr.add_argument("--kernel-name", dest="kernel_name", default="")
     rr.add_argument("--language", default="")
     rr.add_argument("--gfx", default="")
     rr.add_argument("--producer", default=REMOTE_PRODUCER)
-    rr.add_argument("--gpu", default="", help="product model; default is mapped from --gfx")
+    rr.add_argument("--gpu", default="", help="override the gfx dimension; default is --gfx")
     rr.add_argument("--framework-version", dest="framework_version", default="",
                     help="rocm <major>.<minor>; default is detected on this box")
     rr.add_argument("--top-n", dest="top_n", type=int, default=3, help="max DIRECTIONS to offer")
@@ -1613,12 +1801,32 @@ def main(argv=None):
                     help="where selected candidates are materialized (default <refs-dir>/../kb_cache)")
     rr.add_argument("--min-speedup", dest="min_speedup", type=float, default=1.05)
 
-    wr = add_write_args(sub.add_parser("write-remote", help="store one win in both planes"))
-    wr.add_argument("--store", required=True, help="on-disk KB store root")
+    wr = add_plane_args(add_write_args(
+        sub.add_parser("write-remote", help="store one win in the local store AND under its key")))
+    wr.add_argument("--store", default="", help="on-disk KB store root (--plane local/both)")
     wr.add_argument("--producer", default=REMOTE_PRODUCER)
-    wr.add_argument("--gpu", default="", help="product model; default is mapped from --gfx")
+    wr.add_argument("--gpu", default="", help="override the gfx dimension; default is --gfx")
     wr.add_argument("--framework-version", dest="framework_version", default="",
                     help="rocm <major>.<minor> for the key; default is the measured stack")
+
+    tr = add_plane_args(sub.add_parser(
+        "retract-remote", help="take back a written record: retained=false, score zeroed, champion "
+                               "re-pointed (there is no delete — this is a rewrite)"))
+    tr.add_argument("--store", default="", help="on-disk KB store root (--plane local/both)")
+    tr.add_argument("--canonical-id", dest="canonical_id", default="",
+                    help="retract on THIS page only; omit to walk both rungs of the ladder")
+    tr.add_argument("--session-id", dest="session_id", required=True,
+                    help="the session to retract, from the write-remote output")
+    tr.add_argument("--reason", required=True,
+                    help="why the record is wrong; it is all a future reader has to judge by")
+    tr.add_argument("--kernel-name", dest="kernel_name", default="")
+    tr.add_argument("--language", default="")
+    tr.add_argument("--gfx", default="")
+    tr.add_argument("--producer", default=REMOTE_PRODUCER)
+    tr.add_argument("--gpu", default="", help="override the gfx dimension; default is --gfx")
+    tr.add_argument("--framework-version", dest="framework_version", default="")
+    tr.add_argument("--measured-by", dest="measured_by", default="", help="who is retracting it")
+    tr.add_argument("--apply", action="store_true", help="actually rewrite; default is a dry run")
 
     m = sub.add_parser("remap", help="rewrite a stored patch's paths onto this workspace's layout")
     m.add_argument("--patch", required=True)
@@ -1644,11 +1852,14 @@ def main(argv=None):
             out = cmd_resolve_remote(a)
         elif a.cmd == "write-remote":
             out = cmd_write_remote(a)
+        elif a.cmd == "retract-remote":
+            out = cmd_retract_remote(a)
         else:  # pragma: no cover
             out = {"error": "unknown command"}
     except Exception as e:  # never crash the caller
         err = "exception: " + str(e)[:160]
         out = ({"written": False, "reason": err} if a.cmd in ("write", "write-remote")
+               else {"retracted": False, "reason": err} if a.cmd == "retract-remote"
                else {"remapped": False, "reason": err} if a.cmd == "remap"
                else {"read_reason": err, "candidates": []})
     print(json.dumps(out, ensure_ascii=False))

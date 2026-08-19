@@ -249,6 +249,20 @@ const KB_STORE_DIR = String(A.kb_store_dir ||
 const KB_FRAMEWORK_VERSION = String(A.kb_framework_version || '').trim();
 const KB_VERSION_FLAG = KB_FRAMEWORK_VERSION ? ` --framework-version ${JSON.stringify(KB_FRAMEWORK_VERSION)}` : '';
 const KB_ROOT_OK = KB_MODE === 'store' ? !!KB_STORE_DIR : !!KB_ARTIFACTS_DIR;
+// Whether this run may also talk to the KB Store SERVICE, on top of whichever local plane KB_MODE
+// selected. `auto` (default) uses it when credentials are present and silently does not when they
+// are not; `off` restores the directory-only behaviour byte for byte.
+const KB_REMOTE = String(A.kb_remote || 'auto').trim().toLowerCase() === 'off' ? 'off' : 'auto';
+// The credentials are NOT visible from this process. They live in the user's profile, and the
+// shells these commands run in are non-interactive, so `process.env.KB_STORE_TOKEN` is empty here
+// even on a box where the service is configured. Deciding the plane in JS would therefore mean
+// deciding it wrong. Instead every emitted command exports its own credentials from the profile's
+// two sources and then branches on what it actually got — the test happens where the answer is
+// knowable. The token is read from a 0600 file into a variable, never passed in argv, because
+// `ps` is world-readable on this box.
+const KB_ENV_PRELUDE =
+  'export KB_STORE_URL="${KB_STORE_URL:-https://global.primus-safe.amd.com/knowledge-base}"; ' +
+  'export KB_STORE_TOKEN="${KB_STORE_TOKEN:-$(cat ~/.geak_kb_token 2>/dev/null)}"; ';
 // Writing in store mode records BOTH planes in one call, so it needs both roots: the directory tree
 // stays the source of truth a curation pass edits, and the store is derived from it.
 const KB_WRITE_OK = KB_ROOT_OK && !!KB_ARTIFACTS_DIR;
@@ -955,17 +969,43 @@ if (WARM_START_ON && !setup.resumed && KB_ROOT_OK) {
   } else {
     // The two planes take a different root flag and a different name→page rule (the store addresses
     // by canonical id, so there is nothing to match fuzzily), and print the same JSON.
-    const resolveCmd = KB_MODE === 'store'
-      ? `resolve-remote --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
+    const localResolveCmd = KB_MODE === 'store'
+      ? `resolve-remote --plane local --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
       : `resolve --root ${JSON.stringify(KB_ARTIFACTS_DIR)} --match ${WARM_START_MATCH}`;
+    const commonArgs =
+      `--kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\\n` +
+      `  --gfx ${GFX} --top-n 3 --min-speedup ${WARM_START_MIN_SPEEDUP} \\\n` +
+      `  --refs-dir ${JSON.stringify(EVAL_DIR + '/kb_references')}`;
+    // Remote first, local curated tree as the fallback. The service is the shared plane and should
+    // win when it has an answer, but it is still filling up, while `kb_artifacts/` holds a hand-
+    // curated history (retired entries, one entry per direction) that a thin remote page must not
+    // shadow. An empty remote answer is indistinguishable from a 404 on this scheme, so "no
+    // candidates" — not "no error" — is what triggers the second read. Both reads are seconds and
+    // no GPU; the thing they protect against is a cold start that costs hours.
+    const resolveScript = KB_REMOTE === 'off'
+      ? `python3 ${JSON.stringify(EXPERIENCE_STORE)} ${localResolveCmd} \\\n  ${commonArgs}`
+      : `${KB_ENV_PRELUDE}
+REMOTE_OUT=''
+if [ -n "$KB_STORE_TOKEN" ]; then
+  REMOTE_OUT=$(python3 ${JSON.stringify(EXPERIENCE_STORE)} resolve-remote --plane remote${KB_VERSION_FLAG} \\
+  ${commonArgs} 2>/dev/null || true)
+  if printf '%s' "$REMOTE_OUT" | python3 -c 'import json,sys; sys.exit(0 if (json.load(sys.stdin).get("candidates") or []) else 1)' 2>/dev/null; then
+    printf '%s\\n' "$REMOTE_OUT"; exit 0
+  fi
+fi
+python3 ${JSON.stringify(EXPERIENCE_STORE)} ${localResolveCmd} \\
+  ${commonArgs}`;
     const resolved = await agentT(
-      `You are the warm-start resolver. Run EXACTLY this command and return its single-line JSON stdout ` +
-      `verbatim as StructuredOutput — do not add, drop, reorder, or reinterpret any field:
+      `You are the warm-start resolver. Run EXACTLY this ${KB_REMOTE === 'off' ? 'command' : 'script'} ` +
+      `and return its single-line JSON stdout verbatim as StructuredOutput — do not add, drop, reorder, ` +
+      `or reinterpret any field. ` +
+      (KB_REMOTE === 'off' ? '' :
+        `It tries the shared KB Store service first and falls back to the on-disk knowledge base by ` +
+        `itself; run it as one script, do not split it into separate commands. `) +
+      `An empty candidate list is a VALID answer meaning "nothing recorded for this kernel yet". Do not ` +
+      `retry with different flags and do not invent candidates:
 \`\`\`bash
-python3 ${JSON.stringify(EXPERIENCE_STORE)} ${resolveCmd} \\
-  --kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\
-  --gfx ${GFX} --top-n 3 --min-speedup ${WARM_START_MIN_SPEEDUP} \\
-  --refs-dir ${JSON.stringify(EVAL_DIR + '/kb_references')}
+${resolveScript}
 \`\`\``,
       { phase: 'WarmStart', label: 'warm_start:resolve', schema: WARMSTART_RESOLVE_SCHEMA }) || {};
     warm_start.read_reason = resolved.read_reason || 'read';
@@ -977,9 +1017,14 @@ python3 ${JSON.stringify(EXPERIENCE_STORE)} ${resolveCmd} \\
       rank: c.rank, slug: c.slug, speedup: c.speedup, direction: c.direction || '', status: 'read',
     }));
     const f = resolved.filtered || {};
-    // In store mode the canonical id IS the address; log it so the run can be checked against the
-    // store tree (and, later, against what the service holds) without re-deriving the key by hand.
-    if (KB_MODE === 'store') log(`[kb] plane=store key=${resolved.canonical_id || '?'}`);
+    // Which plane actually answered. Only the key-addressed subcommand emits `canonical_id`, so its
+    // presence separates a store read from a slug-tree read; in `local` KB_MODE the only key-
+    // addressed reader in the script is the remote one, so that is also the remote/fallback tell.
+    // Worth logging either way: the canonical id is the address, and on a scheme with no search a
+    // thin answer and a mis-keyed question look identical from the outside.
+    warm_start.plane = resolved.canonical_id ? (KB_MODE === 'store' ? 'store' : 'remote') : 'local';
+    if (resolved.canonical_id) log(`[kb] plane=${warm_start.plane} key=${resolved.canonical_id}`);
+    else if (KB_REMOTE !== 'off') log('[kb] plane=local (service had no candidates, or no credentials)');
     log(`[kb] experience read: slug=${resolved.slug || '?'} (${resolved.match_tier || 'exact'} match of ` +
       `${resolved.requested_slug || KERNEL_NAME}) reason=${warm_start.read_reason} ` +
       `candidates=${cands.length}${f.total ? ` of ${f.total} recorded [${f.retired || 0} retired, ` +
@@ -1595,15 +1640,27 @@ if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
     .filter(Boolean).join(',');
   // write-remote runs the directory write first and files the same entry in the store, so the two
   // planes cannot drift; its extra `remote` field rides along under the schema's open object.
-  const writeCmd = KB_MODE === 'store'
-    ? `write-remote --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
-    : 'write';
+  // `--plane both` extends that ordering one hop further: directory tree, then local store, then the
+  // service. Unlike the read there is no branch on credentials here, because `_open_plane` already
+  // makes the right call — a `both` without them degrades to the local planes and reports
+  // `remote_unavailable` rather than failing, which is the behaviour we would have written by hand.
+  const remoteWriteOn = KB_REMOTE !== 'off' && !!KB_STORE_DIR;
+  const writeCmd = remoteWriteOn
+    ? `write-remote --plane both --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
+    : KB_MODE === 'store'
+      ? `write-remote --plane local --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
+      : 'write';
   kb_written = await agentT(
     `You are the experience writer. Run EXACTLY this command (it applies its own gates and prints a ` +
     `single-line JSON) and return that JSON verbatim as StructuredOutput. If the command errors, return ` +
-    `{"written": false, "reason": "io_error"}.
+    `{"written": false, "reason": "io_error"}` +
+    (remoteWriteOn
+      ? ` — do NOT retry it and do NOT adjust its arguments. It may reach the shared KB Store service, ` +
+        `and every write that service accepts is PERMANENT (it exposes no delete), so a second attempt ` +
+        `creates a second permanent record instead of fixing the first.`
+      : `.`) + `
 \`\`\`bash
-python3 ${JSON.stringify(EXPERIENCE_STORE)} ${writeCmd} --root ${JSON.stringify(KB_ARTIFACTS_DIR)} \\
+${remoteWriteOn ? KB_ENV_PRELUDE + '\n' : ''}python3 ${JSON.stringify(EXPERIENCE_STORE)} ${writeCmd} --root ${JSON.stringify(KB_ARTIFACTS_DIR)} \\
   --kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\
   --gfx ${GFX} --kernel-class ${JSON.stringify(kernelClass)} \\
   --speedup ${finalPrimary} --baseline-wall-ms ${BASELINE_GEOMEAN_MS} \\

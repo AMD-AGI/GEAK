@@ -8,7 +8,7 @@ This is the local plane of the same two-plane design KernelForge already ships
 it deliberately, so the whole read/apply/optimize/write-back loop can be exercised offline and
 switching to the service later is a change of backend, not of behaviour:
 
-    <root>/kernel/geak/moe_stage1/rocm/7.2/ck/mi355x/
+    <root>/geak/kernel/geak/moe_stage1/rocm/7.2/ck/gfx950/
         champion.json                     {"session_id", "metric": "speedup", "value"}
         sessions/<session id>/
             knowledge.json                producer / speedup / identity / value
@@ -178,8 +178,17 @@ def _replace_directory(staging: str, destination: str) -> None:
 class LocalKBStore(object):
     """Read and write one producer's candidates under a canonical identity, on disk."""
 
-    def __init__(self, root: str):
+    def __init__(self, root: str, metric: str = CHAMPION_METRIC, promote_floor: float = 1.0):
         self.root = os.path.abspath(os.path.expanduser(str(root)))
+        # Which flat top-level `knowledge.<name>` scalar ranks this identity, and the value a
+        # candidate must beat to be worth recording as champion at all. `speedup` above 1.0 is the
+        # kernel lane's rule and stays the default. The e2e lane's exact-workload rung ranks on
+        # absolute `throughput_tok_s` instead, where 1.0 would be a nonsense floor: two runs there
+        # share a workload but not necessarily a baseline, so the higher speedup can easily be the
+        # slower server. Coarser e2e rungs go back to `speedup`, because their workloads differ and
+        # absolute numbers across them are not comparable at all.
+        self.metric = str(metric or CHAMPION_METRIC)
+        self.promote_floor = float(promote_floor)
 
     # -- addressing ----------------------------------------------------------------------
 
@@ -226,7 +235,7 @@ class LocalKBStore(object):
                 continue                       # a half-written document is a miss, not a crash
             if not isinstance(knowledge, dict):
                 continue
-            found.append(Candidate(name, knowledge, finite_speedup(knowledge.get("speedup")),
+            found.append(Candidate(name, knowledge, finite_speedup(knowledge.get(self.metric)),
                                    name == champion_id))
         # Ties keep the session id order so two runs over one store rank identically.
         found.sort(key=lambda c: (-(c.speedup if c.speedup is not None else float("-inf")),
@@ -305,7 +314,10 @@ class LocalKBStore(object):
 
     def champion_speedup(self, canonical_id: str):
         champion = self.champion(canonical_id)
-        if str(champion.get("metric") or "") != CHAMPION_METRIC:
+        # A champion recorded under a different metric is not a weaker incumbent, it is an
+        # incomparable one. Returning None makes the caller treat the slot as empty rather than
+        # rank tokens-per-second against a ratio.
+        if str(champion.get("metric") or "") != self.metric:
             return None
         return finite_speedup(champion.get("value"))
 
@@ -346,7 +358,7 @@ class LocalKBStore(object):
     def promote(self, canonical_id: str, session_id: str, speedup: float) -> None:
         """Point the identity's champion at one session. The caller owns the policy."""
         document = {"session_id": validate_session_id(session_id),
-                    "metric": CHAMPION_METRIC, "value": float(speedup)}
+                    "metric": self.metric, "value": float(speedup)}
         identity_dir = self.identity_dir(canonical_id)
         os.makedirs(identity_dir, exist_ok=True)
         with self._lock(identity_dir):
@@ -355,7 +367,7 @@ class LocalKBStore(object):
     def maybe_promote(self, canonical_id: str, session_id: str, speedup) -> bool:
         """Upstream's gate, verbatim: only a real win, and only over the incumbent."""
         speedup = finite_speedup(speedup)
-        if speedup is None or speedup <= 1.0:
+        if speedup is None or speedup <= self.promote_floor:
             return False
         incumbent = self.champion_speedup(canonical_id)
         if incumbent is not None and speedup <= incumbent:
