@@ -134,6 +134,28 @@ class TestSelectionVerdict(unittest.TestCase):
             sorted([TARGET, alternative]),
         )
 
+    def test_device_projected_annotation_does_not_invert_call_nesting(self):
+        # The profiler re-emits each marker on the GPU timeline as `gpu_user_annotation`, where an
+        # OUTER seam's short device span can land inside the INNER launcher's long one. Only the
+        # host spans describe the real call nesting; the selected inner launcher must still pass.
+        outer = "sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe:_fused_moe_kernel_sequence"
+        events = trace()
+        events.insert(1, {"cat": "cpu_op", "name": ks.INSTALL_PREFIX + outer,
+                          "ph": "X", "pid": 1, "tid": 2, "ts": 92, "dur": 1})
+        events.insert(2, {"cat": "cpu_op", "name": ks.MARKER_PREFIX + outer,
+                          "ph": "X", "pid": 1, "tid": 2, "ts": 95, "dur": 200})
+        # device projections: outer's is a tiny span inside the target's long one, same pid/tid
+        events += [
+            {"cat": "gpu_user_annotation", "name": ks.MARKER_PREFIX + TARGET,
+             "ph": "X", "pid": 9, "tid": 9, "ts": 500, "dur": 400},
+            {"cat": "gpu_user_annotation", "name": ks.MARKER_PREFIX + outer,
+             "ph": "X", "pid": 9, "tid": 9, "ts": 600, "dur": 5},
+        ]
+        verdict = ks.verify(TARGET, KERNEL, self.meta(), events, [TARGET, outer])
+        self.assertEqual(verdict["deeper_live_candidates"], [])
+        self.assertTrue(verdict["ok"], verdict)
+        self.assertTrue(verdict["deepest_verified"])
+
     def test_capture_of_a_different_callable_is_rejected(self):
         wrong = "vllm.model_executor.layers.attention.attention:outer_wrapper"
         verdict = ks.verify(TARGET, KERNEL, self.meta(target=wrong), trace())

@@ -210,6 +210,13 @@ class TestEnsureOverlay(_OverlayCase):
         self.assertIn("def install(target, out_dir, max_cases=5):",
                       self._read(os.path.join(SCRIPTS_DIR, "capture_shapes.py")))
 
+    def test_shim_installs_captures_before_markers(self):
+        # A marker on any module that does `from <capture module> import <attr>` imports that module
+        # and freezes the alias. If markers ran first, the later capture hook would rebind only the
+        # defining module and the live call (through the alias) would never be recorded.
+        shim = ov.SITECUSTOMIZE
+        self.assertLess(shim.index('_m.get("captures", [])'), shim.index('_m.get("markers", [])'))
+
     def test_rerun_preserves_an_edited_shim_and_an_existing_manifest(self):
         # Re-running any add-* must not reset an overlay that already carries accepted kernels.
         ov._ensure_overlay(self.overlay)

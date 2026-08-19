@@ -76,21 +76,23 @@ for _e in _m.get("rebinds", []):
     except Exception as _ex:
         sys.stderr.write("[overlay] rebind FAILED %r: %r\n" % (_e, _ex))
 
-# (c) marker-only hooks used to compare every candidate seam in one trace.
-for _e in _m.get("markers", []):
-    try:
-        import seam_trace
-        seam_trace.install(_e["target"])
-    except Exception as _ex:
-        sys.stderr.write("[overlay] seam marker install FAILED %r: %r\n" % (_e, _ex))
-
-# (d) capture hooks (shape/IO oracle recording).
+# (c) capture hooks (shape/IO oracle recording) go on FIRST, so the capture wrapper is the innermost
+# stand-in and is already bound before any marker install imports a module that does
+# `from <capture target module> import <attr>` (which would otherwise alias the un-captured function).
 for _e in _m.get("captures", []):
     try:
         import capture_shapes
         capture_shapes.install(_e["target"], _e["out"], int(_e.get("max", 5)))
     except Exception as _ex:
         sys.stderr.write("[overlay] capture install FAILED %r: %r\n" % (_e, _ex))
+
+# (d) marker-only hooks used to compare every candidate seam in one trace.
+for _e in _m.get("markers", []):
+    try:
+        import seam_trace
+        seam_trace.install(_e["target"])
+    except Exception as _ex:
+        sys.stderr.write("[overlay] seam marker install FAILED %r: %r\n" % (_e, _ex))
 '''
 
 

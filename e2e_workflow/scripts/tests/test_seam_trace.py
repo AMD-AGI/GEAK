@@ -120,6 +120,18 @@ class TestSeamTrace(unittest.TestCase):
         self.assertTrue(os.path.isfile(self.trace))
         self.assertEqual(self.events.count(("profile", "stop")), 1)
 
+    def test_class_method_candidate_is_marked_and_proven_installed(self):
+        class Runner:
+            def run(self, value):
+                return value + 1
+
+        self.module.Runner = Runner
+        st.install("_seam_trace_fixture:Runner.run")
+        self.assertEqual(Runner().run(3), 4)
+        names = [value for action, value in self.events if action == "enter"]
+        self.assertIn(st.INSTALL_PREFIX + "_seam_trace_fixture:Runner.run", names)
+        self.assertIn(st.MARKER_PREFIX + "_seam_trace_fixture:Runner.run", names)
+
     def test_process_local_call_traces_do_not_overwrite(self):
         os.environ.pop("GEAK_SELECTION_TRACE_UNIQUE", None)
         os.environ["GEAK_SELECTION_PROFILE_CALLS"] = "2"

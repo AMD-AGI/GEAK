@@ -220,10 +220,18 @@ function isImplausibleSpeedup(pct_gpu_time, isolated, integ) {
   return ((integ && integ.e2e_delta_pct) || 0) > ceilPct * (1 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9;
 }
 // Classify a reject reason into a fix-and-retry class ('' = terminal, not auto-correctable).
+// POSTURE IS TESTED FIRST. CORRECTNESS_REJECT_RX contains a bare `mismatch`, which used to swallow
+// the `signature_mismatch` that FIXABLE_REJECT_RX names explicitly: a seam whose signature does not
+// match the live call site was routed to the correctness corrective ("your kernel computes the wrong
+// thing on the live path, look for a data_ptr over-fit") when what it needs is the integration one
+// ("find the method the live server actually dispatches and match its call signature"). The posture
+// tokens are specific (signature/seam/engagement/capture), so testing them first cannot capture a
+// genuine output-correctness reject; and until the candidate is installed at the right seam, any
+// statement about its output is meaningless anyway.
 function rejectClass(reason) {
   const r = reason || '';
-  if (CORRECTNESS_REJECT_RX.test(r)) return 'correctness';
   if (FIXABLE_REJECT_RX.test(r)) return 'integration';
+  if (CORRECTNESS_REJECT_RX.test(r)) return 'correctness';
   return '';
 }
 // A gate 'accept'/'stack' only counts as a REAL win if the measured e2e delta is not an implausible
@@ -731,12 +739,22 @@ function kernelIdentitiesMatch(a, b) {
 }
 function requiredDeviceKernel(h) {
   if (!h || h.entity_kind !== 'gpu_kernel') return '';
-  return String(h.device_kernel || h.profile_kernel ||
+  // entity_evidence.matched_profiled_kernel is what parse_profile.py --annotate stamped on the row,
+  // so it is the profiler's own name for this entity and outranks the display short_name.
+  return String(h.device_kernel ||
     (h.entity_evidence && h.entity_evidence.matched_profiled_kernel) ||
     h.short_name || h.name || '').trim();
 }
 const candidateSpec = (c) =>
   String((c && (c.target_callable || c.callable || c.spec)) || '').trim();
+// A declared depth is a STRUCTURAL claim about the call chain. It orders candidates before any
+// runtime evidence exists, so a value that is absent or not a finite number is unusable: `Number()`
+// turns it into NaN, every comparison against it is silently false, and a genuinely deeper candidate
+// stops being able to outrank anything. Refuse the candidate instead of ranking it as depth 0.
+const candidateDepth = (c) => {
+  const depth = Number(c && c.depth);
+  return Number.isFinite(depth) ? depth : null;
+};
 function selectionCandidatesForHead(h, ext) {
   const required = requiredDeviceKernel(h);
   const fused = !!(h && (h.is_fused_kernel === true || h.op_kind === 'moe'));
@@ -754,6 +772,7 @@ function selectionCandidatesForHead(h, ext) {
       return false;
     const role = String(candidate.role || '').toLowerCase();
     if (role === 'kernel_entry') return false; // native/JIT object identity is unsafe to monkeypatch
+    if (candidateDepth(candidate) === null) return false;
     const kernels = Array.isArray(candidate.device_kernels) ? candidate.device_kernels : [];
     if (required && !kernels.some((kernel) => kernelIdentitiesMatch(required, kernel))) return false;
     return (fused
@@ -773,7 +792,7 @@ function prepareHeadSelection(h) {
     const role = String(candidate.role || '').toLowerCase();
     return fused ? role === 'op_seam' : ['inner_launcher', 'op_seam'].includes(role);
   });
-  deployable.sort((a, b) => Number(b.depth || 0) - Number(a.depth || 0));
+  deployable.sort((a, b) => candidateDepth(b) - candidateDepth(a));
   out.target_callable = deployable.length ? candidateSpec(deployable[0]) : '';
   out.selection_status = out.target_callable
     ? 'candidate_selected_needs_runtime_verification'
@@ -819,14 +838,24 @@ function kernelSelectionVerified(h, ext) {
       why: fused
         ? `fused head must select the whole-operation op_seam, got '${selectedRole || 'unknown'}'`
         : `selected target role '${selectedRole || 'unknown'}' is not a deployable inner/op seam` };
+  // "Deepest" is settled by the profiler's OBSERVED host-span nesting (kernel_selection.py computes
+  // deeper_live_candidates from it), not by the declared `depth`. The declared integer is a claim by
+  // the same agent whose choice is under review, and an appended candidate carrying a large depth
+  // would otherwise outrank a genuinely deeper one. The structural claim is still checked, but only
+  // as an ADDITIONAL way to fail: it can never buy a pass that the observed nesting did not grant.
+  const observedDeeper = (verdict.deeper_live_candidates || [])
+    .map((value) => String(value || '').trim()).filter(Boolean);
+  if (observedDeeper.length)
+    return { ok: false,
+      why: `deeper live candidate(s) observed across calls/ranks: ${observedDeeper.join(', ')}` };
   const live = new Set((verdict.live_candidate_targets || []).map((value) => String(value || '').trim()));
-  const selectedDepth = Number(selected.depth || 0);
+  const selectedDepth = candidateDepth(selected);
   const deeper = candidates.filter((candidate) =>
     candidateSpec(candidate) !== target && live.has(candidateSpec(candidate)) &&
-    Number(candidate.depth || 0) > selectedDepth);
+    candidateDepth(candidate) > selectedDepth);
   if (deeper.length)
     return { ok: false,
-      why: `deeper live candidate(s) observed across calls/ranks: ${deeper.map(candidateSpec).join(', ')}` };
+      why: `declared-deeper live candidate(s): ${deeper.map(candidateSpec).join(', ')}` };
   if (verdict.deepest_verified !== true)
     return { ok: false, why: 'selected callable is not machine-verified as deepest' };
   return { ok: true, why: `${target} launches profiled kernel ${required}` };
@@ -836,12 +865,24 @@ const PRE_FLAGGED_HEADS = [];
 function admitHeads(queue, stage) {
   const admitted = [];
   for (const head of (queue || []).filter(Boolean)) {
+    const label = head.short_name || head.name || '(unnamed)';
     if (head.entity_kind !== 'gpu_kernel') {
-      log(`  ⚠️ FLAG ${head.short_name || head.name}: entity_kind=${head.entity_kind || 'missing'}; ` +
+      log(`  ⚠️ FLAG ${label}: entity_kind=${head.entity_kind || 'missing'}; ` +
         `the head track requires a profiler-confirmed gpu_kernel (${stage}).`);
-      PRE_FLAGGED_HEADS.push({ short_name: head.short_name || head.name,
+      PRE_FLAGGED_HEADS.push({ short_name: label,
         pct_gpu_time: head.pct_gpu_time, stage, gate: 'wrong_head_granularity',
         reason: `entity_kind=${head.entity_kind || 'missing'}; gpu_kernel required` });
+      continue;
+    }
+    // A gpu_kernel head with NO device identity at all makes requiredDeviceKernel return '', and
+    // kernelSelectionVerified then passes it as "not a profiled GPU-head extraction". That vacuous
+    // pass is the whole contract switched off for this head, so refuse it at admission instead.
+    if (!requiredDeviceKernel(head)) {
+      log(`  ⚠️ FLAG ${label}: entity_kind=gpu_kernel but no device_kernel/short_name/name; ` +
+        `there is no profiled symbol to verify a seam against (${stage}).`);
+      PRE_FLAGGED_HEADS.push({ short_name: label,
+        pct_gpu_time: head.pct_gpu_time, stage, gate: 'missing_kernel_identity',
+        reason: 'gpu_kernel head carries no device_kernel/short_name/name' });
       continue;
     }
     admitted.push(prepareHeadSelection(head));

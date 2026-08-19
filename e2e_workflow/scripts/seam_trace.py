@@ -151,12 +151,25 @@ def _leave_call(root_call):
         _finish_profile()
 
 
+def _resolve_owner(target):
+    """Resolve ``module:attr`` (attr may be dotted, e.g. ``Class.method``) to (owner, leaf).
+
+    Class-method seams such as ``pkg.mod:RunnerCore.run`` are declared candidates just as often as
+    module-level functions; resolving only the flat case silently dropped them from the probe.
+    """
+    module_name, attr = target.split(":", 1)
+    owner = importlib.import_module(module_name)
+    parts = attr.split(".")
+    for part in parts[:-1]:
+        owner = getattr(owner, part)
+    return owner, parts[-1]
+
+
 def install(target):
     """Wrap one module:attr with a record_function marker; idempotent per target."""
     if target in _INSTALLED:
         return
-    module_name, attr = target.split(":", 1)
-    module = importlib.import_module(module_name)
+    module, attr = _resolve_owner(target)
     original = getattr(module, attr)
     if not _wrappable(original):
         raise RuntimeError(f"cannot safely mark non-Python callable {target}")

@@ -86,11 +86,24 @@ def kernel_matches(expected, observed):
     )
 
 
+def _device_projection(event):
+    """True for the GPU-timeline copy of a host annotation (``gpu_user_annotation``).
+
+    The profiler re-emits every ``record_function`` marker on the device timeline, where the span
+    covers the kernels it launched rather than the Python call. Those projections do not preserve
+    host call nesting -- a short device span for an OUTER seam routinely lands inside the device span
+    of an INNER one -- so only host-side spans may establish nesting or launch causality.
+    """
+    return str(event.get("cat") or "").startswith("gpu_")
+
+
 def _complete_spans(events, name):
     spans = []
     stacks = {}
     for event in events:
         if not isinstance(event, dict) or event.get("name") != name:
+            continue
+        if _device_projection(event):
             continue
         phase = event.get("ph", "X")
         if phase == "X" and event.get("ts") is not None:
