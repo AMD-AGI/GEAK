@@ -741,6 +741,56 @@ def served_regimes(meta):
     return {str(r).strip().lower() for r in sr if str(r).strip()}
 
 
+def served_buckets(meta):
+    """The M buckets this kernel actually SERVES, with their analytic per-wave pass counts.
+
+    `op_bench` benched at `max(m_buckets)`, on the premise that the largest bucket carries the
+    GPU-time mass. It does not. Mass = per-launch time x LAUNCHES, and the analytic call model
+    (`serving_weight_model.analytic_calls`) counts prefill = CONC*ceil(ISL/chunk) passes against
+    decode = OSL passes. Neither bucket dominates universally -- prefill runs few large passes,
+    decode runs many small ones -- so a single bucket cannot represent the served mix, and the
+    LARGEST one is routinely the least-served shape.
+
+    Decode's M is the concurrency (snapped to a graph capture size); prefill's is the chunk, or
+    ISL when the server does not chunk. Each is matched to the nearest profiled `m_buckets` entry
+    when one exists, so the bench runs on a shape the profile actually saw.
+
+    Returns [(phase, M, calls), ...] ordered by descending calls, de-duplicated by M. Returns []
+    when meta carries no serving model (offline / unit-test metas), which leaves callers on their
+    previous single-bucket behaviour."""
+    swm = ((meta or {}).get("workload") or {}).get("serving_weight_model") or {}
+    calls = swm.get("analytic_calls") or {}
+    if not calls:
+        return []
+    buckets = [int(b) for b in (meta.get("m_buckets") or [])
+               if str(b).strip().lstrip("-").isdigit()]
+    served = served_regimes(meta)
+    want = {"decode": swm.get("conc"),
+            "prefill": swm.get("prefill_chunk") or swm.get("isl")}
+    out = {}
+    for phase, n in calls.items():
+        ph = str(phase).strip().lower()
+        if served and ph not in served:
+            continue                      # a phase this kernel does not run in carries no weight
+        m, n = want.get(ph), _int_or_none(n)
+        m = _int_or_none(m)
+        if not m or not n or n <= 0:
+            continue
+        if buckets:
+            m = min(buckets, key=lambda b: abs(b - m))
+        prev = out.get(m)
+        if prev is None or n > prev[2]:
+            out[m] = (ph, m, n)
+    return sorted(out.values(), key=lambda t: -t[2])
+
+
+def _int_or_none(x):
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return None
+
+
 def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True):
     """Centralized PRIMARY-metric weighting for the immutable unittests — replaces the per-kernel
     hand-rolled `_serving_calls`/`weight` blocks so every UT applies the SAME audited rule. Enforces:

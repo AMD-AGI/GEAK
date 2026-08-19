@@ -139,16 +139,19 @@ def _dtype(torch, name):
             }.get(str(name).lower(), torch.bfloat16)
 
 
-def _resolve_shape(shape, meta):
+def _resolve_shape(shape, meta, m_override=None):
     """Resolve a shape that may carry SYMBOLIC dims (e.g. "M" for a dynamic GEMM row count) into
     concrete ints. String dims are mapped via meta: "M"/"m*"/"-1"/None -> a representative value from
-    meta["m_buckets"] (the dominant = LARGEST profiled bucket). Raises a CLEAR error if a symbolic dim
+    meta["m_buckets"] -- `m_override` when the caller is benching a specific served bucket, else the
+    largest profiled one. Raises a CLEAR error if a symbolic dim
     cannot be resolved, so the caller records a meaningful harness error instead of a cryptic
     `randn(str, int, ...)` TypeError (the exact bug this guards against)."""
     if not shape:
         raise ValueError("empty/None shape")
     buckets = [int(b) for b in (meta.get("m_buckets") or []) if str(b).strip().lstrip("-").isdigit()]
-    rep_m = max(buckets) if buckets else None
+    # `m_override` is the bucket the caller is currently benching (see bench_gemm's served sweep).
+    # Without one, fall back to the largest profiled bucket.
+    rep_m = int(m_override) if m_override else (max(buckets) if buckets else None)
     out = []
     for d in shape:
         if isinstance(d, bool):
@@ -247,18 +250,18 @@ def _synth_blockscale_case(torch, meta, M, device, seed):
     return {"x": x_q, "w": w_q, "x_scale": x_scale, "w_scale": w_scale, "ref": ref, "M": M, "out_dt": out_dt}
 
 
-def bench_blockscale_gemm(args, meta):
+def bench_blockscale_gemm(args, meta, m_override=None):
     """Bake-off for an fp8 a8w8 blockscale GEMM head. The generic dense torch-BLAS backends cannot
     represent this op (fp8 + per-block scales), so the candidates are the meta callable(s):
     the live baseline blockscale path + its bpreshuffle variant (same signature
-    fn(x, w, x_scale, w_scale, dtype=out)). Benched at the DOMINANT (largest) m_bucket — the GPU-time
-    mass. Returns the standard per-backend results list."""
+    fn(x, w, x_scale, w_scale, dtype=out)). Benched at `m_override` — the served bucket the caller is
+    sweeping — else the largest profiled bucket. Returns the standard per-backend results list."""
     torch = _torch()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     buckets = [int(b) for b in (meta.get("m_buckets") or []) if str(b).strip().lstrip("-").isdigit()]
     if not buckets:
-        buckets = [int(_resolve_shape(meta.get("a_shape") or ["M"], meta)[0])]
-    M = max(buckets)
+        buckets = [int(_resolve_shape(meta.get("a_shape") or ["M"], meta, m_override)[0])]
+    M = int(m_override) if m_override else max(buckets)
     case = _synth_blockscale_case(torch, meta, M, device, args.seed)
     out_dt = case["out_dt"]
 
@@ -309,7 +312,7 @@ def bench_blockscale_gemm(args, meta):
     return results
 
 
-def _load_or_synth_gemm(torch, task, meta, device, seed):
+def _load_or_synth_gemm(torch, task, meta, device, seed, m_override=None):
     """Return (A, B, bias, transpose_b, ref). Prefer the recorded oracle; else synthesize + compute ref
     with the default backend (perf is value-independent; this only fixes the correctness target)."""
     dt = _dtype(torch, meta.get("dtype", "bf16"))
@@ -335,8 +338,8 @@ def _load_or_synth_gemm(torch, task, meta, device, seed):
     a_shape0 = meta.get("a_shape"); b_shape0 = meta.get("b_shape")
     if not (a_shape0 and b_shape0):
         raise ValueError("gemm task has neither reference_io.pt nor a_shape/b_shape in meta.json")
-    a_shape = _resolve_shape(a_shape0, meta)
-    b_shape = _resolve_shape(b_shape0, meta)
+    a_shape = _resolve_shape(a_shape0, meta, m_override)
+    b_shape = _resolve_shape(b_shape0, meta, m_override)
     g = torch.Generator(device="cpu").manual_seed(int(seed))
     A = (torch.randn(*a_shape, generator=g) * 0.1).to(device=device, dtype=dt)
     B = (torch.randn(*b_shape, generator=g) * 0.1).to(device=device, dtype=dt)
@@ -385,13 +388,69 @@ def _tunableop(torch, enable, tuning, filename=None):
         return False
 
 
+def _merge_served(per_bucket):
+    """Collapse one results-list per served bucket into ONE results list whose `ms` is the
+    SERVED-weighted per-launch time.
+
+    A kernel is not one shape. Benching a single bucket reports a speedup at a shape the workload
+    may barely run; the served mix is what moves e2e. Weighting by the analytic pass counts,
+
+        ms_served = sum(ms_bucket * calls_bucket) / sum(calls_bucket)
+
+    makes the ratio baseline/candidate exactly the served-weighted speedup, so every downstream
+    consumer (winner pick, isolated_speedup, the Amdahl ceiling) becomes served-weighted with no
+    further change. `ms_by_bucket` keeps the per-shape numbers visible for audit.
+
+    A backend is only credited where it ran correctly EVERYWHERE it is served: a bucket that raised
+    or failed correctness makes the merged entry incorrect, so a candidate that wins at one shape
+    and breaks at another cannot be selected.
+
+    `per_bucket`: [(phase, M, calls, results), ...]."""
+    merged, order = {}, []
+    for phase, M, calls, results in per_bucket:
+        for r in results or []:
+            name = r.get("backend")
+            e = merged.get(name)
+            if e is None:
+                e = merged[name] = dict(r)
+                e["ms_by_bucket"], e["_num"], e["_den"] = {}, 0.0, 0.0
+                order.append(name)
+            e["ms_by_bucket"][f"{phase}:M={M}"] = r.get("ms")
+            e["available"] = bool(e.get("available")) and bool(r.get("available"))
+            e["correct"] = bool(e.get("correct")) and bool(r.get("correct"))
+            e["raised"] = bool(e.get("raised")) or bool(r.get("raised"))
+            if r.get("ms") and r.get("correct"):
+                e["_num"] += float(r["ms"]) * calls
+                e["_den"] += calls
+            if not r.get("correct") and r.get("note"):
+                e["note"] = f"[{phase} M={M}] {r.get('note')}"
+    out = []
+    for name in order:
+        e = merged[name]
+        num, den = e.pop("_num"), e.pop("_den")
+        e["ms"] = round(num / den, 4) if (den and e.get("correct")) else None
+        e["note"] = (f"{e.get('note') or ''} | served-weighted over "
+                     f"{len(e['ms_by_bucket'])} buckets {e['ms_by_bucket']}").strip(" |")
+        out.append(e)
+    return out
+
+
 def bench_gemm(args, meta):
+    """Bake-off across the SERVED buckets, not just the largest one. Falls back to the historical
+    single-bucket bench when meta carries no serving model, or names only one served shape."""
+    buckets = _hlib.served_buckets(meta) if _hlib is not None else []
+    if len(buckets) < 2:
+        return _bench_gemm_at(args, meta)
+    return _merge_served([(ph, M, n, _bench_gemm_at(args, meta, M)) for ph, M, n in buckets])
+
+
+def _bench_gemm_at(args, meta, m_override=None):
     torch = _torch()
     # Quantized block-scaled GEMM (fp8 a8w8 blockscale, …) takes the dedicated path — the generic dense
     # torch-BLAS backends below cannot represent fp8 + per-block scales (this is the head that used to die
     # on `randn(str,int,...)`; it is now benched with the immutable-oracle construction).
     if _is_blockscale_gemm(meta):
-        return bench_blockscale_gemm(args, meta)
+        return bench_blockscale_gemm(args, meta, m_override)
     # Grouped/packed-quant MoE GEMM (int4_w4a16 / awq / gptq / 3D [E,N,K] / structured shape:{E,..}):
     # the dense torch-BLAS bake-off below cannot represent packed/3D weights — it would raise ValueError
     # (no a_shape/b_shape) or RuntimeError (.t() on a 3D weight). Record a clean, non-raising skip so the
@@ -407,7 +466,7 @@ def bench_gemm(args, meta):
                      % (meta.get("kernel_class"), meta.get("dtype"))),
         }]
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    A, B, bias, transpose_b, ref = _load_or_synth_gemm(torch, args.task, meta, device, args.seed)
+    A, B, bias, transpose_b, ref = _load_or_synth_gemm(torch, args.task, meta, device, args.seed, m_override)
     ref = ref.to(device)
     # Default excludes the experimental triton stub (it's a placeholder; real triton GEMM is a Tier-C
     # kernel-squad rewrite, not a bake-off candidate). Request it explicitly with --backends if wanted.

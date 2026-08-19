@@ -1988,5 +1988,64 @@ class TestShuffledBlockTable(_HarnessTestCase):
             a, hl.shuffled_block_table(1, 2, seed=1, torch=self.torch, device="cpu").tolist())
 
 
+def _swm_meta(**kw):
+    swm = {"isl": 16384, "osl": 1024, "conc": 64, "prefill_chunk": 8192,
+           "analytic_calls": {"prefill": 64, "decode": 1024}}
+    swm.update(kw.pop("swm", {}))
+    meta = {"m_buckets": [64, 1024, 8192], "workload": {"serving_weight_model": swm}}
+    meta.update(kw)
+    return meta
+
+
+class ServedBucketsTest(unittest.TestCase):
+    """`served_buckets` replaces `max(m_buckets)` as the answer to "what shape do we bench?".
+
+    The old premise -- largest bucket == the GPU-time mass -- is false: mass is per-launch time x
+    LAUNCHES, and decode runs OSL passes at the small bucket against prefill's CONC*ceil(ISL/chunk)
+    passes at the large one. These pin the mapping from the serving model to the shapes to bench."""
+
+    def test_both_served_phases_are_returned_ordered_by_pass_count(self):
+        self.assertEqual(hl.served_buckets(_swm_meta()),
+                         [("decode", 64, 1024), ("prefill", 8192, 64)])
+
+    def test_the_largest_bucket_is_not_the_most_served_one(self):
+        # the exact defect: max(m_buckets) is 8192, but 1024 of the 1088 served passes are at M=64.
+        buckets = hl.served_buckets(_swm_meta())
+        self.assertEqual(max(m for _, m, _ in buckets), 8192)
+        self.assertEqual(buckets[0][1], 64)
+
+    def test_a_phase_m_snaps_to_the_nearest_profiled_bucket(self):
+        # conc=100 was never profiled; the closest shape the profile actually saw is 64.
+        m = _swm_meta(swm={"conc": 100})
+        self.assertEqual(dict((p, b) for p, b, _ in hl.served_buckets(m))["decode"], 64)
+
+    def test_a_phase_the_kernel_does_not_serve_carries_no_weight(self):
+        m = _swm_meta(served_regimes=["decode"])
+        self.assertEqual(hl.served_buckets(m), [("decode", 64, 1024)])
+
+    def test_prefill_falls_back_to_isl_when_the_server_does_not_chunk(self):
+        m = _swm_meta(swm={"prefill_chunk": None}, m_buckets=[64, 16384])
+        self.assertEqual(dict((p, b) for p, b, _ in hl.served_buckets(m))["prefill"], 16384)
+
+    def test_one_shape_serving_both_phases_is_reported_once(self):
+        # conc == chunk: both phases land on the same bucket; it must not be benched twice.
+        m = _swm_meta(swm={"conc": 8192}, m_buckets=[8192])
+        self.assertEqual(hl.served_buckets(m), [("decode", 8192, 1024)])
+
+    def test_no_serving_model_leaves_the_caller_on_its_old_behaviour(self):
+        self.assertEqual(hl.served_buckets({"m_buckets": [8192]}), [])
+        self.assertEqual(hl.served_buckets({}), [])
+        self.assertEqual(hl.served_buckets(None), [])
+
+    def test_unusable_call_counts_are_dropped_not_guessed(self):
+        m = _swm_meta(swm={"analytic_calls": {"prefill": 0, "decode": "x", "edge": 5}})
+        self.assertEqual(hl.served_buckets(m), [])
+
+    def test_buckets_are_used_only_to_snap_never_to_invent_a_phase(self):
+        # a profiled bucket with no serving phase behind it is not benched.
+        m = _swm_meta(m_buckets=[64, 512, 8192])
+        self.assertNotIn(512, [b for _, b, _ in hl.served_buckets(m)])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

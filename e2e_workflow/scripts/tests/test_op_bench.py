@@ -1758,5 +1758,103 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
         self.assertEqual(summary["apply_flags"], "")
 
 
+def _r(backend, ms, correct=True, **kw):
+    d = {"backend": backend, "available": True, "correct": correct, "ms": ms}
+    d.update(kw)
+    return d
+
+
+class MergeServedTest(unittest.TestCase):
+    """`_merge_served` collapses a per-bucket sweep into ONE served-weighted number.
+
+    The point of the sweep is that a candidate's speedup is shape-dependent: a large-M prefill
+    tile can be much faster at M=8192 and no better -- or worse -- at the M=64 the workload spends
+    94% of its passes on. Benching one shape reported the first number and hid the second."""
+
+    def test_ms_is_the_pass_weighted_mean_not_the_largest_buckets(self):
+        merged = ob._merge_served([("decode", 64, 1024, [_r("cand", 1.0)]),
+                                   ("prefill", 8192, 64, [_r("cand", 10.0)])])
+        self.assertEqual(len(merged), 1)
+        # (1.0*1024 + 10.0*64) / 1088 == 1.5294 ; the single-bucket bench would have said 10.0
+        self.assertAlmostEqual(merged[0]["ms"], 1.5294, places=3)
+
+    def test_a_win_only_at_the_unserved_shape_no_longer_wins(self):
+        """The regression this fix exists for: `cand` is 5x faster at the big prefill bucket and
+        2x SLOWER at the decode bucket the workload runs 1024 of its 1088 passes on. Benching
+        max(m_buckets) alone reports 5x. Served-weighted it is a net LOSS, because the decode
+        penalty (1.0ms x 1024 passes) dwarfs the prefill saving (8.0ms x 64 passes)."""
+        sweep = [("decode", 64, 1024, [_r("base", 1.0), _r("cand", 2.0)]),
+                 ("prefill", 8192, 64, [_r("base", 10.0), _r("cand", 2.0)])]
+        merged = {r["backend"]: r for r in ob._merge_served(sweep)}
+        big_bucket_speedup = 10.0 / 2.0
+        served_speedup = merged["base"]["ms"] / merged["cand"]["ms"]
+        self.assertEqual(big_bucket_speedup, 5.0)
+        self.assertLess(served_speedup, 1.0)
+
+    def test_the_per_bucket_numbers_stay_visible_for_audit(self):
+        merged = ob._merge_served([("decode", 64, 1024, [_r("cand", 1.0)]),
+                                   ("prefill", 8192, 64, [_r("cand", 10.0)])])
+        self.assertEqual(merged[0]["ms_by_bucket"], {"decode:M=64": 1.0, "prefill:M=8192": 10.0})
+        self.assertIn("served-weighted over 2 buckets", merged[0]["note"])
+
+    def test_a_candidate_that_breaks_at_one_served_shape_is_not_correct_anywhere(self):
+        merged = ob._merge_served([("decode", 64, 1024, [_r("cand", 1.0)]),
+                                   ("prefill", 8192, 64, [_r("cand", None, correct=False,
+                                                             note="wrong at large M")])])
+        self.assertFalse(merged[0]["correct"])
+        self.assertIsNone(merged[0]["ms"])                 # never selectable as a winner
+        self.assertIn("[prefill M=8192] wrong at large M", merged[0]["note"])
+
+    def test_a_bucket_that_raised_propagates_and_does_not_poison_the_mean(self):
+        merged = ob._merge_served([("decode", 64, 1024, [_r("cand", 1.0)]),
+                                   ("prefill", 8192, 64, [_r("cand", None, correct=False,
+                                                             raised=True)])])
+        self.assertTrue(merged[0]["raised"])
+        self.assertIsNone(merged[0]["ms"])
+
+    def test_backend_order_is_preserved_so_the_baseline_lookup_still_works(self):
+        merged = ob._merge_served([("decode", 64, 1024, [_r("hipblaslt", 1.0), _r("ck", 2.0)]),
+                                   ("prefill", 8192, 64, [_r("hipblaslt", 3.0), _r("ck", 4.0)])])
+        self.assertEqual([r["backend"] for r in merged], ["hipblaslt", "ck"])
+
+    def test_a_backend_missing_from_one_bucket_is_still_merged(self):
+        merged = {r["backend"]: r for r in
+                  ob._merge_served([("decode", 64, 1024, [_r("a", 1.0), _r("b", 2.0)]),
+                                    ("prefill", 8192, 64, [_r("a", 3.0)])])}
+        self.assertEqual(merged["b"]["ms"], 2.0)
+        self.assertEqual(set(merged["a"]["ms_by_bucket"]), {"decode:M=64", "prefill:M=8192"})
+
+
+class ServedSweepDispatchTest(unittest.TestCase):
+    """bench_gemm sweeps the served buckets; with nothing to sweep it must behave exactly as before."""
+
+    def setUp(self):
+        self.calls = []
+        self._orig = ob._bench_gemm_at
+        ob._bench_gemm_at = lambda args, meta, m=None: (self.calls.append(m) or [_r("x", 1.0)])
+        self.addCleanup(lambda: setattr(ob, "_bench_gemm_at", self._orig))
+
+    def test_two_served_buckets_are_each_benched(self):
+        ob.bench_gemm(None, _swm_meta_ob())
+        self.assertEqual(sorted(c for c in self.calls if c), [64, 8192])
+
+    def test_no_serving_model_benches_once_at_the_old_shape(self):
+        ob.bench_gemm(None, {"m_buckets": [8192]})
+        self.assertEqual(self.calls, [None])
+
+    def test_a_single_served_bucket_is_not_wrapped_in_a_sweep(self):
+        ob.bench_gemm(None, _swm_meta_ob(served_regimes=["decode"]))
+        self.assertEqual(self.calls, [None])
+
+
+def _swm_meta_ob(**kw):
+    meta = {"m_buckets": [64, 1024, 8192],
+            "workload": {"serving_weight_model": {
+                "isl": 16384, "osl": 1024, "conc": 64, "prefill_chunk": 8192,
+                "analytic_calls": {"prefill": 64, "decode": 1024}}}}
+    meta.update(kw)
+    return meta
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
