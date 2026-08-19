@@ -10,7 +10,7 @@ plus any tuning artifact. It does NOT touch a server or measure e2e — that is 
 
 Task-dir contract (written by the Kernel Extractor PHASE=extract_op):
   <op>_task/
-    meta.json         # op_kind=gemm|attn, dtype, a_shape/b_shape/transpose_b/bias (gemm) OR captured
+    meta.json         # op_kind=attn (server-level bake-off) | gemm|moe|... (GEMM family), dtype, a_shape/b_shape/transpose_b/bias (gemm) OR captured
                       # tensor spec (attn), math_contract, reference_io_sha256, regime
     reference_io.pt   # OPTIONAL golden {inputs..., output} oracle. If absent for GEMM, this script
                       # synthesizes inputs from meta shapes+dtype and computes the oracle with the
@@ -189,7 +189,11 @@ def _is_blockscale_gemm(meta):
     qs = str(meta.get("quant_scheme", "")).lower()
     is_fp8 = ("fp8" in dt or "e4m3" in dt or "e5m2" in dt)
     has_block = bool(meta.get("weight_block_size")) or "block" in qs
-    return is_fp8 and has_block
+    # A grouped MXFP8 MoE is block-scaled AND grouped. It is not a *dense* block-scaled GEMM, and
+    # only the dense reading has a synth: `_synth_blockscale_case` builds a [N,K] weight out of
+    # `meta["b_shape"]`, which a grouped op does not carry (it describes per-expert `families`).
+    # Claiming it here sent it down that path and raised KeyError('b_shape').
+    return is_fp8 and has_block and not _is_grouped_or_quant_gemm(meta)
 
 
 def _is_grouped_or_quant_gemm(meta):
@@ -202,6 +206,14 @@ def _is_grouped_or_quant_gemm(meta):
     kc = str(meta.get("kernel_class", "")).lower()
     dt = str(meta.get("dtype", "")).lower()
     qs = str(meta.get("quant_scheme", "")).lower()
+    # The pipeline states the identity outright: the op-identity guard in e2e_workflow.js sets
+    # op_kind='moe' on every fused/grouped-expert head, and the extractor writes n_experts/top_k
+    # beside it. Keying on kernel_class alone made this function blind to its own subject -- the
+    # campaign's MoE metas carry op_kind='moe' and top_k with no kernel_class at all.
+    if str(meta.get("op_kind", "")).lower() == "moe":
+        return True
+    if meta.get("n_experts") or meta.get("num_experts") or meta.get("top_k"):
+        return True
     if any(t in kc for t in ("moe", "grouped", "experts")):
         return True
     if any(t in dt for t in ("int4", "int8", "uint4", "awq", "gptq", "w4a16", "w8a16")):
@@ -785,7 +797,12 @@ def main():
         _GRAPH_MODE = _hlib.deployment_graph_mode(meta.get("regime"))
 
     try:
-        results = bench_gemm(a, meta) if op_kind == "gemm" else bench_attn(a, meta)
+        # Attention is the one op whose bake-off lives at the server level, so it is the branch
+        # that names itself; every other op_kind is a GEMM-family op and takes bench_gemm, which
+        # classifies grouped/quantized weights out on its own. Testing for "gemm" instead made
+        # THAT the special case and swept the rest into bench_attn, so a grouped-expert GEMM was
+        # told it was missing captured q/k/v -- a diagnosis for an op that has no q/k/v.
+        results = bench_attn(a, meta) if op_kind == "attn" else bench_gemm(a, meta)
     except Exception as e:
         results = [{"backend": "ERROR", "available": False, "correct": False, "ms": None,
                     "note": f"{e!r}", "trace": traceback.format_exc()[-800:]}]

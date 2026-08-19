@@ -912,6 +912,31 @@ class TestOpClassification(unittest.TestCase):
     def test_structured_moe_shape_block_is_grouped(self):
         self.assertTrue(ob._is_grouped_or_quant_gemm({"shape": {"E": 8, "N": 2048, "K": 4096}}))
 
+    def test_grouped_is_detected_from_the_op_kind_the_pipeline_writes(self):
+        # e2e_workflow.js's op-identity guard sets op_kind='moe' on every fused/grouped head. The
+        # campaign's two MoE metas carry it with NO kernel_class, so keying on kernel_class alone
+        # classified 59 of 59 logged MoE bake-offs as ungrouped.
+        self.assertTrue(ob._is_grouped_or_quant_gemm({"op_kind": "moe"}))
+        self.assertTrue(ob._is_grouped_or_quant_gemm({"op_kind": "MoE"}))
+
+    def test_grouped_is_detected_from_an_expert_count_or_topk(self):
+        self.assertTrue(ob._is_grouped_or_quant_gemm({"n_experts": 256, "top_k": 6}))
+        self.assertTrue(ob._is_grouped_or_quant_gemm({"num_experts": 128}))
+        self.assertTrue(ob._is_grouped_or_quant_gemm({"top_k": 4}))
+
+    def test_a_grouped_mxfp8_moe_is_not_a_dense_blockscale_gemm(self):
+        # Both true of it: fp8 and block-scaled, AND grouped. Only the grouped reading has a synth
+        # -- `_synth_blockscale_case` reads meta["b_shape"], which a grouped meta does not carry.
+        meta = {"op_kind": "moe", "dtype": "fp8_e4m3fn", "quant_scheme": "mxfp8_blockscale_1x32",
+                "weight_block_size": [1, 32], "top_k": 4}
+        self.assertTrue(ob._is_grouped_or_quant_gemm(meta))
+        self.assertFalse(ob._is_blockscale_gemm(meta))
+
+    def test_a_dense_blockscale_gemm_is_still_blockscale(self):
+        self.assertTrue(ob._is_blockscale_gemm(
+            {"op_kind": "gemm", "dtype": "fp8", "weight_block_size": [128, 128],
+             "b_shape": [34816, 5120]}))
+
     def test_dense_bf16_gemm_is_not_grouped(self):
         self.assertFalse(ob._is_grouped_or_quant_gemm(
             {"dtype": "bf16", "kernel_class": "linear", "b_shape": [2048, 4096],
@@ -1560,6 +1585,34 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
         entry = {"backend": backend, "available": ms is not None, "correct": correct, "ms": ms}
         entry.update(kw)
         return entry
+
+    def _which_bench(self, op_kind):
+        """Return the name of the bench function main() actually dispatched to."""
+        d = self._task_dir({"op_kind": op_kind})
+        picked = []
+        ob.bench_gemm = lambda a, m: picked.append("gemm") or []
+        ob.bench_attn = lambda a, m: picked.append("attn") or []
+        old_argv = sys.argv
+        sys.argv = ["op_bench.py", "--task", d, "--out", os.path.join(d, "r.json")]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                ob.main()
+        finally:
+            sys.argv = old_argv
+        return picked[0] if picked else None
+
+    def test_only_attention_takes_the_attention_bench(self):
+        # A grouped-expert GEMM has no q/k/v, so routing it to bench_attn produced a diagnosis it
+        # could never act on ("needs reference_io.pt (captured q/k/v/meta)") on 59 logged MoE
+        # bake-offs. Attention is the special case; the GEMM family is the default.
+        self.assertEqual(self._which_bench("attn"), "attn")
+        self.assertEqual(self._which_bench("gemm"), "gemm")
+        self.assertEqual(self._which_bench("moe"), "gemm")
+
+    def test_an_unknown_op_kind_takes_the_gemm_family_bench(self):
+        # bench_gemm classifies grouped/quantized weights out on its own, so an op_kind nobody has
+        # taught the harness yet gets a GEMM answer or a clean skip -- never an attention answer.
+        self.assertEqual(self._which_bench("fp8_a8w8_blockscale_gemm_bpreshuffle"), "gemm")
 
     def test_default_arguments_reach_the_bench_function(self):
         self._run_main({"op_kind": "gemm"}, results=[])
