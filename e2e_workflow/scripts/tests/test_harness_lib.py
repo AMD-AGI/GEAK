@@ -1468,6 +1468,7 @@ class TestAmdahlCeiling(unittest.TestCase):
         self.assertEqual(hl.amdahl_ceiling(0.5, 1.0), 0.0)
 
     def test_a_zero_or_negative_speedup_is_no_ceiling_at_all(self):
+        self.assertEqual(hl.amdahl_ceiling(0.5, None), 0.0)   # unmeasured -> no attributable ceiling
         self.assertEqual(hl.amdahl_ceiling(0.5, 0.0), 0.0)
         self.assertEqual(hl.amdahl_ceiling(0.5, -3.0), 0.0)
 

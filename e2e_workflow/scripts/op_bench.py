@@ -745,9 +745,15 @@ def bench_attn(args, meta):
     if not os.path.exists(iopath):
         return [{"backend": "current", "available": False, "correct": False, "ms": None,
                  "note": "attn bake-off needs reference_io.pt (captured q/k/v/meta); none found"}]
+    # A recorded SKIP, not a verdict. This path takes no timing at all, so `available: True,
+    # correct: True, ms: None` claimed a result it never measured -- which is exactly the
+    # self-contradiction main() now flags. Attention is not a contradictory row; it is a deliberate
+    # delegation, so it says so and stays out of the fault signal. This keeps the shipped attention
+    # cards true (`harness_suspect=false expected`) and leaves that rule for rows that really do
+    # contradict themselves.
     note = ("attention backend comparison is a SERVER-level flag (--attention-backend) -> delegated to "
-            "the Config Tuner fast path; op-level here only validates the oracle")
-    return [{"backend": "current", "available": True, "correct": True, "ms": None,
+            "the Config Tuner fast path; op-level bake-off skipped (no timing taken here)")
+    return [{"backend": "current", "available": False, "correct": False, "ms": None,
              "note": note, "artifact": iopath}]
 
 

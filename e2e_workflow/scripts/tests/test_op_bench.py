@@ -1501,15 +1501,22 @@ class TestBenchAttn(_FakeStackMixin, unittest.TestCase):
         self.assertIsNone(res[0]["ms"])
         self.assertIn("needs reference_io.pt", res[0]["note"])
 
-    def test_captured_oracle_is_validated_and_backend_swaps_are_delegated(self):
+    def test_a_captured_oracle_is_a_recorded_skip_and_says_where_the_race_happens(self):
+        """No timing is taken here, so the row must not claim one.
+
+        Reporting ``available+correct`` with ``ms: None`` asserted a verdict on a measurement that
+        never happened -- the same self-contradiction ``main()`` flags as a harness fault. Attention
+        is not a contradictory row, it is a deliberate delegation to the server-level flag, so it
+        records a skip. That also keeps the shipped attention cards true.
+        """
         d = self._task_dir()
         io_path = os.path.join(d, "reference_io.pt")
         open(io_path, "w").close()
         res = ob.bench_attn(self._args(task=d), {"op_kind": "attn"})
-        self.assertTrue(res[0]["available"])
-        self.assertTrue(res[0]["correct"])
+        self.assertFalse(res[0]["available"])
+        self.assertFalse(res[0]["correct"])
         self.assertIsNone(res[0]["ms"])                     # op-level attention is not raced here
-        self.assertEqual(res[0]["artifact"], io_path)
+        self.assertEqual(res[0]["artifact"], io_path)       # the capture is still handed downstream
         self.assertIn("--attention-backend", res[0]["note"])
         self.assertIn("Config Tuner", res[0]["note"])
 
@@ -1914,6 +1921,21 @@ class TestUnmeasuredIsNotZero(unittest.TestCase):
             {"op_kind": "gemm"},
             results=[{"backend": "grouped_quant_gemm", "available": False,
                       "correct": False, "ms": None, "note": "not a candidate"}])
+        self.assertFalse(summary["harness_suspect"])
+
+    def test_the_real_bench_attn_row_is_unmeasured_but_not_a_fault(self):
+        """The two rules together, on the row bench_attn actually emits.
+
+        Every attention bake-off in the campaign flows through here. It must publish no speedup
+        (nothing was timed) AND raise no fault (nothing was claimed) -- 318 silent zeros must not
+        become 318 false alarms.
+        """
+        summary, _ = self._run_main(
+            {"op_kind": "attn"},
+            results=[{"backend": "current", "available": False, "correct": False, "ms": None,
+                      "note": "delegated to the Config Tuner fast path; op-level bake-off skipped"}])
+        self.assertIsNone(summary["isolated_speedup"])
+        self.assertFalse(summary["measured"])
         self.assertFalse(summary["harness_suspect"])
 
     def test_a_measured_bakeoff_with_no_correct_backend_still_reports_zero(self):

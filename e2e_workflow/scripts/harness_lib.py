@@ -685,6 +685,8 @@ def amdahl_ceiling(pct_gpu, isolated_speedup):
     if p > 1.0:
         p /= 100.0
     p = min(max(p, 0.0), 1.0)
+    if isolated_speedup is None:
+        return 0.0        # no measurement -> no attributable ceiling; same answer as a non-win
     s = float(isolated_speedup)
     if s <= 0:
         return 0.0
