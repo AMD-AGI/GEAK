@@ -313,13 +313,19 @@ freeze an out-of-regime oracle nobody should trust.
      never false-fails offline — the e2e gate still catches it there.)
    - **Timing — ONE call: `per_case = h.measure_legs(TASK, meta)`.** You do NOT write a timing loop, do
      NOT bind two callables, and do NOT choose which leg is which. `measure_legs` rebuilds
-     `_cand_overlay` from `meta.candidate_bind`, runs `h.assert_legs_differ`, then for EACH bucket
-     launches TWO fresh subprocesses of `leg_runner.py --mode time --bucket <sig>` — same file, same
-     `cases.py`, differing only in `PYTHONPATH` (`baseline_overlay` vs `_cand_overlay`) — and returns
-     `[{sig, regime, m, baseline_ms, optimized_ms, speedup}]` with `speedup = baseline_ms/optimized_ms`.
+     `_cand_overlay` from `meta.candidate_bind`, runs `h.assert_legs_differ`, then for EACH bucket runs
+     INTERLEAVED baseline/candidate PAIRS of fresh `leg_runner.py --mode time --bucket <sig>`
+     subprocesses — same file, same `cases.py`, differing only in `PYTHONPATH` (`baseline_overlay` vs
+     `_cand_overlay`) — and returns
+     `[{sig, regime, m, baseline_ms, optimized_ms, speedup, reps, speedup_spread}]` with
+     `speedup = baseline_ms/optimized_ms` over the MEDIAN pair.
      Both legs get the SAME `graph=h.deployment_graph_mode(regime)` and the SAME `h.compiled_op` wrap
      (applied inside `leg_runner`, so graph/compile parity is not yours to forget), and each bucket is a
      cold interpreter so warm-JIT/autotune state cannot leak between legs.
+     > A decisive bucket costs ONE pair; only a bucket whose running median lands in the undecided band
+     > (default 0.95–1.10x, where fresh-process noise can flip the verdict) spends up to `max_reps=3`.
+     > Do NOT pass a flat `max_reps` to "be safe" — it triples the cold-import cost of every bucket to
+     > buy resolution the decisive ones do not need. Report `speedup_spread` when a bucket looks noisy.
      > `h.time_op` is the CUDA-EVENT DEVICE-time timer (`inner=1`; device time already EXCLUDES host
      > dispatch, so no amortization is needed — raise `inner` only for sub-microsecond kernels).
      > `deployment_graph_mode` is True whenever the live server replays this op under a CUDA/HIP graph

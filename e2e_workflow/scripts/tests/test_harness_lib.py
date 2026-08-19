@@ -2473,6 +2473,112 @@ class TestMeasureLegs(_LegTestCase):
         per = hl.measure_legs(self.task, self.meta)
         self.assertEqual([c["speedup"] for c in per], [None, None])
 
+    def test_an_unmeasurable_bucket_does_not_burn_the_rep_budget(self):
+        """No timer means no pair can decide it; retrying is pure cost."""
+        self._legs(timings={"decode": (None, None)}, sigs=("decode",))
+        hl.measure_legs(self.task, self.meta)
+        self.assertEqual(self.sub.modes().count("time"), 2)
+
+
+class TestMeasureLegsResolution(_LegTestCase):
+    """How many pairs a bucket costs, and in what order the legs run.
+
+    Fresh-per-bucket is deliberate, but it is also what leaves one B,C pair exposed to fresh-process
+    variance -- ~0.1-0.5% on prefill, up to ~14% on small-M decode on gfx950. A 1.05x candidate is
+    inside that noise, and 1.05x is precisely the size of win the direction fix exists to recover."""
+
+    def _sequenced(self, seq, sigs=("decode",)):
+        """A leg server whose `time` answers come from a per-sig LIST, one entry consumed per pair."""
+        state = {s: 0 for s in sigs}
+        order = []
+
+        def handler(cmd, env):
+            if "overlay_setup.py" in " ".join(cmd):
+                return _Proc(0)
+            mode = cmd[cmd.index("--mode") + 1]
+            is_base = env.get("PYTHONPATH", "").split(os.pathsep)[0] == self.base
+            if mode == "resolve":
+                return _Proc(0, json.dumps(self.BASE_IDENT if is_base else self.CAND_IDENT))
+            if mode == "list":
+                return _Proc(0, json.dumps({"sigs": list(sigs)}))
+            sig = cmd[cmd.index("--bucket") + 1]
+            order.append(("B" if is_base else "C", sig))
+            pair = seq[sig][min(state[sig], len(seq[sig]) - 1)]
+            if not is_base:
+                state[sig] += 1                      # a pair completes on the candidate leg
+            ms = pair[0] if is_base else pair[1]
+            return _Proc(0, json.dumps({"cases": [{"sig": sig, "ms": ms, "regime": "decode",
+                                                   "m": 64}]}))
+        self._script(handler)
+        return order
+
+    def test_a_decisive_bucket_still_costs_exactly_one_pair(self):
+        """The common case must not get 3x slower to buy resolution it does not need."""
+        self._sequenced({"decode": [(2.0, 1.0)]})
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual(self.sub.modes().count("time"), 2)
+        self.assertEqual(per[0]["reps"], 1)
+        self.assertEqual(per[0]["speedup"], 2.0)
+        self.assertEqual(per[0]["speedup_spread"], 0.0)
+
+    def test_a_decisive_slowdown_also_stops_after_one_pair(self):
+        """Below the band is as decisive as above it."""
+        self._sequenced({"decode": [(1.0, 2.0)]})
+        hl.measure_legs(self.task, self.meta)
+        self.assertEqual(self.sub.modes().count("time"), 2)
+
+    def test_an_undecided_bucket_spends_the_full_budget(self):
+        """1.05x is the motivating case: inside the noise, so it is the one worth re-measuring."""
+        self._sequenced({"decode": [(1.055, 1.0)] * 3})
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual(self.sub.modes().count("time"), 6)
+        self.assertEqual(per[0]["reps"], 3)
+
+    def test_the_legs_are_interleaved_rather_than_run_all_baseline_then_all_candidate(self):
+        """B,B,B,C,C,C lets drift over the sweep accrue to the candidate; B,C,B,C makes it common-mode."""
+        order = self._sequenced({"decode": [(1.02, 1.0)] * 3})
+        hl.measure_legs(self.task, self.meta)
+        self.assertEqual([leg for leg, _ in order], ["B", "C", "B", "C", "B", "C"])
+
+    def test_the_reported_time_is_the_median_pair_not_the_first(self):
+        """One unlucky cold process must not carry the bucket."""
+        self._sequenced({"decode": [(1.0, 1.0), (1.04, 1.0), (9.0, 1.0)]})
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual(per[0]["baseline_ms"], 1.04)
+        self.assertEqual(per[0]["speedup"], 1.04)
+
+    def test_the_spread_across_pairs_is_reported(self):
+        """A bucket that disagrees with itself must be visible, not averaged into silence."""
+        self._sequenced({"decode": [(1.0, 1.0), (1.04, 1.0), (1.08, 1.0)]})
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertAlmostEqual(per[0]["speedup_spread"], (1.08 - 1.0) / 1.04, places=12)
+
+    def test_a_bucket_that_turns_decisive_on_a_later_pair_stops_there(self):
+        """The check is on the RUNNING median, so the budget is released as soon as it is not needed."""
+        self._sequenced({"decode": [(1.02, 1.0), (3.0, 1.0), (3.0, 1.0)]})
+        hl.measure_legs(self.task, self.meta)
+        self.assertEqual(self.sub.modes().count("time"), 4)
+
+    def test_max_reps_one_restores_the_single_pair_behaviour(self):
+        self._sequenced({"decode": [(1.055, 1.0)] * 3})
+        per = hl.measure_legs(self.task, self.meta, max_reps=1)
+        self.assertEqual(self.sub.modes().count("time"), 2)
+        self.assertEqual(per[0]["reps"], 1)
+
+    def test_the_undecided_band_is_caller_controlled(self):
+        """A widened band makes a 1.5x bucket worth re-measuring; the default would not."""
+        self._sequenced({"decode": [(1.5, 1.0)] * 3})
+        hl.measure_legs(self.task, self.meta, undecided=(0.5, 2.0))
+        self.assertEqual(self.sub.modes().count("time"), 6)
+
+    def test_the_budget_is_per_bucket_not_shared(self):
+        """A noisy decode bucket must not consume the reps a second bucket would have used."""
+        self._sequenced({"decode": [(1.02, 1.0)] * 3, "prefill": [(1.03, 1.0)] * 3},
+                        sigs=("decode", "prefill"))
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual([c["reps"] for c in per], [3, 3])
+        self.assertEqual(self.sub.modes().count("time"), 12)
+
 
 class TestBaselineRandomOutputs(_LegTestCase):
     def test_the_oracle_is_recorded_by_the_baseline_leg_in_its_own_process(self):

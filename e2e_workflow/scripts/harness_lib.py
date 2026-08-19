@@ -1157,24 +1157,72 @@ def assert_legs_differ(task_dir, base, cand, meta, timeout=600):
     return bi, ci
 
 
-def measure_legs(task_dir, meta, *, timeout=3600):
+def _median(xs):
+    s = sorted(xs)
+    n = len(s)
+    return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
+
+
+def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10)):
     """`per_case` for `serving_weighted_speedup`, one bucket per FRESH subprocess per leg.
 
     Fresh-per-bucket is not optional: a warm interpreter shares JIT/autotune state between the legs and
-    reports a pseudo-1.0x that is an artifact, not a measurement."""
+    reports a pseudo-1.0x that is an artifact, not a measurement.
+
+    But fresh-per-bucket is also what makes ONE pair per bucket too coarse: fresh-process variance is
+    exactly the variance `time_op`'s in-process repeats cannot average away. Measured on gfx950 it is
+    ~0.1-0.5% on a prefill bucket and up to ~14% on a small-M decode bucket — so a real 1.05x candidate
+    sits inside the noise of a single unpaired pair, which is the resolution the direction fix needs and
+    did not have.
+
+    Two things fix that, and only one of them costs anything:
+
+    - INTERLEAVE. Each rep is a B,C PAIR, never all Bs then all Cs. Any drift over the sweep (clocks,
+      thermals, a neighbour on the box) then lands on both legs and cancels, instead of accruing to
+      whichever leg ran later. This is free — same subprocess count.
+    - REPEAT, BUT ONLY WHEN IT MATTERS. `max_reps` pairs is the CEILING, not the plan. After each pair
+      the running median ratio is checked: once it is outside `undecided`, the verdict cannot plausibly
+      flip and the bucket stops. A 2.3x bucket costs one pair, exactly as before; a 1.05x bucket — the
+      one whose answer is in doubt — spends the full budget. Flat `reps=3` would have tripled the cost
+      of every bucket to buy resolution on the few that need it, and this path already pays a cold
+      torch import per subprocess.
+
+    `baseline_ms`/`optimized_ms` are the MEDIAN over the pairs actually run, so one unlucky process
+    cannot carry the bucket. `reps` and `speedup_spread` (per-pair speedup range / median, 0.0 for a
+    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence."""
     task = os.path.abspath(task_dir)
     base, cand = build_candidate_overlay(task, meta)
     assert_legs_differ(task, base, cand, meta)
+    lo, hi = undecided
     per_case = []
     for sig in _run_leg(task, base, "list", timeout=timeout)["sigs"]:
-        b = _run_leg(task, base, "time", bucket=sig, timeout=timeout)["cases"]
-        o = _run_leg(task, cand, "time", bucket=sig, timeout=timeout)["cases"]
-        if not b or not o:
+        row, bms, oms = None, [], []
+        for _ in range(max(1, int(max_reps))):
+            b = _run_leg(task, base, "time", bucket=sig, timeout=timeout)["cases"]
+            o = _run_leg(task, cand, "time", bucket=sig, timeout=timeout)["cases"]
+            if not b or not o:
+                break
+            if row is None:
+                row = b[0]
+            bms.append(b[0].get("ms"))
+            oms.append(o[0].get("ms"))
+            good_b, good_o = [x for x in bms if x], [y for y in oms if y]
+            if not good_b or not good_o:
+                break                      # nothing timable here; more pairs cannot change that
+            if not (lo <= _median(good_b) / _median(good_o) <= hi):
+                break                      # decisive already — do not buy resolution we do not need
+        if row is None:
             continue
-        bm, om = b[0].get("ms"), o[0].get("ms")
-        per_case.append({"sig": sig, "regime": b[0].get("regime", ""), "m": b[0].get("m"),
+        good_b, good_o = [x for x in bms if x], [y for y in oms if y]
+        bm = _median(good_b) if good_b else None
+        om = _median(good_o) if good_o else None
+        pair_sp = [x / y for x, y in zip(bms, oms) if x and y]
+        per_case.append({"sig": sig, "regime": row.get("regime", ""), "m": row.get("m"),
                          "baseline_ms": bm, "optimized_ms": om,
-                         "speedup": (bm / om) if (bm and om) else None})
+                         "speedup": (bm / om) if (bm and om) else None,
+                         "reps": len(bms),
+                         "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
+                                            if len(pair_sp) > 1 else 0.0)})
     return per_case
 
 
