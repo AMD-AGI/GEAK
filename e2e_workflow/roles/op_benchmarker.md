@@ -227,6 +227,32 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    NOTE: the experimental triton GEMM stub is NOT a real implementation — treat "no editable triton
    kernel for this op" as author-needed. FlyDSL DOES have a real importable GEMM (`flydsl_hgemm` /
    `flydsl_preshuffle_gemm_a8`), so a flydsl author baseline reuses it rather than starting from zero.
+2a. **🔴 THE DENOMINATOR — a speedup is only as real as what it was divided by.**
+   `op_bench.py` now names the thing it timed as the baseline and reports it as `denominator` (also on
+   every row as `denominator_provenance`). It is one of:
+   | `denominator` | meaning | speedup |
+   |---|---|---|
+   | `measured_backend_default` | the default backend that the live server actually dispatches, timed here | **bankable** |
+   | `verified_baseline` | the frozen real online kernel, machine-verified by `seam_contract.py` | **bankable** |
+   | `unverified_baseline` | a declared baseline whose binding was never checked | withheld unless `--no-denominator-strict` |
+   | `target_fallback` | no baseline resolved; the candidate was timed against the target itself | **withheld** |
+   | `synthesized_reference` | the reference IO was manufactured, not captured from the live server | **withheld** |
+   | `none` | nothing to divide by | **withheld** |
+
+   When the denominator is not sound the script sets `speedup_withheld:true` with
+   `speedup_withheld_reason`, moves the number to `isolated_speedup_unpublishable`, suppresses
+   `amdahl_ceiling_e2e_pct`, and prints `speedup=WITHHELD (<provenance>)`. **In that case you MUST report
+   `isolated_speedup: null` and `reason_code:"invalid_denominator"` — do NOT copy the unpublishable
+   figure into `isolated_speedup`, and do NOT re-run with `--no-denominator-strict` to make the number
+   reappear.** A withheld speedup is not a missing measurement; it is a measurement of the wrong thing.
+   This is the exact failure being prevented: a kernel timed against a manufactured reference scored
+   4.47× and moved end-to-end throughput by nothing at all, because the server never called it. The right
+   response is to fix the seam (send it back to extract), not to publish the ratio.
+
+   Set `provenance_ok:false` whenever any number you report was not measured by you in this run against a
+   sound denominator — including a figure carried over from an earlier round or read out of a report. The
+   orchestrator will not bank a result with `provenance_ok:false`, which is the correct outcome.
+
 2b. **HARNESS SELF-CHECK + bounded self-repair (do NOT mistake a broken harness for "no win").**
    Distinguish two completely different outcomes in `opbench_result.json`:
    - a backend that **ran and produced a number** but was slower / not correct → a legitimate per-backend
@@ -301,6 +327,9 @@ Return JSON:
   "winner_backend": "aiter|hipblaslt|triton|flydsl|ck|none",
   "winner_kind": "env|flag|patch|none",
   "isolated_speedup": 1.0,
+  "denominator": "measured_backend_default|verified_baseline|unverified_baseline|target_fallback|synthesized_reference|none",
+  "speedup_withheld": false,
+  "reason_code": "<'invalid_denominator' when speedup_withheld; else ''>",
   "winner_editable": false,
   "best_known_ms": 0.0,
   "recommend_tier_c": false,

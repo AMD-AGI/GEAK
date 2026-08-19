@@ -82,7 +82,7 @@ freeze an out-of-regime oracle nobody should trust.
    (`python3 -c "import sglang,os;print(os.path.dirname(sglang.__file__))"`, then grep the
    `short_name` / the `module:attr` target).
    **OP-IDENTITY IS THE RULE: extract the op the LIVE kernel actually is, at the seam it is actually called
-   from — never a different op.** Two cases:
+   from — never a different op.** Three cases:
    - **Standalone LIBRARY op** (a discrete hipBLASLt/rocBLAS `gemm(...)` / library attention whose only
      call site is that library call, no editable body) → STOP, report `editable=false`, `target_callable=""`;
      it belongs to the config/tune-hook track (per-shape DB tune / backend env), not a source rewrite. Do
@@ -95,6 +95,21 @@ freeze an out-of-regime oracle nobody should trust.
      library/asm `.so`. That dispatcher seam is what lets a fused op be BACKEND-SWAPPED (aiter/flydsl/triton
      fused) or AUTHOR-fused-replaced regardless of the underlying kernel's editability. Report
      `editable=true` (the seam is rebindable). NEVER decompose it into a dense A·Bᵀ GEMM — no live call site.
+   - **OUTER WRAPPER that is NOT a pure function of its arguments** (a torch custom-op / dispatch entry that
+     reads a global registry or layer object, writes its result IN PLACE into a caller-owned buffer, and/or
+     returns `None`): it can be **neither captured as an oracle NOR rebound**, so do NOT try to force it and
+     do NOT synthesize a reference implementation to stand in for it. **DESCEND** to the innermost launcher
+     that wrapper dispatches to which IS a pure function of its arguments —
+     `KERNEL.live_call_seam` usually already names it. Confirm which entry the server ACTUALLY dispatched by
+     reading the candidate `server.log` (backends get overridden at startup — do NOT trust the env var you
+     set). Then set **BOTH** `target_callable` **and** `meta.baseline_callable` to that launcher, so the
+     authored kernel and the speedup denominator are the same live seam. Generate its deployable entry with
+     `python3 $SKILL_DIR/scripts/seam_contract.py --task-dir <task_dir> --mode entry` — never hand-write it —
+     and verify with `--mode both` that `baseline_validation.ok` and `binding_check.bindable` are BOTH true.
+     A synthesized oracle plus an unbindable wrapper is the single failure mode this case exists to prevent:
+     it yields a kernel-level "speedup" against a number nothing in the server ever computed, and an overlay
+     that patches nothing. If after descending no seam is both capturable and bindable, report
+     `editable=false` — that is an honest stop, not a fallback to synthesis.
 2. **Capture shapes + oracle** from a live server using `scripts/capture_shapes.py` via a temporary
    capture overlay, driven by the SAME workload as the profile so shapes match the regime:
    ```bash
@@ -340,6 +355,13 @@ freeze an out-of-regime oracle nobody should trust.
    >   caller. `h.check_correct_multi` catches it (later call overwrites the earlier return; distinct
    >   `data_ptr` + no-mutation asserted). Never write a correctness check that reads each output right
    >   after its own call — check them all together, as the shared lib does.
+   >   **Scope: this is the ORACLE HARNESS's timing/correctness contract, not the deployable entry's.** It
+   >   says the function the unittest times must not alias a static buffer across calls. It is NOT licence
+   >   to give the authored kernel a dict-taking, fresh-returning entry when the LIVE seam is positional and
+   >   writes in place — the deployed entry must match the live seam's real signature (that is what
+   >   `seam_contract.py --mode entry` generates and `--mode bind` checks). An in-place live seam is served
+   >   by an entry that writes into the caller's `out` and returns what the live seam returns; the harness
+   >   still gets its fresh-output wrapper around it.
 5. **Finalize `meta.json`**: set `build` (false for pure-Triton; true + a build cmd for HIP/CK/asm
    candidates), `candidate_backends`, `regime`, the source path in sglang, and re-confirm the
    `reference_io_sha256` checksum (the validator re-checks it to detect tampering).
@@ -369,6 +391,39 @@ freeze an out-of-regime oracle nobody should trust.
    > Do **NOT** record `unittest_smoke:"fail"` or drop the head for exit 3 — that status is reserved for a
    > genuine baseline-bind / correctness failure (exit 1). Only after 3 failed regenerations set
    > `unittest_smoke:"fail"` with `reason="harness_incomplete_unrecoverable"`.
+7. **🔴 MANDATORY — machine-check the baseline and the seam binding. Do not hand-write these verdicts.**
+   The orchestrator gates head admission on the OUTPUT of this script, not on your prose. Run it and
+   paste the three objects it prints back VERBATIM into your Return JSON:
+   ```bash
+   python3 "$SKILL_DIR/scripts/seam_contract.py" \
+     --task-dir "<task_dir>" --eval-dir "$EVAL_DIR" \
+     --spec "<module:attr you are declaring as baseline_callable>" \
+     --mode both --json
+   ```
+   - It imports the spec from the LIVE site-packages, checks the module file actually lives under a real
+     install root (not a directory you just created), and rejects a synthesized `baseline_src.*` strawman.
+     `baseline_validation.ok=false` ⇒ the head is NOT admissible: return `editable:false` /
+     `baseline_frozen:false` with the reported reason. Do not "fix" it by pointing at a file you wrote.
+   - `binding_descriptor` is DERIVED from `inspect.signature` of the live callable — parameter names,
+     kinds, defaults, and which parameters are written in place. It is a fact about the seam, not a
+     guess; never edit it by hand.
+   - `binding_check` compares your candidate entry point against that descriptor. If it fails, the
+     candidate cannot be rebound at the seam and the isolated speedup is unbankable — regenerate the
+     entry from the descriptor instead of arguing with it:
+     ```bash
+     python3 "$SKILL_DIR/scripts/seam_contract.py" --task-dir "<task_dir>" --eval-dir "$EVAL_DIR" \
+       --spec "<module:attr>" --mode entry --entry-name <name> --out "<task_dir>/entry_contract.py"
+     ```
+     and report that path as `entry_contract_path`.
+   - `seam_runtime_evidence.inplace_params` MUST list the parameter names the live callable writes
+     through (e.g. an `output=` buffer). `op_bench.py` uses this list — and ONLY this list, never a name
+     heuristic — to decide where a replayed in-place seam's result is read from. Getting it wrong makes
+     correctness unmeasurable, not merely inaccurate.
+   - `num_cases` MUST be the real number of records in `reference_io.pt`. `0` means the oracle recorded
+     no calls, so correctness is unfalsifiable, and the orchestrator will reject the head. Report the
+     true count; do not round it up.
+   - `reference_io_sha256` MUST be the checksum of the oracle bytes you actually shipped. An empty string
+     means the oracle is unpinned and tampering is undetectable — also a rejection.
 
 Return JSON:
 ```json
@@ -380,6 +435,12 @@ Return JSON:
   "target_callable": "<module:attr>",
   "baseline_callable": "<module:attr of the frozen real online kernel>",
   "baseline_frozen": true,
+  "synthesized": false,
+  "baseline_validation": { "...": "verbatim from seam_contract.py --mode both" },
+  "binding_descriptor": { "...": "verbatim from seam_contract.py --mode both" },
+  "binding_check": { "...": "verbatim from seam_contract.py --mode both" },
+  "entry_contract_path": "<task_dir>/entry_contract.py or \"\" if the candidate already matches",
+  "seam_runtime_evidence": { "inplace_params": ["output"] },
   "num_cases": 0,
   "regimes_captured": ["prefill","decode"],
   "candidate_backends": ["triton","hip","ck"],
@@ -718,6 +779,15 @@ force real compact-operand compute:
 > those M values for every (N,K) — these are non-negotiable; the smoke-test and downstream gate depend on
 > them.** Combine with the prefill M per `PREFILL_M_NOTE`.
 
+**🔴 Before returning, run the same machine check as `PHASE=extract` step 7** (`seam_contract.py
+--mode both`) and paste `baseline_validation` / `binding_descriptor` / `binding_check` back verbatim.
+It applies with FULL force here, because `PHASE=extract_op` is the path on which a synthesized oracle is
+legal: `synthesized:true` says the reference IO was manufactured, not captured from the live server, and
+the orchestrator treats a synthesized baseline as an INVALID speedup denominator. Report it honestly —
+a head with `synthesized:true` can still be benchmarked, but its isolated speedup will be withheld
+rather than banked, which is the correct outcome. Claiming `synthesized:false` for a manufactured oracle
+is the single defect that produced a 4.47× "win" with zero end-to-end effect.
+
 Return JSON:
 ```json
 {
@@ -731,9 +801,15 @@ Return JSON:
   "regimes_captured": ["prefill"],
   "candidate_backends": ["aiter","hipblaslt","triton","ck"],
   "reference_io_sha256": "<or '' if synthesized>",
+  "num_cases": 0,
   "target_callable": "<module:attr rebind seam if one exists, else ''>",
   "baseline_callable": "<module:attr of the frozen real online kernel / default backend>",
   "baseline_frozen": true,
+  "baseline_validation": { "...": "verbatim from seam_contract.py --mode both" },
+  "binding_descriptor": { "...": "verbatim from seam_contract.py --mode both" },
+  "binding_check": { "...": "verbatim from seam_contract.py --mode both" },
+  "entry_contract_path": "<task_dir>/entry_contract.py or \"\"",
+  "seam_runtime_evidence": { "inplace_params": [] },
   "smoke": "pass|fail",
   "notes": "transpose/bias inference, regime, whether oracle was synthesized vs captured"
 }

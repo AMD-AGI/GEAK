@@ -122,6 +122,294 @@ def _correct(torch, out, ref, tol):
         return False, float("inf")
 
 
+# ------------------------------------------------------------------- INV-1/INV-3: denominator identity
+# A speedup is a RATIO. The numerator is always measured here; the denominator is only meaningful if it
+# is the thing the deployment actually runs. Every previous silent `baseline or target` fallback made the
+# ratio a self-comparison (or a comparison against a reference this script itself invented) while still
+# printing a headline number. These helpers make the denominator's provenance an explicit, recorded fact,
+# and let main() WITHHOLD the ratio rather than publish an unsourced one.
+#
+# Op-kind agnostic by construction: nothing below inspects op_kind, dtype, shapes or kernel names.
+
+DEGRADATIONS = []
+
+
+def note_degradation(where, what, detail=""):
+    d = {"where": where, "what": what, "detail": str(detail)[:400]}
+    DEGRADATIONS.append(d)
+    sys.stderr.write(f"[op_bench][degraded] {where}: {what}" + (f" — {detail}\n" if detail else "\n"))
+    return d
+
+
+# severity: "ok"        -> the denominator is the deployed path; a ratio against it is publishable
+#           "unverified"-> plausibly the deployed path, but nothing proved it; publishable only with
+#                          --no-denominator-strict, and always carries its provenance
+#           "invalid"   -> provably not a denominator (self-comparison, or a reference we synthesized)
+DENOM_SEVERITY = {
+    "measured_backend_default": "ok",          # baseline row is a real backend we timed on this box
+    "verified_baseline":        "ok",          # meta.baseline_validation proved it is the live seam
+    "unverified_baseline":      "unverified",  # meta.baseline_callable, but no seam_contract.py verdict
+    "target_fallback":          "invalid",     # no baseline declared -> candidate vs itself
+    "synthesized_reference":    "invalid",     # oracle was fabricated, not captured from the seam
+    "none":                     "invalid",     # nothing to divide by
+}
+
+
+def resolve_denominator(meta):
+    """Resolve the baseline spec AND why we believe it is one. Never falls back silently.
+
+    Returns {spec, provenance, severity, why}. `spec` may be non-empty even when severity is "invalid":
+    callers may still want to RUN it (a self-comparison is a valid sanity check), they just may not
+    report a speedup against it.
+    """
+    bl = str(meta.get("baseline_callable") or "").strip()
+    tgt = str(meta.get("target_callable") or "").strip()
+    v = meta.get("baseline_validation")
+    verified = (isinstance(v, dict) and v.get("contract") == "baseline_identity" and v.get("ok") is True)
+
+    def out(spec, prov, why):
+        return {"spec": spec, "provenance": prov, "severity": DENOM_SEVERITY[prov], "why": why}
+
+    if meta.get("synthesized") is True:
+        return out(bl or tgt, "synthesized_reference",
+                   "meta.synthesized=true: the reference was written by the extractor, not captured "
+                   "from the live seam, so it is an oracle for CORRECTNESS only, never a perf denominator")
+    if bl and verified:
+        return out(bl, "verified_baseline",
+                   "seam_contract.py --mode baseline reported ok=true for this spec")
+    if bl:
+        return out(bl, "unverified_baseline",
+                   "meta.baseline_callable is declared but carries no baseline_validation verdict "
+                   "(run scripts/seam_contract.py --mode baseline)")
+    if tgt:
+        return out(tgt, "target_fallback",
+                   "no baseline_callable in meta.json; using target_callable would compare the "
+                   "candidate against ITSELF")
+    return out("", "none", "meta.json declares neither baseline_callable nor target_callable")
+
+
+def _delegation_status(meta):
+    """Some heads have no in-process bake-off at all: their only lever is a server-level flag owned by
+    the Config-Tuner track. That is a legitimate outcome ONLY while that track is actually running. If it
+    is off, 'delegated' means 'nobody measured this', which must surface as a reject code, not as a pass.
+
+    Recognised meta keys (any one of them, all optional):
+      delegated_config_track: true|false      config_track_enabled: true|false
+    Absent -> "unknown": we say so instead of assuming enabled.
+    """
+    for key in ("delegated_config_track", "config_track_enabled"):
+        if key in meta and meta[key] is not None:
+            return "enabled" if bool(meta[key]) else "disabled"
+    return "unknown"
+
+
+# --------------------------------------------------------------- INV-3: generic captured-oracle replay
+def _rehydrate(obj, torch, device):
+    """Inverse of capture_shapes._snapshot: {'__tensor__':True,'data':...} -> a device tensor.
+    Structure-preserving over list/tuple/dict; scalars pass through; un-snapshottable objects
+    (recorded as {'__repr__': ...}) come back as a sentinel so the caller can refuse to replay."""
+    if isinstance(obj, dict) and obj.get("__tensor__"):
+        return obj["data"].to(device)
+    if isinstance(obj, dict) and "__repr__" in obj:
+        return _UNREPLAYABLE
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_rehydrate(v, torch, device) for v in obj)
+    if isinstance(obj, dict):
+        return {k: _rehydrate(v, torch, device) for k, v in obj.items()}
+    return obj
+
+
+class _Unreplayable:
+    def __repr__(self):
+        return "<unreplayable: capture recorded only repr()>"
+
+
+_UNREPLAYABLE = _Unreplayable()
+
+
+def _has_unreplayable(obj):
+    if obj is _UNREPLAYABLE:
+        return True
+    if isinstance(obj, (list, tuple)):
+        return any(_has_unreplayable(v) for v in obj)
+    if isinstance(obj, dict):
+        return any(_has_unreplayable(v) for v in obj.values())
+    return False
+
+
+def load_oracle_records(task, torch, device):
+    """Return (records, err). Each record: {sig, regime, args, kwargs, output} with tensors on `device`.
+    `err` is a human string when the oracle cannot be replayed; records is then []."""
+    iopath = os.path.join(task, "reference_io.pt")
+    if not os.path.exists(iopath):
+        return [], "no reference_io.pt in the task dir"
+    try:
+        blob = torch.load(iopath, map_location="cpu", weights_only=False)
+    except Exception as e:
+        return [], f"reference_io.pt unreadable: {e!r}"
+    recs = blob.get("records") if isinstance(blob, dict) else None
+    if not recs:
+        return [], "reference_io.pt carries no 'records' (not a capture_shapes oracle)"
+    out = []
+    for r in recs:
+        args = _rehydrate(r.get("args", ()), torch, device)
+        kwargs = _rehydrate(r.get("kwargs", {}), torch, device)
+        ref = _rehydrate(r.get("output", None), torch, device)
+        if _has_unreplayable(args) or _has_unreplayable(kwargs):
+            continue
+        out.append({"sig": r.get("sig", ""), "regime": r.get("regime", ""),
+                    "args": tuple(args) if isinstance(args, (list, tuple)) else (args,),
+                    "kwargs": dict(kwargs) if isinstance(kwargs, dict) else {},
+                    "ref": ref})
+    if not out:
+        return [], (f"all {len(recs)} recorded case(s) contain non-tensor arguments the capture could "
+                    f"only store as repr() — cannot replay this seam in-process")
+    return out, ""
+
+
+def _out_param_of(rec, meta):
+    """For an IN-PLACE seam (returns None, writes into a caller-supplied buffer) the oracle's `output`
+    snapshot is None and the golden values live in one of the INPUTS after the call. Which one is a fact
+    the extractor records; we do not guess from names here beyond a last-resort default, and we say so.
+
+    Returns (kind, key) with kind in {"kwarg","arg",""}.
+    """
+    ev = meta.get("seam_runtime_evidence") or {}
+    names = [str(n) for n in (ev.get("inplace_params") or []) if str(n)]
+    for n in names:
+        if n in rec["kwargs"]:
+            return "kwarg", n
+    if names:
+        return "", ""            # declared, but not present in this record -> refuse, don't guess
+    return "", ""
+
+
+def _clone_inputs(rec, torch):
+    """A fresh copy of args/kwargs so an in-place seam cannot poison the next timing iteration."""
+    def cl(o):
+        if torch.is_tensor(o):
+            return o.clone()
+        if isinstance(o, (list, tuple)):
+            return type(o)(cl(v) for v in o)
+        if isinstance(o, dict):
+            return {k: cl(v) for k, v in o.items()}
+        return o
+    return cl(rec["args"]), cl(rec["kwargs"])
+
+
+def bench_captured_replay(args, meta):
+    """Time the CURRENT seam callable against its captured oracle by replaying the recorded call.
+
+    This replaces the former attention stub, which returned {"correct": True, "ms": None} unconditionally
+    — a pass with no measurement behind it. It is op-kind agnostic: it replays whatever capture_shapes
+    recorded at whatever seam, so it serves attention, MoE routing, norms, or anything else that has an
+    oracle but no cross-backend bake-off.
+
+    Each result row carries `denominator_provenance` so main() can decide whether the ratio is
+    publishable.
+    """
+    torch = _torch()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    denom = resolve_denominator(meta)
+    delegation = _delegation_status(meta)
+    results = []
+
+    recs, err = load_oracle_records(args.task, torch, device)
+    if err:
+        note_degradation("bench_captured_replay", "no replayable oracle", err)
+        return [{"backend": "current", "available": False, "correct": False, "ms": None,
+                 "raised": False, "reason_code": "invalid_denominator",
+                 "denominator_provenance": denom["provenance"],
+                 "note": f"cannot measure this seam: {err}"}]
+
+    # Bench the DOMINANT recorded case (most-repeated sig) — same convention as the blockscale path.
+    recs.sort(key=lambda r: -int((meta.get("shape_counts_by_sig") or {}).get(r["sig"], 0)))
+    rec = recs[0]
+
+    plan = []
+    tgt = str(meta.get("target_callable") or "").strip()
+    if tgt:
+        plan.append(("current", tgt))
+    if denom["spec"] and denom["spec"] != tgt:
+        plan.append(("baseline", denom["spec"]))
+
+    if not plan:
+        note_degradation("bench_captured_replay", "no callable to time", denom["why"])
+        return [{"backend": "current", "available": False, "correct": False, "ms": None,
+                 "raised": False, "reason_code": "invalid_denominator",
+                 "denominator_provenance": denom["provenance"], "note": denom["why"]}]
+
+    # In-place seam: capture_shapes snapshots the arguments AFTER invoking the original, so the recorded
+    # out-buffer already holds the golden values. Replay therefore takes the GOLDEN from that buffer and
+    # zeroes the copy it hands to the callee — otherwise the callee would be handed the answer.
+    ip_kind, ip_key = _out_param_of(rec, meta)
+    golden = rec["ref"]
+    if ip_kind == "kwarg" and torch.is_tensor(rec["kwargs"].get(ip_key)):
+        golden = rec["kwargs"][ip_key].clone()
+
+    for name, spec in plan:
+        fn = _resolve_callable(spec)
+        if fn is None:
+            results.append({"backend": name, "available": False, "correct": False, "ms": None,
+                            "raised": False, "reason_code": "candidate_unresolvable",
+                            "denominator_provenance": denom["provenance"],
+                            "note": f"callable not importable: {spec}"})
+            continue
+
+        def call_once():
+            a, k = _clone_inputs(rec, torch)
+            if ip_kind == "kwarg" and torch.is_tensor(k.get(ip_key)):
+                k[ip_key].zero_()
+            r = fn(*a, **k)
+            return r if r is not None else (k.get(ip_key) if ip_kind == "kwarg" else None)
+
+        try:
+            out = call_once(); _sync(torch)
+            out = call_once()
+        except Exception as e:
+            results.append({"backend": name, "available": True, "correct": False, "ms": None,
+                            "raised": True, "denominator_provenance": denom["provenance"],
+                            "note": f"replay raised: {e!r}"})
+            continue
+
+        ref = golden
+        if out is None or ref is None or not torch.is_tensor(out) or not torch.is_tensor(ref):
+            # We CAN time it, but we cannot certify it. Say exactly that instead of asserting correct.
+            ms, wall_ms = _time_call(call_once, args.warmup, args.repeats)
+            why = ("seam returns None and meta.seam_runtime_evidence.inplace_params does not name the "
+                   "output buffer" if out is None else
+                   "oracle recorded no comparable output tensor for this case")
+            note_degradation("bench_captured_replay", f"{name}: timed but unverified", why)
+            results.append({"backend": name, "available": True, "correct": None, "ms": round(ms, 4) if ms else None,
+                            "wall_ms": round(wall_ms, 4) if wall_ms else None, "raised": False,
+                            "denominator_provenance": denom["provenance"],
+                            "note": f"{spec} @ {rec['sig']} ({rec['regime']}) — UNVERIFIED: {why}"})
+            continue
+
+        ok, rel = _correct(torch, out, ref, args.tol)
+        ms, wall_ms = _time_call(call_once, args.warmup, args.repeats)
+        results.append({"backend": name, "available": True, "correct": bool(ok),
+                        "max_rel_err": round(rel, 5) if math.isfinite(rel) else None,
+                        "ms": round(ms, 4) if ms else None,
+                        "wall_ms": round(wall_ms, 4) if wall_ms else None, "raised": False,
+                        "denominator_provenance": denom["provenance"],
+                        "note": f"{spec} @ {rec['sig']} ({rec['regime']})"})
+
+    if delegation == "disabled":
+        note_degradation("bench_captured_replay", "delegated config track is DISABLED",
+                         "cross-backend comparison for this head has no owner; op-level timing above is "
+                         "a reference only")
+        results.append({"backend": "delegated_config_track", "available": False, "correct": False,
+                        "ms": None, "raised": False, "reason_code": "delegated_track_disabled",
+                        "denominator_provenance": denom["provenance"],
+                        "note": "server-level backend comparison is delegated to the Config Tuner, and "
+                                "that track is disabled for this run — nothing measured it"})
+    elif delegation == "unknown":
+        note_degradation("bench_captured_replay", "delegated config track state unknown",
+                         "meta declares neither delegated_config_track nor config_track_enabled")
+    return results
+
+
 # ----------------------------------------------------------------------------- GEMM bake-off
 def _dtype(torch, name):
     # Prefer the shared, ARCH-DRIVEN resolver so a bare "fp8"/"fp8_e4m3" picks the running GPU's fp8
@@ -275,6 +563,7 @@ def bench_blockscale_gemm(args, meta):
             # An EXCEPTION (not a slow/incorrect number) -> candidate could not run. The op_benchmarker
             # treats "all candidates raised" as a harness self-fault (see its role); we surface it clearly.
             results.append({"backend": name, "available": True, "correct": False, "ms": None,
+                            "denominator_provenance": denom["provenance"],
                             "note": f"call raised: {e!r}", "raised": True})
             return
         ok, err = _correct(torch, out, case["ref"], args.tol)
@@ -283,9 +572,16 @@ def bench_blockscale_gemm(args, meta):
                         "max_rel_err": round(err, 5) if math.isfinite(err) else None,
                         "ms": round(ms, 4) if ms else None,
                         "wall_ms": round(wall_ms, 4) if wall_ms else None,
+                        "denominator_provenance": denom["provenance"],
                         "note": note, "raised": False})
 
-    base_spec = meta.get("baseline_callable") or meta.get("target_callable")
+    # INV-1: the denominator is resolved WITH its provenance, never by a silent `baseline or target`.
+    # We still run whatever spec we have (a self-comparison is a usable sanity check); what changes is
+    # that main() now knows whether the resulting ratio may be published.
+    denom = resolve_denominator(meta)
+    if denom["severity"] != "ok":
+        note_degradation("bench_blockscale_gemm", f"denominator is {denom['provenance']}", denom["why"])
+    base_spec = denom["spec"]
     tgt_spec = meta.get("target_callable") or base_spec
     seen = set()
     plan = [("aiter_blockscale", base_spec)]
@@ -668,22 +964,13 @@ def _triton_matmul(torch, A, B, bias, transpose_b, autotune):
     return out
 
 
-# ----------------------------------------------------------------------------- attention (best-effort)
+# --------------------------------------------------------- non-GEMM heads (captured-oracle replay path)
 def bench_attn(args, meta):
-    """Attention op-level timing of the CURRENT captured callable against its oracle. Cross-backend
-    comparison for attention is done at the SERVER level by the Config Tuner (--attention-backend),
-    so here we only (a) confirm the oracle reproduces and (b) time the current path as a reference.
-    Returns a single-entry result list; backend swaps are reported as 'delegated to config track'."""
-    torch = _torch()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    iopath = os.path.join(args.task, "reference_io.pt")
-    if not os.path.exists(iopath):
-        return [{"backend": "current", "available": False, "correct": False, "ms": None,
-                 "note": "attn bake-off needs reference_io.pt (captured q/k/v/meta); none found"}]
-    note = ("attention backend comparison is a SERVER-level flag (--attention-backend) -> delegated to "
-            "the Config Tuner fast path; op-level here only validates the oracle")
-    return [{"backend": "current", "available": True, "correct": True, "ms": None,
-             "note": note, "artifact": iopath}]
+    """Back-compat alias. The former body returned {"correct": True, "ms": None} for every attention
+    task without calling anything — a green result with no measurement under it, which is how an
+    unvalidated head reached the integrator. Timing now goes through the generic captured-oracle replay
+    (see bench_captured_replay), which is not attention-specific."""
+    return bench_captured_replay(args, meta)
 
 
 # ----------------------------------------------------------------------------- main
@@ -697,6 +984,10 @@ def main():
     ap.add_argument("--triton-autotune", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="")
+    # INV-1: refuse to publish a speedup whose denominator nobody verified. Off only for deliberate
+    # exploratory runs, and even then the provenance travels with the number.
+    ap.add_argument("--denominator-strict", dest="denominator_strict", action="store_true", default=True)
+    ap.add_argument("--no-denominator-strict", dest="denominator_strict", action="store_false")
     a = ap.parse_args()
 
     meta_path = os.path.join(a.task, "meta.json")
@@ -714,14 +1005,18 @@ def main():
         _GRAPH_MODE = _hlib.deployment_graph_mode(meta.get("regime"))
 
     try:
-        results = bench_gemm(a, meta) if op_kind == "gemm" else bench_attn(a, meta)
+        # GEMM has a real cross-backend bake-off; every other op kind is timed by replaying its captured
+        # oracle at its own seam. No op kind falls through to an unmeasured pass.
+        results = bench_gemm(a, meta) if op_kind == "gemm" else bench_captured_replay(a, meta)
     except Exception as e:
         results = [{"backend": "ERROR", "available": False, "correct": False, "ms": None,
                     "note": f"{e!r}", "trace": traceback.format_exc()[-800:]}]
 
     correct = [r for r in results if r.get("correct") and r.get("ms")]
     correct.sort(key=lambda r: r["ms"])
-    baseline = next((r for r in results if r["backend"] in ("hipblaslt", "current", "aiter_blockscale") and r.get("ms")), None)
+    # Prefer an explicitly-named baseline row (the replay path emits one) over the library default.
+    baseline = next((r for r in results if r["backend"] == "baseline" and r.get("ms")), None) or \
+        next((r for r in results if r["backend"] in ("hipblaslt", "current", "aiter_blockscale") and r.get("ms")), None)
     winner = correct[0] if correct else None
 
     # ---- Harness self-fault signal (for op_benchmarker self-repair + orchestrator dominant-head guard).
@@ -739,6 +1034,25 @@ def main():
         harness_error = str(r0.get("note") or r0.get("trace") or "unknown harness error")[:400]
     speedup = (baseline["ms"] / winner["ms"]) if (winner and baseline and winner["ms"]) else (
         1.0 if winner else 0.0)
+
+    # ---- INV-1: is that ratio publishable?
+    # The denominator's provenance is whatever the bench function attached to the baseline row. A row we
+    # actually timed as a deployed library backend (hipblaslt/rocblas/...) is self-evidently the deployed
+    # path; a row sourced from meta is only as good as meta's validation.
+    denom = resolve_denominator(meta)
+    prov = (baseline or {}).get("denominator_provenance")
+    if not prov:
+        prov = "measured_backend_default" if baseline else denom["provenance"]
+    severity = DENOM_SEVERITY.get(prov, "invalid")
+    denom_why = denom["why"] if prov == denom["provenance"] else \
+        f"baseline row '{(baseline or {}).get('backend')}' was timed on this box as the deployed default"
+    withhold = (severity == "invalid") or (severity == "unverified" and a.denominator_strict)
+    speedup_reason = ""
+    if withhold:
+        speedup_reason = (f"denominator provenance is '{prov}' ({severity}): {denom_why}. "
+                          f"Reporting a ratio against it would be a number without a comparison.")
+        note_degradation("main", "isolated_speedup WITHHELD", speedup_reason)
+    reported_speedup = None if withhold else round(speedup, 4)
     wb = winner["backend"] if winner else None
     # Only triton/hip are source-editable (-> Tier-C kernel-squad rewrite). ck is a library backend.
     editable = bool(wb in ("triton", "hip"))
@@ -763,7 +1077,8 @@ def main():
     # the bake-off result. pct_gpu_time absent -> ceiling omitted (None).
     pct_gpu = meta.get("pct_gpu_time", meta.get("pct_gpu", None))
     amdahl_ceiling_pct = None
-    if _hlib is not None and pct_gpu is not None and winner:
+    # A ceiling derived from a withheld speedup would launder the unpublishable number back in.
+    if _hlib is not None and pct_gpu is not None and winner and not withhold:
         try:
             amdahl_ceiling_pct = round(_hlib.amdahl_ceiling(float(pct_gpu), float(speedup)), 3)
         except Exception:
@@ -779,7 +1094,16 @@ def main():
         "winner_ms": winner["ms"] if winner else None,
         "baseline_backend": baseline["backend"] if baseline else None,
         "baseline_ms": baseline["ms"] if baseline else None,
-        "isolated_speedup": round(speedup, 4),
+        "isolated_speedup": reported_speedup,
+        "isolated_speedup_unpublishable": round(speedup, 4) if withhold else None,
+        "speedup_withheld": bool(withhold),
+        "speedup_withheld_reason": speedup_reason,
+        "denominator": {"spec": denom["spec"], "provenance": prov, "severity": severity,
+                        "why": denom_why, "strict": bool(a.denominator_strict)},
+        "delegated_config_track": _delegation_status(meta),
+        "degradations": DEGRADATIONS,
+        "reason_code": next((r.get("reason_code") for r in results if r.get("reason_code")),
+                            "invalid_denominator" if withhold else ""),
         "pct_gpu_time": pct_gpu,
         "amdahl_ceiling_e2e_pct": amdahl_ceiling_pct,
         "winner_editable": editable,
@@ -797,10 +1121,13 @@ def main():
         with open(a.out, "w") as fh:
             fh.write(out)
     print(out)
-    print(f"OPBENCH winner={summary['winner_backend']} speedup={summary['isolated_speedup']}x "
+    print(f"OPBENCH winner={summary['winner_backend']} "
+          + (f"speedup=WITHHELD ({prov})" if withhold else f"speedup={summary['isolated_speedup']}x")
+          + f" denominator={prov} "
           f"editable={summary['winner_editable']} kind={summary['winner_kind']} "
           f"harness_suspect={summary['harness_suspect']}"
-          + (f" harness_error={summary['harness_error']!r}" if summary['harness_suspect'] else ""))
+          + (f" harness_error={summary['harness_error']!r}" if summary['harness_suspect'] else "")
+          + (f" degradations={len(DEGRADATIONS)}" if DEGRADATIONS else ""))
 
 
 if __name__ == "__main__":

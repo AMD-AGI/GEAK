@@ -241,6 +241,20 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    e2e by MORE than the noise band. Otherwise drop it — say so.
 5. Write `EVAL_DIR/strategy.md` (human-readable plan) and return the routing.
 
+> **🔴 Every `head_candidates` entry MUST carry `entity_kind` and `target_callable`, copied forward —
+> not re-derived.**
+> - `entity_kind` comes verbatim from the profile row (`parse_profile.py --annotate` stamped it from the
+>   profiler's own event category). Only `gpu_kernel` rows may be routed to the head track: the
+>   orchestrator drops and loudly flags anything else. A `dispatcher_op` row is a HOST span that encloses
+>   the kernels it dispatched, so its GPU time is already counted in them — scheduling a head there books
+>   Amdahl mass twice and guarantees the "win" cannot appear e2e. If a row's `entity_kind` is `unresolved`,
+>   send it back to the Profiler rather than routing it on a name that looks like a kernel.
+> - `target_callable` is the `module:attr` the Extractor must actually bind — normally the callable part
+>   of `live_call_seam`. State it explicitly: the Extractor's speedup is only bankable if it is measured
+>   at the seam the server really dispatches, and leaving the seam implicit is what lets a plausible-looking
+>   reference implementation be frozen as "the baseline" and produce a large isolated speedup with zero
+>   end-to-end effect.
+
 Return JSON:
 ```json
 {
@@ -253,6 +267,8 @@ Return JSON:
   "head_candidates": [
     {"id": "h0", "short_name": "...", "op_kind": "gemm|attn", "pct_gpu_time": 0.0,
      "shapes": "[[1024,5120],[5120,34816]]", "dtype": "bf16", "regime": "prefill|decode|both",
+     "entity_kind": "gpu_kernel",
+     "target_callable": "<module:attr the Extractor must bind, copied from live_call_seam; '' only if genuinely unknown>",
      "transpose_b": true, "bias": false,
      "candidate_backends": ["aiter","hipblaslt","triton","ck"],
      "is_fused_kernel": false,

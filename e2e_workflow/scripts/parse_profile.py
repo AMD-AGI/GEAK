@@ -24,10 +24,17 @@ Schema (json):
   "total_gpu_time_ms": float,
   "num_kernel_launches": int,
   "num_distinct_kernels": int,
+  "entity_kind_contract": "v1",              # present => every row carries entity_kind + evidence
+  "entity_kind_counts": {kind: n, ...},
   "top_kernels": [ {
      "rank", "name", "short_name", "calls", "total_ms", "avg_us", "pct_gpu_time",
      "shapes": [[...dims...], ...],          # up to 5 distinct input-dim sets
      "dtypes": [...],                        # distinct input dtypes seen
+     "entity_kind": "gpu_kernel|memory_op|dispatcher_op|python_launcher|unresolved",
+                                             # OBSERVED (profiler event category / rocprof kernel
+                                             # stats), not inferred from the name. The head track
+                                             # admits gpu_kernel only.
+     "entity_evidence": {...},               # what justified that kind
      "classification": "triton|library_gemm|library_attn|fused_custom|"
                        "elementwise_overhead|reduction_norm|memory|other",
      "backend_guess": "triton|hipblaslt|aiter|ck|rocblas|torch_native|unknown",
@@ -259,9 +266,13 @@ def parse_torch_trace(path):
         total_us += dur
         launches += 1
         d = agg.setdefault(name, {"calls": 0, "total_us": 0.0, "shapes": set(),
-                                  "dtypes": set(), "by_case": {}, "by_phase": {}})
+                                  "dtypes": set(), "by_case": {}, "by_phase": {}, "cat_counts": {}})
         d["calls"] += 1
         d["total_us"] += dur
+        # INV-6 evidence: remember WHICH profiler category this row's samples came from, so the Top-N
+        # can state whether it is a dispatched kernel or a memory op rather than leaving it to a guess.
+        cat = e.get("cat")
+        d["cat_counts"][cat] = d["cat_counts"].get(cat, 0) + 1
         # attribute this launch to its serving phase (measured from the step span it falls in)
         phase, stepM = _phase_of(e.get("ts"))
         if phase:
@@ -341,7 +352,8 @@ def parse_rocprof_dir(d):
             us = ns / 1000.0
             total_us += us
             launches += calls
-            e = agg.setdefault(name, {"calls": 0, "total_us": 0.0, "shapes": set(), "dtypes": set()})
+            e = agg.setdefault(name, {"calls": 0, "total_us": 0.0, "shapes": set(), "dtypes": set(),
+                                      "src": "rocprof_kernel_stats"})
             e["calls"] += calls
             e["total_us"] += us
         break  # one stats file is the authoritative aggregate
@@ -351,6 +363,110 @@ def parse_rocprof_dir(d):
 def norm_key(name):
     """Loose key to match a HW kernel name to a torch op name for shape enrichment."""
     return re.sub(r"[^a-z0-9]", "", short_name(name).lower())
+
+
+# --------------------------------------------------------------------------- #
+# INV-6: what KIND of thing is this row?
+#
+# The head track rewrites GPU kernels. A row that is actually a dispatcher op or a Python launcher can
+# top a table by wall time while owning no device code to rewrite, and the downstream stages have no way
+# to tell — a name is not evidence. So every Top-N row now carries `entity_kind` plus the EVIDENCE that
+# produced it, derived from the profiler event category, never from a name pattern or a blacklist.
+#
+#   gpu_kernel      a dispatched compute kernel (rocprofv3 kernel-stats row, or a torch trace event
+#                   with cat="kernel"). The only kind the head track accepts.
+#   memory_op       a device memcpy/memset. Real device time, but no kernel source to rewrite.
+#   dispatcher_op   a host-side operator span (torch cat="cpu_op"/"user_annotation"): its duration
+#                   includes everything it dispatched, so it double-counts its own children.
+#   python_launcher a host span with no device work attributed to it at all.
+#   unresolved      claimed by an upstream tool but not found among the dispatched kernels.
+# --------------------------------------------------------------------------- #
+ENTITY_KINDS = ("gpu_kernel", "memory_op", "dispatcher_op", "python_launcher", "unresolved")
+
+# torch profiler event category -> entity kind. Categories are emitted by the profiler itself, so this
+# is a fact about how the work was observed, not a guess about what the symbol is called.
+_CAT_ENTITY = {
+    "kernel": "gpu_kernel",
+    "gpu_memcpy": "memory_op",
+    "gpu_memset": "memory_op",
+    "cpu_op": "dispatcher_op",
+    "user_annotation": "dispatcher_op",
+    "cuda_runtime": "python_launcher",
+    "hip_runtime": "python_launcher",
+}
+
+
+def classify_entity(d, source):
+    """-> (entity_kind, evidence). `d` is an agg entry; `source` the profile source string."""
+    cats = d.get("cat_counts") or {}
+    if cats:
+        # A name can appear under several categories; the device categories decide.
+        kinds = {}
+        for cat, n in cats.items():
+            kinds[_CAT_ENTITY.get(cat, "unresolved")] = kinds.get(_CAT_ENTITY.get(cat, "unresolved"), 0) + n
+        for k in ("gpu_kernel", "memory_op", "dispatcher_op", "python_launcher"):
+            if kinds.get(k):
+                return k, {"basis": "torch_profiler_event_category",
+                           "categories": dict(sorted(cats.items())), "device_events": kinds[k]}
+    if d.get("src") == "rocprof_kernel_stats":
+        return "gpu_kernel", {"basis": "rocprofv3_kernel_stats_row",
+                              "why": "rocprofv3 kernel-stats aggregates dispatched kernels only",
+                              "calls": d.get("calls", 0)}
+    return "unresolved", {"basis": "no_category_evidence",
+                          "why": f"source={source!r} carried no per-event category for this row"}
+
+
+def index_host_entities(path):
+    """Name -> agg-shaped stub for HOST-side spans (cpu_op / annotations / runtime launch stubs).
+
+    These are deliberately excluded from the timing aggregate — a cpu_op's duration subsumes the
+    kernels it dispatched, so counting it would double-count device time. But for --annotate we still
+    want to be able to say "this claimed head IS a dispatcher op" rather than the weaker "not found".
+    Used only by the annotate path, so the normal parse is unchanged.
+    """
+    idx = {}
+    try:
+        with _open(path) as fh:
+            data = json.load(fh)
+    except Exception:
+        return idx
+    events = data.get("traceEvents", data if isinstance(data, list) else [])
+    host = {"cpu_op", "user_annotation", "cuda_runtime", "hip_runtime"}
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        cat = e.get("cat")
+        if cat not in host:
+            continue
+        d = idx.setdefault(e.get("name", "?"), {"calls": 0, "total_us": 0.0, "cat_counts": {}})
+        d["calls"] += 1
+        d["total_us"] += float(e.get("dur", 0.0) or 0.0)
+        d["cat_counts"][cat] = d["cat_counts"].get(cat, 0) + 1
+    return idx
+
+
+def annotate_rows(rows, agg, source):
+    """Stamp entity_kind onto Top-N rows that were assembled OUTSIDE this script (the TraceLens
+    fast path builds them by hand from a third-party report). A row survives as a gpu_kernel only if its
+    name matches something this profiler actually observed being dispatched; otherwise it is
+    `unresolved` and the head track will refuse it. Returns (rows, stats)."""
+    by_key = {}
+    for name, d in (agg or {}).items():
+        by_key.setdefault(norm_key(name), (name, d))
+    stats = {k: 0 for k in ENTITY_KINDS}
+    for r in rows:
+        hit = by_key.get(norm_key(r.get("name") or r.get("short_name") or ""))
+        if hit:
+            kind, ev = classify_entity(hit[1], source)
+            ev["matched_profiled_kernel"] = hit[0]
+        else:
+            kind = "unresolved"
+            ev = {"basis": "name_not_found_in_profile",
+                  "why": f"not among the {len(by_key)} kernels observed in {source}"}
+        r["entity_kind"] = kind
+        r["entity_evidence"] = ev
+        stats[kind] = stats.get(kind, 0) + 1
+    return rows, stats
 
 
 def build_summary(agg, total_us, launches, source, top_n, enrich=None,
@@ -392,6 +508,7 @@ def build_summary(agg, total_us, launches, source, top_n, enrich=None,
     top = []
     for rank, (name, d) in enumerate(items[:top_n], 1):
         cls, backend, editable, hint = classify(name)
+        entity_kind, entity_evidence = classify_entity(d, source)
         shapes = sorted(d["shapes"]) if d["shapes"] else []
         dtypes = sorted(d["dtypes"]) if d["dtypes"] else []
         if not shapes and enrich:
@@ -410,6 +527,10 @@ def build_summary(agg, total_us, launches, source, top_n, enrich=None,
             "shapes": [json.loads(s) for s in shapes[:5]],
             "dtypes": dtypes[:8],
             "classification": cls,
+            # INV-6: `classification`/`backend_guess` are name-pattern GUESSES (see RULES) and are
+            # labelled as such. `entity_kind` is not a guess — it is what the profiler observed.
+            "entity_kind": entity_kind,
+            "entity_evidence": entity_evidence,
             "backend_guess": backend,
             "editable": editable,
             "opt_hint": hint,
@@ -438,6 +559,10 @@ def build_summary(agg, total_us, launches, source, top_n, enrich=None,
         "total_gpu_time_ms": round(total_us / 1000.0, 4),
         "num_kernel_launches": launches,
         "num_distinct_kernels": len(agg),
+        "entity_kind_contract": "v1",     # consumers may require this before trusting entity_kind
+        "entity_kind_counts": {k: sum(1 for e in top if e["entity_kind"] == k)
+                               for k in ENTITY_KINDS
+                               if any(e["entity_kind"] == k for e in top)},
         "top_kernels": top,
     }
     if serving:
@@ -571,6 +696,13 @@ def main():
                     help="max_num_batched_tokens (chunked-prefill budget) from server.log")
     ap.add_argument("--capture-sizes", default="",
                     help="comma list of cudagraph_capture_sizes (to snap decode est_shape M)")
+    # INV-6: stamp entity_kind onto a Top-N JSON that was assembled elsewhere (TraceLens fast path).
+    # The rows are cross-checked against a trace/rocprof aggregate parsed here; an unmatched row is
+    # marked `unresolved`, which the head-admission gate refuses.
+    ap.add_argument("--annotate", default="",
+                    help="existing profile_topN json to stamp with entity_kind (needs --torch-trace "
+                         "and/or --rocprof-dir as the evidence source)")
+    ap.add_argument("--annotate-out", default="", help="where to write the annotated json (default: in place)")
     args = ap.parse_args()
 
     if not args.torch_trace and not args.rocprof_dir:
@@ -588,6 +720,31 @@ def main():
     rp_agg = rp_total = rp_launch = None
     if args.rocprof_dir:
         rp_agg, rp_total, rp_launch = parse_rocprof_dir(args.rocprof_dir)
+
+    if args.annotate:
+        with open(args.annotate) as fh:
+            doc = json.load(fh)
+        ev_agg = dict(rp_agg or {})
+        # Host spans first, so a device row of the same name overrides them below.
+        if args.torch_trace:
+            ev_agg.update(index_host_entities(args.torch_trace))
+        ev_agg.update(torch_agg or {})   # torch categories are richer evidence; let them win
+        ev_src = doc.get("source") or ("merged" if (rp_agg and torch_agg) else
+                                       "rocprofv3" if rp_agg else "torch-trace")
+        rows, stats = annotate_rows(doc.get("top_kernels") or [], ev_agg, ev_src)
+        doc["top_kernels"] = rows
+        doc["entity_kind_contract"] = "v1"
+        doc["entity_kind_counts"] = {k: v for k, v in stats.items() if v}
+        dest = args.annotate_out or args.annotate
+        with open(dest, "w") as fh:
+            fh.write(json.dumps(doc, indent=2))
+        sys.stderr.write(f"annotated {len(rows)} row(s) -> {dest}: "
+                         + ", ".join(f"{k}={v}" for k, v in stats.items() if v) + "\n")
+        bad = stats.get("unresolved", 0)
+        print(json.dumps({"annotated": len(rows), "entity_kind_counts":
+                          {k: v for k, v in stats.items() if v}}, indent=2))
+        # Non-zero exit when a claimed head is not a kernel this profiler ever saw dispatched.
+        sys.exit(1 if bad else 0)
 
     if rp_agg and torch_agg:
         summ = build_summary(rp_agg, rp_total, rp_launch, "merged", args.top, enrich=torch_agg,
