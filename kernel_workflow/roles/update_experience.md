@@ -26,7 +26,8 @@ do not "find" a nearby `learned/` folder.
   margin came from a specific technique rather than from the language choice.
 
 ## Hard rules (from README.md)
-- **ADD-only.** You may add one card + one INDEX line, or merge into an existing card. Never delete a
+- **ADD-only.** You may propose one card, or propose into an existing card's key. The INDEX line is
+  generated from your card by `drain`, never written by you. Never delete a
   candidate concept, never rewrite a card into a prohibition. A `caution:` is "also verify X".
 - **Measurement is the judge.** Only claim what the frozen-baseline isolated A/B + oracle parity in
   this run actually showed. Every card needs a `source:` (an `EVAL_DIR` path).
@@ -58,8 +59,8 @@ do not "find" a nearby `learned/` folder.
    split. One direction only → omit `stack:`.
 
 ## Inputs
-`SCOPE` (`lane` | `bakeoff`), `LEARNED_DIR` (the sink), `SKILL_DIR` (the owning workflow — its
-`kb.py ... index` regenerates it), `EVAL_DIR` (this run's episodic record),
+`SCOPE` (`lane` | `bakeoff`), `LEARNED_DIR` (the sink you PROPOSE into — never write it directly),
+`SKILL_DIR` (the owning workflow; `${SKILL_DIR}/scripts/kb.py` is the tool), `EVAL_DIR` (this run's episodic record),
 `REPORT_PATH` (the final report), `WINNER` (the winning candidate + its verified speedup; on a lane run
 it also carries `kernel`/`language`/`gfx`/`kernel_class`/`bottleneck`), `HISTORY` (lane only: the
 per-round ledger, insights, and each round's directions/results/winner/cumulative — this is what lets
@@ -79,19 +80,20 @@ fraction before it reaches the card), `CANDIDATES` (bake-off only), `OP_SPEC` (b
    fields, which take their values from `WINNER` when present, else from the report.
    Reuse a `kernel_class` / `lever` id that already appears on the existing cards when one fits —
    consistent ids are what make the cards findable; only coin a new one when nothing matches.
-2a. **Before you call it novel, regenerate the index and read all of it** (step 7's command; a lane that
-   finished seconds ago may not be projected yet). Decide "already covered?" **by meaning, not wording** —
+2a. **Before you call it novel, read all of `INDEX.md`.** Do NOT regenerate it — `drain` is the only
+   writer, and a lane that finished seconds ago may not be projected yet, so also skim the card files
+   themselves. Decide "already covered?" **by meaning, not wording** —
    a card describing the same lever on the same `(kernel_class, gfx, regime)` in different words IS the
    same card, and filing a near-twin next to it is the main way this folder degrades. When in doubt,
    MERGE into the existing card rather than create.
 3. Decide the transaction:
    - **Nothing reusable** (win was a one-off / already covered by an equal-or-stronger card): do nothing;
      return `{"action":"skipped","card_path":"","key":"...","note":"why"}`.
-   - **Existing card matches the key**: merge — refresh `effect`/`last_seen`, adjust `confidence` by what
-     reproduced, add a `caution` only as "also verify X", and extend `keywords`/`kernels` with any new
-     search terms this run surfaced. Do NOT duplicate.
-   - **New reusable principle**: write ONE new card file `${LEARNED_DIR}/<slug>.md` using the schema in
-     README.md. It MUST open with the full **discovery header** — `name` (= the slug), `description`
+   - **Existing card matches the key**: propose a card carrying THE SAME `key`. `drain` merges by key,
+     so it refreshes that card in place — you do not edit it yourself, and you must not vary the key to
+     "avoid a clash", which is what produces near-twins.
+   - **New reusable principle**: propose ONE card using the schema in README.md.
+   Either way you write a PROPOSAL (step 7), never a file under `${LEARNED_DIR}`. It MUST open with the full **discovery header** — `name` (= the slug), `description`
      (one line, ≤160 chars: lever → on what → relative effect; this becomes the index line), `keywords`
      (**pick from the `## keyword vocabulary` appendix at the bottom of `INDEX.md`** — reusing an existing
      term is what keeps sibling cards clustered; coin a new one only when nothing there fits), `kernels`
@@ -106,17 +108,30 @@ fraction before it reaches the card), `CANDIDATES` (bake-off only), `OP_SPEC` (b
    text you are about to write and strip every absolute measurement — any `ms`/`µs`/`ns`, `TFLOP/s`,
    `GB/s`, clock or power figure, in the frontmatter *and* the body. Restate each one as a ratio, a
    percent delta, or a fraction of achievable peak, or drop it. The INDEX line follows the same rule.
-7. **Regenerate the index — never hand-edit `INDEX.md`.** It is a generated projection of the cards'
-   discovery headers:
+7. **SUBMIT — do not write into the KB yourself, and do not regenerate the index.** Write your card
+   into a proposal file and hand it to `propose`, which lints it and places it in `_inbox/`. An
+   operator later runs `drain --apply`, the single writer of cards and `INDEX.md`.
+
    ```bash
-   node ${SKILL_DIR}/scripts/kb.py ... index ${LEARNED_DIR}
+   cat > /tmp/kb_${RUN_ID}.json <<'JSON'
+   { "run_id": "<run id>", "date": "<YYYY-MM-DD>", "kernel_names": ["<the kernel you optimized>"],
+     "validation_status": "accepted", "box_quiet": true, "held_out": false,
+     "citations": [], "cards": [ { ...your card, confirms_cited: 0, confirms_blind: 0... } ] }
+   JSON
+   python3 ${SKILL_DIR}/scripts/kb.py --kb-dir ${LEARNED_DIR} propose --file /tmp/kb_${RUN_ID}.json
    ```
-   (If `SKILL_DIR` is not in your inputs, the script sits next to the workflow that owns `${LEARNED_DIR}`:
-   `<workflow>/scripts/kb.py ... index`.) The regen reads whatever cards are on disk, so a lane
-   running concurrently with you cannot lose its entry and you cannot lose yours — no append, no race.
-   Report a bad/edited `description` by fixing the **card** and regenerating, never by editing the index.
-   Then **read the regenerated index once**: if it now shows a ⚠ near-duplicate keyword block naming a
-   term you just used, fix your card to the established spelling and regenerate again.
+
+   Three things this fixes, all reported in review of #411. The command here used to be
+   `node .../kb.py ... index ...` — Node running a Python program, with an argument order the parser
+   rejects, so the documented step could not have worked. It also wrote cards and regenerated the
+   whole index directly from lanes running concurrently; the claim that a regen "cannot lose an
+   entry" holds only if no two regens interleave, and up to eight lanes finish at once. And
+   `kernel_names` is what lets `drain` record `origin_kernels`, without which a card can never earn
+   a cross-kernel (blind) confirmation — every card written by the direct path was born unable to
+   reach ★★★.
+
+   If `propose` rejects the card it prints exactly what it refused, and NOTHING is written. Fix the
+   card, never the rule.
 
 ## Do NOT touch the cited cards' counters
 

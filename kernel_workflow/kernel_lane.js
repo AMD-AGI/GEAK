@@ -962,7 +962,9 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       const isDeep = d.specialty === 'deep_explore';
       // deep_explore reads its own role (broad authority + own iteration loop); specialists read engineer.md.
       const readLine = isDeep
-        ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and ALL knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
+        ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and the knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
+          (USE_LEARNED_READ ? '' : `— EXCLUDING knowledge/learned/, which is off for this run: do not open ` +
+            `INDEX.md or any card there. `) +
           `(you have broad authority — combine algorithm + memory + compute + host_runtime levers in one ` +
           `coherent rewrite), and follow them. You MAY edit ANY modifiable source (kernel + Python wrapper ` +
           `+ C++ binding), not just focus_files. Run your OWN multi-iteration measure→(self-)profile→rewrite ` +
@@ -1195,8 +1197,15 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     for (const cardRef of (r.d.learned_refs || [])) {
       citations.push({
         card: cardRef, round, direction: r.d.id, specialty: r.d.specialty,
-        cited_then_verified: r.ver ? r.ver.verified_geomean : 0,
-        became_winner: !!(winner && winner.id === r.d.id),
+        // null, NOT 0, when the verifier produced nothing. `kb.py` scores <=1.0 as a real loss, so
+        // encoding "no evidence" as 0 charged a card for a verifier that crashed or timed out.
+        cited_then_verified: r.ver && Number.isFinite(r.ver.verified_geomean)
+          ? r.ver.verified_geomean : null,
+        // `winner` is only the best candidate OF THIS ROUND; `improved` is whether it beat the
+        // incumbent by MIN_IMPROVE. Crediting on `winner` alone let a 1.5x round winner confirm a
+        // card while the committed best already sat at 2x — a confirmation for advancing nothing,
+        // which is precisely what the three-state scoring was written to avoid. Require both.
+        became_winner: !!(winner && winner.id === r.d.id && improved),
       });
     }
   }
@@ -1268,7 +1277,12 @@ const kbGate = !BOX_QUIET ? 'the box was contended — the number measured neigh
   : HELD_OUT ? 'this kernel is in the held-out split and is the measuring instrument'
   : '';
 if (kbGate) log(`[kb] not distilling: ${kbGate}.`);
-if (!kbGate && UPDATE_EXPERIENCE_ON && validation && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+// `validation.validation_status === 'accepted'` and not merely "a validation object exists": a
+// `flagged` result means the director found a reason not to believe the number (patch install
+// no-op, correctness fail, contended box), and curating from it teaches the next run a lesson this
+// run did not earn. Reported in review of #411.
+const kbAccepted = String((validation && validation.validation_status) || '').toLowerCase() === 'accepted';
+if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
   try {
     learned_card = await agentT(
@@ -1286,9 +1300,10 @@ if (!kbGate && UPDATE_EXPERIENCE_ON && validation && Number.isFinite(finalPrimar
           // `rounds[]` (per-round directions + per-candidate claimed/verified/status + running
           // `cumulative`) is what makes the card's `stack:` attribution and `pitfall:` lines derivable.
           HISTORY: history,
-          // What this run's plan actually cited, and whether the cited direction went on to win.
-          // The curator MERGES these into the cited cards' counters; that is the only mechanism by
-          // which a card in this tree can lose confidence rather than only ever gaining it.
+          // What this run's plan cited and what the verifier then measured. CONTEXT ONLY — the
+          // counters are applied by `kb.py drain` from the ledger filed below, never by this agent.
+          // The comment that used to sit here said the curator merges them, which stopped being
+          // true when that arithmetic moved into code.
           CITATIONS: citations,
           PROFILE: profileSummary,
           REPORT_PATH: report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
@@ -1300,34 +1315,39 @@ if (!kbGate && UPDATE_EXPERIENCE_ON && validation && Number.isFinite(finalPrimar
   } catch (e) {
     log(`[kb] update_experience skipped: ${e && e.message ? e.message : e}`);
   }
+}
 
-  // FILE THE CITATION LEDGER. This is the loss half of the loop and it had no producer: `drain`
-  // could apply citations but nothing ever handed it any, while the same arithmetic sat in
-  // roles/update_experience.md for the curator to do by hand. Across the 2h and 8h campaigns that
-  // produced 292 citations, 126 of them verified at or below the frozen baseline, and 7 recorded
-  // losses — so in practice a card could only ever gain standing.
-  // A workflow script has no filesystem, hence the one-line agent; the JSON is assembled by
-  // `kb.py cite` rather than by the agent, because a proposal hand-written by a model is one more
-  // place for the schema to drift.
-  if (citations.length) {
-    try {
-      await agentT(
-        `Run EXACTLY this command and nothing else. Do NOT edit any file.
+// FILE THE CITATION LEDGER — OUTSIDE the curation gate, and deliberately so.
+// This is the loss half of the loop. It first shipped INSIDE the `finalPrimary > 1.0` branch above,
+// which is the exact bias it exists to remove: the runs that produce losses are the ones that did
+// not beat the baseline, were flagged, or ran on a contended box, and every one of them was
+// filtered out before it could file anything. Selecting successful runs into the feedback data is
+// worse than no feedback, because the resulting counters look earned. Reported in review of #411.
+// Curation (writing a NEW card) still requires a verified win — a run with nothing to teach must
+// not teach — but the ledger of what the cards ALREADY in the tree did is owed for every run.
+// `held_out` is the one exception: that split is the measuring instrument, so it neither writes
+// cards nor votes on them.
+// A workflow script has no filesystem, hence the one-line agent; the JSON is assembled by
+// `kb.py cite` rather than by the agent, because a proposal hand-written by a model is one more
+// place for the schema to drift.
+if (citations.length && !HELD_OUT) {
+  try {
+    await agentT(
+      `Run EXACTLY this command and nothing else. Do NOT edit any file.
 \`\`\`bash
 cat <<'CITEJSON' | python3 ${WORKFLOW_DIR}/scripts/kb.py --kb-dir ${LEARNED_DIR} cite \\
-  --run-id ${JSON.stringify(KERNEL_NAME)} \\
-  --kernel ${JSON.stringify(KERNEL_NAME)} --citations -
+--run-id ${JSON.stringify(KERNEL_NAME)} \\
+--kernel ${JSON.stringify(KERNEL_NAME)} --citations -
 ${JSON.stringify(citations)}
 CITEJSON
 \`\`\`
 Return {"filed": <the "citations" number the command printed, or 0>}.`,
-        { phase: 'Validate', label: 'kb:cite', effort: 'low',
-          schema: { type: 'object', properties: { filed: { type: 'number' } },
-                    required: ['filed'], additionalProperties: true } });
-      log(`[kb] citation ledger filed: ${citations.length} row(s) for the next drain`);
-    } catch (e) {
-      log(`[kb] citation ledger NOT filed: ${e && e.message ? e.message : e}`);
-    }
+      { phase: 'Validate', label: 'kb:cite', effort: 'low',
+        schema: { type: 'object', properties: { filed: { type: 'number' } },
+                  required: ['filed'], additionalProperties: true } });
+    log(`[kb] citation ledger filed: ${citations.length} row(s) for the next drain`);
+  } catch (e) {
+    log(`[kb] citation ledger NOT filed: ${e && e.message ? e.message : e}`);
   }
 }
 

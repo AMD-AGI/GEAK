@@ -307,7 +307,8 @@ shutil.rmtree(dd)
 dd = fresh()
 prop = {"run_id": "assert1", "date": "2026-08-18", "kernel_names": ["k"],
         "validation_status": "accepted", "box_quiet": True, "held_out": False, "citations": [],
-        "cards": [{"title": "T", "key": "a plainly worded gfx950 situation with an op and a regime",
+        "cards": [{"title": "T", "name": "t-card",
+                   "key": "a plainly worded gfx950 situation with an op and a regime",
                    "type": "lever", "confidence": "★★", "effect": "+11% geomean over 4 shapes",
                    "attempts": 3, "confirms_cited": 1, "confirms_blind": 0, "losses": 0,
                    "description": "a lever on an op: +11% on the large shapes",
@@ -321,6 +322,68 @@ with open(pf, "w") as f:
 _, out, _ = run(dd, "lint", "--file", pf)
 check("a new card may not assert its own confirmations",
       "confirms_cited must be 0" in out, out[:300])
+shutil.rmtree(dd)
+
+# MERGE IS BY KEY. It was `if <generated filename> in cards`, and the filename is slugify(title) plus
+# a scope slug — so the same situation under two titles became two cards, each starting fresh
+# counters. Reproduced in review of #411 and reproduced here: same key, different titles, one card.
+dd = fresh()
+for i, title in enumerate(("First wording of it", "Completely different wording")):
+    prop = {"run_id": f"m{i}", "date": "2026-08-19", "kernel_names": ["kern_a"],
+            "validation_status": "accepted", "box_quiet": True, "held_out": False, "citations": [],
+            "cards": [{"title": title, "name": f"card-{i}",
+                       "key": "one and the same plainly worded situation on gfx950",
+                       "type": "lever", "confidence": "★★", "effect": "+11% geomean over 4 shapes",
+                       "attempts": 2, "confirms_cited": 0, "confirms_blind": 0, "losses": 0,
+                       "description": f"{title}: a lever on an op, +11% on the large shapes",
+                       "keywords": ["tiling"], "kernels": [], "platforms": ["gfx950"],
+                       "kernel_class": "dense_gemm", "regime": "decode", "lifecycle": "active",
+                       "source": "campaign 2026-08-19", "last_seen": "2026-08-19",
+                       "lever": "x", "verify": "y"}]}
+    with open(os.path.join(dd, "_inbox", f"m{i}.json"), "w") as f:
+        json.dump(prop, f)
+run(dd, "drain", "--apply", "--validated-runs", "2")
+files = [f for f in os.listdir(dd) if f.endswith(".md") and f not in ("INDEX.md", "README.md")
+         and not f.startswith("_")]
+check("two proposals with one key produce ONE card", len(files) == 1, f"got {sorted(files)}")
+if len(files) == 1:
+    meta = open(os.path.join(dd, files[0])).read()
+    check("a merge does not fabricate a confirmation",
+          "confirms_cited: 0" in meta and "confirms_blind: 0" in meta, meta.split("---")[1])
+shutil.rmtree(dd)
+
+# A verifier that produced no number is an ATTEMPT, not a loss. Encoding "no evidence" as 0 charged
+# cards for crashed or timed-out verifiers.
+dd = fresh()
+write(dd, "noev.md", card("noev", confirms_cited=0, confirms_blind=0, losses=0, attempts=1,
+                          origin_kernels="[kern_a]"))
+cite(dd, "r9", "kern_a", json.dumps([{"card": "noev.md", "cited_then_verified": None,
+                                      "became_winner": False}]))
+run(dd, "drain", "--apply", "--validated-runs", "1")
+meta = open(os.path.join(dd, "noev.md")).read()
+check("a missing verifier result is not scored as a loss",
+      "losses: 0" in meta and "attempts: 2" in meta, meta.split("---")[1])
+shutil.rmtree(dd)
+
+# `rank` must see a blind confirmation. It read only confirms_cited, so the cross-kernel transfer the
+# whole design is built to demonstrate bought a card no standing at all.
+blind_card = {"meta": {"confidence": "★★", "confirms_cited": 0, "confirms_blind": 1, "losses": 0,
+                       "last_seen": str(kb.date.today())}}
+plain_card = {"meta": {"confidence": "★★", "confirms_cited": 0, "confirms_blind": 0, "losses": 0,
+                       "last_seen": str(kb.date.today())}}
+check("a blind confirmation outranks no confirmation",
+      kb.rank(blind_card) > kb.rank(plain_card),
+      f"blind={kb.rank(blind_card):.3f} plain={kb.rank(plain_card):.3f}")
+
+# `lint --cards` must FAIL loudly. It returned 0 unconditionally, so a CI step or a && chain saw
+# success while printing failures.
+dd = fresh()
+write(dd, "bad.md", card("bad", effect="0.0140 ms baseline; per-case +14.8% on the large shapes."))
+rc, _, _ = run(dd, "lint", "--cards")
+check("lint --cards exits non-zero when a card fails", rc == 1, f"exit {rc}")
+write(dd, "bad.md", card("good"))
+rc, _, _ = run(dd, "lint", "--cards")
+check("lint --cards still exits 0 on a clean tree", rc == 0, f"exit {rc}")
 shutil.rmtree(dd)
 
 # A well-formed card must pass: a gate that rejects everything is not a gate.

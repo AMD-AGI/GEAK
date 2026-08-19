@@ -7,7 +7,8 @@
 
 Open the cards matching your run as **additional, advisory priors** — they only ADD candidate levers to
 try, never remove any and never replace measurement. The frozen-baseline isolated A/B + oracle parity is
-always the judge (see `README.md`). **Cap: <=40 card lines.** Confidence (a hint strength, not
+always the judge (see `README.md`). **Budget: <=32 active cards per `kernel_class`** (the
+axis `drain` evicts on; the whole-file total is unbounded by design). Confidence (a hint strength, not
 authority): ★ noise/unverified · ★★ single non-overlap or >=2 consistent · ★★★ >=2 non-overlap.
 
 Effects are **ratios or percent deltas only, never wall-clock or absolute throughput** — those vary box

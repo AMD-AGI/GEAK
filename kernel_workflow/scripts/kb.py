@@ -435,7 +435,13 @@ def rank(c):
     from becoming unevictable and freezing the index against better new work.
     """
     m = c["meta"]
-    standing = (1.0 + int(m.get("confirms_cited", 0) or 0)) / (1.0 + int(m.get("losses", 0) or 0))
+    # A blind confirmation — a win on a kernel this card was NOT distilled from — is the strongest
+    # evidence the tree can produce, and `rank` ignored it entirely: only `confirms_cited` counted,
+    # so the cross-kernel transfer the KB exists to demonstrate bought a card no standing at all.
+    # Weighted double, because that is the difference between "it worked again on its own homework"
+    # and "it worked somewhere it had never seen".
+    wins = int(m.get("confirms_cited", 0) or 0) + 2 * int(m.get("confirms_blind", 0) or 0)
+    standing = (1.0 + wins) / (1.0 + int(m.get("losses", 0) or 0))
     standing = max(0.5, min(2.0, standing))
     return STARS.get(m.get("confidence", "★"), 1) * (0.25 + 0.75 * freshness(m)) * standing
 
@@ -513,7 +519,10 @@ def cmd_lint(kb, a):
         print(json.dumps({"cards_audited": len(all_cards(kb, include_archived=True)),
                           "cards_failing": len(bad),
                           "failures": bad}, ensure_ascii=False, indent=2))
-        return 0
+        # Non-zero when the audit found something. It returned 0 unconditionally, so `lint --cards`
+        # in a CI step or a `&&` chain reported success while printing failures — a gate that always
+        # opens. Reported in review of #411.
+        return 1 if bad else 0
     prop = json.load(open(a.file))
     errs = {"proposal": lint_proposal(prop)}
     names = prop.get("kernel_names") or ([prop["kernel_name"]] if prop.get("kernel_name") else [])
@@ -620,6 +629,10 @@ def cmd_propose(kb, a):
 # Output is byte-compatible with the JS version: same header, same grouping, same ordering, same
 # vocabulary appendix, same ⚠ blocks.
 # ---------------------------------------------------------------------------
+# Advertised in the generated index header. It is NOT the eviction budget — CLASS_CAP is, and it is
+# per kernel_class, so a healthy tree legitimately exceeds this total. The header used to state a
+# flat "Cap: <=40 card lines" over a 135-line index, which reads as a rule the file is breaking;
+# reported in review of #411. The header now reports what actually binds.
 GEN_CAP = 40
 GEN_SKIP = {"INDEX.md", "README.md", "_archive.md"}
 LAST_GROUPS = ["method", "other"]
@@ -656,7 +669,8 @@ def _index_header(d):
 
 Open the cards matching your run as **additional, advisory priors** — they only ADD candidate levers to
 try, never remove any and never replace measurement. The frozen-baseline isolated A/B + oracle parity is
-always the judge (see `README.md`). **Cap: <={GEN_CAP} card lines.** Confidence (a hint strength, not
+always the judge (see `README.md`). **Budget: <={CLASS_CAP} active cards per `kernel_class`** (the
+axis `drain` evicts on; the whole-file total is unbounded by design). Confidence (a hint strength, not
 authority): ★ noise/unverified · ★★ single non-overlap or >=2 consistent · ★★★ >=2 non-overlap.
 
 Effects are **ratios or percent deltas only, never wall-clock or absolute throughput** — those vary box
@@ -766,6 +780,18 @@ def cmd_drain(kb, a):
         (skipped if errs else proposals).append((f, p, errs))
 
     cards = {os.path.basename(c["path"]): c for c in all_cards(kb)}
+    # MERGE IS BY `key`, which is the contract this file's own docstring states ("MERGE if the key
+    # already exists"). It was implemented as `if <generated filename> in cards`, and the filename is
+    # slugify(title) + a class/platform/regime scope — so two cards about the SAME situation under
+    # two different titles produced two files, each starting a fresh set of counters. Reproduced in
+    # review of #411: two same-key proposals, 0 confirmations and 2 losses between them, came out as
+    # two cards each reading `confirms_cited: 1, losses: 0`.
+    def norm_key(k):
+        return re.sub(r"\s+", " ", str(k or "")).strip().lower()
+
+    by_key = {}
+    for base, c in cards.items():
+        by_key.setdefault(norm_key(c["meta"].get("key")), base)
     merged, inserted, rejected, demoted = [], [], [], []
 
     for fname, prop, _ in proposals:
@@ -791,9 +817,11 @@ def cmd_drain(kb, a):
                                             "-".join(card.get("platforms") or []),
                                             card.get("regime", "")] if x)
             fn = f"{slugify(card.get('title'))}-{slugify(fn_scope or key)}.md"
-            blind = 1 if card.get("blind") else 0
-            cited = 0 if card.get("blind") else 1
-            if fn in cards:
+            # Same key => same card, whatever the new title calls it. Filename is only the fallback,
+            # for a tree whose older cards were filed before keys were normalized.
+            target = by_key.get(norm_key(key)) or (fn if fn in cards else None)
+            if target:
+                fn = target
                 m = cards[fn]["meta"]
                 # A merge refreshes the header too: a card whose description still describes the
                 # first run it came from is a stale index line, and the index line is the read path.
@@ -803,8 +831,12 @@ def cmd_drain(kb, a):
                 for lf in ("keywords", "kernels", "platforms"):
                     if card.get(lf):
                         m[lf] = sorted(set(list(m.get(lf) or []) + list(card[lf])))
-                m["confirms_cited"] = int(m.get("confirms_cited", 0)) + cited
-                m["confirms_blind"] = int(m.get("confirms_blind", 0)) + blind
+                # A second run proposing the same key is EVIDENCE THE SITUATION RECURRED, not a
+                # confirmation: nothing here measured whether the card's lever was tried, let alone
+                # whether it won. Confirmations come from `citations` and nowhere else. This used to
+                # add +1 `confirms_cited` per merge (or +1 `confirms_blind` on a self-declared
+                # `blind` flag the proposer set itself), which is how the tree reached 112 recorded
+                # confirm-points against 49 measured wins.
                 m["attempts"] = int(m.get("attempts", 0)) + int(card.get("attempts", 1))
                 m["last_seen"] = prop.get("date", str(date.today()))
                 want = STARS.get(card.get("confidence", "★"), 1)
@@ -839,7 +871,12 @@ def cmd_drain(kb, a):
                     "lifecycle": card.get("lifecycle", "active"),
                     "type": card.get("type", "lever"),
                     "confidence": card.get("confidence"), "effect": card.get("effect"),
-                    "confirms_cited": cited, "confirms_blind": blind, "losses": 0,
+                    # A new card has been cited zero times, so every counter starts at zero. It
+                    # used to insert with `confirms_cited: 1` — fabricated at birth, and directly
+                    # contradicting the lint clause that rejects a proposal asserting its own
+                    # confirmations. `losses` was hardcoded here too, which was right for an insert
+                    # and wrong to leave un-commented next to a fabricated confirm.
+                    "confirms_cited": 0, "confirms_blind": 0, "losses": 0,
                     "attempts": int(card.get("attempts", 1)),
                     # The kernels whose run produced this card. A later citation from one of THESE
                     # is the card recognising its own homework; a citation from any other kernel is
@@ -860,6 +897,11 @@ def cmd_drain(kb, a):
                     if card.get(f_):
                         body += f"- {f_}: {card[f_]}\n"
                 cards[fn] = {"path": os.path.join(kb.root, fn), "meta": meta, "body": body}
+                # Register the new key IMMEDIATELY. `by_key` was built once from the cards already on
+                # disk, so two proposals sharing a key inside ONE drain both missed it and inserted —
+                # and a single drain is exactly where that happens, because the inbox holds a whole
+                # campaign. Caught by the merge test, which is the case it was written for.
+                by_key.setdefault(norm_key(key), fn)
                 inserted.append({"card": fn, "run": prop.get("run_id")})
 
         # ---- citations: the NEGATIVE half of the loop ----------------------
@@ -886,7 +928,11 @@ def cmd_drain(kb, a):
             #   neutral   -> everything between: counted as an attempt, credited to neither side.
             # Deliberately conservative in the direction that penalises the KB: a card must move the
             # number to gain standing, and the ambiguous middle never inflates it.
-            v = float(cite.get("cited_then_verified") or 0)
+            raw = cite.get("cited_then_verified")
+            # None means the verifier produced no number (crash, timeout, dropped agent). That is
+            # NOT a loss: it is an attempt with no evidence either way. Scoring it as <=1.0 charged
+            # cards for infrastructure failures.
+            v = None if raw is None else float(raw)
             if cite.get("became_winner"):
                 # Which counter depends on WHO cited it. ★★★ requires `confirms_blind`, and every
                 # arm runs with the KB on, so under the old reading — any cited win is a "cited"
@@ -902,7 +948,7 @@ def cmd_drain(kb, a):
                 blind_now = bool(origin) and bool(names) and not (set(names) & set(origin))
                 fld = "confirms_blind" if blind_now else "confirms_cited"
                 m[fld] = int(m.get(fld, 0)) + 1
-            elif v <= 1.0:
+            elif v is not None and v <= 1.0:
                 m["losses"] = int(m.get("losses", 0)) + 1
             m["last_seen"] = prop.get("date", str(date.today()))
             # A lever that keeps being tried and keeps not paying is a weaker hint than its stars say.

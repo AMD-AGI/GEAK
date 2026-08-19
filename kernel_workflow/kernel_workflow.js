@@ -409,7 +409,19 @@ if (Number.isFinite(tunedSpeedup) && tunedSpeedup > 1.0 && bake.winner_backend &
 // transparency but must never win "by default"; winner=null => validation_status 'no_winner' => keep
 // the original kernel. Without this, a lane that is SLOWER than baseline (e.g. the only non-failed lane
 // at 0.17x) would be mislabeled the winner and mislead downstream automation reading .winner.
-const ranked = cands.filter(c => c.speedup > 1.0).sort((a, b) => b.speedup - a.speedup);
+// ...and only if the director ACCEPTED it. Ranking on speed alone let a lane whose validation came
+// back `flagged` (patch did not install, correctness failed, contended box) win the bake-off, be
+// applied to the original kernel, and be curated into the KB — a number with a known reason not to
+// be believed, promoted by every downstream step. Reported in review of #411. `laneRows` still
+// carries every lane for transparency; only eligibility to WIN is tightened.
+const ACCEPTED = (c) => String(c.validation_status || '').toLowerCase() === 'accepted';
+const ranked = cands.filter(c => c.speedup > 1.0 && (c.kind !== 'lane' || ACCEPTED(c)))
+  .sort((a, b) => b.speedup - a.speedup);
+const rejectedByGate = cands.filter(c => c.speedup > 1.0 && c.kind === 'lane' && !ACCEPTED(c));
+if (rejectedByGate.length) {
+  log(`bake-off: ${rejectedByGate.length} lane(s) beat the baseline but are NOT eligible to win ` +
+      `(validation_status != accepted): ${rejectedByGate.map(c => `${c.lang}=${c.validation_status}`).join(', ')}`);
+}
 const winner = ranked[0] || null;
 const laneRows = cands;
 const bestSpeedup = cands.reduce((m, c) => Math.max(m, Number(c.speedup) || 0), 0);
