@@ -437,9 +437,15 @@ def _merge_served(per_bucket):
 
 def bench_gemm(args, meta):
     """Bake-off across the SERVED buckets, not just the largest one. Falls back to the historical
-    single-bucket bench when meta carries no serving model, or names only one served shape."""
+    single-bucket bench only when meta names no served shape at all.
+
+    One served bucket is still a served shape, and it is the case that matters most: a decode-only
+    kernel resolves to exactly one bucket, and falling back there benched it at ``max(m_buckets)``
+    -- a prefill shape the kernel never runs. ``_merge_served`` over a single bucket is the identity
+    on ``ms``, so routing one and many down the same path needs no special case and gains the
+    ``ms_by_bucket`` audit trail."""
     buckets = _hlib.served_buckets(meta) if _hlib is not None else []
-    if len(buckets) < 2:
+    if not buckets:
         return _bench_gemm_at(args, meta)
     return _merge_served([(ph, M, n, _bench_gemm_at(args, meta, M)) for ph, M, n in buckets])
 

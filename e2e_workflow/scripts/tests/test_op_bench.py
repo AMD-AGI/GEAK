@@ -1842,9 +1842,27 @@ class ServedSweepDispatchTest(unittest.TestCase):
         ob.bench_gemm(None, {"m_buckets": [8192]})
         self.assertEqual(self.calls, [None])
 
-    def test_a_single_served_bucket_is_not_wrapped_in_a_sweep(self):
+    def test_a_decode_only_kernel_is_benched_at_its_decode_shape(self):
+        """One served bucket is still a served shape.
+
+        A decode-only kernel resolves to exactly one bucket, ``('decode', 64, 1024)``.
+        Falling back to the historical path benched it at ``max(m_buckets)`` = 8192 --
+        a prefill shape it never runs. That is the defect this PR exists to fix, so the
+        single-bucket case must take the served M, not the largest one.
+        """
         ob.bench_gemm(None, _swm_meta_ob(served_regimes=["decode"]))
-        self.assertEqual(self.calls, [None])
+        self.assertEqual(self.calls, [64])
+
+    def test_a_prefill_only_kernel_is_benched_at_its_prefill_shape(self):
+        ob.bench_gemm(None, _swm_meta_ob(served_regimes=["prefill"]))
+        self.assertEqual(self.calls, [8192])
+
+    def test_a_single_bucket_sweep_reports_the_bucket_timing_unchanged(self):
+        """``_merge_served`` over one bucket is the identity on ``ms`` -- collapsing the
+        special case must not perturb the number, only record the shape it came from."""
+        out = ob.bench_gemm(None, _swm_meta_ob(served_regimes=["decode"]))
+        self.assertEqual(out[0]["ms"], 1.0)
+        self.assertEqual(list(out[0]["ms_by_bucket"]), ["decode:M=64"])
 
 
 def _swm_meta_ob(**kw):
