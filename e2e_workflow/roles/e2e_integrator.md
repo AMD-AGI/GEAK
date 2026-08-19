@@ -65,7 +65,7 @@ rule first, so a seam defect was retried as a numerics defect for hours.)
 
 | owning stage | `reason_code` | means |
 |---|---|---|
-| **extract** (the TASK encodes the wrong seam/contract/denominator — re-extraction, not re-authoring) | `no_rebind_seam`, `signature_mismatch`, `arity_mismatch`, `param_name_mismatch`, `return_contract_mismatch`, `hidden_context_inputs`, `candidate_unresolvable`, `no_seam_descriptor`, `no_engagement`, `wrong_seam`, `invalid_denominator` | the kernel may be perfect; it cannot be bound where the server actually calls, or its speedup was measured against something that is not the live path |
+| **extract** (the TASK encodes the wrong seam/contract/denominator — re-extraction, not re-authoring) | `no_rebind_seam`, `signature_mismatch`, `arity_mismatch`, `param_name_mismatch`, `optional_param_dropped`, `param_kind_mismatch`, `return_contract_mismatch`, `seam_mismatch`, `hidden_context_inputs`, `candidate_unresolvable`, `no_seam_descriptor`, `no_engagement`, `wrong_seam`, `invalid_denominator` | the kernel may be perfect; it cannot be bound where the server actually calls, or its speedup was measured against something that is not the live path |
 | **author** (the seam is right; posture or numerics are wrong) | `cuda_graph_capture_unsafe`, `no_binary_for_gpu`, `capture_hang`, `host_sync_in_hot_path`, `oom`, `parity_regression`, `accuracy_regression`, `output_corruption`, `implausible_speedup` | re-authoring on the SAME task dir can fix it |
 | **upstream** (no amount of kernel work fixes it) | `wrong_head_granularity`, `delegated_track_disabled` | |
 | **terminal** (not a defect) | `no_win`, `do_no_harm` | a correct kernel with no headroom |

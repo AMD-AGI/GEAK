@@ -24,7 +24,7 @@ Usage:
 Exit 0 always (unless the task dir is unreadable); per-backend failures are captured in the JSON so an
 unavailable backend on this image is a recorded "skipped", not a crash.
 """
-import argparse, hashlib, json, math, os, sys, time, traceback
+import argparse, hashlib, json, math, os, re, sys, time, traceback
 
 # Shared harness measurement library (single source of truth for timing + correctness + Amdahl).
 # op_bench.py lives in scripts/ so a plain import resolves; keep a guarded fallback so an old
@@ -166,6 +166,15 @@ def resolve_denominator(meta):
     tgt = str(meta.get("target_callable") or "").strip()
     v = meta.get("baseline_validation")
     verified = (isinstance(v, dict) and v.get("contract") == "baseline_identity" and v.get("ok") is True)
+    # C5: a verdict certifies ONLY the spec it names. A stale/foreign verdict (recorded for a
+    # different callable in a prior retry or another task dir) must not upgrade THIS baseline to
+    # verified. Require the verdict's baseline_callable to match; if it also names a target, that
+    # must match too. The verdict carries these fields (seam_contract.py writes them), so the check
+    # is feasible — it was simply omitted before. Both fields are mandatory for an ok verdict:
+    # accepting an omitted target would let a verdict from another seam certify this task.
+    verdict_matches = (verified
+                       and str(v.get("baseline_callable") or "").strip() == bl
+                       and str(v.get("target_callable") or "").strip() == tgt)
 
     def out(spec, prov, why):
         return {"spec": spec, "provenance": prov, "severity": DENOM_SEVERITY[prov], "why": why}
@@ -174,9 +183,14 @@ def resolve_denominator(meta):
         return out(bl or tgt, "synthesized_reference",
                    "meta.synthesized=true: the reference was written by the extractor, not captured "
                    "from the live seam, so it is an oracle for CORRECTNESS only, never a perf denominator")
-    if bl and verified:
+    if bl and verdict_matches:
         return out(bl, "verified_baseline",
                    "seam_contract.py --mode baseline reported ok=true for this spec")
+    if bl and verified and not verdict_matches:
+        return out(bl, "unverified_baseline",
+                   f"baseline_validation.ok=true but it certifies "
+                   f"{str(v.get('baseline_callable') or '')!r}/{str(v.get('target_callable') or '')!r}, "
+                   f"not this spec {bl!r}/{tgt!r} — a stale or foreign verdict cannot bank a speedup")
     if bl:
         return out(bl, "unverified_baseline",
                    "meta.baseline_callable is declared but carries no baseline_validation verdict "
@@ -237,12 +251,44 @@ def _has_unreplayable(obj):
     return False
 
 
-def load_oracle_records(task, torch, device):
+def verify_oracle_sha(task, meta):
+    """Verify that captured oracle bytes match a complete SHA-256 committed by capture_shapes.py."""
+    if meta.get("synthesized") is True:
+        return True, ""
+    declared = meta.get("reference_io_sha256")
+    if not (isinstance(declared, str) and declared.strip()):
+        return False, "reference_io_sha256 is missing; captured oracle bytes are not identity-pinned"
+    declared = declared.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", declared):
+        return False, "reference_io_sha256 is not a complete 64-character lowercase hex digest"
+    iopath = os.path.join(task, "reference_io.pt")
+    if not os.path.exists(iopath):
+        return False, "reference_io.pt is missing; cannot verify its declared checksum"
+    h = hashlib.sha256()
+    try:
+        with open(iopath, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except Exception as e:
+        return False, f"reference_io.pt unreadable for checksum: {e!r}"
+    got = h.hexdigest()
+    if got != declared:
+        return False, (f"reference_io_sha256 MISMATCH: meta declares {declared[:16]}… but the "
+                       f"oracle bytes hash to {got[:16]}… — the oracle was altered after capture, so its "
+                       f"correctness verdict cannot be trusted")
+    return True, ""
+
+
+def load_oracle_records(task, torch, device, meta=None):
     """Return (records, err). Each record: {sig, regime, args, kwargs, output} with tensors on `device`.
     `err` is a human string when the oracle cannot be replayed; records is then []."""
     iopath = os.path.join(task, "reference_io.pt")
     if not os.path.exists(iopath):
         return [], "no reference_io.pt in the task dir"
+    if meta is not None:                       # C4: reject a tampered/forged oracle before replaying it
+        sha_ok, sha_err = verify_oracle_sha(task, meta)
+        if not sha_ok:
+            return [], sha_err
     try:
         blob = torch.load(iopath, map_location="cpu", weights_only=False)
     except Exception as e:
@@ -250,6 +296,16 @@ def load_oracle_records(task, torch, device):
     recs = blob.get("records") if isinstance(blob, dict) else None
     if not recs:
         return [], "reference_io.pt carries no 'records' (not a capture_shapes oracle)"
+    if meta is not None and meta.get("synthesized") is not True:
+        try:
+            declared_cases = int(meta.get("num_cases"))
+        except (TypeError, ValueError):
+            return [], "num_cases is missing or invalid; captured oracle coverage is not identity-pinned"
+        if declared_cases <= 0:
+            return [], f"num_cases={declared_cases}; a captured oracle must contain at least one case"
+        if len(recs) != declared_cases:
+            return [], (f"num_cases mismatch: meta declares {declared_cases}, but reference_io.pt "
+                        f"contains {len(recs)} record(s)")
     out = []
     for r in recs:
         args = _rehydrate(r.get("args", ()), torch, device)
@@ -267,12 +323,35 @@ def load_oracle_records(task, torch, device):
     return out, ""
 
 
+def _param_index_by_name(meta):
+    """Map each parameter NAME of the live target callable to its positional index. Lets an in-place
+    output buffer passed POSITIONALLY (not as a kwarg) still be located. Returns {} on any failure."""
+    import inspect
+    spec = str(meta.get("target_callable") or "").strip()
+    fn = _resolve_callable(spec) if spec else None
+    if fn is None:
+        return {}
+    try:
+        out, index = {}, 0
+        for p in inspect.signature(fn).parameters.values():
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                          inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                out[p.name] = index
+                index += 1
+            elif p.kind is inspect.Parameter.VAR_POSITIONAL:
+                # Everything after *args is keyword-only and has no stable index in the args tuple.
+                break
+        return out
+    except (TypeError, ValueError):
+        return {}
+
+
 def _out_param_of(rec, meta):
     """For an IN-PLACE seam (returns None, writes into a caller-supplied buffer) the oracle's `output`
     snapshot is None and the golden values live in one of the INPUTS after the call. Which one is a fact
     the extractor records; we do not guess from names here beyond a last-resort default, and we say so.
 
-    Returns (kind, key) with kind in {"kwarg","arg",""}.
+    Returns (kind, key) with kind in {"kwarg","arg",""}; for "arg", key is the positional index.
     """
     ev = meta.get("seam_runtime_evidence") or {}
     names = [str(n) for n in (ev.get("inplace_params") or []) if str(n)]
@@ -280,6 +359,15 @@ def _out_param_of(rec, meta):
         if n in rec["kwargs"]:
             return "kwarg", n
     if names:
+        # C3: not a kwarg — the buffer may have been passed POSITIONALLY. Resolve each declared name to
+        # its positional index via the live signature and look in rec["args"]. Still a recorded fact
+        # (the name comes from meta), not a guess.
+        idx_by_name = _param_index_by_name(meta)
+        args = rec.get("args") or ()
+        for n in names:
+            i = idx_by_name.get(n)
+            if i is not None and i < len(args):
+                return "arg", i
         return "", ""            # declared, but not present in this record -> refuse, don't guess
     return "", ""
 
@@ -314,7 +402,7 @@ def bench_captured_replay(args, meta):
     delegation = _delegation_status(meta)
     results = []
 
-    recs, err = load_oracle_records(args.task, torch, device)
+    recs, err = load_oracle_records(args.task, torch, device, meta)
     if err:
         note_degradation("bench_captured_replay", "no replayable oracle", err)
         return [{"backend": "current", "available": False, "correct": False, "ms": None,
@@ -346,6 +434,8 @@ def bench_captured_replay(args, meta):
     golden = rec["ref"]
     if ip_kind == "kwarg" and torch.is_tensor(rec["kwargs"].get(ip_key)):
         golden = rec["kwargs"][ip_key].clone()
+    elif ip_kind == "arg" and ip_key < len(rec["args"]) and torch.is_tensor(rec["args"][ip_key]):
+        golden = rec["args"][ip_key].clone()
 
     for name, spec in plan:
         fn = _resolve_callable(spec)
@@ -360,8 +450,16 @@ def bench_captured_replay(args, meta):
             a, k = _clone_inputs(rec, torch)
             if ip_kind == "kwarg" and torch.is_tensor(k.get(ip_key)):
                 k[ip_key].zero_()
+            elif ip_kind == "arg" and ip_key < len(a) and torch.is_tensor(a[ip_key]):
+                a[ip_key].zero_()
             r = fn(*a, **k)
-            return r if r is not None else (k.get(ip_key) if ip_kind == "kwarg" else None)
+            if r is not None:
+                return r
+            if ip_kind == "kwarg":
+                return k.get(ip_key)
+            if ip_kind == "arg" and ip_key < len(a):
+                return a[ip_key]
+            return None
 
         try:
             out = call_once(); _sync(torch)
@@ -376,8 +474,9 @@ def bench_captured_replay(args, meta):
         if out is None or ref is None or not torch.is_tensor(out) or not torch.is_tensor(ref):
             # We CAN time it, but we cannot certify it. Say exactly that instead of asserting correct.
             ms, wall_ms = _time_call(call_once, args.warmup, args.repeats)
-            why = ("seam returns None and meta.seam_runtime_evidence.inplace_params does not name the "
-                   "output buffer" if out is None else
+            why = ("seam returns None and its output buffer could not be located from "
+                   "meta.seam_runtime_evidence.inplace_params (not present as a kwarg or as a "
+                   "resolvable positional arg)" if out is None else
                    "oracle recorded no comparable output tensor for this case")
             note_degradation("bench_captured_replay", f"{name}: timed but unverified", why)
             results.append({"backend": name, "available": True, "correct": None, "ms": round(ms, 4) if ms else None,
@@ -613,6 +712,9 @@ def _load_or_synth_gemm(torch, task, meta, device, seed):
     use_bias = bool(meta.get("bias", False))
     iopath = os.path.join(task, "reference_io.pt")
     if os.path.exists(iopath):
+        sha_ok, sha_err = verify_oracle_sha(task, meta)   # C4: refuse a tampered oracle before trusting it
+        if not sha_ok:
+            raise ValueError(sha_err)
         blob = torch.load(iopath, map_location=device)
         # accept a few shapes of recorded blob
         A = blob.get("A") if isinstance(blob, dict) else None
@@ -1098,8 +1200,12 @@ def main():
         "isolated_speedup_unpublishable": round(speedup, 4) if withhold else None,
         "speedup_withheld": bool(withhold),
         "speedup_withheld_reason": speedup_reason,
-        "denominator": {"spec": denom["spec"], "provenance": prov, "severity": severity,
-                        "why": denom_why, "strict": bool(a.denominator_strict)},
+        # C1: the orchestrator's OPBENCH_SCHEMA + denominatorSound() require `denominator` to be a
+        # flat provenance-enum STRING (matched against BANKABLE_DENOMINATORS). Emit that at top level;
+        # carry the object detail alongside so nothing is lost.
+        "denominator": prov,
+        "denominator_detail": {"spec": denom["spec"], "provenance": prov, "severity": severity,
+                               "why": denom_why, "strict": bool(a.denominator_strict)},
         "delegated_config_track": _delegation_status(meta),
         "degradations": DEGRADATIONS,
         "reason_code": next((r.get("reason_code") for r in results if r.get("reason_code")),

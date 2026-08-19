@@ -399,6 +399,22 @@ _CAT_ENTITY = {
 def classify_entity(d, source):
     """-> (entity_kind, evidence). `d` is an agg entry; `source` the profile source string."""
     cats = d.get("cat_counts") or {}
+    evidence_sources = set(d.get("evidence_sources") or [])
+    if d.get("src"):
+        evidence_sources.add(d["src"])
+    observed_kinds = {_CAT_ENTITY.get(cat, "unresolved") for cat, n in cats.items() if n}
+    if "rocprof_kernel_stats" in evidence_sources:
+        observed_kinds.add("gpu_kernel")
+    device_kinds = observed_kinds & {"gpu_kernel", "memory_op"}
+    host_kinds = observed_kinds & {"dispatcher_op", "python_launcher"}
+    if device_kinds and host_kinds:
+        return "unresolved", {
+            "basis": "exact_name_multiple_entity_kinds",
+            "categories": dict(sorted(cats.items())),
+            "evidence_sources": sorted(evidence_sources),
+            "why": "the exact name denotes both host and device events; refusing to guess which entity "
+                   "the external Top-N row represents",
+        }
     if cats:
         # A name can appear under several categories; the device categories decide.
         kinds = {}
@@ -445,24 +461,72 @@ def index_host_entities(path):
     return idx
 
 
+def merge_entity_evidence(*aggregates):
+    """Merge profiler evidence without letting a same-name source overwrite another entity kind."""
+    merged = {}
+    for agg in aggregates:
+        for name, raw in (agg or {}).items():
+            d = dict(raw)
+            d["cat_counts"] = dict(raw.get("cat_counts") or {})
+            sources = set(raw.get("evidence_sources") or [])
+            if raw.get("src"):
+                sources.add(raw["src"])
+            d["evidence_sources"] = sorted(sources)
+            if name not in merged:
+                merged[name] = d
+                continue
+            cur = merged[name]
+            cur["calls"] = int(cur.get("calls") or 0) + int(d.get("calls") or 0)
+            cur["total_us"] = float(cur.get("total_us") or 0.0) + float(d.get("total_us") or 0.0)
+            for cat, count in d["cat_counts"].items():
+                cur.setdefault("cat_counts", {})[cat] = cur.setdefault("cat_counts", {}).get(cat, 0) + count
+            cur_sources = set(cur.get("evidence_sources") or [])
+            cur_sources.update(d.get("evidence_sources") or [])
+            cur["evidence_sources"] = sorted(cur_sources)
+    return merged
+
+
 def annotate_rows(rows, agg, source):
     """Stamp entity_kind onto Top-N rows that were assembled OUTSIDE this script (the TraceLens
     fast path builds them by hand from a third-party report). A row survives as a gpu_kernel only if its
     name matches something this profiler actually observed being dispatched; otherwise it is
     `unresolved` and the head track will refuse it. Returns (rows, stats)."""
-    by_key = {}
-    for name, d in (agg or {}).items():
-        by_key.setdefault(norm_key(name), (name, d))
+    agg = agg or {}
+    # C9: resolve by EXACT name first. norm_key() is a lossy fold (short_name + strip non-alnum), so a
+    # host dispatcher span 'aten::mul' and a device kernel 'mul' collapse to the SAME key; the old
+    # `setdefault` let whichever was aggregated first stamp its kind + matched_profiled_kernel onto the
+    # other row, silently misclassifying it and defeating the INV-6 gate in EITHER direction (a
+    # dispatcher_op admitted as a gpu_kernel, or a real kernel downgraded). The normalized fold is kept
+    # only as a fallback, and only when the key maps to exactly ONE observed entity.
+    by_exact = dict(agg)
+    by_norm, norm_collisions = {}, set()
+    for name in agg:
+        k = norm_key(name)
+        if k in by_norm and by_norm[k][0] != name:
+            norm_collisions.add(k)
+        else:
+            by_norm.setdefault(k, (name, agg[name]))
     stats = {k: 0 for k in ENTITY_KINDS}
     for r in rows:
-        hit = by_key.get(norm_key(r.get("name") or r.get("short_name") or ""))
+        rname = r.get("name") or r.get("short_name") or ""
+        k = norm_key(rname)
+        hit = None
+        if rname in by_exact:
+            hit = (rname, by_exact[rname])
+        elif k in by_norm and k not in norm_collisions:
+            hit = by_norm[k]
         if hit:
             kind, ev = classify_entity(hit[1], source)
             ev["matched_profiled_kernel"] = hit[0]
+        elif k in norm_collisions:
+            kind = "unresolved"                    # fail closed: refuse to guess which colliding entity
+            ev = {"basis": "ambiguous_name_match",
+                  "why": f"'{rname}' normalizes to a key shared by multiple entities observed in "
+                         f"{source}; refusing to guess its kind rather than misclassify it"}
         else:
             kind = "unresolved"
             ev = {"basis": "name_not_found_in_profile",
-                  "why": f"not among the {len(by_key)} kernels observed in {source}"}
+                  "why": f"not among the {len(by_exact)} kernels observed in {source}"}
         r["entity_kind"] = kind
         r["entity_evidence"] = ev
         stats[kind] = stats.get(kind, 0) + 1
@@ -724,11 +788,11 @@ def main():
     if args.annotate:
         with open(args.annotate) as fh:
             doc = json.load(fh)
-        ev_agg = dict(rp_agg or {})
-        # Host spans first, so a device row of the same name overrides them below.
-        if args.torch_trace:
-            ev_agg.update(index_host_entities(args.torch_trace))
-        ev_agg.update(torch_agg or {})   # torch categories are richer evidence; let them win
+        # Preserve all same-name evidence. A host span and a dispatched kernel can legitimately share
+        # an exact name; overwriting either one fabricates certainty, so classify_entity marks that row
+        # unresolved and the head gate refuses it.
+        host_agg = index_host_entities(args.torch_trace) if args.torch_trace else {}
+        ev_agg = merge_entity_evidence(rp_agg, host_agg, torch_agg)
         ev_src = doc.get("source") or ("merged" if (rp_agg and torch_agg) else
                                        "rocprofv3" if rp_agg else "torch-trace")
         rows, stats = annotate_rows(doc.get("top_kernels") or [], ev_agg, ev_src)

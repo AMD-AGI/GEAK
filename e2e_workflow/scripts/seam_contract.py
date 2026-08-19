@@ -254,24 +254,9 @@ def validate_baseline(task_dir=None, meta=None, eval_dir=None):
 
 
 # -------------------------------------------------------------------------- INV-2 binding contract
-def describe_binding(spec, meta=None):
-    """Capture the LIVE callable's call contract by reflection. This descriptor -- not an agent's
-    recollection of it -- is what an authored entry has to satisfy."""
+def _describe_signature(sig, spec, qualname, resolved_file=None, meta=None):
+    """Build a binding descriptor from an already-resolved inspect.Signature."""
     meta = dict(meta or {})
-    res = resolve_spec(spec)
-    if not res.get("ok"):
-        return {"contract": "binding", "contract_version": CONTRACT_VERSION, "ok": False,
-                "seam": spec, "error": res.get("error")}
-    obj = res["obj"]
-    if not callable(obj):
-        return {"contract": "binding", "contract_version": CONTRACT_VERSION, "ok": False,
-                "seam": spec, "error": "seam resolves to a non-callable"}
-    try:
-        sig = inspect.signature(obj)
-    except Exception as e:  # noqa: BLE001
-        return {"contract": "binding", "contract_version": CONTRACT_VERSION, "ok": False,
-                "seam": spec, "error": f"signature unavailable: {e!r}"}
-
     params, required_positional, out_params = [], [], []
     accepts_varargs = accepts_varkw = False
     for name, p in sig.parameters.items():
@@ -306,19 +291,41 @@ def describe_binding(spec, meta=None):
     # Inputs the callable reads that do NOT arrive through its parameters (forward-context, layer
     # registries, module globals). A non-empty list means the seam is NOT a pure function of its
     # arguments, so an out-of-tree rewrite cannot be given the same inputs -- see check_binding.
-    hidden_ctx = list((meta.get("seam_runtime_evidence") or {}).get("hidden_context") or [])
+    hidden_known = isinstance(ev, dict) and isinstance(ev.get("hidden_context"), list)
+    hidden_ctx = list(ev["hidden_context"]) if hidden_known else []
 
     return {
         "contract": "binding", "contract_version": CONTRACT_VERSION, "ok": True,
-        "seam": spec, "qualname": res.get("qualname"), "resolved_file": res.get("file"),
+        "seam": spec, "qualname": qualname, "resolved_file": resolved_file,
         "params": params, "required_positional": required_positional,
         "accepts_varargs": accepts_varargs, "accepts_varkw": accepts_varkw,
         "arity_required": len(required_positional), "arity_total": len(params),
         "returns_annotation": ret_ann, "returns_none": returns_none,
         "out_params": out_params, "out_params_evidence": evidence,
         "hidden_context": hidden_ctx,
-        "signature": f"{res.get('qualname')}{sig}",
+        "hidden_context_evidence": "declared" if hidden_known else "unknown",
+        "signature": f"{qualname}{sig}",
     }
+
+
+def describe_binding(spec, meta=None):
+    """Capture the LIVE callable's call contract by reflection. This descriptor -- not an agent's
+    recollection of it -- is what an authored entry has to satisfy."""
+    meta = dict(meta or {})
+    res = resolve_spec(spec)
+    if not res.get("ok"):
+        return {"contract": "binding", "contract_version": CONTRACT_VERSION, "ok": False,
+                "seam": spec, "error": res.get("error")}
+    obj = res["obj"]
+    if not callable(obj):
+        return {"contract": "binding", "contract_version": CONTRACT_VERSION, "ok": False,
+                "seam": spec, "error": "seam resolves to a non-callable"}
+    try:
+        sig = inspect.signature(obj)
+    except Exception as e:  # noqa: BLE001
+        return {"contract": "binding", "contract_version": CONTRACT_VERSION, "ok": False,
+                "seam": spec, "error": f"signature unavailable: {e!r}"}
+    return _describe_signature(sig, spec, res.get("qualname"), res.get("file"), meta)
 
 
 def _ann_str(ann):
@@ -327,6 +334,49 @@ def _ann_str(ann):
     if isinstance(ann, str):
         return ann
     return getattr(ann, "__name__", None) or str(ann)
+
+
+def _signature_from_descriptor(desc):
+    """Reconstruct an inspect.Signature for call-compatibility checks."""
+    params = []
+    for p in desc.get("params") or []:
+        kind = getattr(inspect.Parameter, p["kind"])
+        default = None if p.get("has_default") else inspect.Parameter.empty
+        params.append(inspect.Parameter(p["name"], kind, default=default))
+    return inspect.Signature(params)
+
+
+def _representative_calls(desc):
+    """Calls spanning the live signature's positional/keyword and optional surfaces."""
+    calls = []
+    for include_optional in (False, True):
+        for keyword_pok in (False, True):
+            args, kwargs = [], {}
+            for p in desc.get("params") or []:
+                kind, name = p["kind"], p["name"]
+                required = not p.get("has_default") and kind not in ("VAR_POSITIONAL", "VAR_KEYWORD")
+                if kind == "VAR_POSITIONAL":
+                    if include_optional:
+                        args.append(object())
+                    continue
+                if kind == "VAR_KEYWORD":
+                    if include_optional:
+                        kwargs["__geak_extra_kwarg__"] = object()
+                    continue
+                if not required and not include_optional:
+                    continue
+                value = object()
+                if kind == "POSITIONAL_ONLY":
+                    args.append(value)
+                elif kind == "POSITIONAL_OR_KEYWORD":
+                    if keyword_pok:
+                        kwargs[name] = value
+                    else:
+                        args.append(value)
+                elif kind == "KEYWORD_ONLY":
+                    kwargs[name] = value
+            calls.append((args, kwargs))
+    return calls
 
 
 def check_binding(descriptor, candidate):
@@ -387,10 +437,46 @@ def check_binding(descriptor, candidate):
         m.append({"code": "return_contract_mismatch",
                   "detail": "candidate writes in place but the seam's callers consume a returned value"})
 
+    # C6: an OPTIONAL live parameter that the candidate DROPS is still passed by existing callers, so the
+    # bound call raises TypeError even though the REQUIRED names+arity line up. (Comparing only the
+    # required-name sets missed this.) A candidate that swallows extras via **kwargs is exempt.
+    if not cand_varkw:
+        cand_names = {p["name"] for p in (cand.get("params") or [])}
+        live_optional = [p["name"] for p in (descriptor.get("params") or [])
+                         if p.get("has_default") and p["kind"] in ("POSITIONAL_OR_KEYWORD", "KEYWORD_ONLY")]
+        dropped = [n for n in live_optional if n not in cand_names]
+        if dropped:
+            m.append({"code": "optional_param_dropped",
+                      "detail": f"seam accepts optional param(s) {dropped} that live callers may pass; the "
+                                f"candidate entry omits them and would raise TypeError when they are"})
+
+    # Check actual Python binding behavior over the live signature's minimal/maximal and
+    # positional/keyword call surfaces. This catches positional->keyword-only changes, reordered
+    # positional parameters when keyword calls are also legal, and variadic incompatibilities without
+    # incorrectly rejecting a live POSITIONAL_ONLY parameter against an identical candidate.
+    try:
+        cand_sig = _signature_from_descriptor(cand)
+        for call_args, call_kwargs in _representative_calls(descriptor):
+            try:
+                cand_sig.bind(*call_args, **call_kwargs)
+            except TypeError as e:
+                if not any(x["code"] in ("arity_mismatch", "param_name_mismatch",
+                                         "optional_param_dropped", "param_kind_mismatch") for x in m):
+                    m.append({"code": "param_kind_mismatch",
+                              "detail": f"candidate rejects a call accepted by the live seam: {e}"})
+                break
+    except (TypeError, ValueError, KeyError) as e:
+        m.append({"code": "param_kind_mismatch",
+                  "detail": f"candidate signature descriptor is invalid: {e}"})
+
     # Hidden context. If the seam reads state that never crosses the parameter boundary, an authored
     # replacement cannot be handed the same inputs -- authoring it is wasted budget regardless of how
     # fast it is. This is the check that costs seconds and saves a kernel budget.
-    if descriptor.get("hidden_context"):
+    if descriptor.get("hidden_context_evidence") != "declared":
+        m.append({"code": "hidden_context_inputs",
+                  "detail": "seam_runtime_evidence.hidden_context is missing; purity is unknown, so the "
+                            "seam cannot be admitted under the fail-closed binding contract"})
+    elif descriptor.get("hidden_context"):
         m.append({"code": "hidden_context_inputs",
                   "detail": f"seam reads non-parameter inputs {descriptor['hidden_context']}; it is not a "
                             f"pure function of its arguments -- rebind at an inner seam that is"})
@@ -418,6 +504,11 @@ def render_entry(descriptor, entry_name="entry"):
             parts.append(f"{n}=None")
         else:
             parts.append(n)
+    posonly = [p["name"] for p in (descriptor.get("params") or []) if p["kind"] == "POSITIONAL_ONLY"]
+    if posonly:
+        last = posonly[-1]
+        i = parts.index(last) if last in parts else parts.index(f"{last}=None")
+        parts.insert(i + 1, "/")
     has_star = any(p["kind"] == "VAR_POSITIONAL" for p in descriptor.get("params") or [])
     kwonly = [p["name"] for p in (descriptor.get("params") or []) if p["kind"] == "KEYWORD_ONLY"]
     if kwonly and not has_star:
@@ -455,7 +546,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--task-dir", default="", help="op task dir containing meta.json")
     ap.add_argument("--eval-dir", default="", help="run EVAL_DIR (also disqualified as a baseline origin)")
-    ap.add_argument("--spec", default="", help="module:attr to describe (overrides meta.target_callable)")
+    # C10: the binding DESCRIPTOR must be built from the deployment TARGET, never the baseline. Two
+    # explicit flags make the intent unambiguous; --spec stays as a DEPRECATED alias for --target-spec so
+    # existing callers keep working (it used to feed the descriptor and, when a role piped the
+    # baseline_callable through it, silently described the denominator instead of the deployment seam).
+    ap.add_argument("--target-spec", default="", help="module:attr of the DEPLOYMENT seam to describe (the binding target)")
+    ap.add_argument("--baseline-spec", default="", help="module:attr of the baseline/denominator (overrides meta.baseline_callable for validation)")
+    ap.add_argument("--spec", default="", help="DEPRECATED alias for --target-spec")
     ap.add_argument("--mode", default="both", choices=["baseline", "binding", "both", "entry"])
     ap.add_argument("--candidate", default="", help="module:attr of the authored entry, for --mode binding")
     ap.add_argument("--entry-name", default="entry")
@@ -473,21 +570,59 @@ def main(argv=None):
     if args.task_dir:
         meta, meta_err = _load_meta(args.task_dir)
 
+    # Explicit CLI specs override the corresponding meta fields for this validation run.
+    if args.baseline_spec:
+        meta = dict(meta)
+        meta["baseline_callable"] = args.baseline_spec
+    if args.target_spec or args.spec:
+        meta = dict(meta)
+        meta["target_callable"] = args.target_spec or args.spec
+
     result = {"contract_version": CONTRACT_VERSION, "task_dir": args.task_dir or None}
     if meta_err:
         result["meta_error"] = meta_err
+    if args.spec and not args.target_spec:
+        sys.stderr.write("seam_contract: --spec is deprecated; use --target-spec for the deployment seam "
+                         "(--spec builds the binding DESCRIPTOR, never the baseline)\n")
 
     if args.mode in ("baseline", "both"):
         result["baseline_validation"] = validate_baseline(args.task_dir or None, meta, args.eval_dir or None)
 
     if args.mode in ("binding", "both", "entry"):
-        spec = args.spec or (meta.get("target_callable") or "")
+        # C10: the descriptor is the DEPLOYMENT target's contract. Precedence: --target-spec, then the
+        # deprecated --spec alias, then meta.target_callable. The baseline is NEVER what gets described.
+        spec = args.target_spec or args.spec or (meta.get("target_callable") or "")
         desc = describe_binding(spec, meta) if spec else {
             "contract": "binding", "contract_version": CONTRACT_VERSION, "ok": False,
-            "seam": "", "error": "no target_callable / --spec given"}
+            "seam": "", "error": "no target_callable / --target-spec given"}
         result["binding_descriptor"] = desc
         if args.candidate:
             result["binding_check"] = check_binding(desc, args.candidate)
+        elif desc.get("ok") and args.mode in ("binding", "both"):
+            # Validate the ACTUAL signature emitted by render_entry(), not the descriptor against itself.
+            # This proves the generated immutable entry contract accepts every live call shape.
+            try:
+                ns = {}
+                exec(render_entry(desc, args.entry_name), ns)  # generated source; no untrusted input runs
+                generated = ns[args.entry_name]
+                generated_meta = {"seam_runtime_evidence": {
+                    "inplace_params": list(desc.get("out_params") or []),
+                    "returns_none": bool(desc.get("returns_none")),
+                    "hidden_context": [],
+                }}
+                cand_desc = _describe_signature(inspect.signature(generated),
+                                                "<rendered_entry>",
+                                                args.entry_name, None, generated_meta)
+                result["binding_check"] = check_binding(desc, cand_desc)
+                result["binding_check"]["candidate"] = "<rendered_entry>"
+            except Exception as e:  # noqa: BLE001
+                result["binding_check"] = {
+                    "contract": "binding_check", "contract_version": CONTRACT_VERSION,
+                    "bindable": False, "seam": desc.get("seam"), "candidate": "<rendered_entry>",
+                    "mismatches": [{"code": "candidate_unresolvable",
+                                    "detail": f"generated entry could not be inspected: {e!r}"}],
+                    "codes": ["candidate_unresolvable"],
+                }
         if args.mode == "entry":
             if not desc.get("ok"):
                 result["entry_error"] = desc.get("error")

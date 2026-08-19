@@ -103,6 +103,10 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   `profile_topN.json` + `.md` via your own Write and set `source:"tracelens"`.
   **🔴 Then you MUST annotate the hand-assembled rows — do not hand-write `entity_kind`:**
   ```bash
+  # Select the trace to cross-check against FIRST — the annotate command below needs $TLT set. Prefer
+  # the top-level rank0 serving trace; never recurse into capture_traces/.
+  TLT=$(ls -1 "$TRACELENS_TRACE_FILE"/*rank0*.pt.trace.json.gz 2>/dev/null | head -1)
+  [ -z "$TLT" ] && TLT=$(ls -1 "$TRACELENS_TRACE_FILE"/*.pt.trace.json.gz "$TRACELENS_TRACE_FILE"/*.json.gz "$TRACELENS_TRACE_FILE"/*.json 2>/dev/null | head -1)
   python3 "$EVAL_DIR/parse_profile.py" --annotate "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json" \
     --torch-trace "$TLT" --annotate-out "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json"
   ```
@@ -130,7 +134,10 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   that matches** (this is the mandatory shape double-check, since `analysis.md` shapes may be inaccurate). Keep
   the TraceLens ranking/`%gpu` as the primary impact signal, but cross-check that the same heads top both
   views; note any disagreement in `notes`. Emit the final reconciled `profile_topN.json`/`.md` with
-  `source:"tracelens+trace"`.
+  `source:"tracelens+trace"`. **🔴 Reconciliation rewrites `profile_topN.json`, so re-run the `--annotate`
+  step above on the reconciled file (or carry the `entity_kind`/`entity_evidence`/`entity_kind_*` fields
+  forward onto it) — the final emitted file MUST still carry the annotator's evidence-backed kinds, never
+  hand-written ones.**
 - **If `TRACELENS_ANALYSIS_MD` is empty/missing (or the file does not exist) → ignore TraceLens entirely
   and run the normal collection (steps 1–5) unchanged.** Likewise, for ANY reprofile round the TraceLens
   prior is stale (it reflects the baseline config) — ignore it and re-collect.

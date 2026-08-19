@@ -33,6 +33,7 @@ equal; one that does not is recorded incorrect). The fakes are installed per-tes
 tearDown so the other test modules in this directory keep seeing a torch-free image.
 """
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -173,6 +174,9 @@ class _T:
     def contiguous(self):
         return self._like()
 
+    def clone(self):
+        return self._like()
+
     def reshape(self, *shape):
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
@@ -220,6 +224,10 @@ class _T:
 
     def __setitem__(self, idx, value):
         self.val = value.val if isinstance(value, _T) else float(value)
+
+    def zero_(self):                      # in-place clear, mirroring torch's out-buffer zeroing
+        self.val = 0.0
+        return self
 
     # ---- reductions / elementwise
     def abs(self):
@@ -360,6 +368,7 @@ class _Stack:
         torch = types.ModuleType("torch")
         for dt in (BF16, FP16, FP32, INT8, UINT8, FP8_E4M3FNUZ, FP8_E5M2FNUZ, FP8_E4M3FN, FP8_E5M2):
             setattr(torch, dt.name, dt)
+        torch.is_tensor = lambda value: isinstance(value, _T)
 
         class _Finfo:
             def __init__(self, dt):
@@ -388,7 +397,7 @@ class _Stack:
                 return _T(shape, kw.get("dtype") or FP32, val, kw.get("device") or "cpu")
             return make
 
-        def _load_blob(path, map_location=None):
+        def _load_blob(path, map_location=None, **_kwargs):
             stack.calls.append(("torch.load", os.path.basename(path), map_location))
             if stack.loaded_blob is None:
                 raise RuntimeError("fake torch.load has no blob registered for %s" % path)
@@ -1075,11 +1084,18 @@ class TestLoadOrSynthGemm(_FakeStackMixin, unittest.TestCase):
         self.stack.loaded_blob = blob
         return d
 
+    @staticmethod
+    def _pinned_meta(task, **extra):
+        with open(os.path.join(task, "reference_io.pt"), "rb") as fh:
+            sha = hashlib.sha256(fh.read()).hexdigest()
+        return {"reference_io_sha256": sha, **extra}
+
     def test_recorded_oracle_is_preferred_over_synthesis(self):
         blob = {"A": _T((8, 16), FP32, 0.25), "B": _T((32, 16), FP32, 0.5),
                 "bias": None, "output": _T((8, 32), FP32, 4.0)}
         d = self._task_with_io(blob)
-        A, B, bias, tb, ref = ob._load_or_synth_gemm(self.stack.torch, d, {"dtype": "bf16"}, "cpu", 0)
+        A, B, bias, tb, ref = ob._load_or_synth_gemm(
+            self.stack.torch, d, self._pinned_meta(d, dtype="bf16"), "cpu", 0)
         self.assertIs(A.dtype, BF16)
         self.assertIs(B.dtype, BF16)
         self.assertIsNone(bias)
@@ -1092,7 +1108,8 @@ class TestLoadOrSynthGemm(_FakeStackMixin, unittest.TestCase):
         blob = {"A": _T((8, 16), FP32, 0.5), "B": _T((32, 16), FP32, 2.0),
                 "bias": _T((32,), FP32, 1.0), "output": None}
         d = self._task_with_io(blob)
-        A, B, bias, tb, ref = ob._load_or_synth_gemm(self.stack.torch, d, {}, "cpu", 0)
+        A, B, bias, tb, ref = ob._load_or_synth_gemm(
+            self.stack.torch, d, self._pinned_meta(d), "cpu", 0)
         self.assertEqual(ref.shape, (8, 32))
         self.assertEqual(ref.val, 0.5 * 2.0 * 16 + 1.0)
         self.assertIs(bias.dtype, BF16)
@@ -1100,14 +1117,14 @@ class TestLoadOrSynthGemm(_FakeStackMixin, unittest.TestCase):
     def test_recomputed_oracle_honours_transpose_b_false(self):
         blob = {"A": _T((8, 16), FP32, 1.0), "B": _T((16, 32), FP32, 1.0)}
         d = self._task_with_io(blob)
-        _, _, _, tb, ref = ob._load_or_synth_gemm(self.stack.torch, d, {"transpose_b": False},
-                                                  "cpu", 0)
+        _, _, _, tb, ref = ob._load_or_synth_gemm(
+            self.stack.torch, d, self._pinned_meta(d, transpose_b=False), "cpu", 0)
         self.assertFalse(tb)
         self.assertEqual(ref.shape, (8, 32))
 
     def test_unrecognised_blob_falls_back_to_synthesis(self):
         d = self._task_with_io(["not", "a", "dict"])
-        meta = {"a_shape": [4, 16], "b_shape": [32, 16]}
+        meta = self._pinned_meta(d, a_shape=[4, 16], b_shape=[32, 16])
         A, B, bias, tb, ref = ob._load_or_synth_gemm(self.stack.torch, d, meta, "cpu", 3)
         self.assertEqual((A.shape, B.shape, ref.shape), ((4, 16), (32, 16), (4, 32)))
 
@@ -1499,19 +1516,166 @@ class TestBenchAttn(_FakeStackMixin, unittest.TestCase):
         self.assertEqual(res[0]["backend"], "current")
         self.assertFalse(res[0]["available"])
         self.assertIsNone(res[0]["ms"])
-        self.assertIn("needs reference_io.pt", res[0]["note"])
+        self.assertIn("no reference_io.pt", res[0]["note"])
 
     def test_captured_oracle_is_validated_and_backend_swaps_are_delegated(self):
         d = self._task_dir()
         io_path = os.path.join(d, "reference_io.pt")
         open(io_path, "w").close()
-        res = ob.bench_attn(self._args(task=d), {"op_kind": "attn"})
+        mod = types.ModuleType("fake_attn_seam")
+        mod.current = lambda x: x
+        sys.modules[mod.__name__] = mod
+        self.addCleanup(sys.modules.pop, mod.__name__, None)
+        self.stack.loaded_blob = {"records": [{
+            "sig": "decode", "regime": "decode", "args": (_T((2, 4), FP32, 1.0),),
+            "kwargs": {}, "output": _T((2, 4), FP32, 1.0),
+        }]}
+        with open(io_path, "rb") as fh:
+            sha = hashlib.sha256(fh.read()).hexdigest()
+        meta = {"op_kind": "attn", "target_callable": "fake_attn_seam:current",
+                "reference_io_sha256": sha, "num_cases": 1}
+        res = ob.bench_attn(self._args(task=d), meta)
         self.assertTrue(res[0]["available"])
         self.assertTrue(res[0]["correct"])
-        self.assertIsNone(res[0]["ms"])                     # op-level attention is not raced here
-        self.assertEqual(res[0]["artifact"], io_path)
-        self.assertIn("--attention-backend", res[0]["note"])
-        self.assertIn("Config Tuner", res[0]["note"])
+        self.assertIsNotNone(res[0]["ms"])
+        self.assertIn("fake_attn_seam:current", res[0]["note"])
+
+
+# --------------------------------------------------------------------------- #
+# bench_captured_replay -- POSITIONAL in-place output buffer, END-TO-END (C3)
+# --------------------------------------------------------------------------- #
+class TestCapturedReplayPositionalBuffer(_FakeStackMixin, unittest.TestCase):
+    """C3 END-TO-END: TestOutParamOf covers _out_param_of at the unit level; this drives the
+    positional ('arg') branch through bench_captured_replay itself. An in-place seam whose output
+    buffer is passed POSITIONALLY (entry(query,key,value,output,kv_cache)->None, output at index 3)
+    must have its golden taken from rec['args'][ip_key] (op_bench.py ~437-438), the copy handed to the
+    callee zeroed (~453), the written buffer returned (~460-461) and the result verified. A resolved
+    index that lands on a NON-tensor arg must degrade to the UNVERIFIED path (correct=None), never a
+    false-green."""
+
+    RAW = b"positional-inplace-oracle-bytes"
+
+    def setUp(self):
+        super().setUp()
+        self.seen_buffer_vals = []
+        seen = self.seen_buffer_vals
+        self.mod = types.ModuleType("fake_pos_seam")
+
+        def attn_inplace(query, key, value, output, kv_cache=None):
+            # In-place seam: record what the callee was handed (must be zeroed), then write the answer.
+            seen.append(output.val)
+            output[:] = query
+            return None
+
+        def attn_noop(query, key, value, output, kv_cache=None):
+            return None                       # never writes the buffer (output here is a non-tensor)
+
+        self.mod.attn_inplace = attn_inplace
+        self.mod.attn_noop = attn_noop
+        sys.modules["fake_pos_seam"] = self.mod
+        self.addCleanup(sys.modules.pop, "fake_pos_seam", None)
+
+    def _replay_task(self, records, target):
+        d = self._task_dir()
+        with open(os.path.join(d, "reference_io.pt"), "wb") as fh:
+            fh.write(self.RAW)
+        self.stack.loaded_blob = {"records": records}
+        return d, {"op_kind": "attn", "target_callable": target,
+                   "reference_io_sha256": hashlib.sha256(self.RAW).hexdigest(),
+                   "num_cases": len(records),
+                   "seam_runtime_evidence": {"inplace_params": ["output"]}}
+
+    def test_positional_output_buffer_is_zeroed_verified_and_returned(self):
+        # output snapshot is None (in-place seam); the golden lives in the recorded arg at index 3.
+        buf = _T((2, 4), FP32, 1.0)           # captured AFTER the original ran -> holds the golden
+        rec = {"sig": "decode", "regime": "decode",
+               "args": (_T((2, 4), FP32, 1.0), _T((2, 4), FP32, 1.0), _T((2, 4), FP32, 1.0), buf),
+               "kwargs": {}, "output": None}
+        d, meta = self._replay_task([rec], "fake_pos_seam:attn_inplace")
+        res = ob.bench_captured_replay(self._args(task=d), meta)
+        row = self._by_backend(res)["current"]
+        self.assertTrue(row["available"])
+        # correct:True is only reachable if the golden was pulled from rec['args'][3] (output=None),
+        # the callee rewrote the returned buffer, and _correct verified it.
+        self.assertTrue(row["correct"])
+        self.assertFalse(row["raised"])
+        self.assertEqual(row["ms"], 1.5)
+        self.assertEqual(row["max_rel_err"], 0.0)
+        # every replay iteration handed the callee a ZEROED buffer (~453), not the pre-filled golden.
+        self.assertTrue(self.seen_buffer_vals)
+        self.assertTrue(all(v == 0.0 for v in self.seen_buffer_vals), self.seen_buffer_vals)
+
+    def test_positional_index_on_a_non_tensor_arg_is_unverified_not_false_green(self):
+        rec = {"sig": "decode", "regime": "decode",
+               "args": (_T((2, 4), FP32, 1.0), _T((2, 4), FP32, 1.0), _T((2, 4), FP32, 1.0), 42),
+               "kwargs": {}, "output": None}    # index 3 ('output') resolves onto a NON-tensor
+        d, meta = self._replay_task([rec], "fake_pos_seam:attn_noop")
+        res = ob.bench_captured_replay(self._args(task=d), meta)
+        row = self._by_backend(res)["current"]
+        self.assertTrue(row["available"])
+        self.assertIsNone(row["correct"])       # cannot certify -> NOT correct:True
+        self.assertFalse(row["raised"])
+        self.assertIsNotNone(row["ms"])         # still timed, just unverified
+        self.assertIn("UNVERIFIED", row["note"])
+
+
+# --------------------------------------------------------------------------- #
+# load_oracle_records -- num_cases record-count verification FAILURE modes (C4)
+# --------------------------------------------------------------------------- #
+class TestLoadOracleRecordCount(_FakeStackMixin, unittest.TestCase):
+    """C4: after the SHA identity check passes, load_oracle_records must also verify the declared
+    num_cases matches the actual record count (op_bench.py ~299-308). A missing / non-numeric /
+    non-positive / mismatched count is a fail-closed reject (records=[]), never a bankable replay.
+    A real reference_io.pt with a correct recomputed SHA is written so the count check is actually
+    reached -- it runs AFTER the sha check."""
+
+    RAW = b"reference-io-count-oracle-bytes"
+
+    def _task(self, n_records):
+        d = self._task_dir()
+        with open(os.path.join(d, "reference_io.pt"), "wb") as fh:
+            fh.write(self.RAW)
+        recs = [{"sig": "s%d" % i, "regime": "decode", "args": (_T((2, 2), FP32, 1.0),),
+                 "kwargs": {}, "output": _T((2, 2), FP32, 1.0)} for i in range(n_records)]
+        self.stack.loaded_blob = {"records": recs}
+        return d, hashlib.sha256(self.RAW).hexdigest()
+
+    def _meta(self, sha, **extra):
+        return dict({"op_kind": "attn", "reference_io_sha256": sha}, **extra)
+
+    def test_matching_count_passes_the_gate(self):
+        # positive control: proves the sha check is passed and the count gate is actually reached.
+        d, sha = self._task(2)
+        recs, err = ob.load_oracle_records(d, self.stack.torch, "cpu", self._meta(sha, num_cases=2))
+        self.assertEqual(err, "")
+        self.assertEqual(len(recs), 2)
+
+    def test_missing_num_cases_is_rejected(self):
+        d, sha = self._task(1)
+        recs, err = ob.load_oracle_records(d, self.stack.torch, "cpu", self._meta(sha))
+        self.assertEqual(recs, [])
+        self.assertIn("num_cases is missing or invalid", err)
+
+    def test_non_numeric_num_cases_is_rejected(self):
+        d, sha = self._task(1)
+        recs, err = ob.load_oracle_records(d, self.stack.torch, "cpu",
+                                           self._meta(sha, num_cases="not-a-number"))
+        self.assertEqual(recs, [])
+        self.assertIn("num_cases is missing or invalid", err)
+
+    def test_nonpositive_num_cases_is_rejected(self):
+        d, sha = self._task(1)
+        recs, err = ob.load_oracle_records(d, self.stack.torch, "cpu", self._meta(sha, num_cases=0))
+        self.assertEqual(recs, [])
+        self.assertIn("at least one case", err)
+
+    def test_count_mismatch_is_rejected(self):
+        d, sha = self._task(2)
+        recs, err = ob.load_oracle_records(d, self.stack.torch, "cpu", self._meta(sha, num_cases=5))
+        self.assertEqual(recs, [])
+        self.assertIn("num_cases mismatch", err)
+        self.assertIn("declares 5", err)
+        self.assertIn("2 record", err)
 
 
 # --------------------------------------------------------------------------- #
@@ -1529,6 +1693,7 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
             return list(results or [])
         ob.bench_gemm = fake_bench
         ob.bench_attn = fake_bench
+        ob.bench_captured_replay = fake_bench
         argv = ["op_bench.py", "--task", d] + list(extra_argv)
         if out_path:
             argv += ["--out", out_path]
@@ -1654,12 +1819,45 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
         self.assertEqual(summary["isolated_speedup"], 1.0)      # it is its own baseline
         self.assertIn("nothing to deploy", summary["deployable_note"])
 
-    def test_library_winner_without_a_baseline_reports_a_neutral_speedup(self):
+    def test_measured_backend_default_is_a_bankable_flat_denominator(self):
+        # C1: a real, timed library baseline (hipblaslt) -> denominator is the BANKABLE flat string
+        # 'measured_backend_default'; the object travels under denominator_detail.
+        summary, _ = self._run_main(
+            {"op_kind": "gemm"},
+            results=[self._res("hipblaslt", ms=2.0, correct=True),
+                     self._res("aiter", ms=1.0, correct=True)])
+        self.assertEqual(summary["denominator"], "measured_backend_default")
+        self.assertIsInstance(summary["denominator"], str)
+        self.assertEqual(ob.DENOM_SEVERITY[summary["denominator"]], "ok")   # bankable
+        self.assertFalse(summary["speedup_withheld"])
+        self.assertEqual(summary["isolated_speedup"], 2.0)
+        detail = summary["denominator_detail"]
+        self.assertIsInstance(detail, dict)
+        self.assertEqual(detail["provenance"], "measured_backend_default")
+        self.assertEqual(detail["severity"], "ok")
+        self.assertIn("spec", detail)
+
+    def test_verified_baseline_row_banks_a_flat_verified_denominator(self):
+        # C1: an explicit 'baseline' row carrying a verified provenance -> the flat bankable string
+        # 'verified_baseline' at top level, still with the object under denominator_detail.
+        summary, _ = self._run_main(
+            {"op_kind": "gemm"},
+            results=[self._res("baseline", ms=2.0, correct=True,
+                               denominator_provenance="verified_baseline"),
+                     self._res("current", ms=1.0, correct=True)])
+        self.assertEqual(summary["denominator"], "verified_baseline")
+        self.assertEqual(ob.DENOM_SEVERITY[summary["denominator"]], "ok")   # bankable
+        self.assertFalse(summary["speedup_withheld"])
+        self.assertEqual(summary["isolated_speedup"], 2.0)
+        self.assertEqual(summary["denominator_detail"]["provenance"], "verified_baseline")
+
+    def test_library_winner_without_a_baseline_withholds_the_speedup(self):
         summary, _ = self._run_main({"op_kind": "gemm"},
                                     results=[self._res("flydsl", ms=1.0, correct=True)])
         self.assertEqual(summary["winner_backend"], "flydsl")
         self.assertIsNone(summary["baseline_backend"])
-        self.assertEqual(summary["isolated_speedup"], 1.0)
+        self.assertIsNone(summary["isolated_speedup"])
+        self.assertTrue(summary["speedup_withheld"])
         self.assertEqual(summary["winner_kind"], "none")
         self.assertIn("verify deployability", summary["deployable_note"])
 
@@ -1756,6 +1954,183 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
         self.assertEqual(summary["task"], args.task)
         self.assertEqual(summary["results"][0]["backend"], "hipblaslt")
         self.assertEqual(summary["apply_flags"], "")
+
+
+# --------------------------------------------------------------------------- #
+# resolve_denominator -- verdict-to-spec binding (C5) and the flat provenance (C1)
+# --------------------------------------------------------------------------- #
+class TestResolveDenominator(unittest.TestCase):
+    """A machine verdict certifies ONE spec. resolve_denominator must only bank a speedup when the
+    recorded verdict actually names the current baseline (and target, if it names one) -- a stale or
+    foreign verdict from a prior retry/task must fall through to unverified_baseline."""
+
+    def test_matching_verdict_upgrades_to_verified_baseline(self):
+        meta = {"baseline_callable": "pkg.new:fast", "target_callable": "pkg.new:fast",
+                "baseline_validation": {"contract": "baseline_identity", "ok": True,
+                                        "baseline_callable": "pkg.new:fast",
+                                        "target_callable": "pkg.new:fast"}}
+        d = ob.resolve_denominator(meta)
+        self.assertEqual(d["provenance"], "verified_baseline")
+        self.assertEqual(d["severity"], "ok")
+
+    def test_verdict_for_a_different_callable_does_not_verify(self):
+        # ok:true, but the verdict certifies pkg.OLD:other -- not this baseline. Must NOT bank.
+        meta = {"baseline_callable": "pkg.new:fast", "target_callable": "pkg.new:fast",
+                "baseline_validation": {"contract": "baseline_identity", "ok": True,
+                                        "baseline_callable": "pkg.OLD:other",
+                                        "target_callable": "pkg.OLD:other"}}
+        d = ob.resolve_denominator(meta)
+        self.assertEqual(d["provenance"], "unverified_baseline")
+        self.assertEqual(d["severity"], "unverified")
+        self.assertIn("stale or foreign", d["why"])
+
+    def test_verdict_target_mismatch_alone_blocks_verification(self):
+        meta = {"baseline_callable": "pkg.new:fast", "target_callable": "pkg.new:v2",
+                "baseline_validation": {"contract": "baseline_identity", "ok": True,
+                                        "baseline_callable": "pkg.new:fast",
+                                        "target_callable": "pkg.new:OTHER"}}
+        d = ob.resolve_denominator(meta)
+        self.assertEqual(d["provenance"], "unverified_baseline")
+
+    def test_verdict_without_a_target_is_not_identity_bound(self):
+        meta = {"baseline_callable": "pkg.new:fast", "target_callable": "pkg.new:fast",
+                "baseline_validation": {"contract": "baseline_identity", "ok": True,
+                                        "baseline_callable": "pkg.new:fast"}}
+        self.assertEqual(ob.resolve_denominator(meta)["provenance"], "unverified_baseline")
+
+
+# --------------------------------------------------------------------------- #
+# _out_param_of -- the in-place output buffer, kwarg OR positional (C3)
+# --------------------------------------------------------------------------- #
+class TestOutParamOf(unittest.TestCase):
+    """An in-place seam writes into a caller-supplied buffer. The extractor records its NAME; the
+    driver must locate it whether callers pass it as a kwarg or POSITIONALLY -- otherwise the real
+    target path (e.g. entry(query,key,value,output,kv_cache)->None) can never be verified."""
+
+    def setUp(self):
+        self.mod = types.ModuleType("fake_inplace_seam")
+
+        def entry(query, key, value, output, kv_cache=None):
+            return None
+        self.mod.entry = entry
+        sys.modules["fake_inplace_seam"] = self.mod
+        self.addCleanup(sys.modules.pop, "fake_inplace_seam", None)
+        self.meta = {"target_callable": "fake_inplace_seam:entry",
+                     "seam_runtime_evidence": {"inplace_params": ["output"]}}
+
+    def test_kwarg_output_is_found_as_a_kwarg(self):
+        rec = {"args": (1, 2, 3), "kwargs": {"output": object()}}
+        self.assertEqual(ob._out_param_of(rec, self.meta), ("kwarg", "output"))
+
+    def test_positional_output_is_resolved_to_its_index(self):
+        rec = {"args": (1, 2, 3, object()), "kwargs": {}}     # output is the 4th positional
+        self.assertEqual(ob._out_param_of(rec, self.meta), ("arg", 3))
+
+    def test_declared_but_absent_buffer_refuses_rather_than_guessing(self):
+        rec = {"args": (1, 2, 3), "kwargs": {}}               # only 3 positionals -> not present
+        self.assertEqual(ob._out_param_of(rec, self.meta), ("", ""))
+
+    def test_no_declared_inplace_param_returns_empty(self):
+        rec = {"args": (1, 2, 3, 4), "kwargs": {}}
+        self.assertEqual(ob._out_param_of(rec, {"target_callable": "fake_inplace_seam:entry"}), ("", ""))
+
+    def test_param_index_map_is_empty_for_an_unresolvable_target(self):
+        self.assertEqual(ob._param_index_by_name({"target_callable": "no_mod:none"}), {})
+
+    def test_keyword_only_output_is_never_mapped_into_the_args_tuple(self):
+        def variadic(query, *rest, output=None):
+            return None
+        self.mod.variadic = variadic
+        meta = {"target_callable": "fake_inplace_seam:variadic",
+                "seam_runtime_evidence": {"inplace_params": ["output"]}}
+        rec = {"args": (1, 2, 3), "kwargs": {}}
+        self.assertNotIn("output", ob._param_index_by_name(meta))
+        self.assertEqual(ob._out_param_of(rec, meta), ("", ""))
+
+
+class TestDenominatorIsFlatString(_ObStateMixin, unittest.TestCase):
+    """C1: the orchestrator's OPBENCH_SCHEMA + denominatorSound() match `denominator` as a flat
+    provenance-enum STRING. main() must emit that at top level, with the object under
+    denominator_detail."""
+
+    def _run(self, meta):
+        d = self._task_dir(meta)
+        out_path = os.path.join(d, "result.json")
+        ob.bench_gemm = lambda a, m: [{"backend": "hipblaslt", "available": True,
+                                       "correct": True, "ms": 1.0}]
+        ob.bench_attn = ob.bench_gemm
+        old = sys.argv
+        sys.argv = ["op_bench.py", "--task", d, "--out", out_path]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                ob.main()
+        finally:
+            sys.argv = old
+        with open(out_path) as fh:
+            return json.load(fh)
+
+    def test_denominator_is_a_string_and_detail_is_the_object(self):
+        s = self._run({"op_kind": "gemm"})
+        self.assertIsInstance(s["denominator"], str)
+        self.assertIn(s["denominator"], set(ob.DENOM_SEVERITY))
+        self.assertIsInstance(s["denominator_detail"], dict)
+        self.assertEqual(s["denominator_detail"]["provenance"], s["denominator"])
+        self.assertIn("spec", s["denominator_detail"])
+
+
+class TestVerifyOracleSha(unittest.TestCase):
+    """C4: a declared reference_io_sha256 used to be trusted verbatim -- even a fabricated 'abc123'
+    passed, so an oracle altered after capture could still certify a 'correct' verdict. The verifier
+    now requires a complete digest and the referenced bytes, then recomputes and compares the identity."""
+
+    def _task(self, data=b"golden-oracle-bytes"):
+        d = tempfile.mkdtemp(prefix="op_sha_")
+        self.addCleanup(shutil.rmtree, d, True)
+        p = os.path.join(d, "reference_io.pt")
+        with open(p, "wb") as fh:
+            fh.write(data)
+        return d, hashlib.sha256(data).hexdigest()
+
+    def test_matching_digest_passes(self):
+        d, sha = self._task()
+        ok, err = ob.verify_oracle_sha(d, {"reference_io_sha256": sha})
+        self.assertTrue(ok, err)
+        self.assertEqual(err, "")
+
+    def test_mismatched_digest_is_rejected_as_tamper(self):
+        d, _ = self._task()
+        ok, err = ob.verify_oracle_sha(d, {"reference_io_sha256": "a" * 64})
+        self.assertFalse(ok)
+        self.assertIn("MISMATCH", err)
+
+    def test_fabricated_short_hash_no_longer_passes(self):
+        """The exact fail-open the reviewer named: 'abc123' certified anything."""
+        d, _ = self._task()
+        ok, _ = ob.verify_oracle_sha(d, {"reference_io_sha256": "abc123"})
+        self.assertFalse(ok)
+
+    def test_synthesized_oracle_is_exempt(self):
+        d, _ = self._task()
+        ok, err = ob.verify_oracle_sha(d, {"synthesized": True, "reference_io_sha256": "abc123"})
+        self.assertTrue(ok, err)
+
+    def test_absent_declared_sha_fails_closed(self):
+        d, _ = self._task()
+        self.assertFalse(ob.verify_oracle_sha(d, {})[0])
+        self.assertFalse(ob.verify_oracle_sha(d, {"reference_io_sha256": ""})[0])
+
+    def test_absent_file_cannot_verify_the_digest(self):
+        d = tempfile.mkdtemp(prefix="op_sha_")
+        self.addCleanup(shutil.rmtree, d, True)
+        ok, err = ob.verify_oracle_sha(d, {"reference_io_sha256": "a" * 64})
+        self.assertFalse(ok)
+        self.assertIn("missing", err)
+
+    def test_loader_refuses_a_tampered_oracle(self):
+        d, _ = self._task(b"records-blob")
+        recs, err = ob.load_oracle_records(d, None, "cpu", {"reference_io_sha256": "a" * 64})
+        self.assertEqual(recs, [])
+        self.assertIn("MISMATCH", err)
 
 
 if __name__ == "__main__":

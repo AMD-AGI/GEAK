@@ -251,7 +251,10 @@ const REJECT_CODES = {
   arity_mismatch:            { cls: 'integration', stage: 'extract' },
   param_name_mismatch:       { cls: 'integration', stage: 'extract' },
   return_contract_mismatch:  { cls: 'integration', stage: 'extract' },
+  optional_param_dropped:    { cls: 'integration', stage: 'extract' },
+  param_kind_mismatch:       { cls: 'integration', stage: 'extract' },
   hidden_context_inputs:     { cls: 'integration', stage: 'extract' },
+  seam_mismatch:             { cls: 'integration', stage: 'extract' },
   candidate_unresolvable:    { cls: 'integration', stage: 'extract' },
   no_seam_descriptor:        { cls: 'integration', stage: 'extract' },
   no_engagement:             { cls: 'integration', stage: 'extract' },
@@ -633,7 +636,8 @@ const INTEGRATE_SCHEMA = obj({
   // human-readable detail. The enum is the closed set in REJECT_CODES.
   reason_code: { type: 'string', enum: [
     'no_rebind_seam', 'signature_mismatch', 'arity_mismatch', 'param_name_mismatch',
-    'return_contract_mismatch', 'hidden_context_inputs', 'no_engagement', 'wrong_seam',
+    'return_contract_mismatch', 'optional_param_dropped', 'param_kind_mismatch',
+    'hidden_context_inputs', 'seam_mismatch', 'no_engagement', 'wrong_seam',
     'invalid_denominator', 'cuda_graph_capture_unsafe', 'no_binary_for_gpu', 'capture_hang',
     'host_sync_in_hot_path', 'oom', 'parity_regression', 'accuracy_regression', 'output_corruption',
     'implausible_speedup', 'wrong_head_granularity', 'delegated_track_disabled', 'no_win', 'do_no_harm'] },
@@ -845,11 +849,22 @@ const BASELINE_CONTRACT_STRICT = String(A.baseline_contract_strict != null ? A.b
 // reference_io_sha256) and were, until now, read by nothing — see scripts/check_schema_consumption.py.
 function oracleProvenance(ext) {
   const problems = [];
-  if (ext.num_cases != null && Number(ext.num_cases) <= 0)
-    problems.push('num_cases=0 (the oracle recorded no calls, so correctness is unfalsifiable)');
-  if (typeof ext.reference_io_sha256 === 'string' && ext.reference_io_sha256.trim() === ''
-      && ext.synthesized !== true)
-    problems.push('reference_io_sha256 empty (the oracle bytes are unpinned; tampering is undetectable)');
+  // A fabricated oracle (synthesized:true) is handled as its OWN case downstream (baselineDefect ->
+  // 'synthesized': the RATIO is withheld, but the kernel can still be accepted on a measured e2e A/B —
+  // ten such wins live in the 88-run archive). It has no captured live calls to count or bytes to pin,
+  // so the num_cases/sha256 provenance requirements do not apply to it.
+  const synth = ext.synthesized === true;
+  // A claimed captured oracle must carry complete identity evidence. Partial/failed extractions never
+  // reach this acceptance predicate, so missing fields must fail closed here rather than be treated as
+  // harmless schema degradation. op_bench.py independently recomputes the digest from the bytes.
+  if (!synth) {
+    if (!Number.isFinite(Number(ext.num_cases)) || Number(ext.num_cases) <= 0)
+      problems.push('num_cases missing/zero (the oracle recorded no provable calls)');
+    const sha = typeof ext.reference_io_sha256 === 'string'
+      ? ext.reference_io_sha256.trim().toLowerCase() : '';
+    if (!/^[0-9a-f]{64}$/.test(sha))
+      problems.push('reference_io_sha256 missing/invalid (oracle bytes are not identity-pinned)');
+  }
   return { ok: problems.length === 0, problems };
 }
 
@@ -858,14 +873,10 @@ function oracleProvenance(ext) {
 // nowhere: an agent could truthfully report provenance_ok=false and still have its speedup banked.
 // An explicit false is now disqualifying; an absent value is a recorded degradation, not a pass.
 function provenanceOk(res, where) {
-  if (!res || typeof res !== 'object') return true;
-  if (res.provenance_ok === false) {
-    log(`  ⚠️ ${where}: provenance_ok=false — the agent states its own numbers are unsourced; not banking them`);
+  if (!res || typeof res !== 'object' || res.provenance_ok !== true) {
+    log(`  ⚠️ ${where}: provenance_ok is not true — the number is unsourced; not banking it`);
     return false;
   }
-  if (res.provenance_ok == null)
-    noteDegradation(where, 'result carries no provenance_ok',
-      'cannot tell whether the oracle/baseline was re-verified before the number was produced');
   return true;
 }
 
@@ -883,9 +894,8 @@ function denominatorSound(bake, where) {
   }
   const d = bake.denominator;
   if (d == null) {
-    noteDegradation(where, 'bake-off result declares no denominator',
-      'cannot tell whether the speedup was measured against the live path or against a fabricated reference');
-    return true;                       // older role revision: degrade loudly, do not silently drop a real win
+    log(`  ⚠️ ${where}: bake-off result declares no denominator — not banking an unauditable ratio`);
+    return false;
   }
   if (!BANKABLE_DENOMINATORS.includes(d)) {
     log(`  ⚠️ ${where}: denominator='${d}' is not the live path — the ratio is unbankable`);
@@ -924,7 +934,21 @@ const hasFrozenBaseline = (ext) => {
   }
   const v = ext.baseline_validation;
   if (v && typeof v === 'object' && v.contract === 'baseline_identity') {
-    if (v.ok === true) return true;
+    if (v.ok === true) {
+      // C5: the verdict certifies the spec IT names. A stale/foreign verdict (from a prior retry or
+      // another task) whose callable differs must NOT certify this baseline. Cross-check the callables.
+      const vb = String(v.baseline_callable || '').trim(), eb = String(ext.baseline_callable || '').trim();
+      const vt = String(v.target_callable || '').trim(), et = String(ext.target_callable || '').trim();
+      if (!vb || !eb || vb !== eb) {
+        log(`    [inv-1] baseline_validation ok=true but certifies baseline '${vb}', not this task's '${eb}' — stale/foreign verdict, not a frozen baseline`);
+        return false;
+      }
+      if (!vt || !et || vt !== et) {
+        log(`    [inv-1] baseline_validation ok=true but certifies target '${vt}', not this task's '${et}' — stale/foreign verdict, not a frozen baseline`);
+        return false;
+      }
+      return true;
+    }
     log(`    [inv-1] baseline_validation FAILED: ${(v.failed || []).join(', ') || 'unknown'} ` +
       `(baseline_callable=${v.baseline_callable || "''"}, origin=${(v.baseline_origin || {}).kind || '?'})`);
     return false;
@@ -953,27 +977,58 @@ const hasFrozenBaseline = (ext) => {
 // matter how fast it is, and the reject only surfaces hours later at the e2e gate.
 // Strict by default; seam_contract_strict=false degrades to "unverified but allowed" and records it.
 const SEAM_CONTRACT_STRICT = String(A.seam_contract_strict != null ? A.seam_contract_strict : 'true') === 'true';
-function seamBindable(ext) {
+function seamBindable(ext, seam) {
   if (!ext) return { ok: false, why: 'no extraction' };
   const chk = ext.binding_check, desc = ext.binding_descriptor;
-  if (chk && typeof chk === 'object' && chk.contract === 'binding_check') {
-    return chk.bindable === true
-      ? { ok: true, why: 'binding_check.bindable' }
-      : { ok: false, why: `binding_check: ${(chk.codes || []).join(', ') || 'not bindable'}`,
-          codes: chk.codes || [] };
-  }
-  if (desc && typeof desc === 'object' && desc.contract === 'binding') {
-    if (desc.ok !== true) return { ok: false, why: `binding_descriptor unusable: ${desc.error || 'unknown'}` };
+  // C5: a binding verdict is only valid for the seam it was computed against. seam_contract.py records
+  // that seam on both binding_check and binding_descriptor (field `seam`). If the selected deployment
+  // seam differs, the verdict is stale/foreign and must not admit the head.
+  const want = String(seam || '').trim();
+  const seamMismatch = (obj, kind) => {
+    // Pre-selection contract-PRESENCE checks (extractWithBaseline's re-extract loop) call seamBindable
+    // with no seam yet: there is no selected seam to match against, so skip the seam check here and only
+    // verify a usable binding contract exists. The real admission gate (authoringAdmission) always
+    // passes the selected seam, so C5's stale/foreign-verdict rejection still fires there. Without this
+    // guard an empty `want` made every valid extraction look seam-mismatched, forcing pointless
+    // re-extractions with an unsatisfiable "not the selected seam ''" corrective.
+    if (!want) return null;
+    const got = String((obj && obj.seam) || '').trim();
+    if (!got || got !== want)
+      return { ok: false, why: `${kind} certifies seam '${got}', not the selected seam '${want}'`,
+               codes: ['seam_mismatch'] };
+    return null;
+  };
+  // A binding_check cannot replace the descriptor: hidden-context/purity evidence belongs to the live
+  // seam descriptor and must be present even when the generated entry's signature is bindable.
+  if (!desc || typeof desc !== 'object' || desc.contract !== 'binding' || desc.ok !== true) {
+    if (SEAM_CONTRACT_STRICT)
+      return { ok: false, why: 'missing/unusable binding_descriptor', codes: ['no_seam_descriptor'] };
+  } else {
+    const dm = seamMismatch(desc, 'binding_descriptor'); if (dm) return dm;
+    if (desc.hidden_context_evidence !== 'declared')
+      return { ok: false, why: 'hidden-context purity evidence is missing',
+               codes: ['hidden_context_inputs'] };
     if ((desc.hidden_context || []).length)
       return { ok: false, why: `seam reads non-parameter inputs ${JSON.stringify(desc.hidden_context)}`,
                codes: ['hidden_context_inputs'] };
-    // entry_contract_path names the stub seam_contract.py --mode entry GENERATED from the live
-    // signature. Its presence is the difference between an entry derived from the seam and one the
-    // author invented, so it upgrades a descriptor-only verdict from "unchecked" to "checked by
-    // construction". (Also a declared schema field that nothing read before.)
-    if (typeof ext.entry_contract_path === 'string' && ext.entry_contract_path.trim() !== '')
-      return { ok: true, why: `seam described; entry generated from it (${ext.entry_contract_path})` };
-    return { ok: true, why: 'seam described; no entry to check yet' };
+  }
+  if (chk && typeof chk === 'object' && chk.contract === 'binding_check') {
+    const mm = seamMismatch(chk, 'binding_check'); if (mm) return mm;
+    const entryPath = typeof ext.entry_contract_path === 'string' ? ext.entry_contract_path.trim() : '';
+    return chk.bindable === true
+      ? { ok: true, why: `binding_check.bindable${entryPath ? `; generated contract=${entryPath}` : ''}` }
+      : { ok: false, why: `binding_check: ${(chk.codes || []).join(', ') || 'not bindable'}`,
+          codes: chk.codes || [] };
+  }
+  if (chk && SEAM_CONTRACT_STRICT)
+    return { ok: false, why: 'malformed binding_check', codes: ['no_seam_descriptor'] };
+  if (desc && typeof desc === 'object' && desc.contract === 'binding') {
+    if (desc.ok !== true) return { ok: false, why: `binding_descriptor unusable: ${desc.error || 'unknown'}` };
+    const mm = seamMismatch(desc, 'binding_descriptor'); if (mm) return mm;
+    if (SEAM_CONTRACT_STRICT)
+      return { ok: false, why: 'binding_check missing; generated entry was not verified',
+               codes: ['no_seam_descriptor'] };
+    return { ok: true, why: 'legacy mode: seam described but generated entry unchecked' };
   }
   noteDegradation('seamBindable', 'extraction returned no binding_descriptor (seam_contract.py not run)',
     SEAM_CONTRACT_STRICT
@@ -981,6 +1036,46 @@ function seamBindable(ext) {
       : 'seam_contract_strict=false -> authoring an UNVERIFIED seam; a contract mismatch will only ' +
         'surface at the e2e gate, after the budget is spent');
   return { ok: !SEAM_CONTRACT_STRICT, why: 'no binding contract (unverified)' };
+}
+
+// ---- INV-6: ENTITY-KIND ADMISSION (applied at EVERY headQueue (re)assignment) ---------------------
+// The head track optimizes GPU KERNELS. A torch DISPATCHER op is a Python-side span whose pct_gpu_time
+// is the SUM of the kernels it dispatches; routing one as a head double-counts its Amdahl share and
+// points extraction at a wrapper. The filter used to run ONCE, right after the initial strategy — but
+// headQueue is ALSO (re)assigned from carried state on a phase resume and from the post-config
+// re-strategize, and neither of those was re-admitted. A dispatcher_op arriving by either path reached
+// the author fan-out unchecked. admitHeads() is now called at all three sites.
+// A TYPE check, not a name blacklist: it needs no aten::/vllm:: prefix knowledge.
+const HEAD_ENTITY_KIND_STRICT = String(A.head_entity_kind_strict != null ? A.head_entity_kind_strict : 'true') === 'true';
+function admitHeads(q, stage, flagged) {
+  q = (q || []).filter(Boolean);
+  const bad = q.filter((c) => c.entity_kind && c.entity_kind !== 'gpu_kernel');
+  const noKind = q.filter((c) => !c.entity_kind);
+  let admitted = q.filter((c) => !(c.entity_kind && c.entity_kind !== 'gpu_kernel'));
+  for (const c of bad) {
+    log(`  ⚠️ FLAG ${c.short_name || c.name}: profile row is a ${c.entity_kind}, not a gpu_kernel ` +
+      `(${c.pct_gpu_time || '?'}% is the sum of the kernels it dispatches) — NOT routed to the head ` +
+      `track (${stage}); the Architect must name the underlying kernel instead.`);
+    flagged.push({ short_name: c.short_name || c.name, pct_gpu_time: c.pct_gpu_time,
+      stage, gate: 'wrong_head_granularity', reason_code: 'wrong_head_granularity',
+      reason: `entity_kind=${c.entity_kind}; head track requires gpu_kernel` });
+  }
+  if (noKind.length) {
+    if (HEAD_ENTITY_KIND_STRICT) {
+      admitted = admitted.filter((c) => c.entity_kind);
+      for (const c of noKind) {
+        log(`  ⚠️ FLAG ${c.short_name || c.name}: profile row carries no entity_kind — ` +
+          `head_entity_kind_strict=true rejects it (cannot confirm it is a gpu_kernel).`);
+        flagged.push({ short_name: c.short_name || c.name, pct_gpu_time: c.pct_gpu_time,
+          stage, gate: 'wrong_head_granularity', reason_code: 'wrong_head_granularity',
+          reason: 'entity_kind missing; head track requires a confirmed gpu_kernel (strict)' });
+      }
+    } else {
+      noteDegradation('head-admission', `${noKind.length} head candidate(s) carry no entity_kind at ${stage}`,
+        'profile rows predate the entity_kind contract — a dispatcher op could still be routed as a kernel head');
+    }
+  }
+  return admitted;
 }
 
 // ---- INV-2/INV-3: AUTHORING ADMISSION -------------------------------------------------------------
@@ -1007,7 +1102,7 @@ function authoringAdmission(h, ext) {
     noteDegradation('authoringAdmission', `${(h && h.short_name) || seam}: authoring a head whose oracle is synthesized`,
       'admitted on the strength of the seam alone; its isolated speedup is unbankable and only a ' +
       'measured e2e A/B can accept it');
-  const b = seamBindable(ext);
+  const b = seamBindable(ext, seam);   // C5: verify the binding verdict is for THIS seam, not a stale one
   if (!b.ok) {
     const c = (b.codes || []).find((x) => REJECT_CODES[x]) || 'signature_mismatch';
     return { ok: false, reason_code: c, why: b.why };
@@ -1627,21 +1722,7 @@ if (want('setup')) {
   // the device. parse_profile.py now labels every row `entity_kind`; this admits only gpu_kernel rows.
   // Note this is a TYPE check, not a name blacklist: it does not need to recognize `aten::`/`vllm::`
   // prefixes, or any future naming convention, to keep a dispatcher span out of the kernel track.
-  const _dispatcherHeads = headQueue.filter((c) => c && c.entity_kind && c.entity_kind !== 'gpu_kernel');
-  if (_dispatcherHeads.length) {
-    headQueue = headQueue.filter((c) => !(c && c.entity_kind && c.entity_kind !== 'gpu_kernel'));
-    for (const c of _dispatcherHeads) {
-      log(`  ⚠️ FLAG ${c.short_name || c.name}: profile row is a ${c.entity_kind}, not a gpu_kernel ` +
-        `(${c.pct_gpu_time || '?'}% is the sum of the kernels it dispatches) — NOT routed to the head ` +
-        `track; the Architect must name the underlying kernel instead.`);
-      PRE_FLAGGED_HEADS.push({ short_name: c.short_name || c.name, pct_gpu_time: c.pct_gpu_time,
-        stage: 'strategize', gate: 'wrong_head_granularity', reason_code: 'wrong_head_granularity',
-        reason: `entity_kind=${c.entity_kind}; head track requires gpu_kernel` });
-    }
-  }
-  if (headQueue.some((c) => c && !c.entity_kind))
-    noteDegradation('head-admission', 'some head candidates carry no entity_kind',
-      'profile rows predate the entity_kind contract — a dispatcher op could still be routed as a kernel head');
+  headQueue = admitHeads(headQueue, 'strategize', PRE_FLAGGED_HEADS);
   log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
   // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
   await ensureFlydslGate();
@@ -1657,7 +1738,7 @@ if (want('setup')) {
   profile = { profile_topN_json: ST.profile_topn_json || '' };
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
-  headQueue = ST.headQueue || [];
+  headQueue = admitHeads(ST.headQueue || [], 'resume', PRE_FLAGGED_HEADS);   // C8: re-admit on resume
   log(`Loaded carried state: EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT}, flags='${curFlags}', env='${curEnv}', ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
 }
 
@@ -1696,7 +1777,8 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       }),
       { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
     if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
-    if (restrat && restrat.head_candidates) headQueue = restrat.head_candidates.slice();
+    if (restrat && restrat.head_candidates)
+      headQueue = admitHeads(restrat.head_candidates.slice(), 're-strategize', PRE_FLAGGED_HEADS);   // C8
     // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
     await ensureFlydslGate();
   } else {
@@ -3158,6 +3240,7 @@ const wfReturn = {
   // unaudited. Silence used to be indistinguishable from enforcement.
   degradations: DEGRADATIONS,
   contracts: { baseline_contract_strict: BASELINE_CONTRACT_STRICT, seam_contract_strict: SEAM_CONTRACT_STRICT,
+    head_entity_kind_strict: HEAD_ENTITY_KIND_STRICT,
     head_reextract_max: HEAD_REEXTRACT_MAX },
   config_tune_enabled: CONFIG_TUNE_ENABLED,
   head_budget: HEAD_BUDGET,

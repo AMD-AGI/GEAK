@@ -253,6 +253,79 @@ class TestShortNameAndNormKey(unittest.TestCase):
         self.assertEqual(pp.norm_key("at::native::Fill_Kernel"), "fillkernel")
 
 
+class TestEntityEvidence(unittest.TestCase):
+    def test_exact_name_host_device_collision_is_unresolved(self):
+        host = {"shared_name": {"calls": 2, "total_us": 5.0,
+                                "cat_counts": {"cpu_op": 2}}}
+        device = {"shared_name": {"calls": 3, "total_us": 7.0,
+                                  "cat_counts": {"kernel": 3}}}
+        merged = pp.merge_entity_evidence(host, device)
+        rows, stats = pp.annotate_rows([{"name": "shared_name"}], merged, "torch-trace")
+        self.assertEqual(rows[0]["entity_kind"], "unresolved")
+        self.assertEqual(rows[0]["entity_evidence"]["basis"],
+                         "exact_name_multiple_entity_kinds")
+        self.assertEqual(stats["unresolved"], 1)
+
+    def test_same_name_device_sources_remain_a_gpu_kernel(self):
+        rocprof = {"kernel_name": {"calls": 2, "total_us": 5.0,
+                                   "src": "rocprof_kernel_stats"}}
+        torch = {"kernel_name": {"calls": 3, "total_us": 7.0,
+                                 "cat_counts": {"kernel": 3}}}
+        merged = pp.merge_entity_evidence(rocprof, torch)
+        rows, _ = pp.annotate_rows([{"name": "kernel_name"}], merged, "merged")
+        self.assertEqual(rows[0]["entity_kind"], "gpu_kernel")
+
+    def test_c9_norm_key_collision_resolves_each_row_by_exact_name(self):
+        # C9 (reviewer's LITERAL scenario): a host dispatcher span 'aten::mul' (cpu_op) and a device
+        # kernel 'mul' (cat="kernel") are DIFFERENT exact names that norm_key() folds to the SAME key
+        # 'mul' (short_name drops the aten:: namespace, then non-alnum is stripped). The old
+        # setdefault(first-collision-wins) fold let whichever was aggregated first stamp its kind onto
+        # the other row. Exact-name resolution must win for BOTH, and a third row that only matches via
+        # the lossy fold must fail closed as ambiguous rather than borrow either neighbor's kind.
+        self.assertEqual(pp.norm_key("aten::mul"), pp.norm_key("mul"))     # the collision premise
+        self.assertEqual(pp.norm_key("aten::Mul"), pp.norm_key("mul"))
+        host = {"aten::mul": {"calls": 2, "total_us": 5.0, "cat_counts": {"cpu_op": 2}}}
+        device = {"mul": {"calls": 3, "total_us": 7.0, "cat_counts": {"kernel": 3}}}
+        merged = pp.merge_entity_evidence(host, device)
+        rows, stats = pp.annotate_rows(
+            [{"name": "mul"}, {"name": "aten::mul"}, {"name": "aten::Mul"}], merged, "torch-trace")
+        by_name = {r["name"]: r for r in rows}
+        # device kernel keeps gpu_kernel — EXACT name wins over the shared fold
+        self.assertEqual(by_name["mul"]["entity_kind"], "gpu_kernel")
+        self.assertEqual(by_name["mul"]["entity_evidence"]["matched_profiled_kernel"], "mul")
+        # host dispatcher keeps dispatcher_op — EXACT name wins (not stamped as a kernel)
+        self.assertEqual(by_name["aten::mul"]["entity_kind"], "dispatcher_op")
+        self.assertEqual(by_name["aten::mul"]["entity_evidence"]["matched_profiled_kernel"],
+                         "aten::mul")
+        # a NON-exact row whose norm_key hits the shared collision is stamped unresolved, refusing to
+        # guess which colliding entity it is — never silently misclassified as either kind.
+        self.assertEqual(by_name["aten::Mul"]["entity_kind"], "unresolved")
+        self.assertEqual(by_name["aten::Mul"]["entity_evidence"]["basis"], "ambiguous_name_match")
+        self.assertNotIn("matched_profiled_kernel", by_name["aten::Mul"]["entity_evidence"])
+        self.assertEqual(stats["gpu_kernel"], 1)
+        self.assertEqual(stats["dispatcher_op"], 1)
+        self.assertEqual(stats["unresolved"], 1)
+
+    def test_c9_collision_resolution_is_merge_order_independent(self):
+        # The setdefault bug made the collision winner depend on which aggregate was merged first.
+        # Reversing the merge input order must yield IDENTICAL kinds for every row: neither the
+        # dispatcher nor the kernel may stamp its kind onto the other in EITHER direction.
+        host = {"aten::mul": {"calls": 2, "total_us": 5.0, "cat_counts": {"cpu_op": 2}}}
+        device = {"mul": {"calls": 3, "total_us": 7.0, "cat_counts": {"kernel": 3}}}
+        rowspec = [{"name": "mul"}, {"name": "aten::mul"}, {"name": "aten::Mul"}]
+
+        def kinds(*aggs):
+            merged = pp.merge_entity_evidence(*aggs)
+            rows, _ = pp.annotate_rows([dict(r) for r in rowspec], merged, "torch-trace")
+            return {r["name"]: r["entity_kind"] for r in rows}
+
+        forward = kinds(host, device)
+        reverse = kinds(device, host)   # merge the device kernel FIRST this time
+        self.assertEqual(forward, reverse)
+        self.assertEqual(forward, {"mul": "gpu_kernel", "aten::mul": "dispatcher_op",
+                                   "aten::Mul": "unresolved"})
+
+
 # --------------------------------------------------------------------------- #
 # serving-phase step windows
 # --------------------------------------------------------------------------- #
@@ -627,7 +700,8 @@ class TestParseRocprofDir(_TmpMixin, unittest.TestCase):
         d = self._rocprof_dir("Name,Calls,TotalDurationNs\nqux_kernel,,\n")
         agg, total_us, launches = pp.parse_rocprof_dir(d)
         self.assertEqual(agg["qux_kernel"], {"calls": 1, "total_us": 0.0,
-                                             "shapes": set(), "dtypes": set()})
+                                             "shapes": set(), "dtypes": set(),
+                                             "src": "rocprof_kernel_stats"})
         self.assertEqual((total_us, launches), (0.0, 1))
 
     def test_repeated_kernel_rows_accumulate(self):

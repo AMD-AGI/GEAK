@@ -105,7 +105,10 @@ freeze an out-of-regime oracle nobody should trust.
      set). Then set **BOTH** `target_callable` **and** `meta.baseline_callable` to that launcher, so the
      authored kernel and the speedup denominator are the same live seam. Generate its deployable entry with
      `python3 $SKILL_DIR/scripts/seam_contract.py --task-dir <task_dir> --mode entry` — never hand-write it —
-     and verify with `--mode both` that `baseline_validation.ok` and `binding_check.bindable` are BOTH true.
+     and verify with `--mode both` that `baseline_validation.ok`, `binding_descriptor.ok`, AND
+     `binding_check.bindable` are ALL true. With no `--candidate`, `--mode both` checks the entry it just
+     rendered against its own descriptor, so a `bindable:false` here means the GENERATED entry does not fit
+     the live seam — regenerate it, do not paste the failing verdict.
      A synthesized oracle plus an unbindable wrapper is the single failure mode this case exists to prevent:
      it yields a kernel-level "speedup" against a number nothing in the server ever computed, and an overlay
      that patches nothing. If after descending no seam is both capturable and bindable, report
@@ -359,7 +362,7 @@ freeze an out-of-regime oracle nobody should trust.
    >   says the function the unittest times must not alias a static buffer across calls. It is NOT licence
    >   to give the authored kernel a dict-taking, fresh-returning entry when the LIVE seam is positional and
    >   writes in place — the deployed entry must match the live seam's real signature (that is what
-   >   `seam_contract.py --mode entry` generates and `--mode bind` checks). An in-place live seam is served
+   >   `seam_contract.py --mode entry` generates and `--mode binding` checks). An in-place live seam is served
    >   by an entry that writes into the caller's `out` and returns what the live seam returns; the harness
    >   still gets its fresh-output wrapper around it.
 5. **Finalize `meta.json`**: set `build` (false for pure-Triton; true + a build cmd for HIP/CK/asm
@@ -392,33 +395,57 @@ freeze an out-of-regime oracle nobody should trust.
    > genuine baseline-bind / correctness failure (exit 1). Only after 3 failed regenerations set
    > `unittest_smoke:"fail"` with `reason="harness_incomplete_unrecoverable"`.
 7. **🔴 MANDATORY — machine-check the baseline and the seam binding. Do not hand-write these verdicts.**
-   The orchestrator gates head admission on the OUTPUT of this script, not on your prose. Run it and
-   paste the three objects it prints back VERBATIM into your Return JSON:
+   First write/reconcile `<task_dir>/meta.json` with the final `baseline_callable`, `target_callable`,
+   `baseline_origin`, `baseline_capture_evidence`, and complete `seam_runtime_evidence` (including an
+   explicit `hidden_context`, even when it is `[]`). The validator consumes that file; running it before
+   the evidence is persisted is not a valid check. Then run it and paste the three objects it prints back
+   VERBATIM into your Return JSON:
    ```bash
    python3 "$SKILL_DIR/scripts/seam_contract.py" \
      --task-dir "<task_dir>" --eval-dir "$EVAL_DIR" \
-     --spec "<module:attr you are declaring as baseline_callable>" \
+     --baseline-spec "<module:attr of the frozen real online kernel — your baseline_callable>" \
+     --target-spec "<module:attr of the live seam you are rebinding — your target_callable>" \
      --mode both --json
    ```
-   - It imports the spec from the LIVE site-packages, checks the module file actually lives under a real
+   **🔴 `--baseline-spec` and `--target-spec` are DISTINCT seams — do not conflate them.** `--baseline-spec`
+   is the callable whose numbers you validate against; `--target-spec` is the live seam the entry must
+   rebind, and it is what `binding_descriptor`/`binding_check` are built from. The old single `--spec` is a
+   DEPRECATED alias for `--target-spec` only: passing the baseline through it makes the binding descriptor
+   describe the baseline, not the seam you must rebind, so a mismatched candidate passes silently. If you
+   omit either flag the script falls back to `meta.baseline_callable`/`meta.target_callable`; the explicit
+   flags prevent accidental spec substitution, but they do not replace the evidence that must already be
+   present in meta.json.
+   - It imports each spec from the LIVE site-packages, checks the module file actually lives under a real
      install root (not a directory you just created), and rejects a synthesized `baseline_src.*` strawman.
      `baseline_validation.ok=false` ⇒ the head is NOT admissible: return `editable:false` /
      `baseline_frozen:false` with the reported reason. Do not "fix" it by pointing at a file you wrote.
    - `binding_descriptor` is DERIVED from `inspect.signature` of the live callable — parameter names,
-     kinds, defaults, and which parameters are written in place. It is a fact about the seam, not a
-     guess; never edit it by hand.
+     kinds, and defaults. It is a fact about the seam, not a guess; never edit it by hand.
+     **`inspect.signature` sees ONLY the declared parameters.** It CANNOT see what a callable reads that
+     is not a parameter: module globals, forward/attention context, registries, env, captured closure
+     state, or which parameters it writes in place. Those are NOT inspect-derived — they come from
+     `seam_runtime_evidence` below, which YOU must fill from reading the source, and the descriptor
+     merely copies them through. A seam that reads hidden state is not a pure function of its arguments
+     and cannot be soundly rebound as if it were.
    - `binding_check` compares your candidate entry point against that descriptor. If it fails, the
      candidate cannot be rebound at the seam and the isolated speedup is unbankable — regenerate the
      entry from the descriptor instead of arguing with it:
      ```bash
      python3 "$SKILL_DIR/scripts/seam_contract.py" --task-dir "<task_dir>" --eval-dir "$EVAL_DIR" \
-       --spec "<module:attr>" --mode entry --entry-name <name> --out "<task_dir>/entry_contract.py"
+       --target-spec "<module:attr>" --mode entry --entry-name <name> --out "<task_dir>/entry_contract.py"
      ```
      and report that path as `entry_contract_path`.
    - `seam_runtime_evidence.inplace_params` MUST list the parameter names the live callable writes
      through (e.g. an `output=` buffer). `op_bench.py` uses this list — and ONLY this list, never a name
      heuristic — to decide where a replayed in-place seam's result is read from. Getting it wrong makes
      correctness unmeasurable, not merely inaccurate.
+   - `seam_runtime_evidence.hidden_context` MUST list EVERY non-parameter input the live callable reads:
+     module globals, forward/attention context, registry lookups, env, and captured closure state. This
+     is NOT discoverable from `inspect.signature` — you establish it by reading the source. An omitted
+     `hidden_context` is `unknown` and fails the strict binding gate; it is never inferred as `[]`. Do not
+     declare an empty list unless you verified that the seam is pure. If a seam depends on hidden context
+     it cannot be rebound at the seam by arguments alone: report it (so the entry can supply that context,
+     or the head is dropped) rather than silently admitting an impure seam as pure.
    - `num_cases` MUST be the real number of records in `reference_io.pt`. `0` means the oracle recorded
      no calls, so correctness is unfalsifiable, and the orchestrator will reject the head. Report the
      true count; do not round it up.
@@ -440,7 +467,7 @@ Return JSON:
   "binding_descriptor": { "...": "verbatim from seam_contract.py --mode both" },
   "binding_check": { "...": "verbatim from seam_contract.py --mode both" },
   "entry_contract_path": "<task_dir>/entry_contract.py or \"\" if the candidate already matches",
-  "seam_runtime_evidence": { "inplace_params": ["output"] },
+  "seam_runtime_evidence": { "inplace_params": ["output"], "returns_none": true, "hidden_context": [] },
   "num_cases": 0,
   "regimes_captured": ["prefill","decode"],
   "candidate_backends": ["triton","hip","ck"],
@@ -809,7 +836,7 @@ Return JSON:
   "binding_descriptor": { "...": "verbatim from seam_contract.py --mode both" },
   "binding_check": { "...": "verbatim from seam_contract.py --mode both" },
   "entry_contract_path": "<task_dir>/entry_contract.py or \"\"",
-  "seam_runtime_evidence": { "inplace_params": [] },
+  "seam_runtime_evidence": { "inplace_params": [], "returns_none": false, "hidden_context": [] },
   "smoke": "pass|fail",
   "notes": "transpose/bias inference, regime, whether oracle was synthesized vs captured"
 }
