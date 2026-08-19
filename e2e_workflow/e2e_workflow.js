@@ -479,7 +479,10 @@ const EXTRACT_OP_SCHEMA = obj({
 const OPBENCH_SCHEMA = obj({
   short_name: { type: 'string' }, op_kind: { type: 'string' }, provenance_ok: { type: 'boolean' },
   winner_backend: { type: 'string' }, winner_kind: { type: 'string' },
-  isolated_speedup: { type: 'number' }, winner_editable: { type: 'boolean' },
+  // null when nothing was timed -- a speedup is a measurement, and 0.0 read as
+  // 'benched, not faster'. `measured` is the discriminator; gate on it, not on the number.
+  isolated_speedup: { type: ['number', 'null'] }, measured: { type: 'boolean' },
+  winner_editable: { type: 'boolean' },
   best_known_ms: { type: 'number' },
   recommend_tier_c: { type: 'boolean' }, author_plan: arrObj, tuning_artifact: { type: 'string' },
   apply_env: { type: 'string' }, apply_flags: { type: 'string' }, code_patch: { type: 'string' },
