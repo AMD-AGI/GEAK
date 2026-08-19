@@ -53,35 +53,10 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
    waived) and the measured e2e delta BLOWS PAST that ceiling, the kernel is likely doing LESS / degenerate
    work (corruption) that squeaked past a small accuracy sample — a fast-but-wrong server (truncated /
    degenerate generations). Re-check accuracy on a LARGER sample vs the TRUE baseline; if it does not
-   genuinely hold, report `gate:"rejected"` with `reason_code:"implausible_speedup"`. (A byte-exact accept
-   is NOT subject to this — trust it.)
-
-### 🔴 `reason_code` — the reject vocabulary is a CLOSED ENUM, and it is what routes the fix
-Whenever `gate:"rejected"`, you MUST set `reason_code` to exactly one of these tokens. The orchestrator
-routes the corrective off this field, **not** off your prose in `reason`. Prose is for humans; a code is
-a decision. (Classifying a reject by pattern-matching an English sentence is not a decision procedure —
-it is how `signature_mismatch` became unreachable, because a bare "mismatch" matched the correctness
-rule first, so a seam defect was retried as a numerics defect for hours.)
-
-| owning stage | `reason_code` | means |
-|---|---|---|
-| **extract** (the TASK encodes the wrong seam/contract/denominator — re-extraction, not re-authoring) | `no_rebind_seam`, `signature_mismatch`, `arity_mismatch`, `param_name_mismatch`, `optional_param_dropped`, `param_kind_mismatch`, `return_contract_mismatch`, `seam_mismatch`, `hidden_context_inputs`, `candidate_unresolvable`, `no_seam_descriptor`, `no_engagement`, `wrong_seam`, `invalid_denominator` | the kernel may be perfect; it cannot be bound where the server actually calls, or its speedup was measured against something that is not the live path |
-| **author** (the seam is right; posture or numerics are wrong) | `cuda_graph_capture_unsafe`, `no_binary_for_gpu`, `capture_hang`, `host_sync_in_hot_path`, `oom`, `parity_regression`, `accuracy_regression`, `output_corruption`, `implausible_speedup` | re-authoring on the SAME task dir can fix it |
-| **upstream** (no amount of kernel work fixes it) | `wrong_head_granularity`, `delegated_track_disabled` | |
-| **terminal** (not a defect) | `no_win`, `do_no_harm` | a correct kernel with no headroom |
-
-Pick the code that names the FIRST thing that went wrong, not the symptom you noticed last: if the
-candidate could not be rebound at the seam, that is `no_rebind_seam`/`signature_mismatch` even though
-the visible outcome was "e2e delta was zero". An extract-owned code sent as an author-owned one causes a
-guaranteed-futile re-author loop. If nothing in the enum fits, use the closest extract-owned code and
-explain in `reason` — an unrecognised token is logged as a degradation and the head is dropped.
-
-### 🔴 `provenance_ok`
-Set `provenance_ok:false` whenever any number you are reporting was not measured by you in this run
-against a verified baseline — a carried-over figure, an estimate, a number read out of an earlier
-report, or an A/B where the reference leg did not actually run. The orchestrator will not bank a result
-with `provenance_ok:false`, which is the correct outcome; reporting `true` for an unsourced number is
-the failure this field exists to prevent. Omitting the field entirely is recorded as a degradation.
+   genuinely hold, report `gate:"rejected"` with reason **`implausible_speedup`**. (A byte-exact accept is
+   NOT subject to this — trust it.) Use the reason vocabulary the orchestrator's auto-correct classifier
+   keys on — `parity_regression`, `accuracy_regression`, `implausible_speedup`, `output_corruption` — so a
+   fixable correctness reject is routed to a corrective re-author rather than dropped.
 
 If any fails, REJECT and record why (with the numbers) for the eval-dir timeline report — a real
 isolated speedup that doesn't show up e2e is an expected Amdahl outcome, not a bug.
@@ -335,7 +310,6 @@ Return JSON:
   "output_parity": "pass|fail",
   "parity_kind": "byte_exact|accuracy|none",
   "gate": "accepted|stack|rejected|incomplete",
-  "reason_code": "<one token from the closed enum above; REQUIRED when gate='rejected'>",
   "accepted_overlay": "<path to the overlay to carry forward>",
   "reason": "why accepted/rejected/incomplete (cite Amdahl + measured delta vs noise band)"
 }

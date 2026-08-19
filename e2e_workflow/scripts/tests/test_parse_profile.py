@@ -326,6 +326,78 @@ class TestEntityEvidence(unittest.TestCase):
                                    "aten::Mul": "unresolved"})
 
 
+class TestDispatcherExpansion(_TmpMixin, unittest.TestCase):
+    def test_external_id_edges_expand_wrapper_into_device_kernels(self):
+        events = [
+            {"cat": "cpu_op", "name": "vllm::attention",
+             "args": {"External id": 17}},
+            {"cat": "kernel", "name": "kernel_paged_attention_2d",
+             "ts": 10, "dur": 80, "args": {"External id": 17}},
+            {"cat": "kernel", "name": "_fwd_kernel",
+             "ts": 20, "dur": 20, "args": {"External id": 17}},
+        ]
+        edges = pp.index_dispatch_edges(self._trace_file(events))
+        rows, records = pp.expand_dispatcher_rows([{
+            "rank": 1,
+            "name": "vllm::attention",
+            "short_name": "attention (paged + prefill)",
+            "pct_gpu_time": 25.0,
+            "total_ms": 10.0,
+            "calls": 3,
+            "notes": "aggregate",
+        }], edges)
+
+        self.assertEqual([r["short_name"] for r in rows],
+                         ["kernel_paged_attention_2d", "_fwd_kernel"])
+        self.assertEqual([r["pct_gpu_time"] for r in rows], [20.0, 5.0])
+        self.assertTrue(all(r["profile_parent"] == "vllm::attention" for r in rows))
+        self.assertEqual(records[0]["dispatcher"], "vllm::attention")
+
+    def test_nested_launch_external_id_is_attributed_to_outer_dispatcher(self):
+        events = [
+            {"cat": "cpu_op", "name": "vllm::attention", "pid": 1, "tid": 2,
+             "ts": 100, "dur": 100, "args": {"External id": 17}},
+            {"cat": "cpu_op", "name": "triton::launch", "pid": 1, "tid": 2,
+             "ts": 120, "dur": 10, "args": {"External id": 18}},
+            {"cat": "kernel", "name": "kernel_paged_attention_2d",
+             "ts": 250, "dur": 80, "args": {"External id": 18}},
+        ]
+        edges = pp.index_dispatch_edges(self._trace_file(events))
+        self.assertIn("kernel_paged_attention_2d", edges["vllm::attention"])
+        self.assertIn("kernel_paged_attention_2d", edges["triton::launch"])
+
+    def test_unrelated_dispatcher_is_preserved_for_fail_closed_classification(self):
+        original = {"name": "vllm::unknown", "pct_gpu_time": 9.0}
+        rows, records = pp.expand_dispatcher_rows([original], {})
+        self.assertEqual(rows, [original])
+        self.assertEqual(records, [])
+
+    def test_existing_device_row_is_not_duplicated_by_dispatcher_expansion(self):
+        rows, _ = pp.expand_dispatcher_rows([
+            {"name": "vllm::attention", "pct_gpu_time": 20.0, "total_ms": 10.0},
+            {"name": "kernel_paged_attention_2d", "pct_gpu_time": 20.0, "total_ms": 10.0},
+        ], {
+            "vllm::attention": {
+                "kernel_paged_attention_2d": {"calls": 4, "total_us": 100.0},
+            },
+        })
+        self.assertEqual(
+            [row["name"] for row in rows].count("kernel_paged_attention_2d"), 1)
+        self.assertEqual(sum(row["pct_gpu_time"] for row in rows), 20.0)
+
+    def test_exact_host_device_collision_is_not_expanded(self):
+        row = {"name": "shared", "pct_gpu_time": 20.0}
+        evidence = pp.merge_entity_evidence(
+            {"shared": {"calls": 1, "total_us": 5.0, "cat_counts": {"cpu_op": 1}}},
+            {"shared": {"calls": 1, "total_us": 7.0, "cat_counts": {"kernel": 1}}},
+        )
+        rows, records = pp.expand_dispatcher_rows(
+            [row], {"shared": {"child_kernel": {"calls": 1, "total_us": 7.0}}},
+            evidence, "torch-trace")
+        self.assertEqual(rows, [row])
+        self.assertEqual(records, [])
+
+
 # --------------------------------------------------------------------------- #
 # serving-phase step windows
 # --------------------------------------------------------------------------- #

@@ -101,20 +101,20 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   or triton per `kernel_kind`; attention→library_attn; etc.), `editable`←`op_to_source_patchable`. Carry
   `source_file`/`kernel_path` into each entry's `notes` (the Architect/Extractor reuse them). Write
   `profile_topN.json` + `.md` via your own Write and set `source:"tracelens"`.
-  **🔴 Then you MUST annotate the hand-assembled rows — do not hand-write `entity_kind`:**
+  **Then annotate the assembled rows from profiler evidence; never hand-write `entity_kind`:**
   ```bash
-  # Select the trace to cross-check against FIRST — the annotate command below needs $TLT set. Prefer
-  # the top-level rank0 serving trace; never recurse into capture_traces/.
   TLT=$(ls -1 "$TRACELENS_TRACE_FILE"/*rank0*.pt.trace.json.gz 2>/dev/null | head -1)
-  [ -z "$TLT" ] && TLT=$(ls -1 "$TRACELENS_TRACE_FILE"/*.pt.trace.json.gz "$TRACELENS_TRACE_FILE"/*.json.gz "$TRACELENS_TRACE_FILE"/*.json 2>/dev/null | head -1)
-  python3 "$EVAL_DIR/parse_profile.py" --annotate "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json" \
-    --torch-trace "$TLT" --annotate-out "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json"
+  [ -z "$TLT" ] && TLT=$(ls -1 "$TRACELENS_TRACE_FILE"/*.pt.trace.json.gz \
+    "$TRACELENS_TRACE_FILE"/*.json.gz "$TRACELENS_TRACE_FILE"/*.json 2>/dev/null | head -1)
+  python3 "$EVAL_DIR/parse_profile.py" \
+    --annotate "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json" \
+    --torch-trace "$TLT" \
+    --annotate-out "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json"
   ```
-  Annotation needs an evidence source (`--torch-trace` and/or `--rocprof-dir`): if `TLT` is empty there
-  is no trace to cross-check the TraceLens rows against, so **do not hand-stamp `entity_kind` — fall
-  back to the normal collection (steps 1–5)** and annotate from your own trace. The annotator exits
-  non-zero if any Top-N row is `unresolved`: resolve those before returning, because a row whose kind is
-  unknown may not be a GPU kernel at all.
+  If no trace is available, fall back to the normal collection below instead of guessing a row's
+  entity kind. Annotation expands an outer dispatcher/custom-op row through torch-profiler External-id
+  edges into its concrete device children. Preserve the resulting `device_kernel`, `profile_parent`,
+  and split GPU percentages: rejecting a dispatcher without discovering its children is not success.
 - **If `TRACELENS_TRACE_FILE` is also a non-empty path that EXISTS → run an ADDITIONAL trace-analysis
   pass on top of analysis.md to sharpen the picture** (this is required by contract when the trace is
   present). `TRACELENS_TRACE_FILE` is a `torch_trace` **directory** that holds one steady-state serving
@@ -134,10 +134,7 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   that matches** (this is the mandatory shape double-check, since `analysis.md` shapes may be inaccurate). Keep
   the TraceLens ranking/`%gpu` as the primary impact signal, but cross-check that the same heads top both
   views; note any disagreement in `notes`. Emit the final reconciled `profile_topN.json`/`.md` with
-  `source:"tracelens+trace"`. **🔴 Reconciliation rewrites `profile_topN.json`, so re-run the `--annotate`
-  step above on the reconciled file (or carry the `entity_kind`/`entity_evidence`/`entity_kind_*` fields
-  forward onto it) — the final emitted file MUST still carry the annotator's evidence-backed kinds, never
-  hand-written ones.**
+  `source:"tracelens+trace"`.
 - **If `TRACELENS_ANALYSIS_MD` is empty/missing (or the file does not exist) → ignore TraceLens entirely
   and run the normal collection (steps 1–5) unchanged.** Likewise, for ANY reprofile round the TraceLens
   prior is stale (it reflects the baseline config) — ignore it and re-collect.
@@ -246,20 +243,6 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    skill errors out at any point, note it and return the Top-N anyway — a failed analysis skill must
    never fail or block the profile.**
 
-### 🔴 `entity_kind` — every Top-N row must say WHAT KIND OF THING it is
-`parse_profile.py` stamps each row with `entity_kind ∈ {gpu_kernel, memory_op, dispatcher_op,
-python_launcher, unresolved}` plus `entity_evidence` (the profiler category the kind was DERIVED from).
-This is a fact about how the work was observed, not a guess from the name — so never edit it, and never
-substitute a name pattern for it. The existing `classification`/`backend_guess` fields ARE name guesses
-and are labelled as such; they are not a substitute.
-
-Why it gates: only a `gpu_kernel` row is a rewrite target. A `dispatcher_op` row is a host span that
-ENCLOSES the kernels it dispatched, so its time is already counted in them — routing a head at it
-double-counts and the "optimization" cannot move e2e. A `memory_op` row is a copy (fix the allocation,
-not the kernel). A `python_launcher` row is host overhead. An `unresolved` row is one this profiler
-never saw dispatched at all, and the orchestrator's head-admission gate refuses it. Rows you have not
-annotated are treated as `unresolved`, so run the annotator; do not fill the field in by hand.
-
 Return JSON:
 ```json
 {
@@ -271,8 +254,7 @@ Return JSON:
   "total_gpu_time_ms": 0.0,
   "top_kernels": [
     {"rank": 1, "short_name": "...", "classification": "...", "pct_gpu_time": 0.0,
-     "calls": 0, "avg_us": 0.0, "shapes": [[...]], "editable": true, "regime_note": "prefill|decode|both",
-     "entity_kind": "gpu_kernel", "entity_evidence": "<from parse_profile.py --annotate; never hand-written>"}
+     "calls": 0, "avg_us": 0.0, "shapes": [[...]], "editable": true, "regime_note": "prefill|decode|both"}
   ],
   "shift_note": "for reprofile: how the bottleneck moved vs previous round",
   "notes": "resolved 'other' entries, rocprof availability, anything unusual"

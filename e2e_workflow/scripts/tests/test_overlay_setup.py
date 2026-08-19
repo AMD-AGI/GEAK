@@ -59,7 +59,7 @@ def _load(mod_name, filename):
 
 ov = _load("overlay_setup", "overlay_setup.py")
 
-EMPTY_MANIFEST = {"modules": [], "rebinds": [], "captures": []}
+EMPTY_MANIFEST = {"modules": [], "rebinds": [], "markers": [], "captures": []}
 
 
 class _RecordingRun:
@@ -594,6 +594,27 @@ class TestAddCapture(_OverlayCase):
         self._run(ov.cmd_add_capture, self._ns_capture(target="m:a"))
         self._run(ov.cmd_add_capture, self._ns_capture(target="m:b"))
         self.assertEqual([e["target"] for e in self._manifest()["captures"]], ["m:a", "m:b"])
+
+
+class TestAddMarker(_OverlayCase):
+    def test_marker_targets_compound_and_copy_the_probe(self):
+        marker = self._write("custom_marker.py", "def install(target):\n    pass\n")
+        self._run(ov.cmd_add_marker, self._ns(target="m:outer", marker_file=marker))
+        self._run(ov.cmd_add_marker, self._ns(target="m:inner", marker_file=marker))
+        self.assertEqual(
+            [entry["target"] for entry in self._manifest()["markers"]],
+            ["m:outer", "m:inner"],
+        )
+        self.assertEqual(
+            self._read(os.path.join(self.overlay, "seam_trace.py")),
+            "def install(target):\n    pass\n",
+        )
+
+    def test_readding_a_marker_is_idempotent(self):
+        marker = self._write("custom_marker.py", "def install(target):\n    pass\n")
+        self._run(ov.cmd_add_marker, self._ns(target="m:inner", marker_file=marker))
+        self._run(ov.cmd_add_marker, self._ns(target="m:inner", marker_file=marker))
+        self.assertEqual(self._manifest()["markers"], [{"target": "m:inner"}])
 
 
 # --------------------------------------------------------------------------- #

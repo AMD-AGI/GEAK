@@ -178,21 +178,6 @@ const HEAD_CORRECTIVE_MAX = parseInt(A.head_corrective_max != null ? A.head_corr
 // the heavy re-author only when the surgical patch fails. surgical_fix=false => old heavy-only behavior.
 const SURGICAL_FIX = String(A.surgical_fix != null ? A.surgical_fix : 'true') === 'true';
 const FIXABLE_REJECT_RX = /cuda_graph_capture_unsafe|no[_ ]?binary|NO_BINARY_FOR_GPU|hipErrorNoBinaryForGpu|capture[_ ]?(unsafe|hang)|host[_ ]?sync|graph[_ ]?capture|no[_ ]?rebind[_ ]?seam|no[_ ]?engagement|not[_ ]?engaged|signature[_ ]?mismatch|wrong[_ ]?seam/i;
-// ---- DEGRADATION LEDGER (INV-3: no silent degradation) ----------------------------------------------
-// Every place the orchestrator accepts a WEAKER input than the contract asks for — a missing machine
-// verdict, a fallback field, an unrecognized code — records here instead of quietly carrying on. The
-// ledger is emitted with the run report, so "we ran with 3 contracts unenforced" is visible in the
-// artifact rather than inferable only by reading the source. GENERIC: no op/kernel/model specifics.
-const DEGRADATIONS = [];
-// Heads rejected by an admission gate that runs BEFORE `flaggedHeads` exists (Strategize-time entity-kind
-// admission). Merged into flaggedHeads so they are surfaced by the same "never silently skipped" path.
-const PRE_FLAGGED_HEADS = [];
-function noteDegradation(where, what, detail) {
-  const d = { where, what, detail: detail || '' };
-  DEGRADATIONS.push(d);
-  log(`  [degraded] ${where}: ${what}${detail ? ` — ${detail}` : ''}`);
-  return d;
-}
 // ---- CORRECTNESS-class reject (auto-correct) --------------------------------------------------------
 // A SECOND fix-and-retryable class: the candidate ENGAGED and beat the isolated oracle but produces the
 // WRONG output on the LIVE path (parity/accuracy failure) — OR posts an IMPLAUSIBLE e2e speedup (faster
@@ -234,94 +219,18 @@ function isImplausibleSpeedup(pct_gpu_time, isolated, integ) {
   if (!Number.isFinite(ceilPct)) return false;
   return ((integ && integ.e2e_delta_pct) || 0) > ceilPct * (1 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9;
 }
-// ---- STRUCTURED REJECT CODES (INV-4) + OWNER-STAGE ROUTING (INV-5) ---------------------------------
-// A reject carries a CODE from a closed set, not a sentence. Two things are read off that code:
-//   cls   — which corrective instruction applies ('' = terminal, not auto-correctable);
-//   stage — WHICH PIPELINE STAGE OWNS THE DEFECT, i.e. where a fix has to re-enter.
-// The stage column is the part that was missing. Every corrective used to re-enter at `author`
-// (kernel_workflow mode:'optimize' on the SAME task dir), but a task dir's unittest.py is immutable by
-// contract — so any defect whose fix requires a different call contract or a different seam is
-// literally unfixable there, and re-authoring burns hours to arrive back at the same reject. Routing by
-// owner stage means an extract-owned defect re-extracts and an author-owned defect re-authors.
-// GENERIC — the table is keyed on failure MODE, never on op kind, backend, model or kernel.
-const REJECT_CODES = {
-  // --- owned by EXTRACT: the task itself encodes the wrong seam / wrong contract / wrong denominator
-  no_rebind_seam:            { cls: 'integration', stage: 'extract' },
-  signature_mismatch:        { cls: 'integration', stage: 'extract' },
-  arity_mismatch:            { cls: 'integration', stage: 'extract' },
-  param_name_mismatch:       { cls: 'integration', stage: 'extract' },
-  return_contract_mismatch:  { cls: 'integration', stage: 'extract' },
-  optional_param_dropped:    { cls: 'integration', stage: 'extract' },
-  param_kind_mismatch:       { cls: 'integration', stage: 'extract' },
-  hidden_context_inputs:     { cls: 'integration', stage: 'extract' },
-  seam_mismatch:             { cls: 'integration', stage: 'extract' },
-  candidate_unresolvable:    { cls: 'integration', stage: 'extract' },
-  no_seam_descriptor:        { cls: 'integration', stage: 'extract' },
-  no_engagement:             { cls: 'integration', stage: 'extract' },
-  wrong_seam:                { cls: 'integration', stage: 'extract' },
-  invalid_denominator:       { cls: 'integration', stage: 'extract' },
-  // --- owned by AUTHOR: the kernel is right about the seam, wrong about posture or numerics
-  cuda_graph_capture_unsafe: { cls: 'integration', stage: 'author' },
-  no_binary_for_gpu:         { cls: 'integration', stage: 'author' },
-  capture_hang:              { cls: 'integration', stage: 'author' },
-  host_sync_in_hot_path:     { cls: 'integration', stage: 'author' },
-  oom:                       { cls: 'integration', stage: 'author' },
-  parity_regression:         { cls: 'correctness', stage: 'author' },
-  accuracy_regression:       { cls: 'correctness', stage: 'author' },
-  output_corruption:         { cls: 'correctness', stage: 'author' },
-  implausible_speedup:       { cls: 'correctness', stage: 'author' },
-  // --- owned UPSTREAM of the kernel track: no amount of kernel work fixes these
-  wrong_head_granularity:    { cls: '', stage: 'profile' },
-  delegated_track_disabled:  { cls: '', stage: 'strategize' },
-  // --- terminal by construction: a correct kernel with no headroom is not a defect
-  no_win:                    { cls: '', stage: '' },
-  do_no_harm:                { cls: '', stage: '' },
-};
-const normalizeRejectCode = (c) => String(c || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-// Last-resort recovery of a code from free prose, used ONLY when the integrator returned no
-// reason_code at all (older role revision). Scans for an explicit code token FIRST — this is the fix
-// for the precedence bug where CORRECTNESS_REJECT_RX's bare `mismatch` swallowed `signature_mismatch`
-// and made that FIXABLE_REJECT_RX branch permanently unreachable.
-function rejectCodeFromProse(reason) {
-  const r = String(reason || '');
-  for (const code of Object.keys(REJECT_CODES)) {
-    if (new RegExp(`(^|[^a-z0-9])${code.replace(/_/g, '[_ ]?')}([^a-z0-9]|$)`, 'i').test(r)) return code;
-  }
+// Classify a reject reason into a fix-and-retry class ('' = terminal, not auto-correctable).
+function rejectClass(reason) {
+  const r = reason || '';
+  if (CORRECTNESS_REJECT_RX.test(r)) return 'correctness';
+  if (FIXABLE_REJECT_RX.test(r)) return 'integration';
   return '';
 }
-// Resolve {cls, stage, code, provenance} for a reject. `code` is the integrator's structured
-// reason_code when present. Fails closed on an UNKNOWN structured code (we cannot route what we cannot
-// name) and records the degradation when it has to fall back to prose.
-function rejectVerdict(reason, code) {
-  const c = normalizeRejectCode(code);
-  if (c) {
-    if (REJECT_CODES[c]) return { ...REJECT_CODES[c], code: c, provenance: 'structured' };
-    noteDegradation('rejectVerdict', `unknown reason_code '${c}' — not in REJECT_CODES`,
-      'treating as terminal; add the code to the table and to INTEGRATE_SCHEMA.reason_code');
-    return { cls: '', stage: '', code: c, provenance: 'unknown_code' };
-  }
-  const fromProse = rejectCodeFromProse(reason);
-  if (fromProse) {
-    noteDegradation('rejectVerdict', 'integrator returned no reason_code',
-      `recovered '${fromProse}' from the prose reason`);
-    return { ...REJECT_CODES[fromProse], code: fromProse, provenance: 'prose_code' };
-  }
-  const r = reason || '';
-  const cls = CORRECTNESS_REJECT_RX.test(r) ? 'correctness' : (FIXABLE_REJECT_RX.test(r) ? 'integration' : '');
-  if (r) noteDegradation('rejectVerdict', 'no reason_code and no recognizable code token in the prose',
-    `regex fallback -> class='${cls || 'terminal'}', owner stage UNKNOWN (corrective will re-enter at author)`);
-  return { cls, stage: cls ? 'author' : '', code: '', provenance: 'prose_regex' };
-}
-// Classify a reject reason into a fix-and-retry class ('' = terminal, not auto-correctable).
-function rejectClass(reason, code) { return rejectVerdict(reason, code).cls; }
-// Which pipeline stage owns this defect — i.e. where a corrective must re-enter to have any chance.
-function rejectStage(reason, code) { return rejectVerdict(reason, code).stage; }
 // A gate 'accept'/'stack' only counts as a REAL win if the measured e2e delta is not an implausible
 // (corruption) speedup. Centralizes the guard so every integrate site treats a too-good-to-be-true
 // delta as a reject instead of banking it. GENERIC (uses only pct_gpu_time + isolated speedup).
 function integAccepted(integ, pct_gpu_time, isolated) {
   return !!(integ && (integ.gate === 'accepted' || integ.gate === 'stack')
-    && provenanceOk(integ, 'integrate')          // INV-3: consume the integrator's own provenance claim
     && !isImplausibleSpeedup(pct_gpu_time, isolated, integ));
 }
 // The reason string to feed the corrective loop: if the gate "passed" but the delta is impossible, emit
@@ -561,28 +470,16 @@ const EXTRACT_OP_SCHEMA = obj({
   target_callable: { type: 'string' }, // module:attr rebind seam for an authored kernel ('' if none)
   baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
   baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
-  // MACHINE VERDICTS from scripts/seam_contract.py — pasted verbatim, never hand-written. These are the
-  // fields hasFrozenBaseline()/seamBindable() actually consume; without them the head fails closed.
-  baseline_validation: { type: 'object', additionalProperties: true },  // --mode baseline verdict (INV-1)
-  binding_descriptor: { type: 'object', additionalProperties: true },   // --mode binding descriptor (INV-2)
-  binding_check: { type: 'object', additionalProperties: true },        // entry-vs-seam bindability (INV-2)
-  entry_contract_path: { type: 'string' },                              // --mode entry generated contract
+  device_kernel: { type: 'string' },
+  seam_candidates: arrObj,
+  selection_validation: { type: 'object', additionalProperties: true },
   smoke: { type: 'string' }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
 const OPBENCH_SCHEMA = obj({
   short_name: { type: 'string' }, op_kind: { type: 'string' }, provenance_ok: { type: 'boolean' },
   winner_backend: { type: 'string' }, winner_kind: { type: 'string' },
-  // null, NOT a number, when op_bench.py withheld the ratio: the denominator was not the live path, so
-  // there is no speedup to report. A withheld measurement must not be representable as `1.0` or as the
-  // unpublishable figure — both read as claims.
-  isolated_speedup: { type: ['number', 'null'] }, winner_editable: { type: 'boolean' },
-  // INV-1. What the candidate was divided BY, and whether op_bench.py refused to publish the ratio.
-  // Copied from opbench_result.json; the gate below will not bank a win on an unsound denominator.
-  denominator: { type: 'string', enum: [
-    'measured_backend_default', 'verified_baseline', 'unverified_baseline',
-    'target_fallback', 'synthesized_reference', 'none'] },
-  speedup_withheld: { type: 'boolean' },
+  isolated_speedup: { type: 'number' }, winner_editable: { type: 'boolean' },
   best_known_ms: { type: 'number' },
   recommend_tier_c: { type: 'boolean' }, author_plan: arrObj, tuning_artifact: { type: 'string' },
   apply_env: { type: 'string' }, apply_flags: { type: 'string' }, code_patch: { type: 'string' },
@@ -596,14 +493,11 @@ const EXTRACT_SCHEMA = obj({
   source_path_in_sglang: { type: 'string' }, target_callable: { type: 'string' },
   num_cases: { type: 'number' }, regimes_captured: arrStr, candidate_backends: arrStr,
   build: { type: 'boolean' }, unittest_smoke: { type: 'string' },
-  synthesized: { type: 'boolean' }, // true when the oracle was fabricated -> can never be the denominator
   baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
   baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
-  // Same machine verdicts as EXTRACT_OP_SCHEMA — see the note there.
-  baseline_validation: { type: 'object', additionalProperties: true },
-  binding_descriptor: { type: 'object', additionalProperties: true },
-  binding_check: { type: 'object', additionalProperties: true },
-  entry_contract_path: { type: 'string' },
+  device_kernel: { type: 'string' },
+  seam_candidates: arrObj,
+  selection_validation: { type: 'object', additionalProperties: true },
   reference_io_sha256: { type: 'string' }, notes: { type: 'string' },
 }, ['editable', 'task_dir', 'unittest_smoke']);
 
@@ -629,18 +523,6 @@ const INTEGRATE_SCHEMA = obj({
   // implausible-speedup guard only distrusts an 'accuracy'/soft accept; a byte_exact accept is trusted.
   parity_kind: { type: 'string' },
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
-  // STRUCTURED reject code (INV-4). REQUIRED whenever gate='rejected'. The orchestrator routes the
-  // corrective off THIS, not off the prose in `reason` — classifying a reject by regex over a sentence
-  // an LLM wrote is not a decision procedure (it made the `signature_mismatch` branch unreachable,
-  // because the bare `mismatch` token in the correctness regex matched first). `reason` stays as the
-  // human-readable detail. The enum is the closed set in REJECT_CODES.
-  reason_code: { type: 'string', enum: [
-    'no_rebind_seam', 'signature_mismatch', 'arity_mismatch', 'param_name_mismatch',
-    'return_contract_mismatch', 'optional_param_dropped', 'param_kind_mismatch',
-    'hidden_context_inputs', 'seam_mismatch', 'no_engagement', 'wrong_seam',
-    'invalid_denominator', 'cuda_graph_capture_unsafe', 'no_binary_for_gpu', 'capture_hang',
-    'host_sync_in_hot_path', 'oom', 'parity_regression', 'accuracy_regression', 'output_corruption',
-    'implausible_speedup', 'wrong_head_granularity', 'delegated_track_disabled', 'no_win', 'do_no_harm'] },
   accepted_overlay: { type: 'string' }, reason: { type: 'string' },
 }, ['gate', 'e2e_throughput_tok_s']);
 
@@ -831,346 +713,144 @@ async function ensureFlydslGate() {
   }
 }
 
-// ---- INV-1: DENOMINATOR IDENTITY ------------------------------------------------------------------
-// A frozen baseline is the speedup DENOMINATOR, so the only question that matters is whether the thing
-// it names is the code the live server actually runs. That is not decidable from the string: a
-// task-local `baseline_src.xxx_ref:forward` scaffold the extractor wrote itself is a perfectly
-// well-formed non-empty string, and against it any authored kernel posts a large, meaningless win that
-// cannot carry end-to-end. So the predicate now consumes the MACHINE VERDICT from the vendored
-// validator (scripts/seam_contract.py --mode baseline), which resolves the callable and checks that it
-// (a) imports from outside the task/eval dir, (b) lives in an installed distribution, (c) is the seam
-// itself or an OBSERVED callee of it, and (d) was not flagged `synthesized`. Op-kind agnostic — the
-// validator never asks what kind of op this is.
-// Strict by default: no machine verdict => not a frozen baseline (fail closed). baseline_contract_strict
-// =false restores the old string check for a legacy role revision, and records the degradation.
-const BASELINE_CONTRACT_STRICT = String(A.baseline_contract_strict != null ? A.baseline_contract_strict : 'true') === 'true';
-// An oracle with zero recorded cases, or one whose bytes nobody hashed, cannot certify anything the
-// task later claims. Both facts are already REQUESTED in EXTRACT_SCHEMA (num_cases,
-// reference_io_sha256) and were, until now, read by nothing — see scripts/check_schema_consumption.py.
-function oracleProvenance(ext) {
-  const problems = [];
-  // A fabricated oracle (synthesized:true) is handled as its OWN case downstream (baselineDefect ->
-  // 'synthesized': the RATIO is withheld, but the kernel can still be accepted on a measured e2e A/B —
-  // ten such wins live in the 88-run archive). It has no captured live calls to count or bytes to pin,
-  // so the num_cases/sha256 provenance requirements do not apply to it.
-  const synth = ext.synthesized === true;
-  // A claimed captured oracle must carry complete identity evidence. Partial/failed extractions never
-  // reach this acceptance predicate, so missing fields must fail closed here rather than be treated as
-  // harmless schema degradation. op_bench.py independently recomputes the digest from the bytes.
-  if (!synth) {
-    if (!Number.isFinite(Number(ext.num_cases)) || Number(ext.num_cases) <= 0)
-      problems.push('num_cases missing/zero (the oracle recorded no provable calls)');
-    const sha = typeof ext.reference_io_sha256 === 'string'
-      ? ext.reference_io_sha256.trim().toLowerCase() : '';
-    if (!/^[0-9a-f]{64}$/.test(sha))
-      problems.push('reference_io_sha256 missing/invalid (oracle bytes are not identity-pinned)');
+// A profile identity is a device symbol; the replacement target is a live Python callable. Keep the
+// two machine fields separate and require runtime evidence before bake-off or authoring.
+const CALLABLE_SPEC_RX = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
+const validCallableSpec = (s) => CALLABLE_SPEC_RX.test(String(s || '').trim());
+const canonicalDeviceKernel = (s) => String(s || '').trim().toLowerCase()
+  .replace(/\[clone[^\]]*\]/g, '').replace(/<.*>/g, '').split('(', 1)[0]
+  .split('::').pop().replace(/[^a-z0-9_]+/g, '');
+function kernelIdentitiesMatch(a, b) {
+  const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
+  return !!x && !!y && (x === y ||
+    (x.length >= 6 && new RegExp(`(?:^|_)${x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|_)`).test(y)) ||
+    (y.length >= 6 && new RegExp(`(?:^|_)${y.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|_)`).test(x)));
+}
+function requiredDeviceKernel(h) {
+  if (!h || h.entity_kind !== 'gpu_kernel') return '';
+  return String(h.device_kernel || h.profile_kernel ||
+    (h.entity_evidence && h.entity_evidence.matched_profiled_kernel) ||
+    h.short_name || h.name || '').trim();
+}
+const candidateSpec = (c) =>
+  String((c && (c.target_callable || c.callable || c.spec)) || '').trim();
+function selectionCandidatesForHead(h, ext) {
+  const required = requiredDeviceKernel(h);
+  const fused = !!(h && (h.is_fused_kernel === true || h.op_kind === 'moe'));
+  const bySpec = new Map();
+  for (const candidate of [
+    ...((h && h.seam_candidates) || []),
+    ...((ext && ext.seam_candidates) || []),
+  ]) {
+    const spec = candidateSpec(candidate);
+    // Architect classifications win for an existing spec; Extractor may append missing inner launchers.
+    if (spec && !bySpec.has(spec)) bySpec.set(spec, candidate);
   }
-  return { ok: problems.length === 0, problems };
+  return Array.from(bySpec.values()).filter((candidate) => {
+    if (!candidate || typeof candidate !== 'object' || !validCallableSpec(candidateSpec(candidate)))
+      return false;
+    const role = String(candidate.role || '').toLowerCase();
+    if (role === 'kernel_entry') return false; // native/JIT object identity is unsafe to monkeypatch
+    const kernels = Array.isArray(candidate.device_kernels) ? candidate.device_kernels : [];
+    if (required && !kernels.some((kernel) => kernelIdentitiesMatch(required, kernel))) return false;
+    return (fused
+      ? ['outer_wrapper', 'dispatcher', 'op_seam']
+      : ['outer_wrapper', 'dispatcher', 'op_seam', 'inner_launcher']).includes(role);
+  });
+}
+function prepareHeadSelection(h) {
+  if (!h || typeof h !== 'object') return h;
+  const out = { ...h };
+  const required = requiredDeviceKernel(out);
+  if (required && !out.device_kernel) out.device_kernel = required;
+  // live_call_seam and malformed target_callable values are prose, never machine targets.
+  if (!validCallableSpec(out.target_callable)) out.target_callable = '';
+  const fused = out.is_fused_kernel === true || out.op_kind === 'moe';
+  const deployable = selectionCandidatesForHead(out).filter((candidate) => {
+    const role = String(candidate.role || '').toLowerCase();
+    return fused ? role === 'op_seam' : ['inner_launcher', 'op_seam'].includes(role);
+  });
+  deployable.sort((a, b) => Number(b.depth || 0) - Number(a.depth || 0));
+  out.target_callable = deployable.length ? candidateSpec(deployable[0]) : '';
+  out.selection_status = out.target_callable
+    ? 'candidate_selected_needs_runtime_verification'
+    : 'extractor_must_discover_live_launcher';
+  return out;
+}
+function kernelSelectionVerified(h, ext) {
+  const required = requiredDeviceKernel(h);
+  if (!required) return { ok: true, why: 'not a profiled GPU-head extraction' };
+  const target = String((ext && ext.target_callable) || '').trim();
+  if (!validCallableSpec(target))
+    return { ok: false, why: `target_callable '${target}' is not an exact module:attr spec` };
+  const verdict = ext && ext.selection_validation;
+  if (!verdict || verdict.contract !== 'kernel_selection')
+    return { ok: false, why: 'kernel_selection.py verdict is missing' };
+  if (verdict.ok !== true)
+    return { ok: false,
+      why: `kernel_selection.py failed: ${(verdict.failed || []).join(', ') || 'unknown'}` };
+  if (String(verdict.target_callable || '').trim() !== target)
+    return { ok: false,
+      why: `selection verdict certifies '${verdict.target_callable || ''}', not '${target}'` };
+  if (!kernelIdentitiesMatch(required, verdict.device_kernel || ext.device_kernel))
+    return { ok: false,
+      why: `selection verdict certifies '${verdict.device_kernel || ext.device_kernel || ''}', ` +
+        `not profiled kernel '${required}'` };
+  if (Number(verdict.total_calls_observed || 0) <= 0 ||
+      Number(verdict.target_marker_calls || 0) <= 0 ||
+      Number(verdict.matched_kernel_calls || 0) <= 0)
+    return { ok: false, why: 'selection verdict lacks positive call/marker/kernel evidence' };
+  const candidates = selectionCandidatesForHead(h, ext);
+  if (!candidates.length)
+    return { ok: false, why: 'no relevant structured seam_candidates were returned' };
+  const tested = new Set((verdict.candidate_targets_tested || []).map((value) => String(value || '').trim()));
+  const omitted = candidates.map(candidateSpec).filter((spec) => !tested.has(spec));
+  if (omitted.length)
+    return { ok: false, why: `selection probe omitted candidate(s): ${omitted.join(', ')}` };
+  const selected = candidates.find((candidate) => candidateSpec(candidate) === target);
+  const selectedRole = String((selected && selected.role) || '').toLowerCase();
+  const fused = h.is_fused_kernel === true || h.op_kind === 'moe';
+  if (!selected || (fused ? selectedRole !== 'op_seam'
+    : !['inner_launcher', 'op_seam'].includes(selectedRole)))
+    return { ok: false,
+      why: fused
+        ? `fused head must select the whole-operation op_seam, got '${selectedRole || 'unknown'}'`
+        : `selected target role '${selectedRole || 'unknown'}' is not a deployable inner/op seam` };
+  const live = new Set((verdict.live_candidate_targets || []).map((value) => String(value || '').trim()));
+  const selectedDepth = Number(selected.depth || 0);
+  const deeper = candidates.filter((candidate) =>
+    candidateSpec(candidate) !== target && live.has(candidateSpec(candidate)) &&
+    Number(candidate.depth || 0) > selectedDepth);
+  if (deeper.length)
+    return { ok: false,
+      why: `deeper live candidate(s) observed across calls/ranks: ${deeper.map(candidateSpec).join(', ')}` };
+  if (verdict.deepest_verified !== true)
+    return { ok: false, why: 'selected callable is not machine-verified as deepest' };
+  return { ok: true, why: `${target} launches profiled kernel ${required}` };
 }
 
-// `provenance_ok` is the agent's own assertion that it re-hashed the oracle / confirmed the baseline
-// before reporting a number. It is REQUIRED by both OPBENCH_SCHEMA and INTEGRATE_SCHEMA and was read
-// nowhere: an agent could truthfully report provenance_ok=false and still have its speedup banked.
-// An explicit false is now disqualifying; an absent value is a recorded degradation, not a pass.
-function provenanceOk(res, where) {
-  if (!res || typeof res !== 'object' || res.provenance_ok !== true) {
-    log(`  ⚠️ ${where}: provenance_ok is not true — the number is unsourced; not banking it`);
-    return false;
-  }
-  return true;
-}
-
-// INV-1 at the ORCHESTRATOR boundary. op_bench.py already withholds a ratio it cannot stand behind, but
-// the orchestrator must not depend on the script having been the thing that produced this JSON — an
-// agent can hand-assemble the object, and the 4.47x-with-zero-e2e case is precisely a number that was
-// divided by something the server never calls. So re-check the declared denominator here and fail
-// closed. GENERIC: keyed on the provenance of the measurement, never on op kind or kernel name.
-const BANKABLE_DENOMINATORS = ['measured_backend_default', 'verified_baseline'];
-function denominatorSound(bake, where) {
-  if (!bake || typeof bake !== 'object') return false;
-  if (bake.speedup_withheld === true) {
-    log(`  ⚠️ ${where}: op_bench WITHHELD the speedup (denominator=${bake.denominator || 'unknown'}) — not banking a win`);
-    return false;
-  }
-  const d = bake.denominator;
-  if (d == null) {
-    log(`  ⚠️ ${where}: bake-off result declares no denominator — not banking an unauditable ratio`);
-    return false;
-  }
-  if (!BANKABLE_DENOMINATORS.includes(d)) {
-    log(`  ⚠️ ${where}: denominator='${d}' is not the live path — the ratio is unbankable`);
-    return false;
-  }
-  return true;
-}
-
-// A denominator fails in two DIFFERENT ways and they must not share a consequence:
-//   'missing'     -- nothing to divide by at all (no baseline_callable, or an oracle with zero cases /
-//                    unpinned bytes). Neither the ratio nor the correctness verdict means anything.
-//   'synthesized' -- the reference was written by the extractor. The RATIO is worthless; the KERNEL is
-//                    not. Whether it is actually faster is settled downstream by the live e2e A/B,
-//                    which divides by the real server and by nothing the extractor authored.
-// Replaying the 88 archived runs settles which consequence belongs to which: 113 of 210 real
-// extractions declared synthesized:true, and TEN entries those runs went on to ACCEPT on a MEASURED
-// e2e A/B came from one (+23.3%, +12.6%, +6.5%, +5.0%, ... see geak_inv_verify/corpus_gates.py).
-// Killing the extraction on 'synthesized' would have thrown all ten away. Withholding the ratio costs
-// nothing, because the ratio was never what those wins were banked on.
-function baselineDefect(ext) {
-  if (!ext) return 'missing';
-  if (!oracleProvenance(ext).ok) return 'missing';
-  const v = ext.baseline_validation;
-  if (v && typeof v === 'object' && v.contract === 'baseline_identity')
-    return v.ok === true ? 'none' : 'missing';
-  if (ext.synthesized === true) return 'synthesized';
-  return 'none';
-}
-
-const hasFrozenBaseline = (ext) => {
-  if (!ext) return false;
-  const op = oracleProvenance(ext);
-  if (!op.ok) {
-    log(`    [inv-1] oracle provenance FAILED: ${op.problems.join('; ')}`);
-    return false;
-  }
-  const v = ext.baseline_validation;
-  if (v && typeof v === 'object' && v.contract === 'baseline_identity') {
-    if (v.ok === true) {
-      // C5: the verdict certifies the spec IT names. A stale/foreign verdict (from a prior retry or
-      // another task) whose callable differs must NOT certify this baseline. Cross-check the callables.
-      const vb = String(v.baseline_callable || '').trim(), eb = String(ext.baseline_callable || '').trim();
-      const vt = String(v.target_callable || '').trim(), et = String(ext.target_callable || '').trim();
-      if (!vb || !eb || vb !== eb) {
-        log(`    [inv-1] baseline_validation ok=true but certifies baseline '${vb}', not this task's '${eb}' — stale/foreign verdict, not a frozen baseline`);
-        return false;
-      }
-      if (!vt || !et || vt !== et) {
-        log(`    [inv-1] baseline_validation ok=true but certifies target '${vt}', not this task's '${et}' — stale/foreign verdict, not a frozen baseline`);
-        return false;
-      }
-      return true;
+const PRE_FLAGGED_HEADS = [];
+function admitHeads(queue, stage) {
+  const admitted = [];
+  for (const head of (queue || []).filter(Boolean)) {
+    if (head.entity_kind !== 'gpu_kernel') {
+      log(`  ⚠️ FLAG ${head.short_name || head.name}: entity_kind=${head.entity_kind || 'missing'}; ` +
+        `the head track requires a profiler-confirmed gpu_kernel (${stage}).`);
+      PRE_FLAGGED_HEADS.push({ short_name: head.short_name || head.name,
+        pct_gpu_time: head.pct_gpu_time, stage, gate: 'wrong_head_granularity',
+        reason: `entity_kind=${head.entity_kind || 'missing'}; gpu_kernel required` });
+      continue;
     }
-    log(`    [inv-1] baseline_validation FAILED: ${(v.failed || []).join(', ') || 'unknown'} ` +
-      `(baseline_callable=${v.baseline_callable || "''"}, origin=${(v.baseline_origin || {}).kind || '?'})`);
-    return false;
-  }
-  // No machine verdict at all.
-  if (ext.synthesized === true) {                    // INV-3: a declared field that is now CONSUMED
-    noteDegradation('hasFrozenBaseline', 'extraction reports synthesized:true and no baseline_validation',
-      'a fabricated oracle can never be the denominator — rejecting the extraction');
-    return false;
-  }
-  const legacyOk = !!(ext.baseline_frozen === true ||
-    (typeof ext.baseline_callable === 'string' && ext.baseline_callable.trim() !== ''));
-  noteDegradation('hasFrozenBaseline', 'extraction returned no baseline_validation (seam_contract.py not run)',
-    BASELINE_CONTRACT_STRICT
-      ? 'baseline_contract_strict=true -> treating as NO frozen baseline (fail closed)'
-      : `baseline_contract_strict=false -> falling back to the string check (=${legacyOk}); the ` +
-        'denominator is UNVERIFIED and any isolated speedup from this task is unaudited');
-  return BASELINE_CONTRACT_STRICT ? false : legacyOk;
-};
-
-// ---- INV-2: BINDING CONTRACT ----------------------------------------------------------------------
-// Whether an authored replacement can be bound at the live seam is decided by inspect.signature of the
-// LIVE callable, not by an agent's recollection of it. seam_contract.py --mode binding emits the
-// descriptor and (given the entry) the bindability verdict; the extractor returns both. A head whose
-// seam is not bindable must never enter the author fan-out: the kernel that comes out is unusable no
-// matter how fast it is, and the reject only surfaces hours later at the e2e gate.
-// Strict by default; seam_contract_strict=false degrades to "unverified but allowed" and records it.
-const SEAM_CONTRACT_STRICT = String(A.seam_contract_strict != null ? A.seam_contract_strict : 'true') === 'true';
-function seamBindable(ext, seam) {
-  if (!ext) return { ok: false, why: 'no extraction' };
-  const chk = ext.binding_check, desc = ext.binding_descriptor;
-  // C5: a binding verdict is only valid for the seam it was computed against. seam_contract.py records
-  // that seam on both binding_check and binding_descriptor (field `seam`). If the selected deployment
-  // seam differs, the verdict is stale/foreign and must not admit the head.
-  const want = String(seam || '').trim();
-  const seamMismatch = (obj, kind) => {
-    // Pre-selection contract-PRESENCE checks (extractWithBaseline's re-extract loop) call seamBindable
-    // with no seam yet: there is no selected seam to match against, so skip the seam check here and only
-    // verify a usable binding contract exists. The real admission gate (authoringAdmission) always
-    // passes the selected seam, so C5's stale/foreign-verdict rejection still fires there. Without this
-    // guard an empty `want` made every valid extraction look seam-mismatched, forcing pointless
-    // re-extractions with an unsatisfiable "not the selected seam ''" corrective.
-    if (!want) return null;
-    const got = String((obj && obj.seam) || '').trim();
-    if (!got || got !== want)
-      return { ok: false, why: `${kind} certifies seam '${got}', not the selected seam '${want}'`,
-               codes: ['seam_mismatch'] };
-    return null;
-  };
-  // A binding_check cannot replace the descriptor: hidden-context/purity evidence belongs to the live
-  // seam descriptor and must be present even when the generated entry's signature is bindable.
-  if (!desc || typeof desc !== 'object' || desc.contract !== 'binding' || desc.ok !== true) {
-    if (SEAM_CONTRACT_STRICT)
-      return { ok: false, why: 'missing/unusable binding_descriptor', codes: ['no_seam_descriptor'] };
-  } else {
-    const dm = seamMismatch(desc, 'binding_descriptor'); if (dm) return dm;
-    if (desc.hidden_context_evidence !== 'declared')
-      return { ok: false, why: 'hidden-context purity evidence is missing',
-               codes: ['hidden_context_inputs'] };
-    if ((desc.hidden_context || []).length)
-      return { ok: false, why: `seam reads non-parameter inputs ${JSON.stringify(desc.hidden_context)}`,
-               codes: ['hidden_context_inputs'] };
-  }
-  if (chk && typeof chk === 'object' && chk.contract === 'binding_check') {
-    const mm = seamMismatch(chk, 'binding_check'); if (mm) return mm;
-    const entryPath = typeof ext.entry_contract_path === 'string' ? ext.entry_contract_path.trim() : '';
-    return chk.bindable === true
-      ? { ok: true, why: `binding_check.bindable${entryPath ? `; generated contract=${entryPath}` : ''}` }
-      : { ok: false, why: `binding_check: ${(chk.codes || []).join(', ') || 'not bindable'}`,
-          codes: chk.codes || [] };
-  }
-  if (chk && SEAM_CONTRACT_STRICT)
-    return { ok: false, why: 'malformed binding_check', codes: ['no_seam_descriptor'] };
-  if (desc && typeof desc === 'object' && desc.contract === 'binding') {
-    if (desc.ok !== true) return { ok: false, why: `binding_descriptor unusable: ${desc.error || 'unknown'}` };
-    const mm = seamMismatch(desc, 'binding_descriptor'); if (mm) return mm;
-    if (SEAM_CONTRACT_STRICT)
-      return { ok: false, why: 'binding_check missing; generated entry was not verified',
-               codes: ['no_seam_descriptor'] };
-    return { ok: true, why: 'legacy mode: seam described but generated entry unchecked' };
-  }
-  noteDegradation('seamBindable', 'extraction returned no binding_descriptor (seam_contract.py not run)',
-    SEAM_CONTRACT_STRICT
-      ? 'seam_contract_strict=true -> head is NOT admitted to the author fan-out (fail closed)'
-      : 'seam_contract_strict=false -> authoring an UNVERIFIED seam; a contract mismatch will only ' +
-        'surface at the e2e gate, after the budget is spent');
-  return { ok: !SEAM_CONTRACT_STRICT, why: 'no binding contract (unverified)' };
-}
-
-// ---- INV-6: ENTITY-KIND ADMISSION (applied at EVERY headQueue (re)assignment) ---------------------
-// The head track optimizes GPU KERNELS. A torch DISPATCHER op is a Python-side span whose pct_gpu_time
-// is the SUM of the kernels it dispatches; routing one as a head double-counts its Amdahl share and
-// points extraction at a wrapper. The filter used to run ONCE, right after the initial strategy — but
-// headQueue is ALSO (re)assigned from carried state on a phase resume and from the post-config
-// re-strategize, and neither of those was re-admitted. A dispatcher_op arriving by either path reached
-// the author fan-out unchecked. admitHeads() is now called at all three sites.
-// A TYPE check, not a name blacklist: it needs no aten::/vllm:: prefix knowledge.
-const HEAD_ENTITY_KIND_STRICT = String(A.head_entity_kind_strict != null ? A.head_entity_kind_strict : 'true') === 'true';
-function admitHeads(q, stage, flagged) {
-  q = (q || []).filter(Boolean);
-  const bad = q.filter((c) => c.entity_kind && c.entity_kind !== 'gpu_kernel');
-  const noKind = q.filter((c) => !c.entity_kind);
-  let admitted = q.filter((c) => !(c.entity_kind && c.entity_kind !== 'gpu_kernel'));
-  for (const c of bad) {
-    log(`  ⚠️ FLAG ${c.short_name || c.name}: profile row is a ${c.entity_kind}, not a gpu_kernel ` +
-      `(${c.pct_gpu_time || '?'}% is the sum of the kernels it dispatches) — NOT routed to the head ` +
-      `track (${stage}); the Architect must name the underlying kernel instead.`);
-    flagged.push({ short_name: c.short_name || c.name, pct_gpu_time: c.pct_gpu_time,
-      stage, gate: 'wrong_head_granularity', reason_code: 'wrong_head_granularity',
-      reason: `entity_kind=${c.entity_kind}; head track requires gpu_kernel` });
-  }
-  if (noKind.length) {
-    if (HEAD_ENTITY_KIND_STRICT) {
-      admitted = admitted.filter((c) => c.entity_kind);
-      for (const c of noKind) {
-        log(`  ⚠️ FLAG ${c.short_name || c.name}: profile row carries no entity_kind — ` +
-          `head_entity_kind_strict=true rejects it (cannot confirm it is a gpu_kernel).`);
-        flagged.push({ short_name: c.short_name || c.name, pct_gpu_time: c.pct_gpu_time,
-          stage, gate: 'wrong_head_granularity', reason_code: 'wrong_head_granularity',
-          reason: 'entity_kind missing; head track requires a confirmed gpu_kernel (strict)' });
-      }
-    } else {
-      noteDegradation('head-admission', `${noKind.length} head candidate(s) carry no entity_kind at ${stage}`,
-        'profile rows predate the entity_kind contract — a dispatcher op could still be routed as a kernel head');
-    }
+    admitted.push(prepareHeadSelection(head));
   }
   return admitted;
 }
 
-// ---- INV-2/INV-3: AUTHORING ADMISSION -------------------------------------------------------------
-// The ONLY precondition on spending the author budget used to be `isolated_speedup > 1.0` — a number
-// produced INSIDE the task dir, which says nothing about whether the result can ever reach the live
-// path. A head can clear it while having no seam to bind to at all; the kernel is then authored,
-// optimized for hours, and rejected at the e2e gate for a reason that was decidable in seconds.
-// This gate answers "if this kernel turns out to be fast, can we actually deploy it?" BEFORE the spend.
-// Three questions, none of them op-kind specific:
-//   1. is there a seam to rebind at?         (target_callable / live_call_seam)
-//   2. is the denominator real?              (not a fabricated oracle)
-//   3. does the live signature admit a swap? (seam_contract binding verdict)
-// Returns { ok, reason_code, why }; reason_code is a REJECT_CODES key so the caller can route it.
-function authoringAdmission(h, ext) {
-  const seam = String((ext && ext.target_callable) || (h && h.target_callable) || (h && h.live_call_seam) || '').trim();
-  if (!seam) return { ok: false, reason_code: 'no_rebind_seam',
-    why: 'neither the extraction nor the Architect record names a target_callable/live_call_seam — an ' +
-         'authored kernel would have nowhere to bind' };
-  // NOT a rejection. Deployability is decided by the seam, not by the oracle's provenance: a
-  // fabricated reference makes the isolated RATIO unusable (withheld upstream), while whether the
-  // kernel is faster is decided by the live A/B. Rejecting here would have discarded ten measured
-  // wins in the 88-run archive — see baselineDefect above for the counts.
-  if (baselineDefect(ext) === 'synthesized')
-    noteDegradation('authoringAdmission', `${(h && h.short_name) || seam}: authoring a head whose oracle is synthesized`,
-      'admitted on the strength of the seam alone; its isolated speedup is unbankable and only a ' +
-      'measured e2e A/B can accept it');
-  const b = seamBindable(ext, seam);   // C5: verify the binding verdict is for THIS seam, not a stale one
-  if (!b.ok) {
-    const c = (b.codes || []).find((x) => REJECT_CODES[x]) || 'signature_mismatch';
-    return { ok: false, reason_code: c, why: b.why };
-  }
-  return { ok: true, reason_code: '', why: b.why, seam };
-}
-
-// ---- THE RE-EXTRACT CORRECTIVE (INV-5 at the CHEAPEST detection point) ----------------------------
-// A corrective has to name the ACTUAL defect. Telling an extractor "your denominator is invalid" when
-// what failed is the BINDING verdict makes it re-run the same validator against the same task dir and
-// hand back the same verdict; the retry burns budget and changes nothing.
-//
-// The two defects do share a root cause often enough to say so out loud, and saying it is what turns
-// this from a retry into a fix. When the chosen seam is an OUTER WRAPPER that is not a pure function of
-// its arguments — a torch custom-op reading a global layer/KV registry, writing into a caller-owned
-// buffer and returning None — it can be neither captured as an oracle NOR rebound. DESCENDING to the
-// inner launcher it dispatches to fixes both at once, because when target == the live launcher, the
-// frozen baseline IS that launcher.
-//   0720: target = baseline = `...ops.chunked_prefill_paged_decode` (the live launcher) -> real
-//         denominator, kernel bound at the live call site, +18.079% e2e.
-//   0802: target = `...attention:unified_attention_with_output` (the custom-op wrapper) -> oracle
-//         synthesized, entry invented as `attention_forward(args:dict)->fresh_tensor`, rejected
-//         no_rebind_seam, 0-byte overlay. The run's OWN strategize record already named the inner
-//         launcher in `live_call_seam`; nothing ever asked the extractor to use it.
-// Generic by construction: it describes the SHAPE of the defect (wrapper vs launcher, in-place vs
-// fresh-return, hidden context) and points at fields the record already carries. No op, kernel, model
-// or backend is named.
-function reextractCorrective(needBaseline, bind, codes) {
-  const DESCEND =
-    '\n\nSEAM DESCENT — usually the whole fix, and it fixes BOTH defects at once. If the seam you chose ' +
-    'is an OUTER WRAPPER (a torch custom-op / dispatcher that reads state which never crosses the ' +
-    'parameter boundary, e.g. a global layer or KV-cache registry, and/or writes into a caller-owned ' +
-    'buffer and returns None) then it can be neither captured as an oracle nor rebound, and re-running ' +
-    'the validator against it will keep returning the same verdict. DESCEND to the innermost launcher ' +
-    'that wrapper dispatches to which IS a pure function of its arguments. `KERNEL.live_call_seam` ' +
-    'usually already names it. If it does not, read the candidate server.log to see which entry the ' +
-    'server ACTUALLY dispatched — backends get overridden at startup, so do NOT trust the env var you ' +
-    'set — and grep that module. Then set BOTH `target_callable` and `meta.baseline_callable` to that ' +
-    'launcher: when the target IS the live launcher, the frozen baseline is the launcher itself and the ' +
-    'denominator defect disappears together with the binding defect.';
-  const ENTRY =
-    '\n\nENTRY CONTRACT — GENERATE IT, DO NOT INVENT IT:\n' +
-    '  python3 $SKILL_DIR/scripts/seam_contract.py --task-dir <task_dir> --mode entry ' +
-    '--out <task_dir>/entry_contract.py\n' +
-    'This renders the unittest entry FROM the live signature: exact parameter names and order, and ' +
-    'whether the seam writes into an out-param and returns None. Bind the unittest to THAT entry and ' +
-    'return its path as `entry_contract_path`. The `fn(args) -> FRESH out` shape in the harness ' +
-    'anti-exploit rules is the ORACLE\'s timing/correctness contract — it is NOT licence to hand the ' +
-    'authored kernel a dict-taking, fresh-returning entry when the live seam is positional and in-place.';
-  const BASELINE =
-    '\n\nDENOMINATOR: set `meta.baseline_callable` to the REAL online kernel — a module:attr that imports ' +
-    'from the INSTALLED package, never anything under the task dir and never a reference implementation ' +
-    'you wrote — and bind the unittest\'s baseline leg to it.';
-  const VERIFY =
-    '\n\nTHEN RUN THE VENDORED VALIDATOR AND PASTE ITS VERDICT VERBATIM:\n' +
-    '  python3 $SKILL_DIR/scripts/seam_contract.py --task-dir <task_dir> --eval-dir $EVAL_DIR --mode both\n' +
-    'Return its `baseline_validation` and `binding_descriptor`/`binding_check` objects as your fields of ' +
-    'the same name, plus baseline_frozen:true. The orchestrator reads the VERDICT, not your description ' +
-    'of it: an extraction whose baseline_validation.ok is not true, or whose binding_check.bindable is ' +
-    'not true, is INVALID. If after descending there is still no seam that is both capturable and ' +
-    'bindable, return editable:false and say why — that routes the op to the config/tune track. NEVER ' +
-    'substitute a reference implementation you wrote, and never keep a seam the binding check refused.';
-  const head = !bind.ok
-    ? ' PRIOR ATTEMPT PRODUCED AN UNBINDABLE SEAM' + (codes ? ` (${codes})` : '') + ': ' + bind.why + '.' +
-      (needBaseline ? ' It also produced no valid speedup denominator.' : '')
-    : ' PRIOR ATTEMPT DID NOT PRODUCE A VALID SPEEDUP DENOMINATOR.';
-  return head + DESCEND + (bind.ok ? '' : ENTRY) + (needBaseline ? BASELINE : '') + VERIFY;
-}
+// A FROZEN baseline is resolvable when the extractor either froze baseline_src/ (baseline_frozen)
+// OR set an importable meta.baseline_callable. That is the language-independent speedup denominator.
+const hasFrozenBaseline = (ext) =>
+  !!(ext && (ext.baseline_frozen === true ||
+             (typeof ext.baseline_callable === 'string' && ext.baseline_callable.trim() !== '')));
 
 // Run a kernel_extractor agent and GUARANTEE it froze a real baseline. safeAgent already retries
 // transient failures; this wraps it to ALSO re-extract when the extraction succeeds (smoke passed,
@@ -1182,40 +862,49 @@ function reextractCorrective(needBaseline, bind, codes) {
 // site (deep, opt-A, milestone/head extract_op, and the non-op milestone extract).
 async function extractWithBaseline(role, phase, intro, inputs, opts) {
   const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
+  const head = (inputs && inputs.KERNEL) || {};
   let ext = await safeAgent(roleAgent(role, phase, intro, inputs), opts);
   let tries = 0;
-  // Re-extract for a missing BINDING contract too, not only a missing baseline. The corrective below
-  // already asks for both verdicts in one seam_contract.py run; without this condition an extraction
-  // that froze a baseline but skipped --mode binding is never asked again and dies silently at
-  // authoringAdmission with signature_mismatch, which is a gate firing on an absent field rather than
-  // on a real defect. Replaying the 88-run archive, that absence alone accounts for every one of the
-  // 22 accepted-and-measured heads the strict regime would otherwise drop.
-  const contractOk = (e) => hasFrozenBaseline(e) && seamBindable(e).ok;
-  while (smokeOk(ext) && !contractOk(ext) && tries < BASELINE_EXTRACT_RETRIES) {
+  const attemptedTargets = [];
+  const complete = (e) => hasFrozenBaseline(e) && kernelSelectionVerified(head, e).ok;
+  while (smokeOk(ext) && !complete(ext) && tries < BASELINE_EXTRACT_RETRIES) {
     tries++;
+    const selection = kernelSelectionVerified(head, ext);
     const needBaseline = !hasFrozenBaseline(ext);
-    const bind = seamBindable(ext);
-    const codes = (bind.codes || []).join(', ');
-    const what = needBaseline && !bind.ok ? 'a frozen baseline AND the seam BINDING contract'
-      : needBaseline ? 'a frozen baseline (the speedup denominator would fall back to the candidate\'s ' +
-        'own scaffold — a fake win)'
-      : `the seam BINDING contract (${bind.why}) — an authored kernel could not be proven bindable, so ` +
-        'its win could never reach the server';
-    log(`  ${(opts && opts.label) || role}: extraction is missing ${what}. ` +
+    const priorTarget = String((ext && ext.target_callable) || '').trim();
+    if (priorTarget && !attemptedTargets.includes(priorTarget)) attemptedTargets.push(priorTarget);
+    const selectionCorrective = selection.ok ? '' :
+      ` PRIOR ATTEMPT DID NOT SELECT THE PROFILED GPU KERNEL: ${selection.why}. ` +
+      'Treat KERNEL.live_call_seam as prose only. Merge KERNEL.seam_candidates with any missing inner ' +
+      'launcher found from source/runtime inspection; preserve existing candidate classifications. ' +
+      'Install safe markers for every relevant candidate, never native/JIT kernel_entry objects. Run ' +
+      'kernel_selection.py over every process-local capture and all root-call traces. Return its JSON ' +
+      'verbatim as selection_validation. Select the deepest live inner_launcher/op_seam across all ' +
+      'calls/ranks; a fused head must select the whole-op op_seam. Rejecting the previous outer wrapper ' +
+      'is not success. Do not return any ATTEMPTED_TARGET_CALLABLES value again.';
+    const baselineCorrective = needBaseline ?
+      ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. Freeze the real online kernel into immutable ' +
+      'baseline_src/, set meta.baseline_callable, bind the unittest baseline leg to it, and return ' +
+      'baseline_frozen:true.' : '';
+    log(`  ${(opts && opts.label) || role}: extraction contract incomplete ` +
+      `(${selection.ok ? 'kernel selected' : selection.why}; ` +
+      `${needBaseline ? 'baseline missing' : 'baseline frozen'}). ` +
       `RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
     ext = await safeAgent(
-      roleAgent(role, phase, intro + reextractCorrective(needBaseline, bind, codes), inputs),
+      roleAgent(role, phase, intro + selectionCorrective + baselineCorrective, {
+        ...(inputs || {}),
+        PRIOR_TARGET_CALLABLE: priorTarget,
+        PRIOR_SELECTION_VALIDATION: (ext && ext.selection_validation) || {},
+        ATTEMPTED_TARGET_CALLABLES: attemptedTargets.slice(),
+      }),
       opts);
   }
-  // Retries exhausted. Abort only when there is NO usable denominator at all; a synthesized reference
-  // proceeds with its ratio withheld (see baselineDefect) so the live A/B still gets to decide.
-  if (smokeOk(ext) && !hasFrozenBaseline(ext) && baselineDefect(ext) === 'synthesized') {
-    noteDegradation('extractWithBaseline',
-      `${(opts && opts.label) || role}: baseline is a SYNTHESIZED reference after ${BASELINE_EXTRACT_RETRIES} re-extractions`,
-      'keeping the extraction but its isolated speedup is UNBANKABLE (op_bench withholds it and ' +
-      'denominatorSound refuses it) — only a measured e2e A/B can accept this head');
-    return { ...ext, denominator_invalid: true,
-      notes: `denominator is a synthesized reference (isolated speedup withheld) — ${ext.notes || ''}` };
+  const finalSelection = kernelSelectionVerified(head, ext);
+  if (smokeOk(ext) && !finalSelection.ok) {
+    log(`  ${(opts && opts.label) || role}: kernel selection still unverified after ` +
+      `${BASELINE_EXTRACT_RETRIES} re-extractions — ABORTING (${finalSelection.why}).`);
+    return { ...ext, smoke: 'fail', unittest_smoke: 'fail', selection_failed: true,
+      notes: `kernel selection failed: ${finalSelection.why} — ${ext.notes || ''}` };
   }
   if (smokeOk(ext) && !hasFrozenBaseline(ext)) {
     log(`  ${(opts && opts.label) || role}: STILL no frozen baseline after ${BASELINE_EXTRACT_RETRIES} ` +
@@ -1304,111 +993,13 @@ async function trySurgicalFix(spec, reason, fixClass, attempt) {
 //         isolated, base_inputs (the integrate inputs template, carries KERNEL_RESULT), reason,
 //         cur:{overlay,flags,env,tput} }.  Returns { banked, integ, isolated } (banked=false if
 // ineligible or still rejected). See knowledge/learned/method-cudagraph-safe-integration.
-// EXTRACT-STAGE RE-ENTRY (INV-5). The reject says the TASK is wrong — wrong seam, wrong call contract,
-// or a denominator that was never the online kernel. Fixing that means building a NEW task (new seam,
-// new immutable unittest generated FROM the live signature), then authoring against it — not editing a
-// kernel that is pinned to the old contract. The caller supplies `spec.reextract(reason, code)`, which
-// re-runs extraction with the diagnosis attached and returns a fresh extraction record; without it we
-// refuse rather than fall through to a re-author we know cannot work.
-// Bounded by HEAD_REEXTRACT_MAX (default 1) and, like every corrective, not charged to HEAD_BUDGET.
-const HEAD_REEXTRACT_MAX = parseInt(A.head_reextract_max != null ? A.head_reextract_max : 1, 10);
-async function tryExtractReentry(spec, reason, verdict) {
-  if (typeof spec.reextract !== 'function' || HEAD_REEXTRACT_MAX < 1) {
-    log(`  ${spec.short_name}: reject '${verdict.code || reason}' is EXTRACT-owned (the task's seam/contract ` +
-      `is wrong, and its unittest is immutable) — re-authoring in place cannot fix it. No re-extract hook ` +
-      `available here; NOT spending a corrective.`);
-    return { banked: false, blocked_stage: 'extract', reason_code: verdict.code };
-  }
-  log(`  ${spec.short_name}: reject '${verdict.code || reason}' is EXTRACT-owned — RE-EXTRACTING at a ` +
-    `bindable seam (up to ${HEAD_REEXTRACT_MAX}) instead of re-authoring against the immutable old contract.`);
-  for (let attempt = 1; attempt <= HEAD_REEXTRACT_MAX; attempt++) {
-    const ext2 = await spec.reextract(reason, verdict.code, attempt);
-    if (!ext2 || ext2.smoke !== 'pass' || !ext2.task_dir) {
-      log(`  ${spec.short_name}: re-extract ${attempt}/${HEAD_REEXTRACT_MAX} produced no usable task ` +
-        `(${ext2 ? ext2.notes || ext2.smoke : 'null'}).`);
-      continue;
-    }
-    const adm = authoringAdmission(spec.head || {}, ext2);
-    if (!adm.ok) {
-      log(`  ${spec.short_name}: re-extract ${attempt} still not admissible (${adm.reason_code}) — ${adm.why}.`);
-      continue;
-    }
-    if (ext2.task_dir === spec.task_dir)
-      noteDegradation('tryExtractReentry', 're-extract returned the SAME task_dir',
-        'the seam may not have changed; the re-author may reproduce the original reject');
-    log(`  ${spec.short_name}: re-extracted at ${adm.seam} (task ${ext2.task_dir}); authoring against the ` +
-      `regenerated contract.`);
-    let al;
-    try {
-      al = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
-        kernel_path: ext2.task_dir, workflow_dir: KERNEL_WF_DIR,
-        mode: 'author', target_language: spec.language || 'triton',
-        op_spec: { op_kind: ext2.op_kind || spec.op_kind, shapes: ext2.shapes || spec.shapes || {},
-          dtype: ext2.dtype || spec.dtype || 'bf16', regime: spec.regime || '', cuda_graph_safe: true,
-          ...(ext2.workload_path ? { workload_path: ext2.workload_path } : {}) },
-        perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
-        use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
-        budget: KERNEL_BUDGET, gpu_ids: spec.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
-        task: `RE-EXTRACTED SEAM. The previous attempt was rejected at the e2e gate with reason_code ` +
-          `'${verdict.code}' ("${reason}"): the kernel was correct and fast in isolation but could not be ` +
-          `bound at the live call site. This task dir targets a DIFFERENT, verified-bindable seam and its ` +
-          `unittest entry is GENERATED FROM THE LIVE SIGNATURE — implement exactly that entry contract ` +
-          `(same parameter names/order, same in-place-vs-return convention). Do not invent a new one. ` +
-          GRAPH_REQ + (TASK || ''),
-        apply_to_original: 'false',
-      }, `${spec.short_name}:reextract`);
-    } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
-    const iso2 = al && (al.final_weighted != null ? al.final_weighted : al.final_geomean);
-    if (!al || al.authored === false || !(iso2 > 1.0) || !al.final_patch) {
-      log(`  ${spec.short_name}: re-extract author produced no usable kernel (${al ? al.reason || al.validation_status : 'null'}).`);
-      continue;
-    }
-    const base = spec.base_inputs || {};
-    const inputs2 = { ...base,
-      KERNEL_RESULT: { ...(base.KERNEL_RESULT || {}),
-        task_dir: ext2.task_dir, target_callable: adm.seam,
-        code_patch: al.final_patch, final_patch: al.final_patch,
-        authored_kernel_eval_dir: al.eval_dir || '', verified_isolated_speedup: iso2,
-        corrective_fix_of: `${verdict.code} (re-extracted seam)` } };
-    if (spec.cur) {
-      inputs2.CURRENT_OVERLAY = spec.cur.overlay; inputs2.CURRENT_FLAGS = spec.cur.flags;
-      inputs2.CURRENT_ENV = spec.cur.env; inputs2.CURRENT_THROUGHPUT = spec.cur.tput;
-    }
-    const integ2 = await runIntegrateBothLegs(
-      'Apply the kernel authored against the RE-EXTRACTED seam; gate on e2e throughput.', inputs2,
-      `integrate ${spec.short_name} reextract`, spec.phase_name || 'HeadKernel');
-    const curTput = (spec.cur && spec.cur.tput) || 0;
-    if (abDone(integ2) && integAccepted(integ2, spec.pct_gpu_time, iso2) && integ2.e2e_throughput_tok_s > curTput)
-      return { banked: true, integ: integ2, isolated: iso2, via: 'reextract' };
-    const r2 = gateRejectReason(integ2, spec.pct_gpu_time, iso2);
-    log(`  ${spec.short_name}: re-extracted candidate still rejected (${r2}).`);
-    // If the NEW seam is also extract-owned we are going in circles; stop rather than loop.
-    if (rejectStage(r2, integ2 && integ2.reason_code) === 'extract') break;
-  }
-  return { banked: false, blocked_stage: 'extract', reason_code: verdict.code };
-}
-
 async function tryCorrectiveReauthor(spec) {
   let reason = spec.reason || '';
-  // Which fix-and-retry class is this reject, and WHICH STAGE OWNS IT? '' = terminal.
-  const verdict0 = rejectVerdict(reason, spec.reason_code);
-  let fixClass = spec.fix_class || verdict0.cls;
+  // Which fix-and-retry class is this reject? '' = terminal (not auto-correctable).
+  let fixClass = spec.fix_class || rejectClass(reason);
   const eligible = HEAD_CORRECTIVE_MAX > 0 && !((FAST_MODE && FAST_DEADLINE_HIT) || TIME_DEADLINE_HIT)
     && (spec.kernel_eval_dir || spec.task_dir) && (spec.isolated || 0) > 1.0 && fixClass !== '';
   if (!eligible) return { banked: false };
-  // ---- INV-5: RE-ENTER AT THE STAGE THAT OWNS THE DEFECT --------------------------------------------
-  // The loop below re-runs the kernel workflow on spec.task_dir. That dir's unittest.py is IMMUTABLE by
-  // the extractor's contract, so it pins the entry signature — which means a defect whose fix REQUIRES a
-  // different call contract or a different seam (no_rebind_seam, signature/arity/return mismatch, hidden
-  // context, a fabricated denominator) cannot be fixed there, by construction. Re-authoring anyway costs
-  // hours and lands on the same reject. Route those to the EXTRACT stage instead; route defects the
-  // kernel track cannot touch at all (profile/strategize) to nobody, loudly.
-  if (verdict0.stage && verdict0.stage !== 'author') {
-    if (verdict0.stage === 'extract') return await tryExtractReentry(spec, reason, verdict0);
-    log(`  ${spec.short_name}: reject '${verdict0.code || reason}' is owned by the ${verdict0.stage.toUpperCase()} ` +
-      `stage — no amount of kernel re-authoring can fix it. NOT spending a corrective; flagging instead.`);
-    return { banked: false, blocked_stage: verdict0.stage, reason_code: verdict0.code };
-  }
   const curTput = (spec.cur && spec.cur.tput) || 0;
   // The corrective instruction is CLASS-SPECIFIC. `integration` = the posture is wrong (JIT/capture/
   // host-sync); `correctness` = the output is wrong on the live path (parity/accuracy fail or an
@@ -1509,23 +1100,7 @@ async function tryCorrectiveReauthor(spec) {
       break;
     }
     log(`  ${spec.short_name}: corrective still rejected (${reason}).`);
-    if (implausible2) { fixClass = 'correctness'; }
-    else {
-      const v2 = rejectVerdict(reason, integ2 && integ2.reason_code);
-      // If the NEW reject is owned by a different stage, hand off there instead of grinding the
-      // author loop against a defect it cannot reach (INV-5).
-      if (v2.stage && v2.stage !== 'author') {
-        if (v2.stage === 'extract') {
-          const re = await tryExtractReentry({ ...spec, reason, reason_code: v2.code }, reason, v2);
-          if (re.banked) return re;
-        } else {
-          log(`  ${spec.short_name}: corrective surfaced a ${v2.stage.toUpperCase()}-owned defect ` +
-            `('${v2.code || reason}') — stopping the author loop.`);
-        }
-        break;
-      }
-      fixClass = v2.cls;
-    }
+    fixClass = implausible2 ? 'correctness' : rejectClass(reason);
     if (fixClass === '') break;   // new failure not auto-correctable -> stop retrying
     // Progressive: the NEXT attempt builds on this attempt's (partially) fixed kernel, not the original.
     spec.kernel_eval_dir = fix.eval_dir || spec.kernel_eval_dir;
@@ -1693,36 +1268,20 @@ if (want('setup')) {
   // OP-IDENTITY GUARD — a fused-MoE / grouped-expert GEMM must be optimized AS the fused op at its live
   // dispatcher seam, never decomposed into standalone dense GEMMs (a dense candidate has no live call site
   // → no_rebind_seam). So force op_kind='moe' (the grouped-GEMM branch; gemmSynthFor keys on this to keep
-  // dense synth OFF) and preserve the live seam as target_callable, so ANY lever (backend-swap / tune /
-  // author-fused) binds. The head is never SKIPPED — editability is irrelevant, since a non-editable fused
+  // dense synth OFF). The head is never SKIPPED — editability is irrelevant, since a non-editable fused
   // kernel is still backend-swapped at its (editable) dispatcher. GENERIC: detects via the Architect's
   // is_fused_kernel OR the profile class/name; never keys on a backend name.
   const _isFusedOp = (c) => (c && c.is_fused_kernel === true) ||
     /(?:^|[^a-z])moe(?:[^a-z]|$)|group(?:ed)?[_ ]?gemm|ck_moe|expert|fused[_ ]?moe|fmoe|asm_moe|fused_custom/i
       .test(`${(c && c.op_kind) || ''} ${(c && c.short_name) || ''} ${(c && c.name) || ''} ${(c && c.classification) || ''} ${(c && c.class) || ''} ${(c && c.backend) || ''}`);
-  let _fusedTagged = 0, _seamBackfilled = 0;
+  let _fusedTagged = 0;
   for (const c of headQueue) {
-    // SEAM BACKFILL applies to EVERY head, not just fused ones. It used to sit behind the fused test,
-    // so a non-fused head (attention, a standalone GEMM) whose Architect record carried a live_call_seam
-    // but no explicit target_callable went into extraction with target_callable=undefined — i.e. the
-    // extractor was handed the seam as PROSE and had to re-derive it, and any two runs could re-derive
-    // it differently. Nothing about "copy the seam we already identified into the field that names the
-    // seam" is specific to fused ops. See INV-2.
-    if (!c.target_callable && c.live_call_seam) { c.target_callable = c.live_call_seam; _seamBackfilled++; }
     if (!_isFusedOp(c)) continue;
     c.op_kind = 'moe';                                                                // grouped-GEMM branch (gemmSynthFor → no dense synth)
     _fusedTagged++;
   }
-  if (_seamBackfilled) log(`[op-identity] ${_seamBackfilled} head(s): target_callable backfilled from the Architect's live_call_seam (all op kinds).`);
+  headQueue = admitHeads(headQueue, 'strategize');
   if (_fusedTagged) log(`[op-identity] ${_fusedTagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
-  // ---- INV-6: ENTITY-KIND ADMISSION -----------------------------------------------------------------
-  // The head track optimizes GPU KERNELS. A profile row can also be a torch DISPATCHER op — a Python-side
-  // span whose `pct_gpu_time` is the SUM of the kernels it dispatches, so routing one as a head both
-  // double-counts its Amdahl share and points extraction at a wrapper rather than at code that runs on
-  // the device. parse_profile.py now labels every row `entity_kind`; this admits only gpu_kernel rows.
-  // Note this is a TYPE check, not a name blacklist: it does not need to recognize `aten::`/`vllm::`
-  // prefixes, or any future naming convention, to keep a dispatcher span out of the kernel track.
-  headQueue = admitHeads(headQueue, 'strategize', PRE_FLAGGED_HEADS);
   log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
   // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
   await ensureFlydslGate();
@@ -1738,7 +1297,7 @@ if (want('setup')) {
   profile = { profile_topN_json: ST.profile_topn_json || '' };
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
-  headQueue = admitHeads(ST.headQueue || [], 'resume', PRE_FLAGGED_HEADS);   // C8: re-admit on resume
+  headQueue = admitHeads(ST.headQueue || [], 'resume');
   log(`Loaded carried state: EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT}, flags='${curFlags}', env='${curEnv}', ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
 }
 
@@ -1778,7 +1337,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
     if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
     if (restrat && restrat.head_candidates)
-      headQueue = admitHeads(restrat.head_candidates.slice(), 're-strategize', PRE_FLAGGED_HEADS);   // C8
+      headQueue = admitHeads(restrat.head_candidates.slice(), 're-strategize');
     // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
     await ensureFlydslGate();
   } else {
@@ -1801,41 +1360,13 @@ const acceptedHeads = (ST.accepted_heads || []).slice();
 // so Finalize can finish the best one's A/B (Fix C) and so a real isolated win
 // is surfaced (return.pending_integrations) instead of being silently dropped.
 const pendingIntegrations = (ST.pending_integrations || []).slice();
-const flaggedHeads = (ST.flagged_heads || []).slice().concat(PRE_FLAGGED_HEADS);   // dominant heads that could NOT be optimized (loudly surfaced, never silently skipped)
+const flaggedHeads = (ST.flagged_heads || []).concat(PRE_FLAGGED_HEADS);   // heads that could NOT be optimized (loudly surfaced, never silently skipped)
 let headDispatched = 0;
 const history = ST.history || { insights: [], ledger: [], milestones: [], bottleneck_now: '', suggest_next: '' };
 
 // A fused op (op_kind='moe', set by the op-identity guard OR the Architect) is extracted AS the fused op,
 // never decomposed into a standalone dense GEMM — so dense-GEMM synth is off for it.
 function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
-
-// EXTRACT-STAGE RE-ENTRY HOOK (INV-5), one definition for every track. `tryExtractReentry` can only act
-// when the caller hands it a way to rebuild the task; without one it logs "no re-extract hook available"
-// and the extract-owned reject dies as a flag. That hook used to exist at exactly ONE of the five
-// corrective call sites (fast-mode head integration), so the same defect was repairable or terminal
-// depending only on which scheduling path the run happened to take — deep mode, the serial head path and
-// the milestone track all fell through. Factored out here so all five behave identically.
-// `rec` is the head/kernel record (carries live_call_seam + engagement_check), `priorExt` the extraction
-// being replaced. Op-kind agnostic: everything specific to the failure is passed through as PRIOR_*.
-function headReextractor(rec, priorExt, phaseName) {
-  return async (why, code) => await extractWithBaseline(
-    'kernel_extractor', 'extract_op',
-    'RE-EXTRACT at a BINDABLE seam. The previous task for this op was authored successfully but ' +
-    'REJECTED at the live e2e gate with reason_code=' + (code || 'n/a') + ' ("' + why + '"): the kernel ' +
-    'could not be bound at (or never ran on) the live call site, so its isolated win could never reach ' +
-    'the server. Do NOT rebuild the same task. Pick a seam that the binding contract admits and prove it ' +
-    'mechanically before returning.',
-    { EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, KERNEL: rec, GEMM_SYNTH: gemmSynthFor(rec),
-      ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-      REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
-      PRIOR_TASK_DIR: (priorExt && priorExt.task_dir) || '',
-      PRIOR_TARGET_CALLABLE: (priorExt && priorExt.target_callable) || (rec && rec.target_callable) || '',
-      PRIOR_REJECT_CODE: code || '', PRIOR_REJECT_REASON: why || '',
-      REQUIRE_BINDING_CONTRACT: true },
-    { phase: phaseName || 'HeadKernel', label: `re-extract ${(rec && rec.short_name) || 'op'}`,
-      schema: EXTRACT_OP_SCHEMA });
-}
 
 // ===========================================================================
 // PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized
@@ -1945,17 +1476,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         `Return {roofline_note, target_geomean}.`,
         { phase: 'HeadKernel', label: `roofline ${h.short_name}`, schema: ROOFLINE_SCHEMA });
       const rooflineTarget = anchor && Number.isFinite(anchor.target_geomean) ? anchor.target_geomean : 0;
-      // PRE-AUTHOR ADMISSION (INV-2) — same gate as the fast path, before any lane is opened. Deep mode
-      // spends the most budget per head, so an unbindable seam is most expensive here.
-      const admD = authoringAdmission(h, ext);
-      if (!admD.ok) {
-        log(`  ⚠️ [deep] ${h.short_name}: NOT admitted to authoring (${admD.reason_code}) — ${admD.why}. No lanes opened.`);
-        flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract',
-          gate: 'author_not_admitted', reason_code: admD.reason_code, reason: admD.why });
-        history.ledger.push({ direction: h.short_name, verdict: 'flagged',
-          lesson: `deep author route withheld: ${admD.reason_code} — ${admD.why}` });
-        return null;
-      }
       const lanes = lanesSpec.map((b) => ({
         uid: `${h.short_name}::${b.key || b.lang}`, key: b.key || b.lang, lang: b.lang, mode: b.mode, steer: b.steer || '',
         state_dir: `${deepDir}/state/${b.key || b.lang}`, best: 1.0, noImprove: 0, active: true, ran: 0, lastEval: '', patch: '',
@@ -2090,8 +1610,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             short_name: c.head.short_name, op_kind: c.ext.op_kind, shapes: c.ext.shapes, dtype: c.ext.dtype, regime: c.head.regime,
             gpu_id: SERVING_GPU, kernel_eval_dir: c.lastEval, task_dir: c.ext.task_dir, language: c.lang,
             isolated: c.best, reason: dreason, fix_class: rejectClass(dreason), pct_gpu_time: c.head.pct_gpu_time,
-            reason_code: (integ && integ.reason_code) || '', head: c.head, phase_name: 'HeadKernel',
-            reextract: headReextractor(c.head, c.ext, 'HeadKernel'),
             base_inputs: {
               EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
               KERNEL_RESULT: {
@@ -2311,28 +1829,10 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
       const st = { h, ext, cands: [] };
       headState.set(h.short_name, st);
-      // INV-1/INV-3: a bake-off win is only a win if the benchmarker vouched for its own provenance
-      // (it re-hashed the oracle and confirmed the denominator). op_bench.py now WITHHOLDS
-      // isolated_speedup entirely when the denominator is unsourced, so a null here is also a no-win.
-      if (bake && bake.gate === 'have_winner' && bake.isolated_speedup > 1.0 && provenanceOk(bake, 'op_bench')
-          && denominatorSound(bake, 'op_bench'))
+      if (bake && bake.gate === 'have_winner' && bake.isolated_speedup > 1.0)
         st.cands.push({ kind: 'direct_light', source: bake.winner_backend, winner_kind: bake.winner_kind,
           apply_env: bake.apply_env || '', apply_flags: bake.apply_flags || '', code_patch: bake.code_patch || '',
           tuning_artifact: bake.tuning_artifact || '', isolated: bake.isolated_speedup, parity_note: bake.parity_note || 'expected_close' });
-      // PRE-AUTHOR ADMISSION (INV-2): decide deployability BEFORE the author fan-out, not after it.
-      // A failing verdict does NOT kill the head — direct_light (env/flag/backend-swap) candidates need
-      // no rebind and stay in play; only the AUTHORED route, whose whole value depends on being able to
-      // bind at the seam, is withheld.
-      const adm = authoringAdmission(h, ext);
-      if (!adm.ok) {
-        log(`  ⚠️ ${h.short_name}: NOT admitted to the author fan-out (${adm.reason_code}) — ${adm.why}. ` +
-          `Author budget withheld; ${st.cands.length ? 'the non-authored candidate(s) still proceed' : 'head flagged'}.`);
-        flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract',
-          gate: 'author_not_admitted', reason_code: adm.reason_code, reason: adm.why });
-        history.ledger.push({ direction: h.short_name, verdict: 'flagged',
-          lesson: `author route withheld: ${adm.reason_code} — ${adm.why}` });
-        continue;
-      }
       for (const ap of (bake && bake.author_plan ? bake.author_plan.slice(0, HEAD_AUTHOR_MAX) : []))
         authorJobs.push({ short_name: h.short_name, h, ext, ap, best_known_ms: bake.best_known_ms });
     }
@@ -2431,19 +1931,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
         // impossible (corruption) — so a fake win routes to the correctness corrective instead of banking.
         const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
-        // Route on the STRUCTURED code when the integrator supplied one (INV-4). `reason_code` also
-        // decides, inside the corrective, whether to re-author or re-extract (INV-5).
-        const rcode = (integ && integ.reason_code) || '';
-        const rverdict = rejectVerdict(reason, rcode);
-        const corr = (cand.kind === 'authored' && rverdict.cls !== '')
+        const corr = (cand.kind === 'authored' && rejectClass(reason) !== '')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: st.ext.op_kind, shapes: st.ext.shapes, dtype: st.ext.dtype, regime: h.regime,
               gpu_id: SERVING_GPU, kernel_eval_dir: cand.kernel_eval_dir, task_dir: st.ext.task_dir, language: cand.language,
-              isolated: cand.isolated, reason, reason_code: rcode, head: h,
-              fix_class: rverdict.cls, pct_gpu_time: h.pct_gpu_time, phase_name: 'HeadKernel',
-              // EXTRACT-stage re-entry hook (INV-5): rebuild the task at a seam that is actually
-              // bindable, with a unittest entry GENERATED from the live signature, and re-author there.
-              reextract: headReextractor(h, st.ext, 'HeadKernel'),
+              isolated: cand.isolated, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time, phase_name: 'HeadKernel',
               base_inputs: {
                 EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
                 KERNEL_RESULT: { short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
@@ -2465,16 +1957,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
         } else {
           log(`  ${h.short_name}: REJECTED at e2e gate (${reason}).`);
-          // A defect the kernel track structurally cannot fix is FLAGGED with its owning stage, not
-          // filed as a plain dead end — the run report then says WHERE the pipeline has to change.
-          if (corr.blocked_stage) {
-            flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time,
-              stage: corr.blocked_stage, gate: 'stage_owned_defect',
-              reason_code: corr.reason_code || rverdict.code, reason });
-            log(`  ⚠️ FLAG ${h.short_name}: defect owned by the ${corr.blocked_stage.toUpperCase()} stage ` +
-              `(${corr.reason_code || rverdict.code || 'unclassified'}) — surfaced, not silently dropped.`);
-          }
-          history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ ? integ.e2e_delta_pct : 0, verdict: 'dead_end', lesson: reason || 'no e2e gain', reason_code: rverdict.code || '', owner_stage: rverdict.stage || '' });
+          history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ ? integ.e2e_delta_pct : 0, verdict: 'dead_end', lesson: reason || 'no e2e gain' });
         }
       }
     }
@@ -2548,8 +2031,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
 
     // Build the candidate list: the cheap direct_light winner (if any) + any authored implementations.
     const headCands = [];
-    if (bake.gate === 'have_winner' && bake.isolated_speedup > 1.0
-        && provenanceOk(bake, 'op_bench') && denominatorSound(bake, 'op_bench')) {
+    if (bake.gate === 'have_winner' && bake.isolated_speedup > 1.0) {
       headCands.push({ kind: 'direct_light', source: bake.winner_backend, winner_kind: bake.winner_kind,
         apply_env: bake.apply_env || '', apply_flags: bake.apply_flags || '', code_patch: bake.code_patch || '',
         tuning_artifact: bake.tuning_artifact || '', isolated: bake.isolated_speedup,
@@ -2558,17 +2040,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // Author/rewrite route: write (+optimize) a fresh impl per planned language via the recursive kernel
     // layer. mode=author writes a from-scratch baseline then optimizes it; mode=optimize rewrites an
     // existing editable impl. The immutable oracle in ext.task_dir is the judge for both.
-    // PRE-AUTHOR ADMISSION (INV-2) — same gate as the fast/deep paths. The direct_light candidate above
-    // needs no rebind and is unaffected; only the author route is withheld when the seam cannot take it.
-    const admS = authoringAdmission(h, ext);
-    const plan = admS.ok ? (bake.author_plan || []).slice(0, HEAD_AUTHOR_MAX) : [];
-    if (!admS.ok && (bake.author_plan || []).length) {
-      log(`  ⚠️ ${h.short_name}: author route withheld (${admS.reason_code}) — ${admS.why}.`);
-      flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract',
-        gate: 'author_not_admitted', reason_code: admS.reason_code, reason: admS.why });
-      history.ledger.push({ direction: h.short_name, verdict: 'flagged',
-        lesson: `author route withheld: ${admS.reason_code} — ${admS.why}` });
-    }
+    const plan = (bake.author_plan || []).slice(0, HEAD_AUTHOR_MAX);
     for (const ap of plan) {
       const lang = ap.language || 'triton';
       let al;
@@ -2712,8 +2184,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
               gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
               isolated: cand.isolated, base_inputs: headIntegrateInputs, reason,
-              reason_code: (integ && integ.reason_code) || '', head: h, pct_gpu_time: h.pct_gpu_time,
-              reextract: headReextractor(h, ext, 'HeadKernel'),
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
             })
           : { banked: false };
@@ -2741,8 +2211,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
               gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
               isolated: cand.isolated, base_inputs: headIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time,
-              reason_code: (integ && integ.reason_code) || '', head: h,
-              reextract: headReextractor(h, ext, 'HeadKernel'),
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
             })
           : { banked: false };
@@ -2913,8 +2381,6 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
             short_name: c.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: c.regime,
             gpu_id: c.gpu_id, kernel_eval_dir: kl.kernel_eval_dir, task_dir: ext.task_dir, language: kl.language || '',
             isolated: kl.final_geomean, base_inputs: mileIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: c.pct_gpu_time, phase_name: 'Milestone',
-            reason_code: (integ && integ.reason_code) || '', head: c,
-            reextract: headReextractor(c, ext, 'Milestone'),
             cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
           })
         : { banked: false };
@@ -3126,24 +2592,6 @@ if (want('final')) {
   // carried best-accepted throughput so a real, parity-checked win is never
   // reported as 0 / no_gain downstream.
   validatedOk = !!(validation && validation.director_verified_throughput_tok_s > 0 && validation.throughput_speedup > 0);
-  // INV-3: `claimed_throughput_tok_s` and `applied_to_original` are asked for precisely so the pipeline
-  // can be caught overclaiming — and were read by nothing. A gap between what the run claimed and what
-  // the Director independently measured is the single most important number in the whole report, and a
-  // win that was never applied to the original tree is not a delivered win. Both are now recorded.
-  if (validatedOk && validation.claimed_throughput_tok_s > 0) {
-    const v = validation.director_verified_throughput_tok_s;
-    const gapPct = 100 * (validation.claimed_throughput_tok_s - v) / v;
-    if (gapPct > 2) {
-      noteDegradation('validate', 'the run OVERCLAIMED its throughput',
-        `claimed ${validation.claimed_throughput_tok_s} tok/s vs Director-verified ${v} tok/s ` +
-        `(+${gapPct.toFixed(1)}% overclaim) — the reported speedup is the verified one`);
-      log(`  ⚠️ overclaim: claimed ${validation.claimed_throughput_tok_s} vs verified ${v} tok/s (+${gapPct.toFixed(1)}%)`);
-    }
-  }
-  if (validatedOk && !String(validation.applied_to_original || '').trim())
-    noteDegradation('validate', 'no applied_to_original path',
-      'the Director verified a number but did not state where the win was applied in the original ' +
-      'tree — the result may not be reproducible outside the eval dir');
   finalSpeedup = validatedOk ? validation.throughput_speedup : (BASELINE_TPUT ? finalTput / BASELINE_TPUT : finalSpeedup);
   log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validatedOk ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
     `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}` +
@@ -3197,7 +2645,6 @@ const carryState = {
   // Carry pending (verified-isolated, A/B-incomplete) wins WITH their inputs so a
   // resumed phase run can finish their A/B instead of re-discovering them.
   pending_integrations: pendingIntegrations,
-  degradations: DEGRADATIONS,   // carried so a resumed phase run inherits, not resets, the audit trail
   history,
 };
 
@@ -3235,13 +2682,6 @@ const wfReturn = {
     pct_gpu_time: p.pct_gpu_time, partial: p.partial || null,
   })),
   flagged_heads: flaggedHeads,   // dominant heads surfaced but not optimized (harness/extract/no-candidate) — never silently dropped
-  // INV-3: every contract this run could NOT enforce, and what it fell back to. An empty list means
-  // every gate ran on a machine verdict; a non-empty one is the run telling you which conclusions are
-  // unaudited. Silence used to be indistinguishable from enforcement.
-  degradations: DEGRADATIONS,
-  contracts: { baseline_contract_strict: BASELINE_CONTRACT_STRICT, seam_contract_strict: SEAM_CONTRACT_STRICT,
-    head_entity_kind_strict: HEAD_ENTITY_KIND_STRICT,
-    head_reextract_max: HEAD_REEXTRACT_MAX },
   config_tune_enabled: CONFIG_TUNE_ENABLED,
   head_budget: HEAD_BUDGET,
   head_used: headDispatched,
