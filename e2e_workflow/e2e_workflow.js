@@ -33,6 +33,21 @@ const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
 // worker = 3 levels) and the runtime forbids it. The worker's behavior/args are unchanged.
 const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 
+// The kernel workflow's learned KB is OFF by default for lanes launched from here, and ON by default
+// when kernel_workflow is driven directly. Same worker, different prior: a kernel_workflow campaign
+// re-optimizes a fixed benchmark set, where a card distilled from a past run of the same kernel is
+// the point; e2e extracts whatever the profiler happens to surface from a live server, and a card
+// carrying another run's conclusions about a superficially similar op is a prior nobody asked for.
+// Off is also the conservative default for the layer that has never been measured with it on.
+// Override per run with args.use_learned_kb=true.
+const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb : 'false');
+
+// EVERY nested lane invocation goes through here. Setting the flag at each call site instead would
+// be the defect this repo keeps re-making — there are seven call sites today, and the eighth would
+// silently take the lane's own default (on) with nothing to catch it. test_e2e_lane_defaults.py
+// fails if a `scriptPath: KERNEL_WF_SCRIPT` call is added that does not route through this.
+const laneArgs = (wfArgs) => ({ use_learned_kb: LANE_USE_LEARNED_KB, ...wfArgs });
+
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
@@ -381,8 +396,9 @@ const E2E_REPEATS = parseInt(A.e2e_repeats != null ? A.e2e_repeats : 2, 10);
 // This is what guarantees "every A/B runs ref AND cand to completion regardless
 // of pass/fail" — general, not per-kernel. Bump via args.ab_finish_retries.
 const AB_FINISH_RETRIES = parseInt(A.ab_finish_retries != null ? A.ab_finish_retries : 3, 10);
-// A resolvable FROZEN baseline (baseline_src/ frozen OR importable meta.baseline_callable) is the
-// speedup DENOMINATOR and is MANDATORY. If an extraction smoke-passes but froze no baseline, the
+// A resolvable FROZEN baseline (a seeded baseline_overlay/ + a declared meta.candidate_bind, or an
+// importable meta.baseline_callable on the op track) is the speedup DENOMINATOR and is MANDATORY.
+// If an extraction smoke-passes but froze no baseline, the
 // unittest would silently time the candidate against its own naive same-language scaffold (the
 // "optimized-HIP vs naive-HIP = fake 15.7× isolated, ~0% e2e" bug). When that happens we RE-EXTRACT
 // up to this many times; if still missing, the extraction is treated as a FAILURE (flag dominant /
@@ -469,14 +485,17 @@ const EXTRACT_OP_SCHEMA = obj({
   candidate_backends: arrStr, reference_io_sha256: { type: 'string' },
   target_callable: { type: 'string' }, // module:attr rebind seam for an authored kernel ('' if none)
   baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
-  baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
+  baseline_frozen: { type: 'boolean' }, // true only when baseline_callable resolves outside the task dir
   smoke: { type: 'string' }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
 const OPBENCH_SCHEMA = obj({
   short_name: { type: 'string' }, op_kind: { type: 'string' }, provenance_ok: { type: 'boolean' },
   winner_backend: { type: 'string' }, winner_kind: { type: 'string' },
-  isolated_speedup: { type: 'number' }, winner_editable: { type: 'boolean' },
+  // null when nothing was timed -- a speedup is a measurement, and 0.0 read as
+  // 'benched, not faster'. `measured` is the discriminator; gate on it, not on the number.
+  isolated_speedup: { type: ['number', 'null'] }, measured: { type: 'boolean' },
+  winner_editable: { type: 'boolean' },
   best_known_ms: { type: 'number' },
   recommend_tier_c: { type: 'boolean' }, author_plan: arrObj, tuning_artifact: { type: 'string' },
   apply_env: { type: 'string' }, apply_flags: { type: 'string' }, code_patch: { type: 'string' },
@@ -490,8 +509,11 @@ const EXTRACT_SCHEMA = obj({
   source_path_in_sglang: { type: 'string' }, target_callable: { type: 'string' },
   num_cases: { type: 'number' }, regimes_captured: arrStr, candidate_backends: arrStr,
   build: { type: 'boolean' }, unittest_smoke: { type: 'string' },
-  baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
-  baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
+  // the baseline leg is an ENVIRONMENT (baseline_overlay/ = a frozen CURRENT_OVERLAY snapshot), and
+  // candidate_bind is the ONE entry layered on top of it to make the candidate leg.
+  candidate_bind: { type: 'object', additionalProperties: true },
+  baseline_overlay: { type: 'string' },
+  baseline_frozen: { type: 'boolean' }, // true only when baseline_overlay/ was seeded AND candidate_bind is declared
   reference_io_sha256: { type: 'string' }, notes: { type: 'string' },
 }, ['editable', 'task_dir', 'unittest_smoke']);
 
@@ -707,10 +729,12 @@ async function ensureFlydslGate() {
   }
 }
 
-// A FROZEN baseline is resolvable when the extractor either froze baseline_src/ (baseline_frozen)
-// OR set an importable meta.baseline_callable. That is the language-independent speedup denominator.
+// A FROZEN baseline is resolvable when the extractor seeded baseline_overlay/ + declared
+// meta.candidate_bind (kernel track), or set an importable meta.baseline_callable (op track).
+// That is the language-independent speedup denominator.
 const hasFrozenBaseline = (ext) =>
   !!(ext && (ext.baseline_frozen === true ||
+             (ext.candidate_bind && typeof ext.candidate_bind === 'object') ||
              (typeof ext.baseline_callable === 'string' && ext.baseline_callable.trim() !== '')));
 
 // Run a kernel_extractor agent and GUARANTEE it froze a real baseline. safeAgent already retries
@@ -728,14 +752,14 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
   while (smokeOk(ext) && !hasFrozenBaseline(ext) && tries < BASELINE_EXTRACT_RETRIES) {
     tries++;
     log(`  ${(opts && opts.label) || role}: extraction froze NO baseline ` +
-      `(baseline_src/ or meta.baseline_callable) — the speedup denominator would fall back to the ` +
+      `(baseline_overlay/ + meta.candidate_bind) — the speedup denominator would fall back to the ` +
       `candidate's own scaffold (fake-win). RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
     ext = await safeAgent(
       roleAgent(role, phase,
-        intro + ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. You MUST freeze the real online kernel into ' +
-        'an immutable baseline_src/ and set meta.baseline_callable (the speedup denominator), bind the ' +
-        "unittest's baseline leg to it, then return baseline_frozen:true. An extraction with no frozen " +
-        'baseline is INVALID and will be discarded.',
+        intro + ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. You MUST seed baseline_overlay/ from ' +
+        'CURRENT_OVERLAY (the live serving stack = the speedup denominator), declare meta.candidate_bind ' +
+        '(the ONE overlay entry built from kernel_src/), prove both legs differ via h.assert_legs_differ, ' +
+        'then return baseline_frozen:true. An extraction with no frozen baseline is INVALID and will be discarded.',
         inputs),
       opts);
   }
@@ -744,7 +768,7 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
       `re-extractions — ABORTING this extraction (refusing a fake speedup vs the candidate's own scaffold).`);
     return { ...ext, smoke: 'fail', unittest_smoke: 'fail',
       notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
-        `(baseline_src/ / meta.baseline_callable required as the speedup denominator) — ${ext.notes || ''}` };
+        `(baseline_overlay/ + meta.candidate_bind required as the speedup denominator) — ${ext.notes || ''}` };
   }
   return ext;
 }
@@ -957,7 +981,7 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
 // workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
 // existing null-guards treat it as "no kernel" and continue.
 function fastBoundedWorkflow(ref, wfArgs, label) {
-  const p = workflow(ref, wfArgs);
+  const p = workflow(ref, laneArgs(wfArgs));
   if (!FAST_MODE || typeof setTimeout !== 'function' || !(FAST_HEAD_WF_MS > 0)) return p;
   let to;
   const guard = new Promise((resolve) => {
@@ -998,7 +1022,7 @@ if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HE
   }, TIME_HEAD_DEADLINE_MS);
 }
 function deepBoundedWorkflow(ref, wfArgs, label) {
-  const p = workflow(ref, wfArgs);
+  const p = workflow(ref, laneArgs(wfArgs));
   if (!DEEP_MODE || typeof setTimeout !== 'function' || !(DEEP_HEAD_WF_MS > 0)) return p;
   let to;
   const guard = new Promise((resolve) => {
@@ -1038,12 +1062,12 @@ if (!MODEL_PATH && KERNEL_PATH) {
   // nesting). kernel_workflow.js returns {eval_dir, final_geomean, final_patch, validation_status, ...}.
   let passthru;
   try {
-    const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+    const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
       kernel_path: KERNEL_PATH, workflow_dir: KERNEL_WF_DIR,
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       budget: KERNEL_BUDGET, gpu_ids: GPU_IDS, task: TASK, exp_root: EXP_ROOT,
       apply_to_original: APPLY_TO_ORIGINAL,
-    });
+    }));
     passthru = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
       final_geomean: r.final_geomean, validation_status: r.validation_status,
       note: (r.winner && r.winner.source) || '' };
@@ -1251,7 +1275,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
           ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-          CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
           REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
           PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
         },
@@ -1611,7 +1635,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
             ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-            CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+            CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
             REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
             PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
           },
@@ -1811,7 +1835,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-        CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
         // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
         // Pass the decode M explicitly (= running batch ≈ conc) so it is never dropped, plus a
@@ -2135,7 +2159,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     const ext = await extractWithBaseline(
       'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
-        CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
       },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
@@ -2145,14 +2169,14 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
     let kl;
     try {
-      const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+      const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
-      });
+      }));
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
         final_geomean: r.final_geomean, validation_status: r.validation_status,
         note: (r.winner && r.winner.source) || '' };

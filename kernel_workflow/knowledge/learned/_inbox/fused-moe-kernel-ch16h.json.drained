@@ -1,0 +1,142 @@
+{
+  "run_id": "fused_moe_kernel-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "fused_moe_kernel"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "moe-grouped-gemm-fp4-weight-storage-gfx950",
+      "description": "Store the MoE grouped-GEMM weight operand as e2m1 fp4 consumed natively by MFMA, then nonkdim=16 + XCD de-interleave: ~42x isolated on gfx950",
+      "keywords": [
+        "moe",
+        "grouped-gemm",
+        "fp4",
+        "dot-scaled",
+        "mfma-nonkdim16",
+        "xcd-partitioning",
+        "l2-residency",
+        "weight-quantization"
+      ],
+      "kernels": [
+        "fused_moe_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "mixed",
+      "key": "MoE grouped GEMM whose weight operand dominates HBM traffic, narrowed to e2m1 fp4 with per-block scales, on gfx950 / Triton",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L3",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "~42x isolated vs frozen baseline, non-overlapping; per-case ~30x on the tiny-M case and ~50x on both large-M cases; roofline-emp 0.02 latency-bound -> 0.51 compute-bound",
+      "roofline": "latency-bound at ~0.02 of achievable peak -> compute-bound at ~0.51",
+      "attempts": 4,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-07-30",
+      "last_seen": "2026-08-12",
+      "title": "Narrow the streamed weight operand first, then chase the MFMA shape",
+      "lever": "When one operand of a grouped GEMM is streamed and the other is minority traffic, store the streamed one as e2m1 fp4 with per-block scales folded into the epilogue so the dot-scaled MFMA consumes it natively; this breaks the HBM roofline before any tiling work.",
+      "apply": "Keep the activation operand at fp8; fp4 weights + dot_scaled; matrix_instr_nonkdim=16 on the large-grid config to reach the 2x-K f8f6f4 MFMA; num_stages 1->2 only on the tiny-M case; de-interleave the round-robin XCD dispatch so one expert's weights stay L2-resident per XCD.",
+      "stack": "total ~42x isolated (weighted, director-verified) = four directions compounded\n  - 1. fp4 weight storage - ~40x standalone (verified) - carries essentially all of the win\n  - 2. nonkdim=16 large-grid MFMA - +4% on top of (1) (verified)\n  - 3. num_stages 1->2, tiny-M case only - +0.9% on top of (1,2) (verified); the same knob is net-negative on the large cases\n  - 4. XCD de-interleave - +0.6% on top of (1,2,3) (partial): +1.2% on one large case, neutral on the other\n  - note: incremental in landing order, not independent contributions.",
+      "verify": "Per-case frozen-baseline isolated A/B plus the cosine parity gate; confirm the narrow-float path actually engaged by inspecting the emitted MFMA variant (cbsz/blgp operand-format field), not just the config flag.",
+      "pitfall": "Ported the winning MFMA shape to the tiny-M case and it regressed -> that case is grid-starved, not MFMA-shape limited -> keep shape and stage knobs per-case rather than global.\nScript reported IMPROVED=false while the A/B showed verified gains -> the working tree sits under a gitignored path so git diff came back empty -> build the patch with diff -u against the canonical source.",
+      "caution": "Also verify that the per-row/per-column scale multiply in the epilogue vectorizes under the chosen MFMA output register layout - a 16x16x128 layout interleaves M-rows across a lane's register group and can leave the scale as a long chain of scalar multiplies.",
+      "source": "run fused_moe_kernel-ch16h, 16h per-kernel time-budget campaign, 2026-07-30"
+    },
+    {
+      "name": "dep-chain-not-load-latency-closes-pipeline-axis",
+      "description": "At occupancy 1 with a dequant->MFMA dependency chain, pipeline-depth and occupancy levers return ~1.00x or regress; a regressing double-buffer is the tell",
+      "keywords": [
+        "moe",
+        "grouped-gemm",
+        "fp4",
+        "software-prefetch",
+        "num-stages",
+        "occupancy",
+        "l2-residency",
+        "dep-chain",
+        "anti-pattern"
+      ],
+      "kernels": [
+        "fused_moe_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "mixed",
+      "key": "already-optimized narrow-float grouped GEMM sitting at occupancy 1 on gfx950, where the residual stall is a dequant->MFMA dependency chain rather than exposed load latency",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L2",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "closed axis: ~1.00x cumulative across four pipeline/occupancy directions; a genuine weight-tile double-buffer -14% (both large cases), num_stages>1 -43% when the existing buffer is disabled, sequential sub-tile wave -55%, occupancy 2 -76%, XCD re-order a ~1% ceiling",
+      "attempts": 6,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-07-30",
+      "last_seen": "2026-08-12",
+      "title": "Diagnose dependency chain vs load latency before spending a round on pipelining",
+      "lever": "Cheap discriminator: software double-buffer the operand you believe is on the critical path. If that REGRESSES, the residual is a dependency chain (dequant/scale -> dot_scaled), not exposed load latency, and the whole pipeline-depth / occupancy / cache-hint axis is closed for that body.",
+      "apply": "Spend one round on the discriminator, then reallocate to shape or algorithm work instead of sweeping stage counts, prefetch depths, sub-tile splits and eviction policies one at a time.",
+      "verify": "Frozen-baseline isolated A/B per case, and read the flag's source before sweeping it: a value named like a depth knob was a single 1-deep double-buffer whose out-of-set values merely turned it off, so the sweep measured on-vs-off, not depth.",
+      "pitfall": "Raising occupancy was reachable and numerically valid yet cost ~76% -> the second wave doubles per-CU streamed weight traffic to ~100x the L2 capacity and thrashes -> occupancy is a lever only when a single wave is latency-stalled.\nExtra buffering also raises register pressure on a body already at occupancy 1, so the pipelining attempt makes the dependency chain worse rather than neutral.",
+      "caution": "Also verify the reused operand set actually fits L2 before borrowing a non-temporal / eviction-policy cache lever: when the reuse working set greatly exceeds L2 the op is traffic-bound, not pollution-bound, and the hint returns ~1.00x.",
+      "source": "run fused_moe_kernel-ch16h, 16h per-kernel time-budget campaign, 2026-07-30"
+    },
+    {
+      "name": "activation-side-narrowing-blocked-by-parity-and-synthetic-inputs",
+      "description": "Weight-side fp4 pays; activation-side narrowing closed three ways - parity floor, missing fp6 lowering, iid synthetic inputs with no outliers",
+      "keywords": [
+        "moe",
+        "grouped-gemm",
+        "fp4",
+        "fp6",
+        "weight-quantization",
+        "parity-gate",
+        "anti-pattern",
+        "dot-scaled"
+      ],
+      "kernels": [
+        "fused_moe_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "mixed",
+      "key": "narrowing the ACTIVATION operand of a grouped GEMM that already stores weights in fp4, gfx950 / Triton, judged by a cosine parity gate on synthetic inputs",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L3",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "closed axis: 1.00x banked across three activation-narrowing directions on all cases; the only working variant was ~+13% on the cumulative chain but landed at cosine 0.9883 against a 0.99 gate and stayed off; the outlier-preserving variant ceilinged at ~+5%",
+      "attempts": 3,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-07-30",
+      "last_seen": "2026-08-12",
+      "title": "Activation narrowing is gated by parity and by the benchmark's input distribution",
+      "lever": "Narrow the operand that dominates traffic (weights, when they are streamed) and treat the activation side as a separate, parity-gated question rather than a symmetric follow-up; its payoff is small because it is the minority traffic.",
+      "apply": "Before proposing mixed-precision or outlier-preserving activation formats, check what the harness feeds: iid Gaussian activations have no channel outliers, so an outlier-preserving split degenerates to picking random channels.",
+      "verify": "Re-run the cosine parity gate per case at the intended format, and record the achieved margin - a variant a hair under the gate is worth caching behind a flag so it flips instantly if the gate is ever relaxed or the data changes.",
+      "pitfall": "e3m2/e2m3 activations were accepted in the plan and rejected at compile -> the Triton frontend of that vintage refuses those formats and the arch has no fp6 MFMA lowering -> confirm both frontend acceptance and a real hardware lowering path before budgeting a round on a format.\nBefore proposing a cheaper software dequant, confirm the format is software-unpacked at all: consumed natively by MFMA there is nothing to cheapen.",
+      "caution": "Also verify whether the parity floor is intrinsic to the format or to the tested shapes - the same variant may clear the gate on real activations with different dynamic range, so cache it rather than discarding the patch.",
+      "source": "run fused_moe_kernel-ch16h, 16h per-kernel time-budget campaign, 2026-07-30"
+    }
+  ]
+}

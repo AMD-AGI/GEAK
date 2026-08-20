@@ -1,0 +1,160 @@
+{
+  "run_id": "mi355x_vllm_hip_dynamic_per_tensor_quant-bmk7-12h",
+  "date": "2026-08-17",
+  "kernel_names": [
+    "mi355x_vllm_hip_dynamic_per_tensor_quant"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "collapse-the-graph-nodes-then-shape-gate-a-single-workgroup-quantize-cast-gfx950-launch-bound",
+      "description": "Delete a graph dispatch node via self-resetting device scratch, then shape-gate a single-workgroup fusion: ~1.71x on a graph-captured fp8 quant cast",
+      "keywords": [
+        "dispatch-collapse",
+        "hip-graph",
+        "launch-overhead",
+        "quantize-cast",
+        "fp8",
+        "kernel-fusion",
+        "size-gating",
+        "grid-stride",
+        "non-temporal-store",
+        "raw-hip",
+        "gfx950"
+      ],
+      "kernels": [
+        "data_to_scale_kernel",
+        "scaled_quant_kernel",
+        "initializeScale"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantize_cast",
+      "regime": "launch-bound",
+      "key": "dynamic per-tensor fp8 quantize/cast on gfx950/MI355X, captured as a multi-kernel HIP graph whose wall is dominated by a flat per-dispatch-node cost",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L2",
+      "levers": [
+        "host.launch-overhead",
+        "algo.kernel-fusion",
+        "mem.grid-stride"
+      ],
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.71x unweighted geomean isolated vs frozen baseline, director-verified at 1.7112x with two runs agreeing within 0.73%; per case 1.46x at (64,4096), 2.02x at (64,512), 1.70x at (64,2,1792); no case regressed, correctness PASS",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-14",
+      "last_seen": "2026-08-17",
+      "title": "Collapse the graph nodes first, then shape-gate a single-workgroup fusion",
+      "lever": "on a graph-captured multi-kernel quantize/cast, count the dispatch nodes before touching any device body: a node costs a flat amount that is independent of the work inside it, so deleting a node outranks every per-node lever until the count stops falling",
+      "apply": "delete an initialization node by making the device scratch scale self-resetting (its last consumer restores the sentinel); then gate small shapes onto a single-node, single-workgroup path holding the tensor in registers with one read and one write and no cross-block handoff; place that gate by measuring the fused/multi-node crossover rather than inheriting the first threshold that worked",
+      "stack": "total 1.71x unweighted geomean isolated (director-verified) = five directions compounded\n  - 1. dispatch 3 -> 2 nodes via self-resetting device scratch scale — 1.44x standalone (round 2, verified) — by far the largest single lever\n  - 2. flat grid-stride decomposition replacing row-per-block — +3.4 to +5.0% per case on top of (1) (round 3, verified); the same idea scored ~1.07x and was dropped at 3 nodes\n  - 3. peel the consumer's grid-stride load above the dependent scratch reduce, plus a non-temporal output store — -2.20% and -0.65% (round 6, verified)\n  - 4. shape-gated single-workgroup fusion below the measured crossover — +8.1% cumulative, -23% on the smallest case (rounds 8-9, verified)\n  - 5. host-side exact-tile bounds-guard deletion on the fused path — +3.2% (round 9, verified)\n  - note: attribution is incremental in landing order, not independent",
+      "verify": "re-profile after each landing and confirm the deleted node is actually gone from the captured node list; re-time every case against the frozen baseline, because the small fully-fused case and the large multi-block cases move for different reasons and only one of them can show the fusion gate",
+      "pitfall": "a merge-on-top memory candidate measured ~1.07x in round 1 and was dropped → per-node device work is invisible while dispatch count dominates → re-price shelved candidates against each new incumbent; that same candidate won its round once the node count fell\na host-side trim claimed ~-1.1% and was banked as sub-bar → a later round priced its physical mechanism far too small to produce that reading → it was inside the cross-session drift band and had to be retracted",
+      "caution": "also verify the concurrency story of a self-resetting device scratch: publishing per-block partials through one global buffer is safe only while calls are stream-ordered inside the captured graph, and also verify a fallback path exists for shapes above the scratch's block cap",
+      "source": "run kernel_20_geak_0811_2h_bmk7_long lane, 2026-08-14, TechLead report + director validation (accepted, 11 rounds / 26 directions)"
+    },
+    {
+      "name": "axes-that-stay-closed-once-a-quant-cast-graph-sits-at-two-no-quantize-cast-gfx950-launch-bound",
+      "description": "On a 2-node graph-captured fp8 quant cast, unconditional fusion, per-node cost knobs, cache policy and (VEC,BS) all returned ~1.00x; price the node first",
+      "keywords": [
+        "closed-axis",
+        "anti-pattern",
+        "hip-graph",
+        "dispatch-floor",
+        "launch-overhead",
+        "quantize-cast",
+        "cache-modifier",
+        "cross-workgroup",
+        "atomics",
+        "block-size",
+        "gfx950"
+      ],
+      "kernels": [
+        "data_to_scale_kernel",
+        "scaled_quant_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantize_cast",
+      "regime": "launch-bound",
+      "key": "deciding whether another fusion, cache-policy or launch-parameter round is worth funding on a small two-node graph-captured fp8 quantize/cast at gfx950, where the node cost itself is measured-irreducible",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L1",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "~1.00x across five attacks on unconditional 2->1 node fusion and four on per-node cost; the marginal dependent node cost is invariant across 38 configurations and 9 factors; (VEC,BS) closed to ±0.2% geomean over 9 grid points x 2 sessions with identity controls; non-temporal on the consumer's scratch read costs +38%; a ground-up single-node rewrite read 0.5085x with its worst case +426%",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-14",
+      "last_seen": "2026-08-17",
+      "title": "Axes that stay closed once a quant-cast graph sits at two nodes",
+      "lever": "before funding fusion, cache-policy or launch-parameter rounds on a small graph-captured op, price the graph node itself: a node dependency here is simultaneously the cheapest grid-wide sync available and an irreducible floor, and one cheap measurement decides both axes",
+      "apply": "sweep the marginal cost of one dependent node across the factors you would otherwise tune — kernarg size, pointer count, LDS, grid, block, launch bounds, VGPR, node identity, node ordering; if the cost does not move, the remaining headroom is the node count, not the node, and launch-bounds annotations price as a small net cost rather than a win",
+      "verify": "compute the zero-work ceiling — the wall divided by what would remain with all device work removed at the current dispatch shape; here that ceiling was 2.30x against 1.71x achieved and the node constant was 83.6% of the largest case's wall, which is what justified stopping",
+      "pitfall": "grid barrier, u64 atomicMax handoff and a ticket protocol all lost → a software grid-wide rendezvous costs roughly 9x a graph-node dependency, and a u64 atomic serialises across the 8 XCDs (+19-21% at 112-128 blocks) → only a shape-conditional fusion needing no cross-block sync survived\na ground-up rewrite had every block re-read the whole tensor → redundant read volume scales as nblocks x tensor bytes while a node cost is flat → unprofitable at every size, and its mechanism diagnosis (amplification, not fusion) is what later reopened the axis in conditional form\nnon-temporal on the handoff scratch read looked symmetric with the winning non-temporal output store → it destroys the L2/MALL residency the handoff depends on → keep policy bits off streams that something re-reads",
+      "caution": "also verify the closure against your own footprint: the fused path's working set never pressured a cache here, so no policy bit could pay, and also verify any re-swept knob grid against a byte-identical same-session control arm before calling it closed",
+      "source": "run kernel_20_geak_0811_2h_bmk7_long lane, 2026-08-14, rounds 2-7 and 11, TechLead report + director validation (accepted)"
+    },
+    {
+      "name": "delete-the-in-kernel-bounds-guard-from-the-host-before-decla-quantize-cast-gfx950-both",
+      "description": "A bounds guard can be what makes a latency-hiding transform lose; deleting it from the host with exact tiles flipped the sign and carried ~90% of a round's win",
+      "keywords": [
+        "grid-stride",
+        "host-runtime",
+        "launch-shape",
+        "software-pipelining",
+        "vgpr",
+        "isa-inspection",
+        "quantize-cast",
+        "raw-hip",
+        "measurement-rig",
+        "gfx950"
+      ],
+      "kernels": [
+        "scaled_quant_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantize_cast",
+      "regime": "both",
+      "key": "grid-stride elementwise / quantize bodies on gfx950 where an in-kernel bounds guard blocks a scheduling transform, and buffer addressing already bounds-checks in hardware",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L2",
+      "levers": [
+        "host.launch-shape",
+        "compute.software-pipelining"
+      ],
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "the assigned load/fmax phase-split alone is a -4.7% loss; deleting the guard by construction flips the sign, carrying ~90% of round 9's win on the fused small case against ~10% for the assigned mechanism; extended to the two multi-block cases it measured +1.529% [95% CI +0.97, +2.09], 3.0x the control spread, sign replicated 7/7 across three sessions, with the byte-identical third case moving 0.000% as constructed",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-14",
+      "last_seen": "2026-08-17",
+      "title": "Delete the in-kernel bounds guard from the host before declaring a scheduling transform unprofitable",
+      "lever": "when a latency-hiding or phase-split transform measures as a loss, ask what the surrounding bounds guard forces the compiler to materialise before writing the transform off; then delete the guard by constructing the launch so its predicate is compile-time dead",
+      "apply": "pass a true extent plus a compile-time trip count from the host and specialise an exact-tile instantiation; buffer addressing returns 0 on an out-of-range load and drops an out-of-range store, so the guard can go with no device edit and no tail launch. For shape generality ship a peeled full-tile body plus a guarded remainder tail; the safe host predicate is grid x block == vector count, which is stricter than plain divisibility once the grid is capped",
+      "verify": "diff register and scratch counts plus the ISA between the guarded and guardless instantiations, and route the incumbent's own parameters through the new host path as an identity control arm so the host rewrite itself is priced at zero on shapes that should not move",
+      "pitfall": "the phase-split used two fewer VGPRs and zero scratch yet still lost → the guard forced a zero-fill/phi on the hoisted loads → control flow, not register pressure, was the blocker; the unsplit form's higher VGPR count was the tell that it had already been software-pipelined\n19 reps read as valid but had tested unchanged source → applying a patch from a scratch directory walked up to the enclosing repository, exited 0 and printed nothing → gate every arm on a checksum of the built source rather than on the apply command's exit status\nidentical code read 0.9% apart twenty minutes later on the same box, several times the effect being hunted → cross-session drift → compare only within-session arms, shuffle arm order, discard the first post-build run, and disable implicit rebuilds after one explicit build",
+      "caution": "also verify whether the guard was paying a knob-dependent share: its cost scales with per-thread trip count, so an unguarded body can move the optimum of knobs already swept against the guarded one — two grid points flipped sign between the two bodies here",
+      "source": "run kernel_20_geak_0811_2h_bmk7_long lane, 2026-08-14, rounds 9-11 with a pooled n=16 shuffled-arm rig, TechLead report + director validation (accepted)"
+    }
+  ]
+}

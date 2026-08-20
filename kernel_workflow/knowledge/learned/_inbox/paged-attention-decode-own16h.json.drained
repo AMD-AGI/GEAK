@@ -1,0 +1,129 @@
+{
+  "run_id": "paged_attention_decode-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "paged_attention_decode"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "decode-attention-host-prologue-memoization",
+      "description": "Memoize the whole per-call Python/ctypes prologue of a JIT decode-attention wrapper: cumulative 1.00x->3.15x isolated, concentrated at small batch.",
+      "keywords": [
+        "decode",
+        "paged-attention",
+        "launch-overhead",
+        "host-wrapper",
+        "small-batch",
+        "jit",
+        "memoization"
+      ],
+      "kernels": [
+        "paged_attention_ll4mi_QKV_mfma16_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "aiter-style JIT paged decode attention on gfx950 dispatched through a Python/ctypes wrapper, small-batch host-bound",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "host-only directions took the isolated cumulative from 1.00x to 3.15x vs the frozen baseline (non-overlapping, director re-verified over 3 runs); the gain is per-case lopsided: +26% on the 2-sequence case, fully hidden behind device time at 32 and 64 sequences",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "title": "Decode attention: the Python/ctypes prologue is the first three rounds",
+      "lever": "- lever: when a decode attention op is dispatched through a JIT + ctypes wrapper, memoize the ENTIRE per-call prologue as one unit (resolved function handle, device props, derived ints, boxed argv) before touching the device.",
+      "apply": "- apply: module-scope caches keyed on shapes + partition size for the constant scale tensors and a pooled split-KV workspace; a pointer-identity launch memo; a per-case partition-size table. Each lever alone reads as noise; together they compound.",
+      "verify": "- verify: isolated A/B per case, plus a host-only timing that shows the prologue collapsing to a flat per-call constant; the win survives only where wall-clock is host-dominated, so expect it to vanish at the larger batch cases.",
+      "pitfall": "- pitfall: memo armed only on a cold cache -> it never engaged on the warm path the harness actually times -> arm it on the first call and every call after.\n- pitfall: launch memo guarded on query-tensor identity alone -> stale results, parity collapsed from ~48 dB SNR to ~15 dB -> key the memo on every mutable pointer and shape it captures.",
+      "caution": "- caution: also verify a wrapper-level graph capture/replay arm before concluding the host floor is unreachable — here capture was correct and value-identical, but replay carried a flat per-call add that exceeded the eager path at every case measured.",
+      "source": "- source: kernel_workflow 16h campaign, run kernel_20_geak_0808_16h, 2026-08-12; director-validated geomean 3.98x, correctness pass",
+      "last_seen": "2026-08-12"
+    },
+    {
+      "name": "decode-attention-single-dispatch-arrival-protocol",
+      "description": "Fuse the split-KV reduce into the attention kernel behind a padded arrival counter with arch-cheap release bits: +9.5%, then +3.0% of epilogue protocol tuning.",
+      "keywords": [
+        "decode",
+        "paged-attention",
+        "split-kv",
+        "dispatch-collapse",
+        "cross-workgroup",
+        "arrival-counter",
+        "coherence"
+      ],
+      "kernels": [
+        "paged_attention_ll4mi_QKV_mfma16_kernel",
+        "paged_attention_ll4mi_reduce_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "split-KV paged decode attention on gfx950 that ships as two dispatches (partial attention + reduce), HIP/C++ template source",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "+9.5% over the host-optimized incumbent for the fusion itself (all three cases single-dispatch, profiler-confirmed one dispatch per call with zero reduce rows), then +3.0% more from epilogue protocol tuning, largest on the 2-sequence case; part of an accepted 3.98x geomean",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "title": "One dispatch for split-KV decode, and the protocol that pays for it",
+      "lever": "- lever: collapse the two-kernel split-KV decode into one dispatch — decouple tile size from partition size so one workgroup owns several partitions, then let the last arriver run the combine behind a global arrival counter.",
+      "apply": "- apply: per-store coherence bits (sc0/sc1) plus a bare vmcnt(0) as the cross-workgroup release; relaxed agent-scope atomic loads on the counter; an agent ACQUIRE fence ahead of plain wide combine loads, with the wide form gated on partitions%4==0 since it is pure cost at 2 partitions.",
+      "verify": "- verify: profiler dispatch count == call count with no reduce rows, and hand-check parity on EVERY case — the shipped correctness gate here covered only the largest case, so a corrupted small-batch path scored ~9.9 dB while the gate printed pass.",
+      "pitfall": "- pitfall: a device-scope release fence for the same handshake lowers to an L2 writeback and made the largest-batch case several times slower than the unfused incumbent -> per-store coherence bits + wave-scoped waits instead.\n- pitfall: arrival counters packed one int per (seq, kv-head) false-share a line -> pad them to a full-line stride.\n- pitfall: two handshake barriers where only wave 0 issues the producer stores -> a wave-0-only release drain removes one of them as pure latency.",
+      "caution": "- caution: also verify how much of the combine ceiling is harvestable before budgeting rounds at it — a probe that deleted the whole protocol showed ~20% on the small-batch case, but decomposition priced the reachable part at ~3% because the incumbent already sat on the publish/signal/consume round-trip floor.",
+      "source": "- source: kernel_workflow 16h campaign, run kernel_20_geak_0808_16h, 2026-08-12; director-validated geomean 3.98x, correctness pass",
+      "last_seen": "2026-08-12"
+    },
+    {
+      "name": "decode-attention-wg-geometry-axis-closed",
+      "description": "Closed axis: on a co-resident decode attention kernel near its BW ceiling, WG geometry / occupancy / load-width tuning went 0 for 7 arms, ~1.00x or worse.",
+      "keywords": [
+        "decode",
+        "paged-attention",
+        "wg-geometry",
+        "occupancy",
+        "co-residency",
+        "anti-pattern",
+        "prefetch",
+        "isa-diff"
+      ],
+      "kernels": [
+        "paged_attention_ll4mi_QKV_mfma16_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "paged decode attention on gfx950 that is already grid-limited, co-resident and near its achievable bandwidth — the geometry/occupancy family",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "0 of 7 geometry arms beat the incumbent: fatter workgroups +7.8% slower on the 32-sequence case, splitting the GQA q-head group across workgroups +8.0/+9.9/+23.1% slower on the 2-sequence case, an occupancy clamp -19.7%, a co-scheduling grid remap exactly neutral (~1.00x), kv-head-major remap 2.6-5.2% slower",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "title": "Geometry, occupancy and load width are a spent axis here",
+      "lever": "- lever: on a decode attention kernel that is already grid-limited and co-resident, consider the geometry family (workgroup fatness, waves/SIMD, grid order, LDS staggering) closed and spend the round on the per-workgroup dependent chain instead.",
+      "apply": "- apply: the cheap pre-check is whether bytes-per-workgroup x workgroup-count is invariant under the sweep; if it is, changing the count only trades ramp/tail against co-residency, and co-residency was worth a net +23% per-CU throughput against a ~10% ramp/tail.",
+      "verify": "- verify: price co-residency directly with an occupancy-clamp arm before sweeping geometry; that one arm predicts the sign of every other arm in the family.",
+      "pitfall": "- pitfall: an 'occupancy win' read off a profiler VGPR field -> the compiler's own waves/SIMD had gone down, not up -> read the compiler's occupancy and diff device ISA, since gating code away at compile time does not imply identical codegen.\n- pitfall: wider and non-temporal global loads, deeper prefetch -> marginal bandwidth was already ~100% of nameplate -> the cache hint alone cost the largest case 9.5% with instruction count unchanged.\n- pitfall: a bit-identical ~14% cut in VALU instructions bought nothing -> chain length pays here, issue slots do not.",
+      "caution": "- caution: also verify the arm actually rebuilt — a JIT that only checks whether the shared object exists never hashes sources, so a header-only change silently re-measures the previous binary; gate every number on built-header md5 == source md5, per instantiation.",
+      "source": "- source: kernel_workflow 16h campaign, run kernel_20_geak_0808_16h, 2026-08-12; 14 rounds, director-validated geomean 3.98x",
+      "last_seen": "2026-08-12"
+    }
+  ]
+}

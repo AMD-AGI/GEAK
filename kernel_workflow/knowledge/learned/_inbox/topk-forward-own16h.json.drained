@@ -1,0 +1,142 @@
+{
+  "run_id": "_topk_forward-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "_topk_forward"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "tiny-op-host-launch-bypass-gfx950",
+      "description": "Tiny dispatch-bound Triton op: memoize compile, bake launch opts, call the C launch entry directly - ~1.96x geomean, largest on the smallest case",
+      "keywords": [
+        "launch-overhead",
+        "host-runtime",
+        "dispatch-bound",
+        "triton",
+        "moe-router",
+        "topk",
+        "memoization",
+        "gfx950"
+      ],
+      "kernels": [
+        "_topk_forward"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_router_topk",
+      "regime": "both",
+      "key": "small MoE router top-k + softmax + bitmatrix pack, bf16, tiny grid on gfx950 - the in-tree Triton Python launcher, not the device code, is the bottleneck",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "host.launch-overhead"
+      ],
+      "cost": "L2",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.96x geomean director-verified (three runs 1.94/2.03/1.96, non-overlapping); per case 2.27x at 2048 rows, 2.12x at 32768, 1.54x at 65536 - the gain shrinks as device time grows",
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "attempts": 1,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Bypass the JIT launcher for a dispatch-bound Triton op",
+      "lever": "memoize compile+bind once, bake the launch options into the cached handle, then call the compiled kernel's C launch entry with pre-resolved device pointers and a 1-slot monomorphic inline cache in closure cells.",
+      "apply": "edit the Python launcher that ships next to the kernel: cache the CompiledKernel on first call, skip JITFunction.run and the launcher's scratch wrapper, and compile num_warps/num_stages in so no kwargs cross the binder per call.",
+      "stack": "total 1.96x director-verified geomean = three host-side steps plus one device step\n  - 1. memoized compile + C launcher (round 1) - 1.48x - host issue per launch down ~2.3x, uniform across all three cases\n  - 2. launch options baked into the handle, num_warps=2 / num_stages=1 (round 2) - 1.79x cumulative; LDS per block falls to zero, the reduction stays intra-wave\n  - 3. raw launch entry + int pointers + inline cache (round 3) - 1.88x cumulative; host issue now ~1.1x the empty-kernel direct-C floor\n  - 4. softmax as exp2 + one reciprocal (round 3, device-only) - pays only at the largest case; integrated 1.96-2.00x\n  - note: attribution is incremental in landing order, not independent.",
+      "verify": "paired A/B against the frozen baseline plus a per-launch host-issue counter; re-prove the fast path is live on the merged file, and re-check parity because the exp2 step costs up to ~1 bf16 ULP.",
+      "pitfall": "two real device wins measured null in the first round -> the host floor hid them -> re-issue device candidates after the launcher patch lands.\n- pitfall: the best num_warps lost its gain to per-call kwarg binding -> the constants were passed per launch -> bake them into the memoized handle instead.",
+      "caution": "also verify graph capture/replay before assuming it is the cheapest dispatch path - here replay measured about 2x worse than the direct memoized launch.",
+      "source": "run kernel_20_geak_0808_16h lane _topk_forward, 2026-08-12, director_validation.json + tech_lead_report.md"
+    },
+    {
+      "name": "moe-router-topk-device-axis-closed-gfx950",
+      "description": "Device-side rewrites of a small MoE router top-k (selection topk, pack, BLOCK_M, whole-op rewrite) all returned ~1.00x on gfx950; the win is host-side",
+      "keywords": [
+        "anti-pattern",
+        "moe-router",
+        "topk",
+        "dispatch-bound",
+        "static-isa-screen",
+        "launch-overhead",
+        "triton",
+        "gfx950"
+      ],
+      "kernels": [
+        "_topk_forward"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_router_topk",
+      "regime": "both",
+      "key": "small MoE router top-k + softmax + bitmatrix pack on gfx950 Triton - which device-side reformulations were already measured out on this op shape",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L3",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "~1.00x across eight funded device directions: selection top-k 1.54-1.62x against a 1.80x incumbent, bitmatrix pack +1.6% standalone and null-to-negative stacked (three attempts), topk-network reformulation +0.24% vs a same-session control, per-launch BLOCK_M 0.0%, whole-op rewrite nothing shippable; per case the largest shape moved least",
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "attempts": 1,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "The device lane on a small router top-k is close to closed",
+      "lever": "screen device candidates with a static v_* count per region before benchmarking, and spend the freed rounds on dispatch; on this op shape the merge-tree top-k networks were ~61% of static VALU and the bitmatrix pack ~5%.",
+      "apply": "attribute static VALU by region first; a candidate that can only touch a 5% region is capped near 1% of the largest case, which is inside what a 3-case geomean can resolve.",
+      "verify": "give every device candidate a same-session control arm; a candidate within ~0.5% of its control is null however good its ISA looks.",
+      "pitfall": "three patches merged with zero textual conflict and every stack lost -> all of them targeted the same bottleneck resource -> judge orthogonality by bottleneck, not by whether the patches apply cleanly.\n- pitfall: the static screen under-predicted a mask-free specialization -> predicate/exec-mask setup and the early-exit branch are invisible to the histogram -> that arm carried more static VALU and still won ~0.9% at the largest case.",
+      "caution": "also verify whether the smallest case is host-issue bound before chasing its occupancy - here it contributed exactly 1.0000 to the unweighted geomean three times, which caps every device win at ~2/3 of its per-case size.",
+      "source": "run kernel_20_geak_0808_16h lane _topk_forward, rounds 2-6, 2026-08-12, tech_lead_report.md"
+    },
+    {
+      "name": "method-per-rep-geomean-two-sided-control",
+      "description": "Certify or decline a sub-2% kernel effect: per-rep paired geomean plus a two-sided identity-work control and an acceptance bar fixed before measuring",
+      "keywords": [
+        "method",
+        "ab-harness",
+        "negative-control",
+        "sign-consistency",
+        "small-effect",
+        "dispatch-bound",
+        "gfx950"
+      ],
+      "kernels": [
+        "_topk_forward"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "n/a",
+      "key": "resolving effects of a couple of percent on a short-running Triton op, where a 3-case geomean dilutes a real per-case device saving",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L0",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "resolved a real, bit-exact per-case effect of +1.37% and +1.29% at 92% sign consistency over 62 paired reps; the control arm moved the same case +0.87% and +4.38% monotonically with injected identity work and flipped the geomean -1.46%",
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "attempts": 1,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Per-rep geomean plus a two-sided negative control",
+      "lever": "compute the geomean per rep and keep the distribution, rather than pooling the min across reps into a single number.",
+      "apply": "paired interleaved A/B over tens of reps; report the median paired ratio and the sign consistency; fix the acceptance bar before the first measurement.",
+      "verify": "add a two-sided negative control - inject provably output-neutral work at two magnitudes and confirm the wall clock moves monotonically in the expected direction; a small positive is credible once the harness has been shown to resolve that magnitude both ways.",
+      "pitfall": "the pooled-min A/B emitted one number per candidate -> sign consistency and the paired ratio distribution were unobservable -> a genuine ~1.3% effect could be neither certified nor declined, and an unbounded tail of rounds looked justified.",
+      "caution": "also verify a certified-real effect against the bar stated in advance; here a real bit-exact +1.3% fell under a +1.5% bar, and declining it is what let the campaign terminate defensibly.",
+      "source": "run kernel_20_geak_0808_16h lane _topk_forward, round 6, 2026-08-12, tech_lead_report.md"
+    }
+  ]
+}

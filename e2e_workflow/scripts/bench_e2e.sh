@@ -41,6 +41,9 @@
 #                                      saturated PROF=1 bench.
 #
 # KEY OUTPUTS (written to $OUT_DIR):
+#   server_start.json      {status, reason, phase_hint, wait_sec, ceiling_sec, ...} — ALWAYS
+#                          written when we launch, so a failed cold start is a readable REASON
+#                          downstream instead of a silently empty output dir
 #   bench_runs.jsonl       one bench result object per repeat
 #   bench_summary.json     {throughput_tok_s_median (metric-neutral; see metric_basis), metric_basis,
 #                           ttft_ms_median, tpot_ms_median, spread, runs}  (E2E_METRIC=output default)
@@ -420,8 +423,15 @@ if [ "${SERVING_GPU_LOCK_DISABLE:-0}" != "1" ] && [ "${REUSE_SERVER:-0}" != "1" 
 fi
 
 # ---- launch (unless reusing a warm server) ----
+# A server is declared dead when it stops MAKING PROGRESS, not when it has taken "too long": wedged
+# shows up as SILENCE, while a legitimately slow cold start keeps printing. CEILING is only a backstop
+# against a server that spins printing forever, not a per-purpose budget.
 if [ "$REUSE_SERVER" != "1" ]; then
   mkdir -p "$PROFILE_DIR"
+  STALL_WINDOW_SEC=${STALL_WINDOW_SEC:-600}
+  case "${SERVER_STARTUP_TIMEOUT_SEC:-}" in ''|*[!0-9]*) CEILING=7200 ;; *) CEILING="$SERVER_STARTUP_TIMEOUT_SEC" ;; esac
+
+  _up=0; _reason=""
   echo ">>> Launching $BACKEND server (log: $LOG) ..."
   adapter_launch
   if [ -z "${SERVER_PID:-}" ]; then echo "!!! adapter_launch did not set SERVER_PID"; exit 2; fi
@@ -429,23 +439,54 @@ if [ "$REUSE_SERVER" != "1" ]; then
   # EXIT teardown never has to ask "who owns this pid?" after the pid may be gone.
   server_record_identity "$SERVER_PID"
 
-  echo ">>> Waiting for server health ..."
-  # An overlaid candidate can wedge: process stays alive but /health 503s forever (JIT deadlock /
-  # cuda-graph capture failure). Don't burn the whole window while holding the serving-GPU lock —
-  # fail fast on a fatal server-log marker, and use a TIGHTER budget when an overlay is active so a
-  # broken candidate is rejected quickly instead of starving the box. Non-overlay runs keep 180*5s.
-  HEALTH_TRIES=${HEALTH_TRIES:-180}
-  [ -n "$OVERLAY_PYTHONPATH" ] && HEALTH_TRIES=${OVERLAY_HEALTH_TRIES:-72}   # ~6min for overlays
-  _up=0
-  for i in $(seq 1 "$HEALTH_TRIES"); do
-    if adapter_health >/dev/null 2>&1; then echo ">>> Server up after ~$((i*5))s."; _up=1; break; fi
-    if ! kill -0 "$SERVER_PID" 2>/dev/null; then echo "!!! Server died. Last log:"; tail -n 60 "$LOG"; exit 2; fi
-    if grep -Eq 'CUDA out of memory|HIP out of memory|watchdog timeout|Capturing cuda graph failed|FATAL' "$LOG" 2>/dev/null; then
-      echo "!!! Fatal server-log marker before health; aborting wait. Last log:"; tail -n 60 "$LOG"; exit 2
+  echo ">>> Waiting for server health (stall window ${STALL_WINDOW_SEC}s, backstop ${CEILING}s) ..."
+  _t0=$SECONDS; _last_tok=""; _last_change=$SECONDS
+  while :; do
+    if adapter_health >/dev/null 2>&1; then _up=1; break; fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then _reason="died_early"; break; fi
+    if grep -Eq 'CUDA out of memory|HIP out of memory' "$LOG" 2>/dev/null; then _reason="oom"; break; fi
+    # FATAL must look like an EMITTED record ('[FATAL]' or a 'FATAL:' prefix), not the bare word:
+    # unanchored, it also matches a --log-level legend or a help line and kills a healthy start.
+    if grep -Eq 'watchdog timeout|Capturing cuda graph failed|\[FATAL\]|(^|[[:space:]])FATAL:' "$LOG" 2>/dev/null; then
+      _reason="fatal_marker"; break
     fi
+    _tok=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
+    if [ "$_tok" != "$_last_tok" ]; then
+      _last_tok="$_tok"; _last_change=$SECONDS
+    elif [ $((SECONDS-_last_change)) -ge "$STALL_WINDOW_SEC" ]; then
+      _reason="stalled"; break
+    fi
+    if [ $((SECONDS-_t0)) -ge "$CEILING" ]; then _reason="ceiling_exceeded"; break; fi
     sleep 5
   done
-  [ "$_up" = "1" ] || { echo "!!! Server not healthy within $((HEALTH_TRIES*5))s."; tail -n 60 "$LOG"; exit 2; }
+  _waited=$((SECONDS-_t0))
+  if [ "$_up" = "1" ]; then
+    echo ">>> Server up after ~${_waited}s."
+  else
+    case "$_reason" in
+      died_early|ceiling_exceeded|stalled)
+        if grep -Eq 'ngine ?[Cc]ore.*([Tt]imed out|TimeoutError)|frontend.*handshake.*timed out' "$LOG" 2>/dev/null; then
+          _reason="engine_core_timeout"
+        elif grep -Eq 'NCCL error|RCCL error|rendezvous|Timed out initializing process group|ProcessGroup.*[Tt]imeout' "$LOG" 2>/dev/null; then
+          _reason="dist_init_fail"
+        fi ;;
+    esac
+    echo "!!! Server did not come up (reason=$_reason) after ~${_waited}s. Last log:"; tail -n 60 "$LOG"
+    server_teardown; SERVER_PID=""
+  fi
+  # Structured outcome, ALWAYS written (success too), so a failed start is a REASON downstream can
+  # read rather than an empty task dir that looks like "authored and found no gain".
+  _phase=$(tail -n 1 "$LOG" 2>/dev/null | tr -d '\r\\' | tr '"' "'" | cut -c1-200)
+  printf '{"status":"%s","reason":"%s","phase_hint":"%s","wait_sec":%d,"ceiling_sec":%d,"stall_window_sec":%d,"port":"%s","backend":"%s","log":"%s"}\n' \
+    "$([ "$_up" = "1" ] && echo ok || echo failed)" "${_reason:-none}" "$_phase" \
+    "$_waited" "$CEILING" "$STALL_WINDOW_SEC" "$PORT" "$BACKEND" "$LOG" \
+    > "$OUT_DIR/server_start.json"
+  if [ "$_up" != "1" ]; then
+    echo "!!! Server start FAILED (reason=$_reason) — see $OUT_DIR/server_start.json" >&2
+    [ "$_reason" = "ceiling_exceeded" ] && \
+      echo "    Still progressing at the ${CEILING}s backstop; raise it with SERVER_STARTUP_TIMEOUT_SEC." >&2
+    exit 2
+  fi
 else
   echo ">>> Reusing warm server at $BASE_URL"
   adapter_health >/dev/null 2>&1 || { echo "!!! No healthy server at $BASE_URL"; exit 2; }

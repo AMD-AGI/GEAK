@@ -41,8 +41,18 @@ sources:
 ## How to verify
 - bf16 accuracy gate + TFLOPS vs peak ([../numerics.md](../numerics.md)).
 
+## Porting to FlyDSL (ck→flydsl)
+If the TASK is to rewrite this CK kernel as a **FlyDSL** kernel (e.g. fp8 a8w8 blockscale `ck→flydsl`),
+the CK tuning knobs above do **not** transfer — the relevant how-to is the FlyDSL authoring knowledge.
+Read the FlyDSL SOTA card [[operators/scaled_quant_gemm/backends/flydsl]] plus the FlyDSL GEMM authoring
+docs: [[languages/flydsl/authoring_gemm_levers]] (tiling / LDS / XCD-swizzle / epilogue levers),
+[[languages/flydsl/authoring_optimization]] (structure-first optimization workflow),
+[[languages/flydsl/authoring_tile_programming]] (`@flyc.kernel` CuTe tile model), and
+[[languages/flydsl/debugging]] (NaN / mismatch / compile / hang triage). Validated ck→flydsl recipe:
+expert_skill `flydsl_fp8_blockscale_gemm` (enable with `use_expert_skills=true`).
+
 ## Alternatives / cross-links
-[triton.md](triton.md) · [aiter.md](aiter.md) · [hip.md](hip.md) · [asm.md](asm.md) · [hipblaslt.md](hipblaslt.md) · [../overview.md](../overview.md)
+[triton.md](triton.md) · [aiter.md](aiter.md) · [hip.md](hip.md) · [asm.md](asm.md) · [hipblaslt.md](hipblaslt.md) · [../overview.md](../overview.md) · FlyDSL authoring: [[languages/flydsl/authoring_gemm_levers]] · [[languages/flydsl/authoring_optimization]] · [[languages/flydsl/authoring_tile_programming]] · [[languages/flydsl/debugging]]
 
 ## Sources
 - Composable Kernel: https://github.com/ROCm/composable_kernel
