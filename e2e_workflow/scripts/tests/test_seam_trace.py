@@ -48,8 +48,9 @@ class TestSeamTrace(unittest.TestCase):
         self.events = []
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.trace = os.path.join(self.tmp.name, "selection.json")
-        os.environ["GEAK_SELECTION_TRACE"] = self.trace
+        # UNIQUE=0 drops only the per-call suffix, so an explicit {pid} keeps the path predictable.
+        os.environ["GEAK_SELECTION_TRACE"] = os.path.join(self.tmp.name, "selection.{pid}.json")
+        self.trace = os.path.join(self.tmp.name, f"selection.{os.getpid()}.json")
         os.environ["GEAK_SELECTION_TRACE_UNIQUE"] = "0"
         os.environ["GEAK_SELECTION_PROFILE_CALLS"] = "1"
         self.addCleanup(os.environ.pop, "GEAK_SELECTION_TRACE", None)
@@ -140,7 +141,7 @@ class TestSeamTrace(unittest.TestCase):
         self.module.outer(2)
         traces = sorted(
             name for name in os.listdir(self.tmp.name)
-            if name.startswith("selection.pid-") and name.endswith(".json"))
+            if name.startswith(f"selection.{os.getpid()}.call-") and name.endswith(".json"))
         self.assertEqual(len(traces), 2)
         self.assertIn(".call-1.json", traces[0])
         self.assertIn(".call-2.json", traces[1])
@@ -201,12 +202,20 @@ class TestTracePathIsProcessLocal(unittest.TestCase):
         os.environ["RANK"] = "3"
         self.assertEqual(st._trace_path(7), f"/tmp/sel.pid-{os.getpid()}.rank-3.call-7.json")
 
-    def test_the_unique_opt_out_takes_the_path_verbatim(self):
-        """The escape hatch for a single-process debug capture: write exactly where I said. It is not
-        safe for a multi-rank run, which is why per-process naming is what happens by default."""
+    def test_the_unique_opt_out_drops_the_call_suffix_but_not_the_process(self):
+        """The opt-out is for operators who want one file per process instead of one per call. It
+        cannot also drop the pid: kernel_selection pairs a capture to its trace by matching
+        '.pid-<pid>', so a shared filename loses the pairing and every rank races on one path."""
         os.environ["GEAK_SELECTION_TRACE"] = "/tmp/sel.json"
         os.environ["GEAK_SELECTION_TRACE_UNIQUE"] = "0"
-        self.assertEqual(st._trace_path(7), "/tmp/sel.json")
+        os.environ["RANK"] = "3"
+        self.assertEqual(st._trace_path(7), f"/tmp/sel.pid-{os.getpid()}.rank-3.json")
+
+    def test_the_unique_opt_out_still_substitutes_an_explicit_placeholder(self):
+        """Returning the raw template here used to leave a literal '{pid}' in the filename."""
+        os.environ["GEAK_SELECTION_TRACE"] = "/tmp/sel-{pid}.json"
+        os.environ["GEAK_SELECTION_TRACE_UNIQUE"] = "0"
+        self.assertEqual(st._trace_path(7), f"/tmp/sel-{os.getpid()}.json")
 
     def test_the_rank_comes_from_the_launcher_env_when_it_declares_one(self):
         os.environ["RANK"] = "2"
@@ -214,6 +223,10 @@ class TestTracePathIsProcessLocal(unittest.TestCase):
 
     def test_an_unranked_process_is_still_named_rather_than_dropped(self):
         self.assertEqual(st._rank(), "unknown")
+
+
+def _raise_record_function(name):
+    raise RuntimeError("record_function unavailable on this build")
 
 
 class TestProfileLifecycleFailsSoft(unittest.TestCase):
@@ -269,6 +282,54 @@ class TestProfileLifecycleFailsSoft(unittest.TestCase):
         self.assertTrue(st._start_profile())
         st._finish_profile()
         self.assertFalse(st._PROFILE["active"])
+
+    def test_a_failure_after_entering_the_profiler_still_exits_it(self):
+        """The profiler is entered before the install markers are written. When that write raised,
+        the handler set done=True while active was still True -- and _finish_profile returns early on
+        done, so the profiler stayed entered, and collecting, for the life of the server."""
+        exited = []
+
+        class _EnteredProfiler(_Profiler):
+            def __exit__(self, *exc):
+                exited.append(True)
+                return False
+
+        self._install_torch(lambda activities: _EnteredProfiler([]))
+        sys.modules["torch"].profiler.record_function = _raise_record_function
+        st._INSTALLED["mod:fn"] = None
+        self.addCleanup(st._INSTALLED.pop, "mod:fn", None)
+        self.assertFalse(st._start_profile())
+        self.assertEqual(exited, [True])
+        self.assertFalse(st._PROFILE["active"])
+        self.assertIsNone(st._PROFILE["profiler"])
+
+    def test_a_profiler_that_also_refuses_to_exit_does_not_take_the_call_down(self):
+        """Everything on this path runs inside the served call, including the cleanup."""
+        class _UnstoppableProfiler(_Profiler):
+            def __exit__(self, *exc):
+                raise RuntimeError("profiler already torn down")
+
+        self._install_torch(lambda activities: _UnstoppableProfiler([]))
+        sys.modules["torch"].profiler.record_function = _raise_record_function
+        st._INSTALLED["mod:fn"] = None
+        self.addCleanup(st._INSTALLED.pop, "mod:fn", None)
+        self.assertFalse(st._start_profile())
+        self.assertFalse(st._PROFILE["active"])
+
+    def test_a_process_with_no_trace_destination_never_enters_a_profiler(self):
+        """The marker overlay is loaded by processes that are not the capture. _start_profile has to
+        stop at the missing destination rather than profile a run nothing will read."""
+        os.environ.pop("GEAK_SELECTION_TRACE", None)
+        self._install_torch(lambda activities: _Profiler([]))
+        self.assertFalse(st._start_profile())
+        self.assertFalse(st._PROFILE["done"])
+
+    def test_the_budget_is_rechecked_before_each_start_not_only_after_a_finish(self):
+        os.environ["GEAK_SELECTION_PROFILE_CALLS"] = "1"
+        st._PROFILE["trace_index"] = 1
+        self._install_torch(lambda activities: _Profiler([]))
+        self.assertFalse(st._start_profile())
+        self.assertTrue(st._PROFILE["done"])
 
     def test_finishing_a_profile_that_never_started_is_a_no_op(self):
         st._finish_profile()

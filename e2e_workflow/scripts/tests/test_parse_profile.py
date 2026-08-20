@@ -241,6 +241,19 @@ class TestShortNameAndNormKey(unittest.TestCase):
 
     def test_truncates_to_60_chars(self):
         self.assertEqual(pp.short_name("k" * 70), "k" * 60)
+        self.assertEqual(pp.SHORT_NAME_LIMIT, 60)
+
+    def test_an_unnamed_namespace_shortens_to_the_kernel_not_its_parameter(self):
+        """ROCm spells the unnamed namespace '(anonymous namespace)', so the symbol opens with '('
+        where the identifier should be. The '[\\w:]+' probe found nothing, the whole signature fell
+        through as the "short" name, and splitting it on '::' handed back the trailing parameter
+        type -- this real symbol used to shorten to 'KdaPackedDecodeParams)'."""
+        self.assertEqual(
+            pp.short_name("void (anonymous namespace)::kda_packed_decode_kernel<8, false>"
+                          "((anonymous namespace)::KdaPackedDecodeParams)"),
+            "kda_packed_decode_kernel")
+        self.assertEqual(pp.norm_key("void (anonymous namespace)::clamp_position_kernel<long>(int)"),
+                         "clamppositionkernel")
 
     def test_non_identifier_name_is_returned_as_is(self):
         self.assertEqual(pp.short_name("<unknown>"), "<unknown>")

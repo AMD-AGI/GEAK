@@ -747,27 +747,74 @@ async function ensureFlydslGate() {
 // two machine fields separate and require runtime evidence before bake-off or authoring.
 const CALLABLE_SPEC_RX = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
 const validCallableSpec = (s) => CALLABLE_SPEC_RX.test(String(s || '').trim());
-// Template arguments are removed innermost-first until the symbol stops changing. One greedy pass
-// over `<.*>` spans from the FIRST '<' to the LAST '>', so `k<a>(t<b>)` loses the '(' that marks the
-// end of the name; and a nested `k<pair<a,b>>` leaves the leftover delimiter behind. Removing only
-// balanced groups, repeatedly, is what makes a templated symbol reduce to the same token as its bare
-// spelling -- which is the whole job here, since a mismatch refuses a real head.
-const stripTemplateArgs = (symbol) => {
+// parse_profile.short_name truncates display names at 60 chars; a declared name that hit the limit
+// is our own doing, so a prefix match at it is accepted rather than read as a mismatch.
+const SHORT_NAME_LIMIT = 60;
+// Balanced groups are removed innermost-first until the symbol stops changing. One greedy pass
+// spans from the FIRST opener to the LAST closer, so `k<a>(t<b>)` loses the '(' that marks the end
+// of the name, and a nested `k<pair<a,b>>` leaves the leftover delimiter behind.
+const stripBalanced = (symbol, opener, closer) => {
+  const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const rx = new RegExp(`${esc(opener)}[^${esc(opener)}${esc(closer)}]*${esc(closer)}`, 'g');
   let text = symbol;
   for (let previous = null; previous !== text;) {
     previous = text;
-    text = text.replace(/<[^<>]*>/g, '');
+    text = text.replace(rx, ' ');
   }
   return text;
 };
-const canonicalDeviceKernel = (s) => stripTemplateArgs(
-  String(s || '').trim().toLowerCase().replace(/\[clone[^\]]*\]/g, ''))
-  .split('(', 1)[0].split('::').pop().replace(/[^a-z0-9_]+/g, '');
+// Must stay identical to canonical_kernel_name in kernel_selection.py -- the JS gate and the Python
+// verdict compare the same two symbols, so any drift lets a kernel pass one side and fail the other.
+// Parentheses are stripped as balanced groups rather than by cutting at the first '(': ROCm spells
+// the unnamed namespace `(anonymous namespace)`, which puts a parenthesis BEFORE the kernel, so
+// cutting there collapsed every such symbol to the return type `void`, and two unrelated kernels
+// that both collapsed to `void` then certified each other. Taking the last whitespace-separated
+// token drops that return type without fusing it into names that carry no namespace.
+function canonicalDeviceKernel(s) {
+  const stripped = stripBalanced(
+    stripBalanced(String(s || '').replace(/\[clone[^\]]*\]/gi, ''), '<', '>'), '(', ')');
+  // Whatever opener is left never closes, so the symbol was cut off inside it -- profile artifacts
+  // store kernel names elided mid-template. The name is what precedes that opener; taking the last
+  // whitespace token instead lifts a fragment out of the template arguments and states it with the
+  // same confidence as a real name, which then matches the wrong kernel rather than refusing.
+  const parts = stripped.split(/[<(]/)[0].split('::').pop().split(/\s+/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1].toLowerCase().replace(/[^a-z0-9_]+/g, '') : '';
+}
+// A name that hit the display limit ends mid-token, so no word boundary can follow it. Tested both
+// ways because either side may be the shortened one: heads carry a short_name while traces carry
+// the full symbol, and which is which is not fixed.
+const truncatedPrefix = (needle, haystack) =>
+  needle.length >= SHORT_NAME_LIMIT && haystack.startsWith(needle);
+// [arguments, closed] for the symbol's first `<...>`. Reading only what follows the `<` keeps this
+// independent of the return type and namespace, which one side routinely spells and the other does
+// not. `closed` is false when the symbol was cut off inside the template -- profile artifacts elide
+// long names, and only the visible part of an elided argument list can be held against anything.
+// Separators become `_` rather than vanishing, so `<128, 4, ...>` cannot read as a prefix of
+// `<128, 48, ...>`.
+function templateArguments(value) {
+  const text = String(value || ''), start = text.indexOf('<');
+  const fold = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  if (start < 0) return ['', true];
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === '<') depth++;
+    else if (text[i] === '>' && --depth === 0) return [fold(text.slice(start + 1, i)), true];
+  }
+  return [fold(text.slice(start + 1)), false];
+}
 function kernelIdentitiesMatch(a, b) {
   const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
-  return !!x && !!y && (x === y ||
-    (x.length >= 6 && new RegExp(`(?:^|_)${x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|_)`).test(y)) ||
-    (y.length >= 6 && new RegExp(`(?:^|_)${y.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|_)`).test(x)));
+  if (!x || !y) return false;
+  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)) return false;
+  // The base token deliberately drops template arguments so a bare declared name can match its
+  // decorated spelling. When BOTH sides carry them the information is present on both, and ignoring
+  // it certifies the wrong kernel: one capture here held 20 distinct kernels named
+  // at::native::vectorized_elementwise_kernel, separated only by their functor.
+  const [xa, xc] = templateArguments(a), [ya, yc] = templateArguments(b);
+  if (!xa || !ya) return true;
+  if (xc && yc) return xa === ya;
+  // An elided list still has to agree as far as both sides actually spell it out.
+  return xa.startsWith(ya) || ya.startsWith(xa);
 }
 function requiredDeviceKernel(h) {
   if (!h || h.entity_kind !== 'gpu_kernel') return '';

@@ -47,7 +47,11 @@ def _trace_path(trace_index):
         root, ext = os.path.splitext(template)
         path = f"{root}.pid-{pid}.rank-{_rank()}{ext or '.json'}"
     if os.environ.get("GEAK_SELECTION_TRACE_UNIQUE", "1") == "0":
-        return template
+        # UNIQUE=0 opts out of the per-CALL suffix only. The per-PROCESS part has to stay: returning
+        # the raw template leaves a literal '{pid}' in the name, and kernel_selection pairs a capture
+        # to its trace by matching '.pid-<pid>' -- without it every rank races on one path and the
+        # verdict degrades to capture_process_trace_missing.
+        return path
     root, ext = os.path.splitext(path)
     return f"{root}.call-{trace_index}{ext or '.json'}"
 
@@ -73,6 +77,7 @@ def _start_profile():
         if not out:
             return False
         ident = threading.get_ident()
+        profiler = None
         try:
             import torch
             activities = [torch.profiler.ProfilerActivity.CPU]
@@ -80,16 +85,26 @@ def _start_profile():
                 activities.append(torch.profiler.ProfilerActivity.CUDA)
             profiler = torch.profiler.profile(activities=activities)
             profiler.__enter__()
+            _record_install_markers()
             _PROFILE.update(active=True, owner=ident, profiler=profiler, out=out,
                             active_calls=0, root_calls=0)
-            _record_install_markers()
             if not _PROFILE["atexit_registered"]:
                 atexit.register(_finish_profile)
                 _PROFILE["atexit_registered"] = True
             return True
         except Exception as exc:
-            _PROFILE["done"] = True
+            # Anything that fails after __enter__ has to close the profiler here. _finish_profile
+            # returns early once done is set, so a profiler left entered on this path would stay
+            # entered -- and collecting -- for the life of the process.
+            _PROFILE.update(active=False, done=True, owner=None, profiler=None)
             sys.stderr.write(f"[seam_trace] profiler start failed: {exc!r}\n")
+            if profiler is not None:
+                try:
+                    profiler.__exit__(None, None, None)
+                except Exception as close_exc:
+                    # It stays entered, and collecting, for the life of the server. Nothing here can
+                    # undo that, but an unexplained slowdown later is worth one line now.
+                    sys.stderr.write(f"[seam_trace] profiler close failed: {close_exc!r}\n")
             return False
 
 

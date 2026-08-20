@@ -87,16 +87,26 @@ def classify(name):
     return "other", "unknown", True, "Unclassified — inspect source to route."
 
 
+SHORT_NAME_LIMIT = 60
+
+
 def short_name(name):
     """Best-effort readable short name from a mangled C++/triton symbol."""
     n = name
     # drop leading 'void ' and template/return noise
     n = re.sub(r"^void\s+", "", n)
+    # A symbol from an unnamed namespace opens with '(' where the identifier should be, so the
+    # '[\w:]+' probe below finds nothing and the whole signature falls through as the "short" name
+    # -- ROCm's '(anonymous namespace)::kda_packed_decode_kernel<...>(...)' used to shorten to the
+    # trailing parameter type rather than the kernel.
+    n = re.sub(r"\(anonymous namespace\)", "", n).lstrip(": ")
     # take the first identifier-ish token before '(' or '<'
     m = re.match(r"[\w:]+", n)
     base = m.group(0) if m else n
     base = base.split("::")[-1]
-    return base[:60]
+    # Truncation is for display only. kernel_selection.canonical_kernel_name knows about this limit
+    # and tolerates a prefix match at it, because mangled and Tensile symbols routinely exceed it.
+    return base[:SHORT_NAME_LIMIT]
 
 
 # --------------------------------------------------------------------------- #

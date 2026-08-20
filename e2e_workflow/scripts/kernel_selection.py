@@ -67,30 +67,85 @@ def merge_process_traces(paths):
     return merged
 
 
-def _strip_template_args(text):
-    """Remove balanced ``<...>`` groups innermost-first until the symbol stops changing.
+# parse_profile.short_name truncates display names here. A declared name that hit the limit is our
+# own doing, so the matcher accepts a prefix at it rather than reading the truncation as a mismatch.
+SHORT_NAME_LIMIT = 60
 
-    One greedy pass over ``<.*>`` spans from the FIRST ``<`` to the LAST ``>``, so ``k<a>(t<b>)``
-    loses the ``(`` that marks the end of the name, and a nested ``k<pair<a,b>>`` leaves the leftover
-    delimiter behind. This must stay identical to ``canonicalDeviceKernel`` in e2e_workflow.js: the JS
-    gate and this verdict compare the same two symbols, and a canonicalization that drifted between
-    them would let a kernel pass one side and be refused by the other.
+
+def _strip_balanced(text, opener, closer):
+    """Remove balanced ``opener...closer`` groups innermost-first until the symbol stops changing.
+
+    A single greedy pass spans from the FIRST opener to the LAST closer, so ``k<a>(t<b>)`` loses the
+    ``(`` that ends the name and a nested ``k<pair<a,b>>`` leaves a stray delimiter behind. Removing
+    the innermost group repeatedly is the only way to survive both.
     """
+    pattern = re.compile(
+        re.escape(opener) + "[^" + re.escape(opener + closer) + "]*" + re.escape(closer))
     previous = None
     while previous != text:
         previous = text
-        text = re.sub(r"<[^<>]*>", "", text)
+        text = pattern.sub(" ", text)
     return text
 
 
 def canonical_kernel_name(value):
-    """Return a stable token for matching mangled/demangled kernel symbols."""
-    text = str(value or "").strip().lower()
-    text = re.sub(r"\[clone[^\]]*\]", "", text)
-    text = _strip_template_args(text)
-    text = text.split("(", 1)[0]
-    text = text.rsplit("::", 1)[-1]
-    return re.sub(r"[^a-z0-9_]+", "", text)
+    """Return a stable token for matching mangled/demangled kernel symbols.
+
+    This must stay identical to ``canonicalDeviceKernel`` in e2e_workflow.js: the JS gate and this
+    verdict compare the same two symbols, and a canonicalization that drifted between them would let
+    a kernel pass one side and be refused by the other.
+
+    Parentheses are stripped as balanced groups rather than by cutting at the first ``(``. ROCm names
+    the unnamed namespace ``(anonymous namespace)``, which puts a parenthesis *before* the kernel, so
+    cutting there collapsed every such symbol to the return type ``void`` -- and two unrelated
+    kernels that both collapse to ``void`` then certified each other. Taking the last whitespace-
+    separated token drops that return type without fusing it into names that carry no namespace.
+    """
+    text = re.sub(r"\[clone[^\]]*\]", "", str(value or ""), flags=re.IGNORECASE)
+    text = _strip_balanced(text, "<", ">")
+    text = _strip_balanced(text, "(", ")")
+    # Whatever opener is left never closes, so the symbol was cut off inside it -- profile artifacts
+    # store kernel names elided mid-template. The name is what precedes that opener; taking the last
+    # whitespace token instead lifts a fragment out of the template arguments and states it with the
+    # same confidence as a real name ('...elementwise_kernel_manual_unroll<128, 4, at::native::gpu_k'
+    # answered 'gpu_k'), which then matches the wrong kernel rather than refusing to answer.
+    text = re.split(r"[<(]", text, 1)[0]
+    text = text.split("::")[-1].split()
+    return re.sub(r"[^a-z0-9_]+", "", text[-1].lower()) if text else ""
+
+
+def _truncated_prefix(needle, haystack):
+    """True when ``needle`` is ``haystack`` cut at the display limit.
+
+    A name that hit the limit ends mid-token, so no word boundary can follow it. Tested both ways
+    because either side may be the shortened one: heads carry a short_name while traces carry the
+    full symbol, and which is which is not fixed.
+    """
+    return len(needle) >= SHORT_NAME_LIMIT and haystack.startswith(needle)
+
+
+def _template_arguments(value):
+    """``(arguments, closed)`` for the symbol's first ``<...>``.
+
+    Reading only what follows the ``<`` keeps this independent of the return type and namespace,
+    which one side routinely spells and the other does not. ``closed`` is False when the symbol was
+    cut off inside the template -- profile artifacts elide long names, and only the visible part of
+    an elided argument list can be held against anything. Separators become ``_`` rather than
+    vanishing, so ``<128, 4, ...>`` cannot read as a prefix of ``<128, 48, ...>``.
+    """
+    text = str(value or "")
+    start = text.find("<")
+    if start < 0:
+        return "", True
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "<":
+            depth += 1
+        elif text[index] == ">":
+            depth -= 1
+            if depth == 0:
+                return re.sub(r"[^a-z0-9]+", "_", text[start + 1:index].lower()), True
+    return re.sub(r"[^a-z0-9]+", "_", text[start + 1:].lower()), False
 
 
 def kernel_matches(expected, observed):
@@ -98,10 +153,20 @@ def kernel_matches(expected, observed):
     got = canonical_kernel_name(observed)
     if not want or not got:
         return False
-    return want == got or (
-        len(want) >= 6
-        and re.search(r"(?:^|_)" + re.escape(want) + r"(?:$|_)", got) is not None
-    )
+    if want != got and not _truncated_prefix(want, got) and not _truncated_prefix(got, want):
+        return False
+    # The base token deliberately drops template arguments so a bare declared name can match its
+    # decorated spelling. When BOTH sides carry them the information is present on both, and ignoring
+    # it certifies the wrong kernel: one capture here held 20 distinct kernels named
+    # at::native::vectorized_elementwise_kernel, separated only by their functor.
+    want_args, want_closed = _template_arguments(expected)
+    got_args, got_closed = _template_arguments(observed)
+    if not want_args or not got_args:
+        return True
+    if want_closed and got_closed:
+        return want_args == got_args
+    # An elided list still has to agree as far as both sides actually spell it out.
+    return want_args.startswith(got_args) or got_args.startswith(want_args)
 
 
 def _device_projection(event):
@@ -348,7 +413,10 @@ def main(argv=None):
             verify(args.target, args.device_kernel, meta,
                    merge_process_traces(matching_traces), args.candidate_target),
         ))
-    selected_meta_path, selected_paths, verdict = max(
+    # The strongest single process seeds the verdict shape, but every field that survives below is
+    # recomputed across ALL attempts. Only the meta path stays process-specific, so it is named for
+    # the one process it describes rather than presented as the run's selection.
+    best_process_meta_file, _, verdict = max(
         attempts,
         key=lambda item: (
             item[2]["matched_kernel_calls"],
@@ -406,10 +474,10 @@ def main(argv=None):
         }
         for meta_path, paths, item in attempts
     ]
-    selected_paths = [path for _, paths, _ in attempts for path in paths]
-    verdict["capture_meta_file"] = selected_meta_path
-    verdict["trace_file"] = selected_paths[0] if len(selected_paths) == 1 else ""
-    verdict["trace_files"] = selected_paths
+    all_paths = [path for _, paths, _ in attempts for path in paths]
+    verdict["best_process_meta_file"] = best_process_meta_file
+    verdict["trace_file"] = all_paths[0] if len(all_paths) == 1 else ""
+    verdict["trace_files"] = all_paths
     verdict["trace_files_considered"] = trace_paths
     payload = json.dumps(verdict, indent=2)
     if args.out:

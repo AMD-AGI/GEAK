@@ -14,6 +14,12 @@ SPEC = importlib.util.spec_from_file_location(
 ks = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ks)
 
+# parse_profile owns the display-name limit that canonical_kernel_name's prefix rule depends on.
+PP_SPEC = importlib.util.spec_from_file_location(
+    "parse_profile", os.path.join(SCRIPTS, "parse_profile.py"))
+pp = importlib.util.module_from_spec(PP_SPEC)
+PP_SPEC.loader.exec_module(pp)
+
 TARGET = (
     "vllm.v1.attention.ops.chunked_prefill_paged_decode:"
     "chunked_prefill_paged_decode"
@@ -67,9 +73,176 @@ class TestKernelMatching(unittest.TestCase):
                                  "vectorized_elementwise_kernel")
                 self.assertTrue(ks.kernel_matches("vectorized_elementwise_kernel", decorated))
 
-    def test_an_unbalanced_delimiter_does_not_survive_into_the_token(self):
-        self.assertEqual(ks.canonical_kernel_name("gemm_kernel<half"), "gemm_kernelhalf")
+    def test_a_symbol_elided_mid_template_answers_with_the_name_not_a_fragment(self):
+        """Profile artifacts store long kernel names elided mid-template, so the opener never closes
+        and no amount of balanced stripping removes it. Reading the last whitespace token then lifts
+        a fragment out of the template arguments -- this real elision answered 'gpu_k' -- and states
+        it as confidently as a real name, which matches the wrong kernel instead of refusing."""
+        self.assertEqual(
+            ks.canonical_kernel_name(
+                "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_k..."),
+            "elementwise_kernel_manual_unroll")
+        self.assertEqual(
+            ks.canonical_kernel_name("void aiter::grouped_topk_kernel<c10::BFloat16, float "
+                                     "__vector(4), true>(c10::BFloat1"),
+            "grouped_topk_kernel")
+        self.assertEqual(ks.canonical_kernel_name("gemm_kernel<half"), "gemm_kernel")
         self.assertEqual(ks.canonical_kernel_name("<>"), "")
+
+    def test_an_elided_name_still_matches_the_full_symbol_it_was_cut_from(self):
+        elided = "_ZN7ck_tile6kentryILi2ENS_15MoeFlatmmKernelINS_33GemmSpatiallyLocalTilePart..."
+        full = ("_ZN7ck_tile6kentryILi2ENS_15MoeFlatmmKernelINS_33GemmSpatiallyLocalTilePartitioner"
+                "INS_13TileGemmShapeINS_8sequenceIJLi16")
+        self.assertTrue(ks.kernel_matches(elided, full))
+
+
+# Symbols lifted verbatim from ROCm captures under /shared_nfs/hyperloom-claw. They are here because
+# hand-written C++ never produced the shapes that broke this: an unnamed namespace putting a '(' in
+# front of the kernel, and a bare kernel with no namespace at all to separate it from 'void'.
+REAL_ROCM_SYMBOLS = {
+    "void (anonymous namespace)::kda_packed_decode_kernel<8, false>"
+    "((anonymous namespace)::KdaPackedDecodeParams)": "kda_packed_decode_kernel",
+    "void aiter::greedy_sample_kernel<float, 1024, 16>(float const*, int*, int, int)":
+        "greedy_sample_kernel",
+    "void paged_attention_ll4mi_QKV_mfma16_kernel<0, __hip_bfloat16, "
+    "(vllm::Fp8KVCacheDataType)0, 256>(float*, int*)": "paged_attention_ll4mi_qkv_mfma16_kernel",
+    "void wvSplitKrc_<__hip_bfloat16, 8, 4>(void*, int)": "wvsplitkrc_",
+    "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bLi256EEEvPT_i": "_zn5aiter24add_rmsnorm_quant_kernelidf16bli256eeevpt_i",
+    "reshape_and_cache_shuffle_5d": "reshape_and_cache_shuffle_5d",
+}
+
+
+class TestRealRocmSymbolsCanonicalizeToTheirKernel(unittest.TestCase):
+    def test_each_symbol_reduces_to_the_kernel_it_names(self):
+        for symbol, token in REAL_ROCM_SYMBOLS.items():
+            with self.subTest(symbol=symbol[:48]):
+                self.assertEqual(ks.canonical_kernel_name(symbol), token)
+
+    def test_an_unnamed_namespace_does_not_collapse_the_symbol_to_its_return_type(self):
+        """ROCm spells the unnamed namespace '(anonymous namespace)', which puts a parenthesis BEFORE
+        the kernel. Cutting the symbol at its first '(' left the return type as the whole token, so
+        every such kernel reduced to 'void' -- and two unrelated ones then certified each other,
+        which is exactly the unearned credit this verdict exists to refuse."""
+        one = "void (anonymous namespace)::clamp_position_kernel<long>(long*, long)"
+        two = "void (anonymous namespace)::kda_packed_decode_kernel<8, false>(int)"
+        self.assertEqual(ks.canonical_kernel_name(one), "clamp_position_kernel")
+        self.assertEqual(ks.canonical_kernel_name(two), "kda_packed_decode_kernel")
+        self.assertFalse(ks.kernel_matches(one, two))
+        self.assertFalse(ks.kernel_matches(two, one))
+
+    def test_a_kernel_with_no_namespace_is_not_fused_with_its_return_type(self):
+        """Stripping separators rather than splitting on them glued 'void' onto any kernel that had
+        no '::' to fall back on, so the bare name never matched its own decorated spelling."""
+        bare = "paged_attention_ll4mi_QKV_mfma4_kernel"
+        decorated = f"void {bare}<__hip_bfloat16, 128, 256>(float*, int)"
+        self.assertEqual(ks.canonical_kernel_name(decorated), bare.lower())
+        self.assertTrue(ks.kernel_matches(bare, decorated))
+
+    def test_a_name_truncated_by_the_display_limit_still_matches_its_full_symbol(self):
+        """parse_profile.short_name caps display names, and mangled and Tensile symbols run well past
+        the cap. The truncated name ends mid-token, so no word boundary can follow it -- without an
+        explicit prefix rule our own shortening reads as a different kernel."""
+        symbol = "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0ELb1ELi1EEEvPT0_i"
+        declared = symbol[:ks.SHORT_NAME_LIMIT]
+        self.assertGreater(len(symbol), ks.SHORT_NAME_LIMIT)
+        self.assertTrue(ks.kernel_matches(declared, symbol))
+        self.assertFalse(ks.kernel_matches(declared[:ks.SHORT_NAME_LIMIT - 1], symbol))
+
+    def test_a_name_embedded_inside_another_is_a_different_kernel(self):
+        """The first two pairs are real neighbours inside one sglang capture. Accepting a name
+        because it appears inside the other certified _fwd_kernel as _fwd_kernel_stage2 -- a
+        different kernel, which is precisely the credit this verdict exists to withhold."""
+        for a, b in (
+            ("_fwd_kernel", "_fwd_kernel_stage2"),
+            ("reshape_and_cache_kernel", "reshape_and_cache_kernel_flash"),
+            ("gemm_kernel", "fused_gemm_kernel_v2"),
+            ("gemm", "gemm_kernel_v2"),
+            ("attention_kernel", "attention_kernelbackward"),
+        ):
+            with self.subTest(a=a, b=b):
+                self.assertFalse(ks.kernel_matches(a, b))
+                self.assertFalse(ks.kernel_matches(b, a))
+
+    def test_two_instantiations_of_one_template_are_not_one_kernel(self):
+        """The base token drops template arguments so a bare declared name can match its decorated
+        spelling. When both sides carry those arguments the information is present on both, and one
+        capture here held 20 distinct kernels whose only difference was the functor."""
+        fill = ("void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<bool>, "
+                "std::array<char*, 1ul> >(int, at::native::FillFunctor<bool>)")
+        power = ("void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous "
+                 "namespace)::pow_tensor_scalar_kernel_impl<float>, std::array<char*, 2ul> >(int)")
+        self.assertEqual(ks.canonical_kernel_name(fill), ks.canonical_kernel_name(power))
+        self.assertFalse(ks.kernel_matches(fill, power))
+        self.assertTrue(ks.kernel_matches(fill, fill))
+
+    def test_a_bare_declared_name_still_matches_a_templated_symbol(self):
+        """The tightening above applies only when BOTH sides carry template arguments. A head that
+        declares the bare name has none to compare, and refusing it would reject every real head."""
+        self.assertTrue(ks.kernel_matches(
+            "vectorized_elementwise_kernel",
+            "void at::native::vectorized_elementwise_kernel<4, AddFunctor<float> >(int)"))
+
+    def test_arguments_are_read_past_the_return_type_and_namespace(self):
+        """Only one side spells the return type and namespace. This pair is a real head row whose
+        stored short_name had been cut inside the ARGUMENT list while its template stayed whole --
+        comparing the symbols entire refused a kernel against itself."""
+        self.assertTrue(ks.kernel_matches(
+            "clamp_position_kernel<long>(long*, long const*, unsigned lon",
+            "void (anonymous namespace)::clamp_position_kernel<long>(long*, long const*, unsigned "
+            "long, int)"))
+
+    def test_one_kernel_matches_across_builds_that_name_its_namespace_differently(self):
+        """Both spellings occur across the captures: one build leaves the namespace unnamed, another
+        declares it. Same kernel, same instantiation."""
+        self.assertTrue(ks.kernel_matches(
+            "void (anonymous namespace)::store_kvcache<512l, 512l, 1, false, long>(int)",
+            "void sglang::store_kvcache<512l, 512l, 1, false, long>(sglang::StoreKVCacheParams)"))
+
+    def test_an_elided_argument_list_still_has_to_agree_as_far_as_it_is_spelled(self):
+        """Artifacts elide long names mid-template, so neither list is complete. Skipping the check
+        entirely would let every elided instantiation of one template certify the others -- these two
+        differ only in the visible '128, 4' against '128, 8'."""
+        four = "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_k..."
+        eight = "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k..."
+        self.assertEqual(ks.canonical_kernel_name(four), ks.canonical_kernel_name(eight))
+        self.assertFalse(ks.kernel_matches(four, eight))
+        self.assertTrue(ks.kernel_matches(four, four))
+
+    def test_a_separator_cannot_make_one_argument_list_a_prefix_of_another(self):
+        """Deleting separators instead of folding them read '<128, 4,' as a prefix of '<128, 48,'."""
+        self.assertFalse(ks.kernel_matches("k<128, 4, at::native::gpu_k",
+                                           "k<128, 48, at::native::gpu_k"))
+
+    def test_the_display_limit_agrees_with_the_module_that_applies_it(self):
+        """The prefix rule above is only sound while both sides mean the same number of characters."""
+        self.assertEqual(ks.SHORT_NAME_LIMIT, pp.SHORT_NAME_LIMIT)
+
+
+class TestTheSharedFixtureHoldsOnThisSide(unittest.TestCase):
+    """kernel_symbols.json is the one place both canonicalizers are pinned. The node half of this is
+    scripts/test_kernel_canonicalization_parity.js; a rule added here without adding it there is
+    exactly the drift that lets a kernel pass the JS gate and be refused by this verdict."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "kernel_symbols.json")) as handle:
+            cls.fixture = json.load(handle)
+
+    def test_every_symbol_reduces_to_its_recorded_token(self):
+        for case in self.fixture["canonical"]:
+            with self.subTest(symbol=case["symbol"][:48]):
+                self.assertEqual(ks.canonical_kernel_name(case["symbol"]), case["token"])
+
+    def test_every_recorded_pair_gets_the_recorded_verdict(self):
+        for case in self.fixture["matches"]:
+            with self.subTest(why=case["why"]):
+                self.assertEqual(ks.kernel_matches(case["a"], case["b"]), case["match"])
+                self.assertEqual(ks.kernel_matches(case["b"], case["a"]), case["match"])
+
+    def test_the_fixture_still_covers_symbols_taken_from_real_captures(self):
+        """Hand-written C++ is what let the unnamed-namespace and bare-kernel defects through."""
+        self.assertGreaterEqual(sum(1 for c in self.fixture["canonical"] if c.get("real")), 5)
 
 
 class TestSelectionVerdict(unittest.TestCase):
