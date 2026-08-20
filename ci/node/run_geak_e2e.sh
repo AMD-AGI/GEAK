@@ -9,8 +9,8 @@
 #       subprocess.Popen(cmd, env=dict(os.environ), start_new_session=True)
 #   GEAK:      interface/run_e2e.py::main
 #       - positional args:  args[0]=handoff.json   args[1]=result.json   (only --dry-run flag is read)
-#       - BUDGET is read from env PERFSKILLS_E2E_TIMEOUT_S (default 43200s=12h).
-#         The CLI "--timeout-s" value is DISCARDED by run_e2e (it lands in an ignored positional).
+#       - BUDGET is the min() of "--timeout-s" and env PERFSKILLS_E2E_TIMEOUT_S; 43200s=12h when
+#         neither is stated. (The flag used to be discarded into an ignored positional: Hyperloom #1202.)
 #       - PERFSKILLS_ROOT is derived from run_e2e.py's own location (interface/..), so calling the
 #         real path is enough; it maps the handoff onto e2e_workflow/e2e_workflow.js and drives it
 #         via the Claude SDK (model claude-opus-4-8, effort ultracode).
@@ -167,7 +167,8 @@ if crit:
 print(f"patched handoff -> {dst}\n  exp_root={h['exp_root']}\n  model_path={h.get('model_path')}\n  launch_recipe={h.get('launch_recipe')}\n  inferencex_path={h.get('inferencex_path')}\n  bench_launcher={h.get('bench_launcher')}")
 PY
 
-# ---- Budget: run_e2e reads PERFSKILLS_E2E_TIMEOUT_S (NOT the CLI flag). Export it. ----
+# ---- Budget: reaches run_e2e as the --timeout-s value below (its own env knob is
+# GEAK_E2E_TIMEOUT_S, which this name has never matched). ----
 export PERFSKILLS_E2E_TIMEOUT_S   # value/default from ci/config.sh
 
 # ---- Claude workflow knobs (defaults already match run_e2e.py) ----
@@ -188,6 +189,6 @@ echo "   inferencex_path = ${INFERENCEX_PATH:-<unset -> native bench>}"
 echo "   dry_run  = ${DRY:-<no>}"
 echo "=============================================================="
 
-# We pass --timeout-s too, purely to mirror Hyperloom's exact argv (run_e2e ignores its value;
-# the effective budget is the PERFSKILLS_E2E_TIMEOUT_S env above).
+# --timeout-s mirrors Hyperloom's exact argv, and is now honoured: set PERFSKILLS_E2E_TIMEOUT_S to
+# the wall-clock at which this run will really be killed and GEAK paces its final phase to fit.
 exec python3 "$RUNNER" "$HANDOFF" "$RESULT" --timeout-s "$PERFSKILLS_E2E_TIMEOUT_S" ${DRY:+$DRY}

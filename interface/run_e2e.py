@@ -268,6 +268,15 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # budget-unaware (byte-identical to a direct, non-interface invocation).
     if timeout_s is not None and timeout_s > 0:
         ps_args["time_budget_s"] = int(timeout_s)
+    # How that budget is split at the end. Defaults live in the JS (60min reserve
+    # capped at 20% of the budget, 10min re-curate floor); these let an operator
+    # widen the reserve per run without editing either file -- e.g.
+    # GEAK_FINAL_RESERVE_S=5400 for 90min on a model known to write slowly.
+    for env_key, arg_key in (("GEAK_FINAL_RESERVE_S", "final_reserve_s"),
+                             ("GEAK_FINAL_RECURATE_MIN_S", "final_recurate_min_s")):
+        v = _int_or_none(os.environ.get(env_key), env_key)
+        if v is not None:
+            ps_args[arg_key] = v
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
     # Serving-launch fidelity (see Hyperloom handoff builder / #805): forward the
@@ -3799,16 +3808,71 @@ def _publish_protected_pgids() -> str:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+DEFAULT_E2E_TIMEOUT_S = 43200  # 12h — used only when NOBODY states a budget
+
+
+def _int_or_none(raw: str | None, what: str) -> int | None:
+    """Positive int, or None (with a note) for junk — never abort on a bad budget."""
+    if not raw:
+        return None
+    try:
+        return int(raw) if int(raw) > 0 else None
+    except ValueError:
+        sys.stderr.write(f"ignoring non-integer {what}: {raw!r}\n")
+        return None
+
+
+def _resolve_timeout_s(argv: list[str]) -> tuple[list[str], set[str], int]:
+    """Split argv into positionals + flags, and resolve the wall-clock budget.
+
+    `--timeout-s N` is the wall-clock at which the orchestrator kills us. Its
+    VALUE is not a "--" token, so it used to land in an ignored third positional
+    and we paced against GEAK_E2E_TIMEOUT_S's 12h default instead — a caller
+    killing at 8h tore the run down mid-optimization (Hyperloom #1202). Flag and
+    env var both name a REAL kill, so the min() wins; the default applies only
+    when neither is stated.
+    """
+    positional: list[str] = []
+    flags: set[str] = set()
+    stated: dict[str, int] = {}
+    expect_value = False
+    for tok in argv:
+        if expect_value:
+            expect_value = False
+            v = _int_or_none(tok, "--timeout-s value")
+        elif tok == "--timeout-s":
+            expect_value = True
+            continue
+        elif tok.startswith("--timeout-s="):
+            v = _int_or_none(tok.split("=", 1)[1], "--timeout-s value")
+        elif tok.startswith("--"):
+            flags.add(tok)
+            continue
+        else:
+            positional.append(tok)
+            continue
+        if v is not None:
+            stated["--timeout-s"] = v
+    v = _int_or_none(os.environ.get("GEAK_E2E_TIMEOUT_S"), "GEAK_E2E_TIMEOUT_S")
+    if v is not None:
+        stated["GEAK_E2E_TIMEOUT_S"] = v
+    budget = min(stated.values()) if stated else DEFAULT_E2E_TIMEOUT_S
+    sys.stderr.write(
+        f"[budget] wall-clock {budget}s "
+        f"({', '.join(f'{k}={v}' for k, v in stated.items()) or 'nobody stated one; default'})\n"
+    )
+    return positional, flags, budget
+
+
 def main(argv: list[str]) -> int:
-    args = [a for a in argv if not a.startswith("--")]
-    flags = {a for a in argv if a.startswith("--")}
+    args, flags, timeout_s = _resolve_timeout_s(argv)
     if len(args) < 2:
         sys.stderr.write(
-            "usage: run_e2e.py <handoff.json> <result.json> [--dry-run]\n"
+            "usage: run_e2e.py <handoff.json> <result.json> "
+            "[--timeout-s N] [--dry-run]\n"
         )
         return 2
     handoff_path, result_path = Path(args[0]), Path(args[1])
-    timeout_s = int(os.environ.get("GEAK_E2E_TIMEOUT_S", "43200"))  # 12h
 
     h = _read_json(handoff_path)
     if not h:
