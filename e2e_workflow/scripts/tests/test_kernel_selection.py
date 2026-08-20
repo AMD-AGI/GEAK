@@ -52,6 +52,25 @@ class TestKernelMatching(unittest.TestCase):
             KERNEL, "void vllm::kernel_paged_attention_2d<bf16>(int)"))
         self.assertFalse(ks.kernel_matches(KERNEL, "unrelated_attention_kernel"))
 
+    def test_nested_template_arguments_reduce_to_the_bare_kernel_name(self):
+        """Demangled C++ symbols nest their template arguments, and the argument list can carry both
+        '::' and '(' -- the two delimiters the rest of the canonicalization splits on. Leaving any of
+        it behind produces a token that never matches the profile's own name for the same kernel."""
+        for decorated in (
+            "at::native::vectorized_elementwise_kernel<4, at::native::AddFunctor<float>, "
+            "at::detail::Array<char*, 3> >(int, float)",
+            "void ns::vectorized_elementwise_kernel<std::pair<int, float>>(void*)",
+            "vectorized_elementwise_kernel<float> [clone .isra.0]",
+        ):
+            with self.subTest(decorated=decorated):
+                self.assertEqual(ks.canonical_kernel_name(decorated),
+                                 "vectorized_elementwise_kernel")
+                self.assertTrue(ks.kernel_matches("vectorized_elementwise_kernel", decorated))
+
+    def test_an_unbalanced_delimiter_does_not_survive_into_the_token(self):
+        self.assertEqual(ks.canonical_kernel_name("gemm_kernel<half"), "gemm_kernelhalf")
+        self.assertEqual(ks.canonical_kernel_name("<>"), "")
+
 
 class TestSelectionVerdict(unittest.TestCase):
     def meta(self, calls=7, target=TARGET):
@@ -415,6 +434,110 @@ class TestSelectionVerdict(unittest.TestCase):
             self.assertEqual(verdict["deeper_live_candidates"], [inner])
             self.assertEqual(
                 sorted(verdict["live_candidate_targets"]), sorted([mid, inner]))
+
+
+class TestTheVerdictRefusesMalformedInput(unittest.TestCase):
+    """These are the fail-closed edges. Each one is a way an extraction could arrive incomplete and
+    still be read as "nothing to check here", which is the vacuous pass the contract exists to stop."""
+
+    def meta(self, calls=7, target=TARGET):
+        module, attr = target.split(":", 1)
+        return {"module": module, "attr": attr, "total_calls_observed": calls}
+
+    def test_a_prose_target_is_named_as_such_rather_than_probed(self):
+        verdict = ks.verify("the attention wrapper", KERNEL, self.meta(), trace())
+        self.assertFalse(verdict["ok"])
+        self.assertIn("invalid_target_callable", verdict["failed"])
+
+    def test_a_head_with_no_device_symbol_cannot_certify_anything(self):
+        verdict = ks.verify(TARGET, "", self.meta(), trace())
+        self.assertFalse(verdict["ok"])
+        self.assertIn("missing_device_kernel", verdict["failed"])
+
+    def test_one_malformed_candidate_sinks_the_whole_probe(self):
+        """The coverage check compares the declared candidate set against what was probed. A member
+        that cannot be probed at all must fail rather than quietly shrink the set being compared."""
+        verdict = ks.verify(TARGET, KERNEL, self.meta(), trace(),
+                            candidate_targets=["live_call_seam (see notes)"])
+        self.assertFalse(verdict["ok"])
+        self.assertIn("invalid_candidate_target", verdict["failed"])
+
+    def test_an_empty_kernel_name_never_matches_by_accident(self):
+        self.assertFalse(ks.kernel_matches("", KERNEL))
+        self.assertFalse(ks.kernel_matches(KERNEL, ""))
+        self.assertFalse(ks.kernel_matches("<>", KERNEL))
+
+
+class TestSpansAreReadFromEitherTraceShape(unittest.TestCase):
+    def test_begin_end_pairs_bound_a_span_the_way_a_complete_event_does(self):
+        """Kineto writes a marker as a complete `X` event, but a trace that was cut short (or came
+        from a different exporter) carries the same span as a B/E pair. Reading only `X` would report
+        a live seam as never having run."""
+        events = [
+            {"cat": "cpu_op", "name": ks.INSTALL_PREFIX + TARGET,
+             "ph": "X", "pid": 1, "tid": 2, "ts": 90, "dur": 1},
+            {"cat": "cpu_op", "name": ks.MARKER_PREFIX + TARGET,
+             "ph": "B", "pid": 1, "tid": 2, "ts": 100},
+            {"cat": "cpu_op", "name": "launch", "ph": "X", "pid": 1, "tid": 2,
+             "ts": 110, "dur": 5, "args": {"External id": 7}},
+            {"cat": "cpu_op", "name": ks.MARKER_PREFIX + TARGET,
+             "ph": "E", "pid": 1, "tid": 2, "ts": 200},
+            {"cat": "kernel", "name": KERNEL, "ph": "X", "ts": 300, "dur": 10,
+             "args": {"External id": 7}},
+        ]
+        module, attr = TARGET.split(":", 1)
+        verdict = ks.verify(
+            TARGET, KERNEL,
+            {"module": module, "attr": attr, "total_calls_observed": 1}, events)
+        self.assertTrue(verdict["ok"], verdict)
+        self.assertEqual(verdict["matched_kernel_calls"], 1)
+
+    def test_an_end_with_no_begin_is_dropped_instead_of_inventing_a_span(self):
+        spans = ks._complete_spans([
+            {"cat": "cpu_op", "name": "m", "ph": "E", "pid": 1, "tid": 2, "ts": 200},
+        ], "m")
+        self.assertEqual(spans, [])
+
+    def test_an_event_with_no_timestamp_is_not_inside_any_span(self):
+        self.assertFalse(ks._within_any_span({"cat": "cpu_op"}, [(0.0, 10.0, {})]))
+
+    def test_a_device_row_does_not_donate_its_own_id_to_the_launch_set(self):
+        """Kernel rows sit inside the marker span on the device timeline too. Harvesting ids from
+        them would make a kernel vouch for itself, so only host events may establish causality."""
+        events = [
+            {"cat": "cpu_op", "name": ks.INSTALL_PREFIX + TARGET,
+             "ph": "X", "pid": 1, "tid": 2, "ts": 90, "dur": 1},
+            {"cat": "cpu_op", "name": ks.MARKER_PREFIX + TARGET,
+             "ph": "X", "pid": 1, "tid": 2, "ts": 100, "dur": 100},
+            {"cat": "kernel", "name": KERNEL, "ph": "X", "pid": 1, "tid": 2,
+             "ts": 120, "dur": 10, "args": {"External id": 7}},
+        ]
+        module, attr = TARGET.split(":", 1)
+        verdict = ks.verify(
+            TARGET, KERNEL,
+            {"module": module, "attr": attr, "total_calls_observed": 1}, events)
+        self.assertFalse(verdict["ok"])
+        self.assertIn("device_kernel_not_under_target", verdict["failed"])
+
+
+class TestMergingProcessTraces(unittest.TestCase):
+    def test_a_trace_file_carrying_non_event_entries_is_merged_without_raising(self):
+        """`traceEvents` from a truncated export can contain nulls/strings. The verifier reads other
+        people's files, so a malformed entry must be skipped rather than abort every rank's merge."""
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "selection.pid-1.rank-0.call-1.json")
+            with open(path, "w") as fh:
+                json.dump({"traceEvents": [
+                    None,
+                    "not an event",
+                    {"cat": "cpu_op", "name": "m", "ph": "X", "pid": 1, "tid": 2,
+                     "ts": 1, "dur": 1, "args": {"External id": 5, "correlation": 6}},
+                ]}, fh)
+            merged = ks.merge_process_traces([path])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["pid"], "trace-0:1")
+        self.assertEqual(merged[0]["args"]["External id"], "trace-0:5")
+        self.assertEqual(merged[0]["args"]["correlation"], "trace-0:6")
 
 
 if __name__ == "__main__":

@@ -67,11 +67,27 @@ def merge_process_traces(paths):
     return merged
 
 
+def _strip_template_args(text):
+    """Remove balanced ``<...>`` groups innermost-first until the symbol stops changing.
+
+    One greedy pass over ``<.*>`` spans from the FIRST ``<`` to the LAST ``>``, so ``k<a>(t<b>)``
+    loses the ``(`` that marks the end of the name, and a nested ``k<pair<a,b>>`` leaves the leftover
+    delimiter behind. This must stay identical to ``canonicalDeviceKernel`` in e2e_workflow.js: the JS
+    gate and this verdict compare the same two symbols, and a canonicalization that drifted between
+    them would let a kernel pass one side and be refused by the other.
+    """
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r"<[^<>]*>", "", text)
+    return text
+
+
 def canonical_kernel_name(value):
     """Return a stable token for matching mangled/demangled kernel symbols."""
     text = str(value or "").strip().lower()
     text = re.sub(r"\[clone[^\]]*\]", "", text)
-    text = re.sub(r"<.*>", "", text)
+    text = _strip_template_args(text)
     text = text.split("(", 1)[0]
     text = text.rsplit("::", 1)[-1]
     return re.sub(r"[^a-z0-9_]+", "", text)

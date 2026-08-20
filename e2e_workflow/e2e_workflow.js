@@ -747,9 +747,22 @@ async function ensureFlydslGate() {
 // two machine fields separate and require runtime evidence before bake-off or authoring.
 const CALLABLE_SPEC_RX = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
 const validCallableSpec = (s) => CALLABLE_SPEC_RX.test(String(s || '').trim());
-const canonicalDeviceKernel = (s) => String(s || '').trim().toLowerCase()
-  .replace(/\[clone[^\]]*\]/g, '').replace(/<.*>/g, '').split('(', 1)[0]
-  .split('::').pop().replace(/[^a-z0-9_]+/g, '');
+// Template arguments are removed innermost-first until the symbol stops changing. One greedy pass
+// over `<.*>` spans from the FIRST '<' to the LAST '>', so `k<a>(t<b>)` loses the '(' that marks the
+// end of the name; and a nested `k<pair<a,b>>` leaves the leftover delimiter behind. Removing only
+// balanced groups, repeatedly, is what makes a templated symbol reduce to the same token as its bare
+// spelling -- which is the whole job here, since a mismatch refuses a real head.
+const stripTemplateArgs = (symbol) => {
+  let text = symbol;
+  for (let previous = null; previous !== text;) {
+    previous = text;
+    text = text.replace(/<[^<>]*>/g, '');
+  }
+  return text;
+};
+const canonicalDeviceKernel = (s) => stripTemplateArgs(
+  String(s || '').trim().toLowerCase().replace(/\[clone[^\]]*\]/g, ''))
+  .split('(', 1)[0].split('::').pop().replace(/[^a-z0-9_]+/g, '');
 function kernelIdentitiesMatch(a, b) {
   const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
   return !!x && !!y && (x === y ||

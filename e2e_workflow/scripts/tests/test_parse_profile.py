@@ -306,6 +306,30 @@ class TestEntityEvidence(unittest.TestCase):
         self.assertEqual(stats["dispatcher_op"], 1)
         self.assertEqual(stats["unresolved"], 1)
 
+    def test_a_row_naming_nothing_the_profiler_saw_is_unresolved_not_assumed(self):
+        """The head track routes only gpu_kernel rows. A name the profile never contains has no
+        evidence at all, and defaulting it to "kernel" is exactly how an unverifiable head got in."""
+        rows, stats = pp.annotate_rows(
+            [{"name": "a_kernel_nobody_profiled"}],
+            pp.merge_entity_evidence({"real_kernel": {"calls": 1, "total_us": 5.0,
+                                                      "cat_counts": {"kernel": 1}}}),
+            "torch-trace")
+        self.assertEqual(rows[0]["entity_kind"], "unresolved")
+        self.assertEqual(rows[0]["entity_evidence"]["basis"], "name_not_found_in_profile")
+        self.assertEqual(stats["unresolved"], 1)
+
+    def test_a_decorated_row_name_still_resolves_through_the_normalized_key(self):
+        """Top-N rows arrive with demangled/decorated names ('void ns::k<bf16>(int)'). When the fold
+        is unambiguous that row IS the profiled kernel, and refusing it would drop a real head."""
+        device = {"void ns::gemm_kernel<bf16>(int)": {"calls": 3, "total_us": 9.0,
+                                                      "cat_counts": {"kernel": 3}}}
+        rows, stats = pp.annotate_rows(
+            [{"name": "gemm_kernel"}], pp.merge_entity_evidence(device), "torch-trace")
+        self.assertEqual(rows[0]["entity_kind"], "gpu_kernel")
+        self.assertEqual(rows[0]["entity_evidence"]["matched_profiled_kernel"],
+                         "void ns::gemm_kernel<bf16>(int)")
+        self.assertEqual(stats["gpu_kernel"], 1)
+
     def test_c9_collision_resolution_is_merge_order_independent(self):
         # The setdefault bug made the collision winner depend on which aggregate was merged first.
         # Reversing the merge input order must yield IDENTICAL kinds for every row: neither the
@@ -384,6 +408,40 @@ class TestDispatcherExpansion(_TmpMixin, unittest.TestCase):
         self.assertEqual(
             [row["name"] for row in rows].count("kernel_paged_attention_2d"), 1)
         self.assertEqual(sum(row["pct_gpu_time"] for row in rows), 20.0)
+
+    def test_a_dispatcher_whose_children_cost_nothing_is_left_alone(self):
+        """Expansion divides the row's Amdahl mass by the children's measured time. With no measured
+        time there is nothing to divide by, and inventing a split would be worse than not expanding."""
+        row = {"name": "vllm::attention", "pct_gpu_time": 20.0, "total_ms": 10.0}
+        rows, records = pp.expand_dispatcher_rows([row], {
+            "vllm::attention": {"kernel_paged_attention_2d": {"calls": 4, "total_us": 0.0}},
+        })
+        self.assertEqual(rows, [row])
+        self.assertEqual(records, [])
+
+    def test_a_trace_that_cannot_be_read_yields_no_edges_rather_than_raising(self):
+        """The trace path is supplied by the caller and may be absent or truncated. parse_profile is
+        the step that TRIAGES a run; it must degrade to "no evidence", never take the run down."""
+        self.assertEqual(pp.index_dispatch_edges(self._trace_file(raw="{not json")), {})
+        self.assertEqual(pp.index_dispatch_edges("/nonexistent/trace.json"), {})
+
+    def test_sibling_spans_do_not_inherit_each_others_kernels(self):
+        """Ancestry is what attributes a kernel to an outer dispatcher. A span that already CLOSED is
+        not an ancestor, so a launch under the second sibling must not be credited to the first."""
+        events = [
+            {"cat": "cpu_op", "name": "outer", "pid": 1, "tid": 2,
+             "ts": 100, "dur": 200, "args": {"External id": 1}},
+            {"cat": "cpu_op", "name": "first_child", "pid": 1, "tid": 2,
+             "ts": 110, "dur": 10, "args": {"External id": 2}},
+            {"cat": "cpu_op", "name": "second_child", "pid": 1, "tid": 2,
+             "ts": 150, "dur": 10, "args": {"External id": 3}},
+            {"cat": "kernel", "name": "second_kernel", "ts": 400, "dur": 5,
+             "args": {"External id": 3}},
+        ]
+        edges = pp.index_dispatch_edges(self._trace_file(events))
+        self.assertIn("second_kernel", edges["second_child"])
+        self.assertIn("second_kernel", edges["outer"])
+        self.assertNotIn("first_child", edges)
 
     def test_exact_host_device_collision_is_not_expanded(self):
         row = {"name": "shared", "pct_gpu_time": 20.0}
@@ -1205,6 +1263,131 @@ class TestMain(_TmpMixin, unittest.TestCase):
         finally:
             sys.argv = saved
         self.assertIn("# Profile Top-1", out.getvalue())
+
+
+# --------------------------------------------------------------------------- #
+# host-side entity index + the --annotate CLI the architect's head rows go through
+# --------------------------------------------------------------------------- #
+class TestHostEntityIndex(_TmpMixin, unittest.TestCase):
+    """Host spans are deliberately kept OUT of the timing aggregate (a cpu_op's duration subsumes the
+    kernels it dispatched). They are indexed separately so --annotate can say "this claimed head is a
+    dispatcher" instead of the much weaker "not found"."""
+
+    def test_host_spans_are_counted_by_category_and_device_rows_are_not(self):
+        idx = pp.index_host_entities(self._trace_file([
+            {"cat": "cpu_op", "name": "vllm::attention", "dur": 10.0},
+            {"cat": "cpu_op", "name": "vllm::attention", "dur": 5.0},
+            {"cat": "user_annotation", "name": "step", "dur": 100.0},
+            {"cat": "hip_runtime", "name": "hipLaunchKernel", "dur": 1.0},
+            {"cat": "kernel", "name": "gemm_kernel", "dur": 80.0},
+            "not an event",
+        ]))
+        self.assertEqual(idx["vllm::attention"], {
+            "calls": 2, "total_us": 15.0, "cat_counts": {"cpu_op": 2}})
+        self.assertEqual(idx["step"]["cat_counts"], {"user_annotation": 1})
+        self.assertIn("hipLaunchKernel", idx)
+        self.assertNotIn("gemm_kernel", idx)
+
+    def test_an_unreadable_trace_indexes_nothing_rather_than_raising(self):
+        self.assertEqual(pp.index_host_entities("/nonexistent/trace.json"), {})
+        self.assertEqual(pp.index_host_entities(self._trace_file(raw="{not json")), {})
+
+
+class TestAnnotateCli(_TmpMixin, unittest.TestCase):
+    """`--annotate` is how a Top-N doc becomes routable head candidates. It is the step that must
+    refuse a row it cannot prove is a GPU kernel, and its EXIT CODE is what the workflow reads."""
+
+    def _main(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        saved = sys.argv
+        sys.argv = ["parse_profile.py"] + argv
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as caught:
+                    pp.main()
+        finally:
+            sys.argv = saved
+        return caught.exception.code, out.getvalue(), err.getvalue()
+
+    def _doc(self, top_kernels, name="profile_topN.json"):
+        return self._write(name, json.dumps({"top_kernels": top_kernels}))
+
+    def test_a_dispatcher_row_is_replaced_by_the_kernels_it_launched(self):
+        trace = self._trace_file([
+            {"cat": "cpu_op", "name": "vllm::attention", "pid": 1, "tid": 2,
+             "ts": 100, "dur": 100, "args": {"External id": 17}},
+            {"cat": "kernel", "name": "kernel_paged_attention_2d", "pid": 1, "tid": 7,
+             "ts": 110, "dur": 80, "args": {"External id": 17}},
+        ])
+        doc = self._doc([{"name": "vllm::attention", "short_name": "attention",
+                          "pct_gpu_time": 20.0, "total_ms": 10.0, "calls": 2}])
+        out_path = os.path.join(self._dir(), "annotated.json")
+        code, stdout, stderr = self._main(
+            ["--torch-trace", trace, "--annotate", doc, "--annotate-out", out_path])
+
+        self.assertEqual(code, 0)
+        with open(out_path) as fh:
+            annotated = json.load(fh)
+        self.assertEqual(annotated["entity_kind_contract"], "v1")
+        self.assertEqual([r["name"] for r in annotated["top_kernels"]],
+                         ["kernel_paged_attention_2d"])
+        self.assertEqual([r["entity_kind"] for r in annotated["top_kernels"]], ["gpu_kernel"])
+        self.assertEqual(annotated["entity_kind_counts"], {"gpu_kernel": 1})
+        self.assertEqual(annotated["dispatcher_expansions"][0]["dispatcher"], "vllm::attention")
+        self.assertIn("gpu_kernel=1", stderr)
+        self.assertEqual(json.loads(stdout)["annotated"], 1)
+        with open(doc) as fh:                       # --annotate-out leaves the input untouched
+            self.assertNotIn("entity_kind_contract", json.load(fh))
+
+    def test_a_row_that_is_not_a_profiled_kernel_exits_non_zero(self):
+        """The workflow branches on this exit code: a claimed head the profiler never dispatched must
+        stop the head track rather than be routed as if it had been measured."""
+        trace = self._trace_file([
+            {"cat": "kernel", "name": "gemm_kernel", "ts": 10, "dur": 80,
+             "args": {"External id": 1}},
+        ])
+        doc = self._doc([{"name": "gemm_kernel", "pct_gpu_time": 20.0},
+                         {"name": "live_call_seam", "pct_gpu_time": 5.0}])
+        code, stdout, stderr = self._main(["--torch-trace", trace, "--annotate", doc])
+
+        self.assertEqual(code, 1)
+        with open(doc) as fh:                       # no --annotate-out: annotated in place
+            annotated = json.load(fh)
+        kinds = {r["name"]: r["entity_kind"] for r in annotated["top_kernels"]}
+        self.assertEqual(kinds, {"gemm_kernel": "gpu_kernel", "live_call_seam": "unresolved"})
+        self.assertEqual(annotated["entity_kind_counts"], {"gpu_kernel": 1, "unresolved": 1})
+        self.assertIn("unresolved=1", stderr)
+        self.assertEqual(json.loads(stdout)["entity_kind_counts"]["unresolved"], 1)
+
+    def test_a_host_only_row_is_labelled_a_dispatcher_rather_than_reported_missing(self):
+        """A dispatcher that launched nothing this trace can attribute is still IDENTIFIED, which is
+        a successful classification -- the exit code marks rows with no evidence at all. Refusing a
+        dispatcher from the head track is admitHeads' job, and it needs this label to do it."""
+        trace = self._trace_file([
+            {"cat": "cpu_op", "name": "vllm::opaque", "pid": 1, "tid": 2,
+             "ts": 100, "dur": 100},
+            {"cat": "kernel", "name": "gemm_kernel", "ts": 10, "dur": 80},
+        ])
+        doc = self._doc([{"name": "vllm::opaque", "pct_gpu_time": 20.0}])
+        code, _, stderr = self._main(["--torch-trace", trace, "--annotate", doc])
+
+        self.assertEqual(code, 0)
+        with open(doc) as fh:
+            annotated = json.load(fh)
+        self.assertEqual(annotated["top_kernels"][0]["entity_kind"], "dispatcher_op")
+        self.assertEqual(annotated["entity_kind_counts"], {"dispatcher_op": 1})
+        self.assertIn("dispatcher_op=1", stderr)
+
+    def test_annotating_with_rocprof_evidence_needs_no_torch_trace(self):
+        doc = self._doc([{"name": "gemm_kernel", "pct_gpu_time": 20.0}])
+        code, _, _ = self._main(
+            ["--rocprof-dir", self._rocprof_dir(), "--annotate", doc])
+
+        self.assertEqual(code, 0)
+        with open(doc) as fh:
+            annotated = json.load(fh)
+        self.assertEqual(annotated["top_kernels"][0]["entity_kind"], "gpu_kernel")
+        self.assertEqual(annotated["dispatcher_expansions"], [])
 
 
 if __name__ == "__main__":
