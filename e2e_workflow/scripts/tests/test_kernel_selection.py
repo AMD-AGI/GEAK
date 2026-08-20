@@ -232,7 +232,7 @@ class TestTheSharedFixtureHoldsOnThisSide(unittest.TestCase):
     def test_every_symbol_reduces_to_its_recorded_token(self):
         for case in self.fixture["canonical"]:
             with self.subTest(symbol=case["symbol"][:48]):
-                self.assertEqual(ks.canonical_kernel_name(case["symbol"]), case["token"])
+                self.assertEqual(ks.canonical_kernel_name(case["symbol"]), case["canonical"])
 
     def test_every_recorded_pair_gets_the_recorded_verdict(self):
         for case in self.fixture["matches"]:
@@ -255,6 +255,30 @@ class TestSelectionVerdict(unittest.TestCase):
         self.assertTrue(verdict["ok"])
         self.assertEqual(verdict["matched_kernel_calls"], 1)
         self.assertEqual(verdict["failed"], [])
+
+    def test_capture_and_seam_markers_count_one_logical_call(self):
+        """capture_shapes and seam_trace both emit GEAK_TARGET for the selected callable. The trace
+        therefore nests the same marker inside itself, but the report must count the invocation once."""
+        events = trace()
+        events.insert(2, {
+            "cat": "cpu_op", "name": ks.MARKER_PREFIX + TARGET,
+            "ph": "X", "pid": 1, "tid": 2, "ts": 105, "dur": 80,
+        })
+        verdict = ks.verify(TARGET, KERNEL, self.meta(calls=1), events)
+        self.assertTrue(verdict["ok"], verdict)
+        self.assertEqual(verdict["target_marker_calls"], 1)
+        self.assertEqual(verdict["matched_kernel_calls"], 1)
+
+    def test_nested_markers_on_other_threads_and_later_calls_stay_distinct(self):
+        marker = ks.MARKER_PREFIX + TARGET
+        spans = ks._outermost_spans([
+            (100.0, 200.0, {"pid": 1, "tid": 2, "name": marker}),
+            (110.0, 190.0, {"pid": 1, "tid": 2, "name": marker}),
+            (120.0, 180.0, {"pid": 1, "tid": 3, "name": marker}),
+            (300.0, 320.0, {"pid": 1, "tid": 2, "name": marker}),
+        ])
+        self.assertEqual([(start, end) for start, end, _ in spans],
+                         [(100.0, 200.0), (120.0, 180.0), (300.0, 320.0)])
 
     def test_kernel_seen_elsewhere_is_not_enough(self):
         verdict = ks.verify(TARGET, KERNEL, self.meta(), trace(under_target=False))

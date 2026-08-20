@@ -768,17 +768,25 @@ const stripBalanced = (symbol, opener, closer) => {
 // Parentheses are stripped as balanced groups rather than by cutting at the first '(': ROCm spells
 // the unnamed namespace `(anonymous namespace)`, which puts a parenthesis BEFORE the kernel, so
 // cutting there collapsed every such symbol to the return type `void`, and two unrelated kernels
-// that both collapsed to `void` then certified each other. Taking the last whitespace-separated
-// token drops that return type without fusing it into names that carry no namespace.
+// that both collapsed to `void` then certified each other. Brackets go the same way, which subsumes
+// the `[clone .1]` rule: this pipeline appends its own annotations to a kernel name
+// (`_fwd_grouped_kernel_stage1 [sliding_attention]`, `main_kernel[prefill]`), and rocprof spells
+// memory ops `Memcpy DtoD (Device -> Device)`. The return type is then dropped by name and the FIRST
+// identifier taken, as parse_profile.short_name does; taking the last whitespace token also drops
+// `void`, but on any of those annotated spellings it answers with the annotation.
 function canonicalDeviceKernel(s) {
-  const stripped = stripBalanced(
-    stripBalanced(String(s || '').replace(/\[clone[^\]]*\]/gi, ''), '<', '>'), '(', ')');
+  const stripped = stripBalanced(stripBalanced(
+    stripBalanced(String(s || ''), '[', ']'), '<', '>'), '(', ')');
   // Whatever opener is left never closes, so the symbol was cut off inside it -- profile artifacts
-  // store kernel names elided mid-template. The name is what precedes that opener; taking the last
-  // whitespace token instead lifts a fragment out of the template arguments and states it with the
-  // same confidence as a real name, which then matches the wrong kernel rather than refusing.
-  const parts = stripped.split(/[<(]/)[0].split('::').pop().split(/\s+/).filter(Boolean);
-  return parts.length ? parts[parts.length - 1].toLowerCase().replace(/[^a-z0-9_]+/g, '') : '';
+  // store kernel names elided mid-template. The name is what precedes that opener; reading on
+  // instead lifts a fragment out of the template arguments and states it with the same confidence
+  // as a real name, which then matches the wrong kernel rather than refusing.
+  // Removing a group also leaves a gap where it stood, and an unnamed namespace sits mid-
+  // qualification: `at::native::(anonymous namespace)::CatArrayBatchedCopy` becomes
+  // `at::native:: ::CatArray...`, where the identifier probe stops at the space.
+  const cut = stripped.split(/[<([]/)[0].trim().replace(/\s*::\s*/g, '::');
+  const match = /^[\w:]+/.exec(cut.replace(/^void\s+/, ''));
+  return match ? match[0].split('::').pop().toLowerCase().replace(/[^a-z0-9_]+/g, '') : '';
 }
 // A name that hit the display limit ends mid-token, so no word boundary can follow it. Tested both
 // ways because either side may be the shortened one: heads carry a short_name while traces carry

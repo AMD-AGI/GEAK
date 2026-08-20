@@ -98,20 +98,33 @@ def canonical_kernel_name(value):
     Parentheses are stripped as balanced groups rather than by cutting at the first ``(``. ROCm names
     the unnamed namespace ``(anonymous namespace)``, which puts a parenthesis *before* the kernel, so
     cutting there collapsed every such symbol to the return type ``void`` -- and two unrelated
-    kernels that both collapse to ``void`` then certified each other. Taking the last whitespace-
-    separated token drops that return type without fusing it into names that carry no namespace.
+    kernels that both collapse to ``void`` then certified each other.
+
+    Brackets go the same way, which subsumes the ``[clone .1]`` rule: this pipeline appends its own
+    annotations to a kernel name (``_fwd_grouped_kernel_stage1 [sliding_attention]``,
+    ``main_kernel[prefill]``, ``hgemm_..._SPK1 [qkv_proj]``), and rocprof spells memory ops
+    ``Memcpy DtoD (Device -> Device)``.
+
+    The return type is then dropped by name and the FIRST identifier is taken, exactly as
+    ``parse_profile.short_name`` does. Taking the last whitespace token instead also drops ``void``,
+    but on any of the annotated spellings above it answers with the annotation -- ``DtoD``,
+    ``sliding_attention``, ``qkv_proj`` -- and a head then fails to match its own kernel.
     """
-    text = re.sub(r"\[clone[^\]]*\]", "", str(value or ""), flags=re.IGNORECASE)
+    text = _strip_balanced(str(value or ""), "[", "]")
     text = _strip_balanced(text, "<", ">")
     text = _strip_balanced(text, "(", ")")
     # Whatever opener is left never closes, so the symbol was cut off inside it -- profile artifacts
-    # store kernel names elided mid-template. The name is what precedes that opener; taking the last
-    # whitespace token instead lifts a fragment out of the template arguments and states it with the
-    # same confidence as a real name ('...elementwise_kernel_manual_unroll<128, 4, at::native::gpu_k'
-    # answered 'gpu_k'), which then matches the wrong kernel rather than refusing to answer.
-    text = re.split(r"[<(]", text, 1)[0]
-    text = text.split("::")[-1].split()
-    return re.sub(r"[^a-z0-9_]+", "", text[-1].lower()) if text else ""
+    # store kernel names elided mid-template. The name is what precedes that opener; reading on
+    # instead lifts a fragment out of the template arguments and states it with the same confidence
+    # as a real name ('...elementwise_kernel_manual_unroll<128, 4, at::native::gpu_k' answered
+    # 'gpu_k'), which then matches the wrong kernel rather than refusing to answer.
+    text = re.split(r"[<(\[]", text, maxsplit=1)[0]
+    # Removing a group leaves a gap where it stood, and an unnamed namespace sits mid-qualification:
+    # `at::native::(anonymous namespace)::CatArrayBatchedCopy` becomes `at::native:: ::CatArray...`,
+    # where the identifier probe below stops at the space and the last `::` segment is empty.
+    text = re.sub(r"\s*::\s*", "::", text.strip())
+    match = re.match(r"[\w:]+", re.sub(r"^void\s+", "", text))
+    return re.sub(r"[^a-z0-9_]+", "", match.group(0).split("::")[-1].lower()) if match else ""
 
 
 def _truncated_prefix(needle, haystack):
@@ -203,6 +216,30 @@ def _complete_spans(events, name):
     return spans
 
 
+def _outermost_spans(spans):
+    """Return one logical call for same-thread spans nested inside an identical marker.
+
+    ``capture_shapes`` and ``seam_trace`` can both wrap the selected callable with
+    ``GEAK_TARGET::<target>``. One real invocation then produces the same marker nested inside itself.
+    Keep every raw span for launch-causality analysis, but count only the outermost copy when reporting
+    calls. Different threads and non-nested calls remain distinct.
+    """
+    outermost = []
+    for index, span in sorted(
+            enumerate(spans),
+            key=lambda item: (item[1][0], -item[1][1], item[0])):
+        start, end, event = span
+        contained = any(
+            outer_start <= start and end <= outer_end
+            and event.get("pid") == outer_event.get("pid")
+            and event.get("tid") == outer_event.get("tid")
+            for outer_start, outer_end, outer_event in outermost
+        )
+        if not contained:
+            outermost.append(span)
+    return outermost
+
+
 def _within_any_span(event, spans, same_thread=False):
     if event.get("ts") is None:
         return False
@@ -253,6 +290,7 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel):
         "target": target_callable,
         "marker": marker,
         "spans": spans,
+        "marker_calls": len(_outermost_spans(spans)),
         "related_external_ids": related_external_ids,
         "related_correlations": related_correlations,
         "matched": matched,
@@ -314,7 +352,7 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
     if missing_candidate_markers:
         failed.append("candidate_marker_not_installed")
     selected_evidence = evidence.get(target_callable) or {
-        "marker": MARKER_PREFIX + target_callable, "spans": [],
+        "marker": MARKER_PREFIX + target_callable, "spans": [], "marker_calls": 0,
         "related_external_ids": set(), "related_correlations": set(), "matched": [],
     }
     marker = selected_evidence["marker"]
@@ -355,7 +393,7 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
         "capture_target": meta_target,
         "total_calls_observed": observed_calls,
         "target_marker": marker,
-        "target_marker_calls": len(spans),
+        "target_marker_calls": selected_evidence["marker_calls"],
         "matched_kernel_calls": len(matched),
         "matched_kernel_names": sorted(set(matched)),
         "correlated_external_ids": len(related_external_ids),

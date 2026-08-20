@@ -8,62 +8,85 @@
     "tests/test_kernel_selection.py and from node by scripts/test_kernel_canonicalization_parity.js.",
     "",
     "Symbols marked 'real' were lifted verbatim from ROCm captures. Hand-written C++ never produced",
-    "the shapes that broke this: an unnamed namespace putting a '(' in front of the kernel, and a",
-    "bare kernel with no namespace to separate it from the 'void' return type."
+    "the shapes that broke this: an unnamed namespace putting a '(' in front of the kernel, a bare",
+    "kernel with no namespace to separate it from the 'void' return type, and the annotations this",
+    "pipeline appends to a name after the fact -- a phase tag, a cluster label, a memcpy direction."
   ],
   "canonical": [
     {
       "real": true,
       "symbol": "void (anonymous namespace)::kda_packed_decode_kernel<8, false>((anonymous namespace)::KdaPackedDecodeParams)",
-      "token": "kda_packed_decode_kernel"
+      "canonical": "kda_packed_decode_kernel"
     },
     {
       "real": true,
       "symbol": "void aiter::greedy_sample_kernel<float, 1024, 16>(float const*, int*, int, int)",
-      "token": "greedy_sample_kernel"
+      "canonical": "greedy_sample_kernel"
     },
     {
       "real": true,
       "symbol": "void wvSplitKrc_<__hip_bfloat16, 8, 4>(void*, int)",
-      "token": "wvsplitkrc_"
+      "canonical": "wvsplitkrc_"
     },
     {
       "real": true,
       "symbol": "void paged_attention_ll4mi_QKV_mfma16_kernel<0, __hip_bfloat16, (vllm::Fp8KVCacheDataType)0, 256>(float*, int*)",
-      "token": "paged_attention_ll4mi_qkv_mfma16_kernel"
+      "canonical": "paged_attention_ll4mi_qkv_mfma16_kernel"
     },
     {
       "real": true,
       "symbol": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bLi256EEEvPT_i",
-      "token": "_zn5aiter24add_rmsnorm_quant_kernelidf16bli256eeevpt_i"
+      "canonical": "_zn5aiter24add_rmsnorm_quant_kernelidf16bli256eeevpt_i"
     },
     {
       "real": true,
       "symbol": "reshape_and_cache_shuffle_5d",
-      "token": "reshape_and_cache_shuffle_5d"
+      "canonical": "reshape_and_cache_shuffle_5d"
     },
     {
       "symbol": "at::native::vectorized_elementwise_kernel<4, at::native::AddFunctor<float>, at::detail::Array<char*, 3> >(int, float)",
-      "token": "vectorized_elementwise_kernel"
+      "canonical": "vectorized_elementwise_kernel"
     },
     {
       "symbol": "vectorized_elementwise_kernel<float> [clone .isra.0]",
-      "token": "vectorized_elementwise_kernel"
+      "canonical": "vectorized_elementwise_kernel"
     },
     {
       "real": true,
       "_note": "profile artifacts store long kernel names elided mid-template, leaving an opener that never closes",
       "symbol": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_k...",
-      "token": "elementwise_kernel_manual_unroll"
+      "canonical": "elementwise_kernel_manual_unroll"
     },
     {
       "real": true,
       "symbol": "_ZN7ck_tile6kentryILi2ENS_15MoeFlatmmKernelINS_33GemmSpatiallyLocalTilePart...",
-      "token": "_zn7ck_tile6kentryili2ens_15moeflatmmkernelins_33gemmspatiallylocaltilepart"
+      "canonical": "_zn7ck_tile6kentryili2ens_15moeflatmmkernelins_33gemmspatiallylocaltilepart"
     },
-    { "symbol": "gemm_kernel<half", "token": "gemm_kernel" },
-    { "symbol": "<>", "token": "" },
-    { "symbol": "", "token": "" }
+    {
+      "real": true,
+      "_note": "the annotations below are appended by this pipeline, not by the compiler. Reading the name from the END of the symbol answers with the annotation and the head stops matching its own kernel.",
+      "symbol": "_fwd_grouped_kernel_stage1 [sliding_attention]",
+      "canonical": "_fwd_grouped_kernel_stage1"
+    },
+    { "real": true, "symbol": "main_kernel[prefill]", "canonical": "main_kernel" },
+    { "real": true, "symbol": "main_kernel [cluster B (long, ~34us)]", "canonical": "main_kernel" },
+    { "real": true, "symbol": "hgemm_bf16_32x64x256x3_SPK1 [qkv_proj]", "canonical": "hgemm_bf16_32x64x256x3_spk1" },
+    { "real": true, "symbol": "allreduce_prototype_twoshot@prefill", "canonical": "allreduce_prototype_twoshot" },
+    {
+      "real": true,
+      "_note": "rocprof spells memory ops with the direction after the operation",
+      "symbol": "Memcpy DtoD (Device -> Device)",
+      "canonical": "memcpy"
+    },
+    {
+      "real": true,
+      "_note": "an unnamed namespace can also sit mid-qualification, leaving 'at::native:: ::CatArray...' once the group is removed",
+      "symbol": "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::O",
+      "canonical": "catarraybatchedcopy"
+    },
+    { "symbol": "gemm_kernel<half", "canonical": "gemm_kernel" },
+    { "symbol": "<>", "canonical": "" },
+    { "symbol": "", "canonical": "" }
   ],
   "matches": [
     {
@@ -139,6 +162,16 @@
       "a": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb",
       "b": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0ELb1ELi1EEEvPT0_i",
       "match": false
+    },
+    {
+      "why": "real head row: the phase tag is ours, so the row still has to match the kernel it names",
+      "a": "_fwd_grouped_kernel_stage1 [sliding_attention]",
+      "b": "_fwd_grouped_kernel_stage1",
+      "match": true
+    },
+    {
+      "why": "real head row: a memcpy row and its own rocprof spelling",
+      "a": "Memcpy", "b": "Memcpy DtoD (Device -> Device)", "match": true
     },
     { "why": "an empty side is never evidence", "a": "", "b": "gemm_kernel", "match": false }
   ]

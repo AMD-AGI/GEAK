@@ -37,8 +37,9 @@ const fixture = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
 console.log('\n# canonical tokens');
 for (const c of fixture.canonical) {
   const got = canonicalDeviceKernel(c.symbol);
-  ok(got === c.token, `${JSON.stringify(c.symbol.slice(0, 56))} -> ${JSON.stringify(c.token)}` +
-    (got === c.token ? '' : ` (got ${JSON.stringify(got)})`));
+  ok(got === c.canonical,
+    `${JSON.stringify(c.symbol.slice(0, 56))} -> ${JSON.stringify(c.canonical)}` +
+    (got === c.canonical ? '' : ` (got ${JSON.stringify(got)})`));
 }
 
 console.log('\n# match verdicts');
