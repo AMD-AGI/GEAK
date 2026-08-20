@@ -623,6 +623,33 @@ class TestAddMarker(_OverlayCase):
         self._run(ov.cmd_add_marker, self._ns(target="m:inner", marker_file=marker))
         self.assertEqual(self._manifest()["markers"], [{"target": "m:inner"}])
 
+    def test_a_marker_overlay_seeds_from_the_base_like_every_other_add(self):
+        """Two overlay dirs on PYTHONPATH do not compound, so an overlay that was not seeded from the
+        live stack IS the pristine install. A probe-only overlay that skipped --from would move the
+        seam onto a different build of the code than the one the profile came from."""
+        marker = self._write("custom_marker.py", "def install(target):\n    pass\n")
+        base = os.path.join(self.tmp, "current_overlay")
+        ov._ensure_overlay(base)
+        self._run(ov.cmd_add_rebind, self._ns(
+            overlay=base, target="m:accepted", impl_module="fast", impl_attr="go", impl_file=""))
+
+        probe = os.path.join(self.tmp, "probe_overlay")
+        self._run(ov.cmd_add_marker,
+                  self._ns(overlay=probe, target="m:inner", marker_file=marker, base=base))
+
+        self.assertEqual([e["target"] for e in self._manifest(probe)["rebinds"]], ["m:accepted"],
+                         "the accepted kernel from the base overlay was dropped")
+        self.assertEqual([e["target"] for e in self._manifest(probe)["markers"]], ["m:inner"])
+
+    def test_add_marker_accepts_from_on_the_command_line(self):
+        marker = self._write("custom_marker.py", "def install(target):\n    pass\n")
+        base = os.path.join(self.tmp, "current_overlay")
+        ov._ensure_overlay(base)
+        probe = os.path.join(self.tmp, "probe_overlay")
+        self._main(["add-marker", "--overlay", probe, "--target", "m:inner",
+                    "--marker-file", marker, "--from", base])
+        self.assertEqual([e["target"] for e in self._manifest(probe)["markers"]], ["m:inner"])
+
 
 # --------------------------------------------------------------------------- #
 # check -- "is the overlay actually shadowing this module?"

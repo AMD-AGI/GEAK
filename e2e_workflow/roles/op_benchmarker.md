@@ -122,7 +122,7 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
     requested/feasible.
     > **🔴 The authored same-language impl is ONLY the optimizer's code seed — NEVER the speedup
     > denominator.** Regardless of `target_language`, the reported speedup is ALWAYS measured by the
-    > immutable unittest against the FROZEN REAL ONLINE kernel (`meta.baseline_callable` / `baseline_src/` —
+    > immutable unittest against the LIVE SERVING STACK (`baseline_overlay/` / `meta.baseline_callable` —
     > e.g. the production Triton `_gqa_sparse_fwd_kernel`), never against the naive same-language scaffold
     > you just wrote. Authoring a naive HIP impl and letting the optimize loop beat THAT (optimized-HIP vs
     > naive-HIP = fake 15.7× isolated, ~0% e2e) is exactly the fake-win bug this harness exists to prevent.
