@@ -1,0 +1,135 @@
+{
+  "run_id": "_topk_forward-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "_topk_forward"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "dispatch-floored-tiny-router-host-lane",
+      "description": "Tiny router select whose wall time is flat across a 32x row spread is host-marshaling floored: cached launch closure + steady-state gives 1.9-2.3x per case.",
+      "keywords": [
+        "launch-overhead",
+        "host-runtime",
+        "dispatch-bound",
+        "triton",
+        "small-batch",
+        "top-k",
+        "moe-router",
+        "register-math"
+      ],
+      "kernels": [
+        "_topk_forward"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "topk_router",
+      "regime": "both",
+      "key": "bf16 MoE-router top-k select + softmax, small row counts, dispatch-floored · gfx950 · Triton 3.6",
+      "lifecycle": "active",
+      "type": "lever",
+      "title": "Dispatch-floored router select: spend the budget on the host lane first",
+      "confidence": "★★",
+      "effect": "2.12x cumulative isolated geomean vs frozen baseline; per-case 2.33x at 2 rows, 2.19x at 32 rows, 1.86x at 64 rows — distributions non-overlapping",
+      "attempts": 5,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "cost": "L2",
+      "verified_on": "2026-08-12",
+      "source": "run _topk_forward-ch16h, 2026-08-12 (16h per-kernel time-budget campaign, 50 passes)",
+      "lever": "When per-case time barely moves across a 32x spread in row count, the floor is host per-call marshaling, not the GPU body — attack the launch path before any tile tuning.",
+      "apply": "Cache a direct compiled-kernel run closure keyed on data-pointer identity only, plus a trusted steady-state path that skips the grid-runner/fingerprint walk; then stack the device-side items below.",
+      "stack": "total 2.12x isolated (weighted, verified) = five directions compounded, incremental in landing order\n  - 1. host cached launch closure + trusted steady-state — carries the two small cases (2.33x / 2.19x); the largest case unchanged\n  - 2. iterative argmax replacing a full bitonic sort for k=4 over 128 lanes — ~1.11x on the largest case, bit-exact\n  - 3. partition-parallel halves + register-local 4-way merge — ~1.185x on the largest case; the win is ILP overlap, not reduced tree depth\n  - 4. branchless one-shot bitmask pack (4 where+reduce_or+store collapsed to 1) — ~+2% on the small cases\n  - 5. softmax as register math (split into scalar columns, drop the fp32 [M,4] intermediate and 2 cross-lane reduces) — +2.7% cumulative, VGPR 28->24",
+      "verify": "Re-time every case against the frozen baseline and confirm the small cases move while the largest one does not — that split is the signature that the host lane, not the body, was the floor.",
+      "pitfall": "Flat wall time across all row counts read as memory-bound and sent the first rounds into tile tuning → the cost was per-call host marshaling → a host-side per-call trace separated the two in one round.",
+      "caution": "The frozen golden reference may import the same shared helper module as the edit path, so the built-in correctness gate moves with your change and cannot catch a selection bug — also verify any shared-helper edit against an independent oracle harness."
+    },
+    {
+      "name": "graph-capture-single-tiny-launch-null",
+      "description": "Graph capture around one tiny launch replays ~2x slower than a direct launch at both host layers — a closed axis for dispatch-bound single-kernel ops.",
+      "keywords": [
+        "launch-overhead",
+        "host-runtime",
+        "dispatch-bound",
+        "graph-capture",
+        "triton",
+        "small-batch",
+        "moe-router",
+        "anti-pattern"
+      ],
+      "kernels": [
+        "_topk_forward"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "topk_router",
+      "regime": "both",
+      "key": "graph capture around a single tiny router-select launch, dispatch-floored · gfx950 · Triton",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "title": "Graph capture loses to a direct launch when the graph holds one tiny kernel",
+      "confidence": "★★",
+      "effect": "1.00x banked (reverted bit-identical): replay ~2x SLOWER than direct launch on every case (2 / 32 / 64 rows); both capture layers, launcher and wrapper, measured dead",
+      "attempts": 2,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "cost": "L2",
+      "verified_on": "2026-08-12",
+      "source": "run _topk_forward-ch16h, 2026-08-12 (host_runtime direction, measured directly at both layers)",
+      "lever": "Graph capture pays only when it amortises many launches; with a single tiny kernel the command-processor dispatch of a replay already exceeds a whole direct launch, so treat this axis as closed and spend the round elsewhere.",
+      "apply": "If tried anyway, capture at the launcher layer and at the wrapper layer and time both — they are separate paths and both were measured here.",
+      "verify": "Time replay against direct launch under the same event timer; the timer does capture the replay dispatch, so a graph that looks free is a mis-scoped measurement.",
+      "pitfall": "Graph replay expected to remove the dispatch floor → replay dispatch itself is the larger cost at this size → reverted bit-identical, no patch banked.",
+      "caution": "This was measured at one-kernel granularity; also verify the ratio again if you can batch several launches into one capture, where the amortisation argument changes sign."
+    },
+    {
+      "name": "occupancy-saturated-body-null-axes",
+      "description": "At one full occupancy wave, four device-side axes on a router select all returned ~1.00x: the body is memory+dispatch floored, not chain-latency bound.",
+      "keywords": [
+        "occupancy",
+        "lds-tiling",
+        "convert-layout",
+        "block-size",
+        "triton",
+        "top-k",
+        "moe-router",
+        "anti-pattern",
+        "dispatch-bound"
+      ],
+      "kernels": [
+        "_topk_forward"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "topk_router",
+      "regime": "both",
+      "key": "device-side body of a bf16 router top-k select, grid already one full occupancy wave · gfx950 · Triton",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "title": "Four device-side axes return ~1.00x once the body is one full occupancy wave",
+      "confidence": "★",
+      "effect": "~1.00x on the 64-row case for all four: removing 100% of tail-store layout round-trips and 9 barriers moved <1%; halving serial argmax depth gave 1.008x; BLOCK_M 32->64->128->256 regressed monotonically; exp2-native softmax +1%, at the jitter floor. Small cases untouched.",
+      "attempts": 4,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "cost": "L3",
+      "verified_on": "2026-08-12",
+      "source": "run _topk_forward-ch16h, 2026-08-12 (three deep_explore directions plus a compute sweep, all clean measured negatives)",
+      "lever": "Before shortening a serial reduction chain, check whether the grid already fills the machine in one occupancy wave — a correctness-passing rewrite that halved the chain depth here bought exactly nothing, which falsifies the latency-bound premise rather than the implementation.",
+      "apply": "Cheap discriminator: compute grid / (CUs x blocks-per-CU). At ~1.0 with occupancy at the architectural max, the body is throughput floored and chain-depth, tile-size and tail-layout edits are all inside the same floor.",
+      "verify": "Ablate one axis to its limit rather than tuning it — removing 100% of the tail round-trips is a stronger negative than any parameter sweep, and it showed the tail sits downstream of and hidden behind the load+select critical path.",
+      "pitfall": "Tail layout round-trips looked like the remaining cost → they are in the tail, fully overlapped by the load and select chain → eliminating them moved nothing and a word-split store variant added barriers and regressed ~3%.",
+      "caution": "Output tensors were allocated by the harness, so the store layout could not be restructured from the wrapper — also verify who owns the output allocation before costing a layout direction."
+    }
+  ]
+}

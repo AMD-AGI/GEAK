@@ -115,6 +115,12 @@ pytest -sv /sgl-workspace/aiter/aiter/ops/flydsl/test_flydsl_moe_a4w4.py
 [[operators/act_and_mul_silu_gelu/backends/flydsl]] (the fused silu+quant kernel) ·
 [[operators/quant_fp4_mxfp]] (MXFP4 quantization) · [[operators/dense_gemm/backends/flydsl]].
 
+**Authoring / optimizing a FlyDSL MoE GEMM `@flyc.kernel`** (write from scratch OR port ck→flydsl):
+[[languages/flydsl/authoring_gemm_levers]] (tiling / LDS / XCD-swizzle / epilogue) ·
+[[languages/flydsl/authoring_optimization]] (structure-first workflow) ·
+[[languages/flydsl/authoring_tile_programming]] (CuTe tile model) ·
+[[languages/flydsl/debugging]] (correctness / NaN / hang triage).
+
 ## Sources
 - On-box: `/sgl-workspace/aiter/aiter/ops/flydsl/moe_kernels.py` (fp4 stage1/stage2, `_get_compiled_silu_fused`),
   `kernels/mixed_moe_gemm_2stage.py` (`GateMode`, `compile_mixed_moe_gemm1/2`),

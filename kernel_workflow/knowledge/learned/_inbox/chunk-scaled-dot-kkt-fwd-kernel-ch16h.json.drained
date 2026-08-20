@@ -1,0 +1,158 @@
+{
+  "run_id": "chunk_scaled_dot_kkt_fwd_kernel-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "chunk_scaled_dot_kkt_fwd_kernel"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "nontemporal-store-write-once-output",
+      "description": "Non-temporal '.cs' cache_modifier on write-once output stores lifts store bandwidth on gfx950 store-bound kernels; a cache-policy win, not vectorization",
+      "keywords": [
+        "cache-modifier",
+        "non-temporal-store",
+        "store-bandwidth",
+        "memory-bound",
+        "linear-attention",
+        "gfx950",
+        "roofline",
+        "triton"
+      ],
+      "kernels": [
+        "chunk_scaled_dot_kkt_fwd_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "linear_attention",
+      "regime": "memory-bound",
+      "key": "write-once fp32 output stores in a chunked linear-attention forward, HBM-store-bandwidth-bound large-batch case on gfx950 / Triton",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "mem.store-cache-policy"
+      ],
+      "cost": "L1",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "+6.4% on the largest case (store-bandwidth-bound), stable across 8+ repeats and a clean A/B; ~80-97% of achievable HBM store roofline after; cumulative geomean 15.09x -> 15.36x, bit-identical output",
+      "roofline": "store-byte-bound -> store-bandwidth-bound at ~0.8-0.97 of the achievable store roof",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Streaming non-temporal store for write-once output",
+      "lever": "When the output tile is written once and never re-read, try a write-combining cache_modifier ('.cs', '.wt' equivalent) on the output store: on gfx950 it lowers to a non-temporal buffer store that skips the L2 write-allocate / read-for-ownership path.",
+      "apply": "One argument on the store call(s) in the Triton kernel; tiling, vector width and grid stay untouched, so it stacks on top of any store-byte reduction already banked.",
+      "verify": "Confirm the emitted ISA store carries the non-temporal bits (a config that silently did not engage looks identical to a null result), then A/B the store-bound case against the frozen baseline and check parity is bit-identical.",
+      "pitfall": "eviction_policy set alone moved nothing -> it does not touch the write-allocate path -> the write-combining cache_modifier is the part that lowers to a non-temporal store.\nThe whole-run improvement gate read false -> the net geomean move sat inside the small-case event-bracket noise band while the store-bound component was stable across repeats -> re-check the per-case component plus the ISA marker before discarding the round.",
+      "caution": "Also verify the stores are already at the widest vector width before crediting this lever, otherwise a plain vectorization gain gets attributed to cache policy; and also verify the buffer really is never re-read downstream.",
+      "source": "run chunk_scaled_dot_kkt_fwd_kernel-ch16h, 2026-08-12 (16h per-kernel time-budget campaign, 48 passes, deep_explore memory direction)"
+    },
+    {
+      "name": "collapse-redundant-launch-grid-host-shim",
+      "description": "A caller grid whose kernel guards to the diagonal still dispatches ~98% empty workgroups; a host shim collapsing that dim was the largest single win",
+      "keywords": [
+        "launch-overhead",
+        "grid-collapse",
+        "host-shim",
+        "empty-workgroups",
+        "varlen",
+        "linear-attention",
+        "gfx950",
+        "triton"
+      ],
+      "kernels": [
+        "chunk_scaled_dot_kkt_fwd_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "linear_attention",
+      "regime": "launch-bound",
+      "key": "varlen chunked linear-attention forward whose caller grid spans batch x heads while the kernel guards to the diagonal, gfx950 / Triton harness launch path",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "host.launch-overhead",
+        "host.grid-geometry"
+      ],
+      "cost": "L2",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "2.76x on the largest case from the grid collapse alone; cumulative geomean 5.73x -> 12.12x over the two steps, bit-identical, and the bottleneck class flips from dispatch-overhead to memory",
+      "roofline": "dispatch/overhead-bound -> memory-bound once the empty workgroups stop being launched",
+      "attempts": 2,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Collapse a redundant launch grid instead of guarding inside the kernel",
+      "lever": "If a varlen op's caller builds a quadratic grid and the kernel's first statement is an index guard that returns, the guarded dispatches are still launched: wrap the launch in a host-side shim that rewrites that grid dimension to the set of indices that survive the guard.",
+      "apply": "A callable shim around the entry point that recomputes the grid tuple and remaps the surviving index inside the kernel; the kernel body is unchanged, so parity is structural.",
+      "stack": "total 12.12x isolated (accepted) = two directions compounded\n  - 1. in-kernel index guard turning the quadratic recompute into linear work - 5.73x standalone (round 1, verified)\n  - 2. host shim collapsing the same dimension in the launch grid - 2.11x on top of (1) (round 2, verified) - it pays only because (1) proved the extra dispatches compute nothing",
+      "verify": "Compare the launched workgroup count against the count that clears the guard, then A/B against the frozen baseline; parity should be bit-identical since no arithmetic changed.",
+      "pitfall": "The in-kernel guard alone looked like the whole win -> the guarded workgroups still cost dispatch -> the remaining gain only appeared once the grid itself shrank on the host side.",
+      "caution": "Also verify the collapsed grid still oversubscribes the CUs: this run separately measured that pushing the workgroup count further down costs the store pipe its latency hiding.",
+      "source": "run chunk_scaled_dot_kkt_fwd_kernel-ch16h, 2026-08-12 (16h per-kernel time-budget campaign, rounds 1-2 algorithm + host_runtime directions)"
+    },
+    {
+      "name": "store-roofline-closed-axes",
+      "description": "Once a kernel sits at its store roofline, occupancy lift, persistent grid-stride, finer store-skip granularity and graph replay all returned ~1.00x or regressed",
+      "keywords": [
+        "anti-pattern",
+        "closed-axis",
+        "occupancy",
+        "persistent-kernel",
+        "grid-stride",
+        "graph-replay",
+        "launch-overhead",
+        "store-bandwidth",
+        "memory-bound",
+        "gfx950",
+        "linear-attention"
+      ],
+      "kernels": [
+        "chunk_scaled_dot_kkt_fwd_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "linear_attention",
+      "regime": "memory-bound",
+      "key": "store-bandwidth-saturated chunked linear-attention forward on gfx950 where the small case sits on the harness per-call event-bracket floor",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "compute.occupancy",
+        "host.persistent-grid",
+        "host.graph-replay"
+      ],
+      "cost": "L2",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "four axes closed on the same shape set: occupancy 3->4 waves gave 1.00x on both large cases; persistent grid-stride cost +16% on the largest case even at a logically no-op stride factor; 4 heads per program cost +21%; forced per-call graph replay on the smallest case measured a median identical to eager",
+      "roofline": "store-bandwidth-bound at ~0.8-0.97 of achievable store roof before and after all four attempts",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Axes that stay closed once the store pipe is saturated",
+      "lever": "When the dominant case is already near its store roofline, rank occupancy/VGPR lift, persistent grid-stride workgroup collapse, finer triangular store-skip granularity and per-call graph replay as low-prior seeds - all four were measured out here - and spend the round on store bytes and store cache policy instead.",
+      "apply": "Cheap disconfirmations first: read the bound class off a trace-based roofline, then check whether the candidate axis can move it at all before authoring a patch for it.",
+      "verify": "Benchmark inside the scoring harness with interleaved alternating samples; an isolated in-process probe showed replay clearly ahead of eager while the harness measured them identical, because the isolated eager was inflated by long-lived-process clock effects.",
+      "pitfall": "A host-side lever was recorded as banked but was silently inactive -> its measured-benefit gate timed batched back-to-back launches with one sync (throughput) while scoring used per-call event brackets -> probe the runtime mode after the real harness warmup rather than trusting the gate.\nFiner store-skip granularity looked strictly better on bytes but regressed -> at fine granularity the case turns store-issue-bound rather than store-byte-bound -> the coarse 2x2 skip stayed optimal.",
+      "caution": "Also verify where the smallest case's floor is before spending a round on host-side levers: below the harness per-call event bracket no launch-side change can score, and the required per-case ratio is computable up front.",
+      "source": "run chunk_scaled_dot_kkt_fwd_kernel-ch16h, 2026-08-12 (16h per-kernel time-budget campaign, dead_end ledger entries across compute / memory / host_runtime)"
+    }
+  ]
+}

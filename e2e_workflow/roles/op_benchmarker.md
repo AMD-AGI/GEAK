@@ -28,8 +28,9 @@ Read first, every time:
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder, per-backend tuning knobs,
   parity/accuracy gate (the priors).
 - `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience as **advisory priors** (an aid, not a
-  cage). Use the matching cards to ADD candidates to your bake-off, never to prune it or skip the e2e
-  gate — measurement is the judge. CURATE it after a run — never blind-append.
+  cage). Read it and judge relevance **by meaning, not by string match**; `ls` the folder too (the index
+  is hand-kept today and has drifted). Use the matching cards to ADD candidates to your bake-off, never
+  to prune it or skip the e2e gate — measurement is the judge. CURATE it after a run — never blind-append.
 - `SKILL_DIR/knowledge/e2e_optimization.md` — Amdahl reasoning + measurement discipline.
 - `GEAK/perf_knowledge/index/capability_index.yaml` — **REFERENCE ONLY**, to *widen* your Tier-A
   candidate set: which backends have a documented impl for this op + the gens/dtypes/regimes they support.
@@ -122,7 +123,7 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
     requested/feasible.
     > **🔴 The authored same-language impl is ONLY the optimizer's code seed — NEVER the speedup
     > denominator.** Regardless of `target_language`, the reported speedup is ALWAYS measured by the
-    > immutable unittest against the FROZEN REAL ONLINE kernel (`meta.baseline_callable` / `baseline_src/` —
+    > immutable unittest against the LIVE SERVING STACK (`baseline_overlay/` / `meta.baseline_callable` —
     > e.g. the production Triton `_gqa_sparse_fwd_kernel`), never against the naive same-language scaffold
     > you just wrote. Authoring a naive HIP impl and letting the optimize loop beat THAT (optimized-HIP vs
     > naive-HIP = fake 15.7× isolated, ~0% e2e) is exactly the fake-win bug this harness exists to prevent.
@@ -285,9 +286,11 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
 5. **Tier D (only if `ENABLE_FP8`)**: note fp8 as a candidate for the Integrator (server `--quantization
    fp8`); do not bake it into the op patch — it's a server flag with an accuracy gate.
 6. **CURATE `SKILL_DIR/knowledge/learned/`** (do NOT append run narratives to `gemm_attention_backends.md`).
-   Per `knowledge/learned/README.md`: read `INDEX.md`; MERGE into the card matching this op's
-   `(kernel_class, gfx, regime)` (bump `confirms`/`confidence`, widen `effect`, add `source`, update
-   `last_seen`); INSERT a new card ONLY if novel AND ≥★★; a surprising regression → a CONDITIONED
+   Per `knowledge/learned/README.md`: read `INDEX.md`; MERGE into the card matching this op — match by
+   meaning on the plain-English `key` (op · arch · framework/dtype/regime), not on a rigid triple — (bump
+   `confirms`/`confidence`, widen `effect`, add `source`, update `last_seen`, extend `keywords`/`kernels`);
+   INSERT a new card ONLY if novel AND ≥★★, opening it with the full discovery header (`name`,
+   `description`, `keywords`, `kernels`, `platforms`, `kernel_class`, `regime`); a surprising regression → a CONDITIONED
    `caution:` line ("also verify X", never a blocklist); NULL/unverified → eval-dir report only. Keep
    `INDEX.md` ≤40 lines. Record the e2e-transfer note (did it move e2e, not just isolated). Raw per-backend ms / `best_known_ms`
    / the full route rationale belong in the eval-dir final_report.md, not the persistent card.
@@ -301,6 +304,7 @@ Return JSON:
   "winner_backend": "aiter|hipblaslt|triton|flydsl|ck|none",
   "winner_kind": "env|flag|patch|none",
   "isolated_speedup": 1.0,
+  "measured": true,
   "winner_editable": false,
   "best_known_ms": 0.0,
   "recommend_tier_c": false,
@@ -321,6 +325,10 @@ Return JSON:
   "reason": "the route decision: direct_light winner and/or which languages to author, with Amdahl headroom"
 }
 ```
+- `measured` / `isolated_speedup` — copy BOTH straight from `opbench_result.json`; never fill one in
+  yourself. `measured:false` means no backend produced a timing, and then `isolated_speedup` is `null`,
+  not `0.0`. `0.0` means the bake-off ran and nothing was faster — a different fact, and the acceptance
+  gate needs to tell them apart.
 - `gate:"have_winner"` — a direct_light (env/flag) winner is ready to integrate now.
 - `gate:"author_recommended"` — no direct win, but `author_plan` is non-empty: the orchestrator should
   run `kernel_workflow` per the plan and integrate the fastest authored result that beats `best_known_ms`.

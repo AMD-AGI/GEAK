@@ -1,0 +1,172 @@
+{
+  "run_id": "paged_attention_ragged-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "paged_attention_ragged"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "decode-attention-lds-dma-prefetch-depth",
+      "description": "HIP paged decode attention on gfx950: per-tensor NT policy, then global-to-LDS DMA bought for prefetch depth, then a transposing LDS read: 1.35x weighted",
+      "keywords": [
+        "gfx950",
+        "attention-decode",
+        "paged-attention",
+        "paged-kv",
+        "decode",
+        "lds-staging",
+        "lds-tiling",
+        "prefetch",
+        "non-temporal-loads",
+        "cache-modifier",
+        "bank-conflict",
+        "launch-bounds",
+        "occupancy",
+        "raw-hip",
+        "memory-bound",
+        "isa-diff"
+      ],
+      "kernels": [
+        "aiter_paged_attention_ragged"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "bf16 paged decode attention with a ragged kv_indptr layout, page granularity 1 and GQA 32/4, shipped as jinja-templated HIP through a ctypes wrapper on gfx950/MI355",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "mem.lds-staging",
+        "mem.load-cache-policy",
+        "compute.launch-bounds"
+      ],
+      "cost": "L3",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.35x weighted / 1.34x geomean isolated vs the frozen baseline, independently re-measured by the director; per-case 1.29-1.41x on the eight decode-shape cases and 1.19-1.21x on the long-context streaming case, run-to-run spread under 1% over 3 repeats, oracle parity PASS",
+      "roofline": "memory-bound throughout; the main dispatch ends at ~99.8% of a re-measured blended DRAM roof, and the occupancy limiter moves VGPR -> LDS once the DMA staging lands",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Buy prefetch depth with a global-to-LDS DMA on bandwidth-bound decode attention",
+      "lever": "On a bandwidth-bound HIP decode attention kernel, stage the V tile through the arch's global-to-LDS DMA and hoist the whole first-group prefetch above the QK phase; the DMA on its own is worth ~0, the prefetch depth it frees registers for is the value. Around it, choose the non-temporal hint per tensor and replace the V transpose scalar gather with a transposing LDS read.",
+      "apply": "Four seams in the kernel template: a cache-policy bit chosen per tensor instead of kernel-wide; the LDS-DMA intrinsic with an XOR swizzle of its global source so LDS rows dodge the 32-bank row stride; a transposing LDS read with per-lane addressing in place of the gather; and an explicit launch-bounds attribute pinning the wave count the allocator would otherwise give away.",
+      "stack": "total 1.35x weighted isolated (director-verified) = four directions compounded over 7 rounds\n  1. per-tensor non-temporal loads - 1.25x standalone (round 1, verified) - the bulk of the win; V-only 1.26x, K-only 1.13x, kernel-wide 1.04x\n  2. global-to-LDS DMA V staging + prefetch hoisted above QK - +1.9% on top of (1) (round 3, verified)\n  3. transposing LDS read + XOR swizzle - +1.04% on top of (1,2), uniform across all 9 cases (round 4, verified)\n  4. two tiles per workgroup in one online-softmax loop + launch-bounds - +0.44% weighted on top of (1-3) (round 5, paired, 4/4 positive)\n  note: attribution is incremental in landing order, not independent; (2) alone regresses the streaming case to ~0.99x and only pays once a companion head-rotation lands. Roughly +0.6% more came from host-derived template constants and reverting an earlier rotation.",
+      "verify": "Diff the emitted ISA for both arms before believing any cache-policy change - a metadata-only difference never survives a runtime branch, while an intrinsic-immediate one does - and read occupancy from the compiler's kernel-resource-usage 'Occupancy [waves/SIMD]' line rather than an ELF VGPR count or a profiler VGPR column, both of which report something else. Then re-time every case against the frozen baseline, paired.",
+      "pitfall": "kernel-wide non-temporal loads gave ~1.04x while V-only gave ~1.26x -> the two operands have opposite reuse (K is re-read across heads, V is streamed) -> pick the hint per tensor, not per kernel.\nevery later vmcnt wait in the region degraded to vmcnt(0) -> one outstanding LDS-DMA poisons the compiler's waitcnt bracket -> keep the DMA window tight; a vestigial barrier also drains in-flight LDS-DMA and cost ~0.7% here.\nthe DMA with a default aux operand cost ~20% -> the non-temporal bit on the DMA source is load-bearing -> set it and confirm it in the ISA, not in the C++.\ndropping the launch-bounds attribute landed the allocator at 136 unified registers / 3 waves and lost ~3.3% -> the tile-per-workgroup change alone does not hold the wave count -> pin it explicitly and re-read occupancy.",
+      "caution": "Also verify which budget is binding after the DMA lands - the limiter flipped from registers to LDS capacity here, and the next direction's headroom is on whichever budget is now full. Also verify a hand-port of a winning idea into the golden path against the mechanical merge of its diff: porting the idea beat stacking the patch by ~11.5% in this run.",
+      "source": "run paged_attention_ragged-own16h, 2026-08-12 (16h per-kernel campaign, 7 rounds, 20 direction-credits, director-validated accepted)"
+    },
+    {
+      "name": "decode-attention-structural-axes-closed-at-roof",
+      "description": "Closed axis: at ~99.8% of the DRAM roof, decode-attention reduce fusion, grid right-sizing, occupancy and cache-residency steering all return ~1.00x",
+      "keywords": [
+        "gfx950",
+        "attention-decode",
+        "paged-attention",
+        "decode",
+        "anti-pattern",
+        "closed-axis",
+        "kernel-fusion",
+        "dispatch-collapse",
+        "occupancy",
+        "grid-occupancy",
+        "empty-workgroups",
+        "l2-residency",
+        "roofline",
+        "oracle",
+        "memory-bound"
+      ],
+      "kernels": [
+        "aiter_paged_attention_ragged"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "an already-tuned split-KV decode attention that ships as two dispatches and whose main dispatch is at its measured DRAM roof with all three resource budgets full, gfx950/MI355 HIP",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "host.dispatch-structure",
+        "compute.occupancy"
+      ],
+      "cost": "L2",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "four structural directions returned ~1.00x or worse on the decode cases: two independent reduce-fusion implementations at -4.8% and -3.9%, grid right-sizing / empty-workgroup deletion at 0.0 +/- 0.1% in two separate attempts, 5 waves/SIMD at -18%, partition-size doubling at -6.4%; a two-oracle decomposition then bounded any fusion at +1.2% weighted, below the round's 4% kill gate",
+      "roofline": "main dispatch at ~99.8% of a re-measured blended DRAM roof; registers 124/128 unified, LDS 100% allocated, waves held at 4/SIMD",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Price the residual before funding fusion or geometry work at the roof",
+      "lever": "Before spending a direction on fusing the split-KV reduce, right-sizing the grid, chasing occupancy or steering last-level-cache residency, price what is left: measure the fraction of the re-measured blended DRAM roof the main dispatch already reaches, and convert the residual into a ceiling on the weighted metric. Near the roof these axes were arithmetic dead ends here, and the number tells you that in one hour instead of three rounds.",
+      "apply": "Price a second dispatch with TWO oracles, not one: an empty-body kernel, and an empty-body-plus-one-real-workgroup kernel. Their difference separates a launch ramp (attackable by grid geometry, batching or graph capture) from a fixed pipeline barrier / cache flush (only fusion touches it). Here the fixed part was ~41% of the inter-dispatch gap and the merge body ~59%, so the fusion prize was ~1.2% weighted at best.",
+      "verify": "Check that a 1-workgroup and a full-grid empty kernel really do cost the same before calling the cost fixed, and sanity-check the ceiling with a deliberately wrong-answer oracle that deletes the second dispatch entirely - it reached ~1.41x here against a delivered ~1.35x, which is the whole remaining headroom in that seam.",
+      "pitfall": "two independent fusion implementations both lost (64-bit data atomics, then a ticket-counter last-arriver merge) -> at full residency the merging workgroup still holds its LDS slot and its registers, so the epilogue displaces the next slab instead of overlapping it; the protocol was cheap and the merge body was the cost -> price the slot, not the arithmetic.\nempty-workgroup deletion measured 0.0 +/- 0.1% even at 4 LDS slots per CU -> empty workgroups retire for free once the grid is co-resident -> the premise was wrong, not the implementation.\ncoalescing and page-granularity 'defects' were falsified three ways (over-fetch ratio 1.01, widest load already issued) and the fix was 6-8% worse -> a plausible mechanism outlived its effect -> measure the mechanism, not only the effect.",
+      "caution": "Also verify the roof is re-measured on the same box and blended for the actual mix before quoting a fraction of it. Also verify that a cache-residency knee exists before steering for it: no large last-level knee was found here, only a smaller L2 one, which left the hint space one bit wide and already optimally spent.",
+      "source": "run paged_attention_ragged-own16h, 2026-08-12 (16h per-kernel campaign, rounds 1-7 including a dedicated deep_explore round; director-validated accepted)"
+    },
+    {
+      "name": "periodic-per-case-split-is-allocator-placement",
+      "description": "A period-2 per-case timing split can be the caching allocator moving a large buffer, not a shape effect: the timing follows the pointer, not the shape",
+      "keywords": [
+        "measurement",
+        "harness-artifact",
+        "ab-methodology",
+        "measurement-discipline",
+        "frozen-baseline",
+        "kv-cache",
+        "attention-decode",
+        "decode",
+        "anti-pattern",
+        "gfx950",
+        "noise-floor"
+      ],
+      "kernels": [
+        "aiter_paged_attention_ragged"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "decode",
+      "key": "diagnosing a repeatable two-group split in per-case timings on a large-KV-buffer decode benchmark whose cases are listed in consecutive shape order, gfx950",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "method.measurement"
+      ],
+      "cost": "L0",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "a repeatable ~2.6% split between two case groups tracked the KV buffer's allocation placement rather than the context length it was confounded with - the fast/slow assignment reverses when the allocator phase flips - and the affected cases carried ~51% of the weighted metric; the kernel-side direction built to remove it moved that axis ~1.00x and shipped an unrelated +0.38%",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Test the allocator before designing a kernel fix for a periodic per-case split",
+      "lever": "When per-case timings fall into two groups with period 2 along a parameter the fixture happens to list in order, test the allocator hypothesis first: re-time with the large buffer re-allocated and see whether the timing follows the pointer or the parameter. Only the second one is a kernel property worth a direction.",
+      "apply": "Log the big buffer's base address per case; flip the allocation phase (allocate and free a throwaway buffer before the fixture builds the cache) and re-time. If fast and slow swap groups while every shape is unchanged, it is a caching-allocator placement ping-pong, and no kernel change reaches it.",
+      "verify": "Keep a max/min spread check across repeats of the same case - it caught every occurrence of a single-case spike artifact here - and quote paired deltas only, since the box itself drifted on the order of 1-2.6% per hour and cross-session per-case comparison was meaningless under this fixture.",
+      "pitfall": "a context-parity penalty read as an address-phase / channel-camping defect and a direction was spent building the transform -> the fixture listed contexts consecutively, so parity was perfectly confounded with allocation order -> the sign reversed with the allocator phase, closing the axis by construction (the swept transform topped out at +0.19%).",
+      "caution": "Also verify how much of the weighted metric sits on the artifact before reading a stop decision off the per-case table: about half the weight sat on cases whose split no kernel change can reach here, which flatters or penalises every later A/B on that axis.",
+      "source": "run paged_attention_ragged-own16h, 2026-08-12 (16h per-kernel campaign, round 6 memory direction plus the round-1 to round-6 per-case tables; director-validated accepted)"
+    }
+  ]
+}

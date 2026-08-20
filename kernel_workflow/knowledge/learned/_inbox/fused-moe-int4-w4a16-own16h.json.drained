@@ -1,0 +1,138 @@
+{
+  "run_id": "fused_moe_int4_w4a16-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "fused_moe_int4_w4a16"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "per-arm-split-entries-launcher-shim",
+      "description": "Split an int4 W4A16 MoE grouped GEMM into per-n-width Triton entries picked by a host launcher shim; the shim then owns each arm's launch constants.",
+      "keywords": [
+        "moe-grouped-gemm",
+        "w4a16",
+        "int4-dequant",
+        "split-entry",
+        "launch-config",
+        "waves-per-eu",
+        "num-warps",
+        "triton",
+        "gfx950"
+      ],
+      "kernels": [
+        "fused_moe_kernel_gptq_awq"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "prefill",
+      "key": "int4 W4A16 packed-weight fused-MoE grouped GEMM on gfx950/MI355, Triton + immutable host, several n-width shape arms in one launch",
+      "lifecycle": "active",
+      "type": "lever",
+      "cost": "L2",
+      "title": "One binary per shape arm, selected by a host launcher shim",
+      "confidence": "★★",
+      "effect": "the shared-binary control (one kernel, runtime branch) is 4.9% slower on the small-M arm (M=2048) than two specialized entries; per-arm launch constants that only the shim can set add +3.0-3.4% on M=32768/65536, all non-overlapping vs frozen baseline",
+      "lever": "give each n-width shape arm its own @triton.jit entry chosen on the host, rather than one kernel with a runtime branch: VGPR allocation and I-cache footprint are whole-binary properties, so a shared binary taxes whichever arm takes the narrow path.",
+      "apply": "a thin launcher shim in front of the (often immutable) host call selects the entry and owns the launch kwargs dict per arm - num_warps, waves_per_eu, loop_unroll_factor - so each arm is tuned against its own codegen.",
+      "stack": "total 2.80x geomean isolated (director-verified, accepted), many directions over 24 rounds, incremental in landing order\n  - 1. per-arm split entries + shim-owned launch constants - the enabling mechanism; shared-binary control 4.9% slower on the small-M arm, launch-constant pair +3.0-3.4% on top\n  - 2. dequant-tile fusion width (see the fusion-width card) - +24.4% then a further +23.8%\n  - 3. K-loop schedule: single-stage tl.range + per-arm unroll factor - ~18-20% on the large-M cases\n  - note: attribution is incremental in landing order, not independent; directions interact.",
+      "verify": "A/B each arm interleaved against a byte-identical control binary, and confirm the arm predicate engaged by diffing the generated AMDGCN - an unrecognised launch option is silently swallowed, so absence of an error proves nothing.",
+      "pitfall": "a constant that applied cleanly across arms read as compatible -> a tuning constant belongs to the codegen it was tuned against -> re-tune per arm, and sweep the pair jointly (num_warps and waves_per_eu both had to move DOWN together; no one-axis sweep finds that point).\na widened arm printed 1.6-1.8x while skipping work -> the perf path printed a ratio with no correctness binding -> gate any ratio above ~1.2 behind an md5-bound correctness token at print time.",
+      "caution": "also verify the shared-binary control is measured on the same session, since the split only pays once the narrow arm stops carrying the wide arm's register budget.",
+      "attempts": 4,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "source": "run kernel_20_geak_0808_16h, proposal fused_moe_int4_w4a16-own16h, 2026-08-12; director-validated geomean 2.8019, correctness 8/8",
+      "last_seen": "2026-08-12"
+    },
+    {
+      "name": "dequant-tile-fusion-width-widen-m",
+      "description": "Amortize int4 dequant by reusing one dequantised weight tile across several row-blocks; widen the dot COUNT along M, not the tile extent: ~+24% twice.",
+      "keywords": [
+        "moe-grouped-gemm",
+        "w4a16",
+        "int4-dequant",
+        "fusion-width",
+        "lds-tiling",
+        "triton",
+        "gfx950"
+      ],
+      "kernels": [
+        "fused_moe_kernel_gptq_awq"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "prefill",
+      "key": "dequant-heavy packed-int4 weight GEMM on gfx950, Triton, where the same dequantised weight tile can serve several row-blocks",
+      "lifecycle": "active",
+      "type": "lever",
+      "cost": "L3",
+      "title": "Share the dequantised weight tile across row-blocks, widen M first",
+      "confidence": "★★",
+      "effect": "+24.4% at fusion width 2 and a further +23.8% widening 2 to 4, both non-overlapping vs frozen baseline; the gain lands on the large-M cases (M=32768/65536), the small-M case (M=2048) stays flat because it is memory-latency bound",
+      "lever": "reuse ONE dequantised weight tile across a group of row-blocks so the dequant cost is paid once per group; the dequant tile is shared across M and replicated across N, so widening along M buys more than widening along N at the same product.",
+      "apply": "widen the NUMBER of dots at a small row-tile instead of raising the row-tile extent, and concatenate the sub-blocks into one tile-major [BM, MM*BK] activation operand so the LDS round trip plus barrier pair is paid once per k-iteration.",
+      "verify": "isolated A/B per shape against the frozen baseline plus bit-exactness against the golden path, and check registers: the widened form held at 124 VGPR / 4 waves, beating a pre-declared register kill gate.",
+      "pitfall": "raising the row-tile extent instead of the dot count flipped warpsPerCTA and doubled the dequant work -> measured 0.64x -> keep the tile extent, widen the count.\na width knob that degrades to width 1 on the small shape lost -> degrade to the next-narrower FUSED form instead of unfusing.",
+      "caution": "also verify the activation-concat still pays at the widest group - at group width 8 the concat reversed sign and the unconcatenated form won, so re-measure the concat at each width.",
+      "attempts": 5,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 1,
+      "verified_on": "2026-08-12",
+      "source": "run kernel_20_geak_0808_16h, proposal fused_moe_int4_w4a16-own16h, 2026-08-12; rounds 3/5/18 verified geomeans 1.6379 -> 2.2597, director-accepted final 2.8019",
+      "last_seen": "2026-08-12"
+    },
+    {
+      "name": "static-counters-do-not-price-dequant-gemm",
+      "description": "Counter-guided directions (bank conflicts, VALU, barriers, occupancy, empty CTAs, traffic) returned ~1.00x or worse; time a deletion control first.",
+      "keywords": [
+        "moe-grouped-gemm",
+        "w4a16",
+        "int4-dequant",
+        "occupancy",
+        "lds-tiling",
+        "counter-falsification",
+        "anti-pattern",
+        "launch-config",
+        "gfx950"
+      ],
+      "kernels": [
+        "fused_moe_kernel_gptq_awq"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "prefill",
+      "key": "profiler-counter-guided tuning of a dequant-bound packed-int4 GEMM on gfx950, where the loop is latency- and dependency-bound rather than instruction-supply bound",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "cost": "L1",
+      "title": "Price a counter with a deletion control before funding a round on it",
+      "confidence": "★★",
+      "effect": "closed axis, ~1.00x or worse across six counter families: removing 85% of LDS bank conflicts measured 18.6% SLOWER; deleting 17% of K-loop VALU moved the clock 0%; deleting 75% of the empty CTAs was under +0.15%; breaking the in-flight-load cap cost 28%; DRAM traffic priced at ~0.17% of wall per 1% removed; and the final winner took M=65536 down 3.5% while K-loop VALU went UP 1.2%",
+      "lever": "before funding a direction aimed at a large counter, build the cheapest control that DELETES that counter and time it - across 24 rounds only dependency-chain depth, SLP packing width and K-loop schedule perturbation ever moved the clock on this class.",
+      "apply": "keep the deletion control byte-comparable (same shapes, same launch config, only the counter-bearing transform toggled) and read the clock, not the counter; for the levers that did pay, target chain depth (widen the packed integer domain before nibble extraction) and SLP operand shape (keep non-value operands scalar-broadcast so f32 elementwise stays packed).",
+      "verify": "interleave the A/B against byte-identical controls: the official harness here carried ~2% run-to-run spread over 9 runs, enough that a headline can be a ~90th-percentile draw, so treat the official run as a gate and the interleaved A/B as the meter.",
+      "pitfall": "occupancy swept as waves/SIMD found nothing for five rounds -> the currency is CTAs/CU = floor(512/VGPR)*4/num_warps, and waves/SIMD times peak in-flight loads is conserved at ~20 with HEAD already at the per-SIMD maximum -> sweep the launch-kwargs pair jointly instead.\ncompile-only probes were used to SELECT a variant and picked one with identical registers, waves and CTAs that measured 32.3% slower -> a compile probe is a kill gate, not a select gate -> time every survivor.",
+      "caution": "also verify on your own shapes before treating a family as closed here - the traffic lever was causal, merely cheap, and on a bandwidth-bound shape the same 1% of traffic can be worth far more than it was here.",
+      "attempts": 12,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "source": "run kernel_20_geak_0808_16h, proposal fused_moe_int4_w4a16-own16h, 2026-08-12; 21 static counters individually falsified as win predictors across 24 rounds",
+      "last_seen": "2026-08-12"
+    }
+  ]
+}

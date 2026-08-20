@@ -9,6 +9,12 @@ version_number = "4.0.0"
 html_theme = "rocm_docs_theme"
 html_theme_options = {
     "flavor": "hyperloom",
+    "header_title": f"GEAK {version_number}",
+    "header_link": False,
+    "version_list_link": False,
+    "use_repository_button": True,
+    "use_issues_button": True,
+    "link_main_doc": False,
 }
 
 # This section turns on/off article info

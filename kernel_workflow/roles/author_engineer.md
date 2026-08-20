@@ -39,6 +39,17 @@ never by the knowledge base. Rules (these guarantee the KB can only help, never 
   evidence* — a weak hint at most. Don't pick based on it; measure.
 - If `KERNEL_KNOWLEDGE_DIR` is empty/missing, use the canonical algorithm — no behavior change.
 
+`SKILL_DIR/knowledge/learned/INDEX.md` — **only when the `LEARNED_KB` input says `on`**; when it says
+`off`, that file and every card under `knowledge/learned/` is out of bounds and you author from the op
+spec alone. It is the *local* twin of that contract: distilled cards from past
+runs on this box. Same three rules (`knowledge/learned/README.md`) — a card may only **ADD** a candidate
+to try, the unittest + benchmark is always the judge, and a `caution:` is "also verify X", never a ban.
+Open the cards whose key matches your `(kernel_class, gfx, regime)`; if there are none, nothing changes.
+`INDEX.md` is short (≤40 cards) and each line already carries the card's description, the kernel symbols
+it was measured on, and its keywords — **read it and judge relevance by meaning**, then open the one or
+two that look worth it. Don't string-match: a card written for a neighbouring op or a different tile
+regime often still applies.
+
 ## Load the authoring knowledge for your language + op (focused context, optional)
 Semantic dirs (resolve short names via `index/capability_index.yaml` + `index/taxonomy.md` if unsure).
 Read, as reference, before writing:
@@ -70,20 +81,21 @@ Read, as reference, before writing:
 
 > **🔴 "Baseline" here means your CORRECT-FIRST SEED for the optimize loop — NOT the speedup
 > denominator.** The reported speedup is ALWAYS measured by the immutable `unittest.py` against the
-> FROZEN REAL ONLINE KERNEL (`meta.baseline_callable` / `TASK_DIR/baseline_src/` — e.g. the production
+> LIVE SERVING STACK (`TASK_DIR/baseline_overlay/` on PYTHONPATH — e.g. the production
 > Triton `_gqa_sparse_fwd_kernel`), regardless of your `TARGET_LANGUAGE`. Your from-scratch impl is the
 > optimizer's *starting code*, never the number the win is judged against. Writing a naive same-language
 > impl and letting the optimize loop beat THAT is exactly the fake-win bug (optimized-HIP vs naive-HIP =
 > 15.7× isolated, ~0% e2e). Your seed competes against the live Triton path, not against itself.
 
 ## Rules (NON-NEGOTIABLE)
-1. NEVER modify `TASK_DIR/unittest.py`, `meta.json`, `baseline_src/`, or `reference_io.pt` if the dir has
-   one — they are the
-   immutable oracle + the frozen real-online-kernel baseline (anti-cheating). You only write into
+1. NEVER modify `TASK_DIR/unittest.py`, `cases.py`, `meta.json`, `harness_lib.py`, `leg_runner.py`,
+   `baseline_overlay/` / `baseline_ref/` / `baseline_src/`, or `reference_io.pt` if the dir has one —
+   they are the immutable oracle + the frozen real-online baseline (anti-cheating). You only write into
    `WORKSPACE/kernel_src/`.
 1a. **The speedup denominator is the frozen REAL ONLINE kernel, not your seed.** The immutable
-   `unittest.py` already binds its baseline leg to `meta.baseline_callable` / `baseline_src/` (the live
-   production kernel). Do NOT author, import, or point the timing baseline at a same-language naive impl.
+   `unittest.py` reaches its baseline leg through `baseline_overlay/` on PYTHONPATH (the live production
+   stack). There is no baseline callable for you to point anywhere, and no same-language naive impl can
+   become the denominator.
    If `TARGET_LANGUAGE` differs from the online kernel's language (e.g. authoring HIP against an online
    Triton kernel), the baseline STILL stays the online Triton kernel — your HIP competes against it.
 2. Preserve the **callable signature the unittest imports/calls** (read the unittest to learn the exact
@@ -111,7 +123,7 @@ Read, as reference, before writing:
    your kernel's output to the FROZEN ONLINE baseline on several random in-regime value draws at the same
    online shapes — so a seed that is correct on the one recorded draw but wrong on other values FAILS.
 5. **Record the numbers**: once correct, run the unittest's timing once. It prints TWO things: the
-   FROZEN-ONLINE `baseline_ms` (the real production kernel via `meta.baseline_callable`/`baseline_src/` —
+   FROZEN-ONLINE `baseline_ms` (the real production kernel reached via `baseline_overlay/` —
    this is the denominator, unchanged by your work) and your seed's own `optimized_ms`/`speedup` vs it.
    Report your seed's speedup as `seed_speedup` — it is typically **< 1×** (a naive from-scratch impl is
    slower than the tuned production kernel), and that is FINE: the optimize loop's job is to raise it above

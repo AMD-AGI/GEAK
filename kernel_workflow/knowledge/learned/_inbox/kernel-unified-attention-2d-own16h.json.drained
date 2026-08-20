@@ -1,0 +1,148 @@
+{
+  "run_id": "kernel_unified_attention_2d-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "kernel_unified_attention_2d"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "decode-attention-dispatch-collapse-then-regime-specialisation",
+      "description": "Collapse host dispatch first, then per-grid-density launch tuning, mask hoisting and per-regime constexpr clones: ~1.58x geomean on paged decode attention",
+      "keywords": [
+        "launch-overhead",
+        "host-dispatch",
+        "decode",
+        "constexpr-promotion",
+        "paged-attention",
+        "triton",
+        "launch-tuning"
+      ],
+      "kernels": [
+        "kernel_unified_attention_2d"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "bf16 paged/unified attention at query length 1 (GQA 64/8 heads, head_dim 64) on gfx950/MI355, launched from a Python wrapper over a Triton body",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "host.launch-overhead",
+        "compute.launch-tuning",
+        "compute.constexpr-promotion"
+      ],
+      "cost": "L2",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.58x geomean isolated vs frozen baseline, director-verified x3 repeats, distributions non-overlapping per case: 2.04x at batch B=2, 1.60x at B=32, 1.20x at B=64 — the gain falls off as the case approaches its memory roof",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "source": "run kernel_20_geak_0808_16h, TechLead report + director validation, 2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Dispatch collapse first, then per-regime specialisation, on latency-bound decode attention",
+      "lever": "On small-grid decode attention the host dispatch path is worth attacking before the tile loop; afterwards specialise the body per grid-density regime rather than globally.",
+      "apply": "Cache a pre-bound launcher so the per-call kwarg walk and JIT dispatch disappear, and let it own num_warps/num_stages; add a launch table keyed on program count; hoist the loop-invariant row mask into an additive bias; generate per-regime constexpr-promoted body clones, promoting only kernargs that feed an address (the win is the shortened scalar-load dependency chain, not the marshal).",
+      "stack": "total ~1.58x geomean isolated (director-verified) = four directions compounded\n  - 1. host dispatch collapse via pre-bound launcher — 1.20x standalone (round 1, verified) — largest single lever; host dispatch fell to about a third\n  - 2. launch table keyed on program count — +5.7% on top of (1) (round 2, verified); the optimum is non-monotone in occupancy\n  - 3. loop-invariant row mask folded into an additive bias — +3.5% (round 3, verified)\n  - 4. per-regime constexpr-promoted clones — +3.3% (round 4, verified), bit-exact vs golden\n  - note: attribution is incremental in landing order, not independent",
+      "verify": "Re-time each candidate against the frozen baseline and benchmark every leave-one-out subset of the stack — in one round the full stack lost to a 2-of-3 subset.",
+      "pitfall": "One global constexpr-promotion subset was anti-synergistic (+2.4% alone, negative inside the stack) → a single promotion set does not fit every grid density → promote per regime from a table re-swept for each (geometry, body) pair.\nThe launch table went stale after body edits → a bucket kept a row tuned against the old body → re-sweeping after body changes recovered +0.9% at integration.",
+      "caution": "Also verify that a pre-bound or monomorphic launcher does not pin the stream at bootstrap: a capturing caller then records an empty graph that replays into a zeroed output with no error, and refreshing the stream slot per call costs a fraction of a percent of host time."
+    },
+    {
+      "name": "decode-attention-residual-launch-axis-closed",
+      "description": "Once host time sits far under GPU time, more launch-path work on decode attention returns 1.00x or worse — graph replay measured 0.65-0.76x of eager",
+      "keywords": [
+        "launch-overhead",
+        "host-dispatch",
+        "cuda-graph",
+        "dispatch-floor",
+        "decode",
+        "anti-pattern",
+        "paged-attention"
+      ],
+      "kernels": [
+        "kernel_unified_attention_2d"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "the residual host/launch axis on Triton decode attention at gfx950 after dispatch is already collapsed — graph capture, monomorphic launch, and launch-knob re-sweeps",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "host.launch-overhead"
+      ],
+      "cost": "L1",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "closed axis, four directions: wrapper-level graph replay 0.652x / 0.696x / 0.755x of eager at batch B=2 / 32 / 64 (a regression at every case); a monomorphic launcher that met its own host target measured exactly 1.000x; a full launch-knob re-sweep kept every bucket's winner within 0.2%",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "source": "run kernel_20_geak_0808_16h, rounds 3-5 dead-end evidence + director validation, 2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "The residual launch axis on decode attention closes once host time is far under GPU time",
+      "lever": "Before funding another launch-path round, compare host time per call against pure-GPU time per call; when host is not within a small multiple of binding, a round spent in the kernel body pays and one spent on the launch path does not.",
+      "apply": "Measure a five-line empty kernel at each of your grid sizes and subtract that per-dispatch floor from any 'the preamble costs X' claim before it sizes a lever; here the floor was flat across a 32x span in program count and sat inside every tile-count fit intercept.",
+      "verify": "Judge on the isolated A/B against the frozen baseline, not on the sub-metric the direction targeted: a direction can cut its own host number by a third and still land at exactly 1.000x end to end.",
+      "pitfall": "An apparently large fixed preamble → about 80% of it was the grid-independent dispatch floor → the real preamble was under 4% of the smallest case, so the lever sized against it could not have paid.\nGraph capture engaged correctly yet regressed → one graph launch cost roughly 2x a direct C launcher call → no per-case gate turns it on at these sizes.",
+      "caution": "Also verify the harness print resolution before chasing small deltas: here one printed quantum was 0.4-0.8% of the signal, so effects under about 1.5% at the larger batches were unresolvable at any repeat count."
+    },
+    {
+      "name": "decode-attention-split-kv-rejected-by-reduction-reorder",
+      "description": "KV-split parallelism on decode attention fails the elementwise oracle for reduction reorder, not kernel error; a single-partition control shows which it is",
+      "keywords": [
+        "split-kv",
+        "flash-decoding",
+        "oracle-parity",
+        "reduction-order",
+        "decode",
+        "anti-pattern",
+        "paged-attention"
+      ],
+      "kernels": [
+        "kernel_unified_attention_2d"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "adding KV-split parallelism to bf16 decode attention judged against a golden output captured at a fixed reduction order, on gfx950",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "algo.split-kv"
+      ],
+      "cost": "L3",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "closed axis across three split factors at batch B=2: gate max_rel_err 1.24 / 1.01 / 1.43 against a 1e-2 threshold at 2 / 4 / 8 partitions, while cosine stayed above 0.999997; the same path at 1 partition is bit-exact",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "source": "run kernel_20_geak_0808_16h, rounds 1 and 5 parity evidence, 2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "A single-partition control separates a rejected KV split from a wrong KV split",
+      "lever": "When the structural lever left is more parallelism over KV, run the split-and-combine path at one partition first as a control; bit-exact there says the kernels are correct and the parity gate is rejecting the reduction reorder, which is a cheap way to price the rest of the lane.",
+      "apply": "The control reuses the identical split and combine code with the partition count set to one, compared elementwise-equal against the golden output; then step the partition count and watch which metric moves.",
+      "verify": "Check which metric the gate actually binds on — here cosine similarity stayed at parity across every split factor while the elementwise relative-error gate failed, so the metric identity, not the numerics, decided the verdict.",
+      "pitfall": "At the worst element the split answer was closer to an fp64 reference than the golden was, and lost by one bf16 ulp → the gate scores agreement with a reference reduction order rather than accuracy → a more accurate kernel can still be refused.\nReclaiming the apparently dead row-half of the block to fund the split → MFMA 16x16 padding makes those rows free → the narrower block measured 21% slower.",
+      "caution": "Also verify whether your harness threshold is elementwise or aggregate, and whether the golden can be regenerated at the candidate's reduction order, before treating the lane as closed for your setup."
+    }
+  ]
+}

@@ -1,0 +1,138 @@
+{
+  "run_id": "_fwd_grouped_kernel_stage1-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "_fwd_grouped_kernel_stage1"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "split-cap-one-wg-per-cu-paged-decode",
+      "description": "Cap the parallelism split at one workgroup per CU and make pipeline depth a function of launched WGs: 1.63x geomean on paged split-KV decode attention.",
+      "keywords": [
+        "paged-decode",
+        "attention-decode",
+        "split-kv",
+        "num-stages",
+        "waves-per-eu",
+        "launch-shape",
+        "occupancy",
+        "gfx950",
+        "triton"
+      ],
+      "kernels": [
+        "_fwd_grouped_kernel_stage1"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "bf16 paged MLA-style split-KV decode attention, Triton on gfx950/MI355X, where small batch underfills the CUs and large batch already saturates DRAM",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.63x isolated geomean, director-verified over two independent runs agreeing within 0.03%; per case batch=2 1.65x, batch=32 1.69x, batch=64 1.54x",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L2",
+      "verified_on": "2026-08-08",
+      "roofline": "per-program compute-efficiency bound -> memory-bound at ~104% (batch=64) and ~93% (batch=32) of measured achievable DRAM read rate; small batch stays parallelism-starved at ~26%",
+      "last_seen": "2026-08-12",
+      "title": "Split only up to one workgroup per CU, and make pipeline depth a function of launched WGs",
+      "lever": "Cap the extra-parallelism split (bit-exact partial-output column split) at one workgroup per CU instead of a fixed multiple of CU count, and select pipeline depth from the launched WG count rather than pinning it as a constant.",
+      "apply": "Move split factor and pipeline depth into a thin host launcher that computes them per shape from (grid rows x split) versus CU count; below the one-WG-per-CU line pick the shallower pipeline, at or above it the deeper one.",
+      "stack": "total 1.63x isolated (director-verified) = three directions compounded\n  - 1. per-program knobs (deeper pipeline + waves_per_eu=2, formula tail-peel, head-mask specialization) - 1.48x standalone (round 1, verified) - the bulk of the win\n  - 2. bit-exact partial-output column split - +7-8% on top of (1) (round 1 integrate, verified), landing entirely on batch=2 where the grid underfills the CUs\n  - 3. split cap corrected to one WG per CU + shape-dependent pipeline depth - +2.2% on top of (1,2) (round 2, verified), essentially all on batch=32\n  - note: attribution is incremental in landing order, not independent; the launcher rewrite alone measured 1.003x.",
+      "verify": "Re-time every shape against the frozen baseline and sweep the split per shape: the peak sat exactly at the CU line (batch=32 split 1/2/4 = 1.63/1.69/1.59, batch=64 split 1/2 = 1.54/1.39, batch=2 split 4/8/16 = 1.60/1.66/1.62).",
+      "pitfall": "The assigned hypothesis said the largest batch wanted more split -> it over-split a bus that was already saturated and cost ~10% -> derive the cap from CU count, and note attainable bandwidth is itself a function of WG count (a gather probe held its full rate at 256 WGs but only ~55% of it at 128).\nRetiling the KV block or swapping in exp2 re-rounded the online softmax -> parity gate blew up golden-vs-golden (max_rel 46.9 for one retile, 2.1e-2 for exp2) -> only math-preserving knobs (warps, pipeline depth, waves_per_eu, split) clear this gate.",
+      "caution": "Inherited backend guidance for this decode family claimed deeper pipelining hurts and single-warp launches win; here the opposite measured best and single-warp was the worst point at 0.660x - also verify pipeline depth and warp count on your own box before carrying that guidance over.",
+      "source": "run _fwd_grouped_kernel_stage1-own16h, 2026-08-08, director-validated geomean 1.6337"
+    },
+    {
+      "name": "cache-placement-and-host-lane-closed-decode",
+      "description": "Cache-locality swizzle and host/graph-capture levers both returned ~1.00x on a decode attention op that was neither bandwidth- nor dispatch-bound.",
+      "keywords": [
+        "attention-decode",
+        "paged-decode",
+        "launch-overhead",
+        "l2-locality",
+        "xcd-swizzle",
+        "cuda-graph",
+        "anti-pattern",
+        "gfx950"
+      ],
+      "kernels": [
+        "_fwd_grouped_kernel_stage1"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "paged split-KV decode attention on gfx950 whose small-batch case is parallelism-starved rather than bandwidth-bound, with a launcher already far under the dispatch knee",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "~1.00x across four probes: locality swizzle 1.5838x against a 1.5919x round entry despite batch=2 L2 hit 16.9%->66.7% and DRAM amplification 2.45x->0.98x; full-op graph capture 1.5777x with eager-vs-replay 0.740/0.789/0.801x per case; thin launcher alone 1.003x",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L2",
+      "verified_on": "2026-08-08",
+      "last_seen": "2026-08-12",
+      "title": "Positive cache counters and a cheaper launcher can both buy zero clock",
+      "lever": "Classify each shape first - its fraction of achievable DRAM read rate, and its per-call host cost against the measured dispatch knee - and treat cache placement and host/dispatch as candidates only for shapes that classification says are actually held there.",
+      "apply": "Both probes are cheap: a program-id swizzle that lands sibling programs on one L2 slice, and full-op graph capture with an allocation-free fast path. Run them as probes and gate promotion on the frozen-baseline clock rather than on the counter they move.",
+      "verify": "Pair every counter improvement with an isolated A/B on the same shape; a hit-rate or amplification improvement that leaves the clock inside the noise band is a closed axis, not a partial win.",
+      "pitfall": "Counters moved hugely (L2 hit ~4x, amplification to ~1.0) while the clock stayed flat -> the small-batch case was parallelism-starved at a quarter of CU fill, not bandwidth-bound -> the round was better spent on grid shape.\nGraph capture measured slower than eager -> the launcher already sat ~4x under the dispatch knee and the residual gap was the benchmark's own barrier packets, paid identically by the baseline -> compare per-call host cost to the knee before staffing this lane.",
+      "caution": "Both dead-end directions were still merged at zero measured cost for robustness (safe stream handling, kwargs guard) - also verify whether a clock-neutral direction is worth keeping for safety before discarding it.",
+      "source": "run _fwd_grouped_kernel_stage1-own16h, 2026-08-08, round-2 directions d1/d2 verified against a frozen baseline"
+    },
+    {
+      "name": "read-only-twin-and-hand-counted-bytes",
+      "description": "Hand-count traffic and time a math-stripped read-only twin before staffing a memory round: it closed the largest open lane here at zero patch.",
+      "keywords": [
+        "roofline",
+        "profiler-error",
+        "read-only-twin",
+        "memory-bound",
+        "anti-pattern",
+        "attention-decode",
+        "method"
+      ],
+      "kernels": [
+        "_fwd_grouped_kernel_stage1"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "decode",
+      "key": "deciding whether a memory-bound decode kernel still has headroom when a profiler traffic counter is the only evidence for the target",
+      "lifecycle": "active",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "zero-patch round: the twin's wall time came within 1.02x of the real kernel at batch=64 (compute fully hidden), and the hand count showed the profiler byte figure was 2x low, so the round's target implied above-nameplate bandwidth; the round verified 1.00x and promoted nothing",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L1",
+      "verified_on": "2026-08-08",
+      "last_seen": "2026-08-12",
+      "title": "Hand-count the bytes and build a read-only twin before staffing a memory round",
+      "lever": "Derive the traffic by hand from the problem (batch x tokens x (key_dim + value_dim) x dtype width, times how often each byte is actually read) and reconcile it with the profiler before believing any headroom estimate built on the counter.",
+      "apply": "Build a read-only twin: identical grid and identical gather addressing, all attention math stripped, and a deliberately trivial consumer. Time it against the real kernel; separately time a plain contiguous read on the same box to get the achievable-rate denominator.",
+      "verify": "A twin within a few percent of the real kernel means compute is already hidden behind the loads, so occupancy, ILP and scheduling levers are dead by construction; express the result as a fraction of the measured achievable rate, not of nameplate.",
+      "pitfall": "The first twin came out ~30% slower than the real kernel, i.e. a floor above the thing it was bounding -> its full-tile fp32 reduction consumer was itself the bottleneck -> make the twin's consumer trivial.\nGrouping the profiler's dispatch table by grid size alone merged two shapes that launch the same WG count -> group by (grid size, register count) instead (92 vs 108 separated them here).",
+      "caution": "A round that promotes a zero-byte patch can still be its most valuable one, since it prevents a mis-specified successor - also verify a suspicious profiler figure a second independent way (hand arithmetic plus a stripped probe) before declaring the axis closed.",
+      "source": "run _fwd_grouped_kernel_stage1-own16h, 2026-08-08, round-3 deep_explore, verified 1.6243x at parity"
+    }
+  ]
+}

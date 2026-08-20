@@ -29,18 +29,47 @@ import glob
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 2
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
+
+# result.json must never state a speedup its own baseline/final pair
+# contradicts. Anything beyond this absolute gap on final/baseline means the
+# ratio was computed against a different pair than the one we report.
+SPEEDUP_SELF_CONSISTENCY_TOL = 1e-3
+
+# Headroom over an op's theoretical Amdahl ceiling before a measured e2e delta
+# is treated as corruption rather than a win. Mirrors
+# IMPLAUSIBLE_SPEEDUP_MARGIN in e2e_workflow.js (1.0 => must exceed 2x the
+# ceiling); both sides MUST agree or the recovery path banks what the live path
+# refuses, so this is the SINGLE source of truth: map_args() forwards it to the
+# JS workflow (A.implausible_speedup_margin) and the recovery path reads the same
+# constant. Overridable via env for tuning; validated finite/non-negative (an
+# accepted nan/inf/negative would silently disable the guard) exactly like
+# SAME_CONFIG_DIVERGENCE_WARN_PCT below.
+try:
+    IMPLAUSIBLE_SPEEDUP_MARGIN = float(
+        os.environ.get("GEAK_IMPLAUSIBLE_SPEEDUP_MARGIN", "1.0")
+    )
+    if (
+        not math.isfinite(IMPLAUSIBLE_SPEEDUP_MARGIN)
+        or IMPLAUSIBLE_SPEEDUP_MARGIN < 0.0
+    ):
+        raise ValueError("implausible-speedup margin must be finite and non-negative")
+except (TypeError, ValueError):
+    IMPLAUSIBLE_SPEEDUP_MARGIN = 1.0
 
 try:
     SAME_CONFIG_DIVERGENCE_WARN_PCT = float(
@@ -295,9 +324,19 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     eval_dir = str(h.get("eval_dir") or os.environ.get("GEAK_EVAL_DIR", "")).strip()
     if not eval_dir:
         model_name = Path(h["model_path"]).name
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        eval_dir = str(Path(h["exp_root"]) / f"e2e_{model_name}_{ts}")
+        # Second-resolution names collide when two dry-runs/jobs start together,
+        # causing their recipe_env.nul files and artifacts to overwrite each
+        # other. Keep the readable UTC stamp but add microseconds + random run id.
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+        run_id = uuid.uuid4().hex[:8]
+        eval_dir = str(Path(h["exp_root"]) / f"e2e_{model_name}_{ts}_{run_id}Z")
     ps_args["eval_dir"] = eval_dir
+    # Keep the JS live-path implausible-speedup guard and THIS runner's recovery
+    # path on ONE margin: forward the (validated) Python value so the workflow's
+    # A.implausible_speedup_margin can never silently drift from the constant the
+    # recovery path applies. See IMPLAUSIBLE_SPEEDUP_MARGIN above. Forwarded
+    # unconditionally (not gated on a handoff key) so both sides always agree.
+    ps_args["implausible_speedup_margin"] = IMPLAUSIBLE_SPEEDUP_MARGIN
     # Bridge the upstream TraceLens / kernel-agent artifacts INTO the workflow args
     # (not just the driver prompt) so the JS Profile/Strategize/Extract phases can
     # use them as a prior. Only non-null paths are forwarded; when nothing is found
@@ -462,6 +501,515 @@ def apply_bench_client(h: dict) -> str:
 # all). Extend this set as Magpie adds backends — never add per-backend code.
 _MAGPIE_BACKENDS = {"sglang", "vllm"}
 
+# The flat scalars we need out of the orchestrator's launch recipe. Keep this
+# lightweight scan separate from the BaseLoader parse used for the nested
+# ``envs:`` mapping: these fields are optional launch-discovery hints, whereas
+# malformed environment replay must follow the strict fail-closed path.
+_RECIPE_KEYS = ("inferencex_path", "benchmark_script", "framework", "runner_type")
+
+# Names the recipe may carry that GEAK must nevertheless own, because they
+# address THIS run's resources rather than the served configuration. Replaying
+# the orchestrator's values would not be fidelity -- it would point the server
+# at a port the orchestrator released months ago, a GPU this run was not given,
+# or another run's log file. Everything NOT listed here is replayed verbatim.
+#
+# The overlay is on the list for a different reason: applying it is the entire
+# purpose of a GEAK run, so the orchestrator's PYTHONPATH must not displace it.
+_RECIPE_ENV_GEAK_OWNED = frozenset({
+    "PORT", "RESULT_DIR", "SERVER_LOG", "PROFILE", "PROFILE_DIR", "PYTHONPATH",
+    "MAGPIE_RUN_PHASE", "MAGPIE_SERVER_PID_FILE", "BENCHMARK_BASE_URL",
+    # What this run was asked to serve, not what the recipe happened to record.
+    # The launcher passes both explicitly and so overrides them by ordering
+    # anyway; naming them here is what keeps RECIPE_ENV_REPLAYED honest instead
+    # of advertising a variable a later layer silently displaces.
+    "MODEL", "TP",
+    # GPU pinning: the recipe names whichever of these its own runner used, and
+    # any of them left at the orchestrator's value would fight the device this
+    # run was allocated. Filtering them from the RECIPE replay is independent of
+    # how the launcher pins devices (ROCR-only on a bare box vs HIP-on-top when
+    # an outer ROCR mask is already set — see magpie.sh).
+    "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
+    "VLLM_TORCH_PROFILER_DIR", "SGLANG_TORCH_PROFILER_DIR",
+})
+
+
+# A shell environment-variable name: a leading letter/underscore then word
+# characters. Anything else (notably a leading-dash token like
+# ``-SCUDA_VISIBLE_DEVICES`` that GNU ``env`` parses as the --split-string
+# OPTION) is NOT an env var and must never reach the replay file.
+_VALID_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class _RecipeYAMLError(Exception):
+    """The launch recipe exists and PyYAML is available, but it does not parse.
+
+    Distinct from "PyYAML absent": a genuine parse error must fail closed rather
+    than be silently reinterpreted by the degraded line scanner.
+    """
+
+
+def _env_flag(name: str) -> bool:
+    """Truthiness for an opt-in env switch, matching the spelling used elsewhere."""
+    return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _find_envs_map(node: Any) -> dict | None:
+    """Locate the recipe's ``envs`` mapping in a parsed YAML document.
+
+    The orchestrator emits ``envs:`` either nested under ``benchmark:`` (in the
+    launch recipe) or at the document root (in the per-round effective config).
+    Search depth-first and prefer the first NON-EMPTY mapping: an unrelated
+    metadata ``envs: {}`` must not hide the later launch environment. Return an
+    empty mapping only when at least one empty ``envs`` mapping exists and no
+    non-empty mapping exists anywhere in the document.
+    """
+    if isinstance(node, dict):
+        cand = node.get("envs")
+        saw_empty = isinstance(cand, dict)
+        if isinstance(cand, dict) and cand:
+            return cand
+        for value in node.values():
+            found = _find_envs_map(value)
+            if found:
+                return found
+            if found is not None:
+                saw_empty = True
+        return {} if saw_empty else None
+    elif isinstance(node, list):
+        saw_empty = False
+        for item in node:
+            found = _find_envs_map(item)
+            if found:
+                return found
+            if found is not None:
+                saw_empty = True
+        return {} if saw_empty else None
+    return None
+
+
+def _stringify_env_value(value: Any) -> str | None:
+    """Render one recipe env value as the string the shell must receive.
+
+    Env vars are strings, but the recipe records typed YAML scalars (an int for
+    ``MAX_MODEL_LEN``, a quoted string for a boolean). Non-scalars -- a nested
+    map or a list -- are not environment variables and are dropped (``None``);
+    ``None`` (a bare ``KEY:`` with no value under a typing loader such as
+    ``safe_load``) is dropped for the same reason. Literal/folded block scalars
+    arrive with a trailing newline the dumper added that carries no meaning once
+    the value is word-split as args, so it is stripped.
+
+    An EXPLICIT empty value (``KEY: ''``) is KEPT as the empty string: the
+    orchestrator recorded ``KEY`` set-but-empty, which is distinct from unset,
+    and dropping it would silently change the replayed environment. (Under the
+    string-preserving ``BaseLoader`` the production path uses, a bare ``KEY:``
+    also arrives as ``''`` rather than ``None``; keeping it errs toward fidelity
+    -- replaying an empty var -- rather than dropping a value the recipe held.)
+    """
+    if value is None or isinstance(value, (dict, list)):
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value.rstrip("\n")
+    return str(value)
+
+
+def _recipe_envs_from_yaml(text: str) -> dict[str, str] | None:
+    """Parse the ``envs:`` map with a real YAML parser (PyYAML).
+
+    Returns the extracted mapping on success (possibly empty when the recipe
+    names no ``envs`` block), or ``None`` only when PyYAML is unavailable so a
+    non-strict caller can fall back to the line scanner. Parse errors raise.
+
+    A real parser is required because replay-warm recipes fold a multi-line
+    ``EXTRA_<BE>_ARGS`` as an IMPLICIT plain scalar (no ``|``/``>`` indicator)
+    whose continuation lines can carry JSON with colons, e.g.
+    ``--speculative-config {"method":"ngram",...}``. A line-oriented scan cannot
+    tell such a folded continuation from a new mapping key without
+    reimplementing YAML, and silently truncates the kernel-dispatch flags.
+
+    Returns ``None`` ONLY when PyYAML is unavailable (``ImportError``) so the
+    caller degrades to the line scanner. When PyYAML IS present but the document
+    does not parse, raises :class:`_RecipeYAMLError`: a malformed recipe must
+    fail closed, not be handed to the degraded scanner (which would happily
+    store a truncated flow scalar as if it were a valid environment).
+
+    Parsed with ``BaseLoader`` so every scalar and key is read as its literal
+    STRING, not YAML 1.1's implicit types -- ``yes``/``on`` stay ``"yes"``/``"on"``
+    (not ``True``), ``0x10`` stays ``"0x10"`` (not ``16``), and a key ``ON`` stays
+    ``"ON"`` (not the boolean ``True``). Environment variables are strings, so
+    whether PyYAML is installed must not change the replayed value; BaseLoader is
+    what keeps this path and the scanner fallback in agreement.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return None
+    try:
+        doc = yaml.load(text, Loader=yaml.BaseLoader)
+    except yaml.YAMLError as exc:
+        raise _RecipeYAMLError(str(exc)) from exc
+    envs = _find_envs_map(doc)
+    if envs is None:
+        return {}
+    out: dict[str, str] = {}
+    for key, value in envs.items():
+        rendered = _stringify_env_value(value)
+        if rendered is not None:
+            out[str(key)] = rendered
+    return out
+
+
+def _recipe_env_block_scan(text: str) -> dict[str, str]:
+    """Indentation-scoped fallback used only when PyYAML is unavailable.
+
+    Handles the same shapes as the YAML path -- single-line values, explicit
+    ``|``/``>`` block scalars, nested-map skipping, and IMPLICIT plain-scalar
+    continuation (more-indented lines folded into the value with spaces) -- but a
+    hand scan cannot disambiguate every YAML edge, so it is strictly the degraded
+    path taken only when the parser is missing.
+    """
+    envs: dict[str, str] = {}
+    block_indent: int | None = None
+    nested_indent: int | None = None
+    lines = text.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        i += 1
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if block_indent is None:
+            if line.strip() == "envs:":
+                block_indent = indent
+            continue
+        if indent <= block_indent:
+            break  # dedented out of the block
+        if nested_indent is not None:
+            if indent > nested_indent:
+                continue  # still inside a nested map
+            nested_indent = None
+        key, sep, value = line.strip().partition(":")
+        if not sep or not key:
+            continue
+        key = key.strip()
+        value = value.strip()
+        # Explicit YAML block scalar: `|` (literal) / `>` (folded), optionally
+        # followed by chomping/indent indicators (+, -, digits). Consume the
+        # more-indented block, joining folded scalars with spaces and literal
+        # scalars with newlines (both word-split harmlessly as server args).
+        if value and value[0] in "|>" and (
+            len(value) == 1 or set(value[1:]) <= set("+-0123456789")
+        ):
+            folded = value[0] == ">"
+            block_lines: list[str] = []
+            content_indent: int | None = None
+            while i < n:
+                nxt = lines[i]
+                if not nxt.strip():
+                    block_lines.append("")
+                    i += 1
+                    continue
+                nxt_indent = len(nxt) - len(nxt.lstrip())
+                if content_indent is None:
+                    if nxt_indent <= indent:
+                        break  # nothing more-indented than the key => empty scalar
+                    content_indent = nxt_indent
+                elif nxt_indent < content_indent:
+                    break  # dedented out of the scalar content
+                block_lines.append(nxt[content_indent:])
+                i += 1
+            while block_lines and not block_lines[-1]:
+                block_lines.pop()  # drop trailing padding the dumper may add
+            joined = (" " if folded else "\n").join(block_lines)
+            envs[key] = joined.strip() if folded else joined
+            continue
+        if not value:
+            # BaseLoader represents a bare `KEY:` as an empty string unless the
+            # following significant line is more indented (a nested map). Look
+            # ahead so the fallback preserves that same set-but-empty semantic
+            # while still skipping nested values and their children.
+            j = i
+            while j < n and (
+                not lines[j].strip() or lines[j].lstrip().startswith("#")
+            ):
+                j += 1
+            if j < n and (len(lines[j]) - len(lines[j].lstrip())) > indent:
+                nested_indent = indent
+            else:
+                envs[key] = ""
+            continue
+        # Inline plain scalar. Fold any IMPLICIT continuation: lines indented
+        # deeper than the key with no block indicator are part of this value
+        # (YAML plain-scalar folding), e.g. a multi-line EXTRA_<BE>_ARGS. This is
+        # unambiguous inside envs: a key with an inline value can never be
+        # followed by a nested map, so a deeper line must be a continuation.
+        while i < n:
+            nxt = lines[i]
+            if not nxt.strip():
+                break  # a blank line ends the plain scalar
+            if (len(nxt) - len(nxt.lstrip())) <= indent:
+                break  # dedent -> next key or end of block
+            value = f"{value} {nxt.strip()}"
+            i += 1
+        envs[key] = value.strip("'\"")
+    return envs
+
+
+def _recipe_env_block(recipe_path: str) -> dict[str, str]:
+    """Read the orchestrator's recorded launch environment (the ``envs:`` map).
+
+    This is the block :func:`_recipe_fields` skips. It is the only record of
+    what the orchestrator's server actually inherited, and until it is replayed
+    the two launches agree only where their DEFAULTS happen to agree -- which is
+    agreement by coincidence, not by construction, and silently stops holding
+    the moment the orchestrator sets something explicitly.
+
+    Parsed with PyYAML (a declared dependency) so both shapes the orchestrator
+    emits are handled -- ``envs:`` nested under ``benchmark:`` and ``envs:`` at
+    column 0 -- and, critically, so an IMPLICIT plain-scalar continuation of a
+    multi-line ``EXTRA_<BE>_ARGS`` survives intact (a line scan truncates it).
+    Falls back to an indentation scan only if PyYAML is MISSING (ImportError).
+
+    Fail-close semantics: a recipe that PyYAML rejects, or bytes that are not
+    valid UTF-8, are NOT quietly handed to the degraded line scanner (which
+    would store a truncated flow scalar as though it were a valid environment)
+    -- they raise, and this function turns that into a hard stop under
+    ``GEAK_STRICT_RECIPE_ENV`` or a warning + ``{}`` otherwise. Missing PyYAML is
+    the ONLY condition that legitimately reaches the scanner.
+
+    Returns ``{}`` when the file is unreadable or names no ``envs:`` block --
+    callers distinguish "nothing recorded" from "could not read" via the recipe
+    fields they already hold.
+    """
+    if not recipe_path:
+        return {}
+    # No errors="ignore": undecodable bytes mean a corrupt recipe, and silently
+    # dropping them could split a flow scalar mid-token. Fail closed instead.
+    try:
+        text = Path(recipe_path).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    except UnicodeDecodeError as exc:
+        return _recipe_env_fail_closed(
+            recipe_path, f"is not valid UTF-8 ({exc})"
+        )
+    try:
+        parsed = _recipe_envs_from_yaml(text)
+    except _RecipeYAMLError as exc:
+        return _recipe_env_fail_closed(recipe_path, f"is not valid YAML ({exc})")
+    if parsed is not None:
+        return parsed
+    # A strict aligned launch must be independently validated as YAML. The
+    # scanner supports old/offline hosts in non-strict mode, but cannot prove a
+    # malformed document safe, so strict mode refuses when PyYAML is unavailable.
+    if _env_flag("GEAK_STRICT_RECIPE_ENV"):
+        return _recipe_env_fail_closed(
+            recipe_path,
+            "cannot be validated because PyYAML is unavailable",
+        )
+    print(
+        "[run_e2e] WARNING: PyYAML is unavailable; using the degraded recipe "
+        "env scanner. Set GEAK_STRICT_RECIPE_ENV=1 to refuse.",
+        file=sys.stderr,
+    )
+    return _recipe_env_block_scan(text)
+
+
+def _recipe_env_fail_closed(recipe_path: str, why: str) -> dict[str, str]:
+    """React to an unparseable recipe env block.
+
+    Under ``GEAK_STRICT_RECIPE_ENV`` a malformed recipe is a hard stop: the
+    launch env cannot be reconstructed, so serving a coincidentally-defaulted
+    stack would be a silent fidelity break. Otherwise warn loudly and return an
+    empty block so the caller proceeds on script defaults (the same posture as a
+    recipe that records no ``envs:`` at all), never on partial garbage.
+    """
+    msg = f"recipe env block {recipe_path} {why}"
+    if _env_flag("GEAK_STRICT_RECIPE_ENV"):
+        raise SystemExit(
+            f"[run_e2e] {msg}; refusing to launch under GEAK_STRICT_RECIPE_ENV.\n"
+            "    Fix the recipe, or unset GEAK_STRICT_RECIPE_ENV to fall back to\n"
+            "    script defaults with no recorded environment replayed."
+        )
+    print(
+        f"[run_e2e] WARNING: {msg}; replaying NO recorded environment "
+        "(script defaults only). Set GEAK_STRICT_RECIPE_ENV=1 to refuse.",
+        file=sys.stderr,
+    )
+    return {}
+
+
+def _sanitize_replay_path(path_value: str) -> tuple[str | None, list[str]]:
+    """Keep only existing directories from a recorded ``PATH``.
+
+    The orchestrator's recipe often records a host-local venv prefix
+    (``/opt/venv/bin:...``). Replaying it verbatim on a box where that prefix
+    is gone would put a dead entry first on ``PATH`` and silently select the
+    wrong interpreter / miss the intended one. Drop missing components; if
+    nothing remains, drop ``PATH`` from the replay entirely so the ambient
+    process ``PATH`` stands.
+
+    Returns ``(sanitized_or_None, dropped_components)``.
+    """
+    kept: list[str] = []
+    dropped: list[str] = []
+    for part in path_value.split(":"):
+        if not part:
+            continue
+        if Path(part).is_dir():
+            kept.append(part)
+        else:
+            dropped.append(part)
+    return (":".join(kept) if kept else None), dropped
+
+
+def _recipe_launch_env(h: dict) -> tuple[dict[str, str], list[str]]:
+    """Partition the recipe's recorded environment into replay set + GEAK-owned.
+
+    Returns ``(replay, owned)`` where ``replay`` is applied verbatim underneath
+    the launch and ``owned`` names the variables GEAK deliberately overrode.
+    Reporting ``owned`` rather than dropping it silently is what lets a reviewer
+    see the complete list of ways this launch is allowed to differ.
+
+    ``PATH`` is existence-checked before replay: missing directories are dropped
+    (and the whole variable omitted when nothing remains).
+    """
+    recorded = _recipe_env_block(str(h.get("launch_recipe") or ""))
+    # Every replayed key becomes an `env NAME=VALUE` operand at the shell. A name
+    # that is not a valid POSIX identifier (spaces, `-`, a leading `-` that `env`
+    # would read as an OPTION, an `=` in the name) cannot be a real environment
+    # variable and could smuggle an option/command token onto the launch line.
+    # Drop such names here so the shell only ever sees clean assignments; the
+    # launcher's own allowlist is the second half of this defence in depth.
+    bad = [k for k in recorded if not _VALID_ENV_NAME.match(str(k))]
+    if bad:
+        if _env_flag("GEAK_STRICT_RECIPE_ENV"):
+            raise SystemExit(
+                "[run_e2e] recipe env block records non-identifier name(s) "
+                f"{bad!r}; refusing to launch under GEAK_STRICT_RECIPE_ENV."
+            )
+        print(
+            ">>> recipe alignment: dropping recorded env name(s) that are not "
+            f"valid identifiers: {bad!r}",
+            file=sys.stderr,
+        )
+        recorded = {k: v for k, v in recorded.items() if _VALID_ENV_NAME.match(str(k))}
+    replay = {k: v for k, v in recorded.items() if k not in _RECIPE_ENV_GEAK_OWNED}
+    owned = sorted(k for k in recorded if k in _RECIPE_ENV_GEAK_OWNED)
+    if "PATH" in replay:
+        sanitized, dropped = _sanitize_replay_path(replay["PATH"])
+        if dropped:
+            print(
+                ">>> recipe alignment: dropping missing PATH component(s) from "
+                f"replay: [{':'.join(dropped)}]",
+                file=sys.stderr,
+            )
+        if sanitized is None:
+            print(
+                ">>> recipe alignment: recorded PATH has no existing directories; "
+                "leaving the ambient PATH in place.",
+                file=sys.stderr,
+            )
+            del replay["PATH"]
+        else:
+            replay["PATH"] = sanitized
+    return replay, owned
+
+
+def _recipe_fields(recipe_path: str) -> dict[str, str]:
+    """Read the flat scalars we need out of an orchestrator launch recipe.
+
+    Returns ``{}`` for a missing/unreadable recipe so every caller degrades to
+    the native launch instead of failing the run.
+    """
+    if not recipe_path:
+        return {}
+    try:
+        text = Path(recipe_path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return {}
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition(":")
+        # First occurrence wins; the nested env map uses UPPERCASE names and so
+        # cannot collide with these keys.
+        if sep and key in _RECIPE_KEYS and key not in fields:
+            fields[key] = value.strip().strip("'\"")
+    return fields
+
+
+def _magpie_script_from_recipe(h: dict) -> str:
+    """Rebuild the path of the launch script the orchestrator itself ran.
+
+    This is the one piece of the launch recipe that never survived the handoff.
+    The orchestrator transfers its accepted flags and env, but the script it
+    launched with owns the platform kernel preset, ``--trust-remote-code`` and
+    the gpu-mem-util default — none of which are flags, so none of which a
+    flag-scraper can recover. Without the script GEAK re-baselines a different
+    engine and the same configuration serves measurably slower.
+
+    The handoff does name the recipe file, and the recipe names both the
+    InferenceX checkout and the script inside it, so the path is derivable
+    without asking the orchestrator to send anything new.
+
+    The checkout the RECIPE names is host-local and content-hash addressed
+    (``.../inferencex_local/<hash>``), so a container rebuild, a move to another
+    box, or a post-mortem re-run invalidates that one path while the very same
+    checkout is still on disk elsewhere. We therefore try, in order:
+
+      1. the checkout the recipe names — the only one the orchestrator provably
+         launched from, so whenever it resolves nothing else is consulted and
+         the result is exactly what it was before this fallback existed;
+      2. ``handoff.inferencex_path`` — same handoff, same writer, but usually
+         on durable storage rather than in a container-local cache;
+      3. ``$INFERENCEX_PATH``.
+
+    2 and 3 are the same two sources :func:`apply_bench_client` already trusts
+    to locate the bench client, so the launcher and the client now resolve
+    against ONE checkout instead of disagreeing about which one exists. Every
+    candidate passes the identical usability check below, and the first is
+    still preferred, so a fallback can only turn "" into a working script — it
+    can never displace a good one.
+
+    Returns "" whenever no script can be confirmed usable on this box.
+    """
+    fields = _recipe_fields(str(h.get("launch_recipe") or ""))
+    name = fields.get("benchmark_script", "")
+    if not name:
+        return ""
+    seen: set[str] = set()
+    for root in (
+        fields.get("inferencex_path", ""),
+        str(h.get("inferencex_path") or ""),
+        os.environ.get("INFERENCEX_PATH", ""),
+    ):
+        root = root.strip()
+        if not root or root in seen:
+            continue
+        seen.add(root)
+        benchmarks = Path(root) / "benchmarks"
+        # Mirror the orchestrator's own lookup: top level first, then
+        # subdirectories (its checkouts keep some scripts under single_node/ /
+        # multi_node/).
+        candidates = [benchmarks / name]
+        try:
+            candidates.extend(sorted(benchmarks.rglob(name)))
+        except OSError:
+            pass
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            # The script sources benchmark_lib.sh from its own directory and
+            # dies without it. Checking here turns a half-populated checkout
+            # into a native-launch degrade instead of a hard failure at first
+            # bench.
+            if not (candidate.parent / "benchmark_lib.sh").is_file():
+                continue
+            return str(candidate)
+    return ""
+
 
 def apply_bench_launcher(h: dict) -> str:
     """Align the SERVER LAUNCH recipe with the external orchestrator (Magpie).
@@ -481,10 +1029,13 @@ def apply_bench_launcher(h: dict) -> str:
     the launcher derives the per-backend flag/profiler var names from ``$BACKEND``.
 
     Resolution:
-      * explicit ``handoff.bench_launcher`` / ``$BENCH_LAUNCHER`` wins;
+      * explicit ``handoff.bench_launcher`` / ``$BENCH_LAUNCHER`` wins
+        (``BENCH_LAUNCHER=native`` is the escape hatch when the orchestrator's
+        script cannot run on this box);
       * else enable ``magpie`` ONLY when a script is discoverable
         (``handoff.launch_server_script``, or generic ``$MAGPIE_LAUNCH_SCRIPT``,
-        or per-backend ``$MAGPIE_<BACKEND>_SCRIPT`` e.g. ``$MAGPIE_VLLM_SCRIPT``)
+        or per-backend ``$MAGPIE_<BACKEND>_SCRIPT`` e.g. ``$MAGPIE_VLLM_SCRIPT``,
+        or derived from ``handoff.launch_recipe``)
         AND the backend is one Magpie supports; otherwise ``native``.
 
     When nothing is discoverable the native backend launch is kept, so the
@@ -496,17 +1047,28 @@ def apply_bench_launcher(h: dict) -> str:
         h.get("bench_launcher") or os.environ.get("BENCH_LAUNCHER", "") or ""
     ).strip().lower()
     backend = str(h.get("framework", "sglang") or "sglang").strip().lower()
-    # Discover the Magpie launch script: explicit handoff, generic env, then the
-    # per-backend env (MAGPIE_SGLANG_SCRIPT / MAGPIE_VLLM_SCRIPT / ...).
-    script = str(
-        h.get("launch_server_script")
-        or os.environ.get("MAGPIE_LAUNCH_SCRIPT", "")
-        or os.environ.get(f"MAGPIE_{backend.upper()}_SCRIPT", "")
-        or ""
-    ).strip()
+    # Discover the Magpie launch script, most explicit source first: handoff,
+    # generic env, per-backend env (MAGPIE_SGLANG_SCRIPT / MAGPIE_VLLM_SCRIPT),
+    # then derived from the launch recipe the handoff points at. The recipe is
+    # last because it is inferred rather than stated, but in practice it is the
+    # only source that is ever populated: the orchestrator names its recipe on
+    # every handoff and names the script on none of them.
+    script = str(h.get("launch_server_script") or "").strip()
+    source = "handoff"
+    if not script:
+        script = str(
+            os.environ.get("MAGPIE_LAUNCH_SCRIPT", "")
+            or os.environ.get(f"MAGPIE_{backend.upper()}_SCRIPT", "")
+            or ""
+        ).strip()
+        source = "env"
+    if not script:
+        script = _magpie_script_from_recipe(h)
+        source = "launch_recipe"
     if script:
         # Normalise onto the generic var the backend-agnostic launcher reads.
         os.environ["MAGPIE_LAUNCH_SCRIPT"] = script
+        os.environ["MAGPIE_LAUNCH_SCRIPT_SOURCE"] = source
 
     if requested and requested != "auto":
         launcher = requested
@@ -515,7 +1077,164 @@ def apply_bench_launcher(h: dict) -> str:
     else:
         launcher = "native"
     os.environ["BENCH_LAUNCHER"] = launcher
+
+    # Magpie's script defaults max-model-len to a value of its own (4096) that
+    # has nothing to do with this run, and the orchestrator overrode it via env
+    # when it measured the reference. Forward the same env so the script bakes
+    # in the right value, instead of leaving the correct number to arrive as a
+    # duplicate --max-model-len in EXTRA_<BACKEND>_ARGS and win only because
+    # argparse happens to take the last occurrence. Only forwarded when the
+    # handoff carried it; absent => the script's own default stands, which is
+    # what the orchestrator served with.
+    #
+    # gpu-mem-util is deliberately NOT forwarded the same way: no handoff has
+    # ever carried mem_fraction, and the script's 0.95 default IS the recipe we
+    # are trying to match.
+    if launcher == "magpie":
+        replay, owned = _recipe_launch_env(h)
+        _export_recipe_env(h, replay, owned, source)
+
+        try:
+            max_model_len = int(h.get("max_model_len") or 0)
+        except (TypeError, ValueError):
+            max_model_len = 0
+        # The recipe's own record outranks the handoff scalar: it is what the
+        # reference server inherited, whereas max_model_len is a summary field
+        # that travelled separately and can drift from it. Disagreement is not
+        # fatal (a re-scoped run legitimately differs) but it is never silent --
+        # an unnoticed drift here is precisely the class of bug that produced
+        # the divergence this alignment exists to close.
+        recorded_mml = replay.get("MAX_MODEL_LEN", "").strip()
+        if recorded_mml:
+            if max_model_len > 0 and recorded_mml != str(max_model_len):
+                print(
+                    f"!!! recipe records MAX_MODEL_LEN={recorded_mml} but the handoff "
+                    f"says {max_model_len}; replaying the recipe's value.",
+                    file=sys.stderr,
+                )
+            # Cleared so the launcher's own MAX_MODEL_LEN pass-through cannot
+            # land on top of the replayed value.
+            os.environ.pop("MAX_MODEL_LEN", None)
+        elif max_model_len > 0:
+            os.environ["MAX_MODEL_LEN"] = str(max_model_len)
     return launcher
+
+
+def _export_recipe_env(
+    h: dict, replay: dict[str, str], owned: list[str], source: str
+) -> str:
+    """Materialise the replay set for the launcher, or refuse to launch.
+
+    Written as a NUL-delimited ``NAME=VALUE`` file rather than passed as a
+    string: the recipe records PATH, and any value containing a space would be
+    word-split into two bogus assignments by the unquoted ``env $VAR`` idiom the
+    launcher uses for the flags it already had.
+
+    WARNS when the recipe carries no replayable ``envs:`` values, but proceeds
+    on defaults so GEAK runs smoothly even against older orchestrator output
+    that omits the block. A block containing only GEAK-owned run coordinates is
+    fully accounted for and needs no replay file. Set
+    ``GEAK_STRICT_RECIPE_ENV=1`` to fail-close on an absent/empty record (useful
+    in CI or when investigating a divergence).
+
+    Returns the path written, or "" when there was nothing to write.
+    """
+    # Strictness follows the existence of a recipe alignment attempt, not how
+    # the server script was discovered. An explicit handoff/env script still
+    # launches against h["launch_recipe"] and must not bypass fail-close merely
+    # because `source != "launch_recipe"`.
+    strict = bool(str(h.get("launch_recipe") or "").strip()) and _env_flag(
+        "GEAK_STRICT_RECIPE_ENV"
+    )
+    if not replay and owned:
+        # The recipe did record an environment, but every entry is an explicit
+        # run coordinate GEAK must replace (model/TP/port/GPU mask/etc.). There
+        # is nothing to materialise, yet strict alignment is still satisfied:
+        # the complete difference set is known and reported rather than absent.
+        os.environ.pop("RECIPE_ENV_FILE", None)
+        os.environ["RECIPE_ENV_SOURCE"] = str(h.get("launch_recipe") or "")
+        os.environ["RECIPE_ENV_REPLAYED"] = ""
+        os.environ["RECIPE_ENV_GEAK_OWNED"] = " ".join(owned)
+        return ""
+    if not replay:
+        if strict:
+            raise SystemExit(
+                "!!! recipe alignment: the launch recipe\n"
+                f"      {h.get('launch_recipe')}\n"
+                "    records no envs: block, so the environment the reference server\n"
+                "    ran with is unknown and this launch cannot be shown to match it.\n"
+                "    Re-export the recipe with its envs, point BENCH_LAUNCHER=native at\n"
+                "    an intentionally unaligned run, or unset GEAK_STRICT_RECIPE_ENV to\n"
+                "    launch on defaults anyway."
+            )
+        if source == "launch_recipe":
+            print(
+                ">>> recipe alignment: the recipe carries no envs: block; launching "
+                "with script defaults only. Set GEAK_STRICT_RECIPE_ENV=1 to refuse.",
+                file=sys.stderr,
+            )
+        return ""
+
+    # Resolve the eval dir the same way map_args does: h["eval_dir"] first, then
+    # the GEAK_EVAL_DIR main() pins from ps_args (map_args never writes eval_dir
+    # back into h, so on the --dry-run path h["eval_dir"] can be empty even
+    # though the run has a real eval dir). When BOTH are empty there is no run
+    # directory to own, so write a UNIQUE temp file instead of a fixed
+    # gettempdir()/recipe_env.nul that two concurrent runs would clobber -- the
+    # exact fixed-path collision that made a dry-run's .nul land where a later
+    # inspection could not find it.
+    out_dir = (
+        str(h.get("eval_dir") or "").strip()
+        or os.environ.get("GEAK_EVAL_DIR", "").strip()
+    )
+    path = ""
+    tmp_path = ""
+    try:
+        if out_dir:
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            path = str(Path(out_dir) / "recipe_env.nul")
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".recipe_env.", suffix=".tmp", dir=out_dir
+            )
+        else:
+            fd, path = tempfile.mkstemp(prefix="geak_recipe_env_", suffix=".nul")
+            tmp_path = path
+        with os.fdopen(fd, "wb") as fh:
+            for key in sorted(replay):
+                fh.write(f"{key}={replay[key]}".encode("utf-8") + b"\0")
+            fh.flush()
+            os.fsync(fh.fileno())
+        if out_dir:
+            os.replace(tmp_path, path)
+            tmp_path = ""
+    except OSError as exc:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        if strict:
+            raise SystemExit(
+                f"!!! recipe alignment: cannot materialise the replay env ({exc}). "
+                "Refusing to launch a server whose environment would silently differ "
+                "from the reference."
+            ) from exc
+        return ""
+
+    os.environ["RECIPE_ENV_FILE"] = path
+    os.environ["RECIPE_ENV_SOURCE"] = str(h.get("launch_recipe") or "")
+    os.environ["RECIPE_ENV_REPLAYED"] = " ".join(sorted(replay))
+    os.environ["RECIPE_ENV_GEAK_OWNED"] = " ".join(owned)
+    # stderr, not stdout: callers evaluate this function's stdout as shell
+    # (run_ab.sh does `eval "$(python3 ... apply_bench_launcher ...)"`), so a
+    # progress line on stdout is parsed as a command and kills the run.
+    print(
+        f">>> recipe alignment: replaying {len(replay)} recorded env var(s) "
+        f"[{' '.join(sorted(replay))}]"
+        + (f"; GEAK owns [{' '.join(owned)}]" if owned else ""),
+        file=sys.stderr,
+    )
+    return path
 
 
 def apply_alignment_flags(h: dict) -> dict:
@@ -523,20 +1242,27 @@ def apply_alignment_flags(h: dict) -> dict:
 
     Currently: ``BENCH_COLD_FINAL`` — when on, bench_e2e.sh also measures ONE cold
     full round per bench (surfaced as ``cold_output_throughput_tok_s`` in each
-    bench_summary.json, folded into ``result.json.alignment_metrics``, and used by
-    the cold-preferred final-basis selection in :func:`normalize_result`). Default
-    ON — the cold round is what enables the cold-to-cold promotion, so we opt IN by
-    default; a caller disables it with an explicit falsey ``handoff.bench_cold_final``
-    or ``$BENCH_COLD_FINAL=0`` (e.g. to save the one extra full round per bench).
+    bench_summary.json and folded into ``result.json.alignment_metrics``).
+
+    Default OFF. The round is labelled "cold" but only the FIRST bench of a
+    session ever runs on a genuinely cold box: by the time the final leg is
+    benched, the JIT/HIP kernel caches, torch.compile artifacts and the page
+    cache are all warm, so its "cold" round is a warm round wearing the label.
+    That makes the two cold numbers incomparable — the baseline's cold round
+    pays the full cache-fill cost and the final's pays almost none — and the
+    asymmetry has shown up as a double-digit phantom speedup. It stays available
+    as a diagnostic (explicit truthy ``handoff.bench_cold_final`` or
+    ``$BENCH_COLD_FINAL=1``) but no longer costs an extra full round per bench
+    by default, and never decides the promoted number.
     Returns the flags it exported.
     """
     exported: dict[str, str] = {}
     raw = h.get("bench_cold_final")
     if raw is None:
         raw = os.environ.get("BENCH_COLD_FINAL")
-    # Default ON: enabled unless an explicit falsey value is given.
+    # Default OFF: enabled only on an explicit truthy value.
     if raw is None or str(raw).strip() == "":
-        on = True
+        on = False
     else:
         on = str(raw).strip().lower() in {"1", "true", "yes", "on"}
     os.environ["BENCH_COLD_FINAL"] = "1" if on else "0"
@@ -1100,12 +1826,22 @@ def _positive_finite_float(value: Any) -> float:
 
 def _build_baseline_alignment(
     same_config_divergence_pct: float | None,
+    recipe_aligned: bool = True,
 ) -> dict[str, Any]:
-    """Classify cross-harness alignment using only the same-config metric."""
+    """Classify cross-harness alignment using only the same-config metric.
+
+    ``recipe_aligned`` says whether this run launched its servers through the
+    orchestrator's own launch script. When it did not, the two harnesses served
+    DIFFERENT stacks (the orchestrator's script owns the platform kernel preset,
+    ``--trust-remote-code`` and the gpu-mem-util default), so a divergence is
+    evidence about the launch recipe, not about the box or the bench client.
+    Saying that in the status keeps the number from being read as "GEAK
+    measured slow".
+    """
     if same_config_divergence_pct is None:
         status = "unavailable"
     elif abs(same_config_divergence_pct) > SAME_CONFIG_DIVERGENCE_WARN_PCT:
-        status = "warning"
+        status = "warning" if recipe_aligned else "warning_recipe_unaligned"
     else:
         status = "aligned"
     return {
@@ -1114,7 +1850,178 @@ def _build_baseline_alignment(
         "divergence_pct": same_config_divergence_pct,
         "warning_threshold_pct": SAME_CONFIG_DIVERGENCE_WARN_PCT,
         "raw_session_divergence_is_measurement_signal": False,
+        "recipe_aligned_with_orchestrator": recipe_aligned,
     }
+
+
+# Kernel-selection lines a serving stack prints at startup. Substring matching
+# is backend-agnostic on purpose: the goal is not to enumerate backends but to
+# record WHICH kernels the engine actually chose, so a launch that silently fell
+# back to a slower stack is visible in result.json instead of only in a
+# thousand-line server log.
+_STACK_SIGNAL_PATTERNS = (
+    "Final IR op priority",
+    "for Fp8LinearMethod",
+    "Fp8 MoE backend",
+    "ttention backend",  # "Attention backend" / "attention backend"
+    "server_args=ServerArgs(",
+)
+_STACK_SIGNAL_MAX_PICKS = 8
+
+
+def _serving_stack_signals(log_path: Path) -> dict[str, Any]:
+    """Summarize the kernel stack a server actually came up with.
+
+    Returns ``{}`` when the log is unreadable (leg never ran / was cleaned), so
+    the caller can carry the field harmlessly on a standalone run.
+    """
+    picks: list[str] = []
+    aiter_mentions = 0
+    try:
+        # Stream line-by-line: server.log can reach GBs, and the old
+        # read_text()+splitlines()+text.lower() held three full O(n) copies at
+        # once. Iterating the handle keeps at most one line resident (O(1)).
+        with log_path.open(encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                # Whole-log count (semantics unchanged vs the old text.lower().count).
+                aiter_mentions += line.lower().count("aiter")
+                # Check the cap BEFORE appending so _STACK_SIGNAL_MAX_PICKS is a
+                # real bound (the old code appended then checked, so switching the
+                # break to a continue would have let picks grow without limit).
+                if len(picks) < _STACK_SIGNAL_MAX_PICKS and any(
+                    pattern in line for pattern in _STACK_SIGNAL_PATTERNS
+                ):
+                    # Drop the pid / timestamp / module prefix so the pick is legible.
+                    picks.append(line.rsplit("] ", 1)[-1].strip()[:220])
+    except OSError:
+        return {}
+    return {
+        # A raw count, not a verdict: the accelerated-kernel stack is chatty at
+        # startup, so a near-zero count is the signature of a launch that never
+        # enabled it. Observed on one 122B session: 5499 mentions on the
+        # orchestrator's server vs 4 on GEAK's, for the identical config.
+        "aiter_mentions": aiter_mentions,
+        "kernel_picks": picks,
+    }
+
+
+def _cold_penalty_pct(cold: Any, hot: Any) -> float | None:
+    """How far a leg's cold round fell below that same leg's hot median, in %.
+
+    Negative is the expected direction (the cold round pays JIT / graph-capture
+    / page-cache costs). Comparing the two legs' penalties is what reveals
+    whether their cold rounds were measured in comparable thermal states.
+    """
+    cold_value, hot_value = _positive_finite_float(cold), _positive_finite_float(hot)
+    if cold_value <= 0.0 or hot_value <= 0.0:
+        return None
+    return round((cold_value - hot_value) / hot_value * 100.0, 3)
+
+
+def _overlay_has_loadable_code(path: Path) -> bool:
+    """True when ``path`` is an overlay a consumer could actually PYTHONPATH into.
+
+    The Finalize phase creates ``final/overlay`` unconditionally and drops a
+    marker file (``README.txt``, ``EMPTY_NO_ACCEPTED_OVERLAY.txt``) into it when
+    nothing was accepted, so directory existence proves nothing. What makes an
+    overlay real is importable code: a top-level module, the manifest the
+    overlay loader reads, or an accepted ``cand_*`` subtree.
+    """
+    if not path.is_dir():
+        return False
+    if (path / "_overlay_manifest.json").is_file() or (path / "sitecustomize.py").is_file():
+        return True
+    if any(p.suffix == ".py" for p in path.iterdir() if p.is_file()):
+        return True
+    return any(
+        d.is_dir() and (
+            (d / "_overlay_manifest.json").is_file()
+            or (d / "sitecustomize.py").is_file()
+        )
+        for d in path.glob("cand_*")
+    )
+
+
+def _patch_has_hunks(path: Path) -> bool:
+    """True when ``path`` is a unified diff that would actually change something.
+
+    ``final_patch.diff`` is written even when there is nothing to patch — the
+    header/provenance preamble alone runs to over a kilobyte — so a size check
+    passes on a patch that applies zero edits. A unified diff changes a file
+    only through an ``@@`` hunk, so that marker is the real test.
+    """
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(line.startswith("@@") for line in text.splitlines())
+
+
+def _material_overlay_path(eval_dir: Path, wf: dict) -> str:
+    """Path to a real overlay, or ``""`` when this run produced none.
+
+    Advertising a path that holds nothing (or does not exist at all) makes a
+    caller believe there is something to reuse; an empty string tells it the
+    truth. The path recorded on the return wins when it still resolves,
+    otherwise we look for the product under the eval_dir we were handed.
+    """
+    recorded = str(wf.get("final_overlay") or "").strip()
+    candidates: list[Path] = [Path(recorded)] if recorded else []
+    candidates += [eval_dir / "final" / "overlay", eval_dir / "final"]
+    for candidate in candidates:
+        if _overlay_has_loadable_code(candidate):
+            return str(candidate)
+    return ""
+
+
+def _material_patch_path(eval_dir: Path, wf: dict) -> str:
+    """Path to a patch that carries at least one hunk, or ``""``."""
+    recorded = str(wf.get("final_patch") or "").strip()
+    candidates: list[Path] = [Path(recorded)] if recorded else []
+    candidates.append(eval_dir / "final" / "final_patch.diff")
+    for candidate in candidates:
+        if _patch_has_hunks(candidate):
+            return str(candidate)
+    return ""
+
+
+def _same_session_baseline(
+    base_leg_summary: dict, validation: dict
+) -> tuple[float, str]:
+    """The baseline leg measured in the SAME Validate session as the final leg.
+
+    ``baseline/bench_summary.json`` is minted during Setup, often hours before
+    the final leg runs, and the box moves under us in between (we have observed
+    -4%..+15% drift within a single session). Dividing a Validate-time final by
+    a Setup-time baseline therefore reports drift as optimization. The Validate
+    phase re-measures the unpatched engine right next to the patched one, so
+    that pair — and only that pair — is a valid A/B.
+
+    Preference order, most to least direct:
+      1. ``validation/base/bench_summary.json`` — the re-measured base leg.
+      2. Director's ``base_block.throughput_tok_s_median`` — same leg, as the
+         Director recorded it (used when the summary file was not kept).
+      3. Director's ``drift_corrected_baseline_tok_s`` — the Director's own
+         drift correction, whose key name is stable across schema versions
+         (unlike ``baseline_throughput_tok_s``, which means the Setup baseline
+         in some versions and the corrected one in others).
+
+    Returns ``(0.0, "")`` when no same-session leg exists, which leaves the
+    caller on its previous baseline.
+    """
+    value = _positive_finite_float(base_leg_summary.get("throughput_tok_s_median"))
+    if value > 0.0:
+        return value, "validation_base_bench_summary"
+    base_block = validation.get("base_block") or {}
+    value = _positive_finite_float(base_block.get("throughput_tok_s_median"))
+    if value > 0.0:
+        return value, "director_base_block"
+    value = _positive_finite_float(validation.get("drift_corrected_baseline_tok_s"))
+    if value > 0.0:
+        return value, "director_drift_corrected"
+    return 0.0, ""
 
 
 def normalize_result(h: dict, wf: dict) -> dict:
@@ -1122,30 +2029,39 @@ def normalize_result(h: dict, wf: dict) -> dict:
     validation = _read_json(eval_dir / "director_e2e_validation.json")
     baseline_summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
     final_summary = _read_json(eval_dir / "validation" / "final" / "bench_summary.json")
+    # The unpatched leg re-measured during Validate, next to the final leg.
+    base_leg_summary = _read_json(eval_dir / "validation" / "base" / "bench_summary.json")
 
-    # ── Reconcile a CONTRADICTORY return (do-no-harm guard for the Hyperloom
-    # interface) ────────────────────────────────────────────────────────────
-    # result.json must NEVER report no_gain over a real, parity-checked
-    # same-session win. A return can be internally inconsistent: it ACCEPTED a
-    # head/kernel (accepted_heads/kernels carry a positive e2e_delta_pct + a
-    # complete integrate A/B is on disk) yet reports a degenerate final/speedup
-    # — e.g. the final Validate bench crashed in engine-core init, so the
-    # Director number came back 0. When that happens, backfill the throughput /
-    # speedup / baseline / latency from the best accepted intermediate A/B on
-    # disk (the same source _recover_best_intermediate_win trusts), and tag the
-    # provenance so Hyperloom sees the number came from the disk A/B. We only do
-    # this for a LIVE return (not one we already recovered from disk).
+    # ── Reconcile a return with NO final measurement (do-no-harm guard for the
+    # Hyperloom interface) ───────────────────────────────────────────────────
+    # A run can accept a head/kernel (a positive e2e_delta_pct with a complete
+    # integrate A/B on disk) and then lose the final number entirely — the
+    # Validate bench crashes in engine-core init and the Director reports 0. A
+    # real, parity-checked same-session win must not be thrown away because the
+    # last bench died, so backfill throughput / speedup / baseline / latency /
+    # overlay from the best accepted intermediate A/B on disk and tag the
+    # provenance. Only for a LIVE return (not one we already recovered).
+    #
+    # A MEASURED final of <= 1.0x is NOT this case. That is Validate's verdict:
+    # it re-ran the accepted change against a fresh base and did not confirm the
+    # gain, which is precisely the check the intermediate A/B cannot perform for
+    # itself. Overriding it here would promote the number the arbitration just
+    # rejected, so the trigger is the ABSENCE of a final, never a low one. The
+    # disagreement is still worth recording — see intermediate_win_not_confirmed.
     wf_speedup_raw = float(wf.get("throughput_speedup") or validation.get("throughput_speedup") or 1.0)
     wf_final_raw = float(
         wf.get("final_throughput_tok_s")
         or validation.get("director_verified_throughput_tok_s")
         or 0.0
     )
-    if (
+    live_accepted_win = (
         not wf.get("recovered_from_disk")
         and _wf_best_accepted_delta_pct(wf) > 0.0
-        and (wf_speedup_raw <= 1.0 or wf_final_raw <= 0.0)
-    ):
+    )
+    intermediate_win_not_confirmed = (
+        live_accepted_win and wf_final_raw > 0.0 and wf_speedup_raw <= 1.0
+    )
+    if live_accepted_win and wf_final_raw <= 0.0:
         recovered = _recover_best_intermediate_win(eval_dir)
         if recovered is not None and float(recovered.get("throughput_speedup") or 0.0) > 1.0:
             merged = dict(wf)
@@ -1153,9 +2069,16 @@ def normalize_result(h: dict, wf: dict) -> dict:
                       "final_throughput_tok_s", "output_parity", "ttft_ms", "tpot_ms"):
                 if recovered.get(k) is not None:
                     merged[k] = recovered[k]
+            # The recovered win's own overlay (C7); "" means config-only, in
+            # which case whatever the return already carried still stands.
+            if recovered.get("final_overlay"):
+                merged["final_overlay"] = recovered["final_overlay"]
             merged["recovered_intermediate"] = True   # provenance -> disk_intermediate_win
+            merged["validate_final_missing"] = True
             wf = merged
-            validation = {}   # the on-disk Director json (if any) was the crashed bench
+            # The Director json (the crashed bench) is kept, not erased: it is
+            # the evidence for WHY we fell back here, and validation_evidence
+            # reports it. Every number above is already sourced from wf first.
 
     speedup = float(wf.get("throughput_speedup") or validation.get("throughput_speedup") or 1.0)
     status = "ok" if speedup > 1.0 else "no_gain"
@@ -1176,7 +2099,13 @@ def normalize_result(h: dict, wf: dict) -> dict:
     if wf.get("recovered_no_gain"):
         result_source = "disk_no_gain_synthesis"
     elif wf.get("recovered_intermediate"):
-        result_source = "disk_intermediate_win"
+        # disk_stack_provisional — salvaged from candidates the integrator gated
+        # "stack" (carry forward to compound), i.e. none of them cleared its bar
+        # for a standalone win and no Director ever arbitrated the combination.
+        result_source = (
+            "disk_stack_provisional" if wf.get("recovered_stack_provisional")
+            else "disk_intermediate_win"
+        )
     elif wf.get("recovered_from_disk"):
         result_source = "disk_director_validation"
     else:
@@ -1226,11 +2155,38 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # Cross-harness measurement-protocol check. GEAK's measured baseline is
     # seeded with the upstream orchestrator's accepted config, so compare it
     # separately with the raw session baseline and the same-config current best.
+    # The A/B pair must be measured in the same session (see
+    # _same_session_baseline). A recovered intermediate win already carries its
+    # own paired legs (ref_med/cand_med from one integrate A/B) and a synthesized
+    # no-gain deliberately reports baseline == final, so neither may be re-based.
+    same_session_base, baseline_basis_source = 0.0, ""
+    if not (wf.get("recovered_intermediate") or wf.get("recovered_no_gain")):
+        same_session_base, baseline_basis_source = _same_session_baseline(
+            base_leg_summary, validation
+        )
+    setup_baseline = _positive_finite_float(
+        baseline_summary.get("throughput_tok_s_median")
+    )
     geak_baseline = _positive_finite_float(
-        wf.get("baseline_throughput_tok_s")
+        same_session_base
+        or wf.get("baseline_throughput_tok_s")
         or validation.get("baseline_throughput_tok_s")
         or 0.0
     )
+    if not baseline_basis_source and geak_baseline > 0.0:
+        baseline_basis_source = (
+            "recovered_intermediate_ab"
+            if wf.get("recovered_intermediate")
+            else "no_gain_synthesis"
+            if wf.get("recovered_no_gain")
+            # A baseline rebuilt from a disk Director artifact (no more direct
+            # same-session source) is NOT a live Setup measurement; label its
+            # provenance for what it is so the A/B basis is auditable, mirroring
+            # result_source == "disk_director_validation" above.
+            else "disk_director_validation_baseline"
+            if wf.get("recovered_from_disk")
+            else "setup_baseline"
+        )
     geak_final = _positive_finite_float(
         wf.get("final_throughput_tok_s")
         or validation.get("director_verified_throughput_tok_s")
@@ -1248,10 +2204,43 @@ def normalize_result(h: dict, wf: dict) -> dict:
     )
     raw_session_divergence_pct = _divergence_pct(geak_baseline, orch_baseline)
     same_config_divergence_pct = _divergence_pct(geak_baseline, orch_same_cfg)
-    baseline_alignment = _build_baseline_alignment(same_config_divergence_pct)
+
+    # ── serving-stack provenance ─────────────────────────────────────────────
+    # WHO launched the server, and WHAT kernels it selected. A cross-harness
+    # comparison only means something when both sides served the same stack, and
+    # the biggest way that breaks is silent: the orchestrator's launch script
+    # exports the platform kernel preset and GEAK's own adapter does not, so the
+    # identical config serves measurably slower. Recording the launcher next to
+    # the kernels it produced makes that visible in the interface file.
+    launcher = os.environ.get("BENCH_LAUNCHER", "native")
+    recipe_aligned = launcher == "magpie"
+    serving_stack = {
+        "launcher": launcher,
+        "launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
+        "launch_script_source": os.environ.get("MAGPIE_LAUNCH_SCRIPT_SOURCE", ""),
+        "recipe_aligned_with_orchestrator": recipe_aligned,
+        "baseline": _serving_stack_signals(eval_dir / "baseline" / "server.log"),
+        "validation_base": _serving_stack_signals(
+            eval_dir / "validation" / "base" / "server.log"
+        ),
+    }
+    baseline_alignment = _build_baseline_alignment(
+        same_config_divergence_pct, recipe_aligned
+    )
     baseline_basis = {
         # GEAK's own measured baseline (Hyperloom-accepted config = fair engagement baseline; gating uses this).
         "geak_measured_baseline_tok_s": geak_baseline or None,
+        # Which leg the denominator above came from, so a reviewer can tell a
+        # same-session A/B from a Setup-time comparison at a glance.
+        "baseline_basis_source": baseline_basis_source or None,
+        # The Setup-time baseline, kept for audit even when it is no longer the
+        # denominator, plus how far the box moved between Setup and Validate.
+        # A large drift means the Setup number was never a valid denominator.
+        "setup_baseline_tok_s": setup_baseline or None,
+        "baseline_drift_pct": (
+            round((geak_baseline - setup_baseline) / setup_baseline * 100.0, 3)
+            if (geak_baseline > 0.0 and setup_baseline > 0.0) else None
+        ),
         # Hyperloom's own measured baseline forwarded in the handoff (the orchestrator reference).
         "orchestrator_baseline_tok_s": orch_baseline or None,
         # Audit-only comparison with the RAW session baseline. This includes
@@ -1296,7 +2285,21 @@ def normalize_result(h: dict, wf: dict) -> dict:
     geak_hot_final = geak_final
     geak_hot_baseline = geak_baseline
     geak_cold_final = final_summary.get("cold_output_throughput_tok_s")
-    geak_cold_baseline = baseline_summary.get("cold_output_throughput_tok_s")
+    # Pair the cold legs the same way the hot ones are paired. The Setup-time
+    # cold round ran on a genuinely cold box; the Validate-time one did not, so
+    # dividing the second by the first charges the baseline for a cache fill the
+    # final never paid and returns the difference as speedup. Prefer the base leg
+    # re-measured alongside the final; fall back to Setup only when Validate did
+    # not run one, and let cold_penalty_pct_* below expose how far apart the two
+    # legs' cold rounds really are.
+    if base_leg_summary.get("cold_output_throughput_tok_s") is not None:
+        geak_cold_baseline = base_leg_summary.get("cold_output_throughput_tok_s")
+        cold_baseline_hot_leg = base_leg_summary.get("throughput_tok_s_median")
+        cold_pairing = "same_session"
+    else:
+        geak_cold_baseline = baseline_summary.get("cold_output_throughput_tok_s")
+        cold_baseline_hot_leg = baseline_summary.get("throughput_tok_s_median")
+        cold_pairing = "setup_vs_validate" if geak_cold_baseline is not None else None
     alignment_metrics = {
         "geak_hot_final_tok_s": geak_hot_final or None,
         "geak_hot_baseline_tok_s": geak_hot_baseline or None,
@@ -1308,39 +2311,120 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "hot_geak_speedup": _safe_ratio(geak_hot_final, geak_hot_baseline),
         "cold_speedup": _safe_ratio(geak_cold_final, orch_baseline),
         "cold_geak_speedup": _safe_ratio(geak_cold_final, geak_cold_baseline),
+        # Which two rounds cold_geak_speedup divides: "same_session" is a valid
+        # A/B, "setup_vs_validate" is a comparison across thermal states and the
+        # ratio should be read as such (or ignored).
+        "cold_pairing": cold_pairing,
+        # How much each leg's cold round lost against its OWN hot median. These
+        # tell you whether the cold rounds are comparable at all: similar
+        # penalties mean both paid a similar cache-fill cost, while a large
+        # baseline penalty next to a small final one is the signature of a
+        # "cold" round that ran on an already-warm box.
+        "cold_penalty_pct_baseline": _cold_penalty_pct(
+            geak_cold_baseline, cold_baseline_hot_leg
+        ),
+        "cold_penalty_pct_final": _cold_penalty_pct(
+            geak_cold_final, final_summary.get("throughput_tok_s_median")
+        ),
     }
 
-    # ── final-throughput BASIS selection (cold-preferred when it's a real cold win) ──
-    # When a COLD full round was measured (BENCH_COLD_FINAL=1), prefer the COLD final
-    # as the PROMOTED number: it is the SAME thermal state as Hyperloom's cold
-    # baseline_tput denominator, so the promoted gain becomes a fair cold-to-cold
-    # ratio. BUT an authored-kernel overlay pays a one-off JIT / cuda-graph capture
-    # cost on the cold round that does not amortize in a single pass, so a genuine
-    # steady-state win can surface as a cold LOSS. Guard against promoting that:
-    # only switch to cold when the cold measurement is itself a NON-NEGATIVE gain
-    # (cold_speedup >= 1.0 vs the orchestrator cold baseline it will be compared
-    # against; fall back to the within-GEAK cold ratio when running standalone).
-    # Otherwise keep the HOT median (today's behaviour). Default (no cold round
-    # measured) => HOT, byte-identical to before.
-    final_tput_out = geak_final          # hot median (== the pre-change promoted value)
+    # ── final-throughput BASIS ─────────────────────────────────────────────────
+    # Always the HOT median, i.e. the same basis the baseline above is measured
+    # on. This used to switch to the cold round whenever the cold ratio looked
+    # like a gain, which replaced the numerator and the reported speedup but
+    # left the hot baseline in place as the denominator — so result.json shipped
+    # a cold-over-cold ratio next to a cold-over-hot pair and the two disagreed
+    # by up to ten points. The cold rounds could not carry the comparison
+    # anyway: only the first bench of a session runs cold (see bench_e2e.sh), so
+    # the baseline's cold round pays a cache-fill cost the final's never does.
+    # Cold numbers remain in alignment_metrics as a diagnostic.
+    final_tput_out = geak_final
     final_basis = "hot"
-    cold_gate = (
-        alignment_metrics["cold_speedup"]
-        if alignment_metrics["cold_speedup"] is not None
-        else alignment_metrics["cold_geak_speedup"]
-    )
-    if geak_cold_final and cold_gate is not None and cold_gate >= 1.0:
-        final_tput_out = float(geak_cold_final)
-        final_basis = "cold"
-        # Keep GEAK's own speedup field + status consistent with the chosen basis.
-        # (Hyperloom recomputes the promoted gain from final_throughput_tok_s /
-        # baseline_tput itself; this only keeps result.json self-consistent and the
-        # ok/no_gain status gate correct for the number we actually promote.)
-        cold_geak_sp = alignment_metrics["cold_geak_speedup"]
-        if cold_geak_sp is not None:
-            speedup = float(cold_geak_sp)
-            status = "ok" if speedup > 1.0 else "no_gain"
     alignment_metrics["final_basis"] = final_basis
+
+    # ── speedup self-consistency invariant ───────────────────────────────────
+    # Everything above can move the numerator or the denominator independently:
+    # the final is pinned to the hot number, the same-session re-base can replace
+    # the baseline, and the reported speedup arrives precomputed from a third place.
+    # Whatever the path, the last word belongs to the pair we actually publish —
+    # a consumer that recomputes final/baseline must land on the same number we
+    # printed. When they disagree the reported ratio is describing some other
+    # pair, so rebuild it from ours and re-derive the ok/no_gain gate with it.
+    promoted_final = _positive_finite_float(final_tput_out)
+    speedup_basis = "workflow_return"
+    speedup_as_returned = speedup
+    if geak_baseline > 0.0 and promoted_final > 0.0:
+        pair_ratio = promoted_final / geak_baseline
+        if abs(pair_ratio - speedup) > SPEEDUP_SELF_CONSISTENCY_TOL:
+            speedup = round(pair_ratio, 6)
+            status = "ok" if speedup > 1.0 else "no_gain"
+            speedup_basis = "final_over_baseline"
+    alignment_metrics["speedup_basis"] = speedup_basis
+    # Only populated when we had to override, so its presence is the signal.
+    alignment_metrics["speedup_as_returned"] = (
+        speedup_as_returned if speedup_basis == "final_over_baseline" else None
+    )
+
+    # ── validation evidence ──────────────────────────────────────────────────
+    # A speedup number on its own cannot be judged: 1.01x is a solid win on a
+    # bench that repeats within 0.2% and pure noise on one that swings 3%. This
+    # block carries what a reader needs to decide — the arbitration verdict, the
+    # run-to-run spread of each leg, the Director's noise band, and whether the
+    # delta clears them. Reported, never enforced: nothing here changes status.
+    delta_pct = round((speedup - 1.0) * 100.0, 3)
+    base_spread_pct = _positive_finite_float(
+        base_leg_summary.get("output_throughput_tok_s_spread_pct")
+        or (validation.get("base_block") or {}).get("spread_pct")
+        or baseline_summary.get("output_throughput_tok_s_spread_pct")
+    )
+    final_spread_pct = _positive_finite_float(
+        final_summary.get("output_throughput_tok_s_spread_pct")
+        or (validation.get("final_block") or {}).get("spread_pct")
+    )
+    noise_band_pct = _positive_finite_float(validation.get("noise_band_pct"))
+    # A delta smaller than the benches' own scatter, or than the band the
+    # Director declared, is not measurable with the data we have.
+    significance_threshold_pct = max(noise_band_pct, base_spread_pct, final_spread_pct)
+    validation_evidence = {
+        "validation_status": (
+            validation.get("validation_status")
+            or wf.get("validation_status")
+            or None
+        ),
+        "speedup_basis": speedup_basis,
+        "delta_pct": delta_pct,
+        "noise_band_pct": noise_band_pct or None,
+        "baseline_spread_pct": base_spread_pct or None,
+        "final_spread_pct": final_spread_pct or None,
+        "significance_threshold_pct": significance_threshold_pct or None,
+        "delta_exceeds_noise": (
+            abs(delta_pct) > significance_threshold_pct
+            if significance_threshold_pct > 0.0 else None
+        ),
+        # Stricter than the threshold above: do the two legs' spread intervals
+        # (median +/- spread/2) stay apart? Overlapping intervals mean a single
+        # pair of runs could have produced either ordering. None unless BOTH
+        # legs reported a spread — one unknown side cannot be assumed tight.
+        "spreads_non_overlapping": (
+            geak_baseline * (1.0 + base_spread_pct / 200.0)
+            < promoted_final * (1.0 - final_spread_pct / 200.0)
+            if (geak_baseline > 0.0 and promoted_final > 0.0
+                and base_spread_pct > 0.0 and final_spread_pct > 0.0) else None
+        ),
+        "beats_orchestrator_same_config": (
+            promoted_final > orch_same_cfg if orch_same_cfg > 0.0 else None
+        ),
+        # An intermediate A/B claimed a win that the arbitrated re-check did not
+        # confirm. We keep Validate's verdict (see the reconcile above); this
+        # flag is how the disagreement stays visible instead of disappearing.
+        "intermediate_win_not_confirmed": intermediate_win_not_confirmed or None,
+        # The Validate bench produced no final at all and the number above came
+        # from the best accepted intermediate A/B on disk.
+        "validate_final_missing": bool(wf.get("validate_final_missing")) or None,
+        # How a disk-salvaged headline was chosen out of the candidate pool
+        # (see _recover_best_intermediate_win). Absent for an arbitrated result.
+        "recovery": wf.get("recovery_evidence") or None,
+    }
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1348,9 +2432,10 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "result_source": result_source,
         "eval_dir": str(eval_dir),
         "baseline_throughput_tok_s": geak_baseline,
-        # Promoted final: the COLD final when it is a real cold win, else the HOT
-        # median (see the final-basis selection above). final_throughput_basis says
-        # which one this is, so a consumer can tell cold-to-cold from hot-to-cold.
+        # Promoted final is ALWAYS the HOT median (see the final-basis selection
+        # above); final_throughput_basis is therefore always "hot". Cold rounds,
+        # when BENCH_COLD_FINAL enables them, live only in alignment_metrics as a
+        # diagnostic and never become the headline.
         "final_throughput_tok_s": float(final_tput_out or 0.0),
         "final_throughput_basis": final_basis,
         "throughput_speedup": speedup,
@@ -1363,8 +2448,11 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # Sweep-reuse handles (see interface/run_e2e.md).
         "final_launch_script": final_launch,
         "bench_script": str(eval_dir / "bench_e2e.sh"),
-        "final_patch": str(eval_dir / "final" / "final_patch.diff"),
-        "final_overlay": wf.get("final_overlay") or str(eval_dir / "final" / "overlay"),
+        # Empty string == this run produced no reusable artifact of that kind.
+        # Never a path to a directory/diff that holds nothing (see
+        # _material_overlay_path / _material_patch_path).
+        "final_patch": _material_patch_path(eval_dir, wf),
+        "final_overlay": _material_overlay_path(eval_dir, wf),
         # Measurement basis: read back from the bench_summary.json that actually produced these numbers
         # (bench_e2e.sh records "aggregate_output_tok_s" or "aggregate_total_token_tok_s" per E2E_METRIC),
         # so the label never lies about the basis. Falls back to output when neither summary carries it.
@@ -1395,6 +2483,13 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "baseline_basis": baseline_basis,
         # Reliability classification is independent of the optimization status.
         "baseline_alignment": baseline_alignment,
+        # WHO launched the servers these numbers were measured on, and which
+        # kernels those servers selected. This is what tells a reviewer whether
+        # baseline_alignment's divergence is a measurement signal at all.
+        "serving_stack": serving_stack,
+        # Whether the reported delta is distinguishable from measurement noise,
+        # and what the arbitration actually concluded (see above). Audit only.
+        "validation_evidence": validation_evidence,
         # Cold/hot speedup cross-checks (double-check only; see alignment_metrics above).
         # Does NOT change the promoted final_throughput_tok_s / throughput_speedup.
         "alignment_metrics": alignment_metrics,
@@ -1443,6 +2538,27 @@ def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
         alignment.get("warning_threshold_pct"), digits=1, suffix="%"
     )
     status = str(alignment.get("status") or "unavailable")
+    stack = result.get("serving_stack") or {}
+    launcher = str(stack.get("launcher") or "unknown")
+    recipe_aligned = bool(alignment.get("recipe_aligned_with_orchestrator", True))
+    recipe_caveat = (
+        []
+        if recipe_aligned
+        else [
+            "",
+            (
+                "The servers behind these numbers were launched by GEAK's own "
+                "backend adapter, not by the upstream orchestrator's launch "
+                "script. That script owns the platform kernel preset, "
+                "`--trust-remote-code` and the gpu-memory-utilization default, so "
+                "the two harnesses did not serve the same stack. Read the "
+                "same-config divergence above as a launch-recipe difference, not "
+                "as a measurement or hardware signal, and check "
+                "`serving_stack.baseline.kernel_picks` for which kernels each "
+                "side actually selected."
+            ),
+        ]
+    )
     return "\n".join(
         [
             BASELINE_ALIGNMENT_BEGIN,
@@ -1457,6 +2573,8 @@ def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
             ),
             f"- Same-config divergence: {same_config_divergence}",
             f"- Alignment status: `{status}` (warning threshold: ±{threshold})",
+            f"- Server launch recipe: `{launcher}`",
+            *recipe_caveat,
             "",
             "Raw-session audit comparison:",
             "",
@@ -1787,77 +2905,259 @@ def _ir_float(ir: dict, *keys: str) -> float:
         return 0.0
 
 
+def _amdahl_ceiling_pct(pct_gpu_time: float, isolated: float) -> float:
+    """Largest e2e gain an op can produce, from its GPU-time share and isolated speedup.
+
+    Port of ``amdahlCeilingPct`` in e2e_workflow.js. ``inf`` when either input is
+    missing, so an unknown profile never flags anything (fail-open).
+    """
+    share = max(0.0, min(1.0, (pct_gpu_time or 0.0) / 100.0))
+    speedup = isolated if (isolated and isolated > 1.0) else 1.0
+    if share <= 0.0 or speedup <= 1.0:
+        return math.inf
+    return (1.0 / (1.0 - share * (1.0 - 1.0 / speedup)) - 1.0) * 100.0
+
+
+def _parity_is_soft(ir: dict) -> bool:
+    """Whether the candidate's acceptance rests on a SAMPLED accuracy probe.
+
+    Byte-exact parity is a hard correctness guarantee, so a speedup above the
+    Amdahl ceiling is believed. A sampled accuracy gate can be squeaked past by
+    degenerate output, so an impossible speedup there is treated as corruption.
+
+    Diverges from ``parityIsSoft`` in e2e_workflow.js in one place: the JS falls
+    back to the run's ``accuracy_gate`` arg when the label is absent or
+    unrecognized, and that arg is not in any on-disk artifact. An unlabelled
+    candidate is therefore treated as soft — the guard still needs the delta to
+    exceed twice the ceiling before it fires, and a missing profile makes the
+    ceiling infinite, so this cannot drop a win on schema grounds alone.
+    """
+    kind = str(_ir_get(ir, "parity_kind") or "").strip().lower()
+    if kind in ("byte_exact", "none"):
+        return False
+    return True
+
+
+def _is_implausible_speedup(ir: dict, delta_pct: float, ceiling_pct: float) -> bool:
+    """A gain so far past the op's ceiling that it reads as corruption, not a win."""
+    if not _parity_is_soft(ir) or not math.isfinite(ceiling_pct):
+        return False
+    return delta_pct > ceiling_pct * (1.0 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9
+
+
+def _integrate_candidates(eval_dir: Path) -> list[dict]:
+    """Every integrate A/B on disk, normalized and judged.
+
+    Each entry keeps the candidate's OWN paired legs (``ref_med`` / ``cand_med``)
+    separate from ``e2e_throughput_tok_s``, which is not this candidate's
+    measurement at all: the workflow uses it as the running stack throughput
+    (``curTput``) and carries the previous value forward on a reject. Mixing the
+    two — a cumulative numerator over a local denominator — describes no A/B
+    that was ever run.
+
+    Eligibility mirrors what the live workflow requires before it banks a
+    candidate (``integAccepted`` + the parity check), so a candidate the live
+    path would refuse cannot slip in through recovery.
+    """
+    records: list[dict] = []
+    seen: set[str] = set()
+    for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
+        if not base.is_dir():
+            continue
+        for cand in sorted(base.glob("cand_*")):
+            if cand.name in seen:
+                continue
+            ir = _read_json(cand / "integrate_result.json")
+            if not ir:
+                continue
+            seen.add(cand.name)
+            gate = str(ir.get("gate") or "")
+            delta_pct = _ir_float(ir, "e2e_delta_pct", "delta_pct")
+            ceiling_pct = _amdahl_ceiling_pct(
+                _ir_float(ir, "pct_gpu_time"), _ir_float(ir, "isolated_speedup")
+            )
+            implausible = _is_implausible_speedup(ir, delta_pct, ceiling_pct)
+            parity = str(ir.get("output_parity") or "")
+            separated = ir.get("separated")
+            if separated is None:
+                separated = (ir.get("pooled_all_repeats") or {}).get("separated")
+            if separated is None:
+                separated = _ir_get(ir, "non_overlapping")
+            records.append({
+                "dir": cand,
+                "ir": ir,
+                "short_name": str(ir.get("short_name") or cand.name[len("cand_"):]),
+                "gate": gate,
+                "delta_pct": delta_pct,
+                "ref_med": _ir_float(ir, "ref_med", "ref_median_tok_s"),
+                "cand_med": _ir_float(ir, "cand_med", "cand_median_tok_s"),
+                "stack_tput": _ir_float(ir, "e2e_throughput_tok_s"),
+                "amdahl_ceiling_pct": (
+                    round(ceiling_pct, 3) if math.isfinite(ceiling_pct) else None
+                ),
+                "implausible": implausible,
+                "output_parity": parity or None,
+                "separated": separated,
+                # winner_kind in {"env","config","flags"} => config-only.
+                "is_kernel": _ir_get(ir, "winner_kind") not in ("env", "config", "flags"),
+                "eligible": (
+                    gate in ("accepted", "stack")
+                    and delta_pct > 0.0
+                    and parity != "fail"
+                    and ir.get("ab_complete") is not False
+                    and not implausible
+                ),
+            })
+    return records
+
+
 def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
     """Salvage the best accepted intermediate win when the run died BEFORE Validate.
 
     The whole-pipeline workflow records each accepted config/kernel integrate as
     ``overlay/<cand>/integrate_result.json`` with a measured e2e delta + gate.
     When no ``director_e2e_validation.json`` exists (the run was killed
-    mid-pipeline), pick the BEST accepted, positive-delta intermediate so a real,
-    parity-checked win is NEVER silently discarded.
+    mid-pipeline), salvage the best one so a real, parity-checked win is NEVER
+    silently discarded.
+
+    Selection follows the integrator's own vocabulary and its own numbers:
+
+    * ``accepted`` outranks ``stack``. The integrator writes ``stack`` to mean
+      "non-negative, engaged, parity-safe — carry it forward to compound, but it
+      is NOT a standalone win and the Director decides the headline". Promoting
+      one as the headline says the opposite of what the gate says, so a
+      stack-only salvage is returned flagged as provisional.
+    * Rank by each candidate's own ``e2e_delta_pct``, not by absolute
+      throughput. Every candidate was measured against its own reference leg at
+      its own point in the session, so absolute values are not comparable
+      across candidates — ranking by them preferentially picks whichever
+      candidate happened to draw the slowest reference, which is a property of
+      the box, not of the kernel.
+    * Report the winner's own two legs as the pair. See
+      :func:`_integrate_candidates` for why ``e2e_throughput_tok_s`` is not one
+      of them.
 
     Schema-robust: the integrator's integrate_result.json may carry the numbers
     flat or nested under ``e2e`` / ``accepted_config`` (see :func:`_ir_get`); both
     are read. Returns a workflow-return-shaped dict (status derived later by
     :func:`normalize_result`) or ``None`` when nothing acceptable is on disk.
     """
-    best: dict | None = None
-    best_tput = 0.0
-    for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
-        if not base.is_dir():
-            continue
-        for cand in sorted(base.glob("cand_*")):
-            ir = _read_json(cand / "integrate_result.json")
-            if not ir or ir.get("gate") not in ("accepted", "stack"):
-                continue
-            delta = _ir_float(ir, "e2e_delta_pct", "delta_pct")
-            tput = _ir_float(ir, "e2e_throughput_tok_s", "cand_median_tok_s", "cand_med")
-            if delta > 0.0 and tput > best_tput:
-                best_tput, best = tput, ir
-    if best is None:
+    candidates = _integrate_candidates(eval_dir)
+    eligible = [c for c in candidates if c["eligible"]]
+    if not eligible:
         return None
+    # Candidates sharing a short_name are competing IMPLEMENTATIONS of one kernel
+    # — the workflow benches several backends per op and banks at most one — not
+    # stacked changes. Collapse them so the run is credited with distinct
+    # kernels rather than with one kernel once per backend attempted.
+    by_name: dict[str, dict] = {}
+    for cand in eligible:
+        incumbent = by_name.get(cand["short_name"])
+        if incumbent is None or cand["delta_pct"] > incumbent["delta_pct"]:
+            by_name[cand["short_name"]] = cand
+    banked = sorted(by_name.values(), key=lambda c: -c["delta_pct"])
+    accepted = [c for c in banked if c["gate"] == "accepted"]
+    stack_only = not accepted
+    best = max(
+        accepted or banked,
+        key=lambda c: (c["delta_pct"], c["cand_med"] or c["stack_tput"]),
+    )
 
-    ref_med = _ir_float(best, "ref_med", "ref_median_tok_s")
-    final_tput = best_tput
-    delta_pct = _ir_float(best, "e2e_delta_pct", "delta_pct")
+    ir = best["ir"]
+    delta_pct = best["delta_pct"]
+    if best["cand_med"] > 0.0 and best["ref_med"] > 0.0:
+        final_tput, ref_med = best["cand_med"], best["ref_med"]
+    else:
+        # Only the cumulative stack number survived. Pair it with the
+        # denominator its own delta implies rather than with a reference leg
+        # from a different comparison.
+        final_tput = best["cand_med"] or best["stack_tput"]
+        ref_med = final_tput / (1.0 + delta_pct / 100.0)
     speedup = (final_tput / ref_med) if ref_med > 0 else (1.0 + delta_pct / 100.0)
-    name = str(best.get("short_name") or "")
-    # winner_kind in {"env","config","flags"} => config-only (no authored kernel).
-    is_kernel = _ir_get(best, "winner_kind") not in ("env", "config", "flags")
+    # A win recovered from an intermediate A/B never reached Finalize, so there is
+    # no ``final/overlay`` bundle — but the code that produced the win is on disk
+    # in the candidate's own overlay, and the integrator names it in
+    # ``accepted_overlay`` (which for a stacked gate points at the base of the
+    # stack, not at this candidate). Carrying it forward is the difference between
+    # a reusable win and a number the caller cannot reproduce. Re-root by name
+    # under this eval_dir when the recorded path no longer resolves (the run was
+    # archived or moved), and fall back to the winning candidate's own directory.
+    overlay_out = ""
+    recorded_overlay = str(_ir_get(ir, "accepted_overlay") or "").strip()
+    for cand_path in (
+        Path(recorded_overlay) if recorded_overlay else None,
+        (eval_dir / "overlay" / Path(recorded_overlay).name) if recorded_overlay else None,
+        best["dir"],
+    ):
+        if cand_path is not None and _overlay_has_loadable_code(cand_path):
+            overlay_out = str(cand_path)
+            break
+    # The deployed overlay is the STACK, so every eligible candidate is credited,
+    # not just the one whose pair became the headline. Reporting one of several
+    # stacked kernels loses both the attribution and the fact that more than one
+    # change is live.
+    accepted_kernels = [
+        {"short_name": c["short_name"], "kind": "authored", "backend": "geak",
+         "e2e_delta_pct": c["delta_pct"], "gate": c["gate"],
+         "headline": c is best}
+        for c in banked if c["is_kernel"] and c["short_name"]
+    ]
+    # Same reasoning for env/flags: a config win banked before a later kernel win
+    # is still live on the server, and dropping it makes every downstream reuse
+    # relaunch an UN-optimized server. The integrator emits these under either
+    # ``apply_*`` (flat/nested-e2e schema) or ``accepted_*`` (summary schema).
+    flags: list[str] = []
+    env: list[str] = []
+    for c in banked:
+        for value, sink in (
+            (str(_ir_get(c["ir"], "apply_flags", "accepted_flags") or ""), flags),
+            (str(_ir_get(c["ir"], "apply_env", "accepted_env") or ""), env),
+        ):
+            if value and value not in sink:
+                sink.append(value)
     return {
         "eval_dir": str(eval_dir),
         "throughput_speedup": speedup,
         "baseline_throughput_tok_s": ref_med,
         "final_throughput_tok_s": final_tput,
-        "output_parity": best.get("output_parity"),
+        "output_parity": ir.get("output_parity"),
         "validation_status": "recovered_intermediate",
         # Latency from the candidate (accepted) A/B leg when the integrator recorded
         # it (flat or nested) — so result.json carries real ttft/tpot even without a
         # final Validate bench. None when absent (never fabricated).
-        "ttft_ms": _ir_get(best, "ttft_ms_cand", "ttft_ms_median", "cand_ttft_ms"),
-        "tpot_ms": _ir_get(best, "tpot_ms_cand", "tpot_ms_median", "cand_tpot_ms"),
-        "final_overlay": "",                 # config-only: applied via env/flags
+        "ttft_ms": _ir_get(ir, "ttft_ms_cand", "ttft_ms_median", "cand_ttft_ms"),
+        "tpot_ms": _ir_get(ir, "tpot_ms_cand", "tpot_ms_median", "cand_tpot_ms"),
+        # The accepted candidate's overlay, or "" for a config-only win (applied
+        # through env/flags, so there is no overlay to hand back).
+        "final_overlay": overlay_out,
         "final_launch_script": "",
-        "accepted_config": {
-            # The integrator emits the winning config under either key family:
-            # ``apply_flags``/``apply_env`` (flat/nested-e2e schema) OR
-            # ``accepted_flags``/``accepted_env`` (the integrate_result.json
-            # summary schema). Read BOTH so a disk-recovered win never loses its
-            # server flags/env — otherwise the recovered result.json carries an
-            # empty accepted_config and every downstream reuse (sweep /
-            # conc_sweep) relaunches an UN-optimized server. General across every
-            # env/flags/config winner, not model-specific.
-            "flags": str(_ir_get(best, "apply_flags", "accepted_flags") or ""),
-            "env": str(_ir_get(best, "apply_env", "accepted_env") or ""),
-        },
-        "accepted_kernels": (
-            [{"short_name": name, "kind": "authored", "backend": "geak",
-              "e2e_delta_pct": delta_pct}]
-            if is_kernel and name else []
-        ),
+        "accepted_config": {"flags": " ".join(flags), "env": " ".join(env)},
+        "accepted_kernels": accepted_kernels,
         "accepted_heads": [],
         "recovered_from_disk": True,
         "recovered_intermediate": True,
+        # No candidate cleared the integrator's own bar for a standalone win.
+        "recovered_stack_provisional": stack_only or None,
+        # How the headline was chosen, so picking a maximum out of N noisy
+        # candidates is visible rather than implicit.
+        "recovery_evidence": {
+            "candidates_considered": len(candidates),
+            "candidates_eligible": len(eligible),
+            "distinct_kernels_banked": len(banked),
+            "selected": best["short_name"],
+            "selected_gate": best["gate"],
+            "selection_basis": "max_e2e_delta_pct",
+            "amdahl_ceiling_pct": best["amdahl_ceiling_pct"],
+            "delta_over_amdahl_ceiling": (
+                round(delta_pct / best["amdahl_ceiling_pct"], 2)
+                if best["amdahl_ceiling_pct"] else None
+            ),
+            "distributions_separated": best["separated"],
+            "stack_only": stack_only or None,
+            "excluded_as_implausible": [
+                c["short_name"] for c in candidates if c["implausible"]
+            ] or None,
+        },
     }
 
 
@@ -2215,6 +3515,53 @@ def _journey_return_entry(eval_dir: str, k: dict, idx: int, wf: dict,
     }
 
 
+def _overlay_claim(ir: Any) -> dict | None:
+    """What an INTEGRATED overlay says it optimized, or None when the overlay is
+    not integrated (rejected / A/B never completed) and so claims nothing.
+
+    ``integrate_result.json`` is the only place that records both spellings of a
+    kernel: ``cand_tag`` is the overlay directory's name and ``short_name`` is the
+    symbol the workflow return uses. A claim carries the symbol plus the
+    integrated e2e delta, and is consumed at most once (``used``) so one overlay
+    can never account for two distinct acceptances.
+    """
+    if not isinstance(ir, dict):
+        return None
+    if str(ir.get("gate") or "").lower() not in ("accepted", "stack"):
+        return None
+    gain = ir.get("e2e_delta_pct")
+    return {
+        "sym": _norm_kname(str(ir.get("short_name") or "")),
+        "gain": float(gain) if isinstance(gain, (int, float))
+                and not isinstance(gain, bool) else None,
+        "used": False,
+    }
+
+
+def _claim_for(name: str, gain: Any, claims: list[dict]) -> dict | None:
+    """The overlay claim that already covers this return-named acceptance, or None
+    when the return names a kernel no overlay on disk accounted for.
+
+    Matched on the symbol first — the same normalization the profiler match uses,
+    so a spelling difference does not split one kernel in two. Falling back to the
+    integrated e2e delta covers the runs where the overlay recorded no usable
+    symbol: the return does not recompute that number, it copies the overlay's own
+    A/B result, so an EXACT hit is the same measurement rather than a coincidence.
+    The delta is only allowed to fold when exactly one unconsumed overlay claims
+    it; an ambiguous delta never merges two kernels.
+    """
+    nk = _norm_kname(name)
+    if nk:
+        for c in claims:
+            if c["sym"] and c["sym"] == nk:
+                return c
+    if isinstance(gain, (int, float)) and not isinstance(gain, bool):
+        hits = [c for c in claims if not c["used"] and c["gain"] == float(gain)]
+        if len(hits) == 1:
+            return hits[0]
+    return None
+
+
 def build_kernel_journey(wf: dict, normalized: dict) -> dict:
     """Build the kernel_journey handoff (recorder-input shapes the orchestrator
     replays through the SBD SDK — KERNEL_JOURNEY_SCHEMA.md §2).
@@ -2273,6 +3620,14 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
 
     kernels: list[dict] = []
     seen: set[str] = set()  # dedup on the FINAL emitted kernel_id
+    # What each INTEGRATED overlay says it optimized (see _overlay_claim). The id
+    # dedup above cannot carry pass 2, because the two substreams name a kernel
+    # differently: an overlay dir is named for its CANDIDATE TAG (``cand_c0_triton``)
+    # and the workflow return for the KERNEL SYMBOL
+    # (``dsa_sparse_attn_prefill_main_kernel``). integrate_result.json is the file
+    # that ties the two together, so the claim is read from there, never from the
+    # directory name.
+    claims: list[dict] = []
 
     # 1) Disk truth: one entry per optimization overlay, driven by integrate_result.
     if eval_dir:
@@ -2285,25 +3640,34 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
                 short = cand.name[len("cand_"):]
                 if not short:
                     continue
+                ir = _read_json(cand / "integrate_result.json")
+                claim = _overlay_claim(ir)
+                if claim:
+                    claims.append(claim)
                 m = _match_profiler(short)
                 kid = m["kid"] if m else _canon_kid(short)
                 if kid in seen:
                     continue
                 seen.add(kid)
-                ir = _read_json(cand / "integrate_result.json")
                 kernels.append(_journey_overlay_entry(
                     eval_dir, short, ir, wf, geak_sha, overall_parity,
                     m["pct"] if m else None, m["name"] if m else None,
                     kernel_id_override=kid))
 
     # 2) Augment with accepted kernels named only in the workflow return (live path
-    #    / no overlay on disk), deduped against the overlay entries above (by id).
+    #    / no overlay on disk), deduped against the overlay entries above: by id,
+    #    and by the identity those overlays claimed, which is what catches the same
+    #    acceptance spelled as a candidate tag on disk and as a symbol in the return.
     accepted = list(wf.get("accepted_kernels") or []) + list(wf.get("accepted_heads") or [])
     synth_hot: list[dict] = []
     for idx, k in enumerate(accepted):
         if not isinstance(k, dict):
             continue
         name = str(k.get("short_name") or k.get("name") or k.get("op_kind") or f"kernel{idx}")
+        claimed = _claim_for(name, k.get("e2e_delta_pct"), claims)
+        if claimed is not None:
+            claimed["used"] = True
+            continue
         m = _match_profiler(name)
         kid = m["kid"] if m else _canon_kid(name)
         if kid in seen:
@@ -2467,6 +3831,11 @@ def main(argv: list[str]) -> int:
         print(json.dumps({"mapped_args": ps_args, "bench_client": bench_client,
                           "bench_launcher": bench_launcher,
                           "magpie_launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
+                          "magpie_launch_script_source": os.environ.get("MAGPIE_LAUNCH_SCRIPT_SOURCE", ""),
+                          "recipe_env_file": os.environ.get("RECIPE_ENV_FILE", ""),
+                          "recipe_env_source": os.environ.get("RECIPE_ENV_SOURCE", ""),
+                          "recipe_env_replayed": os.environ.get("RECIPE_ENV_REPLAYED", ""),
+                          "recipe_env_geak_owned": os.environ.get("RECIPE_ENV_GEAK_OWNED", ""),
                           "bench_protocol": bench_protocol,
                           "alignment_flags": alignment_flags,
                           "inferencex_path": os.environ.get("INFERENCEX_PATH", ""),

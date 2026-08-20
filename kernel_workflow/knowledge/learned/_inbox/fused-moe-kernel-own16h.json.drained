@@ -1,0 +1,137 @@
+{
+  "run_id": "fused_moe_kernel-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "fused_moe_kernel"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "derive-the-tile-and-the-scale-contract-fp8-moe-grouped-gemm",
+      "description": "fp8 block-scale MoE grouped GEMM, gfx950: derive the consumer tile in-file and renegotiate the A-scale contract per-row -> ~4.95x geomean.",
+      "keywords": [
+        "moe-grouped-gemm",
+        "fp8-block-scale",
+        "gfx950",
+        "super-tile",
+        "occupancy",
+        "quantization-contract",
+        "xcd-remap",
+        "async-copy",
+        "paired-ab-rig"
+      ],
+      "kernels": [
+        "fused_moe_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "prefill",
+      "key": "fp8 w8a8 block-scale MoE grouped GEMM (up-projection) in Triton on gfx950/MI355X, where the caller pins a small BLOCK_M and a per-k-group A scale",
+      "lifecycle": "active",
+      "title": "Derive the tile, then renegotiate the scale contract",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "4.95x geomean vs the frozen baseline (director-verified, non-overlapping, correctness pass); per-case 3.09x on the smallest case and 6.33x / 6.22x on the two large ones; 4.53x against a same-day re-measured baseline",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L3",
+      "verified_on": "2026-08-12",
+      "roofline": "memory / B-tile-traffic bound before -> MFMA/global-load interlock after, at ~54% of the achievable fp8 MFMA peak",
+      "lever": "A small BLOCK_M fixed by the caller is often a producer-side data-layout constraint, not a consumer tile constraint: let the file derive its own tile. Pair it with sizing num_warps from accumulator elements per lane instead of maximising occupancy, and with renegotiating the fp8 A-scale granularity so the in-loop rescale disappears.",
+      "apply": "Export the launch symbol as an object whose __getitem__(grid) picks an adaptive BLOCK_M (<=256 rows) floored to grid >= 4 blocks/CU and derives num_warps from 64 acc-elems/lane; switch the A scale from per-128-k-group to per-row, which deletes the in-loop rescale and unpins BN/BK (BN reaches 256); fold the row-scale in a separate memory-bound pre-pass that writes A' once and is read ~16x.",
+      "stack": "total 4.95x geomean per-case (director-verified) = four directions compounded\n  - 1. self-deriving super-tile launcher - 2.59x standalone (VMEM-per-MFMA 8.05 -> 1.16)\n  - 2. num_warps from acc-elems/lane + rescale collapse - 1.83x standalone; reconciling (1)+(2), which collide on the same launcher/num_warps knob, gave 3.59x, +38.7% over the better single arm\n  - 3. per-row A-scale contract - 3.59x -> 4.70x, the largest single lever\n  - 4. wide-tile-gated async-copy + XCD pid remap +3.13%, then a K_EXACT constexpr eliding a compile-time-dead masked remainder (vgpr 254/spill 12 -> 249/0) +0.08%\n  - note: attribution is incremental in landing order, not independent.",
+      "verify": "Confirm the derived tile engaged by md5-ing the compiled artifact per config under isolated per-config cache dirs, then re-time every case against the frozen baseline; for any expected delta under ~1%, use interleaved same-session paired arms with a planted known-null arm in the sweep.",
+      "pitfall": "A cross-round win and a <1% integration delta disagreed -> cross-process median-of-3 drifts on this box (one planted null caught a ~0.6% phantom) -> an in-process paired rig settled it, combined arm winning the largest case 4/4.\nPer-row fp8 scaling passes the harness gate but shifts numerics (cosine 0.999300, rel RMS 3.74%, max_rel ~8-9x) -> non-averaging e4m3 reduction over K=7168 -> ship it flagged and re-qualify under any tighter max_rel gate.",
+      "caution": "Also verify where each case's ceiling actually is before budgeting rounds: the smallest case here sat at its compulsory-miss memory roof at ~3.1x while the two large cases reached ~6.2-6.3x, so it capped the geomean and further work on it returned nothing.",
+      "source": "run fused_moe_kernel-own16h, 2026-08-12, director-validated (geomean 4.9568 director vs 4.9518 tech-lead)"
+    },
+    {
+      "name": "co-resident-pipe-instruction-cuts-return-nothing",
+      "description": "gfx950 fp8 grouped GEMM at MFMA/load interlock: cutting real work from a co-resident LDS/VALU pipe returned ~1.00x or worse, three ways.",
+      "keywords": [
+        "moe-grouped-gemm",
+        "fp8-block-scale",
+        "gfx950",
+        "mfma-interlock",
+        "anti-pattern",
+        "occupancy",
+        "paired-ab-rig"
+      ],
+      "kernels": [
+        "fused_moe_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "prefill",
+      "key": "instruction-count reduction on an fp8 grouped GEMM already limited by the MFMA/global-load interlock, gfx950/MI355X, Triton block-pingpong schedule",
+      "lifecycle": "active",
+      "title": "Instruction cuts on a co-resident pipe do not convert",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "~1.00x or worse per-case across three independent directions whose intended change provably landed: -15.5% ds_read per MAC bought -0.59% / -0.08% time; -220 v_cndmask per wave with MFMA/LDS/load counts byte-identical paid -4.5%; recovering 12.5% masked prep lanes paid -1.07% to -1.64% against a +/-0.2% planted-null floor",
+      "attempts": 3,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L1",
+      "verified_on": "2026-08-12",
+      "roofline": "LDS at 56% of speed-of-light co-resident with MFMA at 54%, i.e. not serialised in front of it",
+      "lever": "When the profile shows the secondary pipe co-resident with MFMA rather than serialised ahead of it, an axis that only removes instructions from that pipe is a cheap thing to price out early: on this shape it closed across three directions, so the round is better spent on the schedule itself.",
+      "apply": "Read the two pipes' speed-of-light fractions together before choosing the axis; if both sit near the same fraction, treat the critical path as the pipeline interlock and check whether a candidate perturbs the k-loop instruction MIX (waitcnt count moved 323 -> 336 here) rather than only shrinking it.",
+      "verify": "Confirm the intended cut actually landed in the compiled artifact (counter deltas plus a disassembly diff) BEFORE timing, then time it on a paired in-process rig with a planted known-null arm; a real counter win with a null or negative time delta is the signature of this axis.",
+      "pitfall": "Forcing the 32x32 MFMA shape killed the 16x16 form entirely and still bought nothing -> the win was booked on the counter, not the clock -> the counter and the timing must be reported as two separate claims.",
+      "caution": "Also verify this on your own shapes before writing the axis off: the finding is conditioned on a finely balanced block-pingpong schedule at high MFMA occupancy, and a schedule with an actually serialised LDS pipe would behave differently.",
+      "source": "run fused_moe_kernel-own16h, 2026-08-12, rounds 5-7 (all non-improving), director-validated run"
+    },
+    {
+      "name": "host-dispatch-and-backend-swap-axes-closed",
+      "description": "gfx950 grouped GEMM: graph capture, persistent/split-N, GSMxXCD sweeps and a vendor dense-GEMM swap all priced at ~1.00x or a loss.",
+      "keywords": [
+        "moe-grouped-gemm",
+        "gfx950",
+        "launch-overhead",
+        "hip-graph",
+        "xcd-remap",
+        "persistent-kernel",
+        "aiter",
+        "anti-pattern",
+        "paired-ab-rig"
+      ],
+      "kernels": [
+        "fused_moe_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "prefill",
+      "key": "host-side dispatch, work-ordering and vendor-backend substitution on a compute-saturated fp8 grouped GEMM, gfx950/MI355X under ROCm/Triton",
+      "lifecycle": "active",
+      "title": "Host dispatch and backend swap closed on a saturated grouped GEMM",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "~1.00x or worse per-case on four host-side directions: wrapper-level graph capture was slower on all three cases (+9.7% / +0.85% / +0.42% time); persistent/split-N lost -3.0% at 2 tiles per program and -7.3% at 4; a joint GROUP_SIZE_M x NUM_XCD sweep peaked at +0.23%, under its own 0.4% noise floor; the best vendor dense fp8 block-scale GEMM prices as a 1.26x loss against the incumbent on the full grouped problem",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L2",
+      "verified_on": "2026-08-12",
+      "lever": "Price the host-side axis before opening it: compare enqueue cost against the SHORTEST case's GPU time, and price a vendor kernel on the grouped problem you actually have rather than on the dense shape its benchmark reports.",
+      "apply": "Use an in-process paired rig that imports the harness's own input builders to measure the enqueue floor; for a vendor entry, check its activation contract first (activation-baked / fused-gate-by-construction entries can silently no-op at runtime) and compare achieved fraction of peak on matching shapes.",
+      "verify": "Plant a known-null arm in every sweep and md5 the compiled artifact before spending GPU time; a sweep whose best point sits inside its own noise floor is a closed axis, not a small win.",
+      "pitfall": "Graph capture was expected to remove enqueue and measured slower on every case -> on this stack a graph node's GPU-side dispatch costs more than a live dispatch -> the enqueue was already fully hidden inside even the shortest case's GPU time.\nA vendor entry appeared to run and changed nothing -> the runtime-activation entry silently no-ops -> probe the outputs, not the return code.",
+      "caution": "Also verify whether a pid remap has bandwidth headroom to convert: ungated it cost -2.2% on the largest case, yet re-tested once the kernel became memory-bound and gated to a wide-tile predicate the same remap was half of a +3.13% win, so bank a refuted null with its re-test trigger and the contract it was refuted under.",
+      "source": "run fused_moe_kernel-own16h, 2026-08-12, rounds 2/5/6 nulls on a director-validated run"
+    }
+  ]
+}

@@ -52,7 +52,9 @@ single biggest lever — but the library is already near-optimal, so real wins a
 
 ## Numerics
 hipBLASLt solution swaps are same-math bf16 (parity-safe, tuner err_ratio<0.05). Quant variants need a
-task-accuracy gate, not byte parity. See [numerics.md](numerics.md).
+task-accuracy gate, not byte parity. See [numerics.md](numerics.md). **fp8 a8w8 block-scale
+(per-`[128,128]`, arbitrary fp32) has a *representational* parity trap on gfx950 — the E8M0 scaled-MFMA
+can't hold an arbitrary fp32 scale, so it needs a software fp32 post-MFMA scale ([numerics.md](numerics.md)).**
 
 ## How to bench
 Isolated: `op_bench.py`/gradlib on the exact (M,N,K,bias,dtype). e2e: same-session 2-launch A/B at the

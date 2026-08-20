@@ -1,0 +1,153 @@
+{
+  "run_id": "write_req_to_token_pool_triton-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "write_req_to_token_pool_triton"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "dispatch-bound-scatter-host-launch-bypass-gfx950",
+      "description": "Dispatch-bound Triton scatter/fill: cached direct-launch object + re-grid + write-through store gives ~2.53x, flat across 32x the work",
+      "keywords": [
+        "launch-overhead",
+        "host-runtime",
+        "dispatch-bound",
+        "triton",
+        "memory-movement",
+        "grid-fill",
+        "cache-modifier",
+        "gfx950"
+      ],
+      "kernels": [
+        "write_req_to_token_pool_triton"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "memory_movement",
+      "regime": "both",
+      "key": "int32 request-to-slot scatter/fill in sglang, tiny grid on gfx950 - reported latency is flat across 32x the work, so the Python launch path and not the device code sets the price",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "host.launch-overhead",
+        "device.grid-fill"
+      ],
+      "cost": "L2",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "2.53x geomean director-verified vs the frozen baseline, non-overlapping (paired 2.51x agrees within 1.1%); per-case 2.48x / 2.56x / 2.55x at B=2 / 32 / 64 - nearly flat, the signature of a dispatch-bound op",
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "attempts": 1,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Collapse the host launch path first on a dispatch-bound scatter, then re-grid",
+      "lever": "cache a direct-launch dispatch object that skips the JIT wrapper and the Python launcher down to the compiled C launch entry (raw int pointers, no launch metadata), then re-grid the device side so the machine actually fills.",
+      "apply": "in the Python wrapper beside the kernel: build the handle once, arm an identity-checked hot path with a pre-built launch tuple and a C-level __getitem__; on the device side replace an O(pid) serial prefix-sum with one masked vector load plus a reduction, and expand the grid to batch*CHUNKS grid-strided column tiles, CHUNKS an additive tl.constexpr whose default reproduces golden semantics.",
+      "stack": "total 2.53x director-verified geomean = four directions compounded\n  - 1. cached direct-launch dispatch object (round 1, verified) - 2.30x standalone, the dominant lever; host enqueue down ~3.2x, to ~1.01x of a predicted raw-C floor\n  - 2. serial prefix-sum removed + re-grid (round 1, merged) - 2.33x cumulative; unmeasurable alone (a throwaway host pedestal hid all device time), confirmed by counters instead\n  - 3. identity-armed hot path + pre-built launch tuple + C-level __getitem__ (round 2, verified) - 2.41x cumulative, +5.0-5.8% with an A-vs-A null of 0.2%\n  - 4. write-through store modifier on the write-once output + invariant prefix test hoisted out of the column loop (round 3, verified) - 2.53x cumulative, device time down ~1.03-1.10x\n  - note: attribution is incremental in landing order, not independent.",
+      "verify": "paired interleaved A/B against the frozen baseline plus a dispatch-count gate (candidate dispatch count equal to baseline) so no launch is elided or memoized away, and exact-equality parity against golden.",
+      "pitfall": "a correct device rewrite measured ~1.00x standalone -> the un-bypassed host path hid all device time -> re-issue device candidates after the launch bypass lands and cross-check with counters (VMEM per wave, workgroup count).\n- pitfall: a fast-path guard that drops the ROCm large-storage descriptor check buys speed by risking silent corruption -> keep that check inside the guard; the same hot path also turns an unhashable (list) grid into a TypeError.",
+      "caution": "also verify the guard-miss path under fresh per-call metadata objects, which is what the framework does in production: here it ran ~3.5x slower than baseline while the benchmark, reusing objects, could not see it.\n- caution: also verify the sign of a cache modifier on this arch - the streaming variant cost +8-13% where write-through gained.",
+      "source": "run kernel_20_geak_0808_16h, memory-movement scatter lane, 2026-08-12, director-verified (accepted, correctness pass, dispatch gate pass)"
+    },
+    {
+      "name": "dispatch-bound-op-closed-axes-gfx950",
+      "description": "On a dispatch-bound tiny op, graph replay, side streams, launch-arg slimming and harness-constant attacks all returned <=1.00x on gfx950",
+      "keywords": [
+        "anti-pattern",
+        "closed-axis",
+        "hip-graph",
+        "graph-replay",
+        "dispatch-bound",
+        "host-runtime",
+        "launch-overhead",
+        "memory-movement",
+        "measurement-floor",
+        "gfx950"
+      ],
+      "kernels": [
+        "write_req_to_token_pool_triton"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "memory_movement",
+      "regime": "both",
+      "key": "tiny int32 scatter/fill on gfx950 once the Python launch path is already bypassed - four further host-side axes were measured to the floor and none of them paid",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "host.launch-overhead"
+      ],
+      "cost": "L2",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "four axes closed by measurement: wrapper graph capture/replay lost every case (0.94x at B=64, ~2.2-2.7x costlier per launch than the direct C launcher); side streams 2.1x (back-wait) to 4.9x (both-waits) worse than same-stream; a device-resident argument block cut enqueue yet moved reported time +0.3%; the fixed harness constant is one event record, invariant to iteration count, queue state, arrival rate and stream placement",
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "attempts": 1,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Four host-side axes that a dispatch-bound tiny op has already paid for",
+      "lever": "spend the round elsewhere unless a probe shows a mechanism different from these four; each was root-caused here rather than merely measured slow.",
+      "apply": "if one is re-opened, price the intercept itself rather than enqueue: graph enqueue is cheap and the launch-side latency is what loses; and price a host win against the harness knee (below a few units of host time the reported number stops moving) before investing a direction in it.",
+      "verify": "an A-vs-A null in the same comparator, plus a dispatch-count gate; a win that appears only in enqueue counters and not in the reported number has landed under the knee.",
+      "pitfall": "a launch-value reduction worked mechanically (enqueue down) yet reported +0.3% -> the whole host win sat below the harness knee -> check where the knee is before optimising further host time.\n- pitfall: the same patch regressed the guard-miss path ~3.5x under fresh-metadata calls -> the benchmark reuses objects, so the regression was structurally invisible -> add a fresh-metadata micro-probe.",
+      "caution": "also verify the residual constant is candidate-controlled at all before attacking it; and also verify how much device work is left worth chasing - here the remaining device excess was worth ~+0.5% reported, under the acceptance gate.",
+      "source": "run kernel_20_geak_0808_16h, memory-movement scatter lane, rounds 1-4, 2026-08-12"
+    },
+    {
+      "name": "tiny-op-reported-time-transfer-function-gfx950",
+      "description": "For tiny ops, measure with the harness protocol plus position rotation and an A/A null: replay probes overstate ~4x and slot bias fakes ~14%",
+      "keywords": [
+        "method",
+        "measurement",
+        "ab-methodology",
+        "graph-replay",
+        "dispatch-bound",
+        "noise-floor",
+        "measurement-floor",
+        "negative-control",
+        "gfx950"
+      ],
+      "kernels": [
+        "write_req_to_token_pool_triton"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "both",
+      "key": "measuring single-dispatch tiny ops on gfx950 where the timing harness itself, not the kernel, owns most of the reported number",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "method.ab-protocol"
+      ],
+      "cost": "L1",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "a graph-replay probe overstated reported impact ~4x and inverted small signs (replay spread across cases 3x the harness spread); an unrotated interleaved comparator read the first slot slow on an identical body and manufactured a ~14% fake win; inside the plateau band, added device work is discounted ~4x (transfer function 2.10 / 2.10 / 2.08 / 2.07 across 4x growing device work, breakout only at 16x)",
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "attempts": 1,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Measure a tiny op with the harness's own protocol, rotated, against an A/A null",
+      "lever": "build the probe around one dispatch sandwiched between the harness's own barrier packets, rotate variant position every round, and carry an identical-body A/A pair plus an exact-equality parity gate in every generation.",
+      "apply": "replace throughput-style replay loops with the single-dispatch protocol; derive a transfer function first by sweeping a synthetic in-window kernel from empty dispatch upward, so you know whether your op sits in the discount plateau or past its breakout.",
+      "verify": "the A/A null should read within a few tenths of a percent; a first-slot bias on an identical body means the rig is not rotated yet, and any candidate delta smaller than that null is not a result.",
+      "pitfall": "replay-based probe disagreed with the harness in magnitude and sometimes in sign -> replay measures dispatch throughput and hides exposed latency -> re-time with the single-dispatch protocol.\n- pitfall: two of three probe generations manufactured a win before the third was right -> unrotated slot bias -> rotate positions and publish the A/A null alongside every number.\n- pitfall: a byte-identical artifact re-measured 2.53x in one session and 2.60x in another -> box drift across sessions -> bound what any sub-5% claim can mean, or re-measure both arms in one session.",
+      "caution": "also verify where the op sits on that transfer function before calling a device direction dead: inside the plateau a real device win is discounted several-fold before it reaches the reported number, and outside it the same win reads clean.",
+      "source": "run kernel_20_geak_0808_16h, memory-movement scatter lane, round 4 deep_explore, 2026-08-12"
+    }
+  ]
+}

@@ -1,0 +1,150 @@
+{
+  "run_id": "_per_token_group_quant_fp8-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "_per_token_group_quant_fp8"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "emulated-fp8-cast-to-native-convert",
+      "description": "Non-OCP fp8 output makes the compiler emulate the cast in software; native packed convert + bitcast cuts VALU/wave 852->338 on a quant cast",
+      "keywords": [
+        "fp8",
+        "quantize-cast",
+        "dtype-emulation",
+        "valu-bound",
+        "native-convert",
+        "bitcast",
+        "bit-exact",
+        "gfx950"
+      ],
+      "kernels": [
+        "_per_token_group_quant_fp8"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantize_cast",
+      "regime": "both",
+      "key": "per-token-group fp8 quantization in Triton on gfx950, where the requested fp8 flavour is not the one the hardware convert implements",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "compute.native-convert"
+      ],
+      "cost": "L3",
+      "title": "Software-emulated fp8 cast: find it by differential recompile, kill it with the native convert",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.66x standalone on the coarsened kernel (cumulative 1.60x -> 2.66x geomean); held on every per-case size, and the run total was 2.93x/4.47x/3.95x per case (3.73x geomean, interleaved)",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "roofline": "VALU-issue bound (>100% of device VALU issue on the two large cases) -> HBM bound at 94-99% of the measured no-math bandwidth roof",
+      "source": "run _per_token_group_quant_fp8-own16h, 2026-08-12, director-validated (compile PASS, correctness PASS, 4 interleaved A/B rounds)",
+      "last_seen": "2026-08-12",
+      "lever": "when an elementwise cast shows a ~200:1 VALU:memory instruction ratio, suspect the dtype is emulated; emit the hardware's own packed convert and bitcast into the target flavour (biases differing by a constant are bit-exact over the clamped range), then fix -0 in the fp32 domain",
+      "apply": "differential recompile: change ONLY the output dtype to the hardware-native twin and diff the ISA VALU count (852 -> 290 here); that delta is the emulation, and it is the size of the available win",
+      "stack": "total 3.73x geomean isolated, drift-free interleaved (per case 2.93x / 4.47x / 3.95x) = four directions compounded\n  - 1. coarsening: G groups per program, 2-D tile, dwordx4 loads, num_warps=1 — 1.60x standalone (round 1, verified); fewer warps won monotonically\n  - 2. native convert + bitcast (this card) — 1.60x -> 2.66x cumulative (round 2, verified) — the largest single step\n  - 3. exact reciprocal + prebound host dispatch, textually disjoint — 2.66x -> 4.12x cumulative (round 3, both verified)\n  - 4. geometry-gated packed multiply and a short reciprocal at small tiles — ~+2% (rounds 7-8, verified)\n  - note: 1-4 are cumulative against the FROZEN baseline table, which carried ~1.13x of box drift; the 3.73x total is the drift-free re-measure, so the parts do not multiply to it",
+      "verify": "paired interleaved A/B inside one GPU lock — candidate, incumbent HEAD and a byte-identical null as separate processes from their own directories, randomized order, min AND median, 2-4 windows",
+      "pitfall": "two plain-Triton reformulations passed the harness correctness cases yet were wrong on 8 of 94 NaN/eps configs (including all-zeros with eps=0) -> a clamp lowers to a med3 instruction that maps NaN to a number while the hardware convert maps it to the max code -> keep the med3 in the chain and sweep NaN / +-0 / eps separately\nfrozen-denominator scoring handed out ~1.13x of free geomean -> the frozen table was 17-21% slower than a same-day remeasure on two of three cases -> score every candidate against an incumbent measured in the same window",
+      "caution": "also verify which -0 fixup form is cheapest on your target: abs as a free source modifier measured below the maximum, byte-mask and xor forms here, and the ordering may differ elsewhere"
+    },
+    {
+      "name": "per-element-divide-to-exact-reciprocal",
+      "description": "On a VALU-bound quant cast, a bit-exact reciprocal + FMA replacing per-element division cut VALU/wave 1216->768 for 1.16x, with format constants folded in",
+      "keywords": [
+        "quantize-cast",
+        "valu-bound",
+        "reciprocal",
+        "division",
+        "bit-exact",
+        "fp8",
+        "gated-lever",
+        "gfx950"
+      ],
+      "kernels": [
+        "_per_token_group_quant_fp8"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantize_cast",
+      "regime": "both",
+      "key": "VALU-bound per-token-group quantization on gfx950 Triton, where dividing each element by its group scale dominates the instruction mix",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "compute.exact-reciprocal"
+      ],
+      "cost": "L3",
+      "title": "Divide by the group scale is a correctly-rounded reciprocal, not a division",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.16x standalone on top of the cast fix (2.66x -> 3.09x cumulative geomean), additive with the disjoint host lever to 4.12x; improved every per-case size, largest on the two large cases",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "source": "run _per_token_group_quant_fp8-own16h, 2026-08-12, rounds 3 and 8, director-validated",
+      "last_seen": "2026-08-12",
+      "lever": "replace the per-element divide with a correctly-rounded reciprocal plus two FMAs, and fold any constant format factor (here a x2 from the fp8 flavour) into the divisor so it is free; where surrounding code already excludes overflow/underflow, a 3-op rcp + one Newton step is enough",
+      "apply": "gate the short reciprocal on a geometry constexpr the launcher already computes so both arms live in one kernel, and prove bit-identity exhaustively over the reachable divisor patterns rather than sampling",
+      "verify": "bit-identical to the correctly-rounded reference over all reachable divisors, then a paired interleaved A/B on min and median against the incumbent in the same lock window",
+      "pitfall": "a rule of engagement that fenced off 'the divide region' of the file hid the two largest compute levers for several rounds -> the restriction named a code region instead of the property that mattered -> state such rules about the property (approximate vs correctly-rounded), so a rewrite that preserves it stays in play\ntwo levers keying on the same physical resource anti-composed four separate times (the naive union lost) -> resolve by making one lever yield to the other's existing gate instead of choosing between them",
+      "caution": "also verify packed math at depth greater than 1 on your shapes: freeing ~20 VGPRs met the precondition three separate ways here and every arm still lost (one at -7.1% on the mid-size case), because each inline-asm block is a scheduling barrier loads cannot move across"
+    },
+    {
+      "name": "host-launch-axis-exhausted-after-prebind",
+      "description": "After one prebind win, four more host/launch directions returned ~1.00x on a short elementwise op; exhaustion test: submit cost vs smallest case GPU time",
+      "keywords": [
+        "launch-overhead",
+        "host-runtime",
+        "dispatch-cache",
+        "hip-graph",
+        "anti-pattern",
+        "measurement-floor",
+        "quantize-cast",
+        "gfx950"
+      ],
+      "kernels": [
+        "_per_token_group_quant_fp8"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "both",
+      "key": "deciding when the host/launch lane on a short elementwise GPU op is spent, on a harness whose event bracket costs more than the smallest case",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "host.launch-overhead"
+      ],
+      "cost": "L2",
+      "title": "The host lane pays once; the exhaustion test is submit cost versus the smallest case's kernel time",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "one prebind win (1.68x paired on the smallest case) then ~1.00x across four directions: a 48% per-launch host cut moved the wall 0%, a further -12.3% per launch bought +0.55% at the wall, the event-bracketed NOP wall was flat from grid 1 to 32768 and across num_warps 1/2/4, and 1-node graph replay cost more than the binder it replaced",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "source": "run _per_token_group_quant_fp8-own16h, 2026-08-12, rounds 1 and 3-6 and 10, director-validated",
+      "last_seen": "2026-08-12",
+      "lever": "prebind the dispatch once — cache the compiled handle and the argument binding inside the timed region, refining the JIT's own specialization key so a wrong binary can never be selected — then treat submit-cost-below-smallest-case-GPU-time as the signal that the lane has paid out and later rounds are better spent in the kernel",
+      "apply": "measure an event-bracketed NOP launch to get the harness floor, and compare each case's GPU time against it before planning any host direction; the smallest case here sat under that bracket, so its wall was the harness, not the op",
+      "verify": "before funding a wall-minus-GPU residual, check the estimator: here the residual grew with case size and was an artifact of comparing a min against a mean over pipelined launches, not overhead — three rounds spent budget against that phantom",
+      "pitfall": "reproducible -2.7% to -6.8% cuts in the tiny case's GPU time moved the wall only +0.2-0.4% -> that case is pinned to a single timer quantum (~1.4%) under the event bracket -> compute the geomean ceiling implied by the floor first; here it capped the run at 4.36x and made a 4.7x target arithmetically unreachable",
+      "caution": "also verify that a graph-capture replay actually removes the cost you are paying for: a 1-node graph still sits between the same two event records, and measured costlier than the direct binder"
+    }
+  ]
+}
