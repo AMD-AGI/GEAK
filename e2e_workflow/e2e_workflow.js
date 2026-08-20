@@ -433,7 +433,7 @@ const E2E_KB_PLANE = ['local', 'remote', 'both'].includes(String(A.e2e_kb_plane 
   : (String(A.kb_mode || '').trim().toLowerCase() === 'local' ? 'local' : 'both');
 const E2E_KB_STORE_DIR = String(A.kb_store_dir ||
   KB_ARTIFACTS_DIR.replace(/\/[^/]*$/, '') + '/kb_store_local').replace(/\/+$/, '');
-const E2E_STORE_SCRIPT = `${KERNEL_WF_DIR}/scripts/e2e_store.py`;
+const E2E_STORE_SCRIPT = `${WORKFLOW_DIR}/scripts/e2e_store.py`;
 // Every candidate costs a full server launch to reject, so a recorded near-tie is not worth benching.
 const E2E_WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.warm_start_min_speedup))
   ? parseFloat(A.warm_start_min_speedup) : 1.05;
@@ -461,9 +461,19 @@ const WARM_START_ROLES = new Set(['system_architect', 'config_tuner']);
 // shell (it lives in ~/.bashrc, which such a shell never sources), so each command exports it itself
 // from the 0600 file. It is never passed in argv: /proc is world-readable on this box, and the
 // service has no revocation story for a leaked key.
+// The gateway's internal AMD CA is not in a stock container trust store, so a KB command run inside
+// one fails TLS (the old workaround was `curl -k`). Point urllib/requests/curl/node at a bundle that
+// carries the AMD root, reusing Hyperloom's shared, maintained one. Path-only, no CA content here;
+// overridable with KB_CA_BUNDLE; a no-op when SSL_CERT_FILE is already set or no bundle is readable
+// (so CI and already-trusting images are byte-identical). DNS (the host has none in-container) is a
+// launch concern, handled with `docker run --add-host` — see /shared_nfs/yueliu14/kb_net/kb_net.sh.
 const KB_ENV_PRELUDE =
   'export KB_STORE_URL="${KB_STORE_URL:-https://global.primus-safe.amd.com/knowledge-base}"; ' +
-  'export KB_STORE_TOKEN="${KB_STORE_TOKEN:-$(cat ~/.geak_kb_token 2>/dev/null)}"; ';
+  'export KB_STORE_TOKEN="${KB_STORE_TOKEN:-$(cat ~/.geak_kb_token 2>/dev/null)}"; ' +
+  'if [ -z "${SSL_CERT_FILE:-}" ]; then for _ca in "${KB_CA_BUNDLE:-}" ' +
+  '/shared_nfs/hyperloom/ca/amd-ca-combined.pem "$HOME/amd-extra-ca-bundle.pem"; do ' +
+  '[ -n "$_ca" ] && [ -r "$_ca" ] && { export SSL_CERT_FILE="$_ca" REQUESTS_CA_BUNDLE="$_ca" ' +
+  'CURL_CA_BUNDLE="$_ca" NODE_EXTRA_CA_CERTS="$_ca"; break; }; done; fi; ';
 // Expert skills = human-authored, validated optimization recipes (perf_knowledge/expert_skills/). They
 // are ADVISORY priors: a matched `validated` skill is a HIGH-PRIOR candidate that routing/integration
 // roles reproduce, then gate by the usual on-box A/B — it NEVER overrides measurement and NEVER reduces
@@ -616,6 +626,11 @@ const KB_RESOLVE_SCHEMA = obj({
   tried: arrStr, canonical_id: { type: 'string' }, match_tier: { type: 'string' },
   ranked_by: { type: 'string' }, candidates: arrObj, read_reason: { type: 'string' },
   plane: { type: 'string' },
+  // How the offer was ORDERED (throughput, high to low, on every rung) versus which metric that
+  // rung crowns its champion on. Two different things that used to share one word: a coarse rung
+  // is ranked by absolute throughput here but still promotes on speedup, and a reader told only
+  // 'speedup' would mis-explain the order it is looking at.
+  sorted_by: { type: 'string' }, champion_metric: { type: 'string' },
 }, []);
 
 const PLAN_SCHEMA = obj({
@@ -1725,7 +1740,8 @@ if (want('setup')) {
       KB_READ_PLANE = String(resolved.plane || '');
       log(`[kb] e2e read: plane=${resolved.plane || '?'} tried=[${(resolved.tried || []).join(' | ')}] ` +
         `answered=${resolved.canonical_id || '?'} tier=${resolved.match_tier || '-'} ` +
-        `ranked_by=${resolved.ranked_by || '-'} reason=${resolved.read_reason || '?'} ` +
+        `sorted_by=${resolved.sorted_by || resolved.ranked_by || '-'} ` +
+        `champion_metric=${resolved.champion_metric || '-'} reason=${resolved.read_reason || '?'} ` +
         `candidates=${cands.length}`);
       if (cands.length) KB_REF_DIR = refsDir;   // arms warmStartBlock() for the consumer roles
 
@@ -1806,15 +1822,25 @@ if (want('setup')) {
           kbSeedTput = measured;
           log(`[kb] ADOPTED ${c.session_id || '?'} (${c.direction || 'unlabeled'}): ` +
             `${measured} tok/s, +${deltaPct.toFixed(2)}% vs baseline ${BASELINE_TPUT} (noise band ${NOISE_BAND}%).`);
-        } else {
-          log(`[kb] rejected ${c.session_id || '?'} (${c.direction || 'unlabeled'}): ` +
+        }
+        // THREE outcomes, not two. "ran and lost" and "could not be made to run" were both spelled
+        // `rejected`, and they mean opposite things to the record: a loss is one box's verdict on a
+        // real configuration, while a config that never took effect says the record is missing
+        // something — a flag renamed upstream, an env the build does not honour. Only the second is
+        // evidence for retiring it, and the store now counts them separately (kb/attest.py).
+        const notes = String(trial.notes || (sweep && sweep.summary) || '');
+        const inert = /\b(?:not (?:honou?red|recognized|recognised|applied|supported)|unrecognized|unrecognised|ignored|no such option|unknown (?:option|argument|flag)|renamed|removed upstream|did not take effect)\b/i.test(notes);
+        const outcome = accept ? 'adopted' : (!measured || inert) ? 'not_reproduced' : 'rejected';
+        if (!accept) {
+          log(`[kb] ${outcome === 'not_reproduced' ? 'NOT REPRODUCED' : 'rejected'} ` +
+            `${c.session_id || '?'} (${c.direction || 'unlabeled'}): ` +
             `measured ${measured || 'n/a'} tok/s vs baseline ${BASELINE_TPUT}` +
             `${measured ? ` (${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%)` : ''}` +
-            `${parity ? `, parity=${parity}` : ''} — kept as a reference, not applied.`);
+            `${parity ? `, parity=${parity}` : ''}${inert ? ', the config never took effect' : ''}` +
+            ` — kept as a reference, not applied.`);
         }
         verdicts.push({ ...c, measured_tok_s: measured || null, delta_pct: measured ? deltaPct : null,
-          parity: parity || 'unknown', outcome: accept ? 'adopted' : 'rejected',
-          why: String(trial.notes || (sweep && sweep.summary) || '') });
+          parity: parity || 'unknown', outcome, why: notes });
         if (accept) break;   // adopt the first that passes; the rest stay references
       }
       // ---------------------------------------------------------------------
@@ -1942,11 +1968,60 @@ if (want('setup')) {
       // read if an agent chooses to; the prompt BLOCK only reaches roles in WARM_START_ROLES; the
       // INPUTS entry lands in `## Inputs` unconditionally and is the one that always fires.
       // ---------------------------------------------------------------------
+      // ---------------------------------------------------------------------
+      // Tell the STORE what happened. Until now this loop's verdicts died with the run: the next
+      // box to resolve this identity saw the same optimistic record, benched it, and failed the
+      // same way, forever. `e2e_store.py attest` counts the attempt onto the record itself, at
+      // every rung, so `validations / recalls` becomes something a later curation pass can retire
+      // on. It moves no score and no champion — one box's failure is evidence, not a verdict.
+      //
+      // Only candidates that were actually PUT ON THIS BOX are counted. A record listed in the
+      // offer and never benched (`skipped`, or below benchN) has learned nothing about itself, and
+      // counting it would decay the very ratio the retire pass reads.
+      //
+      // Config verdicts only. A replayed kernel that failed is evidence against the KERNEL lane's
+      // record, not against the e2e run that once used it, and the two have separate ledgers —
+      // `experience_store.py attest` is where that verdict belongs.
+      const attestable = verdicts.filter(v => v.session_id &&
+        ['adopted', 'rejected', 'not_reproduced'].includes(v.outcome));
+      if (attestable.length) {
+        const cmds = attestable.map(v =>
+          `python3 ${shq(E2E_STORE_SCRIPT)} attest ${kbIdentityFlags()} ${kbPlaneFlags()} ` +
+          `--session-id ${shq(v.session_id)} ` +
+          `--outcome ${v.outcome === 'adopted' ? 'validated' : v.outcome} ` +
+          (v.measured_tok_s ? `--measured-tok-s ${v.measured_tok_s} ` : '') +
+          `--baseline-tok-s ${BASELINE_TPUT} --parity ${shq(v.parity || 'n/a')} ` +
+          `--note ${shq(String(v.why || '').slice(0, 200))} ` +
+          `--measured-by ${shq('e2e_workflow:' + BACKEND)} --apply || true`);
+        try {
+          await safeAgent(
+            `You are the e2e knowledge-base attestor. Run EXACTLY these commands in order and ` +
+            `return {"ran": <how many you ran>, "note": "<anything that failed>"}. Each records ` +
+            `what THIS box saw when it benched a stored record. Do NOT edit them, do NOT add or ` +
+            `drop any, and do NOT retry a failure — a repeat would double-count the attempt, and ` +
+            `an over-counted failure retires a record that may still be right elsewhere.\n` +
+            '```bash\n' + KB_ENV_PRELUDE + cmds.join('\n') + '\n```',
+            { phase: 'WarmStart', label: 'kb:attest',
+              schema: obj({ ran: { type: 'number' }, note: { type: 'string' } }, []) },
+            1);
+          log(`[kb] attested ${attestable.length} benched record(s): ` +
+            attestable.map(v => `${v.session_id.slice(-12)}=${v.outcome}`).join(' '));
+        } catch (e) {
+          // Non-fatal, like every other KB write. The measurements are already on disk and already
+          // in the reference file; losing the counter costs a future reader context, not this run.
+          log(`[kb] attest failed (NON-FATAL): ${String(e).slice(0, 200)}`);
+        }
+      }
+
       const allVerdicts = verdicts.concat(kernelVerdicts);
       if (allVerdicts.length) {
         const adoptedCfg = verdicts.filter(v => v.outcome === 'adopted');
         const adoptedKer = kernelVerdicts.filter(v => v.outcome === 'adopted');
         const rejected = allVerdicts.filter(v => v.outcome !== 'adopted');
+        // Split out of `rejected` for the reference section below, but deliberately still counted
+        // inside it: for the roles that come next, "lost the A/B" and "never ran" are both "do not
+        // re-propose this verbatim". The distinction matters to the STORE, not to the Architect.
+        const notReproduced = verdicts.filter(v => v.outcome === 'not_reproduced');
         const md = [
           '# Warm start — MEASURED ON THIS BOX',
           '',
@@ -1980,6 +2055,43 @@ if (want('setup')) {
             `**${v.outcome}** | ${String(v.why || '').replace(/\|/g, '\\|').slice(0, 160)} |`)
             : ['| _(none recorded)_ | | | | | |']),
           '',
+          // The plan's fourth requirement, made concrete: a top-N entry that could not be
+          // reproduced is not discarded, it is handed forward WITH its reproduction material. A
+          // lead the next role cannot open is a lead it will not use, so the launch script and the
+          // patch paths are spelled out here rather than left to be rediscovered in the bundle.
+          ...(notReproduced.length ? [
+            '## REFERENCE ONLY — recalled but NOT reproduced here',
+            '',
+            'These were offered by the store and benched on this box, and either produced no number',
+            'at all or never took effect (a flag renamed upstream is accepted silently and then',
+            'ignored). They are NOT results. They are the closest thing this deployment has to a',
+            'record of what someone else got working, and their material is below so you can read',
+            'what they actually did rather than guess from a direction label.',
+            '',
+            ...notReproduced.flatMap(v => {
+              const repro = (v.repro && typeof v.repro === 'object') ? v.repro : {};
+              const root = (v.bundle && v.bundle.path) ? `${v.bundle.path}/files` : '';
+              const patches = (Array.isArray(repro.kernels) ? repro.kernels : [])
+                .filter(k => k && k.patch).map(k => root ? `${root}/${k.patch}` : k.patch);
+              return [
+                `### ${v.direction || 'unlabeled'} (session \`${v.session_id || '?'}\`)`,
+                `- why it did not reproduce: ${String(v.why || 'no measurement came back').slice(0, 300)}`,
+                `- stored claim: ${v.throughput_tok_s != null ? v.throughput_tok_s + ' tok/s' : '?'}` +
+                  `${v.speedup != null ? ` (${v.speedup}x)` : ''}, recorded elsewhere`,
+                `- launch script: ${repro.launch
+                  ? `\`${root ? `${root}/${repro.launch}` : repro.launch}\`` +
+                    (repro.launch_origin === 'synthesized'
+                      ? ' — SYNTHESIZED from the stored config, never executed as-is'
+                      : ' — captured from the original run')
+                  : 'none recorded (this record predates `repro`)'}`,
+                `- kernel patches: ${patches.length ? patches.map(p => `\`${p}\``).join(', ') : 'none carried'}` +
+                  `${repro.kernels_without_patch ? ` (${repro.kernels_without_patch} accepted kernel(s) carry no patch)` : ''}`,
+                `- flags: \`${String((v.accepted_config || {}).flags || '(none)')}\``,
+                `- env: \`${String((v.accepted_config || {}).env || '(none)')}\``,
+                '',
+              ];
+            }),
+          ] : []),
           '## How to use this',
           '',
           adoptedCfg.length
@@ -2036,6 +2148,12 @@ if (want('setup')) {
                 `re-propose any of them verbatim — the compounded whole lost on this box. Their individual ` +
                 `knobs may each still be a valid axis, and their declared directions are still legitimate ` +
                 `ideas to reach a different way.`
+              : '') +
+            (notReproduced.length
+              ? ` ${notReproduced.length} of those could not be reproduced AT ALL here (no number, or the ` +
+                `config never took effect) — they are in the REFERENCE ONLY section of that file with their ` +
+                `launch script and kernel patches attached. Read them as evidence of what worked somewhere ` +
+                `else, not as something to re-run.`
               : ''),
         };
       }

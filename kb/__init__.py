@@ -10,6 +10,7 @@ callers in kernel_workflow/ and e2e_workflow/.
     store_remote.py  the HTTP plane, wearing store_local's interface
     store_client.py  the standalone HTTP client store_remote is built on
     retract.py       taking back a record on a store that has no delete
+    attest.py        counting what happened when a record was actually tried on a box
     remote_upload.py CLI: push exported records at either plane
 
 This lives at the repo root rather than under kernel_workflow/scripts/ — where it grew — because

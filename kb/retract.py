@@ -104,7 +104,7 @@ def retraction_ok(reports, applied: bool) -> bool:
     return bool(found) and all(r.get("rewritten") for r in found)
 
 
-def _existing_files(store, canonical_id: str, session_id: str):
+def existing_files(store, canonical_id: str, session_id: str):
     """{relative path: absolute source} for a LOCAL session, or None for a remote one.
 
     The two planes lose artifacts differently on a rewrite and this is the whole reason the caller
@@ -112,6 +112,9 @@ def _existing_files(store, canonical_id: str, session_id: str):
     so omitting the files DELETES them. `RemoteKBStore.write()` only calls `put_files` when it is
     given some, and the manifest it does not touch survives. So: re-supply on local, stay silent on
     remote (re-uploading identical bytes would be the only alternative, and it can fail).
+
+    Public because retraction is not the only rewrite: `kb/attest.py` rewrites the same documents to
+    count validations, and a second copy of this rule is a second chance to get it wrong.
     """
     lister = getattr(store, "session_files", None)
     if not callable(lister):
@@ -173,8 +176,8 @@ def retract_session(store, canonical_id: str, session_id: str, reason: str, metr
         report["would_write"] = document
         return report
     try:
-        store.write(canonical_id, session_id, document, _existing_files(store, canonical_id,
-                                                                        session_id))
+        store.write(canonical_id, session_id, document, existing_files(store, canonical_id,
+                                                                       session_id))
         report["rewritten"] = True
     except (KBStoreError, OSError) as e:
         report["error"] = "%s: %s" % (type(e).__name__, str(e)[:160])

@@ -332,3 +332,211 @@ def test_retract_on_a_missing_store_reports_not_found(tmp_path):
                "--session-id", "whatever", "--reason", "wrong", "--apply")
     assert out["ok"] is False
     assert all(r["found"] is False for r in out["rungs"])
+
+
+# -- resolve: the offer is ordered by absolute throughput on EVERY rung -------------------------
+
+
+def _coarse_id(out):
+    """The tp_any rung's canonical id — the coarse page a reader on another workload lands on."""
+    return [r["canonical_id"] for r in out["ladder"] if r["tier"] == "tp_any"][0]
+
+
+def test_a_coarse_rung_is_offered_by_throughput_not_by_its_champion_metric(tmp_path):
+    """The behaviour the whole read path was changed for. A coarse rung still CROWNS on speedup —
+    that is what makes its champion comparable across workload points — but the OFFER is ordered by
+    absolute throughput, because a reader asking "what has run fast on this deployment" is not
+    asking "what improved most over whatever baseline it happened to have"."""
+    store = str(tmp_path / "store")
+    # 1.9x off a slow baseline vs 1.05x off a fast one: opposite orders under the two metrics.
+    _write(tmp_path, "slowbase", "big-ratio", tput=900.0, baseline=474.0)
+    _write(tmp_path, "fastbase", "small-ratio", tput=1600.0, baseline=1524.0)
+    out = _run("resolve", "--store", store, "--tp", "16")        # a workload only the coarse rungs hold
+    assert out["match_tier"] != "exact"
+    assert out["sorted_by"] == "throughput_tok_s"
+    assert out["champion_metric"] == "speedup"                   # the rung's own metric, unchanged
+    assert [c["direction"] for c in out["candidates"]] == ["small-ratio", "big-ratio"]
+
+
+def test_sort_by_speedup_restores_the_old_order(tmp_path):
+    _write(tmp_path, "slowbase", "big-ratio", tput=900.0, baseline=474.0)
+    _write(tmp_path, "fastbase", "small-ratio", tput=1600.0, baseline=1524.0)
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--tp", "16",
+               "--sort-by", "speedup")
+    assert out["sorted_by"] == "speedup"
+    assert [c["direction"] for c in out["candidates"]] == ["big-ratio", "small-ratio"]
+
+
+def test_the_prose_reference_names_the_metric_it_ordered_by(tmp_path):
+    _write(tmp_path, "a", "tuned")
+    _run("resolve", "--store", str(tmp_path / "store"), "--refs-dir", str(tmp_path / "refs"))
+    text = list((tmp_path / "refs").glob("e2e_reference_*.md"))[0].read_text()
+    assert "ordered by `throughput_tok_s` (highest first)" in text
+
+
+# -- attest: counting what happened when a record was actually run ------------------------------
+
+
+def test_attest_counts_on_every_rung_without_moving_anything(tmp_path):
+    """All three rungs share one session id, so a count that lands only on the exact rung leaves
+    the two coarse pages — the ones a reader on another workload reads — quoting a stale ledger."""
+    store = str(tmp_path / "store")
+    sid = _write(tmp_path, "a", "tuned")["session_id"]
+    before = _run("resolve", "--store", store)["candidates"][0]
+    out = _run("attest", "--store", store, "--session-id", sid, "--outcome", "validated",
+               "--measured-tok-s", "1100", "--baseline-tok-s", "1000", "--parity", "pass",
+               "--measured-by", "boxA", "--apply")
+    assert out["ok"] is True
+    assert len(out["rungs"]) == 3 and all(r["rewritten"] for r in out["rungs"])
+    assert all(r["attestations"]["validations"] == 1 for r in out["rungs"])
+    after = _run("resolve", "--store", store)["candidates"][0]
+    assert after["validations"] == 1 and after["recalls"] == 1
+    assert after["throughput_tok_s"] == before["throughput_tok_s"]     # no scalar moved
+    assert after["speedup"] == before["speedup"]
+    assert after["is_champion"] == before["is_champion"]                # no champion re-pointed
+    # and the evidence rode along, including the delta this command derives rather than trusting
+    assert out["rungs"][0]["attestations"]["history"][-1]["delta_pct"] == 10.0
+
+
+def test_repeated_failures_raise_a_retire_hint_but_retire_nothing(tmp_path):
+    store = str(tmp_path / "store")
+    sid = _write(tmp_path, "a", "tuned")["session_id"]
+    for _ in range(2):
+        _run("attest", "--store", store, "--session-id", sid,
+             "--outcome", "not_reproduced", "--apply")
+    view = _run("resolve", "--store", store)["candidates"][0]
+    assert view["not_reproduced"] == 2 and "could not reproduce" in view["retire_hint"]
+    assert view["lifecycle"] == "active"                  # advisory only; still offered, still ranked
+    assert "**" in list_reference_text(tmp_path, store)   # and the prose says so in bold
+
+
+def list_reference_text(tmp_path, store):
+    _run("resolve", "--store", store, "--refs-dir", str(tmp_path / "refs2"))
+    return list((tmp_path / "refs2").glob("e2e_reference_*.md"))[0].read_text()
+
+
+def test_re_writing_the_same_config_keeps_its_attestations(tmp_path):
+    """The bug this carry-forward exists for: _content_digest excludes the measurement, so a
+    re-bench of one config replaces the SAME session — and a naive write would silently reset the
+    record's whole validation history while looking perfectly well-formed."""
+    store = str(tmp_path / "store")
+    sid = _write(tmp_path, "a", "tuned", tput=1000.0)["session_id"]
+    _run("attest", "--store", store, "--session-id", sid, "--outcome", "validated", "--apply")
+    again = _write(tmp_path, "a", "tuned", tput=1200.0)          # same config, new measurement
+    assert again["session_id"] == sid
+    view = _run("resolve", "--store", store)["candidates"][0]
+    assert view["throughput_tok_s"] == 1200.0                    # the number DID update
+    assert view["validations"] == 1                              # the ledger did not reset
+
+
+def test_attest_needs_a_session_id(tmp_path):
+    with pytest.raises(SystemExit):
+        e2e_store.main(["attest"] + IDENTITY + ["--store", str(tmp_path / "store"),
+                                                "--outcome", "validated", "--session-id", ""])
+
+
+def test_attest_on_a_missing_store_reports_not_found(tmp_path):
+    out = _run("attest", "--store", str(tmp_path / "nope"), "--session-id", "whatever",
+               "--outcome", "failed", "--apply")
+    assert out["ok"] is False and all(r["found"] is False for r in out["rungs"])
+
+
+# -- repro: every record must carry something you can actually run ------------------------------
+
+
+def test_a_launch_script_is_synthesized_when_the_run_captured_none(tmp_path):
+    """The common case: the workflow banked flags and env but no script. Rather than storing a
+    record nobody can act on, the write builds one against bench_e2e.sh's env contract and says
+    plainly that it was synthesized."""
+    out = _write(tmp_path, "a", "tuned",
+                 accepted_config={"flags": "--max-num-seqs 256", "env": "VLLM_USE_AITER=1"})
+    assert "launch.sh" in out["files"]
+    view = _run("resolve", "--store", str(tmp_path / "store"),
+                "--cache-dir", str(tmp_path / "cache"))["candidates"][0]
+    assert view["repro"]["launch"] == "launch.sh"
+    assert view["repro"]["launch_origin"] == "synthesized"
+    assert view["repro"]["env_pairs"] == {"VLLM_USE_AITER": "1"}
+    assert view["repro"]["server_args"] == "--max-num-seqs 256"
+    text = (tmp_path / "cache" / view["session_id"] / "files" / "launch.sh").read_text()
+    assert "bench_e2e.sh" in text and "SYNTHESIZED" in text
+    assert "EXTRA_SERVER_ARGS='--max-num-seqs 256'" in text
+    assert "export VLLM_USE_AITER='1'" in text
+    assert "TP='8'" in text and "ISL='1024'" in text        # the workload it was measured at
+
+
+def test_a_captured_launch_script_is_stored_verbatim_and_says_so(tmp_path):
+    (tmp_path / "run.sh").write_text("#!/bin/sh\necho the real thing\n")
+    _write(tmp_path, "a", "tuned", final_launch_script=str(tmp_path / "run.sh"))
+    view = _run("resolve", "--store", str(tmp_path / "store"),
+                "--cache-dir", str(tmp_path / "cache"))["candidates"][0]
+    assert view["repro"]["launch_origin"] == "captured"
+    assert (tmp_path / "cache" / view["session_id"] / "files" / "launch.sh").read_text() \
+        == "#!/bin/sh\necho the real thing\n"
+
+
+def test_a_kernel_without_its_patch_is_counted_not_hidden(tmp_path):
+    """A reader seeing three kernels and two patches cannot otherwise tell whether the third was a
+    no-op or whether its bytes were simply lost, and those read in opposite directions."""
+    (tmp_path / "k.patch").write_text("--- a\n+++ b\n")
+    _write(tmp_path, "a", "tuned",
+           accepted_kernels=[{"name": "op1", "language": "triton", "patch": str(tmp_path / "k.patch")},
+                             {"name": "op2", "language": "triton"}])
+    view = _run("resolve", "--store", str(tmp_path / "store"))["candidates"][0]
+    assert view["repro"]["kernels_without_patch"] == 1
+    assert view["repro"]["complete"] is False
+    assert [k["patch"] for k in view["repro"]["kernels"]] == ["kernels/op1.patch", ""]
+
+
+def test_a_kernel_patch_can_be_fetched_from_the_kernel_lanes_own_store(tmp_path):
+    """--kernel-store closes the usual gap: by the time an e2e run finalizes, the kernel
+    workflow's scratch is gone, so the bytes only survive where the kernel lane filed them."""
+    from kb.store_local import LocalKBStore
+    kroot = str(tmp_path / "kernelkb")
+    kstore = LocalKBStore(kroot, metric="speedup")
+    (tmp_path / "k.patch").write_text("--- a\n+++ b\n")
+    kid = "geak:kernel:gfx950:op1:triton:rocm:7.2"
+    kstore.write(kid, "ksess", {"schema": "geak.kernel.v1", "speedup": 1.4, "value": {}},
+                 {"patch.diff": str(tmp_path / "k.patch")})
+    kstore.promote(kid, "ksess", 1.4)
+    _write(tmp_path, "a", "tuned", "--kernel-store", kroot, "--rocm-version", "7.2",
+           accepted_kernels=[{"name": "op1", "language": "triton"}])
+    view = _run("resolve", "--store", str(tmp_path / "store"),
+                "--cache-dir", str(tmp_path / "cache"))["candidates"][0]
+    assert view["repro"]["kernels_without_patch"] == 0 and view["repro"]["complete"] is True
+    assert (tmp_path / "cache" / view["session_id"] / "files" / "kernels" / "op1.patch") \
+        .read_text() == "--- a\n+++ b\n"
+
+
+def test_write_refusing_a_record_nobody_could_reproduce(tmp_path):
+    """A number with no config, no script, no patch and no overlay is not knowledge — and this
+    store has no delete to take it back with."""
+    (tmp_path / "bare.json").write_text(json.dumps(
+        {"final_throughput_tok_s": 1000.0, "baseline_throughput_tok_s": 800.0}))
+    with pytest.raises(SystemExit):
+        _run("write", "--store", str(tmp_path / "store"), "--result", str(tmp_path / "bare.json"),
+             "--direction", "d", "--apply")
+
+
+def test_a_kernel_patch_alone_is_enough_to_be_reproducible(tmp_path):
+    """The gate is "is there anything to act on", not "is there a config" — a run whose whole win
+    was a kernel rewrite carries the patch and nothing else, and it is perfectly actionable."""
+    (tmp_path / "k.patch").write_text("--- a\n+++ b\n")
+    out = _write(tmp_path, "a", "kernels", accepted_config={},
+                 accepted_kernels=[{"name": "op1", "language": "triton",
+                                    "patch": str(tmp_path / "k.patch")}])
+    assert out["rungs"][0]["written"] is True
+
+
+def test_the_prose_reference_points_at_the_launch_script_and_the_patches(tmp_path):
+    """The Director reads this and then opens a file, so the paths are spelled out — not "see the
+    bundle", which sends it back to the store to ask a question the page already answered."""
+    (tmp_path / "k.patch").write_text("--- a\n+++ b\n")
+    _write(tmp_path, "a", "tuned",
+           accepted_kernels=[{"name": "op1", "language": "triton",
+                              "patch": str(tmp_path / "k.patch")}])
+    _run("resolve", "--store", str(tmp_path / "store"), "--refs-dir", str(tmp_path / "refs"),
+         "--cache-dir", str(tmp_path / "cache"))
+    text = list((tmp_path / "refs").glob("e2e_reference_*.md"))[0].read_text()
+    assert "- reproduce: " in text and "files/launch.sh" in text
+    assert "files/kernels/op1.patch" in text
+    assert "- track record: never benched by anyone since it was recorded" in text
