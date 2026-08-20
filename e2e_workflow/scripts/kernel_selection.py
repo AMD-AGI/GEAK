@@ -60,6 +60,8 @@ def merge_process_traces(paths):
             args = dict(original.get("args") or {})
             if args.get("External id") is not None:
                 args["External id"] = prefix + str(args["External id"])
+            if args.get("correlation") is not None:
+                args["correlation"] = prefix + str(args["correlation"])
             event["args"] = args
             merged.append(event)
     return merged
@@ -138,27 +140,40 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel):
     # Only CPU events on the marker's own thread can establish launch causality. Global timestamp
     # overlap is unsafe under concurrent serving. The resulting External ids bridge to async GPU events.
     related_external_ids = set()
+    # Triton (and any raw hipModuleLaunchKernel) device rows carry only `correlation`, never an
+    # `External id`, so the External-id bridge alone silently misses them. The host-side launch
+    # runtime event inside the marker span carries BOTH ids, so its `correlation` is an equally
+    # strict launch-causality bridge: same thread, inside the marker span, same launch.
+    related_correlations = set()
     for event in trace_events or []:
         if not isinstance(event, dict) or not _within_any_span(event, spans, same_thread=True):
             continue
         if event.get("cat") == "kernel":
             continue
-        ext = (event.get("args") or {}).get("External id")
+        args = event.get("args") or {}
+        ext = args.get("External id")
         if ext is not None:
             related_external_ids.add(ext)
+        corr = args.get("correlation")
+        if corr is not None:
+            related_correlations.add(corr)
     matched = []
     for event in trace_events or []:
         if not isinstance(event, dict) or event.get("cat") != "kernel":
             continue
-        ext = (event.get("args") or {}).get("External id")
-        if ext is not None and ext in related_external_ids and kernel_matches(
-                device_kernel, event.get("name")):
+        args = event.get("args") or {}
+        ext = args.get("External id")
+        corr = args.get("correlation")
+        linked = (ext is not None and ext in related_external_ids) or (
+            corr is not None and corr in related_correlations)
+        if linked and kernel_matches(device_kernel, event.get("name")):
             matched.append(str(event.get("name") or ""))
     return {
         "target": target_callable,
         "marker": marker,
         "spans": spans,
         "related_external_ids": related_external_ids,
+        "related_correlations": related_correlations,
         "matched": matched,
     }
 
@@ -219,7 +234,7 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
         failed.append("candidate_marker_not_installed")
     selected_evidence = evidence.get(target_callable) or {
         "marker": MARKER_PREFIX + target_callable, "spans": [],
-        "related_external_ids": set(), "matched": [],
+        "related_external_ids": set(), "related_correlations": set(), "matched": [],
     }
     marker = selected_evidence["marker"]
     spans = selected_evidence["spans"]
@@ -237,6 +252,16 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
     ]
     if deeper:
         failed.append("deeper_live_candidate_exists")
+    # A candidate whose marker was installed and never fired is NOT evidence that the callable is
+    # off the live path. Installation rebinds one module attribute; a callable reached through the
+    # torch dispatcher (`torch.ops.*`) or through an alias a caller imported before installation
+    # still runs with the wrapper bypassed, and is therefore invisible here. `deeper` can only see
+    # what the markers saw, so report the unobserved candidates separately instead of letting them
+    # be read as "not deeper": whoever holds the declared depths decides what an unobserved
+    # declared-deeper candidate means.
+    unobserved_candidates = sorted(
+        candidate for candidate in installed_candidates
+        if candidate != target_callable and not (evidence.get(candidate) or {}).get("spans"))
     deepest_verified = bool(
         spans and matched and not deeper and not invalid_candidates
         and not missing_candidate_markers)
@@ -253,14 +278,16 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
         "matched_kernel_calls": len(matched),
         "matched_kernel_names": sorted(set(matched)),
         "correlated_external_ids": len(related_external_ids),
+        "correlated_launch_correlations": len(selected_evidence.get("related_correlations") or ()),
         "candidate_targets_tested": installed_candidates,
         "live_candidate_targets": sorted(
             candidate for candidate, candidate_evidence in evidence.items()
             if candidate_evidence["matched"]),
         "deeper_live_candidates": sorted(deeper),
         "missing_candidate_markers": missing_candidate_markers,
+        "installed_but_never_live_candidates": unobserved_candidates,
         "deepest_verified": deepest_verified,
-        "evidence": "installed+live_nested_candidate_markers+torch_profiler_external_id",
+        "evidence": "installed+live_nested_candidate_markers+torch_profiler_external_id_or_launch_correlation",
         "failed": failed,
     }
 
@@ -338,9 +365,16 @@ def main(argv=None):
     ]
     verdict["candidate_targets_tested"] = sorted(
         set.intersection(*tested_sets) if tested_sets else set())
+    # Never-live has to hold on every capture process: one rank observing the candidate is enough
+    # to make it live, so this intersects rather than unions.
+    unobserved_sets = [
+        set(item["installed_but_never_live_candidates"]) for item in all_verdicts
+    ]
+    verdict["installed_but_never_live_candidates"] = sorted(
+        set.intersection(*unobserved_sets) if unobserved_sets else set())
     for field in (
             "total_calls_observed", "target_marker_calls", "matched_kernel_calls",
-            "correlated_external_ids"):
+            "correlated_external_ids", "correlated_launch_correlations"):
         verdict[field] = sum(int(item.get(field) or 0) for item in all_verdicts)
     verdict["matched_kernel_names"] = sorted({
         name for item in all_verdicts for name in item["matched_kernel_names"]

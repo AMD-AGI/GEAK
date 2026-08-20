@@ -85,6 +85,69 @@ class TestSelectionVerdict(unittest.TestCase):
         self.assertTrue(verdict["ok"], verdict)
         self.assertEqual(verdict["correlated_external_ids"], 1)
 
+    def test_triton_kernel_without_external_id_is_linked_by_launch_correlation(self):
+        # ROCm/kineto emits Triton device rows (hipModuleLaunchKernel) with only `correlation`;
+        # `External id` is absent, so the External-id bridge alone reports a false negative.
+        events = [
+            {"cat": "cpu_op", "name": ks.INSTALL_PREFIX + TARGET,
+             "ph": "X", "pid": 1, "tid": 2, "ts": 90, "dur": 1},
+            {"cat": "cpu_op", "name": ks.MARKER_PREFIX + TARGET,
+             "ph": "X", "pid": 1, "tid": 2, "ts": 100, "dur": 40},
+            {"cat": "cuda_runtime", "name": "hipModuleLaunchKernel", "ph": "X",
+             "pid": 1, "tid": 2, "ts": 110, "dur": 5, "args": {"correlation": 25}},
+            {"cat": "kernel", "name": KERNEL, "ph": "X", "pid": 2, "tid": 0,
+             "ts": 300, "dur": 20, "args": {"correlation": 25, "stream": 0}},
+        ]
+        verdict = ks.verify(TARGET, KERNEL, self.meta(), events)
+        self.assertTrue(verdict["ok"], verdict)
+        self.assertEqual(verdict["matched_kernel_calls"], 1)
+        self.assertEqual(verdict["correlated_launch_correlations"], 1)
+
+    def test_launch_correlation_outside_the_marker_span_is_not_enough(self):
+        events = [
+            {"cat": "cpu_op", "name": ks.INSTALL_PREFIX + TARGET,
+             "ph": "X", "pid": 1, "tid": 2, "ts": 90, "dur": 1},
+            {"cat": "cpu_op", "name": ks.MARKER_PREFIX + TARGET,
+             "ph": "X", "pid": 1, "tid": 2, "ts": 100, "dur": 40},
+            {"cat": "cuda_runtime", "name": "hipModuleLaunchKernel", "ph": "X",
+             "pid": 1, "tid": 2, "ts": 500, "dur": 5, "args": {"correlation": 25}},
+            {"cat": "kernel", "name": KERNEL, "ph": "X", "pid": 2, "tid": 0,
+             "ts": 600, "dur": 20, "args": {"correlation": 25, "stream": 0}},
+        ]
+        verdict = ks.verify(TARGET, KERNEL, self.meta(), events)
+        self.assertFalse(verdict["ok"])
+        self.assertIn("device_kernel_not_under_target", verdict["failed"])
+
+    def test_correlation_ids_do_not_collide_across_merged_call_traces(self):
+        # Every per-call trace restarts `correlation` at 1, so an unprefixed merge would let call-2's
+        # kernel be attributed to call-1's in-span launch.
+        def one(marked, corr, kernel_ts):
+            evs = [
+                {"cat": "cpu_op", "name": ks.INSTALL_PREFIX + TARGET,
+                 "ph": "X", "pid": 1, "tid": 2, "ts": 90, "dur": 1},
+                {"cat": "kernel", "name": KERNEL, "ph": "X", "pid": 2, "tid": 0,
+                 "ts": kernel_ts, "dur": 20, "args": {"correlation": corr}},
+            ]
+            if marked:
+                evs += [
+                    {"cat": "cpu_op", "name": ks.MARKER_PREFIX + TARGET,
+                     "ph": "X", "pid": 1, "tid": 2, "ts": 100, "dur": 40},
+                    {"cat": "cuda_runtime", "name": "hipModuleLaunchKernel", "ph": "X",
+                     "pid": 1, "tid": 2, "ts": 110, "dur": 5, "args": {"correlation": corr}},
+                ]
+            return {"traceEvents": evs}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            # call-1: marked launch, correlation 1.  call-2: NO marker at all, correlation 1 again.
+            for i, doc in enumerate((one(True, 1, 300), one(False, 1, 900))):
+                p = os.path.join(tmp, "t%d.json" % i)
+                json.dump(doc, open(p, "w"))
+                paths.append(p)
+            merged = ks.merge_process_traces(paths)
+            verdict = ks.verify(TARGET, KERNEL, self.meta(), merged)
+            self.assertEqual(verdict["matched_kernel_calls"], 1, verdict)
+
     def test_0802_outer_wrapper_fails_when_0720_launcher_is_marked(self):
         outer = "vllm.v1.attention.layer:unified_attention_with_output"
         inner = TARGET
@@ -133,6 +196,25 @@ class TestSelectionVerdict(unittest.TestCase):
             sorted(verdict["candidate_targets_tested"]),
             sorted([TARGET, alternative]),
         )
+
+    def test_a_probed_candidate_that_never_fired_is_reported_not_silently_dropped(self):
+        # A marker rebinds one module attribute. A callable dispatched through `torch.ops.*`, or
+        # reached through an alias a caller imported before installation, runs with the wrapper
+        # bypassed and produces zero spans while being fully live. Reading that as "not deeper"
+        # would let a shallower seam collect `deepest_verified`, so the verdict has to say which
+        # candidates were probed and never observed, apart from the ones never probed at all.
+        invisible = "vllm.model_executor.layers.attention.attention:unified_attention_with_output"
+        unprobed = "vllm.attention:never_installed"
+        events = trace()
+        events.insert(1, {
+            "cat": "cpu_op", "name": ks.INSTALL_PREFIX + invisible,
+            "ph": "X", "pid": 1, "tid": 2, "ts": 92, "dur": 1,
+        })
+        verdict = ks.verify(
+            TARGET, KERNEL, self.meta(), events, [TARGET, invisible, unprobed])
+        self.assertEqual(verdict["installed_but_never_live_candidates"], [invisible])
+        self.assertEqual(verdict["missing_candidate_markers"], [unprobed])
+        self.assertNotIn(invisible, verdict["deeper_live_candidates"])
 
     def test_device_projected_annotation_does_not_invert_call_nesting(self):
         # The profiler re-emits each marker on the GPU timeline as `gpu_user_annotation`, where an
