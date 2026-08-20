@@ -1,0 +1,152 @@
+{
+  "run_id": "mi355x_vllm_hip_paged_attention_decode-bmk7-12h",
+  "date": "2026-08-17",
+  "kernel_names": [
+    "mi355x_vllm_hip_paged_attention_decode"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "collapse-the-co-resident-sequence-set-to-break-the-kv-addres-attention-decode-gfx950-decode",
+      "description": "Sequence-major workgroup dispatch collapses the co-resident sequence set and breaks the power-of-two KV base-address phase: 1.24x, read spread 27%->7.4%.",
+      "keywords": [
+        "attention-decode",
+        "paged-attention",
+        "paged-kv",
+        "workgroup-mapping",
+        "l2-locality",
+        "co-residency",
+        "decode",
+        "memory-bound",
+        "gfx950",
+        "raw-hip"
+      ],
+      "kernels": [
+        "paged_attention_ll4mi_QKV_mfma16_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "paged bf16 KV decode attention in HIP C++ on gfx950/CDNA4 whose per-sequence KV span is a power of two, so many live sequences alias onto the same cache sets",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "mem.workgroup-mapping"
+      ],
+      "cost": "L2",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.240x isolated standalone vs frozen baseline (1.2489x after integrating a second disjoint direction), every case up, largest on the long-context cases; cross-case HBM-read-volume spread narrowed 27% -> 7.4%; the kv-head-fastest variant of the same remap reached only 1.049x",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-11",
+      "last_seen": "2026-08-17",
+      "title": "Collapse the co-resident sequence set to break the KV address phase",
+      "lever": "When each sequence's KV span is a power of two, the base addresses of all live sequences share a cache-set phase; try reindexing the launch grid sequence-major so every workgroup of one sequence is consecutive, shrinking the set of sequences resident at once.",
+      "apply": "A pure blockIdx-decode change in the kernel prologue (a swizzle-mode switch over the (partition, kv_head, seq) decomposition); no math and no traffic change, so oracle parity is free and the diff is a handful of lines.",
+      "verify": "Interleaved per-case A/B against the frozen baseline plus the per-case HBM read-volume counter: the signature of the real mechanism is the cross-case read-volume spread collapsing, not just a faster geomean.",
+      "pitfall": "Making the kv-head dimension fastest-varying looked like the same idea and returned only 1.049x -> it packs 8 workgroups onto one page while leaving all 64 sequences live, so the aliasing set is unchanged -> the lever is how many sequences are co-resident, not the innermost dimension order.\nUndoing the hardware XCD round-robin on top of the swizzle was 0.3% slower and matching the reduce grid's order to the writer's XCD was inside noise -> producer/consumer XCD affinity between the two dispatches is a separate, empty axis here.\nOnce the swizzle lands the residual inverts: the only non-power-of-two context became the case with the least remaining headroom (1.05x) while the aliased contexts caught up -> re-rank the per-case table before planning a follow-up aliasing round.",
+      "caution": "Also verify the remaining swizzle permutations per case rather than by geomean: a further rotation traded +0.7..+2.3% at short context for -1.3..-2.3% at long context for a net 0.997x, so the family can look alive in aggregate while no member wins everywhere.",
+      "source": "run mi355x_vllm_hip_paged_attention_decode-bmk7-12h, 2026-08-11..17, gfx950/MI355X, 13 rounds, direction r1_d0; director-validated geomean 1.365x, correctness 7/7"
+    },
+    {
+      "name": "choose-the-non-temporal-hint-per-operand-not-per-kernel-attention-decode-gfx950-decode",
+      "description": "Non-temporal is a per-operand call in paged decode: nt on the K stream is +6.5%; nt on the re-touched V tile, on Q and on the output stores lose.",
+      "keywords": [
+        "attention-decode",
+        "paged-attention",
+        "paged-kv",
+        "non-temporal-loads",
+        "cache-modifier",
+        "kv-cache",
+        "isa-inspection",
+        "l2-residency",
+        "decode",
+        "gfx950"
+      ],
+      "kernels": [
+        "paged_attention_ll4mi_QKV_mfma16_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "picking the non-temporal cache hint separately for K, V, Q and the partial-output stores inside one HIP C++ paged decode attention on gfx950/CDNA4",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "mem.non-temporal-load"
+      ],
+      "cost": "L1",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "+6.5% isolated vs frozen baseline from marking only the K fetch non-temporal, carried entirely by the long-context cases (+10.7% and +10.6..+14.5%) with the three short-context cases flat inside the noise band; the blanket K+V form is a consistent loss at every context and nt on Q is -1.1%",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-11",
+      "last_seen": "2026-08-17",
+      "title": "Choose the non-temporal hint per operand, not per kernel",
+      "lever": "Split the cache-policy decision per operand instead of per kernel: mark non-temporal only the stream that is genuinely single-touch, and A/B each of K, V, Q and the partial-output stores on its own.",
+      "apply": "One builtin non-temporal load on a native 128-bit vector type at the single-touch fetch site, leaving the other operands on the default path; loads only, so parity is free.",
+      "verify": "Diff the emitted ISA against a non-temporal-free control to confirm exactly one wide global load gained the hint, then interleaved per-case A/B; a policy edit that changes one bit and shows no ISA delta is the silent no-op failure mode.",
+      "pitfall": "The in-tree 16-byte non-temporal helper bought nothing -> it lowers to four scalar loads and quadruples the request count -> a single builtin load on a 4-wide vector emits one wide global load carrying the hint.\nThe blanket KV form captured only about a third of the available win -> the V tile is re-touched across the lane and head-element loops while K is not -> reuse distance, not operand family, decides the hint.\nEvery write-side non-temporal configuration lost, and a hint-free inline-asm control was +0.06% -> the partial outputs are consumed hot by the very next dispatch -> keep the store path cacheable.",
+      "caution": "Also verify whether the hint can reach the last-level cache at all before budgeting a residency round: 13 fractional-residency sweep points all lost, monotone in the mixing fraction in both directions, which is consistent with the hint being an L2 replacement policy that does not suppress LLC allocation.",
+      "source": "run mi355x_vllm_hip_paged_attention_decode-bmk7-12h, 2026-08-11..17, gfx950/MI355X, directions r2_d1 / r3_d1 / r5_d0; director-validated geomean 1.365x, correctness 7/7"
+    },
+    {
+      "name": "axes-that-close-once-decode-attention-sits-on-its-read-roof-attention-decode-gfx950-decode",
+      "description": "Closed axes on a paged decode already at its read roof: LLC residency, more occupancy, backend codegen flags and byte reduction all ~1.00x or worse.",
+      "keywords": [
+        "anti-pattern",
+        "closed-axis",
+        "attention-decode",
+        "paged-attention",
+        "roofline",
+        "occupancy",
+        "codegen",
+        "l2-residency",
+        "isa-inspection",
+        "decode",
+        "gfx950"
+      ],
+      "kernels": [
+        "paged_attention_ll4mi_QKV_mfma16_kernel",
+        "paged_attention_ll4mi_reduce_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "a HIP C++ paged decode attention on gfx950/CDNA4 already reading at ~90% of nameplate HBM peak, where the residual is a fixed per-call head rather than bytes",
+      "lifecycle": "active",
+      "layer": "learned",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "four families measured closed over eight late rounds: fractional LLC residency 13 sweep points all negative and the case the physics demanded was 2.6% worse; a variant that genuinely reached 7 waves/SIMD at zero scratch was -0.18% (5/5 pairs negative); the backend codegen-flag axis produced one byte-identical-ISA null and one -0.026% loser; an ISA byte census put measured DRAM traffic at 1.000x of theory on all 7 cases",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-15",
+      "last_seen": "2026-08-17",
+      "title": "Axes that close once decode attention sits on its read roof",
+      "lever": "Once an affine fit of time against partition count shows the marginal byte cost near the read roof, treat LLC residency, further occupancy, backend codegen flags and byte-count reduction as the low-yield families and spend the round on the fitted intercept, the per-call head, instead.",
+      "apply": "The cheap triage is the fit itself plus an ISA byte census: measured DRAM traffic over the theoretical minimum at 1.000x says there is no byte multiplier left, and the intercept's share (about 23% of the shortest-context case, about 13% at the longest) sizes the only remaining pot.",
+      "verify": "Price each closed family with one arm rather than a sweep: an occupancy arm that reaches the target wave count at zero scratch predicts the sign of the family, and a codegen flag needs an ISA diff next to the resource dump because a flag that is accepted and emits byte-identical code is a proven null the resource dump cannot see.",
+      "pitfall": "Higher occupancy closed from the far side: the extra waves arrived, the slope improved 0.93%, and the arm still lost because it consumed the prologue-pipelining slot that had already been banked -> price a new arm against the incumbent's structure, not against the original baseline.\nA zero-work probe of the second dispatch was read as bounding its removal -> it keeps a full-machine dispatch ramp, so it bounds optimizing that kernel and never fusing it away -> use a separate bound for fusion.\nTwo independently certified sub-1% wins were discarded by a round-delta promotion gate ~10x coarser than the measured run-to-run bar -> judge small wins by paired-sign agreement and effect over pair spread.",
+      "caution": "Also verify additivity rather than assuming it when stacking these late small wins: two disjoint-file directions predicted to sum to +0.47% measured +0.40%, so independent mechanisms composed at about 85%.",
+      "source": "run mi355x_vllm_hip_paged_attention_decode-bmk7-12h, 2026-08-11..17, gfx950/MI355X, 13 rounds / 25 direction-slots, directions r5_d0, r7_d0, r10_d2, r13_d0; director-validated geomean 1.365x, correctness 7/7"
+    }
+  ]
+}

@@ -1,0 +1,140 @@
+{
+  "run_id": "moe_gemm_fp8_blockscale-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "moe_gemm_fp8_blockscale"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "moe-blockscale-stage-pipeline-variant-and-cshuffle-cluster",
+      "description": "Re-route the down-proj stage to the narrow-N V1 pipeline (32x32 MFMA) and shrink the CShuffle M-cluster to 1 XDL/wave: ~1.29x on fp8 block-scaled MoE GEMM",
+      "keywords": [
+        "moe",
+        "grouped-gemm",
+        "fp8-blockscale",
+        "composable-kernel",
+        "mfma",
+        "cshuffle",
+        "pipeline-variant",
+        "tile-shape",
+        "compute-bound"
+      ],
+      "kernels": [
+        "moe_gemm_fp8_blockscale"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "mixed",
+      "key": "fp8 1x128 block-scaled fused-MoE grouped GEMM inside a frozen CK/aiter C++ stack on gfx950, compute-bound, tuned per stage rather than globally",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.29x weighted isolated vs the frozen baseline, non-overlapping; per-case 1.23x at batch 2, 1.30x at batch 32, 1.31x at batch 64 — the win grows with batch",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L1",
+      "verified_on": "2026-07-30",
+      "roofline": "compute-bound 0.37 -> 0.52 of the empirical roof",
+      "last_seen": "2026-08-12",
+      "title": "Pick the pipeline variant per stage, then shrink the CShuffle cluster",
+      "lever": "The two grouped-GEMM stages of an MoE layer want different instance shapes: routing the narrow-N down-proj stage from the wide V3 pipeline to the V1 256x64 instance buys a 32x32 MFMA there, and a second, cheap pass shrinking the CShuffle per-shuffle M-cluster to one XDL per wave pays on top of it.",
+      "apply": "Emit the alternate instance from the generator script the vendor stack already ships (the hand-written instance lists are frozen and not editable); set the stage-2 route to the V1 bm64 instance for all expert buckets, then set MXDLPerWave to 1 in the CShuffle epilogue of both stages.",
+      "stack": "total ~1.29x weighted isolated (director-validated) = four directions compounded\n  - 1. stage-2 pipeline variant V3->V1, 32x32 MFMA — 1.27x standalone, carries essentially the whole win\n  - 2. CShuffle store vector width 2->8 on stage 1 — +0.35% on top of (1)\n  - 3. host-side scale-transpose + routing-metadata cache — +0.27% on top of (1,2), and only on the smallest batch case\n  - 4. CShuffle M-cluster MXDLPerWave->1, bit-exact — +1.01% on top of (1,2,3)\n  - note: attribution is incremental in landing order, not independent.",
+      "verify": "Re-time against the pinned frozen baseline on every batch case, not just the largest — (3) moved only the smallest one; confirm the new instance actually got selected by disassembling and checking the MFMA shape changed, since a mis-routed bucket silently falls back to the old instance and still passes parity.",
+      "pitfall": "A stage-level tile/route change looked like a global win but only paid on one stage → the two stages have different N extents → route per stage and re-measure each; the per-stage M-tile split that this suggests is structurally impossible in this pipeline and returned 1.00x.",
+      "caution": "Also verify the epilogue change is bit-exact against the oracle before crediting it: the cluster shrink was, but the wider store width in (2) changes the write pattern and deserves its own parity check.",
+      "source": "run moe_gemm_fp8_blockscale-ch16h, 2026-07-30 — 16h per-kernel time-budget campaign, 24 passes, director-validated geomean"
+    },
+    {
+      "name": "moe-blockscale-frozen-vendor-stack-closed-axes",
+      "description": "Frozen vendor fp8 block-scaled MoE GEMM at ~0.37 of roof: LDS padding, epilogue rewrite, vector width, HIP-graph and fp4 weights all returned ~1.00x",
+      "keywords": [
+        "moe",
+        "grouped-gemm",
+        "fp8-blockscale",
+        "composable-kernel",
+        "anti-pattern",
+        "closed-axis",
+        "hip-graph",
+        "lds-padding",
+        "occupancy",
+        "compute-bound"
+      ],
+      "kernels": [
+        "moe_gemm_fp8_blockscale"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "mixed",
+      "key": "which axes are already closed on a frozen CK/aiter fp8 block-scaled MoE grouped GEMM at gfx950 whose MFMA path is already native",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "7 of 11 issued directions returned <=1.01x on all three batch cases (2/32/64): HIP-graph replay -3 to -4%, alternate and compiler-default hot-loop schedules -0.4 to -1.4%, LDS-pad and epilogue-cluster rewrites 1.000x, occupancy co-cut -18%",
+      "attempts": 11,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L2",
+      "verified_on": "2026-07-30",
+      "roofline": "stayed compute-bound at ~0.37 of the empirical roof through every direction listed here",
+      "last_seen": "2026-08-12",
+      "title": "Where a native-MFMA block-scaled MoE GEMM has no headroom left",
+      "lever": "When the disassembly shows the native f8f6f4 MFMA is already being emitted and the profile says the stall is dependency wait rather than a schedulable gap, the remaining headroom is in the per-128-K fp32 rescale that co-issues with the MFMA — an axis the frozen pipeline does not expose — so the classic memory/epilogue/graph axes are worth at most one cheap probe each.",
+      "apply": "Before budgeting rounds, disassemble to confirm the MFMA is native (an fnuz/ocp naming difference is cosmetic) and count the independent accumulators: with only two per K-scale block, low ILP is intrinsic and re-scheduling cannot recover it.",
+      "verify": "Treat a direction as closed only after re-timing on the frozen baseline across all batch cases; several of these read as small wins on one case and regressions on another before the frozen re-time.",
+      "pitfall": "Storing the expert weights as fp4 promised a large win but failed the numeric gate at 14-19 dB SNR against a 25 dB threshold → post-MFMA per-block rescale leaves no headroom for a 4-bit mantissa here → a sibling MoE kernel's fp4-weight win did transfer numerically only because it was cosine-gated, not SNR-gated.",
+      "caution": "Also verify the scheduler axis is even reachable before spending a round: the fused pipeline header here specializes exactly one scheduler enum and leaves the primary template body empty, so flipping the enum fails the build rather than producing a slower kernel, and the generator exposes no hook for it.",
+      "source": "run moe_gemm_fp8_blockscale-ch16h, 2026-07-30 — 16h time-budget campaign; ledger of 11 directions with per-direction verdicts"
+    },
+    {
+      "name": "jit-vendor-stack-rebuild-and-verdict-gotchas",
+      "description": "In a JIT-built frozen C++ vendor stack, header edits may not rebuild, gitignored run dirs hide the diff, and the auto improvement flag false-negatived wins",
+      "keywords": [
+        "method",
+        "jit-rebuild",
+        "composable-kernel",
+        "verification",
+        "false-negative",
+        "frozen-baseline",
+        "moe",
+        "grouped-gemm"
+      ],
+      "kernels": [],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "n/a",
+      "key": "confirming that a C++ edit actually took effect and actually won, inside a JIT-built vendor stack whose run directory is gitignored, gfx950",
+      "lifecycle": "active",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "4 of 4 winning rounds in this run were reported as not-improved by the automatic flag, while hand-diff plus re-timing showed 1.01x to 1.27x holding on all three batch cases (2/32/64)",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L0",
+      "verified_on": "2026-07-30",
+      "last_seen": "2026-08-12",
+      "title": "Prove the edit built and prove the win separately from the harness flag",
+      "lever": "In a JIT-compiled vendor stack, three independent things can each make a real win invisible — the edit not rebuilding, the diff not being visible to git, and the harness verdict flag reading false — so confirm build, patch and timing by three separate means before declaring an axis dead.",
+      "apply": "Move aside both the cached shared object and the JIT build directory before re-timing; capture the patch with a plain unified diff against the canonical tree rather than git; read the per-case timings directly instead of the aggregated improvement flag.",
+      "verify": "Grep the disassembly or the emitted instance name for the property you changed; if it is unchanged, the run you just timed is the old binary and its 1.00x means nothing.",
+      "pitfall": "An edited header produced identical timings → the JIT keyed the cache on the built artifact, not the header mtime → moving both the artifact and its build directory aside restored the rebuild; separately, the diff came back empty → the run tree is gitignored → diff against the canonical checkout instead.",
+      "caution": "Also verify a not-improved verdict by hand when the expected delta is around a percent: the aggregate flag here was a false negative on every winning round in this run, so a cheap real win can be discarded as noise.",
+      "source": "run moe_gemm_fp8_blockscale-ch16h, 2026-07-30 — 16h time-budget campaign, durable gotchas recorded in the run state insights"
+    }
+  ]
+}

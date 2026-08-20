@@ -1,0 +1,138 @@
+{
+  "run_id": "moe_stage1-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "moe_stage1"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "ck-moe-blockscale-mfma32-remap",
+      "description": "Remap a CK block-scale MoE grouped GEMM pipeline to 32x32 MFMA (+CShuffle epilogue, +A-LDS pad): 1.47x isolated, all three token cases",
+      "keywords": [
+        "moe",
+        "grouped-gemm",
+        "mfma",
+        "block-scale",
+        "composable-kernel",
+        "cshuffle-epilogue",
+        "lds-padding",
+        "fp8"
+      ],
+      "kernels": [
+        "moe_stage1"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "fp8 block-scale fused MoE grouped GEMM (gate+up stage) on gfx950, Composable-Kernel gufusion-style pipeline with host-side block_m grouping",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L2",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.4655x geomean isolated vs frozen baseline, non-overlapping; per-case 1.30x (smallest token case) / 1.55x / 1.58x — monotone in token count, no case regressed; reproduced across two passes (1.44x, 1.47x)",
+      "roofline": "memory-bound at ~0.40 of its roof -> compute-bound at ~0.53 of its roof",
+      "attempts": 3,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-07-29",
+      "last_seen": "2026-08-12",
+      "title": "32x32 MFMA remap carries a block-scale MoE grouped GEMM; epilogue and LDS pad are thin",
+      "lever": "Switch the grouped-GEMM pipeline variant from 16x16 to 32x32 MFMA with a matching host-side wave shuffle, then add a CShuffle write-out epilogue and one row of A-LDS padding.",
+      "apply": "The pipeline-version remap lives in the modifiable header the build recompiles (an -I path include), so no new kernel is needed; host shuffle shape must be changed in the same patch or the variant never engages.",
+      "stack": "total 1.4655x isolated (verified, incremental in landing order)\n  - 1. MFMA 16x16->32x32 + host shuffle — 1.444x standalone (round 1, verified) — carries the win\n  - 2. CShuffle write-out epilogue — +1.25% geomean on top of (1) (verified, bit-exact)\n  - 3. A-LDS extra-M pad 0->1 — +0.33% geomean on top of (1,2) (verified, bit-exact but thin)",
+      "verify": "Confirm the remapped variant actually runs (the small-token case is the one that silently falls back), then re-time all cases against the frozen baseline; all three landings were bit-exact so parity drift means the wrong variant compiled.",
+      "pitfall": "Perf/correctness runs read a stale artifact -> the build step deletes the shared object and the JIT dir -> compile first inside every measurement invocation.\nWidening the M tile to 128 corrupted results -> MPerBlock is coupled to the host block_m and 128 straddles two expert groups -> keep MPerBlock == block_m.",
+      "caution": "Also verify the accumulator width before chasing occupancy: here the fp32 gate+up accumulator IS the output and pins occupancy at 2, and forcing 3 spilled. Also verify a low-precision B storage format cuts op count at all — the f8f6f4 MFMA path consumes the same K per instruction, so fp4-B returned ~1.00x.",
+      "source": "run moe_stage1-ch16h (16h per-kernel time-budget campaign), 2026-07-29"
+    },
+    {
+      "name": "split-k-closed-when-grouped-grid-already-full",
+      "description": "Closed axis: split-K/KBatch on a dep-stall-bound grouped MoE GEMM whose grid already spans ~20 block-waves regressed monotonically (0.85x)",
+      "keywords": [
+        "moe",
+        "grouped-gemm",
+        "split-k",
+        "grid-occupancy",
+        "dep-stall",
+        "anti-pattern",
+        "composable-kernel"
+      ],
+      "kernels": [
+        "moe_stage1"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "small-batch",
+      "key": "small-token grouped MoE GEMM on gfx950 that profiles as dependency-stalled at occupancy 2, where the stall is mistaken for grid underfill",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L3",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "0.85x vs frozen baseline; on the smallest token case the cost grew monotonically with the split factor (~5x, ~7x, ~10x the unsplit case at K=2,3,4) while staying numerically exact; the unsplit incumbent held at 1.47x",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 1,
+      "verified_on": "2026-07-29",
+      "last_seen": "2026-08-12",
+      "title": "Count the blocks before you attribute a dependency stall to grid underfill",
+      "lever": "Before spending a round on split-K/KBatch, compute the real block count — (sorted token-id length / block_m) x N-tiles — and compare it to the CU count.",
+      "apply": "Here that arithmetic gave roughly 20 block-waves over the CUs even on the smallest case, so the premise 'about one block per CU' was false and the ~56% dependency-wait was per-block latency at occupancy 2.",
+      "verify": "If you try it anyway, check parity (it stays exact) and then look for the added fixed cost: a padded fp32 partial buffer zeroed per call, a cross-partial reduction that grows with the split factor, and a deferred activation pass.",
+      "pitfall": "Split-K plumbed correctly and bit-exact yet slower at every split factor -> the fixed reduction/partial-buffer cost dwarfs a fused GEMM that is already latency-bound, not throughput-bound -> the axis closes on measurement, not on a bug.",
+      "caution": "Also verify which regime you are in: this closure was measured where the grid was already full and occupancy was capped by accumulator VGPRs — a genuinely tall-K, block-starved shape is a different situation and worth re-measuring.",
+      "source": "run moe_stage1-ch16h (16h per-kernel time-budget campaign), 2026-07-29"
+    },
+    {
+      "name": "graph-replay-closed-when-dispatch-async-hidden",
+      "description": "Closed axis: HIP-graph capture/replay at the wrapper layer lost on every case (1.006-1.029x slower) when host enqueue is already async-hidden",
+      "keywords": [
+        "launch-overhead",
+        "hip-graph",
+        "host-runtime",
+        "anti-pattern",
+        "moe",
+        "grouped-gemm"
+      ],
+      "kernels": [
+        "moe_stage1"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "small-batch",
+      "key": "single-dispatch fused MoE GEMM wrapper on gfx950 where host enqueue is a small async-hidden fraction of the timed region",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L2",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "replay/eager 1.0292 on the smallest token case, 1.0058 and 1.0061 on the two larger ones — a loss on all three, worst where a launch win should be largest; incumbent held bit-exact at 1.47x",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 1,
+      "verified_on": "2026-07-29",
+      "last_seen": "2026-08-12",
+      "title": "Graph replay only pays if there is a launch floor to collapse",
+      "lever": "Measure the host-enqueue share of the timed region first; if it is a few percent and already overlapped with GPU work, graph capture has nothing to collapse and replay enqueue costs more than eager.",
+      "apply": "Capture worked mechanically at the wrapper layer on all cases, so 'captured=True' is not evidence of a win — the A/B is.",
+      "verify": "Compare replay against eager per case rather than against the frozen baseline only, and keep the graph path default-off so the incumbent stays byte-exact.",
+      "pitfall": "Capture succeeds and the numbers still get worse -> one dispatch per call, host already hidden behind compute -> the axis closes at the wrapper layer too, not only at the launcher layer.\nAllocation caching looked adjacent but was a non-lever here: the taken path writes into the output buffer, so there is no per-call allocation.",
+      "caution": "Also verify the dispatch count: a wrapper that enqueues many small kernels per call, or a decode step with a real launch floor, is the situation where this can still pay — re-measure rather than inherit this result.",
+      "source": "run moe_stage1-ch16h (16h per-kernel time-budget campaign), 2026-07-29"
+    }
+  ]
+}

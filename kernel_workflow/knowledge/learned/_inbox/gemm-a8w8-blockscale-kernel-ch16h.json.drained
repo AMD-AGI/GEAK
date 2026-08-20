@@ -1,0 +1,132 @@
+{
+  "run_id": "_gemm_a8w8_blockscale_kernel-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "_gemm_a8w8_blockscale_kernel"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "fp8-dequant-path-collapse-blockscale-gemm",
+      "description": "Block-scaled fp8 GEMM, gfx950: hw-cvt upcast + rank-1 scale collapse + 2-deep dot overlap lift a dequant-bound inner loop ~1.53x over a tuned seed",
+      "keywords": [
+        "fp8",
+        "block-scale",
+        "dequant",
+        "quantized-gemm",
+        "mfma",
+        "ilp",
+        "unroll",
+        "triton"
+      ],
+      "kernels": [
+        "_gemm_a8w8_blockscale_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "per-1x128 block-scaled fp8 (a8w8) GEMM in Triton on gfx950/MI355X, dequant-chain bound, arbitrary fp32 scales (not E8M0)",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "~1.53x incremental over an already-tuned seed, non-overlapping on the frozen-baseline A/B and reproduced by a confirmatory re-verify (~1.53x again); per-case cumulative 24.3x at the smallest M, 23.8x and 23.9x at the two larger M shapes; bit-exact on every config",
+      "attempts": 2,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "run _gemm_a8w8_blockscale_kernel-ch16h, 2026-08-12 — 16h time-scaling campaign, deep_explore directions r1_d0 / r2_d0",
+      "last_seen": "2026-08-12",
+      "title": "Collapse the dequant chain in a block-scaled fp8 GEMM",
+      "lever": "Three co-levers on the dequant path, not on occupancy: (a) hardware-cvt fp8 upcast (fnuz->OCP) instead of VALU-emulated conversion, which is the real few-percent-of-peak wall; (b) when the per-1x128 B scale is uniform across the N tile, collapse it to a scalar and dequantize as a rank-1 per-row FMA instead of a full [M,N] outer product every K iteration; (c) unroll K by 2 into two independent dots so the second MFMA issues while the first tile's dequant occupies the VALU.",
+      "apply": "Triton body rewrite; fold the fnuz->OCP 0.25 factor into the accumulator (exact for finite positive-normal fp8). The overlap holds only with exactly 2 dots, num_stages=2 and EVEN_K.",
+      "stack": "total ~1.53x incremental over the tuned seed = the rank-1 scale collapse and the 2-deep overlap unroll landed together in ONE direction and were never isolated from each other; the hw-cvt upcast is an earlier, separately measured win already inside the seed the 1.53x is taken over.",
+      "verify": "Grep the compiled ISA for the hardware cvt ops and for two interleaved MFMA blocks, then re-time every case against the frozen baseline and check outputs stay bit-exact after the accumulator fold.",
+      "pitfall": "A direction reported no improvement while the workspace source md5 equalled the seed -> the patch had not applied at all -> only trust an improved/not-improved verdict after grep-confirming the patch marker and config delta inside the verify workspace.",
+      "caution": "Also verify the rank-1 index is valid for your tile — the collapse assumes the N tile equals the scale group, so a smaller-than-group N tile indexes the wrong scale silently; and also verify LDS headroom before deepening the unroll past 2, which overflowed and never compiled at a 128x128 tile."
+    },
+    {
+      "name": "splitk-grid-fill-tiny-m-quantized-gemm",
+      "description": "Tiny-M block-scaled fp8 GEMM, gfx950: split-K=2 doubles grid fill with a fused reduce; deeper split-K and a narrower N tile both lose",
+      "keywords": [
+        "split-k",
+        "grid-fill",
+        "skinny-m",
+        "quantized-gemm",
+        "fp8",
+        "block-scale",
+        "tile-size",
+        "triton"
+      ],
+      "kernels": [
+        "_gemm_a8w8_blockscale_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "small-batch",
+      "key": "smallest-M shape of a block-scaled fp8 (a8w8) Triton GEMM on gfx950/MI355X, where the grid underfills the device rather than the body being slow",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "the tiny-M case ends at 24.3x, slightly ahead of the 23.8x/23.9x of the two larger per-case shapes it used to trail; split-K depth 3 and 4 measured worse than 2 on that same case, and a narrowed N tile came out ~11% slower there",
+      "attempts": 2,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "run _gemm_a8w8_blockscale_kernel-ch16h, 2026-08-12 — 16h time-scaling campaign, deep_explore + grid/tail directions",
+      "last_seen": "2026-08-12",
+      "title": "Split K by 2 to fill the grid on the tiny-M case",
+      "lever": "When the small-M shape launches roughly one CTA per CU, split K by 2: CTA count doubles, the per-CTA K loop halves (48->24 iterations here), and the best body config inverts toward fewer warps and more stages.",
+      "apply": "Add a split-K axis plus a fused low-precision reduction over the partials; a torch.sum-style multi-kernel reduce costs more than the split gains.",
+      "verify": "Re-time the small-M case alone against the frozen baseline (the larger shapes are unaffected), and re-tune warps/stages after splitting rather than carrying the pre-split config over.",
+      "pitfall": "Deeper splits regressed — depth 3 and 4 lost to 2 on the tiny case, because the extra reduction work stops amortizing once the per-CTA K loop is already short.",
+      "caution": "Also verify the launch grid is recomputed when tile sizes are overridden: one config's non-split grid formula was not, so a tile-size sweep measures the wrong geometry."
+    },
+    {
+      "name": "closed-axes-above-ilp-bound-quantized-gemm",
+      "description": "Above a tuned block-scaled fp8 GEMM on gfx950 five axes returned ~1.00x: occupancy raise, Gluon/HIP ping-pong, host graph capture, body microtune, tile shrink",
+      "keywords": [
+        "anti-pattern",
+        "occupancy",
+        "ilp",
+        "quantized-gemm",
+        "fp8",
+        "block-scale",
+        "launch-overhead",
+        "tile-size",
+        "gfx950"
+      ],
+      "kernels": [
+        "_gemm_a8w8_blockscale_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "a block-scaled fp8 (a8w8) Triton GEMM on gfx950/MI355X already sitting at a 2-wave/high-VGPR ILP optimum, where the remaining directions are closed",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "~1.00x on all five directions, measured not assumed: doubling warps reached a 2.5x-higher occupancy class yet came out ~4% slower on both large per-case shapes; a warps-per-eu hint spilled and cost ~14-15% there; a narrower N tile cost ~11% on the tiny case; hand-scheduled ping-pong and host-side graph capture were byte-identical or slightly worse",
+      "attempts": 5,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "run _gemm_a8w8_blockscale_kernel-ch16h, 2026-08-12 — 16h time-scaling campaign, five dead-end directions (occupancy, Gluon/HIP, host runtime, microtune, grid/tail)",
+      "last_seen": "2026-08-12",
+      "title": "Five closed axes above an ILP-bound block-scaled fp8 GEMM",
+      "lever": "Before spending a round on occupancy or host-side capture for a quantized GEMM whose profile is compute-bound, test whether the compiler's natural high-VGPR / 2-wave pick is already the register-for-ILP optimum: here reaching a higher occupancy class needed either more warps (which halves per-warp ILP and breaks the second-MFMA/dequant overlap) or a forced register cap (which spills), and both net-lose.",
+      "apply": "Read the generated ISA for VGPR count, occupancy class and scratch spill first; that is a minutes-long check that decides whether the occupancy axis is open at all.",
+      "verify": "Re-time any occupancy change per case rather than trusting the occupancy number, and confirm no scratch spill appeared; for host-side capture, first check whether a GPU-idle bubble exists at all — the tiny case was grid/compute-bound, not launch-bound.",
+      "pitfall": "A microtune sweep and a hand-scheduled body both came back with the source byte-identical to the seed — the honest reading is a true negative, confirmed by md5-matching the workspace against the banked best, not a broken harness.",
+      "caution": "Also verify these axes on your own scale granularity: they closed here for arbitrary fp32 per-1x128 scales, which forbid native scaled-MFMA; an E8M0 per-32 layout with a pinned tile reopens the compute axis, and the arithmetic here already sits at ~59% of the native-fp8 MFMA partition peak and ~91% of the dequant-limited floor, with HBM traffic near 6% of achievable bandwidth."
+    }
+  ]
+}

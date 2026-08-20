@@ -1,0 +1,168 @@
+{
+  "run_id": "mi355x_vllm_tilelang_mhc_fused_post_pre-bmk7-12h",
+  "date": "2026-08-17",
+  "kernel_names": [
+    "mi355x_vllm_tilelang_mhc_fused_post_pre"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "collapse-the-dispatch-chain-inside-each-shape-regime-arm-fused-norm-gemm-gfx950-both",
+      "description": "Split a fused norm+GEMM op into decode/prefill dispatch arms, collapse 3 kernels to 1-2 inside each, then stack the arms: ~3.44x geomean",
+      "keywords": [
+        "dispatch-collapse",
+        "kernel-fusion",
+        "launch-overhead",
+        "tilelang",
+        "decode",
+        "prefill",
+        "graph-replay",
+        "dispatch-floor",
+        "gfx950",
+        "stacking"
+      ],
+      "kernels": [
+        "mhc_fused_decode_tilelang",
+        "mhc_pre_big_fuse",
+        "mhc_post_split"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "fused_norm_gemm",
+      "regime": "both",
+      "key": "bf16 fused post-norm + pre-norm/GEMM chain (residual, row sqrsum, iterative row/col normalisation) authored in TileLang and JIT-compiled for gfx950/MI355, serving one decode and one prefill token count per hidden size under vLLM",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L2",
+      "levers": [
+        "host.dispatch-collapse",
+        "compute.kernel-fusion"
+      ],
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "3.4364x geomean isolated vs frozen baseline, director-verified, no case regressing at any integration step; per case 4.49x and 3.70x on the two 64-token decode cases (hidden 7168 / 4096) and 3.00x and 2.80x on the two 7211-token prefill cases",
+      "roofline": "prefill phase 1 ends at ~94% of the measured HBM read roof; decode ends at the graph-dispatch floor",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-14",
+      "last_seen": "2026-08-17",
+      "title": "Collapse the dispatch chain inside each shape-regime arm",
+      "lever": "When one fused op dispatches a chain of three kernels per call, have each kernel also emit the partials the next one needs (residual plus the dot/sqrsum partials) so the chain collapses 3 to 2 to 1, and give each shape regime its own arm of the host if/elif so the two collapses are orthogonal by construction.",
+      "apply": "Keep the arm selection a token-count/hidden-size branch in the host wrapper; fold the small pre-pass body into the large one rather than launching it; the residual re-read round trip disappears with the round trip, which is where most of the prefill gain sits.",
+      "stack": "- stack: total 3.4364x geomean isolated (director-verified) = four directions compounded\n  - 1. prefill dispatch collapse 3 to 2 to 1 - the 2 to 1 step alone -7.1% and -9.9% on the two prefill cases (rounds 2 and 6, verified)\n  - 2. prefill VALU/instruction cut on the surviving arm - cumulative 1.87x to 2.18x, the largest single step (round 4, verified)\n  - 3. decode collapse 3 to 2 plus halving the streamed weight re-read (+10%) and a zero-extra-byte load-width change (+15% on top) (rounds 3 and 6, verified)\n  - 4. CTA linearisation on a fully resident decode grid - -20.0% and -16.9% on the two decode cases with zero instruction changes (round 7, verified)\n  - note: attribution is incremental in landing order; the three arms stacked with plain apply, near-additive at +5.4% over the best individual",
+      "verify": "Count kernels per call to confirm the collapse engaged, then stack the arms in speedup order and re-time after each apply, requiring that no case regresses; an attribution run with the fusion gate switched off in the same tree separates two arms that look coupled.",
+      "pitfall": "Wrapper-level graph capture and entry-point env hatches bought nothing -> the harness already replays a graph, so only kernels inside it are countable, and the env hatch fell through to the unfused path -> cut dispatches inside the graph instead.\nFive rounds paid a re-harvest tax on wins that sat in per-round workspaces -> each workspace is re-inited with a squashed start commit, so a recorded sha is not a durable pointer -> commit the round winner as canonical and cite content-level evidence.",
+      "caution": "Also verify that the last collapse still pays once fences appear: pushing decode from two dispatches to one measured 8% / 7.5% worse here even with the acquire fence deleted, and an agent-scope fence carried its own tax.",
+      "source": "run mi355x_vllm_tilelang_mhc_fused_post_pre-bmk7-12h, 15 rounds / 33 direction-units, director validation accepted 2026-08-14"
+    },
+    {
+      "name": "cut-valu-on-the-prefill-arm-with-native-casts-and-packed-dot-fused-norm-gemm-gfx950-prefill",
+      "description": "On an issue-bound bf16 prefill norm+GEMM arm, native scalar casts, packed bf16 dot and a scalar accumulator cut VALU: 1.87x to 2.18x cumulative",
+      "keywords": [
+        "valu-bound",
+        "bf16",
+        "packed-valu",
+        "dtype-emulation",
+        "prefill",
+        "tilelang",
+        "gfx950",
+        "unroll",
+        "size-gating",
+        "dead-list"
+      ],
+      "kernels": [
+        "mhc_pre_big_fuse"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "fused_norm_gemm",
+      "regime": "prefill",
+      "key": "the instruction-issue-bound prefill arm of a bf16 fused norm+GEMM path on gfx950/MI355, written in TileLang against a C++ half-precision wrapper type",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L2",
+      "levers": [
+        "compute.valu-reduction",
+        "compute.packed-dot"
+      ],
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "cumulative 1.87x to 2.18x in one round (the largest single step of the campaign), isolated prefill body -38% at 7211 tokens; carried on both prefill cases (hidden 7168 and 4096) and flat on the two decode cases",
+      "roofline": "the arm moves from issue-bound to ~91% of the packed-dot issue roof",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-14",
+      "last_seen": "2026-08-17",
+      "title": "Cut VALU on the prefill arm with native casts and packed dot",
+      "lever": "On a bf16 arm whose pipe is issue-bound rather than byte-bound, four cheap edits compound: cast through the compiler's native scalar bf16 type instead of the library wrapper (whose constructor expands into a software round-to-nearest-even), feed a packed two-lane bf16 dot against a packed mirror of the weight operand, keep the row sum-of-squares in a scalar accumulator, and re-pick the unroll factor.",
+      "apply": "Mirror the streamed operand once in packed layout so the packed dot has an operand to consume; the scalar accumulator is what removes a long tail of select instructions the vector form emitted per element.",
+      "verify": "Diff the ISA per region before and after so the cut is attributed to the instruction it removed, then re-time the isolated arm against the frozen baseline; a cut that does not move runtime means the arm is already at a traffic roof rather than an issue roof.",
+      "pitfall": "A size gate that selected the fused arm only above a large hidden size was leaving a whole shape unserved -> the threshold had been fitted against the slower pre-cut body -> re-fitting it after the body sped up was worth another 4.3% of the session, and two unroll/width knobs a do-not-retest list called two-sided optima moved again once 42 registers were freed, for +1.15% geomean.",
+      "caution": "Also verify the knob under the production configuration rather than the kernel default: one round measured a knob at its default split count instead of the shipped one and reported a clean 18% win for what is a 15% loss, and a second round nearly repeated it with a global env knob feeding two shapes with different defaults.",
+      "source": "run mi355x_vllm_tilelang_mhc_fused_post_pre-bmk7-12h, rounds 4 and 9, director validation accepted 2026-08-14"
+    },
+    {
+      "name": "axes-that-stayed-closed-on-a-roof-bound-fused-norm-gemm-path-fused-norm-gemm-gfx950-both",
+      "description": "Once a fused norm+GEMM path sits at its HBM/L2/dispatch roofs, MFMA, phase overlap, occupancy, NT loads and CU-aligned grids all return <=1.00x",
+      "keywords": [
+        "anti-pattern",
+        "closed-axis",
+        "roofline",
+        "occupancy",
+        "double-buffering",
+        "non-temporal-loads",
+        "mfma",
+        "software-pipelining",
+        "wave-quantization",
+        "dispatch-floor",
+        "gfx950",
+        "tilelang"
+      ],
+      "kernels": [
+        "mhc_pre_big_fuse",
+        "mhc_fused_decode_tilelang"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "fused_norm_gemm",
+      "regime": "both",
+      "key": "the late rounds of a bf16 fused norm+GEMM campaign on gfx950/MI355 whose prefill arm is at the HBM read roof and whose decode arm is at the graph-dispatch floor",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L1",
+      "levers": [
+        "compute.mfma",
+        "compute.software-pipelining",
+        "compute.occupancy",
+        "mem.non-temporal"
+      ],
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "disconfirming, all isolated against the frozen baseline: MFMA on the prefill inner phase is bounded by the measured L2 read roof at its 2.15 MB working set to a whole-direction ceiling below the incumbent; cutting 21% of prefill phase-1 instructions moved runtime 0.0%; halving the chunk costs 3.7-19% before any mechanism runs; a double buffer +38%; wave specialisation +5.5%; non-temporal loads +5.3% on the largest prefill case; guard-free block_m>1 on decode hits a register cliff and occupancy 6 measures ~2x slower than the prediction; a CU-aligned decode grid -2.04% +/- 0.41% SEM with sign count 0/10 on one decode case and null on the other",
+      "roofline": "prefill phase 1 at ~94% of the measured HBM read roof with zero removable bytes; prefill phase 2 at ~91% of the packed-dot issue roof; decode at the graph-dispatch floor",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-14",
+      "last_seen": "2026-08-17",
+      "title": "Axes that stayed closed on a roof-bound fused norm-GEMM path",
+      "lever": "Before funding a structural round on an arm already near a roof, price the ceiling: measure bandwidth elasticity (perturb traffic and read the runtime response) and delete the candidate work entirely to get a free upper bound; here elasticity measured ~0.1, so the gap above the byte floor was never serialisation and every overlap/skew/double-buffer variant was paying for a cure to a bound the op does not have.",
+      "apply": "Get the bound from a deletion control rather than from a percent-of-roof figure: emptying the whole decode workgroup body left the residual chain intact and flat across a 7x change in workgroup count, which identifies it as a fixed dispatch/drain cost and caps any intra-kernel win at a few percent weighted.",
+      "verify": "Gate each of these on a same-process interleaved paired A/B with a per-rep sign count and a stated error bar; the wave-quantization result was a clean unanimous negative rather than the expected null, and only the paired form could show that.",
+      "pitfall": "A grid-shape hypothesis looked like it needed a new mechanism -> an existing flag already expressed exactly the shape under test -> flipping the flag off against a control pinned to production settled it in one probe, and showed the fractional tail wave is a purchase, not a cost, because the extra workgroups take the iterative normalisation off the critical path.",
+      "caution": "Also verify the non-temporal axis by form before closing it: the loads regressed, while a one-line traversal reversal delivered the cache residency the hint was meant to buy, and stores on write-once outputs were the only surviving form.",
+      "source": "run mi355x_vllm_tilelang_mhc_fused_post_pre-bmk7-12h, rounds 5, 8, 10, 13 and 15 (five disproof rounds), director validation accepted 2026-08-14"
+    }
+  ]
+}

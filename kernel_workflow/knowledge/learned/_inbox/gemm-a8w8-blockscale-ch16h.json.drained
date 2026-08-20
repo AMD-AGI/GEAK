@@ -1,0 +1,125 @@
+{
+  "run_id": "gemm_a8w8_blockscale-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "gemm_a8w8_blockscale"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "descale-the-k-loop-fp8-blockscale-gemm",
+      "description": "Fold and hoist block scales out of the fp8 GEMM K-loop until the inner loop is a plain non-scaled MFMA: 20.2x per-case stacked on gfx950",
+      "keywords": [
+        "fp8",
+        "block-scale",
+        "quantized-gemm",
+        "mfma",
+        "dequant-hoist",
+        "k-loop",
+        "l2-swizzle",
+        "hip-graph",
+        "gfx950"
+      ],
+      "kernels": [
+        "gemm_a8w8_blockscale"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "fp8 A8W8 block-scaled linear GEMM, Triton on a gfx950/MI355X partition, compute-bound after de-scaling",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "total 20.20x isolated geomean vs frozen baseline, non-overlapping; per-case 18.1x on the smallest-M case and 21.4x / 21.3x on the two larger-M cases",
+      "attempts": 5,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "title": "De-scale the fp8 GEMM K-loop, then feed the native non-scaled MFMA",
+      "lever": "Move every block-scale operation out of the accumulate loop so the K-loop reduces to the widest native non-scaled fp8 MFMA, and apply the scales once in fp32 on the epilogue accumulator.",
+      "apply": "Two folds compose: when GROUP_N equals BLOCK_SIZE_N the per-column scale collapses into the per-row scale bit-exactly; the remainder becomes a full-K mean scale hoisted above the loop. Emit v_mfma_f32_16x16x128_f8f6f4 (widest-K, nonkdim 16), keep the K-group structure only as MFMA scheduling, and capture the wrapper in a HIP graph.",
+      "stack": "total 20.20x isolated geomean = five directions compounded\n  - 1. native non-scaled fp8 MFMA, scales applied in fp32 outside the loop -> 10.69x (the big lever)\n  - 2. L2-reorder GROUP_SIZE_M 1->64 plus a .ca cache modifier, co-dependent and bit-exact -> 12.77x\n  - 3. wrapper HIP-graph capture/replay, fixed tensors, no host allocation in the captured region -> 15.1x\n  - 4. per-column scale folded into the per-row scale, bit-exact -> 16.70x\n  - 5. full-K mean-scale hoist, zero scale ops left in the K-loop -> 20.20x\n  - note: attribution is incremental in landing order, not independent",
+      "verify": "Read the compiled ISA and confirm the non-scaled MFMA opcode is what the loop issues and that no scale arithmetic survives inside it, then re-time against the frozen baseline and check oracle parity on every case.",
+      "pitfall": "Scale cost read as an in-loop FMA -> the real residual was the per-row scale GATHER, not the multiply -> hoisting the gather (not just the multiply) is what banked the last +10.6%.",
+      "caution": "The mean-scale hoist is only bit-exact under the fold condition; on shapes where GROUP_N differs from BLOCK_SIZE_N, also verify oracle parity per case before crediting the win, and also verify the scaled-MFMA variant separately since it re-introduces a scale feed into a loop you just made scale-free.",
+      "source": "run gemm_a8w8_blockscale-ch16h, 2026-08-12, 16h per-kernel time-budget campaign on gfx950"
+    },
+    {
+      "name": "fp8-gemm-latency-hiding-axes-closed",
+      "description": "Once the fp8 GEMM K-loop is scale-free, the latency-hiding axes (num_stages, bigger tiles, nonkdim 32, VGPR shave, LDS bypass) all return <=1.0x on gfx950",
+      "keywords": [
+        "fp8",
+        "quantized-gemm",
+        "mfma",
+        "occupancy",
+        "lds-tiling",
+        "num-stages",
+        "closed-axis",
+        "gfx950"
+      ],
+      "kernels": [
+        "gemm_a8w8_blockscale"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "operand-feed residual of a scale-free fp8 GEMM on gfx950, where occupancy and latency-hiding rounds stop paying",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "~1.00x or worse across five directions on all three per-case shapes: num_stages=3 does not build, a 256x64 tile measures 0.64x, nonkdim 16->32 measures 0.916x, VGPR shave and a register-resident LDS-bypass rewrite both land at ~1.00x; the geomean sat unchanged over six re-measurements",
+      "attempts": 6,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "title": "The operand-feed residual of a scale-free fp8 GEMM is a closed axis",
+      "lever": "Price the occupancy and pipelining walls arithmetically before spending a round on them: both are computable from the tile before any candidate is authored.",
+      "apply": "Compute accumulator VGPR/lane for the tile (an fp32 128x128 accumulator over eight waves is ~32 VGPR/lane on its own; the kernel sat at 88, giving ~5 waves/SIMD and ~2 workgroups/CU) and check unroll*num_stages<=5 against the 160KB/CU LDS budget. If both bind, the round is better spent on a different mechanism.",
+      "verify": "Re-time every candidate against the frozen baseline rather than against the previous champion, and treat an LDS-overflow build failure as the wall itself, not as a config typo to work around.",
+      "pitfall": "MFMAs issue back-to-back yet stall repeatedly -> the current-iteration LDS read feeding each MFMA is gated by lgkmcnt and is inherently serial with its consumer, so it cannot be prefetched -> even a hand-scheduled register-resident rewrite that bypasses LDS entirely failed to beat the ceiling.",
+      "caution": "These closures were measured with the K-loop already scale-free and occupancy pinned at ~2 workgroups/CU; on a different tile, dtype or accumulator width the walls may not bind, so also verify the VGPR and LDS arithmetic for your own shape before reusing the conclusion.",
+      "source": "run gemm_a8w8_blockscale-ch16h, 2026-08-12, 16h per-kernel time-budget campaign on gfx950"
+    },
+    {
+      "name": "partition-aware-percent-of-peak",
+      "description": "On a partitioned GPU, percent-of-peak against full-chip nameplate under-reads by the CU ratio; rescale to the exposed CU count before calling the gap headroom",
+      "keywords": [
+        "roofline",
+        "percent-of-peak",
+        "partition",
+        "measurement",
+        "mfma",
+        "gfx950"
+      ],
+      "kernels": [],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "compute-bound",
+      "key": "reading percent-of-MFMA-peak on a GPU that exposes only a slice of the physical part, where nameplate peak is the wrong denominator",
+      "lifecycle": "active",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "same per-case measurements moved from ~33% of full-chip nameplate MFMA peak to ~72% of achievable partition peak once the denominator used the 118 of 256 CUs actually exposed, leaving ~4% to the pure-fp8-GEMM floor on the two larger cases instead of an apparent 67% of headroom",
+      "attempts": 2,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "title": "Scale percent-of-peak to the CUs the box actually exposes",
+      "lever": "Before treating a low percent-of-peak as headroom, take the CU count the runtime reports and divide the marketing peak by the fraction of the physical part you were given.",
+      "apply": "Read the exposed CU count from the device query, form the ratio against the full part's CU count, and use that fraction of nameplate as the roofline ceiling for every fraction-of-peak claim in the run's report and in any card it produces.",
+      "verify": "Cross-check the rescaled fraction against an independent instrument (the campaign's own empirical roofline for the same case) and against the arithmetic floor of the pure operation; a plausible number on two ceilings is the confirmation.",
+      "pitfall": "A compute-bound kernel looked to be sitting at a third of peak with plenty of room -> the ceiling had been computed from the whole physical part while the run held under half of it -> rescaling put the kernel near its realizable ceiling and correctly closed five subsequent rounds of chasing.",
+      "caution": "The exposed-CU ratio is not the only shrink between nameplate and realizable peak (clock state and the operation's own arithmetic floor also cut it), so also verify the rescaled ceiling against a microbenchmark of the bare operation before declaring a kernel finished.",
+      "source": "run gemm_a8w8_blockscale-ch16h, 2026-08-12, 16h per-kernel time-budget campaign on gfx950"
+    }
+  ]
+}

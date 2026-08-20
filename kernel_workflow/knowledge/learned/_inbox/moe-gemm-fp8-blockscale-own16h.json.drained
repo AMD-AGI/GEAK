@@ -1,0 +1,131 @@
+{
+  "run_id": "moe_gemm_fp8_blockscale-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "moe_gemm_fp8_blockscale"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "bucket-routed-subvariance-stacking",
+      "description": "Shape-conditional wins that read as noise on a 3-case geomean cancel when shipped globally; routed per token bucket they add exactly.",
+      "keywords": [
+        "bucket-routing",
+        "host-runtime",
+        "moe",
+        "grouped-gemm",
+        "tile-selection",
+        "sub-variance",
+        "fp8-blockscale"
+      ],
+      "kernels": [
+        "fmoe_fp8_blockscale_g1u1"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "mixed",
+      "key": "two-stage fp8 block-scale fused-MoE grouped GEMM on gfx950/CDNA4, CK templates behind a Python host router that can pick an instance per token bucket",
+      "lifecycle": "active",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "+1.44% over the pre-routing tree, reproduced five times; per-case the large tile is +1.4% at 65536 tokens but -2.2..-2.4% at 2048, and the epilogue-fusion threshold is +1.5% at 2048 and inert above it — shipped globally the pair nets ~1.00x",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L2",
+      "verified_on": "2026-08-09",
+      "title": "Route discarded sub-noise knobs per shape instead of shipping them globally",
+      "lever": "re-score candidates already discarded as sub-variance: a knob that helps one shape and hurts another is a routing-table entry, not a global default.",
+      "apply": "one host-side table keyed by token bucket selecting the instance and the fusion threshold; single-source each value so the host re-slicer and the device define cannot drift, and give each value its own compiled module name.",
+      "verify": "score each knob on its own bucket — a one-case move of ~1.5% dilutes to ~0.5% on a 3-case geomean against ~2% box variance — then re-measure the pairwise matrix and check additivity rather than assuming it.",
+      "pitfall": "a stacked patch measured slower than its best single part -> the fusion predicate was compile-time-only and therefore bucket-blind, cancelling the other direction's small-token win -> make availability compile-time and the taking runtime (one comparison on token count).\nengineer and verifier disagreed by ~1% on the same tree -> one instance carries a 0.85% run-to-run spread against a 0.09% base -> settle sub-2% items with interleaved paired cycles, not one full run per arm.",
+      "caution": "also verify both halves of a host/device coupling are per-call: a knob whose partner (a weight preshuffle fixed once at startup) is not per-call is not per-bucket expressible, however well it scores.",
+      "source": "run kernel_20_geak_0808_16h, 2026-08-08..09, gfx950/MI355X; director-validated 1.41x geomean, correctness PASS"
+    },
+    {
+      "name": "xcd-chunk-swizzle-l2-reuse",
+      "description": "Chunk-interleaving the linear workgroup id inverts the hardware XCD round-robin and restores weight reuse inside each XCD's L2 slice.",
+      "keywords": [
+        "xcd-swizzle",
+        "l2-reuse",
+        "workgroup-mapping",
+        "bucket-routing",
+        "moe",
+        "grouped-gemm",
+        "fp8-blockscale"
+      ],
+      "kernels": [
+        "fmoe_fp8_blockscale_g1u1"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "mixed",
+      "key": "multi-XCD CDNA4 (gfx950) grouped GEMM whose expert-weight operand is re-read across workgroups — the grid-to-L2-slice mapping, not the inner loop",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "largest single item of the campaign: first-stage HBM read traffic -47% at 2048 tokens and -67% at 65536, carrying the cumulative from 1.29x to 1.35x; a later per-grid-size chunk adds +0.9% more, with the mid case monotone in chunk size (-0% / -1.9% / -2.4% for 24 / 384 / 816)",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L2",
+      "verified_on": "2026-08-09",
+      "title": "Invert the XCD round-robin with a chunk-interleaved workgroup remap",
+      "lever": "the hardware distributes workgroups across XCDs on the LINEAR id, so tiles sharing an operand scatter; remap the id in chunks so a run of tiles sharing weights lands on one XCD's L2 slice.",
+      "apply": "index remap inside the gridwise header, gated on exact divisibility (total % (NumXcd*Chunk) == 0) with a fallback to the stock mapping; the logical XCD count that won was half the physical one, and the chunk value itself is the tuned quantity.",
+      "verify": "enumerate the remap host-side and prove it is a bijection before it is allowed to be timed; then confirm the HBM read counter drops, and swap prebuilt modules in place so an arm is never confounded with a build.",
+      "pitfall": "a remap looked ~12% faster -> the id formula was not a bijection and silently dropped 2 of 12 tiles at one N extent -> full-speed wrong answer that a speed-only A/B accepts; bijection proof first.\none global chunk value scored neutral for ten rounds -> the optimum tracks grid size, and the best mid-case value costs +8.2% at the small case -> express the chunk as a function of grid size.",
+      "caution": "also verify the reuse you are targeting is contiguous in the remapped id — a second-stage operand strided by n-block is structurally unreachable by the same swizzle, and that stage's grid order was pinned by its epilogue's row addressing.",
+      "source": "run kernel_20_geak_0808_16h, 2026-08-08..09, gfx950/MI355X; 10-cycle interleaved paired A/B, correctness PASS per arm"
+    },
+    {
+      "name": "fixed-short-k-loop-inner-axes-closed",
+      "description": "With K trips pinned by the operator contract and full-rate MFMA already emitted, inner-loop levers all returned ~1.00x; the wins sat in mapping and routing.",
+      "keywords": [
+        "anti-pattern",
+        "closed-axis",
+        "instruction-schedule",
+        "double-buffering",
+        "atomic-combine",
+        "moe",
+        "grouped-gemm",
+        "fp8-blockscale"
+      ],
+      "kernels": [
+        "fmoe_fp8_blockscale_g1u1"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "mixed",
+      "key": "CK two-stage fp8 block-scale MoE on gfx950 once tile and occupancy wins have landed — which further rounds inside the K loop returned nothing",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "~1.00x across eight directions: seven schedule variants plus an accumulator split ~+0.4% (inside A/A drift); legal barrier removal 0% (an illegal zero-barrier positive control was itself slower); LDS double buffering -0.53% at 32768 / -0.34% at 65536 tokens; whole-op graph capture 1.011 / 0.996 / 1.003 per case; replacing the atomic combine +2.8% at 65536, nil at 32768, -2.7% at 2048; single-kernel fusion priced at ~+0.6% geomean",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L1",
+      "verified_on": "2026-08-09",
+      "title": "A contract-fixed short K loop closes the inner-loop axes",
+      "lever": "price the loop before funding a round inside it: when trip count is fixed by the operator contract and the arch's full-rate MFMA is already emitted, reordering, deleting, retiling, deeper prefetch and cross-stage fusion each measured ~1.00x, while grid-to-cache mapping and host routing still paid.",
+      "apply": "build the cheap bounding controls first — an exact-copy control, an empty scheduler, an illegal zero-barrier variant — to prove the knob is live and to cap the prize before writing the real candidate.",
+      "verify": "read the emitted ISA for the full-rate instruction and the arch macro before assuming an MFMA-rate gap, and normalize busy counters (per-SIMD vs per-resident-wave) before believing an occupancy figure; prefetch depth is capped by the register file, so check the wave/SIMD count after any depth change.",
+      "pitfall": "seven candidates were wrong at full speed and passed a speed-only A/B -> clamped fp8 conversion against an OCP-range tensor, a non-bijective remap, MFMA-16 against a shuffled operand, a pre-activation routed-weight multiply, accumulator reassociation, an out-of-range N extent returning NaN with no static assert -> SNR-gate every instance/layout arm.\nan A/A control inherited the previous arm's knobs and turned a loss into a fake win -> a runtime wrapper with a compile-time trip count of 1 also cost ~15% on every instance -> make A/A a harness invariant and rebuild/install explicitly after header edits.",
+      "caution": "also verify your controls are inert: hold one cell constant across several arms so the collisions give a free reproducibility floor for the cell you are not testing.",
+      "source": "run kernel_20_geak_0808_16h, 2026-08-08..09, gfx950/MI355X; 13 rounds, 30 direction-credits, director-validated"
+    }
+  ]
+}

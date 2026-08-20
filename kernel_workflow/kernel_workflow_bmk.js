@@ -48,6 +48,9 @@ for (let i = 0; i < KERNELS.length; i++) {
       gpu_ids: GPU,
       eval_dir: EXP_BASE + '/' + name,
       apply_to_original: 'false',
+      // Forward the KB switch. This arg object is explicit, so an omitted key silently takes the
+      // lane's ON default and a batch asked to run KB-off ran KB-on with no error.
+      use_learned_kb: A.use_learned_kb != null ? String(A.use_learned_kb) : 'true',
       task: TASK,
     });
   } catch (e) {

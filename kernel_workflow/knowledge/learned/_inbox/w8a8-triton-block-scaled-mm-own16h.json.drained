@@ -1,0 +1,137 @@
+{
+  "run_id": "_w8a8_triton_block_scaled_mm-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "_w8a8_triton_block_scaled_mm"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "fp8-fnuz-software-decode-bit-exact",
+      "description": "Block-scaled fp8-FNUZ GEMM on gfx950: replacing the emitted per-element FNUZ upcast with a bit-exact packed integer re-encode dominates the win.",
+      "keywords": [
+        "fp8",
+        "fnuz",
+        "dequant",
+        "block-scaled",
+        "bit-exact",
+        "packed-valu",
+        "quantized-gemm",
+        "gfx950",
+        "triton"
+      ],
+      "kernels": [
+        "_w8a8_triton_block_scaled_mm"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "W8A8 block-scaled GEMM with fp8-e4m3FNUZ operands and bf16 out, Triton on gfx950/MI355 — the software FNUZ->fp16 decode path in the K loop",
+      "lifecycle": "active",
+      "cost": "L3",
+      "verified_on": "2026-08-08",
+      "title": "Bit-exact integer re-encode of the fp8-FNUZ upcast",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "16.50x isolated geomean vs the frozen baseline (director-verified, -0.11% vs the lane's claim); per-case 14.02x at M=2048, 17.81x at M=32768, 17.99x at M=65536 — the decode rewrite alone measured 3.82x in the first round",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "lever": "When the compiler emits a software per-element FNUZ fp8 -> fp16 upcast inside the K loop (Triton warns about it), hand-write the same upcast as an integer bit shuffle on packed dwords; the dequant VALU chain is then the thing you delete, not the thing you tune.",
+      "apply": "Kernel-source level: shift/mask the packed byte pairs with 16-bit packed ops (a packed arithmetic-shift plus a sign-hole mask got it to ~3 VALU per output dword), keep the loads as uint32 so tile geometry and vector-load widths are unchanged, and pair it with a two-tier launcher config table (num_warps, waves_per_eu as an allocator directive, mask elision for even-K) plus a once-per-call B decode pre-pass.",
+      "stack": "total 16.50x isolated geomean (director-verified) = six directions compounded, incremental in landing order\n  - 1. bit-exact integer re-encode of the FNUZ upcast — 3.82x standalone (round 1, verified) — the bulk of the win\n  - 2. two-tier launcher/config table with a plan cache — ~+30% cumulative on top (rounds 1-5, verified)\n  - 3. dword-granular decode then packed 16-bit ops — +22.8% then +4.4% on top (rounds 2 and 10, verified)\n  - 4. per-token scale re-layout in the launcher — +3.2% (round 8, verified); the strided gather was ~36% of L2 demand at 16x read amplification\n  - 5. decode B once per call in a pre-pass — +6.2% (round 9, verified)\n  - 6. joint re-tile 256x64 -> 128x128 anchored with the decode plan — +2.1% (round 12, verified)\n  - note: attribution is incremental in landing order, not independent.",
+      "verify": "Compare the isolated A/B ratio against the frozen baseline on every M case, and compare the candidate's output to the predecessor with an integer equality test on the raw bit view — every promotion here was bit-identical, and an independent re-check at five seeds plus three off-tile M values stayed bit-identical.",
+      "pitfall": "the arch's hardware fp8 converter looked like the obvious replacement -> its scaled-convert form destroys the sign of codes 0x7F/0xFF and the legacy forms decode OCP rather than FNUZ, so it is both wrong and 4 ops/dword against the software 3 -> keep the software decode and enumerate all 256 input codes to prove exactness",
+      "caution": "also verify exactness with an integer compare rather than the harness tolerance: when the output's smallest magnitude is ~1e-9 against an rms near 28, a max-relative-error gate of 1e-2 IS bit-exactness in disguise, so a scale re-association that reads 'within tolerance' can still be a numeric change.",
+      "source": "run _w8a8_triton_block_scaled_mm-own16h, 2026-08-08 campaign, director validation accepted 2026-08-12"
+    },
+    {
+      "name": "reprice-dead-list-after-operating-point-moves",
+      "description": "After a decode/layout lever lands, re-price the knobs already dead-listed and sweep the config as a tuple: two thirds of one round win was resurrected knobs.",
+      "keywords": [
+        "config-sweep",
+        "dead-list",
+        "tile-shape",
+        "num-stages",
+        "split-k",
+        "quantized-gemm",
+        "gfx950",
+        "triton",
+        "search-strategy"
+      ],
+      "kernels": [
+        "_w8a8_triton_block_scaled_mm"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "compute-bound",
+      "key": "search discipline for a long Triton GEMM campaign on gfx950: re-pricing dead-listed knobs once a structural lever moves the operating point, and sweeping the config as a tuple rather than one knob at a time",
+      "lifecycle": "active",
+      "cost": "L1",
+      "verified_on": "2026-08-08",
+      "title": "Re-price the dead list when the operating point moves",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "the round's +6.2% was ~2/3 resurrected knobs: the structural change alone measured 0.99x at M=2048 and 1.02x at M=65536, with the rest coming from split-K 2->1 and num_stages 2->1, both previously dead; a later joint re-tile added +2.1% on all three M cases where 21 one-knob variants had returned ~1.00x",
+      "attempts": 3,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "lever": "Treat the dead list as valid only at the operating point that produced it: whenever a structural change alters register pressure, LDS bytes or per-MFMA work, re-run the previously rejected knobs, and move the tile shape jointly with the decode/layout plan instead of one knob per direction.",
+      "apply": "Keep a forced-config hook in the launcher so any (tile, num_warps, non-k-dim, stages, split-k, pre-pass) combination can be replayed without a source edit, then sweep the tuple; a structural change that measures ~1.00x on its own can still be worth taking because it is the carrier for the knobs it re-enables.",
+      "verify": "Score the tuple, not the knob: re-measure the isolated A/B for the combination and separately for the structural change alone, so a carrier that looks neutral is not discarded before its dependents are priced.",
+      "pitfall": "a one-knob-at-a-time re-pricing across 21 variants concluded the config table was exhausted -> the axis it tested was tile size and warp count independently, while the payoff needed tile and decode layout moved together -> the tuple sweep found +2.1% the single-knob sweep could not see",
+      "caution": "also verify the reverse direction: a knob resurrected this way can go dead again after the next structural landing, so re-price rather than assume the new value is now permanent.",
+      "source": "run _w8a8_triton_block_scaled_mm-own16h, 2026-08-08 campaign, director validation accepted 2026-08-12"
+    },
+    {
+      "name": "post-dequant-residual-axes-closed",
+      "description": "Once the dequant chain is gone from a compute-bound fp8 GEMM on gfx950, LDS, barrier, occupancy and host-launch directions all return ~1.00x.",
+      "keywords": [
+        "closed-axis",
+        "lds-tiling",
+        "occupancy",
+        "launch-overhead",
+        "hip-graph",
+        "quantized-gemm",
+        "gfx950",
+        "triton",
+        "measurement-discipline"
+      ],
+      "kernels": [
+        "_w8a8_triton_block_scaled_mm"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "where NOT to spend rounds on a compute-bound Triton block-scaled fp8 GEMM on gfx950 once the decode chain has already been removed",
+      "lifecycle": "active",
+      "cost": "L2",
+      "verified_on": "2026-08-08",
+      "title": "The residual axes on a decoded fp8 GEMM are already closed",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "~1.00x across four axes: graph-capture replay measured -10.5% at M=2048 and -5.1% at M=32768 against direct dispatch; pre-pass fusion has a ceiling under 0.2% on every case; nine LDS round-trip / barrier-count directions all landed under the 1.02x gate; the third workgroup priced at +9.1% against the 25% tile cost of reaching it",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "lever": "Before committing rounds to LDS round-trip removal, barrier reduction, graph capture, pre-pass fusion or a third workgroup on such a kernel, price each ceiling arithmetically first — here all four closed at roughly parity, and the remaining >10% idea (a preshuffled MFMA-fragment operand buffer) is not expressible through tile-language loads at all.",
+      "apply": "Ceiling arithmetic before code: express the candidate's best case as a fraction of the measured kernel ratio (host-side prep versus kernel time, removable fill versus intrinsic per-MFMA work, occupancy gain versus the tile shrink that buys it) and drop anything whose ceiling sits under the promotion gate.",
+      "verify": "Same-session interleaved medians with identity-config control rows before and after each block in both orders; an identical tree re-read across five sessions spread about 1%, so a candidate under ~1.02x is inside that spread.",
+      "pitfall": "a software-pipelining direction hit both of its stated success criteria (prologue share and stall ratio each improved substantially) and ran 4.6% slower -> the counters were proxies, not causes, and the predictor scoreboard finished 0-for-4 on issue count and 0-for-2 on prologue share -> state every target as a ratio on the launched binary before writing code",
+      "caution": "also verify the warm-up launch count is held fixed whenever a candidate changes the early dispatch count: 66 extra warm-up launches alone measured +3.4% at M=2048 and +1.0% at M=32768 with no kernel change, which is larger than most candidates here.",
+      "source": "run _w8a8_triton_block_scaled_mm-own16h, 2026-08-08 campaign, director validation accepted 2026-08-12"
+    }
+  ]
+}
