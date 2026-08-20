@@ -36,8 +36,13 @@ It exists to close two systematic "isolated win / e2e loss" holes that a naive p
       form (observed-vs-ceiling) available to any downstream e2e comparison; an observed delta far above
       the ceiling is box drift / measurement error, not the kernel.
 """
+import json
 import math
 import os
+import shutil
+import signal
+import subprocess
+import sys
 import time
 
 
@@ -457,8 +462,38 @@ def _time_graph(torch, g, warmup, repeats, flush):
 
 
 # --------------------------------------------------------------------------- (b) correctness
+def flatten_outputs(out):
+    """Deterministic tensor list from an op's return value: tensor, tuple/list, dict, or nesting.
+
+    Attention entries return `(out, lse)`; a bare-tensor assumption does not merely raise here, it
+    makes `correct()` fall into its except and report the candidate INCORRECT — a correct kernel
+    rejected for the shape of its return value. Dict order is by sorted key so the two legs pair up."""
+    if isinstance(out, dict):
+        return [t for k in sorted(out) for t in flatten_outputs(out[k])]
+    if isinstance(out, (tuple, list)):
+        return [t for o in out for t in flatten_outputs(o)]
+    if hasattr(out, "shape"):
+        return [out]
+    return []      # scalars/None carry no tolerance semantics and are not compared
+
+
+def to_device_like(ref, dev):
+    """Move a recorded oracle entry (tensor or container of tensors) onto `dev`."""
+    if isinstance(ref, dict):
+        return {k: to_device_like(v, dev) for k, v in ref.items()}
+    if isinstance(ref, tuple) and hasattr(ref, "_fields"):
+        return type(ref)(*(to_device_like(o, dev) for o in ref))
+    if isinstance(ref, (tuple, list)):
+        return type(ref)(to_device_like(o, dev) for o in ref)
+    return ref.to(dev) if hasattr(ref, "to") else ref
+
+
 def correct(out, ref, tol):
     """Per-element mixed-tolerance check `|out-ref| <= atol + tol*|ref|`, returns (ok, max_rel_err).
+
+    A multi-tensor return (e.g. attention's `(out, lse)`) is compared component-wise: ALL components
+    must pass, and the reported error is the worst of them. A count mismatch between the two sides is
+    a failure, never a silent comparison of the first component only.
 
     The absolute floor `atol` exists ONLY to keep near-zero reference elements from blowing up the pure
     relative term — it is set to the computation's NOISE level `tol * RMS(ref)`, NOT `tol * max(|ref|)`.
@@ -467,6 +502,20 @@ def correct(out, ref, tol):
     on the small elements the value-parity gate is meant to catch. RMS tracks the bulk magnitude, so for
     a uniform-magnitude tensor RMS≈max (behavior unchanged) but for a spiky tensor RMS≪max (the floor
     tightens and the small-element error is no longer masked)."""
+    po, pr = flatten_outputs(out), flatten_outputs(ref)
+    if len(po) != 1 or len(pr) != 1:
+        if not po or len(po) != len(pr):
+            return False, float("inf")
+        ok_all, worst = True, 0.0
+        for o, r in zip(po, pr):
+            ok, err = _correct_one(o, r, tol)
+            ok_all = ok_all and ok
+            worst = max(worst, err)
+        return ok_all, worst
+    return _correct_one(po[0], pr[0], tol)
+
+
+def _correct_one(out, ref, tol):
     torch = _torch()
     try:
         if tuple(out.shape) != tuple(ref.shape):
@@ -615,7 +664,8 @@ def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3)
 
 # --------------------------------------------------------------------------- (b) random-value parity vs live baseline
 def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
-                             draws=3, warmup=10, repeats=50, inner=1, graph=False, seed=0):
+                             draws=3, warmup=10, repeats=50, inner=1, graph=False, seed=0,
+                             baseline_outputs=None):
     """Validate the candidate against the LIVE frozen baseline on MANY RANDOM INPUT VALUE DRAWS at the
     SAME online-aligned shapes (NOT random shapes — dims are fixed per `sig`, only values vary). The
     frozen oracle (`reference_io.pt`) pins ONE recorded input+golden; this catches value-dependent bugs
@@ -631,8 +681,13 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
     with the L2/Infinity cache flushed cold before each iteration; `inner=1` (one launch per event window)
     since events time the GPU timeline directly — no host-side amortization loop is needed.
 
-    `baseline_call(args) -> out`  invokes the frozen real online kernel (meta.baseline_callable /
-        baseline_src/). `current_call(args) -> out` invokes the candidate in kernel_src/.
+    `baseline_outputs` (PREFERRED) = the dict `baseline_random_outputs(...)` recorded by the BASELINE
+        leg in its OWN subprocess (`leg_runner.py --mode oracle` under `baseline_overlay/`), keyed
+        `"<sig>|<draw>"`. Same seed => same inputs, so the two legs never have to be co-resident. When
+        it is given, `baseline_call` is ignored and `speedup` is None here (timing comes from
+        `measure_legs`).
+    `baseline_call(args) -> out` is the LEGACY in-process form, kept for op_bench / single-process tasks.
+        `current_call(args) -> out` invokes the candidate in kernel_src/.
     `shapes` is a list of {"sig": <label>, "make_inputs": callable(rng) -> args}. `make_inputs` builds a
         FRESH random in-regime input set for that shape's fixed dims (the unittest closes over
         regime_spec/synth_kv_cache); `rng` is a seeded torch.Generator for reproducibility.
@@ -649,9 +704,20 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
             rng = torch.Generator(device=device).manual_seed(int(seed) + i)
             try:
                 args = make_inputs(rng)
-                base_out = baseline_call(args)
-                base_snap = base_out.detach().clone()      # snapshot BEFORE current runs (anti-alias)
-                cand_out = current_call(args)
+                if baseline_outputs is not None:
+                    ref = baseline_outputs.get(f"{sig}|{i}")
+                    if ref is None:
+                        raise KeyError(f"no recorded baseline output for {sig}|{i}")
+                    cand_out = current_call(args)
+                    parts = flatten_outputs(cand_out)
+                    if not parts:
+                        raise TypeError(f"candidate returned no tensor for {sig}|{i}")
+                    base_snap = to_device_like(ref, parts[0].device)
+                else:
+                    base_out = baseline_call(args)
+                    # snapshot BEFORE current runs (anti-alias)
+                    base_snap = [t.detach().clone() for t in flatten_outputs(base_out)]
+                    cand_out = current_call(args)
             except Exception as e:
                 all_ok = False
                 per_case.append({"case": f"random[{i}]:{sig}", "correct": False, "max_rel_err": None,
@@ -659,9 +725,12 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
                 continue
             ok, err = correct(cand_out, base_snap, tol)
             all_ok = all_ok and ok
-            ms_base = time_op(lambda: baseline_call(args), warmup, repeats, inner, graph)
-            ms_cand = time_op(lambda: current_call(args), warmup, repeats, inner, graph)
-            speedup = (ms_base / ms_cand) if (ms_base and ms_cand) else None
+            if baseline_outputs is not None:
+                speedup = None                             # timing belongs to measure_legs, not here
+            else:
+                ms_base = time_op(lambda: baseline_call(args), warmup, repeats, inner, graph)
+                ms_cand = time_op(lambda: current_call(args), warmup, repeats, inner, graph)
+                speedup = (ms_base / ms_cand) if (ms_base and ms_cand) else None
             per_case.append({"case": f"random[{i}]:{sig}", "correct": ok,
                              "max_rel_err": round(err, 5) if math.isfinite(err) else None,
                              "speedup": round(speedup, 3) if speedup else None,
@@ -905,8 +974,8 @@ UT_HARNESS_INCOMPLETE_SENTINEL = "UT_HARNESS_INCOMPLETE"
 # the h2 paged_attention failure. `run_correctness` closes both holes: the trigger is the AUTHORITATIVE
 # deployment fact `deployment_graph_mode(regime)` (regime.cuda_graph, from the launch flags), and a
 # graph-deploy kernel that supplies no >=2-shape replay bundle FAILS CLOSED instead of silently passing.
-def run_correctness(regime, *, eager_cases, baseline_call, current_call, random_shapes, tol,
-                    replay=None, draws=3):
+def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
+                    baseline_call=None, baseline_outputs=None, replay=None, draws=3):
     """The SINGLE correctness entrypoint every generated unittest must call. Runs, in order:
       1. eager multi-case vs oracle (`check_correct_multi`) — also the output-independence check;
       2. random-value parity vs the frozen live baseline (`check_random_vs_baseline`);
@@ -930,8 +999,12 @@ def run_correctness(regime, *, eager_cases, baseline_call, current_call, random_
     report["eager"] = per
     ok = ok and c_ok
 
+    if baseline_call is None and baseline_outputs is None:
+        raise ValueError("run_correctness needs baseline_outputs (preferred: recorded by the baseline "
+                         "leg via baseline_random_outputs) or a legacy in-process baseline_call")
     r_ok, perr = check_random_vs_baseline(baseline_call, current_call, random_shapes, tol,
-                                          draws=draws, graph=deployment_graph_mode(regime))
+                                          draws=draws, graph=deployment_graph_mode(regime),
+                                          baseline_outputs=baseline_outputs)
     report["random"] = perr
     ok = ok and r_ok
 
@@ -1029,3 +1102,187 @@ def shuffled_block_table(num_seqs, blocks_per_seq, pool_blocks=0, seed=0, torch=
     g = torch.Generator(device=device).manual_seed(int(seed))
     perm = torch.randperm(pool, generator=g, device=device)[:need].to(torch.int32)
     return perm.reshape(int(num_seqs), int(blocks_per_seq))
+
+
+# --------------------------------------------------------------------------- (d) two-leg measurement
+# The baseline is the LIVE SERVING STACK (install + every accepted kernel), reached by running the
+# SAME leg_runner.py + cases.py under `baseline_overlay/` on PYTHONPATH; the candidate is that stack
+# plus ONE entry generated from kernel_src/. Leg direction is therefore a property of the environment,
+# not of a name string the harness binds by hand.
+def _kill_process_group(proc, grace=5.0):
+    """SIGTERM then SIGKILL the leg's whole process group, so nothing it spawned keeps the GPU.
+
+    Reaping is what proves death: `os.kill(pid, 0)` still succeeds on a zombie, so wait() on the
+    child is what confirms the signal took."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        return
+    if pgid == os.getpgid(0):      # start_new_session did not take — never signal our own group
+        proc.kill()
+        return
+    for sig, wait_for in ((signal.SIGTERM, grace), (signal.SIGKILL, 1.0)):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, OSError):
+            return
+        try:
+            proc.wait(timeout=wait_for)   # wait(), not kill(pid, 0): a zombie still answers signal 0
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600):
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    cmd = [sys.executable, os.path.join(task_dir, "leg_runner.py"),
+           "--task", task_dir, "--mode", mode, "--seed", str(int(seed))]
+    if bucket:
+        cmd += ["--bucket", bucket]
+    if out:
+        cmd += ["--out", out]
+    if draws:
+        cmd += ["--draws", str(int(draws))]
+    # Own process GROUP, not just a child: on timeout the leg may be mid-kernel or may have spawned
+    # helpers, and killing only the direct child leaves those holding the GPU allocation. The NEXT leg
+    # then times against a busy device and reads as a slowdown attributable to nothing.
+    p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         start_new_session=True)
+    try:
+        stdout, stderr = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(p)
+        stdout, stderr = p.communicate()
+        raise
+    if p.returncode != 0:
+        raise RuntimeError(f"leg({mode}) under {overlay} exited {p.returncode}: {stderr[-800:]}")
+    lines = [ln for ln in stdout.strip().splitlines() if ln.startswith("{")]
+    if not lines:
+        raise RuntimeError(f"leg({mode}) under {overlay} produced no JSON: {stdout[-800:]}")
+    return json.loads(lines[-1])
+
+
+def build_candidate_overlay(task_dir, meta):
+    """Rebuild `<task>/_cand_overlay` = baseline_overlay + ONE entry from kernel_src/ (meta.candidate_bind).
+
+    Rebuilt on EVERY measurement because kernel_src/ is the optimizer's live workspace. `candidate_bind`
+    is the same {kind, module|target, file} the e2e Integrator uses to wire the accepted kernel."""
+    task = os.path.abspath(task_dir)
+    base = os.path.join(task, "baseline_overlay")
+    cand = os.path.join(task, "_cand_overlay")
+    shutil.rmtree(cand, ignore_errors=True)
+    b = meta.get("candidate_bind") or {}
+    src = os.path.join(task, b.get("file", "") or "")
+    if not b.get("file") or not os.path.exists(src):
+        raise RuntimeError("meta.candidate_bind missing or its file is absent — cannot build the candidate leg")
+    tool = [sys.executable, os.path.join(task, "overlay_setup.py")]
+    if b.get("kind") == "rebind":
+        args = ["add-rebind", "--target", b["target"], "--impl-module", b["impl_module"],
+                "--impl-attr", b["impl_attr"], "--impl-file", src]
+    else:
+        args = ["add-module", "--module", b["module"], "--patched-file", src]
+    r = subprocess.run(tool + args + ["--overlay", cand, "--from", base], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"candidate overlay build failed: {r.stderr[-800:]}")
+    return base, cand
+
+
+def assert_legs_differ(task_dir, base, cand, meta, timeout=600):
+    """Refuse to measure unless the two legs provably import DIFFERENT code AND the baseline leg
+    resolves OUTSIDE the task dir."""
+    task = os.path.abspath(task_dir)
+    target = meta["target_callable"]
+    bi = _run_leg(task, base, "resolve", timeout=timeout)
+    ci = _run_leg(task, cand, "resolve", timeout=timeout)
+    for who, ident in (("baseline", bi), ("candidate", ci)):
+        if ident.get("error"):
+            raise RuntimeError(f"{who} leg cannot import {target}: {ident['error']}")
+    if bi == ci:
+        raise RuntimeError(
+            f"both legs resolve {target} to the SAME code ({bi}) — the candidate overlay is not "
+            "shadowing it, so any measured 'speedup' is noise. Check meta.candidate_bind.")
+    if bi.get("file", "").startswith(task + os.sep):
+        raise RuntimeError(
+            f"baseline leg resolved INSIDE the task dir ({bi['file']}) — the baseline must be the live "
+            "serving stack, never a copy the optimizer can edit.")
+    return bi, ci
+
+
+def _median(xs):
+    s = sorted(xs)
+    n = len(s)
+    return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
+
+
+def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10)):
+    """`per_case` for `serving_weighted_speedup`, one bucket per FRESH subprocess per leg.
+
+    Fresh-per-bucket is not optional: a warm interpreter shares JIT/autotune state between the legs and
+    reports a pseudo-1.0x that is an artifact, not a measurement.
+
+    But fresh-per-bucket is also what makes ONE pair per bucket too coarse: fresh-process variance is
+    exactly the variance `time_op`'s in-process repeats cannot average away. Measured on gfx950 it is
+    ~0.1-0.5% on a prefill bucket and up to ~14% on a small-M decode bucket — so a real 1.05x candidate
+    sits inside the noise of a single unpaired pair, which is the resolution the direction fix needs and
+    did not have.
+
+    Two things fix that, and only one of them costs anything:
+
+    - INTERLEAVE. Each rep is a B,C PAIR, never all Bs then all Cs. Any drift over the sweep (clocks,
+      thermals, a neighbour on the box) then lands on both legs and cancels, instead of accruing to
+      whichever leg ran later. This is free — same subprocess count.
+    - REPEAT, BUT ONLY WHEN IT MATTERS. `max_reps` pairs is the CEILING, not the plan. After each pair
+      the running median ratio is checked: once it is outside `undecided`, the verdict cannot plausibly
+      flip and the bucket stops. A 2.3x bucket costs one pair, exactly as before; a 1.05x bucket — the
+      one whose answer is in doubt — spends the full budget. Flat `reps=3` would have tripled the cost
+      of every bucket to buy resolution on the few that need it, and this path already pays a cold
+      torch import per subprocess.
+
+    `baseline_ms`/`optimized_ms` are the MEDIAN over the pairs actually run, so one unlucky process
+    cannot carry the bucket. `reps` and `speedup_spread` (per-pair speedup range / median, 0.0 for a
+    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence."""
+    task = os.path.abspath(task_dir)
+    base, cand = build_candidate_overlay(task, meta)
+    assert_legs_differ(task, base, cand, meta)
+    lo, hi = undecided
+    per_case = []
+    for sig in _run_leg(task, base, "list", timeout=timeout)["sigs"]:
+        row, bms, oms = None, [], []
+        for _ in range(max(1, int(max_reps))):
+            b = _run_leg(task, base, "time", bucket=sig, timeout=timeout)["cases"]
+            o = _run_leg(task, cand, "time", bucket=sig, timeout=timeout)["cases"]
+            if not b or not o:
+                break
+            if row is None:
+                row = b[0]
+            bms.append(b[0].get("ms"))
+            oms.append(o[0].get("ms"))
+            good_b, good_o = [x for x in bms if x], [y for y in oms if y]
+            if not good_b or not good_o:
+                break                      # nothing timable here; more pairs cannot change that
+            if not (lo <= _median(good_b) / _median(good_o) <= hi):
+                break                      # decisive already — do not buy resolution we do not need
+        if row is None:
+            continue
+        good_b, good_o = [x for x in bms if x], [y for y in oms if y]
+        bm = _median(good_b) if good_b else None
+        om = _median(good_o) if good_o else None
+        pair_sp = [x / y for x, y in zip(bms, oms) if x and y]
+        per_case.append({"sig": sig, "regime": row.get("regime", ""), "m": row.get("m"),
+                         "baseline_ms": bm, "optimized_ms": om,
+                         "speedup": (bm / om) if (bm and om) else None,
+                         "reps": len(bms),
+                         "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
+                                            if len(pair_sp) > 1 else 0.0)})
+    return per_case
+
+
+def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600):
+    """Random-draw outputs recorded by the BASELINE leg in its own process, for
+    `check_random_vs_baseline(baseline_outputs=...)`. Same seed => same inputs on both sides."""
+    task = os.path.abspath(task_dir)
+    out = os.path.join(task, "_baseline_random.pt")
+    _run_leg(task, os.path.join(task, "baseline_overlay"), "oracle",
+             out=out, seed=seed, draws=draws, timeout=timeout)
+    return _torch().load(out, map_location="cpu")

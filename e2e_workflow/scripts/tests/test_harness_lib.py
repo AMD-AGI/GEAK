@@ -35,9 +35,15 @@ import contextlib
 import importlib.util
 import io
 import itertools
+import json
 import math
 import os
+import shutil
+import signal
+import subprocess
 import sys
+import tempfile
+import time
 import types
 import unittest
 
@@ -74,6 +80,19 @@ def _env(**kw):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+@contextlib.contextmanager
+def _patched(obj, **kw):
+    """Swap attributes on a module/object for the duration of the block."""
+    old = {k: getattr(obj, k) for k in kw}
+    try:
+        for k, v in kw.items():
+            setattr(obj, k, v)
+        yield
+    finally:
+        for k, v in old.items():
+            setattr(obj, k, v)
 
 
 # --------------------------------------------------------------------------- #
@@ -1124,6 +1143,55 @@ class TestCorrect(_HarnessTestCase):
         self.assertAlmostEqual(err, 2.0 / 3.0, places=12)
 
 
+class TestCorrectOnMultiTensorReturns(_HarnessTestCase):
+    """Attention entries return `(out, lse)`.
+
+    Comparing only the first component would let a candidate corrupt `lse` and still pass; falling
+    into the except would report a CORRECT candidate as incorrect. Both are silent, so both are
+    tested here rather than left to the shape of whatever the op happens to return."""
+
+    def test_a_tuple_passes_only_when_every_component_passes(self):
+        ref = (_T((2,), [2.0, 2.0]), _T((2,), [1.0, 1.0]))
+        ok, err = hl.correct((_T((2,), [2.0, 2.0]), _T((2,), [1.0, 1.0])), ref, 0.5)
+        self.assertTrue(ok)
+        self.assertEqual(err, 0.0)
+
+    def test_a_corrupt_second_component_fails_the_whole_comparison(self):
+        """The first component matching exactly must not carry the verdict."""
+        ref = (_T((2,), [2.0, 2.0]), _T((2,), [2.0, 2.0]))
+        ok, err = hl.correct((_T((2,), [2.0, 2.0]), _T((2,), [2.0, 9.0])), ref, 0.5)
+        self.assertFalse(ok)
+        self.assertGreater(err, 1.0)
+
+    def test_the_reported_error_is_the_worst_component(self):
+        ref = (_T((2,), [2.0, 2.0]), _T((2,), [2.0, 2.0]))
+        ok, err = hl.correct((_T((2,), [2.0, 4.0]), _T((2,), [2.0, 2.0])), ref, 0.5)
+        self.assertTrue(ok)
+        self.assertAlmostEqual(err, 2.0 / 3.0, places=12)
+
+    def test_a_component_count_mismatch_is_incorrect(self):
+        """Zipping the shorter side would compare a 2-tuple against a 3-tuple and pass."""
+        ok, err = hl.correct((_T((1,), [1.0]),), (_T((1,), [1.0]), _T((1,), [1.0])), 0.5)
+        self.assertFalse(ok)
+        self.assertEqual(err, float("inf"))
+
+    def test_a_dict_return_is_paired_by_key_not_by_insertion_order(self):
+        a = {"lse": _T((1,), [1.0]), "out": _T((1,), [8.0])}
+        b = {"out": _T((1,), [8.0]), "lse": _T((1,), [1.0])}
+        self.assertEqual(hl.correct(a, b, 0.5), (True, 0.0))
+
+    def test_a_scalar_riding_along_with_a_tensor_is_not_compared(self):
+        """(out, num_tokens) must not fail because an int has no .shape."""
+        ok, _ = hl.correct((_T((1,), [1.0]), 7), (_T((1,), [1.0]), 7), 0.5)
+        self.assertTrue(ok)
+
+    def test_an_empty_return_is_incorrect_rather_than_vacuously_correct(self):
+        self.assertEqual(hl.correct((), (), 0.5), (False, float("inf")))
+
+    def test_flatten_is_stable_across_nesting(self):
+        self.assertEqual(len(hl.flatten_outputs([{"a": _T((1,), [1.0])}, (_T((1,), [2.0]),)])), 2)
+
+
 # --------------------------------------------------------------------------- #
 # assert_independent_outputs -- catching the shared/persistent `static_out`
 # --------------------------------------------------------------------------- #
@@ -1987,6 +2055,631 @@ class TestShuffledBlockTable(_HarnessTestCase):
         self.assertNotEqual(a, b)
         self.assertEqual(
             a, hl.shuffled_block_table(1, 2, seed=1, torch=self.torch, device="cpu").tolist())
+
+
+# --------------------------------------------------------------------------- #
+# (d) two-leg measurement
+#
+# Every leg is a subprocess, so `subprocess` is swapped for a recorder that answers by mode. No GPU,
+# no real leg_runner.py -- these tests pin the ORCHESTRATION, not the timing.
+# --------------------------------------------------------------------------- #
+class _Proc:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class _FakePopen:
+    """The handle `_run_leg` drives: communicate() delivers the scripted _Proc, or raises a timeout."""
+
+    def __init__(self, proc, call, timeout_once=False):
+        self._proc = proc
+        self._call = call
+        self._timeout_once = timeout_once
+        self.pid = os.getpid()          # a real pid, so os.getpgid() in the killer resolves
+        self.returncode = None
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        self._call["timeout"] = timeout
+        if self._timeout_once:
+            self._timeout_once = False
+            raise subprocess.TimeoutExpired(self._call["cmd"], timeout)
+        self.returncode = self._proc.returncode
+        return self._proc.stdout, self._proc.stderr
+
+    def wait(self, timeout=None):
+        """Reaped only if a signal actually took; the killpg fake is what decides that."""
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired(self._call["cmd"], timeout)
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
+class _FakeSubprocess:
+    """Stands in for the `subprocess` module inside harness_lib; records every leg invocation."""
+
+    PIPE = subprocess.PIPE
+    TimeoutExpired = subprocess.TimeoutExpired
+
+    def __init__(self, handler, timeout_once=False):
+        self._handler = handler
+        self._timeout_once = timeout_once
+        self.calls = []
+        self.procs = []
+
+    def run(self, cmd, env=None, capture_output=False, text=False, timeout=None):
+        self.calls.append({"cmd": list(cmd), "env": env or {}, "timeout": timeout})
+        return self._handler(list(cmd), env or {})
+
+    def Popen(self, cmd, env=None, stdout=None, stderr=None, text=False, start_new_session=False):
+        call = {"cmd": list(cmd), "env": env or {}, "timeout": None,
+                "start_new_session": start_new_session}
+        self.calls.append(call)
+        p = _FakePopen(self._handler(list(cmd), env or {}), call, self._timeout_once)
+        self.procs.append(p)
+        return p
+
+    def flag(self, name, call=-1):
+        """The value the recorded call passed for `--name`, or None if it was omitted."""
+        cmd = self.calls[call]["cmd"]
+        return cmd[cmd.index(name) + 1] if name in cmd else None
+
+    def modes(self):
+        return [c["cmd"][c["cmd"].index("--mode") + 1] for c in self.calls if "--mode" in c["cmd"]]
+
+
+class _LegTestCase(_HarnessTestCase):
+    """A real task dir on disk (leg_runner.py / kernel_src) + a scripted subprocess."""
+
+    BASE_IDENT = {"module": "live_stack.moe", "qualname": "matmul_ogs",
+                  "file": "/opt/live/stack/moe.py"}
+    CAND_IDENT = {"module": "live_stack.moe", "qualname": "matmul_ogs",
+                  "file": "/tmp/task/_cand_overlay/live_stack/moe.py"}
+
+    def setUp(self):
+        super().setUp()
+        self.task = tempfile.mkdtemp(prefix="harness_legs_")
+        self.addCleanup(shutil.rmtree, self.task, True)
+        self.base = os.path.join(self.task, "baseline_overlay")
+        self.cand = os.path.join(self.task, "_cand_overlay")
+        os.makedirs(os.path.join(self.task, "kernel_src"))
+        for rel in ("leg_runner.py", "overlay_setup.py", "kernel_src/moe.py"):
+            with open(os.path.join(self.task, rel), "w") as fh:
+                fh.write("# stub\n")
+        os.makedirs(self.base)
+        self.meta = {"target_callable": "live_stack.moe:matmul_ogs",
+                     "candidate_bind": {"kind": "module", "module": "live_stack.moe",
+                                        "file": "kernel_src/moe.py"}}
+        self.addCleanup(setattr, hl, "subprocess", hl.subprocess)
+
+    def _script(self, handler):
+        self.sub = _FakeSubprocess(handler)
+        hl.subprocess = self.sub
+        return self.sub
+
+    def _legs(self, base_ident=None, cand_ident=None, timings=None, sigs=("decode", "prefill")):
+        """The standard happy-path server: resolve answers per overlay, list/time answer per bucket."""
+        base_ident = self.BASE_IDENT if base_ident is None else base_ident
+        cand_ident = self.CAND_IDENT if cand_ident is None else cand_ident
+        timings = timings or {"decode": (2.0, 1.0), "prefill": (8.0, 4.0)}
+
+        def handler(cmd, env):
+            if "overlay_setup.py" in " ".join(cmd):
+                return _Proc(0)
+            mode = cmd[cmd.index("--mode") + 1]
+            is_base = env.get("PYTHONPATH", "").split(os.pathsep)[0] == self.base
+            if mode == "resolve":
+                return _Proc(0, json.dumps(base_ident if is_base else cand_ident))
+            if mode == "list":
+                return _Proc(0, json.dumps({"sigs": list(sigs)}))
+            if mode == "time":
+                sig = cmd[cmd.index("--bucket") + 1]
+                got = timings.get(sig)
+                if got is None:
+                    return _Proc(0, json.dumps({"cases": []}))
+                ms = got[0] if is_base else got[1]
+                return _Proc(0, json.dumps({"cases": [{"sig": sig, "ms": ms, "regime": "decode",
+                                                       "m": 64}]}))
+            return _Proc(0, json.dumps({"out": self.flag_out, "n": 1}))
+        self.flag_out = ""
+        return self._script(handler)
+
+
+class TestRunLeg(_LegTestCase):
+    def test_the_overlay_goes_first_on_pythonpath(self):
+        """Last wins on PYTHONPATH would make the overlay shadow nothing and both legs identical."""
+        with _env(PYTHONPATH="/pre/existing"):
+            self._script(lambda cmd, env: _Proc(0, '{"ok": true}'))
+            hl._run_leg(self.task, self.base, "list")
+        self.assertEqual(self.sub.calls[0]["env"]["PYTHONPATH"],
+                         os.pathsep.join([self.base, "/pre/existing"]))
+
+    def test_an_absent_pythonpath_is_not_turned_into_an_empty_entry(self):
+        """A trailing ':' on PYTHONPATH puts CWD on sys.path -- where the task dir's unittest.py is."""
+        with _env(PYTHONPATH=None):
+            self._script(lambda cmd, env: _Proc(0, '{"ok": true}'))
+            hl._run_leg(self.task, self.base, "list")
+        self.assertEqual(self.sub.calls[0]["env"]["PYTHONPATH"], self.base)
+
+    def test_the_leg_runs_the_task_dirs_own_leg_runner(self):
+        self._script(lambda cmd, env: _Proc(0, '{"ok": true}'))
+        hl._run_leg(self.task, self.base, "list", seed=7)
+        cmd = self.sub.calls[0]["cmd"]
+        self.assertEqual(cmd[:2], [sys.executable, os.path.join(self.task, "leg_runner.py")])
+        self.assertEqual(self.sub.flag("--task"), self.task)
+        self.assertEqual(self.sub.flag("--seed"), "7")
+
+    def test_optional_flags_are_omitted_when_unset(self):
+        self._script(lambda cmd, env: _Proc(0, "{}"))
+        hl._run_leg(self.task, self.base, "list")
+        for flag in ("--bucket", "--out", "--draws"):
+            self.assertIsNone(self.sub.flag(flag), flag)
+
+    def test_optional_flags_are_passed_when_set(self):
+        self._script(lambda cmd, env: _Proc(0, "{}"))
+        hl._run_leg(self.task, self.base, "oracle", bucket="decode", out="/tmp/o.pt", draws=5)
+        self.assertEqual(self.sub.flag("--bucket"), "decode")
+        self.assertEqual(self.sub.flag("--out"), "/tmp/o.pt")
+        self.assertEqual(self.sub.flag("--draws"), "5")
+
+    def test_the_timeout_is_forwarded_to_the_subprocess(self):
+        self._script(lambda cmd, env: _Proc(0, "{}"))
+        hl._run_leg(self.task, self.base, "list", timeout=42)
+        self.assertEqual(self.sub.calls[0]["timeout"], 42)
+
+    def test_only_the_last_json_line_is_read(self):
+        """A leg prints warnings and progress; the payload is the final JSON object, not the first."""
+        self._script(lambda cmd, env: _Proc(
+            0, 'loading weights...\n{"sigs": ["stale"]}\nwarming up\n{"sigs": ["decode"]}\n'))
+        self.assertEqual(hl._run_leg(self.task, self.base, "list"), {"sigs": ["decode"]})
+
+    def test_a_nonzero_exit_raises_with_the_tail_of_stderr(self):
+        self._script(lambda cmd, env: _Proc(3, "", "x" * 900 + "SEGFAULT in leg"))
+        with self.assertRaises(RuntimeError) as cm:
+            hl._run_leg(self.task, self.base, "time")
+        self.assertIn("leg(time)", str(cm.exception))
+        self.assertIn("exited 3", str(cm.exception))
+        self.assertIn("SEGFAULT in leg", str(cm.exception))
+
+    def test_a_leg_that_printed_no_json_raises_rather_than_returning_nothing(self):
+        """Exit 0 with no payload must not degrade into an empty measurement."""
+        self._script(lambda cmd, env: _Proc(0, "everything is fine\n"))
+        with self.assertRaises(RuntimeError) as cm:
+            hl._run_leg(self.task, self.base, "list")
+        self.assertIn("produced no JSON", str(cm.exception))
+
+
+class TestLegTimeoutReleasesTheGpu(_LegTestCase):
+    """A timed-out leg must take everything it spawned with it.
+
+    Killing only the direct child leaves a helper holding the GPU allocation, and the NEXT leg then
+    times against a busy device -- a slowdown attributable to nothing, in the one code path whose
+    whole purpose is to compare two legs fairly."""
+
+    def test_the_leg_is_started_in_its_own_session(self):
+        """No new session => the pgid is OURS, and there is no group to kill but our own."""
+        self._script(lambda cmd, env: _Proc(0, "{}"))
+        hl._run_leg(self.task, self.base, "list")
+        self.assertTrue(self.sub.calls[0]["start_new_session"])
+
+    def _timing_out_leg(self):
+        self.sub = _FakeSubprocess(lambda cmd, env: _Proc(0, "{}"), timeout_once=True)
+        hl.subprocess = self.sub
+        return self.sub
+
+    def test_a_timeout_signals_the_whole_group_and_still_raises(self):
+        killed = []
+        sub = self._timing_out_leg()
+
+        def _killpg(pgid, sig):
+            killed.append((pgid, sig))
+            sub.procs[0].returncode = -int(sig)      # SIGTERM is honoured
+        with _patched(os, killpg=_killpg, getpgid=lambda pid: 999 if pid else 1):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                hl._run_leg(self.task, self.base, "time", timeout=1)
+        self.assertEqual(killed, [(999, signal.SIGTERM)])
+
+    def test_a_group_that_ignores_sigterm_is_escalated_to_sigkill(self):
+        """A leg wedged in a kernel launch will not act on SIGTERM; the GPU is freed by SIGKILL."""
+        killed = []
+        sub = self._timing_out_leg()
+
+        def _killpg(pgid, sig):
+            killed.append((pgid, sig))
+            if sig == signal.SIGKILL:
+                sub.procs[0].returncode = -9
+        with _patched(os, killpg=_killpg, getpgid=lambda pid: 999 if pid else 1):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                hl._run_leg(self.task, self.base, "time", timeout=1)
+        self.assertEqual([s for _, s in killed], [signal.SIGTERM, signal.SIGKILL])
+        self.assertEqual({pgid for pgid, _ in killed}, {999})
+
+    def test_our_own_group_is_never_signalled(self):
+        """If start_new_session did not take, killpg would take the harness down with the leg."""
+        killed = []
+        self._timing_out_leg()
+        with _patched(os, killpg=lambda pgid, sig: killed.append((pgid, sig)),
+                      getpgid=lambda pid: 4242):     # child's group == our own
+            with self.assertRaises(subprocess.TimeoutExpired):
+                hl._run_leg(self.task, self.base, "time", timeout=1)
+        self.assertEqual(killed, [])
+        self.assertTrue(self.sub.procs[0].killed)
+
+    def test_a_group_that_is_already_gone_is_not_an_error(self):
+        self._timing_out_leg()
+
+        def _gone(pid):
+            raise ProcessLookupError(pid)
+        with _patched(os, getpgid=_gone):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                hl._run_leg(self.task, self.base, "time", timeout=1)
+
+    def test_a_real_grandchild_does_not_outlive_the_timeout(self):
+        """The end-to-end claim, against the real OS: reaped, not merely signalled."""
+        marker = os.path.join(self.task, "grandchild.pid")
+        with open(os.path.join(self.task, "leg_runner.py"), "w") as fh:
+            fh.write(
+                "import os, subprocess, sys, time\n"
+                "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+                f"open({marker!r}, 'w').write(str(p.pid))\n"
+                "time.sleep(120)\n")
+        with self.assertRaises(subprocess.TimeoutExpired):
+            hl._run_leg(self.task, self.base, "list", timeout=5)
+        with open(marker) as fh:
+            gpid = int(fh.read())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(gpid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail(f"grandchild {gpid} survived the leg timeout and still holds the device")
+
+
+class TestBuildCandidateOverlay(_LegTestCase):
+    def test_the_candidate_is_the_baseline_plus_one_module_entry(self):
+        self._script(lambda cmd, env: _Proc(0))
+        base, cand = hl.build_candidate_overlay(self.task, self.meta)
+        self.assertEqual((base, cand), (self.base, self.cand))
+        cmd = self.sub.calls[0]["cmd"]
+        self.assertEqual(cmd[:2], [sys.executable, os.path.join(self.task, "overlay_setup.py")])
+        self.assertIn("add-module", cmd)
+        self.assertEqual(self.sub.flag("--module"), "live_stack.moe")
+        self.assertEqual(self.sub.flag("--patched-file"), os.path.join(self.task, "kernel_src/moe.py"))
+        self.assertEqual(self.sub.flag("--overlay"), self.cand)
+        self.assertEqual(self.sub.flag("--from"), self.base)
+
+    def test_a_rebind_bind_uses_the_rebind_subcommand(self):
+        """Same {kind,target,file} the e2e Integrator uses, so an isolated win is rebindable e2e."""
+        self.meta["candidate_bind"] = {"kind": "rebind", "target": "live_stack.moe:matmul_ogs",
+                                       "impl_module": "geak_kernels.moe", "impl_attr": "matmul_ogs",
+                                       "file": "kernel_src/moe.py"}
+        self._script(lambda cmd, env: _Proc(0))
+        hl.build_candidate_overlay(self.task, self.meta)
+        self.assertIn("add-rebind", self.sub.calls[0]["cmd"])
+        self.assertEqual(self.sub.flag("--target"), "live_stack.moe:matmul_ogs")
+        self.assertEqual(self.sub.flag("--impl-module"), "geak_kernels.moe")
+        self.assertEqual(self.sub.flag("--impl-attr"), "matmul_ogs")
+
+    def test_a_stale_candidate_overlay_is_rebuilt_from_scratch(self):
+        """kernel_src/ is the optimizer's live workspace; a reused overlay measures yesterday's code."""
+        os.makedirs(self.cand)
+        stale = os.path.join(self.cand, "yesterday.py")
+        with open(stale, "w") as fh:
+            fh.write("# previous iteration\n")
+        self._script(lambda cmd, env: _Proc(0))
+        hl.build_candidate_overlay(self.task, self.meta)
+        self.assertFalse(os.path.exists(stale))
+
+    def test_a_missing_candidate_bind_refuses_to_build(self):
+        for bind in ({}, None, {"kind": "module", "module": "m"}):
+            with self.subTest(bind=bind):
+                self.meta["candidate_bind"] = bind
+                self._script(lambda cmd, env: _Proc(0))
+                with self.assertRaises(RuntimeError) as cm:
+                    hl.build_candidate_overlay(self.task, self.meta)
+                self.assertIn("meta.candidate_bind missing", str(cm.exception))
+
+    def test_a_candidate_bind_pointing_at_an_absent_file_refuses_to_build(self):
+        self.meta["candidate_bind"]["file"] = "kernel_src/never_written.py"
+        self._script(lambda cmd, env: _Proc(0))
+        with self.assertRaises(RuntimeError) as cm:
+            hl.build_candidate_overlay(self.task, self.meta)
+        self.assertIn("its file is absent", str(cm.exception))
+
+    def test_an_overlay_tool_failure_raises_with_the_tail_of_stderr(self):
+        self._script(lambda cmd, env: _Proc(1, "", "SyntaxError in kernel_src/moe.py"))
+        with self.assertRaises(RuntimeError) as cm:
+            hl.build_candidate_overlay(self.task, self.meta)
+        self.assertIn("candidate overlay build failed", str(cm.exception))
+        self.assertIn("SyntaxError", str(cm.exception))
+
+
+class TestAssertLegsDiffer(_LegTestCase):
+    def test_two_legs_importing_different_code_are_accepted(self):
+        self._legs()
+        bi, ci = hl.assert_legs_differ(self.task, self.base, self.cand, self.meta)
+        self.assertEqual((bi, ci), (self.BASE_IDENT, self.CAND_IDENT))
+        self.assertEqual(self.sub.modes(), ["resolve", "resolve"])
+
+    def test_identical_identities_are_refused_as_unmeasurable(self):
+        """Both legs on the same code: correctness still passes and only the RATIO is meaningless."""
+        self._legs(cand_ident=self.BASE_IDENT)
+        with self.assertRaises(RuntimeError) as cm:
+            hl.assert_legs_differ(self.task, self.base, self.cand, self.meta)
+        self.assertIn("SAME code", str(cm.exception))
+        self.assertIn("meta.candidate_bind", str(cm.exception))
+
+    def test_a_baseline_resolving_inside_the_task_dir_is_refused(self):
+        """A baseline the optimizer can edit is the old self-referential bug; never measure it."""
+        inside = dict(self.BASE_IDENT, file=os.path.join(self.task, "baseline_src", "moe.py"))
+        self._legs(base_ident=inside)
+        with self.assertRaises(RuntimeError) as cm:
+            hl.assert_legs_differ(self.task, self.base, self.cand, self.meta)
+        self.assertIn("resolved INSIDE the task dir", str(cm.exception))
+
+    def test_a_task_dir_prefix_that_is_not_a_path_boundary_is_not_a_false_positive(self):
+        outside = dict(self.BASE_IDENT, file=self.task + "_other/moe.py")
+        self._legs(base_ident=outside)
+        bi, _ = hl.assert_legs_differ(self.task, self.base, self.cand, self.meta)
+        self.assertEqual(bi["file"], outside["file"])
+
+    def test_either_leg_failing_to_import_the_target_is_named(self):
+        for who, base_bad in (("baseline", True), ("candidate", False)):
+            with self.subTest(leg=who):
+                bad = {"error": "ModuleNotFoundError: live_stack"}
+                self._legs(base_ident=bad if base_bad else None,
+                           cand_ident=None if base_bad else bad)
+                with self.assertRaises(RuntimeError) as cm:
+                    hl.assert_legs_differ(self.task, self.base, self.cand, self.meta)
+                self.assertIn(f"{who} leg cannot import live_stack.moe:matmul_ogs", str(cm.exception))
+                self.assertIn("ModuleNotFoundError", str(cm.exception))
+
+
+class TestMeasureLegs(_LegTestCase):
+    def test_every_bucket_is_timed_in_a_fresh_subprocess_per_leg(self):
+        """A warm interpreter shares JIT/autotune state between legs and reports a fake 1.0x."""
+        self._legs()
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual([c["sig"] for c in per], ["decode", "prefill"])
+        self.assertEqual([c["speedup"] for c in per], [2.0, 2.0])
+        self.assertEqual(per[0]["baseline_ms"], 2.0)
+        self.assertEqual(per[0]["optimized_ms"], 1.0)
+        self.assertEqual((per[0]["regime"], per[0]["m"]), ("decode", 64))
+        # overlay build, 2x resolve, list, then one time-leg per (bucket, leg)
+        self.assertEqual(self.sub.modes(), ["resolve", "resolve", "list",
+                                            "time", "time", "time", "time"])
+
+    def test_measurement_is_refused_before_the_legs_are_proven_different(self):
+        """assert_legs_differ runs BEFORE any timing."""
+        self._legs(cand_ident=self.BASE_IDENT)
+        with self.assertRaises(RuntimeError):
+            hl.measure_legs(self.task, self.meta)
+        self.assertNotIn("time", self.sub.modes())
+
+    def test_a_bucket_with_no_cases_on_either_leg_is_skipped(self):
+        self._legs(timings={"decode": (2.0, 1.0)}, sigs=("decode", "vanished"))
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual([c["sig"] for c in per], ["decode"])
+
+    def test_an_unmeasurable_bucket_reports_a_null_speedup_not_a_ratio(self):
+        """ms=None (timer unavailable) must never silently become 1.0x."""
+        self._legs(timings={"decode": (None, 1.0), "prefill": (8.0, 0.0)})
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual([c["speedup"] for c in per], [None, None])
+
+    def test_an_unmeasurable_bucket_does_not_burn_the_rep_budget(self):
+        """No timer means no pair can decide it; retrying is pure cost."""
+        self._legs(timings={"decode": (None, None)}, sigs=("decode",))
+        hl.measure_legs(self.task, self.meta)
+        self.assertEqual(self.sub.modes().count("time"), 2)
+
+
+class TestMeasureLegsResolution(_LegTestCase):
+    """How many pairs a bucket costs, and in what order the legs run.
+
+    Fresh-per-bucket is deliberate, but it is also what leaves one B,C pair exposed to fresh-process
+    variance -- ~0.1-0.5% on prefill, up to ~14% on small-M decode on gfx950. A 1.05x candidate is
+    inside that noise, and 1.05x is precisely the size of win the direction fix exists to recover."""
+
+    def _sequenced(self, seq, sigs=("decode",)):
+        """A leg server whose `time` answers come from a per-sig LIST, one entry consumed per pair."""
+        state = {s: 0 for s in sigs}
+        order = []
+
+        def handler(cmd, env):
+            if "overlay_setup.py" in " ".join(cmd):
+                return _Proc(0)
+            mode = cmd[cmd.index("--mode") + 1]
+            is_base = env.get("PYTHONPATH", "").split(os.pathsep)[0] == self.base
+            if mode == "resolve":
+                return _Proc(0, json.dumps(self.BASE_IDENT if is_base else self.CAND_IDENT))
+            if mode == "list":
+                return _Proc(0, json.dumps({"sigs": list(sigs)}))
+            sig = cmd[cmd.index("--bucket") + 1]
+            order.append(("B" if is_base else "C", sig))
+            pair = seq[sig][min(state[sig], len(seq[sig]) - 1)]
+            if not is_base:
+                state[sig] += 1                      # a pair completes on the candidate leg
+            ms = pair[0] if is_base else pair[1]
+            return _Proc(0, json.dumps({"cases": [{"sig": sig, "ms": ms, "regime": "decode",
+                                                   "m": 64}]}))
+        self._script(handler)
+        return order
+
+    def test_a_decisive_bucket_still_costs_exactly_one_pair(self):
+        """The common case must not get 3x slower to buy resolution it does not need."""
+        self._sequenced({"decode": [(2.0, 1.0)]})
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual(self.sub.modes().count("time"), 2)
+        self.assertEqual(per[0]["reps"], 1)
+        self.assertEqual(per[0]["speedup"], 2.0)
+        self.assertEqual(per[0]["speedup_spread"], 0.0)
+
+    def test_a_decisive_slowdown_also_stops_after_one_pair(self):
+        """Below the band is as decisive as above it."""
+        self._sequenced({"decode": [(1.0, 2.0)]})
+        hl.measure_legs(self.task, self.meta)
+        self.assertEqual(self.sub.modes().count("time"), 2)
+
+    def test_an_undecided_bucket_spends_the_full_budget(self):
+        """1.05x is the motivating case: inside the noise, so it is the one worth re-measuring."""
+        self._sequenced({"decode": [(1.055, 1.0)] * 3})
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual(self.sub.modes().count("time"), 6)
+        self.assertEqual(per[0]["reps"], 3)
+
+    def test_the_legs_are_interleaved_rather_than_run_all_baseline_then_all_candidate(self):
+        """B,B,B,C,C,C lets drift over the sweep accrue to the candidate; B,C,B,C makes it common-mode."""
+        order = self._sequenced({"decode": [(1.02, 1.0)] * 3})
+        hl.measure_legs(self.task, self.meta)
+        self.assertEqual([leg for leg, _ in order], ["B", "C", "B", "C", "B", "C"])
+
+    def test_the_reported_time_is_the_median_pair_not_the_first(self):
+        """One unlucky cold process must not carry the bucket."""
+        self._sequenced({"decode": [(1.0, 1.0), (1.04, 1.0), (9.0, 1.0)]})
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual(per[0]["baseline_ms"], 1.04)
+        self.assertEqual(per[0]["speedup"], 1.04)
+
+    def test_the_spread_across_pairs_is_reported(self):
+        """A bucket that disagrees with itself must be visible, not averaged into silence."""
+        self._sequenced({"decode": [(1.0, 1.0), (1.04, 1.0), (1.08, 1.0)]})
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertAlmostEqual(per[0]["speedup_spread"], (1.08 - 1.0) / 1.04, places=12)
+
+    def test_a_bucket_that_turns_decisive_on_a_later_pair_stops_there(self):
+        """The check is on the RUNNING median, so the budget is released as soon as it is not needed."""
+        self._sequenced({"decode": [(1.02, 1.0), (3.0, 1.0), (3.0, 1.0)]})
+        hl.measure_legs(self.task, self.meta)
+        self.assertEqual(self.sub.modes().count("time"), 4)
+
+    def test_max_reps_one_restores_the_single_pair_behaviour(self):
+        self._sequenced({"decode": [(1.055, 1.0)] * 3})
+        per = hl.measure_legs(self.task, self.meta, max_reps=1)
+        self.assertEqual(self.sub.modes().count("time"), 2)
+        self.assertEqual(per[0]["reps"], 1)
+
+    def test_the_undecided_band_is_caller_controlled(self):
+        """A widened band makes a 1.5x bucket worth re-measuring; the default would not."""
+        self._sequenced({"decode": [(1.5, 1.0)] * 3})
+        hl.measure_legs(self.task, self.meta, undecided=(0.5, 2.0))
+        self.assertEqual(self.sub.modes().count("time"), 6)
+
+    def test_the_budget_is_per_bucket_not_shared(self):
+        """A noisy decode bucket must not consume the reps a second bucket would have used."""
+        self._sequenced({"decode": [(1.02, 1.0)] * 3, "prefill": [(1.03, 1.0)] * 3},
+                        sigs=("decode", "prefill"))
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual([c["reps"] for c in per], [3, 3])
+        self.assertEqual(self.sub.modes().count("time"), 12)
+
+
+class TestBaselineRandomOutputs(_LegTestCase):
+    def test_the_oracle_is_recorded_by_the_baseline_leg_in_its_own_process(self):
+        """Same seed => same inputs on both sides, so the legs never have to be co-resident."""
+        loaded = []
+        self.torch.load = lambda path, map_location=None: loaded.append((path, map_location)) or {
+            "decode|0": _T((2,), [1.0, 2.0])}
+        self._script(lambda cmd, env: _Proc(0, '{"out": "x", "n": 2}'))
+        got = hl.baseline_random_outputs(self.task, self.meta, seed=100, draws=2)
+
+        dest = os.path.join(self.task, "_baseline_random.pt")
+        self.assertEqual(self.sub.calls[0]["env"]["PYTHONPATH"].split(os.pathsep)[0], self.base)
+        self.assertEqual(self.sub.modes(), ["oracle"])
+        self.assertEqual(self.sub.flag("--out"), dest)
+        self.assertEqual(self.sub.flag("--seed"), "100")
+        self.assertEqual(self.sub.flag("--draws"), "2")
+        self.assertEqual(loaded, [(dest, "cpu")])          # CPU-side, so either leg can compare it
+        self.assertEqual(list(got), ["decode|0"])
+
+
+# --------------------------------------------------------------------------- #
+# The recorded-oracle arm of check_random_vs_baseline / run_correctness
+# --------------------------------------------------------------------------- #
+class TestCheckRandomVsBaselineRecorded(_HarnessTestCase):
+    """`baseline_outputs=` replaces the in-process `baseline_call` closure entirely. Timing then
+    belongs to measure_legs, so speedup must be None."""
+
+    def _shape(self, sig="m1"):
+        return {"sig": sig, "make_inputs": lambda rng: (1.0, 2.0)}
+
+    def test_the_recorded_output_is_compared_and_no_speedup_is_reported(self):
+        ok, per = hl.check_random_vs_baseline(
+            None, _echo_call, [self._shape()], 0.01, draws=2,
+            baseline_outputs={"m1|0": _T((2,), [1.0, 2.0]), "m1|1": _T((2,), [1.0, 2.0])})
+        self.assertTrue(ok)
+        self.assertEqual([e["case"] for e in per], ["random[0]:m1", "random[1]:m1"])
+        self.assertEqual([e["speedup"] for e in per], [None, None])
+        self.assertEqual([e["max_rel_err"] for e in per], [0.0, 0.0])
+
+    def test_the_recorded_output_is_moved_onto_the_candidates_device(self):
+        """The oracle is loaded map_location='cpu'; comparing it cross-device would raise."""
+        ref = _T((2,), [1.0, 2.0], device="cpu")
+        ok, _ = hl.check_random_vs_baseline(
+            None, lambda args: _T((2,), list(args), device="cuda"), [self._shape()], 0.01,
+            draws=1, baseline_outputs={"m1|0": ref})
+        self.assertTrue(ok)
+        self.assertEqual(ref.device, "cpu")                # the recorded oracle is not mutated
+
+    def test_a_drift_from_the_recorded_baseline_still_fails(self):
+        ok, per = hl.check_random_vs_baseline(
+            None, lambda args: _T((2,), [v + 10.0 for v in args]), [self._shape()], 0.01,
+            draws=1, baseline_outputs={"m1|0": _T((2,), [1.0, 2.0])})
+        self.assertFalse(ok)
+        self.assertFalse(per[0]["correct"])
+
+    def test_a_missing_recorded_draw_is_a_failure_not_a_silent_skip(self):
+        """A short oracle would otherwise shrink the parity check without anyone noticing."""
+        ok, per = hl.check_random_vs_baseline(
+            None, _echo_call, [self._shape()], 0.01, draws=2,
+            baseline_outputs={"m1|0": _T((2,), [1.0, 2.0])})
+        self.assertFalse(ok)
+        self.assertTrue(per[0]["correct"])
+        self.assertFalse(per[1]["correct"])
+        self.assertIn("no recorded baseline output for m1|1", per[1]["note"])
+
+    def test_a_tuple_returning_op_is_compared_component_wise_end_to_end(self):
+        """The oracle now records `(out, lse)` as a tuple; the parity leg must pair it up, not
+        report the candidate incorrect because the return value is not one tensor."""
+        ok, per = hl.check_random_vs_baseline(
+            None, lambda args: (_T((2,), list(args)), _T((1,), [9.0])), [self._shape()], 0.01,
+            draws=1, baseline_outputs={"m1|0": (_T((2,), [1.0, 2.0]), _T((1,), [9.0]))})
+        self.assertTrue(ok, per[0].get("note"))
+        self.assertEqual(per[0]["max_rel_err"], 0.0)
+
+    def test_every_component_of_a_recorded_tuple_is_moved_onto_the_candidates_device(self):
+        """Moving only the first would raise a cross-device compare on the second."""
+        ref = (_T((2,), [1.0, 2.0], device="cpu"), _T((1,), [9.0], device="cpu"))
+        ok, per = hl.check_random_vs_baseline(
+            None, lambda args: (_T((2,), list(args), device="cuda"),
+                                _T((1,), [9.0], device="cuda")),
+            [self._shape()], 0.01, draws=1, baseline_outputs={"m1|0": ref})
+        self.assertTrue(ok, per[0].get("note"))
+        self.assertEqual([t.device for t in ref], ["cpu", "cpu"])   # oracle not mutated
+
+    def test_a_candidate_that_returns_no_tensor_is_named_rather_than_compared(self):
+        ok, per = hl.check_random_vs_baseline(
+            None, lambda args: None, [self._shape()], 0.01,
+            draws=1, baseline_outputs={"m1|0": _T((2,), [1.0, 2.0])})
+        self.assertFalse(ok)
+        self.assertIn("no tensor", per[0]["note"])
+
+
+class TestRunCorrectnessNeedsABaseline(_HarnessTestCase):
+    def test_neither_a_recorded_oracle_nor_a_baseline_call_is_a_hard_error(self):
+        """Running the random leg with no baseline at all would pass vacuously."""
+        with self.assertRaises(ValueError) as cm:
+            hl.run_correctness({"enforce_eager": True}, eager_cases=[], current_call=_echo_call,
+                               random_shapes=[], tol=0.01)
+        self.assertIn("baseline_outputs", str(cm.exception))
+        self.assertIn("baseline_random_outputs", str(cm.exception))
 
 
 def _swm_meta(**kw):
