@@ -79,6 +79,13 @@ jobs:
             e2e_workflow/scripts/tests/test_gsm8k_eval.py \
             e2e_workflow/scripts/tests/test_parse_profile.py \
             e2e_workflow/scripts/tests/test_capture_shapes.py \
+            e2e_workflow/scripts/tests/test_trace_capability.py \
+            e2e_workflow/scripts/tests/test_structural_pattern_mapping.py \
+            e2e_workflow/scripts/tests/test_semantic_kernel_mapping.py \
+            e2e_workflow/scripts/tests/test_semantic_shape_merge.py \
+            e2e_workflow/scripts/tests/test_semantic_source_mapping.py \
+            e2e_workflow/scripts/tests/test_semantic_runtime_marker_mapping.py \
+            e2e_workflow/scripts/tests/test_run_semantics_1_2.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \

@@ -7,6 +7,7 @@ export const meta = {
     { title: 'Profile', detail: 'Profiler captures a warm trace -> standardized Top-N' },
     { title: 'Strategize', detail: 'System Architect routes kernels by Amdahl (config vs kernel vs host)' },
     { title: 'ConfigSweep', detail: 'Config Tuner sweeps flags/env/backends FIRST (default ON)' },
+    { title: 'FusionApplyBack', detail: 'OPT-IN (args.fusion): integrate 单侧-passed tier-B kernel fusions via reversible overlay adapter -> A/B + accuracy gate -> stack -> reprofile/re-strategize' },
     { title: 'HeadKernel', detail: 'highest-%GPU ops (GEMM/attn): extract_op -> backend bake-off (incl. FlyDSL) + aiter-DB/author tune -> e2e gate' },
     { title: 'Milestone', detail: 'loop over editable kernels ABOVE milestone_min_pct% GPU (default 5): plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
     { title: 'Finalize', detail: 'e2e Integrator assembles the overlay + patch + launch bundle' },
@@ -52,6 +53,21 @@ const ANALYSIS_SKILL_INPUTS = ANALYSIS_SKILL_ON ? {
 } : { ANALYSIS_SKILL: '', ANALYSIS_SKILL_DIR: '' };
 if (ANALYSIS_SKILL_ON) log(`Profile-analysis skill: ${ANALYSIS_SKILL} (advisory; annotates + reorders, never prunes).`);
 
+// ---- Baseline semantic mapping (OPTIONAL, additive sidecar) -----------------
+// Runs once after the baseline Profile/Strategize and builds auditable
+// Pattern/Phase/Layer/Kernel tables for future fusion discovery. It never changes
+// Top-N routing and is not re-run after config/head/kernel wins.
+const SEMANTICS_MAPPING_ON = String(
+  A.semantics_mapping != null ? A.semantics_mapping : 'true') === 'true';
+// Phase 1.2 performs one extra, instrumented Shape-only replay after the clean
+// representative tables exist. It is deliberately opt-in because it launches
+// a second model service; failures remain sidecar-only and never affect routing.
+const SEMANTICS_SHAPE_CAPTURE_ON = String(
+  A.semantics_shape_capture != null ? A.semantics_shape_capture : 'false') === 'true';
+const SEMANTICS_SHAPE_CAPTURE_SETUP =
+  (A.semantics_shape_capture_setup && typeof A.semantics_shape_capture_setup === 'object')
+    ? A.semantics_shape_capture_setup : {};
+
 // ---- Upstream TraceLens / kernel-agent prior (OPTIONAL; forwarded by run_e2e.py as args.tracelens) ----
 // run_e2e.py resolves these paths beside the geak handoff and forwards ONLY the non-null ones.
 // They are a PRIOR for the Profile/Strategize/Extract phases: if analysis_md exists the Profiler skips
@@ -66,6 +82,26 @@ const TRACELENS_INPUTS = {
   TRACELENS_TRACE_FILE: String(TL.trace_file || ''),
 };
 if (TL && Object.keys(TL).length) log(`TraceLens prior present: ${Object.keys(TL).filter(k => TL[k]).join(', ') || '(none non-null)'}.`);
+
+// ---- Phase 2 kernel-fusion prior (OPTIONAL; forwarded as args.fusion) --------
+// The frozen Phase 2.1/2.2 fusion artifacts (fusion_topk.json + candidates + validation)
+// are an ADVISORY routing prior for Strategize (Phase 3.1 apply-back): the System
+// Architect folds each Top-K row into its existing tracks — tier A (flag/env) ->
+// config_directions (ConfigSweep applies+gates it), tier B (integrate an existing
+// fused kernel) -> kernel/head_candidates carrying the fused API + live seam, tier C
+// (author) -> drop_list/deferred. Each fusion is then validated one-at-a-time by the
+// SAME e2e A/B gate as any other candidate. ENTIRELY ADDITIVE: when args.fusion is
+// absent every FUSION_* input is '' and the run is byte-identical to a build without it.
+const FU = (A.fusion && typeof A.fusion === 'object') ? A.fusion : {};
+let FUSION_INPUTS = {
+  FUSION_TOPK_JSON: String(FU.topk_json || ''),
+  FUSION_CANDIDATES_JSON: String(FU.candidates_json || ''),
+  FUSION_VALIDATION_JSON: String(FU.validation_json || ''),
+  // Phase 3.0 单侧 gate: when present, only 单侧-passed fusions are nominated (see
+  // system_architect step 1e). Absent -> the Architect nominates on the Top-K alone.
+  FUSION_UNITSIDE_JSON: String(FU.unitside_json || ''),
+};
+if (FU && Object.keys(FU).length) log(`Fusion prior present: ${Object.keys(FU).filter(k => FU[k]).join(', ') || '(none non-null)'}.`);
 
 // ---- single-kernel pass-through: if kernel_path (and no model_path), just run the kernel layer ----
 const KERNEL_PATH = A.kernel_path || '';
@@ -434,15 +470,43 @@ const SETUP_SCHEMA = obj({
 const PROFILE_SCHEMA = obj({
   round: { type: 'number' }, profile_topN_json: { type: 'string' }, profile_topN_md: { type: 'string' },
   profile_workload_json: { type: 'string' }, // per-(shape,dtype) weighted workload model (optional)
+  trace_dir: { type: 'string' }, trace_files: arrStr, analysis_rank_trace: { type: 'string' },
+  trace_manifest_json: { type: 'string' }, phase_evidence_status: { type: 'string' },
   source: { type: 'string' }, total_gpu_time_ms: { type: 'number' }, top_kernels: arrObj,
   shift_note: { type: 'string' }, notes: { type: 'string' },
 }, ['profile_topN_json', 'top_kernels']);
+
+const SEMANTICS_SCHEMA = obj({
+  status: { type: 'string' }, round: { type: 'number' },
+  trace_manifest_json: { type: 'string' }, structural_patterns_json: { type: 'string' },
+  semantic_event_audit_jsonl: { type: 'string' }, layer_instance_audit_json: { type: 'string' },
+  semantic_table_json: { type: 'string' }, semantic_table_md: { type: 'string' },
+  shape_capture_plan_json: { type: 'string' }, quality_json: { type: 'string' },
+  shape_log_jsonl: { type: 'string' }, op_coverage_manifest: { type: 'string' },
+  kernel_semantic_evidence_jsonl: { type: 'string' },
+  shape_type_verification_json: { type: 'string' },
+  notes: { type: 'string' },
+}, ['status']);
 
 const STRATEGY_SCHEMA = obj({
   regime_summary: { type: 'string' }, config_directions: arrObj,
   head_candidates: arrObj, kernel_candidates: arrObj,
   drop_list: arrObj, order_of_work: arrStr, strategy_path: { type: 'string' },
 }, ['kernel_candidates']);
+
+// Phase 3.1/3.2 Fusion apply-back result. The fusion_integrator agent loops the 单侧-passed
+// tier-B fusions (maximal-first + degrade ladder), authors a reversible overlay adapter per
+// fusion, gates each with an interleaved A/B + gsm8k accuracy gate, STACKS accepted overlays,
+// and returns the accepted set + the final stacked overlay + the new throughput. The
+// orchestrator then reprofiles + re-strategizes on the fused baseline. (Same "one role call
+// loops the candidates and keeps wins" pattern as config_tuner:sweep.)
+const FUSION_APPLY_SCHEMA = obj({
+  accepted_fusions: arrObj,   // [{fusion, rung, overlay_path, tpot_delta_pct, throughput_delta_pct, nonoverlap, gsm8k_base, gsm8k_cand, engaged}]
+  final_overlay: { type: 'string' },      // stacked combined-loader overlay dir (PYTHONPATH), '' if none accepted
+  e2e_throughput_tok_s: { type: 'number' },
+  rejected: arrObj, deferred_author_count: { type: 'number' },
+  notes: { type: 'string' },
+}, ['accepted_fusions']);
 
 // Result of the ensure_flydsl provisioning gate (build-on-demand). ok=true iff flydsl is importable
 // (flydsl + kernels.moe_gemm_2stage) after sourcing env_file; built distinguishes a fresh build from reuse.
@@ -1067,7 +1131,7 @@ if (!MODEL_PATH && KERNEL_PATH) {
 // ===========================================================================
 // PHASE: Setup + Baseline profile + Strategize  (gated; else load carried state)
 // ===========================================================================
-let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, profile, strategy, kernelQueue, headQueue;
+let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, profile, strategy, kernelQueue, headQueue, semantics;
 if (want('setup')) {
   phase('Setup');
   const setup = await safeAgent(
@@ -1088,10 +1152,18 @@ if (want('setup')) {
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
 
   phase('Profile');
+  // The semantics sidecar cuts per-layer boundaries from DecoderLayer module spans,
+  // which the sglang profiler only emits with with_stack=true. Turn it on for the
+  // BASELINE capture (only) when semantics mapping is enabled, so the shared clean
+  // trace carries the module hierarchy semantics needs. Reprofiles keep curEnv
+  // (the optimization Top-N does not need stacks, which bloat the trace).
+  const baselineExtraEnv = SEMANTICS_MAPPING_ON
+    ? (curEnv ? curEnv + ' ' : '') + 'SGLANG_PROFILE_WITH_STACK=true'
+    : curEnv;
   profile = await safeAgent(
     roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
-      OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+      OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: baselineExtraEnv, SKILL_DIR: WORKFLOW_DIR,
       ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
@@ -1102,7 +1174,7 @@ if (want('setup')) {
     roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
       EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
       WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
-      ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
+      ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...FUSION_INPUTS,
     }),
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
@@ -1126,6 +1198,44 @@ if (want('setup')) {
   }
   if (_fusedTagged) log(`[op-identity] ${_fusedTagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
   log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
+  // One-shot, non-gating baseline sidecar. It is deliberately awaited so its
+  // artifact paths are durable in carried state, but bounded to one agent
+  // attempt and never allowed to alter native routing.
+  if (SEMANTICS_MAPPING_ON && profile && profile.trace_manifest_json) {
+    semantics = await safeAgent(
+      roleAgent('semantics_mapper', 'build_table',
+        'Build auditable Pattern/Phase/Layer/Kernel tables from the clean baseline trace.', {
+          EVAL_DIR, MODEL_PATH, MODEL_NAME, BACKEND, WORKLOAD, ROUND: 0,
+          TRACE_MANIFEST_JSON: profile.trace_manifest_json,
+          PROFILE_TOPN_JSON: profile.profile_topN_json || '',
+          PROFILE_WORKLOAD_JSON: profile.profile_workload_json || '',
+          SKILL_DIR: WORKFLOW_DIR,
+        }),
+      { phase: 'Profile', label: 'semantics-mapper:baseline', schema: SEMANTICS_SCHEMA },
+      1);
+    if (SEMANTICS_SHAPE_CAPTURE_ON && semantics &&
+        semantics.status !== 'failed' && semantics.status !== 'fail') {
+      const completed = await safeAgent(
+        roleAgent('semantics_mapper', 'complete_table',
+          'Run one metadata-only Shape replay for unresolved representative-layer rows and merge the evidence without changing Clean Trace rows.', {
+            EVAL_DIR, MODEL_PATH, MODEL_NAME, BACKEND, WORKLOAD, ROUND: 0,
+            TRACE_MANIFEST_JSON: profile.trace_manifest_json,
+            STRUCTURAL_PATTERNS_JSON: semantics.structural_patterns_json || '',
+            SEMANTIC_TABLE_JSON: semantics.semantic_table_json || '',
+            SHAPE_CAPTURE_PLAN_JSON: semantics.shape_capture_plan_json || '',
+            SHAPE_CAPTURE_SETUP: SEMANTICS_SHAPE_CAPTURE_SETUP,
+            SKILL_DIR: WORKFLOW_DIR,
+          }),
+        { phase: 'Profile', label: 'semantics-mapper:shape-completion',
+          schema: SEMANTICS_SCHEMA },
+        1);
+      if (completed) semantics = completed;
+    }
+    log(`Baseline semantics mapping: ${semantics ? semantics.status : 'failed'} (non-gating).`);
+  } else {
+    semantics = { status: SEMANTICS_MAPPING_ON ? 'failed' : 'disabled',
+      notes: SEMANTICS_MAPPING_ON ? 'baseline profiler returned no raw trace manifest' : 'disabled by args.semantics_mapping' };
+  }
   // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
   await ensureFlydslGate();
 } else {
@@ -1141,6 +1251,9 @@ if (want('setup')) {
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
   headQueue = ST.headQueue || [];
+  semantics = ST.semantics_mapping || { status: 'unavailable' };
+  // Restore the fusion prior for a phase-scoped continuation that didn't re-pass args.fusion.
+  if (!FUSION_INPUTS.FUSION_TOPK_JSON && ST.fusion_inputs) FUSION_INPUTS = ST.fusion_inputs;
   log(`Loaded carried state: EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT}, flags='${curFlags}', env='${curEnv}', ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
 }
 
@@ -1175,7 +1288,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       roleAgent('system_architect', 'strategize', 'Re-route after config changed the landscape.', {
         EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
         WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
+        ...ANALYSIS_SKILL_INPUTS, ...FUSION_INPUTS,
       }),
       { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
     if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
@@ -1204,11 +1317,80 @@ const acceptedHeads = (ST.accepted_heads || []).slice();
 const pendingIntegrations = (ST.pending_integrations || []).slice();
 const flaggedHeads = (ST.flagged_heads || []).slice();   // dominant heads that could NOT be optimized (loudly surfaced, never silently skipped)
 let headDispatched = 0;
+const acceptedFusions = (ST.accepted_fusions || []).slice();   // Phase 3.1/3.2 fusions accepted into curOverlay
 const history = ST.history || { insights: [], ledger: [], milestones: [], bottleneck_now: '', suggest_next: '' };
 
 // A fused op (op_kind='moe', set by the op-identity guard OR the Architect) is extracted AS the fused op,
 // never decomposed into a standalone dense GEMM — so dense-GEMM synth is off for it.
 function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
+
+// ===========================================================================
+// PHASE: Fusion apply-back (Phase 3.1/3.2) — OPT-IN, gated on args.fusion.
+// Runs AFTER ConfigSweep (so tier-A flag fusions are already swept into curFlags) and BEFORE
+// HeadKernel, so accepted fusion overlays reshape the baseline the head/kernel tracks then
+// optimize. Tier-B fusions (integrate an EXISTING fused kernel to replace a multi-kernel chain)
+// do NOT fit the head extract→bake-off (that authors/optimizes a kernel); they are realized by
+// the fusion_integrator role via a reversible overlay adapter. Tier-A is handled by ConfigSweep;
+// tier-C (author a new kernel) is deferred (二期). The orchestrator has NO fs access, so ONE
+// fusion_integrator agent reads fusion_topk.json + the 单侧 gate, loops the passed candidates
+// (maximal-first + degrade ladder), integrates+gates+STACKS each (same "role loops candidates,
+// keeps wins" pattern as config_tuner:sweep), and returns the accepted set + final stacked
+// overlay. We then reprofile + re-strategize on the fused baseline. ENTIRELY ADDITIVE: absent
+// args.fusion, FUSION_TOPK_JSON is '' and this whole block is skipped → byte-identical.
+// ===========================================================================
+if (want('head') && FUSION_INPUTS.FUSION_TOPK_JSON) {
+  phase('FusionApplyBack');
+  const FUSION_BUDGET = parseInt(A.fusion_budget != null ? A.fusion_budget : 6, 10);
+  log(`Fusion apply-back: applying 单侧-passed tier-B fusions (maximal-first + degrade ladder), budget ${FUSION_BUDGET}.`);
+  const fapply = await safeAgent(
+    roleAgent('fusion_integrator', 'apply_back',
+      'Apply back the 单侧-passed tier-B kernel fusions. Read FUSION_TOPK_JSON + the FUSION_UNITSIDE_JSON ' +
+      'gate; take ONLY unit_side_status==pass tier-B candidates, in Top-K order, maximal-first per each ' +
+      "candidate's fusion_degrade_ladder. For EACH: author a reversible lazy-load overlay adapter (route the " +
+      'fused kernel to a PREBUILT downstream seam — kernel-availability gate; avoid the unbuilt MoE variant), ' +
+      'prove the ENGAGED banner on all TP ranks, run an interleaved A/B (cand_min>ref_max + >noise band) vs the ' +
+      'CURRENT baseline, and a gsm8k accuracy gate (--max-tokens 4096) for quant fusions. STACK accepted overlays ' +
+      'via a combined-loader; on wire/gate/accuracy failure DEGRADE to the next ladder rung, then move to the next ' +
+      'candidate. Skip tier-C (author, 二期). Return the accepted set + the final stacked overlay dir + new tok/s.', {
+        EVAL_DIR, MODEL_PATH, SERVING_GPU, TP: SERVING_TP, WORKLOAD,
+        FUSION_TOPK_JSON: FUSION_INPUTS.FUSION_TOPK_JSON,
+        FUSION_CANDIDATES_JSON: FUSION_INPUTS.FUSION_CANDIDATES_JSON,
+        FUSION_UNITSIDE_JSON: FUSION_INPUTS.FUSION_UNITSIDE_JSON,
+        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput,
+        BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+        FUSION_BUDGET, FUSION_OVERLAYS_DIR: `${EVAL_DIR}/fusion/fusion_overlays`,
+        ...ACCURACY_INPUTS, SKILL_DIR: WORKFLOW_DIR,
+      }),
+    { phase: 'FusionApplyBack', label: 'fusion_integrator:apply_back', schema: FUSION_APPLY_SCHEMA });
+  const acc = (fapply && Array.isArray(fapply.accepted_fusions)) ? fapply.accepted_fusions : [];
+  if (acc.length) {
+    curOverlay = fapply.final_overlay || curOverlay;
+    if (fapply.e2e_throughput_tok_s && fapply.e2e_throughput_tok_s > curTput) curTput = fapply.e2e_throughput_tok_s;
+    for (const f of acc) acceptedFusions.push(f);
+    log(`Fusion apply-back: accepted ${acc.length} fusion(s); e2e now ${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x). Re-profiling on the fused baseline.`);
+    // Re-profile + re-strategize on the fused baseline so HeadKernel/Milestone chase the NEW
+    // bottleneck (mirrors the post-config re-profile/re-strategize block).
+    profile = await safeAgent(
+      roleAgent('profiler', 'reprofile', 'Re-profile after fusion apply-back.', {
+        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'fusion',
+        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS,
+      }),
+      { phase: 'Profile', label: 'profiler:post-fusion', schema: PROFILE_SCHEMA });
+    const restrat = await safeAgent(
+      roleAgent('system_architect', 'strategize', 'Re-route after fusion apply-back changed the landscape.', {
+        EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
+        WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_SKILL_INPUTS, ...FUSION_INPUTS,
+      }),
+      { phase: 'Strategize', label: 'architect:post-fusion-re-strategize', schema: STRATEGY_SCHEMA });
+    if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
+    if (restrat && restrat.head_candidates) headQueue = restrat.head_candidates.slice();
+    await ensureFlydslGate();
+  } else {
+    log(`Fusion apply-back: no fusion accepted (${fapply ? (fapply.notes || 'none passed the gate') : 'agent null/degraded'}); continuing with the non-fused baseline.`);
+  }
+}
 
 // ===========================================================================
 // PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized
@@ -2078,6 +2260,20 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Profile', label: 'profiler:post-head', schema: PROFILE_SCHEMA });
+    // Head wins can remove/merge the very kernels in the original Milestone
+    // queue. Refresh routing before any single-kernel dispatch.
+    const restrat = await safeAgent(
+      roleAgent('system_architect', 'strategize',
+        'Re-route after accepted head kernels changed the profile landscape.', {
+          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '',
+          BASELINE_THROUGHPUT: curTput, WORKLOAD, BUDGET,
+          HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS, ...FUSION_INPUTS,
+        }),
+      { phase: 'Strategize', label: 'architect:post-head-re-strategize', schema: STRATEGY_SCHEMA });
+    if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
+    if (restrat && restrat.head_candidates) headQueue = restrat.head_candidates.slice();
+    log(`Post-head routing refreshed: ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
   }
   log(`Head-kernel track done. ${acceptedHeads.length} accepted, throughput ${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x).`);
   if (flaggedHeads.length) {
@@ -2483,6 +2679,9 @@ const carryState = {
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
+  fusion_inputs: FUSION_INPUTS,   // carry the fusion prior so a phase=config/head continuation still sees it
+  accepted_fusions: acceptedFusions,   // Phase 3.1/3.2 fusions banked into curOverlay
+  semantics_mapping: semantics || { status: 'unavailable' },
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
   // Carry pending (verified-isolated, A/B-incomplete) wins WITH their inputs so a
   // resumed phase run can finish their A/B instead of re-discovering them.
@@ -2514,6 +2713,7 @@ const wfReturn = {
        : (want('final') ? 'unknown' : 'phase_partial')),
   output_parity: validation ? validation.output_parity : 'unknown',
   accepted_config: { flags: curFlags, env: curEnv },
+  semantics_mapping: semantics || { status: 'unavailable' },
   accepted_kernels: acceptedKernels,
   accepted_heads: acceptedHeads,
   // Verified-isolated wins whose e2e A/B never completed (timeout/hang mid-gate).

@@ -86,6 +86,12 @@ adapter_profile_window() {
   local before after
   before=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
   local _acts="${SGLANG_PROFILE_ACTIVITIES:-[\"CPU\",\"GPU\"]}" _stack="${SGLANG_PROFILE_WITH_STACK:-false}"
+  # The semantics sidecar requests module spans by passing SGLANG_PROFILE_WITH_STACK
+  # through EXTRA_ENV (which otherwise only reaches the server launch line). Honor it
+  # for the profiler window too, so DecoderLayer python_function spans get captured.
+  case " ${EXTRA_ENV:-} " in
+    *" SGLANG_PROFILE_WITH_STACK=true "*|*" SGLANG_PROFILE_WITH_STACK=1 "*) _stack=true ;;
+  esac
   # num_steps set => the server records that many forward steps then auto-saves (async; returns at once).
   if ! curl -sf -X POST "${BASE_URL}/start_profile" -H 'Content-Type: application/json' \
         -d "{\"output_dir\":\"${PROFILE_DIR}\",\"num_steps\":${PROFILE_NUM_STEPS},\"record_shapes\":true,\"with_stack\":${_stack},\"activities\":${_acts}}" \

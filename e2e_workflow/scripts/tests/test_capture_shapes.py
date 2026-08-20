@@ -95,17 +95,32 @@ def _reset_state(mod):
         sequence=[], seq_cap=256, in_graph_calls=0,
         shape_counts={}, shape_meta={},
         flush_every=64, oracle_written=False, oracle_sha=None, oracle_records=0,
+        semantics_metadata_only=False, semantics_jsonl=None, semantics_config={},
+        semantics_bucket_forwards={}, semantics_next_instance=0,
+        semantics_static_written=set(),
     )
+    mod.clear_semantics_context()
 
 
 class FakeTensor:
     """Just enough torch.Tensor surface for the recorder: shape/dtype/device + the detach/clone walk."""
 
-    def __init__(self, shape, dtype="torch.float16", device="cuda:0", contiguous=True):
+    def __init__(self, shape, dtype="torch.float16", device="cuda:0", contiguous=True,
+                 stride=None):
         self.shape = tuple(shape)
         self.dtype = dtype
         self.device = device
         self._contiguous = contiguous
+        self._stride = tuple(stride) if stride is not None else self._default_stride()
+        self.clone_calls = 0
+
+    def _default_stride(self):
+        running = 1
+        result = []
+        for dim in reversed(self.shape):
+            result.append(running)
+            running *= dim
+        return tuple(reversed(result))
 
     def dim(self):
         return len(self.shape)
@@ -117,10 +132,14 @@ class FakeTensor:
         return FakeTensor(self.shape, self.dtype, device, self._contiguous)
 
     def clone(self):
+        self.clone_calls += 1
         return FakeTensor(self.shape, self.dtype, self.device, self._contiguous)
 
     def is_contiguous(self):
         return self._contiguous
+
+    def stride(self):
+        return self._stride
 
 
 class ExplodingTensor:
@@ -178,17 +197,22 @@ class _RecorderTestCase(unittest.TestCase):
         self.addCleanup(sys.modules.pop, name, None)
         return mod
 
-    def _hook(self, fn=None, out_dir=None, max_cases=5, name="fake_serving_layer"):
+    def _hook(self, fn=None, out_dir=None, max_cases=5, name="fake_serving_layer",
+              **install_kwargs):
         """Install the recorder over a stub module's `op`, returning (module, install stderr)."""
         mod = self._target_module(fn, name)
         with _stderr() as err:
             cs.install(f"{name}:op", self.out_dir if out_dir is None else out_dir,
-                       max_cases=max_cases)
+                       max_cases=max_cases, **install_kwargs)
         return mod, err.getvalue()
 
     def _meta(self, out_dir=None):
         with open(os.path.join(out_dir or self.out_dir, "meta.json")) as fh:
             return json.load(fh)
+
+    def _semantics_records(self):
+        with open(os.path.join(self.out_dir, "semantics_metadata.jsonl")) as fh:
+            return [json.loads(line) for line in fh if line.strip()]
 
 
 # --------------------------------------------------------------------------- #
@@ -671,6 +695,124 @@ class TestFlush(_RecorderTestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Semantics Mapping 1.2 metadata-only mode
+# --------------------------------------------------------------------------- #
+class TestSemanticsMetadataOnly(_RecorderTestCase):
+    def _semantics_hook(self, config=None, fn=None):
+        return self._hook(
+            fn=fn, semantics_metadata_only=True,
+            semantics_config=config or {})
+
+    def test_records_input_kwargs_and_output_metadata_without_clone_or_oracle(self):
+        shared = FakeTensor((4, 8), stride=(16, 2), contiguous=False)
+        mod, _ = self._semantics_hook(fn=lambda x, **kw: x)
+        with _stderr(), cs.semantics_context(
+                rank=0, layer_id=7, phase="decode", bucket="bs4",
+                forward_id="decode-forward-0", dispatch_branch="fast"):
+            out = mod.op(shared, residual=shared)
+        self.assertIs(out, shared)
+        self.assertEqual(shared.clone_calls, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "reference_io.pt")))
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "meta.json")))
+
+        records = self._semantics_records()
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["rank"], 0)
+        self.assertEqual(record["layer_id"], 7)
+        self.assertEqual(record["phase"], "decode")
+        self.assertEqual(record["bucket"], "bs4")
+        self.assertEqual(record["dispatch_branch"], "fast")
+        self.assertFalse(record["in_graph"])
+        self.assertEqual(record["capture_window"], "eager")
+        self.assertEqual(record["evidence_level"], "kernel_exact")
+        arg = record["inputs"]["items"][0]
+        kwarg = record["kwargs"]["items"]["residual"]
+        output = record["output"]
+        self.assertEqual(arg["shape"], [4, 8])
+        self.assertEqual(arg["dtype"], "torch.float16")
+        self.assertEqual(arg["device"], "cuda:0")
+        self.assertEqual(arg["stride"], [16, 2])
+        self.assertFalse(arg["contiguous"])
+        self.assertEqual(arg["alias_id"], kwarg["alias_id"])
+        self.assertEqual(arg["alias_id"], output["alias_id"])
+        self.assertEqual(record["op_instance_id"], "op-0")
+
+    def test_rank_layer_op_phase_and_bucket_filters_run_before_metadata_walk(self):
+        config = {
+            "ranks": [0], "layer_ids": [22],
+            "op_paths": ["wanted.path"], "target_ops": ["wanted_op"],
+            "phases": ["prefill"], "buckets": ["tokens16384"],
+            "context": {"op_path": "wanted.path", "target_op": "wanted_op"},
+        }
+        mod, _ = self._semantics_hook(config=config)
+        mismatches = [
+            {"rank": 1, "layer_id": 22, "phase": "prefill", "bucket": "tokens16384"},
+            {"rank": 0, "layer_id": 23, "phase": "prefill", "bucket": "tokens16384"},
+            {"rank": 0, "layer_id": 22, "phase": "decode", "bucket": "tokens16384"},
+            {"rank": 0, "layer_id": 22, "phase": "prefill", "bucket": "other"},
+            {"rank": 0, "layer_id": 22, "phase": "prefill", "bucket": "tokens16384",
+             "op_path": "other.path"},
+        ]
+        with _stderr():
+            for context in mismatches:
+                with cs.semantics_context(**context):
+                    self.assertEqual(mod.op(ExplodingTensor()), "OUT")
+        self.assertFalse(os.path.exists(
+            os.path.join(self.out_dir, "semantics_metadata.jsonl")))
+
+        with _stderr(), cs.semantics_context(
+                rank=0, layer_id=22, phase="prefill", bucket="tokens16384",
+                forward_id="f0"):
+            mod.op(FakeTensor((16384, 4096)))
+        self.assertEqual(len(self._semantics_records()), 1)
+
+    def test_forward_limit_is_per_bucket_and_stable_forward_id_shares_slot(self):
+        config = {"max_forwards_per_bucket": 1}
+        mod, _ = self._semantics_hook(config=config)
+        with _stderr():
+            with cs.semantics_context(phase="decode", bucket="bs4", forward_id="f0"):
+                mod.op(FakeTensor((4, 8)))
+                mod.op(FakeTensor((4, 8)))
+            with cs.semantics_context(phase="decode", bucket="bs4", forward_id="f1"):
+                mod.op(FakeTensor((4, 8)))
+            with cs.semantics_context(phase="prefill", bucket="tokens16k", forward_id="f2"):
+                mod.op(FakeTensor((16384, 8)))
+        records = self._semantics_records()
+        self.assertEqual(len(records), 3)
+        self.assertEqual([r["forward_id"] for r in records], ["f0", "f0", "f2"])
+        self.assertEqual({r["bucket"] for r in records}, {"bs4", "tokens16k"})
+
+    def test_one_to_many_wrapper_is_parent_context_only(self):
+        config = {
+            "mapping_cardinality": "1:N",
+            "context": {"static_context": {"weight_shape": [8, 16]}},
+        }
+        mod, _ = self._semantics_hook(config=config)
+        with _stderr(), cs.semantics_context(
+                phase="decode", bucket="bs4", forward_id="f0"):
+            mod.op(FakeTensor((4, 8)))
+            mod.op(FakeTensor((4, 8)))
+        first, second = self._semantics_records()
+        self.assertEqual(first["mapping_cardinality"], "1:N")
+        self.assertEqual(first["evidence_level"], "parent_wrapper_context")
+        self.assertTrue(first["parent_context_only"])
+        self.assertNotIn("kernel_exact", json.dumps(first))
+        self.assertEqual(first["static_context"], {"weight_shape": [8, 16]})
+        self.assertEqual(second["static_context_ref"], "fake_serving_layer:op")
+
+    def test_jsonl_defaults_to_file_not_stdout(self):
+        mod, _ = self._semantics_hook()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), _stderr(), cs.semantics_context(
+                phase="decode", bucket="bs4", forward_id="f0"):
+            mod.op(FakeTensor((4, 8)))
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertTrue(os.path.exists(
+            os.path.join(self.out_dir, "semantics_metadata.jsonl")))
+
+
+# --------------------------------------------------------------------------- #
 # _wrappable -- refusing native callables is what stops the mid-run SIGSEGV
 # --------------------------------------------------------------------------- #
 class TestWrappable(_RecorderTestCase):
@@ -901,6 +1043,28 @@ class TestImportTimeInstall(_RecorderTestCase):
         mod, _ = self._fresh("capture_shapes_cutoff", CAPTURE_TARGET=None, CAPTURE_OUT=None,
                              CAPTURE_DECODE_LEAD_MAX="8")
         self.assertEqual(mod._STATE["decode_lead_max"], 8)
+
+    def test_env_opt_in_enables_metadata_only_semantics_capture(self):
+        target = self._target_module(name="semantics_overlay_layer")
+        mod, _ = self._fresh(
+            "capture_shapes_semantics_overlay",
+            CAPTURE_TARGET="semantics_overlay_layer:op",
+            CAPTURE_OUT=self.out_dir,
+            CAPTURE_SEMANTICS_METADATA_ONLY="1",
+            CAPTURE_SEMANTICS_RANKS="0",
+            CAPTURE_SEMANTICS_CONTEXT_RANK="0",
+            CAPTURE_SEMANTICS_CONTEXT_PHASE="decode",
+            CAPTURE_SEMANTICS_CONTEXT_BUCKET="bs4",
+            CAPTURE_SEMANTICS_CONTEXT_FORWARD_ID="warmup-0")
+        self.assertTrue(mod._STATE["semantics_metadata_only"])
+        with _stderr():
+            target.op(FakeTensor((4, 8)))
+        with open(os.path.join(self.out_dir, "semantics_metadata.jsonl")) as fh:
+            record = json.loads(fh.readline())
+        self.assertEqual(record["rank"], "0")
+        self.assertEqual(record["capture_window"], "eager")
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "reference_io.pt")))
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "meta.json")))
 
 
 if __name__ == "__main__":

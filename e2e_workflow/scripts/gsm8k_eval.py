@@ -66,7 +66,10 @@ def main():
     ap.add_argument("--model", required=True)               # served model name/path
     ap.add_argument("--limit", type=int, default=200)       # subset size (InferenceX-style --limit)
     ap.add_argument("--fewshot", type=int, default=5)
-    ap.add_argument("--max-tokens", type=int, default=1024)   # reasoning model needs room to finish CoT + answer
+    ap.add_argument("--max-tokens", type=int, default=4096)   # reasoning model needs room to finish CoT + answer;
+    # 1024 systematically UNDER-scores a reasoning model (DSR1): the CoT gets cut before the final
+    # "#### N", the last-number fallback then grabs a mid-reasoning number -> ~15pt drop. Verified on
+    # DSR1: gsm8k 1024=~0.79 vs 4096=0.94 (same server, only max_tokens changed). Keep >=4096 for CoT models.
     ap.add_argument("--concurrency", type=int, default=32)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="")

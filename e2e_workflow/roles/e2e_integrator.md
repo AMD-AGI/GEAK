@@ -85,6 +85,25 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
 ∈ {env,flag,patch}, `apply_env`, `apply_flags`, `code_patch`, `tuning_artifact`, `parity_note`),
 `CURRENT_OVERLAY`, `CURRENT_FLAGS`/`CURRENT_ENV`, `CURRENT_THROUGHPUT`, `SKILL_DIR`.
 
+**FUSION DEGRADE LADDER (only if the candidate carries `fusion_degrade_ladder`).** A kernel-fusion
+candidate from Phase 3 nominates the WIDEST fusion (most ops merged) as primary and attaches an ordered
+ladder of narrower alternatives (widest→narrowest, e.g. `AR+norm+quant` → `AR+norm` → `norm+quant`). The
+objective is to fuse as many ops as possible: **try the primary first; if it cannot be wired at the seam OR
+fails this e2e gate, DEGRADE to the next ladder rung and retry — keep the WIDEST rung that both engages and
+passes.** Do NOT settle for a narrow rung (e.g. the flag-only AR+norm) while a wider rung is untried. Record
+which rung was accepted and why the wider ones were rejected (wiring failure vs gate failure).
+
+**A fusion that needs an authored adapter (not a flag/direct call) is done via the `fusion_integrator`
+role — read `roles/fusion_integrator.md` and follow its adapter pattern**: reversible lazy-load overlay
+(NEVER eager-import sglang at sitecustomize startup — it HANGS TP=8 init), a **kernel-availability gate**
+(route the fused fp8 output only to a downstream consumer whose kernel is PREBUILT here — DSR1 MoE experts'
+`preshuffle_off per_1x128` kernel is NOT built and crashes; route to `gemm_a8w8_blockscale` at an
+attention/dense seam or `emit_bf16`-fallback the branch), combined-loader stacking, and stdout→stderr
+logging (stdout pollution breaks the JIT `--offload-arch` subprocess). Prove the `[overlay-…] ENGAGED`
+banner on ALL TP ranks. Decode-path fusions move **TPOT/throughput, not TTFT** (prefill-dominated) — report
+both. For a quant fusion the gsm8k ABSOLUTE is harness-capped on a reasoning model (truncated CoT); trust
+only the same-harness base-vs-cand DELTA.
+
 **ACCURACY GATE (only if `ACCURACY_GATE=gsm8k` is in your inputs; else use the normal parity gate).**
 For a QUANTIZED kernel, byte-exact greedy parity is the WRONG bar (a within-tolerance kernel rounds
 differently → flips borderline argmaxes → over-rejects valid kernels). Instead, score TASK ACCURACY:
