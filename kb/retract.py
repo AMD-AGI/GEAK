@@ -35,7 +35,7 @@ from __future__ import annotations
 import os
 import time
 
-from kb_store_local import Candidate, KBStoreError, finite_speedup
+from kb.store_local import Candidate, KBStoreError, finite_speedup
 
 
 # Written into `value.lifecycle`. The other two values in circulation are "active" (reproduced) and

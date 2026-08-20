@@ -1,4 +1,4 @@
-"""Tests for the on-disk KB Store (kernel_workflow/scripts/kb_store_local.py).
+"""Tests for the on-disk KB Store (kb/store_local.py).
 
 This plane exists to be swapped for the KernelForge service without changing behaviour, so what is
 pinned here is the contract the service defines, not this implementation's conveniences:
@@ -18,8 +18,8 @@ import sys
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from kb_store_local import KBStoreError, LocalKBStore  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from kb.store_local import KBStoreError, LocalKBStore  # noqa: E402
 
 CID = "geak:kernel:geak:fused_moe_kernel:rocm:7.2:triton:gfx950"
 

@@ -21,7 +21,7 @@ Subcommands:
     export-remote
                Render entries as KB Store candidates (one JSON line each); uploads nothing.
     resolve-remote
-               `resolve`, but addressed by canonical id against a KB store (kb_store_local.py).
+               `resolve`, but addressed by canonical id against a KB store (kb/store_local.py).
     write-remote
                `write`, landing the same result in the local store AND under its key.
 
@@ -43,6 +43,17 @@ import re
 import sys
 import tempfile
 import time
+
+# The shared KB plane lives at the repo root as the `kb` package, not beside this file. Executed as
+# a CLI from an arbitrary cwd, so the root is derived from __file__ and never from the environment.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from kb.curate import collapse_by_direction
+from kb.ladder import publish
+from kb.plane import open_plane
+from kb.store_local import CHAMPION_METRIC
 
 try:
     import yaml
@@ -735,27 +746,6 @@ def _rank_key(md):
     return (-_speedup_of(meta), -reps, os.path.basename(exp_dir))
 
 
-def _collapse_by_direction(ordered, direction_of, unique_of, top_n):
-    """One rank per IDEA, best first. Input must already be in rank order.
-
-    Three implementations of one direction verify — or fail to apply — together, and every attempt
-    costs a full on-box measurement, so the runners-up ride along as `alternates` instead of taking
-    a slot. An entry with no direction is its own: unlabeled is honest, not a group.
-
-    Returns (chosen, alternates-per-chosen, how many were collapsed).
-    """
-    groups, order = {}, []
-    for item in ordered:
-        key = str(direction_of(item) or "").strip().lower() or "__undirected__" + unique_of(item)
-        if key not in groups:
-            groups[key] = []
-            order.append(key)
-        groups[key].append(item)
-    chosen = order[: max(1, int(top_n or 3))]
-    return ([groups[k][0] for k in chosen], [groups[k][1:] for k in chosen],
-            sum(len(groups[k]) - 1 for k in chosen))
-
-
 def _render_references(refs_dir: str, address: str, summary: str, views):
     """Mirror the offered candidates' prose into `refs_dir` and index it, one prose path per view.
 
@@ -879,7 +869,7 @@ def cmd_resolve(a) -> dict:
         return dict(base_out, filtered=stats,
                     read_reason="all_retired" if not servable else "below_min_speedup")
 
-    top, alternates, collapsed = _collapse_by_direction(
+    top, alternates, collapsed = collapse_by_direction(
         sorted(above, key=_rank_key), lambda md: md[0].get("direction"), lambda md: md[1], a.top_n)
     stats["same_direction_collapsed"] = collapsed
 
@@ -1038,7 +1028,7 @@ def cmd_backfill_content(a) -> dict:
 # --- remote KB export -------------------------------------------------------------------------
 # Record shape mirrors KernelForge's (knowledge/kernel_identity.py and
 # rewrite_by_flydsl/{identity,agent_kb,record_store}.py @ baabdae); the ADDRESS does not, and
-# kb_identity.py owns it for both workflows and says why. Read and write must both go through it:
+# kb/identity.py owns it for both workflows and says why. Read and write must both go through it:
 # the store finds nothing if the two sides disagree by one segment, and there is no error to notice
 # — a mistyped dimension just reads as a cold start.
 #
@@ -1059,9 +1049,8 @@ def cmd_backfill_content(a) -> dict:
 REMOTE_PRODUCER = "geak"
 REMOTE_ARTIFACT_KIND = "rewrite"        # upstream ARTIFACT_KIND for a recipe bundle
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    import kb_identity as _kbid
+    from kb import identity as _kbid
 except ImportError:                     # resolve/write stay usable; only the remote pair needs it
     _kbid = None
 
@@ -1073,7 +1062,7 @@ REMOTE_UNKNOWN_VERSION = "unspecified"
 
 def _identity_module():
     if _kbid is None:
-        raise RuntimeError("kb_identity_unavailable: kb_identity.py must sit beside this script")
+        raise RuntimeError("kb_identity_unavailable: kb/identity.py must be importable from the repo root")
     return _kbid
 
 
@@ -1287,7 +1276,7 @@ def cmd_export_remote(a) -> dict:
     """Render this store as KB Store candidates, one JSON line each, champion pre-decided.
 
     Nothing is uploaded here — this only produces what to upload, so the mapping is reviewable and
-    diffable before anything leaves the machine. kb_remote_upload.py consumes the output.
+    diffable before anything leaves the machine. kb/remote_upload.py consumes the output.
     """
     root = a.root
     if not os.path.isdir(root):
@@ -1373,57 +1362,6 @@ def cmd_export_remote(a) -> dict:
             "skipped": skipped, "out": a.out or "-"}
 
 
-def _open_store(root: str, create: bool = False):
-    """The on-disk KB store, or a reason. Imported lazily so `resolve`/`write` keep working on a
-    box that only has this one file.
-
-    A missing root is a hard miss when reading — a typo'd path must not read as an empty store and
-    quietly cold-start a run that had experience waiting. Writing creates it, because the first
-    write into a fresh store is the normal case, not an error.
-    """
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from kb_store_local import LocalKBStore
-    except ImportError as e:
-        return None, "store_unavailable: " + str(e)[:120]
-    if not os.path.isdir(root):
-        if not create:
-            return None, "no_such_store: " + root
-        try:
-            os.makedirs(root, exist_ok=True)
-        except OSError as e:
-            return None, "unusable_store: " + str(e)[:120]
-    return LocalKBStore(root), ""
-
-
-def _open_plane(a, create: bool = False):
-    """The store this invocation reads or writes: a directory, the service, or both.
-
-    `--plane both` is the one that needs care. It writes locally FIRST and remotely second, and a
-    remote failure is reported without failing the call — the local plane is the source of truth,
-    the run already spent GPU hours producing the measurement, and a network blip must not discard
-    it. A remote-only failure therefore surfaces as `remote_error` in the result rather than as a
-    refusal, which is also why the field exists at all: without it an unreachable service would
-    look exactly like a successful write.
-    """
-    plane = str(getattr(a, "plane", "local") or "local")
-    if plane == "local":
-        store, why = _open_store(a.store, create)
-        return store, None, why
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from kb_store_remote import RemoteKBStore
-    except ImportError as e:
-        return None, None, "store_unavailable: " + str(e)[:120]
-    remote, why = RemoteKBStore.from_env(getattr(a, "scan", 25))
-    if plane == "remote":
-        return remote, None, why
-    local, local_why = _open_store(a.store, create)
-    if local is None:
-        return None, None, local_why
-    return local, remote, ("remote_unavailable: " + why if remote is None else "")
-
-
 def _value_as_meta(value: dict, gfx: str) -> dict:
     """Read a record's `value` back as a meta.
 
@@ -1465,7 +1403,7 @@ def cmd_retract_remote(a) -> dict:
 
     The service has no delete, so this rewrites the session in place: `retained: false`, a reason,
     the ranking scalar zeroed, and the identity's champion re-pointed at the best survivor. See
-    kb_retract for why all three are needed and why any two of them is worse than none.
+    kb/retract.py for why all three are needed and why any two of them is worse than none.
 
     Both rungs are visited, because `write-remote` filled both with the SAME session id. Retracting
     only the exact rung leaves the record live on the version-agnostic page, which is the page a box
@@ -1475,12 +1413,11 @@ def cmd_retract_remote(a) -> dict:
     an address is auditing it, and quietly widening a WRITE beyond what was asked for is not a
     behaviour this command should have.
     """
-    from kb_retract import retract_session, retraction_ok
-    from kb_store_local import CHAMPION_METRIC
+    from kb.retract import retract_session, retraction_ok
     gfx = _norm_gfx(a.gfx)
     if not gfx and not a.canonical_id:
         return {"retracted": False, "reason": "missing_arch"}
-    store, mirror, why = _open_plane(a)
+    store, mirror, why = open_plane(a, CHAMPION_METRIC, 1.0)
     planes = [p for p in (store, mirror) if p is not None]
     if not planes:
         return {"retracted": False, "reason": why}
@@ -1526,7 +1463,7 @@ def cmd_resolve_remote(a) -> dict:
     # Reading takes ONE plane, never both. Merging two rankings would need a comparability rule
     # across planes that nothing here has, and silently preferring one would make a stale local
     # mirror shadow the service without saying so.
-    store, _second, why = _open_plane(a)
+    store, _second, why = open_plane(a, CHAMPION_METRIC, 1.0)
     if store is None:
         return {"read_reason": why.split(":", 1)[0], "reason": why, "candidates": []}
 
@@ -1584,7 +1521,7 @@ def cmd_resolve_remote(a) -> dict:
         return dict(base_out, filtered=stats, read_reason="below_min_speedup")
 
     # `above` is already speedup-ordered by the store.
-    top, alternates, collapsed = _collapse_by_direction(
+    top, alternates, collapsed = collapse_by_direction(
         above, lambda c: c.value.get("direction"), lambda c: c.session_id, a.top_n)
     stats["same_direction_collapsed"] = collapsed
 
@@ -1648,7 +1585,7 @@ def cmd_write_remote(a) -> dict:
         not a second candidate, which is exactly what the local plane already calls it.
     """
     local = cmd_write(a)
-    store, also, why = _open_plane(a, create=True)
+    store, also, why = open_plane(a, CHAMPION_METRIC, 1.0, create=True)
     if store is None:
         return dict(local, remote={"written": False, "reason": why})
 
@@ -1667,7 +1604,8 @@ def cmd_write_remote(a) -> dict:
     # Asked BEFORE the write: a session that already exists is this same patch measured again, and
     # the caller deserves to know its result replaced one rather than adding one.
     replaced = store.get_session(recs[0]["canonical_id"], recs[0]["session_id"]) is not None
-    written, promoted, error = _publish_ladder(store, recs, files)
+    written, promoted, error = publish(store, recs, files,
+                                       lambda rec: rec["knowledge"].get("speedup"))
     if error:                                    # a KB write must not fail a measured result
         return dict(local, remote={"written": False, "partial": written, "reason": error})
     out = {
@@ -1681,35 +1619,14 @@ def cmd_write_remote(a) -> dict:
     if also is not None:
         # The second plane never gates the first. It reports its own outcome so an unreachable
         # service is visible as a failed mirror rather than as a silent one.
-        mirrored, mirror_promoted, mirror_error = _publish_ladder(also, recs, files)
+        mirrored, mirror_promoted, mirror_error = publish(
+            also, recs, files, lambda rec: rec["knowledge"].get("speedup"))
         out["mirror"] = {"written": not mirror_error, "store": also.root,
                          "canonical_ids": mirrored, "champion_of": mirror_promoted,
                          "reason": mirror_error or ""}
     elif why:
         out["mirror"] = {"written": False, "reason": why}
     return dict(local, remote=out)
-
-
-def _publish_ladder(store, recs, files):
-    """Write one measurement to every rung of its ladder. Returns (written, promoted, error).
-
-    All rungs or none. A partially-filled ladder is the one outcome worth avoiding: the coarse page
-    would hold whichever runs happened to succeed twice and would rank them as if that were the
-    whole history — and because the scheme has no search, no reader could ever tell that page was
-    thin. Stopping at the first failure leaves fewer records than intended but never a page that
-    lies about its own completeness, since the exact rung is written first.
-    """
-    written, promoted = [], []
-    for rec in recs:
-        try:
-            store.write(rec["canonical_id"], rec["session_id"], rec["knowledge"], files)
-            written.append(rec["canonical_id"])
-            if store.maybe_promote(rec["canonical_id"], rec["session_id"],
-                                   rec["knowledge"].get("speedup")):
-                promoted.append(rec["canonical_id"])
-        except Exception as e:
-            return written, promoted, f"{type(e).__name__}: {str(e)[:160]}"
-    return written, promoted, ""
 
 
 def main(argv=None):

@@ -11,10 +11,12 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(_SCRIPTS)))              # repo root, for `kb`
+sys.path.insert(0, _SCRIPTS)
 import e2e_store                                                            # noqa: E402
-from kb_retract import is_retired, retracted_document, retraction_ok        # noqa: E402
-from kb_store_local import KBStoreError, LocalKBStore                       # noqa: E402
+from kb.retract import is_retired, retracted_document, retraction_ok        # noqa: E402
+from kb.store_local import KBStoreError, LocalKBStore                       # noqa: E402
 
 CID = "geak:e2e:m:gfx950:vllm:0.26.0:fp8:tp_8:isl_1024:osl_1024:conc_64"
 IDENTITY = ["--model", "M", "--gfx", "gfx950", "--framework", "vllm",

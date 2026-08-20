@@ -755,7 +755,7 @@ let KB_READ_PLANE = '';    // which plane ANSWERED the read, which `both` alone 
 const shq = (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'";
 
 // The ONE place e2e KB identity argv is formatted — called by both the reader (Module A) and the
-// writer (Module B). kb_identity.py's own header names the failure this prevents: a reader and a
+// writer (Module B). kb/identity.py's own header names the failure this prevents: a reader and a
 // writer that disagree by a single segment do not raise, they address two different pages, and the
 // only symptom is that history quietly stops existing. Two call sites formatting the same flags
 // independently is exactly how that drift starts.
