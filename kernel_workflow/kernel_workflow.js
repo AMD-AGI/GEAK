@@ -6,7 +6,7 @@ export const meta = {
     { title: 'Freeze',   detail: 'oracle_freezer: freeze the input kernel -> immutable oracle + baseline_src/ (the ONE denominator) [bakeoff only]' },
     { title: 'Discover', detail: 'op_benchmarker: per-language existing-impl probe + measure + OFFLINE env tune (aiter/CK, shapes from the frozen oracle) -> author_plan, best_known_ms [bakeoff only]' },
     { title: 'Bakeoff',  detail: 'one unchanged kernel_lane worker per language (optimize if an impl exists, else author), parallel over the GPU pool [bakeoff only]' },
-    { title: 'Report',   detail: 'rank ALL candidates (lanes + tuned env backend) on the SAME frozen baseline; write the comparison table + winner (+ optional apply_to_original) [bakeoff only]' },
+    { title: 'Report',   detail: 'rank ALL candidates (lanes + tuned env backend) on the SAME frozen baseline; write the comparison table + winner (+ optional apply_to_original), then curate ONE distilled card into knowledge/learned/ on a measured win [bakeoff only]' },
   ],
 };
 
@@ -126,6 +126,12 @@ const OPBENCH_SCHEMA = obj({
 const REPORT_SCHEMA = obj({
   report_path: { type: 'string' }, applied_to_original: { type: 'string' }, note: { type: 'string' },
 }, ['report_path']);
+
+const UPDATE_EXPERIENCE_SCHEMA = obj({
+  action: { type: 'string' },      // created | merged | skipped
+  card_path: { type: 'string' },   // path under knowledge/learned/, or "" if nothing distilled
+  key: { type: 'string' }, note: { type: 'string' },
+}, []);
 
 // ---------------------------------------------------------------------------
 // Prompt + agent helpers (self-contained; mirror kernel_lane.js / e2e_workflow.js).
@@ -268,7 +274,13 @@ const DISCOVER_INTRO =
   'the SAME frozen baseline the author lanes use, so it is directly comparable. If no tuned backend beats ' +
   'the baseline, set tuned_speedup=0.\n' +
   '(4) SKIP only pure server-flag levers (--attention-backend swap; serving-only fp8/MoE playbook probes ' +
-  'that need a running server). (5) DECIDE the author_plan as usual.';
+  'that need a running server). (5) DECIDE the author_plan as usual.\n' +
+  '(6) DO NOT run your step 6 (`CURATE SKILL_DIR/knowledge/learned/`). Your SKILL_DIR points at ' +
+  'e2e_workflow, but this is a kernel_workflow run: e2e`s learned/ is e2e`s own memory (owned by its ' +
+  'system_architect after an e2e A/B), and a kernel bake-off has no e2e-transfer evidence to put in it. ' +
+  'This run`s learned sink is kernel_workflow/knowledge/learned/, curated by the TechLead`s ' +
+  'update_experience step after Report. WRITE NOTHING under e2e_workflow/ — read it freely, but the ' +
+  'only files you create or modify live under EVAL_DIR (plus the tuning artifacts you were asked for).';
 const bake = await agentT(
   roleAgentFrom(E2E_WF_DIR, 'op_benchmarker', 'bakeoff', DISCOVER_INTRO, {
     EVAL_DIR, OP_TASK_DIR: oracle.task_dir, OP_KIND: oracle.op_kind,
@@ -355,6 +367,13 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       exp_root: `${EVAL_DIR}/bakeoff/${l.key}`,
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
+      // Forward the KB switch. This arg object is explicit (the optimize/author path spreads {...A},
+      // this one does not), so anything omitted here silently reverts to the lane's default — a
+      // caller asking for a KB-off bakeoff would have got eight KB-on lanes and no error.
+      use_learned_kb: A.use_learned_kb != null ? String(A.use_learned_kb) : 'true',
+      // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
+      // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
+      update_experience: 'off',
     });
     const speedup = primSpeedup(r);
     log(`lane ${l.key}:${l.mode} -> ${speedup ? speedup.toFixed(2) + 'x' : 'no result'} (${r ? r.validation_status : 'null'})`);
@@ -393,7 +412,19 @@ if (Number.isFinite(tunedSpeedup) && tunedSpeedup > 1.0 && bake.winner_backend &
 // transparency but must never win "by default"; winner=null => validation_status 'no_winner' => keep
 // the original kernel. Without this, a lane that is SLOWER than baseline (e.g. the only non-failed lane
 // at 0.17x) would be mislabeled the winner and mislead downstream automation reading .winner.
-const ranked = cands.filter(c => c.speedup > 1.0).sort((a, b) => b.speedup - a.speedup);
+// ...and only if the director ACCEPTED it. Ranking on speed alone let a lane whose validation came
+// back `flagged` (patch did not install, correctness failed, contended box) win the bake-off, be
+// applied to the original kernel, and be curated into the KB — a number with a known reason not to
+// be believed, promoted by every downstream step. Reported in review of #411. `laneRows` still
+// carries every lane for transparency; only eligibility to WIN is tightened.
+const ACCEPTED = (c) => String(c.validation_status || '').toLowerCase() === 'accepted';
+const ranked = cands.filter(c => c.speedup > 1.0 && (c.kind !== 'lane' || ACCEPTED(c)))
+  .sort((a, b) => b.speedup - a.speedup);
+const rejectedByGate = cands.filter(c => c.speedup > 1.0 && c.kind === 'lane' && !ACCEPTED(c));
+if (rejectedByGate.length) {
+  log(`bake-off: ${rejectedByGate.length} lane(s) beat the baseline but are NOT eligible to win ` +
+      `(validation_status != accepted): ${rejectedByGate.map(c => `${c.lang}=${c.validation_status}`).join(', ')}`);
+}
 const winner = ranked[0] || null;
 const laneRows = cands;
 const bestSpeedup = cands.reduce((m, c) => Math.max(m, Number(c.speedup) || 0), 0);
@@ -445,6 +476,31 @@ Return ONLY {report_path, applied_to_original, note} as StructuredOutput.`,
 log(winner
   ? `Bake-off COMPLETE. winner=${winner.lang}:${winner.mode} ${winner.speedup.toFixed(2)}x. Results in ${EVAL_DIR}`
   : `Bake-off COMPLETE. NO candidate beat the frozen baseline (best ${bestSpeedup.toFixed(2)}x <= 1.0x across ${cands.length} candidate(s)) — keeping the ORIGINAL kernel. Results in ${EVAL_DIR}`);
+
+// ---------------------------------------------------------------------------
+// PHASE: UpdateExperience — bake-off curates CENTRALLY here (its lanes run with
+// update_experience=off): the reusable lesson is the cross-language routing outcome, which
+// no single lane can see. Sink is THIS workflow's knowledge/learned/ (see its README.md),
+// never e2e's. Only on a measured win, and ADD-only — a failed step is byte-neutral.
+if (winner && winner.speedup > 1.0) {
+  const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
+  try {
+    const ue = await agentT(
+      roleAgent('update_experience', 'Report',
+        'Curate one distilled learned card from this bake-off win (ADD-only, measured evidence, ' +
+        'ratios not wall-clock; record the pitfalls hit).', {
+          SCOPE: 'bakeoff', LEARNED_DIR, SKILL_DIR: WORKFLOW_DIR, EVAL_DIR,
+          PERF_KNOWLEDGE_DIR: KERNEL_KNOWLEDGE_DIR,
+          WINNER: winner, CANDIDATES: laneRows,
+          REPORT_PATH: rep ? rep.report_path : `${EVAL_DIR}/bakeoff_report.md`,
+          OP_SPEC,
+        }),
+      { phase: 'Report', label: 'update_experience', schema: UPDATE_EXPERIENCE_SCHEMA });
+    if (ue && ue.card_path) log(`[kb] learned card ${ue.action || 'written'}: ${ue.card_path}`);
+  } catch (e) {
+    log(`[kb] update_experience skipped: ${e && e.message ? e.message : e}`);
+  }
+}
 
 return {
   mode: MODE,

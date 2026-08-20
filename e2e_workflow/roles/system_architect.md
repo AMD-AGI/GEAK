@@ -20,8 +20,11 @@ You are invoked per PHASE. Read first, every time:
 - `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience as **advisory priors** (an aid, not a
   cage; the workflow performs well without it). Read it AFTER forming your own profile-driven plan, as a
   cross-check + a source of EXTRA candidates — it only ADDs options, never prunes them or skips
-  measurement; the on-box bake-off + e2e gate is the judge. CURATE it after a run (merge/insert ≥★★ /
-  archive contradicted) per `knowledge/learned/README.md` — never blind-append.
+  measurement; the on-box bake-off + e2e gate is the judge. **Read the index and judge relevance by
+  meaning, not by string match** — a card written for a neighbouring op or a different tile regime often
+  still applies; and `ls` the folder, since the index is hand-kept today and has drifted before (see
+  `knowledge/learned/README.md`). CURATE it after a run (merge/insert ≥★★ / archive contradicted) —
+  never blind-append.
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder + per-backend priors; use
   it to build `head_candidates` (GEMM/attention) and pick their candidate backends.
 - The AMD knowledge base at `GEAK/perf_knowledge/` is **REFERENCE ONLY** — facts/how-to, not
@@ -377,11 +380,17 @@ verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SK
 
 1. **CURATE `SKILL_DIR/knowledge/learned/` — do NOT blind-append.** Follow the curate transaction in
    `knowledge/learned/README.md`: read `INDEX.md`, then for each durable finding:
-   - **Match the reuse key** `kernel_class · gfx · regime`. If a card exists → **MERGE** (bump
-     `confirms`, raise `confidence` if strengthened, widen/correct `effect`, append a `source`, update
-     `last_seen`) and update its one INDEX line. Do NOT create a second card for the same key.
+   - **Match the reuse key** — one line of plain English naming the op, the arch, and whatever else
+     distinguishes it (framework, dtype/quant format, regime), e.g. `bf16 fused-MoE grouped GEMM ·
+     gfx942/MI300X · vLLM`. Match **by meaning**: a differently-worded card for the same lever on the
+     same op/arch IS the same card. If one exists → **MERGE** (bump `confirms`, raise `confidence` if
+     strengthened, widen/correct `effect`, append a `source`, update `last_seen`, extend
+     `keywords`/`kernels`) and update its one INDEX line. Do NOT create a second card for the same key.
    - **INSERT a new card ONLY if novel AND effective (≥★★** = single-run non-overlapping, or ≥2
-     consistent, or Director-verified e2e). Each card carries `lever / apply / verify / source`, stays
+     consistent, or Director-verified e2e). Open it with the full **discovery header** (`name`,
+     `description` — the one line that becomes the index entry, `keywords`, `kernels`, `platforms`,
+     `kernel_class`, `regime`): that header is what makes the card findable and is what the index will be
+     generated from once every card here has one. Each card carries `lever / apply / verify / source`, stays
      ≤~15 lines, and gets ONE INDEX line. Keep `INDEX.md` ≤40 lines (evict lowest `confidence×freshness`).
    - **NULL / overlapping / unverified → write NOTHING to `learned/`** (it goes only in the eval-dir report).
    - **A surprising negative → a CONDITIONED `caution:` line** on the relevant card (e.g. "on
@@ -396,6 +405,12 @@ verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SK
      (`exp/e2e_*<Model>*/ YYYY-MM-DD`, `config/ck_tune/`, `<skill>/<file>.md`), never a path a reader
      can't reproduce. Run-config-only facts (which authors were enabled, an image missing a tool) stay
      in the eval-dir report unless generalized into a conditioned `caution:`. (See `learned/README.md` rule 7.)
+   - **Stay in YOUR sink, and cite the other one.** Write only under `SKILL_DIR/knowledge/learned/`.
+     A gain that came from a kernel the `kernel_workflow` lane produced is recorded here as **the e2e
+     delta + which exploration was worth the budget**, with a citation to that workflow's card
+     (`kernel_workflow/knowledge/learned/<slug>.md`) for the technique itself — the lane already wrote
+     it there. Do NOT copy the kernel card in, and do NOT write into `kernel_workflow/knowledge/learned/`
+     (that sink is owned by the lane's own `update_experience` step, gated by the isolated A/B).
 2. Keep the in-run hypothesis ledger (wins AND nulls, for THIS run's report) in `EVAL_DIR/insight_log.md`.
 3. **Calibrate the roofline prior (ONLY if one was used — `ANALYSIS_SKILL_DIR` non-empty and a
    `profile_roofline_json` exists; else skip).** For each direction this milestone measured, record

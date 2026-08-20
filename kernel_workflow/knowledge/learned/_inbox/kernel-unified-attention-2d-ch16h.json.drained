@@ -1,0 +1,130 @@
+{
+  "run_id": "kernel_unified_attention_2d-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "kernel_unified_attention_2d"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "kv-stream-cache-modifier",
+      "description": "Clearing the .cg non-temporal hint on once-read KV tile loads in paged attention decode: bit-identical, +8.2% geomean, carried by bandwidth-bound cases.",
+      "keywords": [
+        "attention",
+        "decode",
+        "paged-attention",
+        "cache-modifier",
+        "kv-cache",
+        "memory-bound",
+        "triton"
+      ],
+      "kernels": [
+        "kernel_unified_attention_2d"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "paged bf16 KV attention decode in Triton on gfx950, where each KV tile is loaded exactly once per workgroup",
+      "lifecycle": "active",
+      "type": "lever",
+      "cost": "L1",
+      "verified_on": "2026-07-29",
+      "title": "Drop the non-temporal cache hint on once-read KV streams",
+      "lever": "On the K/V tile loads inside the KV loop, try clearing the '.cg' cache_modifier so the streaming reads go through the normal cache path instead of the non-temporal one.",
+      "apply": "One argument on the tl.load of the K/V tiles; no math changes, so the output stays bit-identical and parity is free.",
+      "verify": "Interleaved min/median A/B against the frozen baseline, per case: expect the gain on the bandwidth-bound long-context cases and roughly nothing on a latency-floored small-batch case.",
+      "pitfall": "The geomean read as a uniform win -> it is entirely carried by the two bandwidth-bound cases -> attribute per case before claiming the lever transfers to short contexts.",
+      "caution": "Also verify the tiles really are read once under your blocking; a tile re-read across iterations may genuinely prefer the streaming hint.",
+      "effect": "+8.2% geomean isolated vs frozen baseline, bit-identical; per-case +15% and +8% on the two bandwidth-bound cases, ~0% on the latency-floored small-batch case",
+      "confidence": "★★",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "run kernel_unified_attention_2d-ch16h, 2026-07-29, 16h time-budget campaign, direction r1_d0_cache_modifier"
+    },
+    {
+      "name": "worst-element-gate-closes-kv-reassociation",
+      "description": "Attention decode under a worst-element max_rel gate: split-KV and fp8 KV close on numerics, not speed; split count and scale granularity do not help.",
+      "keywords": [
+        "attention",
+        "decode",
+        "split-kv",
+        "flash-decode",
+        "fp8-kv",
+        "numerics",
+        "oracle-parity",
+        "anti-pattern"
+      ],
+      "kernels": [
+        "kernel_unified_attention_2d"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "bf16 KV attention decode whose golden casts the probabilities to bf16 inside the PV dot, scored by a worst-element relative-error gate on gfx950",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "verified_on": "2026-07-29",
+      "title": "Reproduce the golden's own rounding before costing a KV reassociation",
+      "lever": "Before spending a round on split-KV/flash-decode or a lower-precision KV cache, recompute the golden against a true-fp32 reference and see how much error budget is already spent.",
+      "apply": "If the golden itself sits above the gate on worst-element relative error, any reassociation of the KV reduction inherits that gap; the cast that lives inside the dot cannot be reproduced outside it.",
+      "verify": "Score the near-zero output rows separately: cosine similarity stayed above 0.999 while worst-element relative error was orders of magnitude over the gate, so an aggregate metric hides the failure.",
+      "pitfall": "fp8 e4m3 KV looked fine on cosine but failed the gate -> weighted-V cancellation leaves a sixth of the rows near zero, where a 3-bit mantissa dominates -> scale granularity changed nothing, because the operands are uniform-magnitude and it is the mantissa that binds.",
+      "caution": "Also verify what the parity gate actually scores: this axis reopens if the golden's in-dot cast changes or near-zero rows are scored on an absolute tolerance.",
+      "effect": "closed axis, banked ~1.00x: split-KV per-case diverged at max_rel 1.357 against a 1e-2 gate on all three cases and invariant to the split count; fp8 KV blew worst-element error 36-125x on ~16% near-zero rows",
+      "confidence": "★★",
+      "attempts": 2,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "run kernel_unified_attention_2d-ch16h, 2026-07-29, directions split_kv_deep_16h and r1_d0_fp8kv_16h"
+    },
+    {
+      "name": "latency-floored-decode-host-compute-axes",
+      "description": "With a lean launcher and an MFMA-optimal tile, decode graph capture, manual SW pipelining and occupancy recovery all measured at or below 1.00x.",
+      "keywords": [
+        "attention",
+        "decode",
+        "launch-overhead",
+        "graph-capture",
+        "software-pipelining",
+        "occupancy",
+        "wave-quantization",
+        "anti-pattern"
+      ],
+      "kernels": [
+        "kernel_unified_attention_2d"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "small-batch attention decode already sitting on its serial online-softmax dependency chain behind an async, launcher-lean host wrapper on gfx950",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "verified_on": "2026-07-29",
+      "title": "Four host and compute directions that a latency-floored decode kernel gives back",
+      "lever": "Read the ISA before restructuring: register count with zero spills says whether occupancy is even the constraint, and the MFMA variant says whether tuning its shape can pay at all.",
+      "apply": "Where the residual limiter is wave quantization (about 1.5 waves of workgroups over the CU count), the payoff lives in the grid, not in the inner recurrence.",
+      "verify": "Check the host cost is above the graph-launch cost before capturing; an async back-to-back launcher already overlaps enqueue with the previous call's compute, so capture only adds a fixed per-call charge.",
+      "pitfall": "Manual QK/PV software pipelining carrying the raw score tile across the loop back-edge regressed 40-56% -> live state times the stage count inflates and fights the compiler's own pipeliner -> leave staging to num_stages, and expect reordering the PV dot ahead of the rescale to be a no-op the scheduler already did.",
+      "caution": "Also verify how thin wins are timed: an average-of-many-reps harness washed a ~1% win and the driver reported no improvement while the verified patch was real, so re-measure with interleaved min/median A/B over at least 8 reps and confirm the patch marker landed.",
+      "effect": "closed axis: wrapper graph capture regressed per case -49.6% / -40.2% / -29.0%; manual software pipelining -40 to -56% on every case; PV-dot reorder exactly 1.00x; recovering occupancy on the mid-context case regressed monotonically, with a single deep-prefetched wave the optimum",
+      "confidence": "★★",
+      "attempts": 3,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "run kernel_unified_attention_2d-ch16h, 2026-07-29, directions r1_d0_hipgraph_16h, r1_d0_ilp_restructure, r2_d0"
+    }
+  ]
+}

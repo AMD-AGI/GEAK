@@ -1,0 +1,142 @@
+{
+  "run_id": "moe_stage1-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "moe_stage1"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "block-scale-metadata-path-moe-gemm",
+      "description": "fp8 block-scale MoE grouped GEMM: pipeline-version row + scale-metadata staging (gather packing, LDS slabs, batched prologue fill) compounded to 1.84x",
+      "keywords": [
+        "moe",
+        "grouped-gemm",
+        "block-scale",
+        "fp8",
+        "lds-staging",
+        "pipeline-version",
+        "xcd-swizzle",
+        "epilogue",
+        "prologue",
+        "composable-kernel"
+      ],
+      "kernels": [
+        "kernel_moe_gemm",
+        "ck_moe_stage1_gemm"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "fp8 e4m3 block-scale MoE stage-1 grouped GEMM with fused activation, Composable-Kernel template instances, gfx950/MI355 - where the win lives when the MFMA loop is latency-limited",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L2",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.84x isolated geomean vs frozen baseline, director-verified, bit-identical outputs; per-case 1.56x at the smallest-concurrency shape and 2.01x / 1.99x at the two large ones; repeat spread under 0.6%",
+      "verified_on": "2026-08-12",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "last_seen": "2026-08-12",
+      "title": "Block-scale MoE grouped GEMM: fund the scale-metadata path, not the MFMA loop",
+      "lever": "Try the pipeline-version row of the template instance first, then attack the per-block scale metadata path - gather packing, LDS staging of the scale slabs, batching the prologue fill - before tuning the MFMA loop.",
+      "apply": "Every mechanism is a small edit in the gridwise/common headers plus one token on the instance row; keep each behind its own default-on macro so an ablation is a rebuild rather than a revert.",
+      "stack": "total 1.84x isolated geomean (director-verified) = five mechanism groups compounded\n  - 1. pipeline version V3 -> V1 on the same tile row - 1.33x standalone - halves LDS, removes the register spill, -27% per-wave time at unchanged occupancy; the cheapest lever in the run\n  - 2. XCD-contiguous block-to-tile remap - +8.7% on top of (1) - dispatch-order locality leaked ~9% on every per-case shape, not only the small one\n  - 3. scale-gather KPack=2, then A- and B-scale LDS slabs - +7.2% then +7.7% - in-loop scale traffic goes to exactly zero\n  - 4. epilogue store width widened to the template's own vector constant + transcendental-free activation - +6.8% in the once-per-workgroup tail\n  - 5. batched prologue scale fill, 9 serialised round trips down to 3 - +2.75%, uniform per-case\n  - note: attribution is incremental in landing order, not independent",
+      "verify": "Interleave control/candidate/control/candidate against the frozen baseline in one sitting, require the correctness cos-diff to sit at the baseline's own value, and re-time a fresh pristine copy the same day to show no box drift.",
+      "pitfall": "hand-merging three individually verified directions lost the round -> the directions interact -> re-measure the best single direction alone as a same-sitting control and merge only single-hunk diffs\n  - pitfall: five verified results were booked as zero while a full perf report already sat in the build dir -> a lane reported a lock timeout as a measurement -> read the build report json before believing a zero; the cumulative understated the run by ~10% for five rounds",
+      "caution": "Also verify the scale-block constants before planning a tile sweep: when the scale block equals the K (or N) tile, that tile dimension is welded shut and only M can move.",
+      "source": "run moe_stage1-own16h, 2026-08-12 - 13-round campaign, director-validated at geomean 1.8431x, correctness pass"
+    },
+    {
+      "name": "per-region-isa-census-before-hot-loop",
+      "description": "Census the ISA per region (prologue / main loop / epilogue) on CPU before tuning the hot loop: the two unexamined regions carried the wins the loop refused",
+      "keywords": [
+        "isa-census",
+        "profiling-method",
+        "prologue",
+        "epilogue",
+        "hot-loop",
+        "cpu-locate-gpu-price",
+        "serialisation",
+        "composable-kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "n/a",
+      "key": "locating work in a large template GEMM kernel on gfx950 - deciding which code region deserves the next round before any GPU time is spent",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L1",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "the epilogue returned +6.8% and the prologue +2.75% (uniform across all three per-case shapes) inside a 1.84x stack, after six rounds of hot-loop work had returned ~1.00x; the prologue alone was 36% of static instructions, larger than the epilogue",
+      "verified_on": "2026-08-12",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "last_seen": "2026-08-12",
+      "title": "Per-region ISA census before hot-loop tuning; locate on CPU, price on GPU",
+      "lever": "Build a per-region static-ISA census - instruction and full-wait counts for prologue, main loop and epilogue - and fund the region by its share of instructions and serialised waits rather than by intuition about where a GEMM spends time.",
+      "apply": "Emit device-only assembly on the CPU with the compiler flags scraped from the existing build file, then segment the listing by region with a short script. No GPU lock, minutes rather than a round.",
+      "verify": "A census verdict is a locator, so price every region-local fix on the frozen-baseline A/B with interleaved controls; several structural closures in this run cost zero GPU time but none of them counted as a win until measured.",
+      "pitfall": "a round concluded the kernel was closed from a disassembly that had only ever covered the main loop -> the region scope of the closure was implicit -> state which region a closure covers; the scope error cost two rounds\n  - pitfall: deleting a quarter of a region's instructions measured null with the sign flipping across arms, while deleting that same region's serialised memory round trips paid +2.75% -> count full waits, not instructions",
+      "caution": "Also verify where a wait you plan to delete resolves and whether co-resident waves already cover it - two removals with clean ISA proof and strictly better register use both priced null because the row they loaded was cache-resident.",
+      "source": "run moe_stage1-own16h, 2026-08-12 - 13-round campaign, director-validated"
+    },
+    {
+      "name": "latency-limited-loop-closed-axes",
+      "description": "Latency-limited block-scale MoE GEMM at 2 waves/SIMD: loop instruction count, occupancy, LDS and tile shape all return ~1.00x - a closed axis, priced four ways",
+      "keywords": [
+        "anti-pattern",
+        "moe",
+        "grouped-gemm",
+        "occupancy",
+        "lds-staging",
+        "tile-shape",
+        "scheduler",
+        "latency-bound",
+        "block-scale"
+      ],
+      "kernels": [
+        "kernel_moe_gemm",
+        "ck_moe_stage1_gemm"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "block-scale MoE grouped GEMM whose main loop is latency-bound on the ds_read/global-load to MFMA chain at 2 waves/SIMD, gfx950 - which loop-side axes are already exhausted",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L1",
+      "type": "anti-pattern",
+      "confidence": "★",
+      "effect": "~1.00x from four independent loop-side closures: +20 loop instructions gave 0.00%, deleting 22.5% of loop VALU gave +0.05%, scheduler and pipeline-scheduler flips spanned -3.2% to +0.1%, and doubling the M tile regressed -4.44% (per-case -8.8% and -5.0% on the two large-concurrency shapes)",
+      "verified_on": "2026-08-12",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "last_seen": "2026-08-12",
+      "title": "Loop-side axes are one closed axis when the loop is latency-bound",
+      "lever": "When the main loop is latency-limited on the ds_read/global-load to MFMA chain across its barriers, treat instruction count, scheduling, occupancy, LDS and tile shape as one axis and price the whole axis with a cheap bracket instead of spending a round on each.",
+      "apply": "The bracket is two experiments: add instructions to the loop at zero resource cost, then delete a fifth of its VALU while holding LDS traffic identical. Two readings of ~1.00x close the axis and hand the budget to another region.",
+      "verify": "Run both arms against the frozen baseline with interleaved controls and inspect whether the sign flips between A/B pairs; one direction alone reads like a small win.",
+      "pitfall": "targeting one more wave per SIMD drove the allocator below the pure-data live-set size -> hundreds of spills and reloads and a large scratch growth -> compute the live set first; that step can then be closed arithmetically at zero GPU cost\n  - pitfall: the small-concurrency case was modelled as DRAM-streaming-bound for most of the run -> a hardware counter undercounted DRAM traffic ~1.7x -> it is cache-residency-bound: 1.67x more B-tile reads cost only +13.7% where streaming predicts +67%",
+      "caution": "Also verify the scale-block constants before concluding the tile shape is free: when they equal the K and N tile sizes those dimensions are welded, so a sweep can only move M - and M was already at the minimum of a clean U here.",
+      "source": "run moe_stage1-own16h, 2026-08-12 - 13-round campaign, director-validated"
+    }
+  ]
+}

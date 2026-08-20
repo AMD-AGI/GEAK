@@ -13,7 +13,7 @@ export const meta = {
     { title: 'Verify', detail: 'each candidate patch independently re-benchmarked' },
     { title: 'Merge', detail: 'integrator combines the round winners' },
     { title: 'Report', detail: 'tech_lead writes the final report + patch' },
-    { title: 'Validate', detail: 'director independently validates vs the true baseline' },
+    { title: 'Validate', detail: 'director independently validates vs the true baseline, then the TechLead curates ONE distilled card into knowledge/learned/ on a measured win [update_experience!=off]' },
   ],
 };
 
@@ -177,6 +177,37 @@ const DRA_MAX_BLINDSPOTS = (() => {
   const v = parseInt(A.dra_max_blindspots != null ? A.dra_max_blindspots : 4, 10);
   return Number.isFinite(v) && v >= 1 ? v : 4;
 })();
+
+// ---------------------------------------------------------------------------
+// LEARNED-KNOWLEDGE SINK. Derived from WORKFLOW_DIR and nothing else, so a lane spawned by
+// e2e_workflow still curates into kernel_workflow/knowledge/learned/ — e2e's learned/ is a
+// separate memory owned by its own system_architect step.
+//   update_experience = on (default) | off | false | none
+// The bake-off dispatcher passes `off` and curates once centrally instead (N parallel lanes would
+// file N near-duplicate cards for one op).
+const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
+// How much of ONE round the learned KB may steer. Measured, not guessed: an arm whose planner was
+// handed at most 3 matched cards and could KB-seed at most one direction reached 4.45x geomean on 16
+// kernels; the same 16 under a planner that reads the whole 84-line index and picks freely reached
+// 3.44x — a 22.7% regression, with the losses concentrated on kernels where the bounded arm had found
+// an unusual win (one went 25.77x -> 2.15x). Both arms averaged ~3 rounds, so it was not lost rounds.
+// The index-reading design is better at RECALL; what it lost was the profile-driven direction that
+// nothing from the KB had touched — the per-round control. `knowledge/learned/README.md` says the KB
+// must be "an accelerant, NOT a cage", and this is the line that keeps that true.
+//   KB_DIR_CAP        directions per round that may draw on cards (default 1)
+//   KB_COLD_DIRECTION at least one direction per round must be profile-only (default on)
+// Whether the planner is being pointed at the learned KB at all. Defined HERE because this lane is
+// where it is USED: the constant of this name lives in the dispatcher, and referencing it from the
+// lane threw `USE_LEARNED_READ is not defined` at the first plan step of every kernel — 13 of them
+// before the run was stopped. A parse test cannot catch that: the file compiles, and the reference
+// only resolves when the line runs. Default ON, matching this branch's design where the tech_lead
+// role reads INDEX.md unconditionally; `use_learned_kb=false` turns the budget block off with it.
+const USE_LEARNED_READ = String(A.use_learned_kb != null ? A.use_learned_kb : 'true') === 'true';
+const KB_DIR_CAP = Math.max(0, parseInt(A.kb_dir_cap != null ? A.kb_dir_cap : 1, 10));
+const KB_COLD_DIRECTION = String(A.kb_cold_direction != null ? A.kb_cold_direction : 'true') === 'true';
+let kbCapBound = 0;      // rounds where the cap actually had to strip something
+const UPDATE_EXPERIENCE = String(A.update_experience != null ? A.update_experience : 'on').trim().toLowerCase() || 'on';
+const UPDATE_EXPERIENCE_ON = UPDATE_EXPERIENCE !== 'off' && UPDATE_EXPERIENCE !== 'false' && UPDATE_EXPERIENCE !== 'none';
 
 // ---------------------------------------------------------------------------
 // DEEP-MODE continuation + cross-backend / e2e-feedback hooks. ALL OPTIONAL.
@@ -377,6 +408,13 @@ const PLAN_SCHEMA = obj({
       focus_files: { type: 'array', items: { type: 'string' } },
       expected_speedup: { type: 'number' }, prompt: { type: 'string' },
       kk_refs: { type: 'array', items: { type: 'string' } }, // optional: perf_knowledge card paths for THIS direction (REFERENCE ONLY)
+      // Learned cards that SEEDED this direction, by filename. Structural attribution: the planner
+      // declares what it opened, the script joins that against what the VERIFIER independently
+      // measured. Declared here rather than inferred because the read path is semantic — the planner
+      // reads INDEX.md and judges by meaning, so nothing downstream can reconstruct which card it
+      // acted on. A citation is not a causal claim (the planner saw the profile too, and one run
+      // holds no counterfactual); it is the only way a card can ever LOSE standing.
+      learned_refs: { type: 'array', items: { type: 'string' } },
     }, ['id', 'title', 'specialty', 'prompt']),
   },
 }, ['stop', 'directions']);
@@ -423,6 +461,12 @@ const REPORT_SCHEMA = obj({
   rounds: { type: 'number' }, budget_used: { type: 'number' },
   report_path: { type: 'string' }, final_patch: { type: 'string' }, per_case: perCase,
 }, ['final_speedup_geomean', 'report_path', 'final_patch']);
+
+const UPDATE_EXPERIENCE_SCHEMA = obj({
+  action: { type: 'string' },      // created | merged | skipped
+  card_path: { type: 'string' },   // path under knowledge/learned/, or "" if nothing distilled
+  key: { type: 'string' }, note: { type: 'string' },
+}, []);
 
 const VALIDATE_SCHEMA = obj({
   kernel_name: { type: 'string' },
@@ -494,6 +538,49 @@ async function agentT(p, o) {
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// WALL-CLOCK DEADLINE (opt-in; absent => byte-identical to a build without it).
+//   DEADLINE_EPOCH  unix seconds after which NO new optimization round may start.
+//   NO_STOP_S       while more than this many seconds remain, the TechLead may not end the run on
+//                   its own convergence gates; it gets exactly one forced re-plan.
+// In CODE and not in the caller's prose because the prose version was measured: a "fixed 4h window
+// per kernel" comparison whose window had no implementation anywhere realised 1.55h to 15.22h, a
+// 9.81x spread, and the comparison it existed to make was void. The loop below is
+// `while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE)` — no time term. Emphatic prompt text
+// is not a constraint, it is one more input to a judgement call.
+// A workflow script has no clock (Date.now() is unavailable — it would break resume), so the time is
+// read by a tiny low-effort agent. If that read FAILS the run is NOT killed: an unreadable clock
+// returns Infinity, degrading to the old budget-only behaviour rather than truncating a healthy run.
+const DEADLINE_EPOCH = (() => {
+  const v = parseInt(A.deadline_epoch != null ? A.deadline_epoch : 0, 10);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+})();
+const NO_STOP_S = Math.max(0, parseInt(A.no_stop_s != null ? A.no_stop_s : 900, 10));
+// Run-level cap on how many TechLead stops may be refused (forcedReplans is not reset per round).
+// Not 1: the refusal must scale with the window, or a long budget is handed back early.
+// Not unbounded: a role that truly cannot name a direction would spend the window planning.
+const MAX_FORCED_REPLANS = Math.max(1, parseInt(A.max_forced_replans != null ? A.max_forced_replans : 6, 10));
+const CLOCK_SCHEMA = { type: 'object', properties: { epoch: { type: 'number' } },
+                       required: ['epoch'], additionalProperties: true };
+let deadlineHit = false;
+let forcedReplans = 0;
+
+async function secondsLeft(tag) {
+  if (!DEADLINE_EPOCH) return Infinity;
+  const r = await agentT(
+    `Run EXACTLY this command and nothing else:
+\`\`\`bash
+date +%s
+\`\`\`
+Return {"epoch": <the integer it printed>}. Do NOT modify any file and do NOT run anything else.`,
+    { phase: 'Optimize', label: `clock ${tag}`, effort: 'low', schema: CLOCK_SCHEMA });
+  if (!r || !Number.isFinite(r.epoch)) {
+    log(`  [deadline] clock read failed at ${tag} — treating time as unlimited for this check.`);
+    return Infinity;
+  }
+  return DEADLINE_EPOCH - r.epoch;
 }
 
 // Expert-skills injection. PURELY ADDITIVE: '' when OFF or the role is not a skills consumer, so both
@@ -579,6 +666,9 @@ if (MODE === 'author') {
     roleAgent('author_engineer', 'author', 'Write the simplest correct baseline in the target language.', {
       TARGET_LANGUAGE, OP_SPEC, WORKSPACE: CANONICAL, TASK_DIR: KERNEL_PATH_ORIG,
       GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, KERNEL_KNOWLEDGE_DIR,
+      // The author engineer reads the learned index too, so the switch has to reach it. It is the
+      // second reader; a switch that covers one of two readers is not a switch.
+      LEARNED_KB: USE_LEARNED_READ ? 'on' : 'off',
     }),
     { phase: 'Author', label: `author:${TARGET_LANGUAGE}`, schema: AUTHOR_SCHEMA });
   if (!authored || !authored.authored || !says(authored.correctness, 'pass')) {
@@ -744,6 +834,10 @@ let noImprove = 0;
 let bestPerCase = BASELINE_PER_CASE;
 let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source}
 const history = { insights: [], ledger: [], rounds: [], bottleneck_now: profileSummary ? profileSummary.bottleneck : 'unknown', suggest_next: '' };
+// One row per KB-seeded direction, joined against what the verifier measured (see the push site in
+// the round loop). Fed to update_experience and returned to the caller: a driver aggregating these
+// is how anyone notices the KB has been cited fifty times and never once carried a round.
+const citations = [];
 
 // DEEP-MODE resume: restore cumulative speedup + insight/ledger history from the prior wave so this
 // continuation builds ON the cumulative best (canonical was already seeded from STATE_DIR/best by the
@@ -759,25 +853,86 @@ if (setup.resumed && setup.prior_state) {
 }
 
 while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
+  // --- (0) HARD STOP: no new round may START past the deadline ----------
+  // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
+  // is never interrupted — a killed round leaves a half-verified patch and no report.
+  let left = await secondsLeft(`pre-r${round + 1}`);
+  if (left <= 0) {
+    deadlineHit = true;
+    log(`WALL-CLOCK DEADLINE reached after ${round} round(s) (budget used ${dispatched}/${BUDGET}) — ` +
+        `starting no further rounds; going straight to report + validation.`);
+    break;
+  }
+  if (DEADLINE_EPOCH) log(`[deadline] ${(left / 60).toFixed(0)} min remain before the hard stop.`);
+
   round++;
   const remaining = BUDGET - dispatched;
   phase('Optimize');
 
   // --- (a) Plan the round (TechLead) ------------------------------------
-  const plan = await agentT(
-    roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).', {
-      EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
-      BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
-      CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
-      KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
-      ...KB_INPUTS,
-      // DRA brief (REFERENCE). plan_round Reads it and seeds directions[] from the ranked DRA
-      // directions — see tech_lead.md plan_round. Spread conditionally, so when dra_enabled was off
-      // (or the research degraded) the key is absent and the prompt is byte-identical to a build
-      // without this feature.
-      ...(researchBriefPath ? { DEEP_SEARCH_BRIEF: researchBriefPath } : {}),
-    }),
+  const planInputs = (forbidStop) => ({
+    EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
+    BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
+    CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
+    KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
+    ...KB_INPUTS,
+    // DRA brief (REFERENCE), from main. plan_round reads it and seeds directions[] from the ranked
+    // DRA directions — see tech_lead.md plan_round. Spread conditionally, so when dra_enabled was off
+    // (or the research degraded) the key is absent and the prompt is byte-identical to a build
+    // without the feature. Threaded through `planInputs` rather than the call site so the forced
+    // re-plan below gets it too: a replan that silently loses the research brief would plan against
+    // a different input set than the round it is replacing.
+    ...(researchBriefPath ? { DEEP_SEARCH_BRIEF: researchBriefPath } : {}),
+    // Stated UNCONDITIONALLY, in both directions. `use_learned_kb=false` used to omit the budget and
+    // nothing else, while roles/tech_lead.md still listed knowledge/learned/INDEX.md among the files
+    // to read — so the off switch removed the budget that CONSTRAINS the KB and left the instruction
+    // that USES it, i.e. the arm it exists to produce (a clean KB-off control) was never clean. The
+    // role now gates on this value, so it has to be present whichever way it points.
+    LEARNED_KB: USE_LEARNED_READ ? 'on' : 'off',
+    ...(USE_LEARNED_READ ? { LEARNED_KB_BUDGET:
+      `At most ${KB_DIR_CAP} of this round's directions may draw on learned cards, and you must cite ` +
+      `the cards you used in that direction's \`learned_refs\`. ` +
+      (KB_COLD_DIRECTION ? `At least ONE direction must be planned from the profile alone, with an ` +
+        `empty \`learned_refs\` — it is this round's control, and without it a round cannot tell you ` +
+        `whether the cards helped or merely crowded out what you would have tried anyway. ` : '') +
+      `Read as much of the index as you like; the budget is on how much of the ROUND the KB steers, ` +
+      `not on what you may look at.` } : {}),
+    // Both keys absent unless a deadline was passed => byte-identical prompt when OFF.
+    ...(DEADLINE_EPOCH ? { MINUTES_REMAINING: Math.round(left / 60) } : {}),
+    ...(forbidStop ? { STOP_NOT_PERMITTED:
+      `You returned stop=true with ${Math.round(left / 60)} min of the wall-clock window still ` +
+      `unspent. This run is a FIXED-WINDOW measurement: ending early is an invalid data point no ` +
+      `matter how good the number or how well argued the rationale, and your role's own convergence ` +
+      `gates (launch floor closed, gain under the promotion bar, roofline %, "only a different tech ` +
+      `stack is left") do NOT authorise stopping here. Plan at least one direction. Switch lever ` +
+      `rather than re-running an exhausted one — algorithm / memory / compute / host_runtime, or a ` +
+      `dedicated deep_explore ground-up rewrite. If every direction really is exhausted, spend the ` +
+      `round RE-MEASURING the committed best to tighten its error bars and say so. Sizing: keep the ` +
+      `round finishable inside the remaining ${Math.round(left / 60)} min.` } : {}),
+  });
+
+  let plan = await agentT(
+    roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).',
+      planInputs(false)),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
+
+  // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
+  // on the reasoning that a role repeating "stop" has run out of ideas. Measured at a 2h budget that
+  // cost ~3 min (write_req_to_token_pool_triton stopped at 1.95h/2.00h) and looked harmless; the cost
+  // is proportional to the budget, so at 8h the same one-shot escape hands back hours. The caller's
+  // rule is "must keep optimizing until the budget is spent", so the refusal has to be as long-lived
+  // as the window. Bounded by MAX_FORCED_REPLANS so a role that cannot produce a direction at all
+  // degrades to stopping instead of spinning the window away on planning.
+  while (DEADLINE_EPOCH && left > NO_STOP_S && forcedReplans < MAX_FORCED_REPLANS &&
+         (!plan || plan.stop || !plan.directions || plan.directions.length === 0)) {
+    forcedReplans++;
+    log(`Round ${round}: stop=true with ${(left / 60).toFixed(0)} min left — refusing (#${forcedReplans}), re-planning.`);
+    plan = await agentT(
+      roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.',
+        planInputs(true)),
+      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: PLAN_SCHEMA });
+    left = await secondsLeft(`replan-r${round}`);
+  }
 
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
     log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
@@ -807,7 +962,9 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       const isDeep = d.specialty === 'deep_explore';
       // deep_explore reads its own role (broad authority + own iteration loop); specialists read engineer.md.
       const readLine = isDeep
-        ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and ALL knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
+        ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and the knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
+          (USE_LEARNED_READ ? '' : `— EXCLUDING knowledge/learned/, which is off for this run: do not open ` +
+            `INDEX.md or any card there. `) +
           `(you have broad authority — combine algorithm + memory + compute + host_runtime levers in one ` +
           `coherent rewrite), and follow them. You MAY edit ANY modifiable source (kernel + Python wrapper ` +
           `+ C++ binding), not just focus_files. Run your OWN multi-iteration measure→(self-)profile→rewrite ` +
@@ -1006,9 +1163,56 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     if (mem.bottleneck_now) history.bottleneck_now = mem.bottleneck_now;
     if (mem.suggest_next) history.suggest_next = mem.suggest_next;
   }
+  // Enforce the round's KB budget. Honest about what this can and cannot do: stripping a citation
+  // does NOT un-influence a direction that was already planned with a card in mind — only the prompt
+  // above can do that. What the strip buys is OBSERVABILITY: `kbCapBound` counts the rounds where the
+  // planner overran its budget, so "the KB quietly took over planning" becomes a number in the run's
+  // return value instead of something you infer from a speedup that got worse.
+  if (USE_LEARNED_READ) {
+    let seeded = 0; const stripped = [];
+    for (const d of directions) {
+      if (!d.learned_refs || !d.learned_refs.length) continue;
+      if (seeded < KB_DIR_CAP) { seeded++; continue; }
+      stripped.push(d.id); d.learned_refs = [];
+    }
+    // A round where EVERY direction is KB-seeded has no control in it at all.
+    if (KB_COLD_DIRECTION && directions.length && directions.every(d => (d.learned_refs || []).length)) {
+      const last = directions[directions.length - 1];
+      stripped.push(`${last.id}(forced cold)`); last.learned_refs = [];
+    }
+    if (stripped.length) {
+      kbCapBound++;
+      log(`Round ${round}: KB budget ${KB_DIR_CAP} exceeded — un-cited ${stripped.join(', ')} ` +
+          `(the directions still run). Rounds where the cap bound so far: ${kbCapBound}.`);
+    }
+  }
+
+  // Join the planner's declared citations against what the verifier independently measured. Derived
+  // here rather than self-reported: the planner said which card seeded which direction, the verifier
+  // re-measured that direction without knowing, and their join is a fact neither one could fake.
+  // `became_winner` and not `verified > 1.0` is the standing test — verified_geomean is measured
+  // against the FROZEN baseline, so once a kernel sits at 2.5x cumulative every non-regressing
+  // direction clears 1.0 and a card would accrue credit for advancing nothing.
+  for (const r of clean) {
+    for (const cardRef of (r.d.learned_refs || [])) {
+      citations.push({
+        card: cardRef, round, direction: r.d.id, specialty: r.d.specialty,
+        // null, NOT 0, when the verifier produced nothing. `kb.py` scores <=1.0 as a real loss, so
+        // encoding "no evidence" as 0 charged a card for a verifier that crashed or timed out.
+        cited_then_verified: r.ver && Number.isFinite(r.ver.verified_geomean)
+          ? r.ver.verified_geomean : null,
+        // `winner` is only the best candidate OF THIS ROUND; `improved` is whether it beat the
+        // incumbent by MIN_IMPROVE. Crediting on `winner` alone let a 1.5x round winner confirm a
+        // card while the committed best already sat at 2x — a confirmation for advancing nothing,
+        // which is precisely what the three-state scoring was written to avoid. Require both.
+        became_winner: !!(winner && winner.id === r.d.id && improved),
+      });
+    }
+  }
   history.rounds.push({
     round,
-    directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty })),
+    directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty,
+      learned_refs: d.learned_refs || [] })),
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
       verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none') })),
     integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
@@ -1055,6 +1259,98 @@ log(`COMPLETE. ${KERNEL_NAME}: verified ${HAS_WORKLOAD ? 'time-weighted' : 'geom
     `${HAS_WORKLOAD && Number.isFinite(finalGeomean) ? ` (unweighted geomean ${finalGeomean.toFixed(2)}x)` : ''}` +
     ` (status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
 
+// ===========================================================================
+// PHASE: UpdateExperience — distill ONE reusable card into this workflow's knowledge/learned/
+// (see knowledge/learned/README.md). Runs ONCE, at the very end: never per round, because only
+// the final director-verified speedup is evidence a card may cite. `validation` is required for
+// the same reason — without it `finalPrimary` falls back to the TechLead's own unverified
+// `cumulative`. ADD-only, so a skipped or failing step leaves the run byte-neutral.
+// ===========================================================================
+let learned_card = null;
+// Two runs must never become a card, and neither is a failure. A run that shared its GPU measured
+// contention, not the kernel. A run on a HELD-OUT kernel is the instrument for measuring whether the
+// KB helps at all — distil it and the next A/B over that kernel reads back its own answer and looks
+// spectacular. Defaults are permissive, so the CALLER is the one who has to declare a busy box.
+const BOX_QUIET = String(A.box_quiet != null ? A.box_quiet : 'true') === 'true';
+const HELD_OUT = String(A.held_out != null ? A.held_out : 'false') === 'true';
+const kbGate = !BOX_QUIET ? 'the box was contended — the number measured neighbours, not the kernel'
+  : HELD_OUT ? 'this kernel is in the held-out split and is the measuring instrument'
+  : '';
+if (kbGate) log(`[kb] not distilling: ${kbGate}.`);
+// `validation.validation_status === 'accepted'` and not merely "a validation object exists": a
+// `flagged` result means the director found a reason not to believe the number (patch install
+// no-op, correctness fail, contended box), and curating from it teaches the next run a lesson this
+// run did not earn. Reported in review of #411.
+const kbAccepted = String((validation && validation.validation_status) || '').toLowerCase() === 'accepted';
+if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+  const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
+  try {
+    learned_card = await agentT(
+      roleAgent('update_experience', 'Validate',
+        'Curate one distilled learned card from this lane\'s verified win (ADD-only, measured evidence, ' +
+        'ratios not wall-clock; record the pitfalls hit; total-then-per-direction for a stacked win).', {
+          SCOPE: 'lane', LEARNED_DIR, SKILL_DIR: WORKFLOW_DIR, EVAL_DIR,
+          PERF_KNOWLEDGE_DIR: KERNEL_KNOWLEDGE_DIR,
+          WINNER: {
+            kernel: KERNEL_NAME, language: TARGET_LANGUAGE, mode: MODE, gfx: GFX,
+            kernel_class: (analysis && analysis.kernel_type) || '',
+            speedup: finalPrimary, validation_status: validation ? validation.validation_status : '',
+            bottleneck: profileSummary ? profileSummary.bottleneck : '',
+          },
+          // `rounds[]` (per-round directions + per-candidate claimed/verified/status + running
+          // `cumulative`) is what makes the card's `stack:` attribution and `pitfall:` lines derivable.
+          HISTORY: history,
+          // What this run's plan cited and what the verifier then measured. CONTEXT ONLY — the
+          // counters are applied by `kb.py drain` from the ledger filed below, never by this agent.
+          // The comment that used to sit here said the curator merges them, which stopped being
+          // true when that arithmetic moved into code.
+          CITATIONS: citations,
+          PROFILE: profileSummary,
+          REPORT_PATH: report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
+        }),
+      { phase: 'Validate', label: 'update_experience', schema: UPDATE_EXPERIENCE_SCHEMA });
+    if (learned_card && learned_card.card_path) {
+      log(`[kb] learned card ${learned_card.action || 'written'}: ${learned_card.card_path}`);
+    }
+  } catch (e) {
+    log(`[kb] update_experience skipped: ${e && e.message ? e.message : e}`);
+  }
+}
+
+// FILE THE CITATION LEDGER — OUTSIDE the curation gate, and deliberately so.
+// This is the loss half of the loop. It first shipped INSIDE the `finalPrimary > 1.0` branch above,
+// which is the exact bias it exists to remove: the runs that produce losses are the ones that did
+// not beat the baseline, were flagged, or ran on a contended box, and every one of them was
+// filtered out before it could file anything. Selecting successful runs into the feedback data is
+// worse than no feedback, because the resulting counters look earned. Reported in review of #411.
+// Curation (writing a NEW card) still requires a verified win — a run with nothing to teach must
+// not teach — but the ledger of what the cards ALREADY in the tree did is owed for every run.
+// `held_out` is the one exception: that split is the measuring instrument, so it neither writes
+// cards nor votes on them.
+// A workflow script has no filesystem, hence the one-line agent; the JSON is assembled by
+// `kb.py cite` rather than by the agent, because a proposal hand-written by a model is one more
+// place for the schema to drift.
+if (citations.length && !HELD_OUT) {
+  try {
+    await agentT(
+      `Run EXACTLY this command and nothing else. Do NOT edit any file.
+\`\`\`bash
+cat <<'CITEJSON' | python3 ${WORKFLOW_DIR}/scripts/kb.py --kb-dir ${LEARNED_DIR} cite \\
+--run-id ${JSON.stringify(KERNEL_NAME)} \\
+--kernel ${JSON.stringify(KERNEL_NAME)} --citations -
+${JSON.stringify(citations)}
+CITEJSON
+\`\`\`
+Return {"filed": <the "citations" number the command printed, or 0>}.`,
+      { phase: 'Validate', label: 'kb:cite', effort: 'low',
+        schema: { type: 'object', properties: { filed: { type: 'number' } },
+                  required: ['filed'], additionalProperties: true } });
+    log(`[kb] citation ledger filed: ${citations.length} row(s) for the next drain`);
+  } catch (e) {
+    log(`[kb] citation ledger NOT filed: ${e && e.message ? e.message : e}`);
+  }
+}
+
 return {
   mode: MODE,
   target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
@@ -1073,4 +1369,36 @@ return {
   budget_total: BUDGET,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
   final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
+  // null when the step was off, or the run earned nothing worth a card.
+  // Which condition actually ended the loop. RECORDED, not inferred: on the previous campaign this
+  // existed only in the driver's return value, which the caller sees after ALL its kernels finish —
+  // so a parent-process death erased it for every kernel already done, and the realised window had
+  // to be reconstructed from queue timestamps. It is the whole point of an enforced window that you
+  // can tell a run that used its budget from one that gave up.
+  stopped_by: deadlineHit ? 'deadline'
+    : (dispatched >= BUDGET) ? 'budget'
+    : (noImprove >= MAX_NO_IMPROVE) ? 'no_improve'
+    : 'tech_lead_stop',
+  deadline_hit: deadlineHit,
+  forced_replans: forcedReplans,
+  // What the plan cited and whether it carried its round. Returned ALWAYS, including when nothing was
+  // cited (an empty array is the finding: the KB was read and nothing in it was worth acting on).
+  learned_citations: citations,
+  // Rounds where the planner overran the KB budget. A KB that binds every round is one that has taken
+  // over planning, which is the regression this budget exists to catch.
+  kb_cap_bound_rounds: kbCapBound,
+  // The monoculture canary, and it costs no GPU time: how many DISTINCT (specialty, focus_files)
+  // directions this run explored vs how many it issued. A KB that helps raises the verified speedup;
+  // a KB that cages lowers this without raising that. Reported on KB-less runs too — those are the
+  // baseline it has to be read against.
+  direction_entropy: (() => {
+    const seen = new Set(); let n = 0;
+    for (const r of history.rounds) for (const d of (r.directions || [])) {
+      n++; seen.add(`${d.specialty}|${(d.focus_files || []).slice().sort().join(',')}`);
+    }
+    return n ? { distinct: seen.size, issued: n, ratio: +(seen.size / n).toFixed(3) } : null;
+  })(),
+  learned_card: learned_card && learned_card.card_path
+    ? { action: learned_card.action || '', card_path: learned_card.card_path, key: learned_card.key || '' }
+    : null,
 };

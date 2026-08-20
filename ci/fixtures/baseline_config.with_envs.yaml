@@ -1,0 +1,14 @@
+benchmark:
+  framework: vllm
+  runner_type: ci
+  benchmark_script: magpie_launch_stub.sh
+  inferencex_path: ci/fixtures
+  envs:
+    EXTRA_VLLM_ARGS: >-
+      --attention-backend ROCM_AITER_UNIFIED_ATTN
+      --trust-remote-code
+      --speculative-config {"method":"ngram","num_speculative_tokens":3}
+    PATH: /definitely/missing/geak-ci-venv:/usr/bin:/bin
+    VLLM_ROCM_USE_AITER: "1"
+    PORT: "19000"
+    ROCR_VISIBLE_DEVICES: "7"

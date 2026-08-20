@@ -1,0 +1,136 @@
+{
+  "run_id": "_w8a8_triton_block_scaled_mm-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "_w8a8_triton_block_scaled_mm"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "sub-k-coarsening-order-preserving",
+      "description": "Under a bit-exact accumulation gate, coarsen the inner K sub-tile (fewer, wider dots, one linear fp32 accumulator) — pipeline-balance win, parity untouched.",
+      "keywords": [
+        "fp8",
+        "block-scaled-gemm",
+        "bit-exact-gate",
+        "critical-path",
+        "sub-k-coarsening",
+        "mfma",
+        "gfx950",
+        "num-stages"
+      ],
+      "kernels": [
+        "_w8a8_triton_block_scaled_mm"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "fp8 block-scaled Triton GEMM on gfx950, gated on bit-exact fp32 MFMA accumulation order, dequant-emulated on the VALU",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.16x on top of the previous round's seed (cumulative 9.17x -> 10.66x vs the frozen baseline, non-overlapping); per-case 9.81x / 11.15x / 11.08x on the three shapes; bit-exact, max_rel=0",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "run _w8a8_triton_block_scaled_mm-ch16h, 2026-08-12, 16h per-kernel budget, 31 passes",
+      "last_seen": "2026-08-12",
+      "title": "Sub-K coarsening: regroup the same reduction order into fewer wider dots",
+      "lever": "Sweep the inner sub-K split (SUB_K a multiple of the MFMA K, so only a few values are legal) while keeping ONE linear fp32 accumulator: it regroups the identical summation order, so a bit-exact parity gate stays satisfied.",
+      "apply": "One-line config change to the sub-K factor; the coarser split halves per-K-block convert / repack / transpose invocations and lets the compiler overlap load+convert+LDS against the MFMA chain.",
+      "verify": "Confirm max_rel=0 against golden, then re-time on the frozen isolated A/B; check VGPR count and occupancy in the AMDGCN ISA to see the coarser tile did not spill.",
+      "pitfall": "Too-coarse a split (below the legal midpoint) spills VGPRs and regresses -> register pressure, not issue rate, is the limit -> keep the measured optimum and re-sweep after any convert-path rewrite, since the optimum moved by one step once the packed-convert path landed.",
+      "caution": "The win is critical-path balance, not op count, so also verify it holds when the auto-pipeliner stage count changes; on a shape with a different K it can shift.",
+      "cost": "L1",
+      "verified_on": "2026-08-12"
+    },
+    {
+      "name": "fold-dequant-constant-into-scaled-cvt",
+      "description": "Fold the fp8 format-recovery constant into the scaled-convert scale operand and lift sign from the byte's sign bit: one convert per pair, shorter dep chain.",
+      "keywords": [
+        "fp8",
+        "block-scaled-gemm",
+        "bit-exact-gate",
+        "critical-path",
+        "dequant",
+        "packed-loads",
+        "lds-staging",
+        "gfx950"
+      ],
+      "kernels": [
+        "_w8a8_triton_block_scaled_mm"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "VALU-emulated fp8 dequant feeding an f16 MFMA GEMM on gfx950, where native fp8 MFMA is closed off by a bit-exact parity gate",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "cumulative 8.98x then 9.17x vs the frozen baseline (+1.5-1.8% for the single-convert step alone), bit-exact; per-case the transposed-B staging carried +15% on the two larger shapes and ~0 on the smallest",
+      "attempts": 2,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "run _w8a8_triton_block_scaled_mm-ch16h, 2026-08-12, rounds 1-2 of the final wave",
+      "last_seen": "2026-08-12",
+      "title": "Collapse the fp8 dequant chain into one scaled convert",
+      "lever": "Fold the exact power-of-two format-recovery factor into the fp32 scale operand of the native scaled-convert, derive magnitude from that single convert and the sign from the byte's sign bit, and feed it with int32-packed 4-bytes-per-dword loads.",
+      "apply": "Retires the separate multiply stream, the second convert and the abs; also stage the B operand by loading it transposed into LDS and transposing back, which trades most global loads for LDS reads.",
+      "verify": "Parity first (the folded constant has to be exact in the convert's output format), then the frozen isolated A/B; grep the ISA for the convert / and / multiply counts to confirm the stream actually disappeared.",
+      "pitfall": "Cutting op count alone measured ~0 -> the kernel was dependency-chain-bound, not issue-bound at the margin -> the paying version was the one that shortened the chain; occupancy dropped one wave here while throughput rose ~20%.",
+      "caution": "Also verify the recovery constant is representable exactly in the convert's format before folding, and re-check parity on near-cancellation elements.",
+      "cost": "L2",
+      "verified_on": "2026-08-12"
+    },
+    {
+      "name": "closed-axes-bit-exact-fp8-gemm",
+      "description": "Five directions returned ~1.00x or worse on a parity-gated fp8 GEMM: occupancy, manual SW pipelining, B-side LDS reshape, graph replay, reduction reassociation.",
+      "keywords": [
+        "fp8",
+        "block-scaled-gemm",
+        "bit-exact-gate",
+        "anti-pattern",
+        "occupancy",
+        "software-pipelining",
+        "lds-staging",
+        "gfx950"
+      ],
+      "kernels": [
+        "_w8a8_triton_block_scaled_mm"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "compute-bound",
+      "key": "closed optimization axes on a parity-gated, VALU-dequant fp8 block-scaled GEMM on gfx950 already sitting at high cumulative speedup",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "five directions disconfirmed: manual SW pipelining ~0.90x (loads only) and ~0.83x (loads+convert) per-case; no-transpose B reshape ~0.80x; host graph replay <1.00x on every case; +1 wave of occupancy unreachable; reduction reassociation fails parity outright",
+      "attempts": 5,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "source": "run _w8a8_triton_block_scaled_mm-ch16h, 2026-08-12, ledger of 5 dead-end directions across 4 rounds",
+      "last_seen": "2026-08-12",
+      "title": "Axes that closed on a parity-gated fp8 GEMM",
+      "lever": "Spend rounds on order-preserving compute restructuring first; these five axes were each measured to ~1.00x or worse here, so they are low-yield seeds on a similar op.",
+      "apply": "Reassociating the fp32 reduction (half-split, even/odd, compensated summation) and native low-precision MFMA both change accumulation order and fail a max_rel gate on cancellation-heavy elements; the rest fail on performance, not parity.",
+      "verify": "Before re-opening one, read the ISA: if occupancy is unchanged while throughput moves, the op is issue/dep-chain-bound and adding waves cannot help; if a restructure raises VGPRs past the occupancy ceiling with no spill, the loss is purely the occupancy step.",
+      "pitfall": "Hand-hoisting the next K block's load behind the MFMA drain looked free -> the auto-pipeliner at two stages already prefetched those loads, and the extra live state crossed the register ceiling -> reverted to the compiler's schedule.",
+      "caution": "These closed on one shape family and one compiler version; also verify with a quick ISA diff before assuming the same axis is closed on your op, especially if your parity gate is looser.",
+      "cost": "L2",
+      "verified_on": "2026-08-12"
+    }
+  ]
+}
