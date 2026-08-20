@@ -42,6 +42,23 @@ def known_operators():
     return {c["operator"] for c in (data.get("candidates") or []) if "operator" in c}
 
 
+def skill_index_entry(sub, fm):
+    """Build one selector entry, including non-profile dependency skills."""
+    scope = fm.get("scope", "kernel")
+    entry = {
+        "id": fm["id"],
+        "file": f"skills/{sub}/skill.md",
+        "scope": scope,
+        "match": fm.get("match", {}),
+    }
+    if scope == "dependency":
+        entry["validation_status"] = "n/a"
+    else:
+        entry["expects"] = fm.get("expects", {})
+        entry["validation_status"] = (fm.get("validation") or {}).get("status", "draft")
+    return entry
+
+
 def reindex():
     ops = known_operators()
     entries = []
@@ -57,14 +74,7 @@ def reindex():
             if ops is not None and one != "*" and one not in ops:
                 print(f"  WARN: {sub}/skill.md: operator '{one}' not in capability_index.yaml",
                       file=sys.stderr)
-        entries.append({
-            "id": fm["id"],
-            "file": f"skills/{sub}/skill.md",
-            "scope": fm.get("scope", "kernel"),
-            "match": fm.get("match", {}),
-            "expects": fm.get("expects", {}),
-            "validation_status": (fm.get("validation") or {}).get("status", "draft"),
-        })
+        entries.append(skill_index_entry(sub, fm))
     header = (
         "# index.yaml — expert_skills selector (AUTO-MAINTAINED by _contribute/scaffold.py + "
         "validate_skill.py).\n"

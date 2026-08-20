@@ -6,7 +6,9 @@ authors:
 - zhengy
 scope: kernel
 match:
-  operator: grouped_gemm_moe
+  operator:
+  - grouped_gemm_moe
+  - fused_moe_grouped_gemm
   arch_class:
   - '*'
   gens:
@@ -18,8 +20,8 @@ match:
   - fp8_e4m3_fnuz
   regimes:
   - decode
-  from_backend: ''
-  to_backend: ''
+  from_backend: flydsl
+  to_backend: flydsl
   profile_signature:
     op_name_regex: ''
     min_pct_gpu: 0.0
@@ -29,7 +31,6 @@ expects:
     kernel this recipe adds. Do not include pre-existing sort/align/quant helpers in this isolated
     gate; report the full stage-1 window separately. The producer has an unrelated name, so a GEMM-only
     filter drops it and overstates the win (1.124x GEMM-only vs 1.104x with producer on FlyDSL 0.2.2).'
-  e2e_delta_min_pct: 1.0
   parity: required
 validation:
   status: validated

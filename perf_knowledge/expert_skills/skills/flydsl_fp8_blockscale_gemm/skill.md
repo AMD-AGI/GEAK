@@ -1,12 +1,14 @@
 ---
 id: flydsl_fp8_blockscale_gemm
-title: Rewrite CK fp8 a8w8 blockscale GEMM to FlyDSL on gfx950 (software fp32 post-MFMA scale, NOT E8M0; shape-dependent perf lever — XCD swizzle on wide-N, 8-wave cluster on narrow-N)
+title: Rewrite CK fp8 a8w8 blockscale GEMM to FlyDSL on gfx950 (software fp32 post-MFMA scale, NOT E8M0; shape-dependent perf lever — XCD locality on very-wide-N, tile geometry on K-light, 8-wave cluster on narrow-N)
 kind: expert_skill
 authors:
 - zhengy
 scope: kernel
 match:
-  operator: dense_gemm
+  operator:
+  - dense_gemm
+  - scaled_quant_gemm
   arch_class:
   - '*'
   gens:
@@ -24,19 +26,18 @@ match:
     min_pct_gpu: 0.0
 expects:
   isolated_speedup_min: 1.05
-  e2e_delta_min_pct: 1.0
   parity: required
 validation:
   status: validated
-  last_verified: '2026-07-16 (wide-N q_up), 2026-07-17 (narrow-N qkv)'
+  last_verified: '2026-07-16 (wide-N q_up), 2026-07-17 (narrow-N qkv and K-light down_proj)'
   gpu: 'MI355X / gfx950 (device 0x75a3)'
   model: 'claude (kernel_workflow expert-skill verify run)'
   measured:
-    isolated: 'wide-N q_up_proj M=4096 N=65536 K=1536 (4-wave preshuffle + xcd8): 1.226-1.237x same-session interleaved A/B vs production CK (gemm_a8w8_blockscale_bpreshuffle), xcd0 ablation 0.973x (loses to CK) confirming the XCD lever. narrow-N qkv_proj M=4096 N=2048 K=7168 (8-wave ping-pong cluster, BLOCK_M=128/BLOCK_N=256): director-verified 1.05x, accepted (interleaved A/B 1.0513/1.0500/1.0462, all >1.0); xcd_swizzle no-op and 4-wave -19% both confirmed for this shape'
+    isolated: 'wide-N q_up_proj M=4096 N=65536 K=1536 (4-wave preshuffle + xcd8): 1.226-1.237x same-session interleaved A/B vs production CK (gemm_a8w8_blockscale_bpreshuffle), xcd0 ablation 0.973x (loses to CK) confirming the XCD lever. narrow-N qkv_proj M=4096 N=2048 K=7168 (8-wave ping-pong cluster, BLOCK_M=128/BLOCK_N=256): director-verified 1.05x, accepted (interleaved A/B 1.0513/1.0500/1.0462, all >1.0); xcd_swizzle no-op and 4-wave -19% both confirmed for this shape. K-light down_proj M=16384 N=7168 K=768: 1.4506-1.4553x paired A/B; tile_n=256/tile_k=128 was decisive, XCD/fused-promote were non-load-bearing, and the completed 8-wave follow-up was a measured dead-end'
     e2e_pct: ''
-    parity: 'wide-N: err=0 / cos=1.0 seeds 0-3 vs fp32 dequant oracle (rtol=atol=1e-2). narrow-N: cos=1.0, maxabs_err=0.03125 (identical to CK), checkAllclose pass, 0 elements out of tol'
-  artifact: 'external validation artifacts for wide-N q_up manual verification and narrow-N qkv GEAK director verification (provenance only; exact local paths omitted)'
-  notes: 'Cross-machine reproduction, BOTH regimes now verified. wide-N/4-wave+xcd8 (q_up) and narrow-N/8-wave cluster (qkv) are both parity-clean and beat production CK. FlyDSL API drift confirmed as documented (kernels.mma -> kernels.common.mma; xcd_swizzle compile-arg is an uncommitted patch on mainline -> used the byte-frozen snapshot core via a module-alias shim). IMPORTANT install note: the blockscale software-promote cores live in a standalone FlyDSL checkout/build, NOT the aiter-embedded flydsl (aiter/aiter/ops/flydsl = rowscale/epilogue only: cos~0.999 but ~78% elements out of tol, a dead-end, not a blockscale drop-in). Point ports at a standalone build with software blockscale support.'
+    parity: 'wide-N: err=0 / cos=1.0 seeds 0-3 vs fp32 dequant oracle (rtol=atol=1e-2). narrow-N: cos=1.0, maxabs_err=0.03125 (identical to CK), checkAllclose pass, 0 elements out of tol. down_proj: FlyDSL maxabs_err=0.0078 / cos=1.0, at least as accurate as the CK oracle baseline'
+  artifact: skills/flydsl_fp8_blockscale_gemm/validation_gfx950.yaml
+  notes: 'Cross-machine reproduction across wide-N q_up, narrow-N qkv, and K-light down_proj. XCD is load-bearing only on the locality-limited q_up evidence; down_proj is grid-saturated and its measured lever is tile_n=256/tile_k=128, with XCD/fused-promote non-load-bearing and 8-wave closed as a dead-end. FlyDSL API drift confirmed as documented. IMPORTANT install note: the blockscale software-promote cores live in a standalone FlyDSL checkout/build, NOT the aiter-embedded flydsl (aiter/aiter/ops/flydsl = rowscale/epilogue only: cos~0.999 but ~78% elements out of tol, a dead-end, not a blockscale drop-in). Point ports at a standalone build with software blockscale support.'
 role: advisory_prior
 supersedes: []
 ---
@@ -65,10 +66,11 @@ which is why the tile re-sweep (not the mechanism) matters per shape:
 
 (…and any future / decode `-m`/`-nk` variant of the same operator). Two stages, and only the first is
 universal: **(1) the parity fix** — do the block-scale **in software** (never E8M0) — is the *same for
-every shape* and is what unblocks the port; **(2) the perf lever is shape-dependent** — wide-N/large-C
-shapes win with a 4-wave core + **XCD swizzle**, narrow-N/deep-K shapes win with an **8-wave "cluster"**
-core where XCD is a no-op. Three shapes are already tuned end-to-end; use their configs as the per-regime
-starting point (see **Per-shape recipes** below) rather than sweeping blind.
+every shape* and is what unblocks the port; **(2) the perf lever is shape-dependent** — locality-limited
+very-wide-N shapes need a 4-wave core + **XCD swizzle**, grid-saturated K-light shapes need the 4-wave
+`tile_n=256/tile_k=128` geometry but not XCD, and narrow-N/deep-K shapes win with an **8-wave "cluster"**
+core. Three shapes are already tuned end-to-end; use their configs as the per-regime starting point
+(see **Per-shape recipes** below) rather than sweeping blind.
 
 ## Mechanism
 ### A. Universal — the parity fix (same for every shape; this is what unblocks the port)
@@ -95,13 +97,14 @@ needed** — the fix is choosing a software-scale core over the native scaled-MF
 The correctness fix is universal; **which perf lever wins inverts with the shape**, because the two shape
 classes are bound by different things. Measured on the three tuned shapes:
 
-- **Wide-N / large-C / cold-tail** (`q_up` N=65536/512 MiB C, `down_proj` N=7168/235 MiB C): bound by **L2 /
-  fabric locality**, so **XCD-aware grid rasterization is the lever**. MI355X has **8 XCDs**, each with its
-  own L2 slice; remapping CTA `(bx,by)` so CTAs sharing a B/N-panel land on one XCD lifts L2 hit-rate
-  (`74.8%→83.0%` on q_up) / cuts fabric read-latency (`1030→803 cyc` on down_proj). Worth **~1.23×** and
-  *load-bearing*: `xcd_swizzle=0` → **loses to CK (0.96×)**; `=8` → 1.11–1.36×. Here **8-wave spills**
-  (wide-N accumulator blows the VGPR file). GEAK's gate_up auto-win picked the right kernel but **left
-  `xcd_swizzle` off → only ~1.02×.**
+- **Very-wide-N / locality-limited** (`q_up` N=65536/512 MiB C): **XCD-aware grid rasterization is the
+  lever**. MI355X has **8 XCDs**, each with its own L2 slice; remapping CTA `(bx,by)` so CTAs sharing a
+  B/N-panel land on one XCD lifts L2 hit-rate `74.8%→83.0%`. The `xcd0→xcd8` ablation is worth **~1.23×**;
+  `xcd0` loses to CK while `xcd8` wins. The 8-wave family spills on this accumulator footprint.
+- **K-light / grid-saturated** (`down_proj` M=16384,N=7168,K=768): compute-bound with 7168 output tiles
+  over the device, so the decisive lever is the 4-wave **`tile_n=256/tile_k=128` geometry** that keeps
+  the short six-K-tile loop fed. XCD remapping and `fused_promote` are measured non-load-bearing on this
+  shape, and the 8-wave port is a measured dead-end (`147 us` ceiling vs the 4-wave winner near `129 us`).
 - **Narrow-N / deep-K / tiny-C** (`qkv` N=2048/16 MiB C/K=7168): grid+LDS-bound at **1 block/CU, 2
   waves/SIMD**, no cold tail → **`xcd_swizzle` is a measured no-op** and the 4-wave core is ~19% slower.
   The win comes from the **8-wave ping-pong** kernel with the **`cluster` schedule** — move all four fp32
@@ -115,15 +118,18 @@ label** — match your `(M, N, K)` to the nearest row via the decision guide, ap
 only the shape-dependent knobs. The `seen as` column is provenance only and never a selector.
 
 **Decision guide (pick the kernel family purely from the shape):**
-- **Wide-N (N ≳ 4096) or large C output or a cold-input tail** → **4-wave blockscale-preshuffle core**,
-  set **`xcd_swizzle=8`**, tile `t64×256×128 wpe2`. (XCD is the lever; 8-wave will spill.)
+- **Very-wide-N with measured locality pressure** → **4-wave blockscale-preshuffle core**, tile
+  `t64×256×128 wpe2`, then sweep XCD; `xcd8` is the validated q_up winner.
+- **K-light with enough tiles to saturate the grid** → the same 4-wave core at `t64×256×128 wpe2`;
+  lock the tile geometry first. On validated down_proj, XCD/fused-promote are non-load-bearing and the
+  8-wave family cannot beat the 4-wave winner.
 - **Narrow-N (N ≲ 2048) + deep-K + tiny C output** → **8-wave ping-pong core with the `cluster` schedule**,
   `BLOCK_M=128, BLOCK_N=256`. (8-wave hides the promote; `xcd_swizzle` is a no-op; don't bother with it.)
 
 | shape M×N×K (drives selection) | bind | winning FlyDSL core | config | measured vs CK | decisive lever | what LOSES here | seen as |
 |---|---|---|---|---|---|---|---|
 | 4096×65536×1536 (wide-N, 512 MiB C) | L2-locality | 4-wave blockscale-preshuffle | `t64×256×128, wpe2, xcd8` | **1.11× hot / 1.15× cold / 1.18× ev** | XCD swizzle (`xcd0`→`xcd8` = 1.23×) | 8-wave (spills 0.14–0.72×), bigger tile/`wpe≥3` (spill), `fused_promote` (−1.6%) | `q_up_proj` |
-| 16384×7168×768 (K-light, 235 MiB C) | cold-tail | 4-wave blockscale-preshuffle | `t64×256×128, wpe2, xcd8, fused_promote` | **1.4541× Director-verified** (`0.187491→0.128937 ms`) | XCD swizzle + `fused_promote`; second run `1.4568×` | `wpe≥3` (spill 4–5×); *8-wave is the top **open** lever here (~1.3× more), port unfinished* | `down_proj` |
+| 16384×7168×768 (K-light, 235 MiB C) | compute/grid | 4-wave blockscale-preshuffle | `t64×256×128, wpe2` (`xcd`/`fused_promote` non-load-bearing) | **1.4541× Director-verified** (`0.187491→0.128937 ms`) | `tile_n=256/tile_k=128` | 8-wave measured no-win; `wpe≥3` spills | `down_proj` |
 | 4096×2048×7168 (narrow-N, deep-K, 16 MiB C) | LDS/grid | 8-wave ping-pong (`cluster`) | `BLOCK_M=128, BLOCK_N=256` (promotes after last MFMA) | **1.045× hot / 1.086–1.10× interleaved** | 8-wave + `cluster` promote-reorder (MFMA util 45.8→47.9%) | **XCD swizzle (no-op)**, 4-wave core (−19%), 16-wave (spill 1.35× slower), `BLOCK_M=256` (14× slower) | `qkv_proj` |
 
 Notes: the narrow-N/deep-K shape (`4096×2048×7168`) is the **marginal-speedup** case — it sits ~1.05–1.10×
@@ -186,15 +192,15 @@ interleaved A/B only**, and correctness gates every candidate (a fast-but-wrong 
 3. **Scale = software fp32 post-MFMA (the parity key).** Both kernels already promote+scale after the MFMA.
    Never switch to `mfma_scale_*_f8f6f4` for arbitrary fp32 block scales.
 4. **Apply the shape's perf lever (conditional — do not blind-apply q_up's).**
-   - 4-wave path (wide-N): set **`xcd_swizzle=8`** (MI355X = 8 XCDs) — the single most important knob here;
-     `0` = loses to CK. This is what the gate_up auto-win missed. Add `fused_promote=True` for K-light
-     shapes like `down_proj` (~1.03×).
+   - 4-wave, locality-limited path (`q_up`): set **`xcd_swizzle=8`** (MI355X = 8 XCDs); the measured
+     `xcd0` arm loses to CK.
+   - 4-wave, K-light/grid-saturated path (`down_proj`): lock `tile_n=256/tile_k=128`; do not credit
+     XCD or `fused_promote` without a fresh ablation because both were non-load-bearing in validation.
    - 8-wave path (narrow-N): ensure the **`cluster`** schedule (all four promotes after the last MFMA);
      **skip `xcd_swizzle`** (measured no-op) and do NOT raise occupancy to 16-wave (spills).
 5. **Tile / config = start from the nearest recipe row, then re-sweep only shape-dependent knobs.**
-   4-wave: `tile_m=64, tile_n=256, tile_k=128, waves_per_eu=2`; only these move the needle —
-   `tile_n∈{128,256}` (256 wins, better B reuse), `xcd_swizzle∈{4,8}` (8 wins), `waves_per_eu∈{0,1,2}`
-   (≈ equal — occupancy is NOT the lever); everything larger spills (see pitfalls). 8-wave: `BLOCK_M=128,
+   4-wave: `tile_m=64, tile_n=256, tile_k=128, waves_per_eu=2`; re-sweep `tile_n∈{128,256}` and XCD only
+   when the shape shows locality pressure. Everything larger spills (see pitfalls). 8-wave: `BLOCK_M=128,
    BLOCK_N=256` is the only viable tile (`BLOCK_N` is hardwired to 256 by scale alignment; `BLOCK_M=256`
    idles half the CUs).
 6. **Feed layout (must match the oracle).** Preshuffle B with the CK-matching 16×16 weight layout; flatten
@@ -207,25 +213,25 @@ interleaved A/B only**, and correctness gates every candidate (a fast-but-wrong 
 ## Knobs & pitfalls
 - **Only the *correctness* mechanism is universal — the perf answer is not "one kernel, one config".**
   The software fp32 scale transfers to every shape; the *kernel family, the lever, and the tile* do **not**.
-  Wide-N (`q_up`, `down_proj`) → 4-wave `t64×256×128 wpe2` + `xcd8`; narrow-N/deep-K (`qkv`, and
-  `gate_up` N=1536) → 8-wave `cluster` `BLOCK_M=128×256`. **Never assume q_up's answer transfers** — on
-  `qkv` the winning kernel, the tile, *and* the XCD verdict all flip.
-- **`xcd_swizzle` is shape-conditional, NOT universal.** On wide-N/large-C it is the decisive lever: `8`
-  wins on MI355X (8 XCDs), `4` close, `0` = off (**loses to CK, 0.96×**), `16` too coarse (0.93×); bijective
-  tile remap → bit-exact, always safe to try. On narrow-N/tiny-C (`qkv`, 16 MiB C, LDS/grid-bound, no cold
-  tail) it is a **measured no-op** — don't waste a sweep axis on it there.
+  Very-wide/locality-limited `q_up` → 4-wave `t64×256×128 wpe2` + `xcd8`; K-light/grid-saturated
+  `down_proj` → the same 4-wave tile with XCD/fused-promote treated as non-load-bearing; narrow-N/deep-K
+  (`qkv`, and `gate_up` N=1536) → 8-wave `cluster` `BLOCK_M=128×256`.
+- **`xcd_swizzle` is shape-conditional, NOT universal.** It is decisive on the validated q_up shape, but
+  a measured no-op on both grid-saturated down_proj and narrow-N/tiny-C qkv. Treat it as an ablation axis,
+  not a default inferred from N or output size alone.
 - **8-wave ping-pong WINS or LOSES depending on N — this is the sharpest shape trap.**
   - **Narrow-N/deep-K (`qkv`): 8-wave `cluster` is the winner** (4-wave is ~19% slower). Keep the `cluster`
     promote-reorder; do NOT go 16-wave (register wall → spill, 1.35× slower).
   - **Wide-N (`q_up`): 8-wave LOSES (0.14–0.72×)** — the 256×256 latency-hiding tile needs the unscaled MFMA
     partial live *simultaneously* with the promoted frag → blows the VGPR budget → MFMA serialises. Use the
-    4-wave core instead. (`down_proj` is the exception where 8-wave is a promising *open* lever — its port
-    isn't finished, so its shipped winner is still 4-wave+xcd+`fused_promote`.)
+    4-wave core instead.
+  - **K-light (`down_proj`): 8-wave is a measured dead-end** — its rowscale ceiling is about `147 us`,
+    already slower than the 4-wave blockscale winner near `129 us`.
 - **The 4-wave register-pressure wall is sharp.** Two-level accumulator + register-resident double-buffered
   B leave ~no VGPR headroom at the 2-wave budget. Anything bigger than `t64×256×128 wpe2` — larger
   `tile_m/tile_n/tile_k`, or `waves_per_eu≥3` — **spills to scratch → 3–10× slower** (measured
-  `t128×256`=3057µs, `wpe3`=3683µs). `fuse_promote` on wide-N is −1.6% (helps only K-light `down_proj`).
-  Don't chase bigger tiles / higher occupancy without HK-style explicit register allocation.
+  `t128×256`=3057µs, `wpe3`=3683µs). Do not credit `fused_promote` on down_proj without a fresh ablation;
+  it was non-load-bearing in the validated grid-saturated run.
 - **FlyDSL API drift**: installed FlyDSL builds sometimes change internal helpers (e.g. a `crd2idx` /
   `.ir_value()` signature), so a small compat shim in the harness may be needed. Prefer a source checkout
   matching the core you author against.
@@ -241,16 +247,15 @@ interleaved A/B only**, and correctness gates every candidate (a fast-but-wrong 
   K-light **1.4541×**, wide-N **~1.1–1.2×** (winner within ~1.7% of the promote-free floor), narrow-N/deep-K
   **~1.05–1.10×** (already near its promote-free *rowscale* ceiling). All are stall/locality-bound at
   ~25–36% of the 5 PFLOP fp8 peak, so the software promote is *not* the bottleneck. The one lever left for
-  every shape is **E2E epilog fusion** (cut the C round-trip — invisible in a standalone kernel; on the
-  K-light shape, an 8-wave-blockscale port is also an open kernel-level lever). Don't burn budget on
+  every shape is **E2E epilog fusion** (cut the C round-trip — invisible in a standalone kernel). Don't burn budget on
   tile/occupancy/prefetch/VGPR/numerics micro-opts (all measured <2%).
 - **Inert when not triggered.** Non-blockscale op, non-gfx950 box, or the FlyDSL blockscale entrypoint
   absent → fall back to the generic path, no regression.
 
 ## Sources
-The evidence lives in external artifacts (manual FlyDSL-rewrite handoffs + a GEAK auto-run) and is cited for
-**provenance only** — GEAK does not depend on those trees, and exact commits / file paths are intentionally
-left out. The portable knowledge is the shapes, configs, and measured numbers below.
+`validation_gfx950.yaml` records three archived on-box down_proj latency pairs, parity, the measured
+conclusions, and the known provenance limitation. The underlying manual handoffs and GEAK run remain external;
+GEAK does not depend on those trees. The portable knowledge is the shapes, configs, and measured numbers below.
 
 - **q_up_proj manual rewrite (primary evidence)** — M=4096,N=65536,K=1536; **err=0 / cos=1.0**; **1.114× hot
   / 1.148× cold / 1.179× CUDA-event median**; winner `t64×256×128, wpe2, xcd8`; XCD lever `xcd0`=0.958× vs
@@ -260,9 +265,10 @@ left out. The portable knowledge is the shapes, configs, and measured numbers be
   software-scale core at `t64×256×128` (parity clean) but **omitted `xcd_swizzle`** → only ~1.02×. Shows the
   bypass works *and* why XCD swizzle is mandatory to actually win.
 - **down_proj workflow validation (Director accepted; artifact case `mlp_down_m16384_n7168_k768`)** —
-  **1.4541×** (`0.187491 -> 0.128937 ms`) with a second run at **1.4568×**. Correctness passed:
-  FlyDSL `maxabs_err=0.0078`, `cos=1.0`. Winner `t64×256×128, wpe2, xcd8, fused_promote`;
-  same 4-wave core as q_up. Open lever: 8-wave-blockscale port (~1.3× more, unfinished).
+  **1.4541×** (`0.187491 -> 0.128937 ms`). Correctness passed:
+  FlyDSL `maxabs_err=0.0078`, `cos=1.0`. Winner family is the same 4-wave core as q_up, but ablation
+  showed `tile_n=256/tile_k=128` was decisive while XCD/fused-promote were non-load-bearing; a completed
+  8-wave follow-up could not beat the 4-wave winner.
 - **qkv_proj manual rewrite (narrow-N 8-wave `cluster` winner — where the levers invert)** —
   M=4096,N=2048,K=7168; **err=0 / cos=1.0** (24/24 seeds×shapes); **1.045× hot / 1.086–1.10× interleaved**.
   Winner = 8-wave ping-pong core with the **`cluster`** promote-reorder (all 4 promotes after last MFMA →

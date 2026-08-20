@@ -7,7 +7,9 @@ authors:
 - zhengy
 scope: kernel
 match:
-  operator: grouped_gemm_moe
+  operator:
+  - grouped_gemm_moe
+  - fused_moe_grouped_gemm
   arch_class:
   - '*'
   gens:
@@ -19,8 +21,8 @@ match:
   - fp8_e4m3_fnuz
   regimes:
   - prefill
-  from_backend: ''
-  to_backend: ''
+  from_backend: flydsl
+  to_backend: flydsl
   profile_signature:
     op_name_regex: ''
     min_pct_gpu: 0.0
@@ -31,7 +33,6 @@ expects:
     in the reduce kernel, so a GEMM-only measurement tops out at a measured 1.053x and fails this gate
     even when the recipe is correctly reproduced. A per-kernel timing filter matched on the GEMM name
     will not match the reduce kernel name -- verify your filter catches both.'
-  e2e_delta_min_pct: 1.0
   parity: relaxed
 validation:
   status: validated

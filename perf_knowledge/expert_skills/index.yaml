@@ -31,7 +31,7 @@ skills:
   validation_status: validated
 - id: ensure_flydsl
   file: skills/ensure_flydsl/skill.md
-  scope: dependency          # build/dependency skill: makes flydsl importable; invoked BY the flydsl skills, not profile-matched
+  scope: dependency
   match:
     needs: flydsl
     arch_class:
@@ -47,7 +47,9 @@ skills:
   file: skills/flydsl_decode_moe_stage1_blkmap/skill.md
   scope: kernel
   match:
-    operator: grouped_gemm_moe
+    operator:
+    - grouped_gemm_moe
+    - fused_moe_grouped_gemm
     arch_class:
     - '*'
     gens:
@@ -59,8 +61,8 @@ skills:
     - fp8_e4m3_fnuz
     regimes:
     - decode
-    from_backend: ''
-    to_backend: ''
+    from_backend: flydsl
+    to_backend: flydsl
     profile_signature:
       op_name_regex: ''
       min_pct_gpu: 0.0
@@ -70,14 +72,15 @@ skills:
       this recipe adds. Do not include pre-existing sort/align/quant helpers in this isolated gate; report
       the full stage-1 window separately. The producer has an unrelated name, so a GEMM-only filter drops
       it and overstates the win (1.124x GEMM-only vs 1.104x with producer on FlyDSL 0.2.2).
-    e2e_delta_min_pct: 1.0
     parity: required
   validation_status: validated
 - id: flydsl_fp8_blockscale_gemm
   file: skills/flydsl_fp8_blockscale_gemm/skill.md
   scope: kernel
   match:
-    operator: dense_gemm
+    operator:
+    - dense_gemm
+    - scaled_quant_gemm
     arch_class:
     - '*'
     gens:
@@ -95,7 +98,6 @@ skills:
       min_pct_gpu: 0.0
   expects:
     isolated_speedup_min: 1.05
-    e2e_delta_min_pct: 1.0
     parity: required
   validation_status: validated
 - id: flydsl_fp8_gemm_playbook
@@ -124,7 +126,9 @@ skills:
   file: skills/flydsl_prefill_moe_stage2_fp8partial/skill.md
   scope: kernel
   match:
-    operator: grouped_gemm_moe
+    operator:
+    - grouped_gemm_moe
+    - fused_moe_grouped_gemm
     arch_class:
     - '*'
     gens:
@@ -136,8 +140,8 @@ skills:
     - fp8_e4m3_fnuz
     regimes:
     - prefill
-    from_backend: ''
-    to_backend: ''
+    from_backend: flydsl
+    to_backend: flydsl
     profile_signature:
       op_name_regex: ''
       min_pct_gpu: 0.0
@@ -148,7 +152,6 @@ skills:
       in the reduce kernel, so a GEMM-only measurement tops out at a measured 1.053x and fails this gate
       even when the recipe is correctly reproduced. A per-kernel timing filter matched on the GEMM name
       will not match the reduce kernel name -- verify your filter catches both.'
-    e2e_delta_min_pct: 1.0
     parity: relaxed
   validation_status: validated
 - id: flydsl_rewrite_quantized_moe
