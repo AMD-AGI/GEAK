@@ -1741,7 +1741,7 @@ if (want('setup')) {
         log(`[kb] not benching: ${E2E_WARM_START_REF_ONLY
           ? (FAST_MODE ? 'fast mode — all optimization comes from the head track' : 'warm_start=reference')
           : `match tier '${resolved.match_tier}' is not exact, so the stored numbers are not ` +
-            'comparable to this baseline'}. The offers stay as references.');
+            'comparable to this baseline'}. The offers stay as references.`);
       }
 
       const verdicts = [];
@@ -1779,7 +1779,7 @@ if (want('setup')) {
               NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
               CONFIG_DIRECTIONS: [{
                 rank: 1,
-                direction: `kb_warm_start:${c.direction || 'unlabeled'}`,
+                direction: 'kb_warm_start:' + (c.direction || 'unlabeled'),
                 axis: 'compound (recovered configuration — do not split)',
                 flags: storedFlags, env: storedEnv,
                 rationale: `Recorded under ${c.canonical_id || resolved.canonical_id} (session ` +

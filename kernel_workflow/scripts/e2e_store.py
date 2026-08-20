@@ -396,6 +396,11 @@ def build_record(a, result: dict) -> dict:
         "accepted_kernels": kernels,
         "validation_status": str(result.get("validation_status") or ""),
         "upstream": result.get("upstream") if isinstance(result.get("upstream"), dict) else {},
+        # GEAK's own comparability keys (schema v2): what basis the pair was measured on, which
+        # client took the number, which workload points were validated. A stored speedup is only
+        # meaningful against these, so they ride WITH the number rather than being rediscovered.
+        "comparability": result.get("comparability") if isinstance(
+            result.get("comparability"), dict) else {},
         "measured_by": str(a.measured_by or ""),
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
