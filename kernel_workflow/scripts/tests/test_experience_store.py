@@ -783,7 +783,7 @@ def test_export_filters_and_overrides(tmp_path):
 # is that the lane cannot tell the difference: same JSON shape, same curation, same gates — plus the
 # two write outcomes the store adds, append vs update, which is what a key-value plane makes visible.
 
-UPLOADER = os.path.join(os.path.dirname(STORE), "kb_remote_upload.py")
+UPLOADER = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(STORE))), "kb", "remote_upload.py")
 
 
 def seed_store(tmp_path, root, *extra):

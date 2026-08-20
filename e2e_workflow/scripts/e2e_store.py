@@ -8,7 +8,7 @@
 
 `resolve` answers the question the e2e Director asks at Setup — "has anyone already tuned this
 deployment, and what did they land on" — and `write` is what makes the next run's answer non-empty.
-Addresses come from `kb_identity.e2e_canonical_ids`, never from string formatting here, because a
+Addresses come from `kb.identity.e2e_canonical_ids`, never from string formatting here, because a
 reader and a writer that disagree by one segment do not raise: the run just cold starts.
 
 WHAT AN E2E RECORD IS FOR, and why it is not a kernel record with different fields. A kernel entry
@@ -45,10 +45,15 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import kb_identity as kbid                                                  # noqa: E402
-from kb_retract import is_retired, retract_session, retraction_ok          # noqa: E402
-from kb_store_local import KBStoreError, LocalKBStore, finite_speedup       # noqa: E402
+# The shared KB plane lives at the repo root as the `kb` package, not beside this file. Executed as
+# a CLI from an arbitrary cwd, so the root is derived from __file__ and never from the environment.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from kb import identity as kbid                                             # noqa: E402
+from kb.curate import collapse_by_direction                                 # noqa: E402
+from kb.ladder import publish                                               # noqa: E402
+from kb.plane import open_plane                                             # noqa: E402
+from kb.retract import is_retired, retract_session, retraction_ok           # noqa: E402
+from kb.store_local import KBStoreError, finite_speedup                     # noqa: E402
 
 SCHEMA = "geak.e2e.v1"
 THROUGHPUT_METRIC = "throughput_tok_s"      # ranks the exact-workload rung
@@ -93,35 +98,6 @@ def ladder_of(a):
 # -- planes --------------------------------------------------------------------------------------
 
 
-def open_plane(a, metric: str, floor: float, create: bool = False):
-    """(primary, mirror, why) for one rung's metric. Same contract as the kernel lane's _open_plane.
-
-    A store is per-metric because the champion pointer is: opening one store and reusing it across
-    rungs would file a tokens-per-second champion under the ratio the coarse rungs rank on.
-    """
-    plane = str(getattr(a, "plane", "local") or "local")
-    local = None
-    if plane in ("local", "both"):
-        root = str(getattr(a, "store", "") or "")
-        if not root:
-            return None, None, "no_store: --store is required for plane %s" % plane
-        if not create and not os.path.isdir(root):
-            return None, None, "store_missing: " + root
-        local = LocalKBStore(root, metric=metric, promote_floor=floor)
-    if plane == "local":
-        return local, None, ""
-    try:
-        from kb_store_remote import RemoteKBStore
-    except ImportError as e:
-        return None, None, "store_unavailable: " + str(e)[:120]
-    remote, why = RemoteKBStore.from_env(getattr(a, "scan", DEFAULT_SCAN), metric, floor)
-    if plane == "remote":
-        return remote, None, why
-    # `both` writes locally first and treats a remote failure as reportable, not fatal: the run
-    # already spent the GPU hours, and a network blip must not discard the measurement.
-    return local, remote, ("remote_unavailable: " + why if remote is None else "")
-
-
 # -- read ----------------------------------------------------------------------------------------
 
 
@@ -159,24 +135,6 @@ def _view(candidate, cid: str, tier: str, metric: str) -> dict:
     }
 
 
-def _collapse_by_direction(views):
-    """Keep the best record per direction.
-
-    Three variants of one config sweep are one idea offered three times; three directions are three
-    ideas. The e2e lane wants breadth for the same reason the kernel lane does — the Director is
-    choosing what to TRY, and a shortlist that is secretly one suggestion wastes the whole warm
-    start. `direction` is a producer-declared label, so an unlabeled record collapses with nothing
-    and is kept on its own.
-    """
-    best, order = {}, []
-    for index, view in enumerate(views):
-        key = view["direction"] or ("__unlabeled__%d" % index)
-        if key not in best:
-            order.append(key)
-            best[key] = view
-    return [best[k] for k in order]
-
-
 def cmd_resolve(a) -> dict:
     ladder = ladder_of(a)
     # Echo the plane back. A caller that tries the service and falls back to disk otherwise cannot
@@ -205,8 +163,12 @@ def cmd_resolve(a) -> dict:
         # still serves the session, and nothing in the scheme lets us ask it not to.
         kept = [c for c in found if not is_retired(c.value)]
         curation = {"scanned": len(found), "retired": len(found) - len(kept)}
-        views = _collapse_by_direction([_view(c, cid, tier, metric) for c in kept])
-        curation["same_direction_collapsed"] = len(kept) - len(views)
+        # top_n=len(kept): e2e filters min_speedup AFTER collapse and slices to top_n below, so
+        # collapse must not pre-slice. It consumes only the per-idea best, not the alternates.
+        views, _alternates, collapsed = collapse_by_direction(
+            [_view(c, cid, tier, metric) for c in kept],
+            lambda v: v["direction"], lambda v: v["session_id"], len(kept))
+        curation["same_direction_collapsed"] = collapsed
         if a.min_speedup:
             # Applied to `speedup` on every rung, including the throughput-ranked one: the floor
             # asks "did this run actually improve anything", which is a question about the ratio no
@@ -333,7 +295,7 @@ def _record_state(a, result: dict) -> dict:
       * `parity` — pass | fail | n/a, verbatim. A faster server that answers differently is a
         regression, and this is the only field that says whether anyone looked.
       * `lifecycle` — `active` (believed) or `candidate` (recorded, unproven). The third value,
-        `retracted`, is written only by kb_retract and never by a fresh write.
+        `retracted`, is written only by kb/retract.py and never by a fresh write.
       * `retained` — the curation flag both lanes' readers filter on. True at birth; retraction
         flips it. Written explicitly rather than left absent so `retained is False` stays a
         three-state test (true / false / never stated) instead of degrading to a falsy check.
@@ -545,7 +507,7 @@ def _artifact_files(a, result: dict) -> dict:
         path = str(result.get(field) or "")
         if path and os.path.isfile(path):
             found[role] = (stored, path)
-    for extra in (a.file or []):
+    for extra in (getattr(a, "file", None) or []):   # retract recomputes a record but takes no --file
         path = str(extra)
         if os.path.isfile(path):
             found["file:" + os.path.basename(path)] = (os.path.basename(path), path)
@@ -568,6 +530,11 @@ def cmd_write(a) -> dict:
     out = {"applied": bool(a.apply), "session_id": sid, "speedup": record["speedup"],
            "throughput_tok_s": record["throughput"],
            "files": sorted(record["files"]), "rungs": []}
+    # A rung ranks on its own metric (throughput on the exact rung, speedup on the coarser ones), so
+    # each opens its own per-metric store; `publish` writes that one rung, all-or-none. All-or-none
+    # runs at THIS loop level too: a rung we cannot open or write stops the ladder before a partial
+    # one is published, and because the exact rung is written first, what lands is never a coarse
+    # page that outranks the specific one it was meant to summarize.
     for cid, tier, metric, floor in ladder:
         rung = {"canonical_id": cid, "tier": tier, "metric": metric, "written": False,
                 "promoted": False, "error": ""}
@@ -578,18 +545,21 @@ def cmd_write(a) -> dict:
         if store is None:
             rung["error"] = why
             out["rungs"].append(rung)
-            continue
-        rung["error"] = why          # `both` with an unreachable service: recorded, not fatal
-        for plane in [p for p in (store, mirror) if p is not None]:
-            try:
-                plane.write(cid, sid, record["knowledge"], record["files"])
-                rung["written"] = True
-                score = record["throughput"] if metric == THROUGHPUT_METRIC else record["speedup"]
-                if score is not None and plane.maybe_promote(cid, sid, score):
-                    rung["promoted"] = True
-            except (KBStoreError, OSError) as e:
-                rung["error"] = "%s: %s" % (type(e).__name__, str(e)[:160])
+            break
+        rec = {"canonical_id": cid, "session_id": sid, "knowledge": record["knowledge"]}
+        score_of = lambda r, m=metric: r["knowledge"].get(m)
+        written, promoted, err = publish(store, [rec], record["files"], score_of)
+        rung["written"] = bool(written)
+        rung["promoted"] = bool(promoted)
+        rung["error"] = err or why   # `both` with an unreachable service: recorded, not fatal
+        if mirror is not None:
+            # The mirror never gates the primary; its own failure is reported, not raised.
+            _mw, _mp, merr = publish(mirror, [rec], record["files"], score_of)
+            if merr and not rung["error"]:
+                rung["error"] = merr
         out["rungs"].append(rung)
+        if err:
+            break
     out["ok"] = all(r["written"] for r in out["rungs"]) if a.apply else True
     return out
 

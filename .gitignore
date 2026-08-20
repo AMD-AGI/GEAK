@@ -233,3 +233,5 @@ e2e_bench_out/
 # Machine-produced experience KB (warm-start store, kernel_workflow Part 4/1.7): runtime-accumulated
 # best patches + meta; volume is unbounded, so default-ignore and commit selectively via a whitelist.
 kb_artifacts/
+# Default root of the on-disk KB Store plane (kb/store_local.py): runtime records + artifacts.
+kb_store_local/

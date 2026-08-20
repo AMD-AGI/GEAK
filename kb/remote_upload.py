@@ -2,9 +2,9 @@
 """Push `experience_store.py export-remote` output to a KernelForge KB Store.
 
     experience_store.py export-remote --root kb_artifacts --out /tmp/kb.jsonl
-    kb_remote_upload.py --records /tmp/kb.jsonl                 # dry run: says what it would do
-    kb_remote_upload.py --records /tmp/kb.jsonl --local <dir> --apply   # to the on-disk plane
-    kb_remote_upload.py --records /tmp/kb.jsonl --apply         # to the service
+    kb/remote_upload.py --records /tmp/kb.jsonl                 # dry run: says what it would do
+    kb/remote_upload.py --records /tmp/kb.jsonl --local <dir> --apply   # to the on-disk plane
+    kb/remote_upload.py --records /tmp/kb.jsonl --apply         # to the service
 
 The two planes take the SAME records, byte for byte. That is the whole point of --local: the
 read/apply/optimize/write-back loop can be proven offline, and what proves it is that the service
@@ -18,15 +18,18 @@ Order per candidate is artifacts, then knowledge, then the champion pointer. Tha
 never visible referencing bytes the store does not hold yet, and a run interrupted halfway leaves
 uploaded-but-unreferenced blobs rather than a record pointing at nothing.
 
-Needs the upstream client on PYTHONPATH (KernelForge `src/`, or the single vendored
-kb_store_client.py) plus KB_STORE_URL / KB_STORE_TOKEN. The token is read from the environment and
-never printed: --apply logs the canonical id and session id only.
+Needs the upstream client on PYTHONPATH (KernelForge `src/`, or our vendored kb/store_client.py)
+plus KB_STORE_URL / KB_STORE_TOKEN. The token is read from the environment and never printed:
+--apply logs the canonical id and session id only.
 """
 
 import argparse
 import json
 import os
 import sys
+
+# Executed as a file, so the repo root is not on sys.path yet and `kb.` would not resolve.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _load_client():
@@ -36,14 +39,14 @@ def _load_client():
         return KBStoreClient, KBStoreError
     except ImportError:
         pass
-    try:  # a vendored copy of the single file, sitting next to this script or on PYTHONPATH
-        from kb_store_client import KBStoreClient, KBStoreError  # type: ignore
+    try:  # our vendored copy of the single file
+        from kb.store_client import KBStoreClient, KBStoreError  # type: ignore
         return KBStoreClient, KBStoreError
     except ImportError as e:
         raise SystemExit(
             "cannot import KBStoreClient: " + str(e) + "\n"
             "  put KernelForge's src/ on PYTHONPATH, or vendor "
-            "kernel_agents/knowledge/remote_exp/kb_store_client.py next to this script"
+            "kernel_agents/knowledge/remote_exp/kb_store_client.py at kb/store_client.py"
         )
 
 
@@ -57,8 +60,7 @@ class _LocalBackend:
     """
 
     def __init__(self, root: str):
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from kb_store_local import LocalKBStore  # noqa: PLC0415 - optional, only for --local
+        from kb.store_local import LocalKBStore  # noqa: PLC0415 - optional, only for --local
         self.store = LocalKBStore(root)
         self.root = self.store.root
         self._staged = {}

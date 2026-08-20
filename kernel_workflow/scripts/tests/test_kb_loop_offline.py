@@ -21,7 +21,7 @@ import pytest
 
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STORE = os.path.join(SCRIPTS, "experience_store.py")
-UPLOADER = os.path.join(SCRIPTS, "kb_remote_upload.py")
+UPLOADER = os.path.join(os.path.dirname(os.path.dirname(SCRIPTS)), "kb", "remote_upload.py")
 yaml = pytest.importorskip("yaml")
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="the loop lands a patch with git")
 

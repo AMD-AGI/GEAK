@@ -33,10 +33,8 @@ outranked.
 
 import json
 import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kb_store_local import (CHAMPION_METRIC, KBStoreError, Candidate, finite_speedup,
+from kb.store_local import (CHAMPION_METRIC, KBStoreError, Candidate, finite_speedup,
                             safe_rel_path, validate_session_id)
 
 DEFAULT_SCAN = 25          # candidates hydrated before curation; well under the 200 rollup cap
@@ -63,8 +61,7 @@ class RemoteKBStore(object):
                  promote_floor: float = 1.0):
         """Build from KB_STORE_URL / KB_STORE_TOKEN, or return (None, reason)."""
         try:
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from kb_store_client import KBStoreClient
+            from kb.store_client import KBStoreClient
         except ImportError as e:
             return None, "store_unavailable: " + str(e)[:120]
         if not os.environ.get("KB_STORE_URL") or not os.environ.get("KB_STORE_TOKEN"):
