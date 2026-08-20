@@ -1,0 +1,38 @@
+skill_id: flydsl_prefill_moe_stage2_fp8partial
+date: '2026-08-05'
+flydsl_version: 0.2.2
+provider: aiter_vendored_flydsl
+gpu: gfx950 / MI355X
+scope: stage-2 segment = mfma_moe2 + separate top-k reducer
+method: rocprofv3 kernel-trace medians, 3 paired runs
+calls_per_run: 8
+baseline_latency_ms:
+- 1.211860500
+- 1.206495000
+- 1.205805125
+skill_latency_ms:
+- 1.009437875
+- 0.997182375
+- 0.992282625
+baseline_median_ms: 1.206495000
+skill_median_ms: 0.997182375
+speedup: 1.2099041
+latency_reduction_pct: 17.3488
+components:
+  gemm:
+    baseline_median_ms: 0.885526000
+    skill_median_ms: 0.840565375
+    speedup: 1.0534886
+  reducer:
+    baseline_median_ms: 0.320969000
+    skill_median_ms: 0.156617000
+    speedup: 2.0493880
+parity:
+  baseline_logits_diff_median: 0.0010675762
+  skill_logits_diff_median: 0.0014179463
+  baseline_cos_sim_median: 0.998934
+  skill_cos_sim_median: 0.998583
+runtime_signature:
+  gemm: cshuffle_pf8
+  reducer: infp8
+raw_logs: external perf_results_20260805_flydsl022/prefill_{baseline,skill}_{1,2,3}.log

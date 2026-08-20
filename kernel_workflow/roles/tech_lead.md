@@ -119,6 +119,16 @@ analysis below exactly as before.)
      the engineers cannot be assumed to write these from memory, and only that dir carries the
      programming model. (Dir names differ from the ids for the others: triton→`triton_amd`,
      hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`.)
+   - **Cross-backend port / migration** (the TASK asks to rewrite the kernel into a DIFFERENT backend —
+     ANY `source→target`, e.g. `ck→flydsl`, `triton→tilelang`, `hip→ck`, `ck→ck_tile`): keep `kk_language`
+     = the CURRENT editable source, but `kk_refs` MUST ALSO include (a) the TARGET backend card
+     `operators/<kk_operator>/backends/<target>.md` and (b) the TARGET language's authoring how-to under
+     `languages/<dir>/` — map the language id to its dir: triton→`triton_amd`, hip→`hip_cpp`,
+     ck→`composable_kernel`, asm→`asm_mfma`, flydsl→`flydsl`, tilelang→`tilelang`, gluon→`gluon`,
+     hipkittens→`hipkittens` — reading whatever how-to it has (`overview.md`/`patterns.md`/`knobs.md`;
+     flydsl additionally has the full `authoring_gemm_levers.md` / `authoring_optimization.md` /
+     `authoring_tile_programming.md` / `debugging.md` set). The source-backend card alone does NOT teach how
+     to write the target — without this the engineer re-implements the new backend blind.
    Treat all of this as facts/how-to to *widen* the candidate set — not decisions (see the contract
    above). Do not let it override the per-case data or measurement.
 5. Write `EVAL_DIR/analysis.json` and `EVAL_DIR/codebase_context.md` (human-readable, INCLUDE the

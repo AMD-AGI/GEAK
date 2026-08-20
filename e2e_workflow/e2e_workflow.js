@@ -396,8 +396,9 @@ const E2E_REPEATS = parseInt(A.e2e_repeats != null ? A.e2e_repeats : 2, 10);
 // This is what guarantees "every A/B runs ref AND cand to completion regardless
 // of pass/fail" — general, not per-kernel. Bump via args.ab_finish_retries.
 const AB_FINISH_RETRIES = parseInt(A.ab_finish_retries != null ? A.ab_finish_retries : 3, 10);
-// A resolvable FROZEN baseline (baseline_src/ frozen OR importable meta.baseline_callable) is the
-// speedup DENOMINATOR and is MANDATORY. If an extraction smoke-passes but froze no baseline, the
+// A resolvable FROZEN baseline (a seeded baseline_overlay/ + a declared meta.candidate_bind, or an
+// importable meta.baseline_callable on the op track) is the speedup DENOMINATOR and is MANDATORY.
+// If an extraction smoke-passes but froze no baseline, the
 // unittest would silently time the candidate against its own naive same-language scaffold (the
 // "optimized-HIP vs naive-HIP = fake 15.7× isolated, ~0% e2e" bug). When that happens we RE-EXTRACT
 // up to this many times; if still missing, the extraction is treated as a FAILURE (flag dominant /
@@ -484,14 +485,17 @@ const EXTRACT_OP_SCHEMA = obj({
   candidate_backends: arrStr, reference_io_sha256: { type: 'string' },
   target_callable: { type: 'string' }, // module:attr rebind seam for an authored kernel ('' if none)
   baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
-  baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
+  baseline_frozen: { type: 'boolean' }, // true only when baseline_callable resolves outside the task dir
   smoke: { type: 'string' }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
 const OPBENCH_SCHEMA = obj({
   short_name: { type: 'string' }, op_kind: { type: 'string' }, provenance_ok: { type: 'boolean' },
   winner_backend: { type: 'string' }, winner_kind: { type: 'string' },
-  isolated_speedup: { type: 'number' }, winner_editable: { type: 'boolean' },
+  // null when nothing was timed -- a speedup is a measurement, and 0.0 read as
+  // 'benched, not faster'. `measured` is the discriminator; gate on it, not on the number.
+  isolated_speedup: { type: ['number', 'null'] }, measured: { type: 'boolean' },
+  winner_editable: { type: 'boolean' },
   best_known_ms: { type: 'number' },
   recommend_tier_c: { type: 'boolean' }, author_plan: arrObj, tuning_artifact: { type: 'string' },
   apply_env: { type: 'string' }, apply_flags: { type: 'string' }, code_patch: { type: 'string' },
@@ -505,8 +509,11 @@ const EXTRACT_SCHEMA = obj({
   source_path_in_sglang: { type: 'string' }, target_callable: { type: 'string' },
   num_cases: { type: 'number' }, regimes_captured: arrStr, candidate_backends: arrStr,
   build: { type: 'boolean' }, unittest_smoke: { type: 'string' },
-  baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
-  baseline_frozen: { type: 'boolean' }, // true only when baseline_src/ was frozen OR baseline_callable resolves
+  // the baseline leg is an ENVIRONMENT (baseline_overlay/ = a frozen CURRENT_OVERLAY snapshot), and
+  // candidate_bind is the ONE entry layered on top of it to make the candidate leg.
+  candidate_bind: { type: 'object', additionalProperties: true },
+  baseline_overlay: { type: 'string' },
+  baseline_frozen: { type: 'boolean' }, // true only when baseline_overlay/ was seeded AND candidate_bind is declared
   reference_io_sha256: { type: 'string' }, notes: { type: 'string' },
 }, ['editable', 'task_dir', 'unittest_smoke']);
 
@@ -722,10 +729,12 @@ async function ensureFlydslGate() {
   }
 }
 
-// A FROZEN baseline is resolvable when the extractor either froze baseline_src/ (baseline_frozen)
-// OR set an importable meta.baseline_callable. That is the language-independent speedup denominator.
+// A FROZEN baseline is resolvable when the extractor seeded baseline_overlay/ + declared
+// meta.candidate_bind (kernel track), or set an importable meta.baseline_callable (op track).
+// That is the language-independent speedup denominator.
 const hasFrozenBaseline = (ext) =>
   !!(ext && (ext.baseline_frozen === true ||
+             (ext.candidate_bind && typeof ext.candidate_bind === 'object') ||
              (typeof ext.baseline_callable === 'string' && ext.baseline_callable.trim() !== '')));
 
 // Run a kernel_extractor agent and GUARANTEE it froze a real baseline. safeAgent already retries
@@ -743,14 +752,14 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
   while (smokeOk(ext) && !hasFrozenBaseline(ext) && tries < BASELINE_EXTRACT_RETRIES) {
     tries++;
     log(`  ${(opts && opts.label) || role}: extraction froze NO baseline ` +
-      `(baseline_src/ or meta.baseline_callable) — the speedup denominator would fall back to the ` +
+      `(baseline_overlay/ + meta.candidate_bind) — the speedup denominator would fall back to the ` +
       `candidate's own scaffold (fake-win). RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
     ext = await safeAgent(
       roleAgent(role, phase,
-        intro + ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. You MUST freeze the real online kernel into ' +
-        'an immutable baseline_src/ and set meta.baseline_callable (the speedup denominator), bind the ' +
-        "unittest's baseline leg to it, then return baseline_frozen:true. An extraction with no frozen " +
-        'baseline is INVALID and will be discarded.',
+        intro + ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. You MUST seed baseline_overlay/ from ' +
+        'CURRENT_OVERLAY (the live serving stack = the speedup denominator), declare meta.candidate_bind ' +
+        '(the ONE overlay entry built from kernel_src/), prove both legs differ via h.assert_legs_differ, ' +
+        'then return baseline_frozen:true. An extraction with no frozen baseline is INVALID and will be discarded.',
         inputs),
       opts);
   }
@@ -759,7 +768,7 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
       `re-extractions — ABORTING this extraction (refusing a fake speedup vs the candidate's own scaffold).`);
     return { ...ext, smoke: 'fail', unittest_smoke: 'fail',
       notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
-        `(baseline_src/ / meta.baseline_callable required as the speedup denominator) — ${ext.notes || ''}` };
+        `(baseline_overlay/ + meta.candidate_bind required as the speedup denominator) — ${ext.notes || ''}` };
   }
   return ext;
 }
@@ -1266,7 +1275,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
           ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-          CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
           REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
           PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
         },
@@ -1626,7 +1635,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
             ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-            CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+            CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
             REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
             PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
           },
@@ -1826,7 +1835,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-        CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
         // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
         // Pass the decode M explicitly (= running batch ≈ conc) so it is never dropped, plus a
@@ -2150,7 +2159,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     const ext = await extractWithBaseline(
       'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
-        CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
       },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });

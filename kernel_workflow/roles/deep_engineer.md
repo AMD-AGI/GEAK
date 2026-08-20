@@ -60,6 +60,12 @@ skeletons, split-K/preshuffle, fusion, MFMA/numerics pitfalls, alternative backe
 **Contract:** facts/how-to, not decisions; it may be stale/wrong; your measured benchmark is the floor;
 ignore stored `status`/TFLOPS as decisions. It can only add candidates, never narrow them. Skip entirely
 if empty / `KK_OPERATOR` null.
+**Cross-backend rewrite/port** (your rewrite targets a language ≠ the current source — ANY source→target,
+e.g. ck→flydsl, triton→tilelang, hip→ck): ALSO mine the TARGET backend card
+`operators/<KK_OPERATOR>/backends/<target>.md` and the target language's authoring how-to under
+`languages/<dir>/` (map: triton→`triton_amd`, hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`,
+flydsl→`flydsl`, tilelang→`tilelang`; read `overview.md`/`patterns.md`/`knobs.md`, plus flydsl's
+`authoring_*.md`) — the source card won't teach the target.
 
 ## Roofline targeting (how to know how far you really are)
 Your target may be expressed as "% of roofline". Estimate the ceiling, then drive toward it:
