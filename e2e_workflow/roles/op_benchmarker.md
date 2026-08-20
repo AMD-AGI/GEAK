@@ -301,6 +301,7 @@ Return JSON:
   "winner_backend": "aiter|hipblaslt|triton|flydsl|ck|none",
   "winner_kind": "env|flag|patch|none",
   "isolated_speedup": 1.0,
+  "measured": true,
   "winner_editable": false,
   "best_known_ms": 0.0,
   "recommend_tier_c": false,
@@ -321,6 +322,10 @@ Return JSON:
   "reason": "the route decision: direct_light winner and/or which languages to author, with Amdahl headroom"
 }
 ```
+- `measured` / `isolated_speedup` — copy BOTH straight from `opbench_result.json`; never fill one in
+  yourself. `measured:false` means no backend produced a timing, and then `isolated_speedup` is `null`,
+  not `0.0`. `0.0` means the bake-off ran and nothing was faster — a different fact, and the acceptance
+  gate needs to tell them apart.
 - `gate:"have_winner"` — a direct_light (env/flag) winner is ready to integrate now.
 - `gate:"author_recommended"` — no direct win, but `author_plan` is non-empty: the orchestrator should
   run `kernel_workflow` per the plan and integrate the fastest authored result that beats `best_known_ms`.
