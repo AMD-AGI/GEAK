@@ -260,9 +260,21 @@ const KB_REMOTE = String(A.kb_remote || 'auto').trim().toLowerCase() === 'off' ?
 // two sources and then branches on what it actually got — the test happens where the answer is
 // knowable. The token is read from a 0600 file into a variable, never passed in argv, because
 // `ps` is world-readable on this box.
+// The gateway's internal AMD CA is not in a stock container trust store, so a KB command run inside
+// one fails TLS (the old workaround was `curl -k`). DETECT then heal: only when the caller has NOT
+// already established trust (SSL_CERT_FILE unset) do we point urllib/requests/curl/node at the first
+// readable AMD-root bundle we find. Most callers here run OUTSIDE the warm-start launcher (which sets
+// these at `docker run`), so this self-heal is what keeps their KB reachable. Path-only, no CA
+// content; overridable with KB_CA_BUNDLE; a no-op when SSL_CERT_FILE is already set or no bundle is
+// readable (so CI and already-trusting images are byte-identical). DNS (the host has none
+// in-container) is a launch concern, handled with `docker run --add-host`.
 const KB_ENV_PRELUDE =
   'export KB_STORE_URL="${KB_STORE_URL:-https://global.primus-safe.amd.com/knowledge-base}"; ' +
-  'export KB_STORE_TOKEN="${KB_STORE_TOKEN:-$(cat ~/.geak_kb_token 2>/dev/null)}"; ';
+  'export KB_STORE_TOKEN="${KB_STORE_TOKEN:-$(cat ~/.geak_kb_token 2>/dev/null)}"; ' +
+  'if [ -z "${SSL_CERT_FILE:-}" ]; then for _ca in "${KB_CA_BUNDLE:-}" ' +
+  '/shared_nfs/hyperloom/ca/amd-ca-combined.pem "$HOME/amd-extra-ca-bundle.pem"; do ' +
+  '[ -n "$_ca" ] && [ -r "$_ca" ] && { export SSL_CERT_FILE="$_ca" REQUESTS_CA_BUNDLE="$_ca" ' +
+  'CURL_CA_BUNDLE="$_ca" NODE_EXTRA_CA_CERTS="$_ca"; break; }; done; fi; ';
 // Writing in store mode records BOTH planes in one call, so it needs both roots: the directory tree
 // stays the source of truth a curation pass edits, and the store is derived from it.
 const KB_WRITE_OK = KB_ROOT_OK && !!KB_ARTIFACTS_DIR;
