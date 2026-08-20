@@ -978,3 +978,108 @@ def test_the_store_read_never_raises(tmp_path, args, reason):
               "--refs-dir", str(tmp_path / "refs"))
     assert out["candidates"] == [], reason
     assert out["read_reason"], "a cold start still has to say why"
+
+
+# --------------------------------------------------------------------------- attestation
+# `reproductions` counts the same code being WRITTEN twice. This counts the stored entry being
+# READ back out and put on a box — the only signal a later retire pass can act on, and the one
+# thing the schema never recorded.
+def attest(root, exp_dir, outcome="validated", *extra):
+    return run("attest", "--exp-dir", exp_dir, "--outcome", outcome, *extra)
+
+
+def test_attesting_counts_the_attempt_and_moves_no_speedup(tmp_path):
+    root = str(tmp_path / "kb")
+    d = write_entry(root, "20260101_000000_aaaaaa", speedup=2.0)
+    out = attest(root, d, "validated", "--measured-speedup", "1.9", "--measured-by", "boxA",
+                 "--note", "held on 7.2", "--apply")
+    assert out["attested"] is True
+    assert out["attestations"]["recalls"] == 1 and out["attestations"]["validations"] == 1
+    meta = yaml.safe_load(open(os.path.join(d, "meta.yaml")))
+    assert meta["metric"]["speedup"] == 2.0, "an attestation is evidence, not a re-measurement"
+    assert meta["reproductions"] == 1, "not the same counter as a duplicate write"
+    entry = meta["attestations"]["history"][-1]
+    assert entry["measured_speedup"] == 1.9 and entry["by"] == "boxA"
+
+
+def test_a_dry_attestation_writes_nothing(tmp_path):
+    root = str(tmp_path / "kb")
+    d = write_entry(root, "20260101_000000_aaaaaa")
+    out = attest(root, d, "failed")
+    assert out["attested"] is False and out["attestations"]["failures"] == 1
+    assert "attestations" not in yaml.safe_load(open(os.path.join(d, "meta.yaml")))
+
+
+def test_attestations_accumulate_and_raise_a_hint_the_read_surfaces(tmp_path):
+    """The hint is advisory: the entry is still offered and still ranked. Retiring it is a separate
+    act by a separate caller, which is what makes the counters safe to write automatically."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    d = write_entry(root, "20260101_000000_aaaaaa")
+    for _ in range(2):
+        attest(root, d, "not_reproduced", "--apply")
+    candidate = resolve(root, refs)["candidates"][0]
+    assert candidate["recalls"] == 2 and candidate["validations"] == 0
+    assert "could not reproduce" in candidate["retire_hint"]
+    assert "track record" in open(candidate["prose_path"]).read()
+
+
+def test_a_never_tried_entry_reads_as_untried_not_as_failing(tmp_path):
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_aaaaaa")
+    candidate = resolve(root, refs)["candidates"][0]
+    assert candidate["recalls"] == 0 and candidate["retire_hint"] == ""
+
+
+def test_attest_never_fails_the_caller(tmp_path):
+    out = run("attest", "--exp-dir", str(tmp_path / "nope"), "--outcome", "validated", "--apply")
+    assert out["attested"] is False and out["reason"]
+    out = run("attest", "--exp-dir", str(write_entry(str(tmp_path / "kb"), "20260101_000000_a")),
+              "--outcome", "validated", "--measured-speedup", "not a number", "--apply")
+    assert out["attested"] is True, "unusable evidence drops; the attempt still counted"
+
+
+def _seeded(tmp_path, root):
+    """A store built the way seed_store builds one, plus the session id the export minted."""
+    jsonl = str(tmp_path / "records.jsonl")
+    run("export-remote", "--root", root, "--out", jsonl)
+    store = str(tmp_path / "store")
+    p = subprocess.run([sys.executable, UPLOADER, "--records", jsonl, "--local", store,
+                        "--apply", "--quiet"], capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    records = [json.loads(line) for line in open(jsonl) if line.strip()]
+    return store, records[0]["session_id"]
+
+
+def test_the_remote_record_carries_the_local_ledger(tmp_path):
+    """Both planes read the same page, so a count that only lands on one of them makes the two
+    disagree about how much anyone has actually tried this."""
+    root = str(tmp_path / "kb")
+    d = stacked(root, "20260101_000000_aaaaaa")
+    attest(root, d, "validated", "--apply")
+    store, _ = _seeded(tmp_path, root)
+    out = resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel")
+    assert out["candidates"][0]["validations"] == 1
+
+
+def test_attest_remote_counts_against_the_key_addressed_record(tmp_path):
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    out = run("attest-remote", "--store", store, "--session-id", session, "--outcome", "validated",
+              "--kernel-name", "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950",
+              "--framework-version", "7.2", "--measured-speedup", "2.2", "--apply")
+    assert out["attested"] is True
+    found = [r for r in out["pages"] if r["found"]]
+    assert found and all(r["attestations"]["validations"] == 1 for r in found)
+    assert resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel"
+                          )["candidates"][0]["validations"] == 1
+
+
+def test_attest_remote_on_an_unknown_session_reports_rather_than_raises(tmp_path):
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, _ = _seeded(tmp_path, root)
+    out = run("attest-remote", "--store", store, "--session-id", "nope", "--outcome", "failed",
+              "--kernel-name", "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950",
+              "--apply")
+    assert out["attested"] is False and all(p["found"] is False for p in out["pages"])

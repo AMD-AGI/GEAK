@@ -27,13 +27,24 @@ written:
 
 Only the last one can compare TP4 against TP8, because that comparison needs them filed together.
 
-RANKING METRIC DIFFERS BY RUNG, and getting this wrong is silent. On the exact rung the workload is
-identical by construction, so the honest ranking is absolute `throughput_tok_s` — ranking it by
-speedup would put a run that started from a badly configured baseline above a run that was already
-fast and got faster. On the coarser rungs the workloads differ, absolute numbers are not comparable
-at all, and `speedup` is the only thing that means anything. Both scalars are written flat at the
-top of every document (the service's `sessions/top?metric=` reads a top-level scalar and rejects a
-nested path), so each rung can rank on whichever it needs without a second write.
+READS AND WRITES RANK ON DIFFERENT METRICS, deliberately, and the split is the one thing to keep
+straight in this file:
+
+  * READING (`resolve`) orders every rung by absolute `throughput_tok_s`, high to low. That is what
+    a Director asking "what should I run" wants on every page, including the coarse ones: it is
+    choosing a config to spend a server launch on, and the fastest observed deployment is the
+    honest first offer. The coarse rungs' numbers were measured at other workload points and are
+    NOT comparable to this run's baseline — `_render_reference` says so in as many words — but a
+    speedup ordering there is not more comparable, it just hides the incomparability behind a
+    ratio. `--sort-by speedup` restores the old ordering for a caller that wants it.
+  * WRITING (`write`) keeps the per-rung champion metric from `rung_metric()`: throughput on the
+    exact rung, speedup on the coarser ones. The champion pointer is a promotion gate, not a
+    display order, and a coarse page promoting on absolute tokens/sec would crown whichever
+    workload point happens to be cheapest rather than whichever run improved anything.
+
+Both scalars are written flat at the top of every document (the service's `sessions/top?metric=`
+reads a top-level scalar and rejects a nested path), which is what lets a read rank on one while
+the champion is kept on the other without a second write.
 
 No delete exists on the service. Every `--apply` is permanent.
 """
@@ -42,13 +53,17 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sys
+import tempfile
 import time
 
 # The shared KB plane lives at the repo root as the `kb` package, not beside this file. Executed as
 # a CLI from an arbitrary cwd, so the root is derived from __file__ and never from the environment.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from kb import identity as kbid                                             # noqa: E402
+from kb.attest import (OUTCOMES, attest_session, attestation_ok,           # noqa: E402
+                       attestations_of, carry_attestations, retire_hint)
 from kb.curate import collapse_by_direction                                 # noqa: E402
 from kb.ladder import publish                                               # noqa: E402
 from kb.plane import open_plane                                             # noqa: E402
@@ -56,10 +71,14 @@ from kb.retract import is_retired, retract_session, retraction_ok           # no
 from kb.store_local import KBStoreError, finite_speedup                     # noqa: E402
 
 SCHEMA = "geak.e2e.v1"
-THROUGHPUT_METRIC = "throughput_tok_s"      # ranks the exact-workload rung
-SPEEDUP_METRIC = "speedup"                  # ranks every coarser rung
+THROUGHPUT_METRIC = "throughput_tok_s"      # ranks the exact-workload rung, and every read
+SPEEDUP_METRIC = "speedup"                  # champion metric on every coarser rung
 DEFAULT_TOP_N = 3
 DEFAULT_SCAN = 25
+# What `resolve` orders a page by, by name on the CLI. See the module docstring for why a read and
+# a write do not agree on this.
+SORT_METRICS = {"throughput": THROUGHPUT_METRIC, "speedup": SPEEDUP_METRIC}
+DEFAULT_SORT_BY = "throughput"
 
 # Which metric ranks which rung, indexed the same way e2e_canonical_ids() returns them. A ladder
 # shorter than three (the run recorded no tp, or no workload shape) drops rungs from the FRONT, so
@@ -101,16 +120,22 @@ def ladder_of(a):
 # -- read ----------------------------------------------------------------------------------------
 
 
-def _view(candidate, cid: str, tier: str, metric: str) -> dict:
+def _view(candidate, cid: str, tier: str, metric: str, champion_metric: str = "") -> dict:
     """One offered record, flattened to what a Director prompt actually needs."""
     knowledge = candidate.knowledge if isinstance(candidate.knowledge, dict) else {}
     value = knowledge.get("value") if isinstance(knowledge.get("value"), dict) else {}
     workload = value.get("workload") if isinstance(value.get("workload"), dict) else {}
+    ledger = attestations_of(value)
     return {
         "session_id": candidate.session_id,
         "canonical_id": cid,
         "match_tier": tier,
         "ranked_by": metric,
+        # Which metric the CHAMPION on this page was promoted under, which on a coarse rung is not
+        # the one the offer is ordered by. Spelled out so `is_champion` cannot be misread as "the
+        # top of this list" — on a coarse rung the champion is the best speedup and the first row
+        # is the best throughput, and those are routinely different records.
+        "champion_metric": champion_metric or metric,
         "score": candidate.speedup,
         "throughput_tok_s": finite_speedup(knowledge.get(THROUGHPUT_METRIC)),
         "speedup": finite_speedup(knowledge.get(SPEEDUP_METRIC)),
@@ -131,21 +156,62 @@ def _view(candidate, cid: str, tier: str, metric: str) -> dict:
         "parity": str(value.get("parity") or ""),
         "lifecycle": str(value.get("lifecycle") or ""),
         "upstream": value.get("upstream") if isinstance(value.get("upstream"), dict) else {},
+        # What this record has DONE SINCE it was written, as opposed to what its writer claimed
+        # about it. `validated` above is one box's judgement of its own run; these are everyone
+        # else's. A reader deciding whether to spend a server launch wants both, and they
+        # disagree often enough that collapsing them would be a lie in one direction or the other.
+        "validations": ledger["validations"],
+        "recalls": ledger["recalls"],
+        "not_reproduced": ledger["not_reproduced"],
+        "last_outcome": ledger["last_outcome"],
+        "retire_hint": retire_hint(value),
+        # How to actually run this again. Empty for records written before the field existed —
+        # those are the ones a reader has to reconstruct from `accepted_config` by hand.
+        "repro": value.get("repro") if isinstance(value.get("repro"), dict) else {},
         "is_champion": bool(candidate.is_champion),
     }
 
 
+def read_metric(a) -> str:
+    """The metric a READ orders every rung by. `throughput_tok_s` unless the caller says otherwise.
+
+    Applied to the store itself and not only to the list it hands back, which matters on the remote
+    plane: `candidates()` pages `sessions/top?metric=` and hydrates the first `--scan` rows, so
+    fetching a page ordered by speedup and then re-sorting it locally by throughput would rank a
+    biased sample and quietly drop the fast-but-modest-ratio records that never made the cut.
+    """
+    return SORT_METRICS.get(str(getattr(a, "sort_by", "") or DEFAULT_SORT_BY).strip().lower(),
+                            THROUGHPUT_METRIC)
+
+
+def _sort_key(metric: str):
+    """Rank order for a view list: the chosen metric first, the other as tie-break, id last.
+
+    A record missing the metric sorts last rather than raising — a write cannot produce one (final
+    throughput is required), but a document written by hand or by an older lane can.
+    """
+    other = SPEEDUP_METRIC if metric == THROUGHPUT_METRIC else THROUGHPUT_METRIC
+    low = float("-inf")
+    return lambda v: (-(v.get(metric) if v.get(metric) is not None else low),
+                      -(v.get(other) if v.get(other) is not None else low),
+                      v["session_id"])
+
+
 def cmd_resolve(a) -> dict:
     ladder = ladder_of(a)
+    metric = read_metric(a)
     # Echo the plane back. A caller that tries the service and falls back to disk otherwise cannot
     # tell from the output which one answered — the ladder, the ranking and the shapes are identical
     # — and "where did this candidate come from" is the first question asked when one turns out to
     # be wrong. `dict(out, ...)` carries it onto every return path below.
     out = {"tried": [c for c, _t, _m, _f in ladder], "canonical_id": ladder[0][0],
-           "match_tier": "", "ranked_by": "", "candidates": [], "read_reason": "",
+           "match_tier": "", "ranked_by": "", "sorted_by": metric, "champion_metric": "",
+           "candidates": [], "read_reason": "",
            "plane": str(getattr(a, "plane", "local") or "local"), "curation": {}}
     last_why = ""
-    for cid, tier, metric, floor in ladder:
+    for cid, tier, champion_metric, floor in ladder:
+        # The rung's own metric opens nothing here: a read ranks every rung the same way (see
+        # read_metric), and the floor only ever gates a promotion, which a read never performs.
         store, _mirror, why = open_plane(a, metric, floor)
         if store is None:
             last_why = why
@@ -162,12 +228,21 @@ def cmd_resolve(a) -> dict:
         # to be — retraction zeroes the ranking scalar and re-points the champion, but the service
         # still serves the session, and nothing in the scheme lets us ask it not to.
         kept = [c for c in found if not is_retired(c.value)]
-        curation = {"scanned": len(found), "retired": len(found) - len(kept)}
+        curation = {"scanned": len(found), "retired": len(found) - len(kept),
+                    "sorted_by": metric}
+        # Re-sorted here even though the store already ordered by this metric, because the two
+        # planes order by slightly different things: the local one ranks on the document scalar,
+        # the remote one on the score the service computed and falls back to the document only
+        # when that is absent. Sorting the hydrated views is the one place both planes are
+        # guaranteed to agree, and collapse_by_direction's contract is that its input is already
+        # in rank order — it keeps the FIRST entry per direction, so a wrong order here silently
+        # offers the wrong member of every group.
+        ordered = sorted([_view(c, cid, tier, metric, champion_metric) for c in kept],
+                         key=_sort_key(metric))
         # top_n=len(kept): e2e filters min_speedup AFTER collapse and slices to top_n below, so
         # collapse must not pre-slice. It consumes only the per-idea best, not the alternates.
         views, _alternates, collapsed = collapse_by_direction(
-            [_view(c, cid, tier, metric) for c in kept],
-            lambda v: v["direction"], lambda v: v["session_id"], len(kept))
+            ordered, lambda v: v["direction"], lambda v: v["session_id"], len(kept))
         curation["same_direction_collapsed"] = collapsed
         if a.min_speedup:
             # Applied to `speedup` on every rung, including the throughput-ranked one: the floor
@@ -193,7 +268,7 @@ def cmd_resolve(a) -> dict:
         if a.refs_dir:
             _render_reference(a.refs_dir, cid, tier, views)
         return dict(out, canonical_id=cid, match_tier=tier, ranked_by=metric,
-                    candidates=views, read_reason="read",
+                    champion_metric=champion_metric, candidates=views, read_reason="read",
                     curation=dict(curation, canonical_id=cid, tier=tier))
     return dict(out, read_reason=last_why or "e2e_page_not_found")
 
@@ -236,6 +311,46 @@ def _kernel_line(kernels) -> str:
     return "; ".join(parts)
 
 
+def _track_record_line(view: dict) -> str:
+    """`benched 3x since: 1 reproduced, 1 no-win, 1 could not run (last: failed)`, or a plain miss."""
+    if not view.get("recalls"):
+        return "never benched by anyone since it was recorded"
+    parts = ["%d reproduced a win" % view["validations"] if view["validations"] else "",
+             "%d could not be run at all" % view["not_reproduced"]
+             if view.get("not_reproduced") else ""]
+    detail = ", ".join(p for p in parts if p) or "none reproduced a win"
+    hint = view.get("retire_hint") or ""
+    return "benched %dx since it was recorded — %s%s" % (
+        view["recalls"], detail, " (**%s**)" % hint if hint else "")
+
+
+def _repro_line(view: dict) -> str:
+    """Where the launch script and the kernel patches for this record actually are.
+
+    Spelled as paths rather than as "see the bundle" because the reader is an agent that is about
+    to run something, and the next thing it does after this line is open a file. A record written
+    before `repro` existed says so plainly instead of pointing at a path that is not there.
+    """
+    repro = view.get("repro") or {}
+    root = ((view.get("bundle") or {}).get("path") or "").rstrip("/")
+    where = (lambda name: "%s/files/%s" % (root, name) if root else name)
+    launch = str(repro.get("launch") or "")
+    if not launch:
+        return ("no launch script recorded (pre-`repro` record) — rebuild it from the config below")
+    bits = ["`%s`%s" % (where(launch),
+                        " (SYNTHESIZED from the config, never executed as-is)"
+                        if repro.get("launch_origin") == "synthesized" else " (captured from the run)")]
+    patches = [k.get("patch") for k in (repro.get("kernels") or []) if isinstance(k, dict)
+               and k.get("patch")]
+    if patches:
+        bits.append("kernel patches: " + ", ".join("`%s`" % where(p) for p in patches))
+    missing = int(repro.get("kernels_without_patch") or 0)
+    if missing:
+        bits.append("%d accepted kernel(s) carry NO patch here — that part of the win cannot be "
+                    "reproduced from this record" % missing)
+    return "; ".join(bits)
+
+
 def _render_reference(refs_dir: str, cid: str, tier: str, views) -> str:
     """Mirror the offer into prose the Director can read, or return "" and let the read stand."""
     try:
@@ -243,11 +358,14 @@ def _render_reference(refs_dir: str, cid: str, tier: str, views) -> str:
         key = hashlib.sha1(("|".join(v["session_id"] for v in views)).encode()).hexdigest()[:7]
         path = os.path.join(refs_dir, "e2e_reference_%s.md" % key)
         lines = ["# e2e warm start — `%s`" % cid, "",
-                 "Match tier `%s`, ranked by `%s`." % (tier, views[0]["ranked_by"]), ""]
+                 "Match tier `%s`, ordered by `%s` (highest first)."
+                 % (tier, views[0]["ranked_by"]), ""]
         if tier != "exact":
             lines += ["> These were measured on a DIFFERENT workload point than the one requested. "
                       "Treat the configs as candidates and the numbers as non-comparable — do not "
-                      "quote them as this deployment's throughput.", ""]
+                      "quote them as this deployment's throughput. The ordering above is by "
+                      "absolute throughput, so it says which deployment was fastest AT ITS OWN "
+                      "workload point, not which one would be fastest here.", ""]
         for rank, v in enumerate(views, start=1):
             lines += [
                 "## %d. %s%s" % (rank, v["direction"] or "unlabeled",
@@ -262,7 +380,12 @@ def _render_reference(refs_dir: str, cid: str, tier: str, views) -> str:
                     "VALIDATED" if v["validated"] else "unvalidated",
                     v["validation_status"] or "unrecorded",
                     v["validation_basis"] or "unverified", v["parity"] or "unrecorded"),
+                # The claim above is the writer's own; this line is everybody else's experience of
+                # it since. A record benched three times and never reproduced is a very different
+                # bet from an untried one at the same speedup, and only this line says which it is.
+                "- track record: %s" % _track_record_line(v),
                 "- accepted kernels: %s" % (_kernel_line(v["accepted_kernels"]) or "none"),
+                "- reproduce: %s" % _repro_line(v),
                 "- config:", "```json",
                 json.dumps(v["accepted_config"], indent=2, sort_keys=True), "```", "",
             ]
@@ -321,13 +444,19 @@ def _record_state(a, result: dict) -> dict:
             "lifecycle": "active" if decided else "candidate", "retained": True}
 
 
-def build_record(a, result: dict) -> dict:
+def build_record(a, result: dict, workdir=None) -> dict:
     """One run's knowledge document, identical at every rung.
 
     Both ranking scalars sit flat at the top level because that is the only shape
     `sessions/top?metric=` can read. Everything else lives under `value`, including the dimensions
     that are already in the canonical id — a record that cannot say what it is once detached from
     its address is not auditable.
+
+    `workdir` is a scratch directory whose lifetime must outlast the store write: the synthesized
+    launch script is created in it and uploaded from it. Passing None asks for the document only,
+    which is what `retract` and `attest` want when they recompute the content digest — they must
+    not synthesize files, and must not refuse over a reproducibility rule that only governs new
+    writes.
     """
     identity = identity_of(a)
     final = finite_speedup(result.get("final_throughput_tok_s"))
@@ -369,8 +498,14 @@ def build_record(a, result: dict) -> dict:
     value.update(state)
     files = _artifact_files(a, result)
     files.update(kernel_files)
+    value["artifacts"] = {k: v[0] for k, v in files.items()}
+    # After `artifacts` (it reads the captured launch/overlay names from there) and before the
+    # final rebuild (it may ADD the synthesized script and fetched patches to `files`).
+    value["repro"] = _repro(a, result, value, kernels, files, workdir)
     if files:
         value["artifacts"] = {k: v[0] for k, v in files.items()}
+    else:
+        value.pop("artifacts", None)
     document = {"schema": SCHEMA, THROUGHPUT_METRIC: final, "value": value}
     if speedup is not None:
         document[SPEEDUP_METRIC] = speedup
@@ -514,7 +649,271 @@ def _artifact_files(a, result: dict) -> dict:
     return found
 
 
+def _env_pairs(env: str) -> dict:
+    """`"A=1 B=2"` -> `{"A": "1", "B": "2"}`, which is the shape a reader can act on.
+
+    The workflow carries server env as one flat string because that is what it hands
+    `bench_e2e.sh`'s EXTRA_ENV, and a reader who wants to know whether a record set
+    VLLM_USE_AITER should not have to write a parser to find out. Anything that is not a
+    `KEY=VALUE` token is skipped rather than guessed at; the verbatim string is kept alongside
+    this dict, so nothing is lost by being strict here.
+    """
+    pairs = {}
+    for token in str(env or "").split():
+        key, sep, val = token.partition("=")
+        if sep and key and not key[0].isdigit():
+            pairs[key] = val
+    return pairs
+
+
+def _fetch_kernel_patch(root: str, canonical_id: str, name: str, into: str) -> str:
+    """Pull one kernel's patch out of the kernel lane's local store, or return "".
+
+    The e2e record names the kernel lane's canonical id, but the bytes only ride along if the
+    workflow happened to still have the patch file on disk at write time — and by the time the
+    e2e run finalizes, the kernel workflow's scratch is usually gone. This walks over to the
+    kernel lane's own store and copies its champion's patch in, so the e2e record is complete
+    without the e2e run having had to hoard files it did not produce.
+
+    Best-effort by construction: a kernel page that does not exist, a bundle that fails its
+    integrity check, an unreadable root — all of them mean "no patch here", which is a state the
+    record already knows how to describe (`kernels_without_patch`). Never raises.
+    """
+    try:
+        from kb.store_local import LocalKBStore
+        store = LocalKBStore(root, metric=SPEEDUP_METRIC)
+        found = store.candidates(canonical_id, limit=1)
+        if not found:
+            return ""
+        bundle = store.materialize(canonical_id, found[0].session_id, into)
+        for candidate in ("patch.diff", "final.patch", "patch"):
+            path = os.path.join(bundle, "files", candidate)
+            if os.path.isfile(path):
+                return path
+    except Exception:
+        return ""
+    return ""
+
+
+def _kernel_patches(a, kernels, files: dict, workdir: str) -> int:
+    """Fill in the patches the run did not carry, and return how many are STILL missing.
+
+    Mutates `kernels` (setting `patch` on entries it manages to fetch) and `files` (adding the
+    bytes to upload) in place, because both are already the write path's accumulators and a
+    third copy would just be a chance for them to disagree.
+    """
+    root = str(getattr(a, "kernel_store", "") or "")
+    missing = 0
+    for entry in kernels:
+        if entry.get("patch"):
+            continue
+        cid = str(entry.get("kernel_canonical_id") or "")
+        name = str(entry.get("name") or "kernel")
+        fetched = ""
+        if root and cid and workdir:
+            fetched = _fetch_kernel_patch(root, cid, name,
+                                          os.path.join(workdir, "kernel_%s" % kbid.segment(name,
+                                                                                           "k")))
+        if fetched:
+            stored = "kernels/%s.patch" % kbid.segment(name, "kernel")
+            files["kernel:" + name] = (stored, fetched)
+            entry["patch"] = stored
+            entry["patch_origin"] = "kernel_store"
+            continue
+        # Said out loud in the record itself. A reader that sees three accepted kernels and two
+        # patches has no way to tell whether the third was a no-op or whether its bytes were
+        # simply lost, and those two readings lead to opposite decisions about whether the
+        # configuration below is worth trying.
+        entry["patch_missing"] = True
+        missing += 1
+    return missing
+
+
+def _launch_text(a, result: dict, value: dict, kernels, overlay: str) -> str:
+    """A runnable `launch.sh` built from the config, for a run that captured no script.
+
+    Written against `e2e_workflow/scripts/bench_e2e.sh`'s env contract, because that script is
+    how this pipeline actually measured the number being recorded — reproducing the record means
+    re-entering it at the same door, not inventing a second launcher whose defaults nobody has
+    compared. Every knob it reads that we know is emitted; the ones we cannot know (MODEL's path,
+    HOST/PORT) are left as environment overrides with loud defaults.
+
+    The header says SYNTHESIZED in as many words. A reader must be able to tell a script that was
+    executed and produced the number above from one that was reconstructed afterwards and has
+    never been run, and no amount of correctness in the body substitutes for saying which it is.
+    """
+    identity = identity_of(a)
+    workload = value.get("workload") or {}
+    config = value.get("accepted_config") or {}
+    flags = str(config.get("flags") or "")
+    env = str(config.get("env") or "")
+    model_path = str(result.get("model_path") or (result.get("upstream") or {}).get("model_path")
+                     or "")
+    lines = [
+        "#!/usr/bin/env bash",
+        "# SYNTHESIZED by e2e_store.py from this record's accepted_config — NOT the script that",
+        "# produced the number below. It has never been executed as written. Read it before you",
+        "# run it: the paths it cannot know (MODEL, GEAK_SCRIPTS) are yours to supply.",
+        "#",
+        "#   identity     : %s" % " | ".join(
+            [identity["model"], identity["gpu"], identity["framework"],
+             identity["framework_version"], identity["precision"]]),
+        "#   workload     : %s" % (json.dumps(workload, sort_keys=True) or "{}"),
+        "#   direction    : %s" % (value.get("direction") or "unlabeled"),
+        "#   measured     : %s tok/s vs baseline %s" % (value.get("final_throughput_tok_s"),
+                                                        value.get("baseline_throughput_tok_s")),
+        "#   recorded_at  : %s by %s" % (value.get("recorded_at") or "",
+                                         value.get("measured_by") or "unknown"),
+        "",
+        "set -euo pipefail",
+        "",
+        'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+        '# Where GEAK\'s e2e_workflow/scripts lives on THIS box. bench_e2e.sh is the entry point',
+        '# the recorded number was measured through.',
+        ': "${GEAK_SCRIPTS:?set GEAK_SCRIPTS to GEAK/e2e_workflow/scripts}"',
+        ': "${MODEL:=%s}"' % (model_path or ""),
+        'if [ -z "${MODEL}" ]; then',
+        # The caller's spelling, not the canonical segment: `qwen3-397b` is an address, and the
+        # reader has to type a path or an HF id, which is case-sensitive.
+        '  echo "set MODEL to the path or HF id of %s (bench_e2e.sh requires it)" >&2; exit 4'
+        % (str(getattr(a, "model", "") or "") or identity["model"]),
+        "fi",
+        "",
+    ]
+    if kernels:
+        patched = [k for k in kernels if k.get("patch")]
+        lines += ["# Kernel rewrites this configuration depends on. SRC must point at the source",
+                  "# tree the patches were cut against (the serving stack's checkout)."]
+        if patched:
+            lines += ['SRC="${SRC:-}"',
+                      'if [ -n "${SRC}" ]; then',
+                      '  for p in %s; do' % " ".join('"$HERE/%s"' % k["patch"] for k in patched),
+                      '    git -C "$SRC" apply --check "$p" && git -C "$SRC" apply "$p"',
+                      "  done",
+                      "else",
+                      '  echo "SRC unset: skipping %d kernel patch(es) — the recorded speedup will '
+                      'NOT reproduce without them" >&2' % len(patched),
+                      "fi"]
+        absent = [k for k in kernels if not k.get("patch")]
+        if absent:
+            lines += ["# NO PATCH IN THIS RECORD for: %s" % ", ".join(
+                str(k.get("name") or "?") for k in absent),
+                "# Fetch them from the kernel lane (kernel_canonical_id in value.accepted_kernels)",
+                "# or the number below will not reproduce."]
+        lines.append("")
+    if overlay:
+        lines += ['# Python-level overlay this run served with.',
+                  'OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-$HERE/%s}"' % overlay, ""]
+    pairs = _env_pairs(env)
+    if pairs:
+        lines.append("# Server environment, as recorded.")
+        lines += ["export %s=%s" % (k, _sh_quote(v)) for k, v in sorted(pairs.items())]
+        lines.append("")
+    lines += ["exec env \\"]
+    for key, val in (("BACKEND", identity["framework"]),
+                     ("MODEL", "${MODEL}"),
+                     ("TP", workload.get("tp")), ("ISL", workload.get("isl")),
+                     ("OSL", workload.get("osl")), ("CONC", workload.get("conc")),
+                     ("GPU", "${GPU:-0}"), ("OUT_DIR", "${OUT_DIR:-$PWD/repro_out}")):
+        if val in (None, "", kbid.UNKNOWN):
+            continue
+        lines.append("  %s=%s \\" % (key, _sh_quote(str(val))))
+    if flags:
+        lines.append("  EXTRA_SERVER_ARGS=%s \\" % _sh_quote(flags))
+    if env:
+        lines.append("  EXTRA_ENV=%s \\" % _sh_quote(env))
+    if overlay:
+        lines.append('  OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH}" \\')
+    lines += ['  bash "${GEAK_SCRIPTS}/bench_e2e.sh"', ""]
+    return "\n".join(lines)
+
+
+def _sh_quote(text: str) -> str:
+    """Single-quote for /bin/sh, leaving `${VAR}` references alone.
+
+    Not shlex.quote: several of the values above are deliberately shell expansions the reader is
+    meant to be able to override from the environment, and quoting those into literals would turn
+    a script you can point at your own model into one that tries to open a file called `${MODEL}`.
+    """
+    text = str(text)
+    if text.startswith("${") and text.endswith("}"):
+        return '"%s"' % text
+    return "'%s'" % text.replace("'", "'\"'\"'")
+
+
+def _repro(a, result: dict, value: dict, kernels, files: dict, workdir) -> dict:
+    """`value.repro`: everything needed to run this configuration again, said twice.
+
+    Once as a script (`launch`) for a reader that wants to run it, and once as structured fields
+    for a reader that wants to reason about it without parsing shell. Both, not either: the
+    script is the only artifact that is complete, and the fields are the only form a curation
+    pass or another agent can compare across records.
+
+    `workdir` is None when the caller only wants the document's shape — `retract`/`attest`
+    recompute a record purely to re-derive its content digest, and neither should be synthesizing
+    files or refusing to run because a record it is taking BACK was never reproducible.
+    """
+    artifacts = value.get("artifacts") or {}
+    captured = str(artifacts.get("launch") or "")
+    overlay = str(artifacts.get("overlay") or "")
+    config = value.get("accepted_config") or {}
+    flags, env = str(config.get("flags") or ""), str(config.get("env") or "")
+    missing = _kernel_patches(a, kernels, files, workdir) if workdir else sum(
+        1 for k in kernels if not k.get("patch"))
+    if workdir:
+        # `value.artifacts` is rebuilt by the caller from `files` after this returns, so adding to
+        # `files` here is enough to make the synthesized script a first-class artifact of the
+        # record rather than a loose file nobody indexed.
+        have_patch = any(k.get("patch") for k in kernels)
+        if not captured and not flags and not env and not have_patch and not overlay:
+            raise SystemExit(
+                "result carries no launch script, no accepted_config flags or env, no kernel "
+                "patch and no overlay; refusing to record a run nobody can reproduce — a record "
+                "that only says a number was once achieved cannot be acted on, and this store has "
+                "no delete to take it back with")
+        if not captured:
+            path = os.path.join(workdir, "launch.sh")
+            with open(path, "w") as handle:
+                handle.write(_launch_text(a, result, value, kernels, overlay))
+            os.chmod(path, 0o755)
+            files["launch"] = ("launch.sh", path)
+            captured, origin = "launch.sh", "synthesized"
+        else:
+            origin = "captured"
+    else:
+        origin = "captured" if captured else ""
+    return {
+        "launch": captured,
+        "launch_origin": origin,
+        "entry_point": "e2e_workflow/scripts/bench_e2e.sh",
+        "server_args": flags,
+        "env": env,
+        "env_pairs": _env_pairs(env),
+        "model": str(result.get("model_path")
+                     or (result.get("upstream") or {}).get("model_path") or ""),
+        "backend": identity_of(a)["framework"],
+        "workload": dict(value.get("workload") or {}),
+        "overlay": overlay,
+        "kernels": [{"name": k.get("name") or "", "patch": k.get("patch") or "",
+                     "kernel_canonical_id": k.get("kernel_canonical_id") or ""}
+                    for k in kernels],
+        "kernels_without_patch": missing,
+        # The one field a reader can branch on: is what follows enough to re-run, or is it a lead.
+        "complete": bool(captured) and not missing,
+    }
+
+
 def cmd_write(a) -> dict:
+    workdir = tempfile.mkdtemp(prefix="e2e_store_write_")
+    try:
+        return _write(a, workdir)
+    finally:
+        # Only after every rung has been published: the synthesized launch script and any patches
+        # fetched from the kernel lane live here, and both planes read them at write time.
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _write(a, workdir: str) -> dict:
     try:
         with open(a.result, "r", errors="replace") as handle:
             result = json.load(handle)
@@ -523,7 +922,7 @@ def cmd_write(a) -> dict:
     if not isinstance(result, dict):
         raise SystemExit("--result must be a JSON object")
 
-    record = build_record(a, result)
+    record = build_record(a, result, workdir)
     ladder = ladder_of(a)
     sid = kbid.session_id(ladder[0][0], identity_of(a)["model"],
                           _content_digest(record["knowledge"]))
@@ -546,21 +945,112 @@ def cmd_write(a) -> dict:
             rung["error"] = why
             out["rungs"].append(rung)
             break
-        rec = {"canonical_id": cid, "session_id": sid, "knowledge": record["knowledge"]}
+        # A re-bench of the same configuration lands on the SAME session id by design (see
+        # _content_digest) and replaces the document wholesale. Without this, every re-measurement
+        # would silently reset that record's validation history to zero — and it would look
+        # perfectly healthy afterwards, because the new document is well-formed and simply says
+        # nobody has ever tried this.
+        knowledge = _carrying_ledger(store, cid, sid, record["knowledge"])
+        rec = {"canonical_id": cid, "session_id": sid, "knowledge": knowledge}
         score_of = lambda r, m=metric: r["knowledge"].get(m)
         written, promoted, err = publish(store, [rec], record["files"], score_of)
         rung["written"] = bool(written)
         rung["promoted"] = bool(promoted)
         rung["error"] = err or why   # `both` with an unreachable service: recorded, not fatal
         if mirror is not None:
-            # The mirror never gates the primary; its own failure is reported, not raised.
-            _mw, _mp, merr = publish(mirror, [rec], record["files"], score_of)
+            # The mirror never gates the primary; its own failure is reported, not raised. It gets
+            # its own ledger lookup because the two planes drift: a record attested on the remote
+            # and re-written from a box that only ever wrote locally must not have the remote's
+            # count overwritten by the local one's.
+            mrec = dict(rec, knowledge=_carrying_ledger(mirror, cid, sid, record["knowledge"]))
+            _mw, _mp, merr = publish(mirror, [mrec], record["files"], score_of)
             if merr and not rung["error"]:
                 rung["error"] = merr
         out["rungs"].append(rung)
         if err:
             break
     out["ok"] = all(r["written"] for r in out["rungs"]) if a.apply else True
+    return out
+
+
+def _carrying_ledger(store, cid: str, sid: str, knowledge: dict) -> dict:
+    """`knowledge` with any attestation ledger the store already holds for this session moved in.
+
+    A store that cannot answer is treated as a store that holds nothing: failing the write over a
+    lookup would turn a transient service blip into a lost measurement, and the worst case of
+    guessing wrong here is a reset counter, not a wrong number.
+    """
+    try:
+        previous = store.get_session(cid, sid)
+    except Exception:
+        previous = None
+    fresh = dict(knowledge)
+    fresh["value"] = carry_attestations(
+        previous.get("value") if isinstance(previous, dict) else None, dict(fresh["value"]))
+    return fresh
+
+
+def _as_number(value):
+    """A measurement off the command line, or None. Argparse hands these over as strings, and the
+    caller is usually a shell line built by the workflow, so a stray unit or an empty flag must
+    drop the evidence rather than abort an attestation that is otherwise perfectly recordable."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return finite_speedup(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def cmd_attest(a) -> dict:
+    """Count one attempt to actually RUN a stored record, at every rung it was written to.
+
+    This is the other half of the read path. A resolve offers records; something downstream takes
+    one to a box and finds out whether it still holds. Until now that finding-out evaporated, so
+    the tenth reader of a record that has failed nine times saw exactly what the first reader saw.
+
+    Applied to the whole ladder for the same reason retraction is: all three rungs share one
+    session id, and counting only on the exact rung leaves the two coarse pages — the ones a
+    reader on a DIFFERENT workload reads, which is most readers — quoting a stale ledger.
+
+    Deliberately does not touch the ranking scalars or the champion. See kb/attest.py: one failure
+    on one box is evidence, not a verdict, and burying a record on the strength of it would make
+    this command too dangerous to run automatically, which would mean it never ran at all.
+    """
+    session_id = str(getattr(a, "session_id", "") or "").strip()
+    if not session_id:
+        raise SystemExit("attest needs --session-id (the id the write printed); there is nothing "
+                         "to recompute it from, because the outcome being recorded is not in any "
+                         "result JSON")
+    evidence = {k: v for k, v in (
+        ("measured_tok_s", _as_number(getattr(a, "measured_tok_s", None))),
+        ("baseline_tok_s", _as_number(getattr(a, "baseline_tok_s", None))),
+        ("parity", str(getattr(a, "parity", "") or "").strip()),
+        ("note", str(getattr(a, "note", "") or "").strip()),
+        ("workload", {k: str(getattr(a, k) or "") for k in ("tp", "isl", "osl", "conc")
+                      if getattr(a, k, None)}),
+    ) if v not in (None, "", {})}
+    if evidence.get("measured_tok_s") and evidence.get("baseline_tok_s"):
+        evidence["delta_pct"] = round(
+            (evidence["measured_tok_s"] / evidence["baseline_tok_s"] - 1.0) * 100.0, 3)
+    out = {"applied": bool(a.apply), "session_id": session_id, "outcome": a.outcome, "rungs": []}
+    for cid, tier, metric, floor in ladder_of(a):
+        store, mirror, why = open_plane(a, metric, floor)
+        planes = [p for p in (store, mirror) if p is not None]
+        if not planes:
+            out["rungs"].append({"canonical_id": cid, "tier": tier, "error": why, "found": False})
+            continue
+        for plane in planes:
+            report = attest_session(plane, cid, session_id, a.outcome,
+                                    actor=str(a.measured_by or ""), evidence=evidence,
+                                    apply=bool(a.apply))
+            report.update({"tier": tier, "plane_note": why})
+            out["rungs"].append(report)
+    out["ok"] = attestation_ok(out["rungs"], a.apply)
+    # Hoisted out of the per-rung reports because every rung holds the identical document, and a
+    # caller deciding whether to open a curation ticket should not have to notice that.
+    hints = [r.get("retire_hint") for r in out["rungs"] if r.get("retire_hint")]
+    out["retire_hint"] = hints[0] if hints else ""
     return out
 
 
@@ -678,6 +1168,9 @@ def main(argv=None) -> int:
     _plane_args(q)
     q.add_argument("--top-n", type=int, default=DEFAULT_TOP_N)
     q.add_argument("--min-speedup", type=float, default=0.0)
+    q.add_argument("--sort-by", choices=tuple(SORT_METRICS), default=DEFAULT_SORT_BY,
+                   help="how to order the offer on EVERY rung (default: absolute throughput, "
+                        "high to low). The champion metric per rung is unaffected.")
     q.add_argument("--refs-dir", default="", help="write prose references here")
     q.add_argument("--cache-dir", default="", help="materialize artifact bundles here")
 
@@ -688,8 +1181,27 @@ def main(argv=None) -> int:
     q.add_argument("--direction", default="", help="what this run DID, for the shortlist collapse")
     q.add_argument("--measured-by", default="", help="who/what produced the number")
     q.add_argument("--file", action="append", default=[], help="extra artifact to attach")
+    q.add_argument("--kernel-store", default="",
+                   help="kernel lane's on-disk store root; when given, patches this run no longer "
+                        "has on disk are fetched from there by kernel_canonical_id so the record "
+                        "stays reproducible. Off by default: it is real I/O on the write path.")
     _state_args(q)
     q.add_argument("--apply", action="store_true", help="actually write; default is a dry run")
+
+    q = sub.add_parser("attest", help="count one attempt to RUN a stored record: validated | "
+                                      "failed | not_reproduced. Moves no score, no champion.")
+    _identity_args(q)
+    _plane_args(q)
+    q.add_argument("--session-id", required=True, help="the session that was tried")
+    q.add_argument("--outcome", required=True, choices=OUTCOMES,
+                   help="validated = reproduced a win; failed = ran but did not win; "
+                        "not_reproduced = could not be made to run at all")
+    q.add_argument("--measured-tok-s", default=None, help="what it did here, for the history entry")
+    q.add_argument("--baseline-tok-s", default=None, help="what this box does without it")
+    q.add_argument("--parity", default="", help="pass | fail | n/a on this box")
+    q.add_argument("--note", default="", help="one line a future reader can act on")
+    q.add_argument("--measured-by", default="", help="who tried it")
+    q.add_argument("--apply", action="store_true", help="actually record it; default is a dry run")
 
     q = sub.add_parser("retract", help="take back a written record (rewrite, since there is no "
                                        "delete): retained=false, scores zeroed, champion re-pointed")
@@ -714,6 +1226,8 @@ def main(argv=None) -> int:
         result = cmd_resolve(a)
     elif a.command == "retract":
         result = cmd_retract(a)
+    elif a.command == "attest":
+        result = cmd_attest(a)
     else:
         result = cmd_write(a)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

@@ -24,6 +24,9 @@ Subcommands:
                `resolve`, but addressed by canonical id against a KB store (kb/store_local.py).
     write-remote
                `write`, landing the same result in the local store AND under its key.
+    attest / attest-remote
+               Count one attempt to USE a stored entry (validated | failed | not_reproduced), so a
+               later curation pass can retire what nobody can reproduce. Moves no speedup, no rank.
 
 Speedups only compare within one GPU arch, so resolve drops cross-arch entries outright. Neither
 command ever raises: on failure it prints a JSON reason and exits 0 so the caller degrades.
@@ -50,6 +53,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from kb.attest import OUTCOMES as _OUTCOMES
 from kb.curate import collapse_by_direction
 from kb.ladder import publish
 from kb.plane import open_plane
@@ -736,6 +740,19 @@ def _is_retired(meta: dict) -> bool:
     return meta.get("retained") is False or bool(meta.get("retired_reason"))
 
 
+def _local_attestations(meta: dict) -> dict:
+    """This entry's attestation ledger, or {} when nobody has ever tried it.
+
+    Empty rather than a zeroed ledger because `remote_value` drops empty values, and a record
+    that has never been recalled should carry no ledger at all — four zeroes and no ledger mean
+    the same thing to a reader, and the shorter one does not imply somebody looked.
+    """
+    from kb.attest import attestations_of
+    ledger = attestations_of(meta if isinstance(meta, dict) else {})
+    counted = any(ledger[k] for k in ("recalls", "validations", "failures", "not_reproduced"))
+    return ledger if counted else {}
+
+
 def _rank_key(md):
     """Recorded speedup, then reproductions, then exp_id for determinism."""
     meta, exp_dir = md
@@ -744,6 +761,21 @@ def _rank_key(md):
     except (TypeError, ValueError):
         reps = 0
     return (-_speedup_of(meta), -reps, os.path.basename(exp_dir))
+
+
+def _track_record_md(meta) -> str:
+    """One line on what happened the last times this patch was adopted, or nothing at all.
+
+    Omitted entirely for an untried entry rather than printed as "0 attempts": the reader is an
+    agent about to spend a verify slot, and a line that says nothing still costs it a decision.
+    """
+    ledger = _local_attestations(meta)
+    if not ledger:
+        return ""
+    hint = _retire_hint_of(meta)
+    return ("- track record: adopted %d time(s) — %d reproduced a win, %d did not win, %d would "
+            "not run%s\n" % (ledger["recalls"], ledger["validations"], ledger["failures"],
+                             ledger["not_reproduced"], " (**%s**)" % hint if hint else ""))
 
 
 def _render_references(refs_dir: str, address: str, summary: str, views):
@@ -782,6 +814,7 @@ def _render_references(refs_dir: str, address: str, summary: str, views):
                 + v["origin"]
                 + f"- verified_on: {meta.get('verified_on', '')}\n"
                 f"- verified_stack: {_stack_str(meta)}\n"
+                + _track_record_md(meta)
                 + _alternates_md(v["alts"])
                 + f"\n---\n\n{_prose_body(meta, body)}\n"
             ))
@@ -818,8 +851,20 @@ def _candidate(rank: int, v: dict, gfx: str, prose_path: str, top_bench: str) ->
         # Adoption is decided by this run's own measurement either way.
         "comparable": bool(v["bench_key"]) and v["bench_key"] == top_bench,
         "alternates": v["alts"],
+        # What happened the last times somebody actually adopted this patch, as opposed to the
+        # speedup its own writer measured once. An entry offered at rank 1 that three lanes have
+        # since failed to reproduce should not read identically to an untried one, and before this
+        # it did. Advisory only — nothing here filters on it (see kb/attest.py:retire_hint).
+        "validations": _local_attestations(v["meta"]).get("validations", 0),
+        "recalls": _local_attestations(v["meta"]).get("recalls", 0),
+        "retire_hint": _retire_hint_of(v["meta"]),
         "status": "read",
     }, **v["extra"])
+
+
+def _retire_hint_of(meta) -> str:
+    from kb.attest import retire_hint
+    return retire_hint(meta if isinstance(meta, dict) else {})
 
 
 def cmd_resolve(a) -> dict:
@@ -1192,6 +1237,14 @@ def remote_value(meta: dict, digest: str = "") -> dict:
         "verified_on": str(meta.get("verified_on") or ""),
         "measured_by": str(meta.get("measured_by") or ""),
         "reproductions": meta.get("reproductions"),
+        # NOT the same thing as `reproductions`, and the two are easy to conflate into one wrong
+        # number. `reproductions` counts how many times this lane WROTE the same patch again — a
+        # measure of how often the optimizer rediscovers an idea, produced entirely by the writer.
+        # `attestations` counts what happened when somebody READ this record and took it to a box:
+        # recalls / validations / failures / not_reproduced, in the vocabulary kb/attest.py defines
+        # and both lanes share. A record can be rediscovered five times and never once survive a
+        # recall, and only the second number says so.
+        "attestations": _local_attestations(meta),
         "lifecycle": str(meta.get("lifecycle") or ""),
         "retained": meta.get("retained"),
         # The same two fields the e2e records carry, so one reader can ask "should I believe this"
@@ -1430,6 +1483,90 @@ def cmd_retract_remote(a) -> dict:
                                      scan=int(a.scan), apply=bool(a.apply))
             out["pages"].append(dict(report, tier=tier))
     out["retracted"] = retraction_ok(out["pages"], a.apply)
+    return out
+
+
+def _attest_evidence(a) -> dict:
+    """The one-line record of what this box saw, shared by both attest paths."""
+    evidence = {}
+    for key, raw in (("measured_speedup", getattr(a, "measured_speedup", None)),
+                     ("note", getattr(a, "note", "")),
+                     ("canonical_id", getattr(a, "canonical_id", ""))):
+        if raw not in (None, ""):
+            evidence[key] = raw
+    # Argparse hands the ratio over as a string. Stored as one it would land in meta.yaml quoted,
+    # and every later reader comparing it against a speedup would be comparing str to float.
+    if "measured_speedup" in evidence:
+        try:
+            evidence["measured_speedup"] = float(evidence["measured_speedup"])
+        except (TypeError, ValueError):
+            evidence.pop("measured_speedup")
+    return evidence
+
+
+def cmd_attest(a) -> dict:
+    """Count one attempt to actually USE a stored entry, straight into its meta.yaml.
+
+    The local plane has no session ids and no service — an entry IS a directory — so this is a
+    read-modify-atomic-write of the same file the write path owns, using the same arithmetic
+    kb/attest.py applies remotely. Sharing the arithmetic and not the transport is deliberate: the
+    counters have to mean the same thing on both planes or a curation pass cannot compare them,
+    but a local store should not need a KB plane to record that a patch did not apply.
+
+    Like the remote one, this moves nothing: the speedup meta declares is left exactly as it was,
+    and the entry keeps its rank. A patch that failed to apply on one workspace is a fact about
+    that workspace as much as about the patch.
+    """
+    from kb.attest import record_attestation, retire_hint
+    exp_dir = str(getattr(a, "exp_dir", "") or "")
+    meta_path = os.path.join(exp_dir, "meta.yaml")
+    meta = _read_meta(meta_path)
+    if not meta:
+        return {"attested": False, "reason": "no_meta", "exp_dir": exp_dir}
+    try:
+        updated = record_attestation(dict(meta), a.outcome,
+                                     actor=str(getattr(a, "measured_by", "") or ""),
+                                     evidence=_attest_evidence(a))
+    except Exception as e:
+        return {"attested": False, "reason": "bad_outcome: " + str(e)[:120], "exp_dir": exp_dir}
+    out = {"attested": bool(a.apply), "applied": bool(a.apply), "exp_dir": exp_dir,
+           "outcome": a.outcome, "attestations": updated["attestations"],
+           "retire_hint": retire_hint(updated)}
+    if not a.apply:
+        return out
+    try:
+        _atomic_write(meta_path, _dump_meta(updated))
+    except OSError as e:
+        out.update({"attested": False, "reason": "write_failed: " + str(e)[:120]})
+    return out
+
+
+def cmd_attest_remote(a) -> dict:
+    """The same count, against a key-addressed record on either plane.
+
+    Walks BOTH rungs for the same reason `retract-remote` does: `write-remote` filled them with one
+    session id, and a box on a different ROCm reads the version-agnostic rung — leaving it with a
+    stale ledger hides the failures from exactly the readers most likely to hit them.
+    """
+    from kb.attest import attest_session, attestation_ok, retire_hint
+    gfx = _norm_gfx(a.gfx)
+    if not gfx and not a.canonical_id:
+        return {"attested": False, "reason": "missing_arch"}
+    store, mirror, why = open_plane(a, CHAMPION_METRIC, 1.0)
+    planes = [p for p in (store, mirror) if p is not None]
+    if not planes:
+        return {"attested": False, "reason": why}
+    out = {"applied": bool(a.apply), "session_id": a.session_id, "outcome": a.outcome,
+           "plane_note": why, "pages": []}
+    for cid, tier in _store_ladder(a, gfx):
+        for plane in planes:
+            report = attest_session(plane, cid, a.session_id, a.outcome,
+                                    actor=str(getattr(a, "measured_by", "") or ""),
+                                    evidence=_attest_evidence(a), apply=bool(a.apply))
+            out["pages"].append(dict(report, tier=tier))
+    out["attested"] = attestation_ok(out["pages"], a.apply)
+    hints = [p.get("retire_hint") for p in out["pages"] if p.get("retire_hint")]
+    out["retire_hint"] = hints[0] if hints else ""
     return out
 
 
@@ -1745,6 +1882,38 @@ def main(argv=None):
     tr.add_argument("--measured-by", dest="measured_by", default="", help="who is retracting it")
     tr.add_argument("--apply", action="store_true", help="actually rewrite; default is a dry run")
 
+    at = sub.add_parser("attest", help="count one attempt to USE a stored entry (validated | "
+                                       "failed | not_reproduced); changes no speedup, no rank")
+    at.add_argument("--exp-dir", dest="exp_dir", required=True,
+                    help="the entry that was tried, as `resolve` reports it")
+    at.add_argument("--outcome", required=True, choices=_OUTCOMES,
+                    help="validated = reproduced a win; failed = applied but did not win; "
+                         "not_reproduced = would not apply or would not build")
+    at.add_argument("--measured-speedup", dest="measured_speedup", default=None,
+                    help="what it did here, for the history entry")
+    at.add_argument("--note", default="", help="one line a future reader can act on")
+    at.add_argument("--measured-by", dest="measured_by", default="", help="who tried it")
+    at.add_argument("--apply", action="store_true", help="actually record it; default is a dry run")
+
+    ar = add_plane_args(sub.add_parser(
+        "attest-remote", help="the same count, against a key-addressed record on either plane"))
+    ar.add_argument("--store", default="", help="on-disk KB store root (--plane local/both)")
+    ar.add_argument("--canonical-id", dest="canonical_id", default="",
+                    help="attest on THIS page only; omit to walk both rungs of the ladder")
+    ar.add_argument("--session-id", dest="session_id", required=True,
+                    help="the session that was tried, from the write-remote output")
+    ar.add_argument("--outcome", required=True, choices=_OUTCOMES)
+    ar.add_argument("--kernel-name", dest="kernel_name", default="")
+    ar.add_argument("--language", default="")
+    ar.add_argument("--gfx", default="")
+    ar.add_argument("--producer", default=REMOTE_PRODUCER)
+    ar.add_argument("--gpu", default="", help="override the gfx dimension; default is --gfx")
+    ar.add_argument("--framework-version", dest="framework_version", default="")
+    ar.add_argument("--measured-speedup", dest="measured_speedup", default=None)
+    ar.add_argument("--note", default="")
+    ar.add_argument("--measured-by", dest="measured_by", default="", help="who tried it")
+    ar.add_argument("--apply", action="store_true", help="actually record it; default is a dry run")
+
     m = sub.add_parser("remap", help="rewrite a stored patch's paths onto this workspace's layout")
     m.add_argument("--patch", required=True)
     m.add_argument("--out", required=True)
@@ -1771,12 +1940,17 @@ def main(argv=None):
             out = cmd_write_remote(a)
         elif a.cmd == "retract-remote":
             out = cmd_retract_remote(a)
+        elif a.cmd == "attest":
+            out = cmd_attest(a)
+        elif a.cmd == "attest-remote":
+            out = cmd_attest_remote(a)
         else:  # pragma: no cover
             out = {"error": "unknown command"}
     except Exception as e:  # never crash the caller
         err = "exception: " + str(e)[:160]
         out = ({"written": False, "reason": err} if a.cmd in ("write", "write-remote")
                else {"retracted": False, "reason": err} if a.cmd == "retract-remote"
+               else {"attested": False, "reason": err} if a.cmd in ("attest", "attest-remote")
                else {"remapped": False, "reason": err} if a.cmd == "remap"
                else {"read_reason": err, "candidates": []})
     print(json.dumps(out, ensure_ascii=False))
