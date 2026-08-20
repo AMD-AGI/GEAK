@@ -55,7 +55,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install pytest pytest-cov coverage
+      # pyyaml is required, not optional: run_e2e.py parses the recipe envs: block
+      # with it, and the recipe-env tests assert the string-preserving BaseLoader
+      # path (typed scalars, folded multi-line EXTRA_<BE>_ARGS). Without it those
+      # tests would silently exercise the degraded line-scanner fallback instead.
+      - run: pip install pytest pytest-cov coverage pyyaml
       # Stdlib-only tests (import run_e2e via importlib; no claude_agent_sdk / GPU).
       # Files are listed explicitly rather than discovered, so that adding a test
       # under examples/ (torch/triton + GPU) can never silently break this job.
@@ -73,6 +77,11 @@ jobs:
             interface/test_run_e2e_recovery.py \
             interface/test_run_e2e_alignment.py \
             interface/test_run_e2e_dispatch.py \
+            interface/test_run_e2e_recipe_env.py \
+            interface/test_run_e2e_margin.py \
+            interface/test_run_e2e_measurement_basis.py \
+            e2e_workflow/scripts/tests/test_magpie_launcher_extra_args.py \
+            e2e_workflow/scripts/tests/test_bench_trust_remote_code.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py \
             e2e_workflow/scripts/tests/test_run_correctness_gate.py \
             e2e_workflow/scripts/tests/test_parse_regime_sources.py \
@@ -86,6 +95,7 @@ jobs:
             e2e_workflow/scripts/tests/test_leg_runner.py \
             e2e_workflow/scripts/tests/test_server_teardown.py \
             e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
+            ci/node/test_run_model_material_audit.py \
             geak/test_bootstrap.py
 
       # Standalone contract checks. NOT in the pytest list above: each runs its assertions at import
@@ -226,4 +236,30 @@ jobs:
       # fixture (ci/fixtures/handoff.dry.json), so it needs no geak_runtime
       # dataset, GPU, or Claude. Guards the map_args / build_prompt code path.
       - name: handoff -> args mapping (fixture)
-        run: python interface/run_e2e.py ci/fixtures/handoff.dry.json /tmp/l0_result.json --dry-run
+        run: |
+          pip install pyyaml
+          GEAK_STRICT_RECIPE_ENV=1 python interface/run_e2e.py \
+            ci/fixtures/handoff.dry.json /tmp/l0_result.json --dry-run \
+            > /tmp/geak-l0-dry-run.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          plan = json.loads(Path("/tmp/geak-l0-dry-run.json").read_text())
+          assert plan["bench_launcher"] == "magpie"
+          assert plan["magpie_launch_script_source"] == "handoff"
+          assert plan["recipe_env_source"] == "ci/fixtures/baseline_config.with_envs.yaml"
+          replay = Path(plan["recipe_env_file"])
+          assert replay.is_file(), replay
+          raw = replay.read_bytes()
+          assert raw.endswith(b"\0")
+          entries = dict(item.split(b"=", 1) for item in raw.split(b"\0")[:-1])
+          assert b"PORT" not in entries
+          assert b"ROCR_VISIBLE_DEVICES" not in entries
+          assert b"HIP_VISIBLE_DEVICES" not in entries
+          assert b"CUDA_VISIBLE_DEVICES" not in entries
+          assert entries[b"PATH"] == b"/usr/bin:/bin"
+          extra = entries[b"EXTRA_VLLM_ARGS"]
+          assert b"--trust-remote-code" in extra
+          assert b'{"method":"ngram","num_speculative_tokens":3}' in extra
+          PY

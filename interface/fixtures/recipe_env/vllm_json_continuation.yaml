@@ -1,0 +1,7 @@
+benchmark:
+  framework: vllm
+  envs:
+    EXTRA_VLLM_ARGS: --attention-backend ROCM_AITER_UNIFIED_ATTN --kv-cache-dtype
+      fp8_e4m3 --max-model-len 6144 --gpu-memory-utilization
+      0.87 --speculative-config {"method":"ngram","num_speculative_tokens":7}
+    VLLM_ROCM_USE_AITER: "1"
