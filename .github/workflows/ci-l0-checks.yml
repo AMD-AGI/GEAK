@@ -60,7 +60,7 @@ jobs:
       # path (typed scalars, folded multi-line EXTRA_<BE>_ARGS). Without it those
       # tests would silently exercise the degraded line-scanner fallback instead.
       - run: pip install pytest pytest-cov coverage pyyaml
-      # Stdlib-only tests (import run_e2e via importlib; no claude_agent_sdk / GPU).
+      # CPU-only tests (no claude_agent_sdk / GPU); the expert-skill test also uses PyYAML.
       # Files are listed explicitly rather than discovered, so that adding a test
       # under examples/ (torch/triton + GPU) can never silently break this job.
       #
@@ -98,7 +98,18 @@ jobs:
             e2e_workflow/scripts/tests/test_server_teardown.py \
             e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
             ci/node/test_run_model_material_audit.py \
+            perf_knowledge/expert_skills/_contribute/test_flydsl_skill_portability.py \
             geak/test_bootstrap.py
+
+      - name: expert skill static validation
+        run: |
+          for skill in \
+            flydsl_decode_moe_stage1_blkmap \
+            flydsl_prefill_moe_stage2_fp8partial \
+            flydsl_fp8_blockscale_gemm
+          do
+            python perf_knowledge/expert_skills/_contribute/validate_skill.py "$skill" --static
+          done
 
       # Standalone contract checks. NOT in the pytest list above: each runs its assertions at import
       # time and exits non-zero, which pytest collection cannot express. They were added with the

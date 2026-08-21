@@ -3412,6 +3412,12 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
         gpu_pct = gpu_pct_prof
     micro = _ir_get(ir, "isolated_speedup", "micro_speedup", "speedup") if ir else None
     delta = _ir_get(ir, "e2e_delta_pct", "delta_pct") if ir else None
+    # The delta is a ratio; these are the two numbers it is a ratio of, read
+    # off the SAME integrate_result. A consumer holding the pair can restate
+    # the win in points of one fixed baseline. Holding only the percentage it
+    # can do nothing but add figures measured against different denominators.
+    base_tput = _ir_get(ir, "ref_med", "ref_median_tok_s") if ir else None
+    new_tput = _ir_get(ir, "cand_med", "cand_median_tok_s") if ir else None
     winner_kind = str(_ir_get(ir, "winner_kind") or "").lower() if ir else ""
     is_config = winner_kind in ("env", "config", "flags")
     flags = str(_ir_get(ir, "apply_flags") or "") if ir else ""
@@ -3472,6 +3478,8 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
         "kernel_id": kernel_id,
         "integrated": accepted,
         "e2e_gain_pct": delta,
+        "base_tput": base_tput,
+        "new_tput": new_tput,
         "validated": True,                        # an A/B gate ran either way
         "decision": "KEEP" if accepted else "REJECTED",
         "patch_path": patch,
@@ -3516,6 +3524,8 @@ def _journey_return_entry(eval_dir: str, k: dict, idx: int, wf: dict,
         },
         "e2e": {
             "kernel_id": kid, "integrated": True, "e2e_gain_pct": k.get("e2e_delta_pct"),
+            # Same pair as the overlay path, carried through the workflow return.
+            "base_tput": k.get("base_tput"), "new_tput": k.get("new_tput"),
             "validated": True, "decision": "KEEP", "patch_path": patch,
             "target_file": k.get("target_file") or k.get("target_callable"),
             "extra_server_args": str((wf.get("accepted_config") or {}).get("flags") or ""),
