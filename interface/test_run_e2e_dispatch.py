@@ -2407,5 +2407,68 @@ class TestMain(_RunE2ECase):
         self.assertNotIn("kernel_journey_path", out)
 
 
+class TestE2EDenominatorIsPublished(_RunE2ECase):
+    """A journey e2e block must carry the two throughputs its percentage is a
+    ratio of.
+
+    A percentage alone does not compose: two wins measured against different
+    denominators cannot be added. The consumer needs the pair to restate each
+    win in points of one fixed baseline. Both journey builders read the pair
+    off the same A/B that produced the delta, so the three numbers always
+    agree.
+    """
+
+    def _overlay(self, eval_dir, ir):
+        d = eval_dir / "overlay" / "cand_my_kernel_fwd"
+        self.write_json(d / "integrate_result.json", ir)
+        return d
+
+    def test_overlay_path_publishes_the_pair_and_it_reproduces_the_delta(self):
+        eval_dir = self.tmp / "e2e_flat"
+        self._overlay(eval_dir, {"gate": "accepted", "e2e_delta_pct": 25.0,
+                                 "ref_med": 400.0, "cand_med": 500.0})
+        journey = rx.build_kernel_journey({"eval_dir": str(eval_dir)},
+                                          {"eval_dir": str(eval_dir)})
+        e2e = journey["kernels"][0]["e2e"]
+        self.assertEqual(e2e["base_tput"], 400.0)
+        self.assertEqual(e2e["new_tput"], 500.0)
+        self.assertAlmostEqual(
+            (e2e["new_tput"] / e2e["base_tput"] - 1.0) * 100.0,
+            e2e["e2e_gain_pct"], places=6)
+
+    def test_overlay_path_reads_the_pair_from_the_nested_shape_too(self):
+        """The integrator emits either shape; the delta already reads both, and
+        the pair it is a ratio of must not be lost on the nested one."""
+        eval_dir = self.tmp / "e2e_nested"
+        self._overlay(eval_dir, {"gate": "accepted",
+                                 "e2e": {"delta_pct": 25.0,
+                                         "ref_median_tok_s": 400.0,
+                                         "cand_median_tok_s": 500.0}})
+        e2e = rx.build_kernel_journey({"eval_dir": str(eval_dir)},
+                                      {"eval_dir": str(eval_dir)})["kernels"][0]["e2e"]
+        self.assertEqual((e2e["base_tput"], e2e["new_tput"]), (400.0, 500.0))
+
+    def test_return_path_carries_the_pair_from_the_workflow_return(self):
+        eval_dir = self.tmp / "e2e_return"
+        wf = {"eval_dir": str(eval_dir),
+              "accepted_kernels": [{"short_name": "my_kernel_fwd",
+                                    "e2e_delta_pct": 25.0,
+                                    "base_tput": 400.0, "new_tput": 500.0}]}
+        e2e = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})["kernels"][0]["e2e"]
+        self.assertEqual((e2e["base_tput"], e2e["new_tput"]), (400.0, 500.0))
+
+    def test_a_missing_pair_is_null_not_fabricated(self):
+        """An older workflow return has no throughputs. The block must say so
+        rather than invent a denominator the A/B never measured."""
+        eval_dir = self.tmp / "e2e_nopair"
+        wf = {"eval_dir": str(eval_dir),
+              "accepted_kernels": [{"short_name": "my_kernel_fwd",
+                                    "e2e_delta_pct": 25.0}]}
+        e2e = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})["kernels"][0]["e2e"]
+        self.assertIsNone(e2e["base_tput"])
+        self.assertIsNone(e2e["new_tput"])
+        self.assertEqual(e2e["e2e_gain_pct"], 25.0)
+
+
 if __name__ == "__main__":
     raise SystemExit(0 if unittest.main(exit=False).result.wasSuccessful() else 1)
