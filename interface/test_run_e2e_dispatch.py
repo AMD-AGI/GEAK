@@ -2168,11 +2168,75 @@ class TestMain(_RunE2ECase):
         self.assertIn("1", published)
         self.assertIn(str(os.getpgid(0)), published)
 
+    def _pin_env_timeout(self, value: str | None):
+        """Set/clear GEAK_E2E_TIMEOUT_S for one test and always restore it, so
+        budget tests cannot leak a budget into whatever runs next."""
+        saved = os.environ.pop("GEAK_E2E_TIMEOUT_S", None)
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, "GEAK_E2E_TIMEOUT_S", saved)
+        else:
+            self.addCleanup(os.environ.pop, "GEAK_E2E_TIMEOUT_S", None)
+        if value is not None:
+            os.environ["GEAK_E2E_TIMEOUT_S"] = value
+
     def test_timeout_budget_is_read_from_the_environment(self):
-        os.environ["GEAK_E2E_TIMEOUT_S"] = "600"
+        self._pin_env_timeout("600")
         self.patch_rx("invoke_workflow", lambda *a, **k: {})
         _rc, stdout = self._run(self._handoff(), "--dry-run")
         self.assertEqual(json.loads(stdout)["mapped_args"]["time_budget_s"], 600)
+
+    def test_timeout_budget_is_read_from_the_cli(self):
+        """Hyperloom's coordinator states its REAL kill time as
+        `--timeout-s <runner_timeout>`. We used to drop that value into an
+        ignored third positional and pace against the 12h env default instead,
+        so a caller killing early tore the run down mid-optimization and no
+        final report was written (Hyperloom #1202)."""
+        self._pin_env_timeout(None)
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        for argv in (["--timeout-s", "28800"], ["--timeout-s=28800"]):
+            with self.subTest(argv=argv):
+                _rc, stdout = self._run(self._handoff(), *argv, "--dry-run")
+                plan = json.loads(stdout)
+                self.assertEqual(plan["mapped_args"]["time_budget_s"], 28800)
+                # The value must NOT shift the positionals it sits behind.
+                self.assertEqual(plan["mapped_args"]["eval_dir"],
+                                 str(self.eval_dir))
+
+    def test_smallest_stated_budget_wins(self):
+        """Flag and env var both name a deadline someone actually enforces, so
+        pace against the SMALLER. Junk states nothing, and with nothing stated
+        the 12h default applies — a bad budget must not abort the run."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        default = rx.DEFAULT_E2E_TIMEOUT_S
+        for env, cli, expected in (("14400", "28800", 14400),
+                                   ("28800", "14400", 14400),
+                                   (None, None, default),
+                                   ("not-a-number", "later", default)):
+            with self.subTest(env=env, cli=cli):
+                self._pin_env_timeout(env)
+                argv = ["--timeout-s", cli] if cli else []
+                _rc, stdout = self._run(self._handoff(), *argv, "--dry-run")
+                self.assertEqual(
+                    json.loads(stdout)["mapped_args"]["time_budget_s"], expected)
+
+    def test_final_reserve_is_overridable_from_the_environment(self):
+        """Widening the finalize window must not need a code edit: an operator
+        who measures the final phase taking longer than the 60min default sets
+        GEAK_FINAL_RESERVE_S. Unset => the arg is absent and the JS default wins."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        for env, expected in (("3000", 3000), (None, None)):
+            with self.subTest(env=env):
+                saved = os.environ.pop("GEAK_FINAL_RESERVE_S", None)
+                if saved is not None:
+                    self.addCleanup(
+                        os.environ.__setitem__, "GEAK_FINAL_RESERVE_S", saved)
+                if env is not None:
+                    os.environ["GEAK_FINAL_RESERVE_S"] = env
+                    self.addCleanup(os.environ.pop, "GEAK_FINAL_RESERVE_S", None)
+                _rc, stdout = self._run(self._handoff(), "--dry-run")
+                self.assertEqual(
+                    json.loads(stdout)["mapped_args"].get("final_reserve_s"),
+                    expected)
 
     def test_successful_run_emits_result_and_journey(self):
         report = self.eval_dir / "final_report.md"

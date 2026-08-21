@@ -110,16 +110,43 @@ const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
 // not via the interface) TIME_BUDGET_MS is null and EVERY budget branch below short-circuits, so the run
 // is byte-identical to a build without this feature. No model/run specifics; pure time arithmetic.
 const TIME_BUDGET_MS = A.time_budget_s != null ? parseInt(A.time_budget_s, 10) * 1000 : null;
-// Reserve a tail for the post-deadline finish: the in-flight wave/head completes, then Finalize + Report +
-// the final Validate bench + the workflow_return write must all land before the hard kill. Carve 8% (min
-// 20min) off the top here, ONCE, so every mode below shares one definition of "effective budget".
+// ---- ELAPSED CLOCK ----
+// Date.now() is unavailable in Workflow scripts (breaks resume), so count elapsed time via a 1-minute
+// self-rearming tick. No time_budget_s => remainingMs() is Infinity and every guard short-circuits.
+let ELAPSED_MS = 0;
+const CLOCK_TICK_MS = 60000;
+if (TIME_BUDGET_MS != null && typeof setTimeout === 'function') {
+  // unref so a pending tick can never hold the process open past the run.
+  const arm = () => { const t = setTimeout(tick, CLOCK_TICK_MS); if (t && t.unref) t.unref(); };
+  const tick = () => { ELAPSED_MS += CLOCK_TICK_MS; arm(); };
+  arm();
+}
+const remainingMs = () => (TIME_BUDGET_MS == null ? Infinity : Math.max(0, TIME_BUDGET_MS - ELAPSED_MS));
+const remainingMin = () => (TIME_BUDGET_MS == null ? Infinity : Math.round(remainingMs() / 60000));
+// ---- FINAL-PHASE RESERVE ----
+// Hard floor of wall-clock held back for the WHOLE final phase (Finalize + Report + Validate + the
+// workflow_return write); no mode starts new work inside it. Without it, three sessions shipped no final
+// report (Hyperloom #1202). 50min ~= p75 of 85 historical final phases (p50 40 / p90 77 / max 86min);
+// since Report writes both reports BEFORE Validate, a longer tail still ships them (only the Validate
+// re-measure is at risk, and run_e2e falls back). The 20% cap stops it eating a short budget whole; at
+// >=5h budgets it never binds. Env override: GEAK_FINAL_RESERVE_S.
+const FINAL_RESERVE_CAP_FRAC = 0.2;
+const FINAL_RESERVE_MS = TIME_BUDGET_MS != null
+  ? Math.min(parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3000, 10) * 1000, // 50min
+             Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC))
+  : null;
+// Effective budget = budget minus the reserve: one definition of time available to optimize.
 const TIME_BUDGET_EFFECTIVE_MS = TIME_BUDGET_MS != null
-  ? Math.max(60000, TIME_BUDGET_MS - Math.max(1200000, Math.floor(TIME_BUDGET_MS * 0.08)))
+  ? Math.max(60000, TIME_BUDGET_MS - FINAL_RESERVE_MS)
   : null;
 // Cap on the dispatch-deadline TAIL (budget − deadline). A flat 60% deadline reserves 40%, which is wasteful
 // on large budgets (24h → ~9h reserved though a few hours suffice). Deadlines below are max(60%, budget − this
 // cap): the 60% floor keeps small budgets unchanged; the cap bounds the reserve on large ones. Default 3h.
 const TIME_TAIL_CAP_MS = parseInt(A.time_tail_cap_s != null ? A.time_tail_cap_s : 10800, 10) * 1000; // 3h
+// Point after which no mode starts new head/milestone/wave work. Defined here (not at the deadline timer)
+// because deep mode references it far earlier; TIME_DEADLINE_HIT is armed on it below.
+const TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
+  ? Math.max(Math.floor(TIME_BUDGET_EFFECTIVE_MS * 0.6), TIME_BUDGET_EFFECTIVE_MS - TIME_TAIL_CAP_MS) : null;
 // ---- FAST MODE (opt-in, default OFF) ----------------------------------------------------------------
 // A time-boxed run that takes ALL its optimization from the HeadKernel track: it SKIPS ConfigSweep AND
 // the editable-kernel Milestone loop, and completes within a wall-clock budget (default 5h). It exists
@@ -281,7 +308,10 @@ let DEEP_HEAD_BUDGET_MS = parseInt(A.deep_head_budget_ms != null ? A.deep_head_b
 // 24h default) so deep fills the granted time and self-finalizes before the external SIGKILL (fixing the
 // deep 24h-budget-vs-real-kill failure where it was torn down mid-wave). The 24h default applies only when
 // time_budget_s is absent (direct invocation) => byte-identical to today.
-if (TIME_BUDGET_EFFECTIVE_MS != null) DEEP_HEAD_BUDGET_MS = TIME_BUDGET_EFFECTIVE_MS;
+// Use the SHARED dispatch deadline, not the raw effective budget: deep used to start waves until 92% of
+// the hard kill, then couldn't fit its burst drain + final e2e gate + Finalize/Report/Validate, so it
+// shipped no final report (Hyperloom #1202). Fast/default modes have always carved this same tail.
+if (TIME_HEAD_DEADLINE_MS != null) DEEP_HEAD_BUDGET_MS = TIME_HEAD_DEADLINE_MS;
 const DEEP_HEAD_WF_MS = parseInt(A.deep_head_workflow_ms != null ? A.deep_head_workflow_ms : 4500000, 10); // per-burst nested kernel_workflow time cap (75min) — bounds the per-wave barrier. Harvest+gate run at the TOP of each wave on disk truth, so gate latency is decoupled from this; the cap only bounds how long a burst runs.
 const DEEP_E2E_GAIN_TRIGGER = parseFloat(A.deep_e2e_gain_trigger != null ? A.deep_e2e_gain_trigger : 0.08); // isolated-best improvement since last e2e gate that triggers a new (batched) gate
 const DEEP_E2E_MAX_INTERVAL_MS = parseInt(A.deep_e2e_max_interval_ms != null ? A.deep_e2e_max_interval_ms : 7200000, 10); // force an e2e gate at least this often when a new candidate exists (default 2h)
@@ -673,15 +703,29 @@ function withProcessSafety(prompt) {
   return typeof prompt === 'string' ? PROCESS_SAFETY + prompt : prompt;
 }
 
+// Option A (Hyperloom #1202): near the deadline, tighten each OPTIMIZATION agent's hung-guard so no
+// in-flight step finishes later than (budget − reserve). The loop-tops stop STARTING new work at
+// TIME_HEAD_DEADLINE_MS, but one iteration is a SEQUENCE of agents (extract → bakeoff → author → verify)
+// each armed with the full AGENT_TIMEOUT_MS, and that sequence could overrun the reserve and starve
+// Finalize/Report/Validate (the #1202 stall was a 62min extract_op running into the SIGKILL). Final-phase
+// agents are EXEMPT — they run INSIDE the reserve by design. The 2min floor lets a deadline-killed agent's
+// retries self-limit instead of burning the reserve. Inert when time_budget_s is absent (byte-identical).
+const FINAL_PHASE_LABELS = ['Finalize', 'Report', 'Validate'];
+function agentTimeoutFor(opts) {
+  if (TIME_BUDGET_MS == null || (opts && FINAL_PHASE_LABELS.includes(opts.phase))) return AGENT_TIMEOUT_MS;
+  return Math.max(120000, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
+}
+
 function agentBounded(rawPrompt, opts) {
   const prompt = withProcessSafety(rawPrompt);
-  if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return agent(prompt, opts);
+  const timeoutMs = agentTimeoutFor(opts);
+  if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
   const guard = new Promise((resolve) => {
     to = setTimeout(() => {
-      log(`  [hung-agent guard] ${(opts && opts.label) || 'agent'} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — treating as a failed attempt.`);
+      log(`  [hung-agent guard] ${(opts && opts.label) || 'agent'} exceeded ${Math.round(timeoutMs / 60000)}min with no return — treating as a failed attempt.`);
       resolve(null);
-    }, AGENT_TIMEOUT_MS);
+    }, timeoutMs);
   });
   return Promise.race([
     agent(prompt, opts).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
@@ -1302,8 +1346,6 @@ if (DEEP_MODE && typeof setTimeout === 'function' && DEEP_HEAD_BUDGET_MS > 0) {
 // Report/Validate). Active in ALL modes when time_budget_s is set (harmless for fast/deep, which stop even
 // earlier on their own flags); fully inert (never registered) when time_budget_s is absent => byte-identical.
 let TIME_DEADLINE_HIT = false;
-const TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
-  ? Math.max(Math.floor(TIME_BUDGET_EFFECTIVE_MS * 0.6), TIME_BUDGET_EFFECTIVE_MS - TIME_TAIL_CAP_MS) : null;
 if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HEAD_DEADLINE_MS > 0) {
   setTimeout(() => {
     TIME_DEADLINE_HIT = true;
@@ -1845,7 +1887,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     armInterval();
     let convergeStreak = 0, deepBurstsSpent = 0;
     try {
-    while (!DEEP_DEADLINE_HIT) {
+    // Honour TIME_DEADLINE_HIT as well as DEEP_DEADLINE_HIT (both armed off the same deadline) so the deep
+    // wave loop can never become the one dispatcher that runs past the reserve.
+    while (!DEEP_DEADLINE_HIT && !TIME_DEADLINE_HIT) {
       if (convergeStreak >= DEEP_CONVERGE_STREAK) { log(`[deep] CONVERGED \u2014 ${convergeStreak} consecutive zero-gain waves; stopping to finalize.`); break; }
       const projAgents = (deepBurstsSpent + mainSlots + serveSlots) * DEEP_AGENTS_PER_BURST + wave * 6;   // project a FULL next wave of bursts + per-wave overhead (harvest/curate/gate)
       if (projAgents >= DEEP_AGENT_BUDGET) { log(`[deep] agent budget reached (proj ~${projAgents}/${DEEP_AGENT_BUDGET}, ${deepBurstsSpent} bursts); stopping to finalize with margin for the cap.`); break; }
@@ -2696,6 +2740,7 @@ if (want('final')) {
 }
 allAccepted = acceptedHeads.concat(acceptedKernels);   // refresh after Fix C may have banked a pending win
 if (want('final')) {
+  if (TIME_BUDGET_MS != null) log(`[time-budget] entering the final phase with ~${remainingMin()}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget left (reserve was ${Math.round(FINAL_RESERVE_MS / 60000)}min).`);
   phase('Finalize');
   finalize = await safeAgent(
     roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.', {
@@ -2716,6 +2761,10 @@ if (want('final')) {
     }),
     { phase: 'Report', label: 'architect:report', schema: REPORT_SCHEMA });
 
+  // Validate is sized into FINAL_RESERVE_MS, so there should be room for it here; it is not time-GATED
+  // (attempting it beats skipping when the clock has drifted). If the hard kill lands mid-bench the loss is
+  // bounded — Report already wrote architect_report.md + final_report.md, and run_e2e.py falls back
+  // (director_e2e_validation.json → best overlay's integrate_result.json), so a real win still reaches the caller.
   phase('Validate');
   validation = await safeAgent(
     roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
