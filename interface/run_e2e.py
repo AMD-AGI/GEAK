@@ -2782,6 +2782,12 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
         win = _recover_best_intermediate_win(eval_dir)
         if win is not None:
             return win
+        #   1b. no accepted kernel, but the sweep adopted a winning serving config
+        #       (warm-start recall / ck_tune) — recover it as the final floor so a
+        #       validated config gain is not flattened to the default baseline.
+        cfg_win = _recover_accepted_config_win(eval_dir)
+        if cfg_win is not None:
+            return cfg_win
         return _recover_completed_no_gain(eval_dir)
     serving = validation.get("serving_config") or {}
     accepted_config = {
@@ -3016,6 +3022,119 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
     return records
 
 
+def _recover_accepted_serving_config(eval_dir: Path) -> dict | None:
+    """Recover the SERVING CONFIG the sweep accepted, from ``config/sweep_results.json``.
+
+    The config sweep (warm-start KB recall + ck_tune) writes its winning serving
+    config here — ``accepted_flags`` / ``accepted_env`` / ``best_throughput_tok_s``
+    measured against ``baseline.throughput_tok_s_median`` — and an adopted config
+    stays live in CURRENT_FLAGS/CURRENT_ENV for the rest of the run (the whole
+    pipeline compounds ON TOP of it). Neither :func:`_recover_best_intermediate_win`
+    (reads ``overlay/<cand>/integrate_result.json``) nor
+    :func:`_recover_completed_no_gain` (reads ``baseline/`` only) looks here, so a
+    run that crashed after adopting a config used to be recovered as if the config
+    never happened — the default baseline was reported and a validated recall gain
+    (e.g. a +65% warm-start config) was silently discarded.
+
+    Returns ``None`` when there is no sweep file, no measured numbers, or the
+    accepted config does not actually differ from / beat the baseline (beyond the
+    sweep's own noise band). Otherwise a compact dict the recovery tiers fold in.
+    """
+    sweep = _read_json(eval_dir / "config" / "sweep_results.json")
+    if not sweep:
+        return None
+    base = sweep.get("baseline") or {}
+    try:
+        best_tput = float(sweep.get("best_throughput_tok_s"))
+    except (TypeError, ValueError):
+        return None
+    if best_tput <= 0.0:
+        return None
+    try:
+        sweep_speedup = float(sweep.get("throughput_speedup_vs_baseline"))
+    except (TypeError, ValueError):
+        sweep_speedup = 0.0
+    # The sweep's own baseline median is the denominator when present, but several
+    # runs record it as null in this block (only best + speedup survive). Derive it
+    # from the sweep's own speedup, then fall back to the run's measured default
+    # baseline — otherwise a real config win (mixtral +6.97%, qwen27b +17.56%) is
+    # missed just because this one field was null.
+    baseline_tput = 0.0
+    for v in (base.get("throughput_tok_s_median"),
+              base.get("output_throughput_tok_s_median")):
+        try:
+            baseline_tput = float(v)
+        except (TypeError, ValueError):
+            continue
+        if baseline_tput > 0.0:
+            break
+    if baseline_tput <= 0.0 and sweep_speedup > 1.0:
+        baseline_tput = best_tput / sweep_speedup
+    if baseline_tput <= 0.0:
+        official = _read_json(eval_dir / "baseline" / "baseline_official.json")
+        summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
+        for v in (official.get("baseline_throughput_tok_s"),
+                  official.get("plateau_median_tok_s"),
+                  summary.get("output_throughput_tok_s_median"),
+                  summary.get("throughput_tok_s_median")):
+            try:
+                baseline_tput = float(v)
+            except (TypeError, ValueError):
+                continue
+            if baseline_tput > 0.0:
+                break
+    if baseline_tput <= 0.0:
+        return None
+    flags = str(sweep.get("accepted_flags") or "").strip()
+    env = str(sweep.get("accepted_env") or "").strip()
+    base_flags = str(base.get("flags") or "").strip()
+    base_env = str(base.get("env") or "").strip()
+    # A sweep that kept nothing writes the baseline config back as "accepted" — that
+    # is a genuine no-gain, not a config win. Require a real config change AND a real
+    # gain past the sweep's own acceptance band before crediting it.
+    changed = (flags and flags != base_flags) or (env and env != base_env)
+    band = float(sweep.get("noise_band_pct") or 0.5)
+    if not changed or best_tput <= baseline_tput * (1.0 + band / 100.0):
+        return None
+    speedup = sweep_speedup if sweep_speedup > 1.0 else best_tput / baseline_tput
+    return {
+        "flags": flags, "env": env, "baseline_tput": baseline_tput,
+        "best_tput": best_tput, "speedup": speedup, "band_pct": band,
+    }
+
+
+def _recover_accepted_config_win(eval_dir: Path) -> dict | None:
+    """Config-only recovery tier: the sweep adopted a winning serving config but no
+    kernel/head integrate A/B was accepted before the crash.
+
+    Sits between :func:`_recover_best_intermediate_win` (a kernel win, which folds
+    the config in itself) and :func:`_recover_completed_no_gain` (nothing accepted
+    at all). Reports the adopted config as the final floor — the served path really
+    was running it when the run died — so the validated recall/sweep gain survives a
+    mid-run crash instead of being flattened to the default baseline.
+    """
+    cfg = _recover_accepted_serving_config(eval_dir)
+    if cfg is None:
+        return None
+    return {
+        "eval_dir": str(eval_dir),
+        "throughput_speedup": cfg["speedup"],
+        "baseline_throughput_tok_s": cfg["baseline_tput"],
+        "final_throughput_tok_s": cfg["best_tput"],
+        "output_parity": "n/a",
+        "validation_status": "recovered_intermediate",
+        # Config-only win: applied through env/flags, so there is no overlay bundle.
+        "final_overlay": "",
+        "final_launch_script": "",
+        "accepted_config": {"flags": cfg["flags"], "env": cfg["env"]},
+        "accepted_kernels": [],
+        "accepted_heads": [],
+        "recovered_from_disk": True,
+        "recovered_intermediate": True,
+        "recovered_config_only": True,
+    }
+
+
 def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
     """Salvage the best accepted intermediate win when the run died BEFORE Validate.
 
@@ -3120,11 +3239,40 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
         ):
             if value and value not in sink:
                 sink.append(value)
+    # Fold in the sweep-adopted serving config (config/sweep_results.json). It was
+    # live on the server this kernel A/B ran against, so (a) its flags/env belong in
+    # accepted_config for a reproducible relaunch, and (b) when the kernel's own
+    # reference leg was measured ON that config (ref_med at/above the config-applied
+    # throughput), the honest speedup DENOMINATOR is the DEFAULT baseline, not the
+    # config-applied ref — otherwise the config's own gain is dropped from the
+    # headline and the stack (config ⊕ kernel) is under-credited (the DeepSeek /
+    # gpt-oss recovered_intermediate case). Re-base only when the ref leg is truly at
+    # the config-applied level, so a kernel A/B run against the raw baseline is never
+    # double-counted.
+    baseline_out, speedup_out, config_restacked = ref_med, speedup, False
+    cfg = _recover_accepted_serving_config(eval_dir)
+    if cfg is not None:
+        for value, sink in ((cfg["flags"], flags), (cfg["env"], env)):
+            if value and value not in sink:
+                sink.append(value)
+        # The kernel A/B ran on the config-applied server when its reference leg
+        # sits on the config-applied SIDE of the gap between the default baseline
+        # and the config-applied throughput. The midpoint test is robust to ~1%
+        # measurement drift (the DeepSeek case: ref leg 1481.9 vs config-applied
+        # 1497) while still refusing to re-base a kernel A/B that ran against the
+        # RAW baseline (which lands near cfg baseline, far below the midpoint) —
+        # re-basing that would double-count the config gain.
+        midpoint = (cfg["baseline_tput"] + cfg["best_tput"]) / 2.0
+        if ref_med >= midpoint and cfg["baseline_tput"] < ref_med:
+            baseline_out = cfg["baseline_tput"]
+            speedup_out = final_tput / cfg["baseline_tput"]
+            config_restacked = True
     return {
         "eval_dir": str(eval_dir),
-        "throughput_speedup": speedup,
-        "baseline_throughput_tok_s": ref_med,
+        "throughput_speedup": speedup_out,
+        "baseline_throughput_tok_s": baseline_out,
         "final_throughput_tok_s": final_tput,
+        "config_restacked_over_default": config_restacked or None,
         "output_parity": ir.get("output_parity"),
         "validation_status": "recovered_intermediate",
         # Latency from the candidate (accepted) A/B leg when the integrator recorded
@@ -3183,6 +3331,11 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
     construction (do-no-harm); speedup 1.0 -> :func:`normalize_result` => no_gain.
     Returns ``None`` only when no baseline throughput was ever measured (the run
     genuinely produced nothing to keep).
+
+    This is the LAST recovery tier: :func:`_recover_workflow_return` reaches it only
+    after ruling out an accepted kernel win AND an adopted serving config
+    (:func:`_recover_accepted_config_win`), so "nothing accepted" is really true
+    here — the default baseline is the correct floor.
     """
     official = _read_json(eval_dir / "baseline" / "baseline_official.json")
     summary = _read_json(eval_dir / "baseline" / "bench_summary.json")

@@ -635,6 +635,92 @@ def test_result_source_director_validation(tmp_path):
     assert out["result_source"] == "disk_director_validation"
 
 
+# ── adopted serving-config recovery (config/sweep_results.json) ──────────────
+# A run that crashed AFTER the sweep adopted a warm-start / ck_tune config used to
+# be recovered from baseline/ only, silently discarding the validated config gain
+# (the Qwen3-14B +65.35% case: 5214.3 tok/s adopted -> reported 3153.5, 1.0x).
+
+def _write_sweep(eval_dir: Path, *, baseline_tput: float, best_tput: float,
+                 speedup: float, flags: str = "--max-model-len 6144",
+                 env: str = "VLLM_ROCM_USE_AITER=1",
+                 base_flags: str = "--max-model-len 6144", base_env: str = "") -> None:
+    (eval_dir / "config").mkdir(parents=True, exist_ok=True)
+    (eval_dir / "config" / "sweep_results.json").write_text(json.dumps({
+        "phase": "sweep", "backend": "vllm", "noise_band_pct": 0.5,
+        "baseline": {"throughput_tok_s_median": baseline_tput,
+                     "flags": base_flags, "env": base_env},
+        "accepted_flags": flags, "accepted_env": env,
+        "best_throughput_tok_s": best_tput,
+        "throughput_speedup_vs_baseline": speedup,
+    }), encoding="utf-8")
+
+
+def test_recover_config_only_win_from_sweep(tmp_path):
+    """No accepted kernel, but the sweep adopted a config that beats baseline: the
+    adopted config is the final floor, NOT the default baseline (speedup > 1)."""
+    eval_dir = _make_no_gain_eval_dir(tmp_path)  # baseline + a REJECTED kernel only
+    _write_sweep(eval_dir, baseline_tput=3153.524, best_tput=5214.345, speedup=1.6535)
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    assert wf["recovered_config_only"] is True
+    assert wf["recovered_intermediate"] is True
+    assert not wf.get("recovered_no_gain")
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(3153.524)
+    assert wf["final_throughput_tok_s"] == pytest.approx(5214.345)
+    assert wf["throughput_speedup"] == pytest.approx(1.6535)
+    assert "VLLM_ROCM_USE_AITER=1" in wf["accepted_config"]["env"]
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "ok", "an adopted config gain must never read as no_gain"
+    assert out["result_source"] == "disk_intermediate_win"
+
+
+def test_recover_no_gain_when_sweep_kept_nothing(tmp_path):
+    """A sweep that kept the baseline config (no change / no gain) stays no_gain —
+    the config tier must not manufacture a win."""
+    eval_dir = _make_no_gain_eval_dir(tmp_path)
+    _write_sweep(eval_dir, baseline_tput=604.8, best_tput=604.8, speedup=1.0,
+                 flags="--trust-remote-code --kv-cache-dtype fp8_e4m3", env="",
+                 base_flags="--trust-remote-code --kv-cache-dtype fp8_e4m3", base_env="")
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    assert wf.get("recovered_no_gain") is True
+    assert not wf.get("recovered_config_only")
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "no_gain"
+    assert out["result_source"] == "disk_no_gain_synthesis"
+
+
+def test_intermediate_win_restacks_over_default_baseline(tmp_path):
+    """A kernel win whose ref leg ran ON the adopted config must credit the FULL
+    stack (config ⊕ kernel) vs the default baseline, and carry the config's
+    flags/env forward for a reproducible relaunch."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)  # ref_med 461.314, cand 535.352
+    # Adopted config: default 400 -> config-applied ~461.3 (== the kernel ref leg).
+    _write_sweep(eval_dir, baseline_tput=400.0, best_tput=461.314, speedup=1.1533,
+                 flags="--max-model-len 6144", env="VLLM_ROCM_USE_AITER=1")
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf["config_restacked_over_default"] is True
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(400.0)
+    assert wf["final_throughput_tok_s"] == pytest.approx(535.352)
+    assert wf["throughput_speedup"] == pytest.approx(535.352 / 400.0)  # full stack
+    assert "VLLM_ROCM_USE_AITER=1" in wf["accepted_config"]["env"]
+    assert "--max-model-len 6144" in wf["accepted_config"]["flags"]
+
+
+def test_intermediate_win_no_restack_when_ref_below_config(tmp_path):
+    """If the kernel A/B ran against the RAW baseline (ref leg well below the
+    config-applied throughput), do NOT re-base — that would double-count. The
+    config is still carried in accepted_config as a reproducible lead."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)  # ref_med 461.314
+    # Config-applied best (900) is far above the kernel's ref leg (461.3) => the
+    # kernel was NOT measured on the config; re-basing would fabricate a gain.
+    _write_sweep(eval_dir, baseline_tput=800.0, best_tput=900.0, speedup=1.125,
+                 flags="--max-model-len 6144", env="VLLM_ROCM_USE_AITER=1")
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert not wf.get("config_restacked_over_default")
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(461.314)  # unchanged
+    assert wf["throughput_speedup"] == pytest.approx(535.352 / 461.314)
+    assert "VLLM_ROCM_USE_AITER=1" in wf["accepted_config"]["env"]
+
+
 def test_result_source_live_workflow_return(tmp_path):
     """A live (scraped) workflow return — no recovery flags — is the canonical
     source and stamps result_source=workflow_return."""
