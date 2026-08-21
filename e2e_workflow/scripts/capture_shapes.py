@@ -54,6 +54,22 @@ _STATE = {
 }
 
 
+def _rank():
+    return next((str(os.environ[key]) for key in
+                 ("RANK", "LOCAL_RANK", "TP_RANK", "SLURM_PROCID")
+                 if key in os.environ), "unknown")
+
+
+def _process_out_dir(out_dir):
+    """Isolate selection-capture artifacts so TP workers cannot corrupt each other."""
+    unique = (os.environ.get("CAPTURE_PROCESS_UNIQUE") == "1"
+              or bool(os.environ.get("GEAK_SELECTION_TRACE")))
+    if not unique:
+        return out_dir
+    return os.path.join(
+        out_dir, f"capture.pid-{os.getpid()}.rank-{_rank()}")
+
+
 def _shapes_dtypes(args, kwargs):
     """Light shape/dtype walk (no clone) so we can catalog EVERY distinct shape cheaply, independent of
     the memory-bounded oracle capture."""
@@ -153,7 +169,20 @@ def _sig(args, kwargs):
 
 def _wrapper(*args, **kwargs):
     s = _STATE
-    out = s["orig"](*args, **kwargs)
+    # This marker is consumed by kernel_selection.py from the capture run's torch trace.  It turns
+    # "the hook saw calls" into stronger evidence: the GPU kernel selected from the baseline profile
+    # must actually execute while THIS callable is active.  record_function is effectively a no-op
+    # when no profiler is collecting, so existing non-profiled capture users keep the same behavior.
+    marker = f"GEAK_TARGET::{s['target']}"
+    try:
+        record_function = _torch().profiler.record_function
+    except Exception:
+        record_function = None
+    if record_function:
+        with record_function(marker):
+            out = s["orig"](*args, **kwargs)
+    else:
+        out = s["orig"](*args, **kwargs)
     s["calls"] += 1
     in_graph = _capturing()
     try:
@@ -239,7 +268,9 @@ def _flush(write_oracle=True):
     # workload capture (< max_cases distinct shapes) and a late regime-coverage case (appended past
     # max_cases) land on disk; records is bounded, so this rewrites only a handful of times.
     if write_oracle and records and len(records) > s["oracle_records"]:
-        torch.save({"target": s["target"], "records": records}, io_path)
+        tmp_io = f"{io_path}.tmp-{os.getpid()}-{threading.get_ident()}"
+        torch.save({"target": s["target"], "records": records}, tmp_io)
+        os.replace(tmp_io, io_path)
         import hashlib
         h = hashlib.sha256()
         with open(io_path, "rb") as fh:
@@ -274,6 +305,8 @@ def _flush(write_oracle=True):
     # not just single-shape h.check_correct_multi.
     meta = {
         "target": s["target"],
+        "process_id": os.getpid(),
+        "rank": _rank(),
         "module": s["mod"].__name__ if s["mod"] else None,
         "attr": s["attr"],
         "num_cases": len(records),
@@ -291,8 +324,11 @@ def _flush(write_oracle=True):
         "build": False,  # default: pure-python/triton; Extractor flips to True for HIP/CK/asm tasks
         "note": "Oracle captured from baseline. Do NOT edit unittest.py or reference_io.pt during opt.",
     }
-    with open(os.path.join(out_dir, "meta.json"), "w") as fh:
+    meta_path = os.path.join(out_dir, "meta.json")
+    tmp_meta = f"{meta_path}.tmp-{os.getpid()}-{threading.get_ident()}"
+    with open(tmp_meta, "w") as fh:
         json.dump(meta, fh, indent=2)
+    os.replace(tmp_meta, meta_path)
     sys.stderr.write(f"[capture_shapes] flushed {len(records)} case(s) "
                      f"(regimes={sorted(s['regime_seen'])}), "
                      f"oracle_complete={s['oracle_written']} -> {out_dir}\n")
@@ -365,8 +401,15 @@ def install(target, out_dir, max_cases=5):
             f"({type(orig).__module__}.{type(orig).__name__}): a plain-function stand-in for a native/"
             f"triton-JIT callable SIGSEGVs the server (e.g. mxfp4 matmul_ogs). Hook a Python-level seam "
             f"(its caller) instead, or set CAPTURE_WRAP_UNSAFE=1 to force.")
+    out_dir = _process_out_dir(out_dir)
     s.update(target=target, out_dir=out_dir, max_cases=int(max_cases),
              orig=orig, mod=mod, attr=attr, installed=True)
+    if os.environ.get("GEAK_SELECTION_TRACE"):
+        # Selection runs are intentionally short and server teardown may use SIGTERM, which skips
+        # Python atexit. Persist the first eager capture immediately.
+        s["flush_every"] = 1
+    elif os.environ.get("CAPTURE_FLUSH_EVERY"):
+        s["flush_every"] = max(1, int(os.environ["CAPTURE_FLUSH_EVERY"]))
     setattr(mod, attr, _make_wrapper(orig))
     atexit.register(_flush)
     sys.stderr.write(f"[capture_shapes] hooked {target}; recording up to {max_cases} cases -> {out_dir}\n")

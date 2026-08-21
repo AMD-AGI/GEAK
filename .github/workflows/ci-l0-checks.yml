@@ -89,6 +89,8 @@ jobs:
             e2e_workflow/scripts/tests/test_parse_profile.py \
             e2e_workflow/scripts/tests/test_capture_shapes.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
+            e2e_workflow/scripts/tests/test_seam_trace.py \
+            e2e_workflow/scripts/tests/test_kernel_selection.py \
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \
             e2e_workflow/scripts/tests/test_harness_lib.py \
@@ -212,7 +214,7 @@ jobs:
           /tmp/gitleaks dir . --no-banner --redact --config .gitleaks.toml
 
   node-regression:
-    name: Node regression (expert_skills)
+    name: Node regression (expert_skills, kernel canonicalization)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -223,6 +225,12 @@ jobs:
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
         run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+      # The JS gate and the Python selection verdict canonicalize the same kernel symbols. Only this
+      # job can run the JS half, so without it the two implementations are pinned on the Python side
+      # alone and are free to drift — which lets a kernel pass one side and be refused by the other.
+      # The Python half is TestTheSharedFixtureHoldsOnThisSide in tests/test_kernel_selection.py.
+      - name: kernel canonicalization JS/Python parity
+        run: node e2e_workflow/scripts/test_kernel_canonicalization_parity.js
 
   dry-run:
     name: run_e2e dry-run mapping

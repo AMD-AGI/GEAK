@@ -576,7 +576,7 @@ class TestFlush(_RecorderTestCase):
         io_path = os.path.join(self.out_dir, "reference_io.pt")
         self.assertTrue(os.path.exists(io_path))
         payload, path = self.torch.saved[-1]
-        self.assertEqual(path, io_path)
+        self.assertTrue(path.startswith(io_path + ".tmp-"))
         self.assertEqual(payload["target"], "fake_serving_layer:op")
         self.assertEqual([r["regime"] for r in payload["records"]], ["decode", "prefill"])
         sha = self._meta()["reference_io_sha256"]
@@ -856,6 +856,15 @@ class TestInstall(_RecorderTestCase):
         self.assertEqual(cs._STATE["max_cases"], 2)
         self.assertEqual(cs._STATE["out_dir"], self.out_dir)
         self.assertIsNot(mod.op, cs._STATE["orig"])
+
+    def test_selection_capture_uses_a_process_local_artifact_directory(self):
+        self._target_module()
+        with _env(GEAK_SELECTION_TRACE=os.path.join(self.out_dir, "selection.json")):
+            with _stderr():
+                cs.install("fake_serving_layer:op", self.out_dir)
+        expected_prefix = os.path.join(
+            self.out_dir, f"capture.pid-{os.getpid()}.rank-")
+        self.assertTrue(cs._STATE["out_dir"].startswith(expected_prefix))
 
 
 # --------------------------------------------------------------------------- #

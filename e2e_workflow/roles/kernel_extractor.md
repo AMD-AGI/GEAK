@@ -122,26 +122,35 @@ If the live regime genuinely cannot be reproduced offline (op only exists fused 
 routing-dependent MoE token counts), say so in `notes` and report `editable:false`/drop rather than
 freeze an out-of-regime oracle nobody should trust.
 
-1. **Locate the source.** **If `KERNEL.source_hint`/`KERNEL.launcher_hint` is provided (TraceLens
+1. **Locate the source and select the live launcher.** `KERNEL.device_kernel` is the profiled GPU
+   symbol this extraction must reach. `KERNEL.target_callable` is only a hint, and
+   `KERNEL.live_call_seam` is prose that must never become a machine target. Start from
+   `KERNEL.seam_candidates[]`. If source/runtime inspection finds a missing inner launcher, append it
+   to the returned `seam_candidates[]` with its exact role, depth, matching device kernels, and evidence.
+   **If `KERNEL.source_hint`/`KERNEL.launcher_hint` is provided (TraceLens
    pre-resolved the file/seam), look there FIRST** — but always CONFIRM by importing the package +
    grepping the `short_name`/`module:attr` target; never trust the hint blindly (it may point at a
    launcher/wrapper rather than the true defining file). If no hint, resolve as usual
    (`python3 -c "import sglang,os;print(os.path.dirname(sglang.__file__))"`, then grep the
    `short_name` / the `module:attr` target).
    **OP-IDENTITY IS THE RULE: extract the op the LIVE kernel actually is, at the seam it is actually called
-   from — never a different op.** Two cases:
+   from — never a different op.** Three cases:
    - **Standalone LIBRARY op** (a discrete hipBLASLt/rocBLAS `gemm(...)` / library attention whose only
      call site is that library call, no editable body) → STOP, report `editable=false`, `target_callable=""`;
      it belongs to the config/tune-hook track (per-shape DB tune / backend env), not a source rewrite. Do
      NOT synthesize a standalone-GEMM proxy just to make it look extractable.
    - **FUSED / monolithic op** (fused-MoE, grouped-expert GEMM, asm/CK fused kernel — `KERNEL` arrives with
      `op_kind=moe` and `GEMM_SYNTH=false`): **extract the FUSED op** (capture its live I/O oracle), NOT its
-     constituent standalone GEMMs. Set `target_callable` to the **dispatcher** actually called at runtime —
-     use `KERNEL.target_callable`/`KERNEL.live_call_seam` if provided (e.g. the vLLM `fused_moe`/
-     `fused_experts` dispatcher), which is editable Python EVEN WHEN the underlying kernel is a non-editable
+     constituent standalone GEMMs. Select the bindable whole-operation **`op_seam`** from
+     `KERNEL.seam_candidates` (or an exact `KERNEL.target_callable` hint), which is editable Python EVEN
+     WHEN the underlying kernel is a non-editable
      library/asm `.so`. That dispatcher seam is what lets a fused op be BACKEND-SWAPPED (aiter/flydsl/triton
      fused) or AUTHOR-fused-replaced regardless of the underlying kernel's editability. Report
      `editable=true` (the seam is rebindable). NEVER decompose it into a dense A·Bᵀ GEMM — no live call site.
+   - **OUTER WRAPPER / dispatcher** → do not stop after rejecting it. Descend to the deepest safe Python
+     `inner_launcher` or `op_seam` that launches `KERNEL.device_kernel`. A native or Triton
+     `kernel_entry` remains source evidence, not a monkeypatch target. If no safe callable can be found,
+     report `editable=false`; never claim selection success from rejection alone.
 2. **Capture shapes + oracle** from a live server using `scripts/capture_shapes.py` via a temporary
    capture overlay, driven by the SAME workload as the profile so shapes match the regime:
    ```bash
@@ -152,17 +161,37 @@ freeze an out-of-regime oracle nobody should trust.
    # PRISTINE install instead of the server the accepted kernels actually built.
    python3 "$SKILL_DIR/scripts/overlay_setup.py" add-capture \
      --overlay "$TASK/_capture_overlay" --from "$CURRENT_OVERLAY" \
-     --target "<module:attr>" --out "$TASK" --max 5 \
+     --target "<selected module:attr>" --out "$TASK" --max 5 \
      --capture-file "$SKILL_DIR/scripts/capture_shapes.py"
+   # Repeat add-marker for every relevant safe Python candidate, deepest first. The shim always
+   # installs captures BEFORE markers, so a marker can never freeze an alias of a function that the
+   # capture hook had not wrapped yet.
+   python3 "$SKILL_DIR/scripts/overlay_setup.py" add-marker \
+     --overlay "$TASK/_capture_overlay" --target "<candidate module:attr>" \
+     --marker-file "$SKILL_DIR/scripts/seam_trace.py"
    cp -r "$CURRENT_OVERLAY"/. "$TASK/baseline_overlay"/ 2>/dev/null || \
      python3 -c "import sys;sys.path.insert(0,'$SKILL_DIR/scripts');import overlay_setup as o;o._ensure_overlay('$TASK/baseline_overlay')"
 
    BACKEND="<backend>" OUT_DIR="$TASK/_capture" GPU="$GPU_ID" MODEL="$MODEL_PATH" \
    ISL=<WORKLOAD.isl> OSL=<WORKLOAD.osl> CONC=<WORKLOAD.conc> REPEATS=0 PROFILE=0 \
    OVERLAY_PYTHONPATH="$TASK/_capture_overlay" \
-   EXTRA_ENV="CAPTURE_TARGET=<module:attr> CAPTURE_OUT=$TASK CAPTURE_MAX=5" \
+   EXTRA_ENV="CAPTURE_TARGET=<selected module:attr> CAPTURE_OUT=$TASK CAPTURE_MAX=5 GEAK_SELECTION_TRACE=$TASK/selection_trace.json" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/capture_<short_name>.log"
+   python3 "$SKILL_DIR/scripts/kernel_selection.py" \
+     --target "<selected module:attr>" --device-kernel "<KERNEL.device_kernel>" \
+     --capture-meta "$TASK"/capture.pid-*.rank-*/meta.json \
+     --torch-trace "$TASK"/selection_trace.pid-*.rank-*.call-*.json \
+     --candidate-target "<candidate module:attr>" \
+     --out "$TASK/selection_validation.json"
    ```
+   Repeat `--candidate-target` for every relevant candidate. `seam_trace` writes an atomic trace for
+   each PID/rank/root call, and `capture_shapes` writes atomic process-local artifacts. The verifier
+   merges all calls for each PID, isolates External ids between trace files, and requires every capture
+   PID to pass. Installation proof is distinct from execution: a marked mutually exclusive branch may
+   stay inactive, while a selected outer target fails if a deeper marked candidate launches the same
+   device kernel in any call/rank. Require `deepest_verified:true`, then copy the selected process's
+   `meta.json` and `reference_io.pt` into the task root.
+
    🔴 **Capture on the CURRENT stack, not the install.** The oracle you freeze is the truth source the
    candidate is judged against, and the baseline you time against is `baseline_overlay/`. Both must be
    the server as it runs RIGHT NOW (config + every accepted kernel). Capturing on the pristine install
@@ -451,7 +480,14 @@ Return JSON:
   "editable": true,
   "task_dir": "<EVAL_DIR>/kernels/<short_name>_task",
   "source_path_in_sglang": "<abs path under site-packages>",
+  "device_kernel": "<KERNEL.device_kernel verbatim>",
   "target_callable": "<module:attr>",
+  "seam_candidates": [
+    {"target_callable": "<module:attr>",
+     "role": "outer_wrapper|dispatcher|op_seam|inner_launcher|kernel_entry",
+     "device_kernels": ["<KERNEL.device_kernel>"], "depth": 0, "evidence": "source/runtime evidence"}
+  ],
+  "selection_validation": {"contract": "kernel_selection", "ok": true, "deepest_verified": true},
   "candidate_bind": {"kind": "module|rebind", "module": "<dotted>", "file": "kernel_src/<f>.py"},
   "baseline_overlay": "<task_dir>/baseline_overlay",
   "baseline_frozen": true,
@@ -807,7 +843,14 @@ Return JSON:
   "regimes_captured": ["prefill"],
   "candidate_backends": ["aiter","hipblaslt","triton","ck"],
   "reference_io_sha256": "<or '' if synthesized>",
+  "device_kernel": "<KERNEL.device_kernel verbatim>",
   "target_callable": "<module:attr rebind seam if one exists, else ''>",
+  "seam_candidates": [
+    {"target_callable": "<module:attr>",
+     "role": "outer_wrapper|dispatcher|op_seam|inner_launcher|kernel_entry",
+     "device_kernels": ["<KERNEL.device_kernel>"], "depth": 0, "evidence": "source/runtime evidence"}
+  ],
+  "selection_validation": {"contract": "kernel_selection", "ok": true, "deepest_verified": true},
   "baseline_callable": "<module:attr of the live default backend, resolved OUTSIDE the task dir>",
   "smoke": "pass|fail",
   "notes": "transpose/bias inference, regime, whether oracle was synthesized vs captured"
