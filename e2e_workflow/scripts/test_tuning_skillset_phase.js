@@ -42,6 +42,26 @@ ok(fs.existsSync(SKILLSET), 'tuning_skillset/ is vendored into the repo');
 for (const rel of ['README.md', 'tuning-core/SKILL.md', 'validate/claims.py', 'tuning-kb/README.md']) {
   ok(fs.existsSync(path.join(SKILLSET, rel)), `vendored tree keeps its own entry point: ${rel}`);
 }
+// Nothing in the vendored tree may be git-ignored. The manifest hashes what is ON DISK, so a generic
+// rule swallowing a file (e.g. `*.log` catching tuning-kb evidence logs) commits a tree that is smaller
+// than the manifest: --verify then fails on a fresh clone while still passing for whoever synced it.
+{
+  const { execFileSync } = require('child_process');
+  const manifestPath = path.join(ROOT, 'e2e_workflow', 'knowledge', 'tuning_skillset.manifest.sha256');
+  const tracked = fs.readFileSync(manifestPath, 'utf8').split('\n')
+    .filter((l) => l && !l.startsWith('#'))
+    .map((l) => 'tuning_skillset/' + l.split('  ')[1]);
+  let ignored = [];
+  try {
+    // check-ignore takes pathnames (not globs) and exits 1 when none match, which is the wanted outcome.
+    const out = execFileSync('git', ['-C', ROOT, 'check-ignore', '--stdin'],
+      { input: tracked.join('\n'), encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+    ignored = out.split('\n').filter(Boolean);
+  } catch (e) { ignored = []; }
+  ok(ignored.length === 0,
+    `no manifest-tracked file is git-ignored (checked ${tracked.length})` +
+    (ignored.length ? ` -- ignored: ${ignored.slice(0, 3).join(', ')}` : ''));
+}
 // Every skill directory keeps its SKILL.md — the unit of invocation stays whole.
 const skillDirs = fs.readdirSync(SKILLSET, { withFileTypes: true })
   .filter((d) => d.isDirectory() && d.name.startsWith('tuning-') && d.name !== 'tuning-kb')
@@ -203,6 +223,17 @@ ok(/TUNING_LIVE_TREE_FILES/.test(integrator),
 ok(/any OTHER dirty path is still a hard failure/.test(integrator),
   'the carve-out is scoped to the declared list — it does not blunt the rule');
 ok(/live_tree_files/.test(role), 'the role is told to declare every live-tree path it writes');
+ok(/covers \*\*data only\*\*/.test(integrator),
+  'the carve-out is data-only — a .py in the live tree cannot be varied per A/B leg');
+// Tuning-enabling CODE changes are in scope (a tuned table behind an unrouted seam binds to nothing),
+// and they travel as a reversible overlay, never as a live-tree source edit.
+ok(/apply_overlay: \{ type: 'string' \}/.test(src), 'the phase can return a routing/dispatch overlay');
+ok(/if \(tuning\.apply_overlay\) curOverlay = tuning\.apply_overlay;/.test(src),
+  'an accepted tuning overlay is carried forward (the code half is not dropped at the phase boundary)');
+ok(/OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,/.test(src),
+  'the post-tuning re-profile runs WITH the carried overlay, not an empty one');
+ok(/reversible \*\*overlay\*\*/.test(role) && /Never edit a `\.py` in/.test(role),
+  'the role routes code through the overlay and forbids live-tree source edits');
 // result.json must gain the tuning block WITHOUT any existing key changing.
 const runE2e = fs.readFileSync(path.join(ROOT, 'interface', 'run_e2e.py'), 'utf8');
 ok(/def _tuning_skillset_section\(/.test(runE2e), 'run_e2e.py builds an additive tuning_skillset block');

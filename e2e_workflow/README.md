@@ -178,7 +178,15 @@ legs completed, correctness passed, and `post > pre > 0`; otherwise it is downgr
 run continues on the pre-tuning config. An unproven tuning artifact would otherwise sit silently in the
 reference leg of every downstream measurement — which is the exact failure the skillset exists to catch.
 
-**How the win ships.** A tuning win is usually *data* — a config table a library reads from inside its
+**Scope.** The phase does not author kernels — that is the head/Milestone tracks' job, unchanged. It does
+own the dispatch path: which kernel the seam selects, with which parameters, **and the code that makes a
+tuned artifact actually bind** (a routing switch, a wrapper that drops the kernel selection). That code
+half travels as a reversible overlay (`apply_overlay` → carried `curOverlay` → `final/overlay`), never as
+a live-tree source edit. It is not a corner case: the skillset measures a correctly-tuned row deployed
+behind a wrapper that ignores the kernel selection running **85.7% slower than doing nothing**, with every
+engagement gate passing.
+
+**How the win ships.** The data half of a tuning win is a config table a library reads from inside its
 own package dir, often with a derived cache that must be dropped or the new rows are silently ignored.
 That cannot travel in `final/overlay`, which is a `PYTHONPATH` mechanism for *code*. So the phase writes
 a deploy bundle (`EVAL_DIR/tuning/deploy/`: manifest, git-applyable diff, the files, and an idempotent

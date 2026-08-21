@@ -279,7 +279,9 @@ does not add to it; summing the two double-counts.
   // Accepted gates only — how the win reaches production:
   "deploy_bundle": ".../tuning/deploy",
   "cache_invalidation": ["rm -rf /tmp/aiter_configs"],
-  "live_tree_files": ["aiter/configs/model_configs/..."],  // written inside an installed package
+  "live_tree_files": ["aiter/configs/model_configs/..."],  // DATA written inside an installed package
+  "apply_overlay": "",                   // non-empty if tuning also needed a routing/dispatch code
+                                         //   change to make the artifact bind; merged into final_overlay
 
   "in_final_bundle": true,
   "reaches_production_via": { "final_patch_includes_tuning": true, "final_launch_runs_deploy": true, ... }

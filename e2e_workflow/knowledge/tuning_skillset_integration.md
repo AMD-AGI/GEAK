@@ -124,10 +124,23 @@ attributes. It carries **code**. A tuning win typically is not code — it is a 
 reads from inside its own installed package directory, plus a derived cache that must be dropped or the
 new rows are ignored while everything still looks healthy. Neither survives an overlay.
 
-Env-pointed artifacts (`AITER_CONFIG_*=<csv>`, `PYTORCH_TUNABLEOP_FILENAME=<dat>`,
-`VLLM_TUNED_CONFIG_FOLDER=<dir>`) already work through `apply_env` → carried `curEnv` →
-`accepted_config.env` → `FINAL_ENV`, which is why the head track's env winners need nothing special.
-The gap is everything else. So the tuning phase writes a **deploy bundle**:
+### Two halves, two routes
+
+A tuning win can have a **code** half and a **data** half, and conflating them is how it breaks.
+
+The code half is a dispatch-path change that makes the tuned artifact bind — a routing switch, or a
+wrapper fix. This is squarely in scope for the phase (authoring kernels is not), and it is not
+hypothetical: `tuning-aiter/SKILL.md` §2b measures a correctly-tuned row deployed on a wrapper that
+drops `kernelName` running **85.7% slower than doing nothing** (−6.48% e2e) while every engagement gate
+passes, and the same CSV on a wrapper that honours the selection giving **+23.88%**. It travels as a
+reversible **overlay** (`apply_overlay` → carried `curOverlay` → `final/overlay`), exactly like a head
+env-winner's routing patch. Never as a live-tree `.py` edit: that lands in both legs of every later A/B,
+so the comparison silently measures the same thing twice.
+
+The data half is the tuned table itself. Env-pointed artifacts (`AITER_CONFIG_*=<csv>`,
+`PYTORCH_TUNABLEOP_FILENAME=<dat>`, `VLLM_TUNED_CONFIG_FOLDER=<dir>`) already work through `apply_env` →
+carried `curEnv` → `accepted_config.env` → `FINAL_ENV`, which is why the head track's env winners need
+nothing special. The gap is everything else. So the tuning phase writes a **deploy bundle**:
 
 ```
 EVAL_DIR/tuning/deploy/
@@ -161,10 +174,12 @@ leg that had quietly lost it, inflating all of them.
 
 So the phase declares `live_tree_files` (also `MANIFEST.target_files`), the orchestrator hands it to
 **every** integrate leg via `tuningIntegrateInputs()`, and the rule becomes "clean **apart from this
-list**". The carve-out is narrow on purpose: any other dirty path is still a hard failure, and a listed
-path found missing is reported rather than measured past. It is sound because the rule's rationale —
-unrecorded, irreversible, contaminates the baseline leg — inverts here: these paths are recorded,
-reproducible from the deploy bundle, and *supposed* to be in both legs, exactly like accepted env.
+list**". The carve-out is narrow on purpose: any other dirty path is still a hard failure, a listed path
+found missing is reported rather than measured past, and it covers **data only** — a `.py` listed there
+is a contract violation, not a carve-out, because the code half has the overlay. It is sound because the
+rule's rationale — unrecorded, irreversible, contaminates the baseline leg — inverts for these paths:
+they are recorded, reproducible from the deploy bundle, and *supposed* to be in both legs, exactly like
+accepted env.
 
 An undeclared live-tree write is therefore the one way a tuning win can pass every gate in this phase and
 still evaporate later in the run.

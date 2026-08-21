@@ -163,6 +163,10 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      remove a banked win from your own reference leg and quietly inflate every delta you then measure.
      The carve-out is that list and nothing else: any OTHER dirty path is still a hard failure, and if a
      listed path is unexpectedly *missing* or reverted, say so in `note` rather than measuring past it.
+     It also covers **data only**. A listed path that is a `.py` (or any source the runtime imports) is a
+     contract violation, not a carve-out — the tuning phase's code changes travel as an overlay in
+     `CURRENT_OVERLAY`. Restore it and report it; a source edit in the live tree cannot be varied between
+     your two legs, so it silently makes the A/B measure the same thing twice.
    - **authored** (a from-scratch NEW implementation written by the kernel layer's author mode — there
      is NO installed source file to patch; instead we REBIND the op's call site to the new kernel):
      the authored implementation + its final patch live under
@@ -337,8 +341,8 @@ Return JSON:
 
 Inputs: `EVAL_DIR`, the final accepted overlay, accepted config (flags/env), all accepted kernel
 patches, `BASELINE_THROUGHPUT`, `SKILL_DIR`. Plus, **only when the standalone tuning phase banked a
-win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, `TUNING_ARTIFACTS`
-(see step 1b — omit that step entirely when they are absent).
+win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, `TUNING_ARTIFACTS`,
+`TUNING_LIVE_TREE_FILES`, `TUNING_OVERLAY` (see step 1b — omit that step entirely when they are absent).
 
 1. Assemble the deliverable bundle in `EVAL_DIR/final/`: the accepted overlay dir, a concatenated
    `final_patch.diff` (all accepted kernel patches), and a `final_launch.sh` that reproduces the
@@ -347,10 +351,12 @@ win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, 
 
 1b. **Fold in the tuning deploy bundle** (only when `TUNING_DEPLOY_BUNDLE` is present).
 
-   The overlay is a `PYTHONPATH` mechanism and it carries **code**. The tuning phase's win is usually
-   **data** — a config table a library reads from inside its own installed package, often with a derived
-   cache that must be dropped or the new rows are silently ignored. That cannot ride the overlay, so if
-   you do nothing here the run's reported gain will not reproduce from the bundle. Do all four:
+   A tuning win can have two halves. The **code** half (a routing switch that makes the seam dispatch the
+   tuned backend) is an overlay in `TUNING_OVERLAY`; if it is non-empty it should already be inside the
+   accepted overlay you were handed — confirm that, and merge it if it is not, because a tuned table
+   behind an unrouted seam binds to nothing. The **data** half — a config table a library reads from
+   inside its own installed package, often with a derived cache that must be dropped or the new rows are
+   silently ignored — cannot ride the overlay at all. For that half, do all four:
 
    - **Copy** `TUNING_DEPLOY_BUNDLE` into `EVAL_DIR/final/tuning/` so the bundle is self-contained and
      survives the eval dir being archived or moved.

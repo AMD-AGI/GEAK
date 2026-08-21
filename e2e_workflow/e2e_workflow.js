@@ -521,10 +521,17 @@ const TUNING_SCHEMA = obj({
   // folds it into EVAL_DIR/final/ (diff concatenated, deploy.sh invoked from final_launch.sh).
   deploy_bundle: { type: 'string' }, deploy_verified: { type: 'boolean' },
   cache_invalidation: arrStr,
-  // Paths the deploy writes INSIDE an installed package tree (e.g. aiter/configs/model_configs/*.csv).
-  // The Integrator forbids live-tree edits and asserts `git status --porcelain` is empty before/after
-  // every A/B leg; this list is the carve-out that keeps a banked tuning from being cleaned away.
+  // DATA paths the deploy writes INSIDE an installed package tree (e.g. aiter/configs/*.csv). The
+  // Integrator forbids live-tree edits and asserts `git status --porcelain` is empty before/after every
+  // A/B leg; this list is the carve-out that keeps a banked tuning from being cleaned away. Data only —
+  // a source change belongs in apply_overlay, see below.
   live_tree_files: arrStr,
+  // A tuned artifact binds only if the live seam dispatches the backend that consumes it, so tuning
+  // sometimes needs a CODE change to land (a routing switch, or a wrapper that drops the kernel
+  // selection — tuning-aiter/SKILL.md §2b measures a correctly-tuned row going 85.7% SLOWER on a wrapper
+  // that ignores kernelName). That is in scope, and it travels as a reversible overlay, exactly like a
+  // head env-winner's routing patch: never as a live-tree .py edit, which cannot be varied per A/B leg.
+  apply_overlay: { type: 'string' },
   apply_env: { type: 'string' }, apply_flags: { type: 'string' },
   correctness_gate: { type: 'string' }, accuracy_note: { type: 'string' },
   engagement_verified: { type: 'boolean' }, engagement_evidence: { type: 'string' },
@@ -1622,10 +1629,15 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
   if (tuneOk) {
     if (tuning.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + tuning.apply_env;
     if (tuning.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + tuning.apply_flags;
+    // Carry the routing/enabling overlay forward exactly as an accepted head patch does. Without this
+    // the code half of a tuning win is silently dropped at the phase boundary and the data half is left
+    // bound to nothing — the failure the skillset spends its longest section on.
+    if (tuning.apply_overlay) curOverlay = tuning.apply_overlay;
     curTput = tuning.post_tune_throughput_tok_s;
     log(`Tuning skillset ACCEPTED: ${tuning.pre_tune_throughput_tok_s} -> ${curTput} tok/s ` +
       `(+${(tuning.tuning_delta_pct || 0).toFixed(2)}% attributable to tuning; ` +
-      `${(tuning.ops_tuned || []).length} op(s), engagement proven). Re-profiling.`);
+      `${(tuning.ops_tuned || []).length} op(s), engagement proven` +
+      `${tuning.apply_overlay ? `, carrying routing overlay ${tuning.apply_overlay}` : ''}). Re-profiling.`);
     // A missing/unverified deploy bundle does NOT withhold the accept: the gain was measured and proven
     // live, and the artifacts are already installed in this container, so every in-run number stays
     // valid. What breaks is DELIVERY — final_launch.sh would reproduce less than the headline. Finalize
@@ -1647,7 +1659,10 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
     profile = await safeAgent(
       roleAgent('profiler', 'reprofile', 'Re-profile after the tuning skillset deployed its artifacts.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'tuning',
-        OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        // curOverlay, not '': tuning may have banked a routing overlay, and profiling without it would
+        // measure a stack where the tuned artifact binds to nothing, then hand the head track a Top-N
+        // for the wrong landscape.
+        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Profile', label: 'profiler:post-tuning', schema: PROFILE_SCHEMA });
@@ -1696,6 +1711,7 @@ const TUNING_FINALIZE_INPUTS = (TUNING_SKILLSET_ENABLED && tuning && tuning.gate
     TUNING_CACHE_INVALIDATION: tuning.cache_invalidation || [],
     TUNING_ARTIFACTS: tuning.artifacts || [],
     TUNING_LIVE_TREE_FILES: tuning.live_tree_files || [],
+    TUNING_OVERLAY: tuning.apply_overlay || '',
   }
   : {};
 
@@ -3028,6 +3044,7 @@ function tuningReturn() {
     // deploy_bundle (its deploy.sh is idempotent); final_launch.sh already invokes it.
     deploy_bundle: tuning.deploy_bundle || '', deploy_verified: tuning.deploy_verified === true,
     cache_invalidation: tuning.cache_invalidation || [], live_tree_files: tuning.live_tree_files || [],
+    apply_overlay: tuning.apply_overlay || '',
     // Finalize's independent answer to "did the tuning actually make it into the shipped bundle, and
     // does it still engage there?". null when Finalize did not run (a phase-scoped invocation).
     in_final_bundle: finalize ? (finalize.tuning_in_bundle === true) : null,

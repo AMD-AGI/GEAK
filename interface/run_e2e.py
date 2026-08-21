@@ -2618,9 +2618,12 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
         section["apply_env"] = t.get("apply_env") or ""
         section["apply_flags"] = t.get("apply_flags") or ""
         section["cache_invalidation"] = t.get("cache_invalidation") or []
-        # Paths the deploy owns inside an installed package tree. Surfaced because a consumer diffing the
-        # image against a pristine one would otherwise read these as contamination.
+        # Data paths the deploy owns inside an installed package tree. Surfaced because a consumer
+        # diffing the image against a pristine one would otherwise read these as contamination.
         section["live_tree_files"] = t.get("live_tree_files") or []
+        # Non-empty when tuning also needed a code change to make the artifact bind (a routing switch).
+        # It is merged into the run's accepted overlay, so it ships via the existing final_overlay key.
+        section["apply_overlay"] = t.get("apply_overlay") or ""
         section["deploy_bundle"] = t.get("deploy_bundle") or str(eval_dir / "tuning" / "deploy")
         section["in_final_bundle"] = t.get("in_final_bundle")
         section["final_bundle_engagement_recheck"] = t.get("final_bundle_engagement_recheck") or ""
@@ -2632,7 +2635,8 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
                 "the tuning diff is concatenated into final_patch, and final_launch_script runs the "
                 "bundle's idempotent deploy.sh before starting the server. Reusing final_launch_script "
                 "needs no extra steps; applying final_patch by hand also requires the cache_invalidation "
-                "commands."
+                "commands. When apply_overlay is non-empty the tuning ALSO needed a code change to make "
+                "the artifact bind; that half is merged into final_overlay and needs both to be applied."
             ),
             "final_patch_includes_tuning": t.get("in_final_bundle"),
             "final_launch_runs_deploy": t.get("in_final_bundle"),

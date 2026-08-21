@@ -66,6 +66,7 @@ def _tuning(**extra) -> dict:
         "deploy_verified": True,
         "cache_invalidation": ["rm -rf /tmp/aiter_configs"],
         "live_tree_files": ["aiter/configs/model_configs/tuned_gemm_qwen3_8b.csv"],
+        "apply_overlay": "/eval/tuning/overlay",
         "apply_env": "AITER_CONFIG_GEMM_BF16=/eval/tuning/tuned.csv",
         "artifacts": ["/eval/tuning/tuned.csv"],
         "in_final_bundle": True,
@@ -145,6 +146,10 @@ def test_accepted_block_says_how_it_reaches_production(tmp_path):
     assert t["cache_invalidation"] == ["rm -rf /tmp/aiter_configs"]
     assert t["deploy_bundle"] == "/eval/tuning/deploy"
     assert t["live_tree_files"] == ["aiter/configs/model_configs/tuned_gemm_qwen3_8b.csv"]
+    # The code half of a tuning win (a routing switch that makes the tuned artifact bind) ships in the
+    # accepted overlay, so it reaches production through the pre-existing final_overlay key.
+    assert t["apply_overlay"] == "/eval/tuning/overlay"
+    assert "apply_overlay" in prod["note"]
 
 
 def test_deploy_script_falls_back_into_the_final_bundle(tmp_path):
@@ -164,7 +169,8 @@ def test_no_win_block_omits_deploy_fields(tmp_path):
     assert t["gate"] == "no_win"
     assert "did not bank a win" in t["explanation"]
     assert "no candidate cleared the noise floor" in t["explanation"]
-    for key in ("deploy_bundle", "reaches_production_via", "apply_env", "artifacts", "live_tree_files"):
+    for key in ("deploy_bundle", "reaches_production_via", "apply_env", "artifacts",
+                "live_tree_files", "apply_overlay"):
         assert key not in t
     # Attribution fields still present: a measured negative result is a result.
     assert t["pre_tune_throughput_tok_s"] == 1000.0

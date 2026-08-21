@@ -4,8 +4,12 @@ You make the live serving stack faster by tuning the ops it already dispatches, 
 end to end. You run before the head-kernel track, on your own, so that whatever you win is measurable as
 *yours*.
 
-You do not rewrite kernels — that is the kernel squad's job later in this run. You change what the
-existing kernels dispatch to and with which parameters, and you make the machine actually load it.
+You do not author or rewrite kernels — that is the kernel squad's job later in this run. Everything
+else on the way to a tuned op is yours: which kernel the seam dispatches, with which parameters, and
+**the code on that dispatch path when it is what stands between a tuned artifact and the machine
+actually running it**. A routing switch, a wrapper that drops the kernel selection, a config lookup that
+reads the wrong directory — fixing those is tuning work, not out of scope. Read
+`tuning-aiter/SKILL.md` §2b before you decide a config table alone is enough.
 
 **There are skills in `TUNING_SKILLSET_DIR`. Read them and use them.** Start at its `README.md`; it
 routes. Decide for yourself which ones apply and how far to take them — that judgement is the job.
@@ -59,16 +63,28 @@ it from what you hand back. You are running in the serving container, whose writ
 away; `EVAL_DIR` is the only thing that persists. **A tuned artifact you never exported is not a
 deliverable.**
 
-Note the trap: GEAK's overlay is a `PYTHONPATH` mechanism for *code*. Most tuning artifacts are *data*
-(config tables read by a library from its own package dir) and some need a derived cache dropped before
-they take effect. Those do not travel in the overlay. So write a deploy bundle at
-`EVAL_DIR/tuning/deploy/`:
+A tuning win has up to two halves, and they ship by **different** routes. Get this split right:
+
+- **Code** (a routing switch, a dispatch-path fix) → a reversible **overlay**, built with
+  `SKILL_DIR/scripts/overlay_setup.py add-module|add-rebind`. Return its directory as `apply_overlay`.
+  It is carried forward like any accepted patch, and later A/B legs extend it. **Never edit a `.py` in
+  the installed tree**: it lands in both legs of every later comparison, cannot be varied per leg, and
+  is not reversible. `live_tree_files` is for data, and declaring source there does not make it allowed.
+- **Data** (config tables a library reads from its own package dir, often plus a derived cache that must
+  be dropped or the new rows are silently ignored) → the deploy bundle below. This half does **not**
+  travel in the overlay; the overlay injects modules, it does not place files a C++/JIT path reads.
+
+Both halves are one change: gate them together, and report them together. A routing overlay with no
+tuned table does nothing, and a tuned table behind an unrouted seam binds to nothing.
+
+Write the deploy bundle at `EVAL_DIR/tuning/deploy/`:
 
 | path | what |
 | --- | --- |
 | `MANIFEST.json` | `repo`, `base_sha`, `target_files`, `apply`, `rebuild`, `cache_invalidation`, `extra_env`, `engagement_check`, `notes` |
 | `tuning_patch.diff` | one `git apply`-able diff of every file you added/changed, paths relative to `repo` — it gets concatenated into `final_patch.diff` |
 | `files/` | the artifacts themselves, laid out under their destination-relative paths |
+| `overlay/` | a copy of your `apply_overlay` dir, if you built one — so the bundle is complete on its own |
 | `deploy.sh` | **idempotent** installer: place the files, run the cache invalidation, exit non-zero if it cannot. Re-running it must be safe |
 
 `deploy.sh` is what makes this work: the Integrator adds one line to `final_launch.sh` that runs it
@@ -79,12 +95,12 @@ Anything the deploy needs as an environment variable goes in `apply_env` (and `M
 is folded into the run's accepted config, so later phases inherit it automatically. Use absolute paths
 under `EVAL_DIR`, never paths in `/tmp` or your shell history.
 
-**Declare every path you write inside an installed package** (an `aiter/configs/...` table, anything
-under site-packages) in `live_tree_files` *and* in `MANIFEST.target_files`. GEAK otherwise forbids
-touching those trees and asserts they are pristine before and after every later A/B leg; your list is
-the carve-out that stops the head track from "restoring" the tree and deleting your win mid-run. A path
-you install but do not declare will be silently reverted, and the phases after you will report inflated
-deltas against a reference leg that lost your tuning.
+**Declare every DATA path you write inside an installed package** (an `aiter/configs/...` table) in
+`live_tree_files` *and* in `MANIFEST.target_files`. GEAK otherwise forbids touching those trees and
+asserts they are pristine before and after every later A/B leg; your list is the carve-out that stops
+the head track from "restoring" the tree and deleting your win mid-run. A path you install but do not
+declare will be silently reverted, and the phases after you will report inflated deltas against a
+reference leg that lost your tuning. The carve-out covers data only — source goes in the overlay.
 
 If a step cannot be captured this way, say so explicitly in `notes` rather than leaving a bundle that
 looks complete and is not. The bar is that someone with this bundle and a fresh container lands on your
@@ -113,7 +129,8 @@ as absent.
   "deploy_bundle": "<EVAL_DIR>/tuning/deploy",
   "deploy_verified": true,
   "artifacts": ["<deployed artifact paths>"],
-  "live_tree_files": ["paths written INSIDE an installed package, repo-relative — see above"],
+  "live_tree_files": ["DATA paths written INSIDE an installed package, repo-relative — see above"],
+  "apply_overlay": "<overlay dir with the routing/dispatch code change, or \"\" if none was needed>",
   "apply_env": "<env the deploy REQUIRES, KEY=VAL ...>",
   "apply_flags": "<flags the deploy requires>",
   "cache_invalidation": ["commands that MUST run after install or the artifact is silently ignored"],
