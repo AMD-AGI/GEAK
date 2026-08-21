@@ -25,6 +25,8 @@ Commands:
                 --impl-module fast_act --impl-attr fast_silu_and_mul [--impl-file fast_act.py]
   add-capture   install a shape/IO capture hook on module:attr (uses capture_shapes.py)
                 --overlay O --target sglang...:fn --out <task_dir> [--max 5] [--capture-file capture_shapes.py]
+  add-marker    install a marker-only hook on one candidate seam (uses seam_trace.py)
+                --overlay O --target sglang...:fn [--marker-file seam_trace.py]
   check         print where a module resolves from (run with the overlay on PYTHONPATH)
                 --module sglang.srt.layers.activation [--path-only]
   Every add-* takes --from BASE to SEED a new overlay from an existing one, so a candidate overlay is
@@ -45,7 +47,7 @@ try:
     with open(_MAN) as _fh:
         _m = json.load(_fh)
 except Exception as _e:
-    _m = {"modules": [], "rebinds": [], "captures": []}
+    _m = {"modules": [], "rebinds": [], "markers": [], "captures": []}
 
 # (a) inject patched submodules under their dotted names BEFORE anything imports them.
 for _e in _m.get("modules", []):
@@ -77,13 +79,23 @@ for _e in _m.get("rebinds", []):
     except Exception as _ex:
         sys.stderr.write("[overlay] rebind FAILED %r: %r\n" % (_e, _ex))
 
-# (c) capture hooks (shape/IO oracle recording).
+# (c) capture hooks (shape/IO oracle recording) go on FIRST, so the capture wrapper is the innermost
+# stand-in and is already bound before any marker install imports a module that does
+# `from <capture target module> import <attr>` (which would otherwise alias the un-captured function).
 for _e in _m.get("captures", []):
     try:
         import capture_shapes
         capture_shapes.install(_e["target"], _e["out"], int(_e.get("max", 5)))
     except Exception as _ex:
         sys.stderr.write("[overlay] capture install FAILED %r: %r\n" % (_e, _ex))
+
+# (d) marker-only hooks used to compare every candidate seam in one trace.
+for _e in _m.get("markers", []):
+    try:
+        import seam_trace
+        seam_trace.install(_e["target"])
+    except Exception as _ex:
+        sys.stderr.write("[overlay] seam marker install FAILED %r: %r\n" % (_e, _ex))
 '''
 
 
@@ -120,7 +132,7 @@ def _ensure_overlay(overlay, base=""):
     man = os.path.join(overlay, "_overlay_manifest.json")
     if not os.path.exists(man):
         with open(man, "w") as fh:
-            json.dump({"modules": [], "rebinds": [], "captures": []}, fh, indent=2)
+            json.dump({"modules": [], "rebinds": [], "markers": [], "captures": []}, fh, indent=2)
     return man
 
 
@@ -199,6 +211,19 @@ def cmd_add_capture(a):
     print(f"launch with: PYTHONPATH={a.overlay}:$PYTHONPATH")
 
 
+def cmd_add_marker(a):
+    man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
+    marker = a.marker_file or os.path.join(os.path.dirname(os.path.abspath(__file__)), "seam_trace.py")
+    shutil.copy2(marker, os.path.join(a.overlay, "seam_trace.py"))
+    m = _load_man(man)
+    m["markers"] = [e for e in m.get("markers", []) if e["target"] != a.target]
+    m["markers"].append({"target": a.target})
+    _save_man(man, m)
+    print(f"OVERLAY_DIR={a.overlay}")
+    print(f"add-marker {a.target}")
+    print(f"launch with: PYTHONPATH={a.overlay}:$PYTHONPATH")
+
+
 def cmd_check(a):
     f = module_file(a.module)
     if getattr(a, "path_only", False):
@@ -244,6 +269,13 @@ def main():
     p.add_argument("--capture-file", default="", dest="capture_file")
     p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
     p.set_defaults(func=cmd_add_capture)
+
+    p = sub.add_parser("add-marker")
+    p.add_argument("--overlay", required=True)
+    p.add_argument("--target", required=True, help="module:attr to mark without capturing I/O")
+    p.add_argument("--marker-file", default="", dest="marker_file")
+    p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
+    p.set_defaults(func=cmd_add_marker)
 
     p = sub.add_parser("check")
     p.add_argument("--module", required=True)

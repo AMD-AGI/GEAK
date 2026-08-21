@@ -1,0 +1,178 @@
+{
+  "_comment": [
+    "Shared fixture for kernel symbol canonicalization. Two implementations must agree on it:",
+    "  - canonical_kernel_name / kernel_matches in e2e_workflow/scripts/kernel_selection.py",
+    "  - canonicalDeviceKernel / kernelIdentitiesMatch in e2e_workflow/e2e_workflow.js",
+    "The JS gate and the Python verdict compare the SAME two symbols, so any drift between them lets",
+    "a kernel pass one side and be refused by the other. Asserted from Python by",
+    "tests/test_kernel_selection.py and from node by scripts/test_kernel_canonicalization_parity.js.",
+    "",
+    "Symbols marked 'real' were lifted verbatim from ROCm captures. Hand-written C++ never produced",
+    "the shapes that broke this: an unnamed namespace putting a '(' in front of the kernel, a bare",
+    "kernel with no namespace to separate it from the 'void' return type, and the annotations this",
+    "pipeline appends to a name after the fact -- a phase tag, a cluster label, a memcpy direction."
+  ],
+  "canonical": [
+    {
+      "real": true,
+      "symbol": "void (anonymous namespace)::kda_packed_decode_kernel<8, false>((anonymous namespace)::KdaPackedDecodeParams)",
+      "canonical": "kda_packed_decode_kernel"
+    },
+    {
+      "real": true,
+      "symbol": "void aiter::greedy_sample_kernel<float, 1024, 16>(float const*, int*, int, int)",
+      "canonical": "greedy_sample_kernel"
+    },
+    {
+      "real": true,
+      "symbol": "void wvSplitKrc_<__hip_bfloat16, 8, 4>(void*, int)",
+      "canonical": "wvsplitkrc_"
+    },
+    {
+      "real": true,
+      "symbol": "void paged_attention_ll4mi_QKV_mfma16_kernel<0, __hip_bfloat16, (vllm::Fp8KVCacheDataType)0, 256>(float*, int*)",
+      "canonical": "paged_attention_ll4mi_qkv_mfma16_kernel"
+    },
+    {
+      "real": true,
+      "symbol": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bLi256EEEvPT_i",
+      "canonical": "_zn5aiter24add_rmsnorm_quant_kernelidf16bli256eeevpt_i"
+    },
+    {
+      "real": true,
+      "symbol": "reshape_and_cache_shuffle_5d",
+      "canonical": "reshape_and_cache_shuffle_5d"
+    },
+    {
+      "symbol": "at::native::vectorized_elementwise_kernel<4, at::native::AddFunctor<float>, at::detail::Array<char*, 3> >(int, float)",
+      "canonical": "vectorized_elementwise_kernel"
+    },
+    {
+      "symbol": "vectorized_elementwise_kernel<float> [clone .isra.0]",
+      "canonical": "vectorized_elementwise_kernel"
+    },
+    {
+      "real": true,
+      "_note": "profile artifacts store long kernel names elided mid-template, leaving an opener that never closes",
+      "symbol": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_k...",
+      "canonical": "elementwise_kernel_manual_unroll"
+    },
+    {
+      "real": true,
+      "symbol": "_ZN7ck_tile6kentryILi2ENS_15MoeFlatmmKernelINS_33GemmSpatiallyLocalTilePart...",
+      "canonical": "_zn7ck_tile6kentryili2ens_15moeflatmmkernelins_33gemmspatiallylocaltilepart"
+    },
+    {
+      "real": true,
+      "_note": "the annotations below are appended by this pipeline, not by the compiler. Reading the name from the END of the symbol answers with the annotation and the head stops matching its own kernel.",
+      "symbol": "_fwd_grouped_kernel_stage1 [sliding_attention]",
+      "canonical": "_fwd_grouped_kernel_stage1"
+    },
+    { "real": true, "symbol": "main_kernel[prefill]", "canonical": "main_kernel" },
+    { "real": true, "symbol": "main_kernel [cluster B (long, ~34us)]", "canonical": "main_kernel" },
+    { "real": true, "symbol": "hgemm_bf16_32x64x256x3_SPK1 [qkv_proj]", "canonical": "hgemm_bf16_32x64x256x3_spk1" },
+    { "real": true, "symbol": "allreduce_prototype_twoshot@prefill", "canonical": "allreduce_prototype_twoshot" },
+    {
+      "real": true,
+      "_note": "rocprof spells memory ops with the direction after the operation",
+      "symbol": "Memcpy DtoD (Device -> Device)",
+      "canonical": "memcpy"
+    },
+    {
+      "real": true,
+      "_note": "an unnamed namespace can also sit mid-qualification, leaving 'at::native:: ::CatArray...' once the group is removed",
+      "symbol": "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::O",
+      "canonical": "catarraybatchedcopy"
+    },
+    { "symbol": "gemm_kernel<half", "canonical": "gemm_kernel" },
+    { "symbol": "<>", "canonical": "" },
+    { "symbol": "", "canonical": "" }
+  ],
+  "matches": [
+    {
+      "why": "the bare name and its decorated spelling are one kernel",
+      "a": "paged_attention_ll4mi_QKV_mfma4_kernel",
+      "b": "void paged_attention_ll4mi_QKV_mfma4_kernel<__hip_bfloat16, 128, 256>(float*, int)",
+      "match": true
+    },
+    {
+      "why": "a bare declared name has no template arguments to compare, so it matches the decorated spelling",
+      "a": "vectorized_elementwise_kernel",
+      "b": "void at::native::vectorized_elementwise_kernel<4, AddFunctor<float> >(int)",
+      "match": true
+    },
+    {
+      "why": "two instantiations of one template are two kernels once both sides carry the arguments",
+      "a": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<bool> >(int)",
+      "b": "void at::native::vectorized_elementwise_kernel<4, at::native::MulFunctor<float> >(int)",
+      "match": false
+    },
+    {
+      "why": "real head row: a short_name cut inside the ARGUMENT list keeps a whole template, and only one side spells the return type and namespace",
+      "a": "clamp_position_kernel<long>(long*, long const*, unsigned lon",
+      "b": "void (anonymous namespace)::clamp_position_kernel<long>(long*, long const*, unsigned long, int)",
+      "match": true
+    },
+    {
+      "why": "one build leaves the namespace unnamed and another declares it; same kernel, same instantiation",
+      "a": "void (anonymous namespace)::store_kvcache<512l, 512l, 1, false, long>(int)",
+      "b": "void sglang::store_kvcache<512l, 512l, 1, false, long>(sglang::StoreKVCacheParams)",
+      "match": true
+    },
+    {
+      "why": "both argument lists are elided, so they must agree as far as they are spelled: 128, 4 against 128, 8",
+      "a": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_k...",
+      "b": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "match": false
+    },
+    {
+      "why": "folding separators to _ stops '128, 4,' from reading as a prefix of '128, 48,'",
+      "a": "k<128, 4, at::native::gpu_k", "b": "k<128, 48, at::native::gpu_k", "match": false
+    },
+    {
+      "why": "real sglang neighbours: a name appearing inside another is a different kernel",
+      "a": "_fwd_kernel", "b": "_fwd_kernel_stage2", "match": false
+    },
+    {
+      "why": "a name embedded in another is not evidence of the same kernel",
+      "a": "gemm_kernel", "b": "fused_gemm_kernel_v2", "match": false
+    },
+    {
+      "why": "two unnamed-namespace kernels used to both reduce to 'void' and certify each other",
+      "a": "void (anonymous namespace)::clamp_position_kernel<long>(long*, long)",
+      "b": "void (anonymous namespace)::kda_packed_decode_kernel<8, false>(int)",
+      "match": false
+    },
+    {
+      "why": "a token this short appears inside unrelated kernels and is not evidence",
+      "a": "gemm", "b": "gemm_kernel_v2", "match": false
+    },
+    {
+      "why": "a prefix that is not the display-limit truncation is a different kernel",
+      "a": "attention_kernel", "b": "attention_kernelbackward", "match": false
+    },
+    {
+      "why": "a name cut at the 60-char display limit ends mid-token, so only a prefix rule can match it",
+      "a": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1",
+      "b": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0ELb1ELi1EEEvPT0_i",
+      "match": true
+    },
+    {
+      "why": "one character short of the display limit is just an unrelated fragment",
+      "a": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb",
+      "b": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0ELb1ELi1EEEvPT0_i",
+      "match": false
+    },
+    {
+      "why": "real head row: the phase tag is ours, so the row still has to match the kernel it names",
+      "a": "_fwd_grouped_kernel_stage1 [sliding_attention]",
+      "b": "_fwd_grouped_kernel_stage1",
+      "match": true
+    },
+    {
+      "why": "real head row: a memcpy row and its own rocprof spelling",
+      "a": "Memcpy", "b": "Memcpy DtoD (Device -> Device)", "match": true
+    },
+    { "why": "an empty side is never evidence", "a": "", "b": "gemm_kernel", "match": false }
+  ]
+}

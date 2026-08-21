@@ -244,6 +244,20 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    e2e by MORE than the noise band. Otherwise drop it — say so.
 5. Write `EVAL_DIR/strategy.md` (human-readable plan) and return the routing.
 
+> **Every head candidate must identify a device kernel and a structured callable chain.**
+> - Copy `entity_kind` and `device_kernel` from the profiled row. Route only `gpu_kernel` rows; if a
+>   dispatcher was expanded, route its device children rather than recreating the outer aggregate.
+> - `live_call_seam` is prose context only. Never copy arrows, signatures, paths, or prose into
+>   `target_callable`.
+> - Build `seam_candidates[]` from source and the baseline server log. Each entry has an exact importable
+>   `target_callable` (`module:attr`), `role` (`outer_wrapper|dispatcher|op_seam|inner_launcher|kernel_entry`),
+>   matching `device_kernels`, `depth`, and evidence. Include every plausible callable on the live path.
+> - Keep native/JIT `kernel_entry` objects as source evidence only; replacing them can break their
+>   `.run`, `.warmup`, or cache protocols. For non-fused heads prefer the deepest safe
+>   `inner_launcher`/`op_seam`; fused heads must select the whole-operation `op_seam`.
+> - `target_callable` is only an initial hint. The Extractor may add a missing inner launcher and must
+>   prove the final choice with runtime markers; merely rejecting an outer wrapper is not discovery.
+
 Return JSON:
 ```json
 {
@@ -256,6 +270,15 @@ Return JSON:
   "head_candidates": [
     {"id": "h0", "short_name": "...", "op_kind": "gemm|attn", "pct_gpu_time": 0.0,
      "shapes": "[[1024,5120],[5120,34816]]", "dtype": "bf16", "regime": "prefill|decode|both",
+     "entity_kind": "gpu_kernel",
+     "device_kernel": "<exact GPU symbol copied from profile>",
+     "target_callable": "<exact module:attr hint selected from seam_candidates, or ''>",
+     "seam_candidates": [
+       {"target_callable": "<exact module:attr>",
+        "role": "outer_wrapper|dispatcher|op_seam|inner_launcher|kernel_entry",
+        "device_kernels": ["<exact profiled GPU symbol>"], "depth": 0,
+        "runtime_verified": false, "evidence": "source/log evidence"}
+     ],
      "transpose_b": true, "bias": false,
      "candidate_backends": ["aiter","hipblaslt","triton","ck"],
      "is_fused_kernel": false,

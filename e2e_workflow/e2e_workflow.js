@@ -235,10 +235,18 @@ function isImplausibleSpeedup(pct_gpu_time, isolated, integ) {
   return ((integ && integ.e2e_delta_pct) || 0) > ceilPct * (1 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9;
 }
 // Classify a reject reason into a fix-and-retry class ('' = terminal, not auto-correctable).
+// POSTURE IS TESTED FIRST. CORRECTNESS_REJECT_RX contains a bare `mismatch`, which used to swallow
+// the `signature_mismatch` that FIXABLE_REJECT_RX names explicitly: a seam whose signature does not
+// match the live call site was routed to the correctness corrective ("your kernel computes the wrong
+// thing on the live path, look for a data_ptr over-fit") when what it needs is the integration one
+// ("find the method the live server actually dispatches and match its call signature"). The posture
+// tokens are specific (signature/seam/engagement/capture), so testing them first cannot capture a
+// genuine output-correctness reject; and until the candidate is installed at the right seam, any
+// statement about its output is meaningless anyway.
 function rejectClass(reason) {
   const r = reason || '';
-  if (CORRECTNESS_REJECT_RX.test(r)) return 'correctness';
   if (FIXABLE_REJECT_RX.test(r)) return 'integration';
+  if (CORRECTNESS_REJECT_RX.test(r)) return 'correctness';
   return '';
 }
 // A gate 'accept'/'stack' only counts as a REAL win if the measured e2e delta is not an implausible
@@ -486,6 +494,9 @@ const EXTRACT_OP_SCHEMA = obj({
   target_callable: { type: 'string' }, // module:attr rebind seam for an authored kernel ('' if none)
   baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
   baseline_frozen: { type: 'boolean' }, // true only when baseline_callable resolves outside the task dir
+  device_kernel: { type: 'string' },
+  seam_candidates: arrObj,
+  selection_validation: { type: 'object', additionalProperties: true },
   smoke: { type: 'string' }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
@@ -514,6 +525,9 @@ const EXTRACT_SCHEMA = obj({
   candidate_bind: { type: 'object', additionalProperties: true },
   baseline_overlay: { type: 'string' },
   baseline_frozen: { type: 'boolean' }, // true only when baseline_overlay/ was seeded AND candidate_bind is declared
+  device_kernel: { type: 'string' },
+  seam_candidates: arrObj,
+  selection_validation: { type: 'object', additionalProperties: true },
   reference_io_sha256: { type: 'string' }, notes: { type: 'string' },
 }, ['editable', 'task_dir', 'unittest_smoke']);
 
@@ -729,6 +743,240 @@ async function ensureFlydslGate() {
   }
 }
 
+// A profile identity is a device symbol; the replacement target is a live Python callable. Keep the
+// two machine fields separate and require runtime evidence before bake-off or authoring.
+const CALLABLE_SPEC_RX = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
+const validCallableSpec = (s) => CALLABLE_SPEC_RX.test(String(s || '').trim());
+// parse_profile.short_name truncates display names at 60 chars; a declared name that hit the limit
+// is our own doing, so a prefix match at it is accepted rather than read as a mismatch.
+const SHORT_NAME_LIMIT = 60;
+// Balanced groups are removed innermost-first until the symbol stops changing. One greedy pass
+// spans from the FIRST opener to the LAST closer, so `k<a>(t<b>)` loses the '(' that marks the end
+// of the name, and a nested `k<pair<a,b>>` leaves the leftover delimiter behind.
+const stripBalanced = (symbol, opener, closer) => {
+  const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const rx = new RegExp(`${esc(opener)}[^${esc(opener)}${esc(closer)}]*${esc(closer)}`, 'g');
+  let text = symbol;
+  for (let previous = null; previous !== text;) {
+    previous = text;
+    text = text.replace(rx, ' ');
+  }
+  return text;
+};
+// Must stay identical to canonical_kernel_name in kernel_selection.py -- the JS gate and the Python
+// verdict compare the same two symbols, so any drift lets a kernel pass one side and fail the other.
+// Parentheses are stripped as balanced groups rather than by cutting at the first '(': ROCm spells
+// the unnamed namespace `(anonymous namespace)`, which puts a parenthesis BEFORE the kernel, so
+// cutting there collapsed every such symbol to the return type `void`, and two unrelated kernels
+// that both collapsed to `void` then certified each other. Brackets go the same way, which subsumes
+// the `[clone .1]` rule: this pipeline appends its own annotations to a kernel name
+// (`_fwd_grouped_kernel_stage1 [sliding_attention]`, `main_kernel[prefill]`), and rocprof spells
+// memory ops `Memcpy DtoD (Device -> Device)`. The return type is then dropped by name and the FIRST
+// identifier taken, as parse_profile.short_name does; taking the last whitespace token also drops
+// `void`, but on any of those annotated spellings it answers with the annotation.
+function canonicalDeviceKernel(s) {
+  const stripped = stripBalanced(stripBalanced(
+    stripBalanced(String(s || ''), '[', ']'), '<', '>'), '(', ')');
+  // Whatever opener is left never closes, so the symbol was cut off inside it -- profile artifacts
+  // store kernel names elided mid-template. The name is what precedes that opener; reading on
+  // instead lifts a fragment out of the template arguments and states it with the same confidence
+  // as a real name, which then matches the wrong kernel rather than refusing.
+  // Removing a group also leaves a gap where it stood, and an unnamed namespace sits mid-
+  // qualification: `at::native::(anonymous namespace)::CatArrayBatchedCopy` becomes
+  // `at::native:: ::CatArray...`, where the identifier probe stops at the space.
+  const cut = stripped.split(/[<([]/)[0].trim().replace(/\s*::\s*/g, '::');
+  const match = /^[\w:]+/.exec(cut.replace(/^void\s+/, ''));
+  return match ? match[0].split('::').pop().toLowerCase().replace(/[^a-z0-9_]+/g, '') : '';
+}
+// A name that hit the display limit ends mid-token, so no word boundary can follow it. Tested both
+// ways because either side may be the shortened one: heads carry a short_name while traces carry
+// the full symbol, and which is which is not fixed.
+const truncatedPrefix = (needle, haystack) =>
+  needle.length >= SHORT_NAME_LIMIT && haystack.startsWith(needle);
+// [arguments, closed] for the symbol's first `<...>`. Reading only what follows the `<` keeps this
+// independent of the return type and namespace, which one side routinely spells and the other does
+// not. `closed` is false when the symbol was cut off inside the template -- profile artifacts elide
+// long names, and only the visible part of an elided argument list can be held against anything.
+// Separators become `_` rather than vanishing, so `<128, 4, ...>` cannot read as a prefix of
+// `<128, 48, ...>`.
+function templateArguments(value) {
+  const text = String(value || ''), start = text.indexOf('<');
+  const fold = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  if (start < 0) return ['', true];
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === '<') depth++;
+    else if (text[i] === '>' && --depth === 0) return [fold(text.slice(start + 1, i)), true];
+  }
+  return [fold(text.slice(start + 1)), false];
+}
+function kernelIdentitiesMatch(a, b) {
+  const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
+  if (!x || !y) return false;
+  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)) return false;
+  // The base token deliberately drops template arguments so a bare declared name can match its
+  // decorated spelling. When BOTH sides carry them the information is present on both, and ignoring
+  // it certifies the wrong kernel: one capture here held 20 distinct kernels named
+  // at::native::vectorized_elementwise_kernel, separated only by their functor.
+  const [xa, xc] = templateArguments(a), [ya, yc] = templateArguments(b);
+  if (!xa || !ya) return true;
+  if (xc && yc) return xa === ya;
+  // An elided list still has to agree as far as both sides actually spell it out.
+  return xa.startsWith(ya) || ya.startsWith(xa);
+}
+function requiredDeviceKernel(h) {
+  if (!h || h.entity_kind !== 'gpu_kernel') return '';
+  // entity_evidence.matched_profiled_kernel is what parse_profile.py --annotate stamped on the row,
+  // so it is the profiler's own name for this entity and outranks the display short_name.
+  return String(h.device_kernel ||
+    (h.entity_evidence && h.entity_evidence.matched_profiled_kernel) ||
+    h.short_name || h.name || '').trim();
+}
+const candidateSpec = (c) =>
+  String((c && (c.target_callable || c.callable || c.spec)) || '').trim();
+// A declared depth is a STRUCTURAL claim about the call chain. It orders candidates before any
+// runtime evidence exists, so a value that is absent or not a finite number is unusable: `Number()`
+// turns it into NaN, every comparison against it is silently false, and a genuinely deeper candidate
+// stops being able to outrank anything. Refuse the candidate instead of ranking it as depth 0.
+const candidateDepth = (c) => {
+  const depth = Number(c && c.depth);
+  return Number.isFinite(depth) ? depth : null;
+};
+function selectionCandidatesForHead(h, ext) {
+  const required = requiredDeviceKernel(h);
+  const fused = !!(h && (h.is_fused_kernel === true || h.op_kind === 'moe'));
+  const bySpec = new Map();
+  for (const candidate of [
+    ...((h && h.seam_candidates) || []),
+    ...((ext && ext.seam_candidates) || []),
+  ]) {
+    const spec = candidateSpec(candidate);
+    // Architect classifications win for an existing spec; Extractor may append missing inner launchers.
+    if (spec && !bySpec.has(spec)) bySpec.set(spec, candidate);
+  }
+  return Array.from(bySpec.values()).filter((candidate) => {
+    if (!candidate || typeof candidate !== 'object' || !validCallableSpec(candidateSpec(candidate)))
+      return false;
+    const role = String(candidate.role || '').toLowerCase();
+    if (role === 'kernel_entry') return false; // native/JIT object identity is unsafe to monkeypatch
+    if (candidateDepth(candidate) === null) return false;
+    const kernels = Array.isArray(candidate.device_kernels) ? candidate.device_kernels : [];
+    if (required && !kernels.some((kernel) => kernelIdentitiesMatch(required, kernel))) return false;
+    return (fused
+      ? ['outer_wrapper', 'dispatcher', 'op_seam']
+      : ['outer_wrapper', 'dispatcher', 'op_seam', 'inner_launcher']).includes(role);
+  });
+}
+function prepareHeadSelection(h) {
+  if (!h || typeof h !== 'object') return h;
+  const out = { ...h };
+  const required = requiredDeviceKernel(out);
+  if (required && !out.device_kernel) out.device_kernel = required;
+  // live_call_seam and malformed target_callable values are prose, never machine targets.
+  if (!validCallableSpec(out.target_callable)) out.target_callable = '';
+  const fused = out.is_fused_kernel === true || out.op_kind === 'moe';
+  const deployable = selectionCandidatesForHead(out).filter((candidate) => {
+    const role = String(candidate.role || '').toLowerCase();
+    return fused ? role === 'op_seam' : ['inner_launcher', 'op_seam'].includes(role);
+  });
+  deployable.sort((a, b) => candidateDepth(b) - candidateDepth(a));
+  out.target_callable = deployable.length ? candidateSpec(deployable[0]) : '';
+  out.selection_status = out.target_callable
+    ? 'candidate_selected_needs_runtime_verification'
+    : 'extractor_must_discover_live_launcher';
+  return out;
+}
+function kernelSelectionVerified(h, ext) {
+  const required = requiredDeviceKernel(h);
+  if (!required) return { ok: true, why: 'not a profiled GPU-head extraction' };
+  const target = String((ext && ext.target_callable) || '').trim();
+  if (!validCallableSpec(target))
+    return { ok: false, why: `target_callable '${target}' is not an exact module:attr spec` };
+  const verdict = ext && ext.selection_validation;
+  if (!verdict || verdict.contract !== 'kernel_selection')
+    return { ok: false, why: 'kernel_selection.py verdict is missing' };
+  if (verdict.ok !== true)
+    return { ok: false,
+      why: `kernel_selection.py failed: ${(verdict.failed || []).join(', ') || 'unknown'}` };
+  if (String(verdict.target_callable || '').trim() !== target)
+    return { ok: false,
+      why: `selection verdict certifies '${verdict.target_callable || ''}', not '${target}'` };
+  if (!kernelIdentitiesMatch(required, verdict.device_kernel || ext.device_kernel))
+    return { ok: false,
+      why: `selection verdict certifies '${verdict.device_kernel || ext.device_kernel || ''}', ` +
+        `not profiled kernel '${required}'` };
+  if (Number(verdict.total_calls_observed || 0) <= 0 ||
+      Number(verdict.target_marker_calls || 0) <= 0 ||
+      Number(verdict.matched_kernel_calls || 0) <= 0)
+    return { ok: false, why: 'selection verdict lacks positive call/marker/kernel evidence' };
+  const candidates = selectionCandidatesForHead(h, ext);
+  if (!candidates.length)
+    return { ok: false, why: 'no relevant structured seam_candidates were returned' };
+  const tested = new Set((verdict.candidate_targets_tested || []).map((value) => String(value || '').trim()));
+  const omitted = candidates.map(candidateSpec).filter((spec) => !tested.has(spec));
+  if (omitted.length)
+    return { ok: false, why: `selection probe omitted candidate(s): ${omitted.join(', ')}` };
+  const selected = candidates.find((candidate) => candidateSpec(candidate) === target);
+  const selectedRole = String((selected && selected.role) || '').toLowerCase();
+  const fused = h.is_fused_kernel === true || h.op_kind === 'moe';
+  if (!selected || (fused ? selectedRole !== 'op_seam'
+    : !['inner_launcher', 'op_seam'].includes(selectedRole)))
+    return { ok: false,
+      why: fused
+        ? `fused head must select the whole-operation op_seam, got '${selectedRole || 'unknown'}'`
+        : `selected target role '${selectedRole || 'unknown'}' is not a deployable inner/op seam` };
+  // "Deepest" is settled by the profiler's OBSERVED host-span nesting (kernel_selection.py computes
+  // deeper_live_candidates from it), not by the declared `depth`. The declared integer is a claim by
+  // the same agent whose choice is under review, and an appended candidate carrying a large depth
+  // would otherwise outrank a genuinely deeper one. The structural claim is still checked, but only
+  // as an ADDITIONAL way to fail: it can never buy a pass that the observed nesting did not grant.
+  const observedDeeper = (verdict.deeper_live_candidates || [])
+    .map((value) => String(value || '').trim()).filter(Boolean);
+  if (observedDeeper.length)
+    return { ok: false,
+      why: `deeper live candidate(s) observed across calls/ranks: ${observedDeeper.join(', ')}` };
+  const live = new Set((verdict.live_candidate_targets || []).map((value) => String(value || '').trim()));
+  const selectedDepth = candidateDepth(selected);
+  const deeper = candidates.filter((candidate) =>
+    candidateSpec(candidate) !== target && live.has(candidateSpec(candidate)) &&
+    candidateDepth(candidate) > selectedDepth);
+  if (deeper.length)
+    return { ok: false,
+      why: `declared-deeper live candidate(s): ${deeper.map(candidateSpec).join(', ')}` };
+  if (verdict.deepest_verified !== true)
+    return { ok: false, why: 'selected callable is not machine-verified as deepest' };
+  return { ok: true, why: `${target} launches profiled kernel ${required}` };
+}
+
+const PRE_FLAGGED_HEADS = [];
+function admitHeads(queue, stage) {
+  const admitted = [];
+  for (const head of (queue || []).filter(Boolean)) {
+    const label = head.short_name || head.name || '(unnamed)';
+    if (head.entity_kind !== 'gpu_kernel') {
+      log(`  ⚠️ FLAG ${label}: entity_kind=${head.entity_kind || 'missing'}; ` +
+        `the head track requires a profiler-confirmed gpu_kernel (${stage}).`);
+      PRE_FLAGGED_HEADS.push({ short_name: label,
+        pct_gpu_time: head.pct_gpu_time, stage, gate: 'wrong_head_granularity',
+        reason: `entity_kind=${head.entity_kind || 'missing'}; gpu_kernel required` });
+      continue;
+    }
+    // A gpu_kernel head with NO device identity at all makes requiredDeviceKernel return '', and
+    // kernelSelectionVerified then passes it as "not a profiled GPU-head extraction". That vacuous
+    // pass is the whole contract switched off for this head, so refuse it at admission instead.
+    if (!requiredDeviceKernel(head)) {
+      log(`  ⚠️ FLAG ${label}: entity_kind=gpu_kernel but no device_kernel/short_name/name; ` +
+        `there is no profiled symbol to verify a seam against (${stage}).`);
+      PRE_FLAGGED_HEADS.push({ short_name: label,
+        pct_gpu_time: head.pct_gpu_time, stage, gate: 'missing_kernel_identity',
+        reason: 'gpu_kernel head carries no device_kernel/short_name/name' });
+      continue;
+    }
+    admitted.push(prepareHeadSelection(head));
+  }
+  return admitted;
+}
+
 // A FROZEN baseline is resolvable when the extractor seeded baseline_overlay/ + declared
 // meta.candidate_bind (kernel track), or set an importable meta.baseline_callable (op track).
 // That is the language-independent speedup denominator.
@@ -747,21 +995,50 @@ const hasFrozenBaseline = (ext) =>
 // site (deep, opt-A, milestone/head extract_op, and the non-op milestone extract).
 async function extractWithBaseline(role, phase, intro, inputs, opts) {
   const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
+  const head = (inputs && inputs.KERNEL) || {};
   let ext = await safeAgent(roleAgent(role, phase, intro, inputs), opts);
   let tries = 0;
-  while (smokeOk(ext) && !hasFrozenBaseline(ext) && tries < BASELINE_EXTRACT_RETRIES) {
+  const attemptedTargets = [];
+  const complete = (e) => hasFrozenBaseline(e) && kernelSelectionVerified(head, e).ok;
+  while (smokeOk(ext) && !complete(ext) && tries < BASELINE_EXTRACT_RETRIES) {
     tries++;
-    log(`  ${(opts && opts.label) || role}: extraction froze NO baseline ` +
-      `(baseline_overlay/ + meta.candidate_bind) — the speedup denominator would fall back to the ` +
-      `candidate's own scaffold (fake-win). RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
+    const selection = kernelSelectionVerified(head, ext);
+    const needBaseline = !hasFrozenBaseline(ext);
+    const priorTarget = String((ext && ext.target_callable) || '').trim();
+    if (priorTarget && !attemptedTargets.includes(priorTarget)) attemptedTargets.push(priorTarget);
+    const selectionCorrective = selection.ok ? '' :
+      ` PRIOR ATTEMPT DID NOT SELECT THE PROFILED GPU KERNEL: ${selection.why}. ` +
+      'Treat KERNEL.live_call_seam as prose only. Merge KERNEL.seam_candidates with any missing inner ' +
+      'launcher found from source/runtime inspection; preserve existing candidate classifications. ' +
+      'Install safe markers for every relevant candidate, never native/JIT kernel_entry objects. Run ' +
+      'kernel_selection.py over every process-local capture and all root-call traces. Return its JSON ' +
+      'verbatim as selection_validation. Select the deepest live inner_launcher/op_seam across all ' +
+      'calls/ranks; a fused head must select the whole-op op_seam. Rejecting the previous outer wrapper ' +
+      'is not success. Do not return any ATTEMPTED_TARGET_CALLABLES value again.';
+    const baselineCorrective = needBaseline ?
+      ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. You MUST seed baseline_overlay/ from ' +
+      'CURRENT_OVERLAY (the live serving stack = the speedup denominator), declare meta.candidate_bind ' +
+      '(the ONE overlay entry built from kernel_src/), prove both legs differ via h.assert_legs_differ, ' +
+      'then return baseline_frozen:true. An extraction with no frozen baseline is INVALID and will be discarded.' : '';
+    log(`  ${(opts && opts.label) || role}: extraction contract incomplete ` +
+      `(${selection.ok ? 'kernel selected' : selection.why}; ` +
+      `${needBaseline ? 'baseline missing (baseline_overlay/ + meta.candidate_bind)' : 'baseline frozen'}). ` +
+      `RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
     ext = await safeAgent(
-      roleAgent(role, phase,
-        intro + ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. You MUST seed baseline_overlay/ from ' +
-        'CURRENT_OVERLAY (the live serving stack = the speedup denominator), declare meta.candidate_bind ' +
-        '(the ONE overlay entry built from kernel_src/), prove both legs differ via h.assert_legs_differ, ' +
-        'then return baseline_frozen:true. An extraction with no frozen baseline is INVALID and will be discarded.',
-        inputs),
+      roleAgent(role, phase, intro + selectionCorrective + baselineCorrective, {
+        ...(inputs || {}),
+        PRIOR_TARGET_CALLABLE: priorTarget,
+        PRIOR_SELECTION_VALIDATION: (ext && ext.selection_validation) || {},
+        ATTEMPTED_TARGET_CALLABLES: attemptedTargets.slice(),
+      }),
       opts);
+  }
+  const finalSelection = kernelSelectionVerified(head, ext);
+  if (smokeOk(ext) && !finalSelection.ok) {
+    log(`  ${(opts && opts.label) || role}: kernel selection still unverified after ` +
+      `${BASELINE_EXTRACT_RETRIES} re-extractions — ABORTING (${finalSelection.why}).`);
+    return { ...ext, smoke: 'fail', unittest_smoke: 'fail', selection_failed: true,
+      notes: `kernel selection failed: ${finalSelection.why} — ${ext.notes || ''}` };
   }
   if (smokeOk(ext) && !hasFrozenBaseline(ext)) {
     log(`  ${(opts && opts.label) || role}: STILL no frozen baseline after ${BASELINE_EXTRACT_RETRIES} ` +
@@ -1137,8 +1414,7 @@ if (want('setup')) {
   // OP-IDENTITY GUARD — a fused-MoE / grouped-expert GEMM must be optimized AS the fused op at its live
   // dispatcher seam, never decomposed into standalone dense GEMMs (a dense candidate has no live call site
   // → no_rebind_seam). So force op_kind='moe' (the grouped-GEMM branch; gemmSynthFor keys on this to keep
-  // dense synth OFF) and preserve the live seam as target_callable, so ANY lever (backend-swap / tune /
-  // author-fused) binds. The head is never SKIPPED — editability is irrelevant, since a non-editable fused
+  // dense synth OFF). The head is never SKIPPED — editability is irrelevant, since a non-editable fused
   // kernel is still backend-swapped at its (editable) dispatcher. GENERIC: detects via the Architect's
   // is_fused_kernel OR the profile class/name; never keys on a backend name.
   const _isFusedOp = (c) => (c && c.is_fused_kernel === true) ||
@@ -1148,9 +1424,9 @@ if (want('setup')) {
   for (const c of headQueue) {
     if (!_isFusedOp(c)) continue;
     c.op_kind = 'moe';                                                                // grouped-GEMM branch (gemmSynthFor → no dense synth)
-    if (!c.target_callable && c.live_call_seam) c.target_callable = c.live_call_seam;  // bind at the live seam
     _fusedTagged++;
   }
+  headQueue = admitHeads(headQueue, 'strategize');
   if (_fusedTagged) log(`[op-identity] ${_fusedTagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
   log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
   // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
@@ -1167,7 +1443,7 @@ if (want('setup')) {
   profile = { profile_topN_json: ST.profile_topn_json || '' };
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
-  headQueue = ST.headQueue || [];
+  headQueue = admitHeads(ST.headQueue || [], 'resume');
   log(`Loaded carried state: EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT}, flags='${curFlags}', env='${curEnv}', ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
 }
 
@@ -1206,7 +1482,8 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       }),
       { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
     if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
-    if (restrat && restrat.head_candidates) headQueue = restrat.head_candidates.slice();
+    if (restrat && restrat.head_candidates)
+      headQueue = admitHeads(restrat.head_candidates.slice(), 're-strategize');
     // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
     await ensureFlydslGate();
   } else {
@@ -1229,7 +1506,7 @@ const acceptedHeads = (ST.accepted_heads || []).slice();
 // so Finalize can finish the best one's A/B (Fix C) and so a real isolated win
 // is surfaced (return.pending_integrations) instead of being silently dropped.
 const pendingIntegrations = (ST.pending_integrations || []).slice();
-const flaggedHeads = (ST.flagged_heads || []).slice();   // dominant heads that could NOT be optimized (loudly surfaced, never silently skipped)
+const flaggedHeads = (ST.flagged_heads || []).concat(PRE_FLAGGED_HEADS);   // heads that could NOT be optimized (loudly surfaced, never silently skipped)
 let headDispatched = 0;
 const history = ST.history || { insights: [], ledger: [], milestones: [], bottleneck_now: '', suggest_next: '' };
 
