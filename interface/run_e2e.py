@@ -268,15 +268,11 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # budget-unaware (byte-identical to a direct, non-interface invocation).
     if timeout_s is not None and timeout_s > 0:
         ps_args["time_budget_s"] = int(timeout_s)
-    # How that budget is split at the end. Defaults live in the JS (60min reserve
-    # capped at 20% of the budget, 10min re-curate floor); these let an operator
-    # widen the reserve per run without editing either file -- e.g.
-    # GEAK_FINAL_RESERVE_S=5400 for 90min on a model known to write slowly.
-    for env_key, arg_key in (("GEAK_FINAL_RESERVE_S", "final_reserve_s"),
-                             ("GEAK_FINAL_RECURATE_MIN_S", "final_recurate_min_s")):
-        v = _int_or_none(os.environ.get(env_key), env_key)
-        if v is not None:
-            ps_args[arg_key] = v
+    # Final-phase reserve. Default lives in the JS (50min, capped at 20% of the budget);
+    # this lets an operator widen it per run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
+    final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
+    if final_reserve_s is not None:
+        ps_args["final_reserve_s"] = final_reserve_s
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
     # Serving-launch fidelity (see Hyperloom handoff builder / #805): forward the
@@ -3835,12 +3831,10 @@ def _int_or_none(raw: str | None, what: str) -> int | None:
 def _resolve_timeout_s(argv: list[str]) -> tuple[list[str], set[str], int]:
     """Split argv into positionals + flags, and resolve the wall-clock budget.
 
-    `--timeout-s N` is the wall-clock at which the orchestrator kills us. Its
-    VALUE is not a "--" token, so it used to land in an ignored third positional
-    and we paced against GEAK_E2E_TIMEOUT_S's 12h default instead — a caller
-    killing at 8h tore the run down mid-optimization (Hyperloom #1202). Flag and
-    env var both name a REAL kill, so the min() wins; the default applies only
-    when neither is stated.
+    `--timeout-s N` is the wall-clock kill time. Its VALUE is not a "--" token, so it
+    used to land in an ignored positional and we paced against GEAK_E2E_TIMEOUT_S's 12h
+    default instead (Hyperloom #1202). Flag and env both name a REAL kill, so min() wins;
+    the default applies only when neither is stated.
     """
     positional: list[str] = []
     flags: set[str] = set()
