@@ -1,0 +1,110 @@
+# 03 — decode: fewer, fatter attention segments on gfx950 at large batch
+#
+# Repo:    /sgl-workspace/aiter          <-- NOT the sglang tree (patches 01/02 are)
+# Base:    aiter @ d9e5ef7ce08ee7045d583aed768cff41aa9210fe
+#          (ROCm 7.2.0, torch 2.9.1, triton 3.6.0, MI355X / gfx950)
+# File:    aiter/ops/triton/attention/unified_attention.py
+# Apply:   cd /sgl-workspace/aiter && git apply /work/patches/03-decode-attn-segments.patch
+# Revert:  cd /sgl-workspace/aiter && git checkout -- aiter/ops/triton/attention/unified_attention.py
+#
+# Pristine base: aiter is an editable git checkout at the sha above and the file
+#          was verified clean (`git status --porcelain` empty) before editing, so
+#          this diff is against upstream and not against earlier experiment edits.
+#          The kernel-level numbers below were taken with the patch `git stash`ed,
+#          i.e. against the real pristine select_3d_config rather than a copy of it.
+#
+# What:    select_3d_config's generic occupancy formula splits each sequence into
+#          16 segments here -- ceil(num_sms*4*occ / (bs*kv_heads)) = ceil(4096/256)
+#          at bs=64 with 4 local kv heads. 256 CUs are already saturated at 4
+#          segments (1024 workgroups, 4/CU); the other 12 buy no parallelism and
+#          cost a wider reduce_segments pass and worse L2 reuse on the KV stream.
+#          Sets 4 segments / 4 warps / 3 stages for that case only. The function
+#          already carries arch-specific blocks in the same place (gfx1151, gfx12);
+#          this is one more.
+#
+# Scope:   guarded on gfx950 + bf16 KV + head_size <= 64 + TILE_SIZE 64 +
+#          not shuffled + num_segments >= 8 + num_2d_prgms*4 >= 2*num_sms. The last
+#          term is the one that matters: it only fires when 4 segments still leave
+#          >= 2 workgroups per CU, so small batches keep the extra splits they need
+#          to fill the GPU. Verified: bs 64 and 32 take the tuning, bs 8 does not.
+#
+# Measured, kernel level (analysis/bench_unified_attn.py, 318 candidates each held
+#          to a 2% correctness gate against the shipped default's output, 5-7
+#          interleaved rounds; KV footprint ~700 MB against a 256 MB MALL and a
+#          shuffled page table so no replay walks the same physical order):
+#            bs 64 (steady state) : 108.60 us -> 100.44 us  (1.081x)
+#            bs 32 (request tail) :  58.08 us ->  54.32 us  (1.069x)
+#          Both boundary cases checked (analysis/check_decode_cfg_bs.py) because the
+#          guard admits bs >= 32 but the sweep only covered bs = 64. No regression.
+#          TILE_SIZE 128/256 were in the sweep -- reachable on gfx950 via the
+#          kernel's generic gather branch even though select_3d_config clamps to 64
+#          -- and did not help.
+#
+# Measured, end to end (analysis/ab_restart.sh, 16 order-balanced pairs = 32 server
+#          restarts, one bench round per fresh server; batches ab3 fwd, ab3b rev,
+#          ab3c fwd, ab3d rev; results/ab3{,b,c,d}{base,cand}_*):
+#            base (01+02)      4520.931 tok/s   tpot 11.121 ms   ttft ~3100 ms
+#            cand (01+02+03)   4554.813 tok/s   tpot 11.037 ms   ttft ~3096 ms
+#            delta             +0.750%          -0.75% tpot      flat
+#          That is the 14 clean pairs. Two of the 32 restarts came up sick (4428.7
+#          and 4351.4 tok/s, TTFT 200-330 ms high) -- one on each arm, flagged by
+#          TTFT and so independently of throughput rank. Raw all-16 delta is
+#          +0.818% (means) / +0.748% (medians) / +0.765% (10% trimmed).
+#          Criterion: paired, t = 7.08 on the clean pairs (paired stdev 0.397%);
+#          15/16 pairs favour the candidate, two-sided sign test p = 0.00052.
+#          Restart-to-restart noise floor measured for this stack is 0.501%, so the
+#          effect clears it by 1.5x. It does NOT satisfy the stricter
+#          "disjoint distributions" form -- the two sick instances overlap the arms
+#          by construction -- which is why the sign test is the stated criterion.
+#          Order effect checked and absent: base-first pairs +0.780%, candidate-
+#          first pairs +0.721%.
+#
+# Stacking: measured on top of 01 and 02, which are the banked prefill wins; the
+#          base arm of the A/B already had both applied. 03 is decode-side and
+#          independent of them in mechanism, but the number above is the marginal
+#          gain over 01+02, not over the bare baseline. Full stack 01+02+03 is
+#          4554.813 tok/s against the local baseline of 3938.109 = +15.66%.
+#
+# Accuracy: gsm8k 5-shot, lm-eval, full stack 01+02+03
+#          (eval_results/patch010203_20260820_132842):
+#            strict-match   0.962851 +- 0.005210   (baseline 0.962851)
+#            flexible       0.962092               (baseline 0.962851)
+#          Gate is baseline - 1 sigma = 0.95764. Strict match is numerically
+#          identical to the baseline run. PASS.
+#
+diff --git a/aiter/ops/triton/attention/unified_attention.py b/aiter/ops/triton/attention/unified_attention.py
+index 77db5dc94..2a2a6d032 100644
+--- a/aiter/ops/triton/attention/unified_attention.py
++++ b/aiter/ops/triton/attention/unified_attention.py
+@@ -239,6 +239,31 @@ def select_3d_config(
+     if DEVICE_ARCH == "gfx1151":
+         attn_warps = 8
+ 
++    # gfx950 (CDNA4) bf16 decode, head_size <= 64, page/tile 64, large batch: the
++    # generic occupancy formula splits each sequence into 16 segments
++    # (ceil(num_sms*4*occ / (bs*kv_heads)) = ceil(4096/256) at bs=64, 4 kv heads).
++    # That is more splitting than this arch needs: 256 CUs are already saturated at
++    # 4 segments (1024 workgroups, 4 per CU), and the extra 12 buy nothing while
++    # costing a wider reduce_segments pass and worse L2 reuse on the KV stream.
++    # Fewer, fatter segments with 4 warps and a third pipeline stage measure better.
++    # Swept 318 configs on MI355X at the served shape (bs 64, 32 q / 4 kv heads,
++    # head_size 64, page 64, seqlen 8704, bf16 KV, sinks, shuffled page table):
++    # 108.32 us -> 99.62 us (1.087x). Guarded so only the saturated large-batch
++    # case is affected -- small batches still need the extra splits to fill the GPU
++    # and keep the default.
++    if (
++        DEVICE_ARCH == "gfx950"
++        and not shuffled_kv_cache
++        and kv_cache_dtype == torch.bfloat16
++        and head_size <= 64
++        and TILE_SIZE == 64
++        and num_segments >= 8
++        and num_2d_prgms * 4 >= 2 * get_num_sms()
++    ):
++        num_segments = 4
++        attn_warps = 4
++        attn_stages = 3
++
+     attn_config = {
+         "TILE_SIZE": TILE_SIZE,
+         "NUM_SEGMENTS_PER_SEQ": num_segments,

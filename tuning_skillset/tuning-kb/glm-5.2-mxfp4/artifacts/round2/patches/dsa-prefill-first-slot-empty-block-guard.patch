@@ -1,0 +1,260 @@
+# Switch the DSA prefill empty-index-block guard from an any-valid reduce to a single
+# first-slot test, and add an opt-in assertion for the invariant that makes it correct.
+#
+# SUPERSEDES rejected/04-dsa-prefill-first-slot-guard.patch, which is the same kernel change
+# measured and rejected in round 1 on a correctness argument. Round 2 settled that argument
+# empirically (see below) and adopts it.
+#
+# base:  applies ON TOP OF 01-dsa-prefill-skip-empty-index-blocks.patch (and is developed on
+#        top of 01+02+03). Stacked, not independent: it edits the guard that 01 introduces and
+#        will not apply to stock sglang.
+#        Pristine chain, no git metadata needed:
+#          patches/base/tilelang_kernel.py  (clean at sglang 2948168546)
+#            -> 01 -> patches/applied/tilelang_kernel.py -> this patch
+#          patches/base/dsa_backend.py      (clean at sglang 2948168546)
+#            -> 01+02 -> patches/applied/dsa_backend.py -> this patch
+#        The exact patched files are also kept verbatim at patches/arms/fs/, so a diff can be
+#        produced without applying anything.
+#
+# apply: cd /sgl-workspace/sglang
+#        git apply -p1 01-dsa-prefill-skip-empty-index-blocks.patch
+#        git apply -p1 02-dsa-prefill-fused-q-fp8-prep.patch
+#        git apply -p1 03-mla-absorb-drop-unit-weight-scale.patch
+#        git apply -p1 dsa-prefill-first-slot-empty-block-guard.patch
+#        (or: cp patches/arms/fs/{tilelang_kernel.py,dsa_backend.py} over the two files;
+#         analysis/set_arm.sh fs does exactly that)
+#
+# ---------------------------------------------------------------------------------------
+# MEASUREMENT -- read this before quoting a number for it.
+#
+#   arm    sessions x runs   pooled tok/s   session means
+#   r1ref  3 x 3             1508.187       1507.36 / 1507.76 / 1509.44
+#   fs     5 x 3             1512.166       1511.11 / 1511.51 / 1510.46 / 1513.91 / 1513.84
+#
+#   delta +0.264%   (1508.187 -> 1512.166)
+#
+# Interleaved r1ref/fs/r1ref/fs/r1ref/fs, one fresh server per session, three benches per
+# server, unmodified scripts/run_bench.sh at 192 prompts / concurrency 64 / ISL 8192 / OSL
+# 1024. The two extra fs sessions (s8, s10) are the fs legs of the lead-2 A/B, same arm and
+# same boot, pooled in here.
+#
+# THIS IS NOT CLAIMED AS A THROUGHPUT WIN. The delta is +0.264%, and the run-level
+# peak-to-peak noise on this boot is 0.402% (r1ref) / 0.718% (fs) -- so the gain is smaller
+# than the noise floor by the same peak-to-peak measure round 1 used to set its 0.39% floor.
+# Individual runs from the two arms overlap.
+#
+# Note against my own case: adding s8/s10 moved the point estimate UP (+0.188% -> +0.264%)
+# and the fs run-level p2p up as well (0.410% -> 0.718%). More data made the estimate more
+# favourable and the bar it has to clear worse, and it still does not clear it. It is also
+# partly boot drift: fs drifted ~0.2% upward over four hours (FINDINGS.md section 3), and s8
+# and s10 are the two late sessions.
+#
+# What CAN be said, and is the reason it is adopted rather than shelved:
+#   * the sign is consistent across all five independent restarts of fs;
+#   * every fs session mean (min 1510.46) exceeds every r1ref session mean (max 1509.44);
+#   * on session means -- the independent unit, since runs inside one server are correlated --
+#     Welch gives t = 4.15, df = 5.7, diff = +3.98 tok/s, SE = 0.96 over all five fs sessions
+#     (t = 4.03, df = 2.9 on the original three-vs-three);
+#   * the change is strictly less work: the emitted kernel loses a cross-lane AllReduce and its
+#     LDS workspace and gains a single scalar load. There is no mechanism by which it is slower.
+# Round 1 extrapolated +0.64% from isolated kernel timings and explicitly did not measure it
+# end to end. That extrapolation was optimistic; +0.264% is what it is worth here.
+#
+# accuracy: gsm8k 5-shot strict-match = 0.9704321455648218 +- 0.0046658931342207464
+#           (scripts/run_eval.sh unmodified, 1319 problems, eval_results/fs_gate_20260820_202453).
+#           That is identical to round 1's reference 0.970432 to every digit recorded.
+#           Reference 0.970432 +- 0.004666, and the gate has ~+-0.005 of its own run-to-run
+#           noise (round 1 measured this using a bit-identical patch), so this passes the gate;
+#           it is not evidence that accuracy improved or degraded.
+#
+# ---------------------------------------------------------------------------------------
+# WHY IT IS CORRECT, AND THE CONFIGURATION THAT BOUNDS THAT CLAIM
+#
+# The first-slot test decides a 64-wide index block from slot 0 alone. That is equivalent to
+# the reduce only if the -1 padding is a contiguous SUFFIX of each index row. Round 1 could not
+# close that statically across the four topk backends and rejected the change. Round 2 measured
+# it against live tensors instead, at ISL 8192, over one full benchmark:
+#
+#   rows checked            126,861,936
+#   64-wide blocks checked  4,059,581,952
+#   blocks skipped          491,606,928  (12.11%, reproducing round 1's independent 12.1%)
+#   first_skips == reduce_skips                     exactly equal
+#   blocks where slot 0 is -1 but the block has a real key        0
+#   positions anywhere where a -1 is followed by a valid slot     0
+#   rows that are PARTIALLY padded  31,700,466 (24.99%)  <- the discriminating case
+#
+# The last line is the one that makes this evidence rather than an assert that did not fire:
+# a quarter of all rows straddle the padding boundary.
+#
+# Reachability. dsa_topk_backend is a SERVER ARGUMENT and the frozen launcher does not pass it,
+# so it defaults to 'sgl-kernel'. The probe confirmed by direct observation that exactly one
+# producer runs at prefill: sgl_kernel.fast_topk_transform_fused. The torch and flashinfer
+# backends are not reachable without changing the launch configuration.
+#
+# AND THE INVARIANT IS NOT UNIVERSAL. _topk_unfused in dsa_topk_backend.py masks -inf scores to
+# -1 in place, after the top-k, without re-sorting:
+#     topk_local_indices = topk_local_indices.masked_fill(topk_scores == float("-inf"), -1)
+# The torch backend survives only because torch.topk defaults to sorted=True descending, which
+# pushes -inf to the tail. The flashinfer backend passes sorted=False, so the -1s land in
+# arbitrary positions -- e.g. [-1, 0, -1, -1, -1, 1, 2, -1], where slot 0 is -1 while slots 5
+# and 6 hold real pages. Under that backend this guard silently drops live KV keys.
+#
+# Hence the second half of this patch: SGLANG_DSA_ASSERT_TOPK_SUFFIX=1 (default OFF) checks the
+# invariant and raises, naming the offending row. Cost when off is one predicted branch on a
+# module-level constant per prefill layer call (~8k times per benchmark, ~0.25 ms). The
+# assertion was verified to fire on scattered -1 and to stay silent on suffix-padded and
+# all-padding rows.
+#
+# Decode is unaffected: skip_empty is only enabled at q.shape[0] >= 1024, and the largest
+# decode query-token count observed over 12,168 decode calls at this workload is 512, so the
+# guard is never compiled into the decode kernel. Round 1's prefill-only dispatch from patch 01
+# is load-bearing and must stay -- the first-slot guard still costs ~4% at decode.
+#
+# ENGAGEMENT (the changed kernel is the one that runs). TileLang JIT-caches compiled kernels on
+# disk, so this was verified rather than assumed: one new cache entry appeared the moment the
+# patched server first ran a prefill chunk, and its generated HIP source contains
+#     bool guard = (0 <= indices[(blockIdx.x * 2048) + (k_i * 64)]);
+# with no any_valid symbol and only the two softmax AllReduces, against three AllReduces and an
+# `int any_valid[1]` in every cached reduce-guard build of the same kernel signature.
+# ---------------------------------------------------------------------------------------
+--- a/python/sglang/kernels/ops/attention/dsa/tilelang_kernel.py
++++ b/python/sglang/kernels/ops/attention/dsa/tilelang_kernel.py
+@@ -1077,6 +1077,7 @@
+     inner_iter=1,
+     threads=256,
+     skip_empty=False,
++    skip_mode="reduce",
+ ):
+     assert d_v == 512, f"only support d_v=512"
+     assert (
+@@ -1198,7 +1199,7 @@
+                     valid = idx >= 0
+                     page_idx_shared[bi_i] = T.if_then_else(valid, idx, 0)
+                     mask[bi_i] = valid
+-                    if skip_empty:
++                    if skip_empty and skip_mode == "reduce":
+                         valid_i32[0, bi_i] = T.if_then_else(valid, 1, 0)
+ 
+                 # Skip index blocks that are entirely -1 padding.
+@@ -1231,11 +1232,51 @@
+                 # because at decode no block is ever all-padding (every sequence is longer
+                 # than topk), the guard never fires, and it costs a measured 8%. See
+                 # tilelang_sparse_fwd for the prefill-only dispatch.
+-                if skip_empty:
++                if skip_empty and skip_mode == "reduce":
+                     T.reduce_max(valid_i32, any_valid, dim=1, clear=True)
+                 # Block-uniform, so the __syncthreads inside T.copy/T.gemm below stay
+                 # collective across the whole block.
+-                guard = (any_valid[0] > 0) if skip_empty else True
++                #
++                # skip_mode selects how the predicate is computed:
++                #
++                #   "reduce" -- OR the per-lane validity across the block. Assumes nothing
++                #     about how the -1s are arranged, but costs a cross-lane AllReduce plus
++                #     its LDS workspace. Measured 1.039x on the prefill shape.
++                #
++                #   "first" -- test only indices[..., topk_block_i * BI]. A single scalar
++                #     load, already block-uniform, no reduce and no extra LDS. Measured
++                #     1.067x.
++                #
++                #     Correct ONLY because the -1 padding is a contiguous SUFFIX of each
++                #     index row. That is a property of the top-k producer, not of this
++                #     file, so it was verified against live tensors rather than by reading
++                #     code: over one full ISL-8192 benchmark, 4,059,581,952 index blocks
++                #     across 126,861,936 rows (24.99% of them partially padded, i.e. the
++                #     discriminating case) gave 0 blocks where slot 0 is -1 but the block
++                #     still holds a real key, and 0 positions anywhere where a -1 is
++                #     followed by a valid slot. "first" skipped exactly the same
++                #     491,606,928 blocks as "reduce".
++                #
++                #     THE INVARIANT IS CONFIGURATION-DEPENDENT. It was verified for
++                #     --dsa-topk-backend sgl-kernel, whose fused transform
++                #     (fast_topk_transform_fused) is the only producer reachable there.
++                #     It is NOT safe in general: --dsa-topk-backend flashinfer routes
++                #     through _topk_unfused in dsa_topk_backend.py, which calls
++                #     flashinfer.top_k(..., sorted=False) and then masks -inf scores to -1
++                #     in place -- with an unsorted top-k the -1s land in arbitrary
++                #     positions and this guard silently drops real KV keys. (The torch
++                #     backend survives only because torch.topk defaults to sorted=True
++                #     descending, which pushes -inf to the tail.)
++                #
++                #     Hence: this is an explicit named choice, it is not the default, and
++                #     SGLANG_DSA_ASSERT_TOPK_SUFFIX=1 turns the silent failure into a loud
++                #     one for anyone running a configuration this was not verified against.
++                if not skip_empty:
++                    guard = True
++                elif skip_mode == "first":
++                    guard = indices[b_i, s_i, g_i, topk_block_i * BI] >= 0
++                else:
++                    guard = any_valid[0] > 0
+                 if guard:
+                     for bi_i, j in T.Parallel(BI, group_size):
+                         page = page_idx_shared[bi_i]
+@@ -1404,6 +1445,7 @@
+                 inner_iter=inner_iter,
+                 threads=threads,
+                 skip_empty=q.shape[0] >= _SKIP_EMPTY_MIN_TOKENS,
++                skip_mode="first",
+             )
+         else:
+             if _is_gfx95_supported:
+--- a/python/sglang/srt/layers/attention/dsa_backend.py
++++ b/python/sglang/srt/layers/attention/dsa_backend.py
+@@ -86,6 +86,48 @@
+ _DSA_TRITON_PREFILL = get_bool_env_var("SGLANG_DSA_TRITON_PREFILL")
+ _IS_GFX95 = is_gfx95_supported()
+ 
++# Opt-in (default off): check the invariant the TileLang prefill kernel's cheap
++# "first-slot" empty-block guard rests on -- that the -1 padding in each DSA index
++# row is a contiguous SUFFIX, so testing slot 0 of a 64-wide block decides whether
++# the whole block is dead.
++#
++# Why this exists: when the invariant is violated the guard does not crash, it
++# silently drops real KV keys from the attention. That degrades answers in a way
++# no assertion catches and a 1319-problem gsm8k run cannot resolve. The invariant
++# was verified against 4.06e9 live index blocks under --dsa-topk-backend
++# sgl-kernel, but it is a property of the top-k producer, and at least one other
++# backend violates it by construction: flashinfer's unfused path calls
++# flashinfer.top_k(..., sorted=False) and masks -inf to -1 in place, scattering
++# the -1s through the row. Anyone running an unverified configuration should turn
++# this on once and convert a silent wrong answer into a loud failure.
++#
++# Cost when off: one predicted branch on a module-level constant per prefill layer
++# call (~8k times per benchmark, ~0.25 ms total). Not measurable.
++_ASSERT_TOPK_SUFFIX = get_bool_env_var("SGLANG_DSA_ASSERT_TOPK_SUFFIX")
++_ASSERT_TOPK_SUFFIX_BI = 64
++
++
++def _assert_topk_suffix(idx: torch.Tensor) -> None:
++    """Raise if the -1 padding in `idx` ([num_tokens, topk] int32) is not a suffix.
++
++    Checks the strong property (no -1 anywhere followed by a valid slot), which
++    implies the block-level property the guard needs. Synchronizes, so this is a
++    debugging tool and not something to leave on in production.
++    """
++    if idx.ndim != 2 or idx.shape[0] == 0:
++        return
++    valid = idx >= 0
++    bad = ((~valid[:, :-1]) & valid[:, 1:]).any()
++    if bool(bad):
++        row = int(((~valid[:, :-1]) & valid[:, 1:]).any(dim=1).nonzero()[0, 0])
++        raise RuntimeError(
++            "DSA top-k index row has non-suffix -1 padding, which makes the "
++            "TileLang first-slot empty-block guard silently drop real KV keys. "
++            f"First offending row {row}: {idx[row].tolist()!r}. "
++            "This configuration's top-k producer violates the invariant the "
++            "guard assumes -- see skip_mode='first' in tilelang_kernel.py."
++        )
++
+ 
+ def _concat_and_cast_q_fp8_pad_shape_ok(
+     q_nope: torch.Tensor, q_rope: torch.Tensor
+@@ -2081,6 +2123,8 @@
+                     if _fused_q is not None
+                     else concat_mla_absorb_q_general(q_nope, q_rope)
+                 )
++            if _ASSERT_TOPK_SUFFIX:
++                _assert_topk_suffix(page_table_1)
+             return self._forward_tilelang(
+                 q_all=q_all,
+                 kv_cache=kv_cache,

@@ -1,0 +1,33 @@
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] Setting AITER_CONFIG_FMOE=/home/ethany/tuning_workspace/experiment_standalone/hold_qwen35_397b_a17b_mxfp4_tuning/analysis/fmoe/cand_new_err0.csv for benchmark
+      gfx  cu_num  token  model_dim  ...  xbf16  flat   tflops        bw
+0  gfx950     256     64       4096  ...      0     0    36.08  14437.38
+1  gfx950     256  16384       4096  ...      0     0  1055.56   1855.48
+
+[2 rows x 28 columns]
+=== Running production operator benchmark (tuned) ===
+[aiter] [pid=386983 pname=MainProcess] start build [module_moe_asm] under /sgl-workspace/aiter/aiter/jit/build/module_moe_asm
+[aiter] Current hipcc not support: -mllvm -amdgpu-coerce-illegal-types=1, skip it.
+[aiter] [pid=386983 pname=MainProcess] [32mfinish build [module_moe_asm], cost 24.0s [0m
+[aiter] import [module_moe_asm] under /sgl-workspace/aiter/aiter/jit/module_moe_asm.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] [fused_moe] using 2stage (kernelName1='flydsl_moe1_afp4_wfp4_bf16_t32x64x256_w3', kernelName2='flydsl_moe2_afp4_wfp4_bf16_t16x128x256_atomic_persist_sbm32') for ('gfx950', 256, 64, 4096, 256, 512, 10, 'ActivationType.Silu', 'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False) 
+[aiter] [pid=386983 pname=MainProcess] start build [module_moe_sorting_opus] under /sgl-workspace/aiter/aiter/jit/build/module_moe_sorting_opus
+[aiter] [pid=386983 pname=MainProcess] [32mfinish build [module_moe_sorting_opus], cost 7.2s [0m
+[aiter] import [module_moe_sorting_opus] under /sgl-workspace/aiter/aiter/jit/module_moe_sorting_opus.so
+[aiter] [pid=386983 pname=MainProcess] start build [module_quant] under /sgl-workspace/aiter/aiter/jit/build/module_quant
+[aiter] [pid=386983 pname=MainProcess] [32mfinish build [module_quant], cost 13.4s [0m
+[aiter] import [module_quant] under /sgl-workspace/aiter/aiter/jit/module_quant.so
+[W820 15:10:19.823685231 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 2 (function operator())
+[aiter] run_config (64, 4096, 256, E=512, topk=10, ActivationType.Silu, torch.bfloat16, torch.float4_e2m1fn_x2, torch.float4_e2m1fn_x2, QuantType.per_1x32, g1u1=True, dw_s1=False)[checkAllclose atol=0.01 rtol=0.01 [33mwarning![0m] a and b results are not all close
+[aiter] -->max abs delta:0.0625, delta details: 0.2% (431 of 262144) elements
+[aiter] [fused_moe] using 2stage (kernelName1='flydsl_moe1_afp4_wfp4_bf16_t64x128x256_w3_bnt0_xcd4', kernelName2='flydsl_moe2_afp4_wfp4_bf16_t64x256x256_reduce_bnt2_xcd4') for ('gfx950', 256, 16384, 4096, 256, 512, 10, 'ActivationType.Silu', 'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False) 
+[aiter] run_config (16384, 4096, 256, E=512, topk=10, ActivationType.Silu, torch.bfloat16, torch.float4_e2m1fn_x2, torch.float4_e2m1fn_x2, QuantType.per_1x32, g1u1=True, dw_s1=False)[checkAllclose atol=0.01 rtol=0.01 [33mwarning![0m] a and b results are not all close
+[aiter] -->max abs delta:0.015625, delta details: 0.0% (82 of 67108864) elements
+============= Benchmark (tuned) Benchmark Results =============
+Shape                                    | Kernel(us) |    E2E(us) |   Status
+-----------------------------------------------------------------------------
+(64, 4096, 256, E=512, topk=10, ActivationType.Silu, torch.bfloat16, torch.float4_e2m1fn_x2, torch.float4_e2m1fn_x2, QuantType.per_1x32, g1u1=True, dw_s1=False) |     111.61 |     125.55 |       OK
+keys: gfx=gfx950, cu_num=256, token=64, model_dim=4096, inter_dim=256, expert=512, topk=10, act_type=ActivationType.Silu, dtype=torch.bfloat16, q_dtype_a=torch.float4_e2m1fn_x2, q_dtype_w=torch.float4_e2m1fn_x2, q_type=QuantType.per_1x32, use_g1u1=1, doweight_stage1=0
+(16384, 4096, 256, E=512, topk=10, ActivationType.Silu, torch.bfloat16, torch.float4_e2m1fn_x2, torch.float4_e2m1fn_x2, QuantType.per_1x32, g1u1=True, dw_s1=False) |     976.53 |     973.21 |       OK
+keys: gfx=gfx950, cu_num=256, token=16384, model_dim=4096, inter_dim=256, expert=512, topk=10, act_type=ActivationType.Silu, dtype=torch.bfloat16, q_dtype_a=torch.float4_e2m1fn_x2, q_dtype_w=torch.float4_e2m1fn_x2, q_type=QuantType.per_1x32, use_g1u1=1, doweight_stage1=0

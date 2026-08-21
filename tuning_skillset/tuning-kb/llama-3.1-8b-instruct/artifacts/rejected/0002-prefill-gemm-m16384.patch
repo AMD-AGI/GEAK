@@ -1,0 +1,42 @@
+Subject: [PATCH 2/2] aiter: add M=16384 prefill a16w16 GEMM rows for Llama-3.1-8B on gfx950
+
+NOT SHIPPED -- effect is real but below what the rig can resolve, and it was only ever
+measured stacked on top of patch 1/2, which regresses. See FINDINGS.md #5.
+
+MEASUREMENT
+  M=16384 is the prefill workhorse: 96 of 108 prefill batches in the fixed workload
+  (ISL 8192, chunked-prefill-size 16384 -> 2 requests per batch). Every one of these
+  shapes currently misses the tuned table and falls through to torch.
+
+  Isolated, graph-captured (analysis/race_gemm_candidates.py --m 16384 --footprint-mb 0;
+  no cache-busting needed, one gate_up call alone moves ~1.3 GB):
+    o_proj   (4096, 4096)   torch  367.19 us -> hipblaslt:440237   353.81 us  +3.64%
+    qkv_proj (6144, 4096)   torch  540.07 us -> hipblaslt:439059   531.07 us  +1.67%
+    down_proj(4096,14336)   torch 1235.27 us -> hipblaslt:439112  1231.90 us  +0.27%
+    gate_up  (28672,4096)   torch 2534.49 us -> nothing beat the fallback
+  = 25.7 us of 4677 us of prefill GEMM per layer (0.55%), or 0.11% end-to-end.
+
+  End-to-end (same 6 paired rounds as patch 1/2, both patches in one arm):
+    mean TTFT 3986.2 ms -> 3978.6 ms (-0.19%), consistent with the isolated number.
+    Throughput effect alone is ~0.03%, under the rig's 0.066% resolution at n=6.
+
+  Note the tuner mis-ranked here too: its pick for down_proj (hipblaslt:439305, "+1.05%")
+  re-times as a 0.09% LOSS in a graph, while 439112 -- which the tuner ranked 5th -- is the
+  actual best. Every number above is the graph race, not the tuner.
+
+APPLY
+  cd /sgl-workspace/aiter && patch -p1 < <this file>
+  rm -rf /tmp/aiter_configs      # merged table is regenerated only when absent
+  # then restart the server: the GEMM table is consumed at HIP-graph capture time
+  # revert: python3 analysis/deploy_gemm_rows.py revert   (restores from analysis/gemm_tune/base/)
+
+BASE
+  Applies on top of patch 0001, which creates this file.
+--- a/aiter/configs/model_configs/llama31_8b_bf16_tuned_gemm.csv
++++ b/aiter/configs/model_configs/llama31_8b_bf16_tuned_gemm.csv
+@@ -1,2 +1,5 @@
+ gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernelName,err_ratio,tflops,bw
+ gfx950,256,64,4096,14336,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,440151,0,27.6540,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x64x128_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA0_DTLB0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB512_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT4_2_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK3_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGRO0_VSn1_VWA4_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1,0.0,271.79,4.33
++gfx950,256,16384,6144,4096,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,439059,0,531.0700,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR0_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_8_MO40_NTn1_NTA3_NTB3_NTC5_NTD5_NTM0_NEPBS16_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO1_SVW8_SK3_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGRO0_VSn1_VWA8_VWB8_WSGRA0_WSGRB0_WS64_WG32_8_1,0.0,1552.78,0.73
++gfx950,256,16384,4096,4096,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,440237,0,353.8100,Custom_Cijk_Alik_Bljk_BBS_BH_MT256x256x64_MI16x16x1_UserArgs_shortname0_gfx950,0.0,1553.82,0.85
++gfx950,256,16384,4096,14336,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,439112,0,1231.9000,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_8_MO40_NTn1_NTA1_NTB3_NTC5_NTD4_NTM0_NEPBS16_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO1_SRVW0_SSO4_SVW8_SK3_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGRO0_VSn1_VWA8_VWB8_WSGRA0_WSGRB0_WS64_WG32_8_1,0.0,1561.93,0.59

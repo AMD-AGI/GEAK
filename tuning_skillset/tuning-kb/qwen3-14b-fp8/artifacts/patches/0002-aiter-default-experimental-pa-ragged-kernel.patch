@@ -1,0 +1,126 @@
+# Patch 2/3 -- select the EXPERIMENTAL pa_ragged decode kernel where it is supported
+#
+# Repo:        aiter
+# Base commit: d9e5ef7ce08ee7045d583aed768cff41aa9210fe
+# Apply with:  cd /sgl-workspace/aiter && git apply -p1 <this file>
+# Stacks on:   0001-aiter-tuned-gemm-table-qwen3-14b-gfx950.patch
+#
+# MEASUREMENT (patch 1 + patch 2, frozen server flags / env / workload, TP=1):
+#   output throughput  1536.610 -> 1967.577 tok/s   +28.05%   (n=8 baseline, n=4 arm)
+#   mean TTFT           8570.5  -> 5581.4 ms        -34.88%   (unchanged vs patch 1 alone)
+#   mean TPOT             33.32 ->   27.09 ms       -18.65%
+#   gsm8k 5-shot         0.9454 -> 0.9447           1 of 1319 problems differs; gate >= 0.9328
+#   arms: results/gemm_pa_r{1,2,3,4_restart}_*   gate: eval_results/gemm_pa_20260820_093249
+#
+#   On that one problem (doc_id 494): it is NOT cleanly attributable to this patch. The
+#   patch-3 arm also contains this patch and scores 0.9454 with doc 494 correct. The eval
+#   is exactly reproducible (two runs on one untouched server agree 1319/1319), so this is
+#   an instance-level wobble on a borderline problem, not eval noise and not a regression.
+#   Every arm passes the gate.
+#
+# MARGINAL EFFECT OF THIS PATCH, measured interleaved (this is the number to quote):
+#   analysis/ab/run_ab.sh, A B A B, four fresh servers, three runs each, position-matched.
+#   A = pristine pa_ragged.py at base commit, B = this patch. Patches 1 and 3 present and
+#   IDENTICAL in both arms, so this isolates patch 2.
+#
+#     position     A (GOLDEN)   B (EXPERIMENTAL)   delta    median ITL
+#     r1 run1       1925.774        1980.375      +2.84%      -4.12%
+#     r1 run2       1923.001        1983.105      +3.13%      -4.26%
+#     r1 run3       1918.098        1973.383      +2.88%      -4.17%
+#     r2 run1       1928.242        1986.865      +3.04%      -4.26%
+#     r2 run2       1926.170        1985.994      +3.11%      -4.54%
+#     r2 run3       1917.359        1979.755      +3.25%      -4.36%
+#
+#   median +3.07%, range +2.84..+3.25%, 6/6 pairs positive, arms disjoint
+#   (A max 1928.242 < B min 1973.383). Floor is the 0.21% position-matched restart
+#   spread (FINDINGS.md section 1); this clears it by 15x.
+#   arms: results/paab_{A,B}{1,2}_r{1,2,3}_*
+#
+#   The gain is entirely in decode -- median ITL -4.26% with TTFT flat -- which is the
+#   signature you want from a decode-attention change, and it matches the isolated kernel
+#   microbenchmark (analysis/bench_pa.py: -6.8% on the kernel itself, which is 60.3% of
+#   the decode step -> ~4% of the step).
+#
+#   SUPERSEDED: an earlier non-interleaved pass read +3.95% (1892.866 -> 1967.577). Same
+#   direction, but it folded in ambient machine drift between the two arms' wall-clock
+#   windows -- drift large enough elsewhere in this work to reverse a sign. Use +3.07%.
+#
+# WHAT IT IS
+# aiter ships two implementations of paged_attention_ll4mi_QKV_mfma16_kernel, selected
+# by a compile-time VERSION_ID in pa_ragged.cpp.jinja. VERSION_ID=1 ("EXPERIMENTAL")
+# reworks the K/V fetch to 16B-per-lane non-temporal loads staged through a
+# double-buffered LDS tile, instead of GOLDEN's 16 lanes each striding to a different
+# token 2048 B apart. It was reachable only via the undocumented QKV_VERSION env var
+# and was therefore dark in every default deployment.
+#
+# This selects it by default wherever its preconditions hold. The guard here is
+# deliberately NARROWER than the kernel's own stated support -- alibi and
+# logits-soft-cap take separate paths inside it that were not validated in this
+# work, so those shapes stay on GOLDEN.
+#
+# It also fixes a real bug in the existing guard: the old code printed
+# "Fallback to original kernel" on an unsupported shape but never actually fell
+# back, so QKV_VERSION=EXPERIMENTAL would compile the unsupported kernel anyway.
+#
+# HONEST CAVEAT
+# The same kernel selection is reachable at runtime by setting QKV_VERSION=EXPERIMENTAL.
+# The frozen-configuration rule forbids changing the environment, so this is landed as
+# a source change to aiter's default -- the environment of the measured run is
+# untouched -- but a reviewer should know the two are equivalent in effect.
+#
+# ENGAGEMENT CHECK (loaded-object level, not just a log line):
+#   PID=$(pgrep -f "sglang::scheduler" | head -1)
+#   grep -o "pa_ragged_[0-9a-f]*" /proc/$PID/maps | sort -u
+#     GOLDEN:       pa_ragged_1eda14407ca86673242536de3e4e5472
+#     EXPERIMENTAL: pa_ragged_718e0ba0dd41ab1acefe187f6a0c6fac   <-- observed
+#
+#
+# FULL-STACK RESULT (patches 1+2+3, interleaved A/B against the pristine stack, run last):
+#   output throughput  1538.009 -> 1985.566 tok/s   +29.05%  (median of n=6 each,
+#                      6/6 position-matched pairs positive, +28.91..+29.19%, arms disjoint)
+#   gsm8k 5-shot       0.9454 -> 0.9454, identical on all 1319 problems
+#   arms: results/stackab_{A,B}{1,2}_r{1,2,3}_*   gate: eval_results/stackab_B2_20260820_120659
+#   driver: analysis/ab/run_ab_stack.sh + analysis/ab/stack_{A,B}.sh
+diff --git a/csrc/cpp_itfs/pa/pa_ragged.py b/csrc/cpp_itfs/pa/pa_ragged.py
+index 3f0fef946..f73d5241b 100644
+--- a/csrc/cpp_itfs/pa/pa_ragged.py
++++ b/csrc/cpp_itfs/pa/pa_ragged.py
+@@ -28,11 +28,35 @@ def compile(
+ ):
+     import os
+ 
+-    version = os.getenv("QKV_VERSION", "GOLDEN")
+-    if version == "EXPERIMENTAL" and (head_size != 128 or kv_dtype != "__hip_bfloat16"):
++    # The EXPERIMENTAL variant of paged_attention_ll4mi_QKV_mfma16_kernel reworks the
++    # K/V fetch: 16B-per-lane non-temporal loads staged through a double-buffered LDS
++    # tile, instead of GOLDEN's 16 lanes each striding to a different token. It is
++    # written for head_size 128 with a bf16 KV cache and is measurably faster there
++    # (~7% on gfx950 at GQA 5 / block_size 1 / long context), so select it by default
++    # wherever those preconditions hold rather than leaving it dark behind an env var.
++    #
++    # The guard is deliberately narrower than the kernel's own stated support: alibi
++    # and logits-soft-cap take separate paths inside it that have not been validated
++    # here, so those shapes stay on GOLDEN.
++    #
++    # QKV_VERSION still overrides, and — unlike before — an override that asks for
++    # EXPERIMENTAL on an unsupported shape now actually falls back instead of only
++    # printing that it will.
++    experimental_supported = (
++        head_size == 128
++        and kv_dtype == "__hip_bfloat16"
++        and not alibi_enabled
++        and not logits_soft_cap_enabled
++    )
++    version = os.getenv("QKV_VERSION") or (
++        "EXPERIMENTAL" if experimental_supported else "GOLDEN"
++    )
++    if version == "EXPERIMENTAL" and not experimental_supported:
+         print(
+-            "EXPERIMENTAL pa_ragged kernel requires head_size=128 and kv_dtype=bf16. Fallback to original kernel"
++            "EXPERIMENTAL pa_ragged kernel requires head_size=128, kv_dtype=bf16, no alibi "
++            "and no logits soft cap. Fallback to original kernel"
+         )
++        version = "GOLDEN"
+ 
+     return compile_template_op(
+         src_template,

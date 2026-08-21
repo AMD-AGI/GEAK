@@ -42,25 +42,47 @@ ok(fs.existsSync(SKILLSET), 'tuning_skillset/ is vendored into the repo');
 for (const rel of ['README.md', 'tuning-core/SKILL.md', 'validate/claims.py', 'tuning-kb/README.md']) {
   ok(fs.existsSync(path.join(SKILLSET, rel)), `vendored tree keeps its own entry point: ${rel}`);
 }
-// Nothing in the vendored tree may be git-ignored. The manifest hashes what is ON DISK, so a generic
-// rule swallowing a file (e.g. `*.log` catching tuning-kb evidence logs) commits a tree that is smaller
-// than the manifest: --verify then fails on a fresh clone while still passing for whoever synced it.
+// What git COMMITS must equal what the manifest HASHES, both ways. --verify cannot see this: it compares
+// the manifest against the working tree, so it is blind to a file that exists on the syncer's disk but
+// never made it into the commit (`*.log` swallowed six tuning-kb evidence logs; `build/`, `lib/`, `dist/`
+// and friends would each swallow a subdirectory), and equally blind to committed cache junk, since it
+// applies the same EXCLUDE_DIRS when scanning. Both directions are checked against the git index here.
 {
   const { execFileSync } = require('child_process');
+  const git = (args, input) => {
+    try {
+      return execFileSync('git', ['-C', ROOT, ...args],
+        { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+    } catch (e) { return (e && e.stdout) || ''; }   // check-ignore exits 1 when nothing matches
+  };
   const manifestPath = path.join(ROOT, 'e2e_workflow', 'knowledge', 'tuning_skillset.manifest.sha256');
-  const tracked = fs.readFileSync(manifestPath, 'utf8').split('\n')
+  const inManifest = fs.readFileSync(manifestPath, 'utf8').split('\n')
     .filter((l) => l && !l.startsWith('#'))
     .map((l) => 'tuning_skillset/' + l.split('  ')[1]);
-  let ignored = [];
-  try {
-    // check-ignore takes pathnames (not globs) and exits 1 when none match, which is the wanted outcome.
-    const out = execFileSync('git', ['-C', ROOT, 'check-ignore', '--stdin'],
-      { input: tracked.join('\n'), encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
-    ignored = out.split('\n').filter(Boolean);
-  } catch (e) { ignored = []; }
+
+  // check-ignore takes pathnames, not globs, so feed it the manifest itself. --no-index is what makes
+  // this assertion mean anything: by default check-ignore consults the index and never calls a TRACKED
+  // file ignored, so once the tree is committed the check would pass no matter what the rules say.
+  const ignored = git(['check-ignore', '--no-index', '--stdin'], inManifest.join('\n'))
+    .split('\n').filter(Boolean);
   ok(ignored.length === 0,
-    `no manifest-tracked file is git-ignored (checked ${tracked.length})` +
-    (ignored.length ? ` -- ignored: ${ignored.slice(0, 3).join(', ')}` : ''));
+    `no manifest-tracked file is git-ignored (checked ${inManifest.length})` +
+    (ignored.length ? ` -- e.g. ${ignored.slice(0, 3).join(', ')}` : ''));
+
+  // A repo with no git index (tarball export) cannot answer this half; skip rather than fail.
+  const indexed = git(['ls-files', '--', 'tuning_skillset']).split('\n').filter(Boolean);
+  if (indexed.length) {
+    const manifestSet = new Set(inManifest);
+    const indexedSet = new Set(indexed);
+    const unhashed = indexed.filter((p) => !manifestSet.has(p));
+    const uncommitted = inManifest.filter((p) => !indexedSet.has(p));
+    ok(unhashed.length === 0,
+      `git tracks nothing the manifest does not hash (${indexed.length} tracked)` +
+      (unhashed.length ? ` -- e.g. ${unhashed.slice(0, 3).join(', ')}` : ''));
+    ok(uncommitted.length === 0,
+      `every manifest entry is in the git index` +
+      (uncommitted.length ? ` -- e.g. ${uncommitted.slice(0, 3).join(', ')}` : ''));
+  }
 }
 // Every skill directory keeps its SKILL.md — the unit of invocation stays whole.
 const skillDirs = fs.readdirSync(SKILLSET, { withFileTypes: true })

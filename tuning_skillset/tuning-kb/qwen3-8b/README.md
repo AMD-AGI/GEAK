@@ -4,8 +4,10 @@
 (gsm8k strict-match 0.9280 → 0.9348). The entire win is **four rows of CSV** — a data-only
 drop-in config file, no compilation, no source patch.
 
-Found and reproduced 2026-08-18 over a ~3 h agent run. Reproduced twice from the exported
-artifact alone on clean instances (3790.2 and 3786.2 tok/s).
+Found and reproduced 2026-08-18 over a ~3 h agent run. Reproduced twice from the exported artifact
+alone, on two independent server instances: **H**, patches applied to a clean tree (3790.2 tok/s),
+and **I**, patches re-applied after two later attempts had rewritten the config six times
+(3786.2 tok/s, against F+G's 3786.1 — agreement to 0.003%).
 
 ## Environment fingerprint
 
@@ -166,11 +168,16 @@ variant.
 
 | config | `exact_match,strict-match` | flexible-extract |
 | --- | --- | --- |
-| reference recipe | 0.9280 ± 0.0071 | 0.9318 |
-| with these rows | **0.9348** | 0.9401 |
+| reference recipe (the gate) | 0.9280 ± 0.0071 | 0.9318 |
+| my own stock baseline | 0.9401 ± 0.0065 | 0.9431 |
+| with these rows, instances F/G | 0.9340 ± 0.0068 | 0.9401 |
+| with these rows, reproduction instance I | **0.9348 ± 0.0068** | 0.9409 |
 
-Accuracy went up rather than down, which is expected: the tuner gated every winner at
-`errRatio 0.0`, so these are numerically equivalent kernels and the movement is eval noise.
+Both tuned measurements clear the 0.9280 gate, which is the comparison that matters. Note that
+against *my own* stock baseline the movement is downward (0.9401 → 0.9340), not upward. Either
+direction is expected: the tuner gated every winner at `errRatio 0.0`, so these are numerically
+equivalent kernels, accuracy was measured once per configuration rather than repeated, and the
+movement is eval noise in both directions.
 
 ## What was tried and did not work
 

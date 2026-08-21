@@ -216,7 +216,7 @@ jobs:
           /tmp/gitleaks dir . --no-banner --redact --config .gitleaks.toml
 
   node-regression:
-    name: Node regression (expert_skills, kernel canonicalization)
+    name: Node regression (expert_skills, kernel canonicalization, tuning phase)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -233,6 +233,25 @@ jobs:
       # The Python half is TestTheSharedFixtureHoldsOnThisSide in tests/test_kernel_selection.py.
       - name: kernel canonicalization JS/Python parity
         run: node e2e_workflow/scripts/test_kernel_canonicalization_parity.js
+      # Structural guard on the TuningSkillset phase: the accept bars, the overlay
+      # carry-forward, and the deploy-bundle handoff to finalize. Node + git only.
+      - name: tuning skillset phase regression
+        run: node e2e_workflow/scripts/test_tuning_skillset_phase.js
+
+  tuning-skillset-integrity:
+    name: Vendored tuning skillset matches its manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # The skillset is vendored WHOLE so its standalone validation applies to what GEAK runs.
+      # This is the gate that catches drift between the committed tree and the manifest —
+      # including a file the committer can see locally but .gitignore kept out of the commit.
+      # Stdlib only; no GPU, no network.
+      - name: verify vendored tree against manifest
+        run: python3 e2e_workflow/scripts/tuning_skillset_sync.py --verify
 
   dry-run:
     name: run_e2e dry-run mapping

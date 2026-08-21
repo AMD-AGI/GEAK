@@ -1,0 +1,158 @@
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+      gfx  cu_num  token  ...              q_type  use_g1u1  doweight_stage1
+0  gfx950     256     64  ...  QuantType.per_1x32         1                0
+1  gfx950     256  16384  ...  QuantType.per_1x32         1                0
+
+[2 rows x 14 columns]
+Compare candidate CSV will be written to /tmp/qwen35_397b_agent/aiter_compare/tuned_tp4.367416.candidate.csv
+=== Running pre-tune benchmark (batch 1/1) ===
+[aiter] import [module_moe_asm] under /sgl-workspace/aiter/aiter/jit/module_moe_asm.so
+[aiter] merge tuned file under model_configs/ and configs/ /sgl-workspace/aiter/aiter/configs/tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/a8w8_blockscale_tuned_fmoe_ds_v3.csv:/sgl-workspace/aiter/aiter/configs/model_configs/a8w8_blockscale_tuned_fmoe_glm5.csv:/sgl-workspace/aiter/aiter/configs/model_configs/a8w8_blockscale_tuned_fmoe_glm5_1.csv:/sgl-workspace/aiter/aiter/configs/model_configs/a8w8_blockscale_tuned_fmoe_minimax-m2_5.csv:/sgl-workspace/aiter/aiter/configs/model_configs/a8w8_blockscale_tuned_fmoe_qwen3_235b.csv:/sgl-workspace/aiter/aiter/configs/model_configs/a8w8_blockscale_tuned_fmoe_qwen3_5_397b.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv3_fp4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv4_fp8fp4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm47_fp8_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm5_fp4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm5_mxfp8_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm5_ptpc_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/gptoss_a16w4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/gptoss_fp4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/gptoss_fp8fp4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik2_fp4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik2_fp8fp4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik2_i4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik3_a8w4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik3_fp4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/mimo_v2_5_pro_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/minimax_m25_fp4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/minimax_m3_fp4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/minimax_m3_mxfp8_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen3_235b_bf16_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen3_5_397b_fp4_tuned_fmoe.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen3next_80b_fp8_tuned_fmoe.csv
+[aiter] [fused_moe] duplicate tuned rows after disabling act_type in /tmp/aiter_configs/tuned_fmoe.csv; keeping first match for 449 rows
+[aiter] [fused_moe] using 2stage (kernelName1='flydsl_moe1_afp4_wfp4_bf16_t32x64x256_w3', kernelName2='flydsl_moe2_afp4_wfp4_bf16_t32x128x256_atomic_bnt2') for ('gfx950', 256, 64, 4096, 256, 512, 10, 'ActivationType.Silu', 'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False) 
+[aiter] import [module_moe_sorting_opus] under /sgl-workspace/aiter/aiter/jit/module_moe_sorting_opus.so
+[aiter] import [module_quant] under /sgl-workspace/aiter/aiter/jit/module_quant.so
+[W820 14:50:10.934520886 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 2 (function operator())
+[aiter] run_config (64, 4096, 256, E=512, topk=10, ActivationType.Silu, torch.bfloat16, torch.float4_e2m1fn_x2, torch.float4_e2m1fn_x2, QuantType.per_1x32, g1u1=True, dw_s1=False)[checkAllclose atol=0.01 rtol=0.01 [33mwarning![0m] a and b results are not all close
+[aiter] -->max abs delta:0.09375, delta details: 0.2% (450 of 262144) elements
+[aiter] [fused_moe] using 2stage (kernelName1='flydsl_moe1_afp4_wfp4_bf16_t64x128x256_w2_bnt0_xcd4', kernelName2='flydsl_moe2_afp4_wfp4_bf16_t64x256x256_reduce_persist') for ('gfx950', 256, 16384, 4096, 256, 512, 10, 'ActivationType.Silu', 'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False) 
+[aiter] run_config (16384, 4096, 256, E=512, topk=10, ActivationType.Silu, torch.bfloat16, torch.float4_e2m1fn_x2, torch.float4_e2m1fn_x2, QuantType.per_1x32, g1u1=True, dw_s1=False)[checkAllclose atol=0.01 rtol=0.01 [33mwarning![0m] a and b results are not all close
+[aiter] -->max abs delta:0.015625, delta details: 0.0% (82 of 67108864) elements
+[mxfp4-port] tuning 2 shapes across 2 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[mxfp4-port] shape token=64 inter=256 expert=512 topk=10 -> GPU0
+[mxfp4-port] shape token=16384 inter=256 expert=512 topk=10 -> GPU1
+[aiter] import [module_moe_asm] under /sgl-workspace/aiter/aiter/jit/module_moe_asm.so
+[aiter] import [module_moe_sorting_opus] under /sgl-workspace/aiter/aiter/jit/module_moe_sorting_opus.so
+[aiter] import [module_moe_asm] under /sgl-workspace/aiter/aiter/jit/module_moe_asm.so
+[aiter] import [module_moe_sorting_opus] under /sgl-workspace/aiter/aiter/jit/module_moe_sorting_opus.so
+[aiter] import [module_moe_mxfp4_aux] under /sgl-workspace/aiter/aiter/jit/module_moe_mxfp4_aux.so
+[aiter] import [module_moe_mxfp4_aux] under /sgl-workspace/aiter/aiter/jit/module_moe_mxfp4_aux.so
+[aiter] port[flydsl_mxmoe_g1_a4w4_16x256x256_f16in_nt+flydsl_mxmoe_g2_a4w4_16x256x256_atomic][cosine_diff=0.011582 [32mpassed~[0m]
+[W820 14:50:26.746151768 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_16x256x256_f16in_nt + flydsl_mxmoe_g2_a4w4_16x256x256_atomic us=108.2615
+[aiter] port[flydsl_mxmoe_g1_a4w4_16x256x256_f16in_nt+flydsl_mxmoe_g2_a4w4_16x256x256_atomic][cosine_diff=0.011446 [32mpassed~[0m]
+[W820 14:50:26.144258785 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+[aiter] port[flydsl_mxmoe_g1_a4w4_16x256x256_f16in_nt+flydsl_mxmoe_g2_a4w4_16x256x256_atomic_nt][cosine_diff=0.011581 [32mpassed~[0m]
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_16x256x256_f16in_nt + flydsl_mxmoe_g2_a4w4_16x256x256_atomic us=3077.6758
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_16x256x256_f16in_nt + flydsl_mxmoe_g2_a4w4_16x256x256_atomic_nt us=111.6649
+[aiter] port[flydsl_mxmoe_g1_a4w4_16x256x256_f16in_nt+flydsl_mxmoe_g2_a4w4_16x256x256_atomic_nt][cosine_diff=0.011446 [32mpassed~[0m]
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_16x256x256_f16in_nt + flydsl_mxmoe_g2_a4w4_16x256x256_atomic_nt us=3097.5936
+[aiter] port[flydsl_mxmoe_g1_a4w4_32x256x256+flydsl_mxmoe_g2_a4w4_32x256x256_atomic][cosine_diff=0.011582 [32mpassed~[0m]
+[aiter] port[flydsl_mxmoe_g1_a4w4_32x256x256+flydsl_mxmoe_g2_a4w4_32x256x256_atomic][cosine_diff=0.011446 [32mpassed~[0m]
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_32x256x256 + flydsl_mxmoe_g2_a4w4_32x256x256_atomic us=142.1308
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_32x256x256 + flydsl_mxmoe_g2_a4w4_32x256x256_atomic us=1632.8163
+[aiter] port[flydsl_mxmoe_g1_a4w4_32x256x256+flydsl_mxmoe_g2_a4w4_32x256x256_cshuffle][cosine_diff=0.011576 [32mpassed~[0m]
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_32x256x256 + flydsl_mxmoe_g2_a4w4_32x256x256_cshuffle us=168.8844
+[aiter] port[flydsl_mxmoe_g1_a4w4_32x256x256+flydsl_mxmoe_g2_a4w4_32x256x256_cshuffle][cosine_diff=0.011439 [32mpassed~[0m]
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_32x256x256 + flydsl_mxmoe_g2_a4w4_32x256x256_cshuffle us=1316.3124
+[aiter] port[flydsl_mxmoe_g1_a4w4_32x256x256+flydsl_mxmoe_g2_a4w4_32x256x256_atomic_nt][cosine_diff=0.011582 [32mpassed~[0m]
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_32x256x256 + flydsl_mxmoe_g2_a4w4_32x256x256_atomic_nt us=139.1491
+[aiter] port[flydsl_mxmoe_g1_a4w4_32x256x256+flydsl_mxmoe_g2_a4w4_32x256x256_atomic_nt][cosine_diff=0.011446 [32mpassed~[0m]
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_32x256x256 + flydsl_mxmoe_g2_a4w4_32x256x256_atomic_nt us=1632.3174
+[aiter] port[flydsl_mxmoe_g1_a4w4_32x256x256_nt+flydsl_mxmoe_g2_a4w4_32x256x256_atomic][cosine_diff=0.011583 [32mpassed~[0m]
+[aiter] port[flydsl_mxmoe_g1_a4w4_32x256x256_nt+flydsl_mxmoe_g2_a4w4_32x256x256_atomic][cosine_diff=0.011446 [32mpassed~[0m]
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_32x256x256_nt + flydsl_mxmoe_g2_a4w4_32x256x256_atomic us=131.0619
+[aiter] port[flydsl_mxmoe_g1_a4w4_32x256x256_nt+flydsl_mxmoe_g2_a4w4_32x256x256_cshuffle][cosine_diff=0.011576 [32mpassed~[0m]
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_32x256x256_nt + flydsl_mxmoe_g2_a4w4_32x256x256_atomic us=1958.6257
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_32x256x256_nt + flydsl_mxmoe_g2_a4w4_32x256x256_cshuffle us=153.3935
+[aiter] port[flydsl_mxmoe_g1_a4w4_32x256x256_nt+flydsl_mxmoe_g2_a4w4_32x256x256_cshuffle][cosine_diff=0.011439 [32mpassed~[0m]
+[aiter] port[flydsl_mxmoe_g1_a4w4_32x256x256_nt+flydsl_mxmoe_g2_a4w4_32x256x256_atomic_nt][cosine_diff=0.011583 [32mpassed~[0m]
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_32x256x256_nt + flydsl_mxmoe_g2_a4w4_32x256x256_atomic_nt us=132.8257
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_32x256x256_nt + flydsl_mxmoe_g2_a4w4_32x256x256_cshuffle us=1680.8494
+[aiter] port[flydsl_mxmoe_g1_a4w4_32x256x256_nt+flydsl_mxmoe_g2_a4w4_32x256x256_atomic_nt][cosine_diff=0.011446 [32mpassed~[0m]
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_32x256x256_nt + flydsl_mxmoe_g2_a4w4_32x256x256_atomic_nt us=1966.4738
+[aiter] port[flydsl_mxmoe_g1_a4w4_64x256x256+flydsl_mxmoe_g2_a4w4_64x256x256_atomic][cosine_diff=0.011582 [32mpassed~[0m]
+[aiter] port[flydsl_mxmoe_g1_a4w4_64x256x256+flydsl_mxmoe_g2_a4w4_64x256x256_atomic][cosine_diff=0.011446 [32mpassed~[0m]
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_64x256x256 + flydsl_mxmoe_g2_a4w4_64x256x256_atomic us=152.4165
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_64x256x256 + flydsl_mxmoe_g2_a4w4_64x256x256_atomic us=1601.4025
+[aiter] port[flydsl_mxmoe_g1_a4w4_64x256x256+flydsl_mxmoe_g2_a4w4_64x256x256_cshuffle][cosine_diff=0.011576 [32mpassed~[0m]
+[aiter] port[flydsl_mxmoe_g1_a4w4_64x256x256+flydsl_mxmoe_g2_a4w4_64x256x256_cshuffle][cosine_diff=0.011439 [32mpassed~[0m]
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_64x256x256 + flydsl_mxmoe_g2_a4w4_64x256x256_cshuffle us=193.8771
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_64x256x256 + flydsl_mxmoe_g2_a4w4_64x256x256_cshuffle us=1319.9037
+[aiter] port[flydsl_mxmoe_g1_a4w4_64x256x256+flydsl_mxmoe_g2_a4w4_64x256x256_atomic_nt][cosine_diff=0.011582 [32mpassed~[0m]
+[aiter] port[flydsl_mxmoe_g1_a4w4_64x256x256+flydsl_mxmoe_g2_a4w4_64x256x256_atomic_nt][cosine_diff=0.011446 [32mpassed~[0m]
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_64x256x256 + flydsl_mxmoe_g2_a4w4_64x256x256_atomic_nt us=150.4559
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_64x256x256 + flydsl_mxmoe_g2_a4w4_64x256x256_atomic_nt us=1606.8618
+[aiter] port[flydsl_mxmoe_g1_a4w4_128x256x256+flydsl_mxmoe_g2_a4w4_128x256x256][cosine_diff=0.011576 [32mpassed~[0m]
+[aiter] port[flydsl_mxmoe_g1_a4w4_128x256x256+flydsl_mxmoe_g2_a4w4_128x256x256][cosine_diff=0.011439 [32mpassed~[0m]
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_128x256x256 + flydsl_mxmoe_g2_a4w4_128x256x256 us=250.9157
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_128x256x256 + flydsl_mxmoe_g2_a4w4_128x256x256 us=1176.2521
+[aiter] port[flydsl_mxmoe_g1_a4w4_128x256x256+flydsl_mxmoe_g2_a4w4_128x256x256_cshuffle][cosine_diff=0.011576 [32mpassed~[0m]
+[aiter] port[flydsl_mxmoe_g1_a4w4_128x256x256+flydsl_mxmoe_g2_a4w4_128x256x256_cshuffle][cosine_diff=0.011439 [32mpassed~[0m]
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_128x256x256 + flydsl_mxmoe_g2_a4w4_128x256x256_cshuffle us=268.501
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_128x256x256 + flydsl_mxmoe_g2_a4w4_128x256x256_cshuffle us=1244.7293
+[aiter] port[flydsl_mxmoe_g1_a4w4_128x256x256+flydsl_mxmoe_g2_a4w4_128x256x256_f4out][cosine_diff=0.011576 [32mpassed~[0m]
+[mxfp4-port] token=64 inter=256 flydsl_mxmoe_g1_a4w4_128x256x256 + flydsl_mxmoe_g2_a4w4_128x256x256_f4out us=248.6956
+[aiter] port[flydsl_mxmoe_g1_a4w4_128x256x256+flydsl_mxmoe_g2_a4w4_128x256x256_f4out][cosine_diff=0.011439 [32mpassed~[0m]
+[mxfp4-port] token=16384 inter=256 flydsl_mxmoe_g1_a4w4_128x256x256 + flydsl_mxmoe_g2_a4w4_128x256x256_f4out us=1220.028
+/sgl-workspace/aiter/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py:5400: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  self.success = pd.concat([self.success, valid], ignore_index=True)
+=== Running post-tune benchmark (verification) for batch 1/1 ===
+[aiter] Setting AITER_CONFIG_FMOE=/tmp/qwen35_397b_agent/aiter_compare/mxfp4FlydslTuner_compare_batch_1_367416.csv for benchmark
+[aiter] [pid=367416 pname=MainProcess] start build [module_moe_asm] under /sgl-workspace/aiter/aiter/jit/build/module_moe_asm
+[aiter] Current hipcc not support: -mllvm -amdgpu-coerce-illegal-types=1, skip it.
+[aiter] [pid=367416 pname=MainProcess] [32mfinish build [module_moe_asm], cost 23.9s [0m
+[aiter] import [module_moe_asm] under /sgl-workspace/aiter/aiter/jit/module_moe_asm.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] [fused_moe] using 2stage (kernelName1='flydsl_mxmoe_g1_a4w4_16x256x256_f16in_nt', kernelName2='flydsl_mxmoe_g2_a4w4_16x256x256_atomic') for ('gfx950', 256, 64, 4096, 256, 512, 10, 'ActivationType.Silu', 'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False) 
+[aiter] [pid=367416 pname=MainProcess] start build [module_moe_mxfp4_aux] under /sgl-workspace/aiter/aiter/jit/build/module_moe_mxfp4_aux
+mxfp4_moe aux codegen: 230 instances under /sgl-workspace/aiter/aiter/jit/build/module_moe_mxfp4_aux/blob/instances/
+[aiter] [pid=367416 pname=MainProcess] [32mfinish build [module_moe_mxfp4_aux], cost 26.0s [0m
+[aiter] import [module_moe_mxfp4_aux] under /sgl-workspace/aiter/aiter/jit/module_moe_mxfp4_aux.so
+[aiter] run_config (64, 4096, 256, E=512, topk=10, ActivationType.Silu, torch.bfloat16, torch.float4_e2m1fn_x2, torch.float4_e2m1fn_x2, QuantType.per_1x32, g1u1=True, dw_s1=False)[checkAllclose atol=0.01 rtol=0.01 [31mfailed![0m]
+    a    : torch.Size([64, 4096])
+           tensor([ 0.6289,  0.1406,  0.6719, -0.6328,  0.6406,  1.0391, -0.0830, -1.7344],
+       device='cuda:0', dtype=torch.bfloat16)
+    b    : torch.Size([64, 4096])
+           tensor([ 0.6719,  0.1641,  0.6055, -0.5781,  0.6133,  1.0625, -0.1338, -1.6953],
+       device='cuda:0', dtype=torch.bfloat16)
+    delta:
+           tensor([0.0430, 0.0234, 0.0664, 0.0547, 0.0273, 0.0234, 0.0508, 0.0391],
+       device='cuda:0', dtype=torch.bfloat16)
+[aiter] -->max abs delta:0.53125, delta details: 63.2% (165634 of 262144) elements
+[aiter] [fused_moe] using 2stage (kernelName1='flydsl_mxmoe_g1_a4w4_128x256x256', kernelName2='flydsl_mxmoe_g2_a4w4_128x256x256') for ('gfx950', 256, 16384, 4096, 256, 512, 10, 'ActivationType.Silu', 'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False) 
+[aiter] run_config (16384, 4096, 256, E=512, topk=10, ActivationType.Silu, torch.bfloat16, torch.float4_e2m1fn_x2, torch.float4_e2m1fn_x2, QuantType.per_1x32, g1u1=True, dw_s1=False)[checkAllclose atol=0.01 rtol=0.01 [31mfailed![0m]
+    a    : torch.Size([16384, 4096])
+           tensor([ 0.1094, -0.3066, -2.1875,  1.7344, -1.2578,  0.0613, -1.7109, -0.6328],
+       device='cuda:0', dtype=torch.bfloat16)
+    b    : torch.Size([16384, 4096])
+           tensor([ 0.1377, -0.2314, -2.1250,  1.7734, -1.2188,  0.0118, -1.7422, -0.6719],
+       device='cuda:0', dtype=torch.bfloat16)
+    delta:
+           tensor([0.0283, 0.0752, 0.0625, 0.0391, 0.0391, 0.0493, 0.0312, 0.0391],
+       device='cuda:0', dtype=torch.bfloat16)
+[aiter] -->max abs delta:0.953125, delta details: 59.8% (40119491 of 67108864) elements
+[aiter] error in batch 1 of 1 after 0 completed batches: "['gfx'] not in index"
+Traceback (most recent call last):
+  File "/sgl-workspace/aiter/aiter/utility/base_tuner.py", line 1456, in run
+    self._apply_compare_batch_results(
+  File "/sgl-workspace/aiter/aiter/utility/base_tuner.py", line 1272, in _apply_compare_batch_results
+    final_df = self._merge_compare_filtered_results(
+  File "/sgl-workspace/aiter/aiter/utility/base_tuner.py", line 1106, in _merge_compare_filtered_results
+    kept_old = old_df[~key_mask(old_df)].copy()
+  File "/sgl-workspace/aiter/aiter/utility/base_tuner.py", line 1104, in key_mask
+    return df[self.keys].astype(str).apply(tuple, axis=1).isin(improved_keys)
+  File "/opt/venv/lib/python3.10/site-packages/pandas/core/frame.py", line 4119, in __getitem__
+    indexer = self.columns._get_indexer_strict(key, "columns")[1]
+  File "/opt/venv/lib/python3.10/site-packages/pandas/core/indexes/base.py", line 6212, in _get_indexer_strict
+    self._raise_if_missing(keyarr, indexer, axis_name)
+  File "/opt/venv/lib/python3.10/site-packages/pandas/core/indexes/base.py", line 6264, in _raise_if_missing
+    raise KeyError(f"{not_found} not in index")
+KeyError: "['gfx'] not in index"
+[aiter] ============= Tuning results Summary: ==============
+/sgl-workspace/aiter/aiter/utility/base_tuner.py:531: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  tunedf = pd.concat([self.success, self.failed])
+[aiter] Tuning Error. tune 2 shapes, total tuning time is 84.4825 seconds
+[aiter] Successfully tuned shapes:
+      gfx cu_num  token model_dim inter_dim  ... run_1stage xbf16 flat tflops bw
+0  gfx950    256     64      4096       256  ...          0     0    0      0  0
+1  gfx950    256  16384      4096       256  ...          0     0    0      0  0
+
+[2 rows x 28 columns]
+[aiter] Failed shapes:
+Empty DataFrame
+Columns: [gfx, cu_num, token, model_dim, inter_dim, expert, topk, act_type, dtype, q_dtype_a, q_dtype_w, q_type, use_g1u1, doweight_stage1, block_m, ksplit, us1, kernelName1, err1, us2, kernelName2, err2, us, run_1stage, xbf16, flat, tflops, bw]
+Index: []

@@ -1,0 +1,25 @@
+{
+  "lead": "brief lead 1 -- Triton unified/gluon decode paged attention vs the aiter MFMA kernel",
+  "how": "SGLANG_USE_AITER_UNIFIED_ATTN=1, restart-paired, analysis/decode_probe_ab.sh, off-contract probe load (analysis/probe_load.py --n 192 --conc 64 --osl 1024)",
+  "shipped_prefill_patch_applied_in_both_arms": true,
+  "round1": {
+    "paged": {
+      "decode_tok_s_median": 3710.2,
+      "decode_n": 68,
+      "prefill_tok_s_median": 80681,
+      "probe_wall_s": 72.70
+    },
+    "triton": {
+      "decode_tok_s_median": 586.0,
+      "decode_n": 68,
+      "prefill_tok_s_median": 80828,
+      "probe_wall_s": 353.53
+    }
+  },
+  "decode_ratio_paged_over_triton": 6.331,
+  "probe_wall_ratio": 4.863,
+  "prefill_delta_pct": 0.18,
+  "verdict": "rejected -- 6.33x slower decode, 4.86x slower wall. Not a marginal call; campaign stopped after one paired round.",
+  "cause": "aiter_backend.py:938-955 builds the unified path's page table as torch.zeros(bs, max_kv_len) with page_size 1, i.e. one block per KV token, so the Triton kernel runs one block iteration per token instead of per 16/64. --page-size 1 is a sealed launch argument, so this path cannot be rescued within the contract.",
+  "engagement_evidence": "prefill throughput is unchanged (+0.18%) while decode collapses, which localises the change to the decode branch and rules out a whole-server confound."
+}

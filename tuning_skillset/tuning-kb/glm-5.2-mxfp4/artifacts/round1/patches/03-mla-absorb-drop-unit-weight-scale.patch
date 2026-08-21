@@ -1,0 +1,117 @@
+# Drop the per-forward-pass `w_kc/w_vc * w_scale` multiply on the bf16 MLA absorb path.
+#
+# base:  sglang git 29481685462732237d80d86076d6563e1f658102
+#        file was clean at that commit; pristine copy in patches/base/forward_mla.py
+# apply: cd /sgl-workspace/sglang && git apply -p1 03-mla-absorb-drop-unit-weight-scale.patch
+#        (or: patch -p1 < ...  from the same directory)
+#
+# measurement: local baseline 1468.358 tok/s (n=7, stock source)
+#              this patch was measured ON TOP OF patches 01 and 02, interleaved across
+#              restarts (tuning-core measurement.md Rule 6b):
+#                  A+B      1497.662 tok/s  (n=9, 4 server sessions)
+#                  A+B+C    1509.241 tok/s  (n=5, 2 server sessions)   +0.77%
+#              cumulative vs the stock baseline: +2.78%
+#              worst A+B+C run (1507.291) beats the best A+B run (1501.338) by +0.40%,
+#              i.e. the two distributions do not overlap.
+#              arms: results/abc_s1_r1_20260820_140249 1507.29
+#                    results/abc_s1_r2_20260820_140526 1509.76
+#                    results/abc_s1_r3_20260820_140802 1508.10
+#                    results/abc_s2_r1_20260820_142349 1510.23
+#                    results/abc_s2_r2_20260820_142625 1510.82
+#              against results/ab_s1_*, ab_s2_*, ab_s3_r2, ab_s3_r3, ab_s4_*
+#              latency also improved: mean TPOT 31.90 -> 31.63 ms, mean TTFT 11109 -> 11053 ms
+#
+# direct evidence the change fires: a with_stack profile
+# (analysis/profile_decode_stack.py) counted 624 `aten::mul` ops and 624
+# `AUnaryFunctor<BFloat16,...,MulFunctor<float>>` kernels over 4 prefill passes before the
+# patch, and 0 of each after. 624 = 2 per layer x 78 layers x 4 passes.
+#
+# accuracy: gsm8k 5-shot strict-match 0.968916 +/- 0.004780
+#           (eval_results/abc_gate_20260820_142927), against the stock-baseline gate of
+#           0.970432 +/- 0.004666 (eval_results/baseline_20260820_112214). PASSES: the gap is
+#           2 problems out of 1319, a third of one standard error.
+#           Note this patch is numerically inert -- x*1.0 is the identity on every finite bf16
+#           value -- so A+B and A+B+C run identical arithmetic. The 0.0045 spread between their
+#           two gsm8k runs is therefore a direct measurement of the *eval's* own run-to-run
+#           noise at concurrency 64, not an effect of this change. See FINDINGS.md.
+#
+# independence: this patch does not interact with 01 or 02 -- they are in the DSA prefill
+#           attention kernel and the prefill q-prep, this one is in the MLA absorb bmm and
+#           overwhelmingly pays at decode. It applies cleanly on stock alone. It was measured
+#           on top of them only because they were already the working tree.
+#
+# What it does
+# ------------
+# The bf16 absorb path evaluated `self.w_kc.to(torch.bfloat16) * self.w_scale` inside the
+# forward pass, once for w_kc in forward_absorb_prepare and once for w_vc in
+# forward_absorb_core. Both operands are load-time constants, so the product is loop-invariant;
+# worse, for a quark-MXFP4 checkpoint `w_scale` is the 1.0 that
+# DeepseekV2AttentionMLA.__init__ assigns and no loader branch overwrites, so the multiply is
+# the identity. It still costs a full elementwise pass over ~3.5 MB of weights per layer.
+#
+# The cost is set by the weight size, not the batch, so it is invisible in prefill (0.1% of a
+# 693 ms chunk) and expensive in decode: 46800 calls at 4.60 us = 3.08% of decode GPU time,
+# which at this workload's ~50/50 regime split is ~1.55% of end to end.
+#
+# `_scaled_absorb_weight` returns the cast weight unchanged when the scale is a plain Python
+# 1.0, and otherwise evaluates the stock expression. It is a fast path, not a rewrite: a model
+# whose loader does set a real scale keeps exactly the old behaviour and the old cost.
+--- a/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py
++++ b/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py
+@@ -93,6 +93,38 @@
+     attn_output_buf: torch.Tensor
+ 
+ 
++def _scaled_absorb_weight(w: torch.Tensor, w_scale) -> torch.Tensor:
++    """`w.to(bfloat16) * w_scale` for the bf16 absorb bmm, without the no-op multiply.
++
++    Both operands are load-time constants, so this product is loop-invariant -- yet the two
++    call sites recomputed it on every forward pass, once for w_kc and once for w_vc. That is
++    two elementwise kernels per layer over ~3.5 MB of weights, and because the cost is set by
++    the weight size rather than the batch it is invisible in prefill and expensive in decode:
++    3.08% of decode GPU time in analysis/profile_decode_tp0.json (46800 calls at 4.60 us).
++
++    For this model the multiply is not merely loop-invariant, it is the identity.
++    DeepseekV2AttentionMLA.__init__ sets `w_scale = 1.0`, and the weight loader only overwrites
++    it on the fp8 and int8 paths (`block_quant_to_tensor_quant`, `channel_quant_to_tensor_quant`,
++    or the `w_scale is None` branch, which 1.0 never enters). A quark-MXFP4 kv_b_proj dequantises
++    to bf16, so none of those fire and the absorbed weights are multiplied by 1.0 every step.
++
++    Skipping is bit-exact on every value a weight can hold: `x * 1.0` is the identity for all
++    finite bf16 values, for both signed zeros and for both infinities. (The one bit-level
++    difference is a nan payload -- the stock multiply canonicalises it to 0x7fc0, this returns
++    it untouched -- which no weight tensor carries and which nothing downstream can observe.)
++    A non-unit scale keeps the stock expression, so this is a pure fast path: correctness does
++    not depend on the argument above being right, only the speedup does.
++
++    Only a plain Python number is treated as unit. A 0-dim tensor scale is deliberately left
++    alone: reading its value here would force a device sync mid-forward, which costs far more
++    than the multiply it would save.
++    """
++    w = w.to(torch.bfloat16)
++    if isinstance(w_scale, (int, float)) and not isinstance(w_scale, bool) and w_scale == 1:
++        return w
++    return w * w_scale
++
++
+ def _select_local_dcp_heads_for_autotune(
+     attn_output: torch.Tensor, num_local_heads: int
+ ) -> torch.Tensor:
+@@ -680,7 +712,7 @@
+                     else:
+                         q_nope_out = torch.bmm(
+                             q_nope.to(torch.bfloat16).transpose(0, 1),
+-                            self.w_kc.to(torch.bfloat16) * self.w_scale,
++                            _scaled_absorb_weight(self.w_kc, self.w_scale),
+                         )
+ 
+             elif self.w_kc.dtype == torch.float8_e4m3fn:
+@@ -1140,7 +1172,7 @@
+                 else:
+                     attn_bmm_output = torch.bmm(
+                         attn_output.to(torch.bfloat16).transpose(0, 1),
+-                        self.w_vc.to(torch.bfloat16) * self.w_scale,
++                        _scaled_absorb_weight(self.w_vc, self.w_scale),
+                     )
+ 
+             if _bmm_buf is not None:

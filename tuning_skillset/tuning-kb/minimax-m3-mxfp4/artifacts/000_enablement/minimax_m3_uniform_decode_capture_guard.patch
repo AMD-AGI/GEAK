@@ -1,0 +1,66 @@
+--- a/vllm/models/minimax_m3/common/indexer.py
++++ b/vllm/models/minimax_m3/common/indexer.py
+@@ -314,11 +314,29 @@
+             qsl_cpu = common_attn_metadata.query_start_loc_cpu
+             query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
+             decode_query_len = int(query_lens_cpu[0].item())
++            # A cudagraph-capture dummy batch can arrive fully padded: every
++            # decode slot has a query length of 0, so the leading entry is 0
++            # too. That is not a real batch (a scheduled decode always has a
++            # positive leading query length), and the capture only needs the
++            # *uniform* decode query length this builder is configured with
++            # (1, or 1 + num_speculative_tokens). Fall back to it instead of
++            # asserting, so full-cudagraph capture can proceed.
++            padded_capture_batch = decode_query_len <= 0
++            if padded_capture_batch:
++                nonzero_lens = query_lens_cpu[query_lens_cpu > 0]
++                decode_query_len = (
++                    int(nonzero_lens[0].item())
++                    if nonzero_lens.numel() > 0
++                    else max(1, int(self.reorder_batch_threshold))
++                )
+             assert decode_query_len > 0
+             assert torch.all(
+                 (query_lens_cpu == decode_query_len) | (query_lens_cpu == 0)
+             )
+-            assert num_decode_tokens == num_decodes * decode_query_len
++            assert (
++                padded_capture_batch
++                or num_decode_tokens == num_decodes * decode_query_len
++            )
+             decode_metadata = MiniMaxM3IndexerDecodeMetadata(
+                 seq_lens=seq_lens[:num_decodes],
+                 block_table=block_table[:num_decodes],
+--- a/vllm/models/minimax_m3/common/sparse_attention.py
++++ b/vllm/models/minimax_m3/common/sparse_attention.py
+@@ -285,11 +285,29 @@
+             qsl_cpu = common_attn_metadata.query_start_loc_cpu
+             query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
+             decode_query_len = int(query_lens_cpu[0].item())
++            # A cudagraph-capture dummy batch can arrive fully padded: every
++            # decode slot has a query length of 0, so the leading entry is 0
++            # too. That is not a real batch (a scheduled decode always has a
++            # positive leading query length), and the capture only needs the
++            # *uniform* decode query length this builder is configured with
++            # (1, or 1 + num_speculative_tokens). Fall back to it instead of
++            # asserting, so full-cudagraph capture can proceed.
++            padded_capture_batch = decode_query_len <= 0
++            if padded_capture_batch:
++                nonzero_lens = query_lens_cpu[query_lens_cpu > 0]
++                decode_query_len = (
++                    int(nonzero_lens[0].item())
++                    if nonzero_lens.numel() > 0
++                    else max(1, int(self.reorder_batch_threshold))
++                )
+             assert decode_query_len > 0
+             assert torch.all(
+                 (query_lens_cpu == decode_query_len) | (query_lens_cpu == 0)
+             )
+-            assert num_decode_tokens == num_decodes * decode_query_len
++            assert (
++                padded_capture_batch
++                or num_decode_tokens == num_decodes * decode_query_len
++            )
+             decode_metadata = MiniMaxM3SparseDecodeMetadata(
+                 seq_lens=seq_lens[:num_decodes],
+                 block_table=block_table[:num_decodes],

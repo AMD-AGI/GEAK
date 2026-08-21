@@ -1,0 +1,445 @@
+{
+  "total_gpu_ms": 6410.625155006098,
+  "kernels": [
+    {
+      "kernel": "mfma_moe1_silu_mul_afp4_wfp4_bf16_t32x128x256_pm1_async_v32",
+      "pct": 16.116383239054223,
+      "ms": 1033.1609179999966,
+      "calls": 22500,
+      "us_per_call": 45.91826302222207,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "main_kernel",
+      "pct": 14.461303782143045,
+      "ms": 927.0599779999103,
+      "calls": 46800,
+      "us_per_call": 19.80897388888697,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter26cross_device_reduce_2stageIDF16bLi8ELb0EEEvPNS_8RankDataES2_NS_11RankSignalsEPNS_6SignalEPT_ii",
+      "pct": 9.266909757405939,
+      "ms": 594.0668479999797,
+      "calls": 47100,
+      "us_per_call": 12.612884246284072,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "mfma_moe2_afp4_wfp4_bf16_cshuffle_t32x128x256_vscale_fix3_fp4opt_v1_persist_cu256_acc0",
+      "pct": 8.285489217618924,
+      "ms": 531.1516559999966,
+      "calls": 22500,
+      "us_per_call": 23.606740266666513,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "hgemm_bf16_32x64x64x7_SPK3_W1x2x1_BLDS1_TN_AS1_0",
+      "pct": 5.765308484951353,
+      "ms": 369.5923159999923,
+      "calls": 23400,
+      "us_per_call": 15.79454341880309,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x64x64_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_",
+      "pct": 4.322131341334667,
+      "ms": 277.0756390000026,
+      "calls": 23400,
+      "us_per_call": 11.840839273504384,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "hgemm_bf16_32x64x128x4_SPK1_W2x2x1_BLDS1_TN_AS1_0",
+      "pct": 3.6001665581674662,
+      "ms": 230.79318300000082,
+      "calls": 23400,
+      "us_per_call": 9.862956538461574,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT32x16x1024_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0",
+      "pct": 3.141929657869832,
+      "ms": 201.41733300000047,
+      "calls": 23400,
+      "us_per_call": 8.607578333333354,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb1ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+      "pct": 3.12460740031848,
+      "ms": 200.30686799999856,
+      "calls": 46800,
+      "us_per_call": 4.280061282051252,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter30fused_mx_quant_moe_sort_kernelIDF16bN4opus5fp4_tELi256ELi32EEEvPT0_PhPKT_PKiSA_PKfiiiiiiiii",
+      "pct": 2.7049413560639977,
+      "ms": 173.4036510000017,
+      "calls": 22500,
+      "us_per_call": 7.706828933333409,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "hgemm_bf16_32x64x128x5_SPK8_W1x4x1_BLDS1_TN_AS1_0",
+      "pct": 2.3015869502958184,
+      "ms": 147.54611200000141,
+      "calls": 22500,
+      "us_per_call": 6.5576049777778405,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "(anonymous namespace)::topk_transform_decode_kernel((anonymous namespace)::FastTopKParams, int*, int const*, l",
+      "pct": 2.190111394835832,
+      "ms": 140.39983200000074,
+      "calls": 6300,
+      "us_per_call": 22.28568761904774,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter30fused_mx_quant_moe_sort_kernelIDF16bN4opus5fp4_tELi64ELi8EEEvPT0_PhPKT_PKiSA_PKfiiiiiiiii",
+      "pct": 2.068043019119231,
+      "ms": 132.57448600000498,
+      "calls": 22500,
+      "us_per_call": 5.892199377777999,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x32x64_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_D",
+      "pct": 2.0417871866644615,
+      "ms": 130.8913230000033,
+      "calls": 23400,
+      "us_per_call": 5.593646282051423,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+      "pct": 1.9598710104253576,
+      "ms": 125.63998400000015,
+      "calls": 6300,
+      "us_per_call": 19.942854603174627,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::grouped_topk_kernel<>(hip_bfloat16*, hip_bfloat16 const*, float*, int*, unsigned long, unsigned lo",
+      "pct": 1.6220294820825272,
+      "ms": 103.98222999999761,
+      "calls": 22500,
+      "us_per_call": 4.621432444444338,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter23fused_qk_rmsnorm_kernelIDF16bLi256ELi8ELb1ELi1EEEvPT_S2_PKS1_S4_S4_S4_ffiiiiiii",
+      "pct": 1.6111964668428782,
+      "ms": 103.28776599999902,
+      "calls": 23400,
+      "us_per_call": 4.414007094017053,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "moe_reduction_kernel_plain_bf16_topk9_md6144",
+      "pct": 1.5570012687772636,
+      "ms": 99.81351499999937,
+      "calls": 22500,
+      "us_per_call": 4.436156222222194,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<> >, aiter",
+      "pct": 1.5529381393054629,
+      "ms": 99.55304299999965,
+      "calls": 22500,
+      "us_per_call": 4.424579688888873,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_fused_qk_rope_cat_and_cache_mla_kernel",
+      "pct": 1.5152963658175973,
+      "ms": 97.1399699999961,
+      "calls": 23400,
+      "us_per_call": 4.151280769230603,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_fused_append_shared_experts_kernel",
+      "pct": 1.4325556990067263,
+      "ms": 91.83577599999863,
+      "calls": 22500,
+      "us_per_call": 4.081590044444384,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v2<aiter::MoeSortingProblemMp<> >, ait",
+      "pct": 1.4131248795487643,
+      "ms": 90.59013900000271,
+      "calls": 22500,
+      "us_per_call": 4.02622840000012,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x1024_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0",
+      "pct": 1.101394205600422,
+      "ms": 70.60625400000023,
+      "calls": 6300,
+      "us_per_call": 11.207341904761941,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::kn_entry_2c_sbhd_cached_indirect_inplace<>(c10::BFloat16*, c10::BFloat16*, c10::BFloat16 const*, c",
+      "pct": 0.9251984255183423,
+      "ms": 59.311002999999204,
+      "calls": 6300,
+      "us_per_call": 9.414444920634795,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "hgemm_bf16_16x64x128x4_SPK1_W1x1x2_BLDS1_TN_AS1_0",
+      "pct": 0.8449161148925017,
+      "ms": 54.164404999998936,
+      "calls": 6300,
+      "us_per_call": 8.597524603174435,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void fast_hadamard_transform_kernel<fast_hadamard_transform_kernel_traits<> >(HadamardParamsBase)",
+      "pct": 0.8042262455439471,
+      "ms": 51.55593000000138,
+      "calls": 12600,
+      "us_per_call": 4.091740476190586,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "hgemm_bf16_32x64x128x3_SPK12_W1x2x2_BLDS1_TN_AS1_0",
+      "pct": 0.5820301623916265,
+      "ms": 37.311772000000445,
+      "calls": 6300,
+      "us_per_call": 5.922503492063563,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "act_quant_kernel__kernel",
+      "pct": 0.5142607031742615,
+      "ms": 32.967326000000455,
+      "calls": 6300,
+      "us_per_call": 5.232908888888961,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN7ck_tile6kentryILi1ENS_14Layernorm2dFwdINS_29Layernorm2dFwdPipelineOnePassINS_29Layernorm2dFwdPipelineProbl",
+      "pct": 0.49850273923821575,
+      "ms": 31.95714199999951,
+      "calls": 6300,
+      "us_per_call": 5.072562222222145,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter32indexer_k_quant_and_cache_kernelIDF16bDB8_LN4vllm18Fp8KVCacheDataTypeE1ELi8ELi8ELi16EEEvPKT_PT0_PKl",
+      "pct": 0.41968688465570614,
+      "ms": 26.904553000000124,
+      "calls": 6300,
+      "us_per_call": 4.270563968253988,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "triton_poi_fused_mul_unsqueeze_0",
+      "pct": 0.4195908721787455,
+      "ms": 26.898398000000142,
+      "calls": 6300,
+      "us_per_call": 4.269586984127007,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT32x32x512_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_",
+      "pct": 0.28398751385086535,
+      "ms": 18.205375,
+      "calls": 900,
+      "us_per_call": 20.228194444444444,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x64x128_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0",
+      "pct": 0.28117541681444413,
+      "ms": 18.025102000000004,
+      "calls": 300,
+      "us_per_call": 60.083673333333344,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter13allgather_vecIDF16bLi8EEEvPNS_8RankDataENS_11RankSignalsEPNS_6SignalEPT_ii",
+      "pct": 0.2277660079469444,
+      "ms": 14.601225000000005,
+      "calls": 300,
+      "us_per_call": 48.67075000000001,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x32x256_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR0_CADS0_",
+      "pct": 0.1510261911420525,
+      "ms": 9.681723000000009,
+      "calls": 900,
+      "us_per_call": 10.75747000000001,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Memcpy DtoD (Device -> Device)",
+      "pct": 0.1367497831807268,
+      "ms": 8.76651599999997,
+      "calls": 2401,
+      "us_per_call": 3.651193669304444,
+      "cat": "gpu_memcpy"
+    },
+    {
+      "kernel": "void at::native::elementwise_kernel_manual_unroll<N, 8, at::native::gpu_kernel_impl_nocast<>(at::TensorIterato",
+      "pct": 0.08236713069826943,
+      "ms": 5.280248000000009,
+      "calls": 300,
+      "us_per_call": 17.6008266666667,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::elementwise_kernel_manual_unroll<N, 4, at::native::gpu_kernel_impl<>(at::TensorIteratorBase&,",
+      "pct": 0.08229645116405139,
+      "ms": 5.275716999999987,
+      "calls": 1201,
+      "us_per_call": 4.392770191507067,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::index_elementwise_kernel<N, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<at:",
+      "pct": 0.06987271742915924,
+      "ms": 4.479278000000012,
+      "calls": 901,
+      "us_per_call": 4.971451720310779,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_add<>, std::array<> >(int, at:",
+      "pct": 0.06954360756093464,
+      "ms": 4.458179999999999,
+      "calls": 1504,
+      "us_per_call": 2.964215425531914,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN7sgl_hip10activation18act_and_mul_kernelI14__hip_bfloat16TnPFT_RKS3_EXadL_Z4siluIS2_ES3_S5_EEEEvPS3_PS4_i",
+      "pct": 0.06169301595978633,
+      "ms": 3.954907999999989,
+      "calls": 900,
+      "us_per_call": 4.39434222222221,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::greedy_sample_kernel<>(float const*, int*, int, int)",
+      "pct": 0.059346318151655836,
+      "ms": 3.804469999999999,
+      "calls": 300,
+      "us_per_call": 12.681566666666663,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::index_elementwise_kernel<N, 4, at::native::gpu_index_kernel<at::native::index_put_kernel_impl",
+      "pct": 0.0565465288072447,
+      "ms": 3.624985999999998,
+      "calls": 901,
+      "us_per_call": 4.02329189789123,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIte",
+      "pct": 0.04487376707330291,
+      "ms": 2.8766889999999994,
+      "calls": 300,
+      "us_per_call": 9.588963333333332,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_scan_co",
+      "pct": 0.03794756269753675,
+      "ms": 2.432676000000001,
+      "calls": 600,
+      "us_per_call": 4.054460000000002,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::vectorized_gather_kernel<>(char*, char*, long*, int, long, long, long, long, bool)",
+      "pct": 0.02085965046569203,
+      "ms": 1.337234,
+      "calls": 300,
+      "us_per_call": 4.457446666666667,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_vocab_parallel_embedding_kernel",
+      "pct": 0.020572143404300233,
+      "ms": 1.3188029999999986,
+      "calls": 300,
+      "us_per_call": 4.396009999999995,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+      "pct": 0.02039545236830735,
+      "ms": 1.3074759999999979,
+      "calls": 300,
+      "us_per_call": 4.358253333333326,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<>, std::array<> >(int, at::native::F",
+      "pct": 0.019783936345265735,
+      "ms": 1.2682739999999992,
+      "calls": 300,
+      "us_per_call": 4.227579999999997,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::BUnaryFunctor<>, std::array<> >(int, at::native:",
+      "pct": 0.019042058621174175,
+      "ms": 1.2207149999999989,
+      "calls": 300,
+      "us_per_call": 4.069049999999996,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::TensorLis",
+      "pct": 0.01893841818300548,
+      "ms": 1.2140709999999981,
+      "calls": 300,
+      "us_per_call": 4.046903333333327,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::launch_clamp_scalar(at::T",
+      "pct": 0.01889976360657834,
+      "ms": 1.2115929999999988,
+      "calls": 300,
+      "us_per_call": 4.038643333333329,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void (anonymous namespace)::clamp_position_kernel<>(long*, long const*, unsigned long)",
+      "pct": 0.018625968156437356,
+      "ms": 1.1940409999999986,
+      "calls": 300,
+      "us_per_call": 3.9801366666666618,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void (anonymous namespace)::elementwise_kernel_with_index<>(int, at::native::arange_cuda_out(c10::Scalar const",
+      "pct": 0.01762502053512949,
+      "ms": 1.1298740000000014,
+      "calls": 300,
+      "us_per_call": 3.7662466666666714,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "alloc_decode_kernel",
+      "pct": 0.015546564896587718,
+      "ms": 0.996632,
+      "calls": 301,
+      "us_per_call": 3.31106976744186,
+      "cat": "kernel"
+    }
+  ]
+}
