@@ -11,24 +11,33 @@
 # framework (vllm/sglang) and tp (GPU count) are NOT listed here — they are the
 # single source of truth in each model's handoff.json and read from there.
 #
-# Enrollment is intentionally limited to models with FULL GEAK input material
-# (handoff + launch_recipe + tracelens + torch_trace) per geak_ci_workspace/TABLE.md.
-# Add a row here only once a model's material is complete.
+# See geak_ci_workspace/TABLE.md for each model's input-material status. Weights are
+# pre-staged as symlinks under $HF_MODELS_DIR, so hf_repo is '-' (CI never
+# auto-downloads: stage_weights requires GEAK_ALLOW_DOWNLOAD=1). framework + tp come
+# from each handoff.json. The 'smoke' row is ALSO in the full matrix, so l1-ci-full
+# runs every row below; l1-ci-smoke runs only the 'smoke' row.
 #
 # model_key	hf_repo	tier
-# --- Currently enrolled: the 5 GEAK-v4 onboarded models with FULL material
-#     (handoff + launch_recipe + tracelens triad + torch_trace) and weights
-#     pre-staged as symlinks under $HF_MODELS_DIR. hf_repo is '-' (CI never
-#     auto-downloads: stage_weights requires GEAK_ALLOW_DOWNLOAD=1). framework +
-#     tp come from each handoff.json. The 'smoke' row is ALSO in the full matrix,
-#     so l1-ci-full runs all 5; l1-ci-smoke runs only the 'smoke' row.
-MiniMaxAI-MiniMax-M2.5	-	smoke
-moonshotai-Kimi-K2.6-int4	-	verify
-MiniMaxAI-MiniMax-M3-MXFP8	-	verify
-Qwen-Qwen3-14B-FP8	-	verify
-Qwen-Qwen3.5-27B-FP8	-	verify
+# --- Complete material: handoff + launch_recipe + tracelens triad + torch_trace,
+#     weights staged. Profiled on MI355X, ISL 8192 / OSL 1024 / conc 64.
+Qwen3-8B	-	smoke
+Llama-3.1-8B-Instruct	-	verify
+Qwen3-14B-FP8	-	verify
+gemma-4-26B-A4B-it	-	verify
+Qwen3.5-397B-A17B-MXFP4	-	verify
+Mixtral-8x7B-Instruct-v0.1	-	verify
+gpt-oss-120b	-	verify
 #
-# --- Previously enrolled (reference models). Disabled while the matrix targets
-#     the GEAK-v4 onboarded set above. Re-enable a row to bring it back.
-# Qwen-Qwen3-8B	Qwen/Qwen3-8B	smoke
+# --- Enrolled with KNOWN GAPS (see TABLE.md). These will run, but expect the
+#     degraded behaviour noted against each one.
+#     DeepSeek-V4-Pro       : no tracelens triad -> profiler falls back to
+#                             re-collecting a torch trace (source: torch-trace).
+#     Qwen3-14B-FP8-vllm    : vllm re-profile of Qwen3-14B-FP8; only 2 torch-trace
+#                             files vs 54 for the sglang variant. Shares its weights.
+DeepSeek-V4-Pro	-	verify
+Qwen3-14B-FP8-vllm	-	verify
+#
+# --- Complete, but its weights sit under huggingface_models/Qwen/ rather than
+#     hyperloom/models/ like every other row (see quick_setup.sh).
+Qwen3.5-122B-A10B-FP8	-	verify
 

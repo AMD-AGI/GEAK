@@ -123,10 +123,18 @@ while [ -L "$_p" ]; do
 done
 _realw="$(readlink -f "$WEIGHTS")"; _mark_mount "$_realw"   # 2) resolved weights dir
 if [ -d "$_realw" ]; then                       # 3) nested links escaping the dir
+  # A temp file, NOT process substitution: `< <(...)` needs /dev/fd, which is a
+  # symlink to /proc/self/fd, and inside an overlapping srun step (the held-node
+  # dispatch mode) /proc belongs to a different PID namespace — so /proc/self
+  # dangles and the redirect dies with "/dev/fd/63: No such file or directory".
+  # Piping into the loop instead would put it in a subshell and lose _mset.
+  _lnks="$(mktemp)"
+  find "$_realw/" -type l -print0 >"$_lnks" 2>/dev/null
   while IFS= read -r -d '' _lnk; do
     _tt="$(readlink -f "$_lnk")" || continue
     case "$_tt/" in "$_realw"/*) : ;; *) _mark_mount "$_tt" ;; esac
-  done < <(find "$_realw/" -type l -print0 2>/dev/null)
+  done <"$_lnks"
+  rm -f "$_lnks"
 fi
 if [ -n "${WEIGHTS_EXTRA_MOUNTS:-}" ]; then     # 4) explicit extra/override roots
   IFS=: read -r -a _wm <<< "$WEIGHTS_EXTRA_MOUNTS"
@@ -246,7 +254,7 @@ docker run --rm --name "$CONTAINER_NAME" \
   -e RUN_TS="$RUN_TS" -e OUT_DIR="$OUT_DIR" \
   -e CLAUDE_HOME="$OUT_DIR/claude" \
   -e PERFSKILLS_E2E_TIMEOUT_S="$BUDGET" \
-  -e PERFSKILLS_CLAUDE_MODEL \
+  -e PERFSKILLS_CLAUDE_MODEL -e GEAK_CLAUDE_MODEL \
   -e TMPDIR="$DBG_TMP" \
   -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPYCACHEPREFIX="$DBG_TMP/pycache" \
   "${GPU_ENV[@]}" \

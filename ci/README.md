@@ -252,10 +252,10 @@ bash ci/dispatch/run_matrix.sh Qwen-Qwen3-8B --probe
 bash ci/dispatch/run_matrix.sh smoke  --budget 1800
 
 # L1 verify: one SPUR job per enrolled model, waited on + aggregated
-bash ci/dispatch/run_matrix.sh verify --budget 57600
+bash ci/dispatch/run_matrix.sh verify --budget 86400
 
 # a single model as one SPUR job (prints "<job_id>\t<out_dir>")
-bash ci/dispatch/slurm_submit.sh Qwen-Qwen3-8B --budget 1800
+bash ci/dispatch/slurm_submit.sh Qwen3-8B --budget 1800
 ```
 
 ### Directly on a GPU node (no SLURM — local dev / debugging)
@@ -320,7 +320,7 @@ modes (`GEAK_MONITOR_MODE`):
 | `GEAK_STALL_KILL_S` | `3600` | (stall) flat+idle duration before a kill is considered |
 | `GEAK_STALL_GPU_UTIL_PCT` | `5` | (stall) max GPU util% counted as idle |
 | `GEAK_STALL_CPU_PCT` | `5` | (stall) container CPU% counted as idle |
-| `GEAK_MONITOR_MODEL` | `claude-opus-4-8` | (claude) arbiter model |
+| `GEAK_MONITOR_MODEL` | `claude-opus-5` | (claude) arbiter model |
 | `GEAK_MONITOR_TAIL_LINES` | `300` | (claude) how much of `run.log` to feed each poll |
 | `GPU_HEALTHCHECK_TIMEOUT_S` | `120` | preflight probe cap; `0` skips preflight (CPU-only debugging) |
 | `GEAK_SKIP_DSTATE_CHECK` | `0` | set `1` to skip the D-state wedge pre-check |
@@ -349,7 +349,7 @@ All timeouts / caps / intervals / toggles have their defaults in **`ci/config.sh
 | `DOCKER_DEFAULT` | `ci/docker_setup/docker_default.json` | image selection preset (override with a path; CI sets it from `vars.DOCKER_DEFAULT_JSON`) |
 | `IMAGE` | resolved from the docker preset | override the container image |
 | `MODEL_PATH` | resolved on node (see below) | override weights dir |
-| `PERFSKILLS_E2E_TIMEOUT_S` | `57600` | workflow wall-clock budget fallback (also via `--budget`) |
+| `PERFSKILLS_E2E_TIMEOUT_S` | `86400` | workflow wall-clock budget fallback, 24h (also via `--budget`); forwarded to `run_e2e.py` as `GEAK_E2E_TIMEOUT_S` |
 | `LITELLM_API_KEY` / `LITELLM_BASE_URL` | **required** (no default; from CI secrets or local export) | Claude auth via the global LiteLLM proxy. `claude_setup.sh` errors if unset — nothing is hardcoded. |
 
 ### SPUR / weights overrides
@@ -382,7 +382,7 @@ All timeouts / caps / intervals / toggles have their defaults in **`ci/config.sh
   CA the base image doesn't trust. Preferred long-term fix: bake the corporate
   CA bundle into the image and drop the flag.
 - Only the `claude-opus` family is served by the proxy, so the haiku/sonnet
-  Claude Code defaults also point at `claude-opus-4-8`.
+  Claude Code defaults also point at `claude-opus-5`.
 - The container runs with `--rm`; it's destroyed after each run. The pulled
   image is cached. Everything worth keeping is written to the mounted
   `ci_runs/<timestamp>/` dir.

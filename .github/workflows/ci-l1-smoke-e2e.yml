@@ -48,7 +48,7 @@ on:
         options: ["probe", "smoke", "verify"]
         default: "smoke"
       budget_s:
-        description: "Per-model GEAK budget in seconds (PERFSKILLS_E2E_TIMEOUT_S). Leave empty to use the repo Actions variable vars.GEAK_E2E_BUDGET_S (fallback 57600)."
+        description: "Per-model GEAK budget in seconds (PERFSKILLS_E2E_TIMEOUT_S). Leave empty to use the repo Actions variable vars.GEAK_E2E_BUDGET_S (fallback 86400 = 24h)."
         type: string
         default: ""
 
@@ -69,9 +69,11 @@ env:
   # (budget + SPUR_TIME_HEADROOM_S) and the run_local.sh hard-timeout watchdog.
   # Sourced from a repo/org Actions VARIABLE so it's editable from the GitHub UI
   # (Settings -> Secrets and variables -> Actions -> Variables: GEAK_E2E_BUDGET_S)
-  # WITHOUT editing this file. Falls back to 57600 (16h) if the variable is unset.
-  # Precedence: workflow_dispatch input `budget_s` > vars.GEAK_E2E_BUDGET_S > 57600.
-  GEAK_E2E_BUDGET_S: ${{ vars.GEAK_E2E_BUDGET_S || '57600' }}
+  # WITHOUT editing this file. Falls back to 86400 (24h) if the variable is unset.
+  # Precedence: workflow_dispatch input `budget_s` > vars.GEAK_E2E_BUDGET_S > 86400.
+  # NOTE: if vars.GEAK_E2E_BUDGET_S is set to an older value it still WINS over this
+  # fallback — update or delete it in the GitHub UI to actually get 24h.
+  GEAK_E2E_BUDGET_S: ${{ vars.GEAK_E2E_BUDGET_S || '86400' }}
   # Data workspace on the jump box (siblings live here; NOT under the checkout).
   # Base dir is a repo/org Actions VARIABLE (vars.GEAK_CI_PATH) so we can flip the
   # whole workspace between hosts (e.g. /home/<user> or /shared_nfs/<user>) without
@@ -90,8 +92,8 @@ env:
   # Agent model served by the LiteLLM proxy, read by ci/preflight/claude_setup.sh and
   # run_geak_e2e.sh. Editable from the GitHub UI (Settings -> Secrets and variables ->
   # Actions -> Variables: PERFSKILLS_CLAUDE_MODEL) WITHOUT editing this file; the value
-  # must be a proxy model id (e.g. claude-opus-5). Unset -> claude-opus-4-8.
-  PERFSKILLS_CLAUDE_MODEL: ${{ vars.PERFSKILLS_CLAUDE_MODEL || 'claude-opus-4-8' }}
+  # must be a proxy model id (e.g. claude-opus-4-8). Unset -> claude-opus-5.
+  PERFSKILLS_CLAUDE_MODEL: ${{ vars.PERFSKILLS_CLAUDE_MODEL || 'claude-opus-5' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -193,12 +195,12 @@ jobs:
     # failure), so this cap must cover: queue wait + run wall + overhead.
     #   - queue wait : unbounded in code; an operator scancels a job that pends too
     #                  long (>~36h). Budget ~36h of pend here.
-    #   - run wall   : SPUR -t = budget + SPUR_TIME_HEADROOM_S = 57600 + 7200
-    #                  = 64800s = 18h -> run_local.sh watchdog docker-kills the
+    #   - run wall   : SPUR -t = budget + SPUR_TIME_HEADROOM_S = 86400 + 7200
+    #                  = 93600s = 26h -> run_local.sh watchdog docker-kills the
     #                  container ~5 min before this and writes timeout.json (FAIL).
-    # worst case ~= pend (36h) + run wall (18h) + submit/pull/judge (~1h) ~= 55h;
-    # we set 60h so GitHub never pre-empts a legitimate (even long-pending) run.
-    timeout-minutes: 3600
+    # worst case ~= pend (36h) + run wall (26h) + submit/pull/judge (~1h) ~= 63h;
+    # we set 70h so GitHub never pre-empts a legitimate (even long-pending) run.
+    timeout-minutes: 4200
     env:
       # All model jobs share setup's RUN_TS so results land at a path summarize
       # can find: $HF_LOGS/<model>/ci_runs/<RUN_TS>/.

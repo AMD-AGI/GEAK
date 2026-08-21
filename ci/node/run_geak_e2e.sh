@@ -9,11 +9,12 @@
 #       subprocess.Popen(cmd, env=dict(os.environ), start_new_session=True)
 #   GEAK:      interface/run_e2e.py::main
 #       - positional args:  args[0]=handoff.json   args[1]=result.json   (only --dry-run flag is read)
-#       - BUDGET is read from env PERFSKILLS_E2E_TIMEOUT_S (default 43200s=12h).
-#         The CLI "--timeout-s" value is DISCARDED by run_e2e (it lands in an ignored positional).
+#       - BUDGET is read from env GEAK_E2E_TIMEOUT_S (run_e2e's own fallback: 43200s=12h).
+#         The CLI "--timeout-s" value is DISCARDED by run_e2e (it lands in an ignored positional),
+#         so this script forwards PERFSKILLS_E2E_TIMEOUT_S into GEAK_E2E_TIMEOUT_S below.
 #       - PERFSKILLS_ROOT is derived from run_e2e.py's own location (interface/..), so calling the
 #         real path is enough; it maps the handoff onto e2e_workflow/e2e_workflow.js and drives it
-#         via the Claude SDK (model claude-opus-4-8, effort ultracode).
+#         via the Claude SDK (model claude-opus-5, effort ultracode).
 #
 # Usage:   ./run_geak_e2e.sh <model_dir> [--dry-run]
 #   <model_dir> is one of the per-model folders here (contains handoff.json [+ baseline_config...]).
@@ -21,7 +22,8 @@
 #
 # Optional env overrides:
 #   GEAK_ROOT                 default: the GEAK repo two levels up from this script (ci/..)
-#   PERFSKILLS_E2E_TIMEOUT_S  geak's REAL wall-clock budget in seconds (default in ci/config.sh)
+#   PERFSKILLS_E2E_TIMEOUT_S  geak's REAL wall-clock budget in seconds (default in ci/config.sh);
+#                             forwarded to run_e2e.py as GEAK_E2E_TIMEOUT_S, which can also be set directly
 #   EXP_ROOT                  writable run root; patches handoff.exp_root (default: <model_dir>/repro_out/exp)
 #   MODEL_PATH                real served model dir; patches handoff.model_path (default: keep handoff value)
 #   INFERENCEX_PATH           InferenceX checkout  -> bench_client=inferencex (else geak falls back to native)
@@ -150,12 +152,22 @@ if crit:
 print(f"patched handoff -> {dst}\n  exp_root={h['exp_root']}\n  model_path={h.get('model_path')}\n  launch_recipe={h.get('launch_recipe')}\n  inferencex_path={h.get('inferencex_path')}")
 PY
 
-# ---- Budget: run_e2e reads PERFSKILLS_E2E_TIMEOUT_S (NOT the CLI flag). Export it. ----
+# ---- Budget ----
+# run_e2e.py reads the env var GEAK_E2E_TIMEOUT_S (see main(): it does NOT parse the
+# --timeout-s value — argv is split into positional args and bare flags, so the number
+# after --timeout-s is dropped). Its built-in fallback is 43200 (12h), so without this
+# forward the CI budget below is silently ignored and every run is capped at 12h.
 export PERFSKILLS_E2E_TIMEOUT_S   # value/default from ci/config.sh
+export GEAK_E2E_TIMEOUT_S="${GEAK_E2E_TIMEOUT_S:-$PERFSKILLS_E2E_TIMEOUT_S}"
 
-# ---- Claude workflow knobs (defaults already match run_e2e.py) ----
-export PERFSKILLS_CLAUDE_MODEL="${PERFSKILLS_CLAUDE_MODEL:-claude-opus-4-8}"
+# ---- Claude workflow knobs ----
+export PERFSKILLS_CLAUDE_MODEL="${PERFSKILLS_CLAUDE_MODEL:-claude-opus-5}"
 export PERFSKILLS_CLAUDE_EFFORT="${PERFSKILLS_CLAUDE_EFFORT:-ultracode}"
+# run_e2e.py reads its own GEAK_CLAUDE_MODEL (its built-in default is older than the
+# CI default above), so pin it to the CI model or the SDK dispatch silently uses a
+# different model than claude_setup.sh configured for the CLI path.
+export GEAK_CLAUDE_MODEL="${GEAK_CLAUDE_MODEL:-$PERFSKILLS_CLAUDE_MODEL}"
+export GEAK_CLAUDE_EFFORT="${GEAK_CLAUDE_EFFORT:-$PERFSKILLS_CLAUDE_EFFORT}"
 
 # (INFERENCEX_PATH already exported above; run_e2e exports BENCH_CLIENT from it.)
 
@@ -164,12 +176,12 @@ echo " GEAK e2e reproduction"
 echo "   runner   = $RUNNER"
 echo "   handoff  = $HANDOFF"
 echo "   result   = $RESULT"
-echo "   budget   = PERFSKILLS_E2E_TIMEOUT_S=$PERFSKILLS_E2E_TIMEOUT_S s"
-echo "   claude   = $PERFSKILLS_CLAUDE_MODEL / effort=$PERFSKILLS_CLAUDE_EFFORT"
+echo "   budget   = GEAK_E2E_TIMEOUT_S=$GEAK_E2E_TIMEOUT_S s (from PERFSKILLS_E2E_TIMEOUT_S=$PERFSKILLS_E2E_TIMEOUT_S)"
+echo "   claude   = $GEAK_CLAUDE_MODEL / effort=$GEAK_CLAUDE_EFFORT"
 echo "   inferencex_path = ${INFERENCEX_PATH:-<unset -> native bench>}"
 echo "   dry_run  = ${DRY:-<no>}"
 echo "=============================================================="
 
 # We pass --timeout-s too, purely to mirror Hyperloom's exact argv (run_e2e ignores its value;
-# the effective budget is the PERFSKILLS_E2E_TIMEOUT_S env above).
+# the effective budget is the GEAK_E2E_TIMEOUT_S env exported above).
 exec python3 "$RUNNER" "$HANDOFF" "$RESULT" --timeout-s "$PERFSKILLS_E2E_TIMEOUT_S" ${DRY:+$DRY}
