@@ -1,0 +1,35 @@
+skill_id: flydsl_fp8_blockscale_gemm
+date: '2026-07-17'
+provider: standalone_flydsl
+gpu: gfx950 / MI355X
+scope: down_proj M=16384 N=7168 K=768, CK versus FlyDSL isolated kernel
+method: CUDA-event same-session paired A/B, 3 archived on-box GEAK measurements
+warmup_per_run: 10
+iterations_per_run: 100
+inner_repetitions: 3
+baseline_latency_ms:
+- 0.187491
+- 0.187262
+- 0.187461
+skill_latency_ms:
+- 0.128937
+- 0.129089
+- 0.128817
+baseline_median_ms: 0.187461
+skill_median_ms: 0.128937
+speedup: 1.4538960888
+latency_reduction_pct: 31.2192936131
+parity:
+  pass: true
+  oracle: fp32 block dequantization, matmul, then bf16 cast
+  baseline_maxabs_err_range: [0.535156, 0.586]
+  baseline_cosine_range: [0.99974823, 0.99975228]
+  skill_maxabs_err: 0.0078125
+  skill_cosine: 1.0
+conclusions:
+  decisive_lever: tile_n=256/tile_k=128
+  xcd_swizzle: non-load-bearing for down_proj
+  fused_promote: non-load-bearing for down_proj
+  eight_wave: measured dead-end for down_proj
+raw_logs: external archived GEAK artifacts (director validation, reprofile, TechLead report)
+notes: YAML was created after the measured run; exact FlyDSL/AITER commits were not captured
