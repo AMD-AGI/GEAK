@@ -40,4 +40,23 @@ Qwen3-14B-FP8-vllm	-	verify
 # --- Complete, but its weights sit under huggingface_models/Qwen/ rather than
 #     hyperloom/models/ like every other row (see quick_setup.sh).
 Qwen3.5-122B-A10B-FP8	-	verify
+#
+# --- The '-excluded' set. Same three model families as rows above in two cases,
+#     but a DIFFERENT starting stack, so they are separate enrollments rather
+#     than edits to the rows above (which stay the untouched reference):
+#     DeepSeek-V4-Pro-excluded    : vllm baseline with MTP speculative decoding
+#                                   (--speculative-config) already accepted, vs the
+#                                   plain-decode baseline of the DeepSeek row above.
+#     gemma-4-26B-A4B-it-excluded : sglang baseline whose recorded env replays a
+#                                   GEAK overlay from the source campaign's cycle0,
+#                                   so optimization starts on an already-overlaid stack.
+#     MiniMax-M3-MXFP4-excluded   : new family. vllm + mxfp4 with aiter fused shared
+#                                   experts and fp8 kv-cache in the baseline.
+#     All three come from /shared_nfs/hyperloom-claw/<model>/<ts>/geak/handoff.json.
+#     None has a readable tracelens triad (the campaign copies are root 0600), so
+#     like DeepSeek-V4-Pro above they profile from a freshly collected torch trace;
+#     gemma/MiniMax do carry a readable analysis.md prior.
+DeepSeek-V4-Pro-excluded	-	verify
+gemma-4-26B-A4B-it-excluded	-	verify
+MiniMax-M3-MXFP4-excluded	-	verify
 
