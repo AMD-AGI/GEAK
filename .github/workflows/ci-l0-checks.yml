@@ -59,6 +59,9 @@ jobs:
       # with it, and the recipe-env tests assert the string-preserving BaseLoader
       # path (typed scalars, folded multi-line EXTRA_<BE>_ARGS). Without it those
       # tests would silently exercise the degraded line-scanner fallback instead.
+      # The experience-store tests read/write the on-disk meta.yaml format (that
+      # module degrades to JSON without pyyaml, but then the test would be
+      # asserting a format the real store never uses).
       - run: pip install pytest pytest-cov coverage pyyaml
       # CPU-only tests (no claude_agent_sdk / GPU); the expert-skill test also uses PyYAML.
       # Files are listed explicitly rather than discovered, so that adding a test
@@ -103,6 +106,7 @@ jobs:
             e2e_workflow/scripts/tests/test_kb_retract.py \
             kernel_workflow/scripts/tests/test_experience_store.py \
             kb/tests/test_store_local.py \
+            kb/tests/test_attest.py \
             kernel_workflow/scripts/tests/test_kb_loop_offline.py \
             geak/test_bootstrap.py
 
