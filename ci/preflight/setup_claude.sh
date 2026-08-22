@@ -40,7 +40,7 @@ done
 
 log "probing claude (-p)"
 if claude -p "Reply with exactly: SETUP OK" \
-      --model "${PERFSKILLS_CLAUDE_MODEL:-claude-opus-4-8}" </dev/null; then
+      --model "${PERFSKILLS_CLAUDE_MODEL:-claude-opus-5}" </dev/null; then
   log "claude probe OK"
 else
   die "claude probe failed — refusing to continue to the GPU stage"

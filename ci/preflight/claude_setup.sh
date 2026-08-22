@@ -14,7 +14,7 @@ LITELLM_KEY="${LITELLM_API_KEY:?set LITELLM_API_KEY (LiteLLM virtual key; do NOT
 LITELLM_BASE="${LITELLM_BASE_URL:?set LITELLM_BASE_URL (LiteLLM proxy base URL; do NOT hardcode it)}"
 # Agent model, shared with run_geak_e2e.sh / setup_claude.sh via the same env var so
 # one override switches the settings.json aliases AND the run_e2e invocation together.
-CLAUDE_MODEL="${PERFSKILLS_CLAUDE_MODEL:-claude-opus-4-8}"
+CLAUDE_MODEL="${PERFSKILLS_CLAUDE_MODEL:-claude-opus-5}"
 
 echo "[1/4] Installing Claude Code (native, latest)..."
 # Retry the network install: a single transient curl reset (e.g. errno 104

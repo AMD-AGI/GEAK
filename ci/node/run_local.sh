@@ -79,8 +79,21 @@ log "model=$MODEL_KEY fw=$FW image=$IMAGE weights=$WEIGHTS ts=$RUN_TS budget=${B
 # torch eager ops give RC=0 with TMPDIR=/tmp but RC=139 with TMPDIR on NFS.
 # A long NFS path also overflows the ZMQ IPC 107-char sun_path limit. We bind it
 # same-path so Claude's temp tree still survives the (--rm) container for on-node debug.
-DBG_TMP="/tmp/geak_ci/$MODEL_KEY/$RUN_TS"
-mkdir -p "$DBG_TMP"
+# Not every node ships a usable /tmp: crsuse2-m2m-036 has it as drwxr-xr-x root:root with
+# no sticky bit, so the very first mkdir died with "Permission denied" and lost the whole
+# model 0 seconds in (2026-08-21, Mixtral). Fall back to another node-local scratch rather
+# than forfeiting a 24h slot; NFS is deliberately NOT a candidate (see the note above).
+TMP_ROOT="${GEAK_TMP_ROOT:-/tmp}"
+if ! [ -w "$TMP_ROOT" ]; then
+  for _c in /var/tmp /dev/shm; do
+    [ -d "$_c" ] && [ -w "$_c" ] && { log "WARN: $TMP_ROOT is not writable on $(hostname) — falling back to $_c"; TMP_ROOT="$_c"; break; }
+  done
+fi
+DBG_TMP="$TMP_ROOT/geak_ci/$MODEL_KEY/$RUN_TS"
+mkdir -p "$DBG_TMP" || die "cannot create node-local scratch $DBG_TMP (tried TMP_ROOT=$TMP_ROOT)"
+# Export it host-side too, not just into the container: bare `mktemp` below still defaults
+# to /tmp otherwise, which is exactly the directory that is unwritable on such a node.
+export TMPDIR="$DBG_TMP"
 log "TMPDIR=$DBG_TMP (node-local scratch; Claude task tree persisted here)"
 
 # Same-path bind mounts so paths are identical inside and outside the container:
@@ -123,10 +136,18 @@ while [ -L "$_p" ]; do
 done
 _realw="$(readlink -f "$WEIGHTS")"; _mark_mount "$_realw"   # 2) resolved weights dir
 if [ -d "$_realw" ]; then                       # 3) nested links escaping the dir
+  # A temp file, NOT process substitution: `< <(...)` needs /dev/fd, which is a
+  # symlink to /proc/self/fd, and inside an overlapping srun step (the held-node
+  # dispatch mode) /proc belongs to a different PID namespace — so /proc/self
+  # dangles and the redirect dies with "/dev/fd/63: No such file or directory".
+  # Piping into the loop instead would put it in a subshell and lose _mset.
+  _lnks="$(mktemp)"
+  find "$_realw/" -type l -print0 >"$_lnks" 2>/dev/null
   while IFS= read -r -d '' _lnk; do
     _tt="$(readlink -f "$_lnk")" || continue
     case "$_tt/" in "$_realw"/*) : ;; *) _mark_mount "$_tt" ;; esac
-  done < <(find "$_realw/" -type l -print0 2>/dev/null)
+  done <"$_lnks"
+  rm -f "$_lnks"
 fi
 if [ -n "${WEIGHTS_EXTRA_MOUNTS:-}" ]; then     # 4) explicit extra/override roots
   IFS=: read -r -a _wm <<< "$WEIGHTS_EXTRA_MOUNTS"
@@ -234,8 +255,36 @@ else
   "
 fi
 
+# ---- knowledge base (warm start) ----
+# e2e_workflow runs warm start unless it is explicitly turned off, but the REMOTE lane
+# only engages when KB_STORE_URL and KB_STORE_TOKEN are both present — kb/store_remote.py
+# otherwise returns "no_credentials" and the model optimizes cold with no warning that
+# anything was lost. Reaching the gateway needs two more things: a host alias, because it
+# has no DNS on a compute node, and the internal AMD CA, because NODE_TLS_REJECT_UNAUTHORIZED
+# only rescues node while the KB client is python/requests. All values arrive from the
+# forwarded environment; none of them may be committed (this repo is public).
+KB_DOCKER=()
+if [ -n "${KB_STORE_URL:-}" ] && [ -n "${KB_STORE_TOKEN:-}" ]; then
+  KB_DOCKER+=(-e KB_STORE_URL -e KB_STORE_TOKEN)
+  if [ -n "${KB_HOST_NAME:-}" ] && [ -n "${KB_HOST_IP:-}" ]; then
+    KB_DOCKER+=(--add-host "$KB_HOST_NAME:$KB_HOST_IP")
+  fi
+  if [ -n "${KB_CA_BUNDLE:-}" ] && [ -r "${KB_CA_BUNDLE:-}" ]; then
+    KB_CA_IN="${KB_CA_CONTAINER:-/etc/ssl/amd/amd-ca.pem}"
+    KB_DOCKER+=(-v "$KB_CA_BUNDLE:$KB_CA_IN:ro"
+                -e SSL_CERT_FILE="$KB_CA_IN" -e REQUESTS_CA_BUNDLE="$KB_CA_IN"
+                -e CURL_CA_BUNDLE="$KB_CA_IN" -e NODE_EXTRA_CA_CERTS="$KB_CA_IN")
+    log "knowledge base: remote warm start ENABLED (ca=$KB_CA_BUNDLE)"
+  else
+    log "knowledge base: remote warm start ENABLED but no readable CA bundle (KB_CA_BUNDLE='${KB_CA_BUNDLE:-}') — TLS verification will likely fail"
+  fi
+else
+  log "knowledge base: remote warm start DISABLED (KB_STORE_URL/KB_STORE_TOKEN not both set) — every model would optimize cold"
+fi
+
 docker run --rm --name "$CONTAINER_NAME" \
   --label spur_job_id="${SLURM_JOB_ID:-}" \
+  "${KB_DOCKER[@]}" \
   --device /dev/kfd --device /dev/dri --group-add video \
   --security-opt seccomp=unconfined --ipc=host --shm-size 32g \
   -v "$WS:$WS" -v "$MODELS_ROOT:$MODELS_ROOT" -v "$DBG_TMP:$DBG_TMP" "${GEAK_MOUNT[@]}" "${WEIGHTS_MOUNTS[@]}" \
@@ -246,7 +295,7 @@ docker run --rm --name "$CONTAINER_NAME" \
   -e RUN_TS="$RUN_TS" -e OUT_DIR="$OUT_DIR" \
   -e CLAUDE_HOME="$OUT_DIR/claude" \
   -e PERFSKILLS_E2E_TIMEOUT_S="$BUDGET" \
-  -e PERFSKILLS_CLAUDE_MODEL \
+  -e PERFSKILLS_CLAUDE_MODEL -e GEAK_CLAUDE_MODEL \
   -e BENCH_LAUNCHER \
   -e TMPDIR="$DBG_TMP" \
   -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPYCACHEPREFIX="$DBG_TMP/pycache" \
