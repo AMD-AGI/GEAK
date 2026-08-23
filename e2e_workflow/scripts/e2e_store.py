@@ -55,6 +55,7 @@ import json
 import os
 import shutil
 import sys
+import tarfile
 import tempfile
 import time
 
@@ -662,6 +663,54 @@ _ARTIFACT_KEYS = (("patch", "final_patch", "final.patch"),
                   ("report", "report_path", "report.md"),
                   ("overlay", "final_overlay", "overlay.py"))
 
+OVERLAY_MANIFEST = "_overlay_manifest.json"
+OVERLAY_TARBALL = "overlay.tar.gz"
+# Holds the TemporaryDirectory objects alive for the life of the process. The tarball has to still
+# be on disk when the store uploads it, which happens long after _artifact_files() returns, and a
+# TemporaryDirectory that goes out of scope deletes its tree immediately.
+_PACKED = []
+
+
+def _pack_overlay(dirpath: str) -> str:
+    """`final_overlay`'s directory -> a .tar.gz of the overlay mechanism, or "" if it is not one.
+
+    `final_overlay` names a DIRECTORY, always: the mechanism is a sitecustomize.py plus the modules
+    it swaps in, and no single file carries it. _artifact_files() used to take only
+    `os.path.isfile`, so that directory was dropped without a word and no e2e record ever carried
+    an overlay — the runs that cleared _repro()'s reproducibility gate were the ones that also
+    happened to emit a kernel patch, and a pure-overlay win could not be recorded at all.
+
+    Only the mechanism goes in: the manifest, the sitecustomize.py that installs it, and the
+    `_patched/` modules the manifest names. An accepted-candidate directory also holds the A/B
+    evidence it was judged on (`cand/`, `ref/`, server logs, profiles) — that is how the number was
+    arrived at, not how it is reproduced, and it is several times the size of what a reader needs.
+    `__pycache__` is skipped: a .pyc is stale the moment the reader's interpreter differs.
+
+    Everything is packed under a single `overlay/` top level so the reader can untar into the
+    bundle root and get one predictable directory to point PYTHONPATH at (see _launch_text).
+
+    No manifest means this is not an overlay directory. Returning "" then is deliberate — the gate
+    refuses the record rather than have it promise a tarball of something nobody can install.
+    """
+    if not os.path.isfile(os.path.join(dirpath, OVERLAY_MANIFEST)):
+        return ""
+    holder = tempfile.TemporaryDirectory(prefix="e2e_overlay_")
+    _PACKED.append(holder)
+    out = os.path.join(holder.name, OVERLAY_TARBALL)
+    with tarfile.open(out, "w:gz") as tar:
+        for name in (OVERLAY_MANIFEST, "sitecustomize.py"):
+            src = os.path.join(dirpath, name)
+            if os.path.isfile(src):
+                tar.add(src, arcname="overlay/" + name)
+        for root, dirs, names in os.walk(os.path.join(dirpath, "_patched")):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            for name in names:
+                if name.endswith(".pyc"):
+                    continue
+                src = os.path.join(root, name)
+                tar.add(src, arcname="overlay/" + os.path.relpath(src, dirpath))
+    return out
+
 
 def _artifact_files(a, result: dict) -> dict:
     """{role: (stored_name, local_path)} for the run outputs that actually exist on disk.
@@ -673,8 +722,14 @@ def _artifact_files(a, result: dict) -> dict:
     found = {}
     for role, field, stored in _ARTIFACT_KEYS:
         path = str(result.get(field) or "")
-        if path and os.path.isfile(path):
+        if not path:
+            continue
+        if os.path.isfile(path):
             found[role] = (stored, path)
+        elif role == "overlay" and os.path.isdir(path):
+            packed = _pack_overlay(path)
+            if packed:
+                found[role] = (OVERLAY_TARBALL, packed)
     for extra in (getattr(a, "file", None) or []):   # retract recomputes a record but takes no --file
         path = str(extra)
         if os.path.isfile(path):
@@ -834,7 +889,14 @@ def _launch_text(a, result: dict, value: dict, kernels, overlay: str) -> str:
                 "# Fetch them from the kernel lane (kernel_canonical_id in value.accepted_kernels)",
                 "# or the number below will not reproduce."]
         lines.append("")
-    if overlay:
+    if overlay.endswith(".tar.gz"):
+        # Packed by _pack_overlay under a single `overlay/` top level. Extracted rather than shipped
+        # loose so the bundle keeps one file per artifact role; guarded so a reader who already
+        # unpacked (or edited) it does not get their copy overwritten on the next run.
+        lines += ['# Python-level overlay this run served with.',
+                  '[ -d "$HERE/overlay" ] || tar -xzf "$HERE/%s" -C "$HERE"' % overlay,
+                  'OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-$HERE/overlay}"', ""]
+    elif overlay:
         lines += ['# Python-level overlay this run served with.',
                   'OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-$HERE/%s}"' % overlay, ""]
     pairs = _env_pairs(env)
