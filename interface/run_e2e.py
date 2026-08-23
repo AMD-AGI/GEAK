@@ -2837,6 +2837,128 @@ def _update_baseline_alignment_reports(result: dict[str, Any]) -> list[str]:
 WORKFLOW_RETURN_FILE = "workflow_return.json"
 KERNEL_JOURNEY_FILE = "kernel_journey.json"
 
+# ---------------------------------------------------------------------------
+# KB write-back, salvage path
+#
+# The workflow has its own KB writer (Module B, at the very end of
+# e2e_workflow.js). It only runs if the workflow process gets that far, and
+# for a stretch of runs on 20260821-22 it mostly did not: 6 of 9 measured runs
+# ended in runner_error, _recover_workflow_return rebuilt a complete result
+# from the artifacts on disk, result.json was written with a real speedup —
+# and nothing was recorded. The next run on that deployment cold-started
+# against a win that had already been measured on the same box.
+#
+# So the recovery path gets a writer too. Not a second policy: the DECISION of
+# whether a result may be recorded lives once, in e2e_store.win_gate, and both
+# writers ask for it with --require-win. The address comes from the file the
+# warm-start read left behind (KB_IDENTITY_FILE), so the two writers cannot
+# land on different pages.
+#
+# What this path knows that Module B does not is that its numbers may be
+# provisional: a recovered_* result has no final Validate behind it, only the
+# best accepted intermediate A/B. Such a record is still worth having — a
+# reader sees every session on the page — but it must not become the champion
+# on arithmetic alone (publish() compares scores and never consults
+# `validated`), so it is written with --no-promote and marked unverified.
+# ---------------------------------------------------------------------------
+KB_IDENTITY_FILE = "kb_identity.json"   # spelled in e2e_workflow.js as KB_IDENTITY_BASENAME
+KB_WRITE_FILE = "kb_write.json"         # Module B's receipt; its presence means "already written"
+E2E_STORE_SCRIPT = E2E_DIR / "scripts" / "e2e_store.py"
+KB_ENV_SCRIPT = E2E_DIR / "scripts" / "kb_env.sh"
+# The salvage write runs on the way out, sometimes inside a SIGTERM flush that the outer runner is
+# already counting down on. A KB call that hangs must not cost us the interface files, so it is
+# bounded — and it runs AFTER result.json is on disk, never before.
+KB_WRITE_TIMEOUT_S = int(os.environ.get("GEAK_E2E_KB_WRITE_TIMEOUT_S", "120") or 120)
+
+
+def _kb_direction(wf: dict, ps_args: dict) -> str:
+    """What this run DID, in e2e_workflow.js's vocabulary (see its kbDirection).
+
+    Same three fragments, same order, same join — the string is a shortlist key on the KB page, so
+    a second spelling of it would split one deployment's history into two. `fast`/`deep` never
+    appear here: those are workflow modes, and this path is not the workflow.
+    """
+    accepted = wf.get("accepted_config") or {}
+    changed_config = (
+        str(accepted.get("flags") or "") != str(ps_args.get("initial_extra_server_args") or "")
+        or str(accepted.get("env") or "") != str(ps_args.get("initial_extra_env") or "")
+    )
+    changed_kernels = bool(wf.get("accepted_kernels") or wf.get("accepted_heads"))
+    return "+".join([f for f in ("config" if changed_config else "",
+                                 "kernels" if changed_kernels else "") if f])
+
+
+def _kb_write_back(eval_dir: Path, wf: dict, ps_args: dict) -> dict:
+    """Record this run in the KB when the workflow died before doing it itself.
+
+    Returns a small dict for result.json — always, never raises: a KB failure is a missed record,
+    not a failed run, and the interface files are already on disk by the time we get here.
+    """
+    if str(os.environ.get("GEAK_E2E_KB_WRITE_BACK", "1")).strip().lower() in ("0", "false", "no"):
+        return {"skipped": True, "why": "GEAK_E2E_KB_WRITE_BACK is off"}
+    if (eval_dir / KB_WRITE_FILE).exists():
+        return {"skipped": True, "why": "workflow already wrote (kb_write.json present)"}
+    identity = _read_json(eval_dir / KB_IDENTITY_FILE)
+    dims = (identity or {}).get("dims") or {}
+    # No gfx, no address: kb/identity folds it to `unknown` and the record lands on a page no
+    # reader of this deployment will ever look at. Better to record nothing than to record it there.
+    if not dims.get("model") or not dims.get("gfx"):
+        return {"skipped": True,
+                "why": "no %s (warm start never ran, or ran before this build)" % KB_IDENTITY_FILE}
+    if not (eval_dir / WORKFLOW_RETURN_FILE).exists():
+        return {"skipped": True, "why": "no %s to write" % WORKFLOW_RETURN_FILE}
+
+    flags: list[str] = []
+    for key, value in dims.items():
+        if value not in (None, ""):
+            flags += ["--" + key, str(value)]
+    plane = str((identity or {}).get("plane") or "remote")
+    store = str((identity or {}).get("store") or "")
+    if plane in ("local", "both") and store:
+        flags += ["--store", store]
+    elif plane in ("local", "both"):
+        plane = "remote"   # a store-less local plane cannot be opened; the service still can
+    flags += ["--plane", plane]
+
+    # Provisional until proven otherwise. `recovered_from_disk` means the numbers came from the
+    # artifacts rather than from a Validate leg that finished, so the record says so (unverified)
+    # and declines to move the champion pointer.
+    provisional = bool(wf.get("recovered_from_disk")) or \
+        str(wf.get("validation_status") or "").startswith("recovered")
+    if provisional:
+        flags += ["--validated", "false", "--validation-basis", "unverified", "--no-promote"]
+
+    cmd = [sys.executable, str(E2E_STORE_SCRIPT), "write", *flags,
+           "--result", str(eval_dir / WORKFLOW_RETURN_FILE),
+           "--direction", _kb_direction(wf, ps_args),
+           "--measured-by", "run_e2e:salvage",
+           "--require-win", "--apply"]
+    # Sourced, not reimplemented: the token path and CA fallback list live in kb_env.sh, which
+    # e2e_workflow.js sources too. `exec` so the timeout below kills python, not just the shell.
+    shell = '. %s; exec "$@"' % shlex.quote(str(KB_ENV_SCRIPT))
+    try:
+        proc = subprocess.run(["bash", "-c", shell, "bash", *cmd],
+                              capture_output=True, text=True, timeout=KB_WRITE_TIMEOUT_S,
+                              cwd=str(GEAK_ROOT))
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "why": "timed out after %ds" % KB_WRITE_TIMEOUT_S}
+    except Exception as exc:
+        return {"ok": False, "why": "%s: %s" % (type(exc).__name__, str(exc)[:160])}
+
+    try:
+        receipt = json.loads(proc.stdout)
+    except Exception:
+        return {"ok": False, "rc": proc.returncode,
+                "why": (proc.stderr or proc.stdout or "no output from e2e_store write")[-400:]}
+    receipt.setdefault("ok", proc.returncode == 0)
+    receipt["measured_by"] = "run_e2e:salvage"
+    receipt["provisional"] = provisional
+    try:   # same receipt filename the workflow writes, so one reader finds either
+        (eval_dir / KB_WRITE_FILE).write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    return receipt
+
 
 def _git_short_sha(root: Path) -> str:
     try:
@@ -4301,6 +4423,25 @@ def main(argv: list[str]) -> int:
                 _emit_state.update(done=True, out=out)
             except Exception:
                 pass
+        # ── KB write-back ────────────────────────────────────────────────────
+        # AFTER result.json is on disk and _emit_state is done, deliberately: the
+        # guaranteed-emission contract above outranks the KB, and this call talks to a
+        # network service from what may already be a SIGTERM flush. Recording second
+        # means a KB stall costs the record, never the interface files. Then result.json
+        # is rewritten with the receipt — best-effort, atomic, and if that second write
+        # loses a race the file from the first one is still correct.
+        if _emit_state["done"] and wf is not None and eval_dir_str:
+            try:
+                receipt = _kb_write_back(Path(eval_dir_str), wf, ps_args)
+                if receipt and not receipt.get("skipped"):
+                    out["kb_write"] = receipt
+                    tmp = result_path.with_name(result_path.name + ".tmp")
+                    tmp.write_text(json.dumps(out, indent=2), encoding="utf-8")
+                    os.replace(tmp, result_path)
+                    _emit_state["out"] = out
+            except Exception as kb_exc:
+                out["kb_write"] = {"ok": False,
+                                   "why": f"{type(kb_exc).__name__}: {kb_exc}"}
         return out
 
     # Safety net: any exit path that somehow skipped _emit still leaves a file.
