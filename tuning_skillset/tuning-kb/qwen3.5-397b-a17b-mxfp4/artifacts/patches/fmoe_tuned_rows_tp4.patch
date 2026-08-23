@@ -1,0 +1,119 @@
+# fused-MoE: re-race the TP=4 expert-GEMM kernel selection for this model's two live token tiers
+#
+# Base:   aiter git checkout at /sgl-workspace/aiter, commit
+#         d9e5ef7ce08ee7045d583aed768cff41aa9210fe (vendored in the SGLang 0.5.17 image)
+# Pristine copy of the edited file, independent of git:
+#         git show HEAD:aiter/configs/model_configs/qwen3_5_397b_fp4_tuned_fmoe.csv
+#         (a copy was also kept at /tmp/qwen3_5_397b_fp4_tuned_fmoe.csv.bak before editing)
+#
+# Apply:  cd /sgl-workspace/aiter && git apply /path/to/patches/fmoe_tuned_rows_tp4.patch
+#         rm -rf /tmp/aiter_configs        # REQUIRED: aiter caches a merged CSV there and will
+#                                          # otherwise serve the pre-edit selection silently
+#         then restart the server. No rebuild: this is data read at first use.
+# Revert: cd /sgl-workspace/aiter && git apply -R /path/to/patches/fmoe_tuned_rows_tp4.patch
+#         rm -rf /tmp/aiter_configs
+#
+# What it does
+#   Unlike the bf16 dense-GEMM table (patches/gemm_tuned_table_tp4.patch), this file *does*
+#   already carry TP=4 rows -- inter_dim 256 is moe_intermediate_size 1024 / 4 -- so the shard
+#   is not missing. What is stale is the timings the selection was made on: the shipped row for
+#   token=64 records 114.61 us for a pair that measures 111.61 us here, so the ranking that
+#   produced it was decided on a different build of the kernels.
+#
+#   Re-raced all 1688 stage1 x stage2 candidates at the two token tiers this workload actually
+#   runs -- 64 (decode batch = concurrency) and 16384 (--chunked-prefill-size) -- and replaced
+#   exactly those two rows. Every other row in the file is untouched.
+#
+#   Production-operator time (aiter's own gemm_moe_tune.py --run_config, E2E column, which
+#   re-measures rather than echoing the CSV; analysis/fmoe/runcfg_*.log):
+#
+#       token    shipped     this patch    delta
+#         64     127.85 us   121.56 us     -4.92%
+#      16384     991.99 us   973.21 us     -1.89%
+#
+#   The two tiers get different answers about one thing. At token=64 the winning stage1 is
+#   flydsl_moe1_afp4_wfp4_bf16_t32x64x256_w3_fp4, which keeps the stage-1 intermediate in fp4
+#   instead of bf16; that is a numerics change (the tuner's own error column goes 0.0% -> 0.9%)
+#   and it is why the gsm8k gate below is load-bearing rather than a formality. At token=16384
+#   the same trick is a REGRESSION end to end (994.08 us vs 991.99 shipped) even though its
+#   kernel time is 5% better -- quantizing a 16384-token intermediate costs more than it saves --
+#   so that tier keeps an error-preserving pair. The error-preserving choice at token=64 is
+#   125.55 us (-1.80%), recorded in analysis/fmoe/cand_new_err0.csv as the fallback if the
+#   numerics ever matter more than the 3 us.
+#
+# How the candidate list was obtained
+#   python3 csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py \
+#       -i  analysis/fmoe/untuned_tp4.csv \
+#       -o  analysis/fmoe/tuned_full.csv -o2 analysis/fmoe/profile_full.csv \
+#       --all --mp 4 --shape_grouped
+#   Run with the server STOPPED; a first attempt raced against a live server and against
+#   only the --mxfp4-flydsl subset (analysis/fmoe/tune.log).
+#   Do NOT add --compare --update_improved: on these files it raises
+#   KeyError: "['gfx'] not in index" in base_tuner._merge_compare_filtered_results (the shipped
+#   model_configs CSVs have no gfx column) and then writes the OLD rows to -o, so the output
+#   looks like a tuning result and is the pre-tuning selection. That is what happened on the
+#   first attempt; see FINDINGS.md, skillset assessment, gap 1.
+#
+# End-to-end (frozen config, cold run discarded), stacked with
+# patches/gdn_chunk_h_launch_config.patch on top of the previously reported arm
+# (gemm_tuned_table_tp4 + topk_softmax_ldg_width):
+#
+#     arm                                          warm runs   tok/s     vs local baseline
+#     baseline (frozen config)                       8 / 3      2505.96      --
+#     + GEMM table + topk LDG width (reported arm)   8 / 2      2569.26      +2.53%
+#     + this patch + gdn_chunk_h_launch_config       8 / 2      2604.42      +3.93%
+#
+#   Increment over the reported arm: +1.37%. Run range [2597.63, 2611.06] against the reported
+#   arm's [2565.87, 2574.29] -- disjoint. Against the 2490.308 tok/s in the task document,
+#   +4.58%. mean TTFT 5001.6 -> 4979.2 ms, mean TPOT 20.04 -> 19.72 ms (both improve).
+#   results/gdnmoe_w{1..4}_* (instance 1) and results/gdnmoeB_w{1..4}_* (instance 2);
+#   gdnmoe_w0 / gdnmoeB_w0 were the cold runs and are discarded. The two instances' warm means
+#   are 2605.87 and 2602.96 -- a 0.11% restart-to-restart spread. Instance 2's discarded cold run
+#   was 2570.71, inside the reported arm's range: an undiscarded first run erases this result.
+#   The two changes in this arm were measured together and neither is claimed separately end to
+#   end -- each is worth roughly 0.5-1% on its own, under this machine's restart floor.
+#
+# Accuracy: gsm8k 5-shot strict-match 0.9727 +/- 0.0045 (1283/1319) on this arm, against a gate of
+#   0.9691 and a baseline of 0.9773 (1289). PASSES, by 0.0036 -- about five answers of slack.
+#   eval_results/gdnmoe_gsm8k_20260820_152553; FINDINGS.md "Accuracy gate".
+#   Read this margin carefully. This is the patch that can move an answer -- the token=64 stage1
+#   kernel quantizes the stage-1 intermediate to fp4 -- and it is the only arm in this bundle
+#   whose score moves further than the +/-4-question band two runs of an identical build showed.
+#   The 6-answer drop from baseline is 0.8 sigma and cannot be resolved as an effect of the patch
+#   on one run, but neither can it be shown to be nothing, and the remaining slack is thinner than
+#   the band is wide. Re-run the gate before shipping rather than inheriting this result. If the
+#   numerics matter more than the 3 us, swap in the error-preserving token=64 pair from
+#   analysis/fmoe/cand_new_err0.csv (125.55 us, -1.80% instead of -4.92%, tuner error 0.0%).
+#
+# Engagement check (the reason a stale /tmp/aiter_configs is fatal here):
+#   grep "using 2stage" on the server log must show, for the token=64 key,
+#     kernelName1='flydsl_moe1_afp4_wfp4_bf16_t32x64x256_w3_fp4'
+#     kernelName2='flydsl_moe2_afp4_wfp4_bf16_t16x128x256_atomic_persist_sbm32'
+#   If it still shows ..._w3 / ..._t32x128x256_atomic_bnt2, the merge cache was not cleared and
+#   nothing in this patch is live.
+#
+# Stacking: independent of every other patch here (different file), but the two patches in this
+# arm were only ever measured together.
+#
+diff --git a/aiter/configs/model_configs/qwen3_5_397b_fp4_tuned_fmoe.csv b/aiter/configs/model_configs/qwen3_5_397b_fp4_tuned_fmoe.csv
+index 03ecbbdbc..47ab0dc65 100644
+--- a/aiter/configs/model_configs/qwen3_5_397b_fp4_tuned_fmoe.csv
++++ b/aiter/configs/model_configs/qwen3_5_397b_fp4_tuned_fmoe.csv
+@@ -5,7 +5,7 @@ cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,q_dtype_w,
+ 256,8,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,16,0,26.8949,_ZN5aiter50fmoe_bf16_pertokenMXfp4_g1u1_flat_novs_silu_16x128E,0.0%,0.0,,0.0%,26.8949,1,1,1,18.71,0.0,
+ 256,16,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,16,0,55.31,_ZN5aiter50fmoe_bf16_pertokenMXfp4_g1u1_flat_novs_silu_16x256E,0.0%,0.0,,0.0%,55.31,1,1,1,18.20,0.0,
+ 256,32,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,32,0,50.2597,flydsl_moe1_afp4_wfp4_bf16_t32x64x256_w2,0.0%,31.5129,flydsl_moe2_afp4_wfp4_bf16_t16x128x256_atomic_persist_sbm32,0.1%,81.7726,0,0,0,24.62,19701.05,
+-256,64,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,32,0,70.71889999999999,flydsl_moe1_afp4_wfp4_bf16_t32x64x256_w3,0.0%,43.8912,flydsl_moe2_afp4_wfp4_bf16_t32x128x256_atomic_bnt2,0.2%,114.6101,0,0,0,35.13,14059.84,
++256,64,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,32,0,68.1962,flydsl_moe1_afp4_wfp4_bf16_t32x64x256_w3_fp4,0.9%,40.5473,flydsl_moe2_afp4_wfp4_bf16_t16x128x256_atomic_persist_sbm32,0.2%,108.7435,0,0,0,37.03,14818.35,
+ 256,128,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,32,0,87.4931,flydsl_moe1_afp4_wfp4_bf16_t32x32x256_w4,0.0%,53.1125,flydsl_moe2_afp4_wfp4_bf16_t16x256x256_atomic_bnt2_persist_sbm32,0.2%,140.6056,0,0,0,57.27,11466.01,
+ 256,256,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,32,0,95.837,flydsl_moe1_afp4_wfp4_bf16_t32x32x256_w4,0.0%,57.6025,flydsl_moe2_afp4_wfp4_bf16_t16x128x256_atomic_bnt2_sbm32,0.2%,153.4395,0,0,0,104.97,10517.23,
+ 256,512,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,32,0,99.6753,flydsl_moe1_afp4_wfp4_bf16_t32x32x256_w4,0.0%,60.7698,flydsl_moe2_afp4_wfp4_bf16_t16x128x256_atomic_bnt2_persist_sbm32,0.2%,160.4451,0,0,0,200.77,10077.62,
+@@ -13,7 +13,7 @@ cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,q_dtype_w,
+ 256,2048,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,64,0,119.997,flydsl_moe1_afp4_wfp4_bf16_t64x64x256_w4,0.0%,121.9695,flydsl_moe2_afp4_wfp4_bf16_t64x256x256_reduce_bnt2,0.0%,241.9665,0,0,0,532.51,6760.35,
+ 256,4096,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,64,0,149.0609,flydsl_moe1_afp4_wfp4_bf16_t64x128x256_w3_bnt0_xcd4,0.0%,201.2182,flydsl_moe2_afp4_wfp4_bf16_t64x256x256_reduce_persist,0.0%,350.2791,0,0,0,735.69,4741.77,
+ 256,8192,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,64,0,201.6767,flydsl_moe1_afp4_wfp4_bf16_t64x128x256_w2_bnt0_xcd4,0.0%,342.1527,flydsl_moe2_afp4_wfp4_bf16_t64x256x256_reduce_persist,0.0%,543.8294,0,0,0,947.72,3146.71,
+-256,16384,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,64,0,321.84610000000004,flydsl_moe1_afp4_wfp4_bf16_t64x128x256_w2_bnt0_xcd4,0.0%,664.9736,flydsl_moe2_afp4_wfp4_bf16_t64x256x256_reduce_persist,0.0%,986.8197,0,0,0,1044.56,1836.14,
++256,16384,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,64,0,325.6246,flydsl_moe1_afp4_wfp4_bf16_t64x128x256_w3_bnt0_xcd4,0.0%,650.9087,flydsl_moe2_afp4_wfp4_bf16_t64x256x256_reduce_bnt2_xcd4,0.0%,976.5333,0,0,0,1055.56,1855.48,
+ 256,32768,4096,256,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,128,0,568.1335,flydsl_moe1_afp4_wfp4_bf16_t128x128x256_w2_bnt0_xcd4,0.0%,1325.2201,flydsl_moe2_afp4_wfp4_bf16_t64x256x256_reduce_sbm128,0.0%,1893.3536,0,0,0,1088.85,1063.33,
+ 256,1,4096,512,512,10,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,16,0,21.2804,_ZN5aiter50fmoe_bf16_pertokenMXfp4_g1u1_flat_novs_silu_16x128E,0.0%,0.0,,0.0%,21.2804,1,1,1,5.91,0.0,
+ 256,1,4096,512,513,11,ActivationType.Silu,torch.bfloat16,torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,16,0,21.572,_ZN5aiter50fmoe_bf16_pertokenMXfp4_g1u1_flat_novs_silu_16x128E,0.0%,0.0,,0.0%,21.572,1,1,1,6.42,0.0,

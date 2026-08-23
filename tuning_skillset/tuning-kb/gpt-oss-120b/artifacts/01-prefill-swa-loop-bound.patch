@@ -1,0 +1,79 @@
+# 01 — prefill: bound the extend loop to the sliding window
+#
+# Repo:    /sgl-workspace/sglang
+# Base:    sglang @ 29481685462732237d80d86076d6563e1f658102
+#          (/sgl-workspace/sglang, SGLang 0.5.17, ROCm 7.2.0, torch 2.9.1, triton 3.6.0)
+# File:    python/sglang/kernels/ops/attention/extend_attention.py
+# Apply:   cd /sgl-workspace/sglang && git apply /work/patches/01-prefill-swa-loop-bound.patch
+# Revert:  cd /sgl-workspace/sglang && git checkout -- python/sglang/kernels/ops/attention/extend_attention.py
+#
+# Stack:   independent of 02-prefill-extend-launch-config.patch and orderless with
+#          it (disjoint hunks; both orders verified with `git apply --check`). Each
+#          is a win on its own; the reported +14.30% is the two together.
+#          03-decode-attn-segments.patch (different repo: aiter) sits on top of
+#          both and was measured with 01+02 as its base arm; the full stack
+#          01+02+03 is 4554.813 tok/s, +15.66% over the local baseline.
+#
+# What:    _fwd_kernel's stage-2 loop ran from 0 to the causal diagonal on every
+#          layer. gpt-oss-120b alternates 18 sliding-window(128) layers with 18
+#          full-attention layers; on the windowed ones every tile more than 128
+#          keys back from the diagonal is dead, but the loop still visited it and
+#          reduced its mask. The existing SKIP_TILE guard avoided the loads and
+#          the two dots, and was worth only 4%. This starts the loop at the first
+#          tile that can be live. No live tile is skipped (proof in the comment),
+#          so the result is unchanged.
+#
+# Measured, kernel level (analysis/bench_extend_swa.py, bs=2 x extend 8192,
+#          32 q heads / 4 kv heads / head_dim 64, causal, sinks, 5 interleaved rounds):
+#            sliding_window=128 :  2531.6 us -> 378.1 us   (6.70x)
+#            sliding_window=-1  :  2638.2 us -> 2641.1 us  (unchanged, within noise)
+#          Output is BITWISE IDENTICAL to the unpatched kernel at both settings
+#          (torch.equal == True, max_abs_diff 0.0), checked against the real
+#          unpatched kernel via git stash, not a reimplementation.
+#
+# Measured, end to end (analysis/ab_restart.sh, 3 interleaved base/cand pairs at
+#          restart granularity, ISL 8192 / OSL 1024 / conc 64 / 192 prompts, TP=2):
+#            base 3947.258 / 3958.471 / 3954.008  -> mean 3953.246 tok/s
+#            cand 4194.478 / 4252.199 / 4316.892  -> mean 4254.523 tok/s
+#            +7.62%  (worst cand round still beats best base round by 5.96%;
+#                     noise floor is 0.6%, so this is ~10x the floor)
+#            mean TTFT 4162.3 -> 3554.4 ms (-14.6%)
+#            mean TPOT 12.123 -> 11.572 ms (-4.5%)
+#          vs the 5-round session baseline of 3938.109 tok/s: +8.04%.
+#          Results: results/abbase_{1,2,3}_*, results/abcand_{1,2,3}_*
+#
+# Correctness: gsm8k 5-shot, see FINDINGS.md section "2. Prefill sliding-window
+#          loop bound" (gate: strict-match >= 0.95764).
+diff --git a/python/sglang/kernels/ops/attention/extend_attention.py b/python/sglang/kernels/ops/attention/extend_attention.py
+index c41da1d562..3299dcf97e 100644
+--- a/python/sglang/kernels/ops/attention/extend_attention.py
++++ b/python/sglang/kernels/ops/attention/extend_attention.py
+@@ -517,7 +517,27 @@ def _fwd_kernel(
+         else tl.minimum(cur_seq_len_extend, (cur_block_m + 1) * BLOCK_M)
+     )
+     extend_end = 0 if SKIP_EXTEND else cur_block_m_end
+-    for start_n in range(0, extend_end, BLOCK_N):
++
++    # Under a sliding window the causal triangle is not the live region: a query
++    # at position q_id only attends to kv_id >= q_id - SLIDING_WINDOW_SIZE. The
++    # SKIP_TILE guard below already avoids the loads and the two dots for a dead
++    # tile, but the loop still *visits* every tile from 0 to the diagonal and
++    # reduces its mask, which on this model (window 128, extend 8192) is ~64 dead
++    # tiles for every live one. Start the loop at the first tile that can be live.
++    #
++    # A is the smallest query index handled by this M-block, so a tile
++    # [start_n, start_n + BLOCK_N) is live iff  start_n + BLOCK_N - 1 + W >= A.
++    # extend_start below is the largest multiple of BLOCK_N that is <= A - W; the
++    # tile immediately before it satisfies  start_n + BLOCK_N - 1 + W <= A - 1 < A
++    # and is therefore provably dead, as is every tile before that. So no live
++    # tile is skipped and the result is unchanged -- this is a pure loop-bound
++    # tightening, not an approximation.
++    extend_start = 0
++    if SLIDING_WINDOW_SIZE > 0:
++        window_lo = tl.maximum(cur_block_m * BLOCK_M - SLIDING_WINDOW_SIZE, 0)
++        extend_start = (window_lo // BLOCK_N) * BLOCK_N
++
++    for start_n in range(extend_start, extend_end, BLOCK_N):
+         start_n = tl.multiple_of(start_n, BLOCK_N)
+         mask_n = (start_n + offs_n) < cur_block_m_end
+ 

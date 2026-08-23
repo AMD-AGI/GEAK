@@ -1,0 +1,111 @@
+Subject: [PATCH 3/3] sglang: get the bpreshuffle FP8 scale layout from the quant
+ kernel instead of a transposing copy
+
+Base:        sglang @ 29481685462732237d80d86076d6563e1f658102 (/sgl-workspace/sglang)
+Pristine:    patches/base/sglang-29481685-fp8_utils.py, obtained with
+               git show HEAD:python/sglang/srt/layers/quantization/fp8_utils.py
+             and verified byte-identical (cmp) to the untouched working tree before
+             any edit. The sglang checkout carries unrelated local modifications;
+             this file was clean at HEAD.
+Applies on:  top of patches 0001 and 0002 (independent of both -- it touches sglang,
+             they touch aiter -- but it was only ever measured with them applied).
+
+WHAT
+    On gfx95 with B-preshuffle, ``aiter_w8a8_block_fp8_linear`` quantised the
+    activation to a row-major [M, G] scale and then reshaped it into the
+    column-major arrangement the GEMM consumes with
+
+        scale.t().contiguous().t()
+
+    which is a real transposing copy kernel, launched once per FP8 GEMM.
+    ``per_group_quant_hip`` can emit those bytes directly via its
+    ``transpose_scale`` argument (``shuffle_scale`` inside the kernel), leaving
+    only a stride reinterpretation -- no launch, no traffic.
+
+    A comment in aiter's own
+    ``aiter/dist/device_communicators/communicator_cuda.py:541`` claims the quant
+    kernel "cannot produce that stride directly ... a different physical
+    arrangement". That is not true for this shape family, and the claim is what
+    kept the copy in place. Disproved directly: for (64, 5120) and (64, 17408),
+    ``transpose_scale=True`` returns a quantised tensor ``torch.equal`` to the
+    ``transpose_scale=False`` one, and ``torch.as_strided(s, s.shape, (1, M))``
+    is ``torch.equal`` to ``s.t().contiguous().t()``, with matching raw storage
+    bytes. The GEMM therefore sees identical values behind identical strides.
+
+MEASUREMENT (frozen configuration: ISL 8192 / OSL 1024 / concurrency 64 /
+192 prompts / 8 warmups / random ratio 1.0 / ignore_eos / seed 0 / TP=1)
+
+    Interleaved across-restart A/B, A B A B, four fresh server instances, three
+    runs each, compared position-matched (run i of A against run i of B).
+    Required by measurement.md Rule 6b + 3b: this machine's SCLK free-runs
+    between 1901 and 2398 MHz and absolute throughput drifted -1.8% over the 40
+    minutes before this A/B, so a back-to-back comparison against an earlier
+    number gets the SIGN WRONG. It did: the first, non-interleaved attempt read
+    -0.60%.
+
+      instance     run1       run2       run3
+            A1  1939.687   1937.320   1931.262      A = pristine (copy)
+            A2  1937.971   1939.737   1931.502
+            B1  1962.758   1965.287   1957.759      B = this patch
+            B2  1967.707   1967.392   1959.012
+
+      position-matched delta:  +1.19 +1.44 +1.37 +1.53 +1.43 +1.42  ->  median +1.42%
+      median ITL delta:        -1.96% (range -2.20 .. -1.82%)
+      arm A [1931.262, 1939.737] and arm B [1957.759, 1967.707] are DISJOINT.
+      Position-matched restart floor is 0.21%; this is 6.8x it.
+
+      results/scaleab_{A1,A2,B1,B2}_r{1,2,3}_*
+
+ENGAGEMENT VERIFIED (not from a log line)
+    Decode trace before/after, per step:
+      at::native::direct_copy_kernel_cuda<float> (unroll<128,4>)
+          163 calls/step, 648.5 us  ->  ~0 calls/step
+      dynamic_per_group_scaled_quant                660.7 us -> 675.9 us  (+15.2)
+      net                                                            -620 us/step
+    -620 us on a 22.5 ms step is -2.75% predicted; measured median ITL is -1.96%.
+    analysis/traces_scalelayout/, analysis/bench_scale_layout.py.
+
+ACCURACY
+    gsm8k 5-shot strict-match 0.9454, flexible-extract 0.9454 -- equal to the
+    unmodified baseline, gate >= 0.9328.  eval_results/scalelayout_20260820_105319/
+
+SCOPE
+    The ``input_scale is not None`` branch is untouched: there the caller already
+    owns the scale and the layout is not ours to choose. Only the branch that
+    quantises the activation itself changes, which is every FP8 linear in this
+    model (qkv, o, gate_up, down -- 4 per layer, 40 layers).
+
+#
+# FULL-STACK RESULT (patches 1+2+3, interleaved A/B against the pristine stack, run last):
+#   output throughput  1538.009 -> 1985.566 tok/s   +29.05%  (median of n=6 each,
+#                      6/6 position-matched pairs positive, +28.91..+29.19%, arms disjoint)
+#   gsm8k 5-shot       0.9454 -> 0.9454, identical on all 1319 problems
+#   arms: results/stackab_{A,B}{1,2}_r{1,2,3}_*   gate: eval_results/stackab_B2_20260820_120659
+#   driver: analysis/ab/run_ab_stack.sh + analysis/ab/stack_{A,B}.sh
+--- a/python/sglang/srt/layers/quantization/fp8_utils.py
++++ b/python/sglang/srt/layers/quantization/fp8_utils.py
+@@ -1048,13 +1048,22 @@
+             x_scale = torch.as_strided(x_scale, x_scale.shape, (1, x_scale.shape[0]))
+     else:
+         materialize_bpreshuffle_scale = _use_aiter_bpreshuffle_gfx95 and not use_triton
++        # Ask the quant kernel for the layout the GEMM wants instead of writing
++        # row-major and then paying a transposing copy for it.
++        # ``transpose_scale`` maps to ``shuffle_scale`` in
++        # ``dynamic_per_group_scaled_quant``, which emits the scale bytes already
++        # in the column-major [G, M] arrangement ``bpreshuffle`` consumes; all
++        # that is left is to index them as [M, G], which is a stride
++        # reinterpretation and not a kernel launch. Byte-for-byte identical to
++        # ``materialize_bpreshuffle_fp8_scale`` on this model's decode shapes
++        # ((64, 5120) and (64, 17408)); the quantized tensor itself is unchanged.
+         q_input, x_scale = aiter_per1x128_quant(
+             input_2d,
+             quant_dtype=aiter.dtypes.fp8,
+-            transpose_scale=False,
++            transpose_scale=materialize_bpreshuffle_scale,
+         )
+         if materialize_bpreshuffle_scale:
+-            x_scale = materialize_bpreshuffle_fp8_scale(x_scale)
++            x_scale = view_aiter_fused_rms_transposed_fp8_scale(x_scale)
+ 
+     if use_triton:
+         gemm_a8w8_blockscale_op = triton_gemm_a8w8_blockscale

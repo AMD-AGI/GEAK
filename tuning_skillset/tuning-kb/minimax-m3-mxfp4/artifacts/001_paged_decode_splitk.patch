@@ -1,0 +1,489 @@
+--- a/vllm/v1/attention/ops/chunked_prefill_paged_decode.py
++++ b/vllm/v1/attention/ops/chunked_prefill_paged_decode.py
+@@ -7,6 +7,8 @@
+ #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
+ #  - Thomas Parnell <tpa@zurich.ibm.com>
+ 
++import functools
++
+ import torch
+ 
+ from vllm import _custom_ops as ops
+@@ -37,6 +39,15 @@
+     )
+ 
+ 
++@functools.lru_cache(maxsize=8)
++def _num_cus(device: torch.device) -> int:
++    return torch.cuda.get_device_properties(device).multi_processor_count
++
++
++# SEGM values already reported by this process; see the dispatch site below.
++_SPLITK_LOGGED: set[int] = set()
++
++
+ @triton.jit
+ def cdiv_fn(x, y):
+     return (x + y - 1) // y
+@@ -444,6 +455,113 @@
+         else:
+             processed_block_table = block_table.to(torch.int32)
+ 
++        # Split the KV blocks across extra workgroups when the (num_seqs, num_kv_heads)
++        # grid does not fill the device. See kernel_paged_attention_2d_splitk below.
++        segm = choose_segm(num_seqs, num_kv_heads, _num_cus(query.device))
++        if segm > 1:
++            if segm not in _SPLITK_LOGGED:
++                # Once per distinct SEGM per process. This runs at dispatch, which for
++                # decode means cudagraph warmup/capture only -- replay never re-enters
++                # Python -- so it is free at steady state and is the only way to see,
++                # per rank, that the split path was the one baked into the graphs.
++                _SPLITK_LOGGED.add(segm)
++                logger.info(
++                    "paged-decode split-K engaged: SEGM=%d grid=(%d, %d, %d) "
++                    "num_query_heads=%d cus=%d",
++                    segm,
++                    num_seqs,
++                    num_kv_heads,
++                    segm,
++                    num_query_heads,
++                    _num_cus(query.device),
++                )
++            head_size_padded = triton.next_power_of_2(head_size)
++            segm_output = torch.empty(
++                (num_seqs, num_query_heads, segm, head_size_padded),
++                dtype=torch.float32,
++                device=output.device,
++            )
++            segm_max = torch.empty(
++                (num_seqs, num_query_heads, segm),
++                dtype=torch.float32,
++                device=output.device,
++            )
++            segm_expsum = torch.empty_like(segm_max)
++
++            kernel_paged_attention_2d_splitk[
++                (
++                    num_seqs,
++                    num_kv_heads,
++                    segm,
++                )
++            ](
++                segm_output_ptr=segm_output,
++                segm_max_ptr=segm_max,
++                segm_expsum_ptr=segm_expsum,
++                query_ptr=query,
++                key_cache_ptr=key_cache,
++                value_cache_ptr=value_cache,
++                sink_ptr=sinks,
++                block_tables_ptr=processed_block_table,
++                seq_lens_ptr=seq_lens,
++                alibi_slopes_ptr=alibi_slopes,
++                scale=sm_scale,
++                k_scale=k_scale,
++                v_scale=v_scale,
++                num_query_heads=num_query_heads,
++                num_queries_per_kv=num_queries_per_kv,
++                num_queries_per_kv_padded=num_queries_per_kv_padded,
++                block_table_stride=processed_block_table.stride(0),
++                query_stride_0=query.stride(0),
++                query_stride_1=query.stride(1),
++                BLOCK_SIZE=TRITON_BLOCK_SIZE,
++                PHYSICAL_BLOCK_SIZE=real_block_size,
++                HEAD_SIZE=head_size,
++                HEAD_SIZE_PADDED=head_size_padded,
++                USE_ALIBI_SLOPES=use_alibi_slopes,
++                SLIDING_WINDOW=sliding_window,
++                x=key_cache.shape[4],
++                stride_k_cache_0=key_cache.stride(0),
++                stride_k_cache_1=key_cache.stride(1),
++                stride_k_cache_2=key_cache.stride(2),
++                stride_k_cache_3=key_cache.stride(3),
++                stride_k_cache_4=key_cache.stride(4),
++                stride_v_cache_0=value_cache.stride(0),
++                stride_v_cache_1=value_cache.stride(1),
++                stride_v_cache_2=value_cache.stride(2),
++                stride_v_cache_3=value_cache.stride(3),
++                filter_by_query_len=True,
++                query_start_len_ptr=query_start_loc,
++                USE_SINKS=sinks is not None,
++                SEGM=segm,
++                num_warps=2,
++                num_stages=1,
++            )
++            reduce_paged_attention_segments[
++                (
++                    num_seqs,
++                    num_query_heads,
++                )
++            ](
++                output_ptr=output,
++                segm_output_ptr=segm_output,
++                segm_max_ptr=segm_max,
++                segm_expsum_ptr=segm_expsum,
++                out_scale_inv=1.0 / output_scale if output_scale is not None else 1.0,
++                num_query_heads=num_query_heads,
++                output_stride_0=output.stride(0),
++                output_stride_1=output.stride(1),
++                HEAD_SIZE=head_size,
++                HEAD_SIZE_PADDED=head_size_padded,
++                filter_by_query_len=True,
++                query_start_len_ptr=query_start_loc,
++                SEGM=segm,
++                USE_FP8=output_scale is not None,
++                FP8_MIN=float8_info.min,
++                FP8_MAX=float8_info.max,
++            )
++            return
++
+         kernel_paged_attention_2d[
+             (
+                 num_seqs,
+@@ -491,3 +609,347 @@
+             USE_SINKS=sinks is not None,
+             USE_FP8=output_scale is not None,
+         )
++
++# ---------------------------------------------------------------------------
++# Split-K (flash-decoding) variant of kernel_paged_attention_2d.
++#
++# The kernel above is launched on a (num_seqs, num_kv_heads) grid. With a GQA
++# model sharded over many ranks that can be far smaller than the CU count --
++# MiniMax-M3 at TP=8 gives 8 Q heads and 1 replicated KV head per rank, so a
++# 64-sequence decode batch fills only 64 of a MI355X's 256 CUs while each
++# workgroup serially walks ~72 KV blocks. (This path is reached at all because
++# platforms/rocm.py::use_rocm_custom_paged_attention only accepts block_size 16
++# or 32 on gfx9, and this deployment is pinned to 128 by its sparse-attention
++# backend.)
++#
++# The variant below adds a third grid dimension that partitions the KV blocks,
++# each program emitting an unnormalised partial plus its running (max, expsum),
++# and a reduce pass that rescales the partials against a common maximum. Same
++# structure as triton_unified_attention.py's kernel_unified_attention_3d /
++# reduce_segments pair, which cannot be reused directly because it assumes an
++# NHD flat cache and this path is on ROCm's 5-D key layout.
++# ---------------------------------------------------------------------------
++
++@triton.jit
++def kernel_paged_attention_2d_splitk(
++    segm_output_ptr,  # [num_seqs, num_query_heads, SEGM, HEAD_SIZE_PADDED] fp32
++    segm_max_ptr,  # [num_seqs, num_query_heads, SEGM] fp32
++    segm_expsum_ptr,  # [num_seqs, num_query_heads, SEGM] fp32
++    query_ptr,  # [num_tokens, num_query_heads, head_size]
++    key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
++    value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
++    sink_ptr,  # [num_query_heads]
++    block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
++    seq_lens_ptr,  # [num_seqs]
++    alibi_slopes_ptr,  # [num_query_heads]
++    scale,  # float32
++    k_scale,  # float32
++    v_scale,  # float32
++    num_query_heads: tl.constexpr,  # int
++    num_queries_per_kv: tl.constexpr,  # int
++    num_queries_per_kv_padded: tl.constexpr,  # int
++    block_table_stride: tl.int64,  # int
++    query_stride_0: tl.int64,  # int
++    query_stride_1: tl.int64,  # int, should be equal to head_size
++    BLOCK_SIZE: tl.constexpr,  # int
++    PHYSICAL_BLOCK_SIZE: tl.constexpr,  # int
++    HEAD_SIZE: tl.constexpr,  # int
++    HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
++    USE_ALIBI_SLOPES: tl.constexpr,  # bool
++    SLIDING_WINDOW: tl.constexpr,  # int
++    x: tl.constexpr,  # int
++    stride_k_cache_0: tl.int64,  # int
++    stride_k_cache_1: tl.int64,  # int
++    stride_k_cache_2: tl.int64,  # int
++    stride_k_cache_3: tl.int64,  # int
++    stride_k_cache_4: tl.int64,  # int
++    stride_v_cache_0: tl.int64,  # int
++    stride_v_cache_1: tl.int64,  # int
++    stride_v_cache_2: tl.int64,  # int
++    stride_v_cache_3: tl.int64,  # int
++    filter_by_query_len: tl.constexpr,  # bool
++    query_start_len_ptr,  # [num_seqs+1]
++    USE_SINKS: tl.constexpr,  # bool
++    SEGM: tl.constexpr,  # int, number of KV partitions
++):
++    seq_idx = tl.program_id(0)
++    kv_head_idx = tl.program_id(1)
++    segm_idx = tl.program_id(2)
++
++    if filter_by_query_len:
++        cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
++        cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
++        cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
++        if cur_batch_query_len > 1:
++            return
++    else:
++        cur_batch_in_all_start_index = seq_idx
++
++    query_head_idx = kv_head_idx * num_queries_per_kv + tl.arange(
++        0, num_queries_per_kv_padded
++    )
++
++    query_offset = (
++        cur_batch_in_all_start_index * query_stride_0
++        + query_head_idx[:, None] * query_stride_1
++    )
++
++    head_mask = query_head_idx < (kv_head_idx + 1) * num_queries_per_kv
++    head_mask = head_mask & (query_head_idx < num_query_heads)
++
++    dim_mask = tl.where(tl.arange(0, HEAD_SIZE_PADDED) < HEAD_SIZE, 1, 0).to(tl.int1)
++
++    # Q : (num_queries_per_kv, HEAD_SIZE,)
++    Q = tl.load(
++        query_ptr + query_offset + tl.arange(0, HEAD_SIZE_PADDED)[None, :],
++        mask=dim_mask[None, :] & head_mask[:, None],
++        other=0.0,
++    )
++
++    block_table_offset = seq_idx * block_table_stride
++
++    # Sinks belong to the sequence as a whole, so they may only be folded into ONE
++    # partition -- otherwise the reduce counts them SEGM times. Segment 0 owns them.
++    if not USE_SINKS:
++        M = tl.full([num_queries_per_kv_padded], float("-inf"), dtype=tl.float32)
++        L = tl.zeros([num_queries_per_kv_padded], dtype=tl.float32)
++    else:
++        if segm_idx == 0:
++            M = tl.load(
++                sink_ptr + query_head_idx,
++                mask=head_mask,
++                other=float("-inf"),
++            ).to(dtype=tl.float32)
++            L = tl.where(float("-inf") < M, 1.0, 0.0)
++        else:
++            M = tl.full([num_queries_per_kv_padded], float("-inf"), dtype=tl.float32)
++            L = tl.zeros([num_queries_per_kv_padded], dtype=tl.float32)
++
++    acc = tl.zeros([num_queries_per_kv_padded, HEAD_SIZE_PADDED], dtype=tl.float32)
++
++    # sequence len for this particular sequence
++    seq_len = tl.load(seq_lens_ptr + seq_idx)
++
++    # alibi slope for this head
++    if USE_ALIBI_SLOPES:
++        alibi_slope = tl.load(
++            alibi_slopes_ptr + query_head_idx, mask=head_mask, other=0.0
++        )
++
++    num_blocks = cdiv_fn(seq_len, BLOCK_SIZE)
++    # Partition the KV blocks across the third grid dimension. A segment whose range
++    # starts past the end of the sequence runs zero iterations and stores an empty
++    # (M=-inf, L=0) partial, which the reduce weights to zero.
++    blocks_per_segm = cdiv_fn(num_blocks, SEGM)
++    blk_lo = segm_idx * blocks_per_segm
++    blk_hi = tl.minimum(blk_lo + blocks_per_segm, num_blocks)
++
++    offs_n = tl.arange(0, BLOCK_SIZE)
++    offs_d = tl.arange(0, HEAD_SIZE_PADDED)
++    # iterate through tiles
++    for j in range(blk_lo, blk_hi):
++        start_n = j * BLOCK_SIZE
++        abs_token_idx = start_n + offs_n
++        # Slots >= seq_len are unwritten KV cache and may hold NaN/garbage
++        # (e.g. the tail of the last partial block). They are score-masked
++        # below, but 0 * NaN = NaN would still poison the output, so exclude
++        # them from the K/V loads too.
++        kv_load_mask = abs_token_idx < seq_len
++        l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
++        p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
++        internal_offsets = abs_token_idx % PHYSICAL_BLOCK_SIZE
++
++        # 5D addressing logic of K
++        k_offset = (
++            p_block_idx[None, :] * stride_k_cache_0
++            + kv_head_idx * stride_k_cache_1
++            + (offs_d[:, None] // x) * stride_k_cache_2
++            + internal_offsets[None, :] * stride_k_cache_3
++            + (offs_d[:, None] % x) * stride_k_cache_4
++        )
++
++        # 4D addressing logic of V (Slot is innermost)
++        v_offset = (
++            p_block_idx[:, None] * stride_v_cache_0
++            + kv_head_idx * stride_v_cache_1
++            + offs_d[None, :] * stride_v_cache_2
++            + internal_offsets[:, None] * stride_v_cache_3
++        )
++
++        # K : (HEAD_SIZE, BLOCK_SIZE)
++        K_load = tl.load(
++            key_cache_ptr + k_offset,
++            mask=dim_mask[:, None] & kv_load_mask[None, :],
++            other=0.0,
++            eviction_policy="evict_last",
++        )
++
++        if K_load.dtype.is_fp8():
++            K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
++        else:
++            K = K_load
++
++        # V : (BLOCK_SIZE, HEAD_SIZE)
++        V_load = tl.load(
++            value_cache_ptr + v_offset,
++            mask=dim_mask[None, :] & kv_load_mask[:, None],
++            other=0.0,
++            eviction_policy="evict_last",
++        )
++
++        if V_load.dtype.is_fp8():
++            V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
++        else:
++            V = V_load
++
++        seq_offset = start_n + tl.arange(0, BLOCK_SIZE)
++        boundary = tl.full([BLOCK_SIZE], seq_len, dtype=tl.int32)
++        seq_mask = seq_offset[None, :] < boundary
++
++        # First calculate the dot, then apply the mask.
++        qk = scale * tl.dot(Q, K)
++        S = tl.where(head_mask[:, None] & seq_mask, qk, float("-inf"))
++
++        context_len = seq_len - 1
++
++        if SLIDING_WINDOW > 0:
++            S = tl.where((context_len - seq_offset) < SLIDING_WINDOW, S, -10000)
++
++        if USE_ALIBI_SLOPES:
++            S += alibi_slope[:, None] * (seq_offset - context_len)
++
++        m_j = tl.maximum(M, tl.max(S, axis=1))
++
++        p = tl.exp(S - m_j[:, None])
++        p = tl.where(m_j[:, None] == float("-inf"), 0.0, p)
++
++        l_j = tl.sum(p, axis=1)
++
++        alpha = tl.exp(M - m_j)
++        alpha = tl.where(float("-inf") == M, 0.0, alpha)
++
++        acc = acc * alpha[:, None]
++
++        L = L * alpha + l_j
++        M = m_j
++
++        acc += tl.dot(p.to(V.dtype), V)
++
++    # store the UNNORMALISED partial plus its (max, expsum) so the reduce can
++    # rescale the segments against a common maximum.
++    segm_offset = (
++        seq_idx.to(tl.int64) * (num_query_heads * SEGM)
++        + query_head_idx * SEGM
++        + segm_idx
++    )
++    tl.store(segm_max_ptr + segm_offset, M, mask=head_mask)
++    tl.store(segm_expsum_ptr + segm_offset, L, mask=head_mask)
++
++    segm_output_offset = (
++        seq_idx.to(tl.int64) * (num_query_heads * SEGM * HEAD_SIZE_PADDED)
++        + query_head_idx[:, None] * (SEGM * HEAD_SIZE_PADDED)
++        + segm_idx * HEAD_SIZE_PADDED
++        + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
++    )
++    tl.store(
++        segm_output_ptr + segm_output_offset,
++        acc,
++        mask=dim_mask[None, :] & head_mask[:, None],
++    )
++
++
++@triton.jit
++def reduce_paged_attention_segments(
++    output_ptr,  # [num_tokens, num_query_heads, head_size]
++    segm_output_ptr,  # [num_seqs, num_query_heads, SEGM, HEAD_SIZE_PADDED]
++    segm_max_ptr,  # [num_seqs, num_query_heads, SEGM]
++    segm_expsum_ptr,  # [num_seqs, num_query_heads, SEGM]
++    out_scale_inv,
++    num_query_heads: tl.constexpr,  # int
++    output_stride_0: tl.int64,  # int
++    output_stride_1: tl.int64,  # int
++    HEAD_SIZE: tl.constexpr,  # int
++    HEAD_SIZE_PADDED: tl.constexpr,  # int
++    filter_by_query_len: tl.constexpr,  # bool
++    query_start_len_ptr,  # [num_seqs+1]
++    SEGM: tl.constexpr,  # int
++    USE_FP8: tl.constexpr,  # bool
++    FP8_MIN: tl.constexpr,
++    FP8_MAX: tl.constexpr,
++):
++    seq_idx = tl.program_id(0)
++    query_head_idx = tl.program_id(1)
++
++    if filter_by_query_len:
++        cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
++        cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
++        if cur_batch_in_all_stop_index - cur_batch_in_all_start_index > 1:
++            return
++    else:
++        cur_batch_in_all_start_index = seq_idx
++
++    dim_mask = tl.where(tl.arange(0, HEAD_SIZE_PADDED) < HEAD_SIZE, 1, 0).to(tl.int1)
++
++    segm_offset = (
++        seq_idx.to(tl.int64) * (num_query_heads * SEGM)
++        + query_head_idx * SEGM
++        + tl.arange(0, SEGM)
++    )
++    segm_max = tl.load(segm_max_ptr + segm_offset)
++    overall_max = tl.max(segm_max)
++    # every segment empty (only possible for a masked head) would give -inf - -inf
++    safe_max = tl.where(overall_max == float("-inf"), 0.0, overall_max)
++    w = tl.exp(segm_max - safe_max)
++    w = tl.where(segm_max == float("-inf"), 0.0, w)
++
++    segm_expsum = tl.load(segm_expsum_ptr + segm_offset)
++    overall_expsum = tl.sum(segm_expsum * w)
++
++    segm_output_offset = (
++        seq_idx.to(tl.int64) * (num_query_heads * SEGM * HEAD_SIZE_PADDED)
++        + query_head_idx * (SEGM * HEAD_SIZE_PADDED)
++        + tl.arange(0, SEGM)[:, None] * HEAD_SIZE_PADDED
++        + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
++    )
++    segm_output = tl.load(
++        segm_output_ptr + segm_output_offset,
++        mask=dim_mask[None, :],
++        other=0.0,
++    )
++    acc = tl.sum(segm_output * w[:, None], axis=0)
++    # matches the unsplit kernel's epilogue exactly
++    acc = acc / (overall_expsum + 1e-10)
++
++    if USE_FP8:
++        acc = acc * tl.load(out_scale_inv)
++        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
++
++    output_offset = (
++        cur_batch_in_all_start_index * output_stride_0
++        + query_head_idx * output_stride_1
++        + tl.arange(0, HEAD_SIZE_PADDED)
++    )
++    tl.store(output_ptr + output_offset, acc, mask=dim_mask)
++
++
++def choose_segm(num_seqs: int, num_kv_heads: int, num_cus: int, cap: int = 16) -> int:
++    """Pick the KV-partition count so the launch fills the device.
++
++    The unsplit grid is (num_seqs, num_kv_heads). When that is smaller than the CU
++    count the kernel is parallelism-starved, which is the whole point of this patch;
++    when it already fills the device, splitting only adds a reduce pass, so return 1.
++
++    IMPORTANT: this may depend ONLY on quantities that are identical between
++    cudagraph capture and replay. num_seqs and num_kv_heads are fixed per captured
++    batch descriptor; max_seq_len is NOT (the dummy capture batch carries different
++    sequence lengths than live traffic), so it must not appear here -- keying on it
++    would bake the dummy batch's choice into the graph. A segment whose block range
++    starts past the end of a short sequence simply runs zero iterations and stores an
++    empty partial, so over-splitting is a waste, never a wrong answer.
++    """
++    wgs = num_seqs * num_kv_heads
++    if wgs <= 0 or wgs >= num_cus:
++        return 1
++    # measured optimum on gfx950 is ~2 workgroups per CU at num_warps=2
++    want = triton.next_power_of_2(max(1, (2 * num_cus + wgs - 1) // wgs))
++    return max(1, min(want, cap))

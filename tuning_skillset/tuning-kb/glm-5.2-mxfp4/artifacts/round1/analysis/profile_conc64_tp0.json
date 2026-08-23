@@ -1,0 +1,285 @@
+{
+  "total_gpu_ms": 8327.959149000115,
+  "kernels": [
+    {
+      "kernel": "main_kernel",
+      "pct": 48.675941926140524,
+      "ms": 4053.712559000003,
+      "calls": 1872,
+      "us_per_call": 2165.444743055557,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void quickreduce::allreduce_prototype_twoshot<quickreduce::AllReduceTwoshot<__half, quickreduce::CodecQ4<>, tr",
+      "pct": 15.072123380320635,
+      "ms": 1255.2002779999978,
+      "calls": 1884,
+      "us_per_call": 666.2421857749458,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "mfma_moe2_afp4_wfp4_bf16_cshuffle_t64x256x256_vscale_fix3_fp4opt_v1_persist_cu256_sbm128_acc0",
+      "pct": 4.807759594354781,
+      "ms": 400.3882549999999,
+      "calls": 900,
+      "us_per_call": 444.8758388888888,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT224x256x64_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0",
+      "pct": 4.34276436194362,
+      "ms": 361.66364200000015,
+      "calls": 936,
+      "us_per_call": 386.3927799145301,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "moe_reduction_kernel_plain_bf16_topk9_md6144",
+      "pct": 4.182329100903654,
+      "ms": 348.3026590000001,
+      "calls": 900,
+      "us_per_call": 387.0029544444446,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_C",
+      "pct": 3.8761816937917746,
+      "ms": 322.80682799999977,
+      "calls": 1944,
+      "us_per_call": 166.05289506172826,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "mfma_moe1_silu_mul_afp4_wfp4_bf16_t128x128x256_pm1_async_xcd4_v32",
+      "pct": 3.3062919146650627,
+      "ms": 275.3466400000002,
+      "calls": 900,
+      "us_per_call": 305.94071111111134,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb1ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+      "pct": 2.583241850145593,
+      "ms": 215.1313259999998,
+      "calls": 1872,
+      "us_per_call": 114.92058012820502,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "(anonymous namespace)::topk_transform_prefill_kernel((anonymous namespace)::FastTopKParams, int*, int const*, ",
+      "pct": 2.033269411754142,
+      "ms": 169.3298459999999,
+      "calls": 252,
+      "us_per_call": 671.9438333333329,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_gluon_fp8_mqa_logits_kernel",
+      "pct": 1.6305589829448623,
+      "ms": 135.7922859999999,
+      "calls": 252,
+      "us_per_call": 538.8582777777774,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::OpaqueType<>, u",
+      "pct": 1.4177131742315952,
+      "ms": 118.06657400000007,
+      "calls": 936,
+      "us_per_call": 126.13950213675223,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0_AFC1_AFEM1_AFEM1_ASEM1_CLR1_C",
+      "pct": 1.148929134834769,
+      "ms": 95.68234900000003,
+      "calls": 936,
+      "us_per_call": 102.22473183760687,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "hgemm_bf16_128x128x64x4_SPK1_W4x4x1_BLDS1_TN_AS1_0",
+      "pct": 0.8737074677982315,
+      "ms": 72.76200100000007,
+      "calls": 900,
+      "us_per_call": 80.84666777777785,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x32_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR0_CADS0",
+      "pct": 0.6173614817283638,
+      "ms": 51.41361199999996,
+      "calls": 936,
+      "us_per_call": 54.9290726495726,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "aiter::bf16gemm_bf16_tn_256x256",
+      "pct": 0.5951112765238585,
+      "ms": 49.56062400000005,
+      "calls": 252,
+      "us_per_call": 196.66914285714304,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bN4opus5fp4_tELi32ELi32ELb0ELi64ELb1EEEvPT0_PfPKT_PKfliil",
+      "pct": 0.5759197798869901,
+      "ms": 47.96236399999992,
+      "calls": 1800,
+      "us_per_call": 26.645757777777735,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void fast_hadamard_transform_kernel<fast_hadamard_transform_kernel_traits<> >(HadamardParamsBase)",
+      "pct": 0.5531891448522692,
+      "ms": 46.06936600000006,
+      "calls": 504,
+      "us_per_call": 91.40747222222234,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::elementwise_kernel_manual_unroll<N, 8, at::native::gpu_kernel_impl_nocast<>(at::TensorIterato",
+      "pct": 0.5359122469441812,
+      "ms": 44.63055300000002,
+      "calls": 948,
+      "us_per_call": 47.07864240506331,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_fused_qk_rope_cat_and_cache_mla_kernel",
+      "pct": 0.5138152125198355,
+      "ms": 42.790321000000034,
+      "calls": 936,
+      "us_per_call": 45.71615491452995,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::mxfp4_moe_sort_kernel<>(unsigned char*, unsigned char*, int const*, int const*, int, int, int, int",
+      "pct": 0.40539339105732003,
+      "ms": 33.7609959999999,
+      "calls": 1800,
+      "us_per_call": 18.756108888888832,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<> >, aiter",
+      "pct": 0.38708894247962844,
+      "ms": 32.23660900000001,
+      "calls": 900,
+      "us_per_call": 35.818454444444455,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi8ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+      "pct": 0.25547102980871866,
+      "ms": 21.275522999999996,
+      "calls": 936,
+      "us_per_call": 22.73025961538461,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "hgemm_bf16_64x128x128x3_SPK1_W2x4x1_BLDS1_TN_AS1_0",
+      "pct": 0.22050405953545987,
+      "ms": 18.363487999999993,
+      "calls": 252,
+      "us_per_call": 72.8709841269841,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::grouped_topk_kernel<>(hip_bfloat16*, hip_bfloat16 const*, float*, int*, unsigned long, unsigned lo",
+      "pct": 0.19119125964866976,
+      "ms": 15.92232999999996,
+      "calls": 900,
+      "us_per_call": 17.691477777777735,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Memcpy DtoD (Device -> Device)",
+      "pct": 0.15286394628302732,
+      "ms": 12.730446999999998,
+      "calls": 391,
+      "us_per_call": 32.558687979539634,
+      "cat": "gpu_memcpy"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT32x96x256_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_",
+      "pct": 0.1420690326203213,
+      "ms": 11.831451000000008,
+      "calls": 252,
+      "us_per_call": 46.95020238095241,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "act_quant_kernel__kernel",
+      "pct": 0.13772164097823472,
+      "ms": 11.469401999999992,
+      "calls": 252,
+      "us_per_call": 45.513499999999965,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::vectorized_elementwise_kernel<8, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10:",
+      "pct": 0.09671552004391286,
+      "ms": 8.054429000000082,
+      "calls": 1872,
+      "us_per_call": 4.302579594017137,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::kn_entry_2c_sbhd_cached_indirect_inplace<>(c10::BFloat16*, c10::BFloat16*, c10::BFloat16 const*, c",
+      "pct": 0.0925277953713927,
+      "ms": 7.705677000000004,
+      "calls": 252,
+      "us_per_call": 30.57808333333335,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi64ELi8ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+      "pct": 0.08816655880068237,
+      "ms": 7.342474999999994,
+      "calls": 936,
+      "us_per_call": 7.844524572649566,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<>, std::array<> >(int, at::native::F",
+      "pct": 0.08008240531295978,
+      "ms": 6.669229999999988,
+      "calls": 614,
+      "us_per_call": 10.861938110749167,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_fused_append_shared_experts_kernel",
+      "pct": 0.064181606854324,
+      "ms": 5.3450179999999605,
+      "calls": 900,
+      "us_per_call": 5.938908888888846,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<> >, aiter:",
+      "pct": 0.04797316999903434,
+      "ms": 3.995185999999959,
+      "calls": 900,
+      "us_per_call": 4.43909555555551,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProble",
+      "pct": 0.04623434062428471,
+      "ms": 3.8503769999999964,
+      "calls": 900,
+      "us_per_call": 4.278196666666663,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<> >, ait",
+      "pct": 0.045128775643084804,
+      "ms": 3.7583060000000166,
+      "calls": 900,
+      "us_per_call": 4.175895555555574,
+      "cat": "kernel"
+    }
+  ]
+}

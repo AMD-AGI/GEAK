@@ -1,0 +1,730 @@
+[
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 1254.4730305671692,
+    "swa_us": 188.52199614048004,
+    "pass_ms": 25.973910480737686,
+    "speedup": 2.0880813462046626
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1301.7339706420898,
+    "swa_us": 220.96200287342072,
+    "pass_ms": 27.40852752327919,
+    "speedup": 1.9787870003871455
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 1367.3539757728577,
+    "swa_us": 188.6419951915741,
+    "pass_ms": 28.00792747735977,
+    "speedup": 1.9364388174262293
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 1437.9340410232544,
+    "swa_us": 178.64100635051727,
+    "pass_ms": 29.09835085272789,
+    "speedup": 1.8638732565056588
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1386.775016784668,
+    "swa_us": 250.56250393390656,
+    "pass_ms": 29.47207537293434,
+    "speedup": 1.840238167028624
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1449.1349458694458,
+    "swa_us": 250.8624941110611,
+    "pass_ms": 30.599953919649124,
+    "speedup": 1.772409138433109
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1492.055058479309,
+    "swa_us": 208.86249840259552,
+    "pass_ms": 30.616516023874283,
+    "speedup": 1.7714503479274402
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1468.9350128173828,
+    "swa_us": 254.2020082473755,
+    "pass_ms": 31.01646637916565,
+    "speedup": 1.748607894265133
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 1502.8150081634521,
+    "swa_us": 220.56200355291367,
+    "pass_ms": 31.020786210894585,
+    "speedup": 1.748364390060831
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1565.816044807434,
+    "swa_us": 220.80199420452118,
+    "pass_ms": 32.159124702215195,
+    "speedup": 1.686477429501751
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 1496.7349767684937,
+    "swa_us": 293.32301020622253,
+    "pass_ms": 32.22104376554489,
+    "speedup": 1.6832365319218567
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 1590.5760526657104,
+    "swa_us": 202.00200378894806,
+    "pass_ms": 32.26640501618385,
+    "speedup": 1.680870178615039
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 1508.255958557129,
+    "swa_us": 291.72301292419434,
+    "pass_ms": 32.39962148666382,
+    "speedup": 1.673958999340235
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1618.8969612121582,
+    "swa_us": 208.9420035481453,
+    "pass_ms": 32.90110136568546,
+    "speedup": 1.6484444505369584
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1495.136022567749,
+    "swa_us": 359.60400104522705,
+    "pass_ms": 33.38532042503357,
+    "speedup": 1.624535492615797
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1627.0570158958435,
+    "swa_us": 230.72199523448944,
+    "pass_ms": 33.44002220034599,
+    "speedup": 1.62187804894032
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 1650.0970125198364,
+    "swa_us": 220.3420028090477,
+    "pass_ms": 33.667902275919914,
+    "speedup": 1.6109004213668745
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1617.5769567489624,
+    "swa_us": 254.08250093460083,
+    "pass_ms": 33.68987023830414,
+    "speedup": 1.6098500106763316
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 1597.4960327148438,
+    "swa_us": 288.8629883527756,
+    "pass_ms": 33.95446237921715,
+    "speedup": 1.597305159984353
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 1556.4160346984863,
+    "swa_us": 330.2440047264099,
+    "pass_ms": 33.95988070964813,
+    "speedup": 1.5970503084661776
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 1685.6170296669006,
+    "swa_us": 201.84199512004852,
+    "pass_ms": 33.974262446165085,
+    "speedup": 1.5963742567998
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 1559.7360134124756,
+    "swa_us": 330.12300729751587,
+    "pass_ms": 34.017462372779846,
+    "speedup": 1.5943469671099428
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 1715.5579924583435,
+    "swa_us": 178.5620003938675,
+    "pass_ms": 34.0941598713398,
+    "speedup": 1.5907603580051743
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1664.3970012664795,
+    "swa_us": 231.14249855279922,
+    "pass_ms": 34.11971099674702,
+    "speedup": 1.5895690900778434
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1540.4959917068481,
+    "swa_us": 358.9635044336319,
+    "pass_ms": 34.19027093052864,
+    "speedup": 1.5862886279263413
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 1613.6970520019531,
+    "swa_us": 292.24300384521484,
+    "pass_ms": 34.30692100524902,
+    "speedup": 1.5808949440411744
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 1595.6170558929443,
+    "swa_us": 331.60400390625,
+    "pass_ms": 34.6899790763855,
+    "speedup": 1.5634381860938613
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 1647.6960182189941,
+    "swa_us": 293.2429909706116,
+    "pass_ms": 34.9369021654129,
+    "speedup": 1.5523882943608764
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 1681.4975142478943,
+    "swa_us": 263.263002038002,
+    "pass_ms": 35.00568929314613,
+    "speedup": 1.5493378093096741
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 1630.0569772720337,
+    "swa_us": 331.24399185180664,
+    "pass_ms": 35.303417444229126,
+    "speedup": 1.5362716102059342
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 1704.277515411377,
+    "swa_us": 263.6429965496063,
+    "pass_ms": 35.4225692152977,
+    "speedup": 1.5311040154421034
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1741.5379881858826,
+    "swa_us": 230.8419942855835,
+    "pass_ms": 35.50283968448639,
+    "speedup": 1.527642251853938
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1708.1779837608337,
+    "swa_us": 349.28300976753235,
+    "pass_ms": 37.03429788351059,
+    "speedup": 1.4644705330559649
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 1687.9370212554932,
+    "swa_us": 407.08398818969727,
+    "pass_ms": 37.71037817001343,
+    "speedup": 1.4382151703253214
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 1757.2380304336548,
+    "swa_us": 349.32398796081543,
+    "pass_ms": 37.918116331100464,
+    "speedup": 1.4303357658706806
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 1852.219045162201,
+    "swa_us": 260.36301255226135,
+    "pass_ms": 38.02647703886032,
+    "speedup": 1.4262598638152366
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 1711.537480354309,
+    "swa_us": 405.52398562431335,
+    "pass_ms": 38.107106387615204,
+    "speedup": 1.4232420958743985
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 1898.5999822616577,
+    "swa_us": 237.12199926376343,
+    "pass_ms": 38.44299566745758,
+    "speedup": 1.4108067548109735
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 1855.018973350525,
+    "swa_us": 288.58301043510437,
+    "pass_ms": 38.58483570814133,
+    "speedup": 1.4056205493023397
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 1754.9780011177063,
+    "swa_us": 393.9644992351532,
+    "pass_ms": 38.68096500635147,
+    "speedup": 1.402127324225561
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 1890.7189965248108,
+    "swa_us": 260.60301065444946,
+    "pass_ms": 38.723796129226685,
+    "speedup": 1.4005764771053513
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 1869.9795007705688,
+    "swa_us": 295.68299651145935,
+    "pass_ms": 38.98192495107651,
+    "speedup": 1.3913022004656135
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 1761.6180181503296,
+    "swa_us": 407.5239896774292,
+    "pass_ms": 39.04455614089966,
+    "speedup": 1.3890704191154997
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 1776.7579555511475,
+    "swa_us": 408.3639979362488,
+    "pass_ms": 39.33219516277313,
+    "speedup": 1.378912052540376
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 1958.940029144287,
+    "swa_us": 386.0439956188202,
+    "pass_ms": 42.20971244573593,
+    "speedup": 1.2849089657396395
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2033.4210395812988,
+    "swa_us": 371.94399535655975,
+    "pass_ms": 43.296570628881454,
+    "speedup": 1.2526543598037223
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2076.5020847320557,
+    "swa_us": 329.2030096054077,
+    "pass_ms": 43.30269169807434,
+    "speedup": 1.2524772903489043
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 2064.7010803222656,
+    "swa_us": 350.64399242401123,
+    "pass_ms": 43.47621130943298,
+    "speedup": 1.2474784791344204
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2002.9809474945068,
+    "swa_us": 437.88400292396545,
+    "pass_ms": 43.9355691075325,
+    "speedup": 1.2344357672954271
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2084.9409103393555,
+    "swa_us": 386.36401295661926,
+    "pass_ms": 44.483488619327545,
+    "speedup": 1.219230767329103
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 2240.022897720337,
+    "swa_us": 231.502503156662,
+    "pass_ms": 44.48745721578598,
+    "speedup": 1.2191220033041832
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 1978.1800508499146,
+    "swa_us": 575.5259990692139,
+    "pass_ms": 45.96670889854431,
+    "speedup": 1.1798895170529753
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2151.901960372925,
+    "swa_us": 424.54400658607483,
+    "pass_ms": 46.37602740526199,
+    "speedup": 1.1694757183247735
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2263.3039951324463,
+    "swa_us": 425.0839948654175,
+    "pass_ms": 48.39098381996155,
+    "speedup": 1.1207798164344336
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2121.5009689331055,
+    "swa_us": 576.445996761322,
+    "pass_ms": 48.563045382499695,
+    "speedup": 1.1168088313992484
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2181.143045425415,
+    "swa_us": 528.2049775123596,
+    "pass_ms": 48.768264412879944,
+    "speedup": 1.1121092500575895
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2305.504083633423,
+    "swa_us": 418.00399124622345,
+    "pass_ms": 49.02314534783363,
+    "speedup": 1.1063271762348243
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2373.2640743255615,
+    "swa_us": 372.4839985370636,
+    "pass_ms": 49.42346531152725,
+    "speedup": 1.0973661523116334
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2425.6850481033325,
+    "swa_us": 329.3229937553406,
+    "pass_ms": 49.590144753456116,
+    "speedup": 1.09367775053809
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2422.325015068054,
+    "swa_us": 353.4429967403412,
+    "pass_ms": 49.96382421255112,
+    "speedup": 1.08549813425198
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2342.664957046509,
+    "swa_us": 446.3239908218384,
+    "pass_ms": 50.20180106163025,
+    "speedup": 1.0803524338944683
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2402.344584465027,
+    "swa_us": 403.5840034484863,
+    "pass_ms": 50.50671458244324,
+    "speedup": 1.0738302503182642
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2524.6859788894653,
+    "swa_us": 295.36350071430206,
+    "pass_ms": 50.76089063286781,
+    "speedup": 1.0684532380466236
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2416.0449504852295,
+    "swa_us": 417.72399842739105,
+    "pass_ms": 51.00784108042717,
+    "speedup": 1.0632804057968561
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2252.502918243408,
+    "swa_us": 618.6864972114563,
+    "pass_ms": 51.68140947818756,
+    "speedup": 1.0494225778750985
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 2674.4279861450195,
+    "swa_us": 220.96199542284012,
+    "pass_ms": 52.117019668221474,
+    "speedup": 1.0406511789830628
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2514.785408973694,
+    "swa_us": 394.8639929294586,
+    "pass_ms": 52.373689234256744,
+    "speedup": 1.0355512234441475
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 2584.806442260742,
+    "swa_us": 350.88300704956055,
+    "pass_ms": 52.84241008758545,
+    "speedup": 1.026365714071774
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2041.9011116027832,
+    "swa_us": 936.2894892692566,
+    "pass_ms": 53.607430815696716,
+    "speedup": 1.0117186579838384
+  },
+  {
+    "name": "default",
+    "full_us": 2641.1269903182983,
+    "swa_us": 371.9640076160431,
+    "pass_ms": 54.235637962818146,
+    "speedup": 1.0
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2679.2279481887817,
+    "swa_us": 353.28400135040283,
+    "pass_ms": 54.58521509170532,
+    "speedup": 0.9935957543027013
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2605.56697845459,
+    "swa_us": 445.80501317977905,
+    "pass_ms": 54.92469584941864,
+    "speedup": 0.987454497909472
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2703.807473182678,
+    "swa_us": 372.60401248931885,
+    "pass_ms": 55.37540674209595,
+    "speedup": 0.9794174192780898
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 2580.927014350891,
+    "swa_us": 528.1649827957153,
+    "pass_ms": 55.963655948638916,
+    "speedup": 0.9691224964393557
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2516.9659852981567,
+    "swa_us": 618.8260018825531,
+    "pass_ms": 56.44425576925278,
+    "speedup": 0.9608708135782039
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 2922.809958457947,
+    "swa_us": 220.7220047712326,
+    "pass_ms": 56.58357533812523,
+    "speedup": 0.9585049661270684
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2776.867985725403,
+    "swa_us": 438.4849965572357,
+    "pass_ms": 57.876353681087494,
+    "speedup": 0.9370949362440737
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2629.7069787979126,
+    "swa_us": 663.6070013046265,
+    "pass_ms": 59.2796516418457,
+    "speedup": 0.91491154992775
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 3053.352117538452,
+    "swa_us": 260.36301255226135,
+    "pass_ms": 59.64687234163284,
+    "speedup": 0.9092788244147763
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 2673.50697517395,
+    "swa_us": 733.3279848098755,
+    "pass_ms": 61.32302927970886,
+    "speedup": 0.88442529013752
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 2754.108428955078,
+    "swa_us": 664.3270254135132,
+    "pass_ms": 61.531838178634644,
+    "speedup": 0.8814239842041658
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 3185.3129863739014,
+    "swa_us": 236.3629937171936,
+    "pass_ms": 61.59016764163971,
+    "speedup": 0.8805892245396434
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 3240.4730319976807,
+    "swa_us": 260.562002658844,
+    "pass_ms": 63.018630623817444,
+    "speedup": 0.8606286335634874
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 3024.5909690856934,
+    "swa_us": 505.204975605011,
+    "pass_ms": 63.53632700443268,
+    "speedup": 0.8536161991081785
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 4, \"waves_per_eu\": 2}",
+    "full_us": 2852.9489040374756,
+    "swa_us": 732.4069738388062,
+    "pass_ms": 64.53640580177307,
+    "speedup": 0.8403882628574906
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 3469.0349102020264,
+    "swa_us": 318.963497877121,
+    "pass_ms": 68.18397134542465,
+    "speedup": 0.7954309039591828
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 3583.9169025421143,
+    "swa_us": 337.4039977788925,
+    "pass_ms": 70.58377620577812,
+    "speedup": 0.7683867437851577
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 3481.0760021209717,
+    "swa_us": 484.9250018596649,
+    "pass_ms": 71.38801807165146,
+    "speedup": 0.7597302660564461
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 3122.9119300842285,
+    "swa_us": 931.769996881485,
+    "pass_ms": 72.98427468538284,
+    "speedup": 0.7431140228030568
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 1}",
+    "full_us": 3906.0399532318115,
+    "swa_us": 319.38350200653076,
+    "pass_ms": 76.05762219429016,
+    "speedup": 0.7130861628078843
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 3817.639112472534,
+    "swa_us": 484.88500714302063,
+    "pass_ms": 77.44543415307999,
+    "speedup": 0.7003077528833404
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 4272.143602371216,
+    "swa_us": 337.3434990644455,
+    "pass_ms": 82.9707678258419,
+    "speedup": 0.6536716410370018
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 4, \"waves_per_eu\": 1}",
+    "full_us": 4232.003450393677,
+    "swa_us": 403.6040008068085,
+    "pass_ms": 83.44093412160873,
+    "speedup": 0.6499883844034378
+  },
+  {
+    "name": "{\"BLOCK_M\": 128, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 4546.226024627686,
+    "swa_us": 504.24501299858093,
+    "pass_ms": 90.9084786772728,
+    "speedup": 0.5965960353968294
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 4753.309011459351,
+    "swa_us": 414.1240119934082,
+    "pass_ms": 93.01379442214966,
+    "speedup": 0.5830924144075434
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 32, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 4086.5819454193115,
+    "swa_us": 1090.0909900665283,
+    "pass_ms": 93.18011283874512,
+    "speedup": 0.5820516450401473
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 64, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 5146.372556686401,
+    "swa_us": 817.2490000724792,
+    "pass_ms": 107.34518802165985,
+    "speedup": 0.5052451717898581
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 4945.570945739746,
+    "swa_us": 1089.0510082244873,
+    "pass_ms": 108.6231951713562,
+    "speedup": 0.49930070531675924
+  },
+  {
+    "name": "{\"BLOCK_M\": 64, \"BLOCK_N\": 32, \"num_stages\": 1, \"num_warps\": 8, \"waves_per_eu\": 2}",
+    "full_us": 5757.959365844727,
+    "swa_us": 413.5040044784546,
+    "pass_ms": 111.08634066581726,
+    "speedup": 0.4882295846433185
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 6009.582042694092,
+    "swa_us": 986.5700006484985,
+    "pass_ms": 125.93073678016663,
+    "speedup": 0.43067831849102584
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 64, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 7009.912014007568,
+    "swa_us": 817.0480132102966,
+    "pass_ms": 140.88528048992157,
+    "speedup": 0.3849631258440655
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 1}",
+    "full_us": 7051.112174987793,
+    "swa_us": 986.6499900817871,
+    "pass_ms": 144.67971897125244,
+    "speedup": 0.3748669015150261
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 128, \"num_stages\": 1, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 11090.153694152832,
+    "swa_us": 1573.815941810608,
+    "pass_ms": 227.95145344734192,
+    "speedup": 0.23792626518763077
+  },
+  {
+    "name": "{\"BLOCK_M\": 256, \"BLOCK_N\": 128, \"num_stages\": 2, \"num_warps\": 2, \"waves_per_eu\": 2}",
+    "full_us": 19645.52116394043,
+    "swa_us": 1575.7759809494019,
+    "pass_ms": 381.98334860801697,
+    "speedup": 0.14198429895035447
+  }
+]

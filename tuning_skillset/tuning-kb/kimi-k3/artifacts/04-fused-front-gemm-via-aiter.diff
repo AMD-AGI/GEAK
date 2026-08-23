@@ -1,0 +1,124 @@
+# 04-fused-front-gemm-via-aiter.diff
+#
+# Route the K3 fused-MoE-front GEMM (N=6016 K=7168) through aiter's tuned bf16
+# dispatch instead of leaving it on hipBLASLt's own heuristic.
+#
+# Origin:  mine.
+# Base:    sglang 0.5.15.post1.dev20260723+g6c9fd0adc5,
+#          git 0e756912eb3cd8f531f95c17299485b9312b2534. Editable checkout at
+#          /sgl-workspace/sglang; pristine copy is
+#          `git show 0e756912e:python/sglang/srt/models/kimi_k3.py`.
+# Apply:   cd /sgl-workspace/sglang && git apply <this file>
+# Requires: 05-aiter-kimik3-fused-tuned-gemm.diff. Without that CSV the shape
+#          misses aiter's table, `_aiter_has_tuned_gemm` returns False and this
+#          patch is a no-op -- deliberately, so the fast path is opt-in per
+#          shape and no untuned shape is silently rerouted.
+# Stack:   measured as part of arm D, on top of 01 and 02, together with 03.
+#
+# Why the shape was on hipBLASLt at all: `_k3_bf16_gemm` calls torch directly
+# because the MoE front's weight is a merged *view* over three modules
+# (shared gate_up | router gate | latent down), not a Linear, so it never
+# reaches UnquantizedLinearMethod and never sees aiter's tuned dispatch. Under
+# SGLANG_USE_AITER=1 every other dense bf16 linear in the model does. It is the
+# largest `Cijk_*` in the decode profile at 7.86%, and nothing had ever tuned
+# it: aiter/configs/model_configs/kimik3_bf16_tuned_gemm.csv covers the module
+# linears (1536/2112/2304/3072/6144/7168/8448 x ...) and not the two shapes
+# sglang synthesises by merging.
+#
+# The deferred shared-down GEMM (N=7168 K=768) keeps its torch.mm(out=) store:
+# tgemm.mm has no out= parameter, and aiter's tuned pick for that shape
+# measures 0.826x, i.e. slower than torch. That is a measurement, not an
+# oversight -- analysis/bench_k3_gemm.py.
+#
+# Isolated measurement: analysis/bench_k3_gemm.py --m 63, graph-captured, one
+#          process so the clocks are shared:
+#            front  N=6016 K=7168  torch 41.52 us -> tgemm.mm 30.04 us  1.382x
+#                                  (triton 33.56 us 1.237x)
+#            shared N=7168 K=768   torch 15.08 us -> tgemm.mm 18.26 us  0.826x
+#            bfa    N=144  K=7168  torch 17.36 us -> tgemm.mm 16.52 us  1.051x
+# In-server: analysis/profiles/candD_s7/kernel_table.txt -- the 92 front-GEMM
+#          calls are now Cijk_..._MT48x64x256 at 2.11 ms (6.03% of decode)
+#          where analysis/profiles/candC_s3/ had Cijk_..._MT160x64x128 at
+#          2.84 ms (7.86%). The hipBLASLt macro-tile in the kernel name is the
+#          engagement proof: MT48x64x256 is the solution the aiter tuner
+#          selected (solidx 438691), MT160x64x128 is the heuristic default.
+# End-to-end: arm D (01+02+03+04+05) 949.964 tok/s, mean of 7 settled runs over
+#          2 server restarts (sd 2.606), against arm C (01+02) 936.952, mean of
+#          10 runs over 3 restarts (sd 1.318): +1.389%, which is 1.95x this
+#          machine's 0.713% across-restart noise floor. +18.19% over the local
+#          baseline of 803.786. gsm8k 5-shot strict-match 0.9788 +/- 0.0040
+#          (gate 0.9765 +/- 0.0042), eval_results/candD_s7_20260820_163121.
+#          04+05 and 03 were measured together and are not separable within
+#          that floor; the profile attributes 0.73 ms/step here and 0.23 to 03.
+diff --git a/python/sglang/srt/models/kimi_k3.py b/python/sglang/srt/models/kimi_k3.py
+index b7f61cf2c..74671c033 100644
+--- a/python/sglang/srt/models/kimi_k3.py
++++ b/python/sglang/srt/models/kimi_k3.py
+@@ -8,7 +8,7 @@
+ 
+ import logging
+ from collections.abc import Iterable
+-from functools import cached_property
++from functools import cached_property, lru_cache
+ from typing import TYPE_CHECKING, List, Optional, Tuple
+ 
+ import torch
+@@ -119,6 +119,7 @@ from sglang.srt.utils.common import (
+ logger = logging.getLogger(__name__)
+ _is_hip = is_hip()
+ _aiter_k3_opt = get_bool_env_var("SGLANG_AITER_K3_OPT")
++_aiter_tuned_mm = _is_hip and get_bool_env_var("SGLANG_USE_AITER")
+ 
+ # ---------------------------------------------------------------------------
+ # Helpers
+@@ -137,6 +138,25 @@ def _cdiv(a: int, b: int) -> int:
+ _K3_MEGA_SITU_SENTINEL_CLAMP = 0.03125
+ 
+ 
++@lru_cache(maxsize=64)
++def _aiter_has_tuned_gemm(m: int, n: int, k: int) -> bool:
++    """Does aiter's bf16 GEMM table hold a real entry for this shape?
++
++    `get_GEMM_A16W16_config` answers `{"libtype": "torch"}` on a miss, i.e. it
++    hands the shape straight back to `F.linear`, so routing a missed shape
++    through `tgemm.mm` only buys dispatch overhead. Asking first keeps the
++    fast path opt-in per shape: add a row to a `*_bf16_tuned_gemm.csv` under
++    `aiter/configs/model_configs/` and the call site starts using it."""
++    try:
++        from aiter.tuned_gemm import get_GEMM_A16W16_config
++    except ImportError:
++        return False
++    cfg = get_GEMM_A16W16_config(
++        m, n, k, False, "torch.bfloat16", "torch.bfloat16", False, False
++    )
++    return cfg.get("libtype", "torch") != "torch"
++
++
+ def _k3_bf16_gemm(
+     x: torch.Tensor,
+     weight: torch.Tensor,
+@@ -167,6 +187,24 @@ def _k3_bf16_gemm(
+                 out.copy_(cutedsl_bf16_gemm(x, weight))
+                 return out
+     if out is None:
++        # These weights are merged views, not Linear modules, so they never
++        # reach UnquantizedLinearMethod and never get aiter's tuned dispatch --
++        # under SGLANG_USE_AITER they are the only dense bf16 GEMMs left on
++        # hipBLASLt's own heuristic. The fused MoE front (N=6016 K=7168) picks
++        # MT160x64x128 that way and runs 1.38x slower at bs 63 than the
++        # solution aiter's tuner finds. tgemm.mm has no out= parameter, so the
++        # deferred shared-down GEMM below keeps its torch.mm store-in-place --
++        # it measures 0.83x through aiter anyway.
++        if (
++            _aiter_tuned_mm
++            and x.dim() == 2
++            and x.dtype == torch.bfloat16
++            and weight.dtype == torch.bfloat16
++            and _aiter_has_tuned_gemm(x.shape[0], weight.shape[0], weight.shape[1])
++        ):
++            from aiter.tuned_gemm import tgemm
++
++            return tgemm.mm(x, weight, None, otype=x.dtype)
+         return torch.nn.functional.linear(x, weight)
+     return torch.mm(x, weight.t(), out=out)
+ 

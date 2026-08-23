@@ -1,0 +1,14 @@
+# torchrun --nproc-per-node 8 analysis/bench_allreduce.py   (us per call, 8-way, bf16, median of 7)
+# ca/qr timed inside a HIP graph of 50 calls; rccl timed eagerly (upper bound, includes dispatch).
+# "gate" = what sglang would actually dispatch at that size. nan = above ca max_size, uncallable.
+ca disabled=False max_size=16.0 MB
+qr disabled=False quant=QuickReduceRegime.INT4 fp16_kernels=1 max_size=2048.0 MB
+           shape      bytes |      rccl        ca        qr |  gate: ca  gate: qr |  qr relL2
+       decode 64     786432 |     46.62     15.76     32.12 |      True     False |  1.22e-01
+             128    1572864 |     51.34     23.77     32.83 |      True     False |  1.22e-01
+             256    3145728 |     60.31     34.52     34.80 |      True      True |  1.21e-01
+             512    6291456 |     76.83     56.69     40.73 |      True      True |  1.22e-01
+            1024   12582912 |    108.30    101.50     58.93 |      True      True |  1.22e-01
+            2048   25165824 |    159.70       nan    109.13 |     False      True |  1.21e-01
+            4096   50331648 |    272.53       nan    176.92 |     False      True |  1.21e-01
+   prefill 16384  201326592 |    976.77       nan    623.12 |     False      True |  1.22e-01
