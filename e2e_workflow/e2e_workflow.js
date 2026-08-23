@@ -434,6 +434,11 @@ const E2E_KB_PLANE = ['local', 'remote', 'both'].includes(String(A.e2e_kb_plane 
 const E2E_KB_STORE_DIR = String(A.kb_store_dir ||
   KB_ARTIFACTS_DIR.replace(/\/[^/]*$/, '') + '/kb_store_local').replace(/\/+$/, '');
 const E2E_STORE_SCRIPT = `${WORKFLOW_DIR}/scripts/e2e_store.py`;
+// The file the warm-start read drops this run's KB address into, and the one run_e2e.py looks for
+// when it has to write the record this process never got to. Named in both programs; spelled once
+// here and once in interface/run_e2e.py (KB_IDENTITY_FILE), which is the same arrangement
+// workflow_return.json already has.
+const KB_IDENTITY_BASENAME = 'kb_identity.json';
 // Every candidate costs a full server launch to reject, so a recorded near-tie is not worth benching.
 const E2E_WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.warm_start_min_speedup))
   ? parseFloat(A.warm_start_min_speedup) : 1.05;
@@ -457,25 +462,13 @@ const E2E_REPLAYABLE_KINDS = new Set(['patch', 'env', 'flag']);
 // director:validate — those two produce the run's authoritative numbers, and a stored prior in their
 // context is contamination with no upside.
 const WARM_START_ROLES = new Set(['system_architect', 'config_tuner']);
-// Credentials for every emitted KB command. The service token is NOT present in a non-interactive
-// shell (it lives in ~/.bashrc, which such a shell never sources), so each command exports it itself
-// from the 0600 file. It is never passed in argv: /proc is world-readable on this box, and the
-// service has no revocation story for a leaked key.
-// The gateway's internal AMD CA is not in a stock container trust store, so a KB command run inside
-// one fails TLS (the old workaround was `curl -k`). DETECT then heal: only when the caller has NOT
-// already established trust (SSL_CERT_FILE unset) do we point urllib/requests/curl/node at the first
-// readable AMD-root bundle we find. Most callers here run OUTSIDE the warm-start launcher (which sets
-// these at `docker run`), so this self-heal is what keeps their KB reachable. Path-only, no CA
-// content; overridable with KB_CA_BUNDLE; a no-op when SSL_CERT_FILE is already set or no bundle is
-// readable (so CI and already-trusting images are byte-identical). DNS (the host has none
-// in-container) is a launch concern, handled with `docker run --add-host`.
-const KB_ENV_PRELUDE =
-  'export KB_STORE_URL="${KB_STORE_URL:-https://global.primus-safe.amd.com/knowledge-base}"; ' +
-  'export KB_STORE_TOKEN="${KB_STORE_TOKEN:-$(cat ~/.geak_kb_token 2>/dev/null)}"; ' +
-  'if [ -z "${SSL_CERT_FILE:-}" ]; then for _ca in "${KB_CA_BUNDLE:-}" ' +
-  '/shared_nfs/hyperloom/ca/amd-ca-combined.pem "$HOME/amd-extra-ca-bundle.pem"; do ' +
-  '[ -n "$_ca" ] && [ -r "$_ca" ] && { export SSL_CERT_FILE="$_ca" REQUESTS_CA_BUNDLE="$_ca" ' +
-  'CURL_CA_BUNDLE="$_ca" NODE_EXTRA_CA_CERTS="$_ca"; break; }; done; fi; ';
+// Credentials and trust for every emitted KB command. The six lines that do the work live in
+// scripts/kb_env.sh (which explains them), not here, because run_e2e.py runs KB commands too — the
+// salvage write for a run whose workflow died before Module B — and a Python copy of the token path
+// and CA fallback list is exactly the kind of duplicate that drifts without ever raising. Sourced,
+// so both programs get the same answer from the same file.
+// (shq is declared further down, so the quoting is written out here rather than called.)
+const KB_ENV_PRELUDE = `. "${WORKFLOW_DIR}/scripts/kb_env.sh"; `;
 // Expert skills = human-authored, validated optimization recipes (perf_knowledge/expert_skills/). They
 // are ADVISORY priors: a matched `validated` skill is a HIGH-PRIOR candidate that routing/integration
 // roles reproduce, then gate by the usual on-box A/B — it NEVER overrides measurement and NEVER reduces
@@ -1720,6 +1713,7 @@ if (want('setup')) {
     } else {
       const refsDir = `${EVAL_DIR}/kb_references`;
       const cacheDir = `${EVAL_DIR}/kb_cache`;
+      const KB_IDENTITY_FILE = `${EVAL_DIR}/${KB_IDENTITY_BASENAME}`;
       const resolved = await safeAgent(
         `You are the e2e warm-start resolver. Run EXACTLY this command and return its JSON stdout ` +
         `verbatim as StructuredOutput — do not add, drop, reorder, or reinterpret any field. The ` +
@@ -1732,7 +1726,17 @@ if (want('setup')) {
         kbResolveScript(
           `--top-n ${E2E_WARM_START_TOP_N} \\\n` +
           `  --min-speedup ${E2E_WARM_START_MIN_SPEEDUP} \\\n` +
-          `  --refs-dir ${shq(refsDir)} --cache-dir ${shq(cacheDir)}`) + '\n' +
+          `  --refs-dir ${shq(refsDir)} --cache-dir ${shq(cacheDir)} \\\n` +
+          // The read leaves this run's KB ADDRESS on disk as a side effect, at the one moment the
+          // dimensions are known and the process is still healthy. Module B below is the happy
+          // path; when this process dies before reaching it (6 of the 9 measured runs on
+          // 20260821-22), run_e2e.py salvages the numbers from disk and needs this file to know
+          // which pages they belong on. Free: no extra agent, no second formatting of the dims.
+          // --store/--identity-plane are recorded, not used, by the read: a `both` run reads
+          // remote-first, so without them the file would tell the salvage writer "remote" and lose
+          // the local mirror this run was configured to keep.
+          `  --identity-out ${shq(KB_IDENTITY_FILE)} \\\n` +
+          `  --store ${shq(E2E_KB_STORE_DIR)} --identity-plane ${E2E_KB_PLANE}`) + '\n' +
         '```',
         { phase: 'WarmStart', label: 'warm_start:resolve', schema: KB_RESOLVE_SCHEMA }) || {};
       const cands = Array.isArray(resolved.candidates) ? resolved.candidates : [];
@@ -3704,8 +3708,19 @@ if (EVAL_DIR) {
 // EVERY --apply IS PERMANENT. The service exposes no DELETE for /v1/kb/*, so a wrong record cannot
 // be cleaned up, only outranked. Hence the gates below are conservative by design.
 // ===========================================================================
+// The Director's verdict, not the raw ratio, decides whether a same-session A/B is a real win: a
+// declared no-win can still carry a ratio ABOVE 1.0 when a low outlier in the base leg depresses its
+// median, so the two mechanically-identical legs' ratio squeaks over 1.0 while the run bought
+// nothing (see the 20260822 gemma-4-26B-A4B run: 1.0215x raw same-session, but 0.9453x vs the
+// provided baseline, validation_status=validated_no_win, empty overlay + empty patch). Keying the
+// write on the ratio alone wrote that BELOW-baseline number in as the exact-id champion and buried
+// the real framework-layer win beneath it. A KB write is PERMANENT (no delete), so a verdict the
+// Director already computed to mean "no win" must never mint a champion record, whatever the ratio
+// rounded to. `startsWith` also catches the `..._no_number_used_carried_ab` fallback spelling.
+const kbNoWinVerdict = ['validated_no_win', 'recovered_no_gain']
+  .some((s) => String(wfReturn.validation_status || '').startsWith(s));
 if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
-    wfReturn.throughput_speedup > 1.0 && wfReturn.final_throughput_tok_s > 0) {
+    wfReturn.throughput_speedup > 1.0 && wfReturn.final_throughput_tok_s > 0 && !kbNoWinVerdict) {
   // Computed HERE, deterministically, from facts this script already holds — never asked of an
   // agent. `direction` is inside _content_digest, so a label that varies between two runs of the
   // same configuration mints a second session instead of replacing the first, and the page fills
@@ -3720,7 +3735,12 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
     KB_ENV_PRELUDE +
     `python3 ${shq(E2E_STORE_SCRIPT)} write ${kbIdentityFlags()} ` +
     `${kbPlaneFlags()} --result ${shq(EVAL_DIR + '/workflow_return.json')} ` +
-    `--direction ${shq(kbDirection)} --measured-by ${shq('e2e_workflow:' + BACKEND)} --apply`;
+    // --require-win re-asks, inside the writer, the same question the `if` above already answered.
+    // Not redundancy for its own sake: run_e2e.py's salvage path is a SECOND writer, and the two
+    // must refuse the same results. One gate implementation (e2e_store.win_gate), two callers —
+    // the arrangement that stops the next gate fix from reaching only half the write paths.
+    `--require-win --direction ${shq(kbDirection)} ` +
+    `--measured-by ${shq('e2e_workflow:' + BACKEND)} --apply`;
   try {
     const written = await safeAgent(
       `You are the e2e knowledge-base writer. Run EXACTLY this command and return its JSON stdout ` +
@@ -3750,6 +3770,7 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
   const why = !KB_DIMS.gfx ? 'no gfx (an arch-less record is permanent and unattributable)'
     : !want('final') ? 'this is a phase-partial run, so the number is not final'
     : !(wfReturn.throughput_speedup > 1.0) ? `no win to record (${wfReturn.throughput_speedup}x)`
+    : kbNoWinVerdict ? `Director declared no win (${wfReturn.validation_status}) — the ${wfReturn.throughput_speedup}x same-session ratio is box-drift, not a gain`
     : 'no final throughput measured';
   log(`[kb] not recording this run: ${why}.`);
 }
