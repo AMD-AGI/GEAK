@@ -5,7 +5,13 @@
 // any role prompt, so roleAgent's output is byte-identical to a build without the feature. We prove this
 // behaviorally by extracting the ACTUAL `expertSkillsBlock` function source from each workflow script and
 // asserting it returns '' (a) whenever the flag is off, and (b) for any non-consumer role even when on;
-// and that roleAgent's return is exactly `base + expertSkillsBlock(role)` (purely additive).
+// and that roleAgent's return is `base` plus ONLY additive `<name>Block(role)` terms.
+//
+// roleAgent grew a second injector (warmStartBlock) after this guard was written. The invariant was
+// never "expert skills is the only block" — it is "base is never rewritten, and every block that hangs
+// off it is inert when its own gate is off". So the tail of the return is matched generically and each
+// extra block found there is held to the SAME off-is-empty proof, which is what actually keeps a
+// feature-off run byte-identical. A new injector is covered the day it is added, with no edit here.
 //
 // Run:  node e2e_workflow/scripts/test_expert_skills_off_identical.js
 'use strict';
@@ -55,11 +61,28 @@ for (const t of TARGETS) {
   ok(/A\.use_expert_skills != null \? A\.use_expert_skills : 'false'/.test(src),
     "use_expert_skills defaults to 'false' (opt-in)");
 
-  // 4) roleAgent must be purely additive: returns `base + expertSkillsBlock(role)`.
-  ok(/return base \+ expertSkillsBlock\(role\);/.test(src),
-    'roleAgent returns base + expertSkillsBlock(role) (additive)');
+  // 4) roleAgent must be purely additive: `base + expertSkillsBlock(role)` optionally followed by
+  //    further `+ <name>Block(role)` terms, and nothing else.
+  const ret = src.match(/return base \+ expertSkillsBlock\(role\)((?:\s*\+\s*\w+\(role\))*);/);
+  ok(!!ret, 'roleAgent returns base + expertSkillsBlock(role) [+ more blocks] (additive)');
   ok(/const base = `You are the \$\{role\}\. PHASE=\$\{phase\}\./.test(src),
     'roleAgent base template preserved (original anchor intact)');
+
+  // 5) Every EXTRA injector on that return is held to the same bar: gate off -> ''. Each is rebuilt
+  //    with its module-scope deps neutralised (SCREAMING_CASE is this codebase's module-constant
+  //    convention), so an injector that forgets its early return fails here instead of silently
+  //    polluting a feature-off prompt.
+  for (const extra of (ret ? ret[1].match(/\w+(?=\(role\))/g) || [] : [])) {
+    const fm = src.match(new RegExp(`function ${extra}\\(role\\) \\{[\\s\\S]*?\\n\\}`));
+    ok(!!fm, `${extra}(role) defined`);
+    if (!fm) continue;
+    const deps = [...new Set(fm[0].match(/\b[A-Z][A-Z0-9_]{2,}\b/g) || [])];
+    const off = new Function(...deps, `${fm[0]}\nreturn ${extra};`)(
+      ...deps.map((d) => (/_ROLES$/.test(d) ? new Set() : '')));
+    let out;
+    try { out = off(t.consumer); } catch (e) { out = `threw: ${e.message}`; }
+    ok(out === '', `${extra} -> '' when its gate is off (no pollution)`);
+  }
 }
 
 console.log(failures === 0
