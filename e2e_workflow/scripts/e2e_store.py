@@ -55,6 +55,7 @@ import json
 import os
 import shutil
 import sys
+import tarfile
 import tempfile
 import time
 
@@ -208,6 +209,39 @@ def cmd_resolve(a) -> dict:
            "match_tier": "", "ranked_by": "", "sorted_by": metric, "champion_metric": "",
            "candidates": [], "read_reason": "",
            "plane": str(getattr(a, "plane", "local") or "local"), "curation": {}}
+    # Leave the ADDRESS behind on disk, not just the answer. The writer at the end of the run is a
+    # different process, and when the workflow dies mid-flight it is a different program entirely
+    # (run_e2e.py salvaging the run from its artifacts) — one that has the measurement but not the
+    # dimensions the Director established at preflight, and so could not address the KB at all. Its
+    # write was silently lost for every run that did not finish cleanly. Written HERE, from the same
+    # argv that formed the read, because two places formatting these dims independently is how a
+    # reader and a writer drift onto different pages. Best-effort: a read must not fail over it.
+    if getattr(a, "identity_out", ""):
+        try:
+            with open(a.identity_out, "w") as handle:
+                # `dims` is the raw argv, one key per --flag of _identity_args, because the reader
+                # of this file writes with those same flags: it hands them straight back. `identity`
+                # is the derived form (gfx -> gpu, tp -> "tp_2"), kept for a human reading the file
+                # and for anyone matching it against a canonical id — reconstructing argv FROM it
+                # would mean a second, inverse copy of e2e_identity() living in run_e2e.py.
+                json.dump({"identity": identity_of(a),
+                           "dims": {"model": str(a.model or ""), "gfx": str(a.gfx or ""),
+                                    "framework": str(a.framework or ""),
+                                    "framework-version": str(a.framework_version or ""),
+                                    "precision": str(a.precision or ""),
+                                    "rocm-version": str(a.rocm_version or ""),
+                                    "tp": a.tp, "isl": a.isl, "osl": a.osl, "conc": a.conc},
+                           "store": str(getattr(a, "store", "") or ""),
+                           # The plane the RUN writes on, which is not this read's plane: a `both`
+                           # run reads remote-first (see kbResolveScript) and would otherwise leave
+                           # behind "remote", talking the salvage writer out of the local mirror the
+                           # run was configured to keep. Falls back to the read's own plane when the
+                           # caller says nothing.
+                           "plane": str(getattr(a, "identity_plane", "")
+                                        or getattr(a, "plane", "") or "remote"),
+                           "canonical_id": ladder[0][0]}, handle, indent=2, sort_keys=True)
+        except OSError:
+            pass
     last_why = ""
     for cid, tier, champion_metric, floor in ladder:
         # The rung's own metric opens nothing here: a read ranks every rung the same way (see
@@ -629,6 +663,54 @@ _ARTIFACT_KEYS = (("patch", "final_patch", "final.patch"),
                   ("report", "report_path", "report.md"),
                   ("overlay", "final_overlay", "overlay.py"))
 
+OVERLAY_MANIFEST = "_overlay_manifest.json"
+OVERLAY_TARBALL = "overlay.tar.gz"
+# Holds the TemporaryDirectory objects alive for the life of the process. The tarball has to still
+# be on disk when the store uploads it, which happens long after _artifact_files() returns, and a
+# TemporaryDirectory that goes out of scope deletes its tree immediately.
+_PACKED = []
+
+
+def _pack_overlay(dirpath: str) -> str:
+    """`final_overlay`'s directory -> a .tar.gz of the overlay mechanism, or "" if it is not one.
+
+    `final_overlay` names a DIRECTORY, always: the mechanism is a sitecustomize.py plus the modules
+    it swaps in, and no single file carries it. _artifact_files() used to take only
+    `os.path.isfile`, so that directory was dropped without a word and no e2e record ever carried
+    an overlay — the runs that cleared _repro()'s reproducibility gate were the ones that also
+    happened to emit a kernel patch, and a pure-overlay win could not be recorded at all.
+
+    Only the mechanism goes in: the manifest, the sitecustomize.py that installs it, and the
+    `_patched/` modules the manifest names. An accepted-candidate directory also holds the A/B
+    evidence it was judged on (`cand/`, `ref/`, server logs, profiles) — that is how the number was
+    arrived at, not how it is reproduced, and it is several times the size of what a reader needs.
+    `__pycache__` is skipped: a .pyc is stale the moment the reader's interpreter differs.
+
+    Everything is packed under a single `overlay/` top level so the reader can untar into the
+    bundle root and get one predictable directory to point PYTHONPATH at (see _launch_text).
+
+    No manifest means this is not an overlay directory. Returning "" then is deliberate — the gate
+    refuses the record rather than have it promise a tarball of something nobody can install.
+    """
+    if not os.path.isfile(os.path.join(dirpath, OVERLAY_MANIFEST)):
+        return ""
+    holder = tempfile.TemporaryDirectory(prefix="e2e_overlay_")
+    _PACKED.append(holder)
+    out = os.path.join(holder.name, OVERLAY_TARBALL)
+    with tarfile.open(out, "w:gz") as tar:
+        for name in (OVERLAY_MANIFEST, "sitecustomize.py"):
+            src = os.path.join(dirpath, name)
+            if os.path.isfile(src):
+                tar.add(src, arcname="overlay/" + name)
+        for root, dirs, names in os.walk(os.path.join(dirpath, "_patched")):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            for name in names:
+                if name.endswith(".pyc"):
+                    continue
+                src = os.path.join(root, name)
+                tar.add(src, arcname="overlay/" + os.path.relpath(src, dirpath))
+    return out
+
 
 def _artifact_files(a, result: dict) -> dict:
     """{role: (stored_name, local_path)} for the run outputs that actually exist on disk.
@@ -640,8 +722,14 @@ def _artifact_files(a, result: dict) -> dict:
     found = {}
     for role, field, stored in _ARTIFACT_KEYS:
         path = str(result.get(field) or "")
-        if path and os.path.isfile(path):
+        if not path:
+            continue
+        if os.path.isfile(path):
             found[role] = (stored, path)
+        elif role == "overlay" and os.path.isdir(path):
+            packed = _pack_overlay(path)
+            if packed:
+                found[role] = (OVERLAY_TARBALL, packed)
     for extra in (getattr(a, "file", None) or []):   # retract recomputes a record but takes no --file
         path = str(extra)
         if os.path.isfile(path):
@@ -801,7 +889,14 @@ def _launch_text(a, result: dict, value: dict, kernels, overlay: str) -> str:
                 "# Fetch them from the kernel lane (kernel_canonical_id in value.accepted_kernels)",
                 "# or the number below will not reproduce."]
         lines.append("")
-    if overlay:
+    if overlay.endswith(".tar.gz"):
+        # Packed by _pack_overlay under a single `overlay/` top level. Extracted rather than shipped
+        # loose so the bundle keeps one file per artifact role; guarded so a reader who already
+        # unpacked (or edited) it does not get their copy overwritten on the next run.
+        lines += ['# Python-level overlay this run served with.',
+                  '[ -d "$HERE/overlay" ] || tar -xzf "$HERE/%s" -C "$HERE"' % overlay,
+                  'OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-$HERE/overlay}"', ""]
+    elif overlay:
         lines += ['# Python-level overlay this run served with.',
                   'OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-$HERE/%s}"' % overlay, ""]
     pairs = _env_pairs(env)
@@ -903,6 +998,41 @@ def _repro(a, result: dict, value: dict, kernels, files: dict, workdir) -> dict:
     }
 
 
+# The verdicts that mean "this run bought nothing", whatever the ratio rounded to. `startsWith`
+# semantics (not equality) because the Director spells its fallbacks with suffixes —
+# `flagged_no_number_used_carried_ab`, `recovered_no_gain_*` — and a new suffix must not silently
+# reopen the gate.
+NO_WIN_VERDICTS = ("validated_no_win", "recovered_no_gain", "flagged_")
+
+
+def win_gate(result: dict) -> str:
+    """Why this result must NOT be recorded, or '' when it may be. ONE implementation.
+
+    Two callers ask this question — e2e_workflow.js at the end of a live run, and run_e2e.py when it
+    salvages a run whose workflow died before it got there — and they must answer it identically.
+    They previously could not: only the JS had a gate at all, so every salvaged run was unwritable
+    and every gate fix reached exactly half the write paths.
+
+    The Director's VERDICT decides, not the raw ratio. A declared no-win can still carry a ratio
+    above 1.0 when a low outlier in the base leg depresses its median: the 20260822 gemma-4-26B run
+    read 1.0215x same-session while measuring 0.9453x against its provided baseline, and keying the
+    write on the ratio alone minted that below-baseline number as the exact-id champion. A KB write
+    is PERMANENT (the service exposes no DELETE), so a wrong record cannot be cleaned up, only
+    outranked — hence a verdict the Director already computed to mean "no win" never writes.
+    """
+    speedup = finite_speedup(result.get("throughput_speedup"))
+    final = finite_speedup(result.get("final_throughput_tok_s"))
+    status = str(result.get("validation_status") or "")
+    if not final:
+        return "no final throughput measured"
+    if speedup is None or speedup <= 1.0:
+        return "no win to record (%sx)" % speedup
+    if any(status.startswith(s) for s in NO_WIN_VERDICTS):
+        return ("Director declared no win (%s) — the %sx same-session ratio is box-drift, "
+                "not a gain" % (status, speedup))
+    return ""
+
+
 def cmd_write(a) -> dict:
     workdir = tempfile.mkdtemp(prefix="e2e_store_write_")
     try:
@@ -921,6 +1051,16 @@ def _write(a, workdir: str) -> dict:
         raise SystemExit("cannot read --result %s: %s" % (a.result, e))
     if not isinstance(result, dict):
         raise SystemExit("--result must be a JSON object")
+
+    # Opt-in rather than always-on: `write` is also the backfill path, where a human has evidence
+    # this result JSON cannot carry (a framework-layer win the sub-run self-judged no-win), and a
+    # gate that could not be declined would make that correction unexpressible. Automated callers
+    # pass it; a human deciding to override omits it, deliberately and visibly.
+    if getattr(a, "require_win", False):
+        why = win_gate(result)
+        if why:
+            return {"ok": True, "applied": False, "skipped": True, "why": why,
+                    "session_id": "", "files": [], "rungs": []}
 
     record = build_record(a, result, workdir)
     ladder = ladder_of(a)
@@ -953,7 +1093,9 @@ def _write(a, workdir: str) -> dict:
         knowledge = _carrying_ledger(store, cid, sid, record["knowledge"])
         rec = {"canonical_id": cid, "session_id": sid, "knowledge": knowledge}
         score_of = lambda r, m=metric: r["knowledge"].get(m)
-        written, promoted, err = publish(store, [rec], record["files"], score_of)
+        may_promote = not getattr(a, "no_promote", False)
+        written, promoted, err = publish(store, [rec], record["files"], score_of,
+                                         promote=may_promote)
         rung["written"] = bool(written)
         rung["promoted"] = bool(promoted)
         rung["error"] = err or why   # `both` with an unreachable service: recorded, not fatal
@@ -963,7 +1105,8 @@ def _write(a, workdir: str) -> dict:
             # and re-written from a box that only ever wrote locally must not have the remote's
             # count overwritten by the local one's.
             mrec = dict(rec, knowledge=_carrying_ledger(mirror, cid, sid, record["knowledge"]))
-            _mw, _mp, merr = publish(mirror, [mrec], record["files"], score_of)
+            _mw, _mp, merr = publish(mirror, [mrec], record["files"], score_of,
+                                     promote=may_promote)
             if merr and not rung["error"]:
                 rung["error"] = merr
         out["rungs"].append(rung)
@@ -1173,6 +1316,12 @@ def main(argv=None) -> int:
                         "high to low). The champion metric per rung is unaffected.")
     q.add_argument("--refs-dir", default="", help="write prose references here")
     q.add_argument("--cache-dir", default="", help="materialize artifact bundles here")
+    q.add_argument("--identity-out", default="",
+                   help="also dump the resolved dimensions here, so a later writer (including "
+                        "run_e2e.py salvaging a workflow that died) can address the same pages")
+    q.add_argument("--identity-plane", default="",
+                   help="the plane to record in --identity-out (the RUN's write plane, which for a "
+                        "`both` run differs from this read's remote-first plane)")
 
     q = sub.add_parser("write", help="record one run at every rung")
     _identity_args(q)
@@ -1186,6 +1335,14 @@ def main(argv=None) -> int:
                         "has on disk are fetched from there by kernel_canonical_id so the record "
                         "stays reproducible. Off by default: it is real I/O on the write path.")
     _state_args(q)
+    q.add_argument("--require-win", action="store_true",
+                   help="refuse to write a result the Director declared a no-win, whatever its "
+                        "raw ratio (see win_gate). Every automated caller passes this; a human "
+                        "backfilling a win the run itself mis-judged omits it on purpose.")
+    q.add_argument("--no-promote", action="store_true",
+                   help="record the measurement but leave the champion pointer alone. For numbers "
+                        "the writer knows are provisional — a run salvaged from disk artifacts "
+                        "with no final Validate behind it.")
     q.add_argument("--apply", action="store_true", help="actually write; default is a dry run")
 
     q = sub.add_parser("attest", help="count one attempt to RUN a stored record: validated | "
