@@ -1,0 +1,108 @@
+# Patch: bf16 dense-GEMM tuned table for TP=4
+#
+# Base:   aiter @ d9e5ef7ce08ee7045d583aed768cff41aa9210fe (/sgl-workspace/aiter),
+#         which is what SGLang 0.5.17 in this container imports.
+# Apply:  cd /sgl-workspace/aiter && git apply /path/to/gemm_tuned_table_tp4.patch
+#         then  rm -rf /tmp/aiter_configs   (the merged table is cached there)
+#         and restart the server -- aiter reads the table once, at import.
+#
+# What it is
+#   aiter looks up every bf16 dense GEMM in a CSV keyed on
+#   (gfx, cu_num, M, N, K, bias, dtype, outdtype, scaleAB, bpreshuffle) and falls back to a
+#   generic torch/hipblaslt call on a miss. The table AMD ships for this model,
+#   model_configs/qwen3_5_397b_bf16_tuned_gemm.csv, was tuned at TP=2: its rows are
+#   N in {10240, 8704, 8192, 4096} with K in {8192, 4096, 512}. At TP=4 every one of those
+#   N and K halves, so not one row matches and every dense GEMM in the model misses.
+#   This adds a TP=4 table for the M tiers the frozen workload actually runs:
+#   M=64 (decode batch) and M=8192 / M=16384 (chunked prefill, chunked-prefill-size 16384).
+#
+#   Tuned with aiter's own tuner:
+#     python3 /sgl-workspace/aiter/csrc/gemm_a16w16/gemm_a16w16_tune.py \
+#       --input_file <shapes>.csv --tuned_file <out>.csv --libtype all \
+#       --with-hipblaslt --splitK --compare --update_improved --min_improvement_pct 3
+#   Per-shape kernel-level results are in analysis/bf16_gemm/tune.log and tune_prefill.log;
+#   the largest are 8192x512x4096 52.45 -> 44.38 us (1.18x) and
+#   16384x4608x4096 519.65 -> 443.71 us (1.17x).
+#
+#   The two deletions in dsv4_ and glm5_ are not optional. aiter merges every file under
+#   model_configs/ into one table and hard-errors if two files key the same shape; those two
+#   models had already been tuned at three shapes that TP=4 Qwen3.5-397B also hits, and the
+#   new rows are faster at all three (45.76->39.36, 68.36->64.19, 212.35->210.23 us).
+#   aiter's auto-resolver keeps the faster row and rewrites both files wholesale; deleting the
+#   three lines by hand gets the same table with a three-line diff.
+#
+# Measured  (ISL 8192 / OSL 1024 / concurrency 64 / 192 prompts / TP=4; one server start per
+#            arm, first benchmark after each start discarded)
+#
+#   baseline (frozen config, 8 warm runs / 3 starts)      2505.96 tok/s
+#   + this patch          (5 warm runs / 1 start)         2546.04 tok/s   +1.60%
+#   + topk_softmax_ldg_width.patch on top
+#                         (8 warm runs / 2 starts)        2569.26 tok/s   +2.53%
+#
+#   Against the 2490.308 tok/s in the task document the stacked pair is +3.17%.
+#   mean TTFT 5039.9 -> 5001.6 ms, mean TPOT 20.63 -> 20.04 ms (both improve).
+#   gsm8k 5-shot exact_match strict-match 0.9765 +/- 0.0042 on the stacked pair against a
+#   0.9691 gate and a 0.9773 baseline -- one answer of 1319. Reduction order in the dense
+#   bf16 GEMMs is the only thing in this pair that can move an answer; the other half of the
+#   stack is bit-identical.
+#
+#   Per-run numbers, arm tables and the noise floor are in FINDINGS.md section 6.
+#   Raw benchmark output: results/gemm_only_w{1..5}_*, results/final_w{1..5}_*,
+#   results/gemm_topk_w{1..3}_*, baseline results/baseC_w{1..3}_*.
+#   Accuracy: eval_results/gemm_topk_gsm8k_20260820_133923 and eval_results/final_gsm8k_20260820_142652
+#   -- two server instances, both 0.9765 (1288/1319), but not on the same 1288 questions: 4 flip
+#   each way between two runs of the identical build, so the 1-answer gap to baseline is under the
+#   stack's own run-to-run nondeterminism.
+#
+#   This patch stands alone. topk_softmax_ldg_width.patch also stands alone; they were
+#   measured stacked and then separated by re-running this one on its own, so the +0.91%
+#   attributed to the other patch is a difference, not an independent measurement.
+#
+diff --git a/aiter/configs/model_configs/qwen3_5_397b_bf16_tuned_gemm_tp4.csv b/aiter/configs/model_configs/qwen3_5_397b_bf16_tuned_gemm_tp4.csv
+new file mode 100644
+index 000000000..e92e52804
+--- /dev/null
++++ b/aiter/configs/model_configs/qwen3_5_397b_bf16_tuned_gemm_tp4.csv
+@@ -0,0 +1,14 @@
++gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernelName,err_ratio,tflops,bw
++gfx950,256,64,1,4096,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,440197,0,5.7924,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x512_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT1_1_MO40_NTn1_NTA0_NTB0_NTC2_NTD1_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS0_SPO1_SRVW0_SSO0_SVW1_SK3_SKFTR0_SKXCCM0_TLDS2_ULSGRO0_USL1_UIOFGRO0_USFGRO1_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS64_WG16_4_4,0.0,0.09,91.95
++gfx950,256,64,32,4096,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,440197,0,6.653,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x512_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT1_1_MO40_NTn1_NTA0_NTB0_NTC2_NTD1_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS0_SPO1_SRVW0_SSO0_SVW1_SK3_SKFTR0_SKXCCM0_TLDS2_ULSGRO0_USL1_UIOFGRO0_USFGRO1_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS64_WG16_4_4,0.0,2.52,118.82
++gfx950,256,64,4096,256,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,313,1,3.3825,flydsl_gemm2_abf16_wbf16_bf16_t16x64x128_split_k1_block_m_warp1_block_n_warp2_block_k_warp1_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0,39.68,784.69
++gfx950,256,64,4608,4096,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,3338,1,14.5495,flydsl_gemm4_abf16_wbf16_bf16_t16x64x128_split_k1_block_m_warp1_block_n_warp2_block_k_warp1_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0,166.05,2671.08
++gfx950,256,64,5120,4096,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,3337,1,15.0936,flydsl_gemm4_abf16_wbf16_bf16_t16x64x128_split_k1_block_m_warp1_block_n_warp1_block_k_warp2_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0049,177.85,2857.02
++gfx950,256,8192,32,4096,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,438285,0,15.2427,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT32x32x256_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT1_1_MO40_NTn1_NTA3_NTB4_NTC0_NTD5_NTM0_NEPBS14_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO1_SVW1_SK3_SKFTR0_SKXCCM8_TLDS2_ULSGRO0_USL1_UIOFGRO0_USFGRO1_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS64_WG32_8_1,0.0,140.89,4454.28
++gfx950,256,8192,512,4096,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,438976,0,39.3565,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x128x128_MI32x32x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR0_CADS0_DTLA0_DTLB0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA512_LBSPPB512_LBSPPM0_LPA8_LPB8_LPM0_LRVW8_LWPMn1_MIAV0_MIWT2_2_MO40_NTn1_NTA2_NTB3_NTC7_NTD7_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO1_SRVW0_SSO1_SVW2_SK3_SKFTR0_SKXCCM8_TLDS2_ULSGRO0_USL1_UIOFGRO0_USFGRO0_VSn1_VWA2_VWB2_WSGRA0_WSGRB0_WS64_WG64_4_1,0.0,873.04,2024.87
++gfx950,256,8192,4096,256,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,438366,0,26.4112,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR0_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_8_MO40_NTn1_NTA3_NTB6_NTC5_NTD3_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO1_SVW8_SK3_SKFTR0_SKXCCM4_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGRO0_VSn1_VWA8_VWB8_WSGRA0_WSGRB0_WS64_WG32_8_1,0.0,650.48,2779.14
++gfx950,256,8192,5120,4096,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,438921,0,258.5912,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x224x64_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_7_MO40_NTn1_NTA1_NTB3_NTC5_NTD5_NTM0_NEPBS14_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO1_SVW8_SK3_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGRO0_VSn1_VWA8_VWB1_WSGRA0_WSGRB0_WS64_WG32_8_1,0.0,1328.73,746.11
++gfx950,256,16384,512,4096,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,439145,0,64.186,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDSB0_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT4_8_MO40_NTn1_NTA0_NTB5_NTC0_NTD6_NTM0_NEPBS12_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO4_SVW4_SK3_SKFTR0_SKXCCM0_TLDS2_ULSGRO0_USL1_UIOFGRO0_USFGRO1_VSn1_VWA4_VWB8_WSGRA0_WSGRB0_WS64_WG64_4_1,0.0,1070.63,2417.81
++gfx950,256,16384,4096,256,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,440238,0,50.9277,Custom_Cijk_Alik_Bljk_BBS_BH_MT256x256x64_MI16x16x1_UserArgs_shortname1_gfx950,0.0,674.68,2841.35
++gfx950,256,16384,4096,2048,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,438241,0,210.2298,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_8_MO40_NTn1_NTA3_NTB2_NTC4_NTD4_NTM0_NEPBS16_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW8_SK3_SKFTR0_SKXCCM4_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGRO0_VSn1_VWA8_VWB8_WSGRA0_WSGRB0_WS64_WG32_8_1,0.0,1307.51,1037.45
++gfx950,256,16384,4608,4096,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,439111,0,439.9192,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_8_MO40_NTn1_NTA2_NTB1_NTC4_NTD2_NTM0_NEPBS12_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW8_SK3_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGRO0_VSn1_VWA8_VWB8_WSGRA0_WSGRB0_WS64_WG32_8_1,0.0,1405.88,734.14
+diff --git a/aiter/configs/model_configs/dsv4_bf16_tuned_gemm.csv b/aiter/configs/model_configs/dsv4_bf16_tuned_gemm.csv
+index 0eac289b0..2cfd8e099 100644
+--- a/aiter/configs/model_configs/dsv4_bf16_tuned_gemm.csv
++++ b/aiter/configs/model_configs/dsv4_bf16_tuned_gemm.csv
+@@ -698,11 +698,9 @@ gfx950,256,1984,512,4096,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,
+ gfx950,256,2048,512,4096,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,4888,1,21.2677,flydsl_gemm5_abf16_wbf16_bf16_t64x64x128_split_k1_block_m_warp2_block_n_warp2_block_k_warp2_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0049,403.9,1084.68
+ gfx950,256,4096,512,4096,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,4065,1,30.6676,flydsl_gemm4_abf16_wbf16_bf16_t64x128x64_split_k1_block_m_warp2_block_n_warp4_block_k_warp1_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0,560.2,1367.67
+ gfx950,256,6144,512,4096,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,4365,1,38.8247,flydsl_gemm4_abf16_wbf16_bf16_t96x128x64_split_k1_block_m_warp1_block_n_warp4_block_k_warp1_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0,663.75,1566.46
+-gfx950,256,8192,512,4096,False,torch.bfloat16,torch.bfloat16,False,False,torch,0,0,45.7645,native,0.0,750.79,1741.34
+ gfx950,256,10240,512,4096,False,torch.bfloat16,torch.bfloat16,False,False,torch,0,0,54.113,native,0.0,793.7,1821.49
+ gfx950,256,12288,512,4096,False,torch.bfloat16,torch.bfloat16,False,False,opus,6402,0,61.1809,opus_gemm_mono_tile_512x192x128x64_2x4_16x16x32_0x0x0_nooob_4g_safe,0.0,842.41,1919.56
+ gfx950,256,14336,512,4096,False,torch.bfloat16,torch.bfloat16,False,False,opus,6401,0,64.5807,opus_gemm_mono_tile_512x128x256x64_2x4_16x16x32_0x0x0_nooob_4g_safe,0.0,931.08,2110.77
+-gfx950,256,16384,512,4096,False,torch.bfloat16,torch.bfloat16,False,False,opus,1401,0,68.3623,opus_gemm_mono_tile_512x128x256x64_2x4_16x16x32_0x0x0_nooob,0.0,1005.22,2270.1
+ gfx950,256,16,1024,4096,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,4022,8,6.2326,flydsl_gemm7_abf16_wbf16_bf16_t16x64x64_split_k8_block_m_warp1_block_n_warp1_block_k_warp2_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0258,21.53,1372.21
+ gfx950,256,32,1024,4096,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,4007,4,6.8983,flydsl_gemm7_abf16_wbf16_bf16_t16x64x128_split_k4_block_m_warp1_block_n_warp1_block_k_warp2_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.019,38.91,1263.54
+ gfx950,256,48,1024,4096,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,1495,4,7.2215,flydsl_gemm3_abf16_wbf16_bf16_t16x64x256_split_k4_block_m_warp1_block_n_warp1_block_k_warp2_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0187,55.76,1229.68
+diff --git a/aiter/configs/model_configs/glm5_bf16_tuned_gemm.csv b/aiter/configs/model_configs/glm5_bf16_tuned_gemm.csv
+index 9591aa554..a9a59574c 100644
+--- a/aiter/configs/model_configs/glm5_bf16_tuned_gemm.csv
++++ b/aiter/configs/model_configs/glm5_bf16_tuned_gemm.csv
+@@ -11,7 +11,6 @@ gfx950,256,16384,128,6144,False,torch.bfloat16,torch.bfloat16,False,False,flydsl
+ gfx950,256,16384,256,6144,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,5883,1,75.3376,flydsl_gemm4_abf16_wbf16_bf16_t128x128x64_split_k1_block_m_warp4_block_n_warp4_block_k_warp1_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0,684.12,2825.43
+ gfx950,256,16384,2624,6144,False,torch.bfloat16,torch.bfloat16,False,False,torch,0,0,406.341,native,0.0,1300.09,786.42
+ gfx950,256,16384,32,6144,False,torch.bfloat16,torch.bfloat16,False,False,torch,0,0,43.456,native,0.0,148.25,4666.06
+-gfx950,256,16384,4096,2048,False,torch.bfloat16,torch.bfloat16,False,False,asm,10,1,212.3527,_ZN5aiter24bf16gemm_bf16_tn_256x256E,0.0,1294.44,1027.08
+ gfx950,256,16384,6144,3072,False,torch.bfloat16,torch.bfloat16,False,False,torch,0,0,426.5721,native,0.0,1449.87,796.44
+ gfx950,256,16384,6144,6144,False,torch.bfloat16,torch.bfloat16,False,False,torch,0,0,802.3853,native,0.0,1541.59,595.91
+ gfx950,256,16,128,6144,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,5888,12,4.7249,flydsl_gemm8_abf16_wbf16_bf16_t16x64x64_split_k12_block_m_warp1_block_n_warp1_block_k_warp2_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0342,5.33,375.37

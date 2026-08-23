@@ -440,7 +440,7 @@ Return JSON:
 
 Inputs: `EVAL_DIR`, full `HISTORY`, `BASELINE_THROUGHPUT`, `FINAL_THROUGHPUT`, accepted config +
 kernel changes, `MILESTONES`, `BUDGET_USED`, `BUDGET`, `MIN_KERNEL_TASKS`, `PROFILE_TOPN`, `WORKLOAD`,
-`MODEL_NAME`, `SKILL_DIR`.
+`MODEL_NAME`, `SKILL_DIR`, and — when the standalone tuning phase ran — `TUNING_RESULT` (see §2b).
 
 Write TWO files:
 
@@ -519,6 +519,7 @@ attempt, win or not. REQUIRED sections, in order:
      Phases                                                     [  step · cum  ]
      ✅ 1  Setup        preflight + TRUE baseline <tok/s>        [ Δ17m  · 0:17 ]
      ✅ 3  ConfigSweep  cfg0 ✘−X% · ⭐ aiter +Y% · cuda-graph ✓   [ Δ45m  · 1:49 ]
+     ⭐ 4  TuningSkill  2 ops tuned · engaged ✓ · A/B ✓+X.X%     [ Δ1h12m· 3:01 ]
      🔧 5  HeadKernel   extract+bake-off+author+integrate        [ Δ5h41m· 8:13 ]
         ❌ h0 GEMM  <pct>%GPU · stock=triton matmul_ogs (mxfp4)  [ Δ2h03m       ]
            ├ ✘ triton-opt     tile tune  1.12× iso · e2e ✘−0.4% [ Δ38m         ]
@@ -534,6 +535,49 @@ attempt, win or not. REQUIRED sections, in order:
      `❌ integrate  A/B 1768.5 → 1536.7 = ✘−13.1% · parity ✓` — parity ✓ is numeric-only, the throughput
      still ✘. A **no-win** run closes with `✅ Validate  Director A/B <b>→<f> = 0.9997× · validated_no_win`
      (validated, no regression, NO win). Only `validated_win` earns a `🏁`+`⭐` final stack.
+
+2b. **🎛️ Tuning skillset — attributable contribution** — MANDATORY whenever `TUNING_RESULT` is present
+   (omit the section entirely when it is absent, i.e. the phase did not run). This answers a question the
+   headline speedup cannot: **how much of the gain came from tuning?** The phase runs standalone before
+   HeadKernel and measures its own interleaved pre/post A/B precisely so this number exists — report it,
+   do not fold it into the total and do not re-derive it from the run baseline.
+
+   Write, in this order:
+   - **One-line verdict**: `<pre> → <post> tok/s, +X.XX% (×Y.YYY) — <gate>`, then its **share of the
+     run's total gain** (`TUNING_RESULT.share_of_total_gain_pct`, e.g. `≈41% of the run's total gain`).
+     If the share is `null`, say `no net run gain to apportion` rather than printing a percentage.
+     These legs are the tuning phase's own same-session A/B; the Director's `validate` reconciliation
+     applies to the RUN headline, not to this section — do not overwrite these two numbers with it.
+   - **Ops tuned table**: `op | backend | tuner | shapes | isolated× | engaged? | artifact`. One row per
+     op in `ops_tuned`, including ops that were attempted and produced nothing (say so).
+   - **Engagement evidence** — quote it verbatim from `engagement_evidence`. This is the skillset's
+     central claim (a tuned artifact that the runtime never loads is not a win, and it fails silently),
+     and the orchestrator refuses to bank an accept without it. If the gate was `no_win` *because*
+     engagement could not be proven, say that explicitly — it is a very different outcome from "tuning
+     was tried and the kernel was already optimal".
+   - **Correctness/accuracy gate**: `correctness_gate` + `accuracy_note`.
+   - **Measurement discipline**: the noise floor used (`noise_floor_pct`) and whether the A/B was
+     interleaved (`ab_interleaved`). On gfx950 a back-to-back A/B drifts far more than a real tuning win,
+     so a non-interleaved result must be flagged as suspect rather than quoted as fact.
+   - **Deployed artifacts + required env** (`artifacts`, `apply_env`, `apply_flags`) — and state plainly
+     that these are folded into the accepted config, so every later phase (HeadKernel, Milestone,
+     Finalize, Validate) was measured **on top of** the tuned stack. This is why head-kernel deltas in §3
+     must not be added to the tuning delta: tuning is already in their reference leg.
+   - **Does it ship?** — `deploy_bundle`, `in_final_bundle` and `final_bundle_engagement_recheck`. A
+     tuning win is usually a data artifact plus a cache invalidation, which cannot ride the `PYTHONPATH`
+     overlay; it reaches production only because Finalize concatenated its diff into `final_patch.diff`
+     and made `final_launch.sh` run its `deploy.sh` before launch. If `in_final_bundle` is false or the
+     engagement re-check failed, say so **here and in §1** — a gain that the shipped bundle does not
+     reproduce is a reporting failure, not a footnote. Name the cache-invalidation commands
+     (`cache_invalidation`) for anyone applying `final_patch.diff` by hand.
+   - **What tuning could NOT reach** — levers absent on this image (`preflight.absent`), ops with no
+     tuner, and anything the skillset flagged as broken for this stack/arch. These are provisioning
+     actions, not measured no-wins.
+   - Whether `tuning-kb` was consulted (`mode`: `kb_assisted`) or the run derived everything blind
+     (`derived`). A `kb_assisted` win is a reproduction of a known result; label it as such.
+
+   Source: `EVAL_DIR/tuning/tuning_report.md` (+ `tuning/bench_pre`, `tuning/bench_post`,
+   `tuning/env_audit.txt`, `tuning/claims_report.json`). Read the real files; never invent.
 
 3. **Head-kernel deep-dive** (the centerpiece) — for EACH head op a `####` sub-section titled
    `<id> — <op> (<pct>% GPU) — RESULT: <ACCEPTED +X% | no win | flagged>`, containing:
@@ -596,7 +640,9 @@ attempt, win or not. REQUIRED sections, in order:
    configuration gain and must never be described as pure measurement drift.
 
 Data sources (read the ACTUAL files, never invent): `director_e2e_validation.json`,
-`final/bench/bench_summary.json`, `config/sweep_results.json`, `overlay/cand_*/integrate_result.json`,
+`final/bench/bench_summary.json`, `config/sweep_results.json`,
+`tuning/tuning_report.md` + `tuning/bench_{pre,post}/bench_summary.json` (the §2b attribution),
+`overlay/cand_*/integrate_result.json`,
 `kernels/_exp/*/*/director_validation.json`, `kernels/*/opbench_result.json` (incl. its `backend_absent[]`),
 `env_report.json` (`absent_backends` → the BACKEND ABSENT section),
 `profile/round_*/profile_topN.{md,json}`, and artifact mtimes for the timeline.

@@ -1,0 +1,5 @@
+gfx,cu_num,M,N,K,q_dtype_w,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio
+gfx950,256,64,4096,12288,torch.float8_e4m3fn,ck,11,0,18.7774,a8w8_bpreshuffle_256x16x64x512_16x16_16x16_32x8x1_32x8x1_1x16x1x16_4x4x1_1x1_intrawave_v1,343.1,2750.24,0.0
+gfx950,256,64,24576,4096,torch.float8_e4m3fn,flydsl,210,0,22.1105,flydsl_bpreshuflle_64x128x256_F8_F8_B16_1x0x4x2_default,582.75,4706.87,0.0
+gfx950,256,16384,4096,4096,torch.float8_e4m3fn,flydsl,727,0,236.5237,flydsl_bpreshuflle_128x256x128_F8_F8_B16_1x2x4x2_default,2324.32,922.12,0.0
+gfx950,256,16384,24576,4096,torch.float8_e4m3fn,flydsl,727,0,1321.4639,flydsl_bpreshuflle_128x256x128_F8_F8_B16_1x2x4x2_default,2496.12,736.36,0.0

@@ -1,0 +1,57 @@
+# Rejected: fixed BLOCK_R=8 in _combine_kernel
+#
+# Base:  applies on top of patches/02-attn-residual-triton.diff, i.e. against
+#        sglang 0e756912eb3cd8f531f95c17299485b9312b2534 + patches/01 + patches/02.
+# Apply: cd /sgl-workspace/sglang && git apply /work/patches/rejected/attn-residual-fixed-block-r.diff
+#
+# What it does: takes the combine kernel's row tile back to a module constant of
+# 8 (the full attn-res bank height) instead of _pow2_ge(max(nvb, 1)) chosen per
+# call on the host, and masks the unused rows.  Simpler, and the masked rows do
+# no memory traffic.
+#
+# Why it lost: they still cost registers.  A [8, BLOCK_H] fp32 tile is 32 KB per
+# CTA whether or not the rows are masked, and occupancy pays for it at low nvb.
+# Isolated, graph-captured (analysis/bench_attn_res.py --cand --reps 32):
+#
+#     shape            stock     fixed BLOCK_R=8      _pow2_ge(nvb)
+#     T=2048, nvb=1    55.1 us   81.3 us  (0.678x)    31.5 us  (1.75x)
+#     T=16384, nvb=1  393    us  569    us (0.691x)   225    us (1.75x)
+#     T=2048, nvb=7   ~ wins either way (tile is genuinely 8 rows deep)
+#
+# nvb is a host-side value and the kernel is already specialized per constexpr,
+# so sizing the tile costs one extra compile per distinct nvb and nothing at
+# run time.  Never benchmarked end to end -- it was rejected on the isolated
+# regression, before any server run.
+--- a/python/sglang/srt/layers/attn_residual.py	2026-08-20 14:32:35.536174412 +0000
++++ b/python/sglang/srt/layers/attn_residual.py	2026-08-20 14:38:07.511345421 +0000
+@@ -41,6 +41,9 @@
+ _COMBINE_WARPS: int = 1 if _is_hip else 4
+ 
+ 
++_BLOCK_R: int = 8  # full bank height; rows past nvb are masked
++
++
+ def _pow2_ge(n: int) -> int:
+     p = 1
+     while p < n:
+@@ -200,9 +203,8 @@
+     The bank rows are mixed as one [BLOCK_R, BLOCK_H] tile rather than a loop
+     over rows. Per-row, turning p[j] into a scalar multiplier needs a cross-lane
+     reduce over MAX_ROWS; as a tile the weight is a broadcast along axis 0 and
+-    the whole mix is one tl.sum. BLOCK_R is sized to nvb by the caller -- a
+-    fixed 8-row tile is 32 KB of registers per CTA whether or not the rows are
+-    masked off, which cost 32% at nvb=1.
++    the whole mix is one tl.sum. BLOCK_R is the full bank height; rows past nvb
++    are masked to zero.
+     """
+     pid_t = tl.program_id(0)
+     pid_h = tl.program_id(1)
+@@ -288,7 +290,7 @@
+         scores.stride(0),
+         out.stride(0),
+         BLOCK_H=_COMBINE_BLOCK_H,
+-        BLOCK_R=_pow2_ge(max(nvb, 1)),
++        BLOCK_R=_BLOCK_R,
+         MAX_ROWS=_MAX_ROWS,
+         num_warps=_COMBINE_WARPS,
+     )

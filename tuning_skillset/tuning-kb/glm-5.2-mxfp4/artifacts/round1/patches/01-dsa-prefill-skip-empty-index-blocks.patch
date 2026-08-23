@@ -1,0 +1,303 @@
+Subject: [DSA prefill] skip index blocks that are entirely -1 padding
+
+Base:      sglang git 29481685462732237d80d86076d6563e1f658102
+           (python/sglang/kernels/ops/attention/dsa/tilelang_kernel.py is clean at
+           that commit in this image; pristine copy in patches/base/)
+File:      python/sglang/kernels/ops/attention/dsa/tilelang_kernel.py
+Related:   patches/rejected/04-dsa-prefill-first-slot-guard.patch is a REJECTED variant that
+           stacks on top of this one, replacing this patch's any-valid reduce with a single
+           first-slot test. It is faster (1.067x vs 1.039x isolated on the prefill shape,
+           roughly +0.64% more end to end) and was not adopted because it depends on an
+           invariant four different topk backends would each have to preserve. Read its
+           header before "improving" the guard here -- the cheaper predicate was measured,
+           not overlooked.
+
+Measurement (ISL 8192 / OSL 1024 / concurrency 64 / 192 prompts / TP8, frozen config):
+
+    output_throughput   1487.89 tok/s  vs baseline 1468.358 tok/s   = +1.33%
+      arms: results/a_only_r1_20260820_131134 1487.08
+            results/a_only_r2_20260820_131413 1488.70
+      baseline: 7 runs over 3 server sessions, mean 1468.358, peak-to-peak 0.306%
+    Noise floor for this workload is 0.39% peak-to-peak across restarts (measured
+    over 21 runs and 9 server sessions; see FINDINGS.md), so this is ~3.4x the floor.
+
+    Isolated (analysis/bench_dsa_prefill.py, 16384x8, topk 2048, interleaved):
+      live cat+cast+tilelang   4.415 ms
+      + block-skip             4.248 ms   = 1.039x
+
+    Accuracy: gated as part of A+B, gsm8k 5-shot strict-match 0.973465 +/- 0.004427
+    vs baseline 0.970432 +/- 0.004666 (eval_results/ab_gate_20260820_125928).
+
+What it does
+    sparse_mla_fwd_decode_partial_fp8 walks all topk/block_I index blocks for every
+    query and *masks* the -1 padding: it still gathers block_I x 576 B of KV and still
+    issues all five GEMMs, then discards the result via a -inf score. At this workload
+    12.1% of all blocks processed are entirely padding. This adds a block-uniform
+    any-valid reduce over the mask the kernel already builds and branches the gather
+    and the GEMMs around it.
+
+    Eliding an all-padding block is bit-exact rather than an approximation: every score
+    in it is -inf, so exp2 gives 0 -- it contributes nothing to sumexp and nothing to
+    acc_o -- and m_i is reduced with clear=False so a block of -inf cannot lower it.
+
+    The guard is compiled in only for prefill-sized calls (>= _SKIP_EMPTY_MIN_TOKENS
+    tokens). At decode no block is ever all-padding, the guard never fires, and it
+    costs a measured 8% (34.55 -> 37.32 us). skip_empty defaults to False and, left
+    False, the TVM Script parser drops the branch, the reduce and the valid_i32 write
+    entirely: the factory then emits a byte-identical kernel to the pre-patch one
+    (verified by string comparison of get_kernel_source() at both splits), and decode
+    output is bitwise identical.
+
+    No server flag, environment variable or workload parameter is changed.
+
+diff --git a/python/sglang/kernels/ops/attention/dsa/tilelang_kernel.py b/python/sglang/kernels/ops/attention/dsa/tilelang_kernel.py
+index d2dc851325..3dd3796d00 100644
+--- a/python/sglang/kernels/ops/attention/dsa/tilelang_kernel.py
++++ b/python/sglang/kernels/ops/attention/dsa/tilelang_kernel.py
+@@ -1076,6 +1076,7 @@ def sparse_mla_fwd_decode_partial_fp8(
+     block_I=64,
+     inner_iter=1,
+     threads=256,
++    skip_empty=False,
+ ):
+     assert d_v == 512, f"only support d_v=512"
+     assert (
+@@ -1158,6 +1159,9 @@ def sparse_mla_fwd_decode_partial_fp8(
+             page_idx_shared = T.alloc_shared([BI], T.int32)
+ 
+             mask = T.alloc_fragment([BI], T.bool)
++            # Block-uniform "does this index block hold any real key at all".
++            valid_i32 = T.alloc_fragment([1, BI], T.int32)
++            any_valid = T.alloc_fragment([1], T.int32)
+             acc_s = T.alloc_fragment([h_per_block, BI], accum_dtype)
+             acc_tile = T.alloc_fragment([h_per_block, BI], accum_dtype)
+             sv_tile = T.alloc_fragment([h_per_block, group_size], accum_dtype)
+@@ -1194,87 +1198,125 @@ def sparse_mla_fwd_decode_partial_fp8(
+                     valid = idx >= 0
+                     page_idx_shared[bi_i] = T.if_then_else(valid, idx, 0)
+                     mask[bi_i] = valid
++                    if skip_empty:
++                        valid_i32[0, bi_i] = T.if_then_else(valid, 1, 0)
++
++                # Skip index blocks that are entirely -1 padding.
++                #
++                # The stock kernel walks all topk // block_I blocks for every query and
++                # *masks* the padding: it still gathers BI x 576 B of KV and still issues
++                # all five GEMMs, then discards the result via a -inf score. At a chunked
++                # prefill of ISL-8192 requests with index_topk=2048, every query at
++                # position < 2048 in its sequence has a causal prefix shorter than topk and
++                # so a padded index row -- 12.1% of all blocks processed are entirely dead.
++                #
++                # Eliding such a block is bit-exact, not an approximation: every score in
++                # it is -inf, so exp2 gives 0, contributing nothing to sumexp and nothing
++                # to acc_o, and m_i is reduced with clear=False so a block of -inf cannot
++                # lower it either. Only the arithmetic disappears.
++                #
++                # The predicate is an any-valid reduce over the mask the kernel already
++                # builds, deliberately not "is slot 0 of the block -1". Padding happens to
++                # be a contiguous suffix today (naive_paged_transform in
++                # kernels/aot/csrc/elementwise/deepseek_v4_topk.hip writes page_to_slot(i)
++                # for i < length and -1 above it, and the radix_topk branch pads not at
++                # all), but the reduce stays correct if any producer ever scatters padding.
++                # The cheap first-slot test was measured at 1.067x vs this one's 1.039x on
++                # the prefill shape; the 2.7% was not judged worth depending on an
++                # invariant that four different topk backends would each have to preserve.
++                #
++                # `skip_empty` is a Python bool read at TVM Script parse time. Left False
++                # the branch, the reduce and the valid_i32 write all vanish and this
++                # factory emits a byte-identical kernel to the stock one -- which matters,
++                # because at decode no block is ever all-padding (every sequence is longer
++                # than topk), the guard never fires, and it costs a measured 8%. See
++                # tilelang_sparse_fwd for the prefill-only dispatch.
++                if skip_empty:
++                    T.reduce_max(valid_i32, any_valid, dim=1, clear=True)
++                # Block-uniform, so the __syncthreads inside T.copy/T.gemm below stay
++                # collective across the whole block.
++                guard = (any_valid[0] > 0) if skip_empty else True
++                if guard:
++                    for bi_i, j in T.Parallel(BI, group_size):
++                        page = page_idx_shared[bi_i]
++                        kv_tile0[bi_i, j] = kv_fp8[b_i, page, g_i, 0 * group_size + j]
++                        kv_tile1[bi_i, j] = kv_fp8[b_i, page, g_i, 1 * group_size + j]
++                        kv_tile2[bi_i, j] = kv_fp8[b_i, page, g_i, 2 * group_size + j]
++                        kv_tile3[bi_i, j] = kv_fp8[b_i, page, g_i, 3 * group_size + j]
++
++                    for bi_i, j in T.Parallel(BI, d_tail):
++                        page = page_idx_shared[bi_i]
++                        k_tail_shared[bi_i, j] = kv_fp8[b_i, page, g_i, rope_offset_fp8 + j]
++
++                    for h_i, bi_i in T.Parallel(h_per_block, BI):
++                        acc_s[h_i, bi_i] = T.if_then_else(
++                            mask[bi_i], 0, -T.infinity(acc_s.dtype)
++                        )
+ 
+-                for bi_i, j in T.Parallel(BI, group_size):
+-                    page = page_idx_shared[bi_i]
+-                    kv_tile0[bi_i, j] = kv_fp8[b_i, page, g_i, 0 * group_size + j]
+-                    kv_tile1[bi_i, j] = kv_fp8[b_i, page, g_i, 1 * group_size + j]
+-                    kv_tile2[bi_i, j] = kv_fp8[b_i, page, g_i, 2 * group_size + j]
+-                    kv_tile3[bi_i, j] = kv_fp8[b_i, page, g_i, 3 * group_size + j]
+-
+-                for bi_i, j in T.Parallel(BI, d_tail):
+-                    page = page_idx_shared[bi_i]
+-                    k_tail_shared[bi_i, j] = kv_fp8[b_i, page, g_i, rope_offset_fp8 + j]
+-
+-                for h_i, bi_i in T.Parallel(h_per_block, BI):
+-                    acc_s[h_i, bi_i] = T.if_then_else(
+-                        mask[bi_i], 0, -T.infinity(acc_s.dtype)
++                    T.gemm(q_tile0, kv_tile0, acc_s, transpose_B=True, clear_accum=False)
++                    T.gemm(q_tile1, kv_tile1, acc_tile, transpose_B=True, clear_accum=True)
++                    for h_i, bi_i in T.Parallel(h_per_block, BI):
++                        acc_s[h_i, bi_i] += acc_tile[h_i, bi_i]
++                    T.gemm(q_tile2, kv_tile2, acc_tile, transpose_B=True, clear_accum=True)
++                    for h_i, bi_i in T.Parallel(h_per_block, BI):
++                        acc_s[h_i, bi_i] += acc_tile[h_i, bi_i]
++                    T.gemm(q_tile3, kv_tile3, acc_tile, transpose_B=True, clear_accum=True)
++                    for h_i, bi_i in T.Parallel(h_per_block, BI):
++                        acc_s[h_i, bi_i] += acc_tile[h_i, bi_i]
++                    T.gemm(
++                        q_tail_buf,
++                        k_tail_shared,
++                        acc_s,
++                        transpose_B=True,
++                        policy=T.GemmWarpPolicy.FullCol,
+                     )
+ 
+-                T.gemm(q_tile0, kv_tile0, acc_s, transpose_B=True, clear_accum=False)
+-                T.gemm(q_tile1, kv_tile1, acc_tile, transpose_B=True, clear_accum=True)
+-                for h_i, bi_i in T.Parallel(h_per_block, BI):
+-                    acc_s[h_i, bi_i] += acc_tile[h_i, bi_i]
+-                T.gemm(q_tile2, kv_tile2, acc_tile, transpose_B=True, clear_accum=True)
+-                for h_i, bi_i in T.Parallel(h_per_block, BI):
+-                    acc_s[h_i, bi_i] += acc_tile[h_i, bi_i]
+-                T.gemm(q_tile3, kv_tile3, acc_tile, transpose_B=True, clear_accum=True)
+-                for h_i, bi_i in T.Parallel(h_per_block, BI):
+-                    acc_s[h_i, bi_i] += acc_tile[h_i, bi_i]
+-                T.gemm(
+-                    q_tail_buf,
+-                    k_tail_shared,
+-                    acc_s,
+-                    transpose_B=True,
+-                    policy=T.GemmWarpPolicy.FullCol,
+-                )
+-
+-                T.copy(m_i, m_i_prev)
+-                T.reduce_max(acc_s, m_i, dim=1, clear=False)
+-                for h_i in T.Parallel(h_per_block):
+-                    alpha[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
+-                for h_i, bi_i in T.Parallel(h_per_block, BI):
+-                    acc_s[h_i, bi_i] = T.exp2(
+-                        acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale
+-                    )
+-                T.reduce_sum(acc_s, sumexp_i, dim=1)
+-                for h_i in T.Parallel(h_per_block):
+-                    sumexp[h_i] = sumexp[h_i] * alpha[h_i] + sumexp_i[h_i]
+-                for h_i, j in T.Parallel(h_per_block, group_size):
+-                    acc_o_tile0[h_i, j] = acc_o_tile0[h_i, j] * alpha[h_i]
+-                    acc_o_tile1[h_i, j] = acc_o_tile1[h_i, j] * alpha[h_i]
+-                    acc_o_tile2[h_i, j] = acc_o_tile2[h_i, j] * alpha[h_i]
+-                    acc_o_tile3[h_i, j] = acc_o_tile3[h_i, j] * alpha[h_i]
+-
+-                for h_i, bi_i in T.Parallel(h_per_block, BI):
+-                    s_fp8_shared[h_i, bi_i] = T.clamp(
+-                        acc_s[h_i, bi_i] * s_inv_scale_const,
+-                        -fp8_max_val,
+-                        fp8_max_val,
+-                    )
+-                T.gemm(s_fp8_shared, kv_tile0, sv_tile, clear_accum=True)
+-                for h_i, j in T.Parallel(h_per_block, group_size):
+-                    acc_o_tile0[h_i, j] = (
+-                        acc_o_tile0[h_i, j] + sv_tile[h_i, j] * s_scale_const
+-                    )
++                    T.copy(m_i, m_i_prev)
++                    T.reduce_max(acc_s, m_i, dim=1, clear=False)
++                    for h_i in T.Parallel(h_per_block):
++                        alpha[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
++                    for h_i, bi_i in T.Parallel(h_per_block, BI):
++                        acc_s[h_i, bi_i] = T.exp2(
++                            acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale
++                        )
++                    T.reduce_sum(acc_s, sumexp_i, dim=1)
++                    for h_i in T.Parallel(h_per_block):
++                        sumexp[h_i] = sumexp[h_i] * alpha[h_i] + sumexp_i[h_i]
++                    for h_i, j in T.Parallel(h_per_block, group_size):
++                        acc_o_tile0[h_i, j] = acc_o_tile0[h_i, j] * alpha[h_i]
++                        acc_o_tile1[h_i, j] = acc_o_tile1[h_i, j] * alpha[h_i]
++                        acc_o_tile2[h_i, j] = acc_o_tile2[h_i, j] * alpha[h_i]
++                        acc_o_tile3[h_i, j] = acc_o_tile3[h_i, j] * alpha[h_i]
++
++                    for h_i, bi_i in T.Parallel(h_per_block, BI):
++                        s_fp8_shared[h_i, bi_i] = T.clamp(
++                            acc_s[h_i, bi_i] * s_inv_scale_const,
++                            -fp8_max_val,
++                            fp8_max_val,
++                        )
++                    T.gemm(s_fp8_shared, kv_tile0, sv_tile, clear_accum=True)
++                    for h_i, j in T.Parallel(h_per_block, group_size):
++                        acc_o_tile0[h_i, j] = (
++                            acc_o_tile0[h_i, j] + sv_tile[h_i, j] * s_scale_const
++                        )
+ 
+-                T.gemm(s_fp8_shared, kv_tile1, sv_tile, clear_accum=True)
+-                for h_i, j in T.Parallel(h_per_block, group_size):
+-                    acc_o_tile1[h_i, j] = (
+-                        acc_o_tile1[h_i, j] + sv_tile[h_i, j] * s_scale_const
+-                    )
++                    T.gemm(s_fp8_shared, kv_tile1, sv_tile, clear_accum=True)
++                    for h_i, j in T.Parallel(h_per_block, group_size):
++                        acc_o_tile1[h_i, j] = (
++                            acc_o_tile1[h_i, j] + sv_tile[h_i, j] * s_scale_const
++                        )
+ 
+-                T.gemm(s_fp8_shared, kv_tile2, sv_tile, clear_accum=True)
+-                for h_i, j in T.Parallel(h_per_block, group_size):
+-                    acc_o_tile2[h_i, j] = (
+-                        acc_o_tile2[h_i, j] + sv_tile[h_i, j] * s_scale_const
+-                    )
++                    T.gemm(s_fp8_shared, kv_tile2, sv_tile, clear_accum=True)
++                    for h_i, j in T.Parallel(h_per_block, group_size):
++                        acc_o_tile2[h_i, j] = (
++                            acc_o_tile2[h_i, j] + sv_tile[h_i, j] * s_scale_const
++                        )
+ 
+-                T.gemm(s_fp8_shared, kv_tile3, sv_tile, clear_accum=True)
+-                for h_i, j in T.Parallel(h_per_block, group_size):
+-                    acc_o_tile3[h_i, j] = (
+-                        acc_o_tile3[h_i, j] + sv_tile[h_i, j] * s_scale_const
+-                    )
++                    T.gemm(s_fp8_shared, kv_tile3, sv_tile, clear_accum=True)
++                    for h_i, j in T.Parallel(h_per_block, group_size):
++                        acc_o_tile3[h_i, j] = (
++                            acc_o_tile3[h_i, j] + sv_tile[h_i, j] * s_scale_const
++                        )
+ 
+             for h_i in T.Parallel(h_per_block):
+                 denom = T.if_then_else(sumexp[h_i] == 0.0, 1.0, sumexp[h_i])
+@@ -1314,6 +1356,19 @@ def sparse_mla_fwd_decode_partial_fp8(
+     return main
+ 
+ 
++# Token count at or above which the empty-index-block guard is compiled in.
++#
++# The guard only pays where index rows carry -1 padding, and padding only exists for
++# queries whose causal prefix is shorter than index_topk -- a prefill property. At decode
++# every sequence is longer than topk, no block is ever all-padding, the guard never fires,
++# and it costs a measured 8% (34.55 -> 37.32 us at bs=64, ctx=9216, topk=2048). The two
++# regimes sit far apart in token count -- decode batches are captured at CUDA-graph sizes
++# (<= 512 here), prefill chunks are --chunked-prefill-size (16384 here) -- so 1024 falls in
++# an empty gap and the split is not sensitive to its exact value. Purely a performance
++# switch: both variants compute the same thing, so a misdispatch costs speed, not answers.
++_SKIP_EMPTY_MIN_TOKENS = 1024
++
++
+ def tilelang_sparse_fwd(
+     q: torch.Tensor,
+     kv: torch.Tensor,
+@@ -1348,6 +1403,7 @@ def tilelang_sparse_fwd(
+                 block_I=block_I,
+                 inner_iter=inner_iter,
+                 threads=threads,
++                skip_empty=q.shape[0] >= _SKIP_EMPTY_MIN_TOKENS,
+             )
+         else:
+             if _is_gfx95_supported:

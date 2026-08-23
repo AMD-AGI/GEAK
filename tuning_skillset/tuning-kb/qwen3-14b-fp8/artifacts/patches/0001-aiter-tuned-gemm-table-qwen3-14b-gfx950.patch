@@ -1,0 +1,64 @@
+# Patch 1/2 -- tuned CK block-scale B-preshuffle GEMM table for Qwen3-14B-FP8 on gfx950
+#
+# Repo:        aiter
+# Base commit: d9e5ef7ce08ee7045d583aed768cff41aa9210fe
+# Apply with:  cd /sgl-workspace/aiter && git apply -p1 <this file>
+#
+# MEASUREMENT (this patch alone, frozen server flags / env / workload, TP=1):
+#   output throughput  1536.610 -> 1892.866 tok/s   +23.19%   (n=8 baseline, n=3 arm)
+#   mean TTFT           8570.5  -> 5579.8 ms        -34.90%
+#   mean TPOT             33.32 ->   28.38 ms       -14.82%
+#   gsm8k 5-shot         0.9454 -> 0.9454           bit-identical; gate >= 0.9328
+#   arms: results/gemmtune_r{1,2,3}_*   gate: eval_results/gemmtune_20260820_091030
+#
+# WHAT IT IS
+# aiter's CK block-scale / B-preshuffle GEMM ships no tuned entry for any of this
+# model's four linear shapes, so every prefill and decode GEMM fell through to
+# "not found tuned config ... will use default config!". This adds the tuner's
+# output for those shapes at the M values the frozen workload actually produces
+# (decode M=64, prefill M=8192 and M=16384), as an additive file under
+# aiter/configs/model_configs/ -- the same mechanism aiter already ships for dsv3,
+# qwen3_235b, glm5.2 and mm2.5. It is picked up by the existing model_configs glob
+# in aiter/jit/core.py: no environment variable and no server flag is involved.
+#
+# The tuner picks `ck` kernel 12/17 for the M=64 decode shapes and `cktile` for the
+# large-M prefill shapes; all twelve rows tuned with errRatio 0.0 against the
+# reference, which is why accuracy is unchanged to the digit.
+#
+# PRODUCED BY
+#   python3 csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale_tune.py --preshuffle \
+#     -i analysis/gemm_tune/untuned_{decode,prefill}.csv -o <tuned.csv>
+# All 228 decode + 456 prefill candidate timings are kept in
+# analysis/gemm_tune/profile_{decode,prefill}.csv.
+#
+# ENGAGEMENT CHECK
+#   rm -rf /tmp/aiter_configs && restart; then
+#   wc -l /tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv   # 3456 -> 3468
+#   grep -c "M:64, N:" /tmp/sglang_server_qwen3_14b_fp8.log               # 4 -> 0
+#
+#
+# FULL-STACK RESULT (patches 1+2+3, interleaved A/B against the pristine stack, run last):
+#   output throughput  1538.009 -> 1985.566 tok/s   +29.05%  (median of n=6 each,
+#                      6/6 position-matched pairs positive, +28.91..+29.19%, arms disjoint)
+#   gsm8k 5-shot       0.9454 -> 0.9454, identical on all 1319 problems
+#   arms: results/stackab_{A,B}{1,2}_r{1,2,3}_*   gate: eval_results/stackab_B2_20260820_120659
+#   driver: analysis/ab/run_ab_stack.sh + analysis/ab/stack_{A,B}.sh
+diff --git a/aiter/configs/model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_qwen3_14b.csv b/aiter/configs/model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_qwen3_14b.csv
+new file mode 100644
+index 000000000..6c32e1b64
+--- /dev/null
++++ b/aiter/configs/model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_qwen3_14b.csv
+@@ -0,0 +1,13 @@
++gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio
++gfx950,256,64,5120,5120,ck,12,0,13.9587,a8w8_blockscale_bpreshuffle_1x128x128_256x32x64x256_16x16_16x16_16x16x1_16x16x1_1x32x1x8_8_2x1_intrawave_v1,240.38,1948.42,0.0
++gfx950,256,64,5120,17408,ck,12,0,39.176,a8w8_blockscale_bpreshuffle_1x128x128_256x32x64x256_16x16_16x16_16x16x1_16x16x1_1x32x1x8_8_2x1_intrawave_v1,291.21,2320.26,0.0
++gfx950,256,64,7168,5120,ck,12,0,14.6796,a8w8_blockscale_bpreshuffle_1x128x128_256x32x64x256_16x16_16x16_16x16x1_16x16x1_1x32x1x8_8_2x1_intrawave_v1,320.01,2584.9,0.0
++gfx950,256,64,34816,5120,ck,17,0,47.6302,a8w8_blockscale_bpreshuffle_1x128x128_256x64x64x256_16x16_16x16_16x16x1_16x16x1_1x32x1x8_8_2x1_intrawave_v1,479.05,3842.98,0.0
++gfx950,256,8192,5120,5120,cktile,11,0,224.7354,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1,1911.12,676.54,0.0
++gfx950,256,8192,5120,17408,cktile,28,0,694.901,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_3,2101.43,454.2,0.0
++gfx950,256,8192,7168,5120,cktile,28,0,286.2784,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_3,2100.39,684.94,0.0
++gfx950,256,8192,34816,5120,cktile,27,0,1308.5204,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_2,2231.97,604.21,0.0
++gfx950,256,16384,5120,5120,cktile,27,0,394.2687,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_2,2178.7,704.78,0.0
++gfx950,256,16384,5120,17408,cktile,27,0,1242.3169,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_2,2350.91,436.37,0.0
++gfx950,256,16384,7168,5120,cktile,29,0,525.88,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_4,2286.82,675.95,0.0
++gfx950,256,16384,34816,5120,cktile,28,0,2634.3799,a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_3,2217.28,532.57,0.0

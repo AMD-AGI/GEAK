@@ -1,0 +1,112 @@
+# 02 — prefill: give head_dim 64 the gfx950 extend-kernel launch config
+#
+# Repo:    /sgl-workspace/sglang
+# Base:    sglang @ 29481685462732237d80d86076d6563e1f658102
+#          (/sgl-workspace/sglang, SGLang 0.5.17, ROCm 7.2.0, torch 2.9.1, triton 3.6.0)
+# File:    python/sglang/kernels/ops/attention/extend_attention.py
+# Apply:   cd /sgl-workspace/sglang && git apply /work/patches/02-prefill-extend-launch-config.patch
+# Revert:  cd /sgl-workspace/sglang && git checkout -- python/sglang/kernels/ops/attention/extend_attention.py
+#
+# Stack:   independent of 01-prefill-swa-loop-bound.patch and orderless with it
+#          (disjoint hunks; verified to apply cleanly on the clean base and on top
+#          of 01). Each is a win on its own. The kernel-level windowed figures
+#          below were measured with 01 applied, so they do not double-count it.
+#          03-decode-attn-segments.patch (different repo: aiter) sits on top of
+#          both and was measured with 01+02 as its base arm; the full stack
+#          01+02+03 is 4554.813 tok/s, +15.66% over the local baseline.
+#
+# What:    _get_block_sizes_for_extend_attention already carries a gfx950 tuning
+#          -- BLOCK_M/BLOCK_N = (128, 64), num_warps = 8 -- but only for
+#          128 < head_dim <= 256, where it was worth -36% on MI350X. head_dim 64,
+#          which is what gpt-oss-120b uses, falls through to the generic AMD
+#          default (64, 64) / 4 warps that nobody tuned. The same argument applies
+#          and the traffic says so: at BLOCK_M=64 each of the 128 M-blocks of an
+#          8192-token extend re-reads its whole KV prefix, 8.66 GB of K/V reads
+#          against 8.4 MB of unique KV, and the kernel sustains 3.28 TB/s of an
+#          achievable ~4.6 TB/s. It is bound by redundant traffic, not by FLOPs
+#          (208 TFLOPS, ~8% of bf16 peak). Doubling BLOCK_M halves the re-reads.
+#          The second hunk adds num_stages=2, which is only affordable once
+#          BLOCK_M is 128.
+#
+# Not an approximation: BLOCK_M/BLOCK_N/num_warps/num_stages are launch geometry.
+#          The BLOCK_N reduction order -- the only thing that would move the
+#          arithmetic -- is unchanged at 64.
+#
+# Measured, kernel level (analysis/bench_extend_cfg.py, 103 candidates all held to
+#          a 2% correctness gate against the shipped default's output, 5 interleaved
+#          rounds, scored on the real 18-full + 18-windowed layer mix):
+#            full-attention (window -1)  : 2641.1 us -> 1254.5 us  (2.11x)
+#            sliding-window (window 128) :  372.0 us ->  188.5 us  (1.97x)
+#            per 36-layer prefill pass   :   54.24 ms ->  25.97 ms  (2.088x)
+#          Runner-up configs and the full ranking: analysis/extend_cfg_sweep.json.
+#          The sweep ran with patch 01 applied, so the windowed figures already
+#          include it and the two wins do not double-count.
+#
+# Measured, end to end (analysis/ab_restart.sh, 3 interleaved base/candidate pairs
+#          at restart granularity, ISL 8192 / OSL 1024 / conc 64 / 192 prompts, TP=2).
+#          The candidate arm is 01+02 stacked, so this is the headline stack number:
+#            base     3955.210 / 3967.072 / 3947.785  -> mean 3956.689 tok/s
+#            01+02    4506.781 / 4526.655 / 4534.082  -> mean 4522.506 tok/s
+#            +14.30%  (arm spreads 0.49% and 0.60%, i.e. both at the 0.6% noise floor;
+#                      no overlap between the arms whatsoever)
+#            mean TTFT 4170.3 -> 3090.6 ms (-25.9%)
+#            mean TPOT 12.098 -> 11.132 ms (-8.0%)
+#          Patch 02's own contribution, against patch 01's separately measured
+#          4254.523 tok/s: +6.30%.
+#          vs the 5-round session baseline of 3938.109 tok/s: +14.84%.
+#          Results: results/ab12base_{1,2,3}_*, results/ab12cand_{1,2,3}_*
+#
+# Correctness: gsm8k 5-shot, see FINDINGS.md "3. Prefill extend-kernel launch config".
+#
+diff --git a/python/sglang/kernels/ops/attention/extend_attention.py b/python/sglang/kernels/ops/attention/extend_attention.py
+index c41da1d562..4f2f97f2ff 100644
+--- a/python/sglang/kernels/ops/attention/extend_attention.py
++++ b/python/sglang/kernels/ops/attention/extend_attention.py
+@@ -64,12 +64,27 @@ def _get_block_sizes_for_extend_attention(Lq: int, Lv: int):
+ 
+     # Determine BLOCK_M, BLOCK_N, and num_warps based on hardware
+     if _is_hip:
+-        if _is_gfx95 and 128 < Lq <= 256:
+-            # gfx950 (CDNA4), 128 < head_dim <= 256: a larger query tile halves KV bytes
+-            # streamed per call (each workgroup reads the whole prefix); 8 warps
+-            # hide the loads. Measured on MI350X head_dim 256: -36% kernel time,
+-            # 28% -> 44% MFU, numerically equivalent (BLOCK_N reduction order
+-            # unchanged). Other AMD archs / head dims keep the default below.
++        if _is_gfx95 and (Lq <= 64 or 128 < Lq <= 256):
++            # gfx950 (CDNA4): a larger query tile halves KV bytes streamed per call
++            # (each workgroup reads the whole prefix); 8 warps hide the loads.
++            #
++            # 128 < head_dim <= 256, measured on MI350X head_dim 256: -36% kernel
++            # time, 28% -> 44% MFU, numerically equivalent (BLOCK_N reduction order
++            # unchanged).
++            #
++            # head_dim <= 64 wants the same treatment for the same reason, and the
++            # traffic says so louder. At (64, 64) each of the 128 M-blocks of an
++            # 8192-token extend re-reads its whole KV prefix: 8.66 GB of K/V reads
++            # against only 8.4 MB of unique KV. The kernel runs at 3.28 TB/s of an
++            # achievable ~4.6 TB/s, i.e. it is bound by that redundant traffic and
++            # not by FLOPs (208 TFLOPS, ~8% of bf16 peak). Doubling BLOCK_M halves
++            # the re-reads. Measured on MI355X at gpt-oss-120b's shape (bs 2 x
++            # extend 8192, 32 q heads / 4 kv heads, head_dim 64, causal, sinks):
++            # full-attention 2641.1 -> 1254.5 us, sliding-window(128) 372.0 ->
++            # 188.5 us, 2.09x over a 36-layer prefill pass.
++            #
++            # 64 < head_dim <= 128 is deliberately left on the default below: the
++            # argument applies there too, but it was not measured here.
+             BLOCK_M, BLOCK_N = (128, 64)
+             num_warps = 8
+         else:
+@@ -729,6 +744,13 @@ def extend_attention_fwd(
+ 
+     grid = (batch_size, head_num, triton.cdiv(max_len_extend, BLOCK_M))
+     num_stages = 1
++    if _is_gfx95 and Lq <= 64:
++        # With BLOCK_M=128 selected above there is room for a second stage, which
++        # hides the K/V loads behind the dots. Measured on the shape in
++        # _get_block_sizes_for_extend_attention: 1367.4 -> 1254.5 us on the
++        # full-attention layers, 188.6 -> 188.5 us on the windowed ones (too few
++        # tiles there for pipelining to have anything to hide).
++        num_stages = 2
+ 
+     extra_kargs = {}
+     if _is_hip:

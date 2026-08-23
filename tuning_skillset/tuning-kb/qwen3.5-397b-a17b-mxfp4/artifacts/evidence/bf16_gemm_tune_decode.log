@@ -1,0 +1,669 @@
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] FlyDSL bf16 catalog size for M=64, N=5120, K=4096: 5592 kernels
+[aiter] FlyDSL candidate count for M=64, N=5120, K=4096: 2774
+[aiter] merge tuned file under model_configs/ and configs/ /sgl-workspace/aiter/aiter/configs/bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv3_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv4_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm47_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm5_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/gptoss_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimi_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik2_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik3_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/llama405B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/llama70B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/minimax_m3_eagle_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen32B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen3_5_397b_bf16_tuned_gemm.csv
+[aiter] opus candidate count for M=64, N=5120, K=4096: 216
+[opus _ensure_kids_compiled] need to add 36 kids to sidecar (existing=41, target=77)
+[opus _ensure_kids_compiled] wrote sidecar at /sgl-workspace/aiter/aiter/jit/build/compiled_kids_opus.json with 77 kids; triggering build...
+[aiter] merge tuned file under model_configs/ and configs/ /sgl-workspace/aiter/aiter/configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_dsv3.csv:/sgl-workspace/aiter/aiter/configs/model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_glm5.2.csv:/sgl-workspace/aiter/aiter/configs/model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_mm2.5.csv:/sgl-workspace/aiter/aiter/configs/model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_qwen3.5_397b.csv:/sgl-workspace/aiter/aiter/configs/model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_qwen3_235b.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv4_a8w8_blockscale_bpreshuffle_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm5_a8w8_blockscale_bpreshuffle_tuned_gemm.csv
+[aiter] [pid=21546 pname=MainProcess] start build [module_deepgemm_opus] under /sgl-workspace/aiter/aiter/jit/build/module_deepgemm_opus
+[aiter] Current hipcc not support: -mllvm -amdgpu-coerce-illegal-types=1, skip it.
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[opus gen_instances] arch filter: target=['gfx950'] dropped 27 off-arch kids from |S|
+[opus gen_instances] subset compile: |S|=77 kids (CSV=54, sidecar=77, heuristic=29)
+  opus_gemm_256x128x256x32_2x2_16x16x32_0x0x0: E=(2,4,1)  VGPR~120  AGPR=128  LDS=49KiB  K>=64
+  opus_gemm_256x256x128x32_2x2_16x16x32_0x0x0: E=(4,2,1)  VGPR~112  AGPR=128  LDS=49KiB  K>=64
+  opus_gemm_512x128x128x64_2x4_16x16x32_0x0x0: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_512x256x128x64_2x4_16x16x32_0x0x0: E=(4,1,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_512x128x256x64_2x4_16x16x32_0x0x0: E=(2,2,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_512x256x256x64_2x4_16x16x32_0x0x0: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_flatmm_splitk_256x64x64x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=4 slots=4 comrep=(2,4) LDS=66KiB K>=256 WG=2
+  opus_gemm_flatmm_splitk_256x32x32x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=9 slots=4 comrep=(1,2) LDS=74KiB K>=576 WG=2
+  opus_gemm_flatmm_splitk_256x32x32x128_2x1_16x16x32_0x0x0_wgpcu2: pfk=4 slots=4 comrep=(1,2) LDS=66KiB K>=512 WG=2
+  opus_gemm_flatmm_splitk_256x32x64x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=6 slots=4 comrep=(1,4) LDS=74KiB K>=384 WG=2
+  opus_gemm_flatmm_splitk_256x32x128x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=3 slots=4 comrep=(1,8) LDS=61KiB K>=192 WG=2
+  opus_gemm_flatmm_splitk_256x64x32x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=6 slots=4 comrep=(2,2) LDS=74KiB K>=384 WG=2
+  opus_gemm_flatmm_splitk_256x64x32x128_2x1_16x16x32_0x0x0_wgpcu2: pfk=3 slots=4 comrep=(2,2) LDS=74KiB K>=384 WG=2
+  opus_gemm_flatmm_splitk_256x128x32x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=3 slots=4 comrep=(4,2) LDS=61KiB K>=192 WG=2
+  opus_gemm_flatmm_splitk_256x64x64x128_2x1_16x16x32_0x0x0_wgpcu1: pfk=4 slots=4 comrep=(2,4) LDS=132KiB K>=512 WG=1
+  opus_gemm_flatmm_splitk_256x256x32x64_2x1_16x16x32_0x0x0_wgpcu1: pfk=4 slots=4 comrep=(8,2) LDS=148KiB K>=256 WG=1
+  opus_gemm_flatmm_splitk_256x32x256x64_2x1_16x16x32_0x0x0_wgpcu1: pfk=4 slots=4 comrep=(1,16) LDS=148KiB K>=256 WG=1
+  opus_gemm_flatmm_splitk_256x32x96x64_2x1_16x16x32_0x0x0_wgpcu1: pfk=9 slots=4 comrep=(1,6) LDS=148KiB K>=576 WG=1
+  opus_gemm_flatmm_splitk_256x32x96x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=4 slots=4 comrep=(1,6) LDS=66KiB K>=256 WG=2
+  opus_gemm_flatmm_splitk_256x32x96x128_2x1_16x16x32_0x0x0_wgpcu1: pfk=4 slots=4 comrep=(1,6) LDS=132KiB K>=512 WG=1
+  opus_gemm_flatmm_splitk_256x64x96x64_2x1_16x16x32_0x0x0_wgpcu1: pfk=7 slots=4 comrep=(2,6) LDS=144KiB K>=448 WG=1
+  opus_gemm_flatmm_splitk_256x64x96x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=3 slots=4 comrep=(2,6) LDS=61KiB K>=192 WG=2
+  opus_gemm_flatmm_splitk_256x64x96x128_2x1_16x16x32_0x0x0_wgpcu1: pfk=3 slots=4 comrep=(2,6) LDS=123KiB K>=384 WG=1
+  opus_gemm_flatmm_splitk_256x96x32x64_2x1_16x16x32_0x0x0_wgpcu1: pfk=9 slots=4 comrep=(3,2) LDS=148KiB K>=576 WG=1
+  opus_gemm_flatmm_splitk_256x96x32x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=4 slots=4 comrep=(3,2) LDS=66KiB K>=256 WG=2
+  opus_gemm_flatmm_splitk_256x96x32x128_2x1_16x16x32_0x0x0_wgpcu1: pfk=4 slots=4 comrep=(3,2) LDS=132KiB K>=512 WG=1
+  opus_gemm_flatmm_splitk_256x96x64x64_2x1_16x16x32_0x0x0_wgpcu1: pfk=7 slots=4 comrep=(3,4) LDS=144KiB K>=448 WG=1
+  opus_gemm_flatmm_splitk_256x96x64x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=3 slots=4 comrep=(3,4) LDS=61KiB K>=192 WG=2
+  opus_gemm_flatmm_splitk_256x96x64x128_2x1_16x16x32_0x0x0_wgpcu1: pfk=3 slots=4 comrep=(3,4) LDS=123KiB K>=384 WG=1
+  opus_gemm_flatmm_splitk_256x96x96x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=3 slots=4 comrep=(3,6) LDS=74KiB K>=192 WG=2
+  opus_gemm_persistent_512x256x256x64_2x4_16x16x32_0x0x0: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_persistent_512x128x128x64_2x4_16x16x32_0x0x0: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_persistent_512x128x128x64_2x4_16x16x32_0x0x0_cA0cB0: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_flatmm_splitk_256x64x64x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=4 slots=4 comrep=(2,4) LDS=66KiB K>=256 WG=2
+  opus_gemm_flatmm_splitk_256x32x32x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=9 slots=4 comrep=(1,2) LDS=74KiB K>=576 WG=2
+  opus_gemm_flatmm_splitk_256x32x32x128_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=4 slots=4 comrep=(1,2) LDS=66KiB K>=512 WG=2
+  opus_gemm_flatmm_splitk_256x32x64x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=6 slots=4 comrep=(1,4) LDS=74KiB K>=384 WG=2
+  opus_gemm_flatmm_splitk_256x32x128x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=3 slots=4 comrep=(1,8) LDS=61KiB K>=192 WG=2
+  opus_gemm_flatmm_splitk_256x64x32x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=6 slots=4 comrep=(2,2) LDS=74KiB K>=384 WG=2
+  opus_gemm_flatmm_splitk_256x64x32x128_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=3 slots=4 comrep=(2,2) LDS=74KiB K>=384 WG=2
+  opus_gemm_flatmm_splitk_256x64x64x128_2x1_16x16x32_0x0x0_wgpcu1_nooob: pfk=4 slots=4 comrep=(2,4) LDS=132KiB K>=512 WG=1
+  opus_gemm_flatmm_splitk_256x32x256x64_2x1_16x16x32_0x0x0_wgpcu1_nooob: pfk=4 slots=4 comrep=(1,16) LDS=148KiB K>=256 WG=1
+  opus_gemm_flatmm_splitk_256x32x96x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=4 slots=4 comrep=(1,6) LDS=66KiB K>=256 WG=2
+  opus_gemm_flatmm_splitk_256x64x96x64_2x1_16x16x32_0x0x0_wgpcu1_nooob: pfk=7 slots=4 comrep=(2,6) LDS=144KiB K>=448 WG=1
+  opus_gemm_flatmm_splitk_256x64x96x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=3 slots=4 comrep=(2,6) LDS=61KiB K>=192 WG=2
+  opus_gemm_flatmm_splitk_256x64x96x128_2x1_16x16x32_0x0x0_wgpcu1_nooob: pfk=3 slots=4 comrep=(2,6) LDS=123KiB K>=384 WG=1
+  opus_gemm_flatmm_splitk_256x96x64x64_2x1_16x16x32_0x0x0_wgpcu1_nooob: pfk=7 slots=4 comrep=(3,4) LDS=144KiB K>=448 WG=1
+  opus_gemm_flatmm_splitk_256x96x64x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=3 slots=4 comrep=(3,4) LDS=61KiB K>=192 WG=2
+  opus_gemm_persistent_512x256x256x64_2x4_16x16x32_0x0x0_nooob: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_persistent_512x128x256x64_2x4_16x16x32_0x0x0_nooob: E=(2,2,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_mono_tile_512x192x256x64_2x4_16x16x32_0x0x0_nooob: E=(6,4,2)  LDS=148KiB  K>=128
+  opus_gemm_mono_tile_512x128x256x64_2x4_16x16x32_0x0x0_nooob: E=(4,4,2)  LDS=132KiB  K>=128
+  opus_gemm_mono_tile_512x192x128x64_2x4_16x16x32_0x0x0_nooob: E=(6,2,2)  LDS=99KiB  K>=128
+  opus_gemm_mono_tile_512x64x128x64_2x4_16x16x32_0x0x0_nooob: E=(2,2,2)  LDS=66KiB  K>=128
+  opus_gemm_256x128x256x32_2x2_16x16x32_0x0x0_cA1cB17: E=(2,4,1)  VGPR~120  AGPR=128  LDS=49KiB  K>=64
+  opus_gemm_256x256x128x32_2x2_16x16x32_0x0x0_cA1cB17: E=(4,2,1)  VGPR~112  AGPR=128  LDS=49KiB  K>=64
+  opus_gemm_512x128x128x64_2x4_16x16x32_0x0x0_cA1cB17: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_512x256x128x64_2x4_16x16x32_0x0x0_cA1cB17: E=(4,1,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_512x128x256x64_2x4_16x16x32_0x0x0_cA1cB17: E=(2,2,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_512x256x256x64_2x4_16x16x32_0x0x0_cA1cB17: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_512x128x128x64_2x4_16x16x32_0x0x0_nooob_cA17cB1: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_512x256x256x64_2x4_16x16x32_0x0x0_nooob_cA17cB1: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_256x128x256x32_2x2_16x16x32_0x0x0_4g_safe: E=(2,4,1)  VGPR~120  AGPR=128  LDS=49KiB  K>=64
+  opus_gemm_256x256x128x32_2x2_16x16x32_0x0x0_4g_safe: E=(4,2,1)  VGPR~112  AGPR=128  LDS=49KiB  K>=64
+  opus_gemm_512x128x128x64_2x4_16x16x32_0x0x0_4g_safe: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_512x256x128x64_2x4_16x16x32_0x0x0_4g_safe: E=(4,1,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_512x128x256x64_2x4_16x16x32_0x0x0_4g_safe: E=(2,2,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_512x256x256x64_2x4_16x16x32_0x0x0_4g_safe: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_persistent_512x256x256x64_2x4_16x16x32_0x0x0_4g_safe: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_512x128x128x64_2x4_16x16x32_0x0x0_nooob_4g_safe: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_512x256x128x64_2x4_16x16x32_0x0x0_nooob_4g_safe: E=(4,1,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_mono_tile_512x192x256x64_2x4_16x16x32_0x0x0_nooob_4g_safe: E=(6,4,2)  LDS=148KiB  K>=128
+  opus_gemm_mono_tile_512x128x256x64_2x4_16x16x32_0x0x0_nooob_4g_safe: E=(4,4,2)  LDS=132KiB  K>=128
+  opus_gemm_mono_tile_512x192x128x64_2x4_16x16x32_0x0x0_nooob_4g_safe: E=(6,2,2)  LDS=99KiB  K>=128
+  opus_gemm_mono_tile_512x64x128x64_2x4_16x16x32_0x0x0_nooob_4g_safe: E=(2,2,2)  LDS=66KiB  K>=128
+[opus gen_instances] baked 76 tuned entries from 15 CSV file(s) into opus_gemm_lookup.h
+[opus gen_instances] wrote sidecar with 77 kids: /sgl-workspace/aiter/aiter/jit/build/module_deepgemm_opus/blob//../../compiled_kids_opus.json
+Not exist tuned file: /home/ethany/tuning_workspace/experiment_standalone/hold_qwen35_397b_a17b_mxfp4_tuning/analysis/bf16_gemm/tuned_tp4_decode.csv
+untunedf is        gfx  cu_num   M  ...        outdtype  scaleAB  bpreshuffle
+0  gfx950     256  64  ...  torch.bfloat16    False        False
+1  gfx950     256  64  ...  torch.bfloat16    False        False
+2  gfx950     256  64  ...  torch.bfloat16    False        False
+3  gfx950     256  64  ...  torch.bfloat16    False        False
+4  gfx950     256  64  ...  torch.bfloat16    False        False
+5  gfx950     256  64  ...  torch.bfloat16    False        False
+6  gfx950     256  64  ...  torch.bfloat16    False        False
+
+[7 rows x 10 columns]
+      gfx  cu_num   M  ...        outdtype  scaleAB  bpreshuffle
+0  gfx950     256  64  ...  torch.bfloat16    False        False
+1  gfx950     256  64  ...  torch.bfloat16    False        False
+2  gfx950     256  64  ...  torch.bfloat16    False        False
+3  gfx950     256  64  ...  torch.bfloat16    False        False
+4  gfx950     256  64  ...  torch.bfloat16    False        False
+5  gfx950     256  64  ...  torch.bfloat16    False        False
+6  gfx950     256  64  ...  torch.bfloat16    False        False
+
+[7 rows x 10 columns]
+[aiter] [pid=21546 pname=MainProcess] [32mfinish build [module_deepgemm_opus], cost 30.1s [0m
+[aiter] opus subset-compile: expanded sidecar to cover 53 candidate kids
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+M N K bias dtype outdtype 64 5120 4096 False torch.bfloat16 torch.bfloat16 False >>> Total hipb solutions 2084
+Distributing 2084 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:21:53.935566800 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:21:53.970590345 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:21:53.995985384 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:21:56.731279717 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+Waiting for 2084 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 1
+      solidx  gtimems  splitK  err_ratio kernelName    libtype
+402   438553   0.0136       0        0.0             hipblaslt
+120   438272   0.0144       0        0.0             hipblaslt
+471   438622   0.0144       0        0.0             hipblaslt
+540   438691   0.0145       0        0.0             hipblaslt
+949   439100   0.0146       0        0.0             hipblaslt
+717   438868   0.0147       0        0.0             hipblaslt
+2033  440181   0.0148       0        0.0             hipblaslt
+1270  439418   0.0149       0        0.0             hipblaslt
+889   439040   0.0150       0        0.0             hipblaslt
+396   438547   0.0150       0        0.0             hipblaslt
+791   438942   0.0151       0        0.0             hipblaslt
+377   438528   0.0151       0        0.0             hipblaslt
+406   438557   0.0152       0        0.0             hipblaslt
+808   438959   0.0152       0        0.0             hipblaslt
+239   438391   0.0152       0        0.0             hipblaslt
+1941  440089   0.0152       0        0.0             hipblaslt
+265   438416   0.0152       0        0.0             hipblaslt
+2036  440184   0.0152       0        0.0             hipblaslt
+338   438489   0.0152       0        0.0             hipblaslt
+1495  439643   0.0153       0        0.0             hipblaslt
+Distributing 20 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:22:20.957456699 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:22:20.019383037 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:22:20.193542359 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:22:20.321951561 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[aiter] FlyDSL bf16 catalog size for M=64, N=4608, K=4096: 5592 kernels
+[aiter] FlyDSL candidate count for M=64, N=4608, K=4096: 2774
+[aiter] opus candidate count for M=64, N=4608, K=4096: 285
+[opus _ensure_kids_compiled] need to add 2 kids to sidecar (existing=77, target=79)
+[opus _ensure_kids_compiled] wrote sidecar at /sgl-workspace/aiter/aiter/jit/build/compiled_kids_opus.json with 79 kids; triggering build...
+[aiter] [pid=21546 pname=MainProcess] start build [module_deepgemm_opus] under /sgl-workspace/aiter/aiter/jit/build/module_deepgemm_opus
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[opus gen_instances] arch filter: target=['gfx950'] dropped 27 off-arch kids from |S|
+[opus gen_instances] subset compile: |S|=79 kids (CSV=54, sidecar=79, heuristic=29)
+  opus_gemm_256x128x256x32_2x2_16x16x32_0x0x0: E=(2,4,1)  VGPR~120  AGPR=128  LDS=49KiB  K>=64
+  opus_gemm_256x256x128x32_2x2_16x16x32_0x0x0: E=(4,2,1)  VGPR~112  AGPR=128  LDS=49KiB  K>=64
+  opus_gemm_512x128x128x64_2x4_16x16x32_0x0x0: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_512x256x128x64_2x4_16x16x32_0x0x0: E=(4,1,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_512x128x256x64_2x4_16x16x32_0x0x0: E=(2,2,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_512x256x256x64_2x4_16x16x32_0x0x0: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_flatmm_splitk_256x64x64x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=4 slots=4 comrep=(2,4) LDS=66KiB K>=256 WG=2
+  opus_gemm_flatmm_splitk_256x32x32x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=9 slots=4 comrep=(1,2) LDS=74KiB K>=576 WG=2
+  opus_gemm_flatmm_splitk_256x32x32x128_2x1_16x16x32_0x0x0_wgpcu2: pfk=4 slots=4 comrep=(1,2) LDS=66KiB K>=512 WG=2
+  opus_gemm_flatmm_splitk_256x32x64x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=6 slots=4 comrep=(1,4) LDS=74KiB K>=384 WG=2
+  opus_gemm_flatmm_splitk_256x32x128x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=3 slots=4 comrep=(1,8) LDS=61KiB K>=192 WG=2
+  opus_gemm_flatmm_splitk_256x64x32x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=6 slots=4 comrep=(2,2) LDS=74KiB K>=384 WG=2
+  opus_gemm_flatmm_splitk_256x64x32x128_2x1_16x16x32_0x0x0_wgpcu2: pfk=3 slots=4 comrep=(2,2) LDS=74KiB K>=384 WG=2
+  opus_gemm_flatmm_splitk_256x128x32x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=3 slots=4 comrep=(4,2) LDS=61KiB K>=192 WG=2
+  opus_gemm_flatmm_splitk_256x64x64x128_2x1_16x16x32_0x0x0_wgpcu1: pfk=4 slots=4 comrep=(2,4) LDS=132KiB K>=512 WG=1
+  opus_gemm_flatmm_splitk_256x256x32x64_2x1_16x16x32_0x0x0_wgpcu1: pfk=4 slots=4 comrep=(8,2) LDS=148KiB K>=256 WG=1
+  opus_gemm_flatmm_splitk_256x32x256x64_2x1_16x16x32_0x0x0_wgpcu1: pfk=4 slots=4 comrep=(1,16) LDS=148KiB K>=256 WG=1
+  opus_gemm_flatmm_splitk_256x32x96x64_2x1_16x16x32_0x0x0_wgpcu1: pfk=9 slots=4 comrep=(1,6) LDS=148KiB K>=576 WG=1
+  opus_gemm_flatmm_splitk_256x32x96x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=4 slots=4 comrep=(1,6) LDS=66KiB K>=256 WG=2
+  opus_gemm_flatmm_splitk_256x32x96x128_2x1_16x16x32_0x0x0_wgpcu1: pfk=4 slots=4 comrep=(1,6) LDS=132KiB K>=512 WG=1
+  opus_gemm_flatmm_splitk_256x64x96x64_2x1_16x16x32_0x0x0_wgpcu1: pfk=7 slots=4 comrep=(2,6) LDS=144KiB K>=448 WG=1
+  opus_gemm_flatmm_splitk_256x64x96x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=3 slots=4 comrep=(2,6) LDS=61KiB K>=192 WG=2
+  opus_gemm_flatmm_splitk_256x64x96x128_2x1_16x16x32_0x0x0_wgpcu1: pfk=3 slots=4 comrep=(2,6) LDS=123KiB K>=384 WG=1
+  opus_gemm_flatmm_splitk_256x96x32x64_2x1_16x16x32_0x0x0_wgpcu1: pfk=9 slots=4 comrep=(3,2) LDS=148KiB K>=576 WG=1
+  opus_gemm_flatmm_splitk_256x96x32x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=4 slots=4 comrep=(3,2) LDS=66KiB K>=256 WG=2
+  opus_gemm_flatmm_splitk_256x96x32x128_2x1_16x16x32_0x0x0_wgpcu1: pfk=4 slots=4 comrep=(3,2) LDS=132KiB K>=512 WG=1
+  opus_gemm_flatmm_splitk_256x96x64x64_2x1_16x16x32_0x0x0_wgpcu1: pfk=7 slots=4 comrep=(3,4) LDS=144KiB K>=448 WG=1
+  opus_gemm_flatmm_splitk_256x96x64x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=3 slots=4 comrep=(3,4) LDS=61KiB K>=192 WG=2
+  opus_gemm_flatmm_splitk_256x96x64x128_2x1_16x16x32_0x0x0_wgpcu1: pfk=3 slots=4 comrep=(3,4) LDS=123KiB K>=384 WG=1
+  opus_gemm_flatmm_splitk_256x96x96x64_2x1_16x16x32_0x0x0_wgpcu2: pfk=3 slots=4 comrep=(3,6) LDS=74KiB K>=192 WG=2
+  opus_gemm_persistent_512x256x256x64_2x4_16x16x32_0x0x0: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_persistent_512x128x128x64_2x4_16x16x32_0x0x0: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_persistent_512x128x128x64_2x4_16x16x32_0x0x0_cA0cB0: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_flatmm_splitk_256x64x64x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=4 slots=4 comrep=(2,4) LDS=66KiB K>=256 WG=2
+  opus_gemm_flatmm_splitk_256x32x32x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=9 slots=4 comrep=(1,2) LDS=74KiB K>=576 WG=2
+  opus_gemm_flatmm_splitk_256x32x32x128_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=4 slots=4 comrep=(1,2) LDS=66KiB K>=512 WG=2
+  opus_gemm_flatmm_splitk_256x32x64x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=6 slots=4 comrep=(1,4) LDS=74KiB K>=384 WG=2
+  opus_gemm_flatmm_splitk_256x32x128x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=3 slots=4 comrep=(1,8) LDS=61KiB K>=192 WG=2
+  opus_gemm_flatmm_splitk_256x64x32x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=6 slots=4 comrep=(2,2) LDS=74KiB K>=384 WG=2
+  opus_gemm_flatmm_splitk_256x64x32x128_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=3 slots=4 comrep=(2,2) LDS=74KiB K>=384 WG=2
+  opus_gemm_flatmm_splitk_256x64x64x128_2x1_16x16x32_0x0x0_wgpcu1_nooob: pfk=4 slots=4 comrep=(2,4) LDS=132KiB K>=512 WG=1
+  opus_gemm_flatmm_splitk_256x32x256x64_2x1_16x16x32_0x0x0_wgpcu1_nooob: pfk=4 slots=4 comrep=(1,16) LDS=148KiB K>=256 WG=1
+  opus_gemm_flatmm_splitk_256x32x96x64_2x1_16x16x32_0x0x0_wgpcu1_nooob: pfk=9 slots=4 comrep=(1,6) LDS=148KiB K>=576 WG=1
+  opus_gemm_flatmm_splitk_256x32x96x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=4 slots=4 comrep=(1,6) LDS=66KiB K>=256 WG=2
+  opus_gemm_flatmm_splitk_256x32x96x128_2x1_16x16x32_0x0x0_wgpcu1_nooob: pfk=4 slots=4 comrep=(1,6) LDS=132KiB K>=512 WG=1
+  opus_gemm_flatmm_splitk_256x64x96x64_2x1_16x16x32_0x0x0_wgpcu1_nooob: pfk=7 slots=4 comrep=(2,6) LDS=144KiB K>=448 WG=1
+  opus_gemm_flatmm_splitk_256x64x96x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=3 slots=4 comrep=(2,6) LDS=61KiB K>=192 WG=2
+  opus_gemm_flatmm_splitk_256x64x96x128_2x1_16x16x32_0x0x0_wgpcu1_nooob: pfk=3 slots=4 comrep=(2,6) LDS=123KiB K>=384 WG=1
+  opus_gemm_flatmm_splitk_256x96x64x64_2x1_16x16x32_0x0x0_wgpcu1_nooob: pfk=7 slots=4 comrep=(3,4) LDS=144KiB K>=448 WG=1
+  opus_gemm_flatmm_splitk_256x96x64x64_2x1_16x16x32_0x0x0_wgpcu2_nooob: pfk=3 slots=4 comrep=(3,4) LDS=61KiB K>=192 WG=2
+  opus_gemm_persistent_512x256x256x64_2x4_16x16x32_0x0x0_nooob: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_persistent_512x128x256x64_2x4_16x16x32_0x0x0_nooob: E=(2,2,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_mono_tile_512x192x256x64_2x4_16x16x32_0x0x0_nooob: E=(6,4,2)  LDS=148KiB  K>=128
+  opus_gemm_mono_tile_512x128x256x64_2x4_16x16x32_0x0x0_nooob: E=(4,4,2)  LDS=132KiB  K>=128
+  opus_gemm_mono_tile_512x192x128x64_2x4_16x16x32_0x0x0_nooob: E=(6,2,2)  LDS=99KiB  K>=128
+  opus_gemm_mono_tile_512x64x128x64_2x4_16x16x32_0x0x0_nooob: E=(2,2,2)  LDS=66KiB  K>=128
+  opus_gemm_256x128x256x32_2x2_16x16x32_0x0x0_cA1cB17: E=(2,4,1)  VGPR~120  AGPR=128  LDS=49KiB  K>=64
+  opus_gemm_256x256x128x32_2x2_16x16x32_0x0x0_cA1cB17: E=(4,2,1)  VGPR~112  AGPR=128  LDS=49KiB  K>=64
+  opus_gemm_512x128x128x64_2x4_16x16x32_0x0x0_cA1cB17: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_512x256x128x64_2x4_16x16x32_0x0x0_cA1cB17: E=(4,1,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_512x128x256x64_2x4_16x16x32_0x0x0_cA1cB17: E=(2,2,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_512x256x256x64_2x4_16x16x32_0x0x0_cA1cB17: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_512x128x128x64_2x4_16x16x32_0x0x0_nooob_cA17cB1: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_512x256x256x64_2x4_16x16x32_0x0x0_nooob_cA17cB1: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_256x128x256x32_2x2_16x16x32_0x0x0_4g_safe: E=(2,4,1)  VGPR~120  AGPR=128  LDS=49KiB  K>=64
+  opus_gemm_256x256x128x32_2x2_16x16x32_0x0x0_4g_safe: E=(4,2,1)  VGPR~112  AGPR=128  LDS=49KiB  K>=64
+  opus_gemm_512x128x128x64_2x4_16x16x32_0x0x0_4g_safe: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_512x256x128x64_2x4_16x16x32_0x0x0_4g_safe: E=(4,1,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_512x128x256x64_2x4_16x16x32_0x0x0_4g_safe: E=(2,2,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_512x256x256x64_2x4_16x16x32_0x0x0_4g_safe: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_persistent_512x256x256x64_2x4_16x16x32_0x0x0_4g_safe: E=(4,2,2)  VGPR~144  AGPR=128  LDS=132KiB  K>=128
+  opus_gemm_512x128x128x64_2x4_16x16x32_0x0x0_nooob_4g_safe: E=(2,1,2)  VGPR~112  AGPR=32  LDS=66KiB  K>=128
+  opus_gemm_512x256x128x64_2x4_16x16x32_0x0x0_nooob_4g_safe: E=(4,1,2)  VGPR~128  AGPR=64  LDS=99KiB  K>=128
+  opus_gemm_mono_tile_512x192x256x64_2x4_16x16x32_0x0x0_nooob_4g_safe: E=(6,4,2)  LDS=148KiB  K>=128
+  opus_gemm_mono_tile_512x128x256x64_2x4_16x16x32_0x0x0_nooob_4g_safe: E=(4,4,2)  LDS=132KiB  K>=128
+  opus_gemm_mono_tile_512x192x128x64_2x4_16x16x32_0x0x0_nooob_4g_safe: E=(6,2,2)  LDS=99KiB  K>=128
+  opus_gemm_mono_tile_512x64x128x64_2x4_16x16x32_0x0x0_nooob_4g_safe: E=(2,2,2)  LDS=66KiB  K>=128
+[opus gen_instances] baked 76 tuned entries from 15 CSV file(s) into opus_gemm_lookup.h
+[opus gen_instances] wrote sidecar with 79 kids: /sgl-workspace/aiter/aiter/jit/build/module_deepgemm_opus/blob//../../compiled_kids_opus.json
+Waiting for 20 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 0
+[aiter] [pid=21546 pname=MainProcess] [32mfinish build [module_deepgemm_opus], cost 16.4s [0m
+[aiter] opus subset-compile: expanded sidecar to cover 59 candidate kids
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+M N K bias dtype outdtype 64 4608 4096 False torch.bfloat16 torch.bfloat16 False >>> Total hipb solutions 2084
+Distributing 2084 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:22:46.106350574 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:22:46.153661766 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:22:46.178412637 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:22:49.864469983 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+Waiting for 2084 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 1
+      solidx  gtimems  splitK  err_ratio kernelName    libtype
+1948  440096   0.0132       0        0.0             hipblaslt
+471   438622   0.0138       0        0.0             hipblaslt
+2036  440184   0.0141       0        0.0             hipblaslt
+1956  440104   0.0142       0        0.0             hipblaslt
+402   438553   0.0143       0        0.0             hipblaslt
+540   438691   0.0143       0        0.0             hipblaslt
+394   438545   0.0144       0        0.0             hipblaslt
+120   438272   0.0144       0        0.0             hipblaslt
+256   438408   0.0145       0        0.0             hipblaslt
+2062  440215   0.0145       0        0.0             hipblaslt
+1027  439178   0.0145       0        0.0             hipblaslt
+1947  440095   0.0146       0        0.0             hipblaslt
+406   438557   0.0146       0        0.0             hipblaslt
+377   438528   0.0147       0        0.0             hipblaslt
+2003  440151   0.0148       0        0.0             hipblaslt
+544   438695   0.0148       0        0.0             hipblaslt
+328   438479   0.0148       0        0.0             hipblaslt
+730   438881   0.0149       0        0.0             hipblaslt
+2009  440157   0.0149       0        0.0             hipblaslt
+397   438548   0.0149       0        0.0             hipblaslt
+Distributing 20 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:23:10.733828110 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:23:10.745633076 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:23:10.848269535 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:23:10.852750754 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[aiter] FlyDSL bf16 catalog size for M=64, N=4096, K=2048: 5592 kernels
+[aiter] FlyDSL candidate count for M=64, N=4096, K=2048: 3395
+[aiter] opus candidate count for M=64, N=4096, K=2048: 199
+Waiting for 20 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 0
+M N K bias dtype outdtype 64 4096 2048 False torch.bfloat16 torch.bfloat16 False >>> Total hipb solutions 2084
+Distributing 2084 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:23:19.295131195 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:23:19.339600619 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:23:19.339600099 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:23:22.853248450 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+Waiting for 2084 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 1
+      solidx  gtimems  splitK  err_ratio kernelName    libtype
+737   438888   0.0078       0        0.0             hipblaslt
+468   438619   0.0081       0        0.0             hipblaslt
+331   438482   0.0085       0        0.0             hipblaslt
+2037  440185   0.0086       0        0.0             hipblaslt
+178   438330   0.0086       0        0.0             hipblaslt
+669   438820   0.0086       0        0.0             hipblaslt
+800   438951   0.0088       0        0.0             hipblaslt
+169   438321   0.0092       0        0.0             hipblaslt
+471   438622   0.0094       0        0.0             hipblaslt
+1140  439288   0.0094       0        0.0             hipblaslt
+239   438391   0.0094       0        0.0             hipblaslt
+259   438411   0.0094       0        0.0             hipblaslt
+306   438457   0.0095       0        0.0             hipblaslt
+1524  439672   0.0095       0        0.0             hipblaslt
+1183  439331   0.0096       0        0.0             hipblaslt
+472   438623   0.0096       0        0.0             hipblaslt
+402   438553   0.0096       0        0.0             hipblaslt
+1511  439659   0.0096       0        0.0             hipblaslt
+2036  440184   0.0096       0        0.0             hipblaslt
+1262  439410   0.0096       0        0.0             hipblaslt
+Distributing 20 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:23:42.492357749 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:23:43.693252597 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:23:43.716328219 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:23:43.724754356 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[aiter] FlyDSL bf16 catalog size for M=64, N=4096, K=256: 3592 kernels
+[aiter] FlyDSL candidate count for M=64, N=4096, K=256: 2151
+[aiter] opus candidate count for M=64, N=4096, K=256: 46
+Waiting for 20 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 0
+M N K bias dtype outdtype 64 4096 256 False torch.bfloat16 torch.bfloat16 False >>> Total hipb solutions 2084
+Distributing 2084 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:23:52.336530276 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:23:52.372350487 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:23:52.377363116 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:23:55.023058613 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+Waiting for 2084 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 1
+      solidx  gtimems  splitK  err_ratio kernelName    libtype
+868   439019   0.0039       0        0.0             hipblaslt
+587   438738   0.0040       0        0.0             hipblaslt
+516   438667   0.0040       0        0.0             hipblaslt
+1262  439410   0.0041       0        0.0             hipblaslt
+870   439021   0.0041       0        0.0             hipblaslt
+1768  439916   0.0041       0        0.0             hipblaslt
+898   439049   0.0041       0        0.0             hipblaslt
+421   438572   0.0041       0        0.0             hipblaslt
+311   438462   0.0041       0        0.0             hipblaslt
+800   438951   0.0041       0        0.0             hipblaslt
+331   438482   0.0042       0        0.0             hipblaslt
+856   439007   0.0042       0        0.0             hipblaslt
+163   438315   0.0042       0        0.0             hipblaslt
+168   438320   0.0042       0        0.0             hipblaslt
+468   438619   0.0042       0        0.0             hipblaslt
+1266  439414   0.0042       0        0.0             hipblaslt
+171   438323   0.0042       0        0.0             hipblaslt
+380   438531   0.0042       0        0.0             hipblaslt
+87    438239   0.0042       0        0.0             hipblaslt
+52    438205   0.0042       0        0.0             hipblaslt
+Distributing 20 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:24:16.756101790 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:24:16.802787234 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:24:16.809883735 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:24:16.813209865 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[aiter] FlyDSL bf16 catalog size for M=64, N=512, K=4096: 5592 kernels
+[aiter] FlyDSL candidate count for M=64, N=512, K=4096: 3548
+[aiter] opus candidate count for M=64, N=512, K=4096: 435
+Waiting for 20 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 0
+M N K bias dtype outdtype 64 512 4096 False torch.bfloat16 torch.bfloat16 False >>> Total hipb solutions 2084
+Distributing 2084 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:24:25.238534514 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:24:25.250240162 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:24:25.281863439 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:24:28.129644791 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+Waiting for 2084 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 1
+      solidx  gtimems  splitK  err_ratio kernelName    libtype
+2054  440202   0.0070       0        0.0             hipblaslt
+240   438392   0.0070       0        0.0             hipblaslt
+603   438754   0.0071       0        0.0             hipblaslt
+880   439031   0.0072       0        0.0             hipblaslt
+604   438755   0.0073       0        0.0             hipblaslt
+2049  440197   0.0073       0        0.0             hipblaslt
+667   438818   0.0074       0        0.0             hipblaslt
+511   438662   0.0075       0        0.0             hipblaslt
+258   438410   0.0076       0        0.0             hipblaslt
+785   438936   0.0076       0        0.0             hipblaslt
+806   438957   0.0077       0        0.0             hipblaslt
+1535  439683   0.0078       0        0.0             hipblaslt
+583   438734   0.0078       0        0.0             hipblaslt
+915   439066   0.0078       0        0.0             hipblaslt
+304   438455   0.0078       0        0.0             hipblaslt
+1540  439688   0.0079       0        0.0             hipblaslt
+2050  440198   0.0080       0        0.0             hipblaslt
+442   438593   0.0080       0        0.0             hipblaslt
+1797  439945   0.0080       0        0.0             hipblaslt
+375   438526   0.0080       0        0.0             hipblaslt
+Distributing 20 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:24:49.146742088 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:24:49.216868746 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:24:49.265624382 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:24:49.276470396 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[aiter] FlyDSL bf16 catalog size for M=64, N=32, K=4096: 0 kernels
+[aiter] FlyDSL candidate count for M=64, N=32, K=4096: 0
+[aiter] opus candidate count for M=64, N=32, K=4096: 362
+Waiting for 20 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 0
+M N K bias dtype outdtype 64 32 4096 False torch.bfloat16 torch.bfloat16 False >>> Total hipb solutions 2084
+Distributing 2084 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:24:59.723709210 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:24:59.723709180 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:24:59.769107367 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:25:01.245656840 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+Waiting for 2084 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 1
+      solidx  gtimems  splitK  err_ratio kernelName    libtype
+931   439082   0.0060       0        0.0             hipblaslt
+2049  440197   0.0060       0        0.0             hipblaslt
+667   438818   0.0060       0        0.0             hipblaslt
+784   438935   0.0061       0        0.0             hipblaslt
+1535  439683   0.0063       0        0.0             hipblaslt
+915   439066   0.0064       0        0.0             hipblaslt
+788   438939   0.0064       0        0.0             hipblaslt
+467   438618   0.0064       0        0.0             hipblaslt
+603   438754   0.0064       0        0.0             hipblaslt
+258   438410   0.0065       0        0.0             hipblaslt
+914   439065   0.0065       0        0.0             hipblaslt
+930   439081   0.0065       0        0.0             hipblaslt
+785   438936   0.0065       0        0.0             hipblaslt
+177   438329   0.0066       0        0.0             hipblaslt
+398   438549   0.0066       0        0.0             hipblaslt
+798   438949   0.0066       0        0.0             hipblaslt
+176   438328   0.0066       0        0.0             hipblaslt
+1792  439940   0.0066       0        0.0             hipblaslt
+913   439064   0.0066       0        0.0             hipblaslt
+929   439080   0.0067       0        0.0             hipblaslt
+Distributing 20 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:25:22.154916922 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:25:22.312192311 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:25:22.356216763 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:25:22.468022346 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[aiter] FlyDSL bf16 catalog size for M=64, N=1, K=4096: 0 kernels
+[aiter] FlyDSL candidate count for M=64, N=1, K=4096: 0
+[aiter] opus candidate count for M=64, N=1, K=4096: 305
+Waiting for 20 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 0
+M N K bias dtype outdtype 64 1 4096 False torch.bfloat16 torch.bfloat16 False >>> Total hipb solutions 2084
+Distributing 2084 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:25:32.861850380 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:25:32.861850520 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:25:32.876452946 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:25:34.437848401 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+Waiting for 2084 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 1
+      solidx  gtimems  splitK  err_ratio kernelName    libtype
+467   438618   0.0052       0        0.0             hipblaslt
+258   438410   0.0052       0        0.0             hipblaslt
+667   438818   0.0053       0        0.0             hipblaslt
+931   439082   0.0053       0        0.0             hipblaslt
+785   438936   0.0053       0        0.0             hipblaslt
+784   438935   0.0054       0        0.0             hipblaslt
+2049  440197   0.0056       0        0.0             hipblaslt
+1535  439683   0.0057       0        0.0             hipblaslt
+913   439064   0.0057       0        0.0             hipblaslt
+807   438958   0.0059       0        0.0             hipblaslt
+603   438754   0.0059       0        0.0             hipblaslt
+2054  440202   0.0060       0        0.0             hipblaslt
+1792  439940   0.0061       0        0.0             hipblaslt
+1553  439701   0.0061       0        0.0             hipblaslt
+398   438549   0.0062       0        0.0             hipblaslt
+915   439066   0.0063       0        0.0             hipblaslt
+914   439065   0.0063       0        0.0             hipblaslt
+52    438205   0.0063       0        0.0             hipblaslt
+537   438688   0.0063       0        0.0             hipblaslt
+1540  439688   0.0063       0        0.0             hipblaslt
+Distributing 20 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[aiter] import [module_hipbsolgemm] under /sgl-workspace/aiter/aiter/jit/module_hipbsolgemm.so
+[W820 11:25:56.644674492 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:25:56.680861926 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:25:57.704940659 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:25:57.732709836 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+Waiting for 20 tasks to complete (no timeout limit)...
+>>> hipblaslt top solutions, Fast Mode 0
+[Task Grouping] Grouped 16638 tasks into 7 groups by info_keys
+Distributing 7 task groups across 4 GPUs
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_32x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_32x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_32x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_32x64_pf3_splitk.co
+[W820 11:26:07.744750249 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:26:07.747878562 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_32x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_32x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_32x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_32x64_splitk_clean.co
+[W820 11:26:07.807490441 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[W820 11:26:07.815163832 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 4 (function operator())
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_48x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_48x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_48x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_48x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_64x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_64x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_64x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_64x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_32x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_32x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_32x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_32x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_64x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_64x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_48x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_48x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_64x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_64x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_48x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_48x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_80x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_80x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_48x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_48x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_80x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_80x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_48x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_48x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_64x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_64x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_64x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_64x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_96x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_96x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_96x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_96x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_96x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_96x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_96x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_96x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter24bf16gemm_bf16_tn_256x256E hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_bf16_tn_256x256.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_64x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_64x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter24bf16gemm_bf16_tn_256x256E hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_bf16_tn_256x256.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_80x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_80x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_64x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_64x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_80x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_80x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_96x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_96x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter39bf16gemm_fp32bf16_tn_96x64_splitk_cleanE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_96x64_splitk_clean.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_96x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_96x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter24bf16gemm_bf16_tn_256x256E hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_bf16_tn_256x256.co
+[aiter] LoadKernel: _ZN5aiter37bf16gemm_fp32bf16_tn_96x64_pf3_splitkE hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_fp32bf16_tn_96x64_pf3_splitk.co
+[aiter] LoadKernel: _ZN5aiter24bf16gemm_bf16_tn_256x256E hsaco: /sgl-workspace/aiter/hsa//gfx950/bf16gemm/bf16gemm_bf16_tn_256x256.co
+[aiter] merge tuned file under model_configs/ and configs/ /sgl-workspace/aiter/aiter/configs/bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv3_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv4_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm47_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm5_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/gptoss_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimi_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik2_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik3_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/llama405B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/llama70B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/minimax_m3_eagle_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen32B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen3_5_397b_bf16_tuned_gemm.csv
+[aiter] import [module_deepgemm_opus] under /sgl-workspace/aiter/aiter/jit/module_deepgemm_opus.so
+[aiter] merge tuned file under model_configs/ and configs/ /sgl-workspace/aiter/aiter/configs/bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv3_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv4_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm47_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm5_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/gptoss_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimi_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik2_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik3_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/llama405B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/llama70B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/minimax_m3_eagle_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen32B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen3_5_397b_bf16_tuned_gemm.csv
+[aiter] import [module_deepgemm_opus] under /sgl-workspace/aiter/aiter/jit/module_deepgemm_opus.so
+[aiter] merge tuned file under model_configs/ and configs/ /sgl-workspace/aiter/aiter/configs/bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv3_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv4_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm47_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm5_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/gptoss_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimi_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik2_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik3_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/llama405B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/llama70B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/minimax_m3_eagle_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen32B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen3_5_397b_bf16_tuned_gemm.csv
+[aiter] import [module_deepgemm_opus] under /sgl-workspace/aiter/aiter/jit/module_deepgemm_opus.so
+[aiter] merge tuned file under model_configs/ and configs/ /sgl-workspace/aiter/aiter/configs/bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv3_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/dsv4_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm47_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/glm5_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/gptoss_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimi_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik2_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/kimik3_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/llama405B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/llama70B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/minimax_m3_eagle_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen32B_bf16_tuned_gemm.csv:/sgl-workspace/aiter/aiter/configs/model_configs/qwen3_5_397b_bf16_tuned_gemm.csv
+[aiter] import [module_deepgemm_opus] under /sgl-workspace/aiter/aiter/jit/module_deepgemm_opus.so
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so
+[aiter] type hints mismatch, override to --> getHipblasltKernelName(arg0: int) -> str
+/sgl-workspace/aiter/aiter/utility/base_tuner.py:482: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  profiledf = pd.concat([old_df, profiledf], ignore_index=True)
+/sgl-workspace/aiter/aiter/utility/base_tuner.py:1661: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  self.success = pd.concat(
+/sgl-workspace/aiter/aiter/utility/base_tuner.py:1677: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  resultdf = pd.concat([old_df, update_tunedf], ignore_index=True)
+[aiter] processed 1 batches of 1, Processing Status ====> 100.0% tuned in GemmA16W16Tuner
+[aiter] ============= Tuning results Summary: ==============
+/sgl-workspace/aiter/aiter/utility/base_tuner.py:531: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  tunedf = pd.concat([self.success, self.failed])
+[aiter] Tuning Finished. tune 7 shapes, total tuning time is 2234.495 seconds
+[aiter] Successfully tuned shapes:
+Waiting for 7 tasks to complete (no timeout limit)...
+Not exist tuned file: /home/ethany/tuning_workspace/experiment_standalone/hold_qwen35_397b_a17b_mxfp4_tuning/analysis/bf16_gemm/tuned_tp4_decode.csv
+      gfx cu_num   M  ... err_ratio  tflops       bw
+0  gfx950    256  64  ...    0.0049  177.85  2857.02
+1  gfx950    256  64  ...    0.0000  166.05  2671.08
+2  gfx950    256  64  ...    0.0000  118.07  1931.26
+3  gfx950    256  64  ...    0.0000   39.68   784.69
+4  gfx950    256  64  ...    0.0188   39.30   700.48
+5  gfx950    256  64  ...    0.0000    2.52   118.82
+6  gfx950    256  64  ...    0.0000    0.09    91.95
+
+[7 rows x 18 columns]
+[aiter] Failed shapes:
+Empty DataFrame
+Columns: [gfx, cu_num, M, N, K, bias, dtype, outdtype, scaleAB, bpreshuffle, libtype, solidx, splitK, us, kernelName, err_ratio, tflops, bw]
+Index: []

@@ -1,0 +1,75 @@
+Subject: [PATCH 1/2] aiter: retune the M=64 decode a16w16 GEMMs for Llama-3.1-8B on gfx950
+
+REJECTED -- DO NOT APPLY. Measured end-to-end regression. Kept as a recorded negative
+result; see FINDINGS.md #4.
+
+MEASUREMENT
+  Isolated, graph-captured, LLC-overflowing working set (analysis/race_gemm_candidates.py
+  --m 64 --footprint-mb 1024), vs what the stack resolves today:
+    o_proj   (4096, 4096)   flydsl:3511  13.932 us -> hipblaslt:438482  12.859 us  +7.70%
+    down_proj(4096,14336)   torch        28.973 us -> hipblaslt:440151  27.654 us  +4.55%
+    qkv_proj (6144, 4096)   flydsl:2331  16.170 us -> hipblaslt:438484  15.823 us  +2.15%
+    gate_up  (28672,4096)   torch        43.506 us -> no candidate beat the fallback
+  = 2.74 us of 102.6 us of GEMM per layer-step, and GEMM is 20.16% of decode.
+
+  End-to-end, 6 paired restart-to-restart rounds with the arm order flipped every round
+  (analysis/ab_campaign.sh), bench/ against a bench/ baseline:
+    base 2638.411 tok/s   cand 2628.008 tok/s   -0.394% +/- 0.066% (2*SEM)
+    mean TPOT  20.372 ms -> 20.478 ms  (+0.52%)   <-- this patch's term
+    mean TTFT 3986.2  ms -> 3978.6  ms (-0.19%)   <-- patch 2/2's term
+  All six paired deltas negative, sd 0.055%. The kernels are faster in isolation and
+  slower in the server. Reverting is the result.
+
+APPLY
+  cd /sgl-workspace/aiter && patch -p1 < <this file>
+  rm -rf /tmp/aiter_configs      # merged table is regenerated only when absent
+  # then restart the server: the GEMM table is consumed at HIP-graph capture time
+  # revert: python3 analysis/deploy_gemm_rows.py revert   (restores from analysis/gemm_tune/base/)
+
+BASE
+  aiter d9e5ef7ce08ee7045d583aed768cff41aa9210fe; recorded copies of the two edited files
+  are in analysis/gemm_tune/base/.
+
+WHY THESE TWO FILES ARE EDITED IN PLACE
+  Llama-3.1-8B has no tuned-GEMM config of its own. It inherits (64,4096,4096) from
+  qwen3_5_397b_bf16_tuned_gemm.csv and (64,6144,4096) from glm5_bf16_tuned_gemm.csv,
+  because those models happen to share the shape. Shipping the same keys in a new
+  model_configs file makes aiter/jit/core.py:295 raise on the duplicate and auto-resolve
+  by the `us` column -- the tuner's eager `us`, which is exactly the metric shown to
+  mis-rank these kernels. So the rows must be replaced where they live, which also changes
+  those two shapes for GLM/Qwen on this GPU. Only (64,4096,14336) is a genuinely new key
+  and goes in the new file.
+
+  The `us` values written here are the graph-measured numbers above, not the tuner's.
+
+NOTE
+  The flydsl row replaced for o_proj carried err_ratio 0.0198; the hipblaslt row is exact.
+  See FINDINGS.md #6 -- that accuracy difference was gated and is not visible in gsm8k.
+
+--- a/aiter/configs/model_configs/qwen3_5_397b_bf16_tuned_gemm.csv
++++ b/aiter/configs/model_configs/qwen3_5_397b_bf16_tuned_gemm.csv
+@@ -37,7 +37,7 @@
+ gfx950,256,48,4096,4096,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,2622,2,12.4017,flydsl_gemm4_abf16_wbf16_bf16_t32x64x128_split_k2_block_m_warp1_block_n_warp4_block_k_warp1_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0049,129.87,2769.04
+ gfx950,256,48,4096,8192,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,2625,2,18.56,flydsl_gemm4_abf16_wbf16_bf16_t32x64x128_split_k2_block_m_warp2_block_n_warp2_block_k_warp1_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0062,173.56,3679.34
+ gfx950,256,64,4096,512,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,4183,1,4.7372,flydsl_gemm6_abf16_wbf16_bf16_t16x64x64_split_k1_block_m_warp1_block_n_warp2_block_k_warp1_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0,56.67,1009.91
+-gfx950,256,64,4096,4096,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,3511,2,12.7077,flydsl_gemm4_abf16_wbf16_bf16_t32x64x128_split_k2_block_m_warp1_block_n_warp1_block_k_warp4_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0198,168.99,2723.0
++gfx950,256,64,4096,4096,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,438482,0,12.8590,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT32x32x256_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MO40_NTn1_NTA4_NTB0_NTC0_NTD2_NTM0_NEPBS10_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS0_SPO1_SRVW0_SSO0_SVW4_SK3_SKFTR0_SKXCCM4_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGRO1_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS64_WG32_8_1,0.0,167.00,2.69
+ gfx950,256,64,4096,8192,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,3517,2,20.0442,flydsl_gemm4_abf16_wbf16_bf16_t32x64x128_split_k2_block_m_warp2_block_n_warp2_block_k_warp1_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0061,214.27,3426.51
+ gfx950,256,96,4096,512,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,4183,1,4.8706,flydsl_gemm6_abf16_wbf16_bf16_t16x64x64_split_k1_block_m_warp1_block_n_warp2_block_k_warp1_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0,82.67,1042.8
+ gfx950,256,96,4096,4096,False,torch.bfloat16,torch.bfloat16,False,False,asm,8,4,14.9718,_ZN5aiter39bf16gemm_fp32bf16_tn_96x64_splitk_cleanE,0.0116,215.15,2346.23
+--- a/aiter/configs/model_configs/glm5_bf16_tuned_gemm.csv
++++ b/aiter/configs/model_configs/glm5_bf16_tuned_gemm.csv
+@@ -77,7 +77,7 @@
+ gfx950,256,64,32,6144,False,torch.bfloat16,torch.bfloat16,False,False,torch,0,0,8.1827,native,0.0,3.08,144.66
+ gfx950,256,64,4096,2048,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,3181,1,8.6927,flydsl_gemm4_abf16_wbf16_bf16_t16x64x128_split_k1_block_m_warp1_block_n_warp1_block_k_warp2_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0034,123.52,2020.51
+ gfx950,256,64,6144,3072,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,4016,1,13.2611,flydsl_gemm3_abf16_wbf16_bf16_t32x64x256_split_k1_block_m_warp1_block_n_warp2_block_k_warp2_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0043,182.18,2935.53
+-gfx950,256,64,6144,4096,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,2331,1,16.7063,flydsl_gemm3_abf16_wbf16_bf16_t32x64x256_split_k1_block_m_warp2_block_n_warp1_block_k_warp2_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0047,192.82,3091.19
++gfx950,256,64,6144,4096,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,438484,0,15.8230,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT48x64x256_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA0_DTLB0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA512_LBSPPB512_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT3_1_MO40_NTn1_NTA5_NTB3_NTC1_NTD2_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS0_SPO0_SRVW0_SSO0_SVW4_SK3_SKFTR0_SKXCCM0_TLDS2_ULSGRO0_USL1_UIOFGRO0_USFGRO0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS64_WG16_16_1,0.0,203.58,3.26
+ gfx950,256,64,6144,6144,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,6346,2,22.8561,flydsl_gemm4_abf16_wbf16_bf16_t64x64x128_split_k2_block_m_warp2_block_n_warp2_block_k_warp2_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0136,211.4,3371.98
+ gfx950,256,8,128,6144,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,4881,12,4.5522,flydsl_gemm6_abf16_wbf16_bf16_t16x64x64_split_k12_block_m_warp1_block_n_warp2_block_k_warp1_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0205,2.76,367.56
+ gfx950,256,8,256,6144,False,torch.bfloat16,torch.bfloat16,False,False,flydsl,6603,12,5.2817,flydsl_gemm7_abf16_wbf16_bf16_t16x64x64_split_k12_block_m_warp1_block_n_warp2_block_k_warp1_async_copyTrue_b_to_ldsTrue_b_preshuffleFalse_c_to_ldsFalse_gfx950,0.0239,4.76,614.98
+--- a/aiter/configs/model_configs/llama31_8b_bf16_tuned_gemm.csv
++++ b/aiter/configs/model_configs/llama31_8b_bf16_tuned_gemm.csv
+@@ -0,0 +1,2 @@
++gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernelName,err_ratio,tflops,bw
++gfx950,256,64,4096,14336,False,torch.bfloat16,torch.bfloat16,False,False,hipblaslt,440151,0,27.6540,Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x64x128_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA0_DTLB0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB512_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT4_2_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK3_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGRO0_VSn1_VWA4_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1,0.0,271.79,4.33

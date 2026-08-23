@@ -1,0 +1,148 @@
+diff --git a/python/sglang/kernels/aot/csrc/moe/moe_align_kernel.cu b/python/sglang/kernels/aot/csrc/moe/moe_align_kernel.cu
+index f5ef1b4d07..7a5510442a 100644
+--- a/python/sglang/kernels/aot/csrc/moe/moe_align_kernel.cu
++++ b/python/sglang/kernels/aot/csrc/moe/moe_align_kernel.cu
+@@ -19,26 +19,95 @@ limitations under the License.
+ 
+ #include <THC/THCAtomics.cuh>
+ 
++#include <iostream>
++#include <mutex>
++
+ #include "utils.h"
+ 
+ #define VEC_SIZE 4
+ using Vec = int4;
+ 
+-template <typename scalar_t>
+-__global__ void count_and_sort_expert_tokens_kernel(
++// Two-level counting sort of (token, expert) pairs into per-expert contiguous ranges.
++//
++// This replaces a version that issued one *global* atomicAdd per pair onto only
++// `num_experts + 1` counters:
++//
++//     for (i = tid; i < numel; i += stride) {
++//       rank = atomicAdd(&cumsum_buffer[topk_ids[i] + 1], 1);
++//       sorted_token_ids[rank] = i;
++//     }
++//
++// For a 16384-token prefill chunk with topk 8 and 128 experts that is 131072 atomics contending
++// on 129 addresses -- roughly a thousand deep per address. Global same-address atomics serialise
++// at the memory controller, so its cost was set by the contention depth and not by its 1 MB of
++// actual traffic. Measured on MI355X at that shape: 102 us with a perfectly balanced router,
++// 332 us with a skewed one, against ~264 us observed in production. The read plus write it
++// performs should take single-digit microseconds.
++//
++// This version privatises the histogram in LDS. Each block counts its own slice, then takes one
++// global atomicAdd per bucket to reserve a contiguous output range. Global atomics fall from
++// `numel` to `gridDim * (num_experts + 1)` -- for the shape above, 131072 -> 8256, a 16x cut
++// that the block geometry controls. Measured 6.3-6.9 us on both router distributions, i.e. the
++// runtime stops depending on router balance at all.
++//
++// ITEMS elements per thread are held in registers between the counting pass and the scatter pass
++// so that `topk_ids` is read once, not twice.
++//
++// ORDERING. Ranks within a bucket come out in a different order than the old kernel produced.
++// That is not a behaviour change: `atomicAdd` handed out ranks in whatever order the memory
++// system happened to serialise them, so the old kernel did not produce a repeatable order
++// either. Only the grouping is defined, and downstream (fused_moe) only consumes the grouping.
++//
++// LDS. 2 * (num_experts + 1) int32. The caller's other kernel, moe_align_block_size_kernel,
++// already requires ~3x that in the same function, so any launch that reaches here has the room.
++template <typename scalar_t, int THREADS, int ITEMS>
++__global__ void __launch_bounds__(THREADS) count_and_sort_expert_tokens_smem_kernel(
+     const scalar_t* __restrict__ topk_ids,
+     int32_t* __restrict__ sorted_token_ids,
+     int32_t* __restrict__ cumsum_buffer,
+     size_t numel,
++    int32_t num_buckets,
+     bool ignore_invalid_expert) {
+-  const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+-  const size_t stride = blockDim.x * gridDim.x;
++  extern __shared__ int32_t smem_sort[];
++  int32_t* s_cnt = smem_sort;                 // [num_buckets] block-local histogram
++  int32_t* s_base = smem_sort + num_buckets;  // [num_buckets] this block's reserved global base
+ 
+-  for (size_t i = tid; i < numel; i += stride) {
+-    if (ignore_invalid_expert && topk_ids[i] < 0) continue;
+-    int32_t expert_id = topk_ids[i] + 1;
+-    int32_t rank_post_pad = atomicAdd(&cumsum_buffer[expert_id], 1);
+-    sorted_token_ids[rank_post_pad] = i;
++  for (int e = threadIdx.x; e < num_buckets; e += THREADS) s_cnt[e] = 0;
++  __syncthreads();
++
++  const size_t base_i = static_cast<size_t>(blockIdx.x) * (THREADS * ITEMS);
++  int32_t eid[ITEMS];
++  int32_t rnk[ITEMS];
++
++#pragma unroll
++  for (int t = 0; t < ITEMS; ++t) {
++    const size_t i = base_i + static_cast<size_t>(t) * THREADS + threadIdx.x;
++    eid[t] = -1;
++    rnk[t] = 0;
++    if (i < numel) {
++      const int32_t v = static_cast<int32_t>(topk_ids[i]);
++      if (!(ignore_invalid_expert && v < 0)) {
++        eid[t] = v + 1;
++        rnk[t] = atomicAdd(&s_cnt[eid[t]], 1);
++      }
++    }
++  }
++  __syncthreads();
++
++  // One global atomic per (block, bucket). Buckets this block never saw are skipped, which is
++  // what makes the small-batch case cheap: a decode step has far fewer tokens than experts.
++  for (int e = threadIdx.x; e < num_buckets; e += THREADS) {
++    const int32_t c = s_cnt[e];
++    s_base[e] = c ? atomicAdd(&cumsum_buffer[e], c) : 0;
++  }
++  __syncthreads();
++
++#pragma unroll
++  for (int t = 0; t < ITEMS; ++t) {
++    if (eid[t] >= 0) {
++      const size_t i = base_i + static_cast<size_t>(t) * THREADS + threadIdx.x;
++      sorted_token_ids[s_base[eid[t]] + rnk[t]] = static_cast<int32_t>(i);
++    }
+   }
+ }
+ 
+@@ -377,17 +446,31 @@ void moe_align_block_size(
+           scan_size,
+           max_num_tokens_padded);
+ 
+-      const int block_threads = std::min(256, (int)threads);
+-      const int num_blocks = (topk_ids.numel() + block_threads - 1) / block_threads;
+-      const int max_blocks = 65535;
+-      const int actual_blocks = std::min(num_blocks, max_blocks);
+-
+-      auto sort_kernel = count_and_sort_expert_tokens_kernel<scalar_t>;
+-      sort_kernel<<<actual_blocks, block_threads, 0, stream>>>(
++      // Block geometry for the two-level sort. 512 threads x 4 elements = 2048 elements per
++      // block, chosen by sweeping (threads, items) over token counts from 1 to 16384 on both a
++      // balanced and a skewed router (analysis/moe_align_bench.py in the tuning bundle). It is
++      // within 7% of the best geometry at every size measured, and the sizes where it is not
++      // first are the ones where every variant is already at the ~4.2 us launch floor. Per-warp
++      // histogram replication was also swept and never helped, so it is not here.
++      constexpr int kSortThreads = 512;
++      constexpr int kSortItems = 4;
++      constexpr int64_t kPerBlock = static_cast<int64_t>(kSortThreads) * kSortItems;
++
++      const int sort_blocks = static_cast<int>((topk_ids.numel() + kPerBlock - 1) / kPerBlock);
++      const size_t sort_shmem = static_cast<size_t>(2 * num_experts) * sizeof(int32_t);
++
++      static std::once_flag sort_banner;
++      std::call_once(sort_banner, [] {
++        std::cerr << "[sgl] two-level MoE token sort active" << std::endl;
++      });
++
++      auto sort_kernel = count_and_sort_expert_tokens_smem_kernel<scalar_t, kSortThreads, kSortItems>;
++      sort_kernel<<<sort_blocks, kSortThreads, sort_shmem, stream>>>(
+           topk_ids.data_ptr<scalar_t>(),
+           sorted_token_ids.data_ptr<int32_t>(),
+           cumsum_buffer.data_ptr<int32_t>(),
+           topk_ids.numel(),
++          static_cast<int32_t>(num_experts),
+           ignore_invalid_expert);
+     }
+   });

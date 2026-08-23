@@ -1,0 +1,215 @@
+{
+  "image": "vllm 0.21.0",
+  "rows": [
+    {
+      "skill": "env-setup",
+      "claim": "GPUs are visible; rocminfo reports a gfx arch",
+      "status": "PASS",
+      "detail": "gfx950",
+      "seconds": 0.18
+    },
+    {
+      "skill": "env-setup",
+      "claim": "neither image ships a bench client; both ship deploy targets",
+      "status": "PASS",
+      "detail": "absent=hipblaslt-bench; aiter configs dir present=True",
+      "seconds": 2.59
+    },
+    {
+      "skill": "env-setup",
+      "claim": "aiter ships as a wheel in vllm and a source checkout in sglang",
+      "status": "PASS",
+      "detail": "wheel (no tuner tree), version 0.1.13, root /usr/local/lib/python3.12/dist-packages",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-triton",
+      "claim": "AMD knobs raise TypeError as kwargs but are accepted in the positional dict",
+      "status": "PASS",
+      "detail": "TypeError on kwarg; all three knobs present in all_kwargs (triton 3.6.0)",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-triton",
+      "claim": "the HIP backend exposes the knobs as HIPOptions fields",
+      "status": "PASS",
+      "detail": "21 fields, all three knobs present",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-hipblaslt",
+      "claim": "hipblaslt-bench replays a solution by index with --algo_method index",
+      "status": "N/A",
+      "detail": "hipblaslt-bench not built in this image (see env-setup)",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-hipblaslt",
+      "claim": "torch exposes TunableOp as the no-build route to solution selection",
+      "status": "PASS",
+      "detail": "torch 2.10.0+git8514f05, tunable API complete",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-ck",
+      "claim": "ckProfiler takes positional args and lists its ops when run bare",
+      "status": "PASS",
+      "detail": "op list printed, gemm present",
+      "seconds": 0.12
+    },
+    {
+      "skill": "tuning-aiter",
+      "claim": "the tuned-config CSV has the documented 18-column schema",
+      "status": "PASS",
+      "detail": "18 columns as documented",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-aiter",
+      "claim": "AITER_LOG_TUNED_CONFIG is the engagement signal, and rows are keyed by cu_num",
+      "status": "PASS",
+      "detail": "9195 of 9964 rows across 8 tables reachable at cu_num=256; unreachable: a8w8_tuned_batched_gemm.csv 0/26, bf16_tuned_batched_gemm.csv 0/26, tuned_fmoe.csv 0/622",
+      "seconds": 0.01
+    },
+    {
+      "skill": "tuning-flydsl",
+      "claim": "flydsl is importable and exposes a tunable Config surface",
+      "status": "PASS",
+      "detail": "flydsl 0.1.4",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-hip",
+      "claim": "rocprofv3 is present and gives ground truth for which kernel ran",
+      "status": "PASS",
+      "detail": "--kernel-trace supported",
+      "seconds": 0.02
+    },
+    {
+      "skill": "tuning-hip",
+      "claim": "the arch limits the skill reasons about are readable, not assumed",
+      "status": "PASS",
+      "detail": "gfx950: CU=256, warp=64, LDS/workgroup=163840",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-ck",
+      "claim": "aiter ships seven CK offline tuners, and none of them takes --indtype",
+      "status": "N/A",
+      "detail": "aiter is a wheel here -- csrc/ tuners ship only in the source checkout",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-ck",
+      "claim": "the AITER_CONFIG_<OP> override has no _FILE suffix; the _FILE name is a property",
+      "status": "PASS",
+      "detail": "no-suffix form redirects; _FILE form is silently ignored",
+      "seconds": 10.08
+    },
+    {
+      "skill": "tuning-ck",
+      "claim": "the shipped fused-MoE shape list is gfx942-only and will not run here",
+      "status": "PASS",
+      "detail": "11 of 13 rows are FNUZ and cannot run on gfx950; gemm_moe_tune.py raises KeyError and tunes 0 shapes. Filter with `grep -v fnuz`.",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-ck",
+      "claim": "CK gates instances on an exact get_device_name() string, so the candidate pool differs between parts (SKILL.md 2b)",
+      "status": "PASS",
+      "detail": "87 gates exclude on gfx950 and 79 add only there; exclusions touch: batched_gemm_softmax_gemm_permute gemm_universal gemm_universal_batched gemm_universal_reduce gemm_universal_streamk grouped_conv2d_fwd grouped_conv2d_fwd_bias_bnorm_clamp grouped_conv2d_fwd_bias_clamp grouped_conv2d_fwd_clamp grouped_conv3d_fwd grouped_conv3d_fwd_bias_bnorm_clamp grouped_conv3d_fwd_bias_clamp grouped_conv3d_fwd_clamp",
+      "seconds": 1.92
+    },
+    {
+      "skill": "tuning-hipblaslt",
+      "claim": "the gfx950 Tensile logic tree is split by selection strategy and is Origami-dominated, unlike gfx942's CU-count split (SKILL.md 7)",
+      "status": "PASS",
+      "detail": "Origami is 83% of 566 gfx950 logic files {'Equality': 25, 'GridBased': 67, 'Origami': 471, 'Range': 3}; gfx942 splits by CU count instead (7 dirs, no Origami)",
+      "seconds": 0.04
+    },
+    {
+      "skill": "tuning-aiter",
+      "claim": "gradlib's gemm_tuner.py has no --libtype flag; libtype is an output column",
+      "status": "N/A",
+      "detail": "gradlib tuner ships only in the aiter source checkout",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-in-vllm",
+      "claim": "vLLM reads tuned configs from VLLM_TUNED_CONFIG_FOLDER",
+      "status": "PASS",
+      "detail": "vllm 0.21.0 reads it in 3 file(s)",
+      "seconds": 2.38
+    },
+    {
+      "skill": "tuning-in-sglang",
+      "claim": "SGLang keys MoE configs by Triton version, and no dir holds a config for the live device",
+      "status": "N/A",
+      "detail": "sglang not installed in this image",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-in-sglang",
+      "claim": "SGLANG_MOE_CONFIG_DIR must name the parent of configs/, and naming the version dir raises",
+      "status": "N/A",
+      "detail": "sglang not installed in this image",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-in-vllm",
+      "claim": "the device name comes from the framework, not from torch or gcnArchName",
+      "status": "PASS",
+      "detail": "platform='AMD Instinct MI355 OAM' torch='' arch='gfx950:sramecc+:xnack-' -> E=128,N=1024,device_name=AMD_Instinct_MI355_OAM,dtype=fp8_w8a8.json",
+      "seconds": 2.89
+    },
+    {
+      "skill": "tuning-in-sglang",
+      "claim": "SGLANG_MOE_CONFIG_DIR is an override the installed code honors",
+      "status": "N/A",
+      "detail": "sglang not installed in this image",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-core",
+      "claim": "an idle-GPU check exists, so 'pin your GPUs' is actionable",
+      "status": "PASS",
+      "detail": "8 GPUs reporting utilization",
+      "seconds": 0.07
+    },
+    {
+      "skill": "tuning-core",
+      "claim": "relative error is the gate; bf16 at K=4096 shows why absolute is not",
+      "status": "PASS",
+      "detail": "abs=0.934 but rel=0.00315 -- absolute error alone would look alarming",
+      "seconds": 2.86
+    },
+    {
+      "skill": "tuning-core",
+      "claim": "fp8 dialect is arch-specific: exactly one of FNUZ/OCP computes",
+      "status": "PASS",
+      "detail": "float8_e4m3fn computes; float8_e4m3fnuz refused with 'could not find valid hipblaslt solution'",
+      "seconds": 2.29
+    },
+    {
+      "skill": "tuning-hip",
+      "claim": "LDS per workgroup is read from the device, and any two sources agree",
+      "status": "PASS",
+      "detail": "163840 bytes from rocminfo+torch",
+      "seconds": 0.23
+    },
+    {
+      "skill": "tuning-triton",
+      "claim": "Gluon exposes a cdna4 dialect, and it is the gfx950-only surface",
+      "status": "PASS",
+      "detail": "cdna3+cdna4 present; cdna4 has mfma_scaled and scale layout",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-core",
+      "claim": "microscaled FP4 is reachable on gfx950, and torch.zeros is the wrong probe",
+      "status": "PASS",
+      "detail": "mxfp4 runs via both torch._scaled_mm and aiter; torch.zeros still raises, so probing with it would report FP4 unsupported on the one arch that has it",
+      "seconds": 0.65
+    }
+  ]
+}

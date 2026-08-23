@@ -1,0 +1,204 @@
+# 02-attn-residual-triton.diff
+#
+# Retune and restructure the Kimi-K3 attention-residual triton pair
+# (_score_kernel / _combine_kernel) for gfx950.
+#
+#   - score:   hoist the two cross-lane reductions out of the H loop
+#              (14 block-wide reduces per CTA -> 2)
+#   - combine: mix the bank rows as one [BLOCK_R, BLOCK_H] tile instead of a
+#              loop with a cross-lane reduce per row; BLOCK_R sized to nvb
+#   - launch:  1 wave64 per CTA for both kernels, combine tile 512, on ROCm only
+#
+# Why it was there to find: _use_fast() gates the fast TMA kernel on
+# get_device_capability()[0] >= 10, i.e. SM100+, so on CDNA this fallback is the
+# only path -- and its launch config had never been tuned on a machine that runs
+# it. See analysis/triton_amd_ptr_if_bug.md for the rewrite that does not
+# compile.
+#
+# Base:    sglang 0.5.15.post1.dev20260723+g6c9fd0adc5,
+#          git 0e756912eb3cd8f531f95c17299485b9312b2534
+# Apply:   cd /sgl-workspace/sglang && git apply 01-codelane-mla-decode.diff
+#          cd /sgl-workspace/sglang && git apply 02-attn-residual-triton.diff
+#          (independent of 01; measured stacked on it)
+#
+# Measurement: arm C, stacked on 01. 936.952 tok/s (n=10 over 3 server
+#          restarts: candC_s3_r1..r3, candC_s6_r1..r3, candC_s8_r1..r4;
+#          sd 1.318) against arm B's 889.683 -> +5.31%, and against the local
+#          baseline 803.786 -> +16.57%. Across-restart noise floor 0.713%.
+#          (An earlier revision of this header quoted 937.076 from the first
+#          n=5; server 8 was added later as the matched control between the two
+#          arm-D servers and moved the mean by 0.01%.)
+#          Gate: eval_results/candC_s3_20260820_133546, gsm8k strict-match
+#          0.9780 +/- 0.0040 vs the baseline gate's 0.9765 +/- 0.0042.
+#          Kernel: analysis/profiles/{cand_s2,candC_s3}/kernel_table.txt --
+#          _score_kernel 1.54 -> 0.78 ms and the pair 6.48% -> 4.42% of decode
+#          GPU time over the same 186-call window.
+#          Isolated: analysis/bench_attn_res.py, graph-captured, 1.83x on the
+#          pair at T=64 and 1.49-2.03x at the prefill tiles.
+diff --git a/python/sglang/srt/layers/attn_residual.py b/python/sglang/srt/layers/attn_residual.py
+index 266d2f2cd..17875fe3d 100644
+--- a/python/sglang/srt/layers/attn_residual.py
++++ b/python/sglang/srt/layers/attn_residual.py
+@@ -22,10 +22,32 @@ import triton.language as tl
+ 
+ from sglang.srt.layers.layernorm import RMSNorm
+ from sglang.srt.layers.linear import ReplicatedLinear
++from sglang.srt.utils import is_hip
+ 
+ _BLOCK_H: int = 1024  # H = 7168 = 7 x 1024
+ _MAX_ROWS: int = 16  # next_pow2(8 + 1), K3 has <= 8 snapshots
+ 
++_is_hip = is_hip()
++
++# Launch config for the triton pipeline. The published values were never tuned
++# for a machine that actually runs it: _use_fast() takes SM100+, so on CDNA the
++# fallback is the only path, and on gfx950 it was measurably mis-shaped -- one
++# wave64 per CTA beats the 8 and 4 warps below by 1.83x on the pair.
++# Measurement: analysis/bench_attn_res.py --sweep (graph-captured, T in
++# {64, 2048, 16384} x nvb in {1, 4, 7}); the optimum is 1 warp at every shape.
++# Left alone off ROCm, where a warp is 32 lanes and the sweep does not apply.
++_SCORE_WARPS: int = 1 if _is_hip else 8
++_COMBINE_BLOCK_H: int = 512 if _is_hip else _BLOCK_H
++_COMBINE_WARPS: int = 1 if _is_hip else 4
++
++
++def _pow2_ge(n: int) -> int:
++    p = 1
++    while p < n:
++        p *= 2
++    return p
++
++
+ _FAST_SUPPORTED = None
+ 
+ 
+@@ -114,13 +136,26 @@ def _score_kernel(
+     H: tl.constexpr,
+     BLOCK_H: tl.constexpr,
+ ):
+-    """One CTA per (token, row): scan H, output one scalar score."""
++    """One CTA per (token, row): scan H, output one scalar score.
++
++    The two cross-lane reductions are kept out of the H loop. Reducing inside it
++    costs 2 block-wide reduces per H block -- 14 for H=7168 -- where the loop
++    body is otherwise two FMAs into per-lane accumulators and one reduce each at
++    the end is enough. The summation order changes, so the scores differ from
++    the previous version in the last bf16 ulp.
++
++    The bank/prefix select stays inside the loop rather than choosing a base
++    pointer once, above it. That rewrite is the obvious one and it does not
++    compile: TritonAMDGPUCanonicalizePointers asserts on an scf.if yielding fat
++    pointers with different bases ("expected then fat ptr canNarrow and else fat
++    ptr canNarrow to be equal", CanonicalizePointers.cpp:1441).
++    """
+     pid_t = tl.program_id(0)
+     j = tl.program_id(1)
+     if j > NVB:
+         return
+-    sumsq = 0.0
+-    dotv = 0.0
++    acc_sq = tl.zeros([BLOCK_H], dtype=tl.float32)
++    acc_dot = tl.zeros([BLOCK_H], dtype=tl.float32)
+     for h0 in tl.static_range(0, H, BLOCK_H):
+         offs_h = h0 + tl.arange(0, BLOCK_H)
+         if j < NVB:
+@@ -130,8 +165,10 @@ def _score_kernel(
+         else:
+             v = tl.load(prefix_ptr + pid_t * stride_pm + offs_h).to(tl.float32)
+         cw = tl.load(cw_ptr + offs_h)
+-        sumsq += tl.sum(v * v)
+-        dotv += tl.sum(v * cw)
++        acc_sq += v * v
++        acc_dot += v * cw
++    sumsq = tl.sum(acc_sq)
++    dotv = tl.sum(acc_dot)
+     rrms = 1.0 / tl.sqrt(sumsq / H + eps)
+     tl.store(scores_ptr + pid_t * stride_sm + j, dotv * rrms)
+ 
+@@ -152,12 +189,20 @@ def _combine_kernel(
+     stride_sm,
+     stride_om,
+     BLOCK_H: tl.constexpr,
++    BLOCK_R: tl.constexpr,
+     MAX_ROWS: tl.constexpr,
+ ):
+     """One CTA per (token, H-chunk): softmax(scores) → weighted sum → write chunk.
+ 
+     Softmax is redundantly computed by each H-chunk CTA (≤16 elements, trivial).
+     This gives full H-parallelism: 7 CTAs for H=7168/1024.
++
++    The bank rows are mixed as one [BLOCK_R, BLOCK_H] tile rather than a loop
++    over rows. Per-row, turning p[j] into a scalar multiplier needs a cross-lane
++    reduce over MAX_ROWS; as a tile the weight is a broadcast along axis 0 and
++    the whole mix is one tl.sum. BLOCK_R is sized to nvb by the caller -- a
++    fixed 8-row tile is 32 KB of registers per CTA whether or not the rows are
++    masked off, which cost 32% at nvb=1.
+     """
+     pid_t = tl.program_id(0)
+     pid_h = tl.program_id(1)
+@@ -173,18 +218,23 @@ def _combine_kernel(
+     e = tl.where(mask_b, tl.exp(raw - m), 0.0)
+     p = e / tl.sum(e, axis=0)
+ 
+-    # Weighted sum for this H chunk
++    # Weighted sum for this H chunk: the NVB bank rows as one tile, then the
++    # prefix row (index NVB), which does not live in the bank.
+     offs_h = h0 + tl.arange(0, BLOCK_H)
+-    acc = tl.zeros([BLOCK_H], tl.float32)
+-    for j in range(0, NVB + 1):
+-        if j < NVB:
+-            v = tl.load(bank_ptr + pid_t * stride_bm + j * stride_bb + offs_h).to(
+-                tl.float32
+-            )
+-        else:
+-            v = tl.load(prefix_ptr + pid_t * stride_pm + offs_h).to(tl.float32)
+-        p_j = tl.sum(tl.where(offs_b == j, p, 0.0), axis=0)
+-        acc += p_j * v
++    offs_r = tl.arange(0, BLOCK_R)
++    mask_r = offs_r < NVB
++    vb = tl.load(
++        bank_ptr + pid_t * stride_bm + offs_r[:, None] * stride_bb + offs_h[None, :],
++        mask=mask_r[:, None],
++        other=0.0,
++    ).to(tl.float32)
++    pb = tl.sum(
++        tl.where(offs_b[None, :] == offs_r[:, None], p[None, :], 0.0), axis=1
++    )
++    acc = tl.sum(tl.where(mask_r, pb, 0.0)[:, None] * vb, axis=0)
++
++    vp = tl.load(prefix_ptr + pid_t * stride_pm + offs_h).to(tl.float32)
++    acc += tl.sum(tl.where(offs_b == NVB, p, 0.0), axis=0) * vp
+     tl.store(
+         out_ptr + pid_t * stride_om + offs_h,
+         acc.to(out_ptr.dtype.element_ty),
+@@ -204,7 +254,7 @@ def _mix_fused(
+     """Triton score + combine pair: returns the pre-norm mixture."""
+     T, H = prefix_sum.shape
+     cw = get_cw(score_proj, score_norm)
+-    n_h_blocks = H // _BLOCK_H
++    n_h_blocks = H // _COMBINE_BLOCK_H
+ 
+     # Step 1: score each row (2D grid, full row-parallelism)
+     scores = torch.empty((T, _MAX_ROWS), dtype=torch.float32, device=prefix_sum.device)
+@@ -221,7 +271,7 @@ def _mix_fused(
+         scores.stride(0),
+         H=H,
+         BLOCK_H=_BLOCK_H,
+-        num_warps=8,
++        num_warps=_SCORE_WARPS,
+     )
+ 
+     # Step 2: softmax + weighted sum (2D grid, full H-parallelism)
+@@ -237,9 +287,10 @@ def _mix_fused(
+         bank.stride(1),
+         scores.stride(0),
+         out.stride(0),
+-        BLOCK_H=_BLOCK_H,
++        BLOCK_H=_COMBINE_BLOCK_H,
++        BLOCK_R=_pow2_ge(max(nvb, 1)),
+         MAX_ROWS=_MAX_ROWS,
+-        num_warps=4,
++        num_warps=_COMBINE_WARPS,
+     )
+     return out
+ 

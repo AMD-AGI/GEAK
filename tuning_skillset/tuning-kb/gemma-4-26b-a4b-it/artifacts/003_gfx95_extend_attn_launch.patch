@@ -1,0 +1,104 @@
+diff --git a/python/sglang/kernels/ops/attention/extend_attention.py b/python/sglang/kernels/ops/attention/extend_attention.py
+index 82fa160e49..5d7687d699 100644
+--- a/python/sglang/kernels/ops/attention/extend_attention.py
++++ b/python/sglang/kernels/ops/attention/extend_attention.py
+@@ -16,6 +16,8 @@ Memory-efficient attention for prefill.
+ It supports page size = 1 and prefill with KV cache (i.e. extend).
+ """
+ 
++import logging
++
+ import torch
+ import triton
+ import triton.language as tl
+@@ -35,6 +37,64 @@ if _is_cuda:
+ _is_hip = is_hip()
+ _is_gfx95 = _is_hip and is_gfx95_supported()
+ 
++logger = logging.getLogger(__name__)
++
++# gfx95 (MI350/MI355X) launch tuning for the extend (prefill) attention kernel.
++#
++# The HIP branch of _get_block_sizes_for_extend_attention() below has exactly one
++# tuned case -- `128 < Lq <= 256` -> (128, 64, 8 warps) -- and sends everything else
++# to a generic (64, 64, 4 warps). Every CUDA branch in the same function instead
++# specialises `Lq > 256` separately (Hopper 32/64, sm100 16/64, sm120 32/32), and the
++# sm100 comment spells out why: large head dims exhaust registers, so they need a
++# *smaller* query tile. The HIP branch never got that treatment.
++#
++# Both shapes this model runs were measured on the machine (analysis/extend_bench.py,
++# interleaved re-time per measurement.md Rule 5, batch 2x8192, 8 query heads/rank):
++#
++#   head_dim 512, full attention, 1 KV head/rank  (5 of 30 layers)
++#     stock m64n64w4s1  3268.8 us / 336 TFLOP/s
++#     tuned m64n32w4s2  2275.9 us / 483 TFLOP/s   -30.4% kernel time
++#     Not bit-exact: BLOCK_N 64->32 reorders the online-softmax reduction.
++#     Max relative error 6.8e-04 (comparable to patch 001's 4.4e-04); gsm8k-gated.
++#
++#   head_dim 256, sliding window 1023, 4 KV heads/rank  (25 of 30 layers)
++#     stock m128n64w8s1   787.0 us / 174 TFLOP/s
++#     tuned m64n64w4s2    700.3 us / 196 TFLOP/s   -11.0% kernel time
++#     Bit-exact (relerr 0.0): BLOCK_N is unchanged, so the reduction order is too.
++#     With a 1024-token window a 128-row query tile spans more rows than the window
++#     serves, so the upstream gfx95 tile -- tuned on non-SWA head_dim 256 -- is the
++#     wrong shape here. Keyed on the window being active so non-SWA head_dim 256
++#     keeps upstream's tile.
++#
++# Keyed on (BLOCK_DMODEL, window-active); shapes not listed keep the stock launch, so
++# this can only affect configurations that were measured.
++_GFX95_EXTEND_CFG = {
++    # (BLOCK_M, BLOCK_N, num_warps, num_stages, waves_per_eu)
++    (512, False): (64, 32, 4, 2, 1),
++    (256, True): (64, 64, 4, 2, 2),
++}
++_GFX95_EXTEND_LOGGED = set()
++
++
++def _gfx95_extend_launch(BLOCK_DMODEL: int, BLOCK_DPE: int, sliding_window_size):
++    """Tuned (BLOCK_M, BLOCK_N, num_warps, num_stages, waves_per_eu), or None.
++
++    BLOCK_DPE != 0 means a split rope/nope head dim (MLA, Lq=576/288/192), which is a
++    different kernel shape entirely and was not measured -- those keep the stock launch.
++    """
++    if not _is_gfx95 or BLOCK_DPE != 0:
++        return None
++    key = (BLOCK_DMODEL, bool(sliding_window_size and sliding_window_size > 0))
++    tuned = _GFX95_EXTEND_CFG.get(key)
++    if tuned is not None and key not in _GFX95_EXTEND_LOGGED:
++        _GFX95_EXTEND_LOGGED.add(key)
++        logger.info(
++            "gfx95 extend attention tuning active: BLOCK_DMODEL=%d swa=%s -> "
++            "BLOCK_M=%d BLOCK_N=%d num_warps=%d num_stages=%d waves_per_eu=%d",
++            key[0], key[1], *tuned,
++        )
++    return tuned
++
+ 
+ def _get_block_sizes_for_extend_attention(Lq: int, Lv: int):
+     """
+@@ -789,6 +849,15 @@ def extend_attention_fwd(
+         _get_block_sizes_for_extend_attention(Lq, Lv)
+     )
+ 
++    # gfx95 launch tuning (see _GFX95_EXTEND_CFG). Applied here rather than inside
++    # _get_block_sizes_for_extend_attention() because the choice depends on whether a
++    # sliding window is active -- which that function does not receive -- and because
++    # num_stages / waves_per_eu are set at the launch site below, not returned by it.
++    # Must land before the compact-grid computation, which reads BLOCK_M.
++    _gfx95_tuned = _gfx95_extend_launch(BLOCK_DMODEL, BLOCK_DPE, sliding_window_size)
++    if _gfx95_tuned is not None:
++        BLOCK_M, BLOCK_N, num_warps = _gfx95_tuned[:3]
++
+     sm_scale = sm_scale or 1.0 / (Lq**0.5)
+     batch_size, head_num = qo_indptr.shape[0] - 1, q_extend.shape[1]
+     kv_group_num = q_extend.shape[1] // k_extend.shape[1]
+@@ -827,6 +896,9 @@ def extend_attention_fwd(
+     extra_kargs = {}
+     if _is_hip:
+         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
++        if _gfx95_tuned is not None:
++            num_stages = _gfx95_tuned[3]
++            extra_kargs["waves_per_eu"] = _gfx95_tuned[4]
+ 
+     k_slot_stride, k_head_stride, k_page_stride, k_tok_stride = _extract_kv_strides(
+         k_buffer, page_size

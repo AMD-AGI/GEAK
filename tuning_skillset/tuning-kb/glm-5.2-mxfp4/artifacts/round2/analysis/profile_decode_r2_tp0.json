@@ -1,0 +1,365 @@
+{
+  "total_gpu_ms": 6251.279935009151,
+  "kernels": [
+    {
+      "kernel": "main_kernel",
+      "pct": 14.91921735542464,
+      "ms": 932.6420410000634,
+      "calls": 46800,
+      "us_per_call": 19.928248739317596,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "mfma_moe1_silu_mul_afp4_wfp4_bf16_t32x128x256_pm1_async_v32",
+      "pct": 13.28299080560657,
+      "ms": 830.3569389999939,
+      "calls": 22500,
+      "us_per_call": 36.90475284444417,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter26cross_device_reduce_2stageIDF16bLi8ELb0EEEvPNS_8RankDataES2_NS_11RankSignalsEPNS_6SignalEPT_ii",
+      "pct": 9.209051985913673,
+      "ms": 575.6836189999832,
+      "calls": 47100,
+      "us_per_call": 12.222582144373316,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "mfma_moe2_afp4_wfp4_bf16_cshuffle_t32x128x256_vscale_fix3_fp4opt_v1_persist_cu256_acc0",
+      "pct": 7.675213716041876,
+      "ms": 479.79909499999593,
+      "calls": 22500,
+      "us_per_call": 21.324404222222043,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "hgemm_bf16_32x64x64x7_SPK3_W1x2x1_BLDS1_TN_AS1_0",
+      "pct": 5.921833846006636,
+      "ms": 370.19041099999356,
+      "calls": 23400,
+      "us_per_call": 15.82010303418776,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x64x64_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_",
+      "pct": 4.364251830606945,
+      "ms": 272.8215990000016,
+      "calls": 23400,
+      "us_per_call": 11.659042692307759,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "hgemm_bf16_32x64x128x4_SPK1_W2x2x1_BLDS1_TN_AS1_0",
+      "pct": 3.7324261499362668,
+      "ms": 233.3244070000004,
+      "calls": 23400,
+      "us_per_call": 9.971128504273523,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT32x16x1024_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0",
+      "pct": 3.2073612617655214,
+      "ms": 200.50113100000436,
+      "calls": 23400,
+      "us_per_call": 8.568424401709589,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb1ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+      "pct": 3.174637579235657,
+      "ms": 198.45548200001886,
+      "calls": 46800,
+      "us_per_call": 4.240501752137155,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter30fused_mx_quant_moe_sort_kernelIDF16bN4opus5fp4_tELi256ELi32EEEvPT0_PhPKT_PKiSA_PKfiiiiiiiii",
+      "pct": 2.630776300369934,
+      "ms": 164.45719100000173,
+      "calls": 22500,
+      "us_per_call": 7.309208488888967,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "hgemm_bf16_32x64x128x5_SPK8_W1x4x1_BLDS1_TN_AS1_0",
+      "pct": 2.3190098908886743,
+      "ms": 144.9678000000013,
+      "calls": 22500,
+      "us_per_call": 6.443013333333391,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "(anonymous namespace)::topk_transform_decode_kernel((anonymous namespace)::FastTopKParams, int*, int const*, l",
+      "pct": 2.2418951071944826,
+      "ms": 140.14713900000058,
+      "calls": 6300,
+      "us_per_call": 22.24557761904771,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x32x64_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_D",
+      "pct": 2.1288255266688605,
+      "ms": 133.07884300000336,
+      "calls": 23400,
+      "us_per_call": 5.687130042735187,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter30fused_mx_quant_moe_sort_kernelIDF16bN4opus5fp4_tELi64ELi8EEEvPT0_PhPKT_PKiSA_PKfiiiiiiiii",
+      "pct": 2.1258570625794686,
+      "ms": 132.89327600000524,
+      "calls": 22500,
+      "us_per_call": 5.906367822222456,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+      "pct": 2.0387238985453258,
+      "ms": 127.44633800000027,
+      "calls": 6300,
+      "us_per_call": 20.229577460317504,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::elementwise_kernel_manual_unroll<N, 8, at::native::gpu_kernel_impl_nocast<>(at::TensorIterato",
+      "pct": 1.9145968544732235,
+      "ms": 119.68680900000096,
+      "calls": 23700,
+      "us_per_call": 5.050076329113965,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::grouped_topk_kernel<>(hip_bfloat16*, hip_bfloat16 const*, float*, int*, unsigned long, unsigned lo",
+      "pct": 1.6712656941645254,
+      "ms": 104.47549699999837,
+      "calls": 22500,
+      "us_per_call": 4.64335542222215,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter23fused_qk_rmsnorm_kernelIDF16bLi256ELi8ELb1ELi1EEEvPT_S2_PKS1_S4_S4_S4_ffiiiiiii",
+      "pct": 1.642383656905472,
+      "ms": 102.6700000000013,
+      "calls": 23400,
+      "us_per_call": 4.387606837606893,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<> >, aiter",
+      "pct": 1.597917483115483,
+      "ms": 99.89029500000142,
+      "calls": 22500,
+      "us_per_call": 4.439568666666729,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "moe_reduction_kernel_plain_bf16_topk9_md6144",
+      "pct": 1.5751900094657452,
+      "ms": 98.46953700000087,
+      "calls": 22500,
+      "us_per_call": 4.3764238666667055,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_fused_qk_rope_cat_and_cache_mla_kernel",
+      "pct": 1.5597928906354745,
+      "ms": 97.50701999999465,
+      "calls": 23400,
+      "us_per_call": 4.166966666666438,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_fused_append_shared_experts_kernel",
+      "pct": 1.5051752597583736,
+      "ms": 94.09271899999708,
+      "calls": 22500,
+      "us_per_call": 4.181898622222092,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v2<aiter::MoeSortingProblemMp<> >, ait",
+      "pct": 1.4959245142148647,
+      "ms": 93.51442899999695,
+      "calls": 22500,
+      "us_per_call": 4.156196844444309,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x1024_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0",
+      "pct": 1.1318773872809558,
+      "ms": 70.7568240000002,
+      "calls": 6300,
+      "us_per_call": 11.231241904761935,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::kn_entry_2c_sbhd_cached_indirect_inplace<>(c10::BFloat16*, c10::BFloat16*, c10::BFloat16 const*, c",
+      "pct": 0.9508216976034752,
+      "ms": 59.43852599999943,
+      "calls": 6300,
+      "us_per_call": 9.434686666666575,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "hgemm_bf16_16x64x128x4_SPK1_W1x1x2_BLDS1_TN_AS1_0",
+      "pct": 0.8635661266370783,
+      "ms": 53.98393599999939,
+      "calls": 6300,
+      "us_per_call": 8.568878730158634,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void fast_hadamard_transform_kernel<fast_hadamard_transform_kernel_traits<> >(HadamardParamsBase)",
+      "pct": 0.8425908861482306,
+      "ms": 52.67271500000014,
+      "calls": 12600,
+      "us_per_call": 4.180374206349217,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "hgemm_bf16_32x64x128x3_SPK12_W1x2x2_BLDS1_TN_AS1_0",
+      "pct": 0.6016786544681568,
+      "ms": 37.61261700000093,
+      "calls": 6300,
+      "us_per_call": 5.970256666666814,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "act_quant_kernel__kernel",
+      "pct": 0.5359091793727393,
+      "ms": 33.50118300000025,
+      "calls": 6300,
+      "us_per_call": 5.317648095238135,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN7ck_tile6kentryILi1ENS_14Layernorm2dFwdINS_29Layernorm2dFwdPipelineOnePassINS_29Layernorm2dFwdPipelineProbl",
+      "pct": 0.4660511335740824,
+      "ms": 29.13416099999931,
+      "calls": 6300,
+      "us_per_call": 4.62446999999989,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter32indexer_k_quant_and_cache_kernelIDF16bDB8_LN4vllm18Fp8KVCacheDataTypeE1ELi8ELi8ELi16EEEvPKT_PT0_PKl",
+      "pct": 0.4447658285832115,
+      "ms": 27.803556999999493,
+      "calls": 6300,
+      "us_per_call": 4.413263015872936,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "triton_poi_fused_mul_unsqueeze_0",
+      "pct": 0.42288550944505904,
+      "ms": 26.4357570000002,
+      "calls": 6300,
+      "us_per_call": 4.196151904761937,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT32x32x512_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_",
+      "pct": 0.2936348266408762,
+      "ms": 18.355935,
+      "calls": 900,
+      "us_per_call": 20.39548333333333,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x64x128_MI16x16x1_SN_LDSB1_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0",
+      "pct": 0.2873970640697871,
+      "ms": 17.965994999999996,
+      "calls": 300,
+      "us_per_call": 59.88664999999998,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN5aiter13allgather_vecIDF16bLi8EEEvPNS_8RankDataENS_11RankSignalsEPNS_6SignalEPT_ii",
+      "pct": 0.23493945484267453,
+      "ms": 14.686722999999999,
+      "calls": 300,
+      "us_per_call": 48.955743333333324,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x32x256_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR0_CADS0_",
+      "pct": 0.1565377666931449,
+      "ms": 9.785614000000002,
+      "calls": 900,
+      "us_per_call": 10.872904444444448,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "Memcpy DtoD (Device -> Device)",
+      "pct": 0.13997416674617702,
+      "ms": 8.750177000000015,
+      "calls": 2401,
+      "us_per_call": 3.6443885880883027,
+      "cat": "gpu_memcpy"
+    },
+    {
+      "kernel": "void at::native::elementwise_kernel_manual_unroll<N, 4, at::native::gpu_kernel_impl<>(at::TensorIteratorBase&,",
+      "pct": 0.08424679513240001,
+      "ms": 5.266502999999988,
+      "calls": 1201,
+      "us_per_call": 4.385098251457109,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::index_elementwise_kernel<N, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<at:",
+      "pct": 0.07147200327693327,
+      "ms": 4.467915000000013,
+      "calls": 901,
+      "us_per_call": 4.9588401775804805,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_add<>, std::array<> >(int, at:",
+      "pct": 0.07110919757576788,
+      "ms": 4.4452349999999905,
+      "calls": 1504,
+      "us_per_call": 2.9556083776595683,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "_ZN7sgl_hip10activation18act_and_mul_kernelI14__hip_bfloat16TnPFT_RKS3_EXadL_Z4siluIS2_ES3_S5_EEEEvPS3_PS4_i",
+      "pct": 0.0650752492656374,
+      "ms": 4.068035999999981,
+      "calls": 900,
+      "us_per_call": 4.5200399999999785,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void aiter::greedy_sample_kernel<>(float const*, int*, int, int)",
+      "pct": 0.06095897223637007,
+      "ms": 3.8107160000000007,
+      "calls": 300,
+      "us_per_call": 12.70238666666667,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::index_elementwise_kernel<N, 4, at::native::gpu_index_kernel<at::native::index_put_kernel_impl",
+      "pct": 0.06008651090737755,
+      "ms": 3.7561759999999778,
+      "calls": 901,
+      "us_per_call": 4.168896781354026,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIte",
+      "pct": 0.04611746762218513,
+      "ms": 2.8829320000000007,
+      "calls": 300,
+      "us_per_call": 9.609773333333335,
+      "cat": "kernel"
+    },
+    {
+      "kernel": "void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_scan_co",
+      "pct": 0.038996589903895214,
+      "ms": 2.4377860000000053,
+      "calls": 600,
+      "us_per_call": 4.062976666666676,
+      "cat": "kernel"
+    }
+  ]
+}

@@ -1,0 +1,236 @@
+# GDN chunk_delta_h: choose the launch tile from the grid, not from a single hardcoded config
+#
+# Base:   sglang git checkout at /sgl-workspace/sglang, commit
+#         29481685462732237d80d86076d6563e1f658102 (SGLang 0.5.17)
+#         The checkout has pre-existing unrelated dirty files from the image build
+#         (python/pyproject.toml, python/sglang/kernels/aot/pyproject.toml, two deleted
+#         pyproject_*.toml, untracked .hip sources). None is touched by this patch.
+#
+# Pristine copy of the edited file (the base to diff against, independent of git):
+#         git show HEAD:python/sglang/kernels/ops/attention/fla/chunk_delta_h.py \
+#           > /tmp/chunk_delta_h.py.bak
+#         verified byte-identical to the file before editing.
+#
+# Apply:  cd /sgl-workspace/sglang && git apply /path/to/patches/gdn_chunk_h_launch_config.patch
+#         then restart the server -- this is python source read at import, no rebuild needed.
+# Revert: cd /sgl-workspace/sglang && git apply -R /path/to/patches/gdn_chunk_h_launch_config.patch
+#
+# What it does
+#   chunk_gated_delta_rule_fwd_kernel_h_blockdim64 launches on grid
+#   (cdiv(V, BV), N * H). SGLang pins BV=32 through a *single-config* @triton.autotune --
+#   deliberately, because the kernel writes the final recurrent state back into initial_state
+#   in place, so a multi-config autotune benchmark phase would run many candidates over live
+#   state and corrupt the pool. The consequence is that BV is fixed while the grid is not.
+#   At this model's TP=4 shard (V=128, H=16) with chunked-prefill 16384 over ISL 8192, N is 1
+#   or 2, so the grid is 64 or 128 workgroups on a 256-CU part: half to three quarters of the
+#   device idle. This patch replaces the pinned config with an analytic rule that halves BV
+#   when -- and only when -- the resulting grid still fits the device, and keeps 32/4/2
+#   otherwise. The autotune key (H, K, V, BT, USE_GK, NT_BUCKET) could not have expressed this
+#   even with more configs, because it does not contain N.
+#
+#   Output is unaffected: BV tiles V, which the kernel never reduces over.
+#
+# Kernel measurement (analysis/gdn/bench_chunk_h.py, torch.profiler device time,
+# V=K=128 H=16 Hg=4 T=8192/seq, MI355X 256 CU):
+#
+#     N   shipped 32/4/2   this patch        speedup
+#     1       369.45 us     272.78 (16/4/3)   1.354x
+#     2       506.91 us     421.62 (16/4/3)   1.202x
+#     3       540.21 us     481.05 (16/4/2)   1.123x
+#     4       559.85 us     504.72 (16/4/2)   1.109x
+#     8       719.04 us     718.71 (shipped)  1.000x
+#
+#   Production N is 1-2, so 1.20-1.35x on a kernel worth 7.70% of prefill device time, in a
+#   benchmark that is 36% prefill: ~0.5% end-to-end on its own, which is BELOW this machine's
+#   restart-to-restart floor (0.65-1.60%, FINDINGS.md section 1). It is therefore NOT claimed
+#   as a standalone end-to-end delta. It was measured stacked -- see below.
+#
+# Correctness: analysis/gdn/check_chunk_h.py -- h, v_new and the in-place-updated recurrent
+#   state are all bit-identical to the shipped tile on 8 shapes (N=1..4 at the production head
+#   config, plus two other head configs and a K=V=64 case).
+#
+# End-to-end (frozen config, cold run discarded), stacked on the previously reported arm
+# (patches/gemm_tuned_table_tp4.patch + patches/topk_softmax_ldg_width.patch) together with
+# patches/fmoe_tuned_rows_tp4.patch:
+#
+#     arm                                          warm runs   tok/s     vs local baseline
+#     baseline (frozen config)                       8 / 3      2505.96      --
+#     + GEMM table + topk LDG width (reported arm)   8 / 2      2569.26      +2.53%
+#     + this patch + fmoe_tuned_rows_tp4             8 / 2      2604.42      +3.93%
+#
+#   Increment over the reported arm: +1.37%. Run range [2597.63, 2611.06] against the reported
+#   arm's [2565.87, 2574.29] -- disjoint. Against the 2490.308 tok/s in the task document,
+#   +4.58%. mean TTFT 5001.6 -> 4979.2 ms, mean TPOT 20.04 -> 19.72 ms (both improve).
+#   results/gdnmoe_w{1..4}_* (instance 1) and results/gdnmoeB_w{1..4}_* (instance 2);
+#   gdnmoe_w0 / gdnmoeB_w0 were the cold runs and are discarded.
+#   The two instances' warm means are 2605.87 and 2602.96 -- a 0.11% restart-to-restart spread,
+#   smaller than either instance's own within-run spread, which is what makes +1.37% claimable.
+#   Instance 2's discarded cold run was 2570.71, inside the reported arm's range: an undiscarded
+#   first run would have erased this result entirely.
+#   This patch's own share of that +1.37% is the ~0.5% estimated above; it is not separable
+#   end to end and is not claimed separately.
+#
+#   Accuracy: gsm8k 5-shot strict-match 0.9727 +/- 0.0045 (1283/1319) for the stacked arm, gate
+#   0.9691 -- passes. eval_results/gdnmoe_gsm8k_20260820_152553. Note that gate was run on the
+#   stack; THIS patch cannot have contributed to the 6-answer drop from the 1289 baseline, because
+#   its outputs are bit-identical to the shipped tile (analysis/gdn/check_chunk_h.py, 8 shapes,
+#   torch.equal on h, v_new and the in-place recurrent state). The fp4 stage-1 intermediate in
+#   patches/fmoe_tuned_rows_tp4.patch is the only numerics change in the arm.
+#
+# Stacking: applies cleanly on its own; it touches no file any other patch here touches.
+#
+# One difference between this patch and the exact build that was benchmarked, recorded for
+# honesty: the server that produced the numbers above was started before the now-unused
+# `autotune_cache_kwargs` import was dropped, so that build still carried the binding
+# (`from ...fla.utils import (autotune_cache_kwargs, is_nvidia_hopper,)`) while this patch
+# imports only `is_nvidia_hopper`. Removing @triton.autotune is what made the name unused. No
+# behavioural difference: the same module is imported either way, the name was never referenced
+# after the decorator was removed, and nothing in the kernel path reads it. Every other byte of
+# the file is identical to the benchmarked build.
+#
+diff --git a/python/sglang/kernels/ops/attention/fla/chunk_delta_h.py b/python/sglang/kernels/ops/attention/fla/chunk_delta_h.py
+index 2fe5e623d4..6afa7a442a 100644
+--- a/python/sglang/kernels/ops/attention/fla/chunk_delta_h.py
++++ b/python/sglang/kernels/ops/attention/fla/chunk_delta_h.py
+@@ -3,6 +3,7 @@
+ # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+ 
+ import os
++from functools import lru_cache
+ from typing import Optional, Tuple
+ 
+ import torch
+@@ -14,41 +15,75 @@ from sglang.kernels.ops.attention.fla.index import (
+     prepare_chunk_offsets,
+ )
+ from sglang.kernels.ops.attention.fla.op import exp, exp2, safe_exp
+-from sglang.kernels.ops.attention.fla.utils import (
+-    autotune_cache_kwargs,
+-    is_nvidia_hopper,
+-)
++from sglang.kernels.ops.attention.fla.utils import is_nvidia_hopper
+ 
+ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
+ CHUNK_SIZE = 64
+-GDN_CHUNK_H_BV = int(os.getenv("SGLANG_GDN_CHUNK_H_BV", "32"))
+-GDN_CHUNK_H_NUM_WARPS = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_WARPS", "4"))
+-GDN_CHUNK_H_NUM_STAGES = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_STAGES", "2"))
+-
+-
+-@triton.autotune(
+-    # Single hardcoded config. The kernel writes ht (final state) back into
+-    # initial_state in-place; with multiple configs, triton's autotune benchmark
+-    # phase invokes the kernel many times for timing and corrupts the cache pool,
+-    # producing silently wrong output on the first user request. Restoring via
+-    # `restore_value=["initial_state"]` works for unit tests but OOMs on
+-    # production-scale models (e.g. Kimi-Linear-48B at default mem_fraction)
+-    # because cloning the cache pool for each benchmark exceeds available memory.
+-    # NT_BUCKET is kept in the autotune key for forward-compatibility (allows
+-    # future per-bucket configs once the kernel is refactored to write final
+-    # state to a separate output buffer). The env knobs keep this single-config
+-    # property while allowing model/hardware-local validation of the selected
+-    # tile without corrupting the state pool through multi-config autotune.
+-    configs=[
+-        triton.Config(
+-            {"BV": GDN_CHUNK_H_BV},
+-            num_warps=GDN_CHUNK_H_NUM_WARPS,
+-            num_stages=GDN_CHUNK_H_NUM_STAGES,
++GDN_CHUNK_H_BV = os.getenv("SGLANG_GDN_CHUNK_H_BV")
++GDN_CHUNK_H_NUM_WARPS = os.getenv("SGLANG_GDN_CHUNK_H_NUM_WARPS")
++GDN_CHUNK_H_NUM_STAGES = os.getenv("SGLANG_GDN_CHUNK_H_NUM_STAGES")
++
++
++@lru_cache(maxsize=1)
++def _num_cus() -> int:
++    return torch.cuda.get_device_properties(
++        torch.cuda.current_device()
++    ).multi_processor_count
++
++
++def gdn_chunk_h_launch_config(V: int, N: int, H: int) -> Tuple[int, int, int]:
++    """Pick (BV, num_warps, num_stages) for this launch. Returns the shipped
++    32/4/2 unless a smaller tile is known to win at this grid size.
++
++    The kernel's grid is (cdiv(V, BV), N * H), so BV alone decides how much of
++    the device gets work. On a 256-CU MI355X with V=128, H=16 (Qwen3.5-397B-A17B
++    at TP=4) and the 16384-token chunked-prefill limit, N is 1 or 2, so the
++    shipped BV=32 launches 64 or 128 workgroups and leaves half to three
++    quarters of the device idle. Halving BV doubles the grid; the cost is that
++    each i_v workgroup re-reads all of k, so once the device is already
++    oversubscribed the duplicated traffic outweighs the parallelism and BV=32
++    wins again. Deeper pipelining pays for itself only in the same undersubscribed
++    regime.
++
++    Measured on MI355X / ROCm 7.2 at V=K=128, H=16, Hg=4, T=8192 per sequence
++    (analysis/gdn/bench_chunk_h.py in the tuning bundle; us for the whole kernel):
++
++        N   grid(BV=16)   shipped 32/4/2   this function     speedup
++        1       128           369.06        272.88 (16/4/3)   1.352x
++        2       256           507.41        419.59 (16/4/3)   1.209x
++        3       384           538.40        478.44 (16/4/2)   1.125x
++        4       512           563.98        500.94 (16/4/2)   1.126x
++        8      1024           742.30        742.30 (shipped)  1.000x
++
++    At N=8 the best config found was 32/2/2 at 716.81 us; this function leaves
++    that 3.4% alone rather than widen the rule on one point. BV never changes a
++    reduction order -- V is tiled, not reduced -- so output is unaffected.
++    """
++    if GDN_CHUNK_H_BV or GDN_CHUNK_H_NUM_WARPS or GDN_CHUNK_H_NUM_STAGES:
++        # An explicit env override wins over the heuristic, for A/B-ing a tile
++        # on a model or a part this was not measured on.
++        return (
++            int(GDN_CHUNK_H_BV or 32),
++            int(GDN_CHUNK_H_NUM_WARPS or 4),
++            int(GDN_CHUNK_H_NUM_STAGES or 2),
+         )
+-    ],
+-    key=["H", "K", "V", "BT", "USE_GK", "NT_BUCKET"],
+-    **autotune_cache_kwargs,
+-)
++    small_tile_grid = triton.cdiv(V, 16) * N * H
++    if small_tile_grid > 2 * _num_cus():
++        return 32, 4, 2
++    return 16, 4, 3 if small_tile_grid <= _num_cus() else 2
++
++
++# No @triton.autotune. The kernel writes ht (final state) back into
++# initial_state in-place, so triton's autotune benchmark phase -- which invokes
++# the kernel many times for timing -- corrupts the cache pool and produces
++# silently wrong output on the first user request. Restoring via
++# `restore_value=["initial_state"]` works for unit tests but OOMs on
++# production-scale models (e.g. Kimi-Linear-48B at default mem_fraction)
++# because cloning the cache pool for each benchmark exceeds available memory.
++# The launch config is therefore chosen analytically, by
++# gdn_chunk_h_launch_config() above, from the grid the caller is about to use --
++# which the autotune key (H, K, V, BT, USE_GK, NT_BUCKET) could not express
++# anyway, because it does not contain N.
+ @triton.jit(do_not_specialize=["T"])
+ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
+     k,
+@@ -350,8 +385,8 @@ def chunk_gated_delta_rule_fwd_h(
+ 
+     v_new = torch.empty_like(u) if save_new_value else None
+ 
+-    def grid(meta):
+-        return (triton.cdiv(V, meta["BV"]), N * H)
++    BV, num_warps, num_stages = gdn_chunk_h_launch_config(V, N, H)
++    grid = (triton.cdiv(V, BV), N * H)
+ 
+     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
+         k=k,
+@@ -374,6 +409,7 @@ def chunk_gated_delta_rule_fwd_h(
+         K=K,
+         V=V,
+         BT=BT,
++        BV=BV,
+         USE_G=g is not None,
+         USE_GK=gk is not None,
+         USE_INITIAL_STATE=initial_state is not None,
+@@ -382,5 +418,7 @@ def chunk_gated_delta_rule_fwd_h(
+         IS_VARLEN=cu_seqlens is not None,
+         NT_BUCKET=(0 if NT <= 32 else (1 if NT <= 128 else 2)),
+         USE_EXP2=use_exp2,
++        num_warps=num_warps,
++        num_stages=num_stages,
+     )
+     return h, v_new
