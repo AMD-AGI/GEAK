@@ -126,5 +126,42 @@ ok(src.slice(gate, loop).includes('TIME_FINAL_DEADLINE_HIT'),
 ok(/pending_integrations/.test(src.slice(gate, loop + 4000)),
   'unfinished A/Bs are surfaced to the caller rather than dropped');
 
+console.log('\n# the per-agent reserve cap is not waived for optimization work');
+// The round-2 hole: agentTimeoutFor() exempts FINAL_PHASE_LABELS from the reserve cap, and the
+// Finalize-GATE tagged its integrator agents 'Finalize' -- so measured optimization work (server boot
+// + two benches, x AB_FINISH_RETRIES) inherited an exemption written for Finalize/Report/Validate and
+// ran up to 4 x AGENT_TIMEOUT_MS with no budget bound at all. Executed, not just grepped: the real
+// function is lifted from source and asked for a verdict.
+const aStart = src.indexOf('const FINAL_PHASE_LABELS');
+const aEnd = src.indexOf('\n}', src.indexOf('function agentTimeoutFor')) + 2;
+ok(aStart !== -1 && aEnd > aStart, 'agentTimeoutFor located');
+const mk = (TIME_BUDGET_MS, ELAPSED_MS) => new Function(
+  'TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',
+  `${src.slice(aStart, aEnd)}\nreturn { agentTimeoutFor, FINALIZE_GATE_PHASE, FINAL_PHASE_LABELS };`)(
+  TIME_BUDGET_MS, 2 * 3600 * 1000, 50 * 60000, () => Math.max(0, TIME_BUDGET_MS - ELAPSED_MS));
+
+// 40min left of a 12h budget: less than the 50min reserve, so every capped agent floors at 2min.
+const near = mk(H, H - 40 * 60000);
+const RESERVE = 50 * 60000;
+ok(near.agentTimeoutFor({ phase: 'HeadKernel' }) === 120000, 'an optimization agent floors at 2min near the deadline');
+ok(near.agentTimeoutFor({ phase: near.FINALIZE_GATE_PHASE }) === 120000,
+  'a Finalize-GATE agent is capped the same way — it measures, so it is optimization work');
+ok(near.agentTimeoutFor({ phase: 'Finalize' }) === 2 * 3600 * 1000,
+  'the real Finalize phase keeps its exemption — it runs inside the reserve by design');
+ok(!near.FINAL_PHASE_LABELS.includes(near.FINALIZE_GATE_PHASE),
+  `${JSON.stringify(near.FINALIZE_GATE_PHASE)} must never be added to FINAL_PHASE_LABELS`);
+
+// Mid-run the cap is the real remaining-minus-reserve, not the flat AGENT_TIMEOUT_MS.
+const mid = mk(H, 10 * 3600 * 1000);
+ok(mid.agentTimeoutFor({ phase: near.FINALIZE_GATE_PHASE }) === 2 * 3600 * 1000 - RESERVE,
+  'with 2h left the gate agent gets 2h minus the 50min reserve, not a flat 2h');
+
+// And the gate must actually USE that phase at both of its agent call sites.
+const gateSrc = src.slice(gate, src.indexOf('if (stillIncomplete.length)', gate));
+ok((gateSrc.match(/FINALIZE_GATE_PHASE/g) || []).length >= 2,
+  'both Finalize-gate agent call sites (scan + finish-integrate) pass FINALIZE_GATE_PHASE');
+ok(!/phase: 'Finalize'/.test(gateSrc) && !/, 'Finalize'\)/.test(gateSrc),
+  'no agent inside the gate still claims the exempt \'Finalize\' label');
+
 console.log(failures ? `\nFAILED (${failures})` : '\nPASS');
 process.exit(failures ? 1 : 0);
