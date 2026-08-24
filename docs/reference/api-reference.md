@@ -60,12 +60,12 @@ extraction, and reversible reintegration; recursively calls `kernel_workflow.js`
 | Arg | Default | Description |
 |---|---|---|
 | `budget` | `6` | Max kernel-optimization tasks (config sweep is free). |
-| `kernel_budget` | `6` (`3` in fast) | Budget passed down to each recursive single-kernel run. |
+| `kernel_budget` | `6` (`3` in fast) | Budget passed down to each recursive single-kernel run. Inert in fast: no kernel phase. |
 | `min_kernel_tasks` | `4` (capped by `budget`) | Milestone floor. |
 | `milestone_min_pct` | `5` | Skip editable kernels below this %GPU time (Amdahl). |
 | `config_tune` | `true` | Tier-0 flag/env/backend sweep on/off (runs FIRST). |
 | `head_threshold_pct` | `5` | Head-kernel selection threshold. |
-| `head_budget` | `3` (≥ GPU count in fast) | Max head bake-offs. |
+| `head_budget` | `3` (≥ GPU count in fast) | Max head bake-offs. Inert in fast: no head phase. |
 | `head_author_max` | `2` | Author languages per head (FlyDSL + Triton). |
 | `head_protect_pct` | `30` | A dominant head is never silently dropped. |
 | `head_corrective_max` | `2` | Corrective re-author retries. |
@@ -78,7 +78,7 @@ the run is byte-identical to an unmodified run (every mode knob is gated).
 | Mode | Arg | Phases | Default budget |
 |---|---|---|---|
 | default | *(none)* | ConfigSweep + HeadKernel + Milestone | — |
-| fast | `fast_mode: true` | HeadKernel only (parallel, time-boxed) | `fast_budget_ms` = 5h (`18000000`) |
+| fast | `fast_mode: true` | TuningSkillset only (time-boxed; skips ConfigSweep + HeadKernel + Milestone) | `fast_budget_ms` = 6h (`21600000`); tuning agent cap `agent_timeout_ms` = 4h (`14400000`) |
 | deep | `deep_mode: true` | ConfigSweep + HeadKernel (global cross-kernel×backend lane pool) | `deep_head_budget_ms` = 24h (`86400000`) |
 
 Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `deep_wave_budget`,

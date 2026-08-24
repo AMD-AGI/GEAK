@@ -184,9 +184,22 @@ ok(/const TUNING_REPORT_INPUTS = \(TUNING_SKILLSET_ENABLED && tuning\) \? \{ TUN
   'report inputs are an empty object when the phase is off/absent (Report prompt byte-identical)');
 ok((src.match(/\.\.\.TUNING_REPORT_INPUTS/g) || []).length === 1,
   'the report spread appears exactly once (Report phase only)');
-// Fast mode's contract is HeadKernel-only, so 'tune' must join its skip set.
-ok(/FAST_SKIP = FAST_MODE \? new Set\(\['config', 'tune', 'kernel'\]\)/.test(src),
-  "fast mode skips 'tune' (its budget is reserved for the head track)");
+// Fast mode's contract is TUNING-ONLY, so 'tune' must be the one optimization phase it KEEPS: the head
+// track and the Milestone loop are what it trades away to give the tuning loop the whole budget.
+ok(/FAST_SKIP = FAST_MODE \? new Set\(\['config', 'head', 'kernel'\]\)/.test(src),
+  "fast mode skips 'head'/'kernel' and KEEPS 'tune' (tuning-only)");
+// The tuning phase is one agent call that runs for hours, so fast mode must RAISE the hung-guard to 4h
+// and exempt TuningSkillset from the near-deadline squeeze — otherwise the mode discards its own work.
+ok(/FAST_MODE \? 14400000 : 7200000/.test(src),
+  'fast mode raises the per-agent cap to 4h (not a shorter fast-mode cap)');
+// Granted BY POSITION, like FINAL_PHASE_STARTED — a label-keyed exemption failed open once already
+// (see the #1202 comment block), so this must never regress to matching on opts.phase.
+ok(/FINAL_PHASE_STARTED \|\| TUNING_PHASE_STARTED\) return AGENT_TIMEOUT_MS;/.test(src),
+  'TuningSkillset is exempt from the deadline squeeze in fast mode (guaranteed 4h)');
+// Granted at the phase call site and gated on the MODE there, so the exemption cannot leak into the full
+// pipeline and agentTimeoutFor stays self-contained (test_time_budget_reserve.js evaluates it in isolation).
+ok(/if \(FAST_MODE\) TUNING_PHASE_STARTED = true;[^\n]*\n\s*phase\('TuningSkillset'\);/.test(src),
+  'the tuning exemption is granted by POSITION at the phase call site, fast mode only');
 
 // ---------------------------------------------------------------------------
 // D. The role delegates to the skillset instead of restating it.

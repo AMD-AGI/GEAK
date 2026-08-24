@@ -17,8 +17,12 @@ routes. Decide for yourself which ones apply and how far to take them — that j
 `TUNING_SKILLSET_DIR` is vendored and hash-pinned: **never edit anything inside it.** Everything you
 produce goes under `EVAL_DIR/tuning/`.
 
-`tuning-kb/` in that tree is a per-model answer key. When `TUNING_KB_ENABLED=false` this run is a blind
-evaluation — do not read it. Otherwise it is fair game; say in your return which mode you were in.
+`tuning-kb/` in that tree is a per-model **hint**, not a recipe: what previous campaigns found worth
+tuning on this model, useful for deciding where to look first. Its entries were tuned on another box and
+another build, so treat one as a lead to re-derive and re-measure here — never as an artifact to install
+because it is there. Adopting a KB config you have not re-verified on this box is the one way this phase
+can report a gain it did not earn. When `TUNING_KB_ENABLED=false` this run is a blind evaluation — do not
+read it. Otherwise it is fair game; say in your return which mode you were in.
 
 ---
 

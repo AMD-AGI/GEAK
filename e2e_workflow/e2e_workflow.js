@@ -161,23 +161,26 @@ const TIME_TAIL_CAP_MS = parseInt(A.time_tail_cap_s != null ? A.time_tail_cap_s 
 // because deep mode references it far earlier; TIME_DEADLINE_HIT is armed on it below.
 const TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
   ? Math.max(Math.floor(TIME_BUDGET_EFFECTIVE_MS * 0.6), TIME_BUDGET_EFFECTIVE_MS - TIME_TAIL_CAP_MS) : null;
-// ---- FAST MODE (opt-in, default OFF) ----------------------------------------------------------------
-// A time-boxed run that takes ALL its optimization from the HeadKernel track: it SKIPS ConfigSweep AND
-// the editable-kernel Milestone loop, and completes within a wall-clock budget (default 5h). It exists
-// for "give me the best head-kernel wins you can in 5 hours" runs.
+// ---- FAST MODE / TUNING-ONLY (opt-in, default OFF) ---------------------------------------------------
+// A time-boxed run whose ONLY optimization phase is the tuning skillset: it SKIPS ConfigSweep, the
+// HeadKernel track AND the editable-kernel Milestone loop, and completes within a wall-clock budget
+// (6h). Setup, Finalize, Report and Validate run exactly as they do in the full pipeline — the mode
+// changes WHICH optimization phases run, never how the deliverable is assembled or measured.
 // CRITICAL: when fast_mode is OFF (the default) NOTHING below changes the full pipeline — every fast-mode
 // knob is selected by a `FAST_MODE ? fast : original` ternary that resolves to the ORIGINAL value, and
 // the phase skips / deadline timers are gated on FAST_MODE — so a non-fast run is byte-identical (same
 // prompts, same budgets, same control flow) to a build without this feature. No default-mode regression.
 const FAST_MODE = String(A.fast_mode != null ? A.fast_mode : 'false') === 'true';
-// Total wall-clock budget for a fast run (default 5h). Enforced with setTimeout (Date.now() is NOT
-// available in workflow scripts): a global deadline flag stops dispatching NEW head ops, and each nested
-// head author-workflow is independently time-bounded so no single op can overrun the budget.
-let FAST_BUDGET_MS = parseInt(A.fast_budget_ms != null ? A.fast_budget_ms : 18000000, 10); // 5h
-// When the orchestrator passes a wall-clock budget it is the SOURCE OF TRUTH — use it directly (replace the
-// 5h default) so a fast run fills the granted time and still finalizes before the external SIGKILL. The 5h
-// default (and any explicit fast_budget_ms) applies only when time_budget_s is absent (direct invocation).
-if (TIME_BUDGET_EFFECTIVE_MS != null) FAST_BUDGET_MS = TIME_BUDGET_EFFECTIVE_MS;
+// Total wall-clock budget for a tuning-only run (default 6h): ~4h of tuning plus the Finalize/Report/
+// Validate tail. Enforced with setTimeout (Date.now() is NOT available in workflow scripts).
+let FAST_BUDGET_MS = parseInt(A.fast_budget_ms != null ? A.fast_budget_ms : 21600000, 10); // 6h
+// A tuning-only run is a 6h box BY CONTRACT, so when the orchestrator also passes a wall-clock budget take
+// the SMALLER of the two — a 24h CI budget must not stretch this mode to 24h, and a budget shorter than 6h
+// still binds. Outside fast mode nothing reads FAST_BUDGET_MS, so the orchestrator budget stays SOURCE OF
+// TRUTH there exactly as before.
+if (TIME_BUDGET_EFFECTIVE_MS != null) {
+  FAST_BUDGET_MS = FAST_MODE ? Math.min(FAST_BUDGET_MS, TIME_BUDGET_EFFECTIVE_MS) : TIME_BUDGET_EFFECTIVE_MS;
+}
 // Stop STARTING new head ops after this point so the in-flight head + Finalize/Report/Validate still land
 // inside FAST_BUDGET_MS. Default 60% of the budget (3h at 5h) leaves ~40% for the last head to finish +
 // the deliverable/validation tail.
@@ -215,9 +218,11 @@ const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true
 const TUNING_SKILLSET_ENABLED = String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
 const TUNING_SKILLSET_DIR = String(A.tuning_skillset_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/tuning_skillset')).replace(/\/+$/, '');
-// tuning-kb/ is the skillset's per-model ANSWER KEY (verified wins + deployable artifacts). Useful in
-// production, contaminating in a blind evaluation — the skillset says so itself. Default ON; pass
-// tuning_kb="false" for eval runs and the role is told not to read it.
+// tuning-kb/ is the skillset's per-model HINT store (what previous campaigns found worth tuning on this
+// model). It points the search at likely ops; it is NOT a set of configs to install, because its entries
+// were tuned on another box and build and must be re-derived and re-measured here. Useful in production,
+// contaminating in a blind evaluation — the skillset says so itself. Default ON; pass tuning_kb="false"
+// for eval runs and the role is told not to read it.
 const TUNING_KB_ENABLED = String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
 // NOTE: there is deliberately NO op budget here. The head track caps its ops because each one spends a
 // recursive kernel-authoring run; tuning ops are cheap by comparison and their value is cumulative, so
@@ -452,9 +457,11 @@ const WARM_START_OFF = ['off', 'false', 'none'].includes(KB_ARGS.warm_start.trim
 //   off/false/none    | nothing: no phase, no agent, no log, and every role prompt byte-identical.
 const E2E_WARM_START = KB_ARGS.warm_start.trim().toLowerCase() || 'on';
 const E2E_WARM_START_ON = !WARM_START_OFF;
-// Fast mode's premise is that all optimization comes from the head track within a wall-clock budget
+// Fast mode's premise is that all optimization comes from the tuning phase within a wall-clock budget
 // (FAST_SKIP already drops 'config'), so a warm-start config bench — a 20-40min server launch that
-// this mode has explicitly declined to spend anywhere else — is forced down to reference-only.
+// this mode has explicitly declined to spend anywhere else — is forced down to reference-only. Adopting
+// a warm-start config here would also move the floor the tuning phase measures its own pre/post A/B
+// against, which is the one number this mode exists to produce.
 const E2E_WARM_START_REF_ONLY = E2E_WARM_START === 'reference' || FAST_MODE;
 const E2E_WARM_START_RETURN_AFTER = E2E_WARM_START === 'return_after_read';
 // Which plane the DEPLOYMENT store is read from and written to. Translated from the kernel layer's
@@ -597,12 +604,13 @@ const MODEL_NAME_HINT = (MODEL_PATH || KERNEL_PATH).replace(/\/+$/, '').split('/
 // ---------------------------------------------------------------------------
 const PHASES = String(A.phases || 'all').split(',').map(s => s.trim()).filter(Boolean);
 const RUN_ALL = PHASES.includes('all');
-// Fast mode SKIPS ConfigSweep ('config'), the tuning skillset ('tune') and the editable-kernel Milestone
-// ('kernel') so all optimization comes from HeadKernel within the wall-clock budget. ('tune' joins the
-// skip set for the same reason 'config' does: fast mode's contract is "best head-kernel wins in N hours",
-// and the tuning loop's tuner sweeps + its own pre/post A/B do not fit that budget.) Default mode:
-// FAST_SKIP is null → want() is the original `RUN_ALL || PHASES.includes(p)`, unchanged.
-const FAST_SKIP = FAST_MODE ? new Set(['config', 'tune', 'kernel']) : null;
+// Fast mode SKIPS ConfigSweep ('config'), the HeadKernel track ('head') and the editable-kernel Milestone
+// ('kernel') so ALL optimization comes from the tuning skillset ('tune') within the wall-clock budget.
+// 'config' stays skipped because a handoff-driven run has already had its config search done upstream
+// (run_e2e.py pins config_tune=false); 'head'/'kernel' are what this mode trades away to give the tuning
+// loop its own uncapped op count and a full 4h. Default mode: FAST_SKIP is null → want() is the original
+// `RUN_ALL || PHASES.includes(p)`, unchanged.
+const FAST_SKIP = FAST_MODE ? new Set(['config', 'head', 'kernel']) : null;
 // Deep mode concentrates its (20h) HeadKernel budget on cross-backend co-opt: skip the editable-kernel
 // Milestone ('kernel') but KEEP ConfigSweep ('config' — cheap and it stabilizes the baseline) and KEEP
 // the tuning skillset ('tune' — same rationale, and a tuned stack is a strictly better starting point
@@ -610,7 +618,7 @@ const FAST_SKIP = FAST_MODE ? new Set(['config', 'tune', 'kernel']) : null;
 const DEEP_SKIP = DEEP_MODE ? new Set(['kernel']) : null;
 const want = (p) => (RUN_ALL || PHASES.includes(p)) && !(FAST_SKIP && FAST_SKIP.has(p)) && !(DEEP_SKIP && DEEP_SKIP.has(p));
 const ST = A.state || {};   // carried state from a prior phase invocation
-if (FAST_MODE) log(`[fast-mode] ON: skipping ConfigSweep + Milestone; HeadKernel-only; budget ${Math.round(FAST_BUDGET_MS / 60000)}min (stop new heads at ${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min, per-head workflow cap ${Math.round(FAST_HEAD_WF_MS / 60000)}min).`);
+if (FAST_MODE) log(`[fast-mode] ON (TUNING-ONLY): skipping ConfigSweep + HeadKernel + Milestone; the tuning skillset is the only optimization phase; budget ${Math.round(FAST_BUDGET_MS / 60000)}min. Setup/Finalize/Report/Validate run exactly as in the full pipeline.`);
 
 // ---------------------------------------------------------------------------
 // Schema fragments.
@@ -962,10 +970,12 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // agent, so the bound must be large (default 120min). Too-short a bound here causes the long setup
 // agent to be killed and retried, spawning duplicate exp dirs. args.agent_timeout_ms=0 disables;
 // falls back to raw agent() if setTimeout is unavailable.
-// Default 120min (generous — outer e2e agents launch servers + run ~30min benches). Fast mode tightens
-// it to 45min so a single hung/slow agent can't blow the wall-clock budget (still ample for the director
-// baseline + the head e2e A/B). Default mode keeps 120min → unchanged.
-const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : (FAST_MODE ? 2700000 : 7200000), 10);
+// Default 120min (generous — outer e2e agents launch servers + run ~30min benches), unchanged.
+// FAST_MODE (tuning-only) RAISES it to 4h rather than tightening it: the tuning skillset's six-step
+// loop (scope -> baseline -> search -> correctness -> deploy -> engagement verify) is ONE agent call and
+// routinely needs hours, so a short cap does not "keep the run fast", it discards the only work the mode
+// does. Default mode is unchanged at 2h.
+const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : (FAST_MODE ? 14400000 : 7200000), 10);
 // Process-safety rule prepended to EVERY agent prompt. It is injected at this funnel
 // (the one place `agent()` is ever called) rather than in roleAgent(), because several
 // prompts are built inline and would otherwise never see it — and any future call site
@@ -1005,8 +1015,14 @@ function withProcessSafety(prompt) {
 // with — work started before the final phase stays bounded.
 let FINAL_PHASE_STARTED = false;
 const FINALIZE_GATE_PHASE = 'Finalize-gate';   // display grouping only — not load-bearing for the cap
+// Tuning-only mode grants a second exemption the SAME way — by position, at the phase('TuningSkillset')
+// call site — for a reason the squeeze itself implies: it exists to stop one of SEVERAL optimization
+// agents from eating the reserve, and in that mode there is only one. Squeezing it does not protect the
+// tail, it truncates the only work the run does. The MODE check lives at the assignment, not here, so
+// this flag means simply "an exempted phase is running" and the full pipeline never sets it.
+let TUNING_PHASE_STARTED = false;
 function agentTimeoutFor() {
-  if (TIME_BUDGET_MS == null || FINAL_PHASE_STARTED) return AGENT_TIMEOUT_MS;
+  if (TIME_BUDGET_MS == null || FINAL_PHASE_STARTED || TUNING_PHASE_STARTED) return AGENT_TIMEOUT_MS;
   return Math.max(120000, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
 }
 
@@ -2450,6 +2466,7 @@ function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SY
 // ===========================================================================
 let tuning = ST.tuning || null;
 if (want('tune') && TUNING_SKILLSET_ENABLED) {
+  if (FAST_MODE) TUNING_PHASE_STARTED = true;   // the one place the tuning-only exemption is granted — by position, not label
   phase('TuningSkillset');
   log(`Tuning skillset: ${TUNING_SKILLSET_DIR} (whole, standalone, pre-HeadKernel); ` +
     `no op cap, tuning-kb ${TUNING_KB_ENABLED ? 'ENABLED' : 'DISABLED (blind eval)'}.`);
@@ -3806,6 +3823,21 @@ if (want('final')) {
     { phase: 'Finalize', label: 'e2e_integrator:finalize', schema: FINALIZE_SCHEMA });
   finalTput = (finalize && finalize.final_throughput_tok_s) || curTput;
 
+  // Delivery check for the tuning phase. Finalize already computes the answer (tuning_in_bundle: did BOTH
+  // halves — the overlay for the code half, the deploy bundle for the data half — reach final/, and does
+  // the tuning still engage there?); until now nothing acted on it. In the full pipeline a tuning win that
+  // misses the bundle costs only its own slice because the head/kernel patches still ship. In tuning-only
+  // mode it is the ENTIRE result, so the run would report a validated gain nobody can reproduce. Surfaced,
+  // not fatal: the measurement is real and the artifacts are on disk, so the operator can repair the bundle
+  // rather than lose the run.
+  if (TUNING_SKILLSET_ENABLED && tuning && tuning.gate === 'accepted' && finalize && finalize.tuning_in_bundle !== true) {
+    log(`ERROR: tuning ACCEPTED (+${(tuning.tuning_delta_pct || 0).toFixed(2)}%) but Finalize reports it is NOT ` +
+      `reproducible from ${EVAL_DIR}/final/ (tuning_in_bundle=${finalize.tuning_in_bundle}, ` +
+      `recheck: ${finalize.tuning_engagement_recheck || 'none'}; deploy_bundle=${tuning.deploy_bundle || '<none>'}, ` +
+      `overlay=${tuning.apply_overlay || '<none>'}). final_launch.sh will deliver LESS than the headline` +
+      `${FAST_MODE ? ' — and in tuning-only mode that is the whole result.' : '.'}`);
+  }
+
   phase('Report');
   report = await safeAgent(
     roleAgent('system_architect', 'report', 'Write architect_report.md AND the full final_report.md in English (with the Phases tree + artifacts tree modules).', {
@@ -3976,7 +4008,7 @@ const wfReturn = {
   // read off this so it never silently mis-parses a future shape.
   schema_version: 1,
   mode: 'e2e',
-  fast_mode: FAST_MODE,   // true => ConfigSweep + Milestone skipped; HeadKernel-only within the time budget
+  fast_mode: FAST_MODE,   // true => ConfigSweep + HeadKernel + Milestone skipped; TUNING-ONLY within the time budget
   deep_mode: DEEP_MODE,   // true => HeadKernel runs the long cross-backend co-optimization scheduler (20h)
   backend: BACKEND,
   phases_run: PHASES,
