@@ -1056,5 +1056,90 @@ def test_journey_rejected_overlay_is_reverted(tmp_path):
     assert k["backend_result"]["attempts"][0]["decision"] == "REVERT"
 
 
+# ── the final report is a guaranteed interface file ─────────────────────────
+#
+# Hyperloom #1202: the 20260823 Qwen3.5-27B / gpt-oss-120b / DeepSeek-V4-Pro
+# sessions were all killed before the Report phase. Nobody got a report, and
+# result.json still advertised report_path=<eval_dir>/final_report.md — a file
+# that was never written. Two separate contracts: never lie about a path, and
+# always leave a readable report behind.
+
+def test_report_path_is_empty_when_no_report_exists(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    assert out["report_path"] == "", "a path that does not exist must not be advertised"
+
+
+def test_report_path_points_at_a_real_report_when_one_exists(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    (eval_dir / "final_report.md").write_text("# real report\n", encoding="utf-8")
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    assert out["report_path"] == str(eval_dir / "final_report.md")
+
+
+def test_final_launch_script_is_empty_when_finalize_never_ran(tmp_path):
+    """Same rule for the launch script: eval_dir/final/ only exists once the
+    Finalize phase has run. A killed run must not hand back an unopenable path."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    assert out["final_launch_script"] == ""
+    (eval_dir / "final").mkdir()
+    (eval_dir / "final" / "final_launch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    assert out["final_launch_script"] == str(eval_dir / "final" / "final_launch.sh")
+
+
+def test_a_killed_run_still_gets_a_synthesized_report(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    # The shape a timeout actually leaves behind: a real accepted head whose
+    # numbers had to be reconciled off disk because Validate never ran.
+    wf = {
+        "eval_dir": str(eval_dir),
+        "baseline_throughput_tok_s": 255.049,
+        "final_throughput_tok_s": 0, "throughput_speedup": 0,
+        "accepted_heads": [{"short_name": "fused_moe_kernel_gptq_awq",
+                            "op_kind": "gemm", "backend": "triton", "kind": "env",
+                            "e2e_delta_pct": 16.049, "isolated": 1.5902}],
+        "accepted_kernels": [],
+    }
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    path = Path(rx._write_final_report_fallback(eval_dir, out, wf))
+    assert path.is_file() and path.name == "final_report.md"
+    text = path.read_text(encoding="utf-8")
+    # The banner is the whole point: nobody may mistake this for the architect's
+    # report, or an unvalidated number gets promoted off it.
+    assert "SYNTHESIZED" in text
+    assert "no independent Director re-measurement" in text
+    # It must actually carry the recovered numbers, not just apologize.
+    assert "535.35" in text and "disk_intermediate_win" in text
+    assert "fused_moe_kernel_gptq_awq" in text
+
+
+def test_the_synthesized_report_never_overwrites_a_real_one(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    (eval_dir / "final_report.md").write_text("# architect report\n", encoding="utf-8")
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    path = Path(rx._write_final_report_fallback(eval_dir, out, {}))
+    assert path.read_text(encoding="utf-8") == "# architect report\n"
+
+
+def test_the_synthesized_report_surfaces_deferred_ab_work(tmp_path):
+    """A/Bs the Finalize-gate dropped at the reserve boundary are deferred, not
+    rejected — the report has to say so or they read as failures."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    wf = {"pending_integrations": [
+        {"short_name": "_fwd_kernel", "isolated": 2.4, "pct_gpu_time": 31.0}]}
+    text = Path(rx._write_final_report_fallback(eval_dir, out, wf)).read_text(encoding="utf-8")
+    assert "_fwd_kernel" in text and "Deferred" in text
+
+
+def test_a_no_gain_run_reports_as_a_no_gain(tmp_path):
+    eval_dir = _make_no_gain_eval_dir(tmp_path)
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    text = Path(rx._write_final_report_fallback(eval_dir, out, {})).read_text(encoding="utf-8")
+    assert "do-no-harm no-gain" in text
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

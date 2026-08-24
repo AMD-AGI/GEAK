@@ -2121,10 +2121,14 @@ def normalize_result(h: dict, wf: dict) -> dict:
     speedup = float(wf.get("throughput_speedup") or validation.get("throughput_speedup") or 1.0)
     status = "ok" if speedup > 1.0 else "no_gain"
 
+    # Same rule as report_path: never advertise a path that does not exist. The
+    # eval_dir/final/ fallback was unconditional, so a run killed before the
+    # Finalize phase handed Hyperloom a launch script it could not open.
+    _launch_default = eval_dir / "final" / "final_launch.sh"
     final_launch = (
         wf.get("final_launch_script")
         or validation.get("final_launch_script")
-        or str(eval_dir / "final" / "final_launch.sh")
+        or (str(_launch_default) if _launch_default.is_file() else "")
     )
     workload = h.get("workload") or {"isl": 1024, "osl": 1024, "conc": 64}
 
@@ -2531,7 +2535,14 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # Cold/hot speedup cross-checks (double-check only; see alignment_metrics above).
         # Does NOT change the promoted final_throughput_tok_s / throughput_speedup.
         "alignment_metrics": alignment_metrics,
-        "report_path": wf.get("report_path") or str(eval_dir / "final_report.md"),
+        # NEVER advertise a report that is not on disk. This used to fall back to
+        # str(eval_dir / "final_report.md") unconditionally, so a run that died
+        # before the Report phase still handed the caller a confident-looking path
+        # to a file that did not exist (the 20260823 sessions all did exactly
+        # that). Report only what a reader can actually open; _emit's
+        # guaranteed-emit step fills this in with the synthesized report when the
+        # workflow never wrote one.
+        "report_path": wf.get("report_path") or _existing_report_path(eval_dir),
     }
     # ADDITIVE ONLY. Appended after the dict above is complete so it is self-evident at review time that
     # no existing key is touched, and omitted entirely when the phase did not run.
@@ -2651,6 +2662,15 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
             ),
         }
     return section
+
+
+def _existing_report_path(eval_dir: Path) -> str:
+    """Absolute path of the run's final report, or "" when none exists yet."""
+    try:
+        candidate = eval_dir / FINAL_REPORT_FILE
+        return str(candidate) if candidate.is_file() else ""
+    except OSError:
+        return ""
 
 
 def _format_optional_number(
@@ -2836,6 +2856,7 @@ def _update_baseline_alignment_reports(result: dict[str, Any]) -> list[str]:
 # ---------------------------------------------------------------------------
 WORKFLOW_RETURN_FILE = "workflow_return.json"
 KERNEL_JOURNEY_FILE = "kernel_journey.json"
+FINAL_REPORT_FILE = "final_report.md"
 
 # ---------------------------------------------------------------------------
 # KB write-back, salvage path
@@ -4204,6 +4225,122 @@ def _write_kernel_journey(eval_dir: Path, wf: dict | None, normalized: dict) -> 
     return str(path)
 
 
+def _md_table(rows: list[tuple[str, Any]]) -> str:
+    """Two-column markdown table; ``None``/"" render as an explicit em dash."""
+    out = ["| item | value |", "|---|---|"]
+    for key, value in rows:
+        text = "—" if value is None or value == "" else str(value)
+        out.append(f"| {key} | {text} |")
+    return "\n".join(out)
+
+
+def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
+    """Render a final report from the normalized result + on-disk recovery.
+
+    Deliberately NOT an LLM call: this runs on the timeout/crash path, where the
+    only budget left is the flush grace, and it must never itself hang. It is a
+    faithful dump of the numbers already recovered from disk, not an analysis —
+    the banner says so, so nobody mistakes it for the architect's report.
+    """
+    status = str(normalized.get("status") or "unknown")
+    speedup = normalized.get("throughput_speedup")
+    kernels = normalized.get("accepted_kernels") or []
+    heads = normalized.get("accepted_heads") or []
+    config = normalized.get("accepted_config") or {}
+    evidence = normalized.get("validation_evidence") or {}
+    pending = (wf or {}).get("pending_integrations") or []
+
+    parts: list[str] = []
+    parts.append("# GEAK e2e — final report (SYNTHESIZED)\n")
+    parts.append(
+        "> **This report was not written by the Report phase.** The workflow did not reach\n"
+        "> Finalize/Report/Validate before its wall-clock budget expired, so `run_e2e.py`\n"
+        "> synthesized this file from the artifacts already on disk. Every number below was\n"
+        "> really measured, but there was **no independent Director re-measurement**, so treat\n"
+        "> the headline as provisional and re-bench before promoting it.\n"
+    )
+    parts.append("\n## Result\n")
+    parts.append(_md_table([
+        ("status", status),
+        ("result_source", normalized.get("result_source")),
+        ("baseline tok/s", normalized.get("baseline_throughput_tok_s")),
+        ("final tok/s", normalized.get("final_throughput_tok_s")),
+        ("speedup", f"{speedup:.4f}x" if isinstance(speedup, (int, float)) else None),
+        ("output parity", normalized.get("output_parity")),
+        ("TTFT ms", normalized.get("ttft_ms")),
+        ("TPOT ms", normalized.get("tpot_ms")),
+        ("validation_status", evidence.get("validation_status")),
+        ("speedup basis", evidence.get("speedup_basis")),
+        ("bench client", normalized.get("bench_client")),
+        ("eval_dir", normalized.get("eval_dir")),
+    ]))
+
+    parts.append("\n\n## Accepted work\n")
+    if not kernels and not heads:
+        parts.append("\nNothing was accepted — the run is a do-no-harm no-gain.\n")
+    for label, entries in (("kernels", kernels), ("heads", heads)):
+        if not entries:
+            continue
+        parts.append(f"\n### Accepted {label}\n\n")
+        parts.append(_md_table([
+            (str(e.get("short_name") or "?"),
+             f"{e.get('e2e_delta_pct')}% e2e, backend={e.get('backend') or '?'}, gate={e.get('gate') or '?'}")
+            for e in entries if isinstance(e, dict)
+        ]))
+        parts.append("\n")
+    if config.get("flags") or config.get("env"):
+        parts.append("\n### Accepted config\n\n")
+        parts.append(f"- flags: `{config.get('flags') or ''}`\n")
+        parts.append(f"- env: `{config.get('env') or ''}`\n")
+
+    if pending:
+        parts.append("\n## Deferred (verified-isolated, e2e A/B never completed)\n\n")
+        parts.append(
+            "These are REAL isolated wins whose end-to-end A/B ran out of time. They are not\n"
+            "rejections — resume the run against the same eval_dir to finish them.\n\n"
+        )
+        for entry in pending:
+            if isinstance(entry, dict):
+                parts.append(
+                    f"- `{entry.get('short_name') or '?'}` — "
+                    f"{entry.get('isolated') or '?'}x isolated, "
+                    f"{entry.get('pct_gpu_time') or '?'}% GPU time\n"
+                )
+
+    parts.append("\n## Artifacts\n\n")
+    parts.append(f"- `{KERNEL_JOURNEY_FILE}` — per-kernel journey\n")
+    parts.append(f"- `{WORKFLOW_RETURN_FILE}` — recovered workflow return\n")
+    parts.append("- `result.json` — the full normalized result this report was rendered from\n")
+    if normalized.get("final_overlay"):
+        parts.append(f"- `{normalized['final_overlay']}` — final overlay\n")
+    return "".join(parts)
+
+
+def _write_final_report_fallback(eval_dir: Path, normalized: dict,
+                                 wf: dict | None) -> str:
+    """Guarantee a readable final report; return its path ("" on failure).
+
+    Same GUARANTEED-EMIT contract as ``result.json`` / ``kernel_journey.json``:
+    a caller must ALWAYS find a report. When the Report phase already wrote one
+    this is a no-op that just returns the existing path — the architect's report
+    is strictly better and is never overwritten.
+
+    Hyperloom #1202: three 20260823 sessions were SIGKILLed in the Finalize-gate
+    and shipped no report at all, while result.json still pointed at the file
+    that was never written. Passive disk recovery rebuilt the NUMBERS but nobody
+    rebuilt the human-readable artifact.
+    """
+    existing = _existing_report_path(eval_dir)
+    if existing:
+        return existing
+    path = eval_dir / FINAL_REPORT_FILE
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(_render_synthesized_final_report(normalized, wf), encoding="utf-8")
+    os.replace(tmp, path)  # atomic: a kill mid-write never yields a partial file
+    return str(path)
+
+
 def _publish_protected_pgids() -> str:
     """Tell the benchmark teardown which process groups it must NEVER signal.
 
@@ -4401,6 +4538,18 @@ def main(argv: list[str]) -> int:
                 out["kernel_journey_path"] = _write_kernel_journey(eval_dir, wf, out)
             except Exception as kj_exc:
                 out["kernel_journey_error"] = f"{type(kj_exc).__name__}: {kj_exc}"
+            # A final report is a GUARANTEED interface file too. If the Report
+            # phase never ran (timeout/crash), synthesize one from what IS on
+            # disk. Must happen BEFORE _update_baseline_alignment_reports so the
+            # alignment section gets appended to the synthesized report as well.
+            try:
+                had_report = bool(_existing_report_path(eval_dir))
+                report_path = _write_final_report_fallback(eval_dir, out, wf)
+                if report_path:
+                    out["report_path"] = report_path
+                    out["final_report_synthesized"] = not had_report
+            except Exception as fr_exc:
+                out["final_report_error"] = f"{type(fr_exc).__name__}: {fr_exc}"
         if out.get("baseline_basis"):
             try:
                 updated_reports = _update_baseline_alignment_reports(out)

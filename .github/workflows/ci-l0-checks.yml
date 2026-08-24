@@ -236,7 +236,7 @@ jobs:
           /tmp/gitleaks dir . --no-banner --redact --config .gitleaks.toml
 
   node-regression:
-    name: Node regression (expert_skills, kernel canonicalization, tuning phase)
+    name: Node regression (expert_skills, kernel canonicalization, tuning phase, time budget)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -257,6 +257,11 @@ jobs:
       # carry-forward, and the deploy-bundle handoff to finalize. Node + git only.
       - name: tuning skillset phase regression
         run: node e2e_workflow/scripts/test_tuning_skillset_phase.js
+      # The elapsed clock and the final reserve are the only thing standing between a
+      # long run and a hard kill with no report (Hyperloom #1202). Only this job can
+      # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
+      - name: wall-clock budget / final reserve regression
+        run: node e2e_workflow/scripts/test_time_budget_reserve.js
 
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest

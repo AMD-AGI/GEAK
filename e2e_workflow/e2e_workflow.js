@@ -112,15 +112,36 @@ const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
 // is byte-identical to a build without this feature. No model/run specifics; pure time arithmetic.
 const TIME_BUDGET_MS = A.time_budget_s != null ? parseInt(A.time_budget_s, 10) * 1000 : null;
 // ---- ELAPSED CLOCK ----
-// Date.now() is unavailable in Workflow scripts (breaks resume), so count elapsed time via a 1-minute
-// self-rearming tick. No time_budget_s => remainingMs() is Infinity and every guard short-circuits.
+// Date.now() is unavailable in Workflow scripts (breaks resume), so elapsed time is derived from timers.
+// No time_budget_s => remainingMs() is Infinity and every guard short-circuits.
+//
+// The rungs are armed ALL AT ONCE, each at its own ABSOLUTE offset from t0 — NOT as a self-rearming
+// chain. That distinction is the whole point (Hyperloom #1202 round 2). A chain re-arms inside its own
+// callback, so every rung's scheduler lateness is ADDED to the next rung's start: on a busy event loop
+// (this workflow runs dozens of concurrent agents + child benchmarks) the error COMPOUNDS and ELAPSED_MS
+// drifts arbitrarily far BEHIND real time. Under-counting elapsed is the dangerous direction — it makes
+// remainingMs() report time the run does not have, so the final reserve is spent optimizing and the hard
+// kill lands before Finalize/Report ever start. That is exactly how the 20260823 Qwen3.5-27B /
+// gpt-oss-120b / DeepSeek-V4-Pro sessions each shipped no final report. With an absolute ladder a late
+// rung only delays ITSELF; lateness never accumulates, so ELAPSED_MS tracks real time to within one
+// step plus that single rung's lag.
 let ELAPSED_MS = 0;
 const CLOCK_TICK_MS = 60000;
+// Bound on how many timers the ladder may arm (a 24h budget needs 1440 at 1min). Past this the step is
+// widened instead, so an absurd budget cannot flood the event loop with timers.
+const CLOCK_MAX_RUNGS = 2048;
 if (TIME_BUDGET_MS != null && typeof setTimeout === 'function') {
-  // unref so a pending tick can never hold the process open past the run.
-  const arm = () => { const t = setTimeout(tick, CLOCK_TICK_MS); if (t && t.unref) t.unref(); };
-  const tick = () => { ELAPSED_MS += CLOCK_TICK_MS; arm(); };
-  arm();
+  const step = Math.ceil(TIME_BUDGET_MS / CLOCK_TICK_MS) <= CLOCK_MAX_RUNGS
+    ? CLOCK_TICK_MS
+    : Math.ceil(TIME_BUDGET_MS / CLOCK_MAX_RUNGS);
+  // One rung PAST the budget so remainingMs() can actually reach 0.
+  for (let at = step; at <= TIME_BUDGET_MS + step; at += step) {
+    const mark = at;
+    // max() (not assignment) keeps the clock monotonic if rungs land out of order.
+    const t = setTimeout(() => { if (mark > ELAPSED_MS) ELAPSED_MS = mark; }, mark);
+    // unref so a pending rung can never hold the process open past the run.
+    if (t && t.unref) t.unref();
+  }
 }
 const remainingMs = () => (TIME_BUDGET_MS == null ? Infinity : Math.max(0, TIME_BUDGET_MS - ELAPSED_MS));
 const remainingMin = () => (TIME_BUDGET_MS == null ? Infinity : Math.round(remainingMs() / 60000));
@@ -1648,6 +1669,25 @@ if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HE
     TIME_DEADLINE_HIT = true;
     log(`[time-budget] dispatch deadline (${Math.round(TIME_HEAD_DEADLINE_MS / 60000)}min of ${Math.round(TIME_BUDGET_MS / 60000)}min budget) reached — no NEW head/milestone work will start; finishing in-flight then proceeding to Finalize/Report/Validate before the hard kill.`);
   }, TIME_HEAD_DEADLINE_MS);
+}
+// --- RESERVE BOUNDARY (the moment the final phase MUST own the machine) ------------------------------
+// TIME_DEADLINE_HIT above only stops STARTING new head/milestone work; it does NOT bound what runs
+// between it and phase('Finalize'). The Finalize-GATE that sits in that window drives a full both-legs
+// e2e A/B per pending integration (server boot + two benches, tens of minutes each) in an unbounded
+// `while (pendingIntegrations.length)` loop, so a handful of pending A/Bs silently ate the entire
+// reserve and the run was SIGKILLed before Finalize/Report/Validate ever started (Hyperloom #1202
+// round 2: the 20260823 sessions each went 3.4-4.4h with no artifact write, then died).
+//
+// This is the ONE flag that says "the reserve has begun": armed off a SINGLE absolute setTimeout, so
+// unlike remainingMs() it cannot drift no matter how blocked the event loop gets. Consumers must stop
+// STARTING new measured work and hand the remaining time to the final phase. Inert when time_budget_s
+// is absent => byte-identical default behavior.
+let TIME_FINAL_DEADLINE_HIT = false;
+if (TIME_BUDGET_EFFECTIVE_MS != null && typeof setTimeout === 'function' && TIME_BUDGET_EFFECTIVE_MS > 0) {
+  setTimeout(() => {
+    TIME_FINAL_DEADLINE_HIT = true;
+    log(`[time-budget] RESERVE BOUNDARY reached (${Math.round(TIME_BUDGET_EFFECTIVE_MS / 60000)}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget spent) — the remaining ~${Math.round(FINAL_RESERVE_MS / 60000)}min belongs to Finalize/Report/Validate. No NEW A/B or measured work starts from here.`);
+  }, TIME_BUDGET_EFFECTIVE_MS);
 }
 function deepBoundedWorkflow(ref, wfArgs, label) {
   const p = workflow(ref, laneArgs(wfArgs));
@@ -3621,8 +3661,19 @@ let validatedOk = false;   // did the independent Validate produce a usable (pos
 // was accepted" gate, which stranded sibling incompletes (e.g. an env-config
 // head) at ref-only whenever any other head/kernel had been accepted. Keys ONLY
 // off the stable overlay/cand_*/integrate_result.json layout. Bounded by
-// AB_FINISH_RETRIES + each agent's agentBounded guard + the outer runner budget.
+// AB_FINISH_RETRIES + each agent's agentBounded guard + the outer runner budget
+// + TIME_FINAL_DEADLINE_HIT (this gate must NEVER spend the final reserve; see below).
 if (want('final')) {
+  // (0) The reserve is not ours. Each iteration below boots a server and runs TWO
+  // benches; a few pending A/Bs outlast a 50min reserve easily. If the boundary has
+  // already passed there is no time to finish even one, so skip the whole gate
+  // (including the scan agent) and go straight to Finalize/Report/Validate. The
+  // pending entries stay in `pendingIntegrations` and are surfaced in the workflow
+  // return, so a real verified-isolated win is deferred, never discarded.
+  if (TIME_FINAL_DEADLINE_HIT) {
+    log(`Finalize-gate: SKIPPED entirely — the final reserve has already begun. ` +
+      `${pendingIntegrations.length} pending A/B(s) deferred to the caller (surfaced in pending_integrations).`);
+  } else {
   // (1) Disk-reconstruct incomplete A/Bs. The JS has no fs, so a read-only Bash
   // agent enumerates the overlay layout and reports which A/Bs never completed.
   const RECON_SCHEMA = obj({ incomplete: { type: 'array', items: obj({
@@ -3673,10 +3724,21 @@ if (want('final')) {
       `(winner_kind=${it.winner_kind || '?'}, ref=${!!it.ref_present}, cand=${!!it.cand_present}); queued to finish.`);
   }
 
-  // (2) Drive EVERY pending integration to a complete ref+cand measurement.
+  // (2) Drive EVERY pending integration to a complete ref+cand measurement — but never
+  // past the reserve boundary. Highest isolated speedup first, so if the clock cuts the
+  // queue short the most valuable A/B is the one that got finished.
   pendingIntegrations.sort((a, b) => (b.isolated || 0) - (a.isolated || 0));
   const stillIncomplete = [];
   while (pendingIntegrations.length) {
+    // Re-check EVERY iteration: the boundary can fall in the middle of the queue. Break
+    // (do not shift) so the unfinished entries remain in pendingIntegrations and reach
+    // the caller via wfReturn.pending_integrations for a resume.
+    if (TIME_FINAL_DEADLINE_HIT) {
+      log(`Finalize-gate: STOPPING with ${pendingIntegrations.length} A/B(s) unfinished ` +
+        `(${pendingIntegrations.map((q) => q.short_name).join(', ')}) — the final reserve has begun and ` +
+        `Finalize/Report/Validate must run. Deferred, not discarded: they are surfaced in pending_integrations.`);
+      break;
+    }
     const p = pendingIntegrations.shift();   // pop one per iteration => guaranteed termination
     log(`Finalize-gate: finishing pending A/B (${p.short_name}, ${(p.isolated || 0).toFixed(2)}x isolated); ` +
       `${pendingIntegrations.length} more queued.`);
@@ -3711,6 +3773,7 @@ if (want('final')) {
     }
   }
   if (stillIncomplete.length) log(`Finalize-gate: ${stillIncomplete.length} A/B(s) could not complete both legs even after retries: ${stillIncomplete.join(', ')}.`);
+  }
 }
 allAccepted = acceptedHeads.concat(acceptedKernels);   // refresh after Fix C may have banked a pending win
 if (want('final')) {
