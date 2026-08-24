@@ -140,6 +140,20 @@ CLAUDE_BIN = os.environ.get("GEAK_CLAUDE_BIN", "").strip()
 DONE_GRACE_S = float(os.environ.get("GEAK_DONE_GRACE_S", "1800"))
 DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
 
+# GEAK_FAST_MODE=1 selects the workflow's TUNING-ONLY mode: the tuning skillset is
+# the sole optimization phase (ConfigSweep / HeadKernel / Milestone are skipped),
+# its agent is armed with 4h, and Setup/Finalize/Report/Validate run exactly as in
+# the full pipeline. Exposed as an env flag so a caller can select it without
+# rewriting its args dict; the workflow arg (fast_mode) is unchanged and still works.
+FAST_MODE_ENABLED = str(os.environ.get("GEAK_FAST_MODE", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
+# The wall clock that goes with it. Sized in the JS from measured phases (~1h setup +
+# 4h tuning + ~1.2h final); 7h is the smallest budget a full-length tuning phase fits
+# in with margin. This is a REAL kill like --timeout-s / GEAK_E2E_TIMEOUT_S, so it
+# joins the min() below rather than overriding a caller who asked for LESS.
+FAST_MODE_TIMEOUT_S = int(os.environ.get("GEAK_FAST_MODE_TIMEOUT_S", "25200") or 25200)
+
 
 # ---------------------------------------------------------------------------
 # Serving-launch FIDELITY: backend-agnostic knob -> per-adapter CLI flag map.
@@ -346,6 +360,11 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
     if final_reserve_s is not None:
         ps_args["final_reserve_s"] = final_reserve_s
+    # Tuning-only mode. Everything else in this mapping is mode-agnostic: the handoff's
+    # launch recipe, server args, workload and fidelity knobs are forwarded identically,
+    # so a fast run baselines and measures on exactly the config a normal run would.
+    if FAST_MODE_ENABLED:
+        ps_args["fast_mode"] = "true"
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
     # Serving-launch fidelity (see Hyperloom handoff builder / #805): forward the
@@ -4498,6 +4517,12 @@ def _resolve_timeout_s(argv: list[str]) -> tuple[list[str], set[str], int]:
     v = _int_or_none(os.environ.get("GEAK_E2E_TIMEOUT_S"), "GEAK_E2E_TIMEOUT_S")
     if v is not None:
         stated["GEAK_E2E_TIMEOUT_S"] = v
+    # Tuning-only mode names its own kill (7h). It joins the min() for the same reason
+    # the other two do: a caller who asked for LESS still means it, and a CI budget of
+    # 24h must not stretch a mode that is sized for 7. Setting GEAK_FAST_MODE alone is
+    # therefore enough to get "4h tuning inside a 7h run" with no other argument.
+    if FAST_MODE_ENABLED:
+        stated["GEAK_FAST_MODE"] = FAST_MODE_TIMEOUT_S
     budget = min(stated.values()) if stated else DEFAULT_E2E_TIMEOUT_S
     sys.stderr.write(
         f"[budget] wall-clock {budget}s "
