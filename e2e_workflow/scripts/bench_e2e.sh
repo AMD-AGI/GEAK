@@ -730,20 +730,27 @@ if [ "${BENCH_COLD_FINAL:-0}" = "1" ] && [ "$REUSE_SERVER" != "1" ]; then
   RESULT_JSONL="$_saved_result_jsonl"; export RESULT_JSONL
 fi
 
-# ---- warmup (never timed) ----
-# Isolated replicas request a complete outer warmup round.  Legacy/default keeps
-# the historical short CONC-prompt warmup.
-_warmup_prompts="$CONC"
-if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
-  _warmup_prompts="$NUM_PROMPTS"
-  echo ">>> Warmup full round (prompts=$_warmup_prompts) ..."
+# ---- optional outer warmup (never timed) ----
+# Cache-cold isolated replicas skip this invocation: their benchmark client still
+# performs its own internal warmup, but the timed prompt set is not pre-populated
+# by an earlier full replay. Legacy/default runs retain the historical short
+# CONC-prompt warmup, and explicit full-round callers retain the full warmup.
+if [ "${GEAK_ISOLATED_REPLICA:-0}" = "1" ] \
+   && [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" != "1" ]; then
+  echo ">>> Skipping outer warmup (compute-warm/cache-cold isolated replica) ..."
 else
-  echo ">>> Warmup round ..."
-fi
-if ! adapter_bench "$_warmup_prompts" "$CONC" 0 >/dev/null 2>&1; then
+  _warmup_prompts="$CONC"
   if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
-    echo "!!! Full outer warmup failed; isolated replica is invalid." >&2
-    exit 2
+    _warmup_prompts="$NUM_PROMPTS"
+    echo ">>> Warmup full round (prompts=$_warmup_prompts) ..."
+  else
+    echo ">>> Warmup round ..."
+  fi
+  if ! adapter_bench "$_warmup_prompts" "$CONC" 0 >/dev/null 2>&1; then
+    if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
+      echo "!!! Full outer warmup failed; isolated replica is invalid." >&2
+      exit 2
+    fi
   fi
 fi
 # the warmup line should not pollute the timed results
