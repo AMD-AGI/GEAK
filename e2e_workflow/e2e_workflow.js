@@ -399,6 +399,19 @@ const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC };
 // default. Serving TP/GPU are handled by SERVING_TP / SERVING_GPU above.
 const INIT_FLAGS = String(A.initial_extra_server_args || '');
 const INIT_ENV = String(A.initial_extra_env || '');
+// Schema-v2 handoffs may carry the exact Python overlay/source snapshot stack
+// that produced Hyperloom's current best.  This is part of the baseline
+// configuration, not a GEAK-authored candidate, so it must remain underneath
+// every later candidate overlay instead of being dropped at Setup.
+const INIT_BASE_OVERLAY = String(A.initial_overlay_pythonpath || '');
+const EFFECTIVE_CONFIG_DIGEST = String(A.effective_config_digest || '');
+// Throughput measurements use independent server replicas.  Search/parity use
+// one Hyperloom-equivalent replica; final validation uses three replicas to
+// estimate variance.  The bench dispatcher owns retry/degraded aggregation.
+const MEASUREMENT_MODE = String(A.measurement_mode || 'isolated_server');
+const PARITY_REPLICAS = parseInt(A.parity_replicas != null ? A.parity_replicas : 1, 10);
+const SEARCH_REPLICAS = parseInt(A.search_replicas != null ? A.search_replicas : 1, 10);
+const VALIDATION_REPLICAS = parseInt(A.validation_replicas != null ? A.validation_replicas : 3, 10);
 // CUDA/HIP-graph deployment requirement (general; derived from the serving config, NOT hardcoded).
 // vllm/sglang capture the steady-state decode path into a FULL CUDA graph UNLESS --enforce-eager is set.
 // A kernel that wins only via its OWN per-call graph-capture+replay wrapper falls back to eager inside the
@@ -634,7 +647,12 @@ function expertSkillsBlock(role) {
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
-  const inall = { BACKEND, SERVING_TP, SERVING_GPU, ...inputs };
+  const inall = {
+    BACKEND, SERVING_TP, SERVING_GPU,
+    MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
+    EFFECTIVE_CONFIG_DIGEST,
+    ...inputs,
+  };
   const base = `You are the ${role}. PHASE=${phase}.
 First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
 Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.
@@ -1130,8 +1148,8 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
         'FINISH this e2e A/B. A reference leg may already exist on disk under $CB/ref — reuse it and ' +
         'run ONLY the missing candidate leg (or re-run both if no usable ref exists), then return ' +
         'accepted/stack/rejected with ab_complete:true. Do NOT return gate:"incomplete" unless a hard ' +
-        'hardware/harness fault persists after this retry. If short on time, shrink E2E_REPEATS toward 1 ' +
-        'so BOTH legs still run.',
+        'hardware/harness fault persists after this retry. If short on time, keep one isolated search ' +
+        'replica per leg so BOTH legs still run.',
         { ...inputs, RESUME_AB: true }),
       { phase: phaseName, label: `${label} (finish ${tries})`, schema: INTEGRATE_SCHEMA });
   }
@@ -1413,13 +1431,15 @@ if (!MODEL_PATH && KERNEL_PATH) {
 // ===========================================================================
 // PHASE: Setup + Baseline profile + Strategize  (gated; else load carried state)
 // ===========================================================================
-let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, profile, strategy, kernelQueue, headQueue;
+let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
 if (want('setup')) {
   phase('Setup');
   const setup = await safeAgent(
     roleAgent('director', 'setup', 'Build the isolated e2e eval dir and record the baseline throughput.', {
       LAUNCH_SCRIPT, MODEL_PATH, EXP_ROOT, EVAL_DIR_OVERRIDE, MODEL_NAME_HINT, TASK,
-      GPU_IDS, WORKLOAD, INIT_FLAGS, INIT_ENV, SKILL_DIR: WORKFLOW_DIR,
+      GPU_IDS, WORKLOAD, INIT_FLAGS, INIT_ENV, INIT_BASE_OVERLAY,
+      MEASUREMENT_PURPOSE: 'parity', REPLICAS: PARITY_REPLICAS,
+      SKILL_DIR: WORKFLOW_DIR,
     }),
     { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
   if (!setup || !setup.eval_dir) throw new Error('Setup failed: no eval_dir');
@@ -1431,13 +1451,14 @@ if (want('setup')) {
   // back to whatever the director resolved.
   curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
   curEnv = INIT_ENV || (setup.server_env || '');
+  curOverlay = INIT_BASE_OVERLAY;
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
 
   phase('Profile');
   profile = await safeAgent(
     roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
-      OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+      OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
       ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
@@ -1482,6 +1503,7 @@ if (want('setup')) {
   NOISE_BAND = ST.noise_band_pct || NOISE_BAND_DEFAULT;
   curFlags = ST.flags || '';
   curEnv = ST.env || '';
+  curOverlay = ST.overlay || INIT_BASE_OVERLAY;
   profile = { profile_topN_json: ST.profile_topn_json || '' };
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
@@ -1499,7 +1521,9 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
     roleAgent('config_tuner', 'sweep', 'Sweep the ranked config axes one at a time; keep wins.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, BASELINE_THROUGHPUT: BASELINE_TPUT,
       NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS, CONFIG_DIRECTIONS: strategy.config_directions,
-      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+      MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
+      SKILL_DIR: WORKFLOW_DIR,
     }),
     { phase: 'ConfigSweep', label: 'config_tuner:sweep', schema: SWEEP_SCHEMA });
   if (sweep && sweep.best_throughput_tok_s > curTput) {
@@ -1511,7 +1535,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
     profile = await safeAgent(
       roleAgent('profiler', 'reprofile', 'Re-profile after the config sweep.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'config',
-        OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Profile', label: 'profiler:post-config', schema: PROFILE_SCHEMA });
@@ -1537,7 +1561,6 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
 // Shared state carried across the head + kernel tracks (and across phase invocations via args.state).
 // MUST be declared BEFORE the HeadKernel block that uses them (else temporal-dead-zone ReferenceError).
 // ---------------------------------------------------------------------------
-let curOverlay = ST.overlay || '';        // the accepted overlay carried forward
 let dispatched = 0;                        // counts ONLY kernel-optimization tasks (the budget)
 let milestone = 0;
 let noImprove = 0;
@@ -1777,7 +1800,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               verified_isolated_speedup: c.best, pct_gpu_time: c.head.pct_gpu_time, parity_note: 'expected_close',
             },
             CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
-            CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
+            CURRENT_THROUGHPUT: curTput,
+            MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
+            SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
             ...ACCURACY_INPUTS,
             ...(opts.final && ACCURACY_GATE !== 'none' ? { ACCURACY_LIMIT: DEEP_FINAL_ACCURACY_LIMIT } : {}),   // de-noise the finalize accuracy decision
           }),
@@ -2769,9 +2794,12 @@ if (want('final')) {
   validation = await safeAgent(
     roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
+      BASELINE_OVERLAY: INIT_BASE_OVERLAY,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
       FINAL_FLAGS: { flags: curFlags, env: curEnv },
-      CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL, E2E_REPEATS, SKILL_DIR: WORKFLOW_DIR,
+      CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL, E2E_REPEATS,
+      MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_REPLICAS,
+      SKILL_DIR: WORKFLOW_DIR,
       // The Report phase already wrote these files with the Finalize-bundle bench (the Director had not
       // run yet). After validation the Director MUST review + rewrite their headline throughput / speedup
       // / TTFT / TPOT (and status/parity) to its authoritative same-session numbers, so report-vs-director

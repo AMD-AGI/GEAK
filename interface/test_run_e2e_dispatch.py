@@ -1038,6 +1038,25 @@ class TestBenchProtocol(_RunE2ECase):
     def test_non_dict_protocol_is_ignored(self):
         self.assertEqual(rx.apply_bench_protocol({"bench_protocol": "0.5"}), {})
 
+    def test_schema_v2_uses_actual_hyperloom_wrapper_protocol(self):
+        """Historical metadata cannot override the wrapper's 2*conc policy."""
+        exported = rx.apply_bench_protocol({
+            "schema_version": 2,
+            "workload": {"conc": 64},
+            "baseline_env_spec": {"config": {}},
+            "bench_protocol": {
+                "random_range_ratio": 0,
+                "num_prompts": 192,
+                "num_warmups": 8,
+            },
+        })
+        self.assertEqual(exported["NUM_PROMPTS"], "192")
+        self.assertEqual(exported["NUM_WARMUPS"], "128")
+        self.assertEqual(exported["SEED"], "0")
+        self.assertEqual(exported["RANDOM_RANGE_RATIO"], "1")
+        self.assertEqual(exported["GEAK_REPEAT_MODE"], "isolated_server")
+        self.assertEqual(exported["REPLICA_RETRIES"], "1")
+
 
 class TestAlignmentFlags(_RunE2ECase):
     def test_cold_final_defaults_off(self):

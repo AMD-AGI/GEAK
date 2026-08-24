@@ -133,10 +133,11 @@ json.dump(h, open(dst, "w"), indent=2)
 # ---- B. reachability check: absolute paths run_e2e.py OPENS as real local
 # files/dirs must EXIST; informational/metadata paths may legitimately be absent.
 # CRITICAL = the keys run_e2e dereferences as real local paths (a stale value here
-# breaks the run). Everything else — e.g. the schema-2 baseline_env_spec.* block,
-# which run_e2e never reads — is advisory: note it, don't block. Existence, not a
-# source-prefix blacklist. Hard-fail on real runs only for CRITICAL leaks; warn in
-# --dry-run (weights/etc. legitimately absent).
+# breaks the run). The schema-2 baseline_env_spec is now consumed to build the
+# effective flags/env/overlay stack. Its nested paths stay informational here
+# because they may be container-visible even when the host cannot stat them;
+# the effective-config resolver still incorporates them into its descriptor.
+# Hard-fail on real runs only for CRITICAL leaks; warn in --dry-run.
 CRITICAL = {"model_path", "exp_root", "launch_recipe", "inferencex_path"}
 def _top(path):   # top-level handoff key for a (possibly nested) scan path
     return path.split(".", 1)[0].split("[", 1)[0]
