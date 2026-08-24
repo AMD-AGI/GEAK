@@ -163,19 +163,25 @@ const TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
   ? Math.max(Math.floor(TIME_BUDGET_EFFECTIVE_MS * 0.6), TIME_BUDGET_EFFECTIVE_MS - TIME_TAIL_CAP_MS) : null;
 // ---- FAST MODE / TUNING-ONLY (opt-in, default OFF) ---------------------------------------------------
 // A time-boxed run whose ONLY optimization phase is the tuning skillset: it SKIPS ConfigSweep, the
-// HeadKernel track AND the editable-kernel Milestone loop, and completes within a wall-clock budget
-// (6h). Setup, Finalize, Report and Validate run exactly as they do in the full pipeline — the mode
-// changes WHICH optimization phases run, never how the deliverable is assembled or measured.
+// HeadKernel track AND the editable-kernel Milestone loop, and targets a 7h wall clock (4h of tuning
+// plus setup and the final tail). Setup, Finalize, Report and Validate run exactly as they do in the
+// full pipeline — the mode changes WHICH optimization phases run, never how the deliverable is
+// assembled or measured.
 // CRITICAL: when fast_mode is OFF (the default) NOTHING below changes the full pipeline — every fast-mode
 // knob is selected by a `FAST_MODE ? fast : original` ternary that resolves to the ORIGINAL value, and
 // the phase skips / deadline timers are gated on FAST_MODE — so a non-fast run is byte-identical (same
 // prompts, same budgets, same control flow) to a build without this feature. No default-mode regression.
 const FAST_MODE = String(A.fast_mode != null ? A.fast_mode : 'false') === 'true';
-// Total wall-clock budget for a tuning-only run (default 6h): ~4h of tuning plus the Finalize/Report/
-// Validate tail. Enforced with setTimeout (Date.now() is NOT available in workflow scripts).
-let FAST_BUDGET_MS = parseInt(A.fast_budget_ms != null ? A.fast_budget_ms : 21600000, 10); // 6h
-// A tuning-only run is a 6h box BY CONTRACT, so when the orchestrator also passes a wall-clock budget take
-// the SMALLER of the two — a 24h CI budget must not stretch this mode to 24h, and a budget shorter than 6h
+// Total wall-clock budget for a tuning-only run (default 7h), sized from measured runs rather than picked:
+// setup+profile+strategize ran a median 0.9h (max 2.6h), the tuning phase is capped at 4h, and
+// Finalize/Report/Validate ran a median 1.2h (p90 3.3h). 4+1+1.2 overruns a 6h box at the MEDIAN, so 7h is
+// the smallest budget that fits a full-length tuning phase with any margin.
+// NOTE: in tuning-only mode this is currently advisory. Its enforcement path (FAST_DEADLINE_HIT,
+// fastBoundedWorkflow) is read only by the HeadKernel/Milestone blocks this mode skips, so the real bounds
+// are the 4h tuning guard, time_budget_s, and the orchestrator's hard kill.
+let FAST_BUDGET_MS = parseInt(A.fast_budget_ms != null ? A.fast_budget_ms : 25200000, 10); // 7h
+// A tuning-only run is a 7h box BY CONTRACT, so when the orchestrator also passes a wall-clock budget take
+// the SMALLER of the two — a 24h CI budget must not stretch this mode to 24h, and a budget shorter than 7h
 // still binds. Outside fast mode nothing reads FAST_BUDGET_MS, so the orchestrator budget stays SOURCE OF
 // TRUTH there exactly as before.
 if (TIME_BUDGET_EFFECTIVE_MS != null) {
@@ -2483,7 +2489,12 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       TUNING_TARGETS: (strategy && strategy.head_candidates) || headQueue || [],
       TUNING_SKILLSET_DIR, TUNING_KB_ENABLED, SKILL_DIR: WORKFLOW_DIR,
     }),
-    { phase: 'TuningSkillset', label: 'tuning_specialist:tune', schema: TUNING_SCHEMA });
+    { phase: 'TuningSkillset', label: 'tuning_specialist:tune', schema: TUNING_SCHEMA },
+    // ONE attempt in tuning-only mode. The default 3 assumes a cheap agent worth re-rolling, but this one
+    // is armed with 4h and the hung-guard does not CANCEL it (Promise.race abandons the wait, not the
+    // work) — so a retry stacks a second 4h agent on top of the first, still-running one and can push the
+    // phase past 12h. If 4h was not enough, more of the same is not the answer. Full pipeline keeps 3.
+    FAST_MODE ? 1 : 3);
 
   // An accept must clear EVERY bar the skillset itself sets. Engagement is the load-bearing one: its
   // stated thesis is that a speedup whose artifact was never proven live has proven nothing, and that

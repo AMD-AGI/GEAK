@@ -89,7 +89,7 @@ Both default off = **default** mode; mutually exclusive, deep wins.
 | Mode | Trigger | What runs |
 |---|---|---|
 | **default** | *(none)* | ConfigSweep + HeadKernel + Milestone. |
-| **fast** | "fast mode" | TuningSkillset only, time-boxed (`fast_budget_ms`, 6h; tuning agent cap 4h). |
+| **fast** | "fast mode" | TuningSkillset only, time-boxed (`fast_budget_ms`, 7h; tuning agent cap 4h). |
 | **deep** | "deep mode" | ConfigSweep + HeadKernel, cross-kernel×backend lane pool, many rounds (`deep_head_budget_ms`, 24h). |
 
 ```

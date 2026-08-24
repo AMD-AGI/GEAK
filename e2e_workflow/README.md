@@ -132,14 +132,14 @@ identical. With both off, the run is **byte-identical** to the original (every m
 | Mode | arg | Phases | HeadKernel | Budget (default) | Use when |
 |---|---|---|---|---|---|
 | **default** | *(none)* | ConfigSweep + HeadKernel + **Milestone** | serial, 1 pass/head, ≤2 authored langs, single e2e gate | — | full pipeline incl. the editable-kernel Milestone loop |
-| **fast** | `fast_mode:true` | **TuningSkillset only** (skips ConfigSweep + HeadKernel + Milestone) | not run | `fast_budget_ms` = 6h, tuning agent cap 4h | a tuning-only pass under a wall-clock cap: tune the ops the stack already dispatches, no kernel authoring |
+| **fast** | `fast_mode:true` | **TuningSkillset only** (skips ConfigSweep + HeadKernel + Milestone) | not run | `fast_budget_ms` = 7h, tuning agent cap 4h (single attempt) | a tuning-only pass under a wall-clock cap: tune the ops the stack already dispatches, no kernel authoring |
 | **deep** | `deep_mode:true` | ConfigSweep + HeadKernel (skips Milestone) | **global cross-kernel×backend lane pool** — every (head op × backend) optimizes in parallel, many rounds via STATE_DIR + reseed, cross-pollination (per-op SHARED_KB + run-global GLOBAL_KB), convergence-stop + agent-budget backstop, finalize banks a **combined cross-kernel overlay** | `deep_head_budget_ms` = 24h | the deepest/broadest result: most backends, most rounds, hours available |
 
 ```
 # default — full pipeline
 args: { model_path, workflow_dir, backend:"vllm", tp:4, gpu_ids:"0,1,2,3", isl:1024, osl:1024, conc:64 }
 # fast — TuningSkillset-only, time-boxed
-args: { ...same..., fast_mode:true, fast_budget_ms: 21600000 }
+args: { ...same..., fast_mode:true, fast_budget_ms: 25200000 }
 # deep — exhaustive, multi-backend, parallel (give it all GPUs + hours)
 args: { ...same..., deep_mode:true, gpu_ids:"0,1,2,3,4,5,6,7", deep_head_budget_ms: 64800000 }
 ```

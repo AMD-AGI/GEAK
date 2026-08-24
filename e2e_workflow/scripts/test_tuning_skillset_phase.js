@@ -200,6 +200,12 @@ ok(/FINAL_PHASE_STARTED \|\| TUNING_PHASE_STARTED\) return AGENT_TIMEOUT_MS;/.te
 // pipeline and agentTimeoutFor stays self-contained (test_time_budget_reserve.js evaluates it in isolation).
 ok(/if \(FAST_MODE\) TUNING_PHASE_STARTED = true;[^\n]*\n\s*phase\('TuningSkillset'\);/.test(src),
   'the tuning exemption is granted by POSITION at the phase call site, fast mode only');
+// A 4h agent that the hung-guard abandons is still RUNNING, so a retry stacks agents and can treble the
+// phase. One attempt in tuning-only mode; the full pipeline keeps the default 3.
+ok(/FAST_MODE \? 1 : 3\);/.test(src),
+  'the tuning phase gets ONE attempt in fast mode (a 4h timeout must not be re-rolled)');
+ok(/fast_budget_ms != null \? A\.fast_budget_ms : 25200000/.test(src),
+  'the tuning-only box is 7h: 4h tuning does not fit a 6h budget alongside measured setup + final phases');
 
 // ---------------------------------------------------------------------------
 // D. The role delegates to the skillset instead of restating it.

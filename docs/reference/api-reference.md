@@ -78,7 +78,7 @@ the run is byte-identical to an unmodified run (every mode knob is gated).
 | Mode | Arg | Phases | Default budget |
 |---|---|---|---|
 | default | *(none)* | ConfigSweep + HeadKernel + Milestone | — |
-| fast | `fast_mode: true` | TuningSkillset only (time-boxed; skips ConfigSweep + HeadKernel + Milestone) | `fast_budget_ms` = 6h (`21600000`); tuning agent cap `agent_timeout_ms` = 4h (`14400000`) |
+| fast | `fast_mode: true` | TuningSkillset only (time-boxed; skips ConfigSweep + HeadKernel + Milestone) | `fast_budget_ms` = 7h (`25200000`); tuning agent cap `agent_timeout_ms` = 4h (`14400000`) |
 | deep | `deep_mode: true` | ConfigSweep + HeadKernel (global cross-kernel×backend lane pool) | `deep_head_budget_ms` = 24h (`86400000`) |
 
 Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `deep_wave_budget`,
