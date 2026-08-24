@@ -214,22 +214,23 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      use the fused-fp8 path (no bf16 re-materialization; compact fp8/preshuffled cache) and/or route
      only the tuned target (N,K) through the seam (pass other shapes to stock). Never accept a net
      usable regression (do-no-harm).
-3. **Measure e2e with the TIGHT 2-launch protocol.** Do NOT edit the shared `scripts/bench_e2e.sh` —
-   drive it from the eval dir. `bench_e2e.sh` already does N timed repeats **on ONE server** (its
-   `REPEATS` knob), so launch only TWO servers — a reference block then a candidate block, back-to-back
-   on the same GPU — NOT a fresh server per repeat (per-leg relaunch is ~14 launches/integrate and far
-   too slow):
+3. **Measure e2e with isolated server replicas.** Do NOT edit the shared `scripts/bench_e2e.sh` —
+   drive it from the eval dir. Search uses one Hyperloom-equivalent replica per leg by default. Each
+   replica launches a fresh server, performs one full warmup round, records one full measured round,
+   and tears down. Never use multiple timed requests against one server as replicas:
    ```bash
    CB="$EVAL_DIR/overlay/cand_<short>"
    # BOTH blocks MUST use the run-wide serving invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
-   # reference block: current accepted config, E2E_REPEATS timed repeats on one server
+   # reference block: current accepted config, one fresh-server replica
    BACKEND="<backend>" OUT_DIR="$CB/ref" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
-     REPEATS="${E2E_REPEATS:-7}" PROFILE=0 OVERLAY_PYTHONPATH="$CURRENT_OVERLAY" \
+     GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=search REPLICAS="${REPLICAS:-1}" \
+     PROFILE=0 OVERLAY_PYTHONPATH="$CURRENT_OVERLAY" \
      EXTRA_SERVER_ARGS="<cur flags>" EXTRA_ENV="<cur env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
-   # candidate block: + this one change, E2E_REPEATS timed repeats on one server (SAME TP/GPU)
+   # candidate block: + this one change, one fresh-server replica (SAME TP/GPU)
    BACKEND="<backend>" OUT_DIR="$CB/cand" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
-     REPEATS="${E2E_REPEATS:-7}" PROFILE=0 OVERLAY_PYTHONPATH="<CAND or empty>" \
+     GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=search REPLICAS="${REPLICAS:-1}" \
+     PROFILE=0 OVERLAY_PYTHONPATH="<CAND or empty>" \
      EXTRA_SERVER_ARGS="<cand flags>" EXTRA_ENV="<cand env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
    ```
@@ -240,8 +241,8 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    otherwise. Hard-coding them here would silently override the caller's 口径 and make the A/B
    incomparable to the caller's baseline (e.g. fixed vs variable sequence lengths). Only vary
    `OVERLAY_PYTHONPATH` / `EXTRA_SERVER_ARGS` / `EXTRA_ENV` between the two legs.
-   Read ALL per-repeat throughputs from `$CB/ref/bench_runs.jsonl` and `$CB/cand/bench_runs.jsonl`
-   (each has E2E_REPEATS rows). Compute `ref_med`, `cand_med`, `ref_max`, `cand_min`, and
+   Read the replica aggregates from `$CB/ref/bench_summary.json` and `$CB/cand/bench_summary.json`.
+   Compute `ref_med`, `cand_med`, `ref_max`, `cand_min`, and
    `delta% = (cand_med - ref_med)/ref_med*100`.
    **MANDATORY — measure BOTH legs before returning a verdict. Completing only the reference leg is NOT
    an acceptable stopping point and is NOT a valid result.** Checkpoint each leg as it finishes (for crash
@@ -250,11 +251,10 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    then **ALWAYS run the candidate block** and update it (adding `cand_med`, the final `gate`,
    `ab_complete:true`, `e2e_throughput_tok_s`, `e2e_delta_pct`). The checkpoint exists ONLY so a CRASH is
    recoverable — it is NOT a licence to stop after the reference leg. If wall-clock is tight, SHRINK the
-   cost (drop `E2E_REPEATS` toward 1, even 1 repeat per leg) so that BOTH legs still run — never skip,
+   cost (keep one search replica per leg) so that BOTH legs still run — never skip,
    defer, or "leave for later" the candidate leg. The two blocks run within ~30 min back-to-back, so box
    drift between them is negligible (the box drifts over hours, not minutes). If you want extra drift
-   robustness on a borderline result, run a second ref block after the cand block and pool the ref
-   repeats — but do NOT relaunch per repeat.
+   robustness on a borderline result, defer the authoritative 3-replica estimate to validation.
    **RESUME / finish a cut-off A/B (`RESUME_AB` is set in your inputs, OR `$CB/ref/bench_runs.jsonl`
    already exists on disk):** do NOT re-run the reference leg — reuse the on-disk ref repeats and run ONLY
    the MISSING candidate block, then gate. When `CAND_OVERLAY_DIR` is provided the candidate overlay is

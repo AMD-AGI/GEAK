@@ -34,7 +34,10 @@ Inputs: `LAUNCH_SCRIPT` (path to a bench/launch script; may be empty), `MODEL_PA
 (sglang|vllm; default sglang), `EXP_ROOT`, `EVAL_DIR_OVERRIDE` (may be empty), `MODEL_NAME_HINT`,
 `TASK`, `SKILL_DIR`, `GPU_IDS`, `SERVING_TP`/`SERVING_GPU` (serving config invariant), `WORKLOAD`
 (ISL/OSL/conc), `INIT_FLAGS` (seed `--server` flags from the caller's best config; may be empty),
-`INIT_ENV` (seed `KEY=VAL` env from the caller's best config; may be empty).
+`INIT_ENV` (seed `KEY=VAL` env from the caller's best config; may be empty),
+`INIT_BASE_OVERLAY` (the caller's current-best Python overlay/source stack),
+`MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, and
+`EFFECTIVE_CONFIG_DIGEST`.
 
 Steps:
 1. Collision-proof run id: `TS=$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}`.
@@ -46,6 +49,7 @@ Steps:
    echo "$MODEL_PATH" > "$EVAL_DIR/model_path.txt"
    [ -n "$LAUNCH_SCRIPT" ] && cp "$LAUNCH_SCRIPT" "$EVAL_DIR/launch_baseline.sh"
    cp "$SKILL_DIR/scripts/bench_e2e.sh" "$EVAL_DIR/bench_e2e.sh"
+   cp "$SKILL_DIR/scripts/bench_replica.sh" "$EVAL_DIR/bench_replica.sh"
    cp "$SKILL_DIR/scripts/server_teardown.sh" "$EVAL_DIR/server_teardown.sh"   # the server-kill contract; bench_e2e.sh REFUSES to run without it
    cp -r "$SKILL_DIR/scripts/adapters" "$EVAL_DIR/adapters"   # bench_e2e.sh sources adapters/<backend>.sh next to itself
    cp "$SKILL_DIR/scripts/parse_profile.py" "$EVAL_DIR/parse_profile.py"
@@ -84,8 +88,10 @@ Steps:
    (substitute the actual SERVING_TP / SERVING_GPU values from your inputs):
    ```bash
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/baseline" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
-   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=3 PROFILE=0 \
-   EXTRA_SERVER_ARGS="<INIT_FLAGS>" EXTRA_ENV="<INIT_ENV>" \
+   ISL=<isl> OSL=<osl> CONC=<conc> PROFILE=0 \
+   GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=parity REPLICAS="${REPLICAS:-1}" \
+   EFFECTIVE_CONFIG_DIGEST="$EFFECTIVE_CONFIG_DIGEST" \
+   OVERLAY_PYTHONPATH="$INIT_BASE_OVERLAY" EXTRA_SERVER_ARGS="<INIT_FLAGS>" EXTRA_ENV="<INIT_ENV>" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/baseline_bench.log"
    ```
    Parse `EVAL_DIR/baseline/bench_summary.json` for `throughput_tok_s_median` + spread (the metric-neutral
@@ -135,9 +141,10 @@ The final overlay may include PROVISIONAL "stack" kernels (each individually sub
 compound). THIS phase is the authoritative gate for the combined stack: measure the FULL bundle vs the
 TRUE baseline with the tight 2-block protocol and decide if the COMBINED result clears the band.
 
-1. Measure baseline AND final **same-session, tight** (2 launches, not per-repeat): a reference block
-   (stack/stack-default = the TRUE baseline config, i.e. NO overlay/flags) and a final block (full
-   overlay + flags), each `E2E_REPEATS` (default 7) timed repeats on ONE server:
+1. Measure baseline AND final with **independent-server replicas**: a reference block
+   (the TRUE baseline current-best stack) and a final block (full overlay + flags), each with
+   `VALIDATION_REPLICAS` fresh servers (default 3). Every replica performs the same full warmup round
+   and one measured round; never replace a failed replica with another repeat on the same server.
    The TRUE-baseline block MUST reproduce the seed config the baseline was measured on (the caller's
    best config = the recorded `baseline` flags/env, i.e. the same `INIT_FLAGS`/`INIT_ENV`) — NOT
    `FINAL_FLAGS` minus GEAK's kernel wins. Use the same `TP=SERVING_TP GPU=SERVING_GPU` as setup.
@@ -145,15 +152,20 @@ TRUE baseline with the tight 2-block protocol and decide if the COMBINED result 
    # fresh TRUE-baseline block (baseline seed flags/env, NO kernel overlay) — re-measured NOW for drift.
    # Serving config MUST be the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/validation/base" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
-   EXTRA_SERVER_ARGS="<baseline seed flags>" EXTRA_ENV="<baseline seed env>" \
-   REPEATS="${E2E_REPEATS:-7}" PROFILE=0 ISL=<isl> OSL=<osl> CONC=<conc> \
+   OVERLAY_PYTHONPATH="$BASELINE_OVERLAY" EXTRA_SERVER_ARGS="<baseline seed flags>" EXTRA_ENV="<baseline seed env>" \
+   GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=validation REPLICAS="${REPLICAS:-3}" \
+   PROFILE=0 ISL=<isl> OSL=<osl> CONC=<conc> \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee -a "$EVAL_DIR/logs/validation_bench.log"
    # final block (full overlay + flags + env), SAME TP=SERVING_TP GPU=SERVING_GPU
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/validation/final" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
    OVERLAY_PYTHONPATH="$FINAL_OVERLAY" EXTRA_SERVER_ARGS="<final flags>" EXTRA_ENV="<final env>" \
-   REPEATS="${E2E_REPEATS:-7}" PROFILE=0 ISL=<isl> OSL=<osl> CONC=<conc> \
+   GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=validation REPLICAS="${REPLICAS:-3}" \
+   PROFILE=0 ISL=<isl> OSL=<osl> CONC=<conc> \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee -a "$EVAL_DIR/logs/validation_bench.log"
    ```
+   Read `status`, `successful_replicas`, and `usable_for_acceptance` from both summaries. A degraded
+   median remains observable, but acceptance requires at least two successful validation replicas per
+   leg; an `incomplete` leg must never be silently promoted.
    Use `validation/base` as the drift-corrected baseline (the provided `BASELINE_THROUGHPUT` may be
    hours stale). Combined `delta% = (final_med - base_med)/base_med*100`; check `final_min > base_max`.
 2. **Output parity** (a faster wrong server is a regression): run a short greedy/temp=0 fixed-seed

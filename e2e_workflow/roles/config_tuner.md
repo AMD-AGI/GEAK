@@ -51,7 +51,8 @@ For EACH direction, in the Architect's order:
    ```bash
    # SERVING config MUST match the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/config/<dir_id>" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
-   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=3 PROFILE=0 \
+   ISL=<isl> OSL=<osl> CONC=<conc> PROFILE=0 \
+   GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=search REPLICAS="${REPLICAS:-1}" \
    EXTRA_SERVER_ARGS="<current flags + this flag>" EXTRA_ENV="<current env + this env>" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/cfg_<dir_id>.log"
    ```

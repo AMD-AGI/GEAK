@@ -53,6 +53,188 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ---- isolated-server measurement protocol ----
+# Keep the existing body below as the single-server implementation.  In isolated
+# mode this process is only a scheduler: each attempt runs bench_replica.sh,
+# which re-enters this script in legacy mode for exactly one fresh-server
+# warmup+measurement lifecycle.
+# Profiling is not a throughput replica: it intentionally needs one warm server
+# and a sustained load/window.  An aligned run exports isolated mode globally,
+# so profile invocations opt back into the existing single-server body here.
+if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ] && [ "${PROFILE:-0}" = "1" ]; then
+  echo ">>> PROFILE=1: using the single-server profiling lifecycle (not a timed replica)."
+  GEAK_REPEAT_MODE=legacy
+fi
+if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
+  _replica_runner="$HERE/bench_replica.sh"
+  if [ ! -f "$_replica_runner" ]; then
+    echo "!!! GEAK_REPEAT_MODE=isolated_server requires $_replica_runner" >&2
+    exit 3
+  fi
+  if [ "${REUSE_SERVER:-0}" = "1" ]; then
+    echo "!!! REUSE_SERVER=1 is incompatible with GEAK_REPEAT_MODE=isolated_server; timed replicas must fresh-launch." >&2
+    exit 4
+  fi
+  _purpose="${MEASUREMENT_PURPOSE:-search}"
+  if [ -n "${REPEATS+x}" ]; then
+    _requested="$REPEATS"
+  elif [ -n "${REPLICAS+x}" ]; then
+    _requested="$REPLICAS"
+  else
+    case "$_purpose" in
+      validation) _requested=3 ;;
+      parity|search|"") _requested=1 ;;
+      *)
+        echo ">>> Unknown MEASUREMENT_PURPOSE='$_purpose'; using 1 isolated replica." >&2
+        _requested=1 ;;
+    esac
+  fi
+  case "$_requested" in
+    ''|*[!0-9]*|0)
+      echo "!!! REPEATS must be a positive integer in isolated-server mode (got '$_requested')." >&2
+      exit 4 ;;
+  esac
+
+  _aggregate_out="${OUT_DIR:-$(pwd)/e2e_bench_out}"
+  mkdir -p "$_aggregate_out"
+  : > "$_aggregate_out/bench_runs.jsonl"
+  echo "Measurement: isolated_server  purpose=$_purpose  requested_replicas=$_requested"
+  _successful=0
+  for ((_replica=1; _replica<=_requested; _replica++)); do
+    _replica_dir="$_aggregate_out/replica_$(printf '%03d' "$_replica")"
+    mkdir -p "$_replica_dir"
+    rm -f "$_replica_dir/selected_summary.json" "$_replica_dir/selected_attempt"
+    _replica_ok=0
+    for _attempt in 1 2; do
+      _attempt_dir="$_replica_dir/attempt_$_attempt"
+      rm -f "$_attempt_dir/bench_summary.json"
+      echo ">>> Isolated replica $_replica/$_requested (attempt $_attempt/2) ..."
+      OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
+        bash "$_replica_runner"
+      _rc=$?
+      if [ "$_rc" -eq 0 ] && python3 - "$_attempt_dir/bench_summary.json" "${EFFECTIVE_CONFIG_DIGEST:-}" <<'PY'
+import json, sys
+try:
+    summary = json.load(open(sys.argv[1]))
+    value = summary.get("throughput_tok_s_median")
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    ok = ok and int(summary.get("runs", 0)) == 1
+    expected_digest = sys.argv[2]
+    if expected_digest:
+        ok = ok and summary.get("effective_config_digest") == expected_digest
+except (OSError, ValueError, TypeError):
+    ok = False
+raise SystemExit(0 if ok else 1)
+PY
+      then
+        cp "$_attempt_dir/bench_summary.json" "$_replica_dir/selected_summary.json"
+        if [ -f "$_attempt_dir/bench_runs.jsonl" ]; then
+          cat "$_attempt_dir/bench_runs.jsonl" >> "$_aggregate_out/bench_runs.jsonl"
+        fi
+        printf '%s\n' "$_attempt" > "$_replica_dir/selected_attempt"
+        _replica_ok=1
+        _successful=$((_successful + 1))
+        break
+      fi
+      echo "!!! Isolated replica $_replica attempt $_attempt failed (rc=$_rc)." >&2
+    done
+    if [ "$_replica_ok" != "1" ]; then
+      echo "!!! Isolated replica $_replica failed after one retry; continuing without same-server fallback." >&2
+    fi
+  done
+
+  python3 - "$_aggregate_out" "$_requested" "$_successful" "$_purpose" "${EFFECTIVE_CONFIG_DIGEST:-}" <<'PY'
+import glob
+import json
+import os
+import statistics
+import sys
+
+out_dir, requested_s, successful_s, purpose, effective_digest = sys.argv[1:]
+requested, successful = int(requested_s), int(successful_s)
+selected = sorted(glob.glob(os.path.join(out_dir, "replica_*", "selected_summary.json")))
+summaries = []
+replicas = []
+for path in selected:
+    replica_dir = os.path.dirname(path)
+    replica_index = int(os.path.basename(replica_dir).split("_")[-1])
+    if replica_index > requested:
+        continue
+    with open(path) as fh:
+        item = json.load(fh)
+    summaries.append(item)
+    try:
+        attempt = int(open(os.path.join(replica_dir, "selected_attempt")).read().strip())
+    except (OSError, ValueError):
+        attempt = None
+    replicas.append({
+        "replica": replica_index,
+        "attempt": attempt,
+        "throughput_tok_s": item.get("throughput_tok_s_median"),
+    })
+
+def numbers(key):
+    return [
+        float(item[key]) for item in summaries
+        if isinstance(item.get(key), (int, float)) and not isinstance(item.get(key), bool)
+    ]
+
+def median(key):
+    values = numbers(key)
+    return round(statistics.median(values), 3) if values else None
+
+tputs = numbers("throughput_tok_s_median")
+observed = round(statistics.median(tputs), 3) if tputs else None
+if len(tputs) < 2 or not observed:
+    spread = 0.0
+else:
+    spread = round(100.0 * (max(tputs) - min(tputs)) / observed, 2)
+complete = successful == requested
+metric_bases = {item.get("metric_basis") for item in summaries if item.get("metric_basis")}
+metric_basis = next(iter(metric_bases)) if len(metric_bases) == 1 else None
+summary = {
+    "requested": requested,
+    "successful": successful,
+    "requested_replicas": requested,
+    "successful_replicas": successful,
+    "status": "complete" if complete else "incomplete",
+    "usable_for_acceptance": complete and observed is not None,
+    "measurement_mode": "isolated_server",
+    "measurement_purpose": purpose,
+    "effective_config_digest": effective_digest or None,
+    "observed_median": observed,
+    "throughput_tok_s_median": observed,
+    "throughput_tok_s_spread_pct": spread,
+    "output_throughput_tok_s_median": (
+        observed if metric_basis == "aggregate_output_tok_s" else None
+    ),
+    "output_throughput_tok_s_spread_pct": (
+        spread if metric_basis == "aggregate_output_tok_s" else None
+    ),
+    "ttft_ms_median": median("ttft_ms_median"),
+    "tpot_ms_median": median("tpot_ms_median"),
+    "runs": successful,
+    "all_throughput": tputs,
+    "metric_basis": metric_basis,
+    "replicas": replicas,
+}
+with open(os.path.join(out_dir, "bench_summary.json"), "w") as fh:
+    json.dump(summary, fh, indent=2)
+print(
+    f"E2E_SUMMARY {metric_basis or 'unknown'}={observed} spread={spread}% "
+    f"requested={requested} successful={successful} status={summary['status']} "
+    f"usable_for_acceptance={str(summary['usable_for_acceptance']).lower()} "
+    "measurement_mode=isolated_server"
+)
+PY
+  echo ">>> Done. Summary: $_aggregate_out/bench_summary.json"
+  # A degraded leg remains observable: callers consume status=incomplete and
+  # the successful-replica median.  Only a leg with no measurement at all is a
+  # process-level failure.
+  [ "$_successful" -gt 0 ] && exit 0
+  exit 2
+fi
+
 # ---- backend selection (the only thing that picks the stack) ----
 BACKEND=${BACKEND:-sglang}
 ADAPTER="${ADAPTER:-$HERE/adapters/${BACKEND}.sh}"
@@ -548,17 +730,38 @@ if [ "${BENCH_COLD_FINAL:-0}" = "1" ] && [ "$REUSE_SERVER" != "1" ]; then
   RESULT_JSONL="$_saved_result_jsonl"; export RESULT_JSONL
 fi
 
-# ---- warmup (one short round; never timed) ----
-echo ">>> Warmup round ..."
-adapter_bench "$CONC" "$CONC" 0 >/dev/null 2>&1 || true
+# ---- warmup (never timed) ----
+# Isolated replicas request a complete outer warmup round.  Legacy/default keeps
+# the historical short CONC-prompt warmup.
+_warmup_prompts="$CONC"
+if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
+  _warmup_prompts="$NUM_PROMPTS"
+  echo ">>> Warmup full round (prompts=$_warmup_prompts) ..."
+else
+  echo ">>> Warmup round ..."
+fi
+if ! adapter_bench "$_warmup_prompts" "$CONC" 0 >/dev/null 2>&1; then
+  if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
+    echo "!!! Full outer warmup failed; isolated replica is invalid." >&2
+    exit 2
+  fi
+fi
 # the warmup line should not pollute the timed results
 : > "$RESULT_JSONL"
 
 # ---- timed repeats ----
+_bench_failed=0
 for r in $(seq 1 "$REPEATS"); do
   echo ">>> Bench repeat $r/$REPEATS ..."
-  adapter_bench "$NUM_PROMPTS" "$CONC" 0 || echo "!!! bench repeat $r failed (continuing)"
+  if ! adapter_bench "$NUM_PROMPTS" "$CONC" 0; then
+    echo "!!! bench repeat $r failed (continuing)"
+    _bench_failed=1
+  fi
 done
+if [ "${BENCH_REQUIRE_SUCCESS:-0}" = "1" ] && [ "$_bench_failed" = "1" ]; then
+  echo "!!! Required isolated measurement round failed." >&2
+  exit 2
+fi
 
 # ---- optional profile trace (STEADY-STATE MIX, not a cold prefill burst) ----
 # Real serving is continuous batching: at any instant some sequences are prefilling (chunks) and others
@@ -717,6 +920,12 @@ summ = {
     # Aggregate tok/s (NOT divided by TP). Default matches Hyperloom/Magpie output_throughput protocol;
     # E2E_METRIC=total switches to total (input+output) token throughput.
     "metric_basis": ("aggregate_total_token_tok_s" if _is_total else "aggregate_output_tok_s"),
+    "measurement_mode": (
+        "isolated_server_replica"
+        if os.environ.get("GEAK_ISOLATED_REPLICA") == "1"
+        else "legacy_same_server"
+    ),
+    "effective_config_digest": os.environ.get("EFFECTIVE_CONFIG_DIGEST") or None,
 }
 with open(out_path, "w") as fh: json.dump(summ, fh, indent=2)
 print(f"E2E_SUMMARY {summ['metric_basis']}={summ['throughput_tok_s_median']} "
