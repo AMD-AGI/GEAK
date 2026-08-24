@@ -1,22 +1,17 @@
 #!/usr/bin/env node
 // Regression guard for the wall-clock budget -> final reserve contract (no GPU, no model needed).
 //
-// Hyperloom #1202 round 2: three 20260823 sessions (Qwen3.5-27B-FP8, gpt-oss-120b, DeepSeek-V4-Pro)
-// each burned their whole budget and shipped NO final report, despite a 50min reserve being configured
-// and never overridden. Two independent defects put them there, and this file pins both:
+// Hyperloom #1202 round 2: three 20260823 sessions burned their whole budget and shipped NO final
+// report despite a configured reserve. Two defects, both pinned here:
 //
-//   1. ELAPSED_MS under-counted. The clock was a self-rearming setTimeout chain, so every rung's
-//      scheduler lateness was added to the next rung's start and the error compounded without bound.
-//      Under-counting is the dangerous direction: remainingMs() reports time the run does not have.
-//   2. The Finalize-gate had no wall-clock bound at all. TIME_DEADLINE_HIT only stops STARTING new
-//      head/milestone work; the pendingIntegrations drain loop that runs after it boots a server and
-//      benches two legs per iteration, unbounded. That loop is where all three runs were SIGKILLed.
+//   1. ELAPSED_MS under-counted -- a self-rearming setTimeout chain compounds scheduler lateness, so
+//      remainingMs() reported time the run did not have.
+//   2. The Finalize-gate had no wall-clock bound: its drain loop boots a server and benches two legs
+//      per iteration, unbounded. That loop is where all three runs were SIGKILLed.
 //
-// The clock is EXTRACTED from the real workflow source and executed against a virtual scheduler that
-// injects lateness -- a reimplementation here would pass while the shipped code drifted, which is the
-// failure this test exists to catch. The Finalize-gate is checked structurally (it is 200 lines of
-// async agent orchestration and cannot be executed standalone), asserting the deadline check precedes
-// the work in the shipped bytes.
+// The clock is EXTRACTED from the real source and run against a virtual scheduler that injects
+// lateness; a reimplementation here would pass while the shipped code drifted. The Finalize-gate is
+// checked structurally (200 lines of async orchestration, not executable standalone).
 //
 // Run:  node e2e_workflow/scripts/test_time_budget_reserve.js
 'use strict';
@@ -143,12 +138,9 @@ ok(/pending_integrations/.test(src.slice(gate, loop + 4000)),
   'unfinished A/Bs are surfaced to the caller rather than dropped');
 
 console.log('\n# the per-agent reserve cap is waived by POSITION, not by a self-reported label');
-// The round-2 hole: agentTimeoutFor() used to exempt opts.phase in ['Finalize','Report','Validate'],
-// and the Finalize-GATE tags its integrator agents 'Finalize' too -- so measured optimization work
-// (server boot + two benches, x AB_FINISH_RETRIES) inherited an exemption written for the final phase
-// and ran up to 4 x AGENT_TIMEOUT_MS with no budget bound at all. A self-reported label fails OPEN.
-// The exemption is now the FINAL_PHASE_STARTED flag, set once at the phase('Finalize') call site.
-// Executed, not grepped: the real function is lifted from source and asked for a verdict.
+// The round-2 hole: agentTimeoutFor() exempted opts.phase in ['Finalize','Report','Validate'], and the
+// Finalize-GATE tags its agents 'Finalize' too -- so optimization work inherited the exemption and ran
+// unbounded. A self-reported label fails OPEN. Executed, not grepped: lifted from the real source.
 const aStart = src.indexOf('let FINAL_PHASE_STARTED = false;');
 const aEnd = src.indexOf('\n}', src.indexOf('function agentTimeoutFor')) + 2;
 ok(aStart !== -1 && aEnd > aStart, 'agentTimeoutFor located');
