@@ -26,8 +26,9 @@ evaluation — do not read it. Otherwise it is fair game; say in your return whi
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `SERVING_TP`, `SERVING_GPU`, `GPU_ID`
 (an isolated GPU for op-level sweeps — never the serving set), `WORKLOAD`, `BASELINE_THROUGHPUT`,
-`CURRENT_THROUGHPUT`, `CURRENT_FLAGS` / `CURRENT_ENV` (the accepted config so far), `NOISE_BAND_PCT`,
-`E2E_REPEATS`, `PROFILE_TOPN`, `TUNING_TARGETS` (the Architect's ranked ops — advisory, not a shortlist),
+`CURRENT_THROUGHPUT`, `CURRENT_FLAGS` / `CURRENT_ENV` / `CURRENT_OVERLAY` (the accepted stack so far),
+`MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, `NOISE_BAND_PCT`, `PROFILE_TOPN`,
+`TUNING_TARGETS` (the Architect's ranked ops — advisory, not a shortlist),
 `TUNING_SKILLSET_DIR`, `TUNING_KB_ENABLED`, `ACCURACY_GATE`, `SKILL_DIR`.
 
 There is no cap on how many ops you tune. Work the profile until the remaining candidates are not worth
@@ -41,9 +42,11 @@ Everything else is your call. These four are not:
    `BACKEND=<backend> TP=<SERVING_TP> GPU=<SERVING_GPU>` and the run's `WORKLOAD`. Every e2e number in
    this run comes from it, on the same serving invariant, or deltas are not comparable.
 2. **Measure your own pre-tune baseline in-session.** Do not inherit `CURRENT_THROUGHPUT` as your
-   denominator — re-measure it on the current accepted config, now. Your reported delta is
+   denominator — re-measure it on the current accepted config and `CURRENT_OVERLAY`, now. Your reported delta is
    `post` vs `your own pre`, and it is the whole reason this phase is separate.
-3. **Interleave the pre/post A/B**, and complete both legs. A post-only number is not a result.
+3. **Measure pre/post as isolated-server search replicas**, and complete both legs. Each leg retains
+   internal kernel/graph warmups, skips the outer full-round replay, and records one cache-cold request
+   set. A post-only number is not a result.
 4. **Prove engagement before you claim anything**, and quote the evidence. An unproven artifact is not a
    win here regardless of what the timing said — the orchestrator will refuse the accept without it, and
    an unproven artifact silently poisons every later A/B in the run, since your accepted config becomes
@@ -67,6 +70,7 @@ A tuning win has up to two halves, and they ship by **different** routes. Get th
 
 - **Code** (a routing switch, a dispatch-path fix) → a reversible **overlay**, built with
   `SKILL_DIR/scripts/overlay_setup.py add-module|add-rebind`. Return its directory as `apply_overlay`.
+  Seed it from `CURRENT_OVERLAY` so a Hyperloom handoff or warm-start kernel stack is never discarded.
   It is carried forward like any accepted patch, and later A/B legs extend it. **Never edit a `.py` in
   the installed tree**: it lands in both legs of every later comparison, cannot be varied per leg, and
   is not reversible. `live_tree_files` is for data, and declaring source there does not make it allowed.
@@ -110,7 +114,7 @@ numbers without asking you a question.
 
 Write `EVAL_DIR/tuning/tuning_report.md`: what you targeted and why, per attempt what you changed and
 what it measured (including the attempts that failed — a dead end that is explained saves the next
-person from repeating it), the correctness evidence, the engagement evidence, and the interleaved A/B.
+person from repeating it), the correctness evidence, the engagement evidence, and the isolated-server A/B.
 The System Architect quotes this in the final report, so put real numbers in it and mark absent things
 as absent.
 

@@ -70,7 +70,8 @@ one-at-a-time would bank NONE of them. So emit one of three gates:
 - **`stack`** — engagement proven, parity holds, and `cand_med >= ref_med` (non-negative) but the delta
   is sub-threshold/overlapping. PROVISIONAL: it doesn't regress and may compound with siblings. The
   orchestrator carries it forward; the Director's FINAL combined validation (full stack vs TRUE
-  baseline, tight protocol) is the authoritative gate that decides if the COMBINED stack clears 0.5%.
+  baseline, independent-server replicas) is the authoritative gate that decides if the COMBINED stack
+  clears 0.5%.
 - **`rejected`** — parity fails, OR no engagement, OR `cand_med < ref_med` (a real regression).
 Never `stack` a parity-failure, a regression, or a non-engaging change.
 
@@ -79,7 +80,7 @@ Never `stack` a parity-failure, a regression, or a non-engaging change.
 ## PHASE=integrate  (one optimized kernel)
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `GPU_ID`, `WORKLOAD`, `NOISE_BAND_PCT`
-(default 0.5), `E2E_REPEATS` (default 7; repeats per leg of the interleaved A/B),
+(default 0.5), `MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`,
 `KERNEL_RESULT` (task_dir, source_path_in_sglang, target_callable, final_patch.diff,
 verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `winner_kind`
 ∈ {env,flag,patch}, `apply_env`, `apply_flags`, `code_patch`, `tuning_artifact`, `parity_note`),
@@ -229,22 +230,24 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      use the fused-fp8 path (no bf16 re-materialization; compact fp8/preshuffled cache) and/or route
      only the tuned target (N,K) through the seam (pass other shapes to stock). Never accept a net
      usable regression (do-no-harm).
-3. **Measure e2e with the TIGHT 2-launch protocol.** Do NOT edit the shared `scripts/bench_e2e.sh` —
-   drive it from the eval dir. `bench_e2e.sh` already does N timed repeats **on ONE server** (its
-   `REPEATS` knob), so launch only TWO servers — a reference block then a candidate block, back-to-back
-   on the same GPU — NOT a fresh server per repeat (per-leg relaunch is ~14 launches/integrate and far
-   too slow):
+3. **Measure e2e with isolated server replicas.** Do NOT edit the shared `scripts/bench_e2e.sh` —
+   drive it from the eval dir. Search uses one Hyperloom-equivalent replica per leg by default. Each
+   replica launches a fresh server, retains the client's internal kernel/graph warmups, skips the
+   outer full-round replay, records one cache-cold measured request set, and tears down. Never use
+   multiple timed requests against one server as replicas:
    ```bash
    CB="$EVAL_DIR/overlay/cand_<short>"
    # BOTH blocks MUST use the run-wide serving invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
-   # reference block: current accepted config, E2E_REPEATS timed repeats on one server
+   # reference block: current accepted config, one fresh-server replica
    BACKEND="<backend>" OUT_DIR="$CB/ref" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
-     REPEATS="${E2E_REPEATS:-7}" PROFILE=0 OVERLAY_PYTHONPATH="$CURRENT_OVERLAY" \
+     GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=search REPLICAS="${REPLICAS:-1}" \
+     PROFILE=0 OVERLAY_PYTHONPATH="$CURRENT_OVERLAY" \
      EXTRA_SERVER_ARGS="<cur flags>" EXTRA_ENV="<cur env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
-   # candidate block: + this one change, E2E_REPEATS timed repeats on one server (SAME TP/GPU)
+   # candidate block: + this one change, one fresh-server replica (SAME TP/GPU)
    BACKEND="<backend>" OUT_DIR="$CB/cand" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
-     REPEATS="${E2E_REPEATS:-7}" PROFILE=0 OVERLAY_PYTHONPATH="<CAND or empty>" \
+     GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=search REPLICAS="${REPLICAS:-1}" \
+     PROFILE=0 OVERLAY_PYTHONPATH="<CAND or empty>" \
      EXTRA_SERVER_ARGS="<cand flags>" EXTRA_ENV="<cand env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
    ```
@@ -255,8 +258,8 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    otherwise. Hard-coding them here would silently override the caller's 口径 and make the A/B
    incomparable to the caller's baseline (e.g. fixed vs variable sequence lengths). Only vary
    `OVERLAY_PYTHONPATH` / `EXTRA_SERVER_ARGS` / `EXTRA_ENV` between the two legs.
-   Read ALL per-repeat throughputs from `$CB/ref/bench_runs.jsonl` and `$CB/cand/bench_runs.jsonl`
-   (each has E2E_REPEATS rows). Compute `ref_med`, `cand_med`, `ref_max`, `cand_min`, and
+   Read the replica aggregates from `$CB/ref/bench_summary.json` and `$CB/cand/bench_summary.json`.
+   Compute `ref_med`, `cand_med`, `ref_max`, `cand_min`, and
    `delta% = (cand_med - ref_med)/ref_med*100`.
    **MANDATORY — measure BOTH legs before returning a verdict. Completing only the reference leg is NOT
    an acceptable stopping point and is NOT a valid result.** Checkpoint each leg as it finishes (for crash
@@ -265,14 +268,16 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    then **ALWAYS run the candidate block** and update it (adding `cand_med`, the final `gate`,
    `ab_complete:true`, `e2e_throughput_tok_s`, `e2e_delta_pct`). The checkpoint exists ONLY so a CRASH is
    recoverable — it is NOT a licence to stop after the reference leg. If wall-clock is tight, SHRINK the
-   cost (drop `E2E_REPEATS` toward 1, even 1 repeat per leg) so that BOTH legs still run — never skip,
+   cost (keep one search replica per leg) so that BOTH legs still run — never skip,
    defer, or "leave for later" the candidate leg. The two blocks run within ~30 min back-to-back, so box
    drift between them is negligible (the box drifts over hours, not minutes). If you want extra drift
-   robustness on a borderline result, run a second ref block after the cand block and pool the ref
-   repeats — but do NOT relaunch per repeat.
-   **RESUME / finish a cut-off A/B (`RESUME_AB` is set in your inputs, OR `$CB/ref/bench_runs.jsonl`
-   already exists on disk):** do NOT re-run the reference leg — reuse the on-disk ref repeats and run ONLY
-   the MISSING candidate block, then gate. When `CAND_OVERLAY_DIR` is provided the candidate overlay is
+   robustness on a borderline result, defer the authoritative 3-replica estimate to validation.
+   **RESUME / finish a cut-off A/B (`RESUME_AB` is set in your inputs, OR a usable
+   `$CB/ref/bench_summary.json` already exists on disk):** a summary is reusable only when
+   `status=="complete"` and `usable_for_acceptance==true`. When it is usable, do NOT re-run the
+   reference leg — reuse the on-disk aggregate and run ONLY the MISSING candidate block, then gate.
+   Otherwise re-run the reference leg first. When
+   `CAND_OVERLAY_DIR` is provided the candidate overlay is
    already built — bench it directly (do not rebuild it). This is how the orchestrator forces every
    incomplete A/B to completion; your job on resume is solely to produce the missing candidate
    measurement and emit the final `accepted`/`stack`/`rejected` with `ab_complete:true`.
@@ -280,7 +285,7 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    the orchestrator tests several candidates for the SAME head against the SAME current config, so the
    reference leg is identical for all of them and must be measured only ONCE. When `REUSE_REF` is set, do
    NOT launch the reference server — take `ref_med` (and `ref_max`) from `SHARED_REF_MED` (reusing the
-   on-disk `$CB/ref/bench_runs.jsonl` + ref parity outputs from the first candidate if present, since the
+   on-disk `$CB/ref/bench_summary.json` + ref parity outputs from the first candidate if present, since the
    reference config/output is unchanged), bench ONLY the candidate leg, and gate against `SHARED_REF_MED`.
    Echo `ref_med: SHARED_REF_MED` in your result. This roughly halves the server launches per extra
    candidate. The very FIRST candidate of a head (no `REUSE_REF`) runs both legs normally and its `ref_med`
@@ -303,7 +308,8 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    sub-threshold → carry forward to compound), `rejected` (parity-fail / no-engagement / regression), or
    `incomplete` — reserved for a HARD fault that genuinely prevented measuring BOTH legs *even after
    retrying* (a server that will not become healthy, a persistent harness/hardware fault). "Ran out of
-   time after the reference leg" is NOT a valid `incomplete`: shrink `E2E_REPEATS` so both legs still run.
+   time after the reference leg" is NOT a valid `incomplete`: keep one search replica per leg so both
+   legs still run.
    Returning `incomplete` for a leg you simply chose not to run is a defect — both legs are mandatory.
    For `accepted` or `stack`, fold the change into the carried overlay/config and report the measured
    throughput. For `rejected`, keep the previous. Always report the full numbers (engagement hits,
@@ -381,8 +387,10 @@ win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, 
    result. If the check fails, the bundle is broken — say so in `note` and set `tuning_in_bundle:false`
    rather than shipping a bundle that silently drops the tuning.
 
-2. Do a final warm-server bench of the assembled bundle to confirm the combined result matches the
-   sum of accepted milestones (combined effects can interact). Record it.
+2. Do a final isolated-server search replica of the assembled bundle to confirm the combined result
+   matches the sum of accepted milestones (combined effects can interact). Retain the client's internal
+   kernel/graph warmups, skip the outer full-round replay, and read the result from `bench_summary.json`.
+   The Director's independent validation replicas remain the authoritative estimate.
 
 Return JSON:
 ```json

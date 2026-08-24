@@ -196,12 +196,12 @@ ok(fs.existsSync(ROLE), 'roles/tuning_specialist.md exists');
 const role = fs.existsSync(ROLE) ? fs.readFileSync(ROLE, 'utf8') : '';
 if (role) {
   ok(/## PHASE=tune/.test(role), 'role defines PHASE=tune');
-  for (const key of ['TUNING_SKILLSET_DIR', 'TUNING_KB_ENABLED', 'CURRENT_THROUGHPUT']) {
+  for (const key of ['TUNING_SKILLSET_DIR', 'TUNING_KB_ENABLED', 'CURRENT_THROUGHPUT', 'CURRENT_OVERLAY']) {
     ok(role.includes(key), `role consumes ${key}`);
   }
   ok(/never edit anything inside it/i.test(role), 'role forbids editing the vendored tree');
-  ok(/engagement/i.test(role) && /[Ii]nterleave/i.test(role),
-    'role carries the two rules the skillset says results die on (engagement proof + interleaved A/B)');
+  ok(/engagement/i.test(role) && /isolated-server A\/B/i.test(role),
+    'role carries engagement proof and the isolated-server A/B contract');
   // The point of vendoring whole is that the METHOD stays in the skillset. The role must route into it
   // and must not grow into a paraphrase of the loop, which is the failure mode this guards.
   ok(/[Rr]ead them and use them/.test(role),
