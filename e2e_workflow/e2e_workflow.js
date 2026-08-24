@@ -116,31 +116,21 @@ const TIME_BUDGET_MS = A.time_budget_s != null ? parseInt(A.time_budget_s, 10) *
 // Date.now() is unavailable in Workflow scripts (breaks resume), so elapsed time is derived from timers.
 // No time_budget_s => remainingMs() is Infinity and every guard short-circuits.
 //
-// The rungs are armed ALL AT ONCE, each at its own ABSOLUTE offset from t0 — NOT as a self-rearming
-// chain. That distinction is the whole point (Hyperloom #1202 round 2). A chain re-arms inside its own
-// callback, so every rung's scheduler lateness is ADDED to the next rung's start: on a busy event loop
-// (this workflow runs dozens of concurrent agents + child benchmarks) the error COMPOUNDS and ELAPSED_MS
-// drifts arbitrarily far BEHIND real time. Under-counting elapsed is the dangerous direction — it makes
-// remainingMs() report time the run does not have, so the final reserve is spent optimizing and the hard
-// kill lands before Finalize/Report ever start. That is exactly how the 20260823 Qwen3.5-27B /
-// gpt-oss-120b / DeepSeek-V4-Pro sessions each shipped no final report. With an absolute ladder a late
-// rung only delays ITSELF; lateness never accumulates, so ELAPSED_MS tracks real time to within one
-// step plus that single rung's lag.
+// Rungs are armed all at once at ABSOLUTE offsets from t0, not as a self-rearming chain: a chain re-arms
+// inside its own callback, so scheduler lateness compounds and ELAPSED_MS drifts behind real time. That
+// under-count is what spent the reserve in the 20260823 sessions (#1202). A late rung here delays only
+// itself.
 let ELAPSED_MS = 0;
 const CLOCK_TICK_MS = 60000;
-// Bound on how many timers the ladder may arm (a 24h budget needs 1440 at 1min). Past this the step is
-// widened instead, so an absurd budget cannot flood the event loop with timers.
-const CLOCK_MAX_RUNGS = 2048;
+const CLOCK_MAX_RUNGS = 2048;   // an absurd budget widens the step instead of flooding the event loop
 if (TIME_BUDGET_MS != null && typeof setTimeout === 'function') {
   const step = Math.ceil(TIME_BUDGET_MS / CLOCK_TICK_MS) <= CLOCK_MAX_RUNGS
     ? CLOCK_TICK_MS
     : Math.ceil(TIME_BUDGET_MS / CLOCK_MAX_RUNGS);
-  // One rung PAST the budget so remainingMs() can actually reach 0.
+  // One rung PAST the budget so remainingMs() can reach 0.
   for (let at = step; at <= TIME_BUDGET_MS + step; at += step) {
     const mark = at;
-    // max() (not assignment) keeps the clock monotonic if rungs land out of order.
-    const t = setTimeout(() => { if (mark > ELAPSED_MS) ELAPSED_MS = mark; }, mark);
-    // unref so a pending rung can never hold the process open past the run.
+    const t = setTimeout(() => { if (mark > ELAPSED_MS) ELAPSED_MS = mark; }, mark);   // max: stays monotonic
     if (t && t.unref) t.unref();
   }
 }
@@ -149,13 +139,11 @@ const remainingMin = () => (TIME_BUDGET_MS == null ? Infinity : Math.round(remai
 // ---- FINAL-PHASE RESERVE ----
 // Hard floor of wall-clock held back for the WHOLE final phase (Finalize + Report + Validate + the
 // workflow_return write); no mode starts new work inside it. Without it, three sessions shipped no final
-// report (Hyperloom #1202). 60min sits ABOVE the observed max of 85 historical final phases (p50 40 /
-// p75 50 / p90 77 / max 86min) for everything but the tail, and the tail is exactly the case this exists
-// for: big models (DeepSeek-V4-Pro, gpt-oss-120b, Kimi) spend most of the final phase waiting on server
-// boots, so a p75-sized reserve is what left them with no report. Since Report writes both reports BEFORE
-// Validate, an even longer tail still ships them (only the Validate re-measure is at risk, and run_e2e
-// falls back). The 20% cap stops it eating a short budget whole; at >=5h budgets it never binds — below
-// that the cap, not this default, is what you get. Env override: GEAK_FINAL_RESERVE_S.
+// report (Hyperloom #1202). 60min covers all but the tail of 85 historical final phases (p50 40 / p75 50
+// / p90 77 / max 86min), and the tail is the case this exists for: big models spend the final phase
+// waiting on server boots. A longer tail still ships the reports (Report writes them before Validate; only
+// the re-measure is at risk and run_e2e falls back). The 20% cap binds below a 5h budget.
+// Env override: GEAK_FINAL_RESERVE_S.
 const FINAL_RESERVE_CAP_FRAC = 0.2;
 const FINAL_RESERVE_MS = TIME_BUDGET_MS != null
   ? Math.min(parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3600, 10) * 1000, // 60min
@@ -994,20 +982,13 @@ function withProcessSafety(prompt) {
 // agents are EXEMPT — they run INSIDE the reserve by design. The 2min floor lets a deadline-killed agent's
 // retries self-limit instead of burning the reserve. Inert when time_budget_s is absent (byte-identical).
 //
-// WHO is exempt is decided by WHERE EXECUTION ACTUALLY IS, not by a label the caller passes. The first
-// version keyed it on opts.phase ∈ ['Finalize','Report','Validate'], and round 2 walked straight through
-// that: the Finalize-GATE (the pendingIntegrations drain that runs BEFORE phase('Finalize')) tags its
-// integrator agents 'Finalize' too, so pure OPTIMIZATION work — a server boot + two benches, ×
-// AB_FINISH_RETRIES, up to 4 × AGENT_TIMEOUT_MS = 8h — claimed an exemption written for the final phase.
-// A self-reported label fails OPEN: get it wrong and you get UNLIMITED time, silently.
-//
-// FINAL_PHASE_STARTED is set exactly once, at the phase('Finalize') call site, so it is a fact about the
-// program rather than a claim. Nothing to pass, nothing to keep in sync, and no future agent added
-// anywhere before that line can accidentally opt itself out. Agents already in flight when it flips keep
-// the cap they were armed with (the timeout is fixed when the agent starts), which is what we want:
-// optimization work started before the final phase stays bounded by the reserve.
+// Exemption is by POSITION, not by a caller-supplied label. Keying it on opts.phase ∈ ['Finalize',
+// 'Report','Validate'] failed OPEN: the Finalize-GATE runs before phase('Finalize') yet tagged its
+// integrator agents 'Finalize', so optimization work claimed unlimited time. FINAL_PHASE_STARTED is set
+// once, at the phase('Finalize') call site. Agents in flight when it flips keep the cap they were armed
+// with — work started before the final phase stays bounded.
 let FINAL_PHASE_STARTED = false;
-const FINALIZE_GATE_PHASE = 'Finalize-gate';   // display grouping only — NOT load-bearing for the cap
+const FINALIZE_GATE_PHASE = 'Finalize-gate';   // display grouping only — not load-bearing for the cap
 function agentTimeoutFor() {
   if (TIME_BUDGET_MS == null || FINAL_PHASE_STARTED) return AGENT_TIMEOUT_MS;
   return Math.max(120000, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
@@ -1688,18 +1669,11 @@ if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HE
     log(`[time-budget] dispatch deadline (${Math.round(TIME_HEAD_DEADLINE_MS / 60000)}min of ${Math.round(TIME_BUDGET_MS / 60000)}min budget) reached — no NEW head/milestone work will start; finishing in-flight then proceeding to Finalize/Report/Validate before the hard kill.`);
   }, TIME_HEAD_DEADLINE_MS);
 }
-// --- RESERVE BOUNDARY (the moment the final phase MUST own the machine) ------------------------------
-// TIME_DEADLINE_HIT above only stops STARTING new head/milestone work; it does NOT bound what runs
-// between it and phase('Finalize'). The Finalize-GATE that sits in that window drives a full both-legs
-// e2e A/B per pending integration (server boot + two benches, tens of minutes each) in an unbounded
-// `while (pendingIntegrations.length)` loop, so a handful of pending A/Bs silently ate the entire
-// reserve and the run was SIGKILLed before Finalize/Report/Validate ever started (Hyperloom #1202
-// round 2: the 20260823 sessions each went 3.4-4.4h with no artifact write, then died).
-//
-// This is the ONE flag that says "the reserve has begun": armed off a SINGLE absolute setTimeout, so
-// unlike remainingMs() it cannot drift no matter how blocked the event loop gets. Consumers must stop
-// STARTING new measured work and hand the remaining time to the final phase. Inert when time_budget_s
-// is absent => byte-identical default behavior.
+// --- RESERVE BOUNDARY ---------------------------------------------------------------------------
+// TIME_DEADLINE_HIT above only stops STARTING new head/milestone work; it does not bound the
+// Finalize-gate that sits between it and phase('Finalize'), whose unbounded drain loop ate the whole
+// reserve in the 20260823 sessions. This is the one flag saying "the reserve has begun": a single
+// absolute setTimeout, so unlike remainingMs() it cannot drift. Inert without time_budget_s.
 let TIME_FINAL_DEADLINE_HIT = false;
 if (TIME_BUDGET_EFFECTIVE_MS != null && typeof setTimeout === 'function' && TIME_BUDGET_EFFECTIVE_MS > 0) {
   setTimeout(() => {
@@ -3682,12 +3656,9 @@ let validatedOk = false;   // did the independent Validate produce a usable (pos
 // AB_FINISH_RETRIES + each agent's agentBounded guard + the outer runner budget
 // + TIME_FINAL_DEADLINE_HIT (this gate must NEVER spend the final reserve; see below).
 if (want('final')) {
-  // (0) The reserve is not ours. Each iteration below boots a server and runs TWO
-  // benches; a few pending A/Bs outlast a 50min reserve easily. If the boundary has
-  // already passed there is no time to finish even one, so skip the whole gate
-  // (including the scan agent) and go straight to Finalize/Report/Validate. The
-  // pending entries stay in `pendingIntegrations` and are surfaced in the workflow
-  // return, so a real verified-isolated win is deferred, never discarded.
+  // (0) The reserve is not ours. Each iteration below boots a server and runs two benches, so past
+  // the boundary there is no time to finish even one: skip the whole gate, scan agent included.
+  // Pending entries stay in pendingIntegrations and reach the caller — deferred, not discarded.
   if (TIME_FINAL_DEADLINE_HIT) {
     log(`Finalize-gate: SKIPPED entirely — the final reserve has already begun. ` +
       `${pendingIntegrations.length} pending A/B(s) deferred to the caller (surfaced in pending_integrations).`);
@@ -3748,9 +3719,7 @@ if (want('final')) {
   pendingIntegrations.sort((a, b) => (b.isolated || 0) - (a.isolated || 0));
   const stillIncomplete = [];
   while (pendingIntegrations.length) {
-    // Re-check EVERY iteration: the boundary can fall in the middle of the queue. Break
-    // (do not shift) so the unfinished entries remain in pendingIntegrations and reach
-    // the caller via wfReturn.pending_integrations for a resume.
+    // Break, not shift, so unfinished entries stay in pendingIntegrations for wfReturn.
     if (TIME_FINAL_DEADLINE_HIT) {
       log(`Finalize-gate: STOPPING with ${pendingIntegrations.length} A/B(s) unfinished ` +
         `(${pendingIntegrations.map((q) => q.short_name).join(', ')}) — the final reserve has begun and ` +
@@ -3796,9 +3765,7 @@ if (want('final')) {
 allAccepted = acceptedHeads.concat(acceptedKernels);   // refresh after Fix C may have banked a pending win
 if (want('final')) {
   if (TIME_BUDGET_MS != null) log(`[time-budget] entering the final phase with ~${remainingMin()}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget left (reserve was ${Math.round(FINAL_RESERVE_MS / 60000)}min).`);
-  // The reserve is now OURS: from here every agent is a final-phase agent and drops the budget cap.
-  // This is the ONE place that grants the exemption, and it grants it by position, not by label.
-  FINAL_PHASE_STARTED = true;
+  FINAL_PHASE_STARTED = true;   // the one place the reserve exemption is granted — by position, not label
   phase('Finalize');
   finalize = await safeAgent(
     roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.', {

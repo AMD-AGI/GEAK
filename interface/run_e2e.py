@@ -2122,9 +2122,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
     speedup = float(wf.get("throughput_speedup") or validation.get("throughput_speedup") or 1.0)
     status = "ok" if speedup > 1.0 else "no_gain"
 
-    # Same rule as report_path: never advertise a path that does not exist. The
-    # eval_dir/final/ fallback was unconditional, so a run killed before the
-    # Finalize phase handed Hyperloom a launch script it could not open.
+    # Same rule as report_path: never advertise a path that does not exist.
     _launch_default = eval_dir / "final" / "final_launch.sh"
     final_launch = (
         wf.get("final_launch_script")
@@ -2536,13 +2534,9 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # Cold/hot speedup cross-checks (double-check only; see alignment_metrics above).
         # Does NOT change the promoted final_throughput_tok_s / throughput_speedup.
         "alignment_metrics": alignment_metrics,
-        # NEVER advertise a report that is not on disk. This used to fall back to
-        # str(eval_dir / "final_report.md") unconditionally, so a run that died
-        # before the Report phase still handed the caller a confident-looking path
-        # to a file that did not exist (the 20260823 sessions all did exactly
-        # that). Report only what a reader can actually open; _emit's
-        # guaranteed-emit step fills this in with the synthesized report when the
-        # workflow never wrote one.
+        # Never advertise a report that is not on disk: the old unconditional
+        # fallback handed the caller a path to a file that was never written.
+        # _emit fills this in with the synthesized report if the workflow died first.
         "report_path": wf.get("report_path") or _existing_report_path(eval_dir),
     }
     # ADDITIVE ONLY. Appended after the dict above is complete so it is self-evident at review time that
@@ -4238,10 +4232,9 @@ def _md_table(rows: list[tuple[str, Any]]) -> str:
 def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
     """Render a final report from the normalized result + on-disk recovery.
 
-    Deliberately NOT an LLM call: this runs on the timeout/crash path, where the
-    only budget left is the flush grace, and it must never itself hang. It is a
-    faithful dump of the numbers already recovered from disk, not an analysis —
-    the banner says so, so nobody mistakes it for the architect's report.
+    Deliberately not an LLM call: this runs on the timeout path where the only
+    budget left is the flush grace, so it must never hang. A dump of recovered
+    numbers, not an analysis — the banner says so.
     """
     status = str(normalized.get("status") or "unknown")
     speedup = normalized.get("throughput_speedup")
@@ -4321,15 +4314,9 @@ def _write_final_report_fallback(eval_dir: Path, normalized: dict,
                                  wf: dict | None) -> str:
     """Guarantee a readable final report; return its path ("" on failure).
 
-    Same GUARANTEED-EMIT contract as ``result.json`` / ``kernel_journey.json``:
-    a caller must ALWAYS find a report. When the Report phase already wrote one
-    this is a no-op that just returns the existing path — the architect's report
-    is strictly better and is never overwritten.
-
-    Hyperloom #1202: three 20260823 sessions were SIGKILLed in the Finalize-gate
-    and shipped no report at all, while result.json still pointed at the file
-    that was never written. Passive disk recovery rebuilt the NUMBERS but nobody
-    rebuilt the human-readable artifact.
+    Same guaranteed-emit contract as ``result.json`` / ``kernel_journey.json``.
+    When the Report phase already wrote one this is a no-op returning the
+    existing path — the architect's report is never overwritten.
     """
     existing = _existing_report_path(eval_dir)
     if existing:
@@ -4539,10 +4526,9 @@ def main(argv: list[str]) -> int:
                 out["kernel_journey_path"] = _write_kernel_journey(eval_dir, wf, out)
             except Exception as kj_exc:
                 out["kernel_journey_error"] = f"{type(kj_exc).__name__}: {kj_exc}"
-            # A final report is a GUARANTEED interface file too. If the Report
-            # phase never ran (timeout/crash), synthesize one from what IS on
-            # disk. Must happen BEFORE _update_baseline_alignment_reports so the
-            # alignment section gets appended to the synthesized report as well.
+            # A final report is a guaranteed interface file too. Must run before
+            # _update_baseline_alignment_reports so the alignment section is
+            # appended to a synthesized report as well.
             try:
                 had_report = bool(_existing_report_path(eval_dir))
                 report_path = _write_final_report_fallback(eval_dir, out, wf)
