@@ -126,42 +126,52 @@ ok(src.slice(gate, loop).includes('TIME_FINAL_DEADLINE_HIT'),
 ok(/pending_integrations/.test(src.slice(gate, loop + 4000)),
   'unfinished A/Bs are surfaced to the caller rather than dropped');
 
-console.log('\n# the per-agent reserve cap is not waived for optimization work');
-// The round-2 hole: agentTimeoutFor() exempts FINAL_PHASE_LABELS from the reserve cap, and the
-// Finalize-GATE tagged its integrator agents 'Finalize' -- so measured optimization work (server boot
-// + two benches, x AB_FINISH_RETRIES) inherited an exemption written for Finalize/Report/Validate and
-// ran up to 4 x AGENT_TIMEOUT_MS with no budget bound at all. Executed, not just grepped: the real
-// function is lifted from source and asked for a verdict.
-const aStart = src.indexOf('const FINAL_PHASE_LABELS');
+console.log('\n# the per-agent reserve cap is waived by POSITION, not by a self-reported label');
+// The round-2 hole: agentTimeoutFor() used to exempt opts.phase in ['Finalize','Report','Validate'],
+// and the Finalize-GATE tags its integrator agents 'Finalize' too -- so measured optimization work
+// (server boot + two benches, x AB_FINISH_RETRIES) inherited an exemption written for the final phase
+// and ran up to 4 x AGENT_TIMEOUT_MS with no budget bound at all. A self-reported label fails OPEN.
+// The exemption is now the FINAL_PHASE_STARTED flag, set once at the phase('Finalize') call site.
+// Executed, not grepped: the real function is lifted from source and asked for a verdict.
+const aStart = src.indexOf('let FINAL_PHASE_STARTED = false;');
 const aEnd = src.indexOf('\n}', src.indexOf('function agentTimeoutFor')) + 2;
 ok(aStart !== -1 && aEnd > aStart, 'agentTimeoutFor located');
 const mk = (TIME_BUDGET_MS, ELAPSED_MS) => new Function(
   'TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',
-  `${src.slice(aStart, aEnd)}\nreturn { agentTimeoutFor, FINALIZE_GATE_PHASE, FINAL_PHASE_LABELS };`)(
+  `${src.slice(aStart, aEnd)}
+   return { agentTimeoutFor, enterFinalPhase: () => { FINAL_PHASE_STARTED = true; } };`)(
   TIME_BUDGET_MS, 2 * 3600 * 1000, 50 * 60000, () => Math.max(0, TIME_BUDGET_MS - ELAPSED_MS));
 
-// 40min left of a 12h budget: less than the 50min reserve, so every capped agent floors at 2min.
+const RESERVE = 50 * 60000, AGENT_MAX = 2 * 3600 * 1000;
+// 40min left of a 12h budget: less than the 50min reserve, so a capped agent floors at 2min.
 const near = mk(H, H - 40 * 60000);
-const RESERVE = 50 * 60000;
-ok(near.agentTimeoutFor({ phase: 'HeadKernel' }) === 120000, 'an optimization agent floors at 2min near the deadline');
-ok(near.agentTimeoutFor({ phase: near.FINALIZE_GATE_PHASE }) === 120000,
-  'a Finalize-GATE agent is capped the same way — it measures, so it is optimization work');
-ok(near.agentTimeoutFor({ phase: 'Finalize' }) === 2 * 3600 * 1000,
-  'the real Finalize phase keeps its exemption — it runs inside the reserve by design');
-ok(!near.FINAL_PHASE_LABELS.includes(near.FINALIZE_GATE_PHASE),
-  `${JSON.stringify(near.FINALIZE_GATE_PHASE)} must never be added to FINAL_PHASE_LABELS`);
+ok(near.agentTimeoutFor() === 120000,
+  'before the final phase, an agent floors at 2min near the deadline — no caller can opt out');
+near.enterFinalPhase();
+ok(near.agentTimeoutFor() === AGENT_MAX,
+  'once phase(\'Finalize\') has actually run, the cap lifts — the final phase owns the reserve');
 
 // Mid-run the cap is the real remaining-minus-reserve, not the flat AGENT_TIMEOUT_MS.
 const mid = mk(H, 10 * 3600 * 1000);
-ok(mid.agentTimeoutFor({ phase: near.FINALIZE_GATE_PHASE }) === 2 * 3600 * 1000 - RESERVE,
-  'with 2h left the gate agent gets 2h minus the 50min reserve, not a flat 2h');
+ok(mid.agentTimeoutFor() === AGENT_MAX - RESERVE,
+  'with 2h left an agent gets 2h minus the 50min reserve, not a flat 2h');
 
-// And the gate must actually USE that phase at both of its agent call sites.
-const gateSrc = src.slice(gate, src.indexOf('if (stillIncomplete.length)', gate));
-ok((gateSrc.match(/FINALIZE_GATE_PHASE/g) || []).length >= 2,
-  'both Finalize-gate agent call sites (scan + finish-integrate) pass FINALIZE_GATE_PHASE');
-ok(!/phase: 'Finalize'/.test(gateSrc) && !/, 'Finalize'\)/.test(gateSrc),
-  'no agent inside the gate still claims the exempt \'Finalize\' label');
+// No budget => the feature is inert and every agent keeps the plain timeout.
+const noBudget = new Function('TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',
+  `${src.slice(aStart, aEnd)}\nreturn agentTimeoutFor;`)(null, AGENT_MAX, null, () => Infinity);
+ok(noBudget() === AGENT_MAX, 'no time_budget_s => byte-identical to a build without the feature');
+
+// The flag must be granted in exactly ONE place, and that place must be the final phase entry.
+ok((src.match(/FINAL_PHASE_STARTED = true/g) || []).length === 1,
+  'the exemption is granted in exactly one place');
+const grant = src.indexOf('FINAL_PHASE_STARTED = true');
+ok(src.slice(grant, grant + 200).includes("phase('Finalize')"),
+  "it is granted immediately before phase('Finalize'), so position is what decides");
+// Nothing may pass a phase/label to buy the exemption any more.
+ok(/function agentTimeoutFor\(\)/.test(src) && !/FINAL_PHASE_LABELS/.test(src),
+  'agentTimeoutFor takes no arguments — there is no label left to get wrong');
+ok(src.slice(gate, grant).indexOf('FINAL_PHASE_STARTED = true') === -1,
+  'the Finalize-gate runs entirely before the exemption is granted');
 
 console.log(failures ? `\nFAILED (${failures})` : '\nPASS');
 process.exit(failures ? 1 : 0);
