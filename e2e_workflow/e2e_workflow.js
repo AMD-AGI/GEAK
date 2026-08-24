@@ -991,22 +991,28 @@ function withProcessSafety(prompt) {
 // agents are EXEMPT — they run INSIDE the reserve by design. The 2min floor lets a deadline-killed agent's
 // retries self-limit instead of burning the reserve. Inert when time_budget_s is absent (byte-identical).
 //
-// The exemption is keyed on the phase LABEL, which is why round 2 slipped through: the Finalize-GATE
-// (the pendingIntegrations drain that runs BEFORE phase('Finalize')) tagged its integrator agents
-// 'Finalize' too, so pure OPTIMIZATION work — a server boot + two benches, ×AB_FINISH_RETRIES, up to
-// 4 × AGENT_TIMEOUT_MS = 8h — claimed an exemption written for the final phase. It is now labelled
-// 'Finalize-gate' (not in this list) so it takes the cap like every other optimization agent. Keep this
-// list to the three phases that genuinely run INSIDE the reserve; anything that measures is not one.
-const FINAL_PHASE_LABELS = ['Finalize', 'Report', 'Validate'];
-const FINALIZE_GATE_PHASE = 'Finalize-gate';   // deliberately NOT exempt; see above
-function agentTimeoutFor(opts) {
-  if (TIME_BUDGET_MS == null || (opts && FINAL_PHASE_LABELS.includes(opts.phase))) return AGENT_TIMEOUT_MS;
+// WHO is exempt is decided by WHERE EXECUTION ACTUALLY IS, not by a label the caller passes. The first
+// version keyed it on opts.phase ∈ ['Finalize','Report','Validate'], and round 2 walked straight through
+// that: the Finalize-GATE (the pendingIntegrations drain that runs BEFORE phase('Finalize')) tags its
+// integrator agents 'Finalize' too, so pure OPTIMIZATION work — a server boot + two benches, ×
+// AB_FINISH_RETRIES, up to 4 × AGENT_TIMEOUT_MS = 8h — claimed an exemption written for the final phase.
+// A self-reported label fails OPEN: get it wrong and you get UNLIMITED time, silently.
+//
+// FINAL_PHASE_STARTED is set exactly once, at the phase('Finalize') call site, so it is a fact about the
+// program rather than a claim. Nothing to pass, nothing to keep in sync, and no future agent added
+// anywhere before that line can accidentally opt itself out. Agents already in flight when it flips keep
+// the cap they were armed with (the timeout is fixed when the agent starts), which is what we want:
+// optimization work started before the final phase stays bounded by the reserve.
+let FINAL_PHASE_STARTED = false;
+const FINALIZE_GATE_PHASE = 'Finalize-gate';   // display grouping only — NOT load-bearing for the cap
+function agentTimeoutFor() {
+  if (TIME_BUDGET_MS == null || FINAL_PHASE_STARTED) return AGENT_TIMEOUT_MS;
   return Math.max(120000, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
 }
 
 function agentBounded(rawPrompt, opts) {
   const prompt = withProcessSafety(rawPrompt);
-  const timeoutMs = agentTimeoutFor(opts);
+  const timeoutMs = agentTimeoutFor();
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
   const guard = new Promise((resolve) => {
@@ -3787,6 +3793,9 @@ if (want('final')) {
 allAccepted = acceptedHeads.concat(acceptedKernels);   // refresh after Fix C may have banked a pending win
 if (want('final')) {
   if (TIME_BUDGET_MS != null) log(`[time-budget] entering the final phase with ~${remainingMin()}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget left (reserve was ${Math.round(FINAL_RESERVE_MS / 60000)}min).`);
+  // The reserve is now OURS: from here every agent is a final-phase agent and drops the budget cap.
+  // This is the ONE place that grants the exemption, and it grants it by position, not by label.
+  FINAL_PHASE_STARTED = true;
   phase('Finalize');
   finalize = await safeAgent(
     roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.', {
