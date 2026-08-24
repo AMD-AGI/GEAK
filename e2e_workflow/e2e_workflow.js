@@ -529,6 +529,19 @@ const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC };
 // default. Serving TP/GPU are handled by SERVING_TP / SERVING_GPU above.
 const INIT_FLAGS = String(A.initial_extra_server_args || '');
 const INIT_ENV = String(A.initial_extra_env || '');
+// Schema-v2 handoffs may carry the exact Python overlay/source snapshot stack
+// that produced Hyperloom's current best.  This is part of the baseline
+// configuration, not a GEAK-authored candidate, so it must remain underneath
+// every later candidate overlay instead of being dropped at Setup.
+const INIT_BASE_OVERLAY = String(A.initial_overlay_pythonpath || '');
+const EFFECTIVE_CONFIG_DIGEST = String(A.effective_config_digest || '');
+// Throughput measurements use independent server replicas.  Search/parity use
+// one Hyperloom-equivalent replica; final validation uses three replicas to
+// estimate variance.  The bench dispatcher owns retry/degraded aggregation.
+const MEASUREMENT_MODE = String(A.measurement_mode || 'isolated_server');
+const PARITY_REPLICAS = parseInt(A.parity_replicas != null ? A.parity_replicas : 1, 10);
+const SEARCH_REPLICAS = parseInt(A.search_replicas != null ? A.search_replicas : 1, 10);
+const VALIDATION_REPLICAS = parseInt(A.validation_replicas != null ? A.validation_replicas : 3, 10);
 // CUDA/HIP-graph deployment requirement (general; derived from the serving config, NOT hardcoded).
 // vllm/sglang capture the steady-state decode path into a FULL CUDA graph UNLESS --enforce-eager is set.
 // A kernel that wins only via its OWN per-call graph-capture+replay wrapper falls back to eager inside the
@@ -549,13 +562,11 @@ const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   'and prep/compile ONCE (cache by data_ptr) so the captured region only LAUNCHES the kernel. VERIFY your ' +
   'speedup holds when the op is replayed under a CUDA graph, not just in eager timing.'
 ) : '';
-// Acceptance noise band (%). Tight measurement (interleaved A/B, E2E_REPEATS repeats, non-overlap +
-// engagement proof — see e2e_integrator) makes a 0.5% default trustworthy. Prompt-tunable.
+// Acceptance noise band (%). Isolated-server ref/candidate measurements, non-overlap, and engagement
+// proof (see e2e_integrator) make a 0.5% default trustworthy. Prompt-tunable.
 const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
-// Repeats per timed e2e measurement (the integrator/validator pass this to bench_e2e.sh; the shared
-// bench script is NOT edited — interleaving is driven from the eval dir). Prompt-tunable.
-// Default 2: with <0.5% spreads, 2 reps + the non-overlap (cand_min>ref_max) check is sufficient to
-// judge a win; 7 was overkill and ~3x slower. Bump via args.e2e_repeats for a noisy box.
+// Legacy timed-repeat input retained for callers that explicitly select the legacy protocol.
+// Isolated-server runs use the purpose-specific replica counts above.
 const E2E_REPEATS = parseInt(A.e2e_repeats != null ? A.e2e_repeats : 2, 10);
 // Every integrate A/B MUST measure BOTH legs (reference + candidate). When the
 // integrator returns gate:'incomplete'/ab_complete:false (it only ran ref, hung,
@@ -666,8 +677,8 @@ const KB_RESOLVE_SCHEMA = obj({
   // 'speedup' would mis-explain the order it is looking at.
   sorted_by: { type: 'string' }, champion_metric: { type: 'string' },
 }, []);
-// Result of the standalone tuning-skillset phase. pre/post are ITS OWN in-session interleaved A/B legs
-// (NOT the run baseline), which is what makes tuning_delta_pct an attributable share of the total gain.
+// Result of the standalone tuning-skillset phase. pre/post are ITS OWN in-session isolated-server A/B
+// legs (NOT the run baseline), which makes tuning_delta_pct an attributable share of the total gain.
 // engagement_verified is load-bearing: the skillset's own thesis is that an unproven artifact is not a
 // win, so the orchestrator refuses to bank an accept without it.
 const TUNING_SCHEMA = obj({
@@ -905,7 +916,12 @@ function warmStartBlock(role) {
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
-  const inall = { BACKEND, SERVING_TP, SERVING_GPU, ...inputs };
+  const inall = {
+    BACKEND, SERVING_TP, SERVING_GPU,
+    MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
+    EFFECTIVE_CONFIG_DIGEST,
+    ...inputs,
+  };
   const base = `You are the ${role}. PHASE=${phase}.
 First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
 Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.
@@ -1426,7 +1442,10 @@ const bankAccepted = (list, e, kr) => {
 // reference leg alone — it is driven to a complete ref+cand measurement.
 async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
   // Caller inputs win; the tuning carve-out only ever ADDS keys (and is {} when no tuning was banked).
-  const withTuning = { ...tuningIntegrateInputs(), ...inputs };
+  const withTuning = {
+    MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
+    ...tuningIntegrateInputs(), ...inputs,
+  };
   let integ = await safeAgent(
     roleAgent('e2e_integrator', 'integrate', intro, withTuning),
     { phase: phaseName, label, schema: INTEGRATE_SCHEMA });
@@ -1440,8 +1459,8 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
         'FINISH this e2e A/B. A reference leg may already exist on disk under $CB/ref — reuse it and ' +
         'run ONLY the missing candidate leg (or re-run both if no usable ref exists), then return ' +
         'accepted/stack/rejected with ab_complete:true. Do NOT return gate:"incomplete" unless a hard ' +
-        'hardware/harness fault persists after this retry. If short on time, shrink E2E_REPEATS toward 1 ' +
-        'so BOTH legs still run.',
+        'hardware/harness fault persists after this retry. If short on time, keep one isolated search ' +
+        'replica per leg so BOTH legs still run.',
         { ...withTuning, RESUME_AB: true }),
       { phase: phaseName, label: `${label} (finish ${tries})`, schema: INTEGRATE_SCHEMA });
   }
@@ -1771,10 +1790,8 @@ function applyOpIdentityGuard(queue, stage) {
 // PHASE: Setup + Baseline profile + Strategize  (gated; else load carried state)
 // ===========================================================================
 // Module A's outputs. They are folded into the ORDINARY state variables at those variables' real
-// declaration sites further down — `curTput` (~1204), `curOverlay` / `acceptedKernels` (~1248) — and
-// not assigned here, because all three are in the temporal dead zone at Module A's insertion point
-// and Module A must run BEFORE Profile so the Top-N is taken on the adopted config. Their off-values
-// are 0 / '' / [], which is exactly what makes each fold below a no-op when the feature is off.
+// declaration sites further down. Module A must run BEFORE Profile so the Top-N is taken on the
+// adopted config. Their off-values are 0 / '' / [], which makes each fold a no-op when the feature is off.
 let kbSeedTput = 0;
 let kbSeedOverlay = '';
 const kbSeedKernels = [];
@@ -1783,13 +1800,15 @@ const kbSeedKernels = [];
 // byte-identical to the pre-feature build on an off run.
 let KB_REF_INPUTS = {};
 
-let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, profile, strategy, kernelQueue, headQueue;
+let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
 if (want('setup')) {
   phase('Setup');
   const setup = await safeAgent(
     roleAgent('director', 'setup', 'Build the isolated e2e eval dir and record the baseline throughput.', {
       LAUNCH_SCRIPT, MODEL_PATH, EXP_ROOT, EVAL_DIR_OVERRIDE, MODEL_NAME_HINT, TASK,
-      GPU_IDS, WORKLOAD, INIT_FLAGS, INIT_ENV, SKILL_DIR: WORKFLOW_DIR,
+      GPU_IDS, WORKLOAD, INIT_FLAGS, INIT_ENV, INIT_BASE_OVERLAY,
+      MEASUREMENT_PURPOSE: 'parity', REPLICAS: PARITY_REPLICAS,
+      SKILL_DIR: WORKFLOW_DIR,
     }),
     { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
   if (!setup || !setup.eval_dir) throw new Error('Setup failed: no eval_dir');
@@ -1801,6 +1820,7 @@ if (want('setup')) {
   // back to whatever the director resolved.
   curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
   curEnv = INIT_ENV || (setup.server_env || '');
+  curOverlay = INIT_BASE_OVERLAY;
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
 
   // =========================================================================
@@ -1908,7 +1928,7 @@ if (want('setup')) {
         const sweep = await safeAgent(
           roleAgent('config_tuner', 'sweep',
             'Validate ONE historical configuration recovered from the knowledge base. Treat it exactly ' +
-            'as you would a fresh direction: same A/B, same repeats, same parity check, same ' +
+            'as you would a fresh direction: same isolated-server measurement, same parity check, same ' +
             'swap-took-effect verification. TWO deviations from your role file, both deliberate:\n' +
             '(1) Do NOT decompose this direction into one-axis-at-a-time trials. A stored config is an ' +
             'ALREADY-COMPOUNDED whole that was accepted together on another box; benching its knobs ' +
@@ -1934,7 +1954,9 @@ if (want('setup')) {
                   `baseline of ${c.baseline_throughput_tok_s != null ? c.baseline_throughput_tok_s : '?'} tok/s. ` +
                   'That number is a HYPOTHESIS about this box, not a measurement of it.',
               }],
-              CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+              CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
+              MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
+              SKILL_DIR: WORKFLOW_DIR,
             }),
           { phase: 'WarmStart', label: `warm_start:validate:${c.session_id || 'cand'}`, schema: SWEEP_SCHEMA });
         const trial = (sweep && (sweep.trials || [])[0]) || {};
@@ -1977,7 +1999,7 @@ if (want('setup')) {
       // Replay the stored KERNELS through the ordinary integrate gate.
       //
       // Same machinery as the Milestone track, verbatim: runIntegrateBothLegs, the same
-      // INTEGRATE_SCHEMA, the same two-launch A/B with the parity probe, the same integAccepted
+      // INTEGRATE_SCHEMA, the same isolated ref/candidate A/B with the parity probe, the same integAccepted
       // predicate. The only thing that differs is where the patch came from, and that is exactly the
       // thing the A/B is there to make irrelevant.
       //
@@ -2040,12 +2062,12 @@ if (want('setup')) {
             // task_dir is deliberately EMPTY and the provenance is declared foreign — see the intro.
             task_dir: '', provenance: 'knowledge_base_replay',
           },
-          CURRENT_OVERLAY: kbSeedOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+          CURRENT_OVERLAY: kbSeedOverlay || curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
           CURRENT_THROUGHPUT: kbSeedTput || BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
         };
         const integ = await runIntegrateBothLegs(
           'Overlay a kernel RECOVERED FROM THE KNOWLEDGE BASE and gate it on e2e throughput. Run your ' +
-          'normal A/B — same two launches, same repeats, same parity probe. Two things are different ' +
+          'normal isolated-server A/B — same fresh-server legs, same parity probe. Two things are different ' +
           'and you must honour both:\n' +
           '(1) There is NO task_dir and therefore NO immutable oracle for this kernel. Your step-1 ' +
           'provenance re-check cannot run, because the workspace that produced this patch does not ' +
@@ -2290,13 +2312,15 @@ if (want('setup')) {
     }
   }
 
+  // A resumed overlay wins; otherwise a freshly replayed KB overlay stacks on the Hyperloom underlay.
+  // Fold before Profile and ConfigSweep so every downstream measurement sees the active source stack.
+  curOverlay = ST.overlay || kbSeedOverlay || curOverlay || '';
+
   phase('Profile');
   profile = await safeAgent(
     roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
-      // '' unless Module A adopted a stored kernel — the baseline Top-N must be captured on the
-      // configuration this run will actually optimize from, overlay included.
-      OVERLAY_PYTHONPATH: kbSeedOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+      OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
       ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
     }),
     { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
@@ -2325,6 +2349,7 @@ if (want('setup')) {
   NOISE_BAND = ST.noise_band_pct || NOISE_BAND_DEFAULT;
   curFlags = ST.flags || '';
   curEnv = ST.env || '';
+  curOverlay = ST.overlay || INIT_BASE_OVERLAY;
   profile = { profile_topN_json: ST.profile_topn_json || '' };
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
@@ -2344,7 +2369,9 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
     roleAgent('config_tuner', 'sweep', 'Sweep the ranked config axes one at a time; keep wins.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, BASELINE_THROUGHPUT: BASELINE_TPUT,
       NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS, CONFIG_DIRECTIONS: strategy.config_directions,
-      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR, ...KB_REF_INPUTS,
+      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
+      MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
+      SKILL_DIR: WORKFLOW_DIR, ...KB_REF_INPUTS,
     }),
     { phase: 'ConfigSweep', label: 'config_tuner:sweep', schema: SWEEP_SCHEMA });
   if (sweep && sweep.best_throughput_tok_s > curTput) {
@@ -2356,7 +2383,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
     profile = await safeAgent(
       roleAgent('profiler', 'reprofile', 'Re-profile after the config sweep.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'config',
-        OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Profile', label: 'profiler:post-config', schema: PROFILE_SCHEMA });
@@ -2382,7 +2409,6 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
 // Shared state carried across the head + kernel tracks (and across phase invocations via args.state).
 // MUST be declared BEFORE the HeadKernel block that uses them (else temporal-dead-zone ReferenceError).
 // ---------------------------------------------------------------------------
-let curOverlay = ST.overlay || kbSeedOverlay || '';   // the accepted overlay carried forward
 let dispatched = 0;                        // counts ONLY kernel-optimization tasks (the budget)
 let milestone = 0;
 let noImprove = 0;
@@ -2417,7 +2443,7 @@ function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SY
 //     tuning, and every head A/B measures against a reference leg that already contains the tuning.
 //   * STANDALONE, because a tuning loop folded into the head bake-off never runs to completion (it
 //     collapses into "one more candidate config") and its contribution becomes unattributable. With its
-//     own in-session pre/post interleaved A/B, the final report can state tuning's share of the gain.
+//     own in-session pre/post isolated-server A/B, the final report can state tuning's share of the gain.
 //
 // An accept is folded into curFlags/curEnv (the deploy's required env IS the engagement mechanism), then
 // the profile is re-taken exactly as it is after a config win, because tuning changes the landscape too.
@@ -2429,11 +2455,12 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
     `no op cap, tuning-kb ${TUNING_KB_ENABLED ? 'ENABLED' : 'DISABLED (blind eval)'}.`);
   tuning = await safeAgent(
     roleAgent('tuning_specialist', 'tune',
-      'Tune the live stack with the skillset, measure your OWN in-session interleaved pre/post A/B, ' +
+      'Tune the live stack with the skillset, measure your OWN in-session isolated-server pre/post A/B, ' +
       'prove engagement, and hand back a deploy bundle that reaches production through EVAL_DIR/final/.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD,
       BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: curTput,
-      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
+      MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
       NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS, ACCURACY_GATE,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '',
       TUNING_TARGETS: (strategy && strategy.head_candidates) || headQueue || [],
@@ -2776,7 +2803,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             verified_isolated_speedup: c.best, pct_gpu_time: c.head.pct_gpu_time, parity_note: 'expected_close',
           },
           CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
-          CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
+          CURRENT_THROUGHPUT: curTput,
+          MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
+          SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
           ...tuningIntegrateInputs(), ...ACCURACY_INPUTS,
           ...(opts.final && ACCURACY_GATE !== 'none' ? { ACCURACY_LIMIT: DEEP_FINAL_ACCURACY_LIMIT } : {}),   // de-noise the finalize accuracy decision
         };
@@ -3677,15 +3706,16 @@ if (want('final')) {
     `Enumerate the directories ${EVAL_DIR}/overlay/cand_* and (if it exists) ` +
     `${EVAL_DIR}/final/overlay/cand_*. For EACH such cand_<name> dir, read its ` +
     `integrate_result.json if present. Classify the A/B as INCOMPLETE when: the file is ` +
-    `MISSING, OR gate=="incomplete", OR (ab_complete is false/absent AND there is no ` +
-    `cand/bench_runs.jsonl in the dir). Treat it as COMPLETE (skip it) when ab_complete:true ` +
-    `OR gate is one of {accepted,stack,rejected} AND a cand/bench_runs.jsonl exists. ` +
+    `MISSING, OR gate=="incomplete", OR (ab_complete is false/absent AND there is no usable ` +
+    `cand/bench_summary.json in the dir). A summary is usable only when status=="complete" and ` +
+    `usable_for_acceptance==true. Treat it as COMPLETE (skip it) when ab_complete:true ` +
+    `OR gate is one of {accepted,stack,rejected} AND the candidate summary is usable. ` +
     `For each INCOMPLETE dir, emit one object with: short_name (the dir name minus the ` +
     `"cand_" prefix), overlay_dir (absolute path), and from integrate_result.json (use "" / ` +
     `null when absent): winner_kind, apply_env, apply_flags, op_kind, ` +
     `target_callable (or target_file), isolated (= isolated_speedup), pct_gpu_time, plus ` +
-    `ref_present (true if ref/bench_runs.jsonl exists) and cand_present (true if ` +
-    `cand/bench_runs.jsonl exists). Return ONLY compact JSON {"incomplete":[...]} (empty array if none).`,
+    `ref_present (true only if ref/bench_summary.json is usable) and cand_present (true only if ` +
+    `cand/bench_summary.json is usable). Return ONLY compact JSON {"incomplete":[...]} (empty array if none).`,
     { phase: FINALIZE_GATE_PHASE, label: 'scan-incomplete-ab', schema: RECON_SCHEMA });
   const known = new Set(pendingIntegrations.map((p) => p.short_name));
   for (const it of ((scan && scan.incomplete) || [])) {
@@ -3795,9 +3825,12 @@ if (want('final')) {
   validation = await safeAgent(
     roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
+      BASELINE_OVERLAY: INIT_BASE_OVERLAY,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
       FINAL_FLAGS: { flags: curFlags, env: curEnv },
-      CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL, E2E_REPEATS, SKILL_DIR: WORKFLOW_DIR,
+      CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL, E2E_REPEATS,
+      MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_REPLICAS,
+      SKILL_DIR: WORKFLOW_DIR,
       // The Report phase already wrote these files with the Finalize-bundle bench (the Director had not
       // run yet). After validation the Director MUST review + rewrite their headline throughput / speedup
       // / TTFT / TPOT (and status/parity) to its authoritative same-session numbers, so report-vs-director

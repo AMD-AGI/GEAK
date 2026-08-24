@@ -172,8 +172,10 @@ adapter_launch() {
   # inserted only when BOTH layers are non-empty, so neither an empty recipe nor
   # empty GEAK flags leaves a stray leading/trailing space.
   local _extra_args="${EXTRA_SERVER_ARGS:-}" _bound=""
-  if [ -n "$_recipe_extra" ]; then
+  if [ -n "$_recipe_extra" ] && [ "${EFFECTIVE_SERVER_ARGS_COMPLETE:-0}" != "1" ]; then
     _extra_args="${_recipe_extra}${_extra_args:+ }${_extra_args}"
+  elif [ -n "$_recipe_extra" ]; then
+    echo ">>> magpie launcher: effective args already include the recipe layer; not prepending it again."
   fi
   if [ "${PROFILE:-0}" = "1" ] && [ "$backend_uc" = "VLLM" ]; then
     local _prof_fields

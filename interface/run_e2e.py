@@ -42,6 +42,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    # Package import under pytest / module use.
+    from interface.effective_config import resolve_effective_config
+except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
+    from effective_config import resolve_effective_config
+
 SCHEMA_VERSION = 2
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
 
@@ -254,6 +260,42 @@ def _as_bool(v) -> bool:
 def map_args(h: dict, timeout_s: int | None = None) -> dict:
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
+    effective = None
+    if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
+        h.get("baseline_env_spec"), dict
+    ):
+        # Schema-v2 is authoritative: launch_recipe < complete resolved
+        # server_launch_flags < reconciled current-best delta.  The resolver
+        # canonicalises flag spellings so a key appears once and refuses
+        # contradictory extra_server_args vs accepted_flags/env.
+        effective = resolve_effective_config(h)
+    initial_server_args = (
+        effective.final_server_args
+        if effective is not None
+        else (h.get("accepted_flags", "") or "")
+    )
+    initial_env = (
+        " ".join(
+            shlex.quote(f"{key}={value}")
+            for key, value in effective.final_env.items()
+        )
+        if effective is not None
+        else (h.get("accepted_env", "") or "")
+    )
+    initial_overlay = ""
+    if effective is not None:
+        # Prefer a materialized aggregate overlay.  When Hyperloom only emitted
+        # source snapshots, later accepted snapshots precede earlier ones so
+        # Python resolves the newest current-best source first.
+        overlay_parts = [effective.base_overlay_pythonpath]
+        overlay_parts.extend(
+            str(snapshot.get("snapshot_dir") or "")
+            for snapshot in reversed(effective.source_snapshots)
+            if isinstance(snapshot, dict) and snapshot.get("reproducible")
+        )
+        initial_overlay = ":".join(
+            dict.fromkeys(part for part in overlay_parts if part)
+        )
     # gpu_ids is the optimization-parallelism pool AND the serving device set.
     # Default to 0..tp-1 so serving honours the requested tensor-parallel size.
     gpu_ids = h.get("gpu_ids") or ",".join(str(i) for i in range(max(tp, 1)))
@@ -268,8 +310,17 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         "conc": int(workload.get("conc", 64)),
         # Seed the baseline with Hyperloom's accepted best config so the
         # baseline == Hyperloom best config (fair engagement start).
-        "initial_extra_server_args": h.get("accepted_flags", "") or "",
-        "initial_extra_env": h.get("accepted_env", "") or "",
+        "initial_extra_server_args": initial_server_args,
+        "initial_extra_env": initial_env,
+        "initial_overlay_pythonpath": initial_overlay,
+        # One fresh replica matches Hyperloom's compute-warm/cache-cold
+        # lifecycle: the client keeps internal kernel/graph warmups but skips
+        # the outer full-round replay. Three independent servers are reserved
+        # for final validation; the shell dispatcher owns retries/degradation.
+        "measurement_mode": "isolated_server",
+        "parity_replicas": 1,
+        "search_replicas": 1,
+        "validation_replicas": 3,
         # Hyperloom already did config/param search in EXPLORE; do not double-run.
         "config_tune": "false",
         # Produce the final/ bundle (final_launch.sh + overlay) so the caller can
@@ -277,6 +328,8 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         "apply_to_original": "true",
         "exp_root": h["exp_root"],
     }
+    if effective is not None:
+        ps_args["effective_config_digest"] = effective.digest
     # Forward the orchestrator's HARD wall-clock budget (the same timeout_s this
     # runner enforces via anyio.fail_after / subprocess timeout) so the JS
     # workflow can self-pace and FINISH (Finalize/Report/Validate + workflow_return
@@ -332,8 +385,8 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # subset of {setup,profile,config,tune,head,kernel,final} (default unset => "all").
     if h.get("phases"):
         ps_args["phases"] = str(h["phases"])
-    # Optional A/B repeat count override (bounds the cost of a resume / finalize
-    # A/B — e.g. 1 repeat per leg is enough to PROVE both legs ran). General.
+    # Legacy A/B repeat override. Isolated-server handoffs use the purpose-specific
+    # replica counts above; retain this pass-through for explicitly legacy runs.
     if h.get("e2e_repeats") is not None:
         ps_args["e2e_repeats"] = int(h["e2e_repeats"])
     # Standalone tuning-skillset phase (workflow default ON). This is NOT the
@@ -1116,6 +1169,17 @@ def apply_bench_launcher(h: dict) -> str:
     else:
         launcher = "native"
     os.environ["BENCH_LAUNCHER"] = launcher
+    if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
+        h.get("baseline_env_spec"), dict
+    ):
+        # initial_extra_server_args was resolved from the COMPLETE server argv,
+        # including the recipe layer.  Tell the Magpie adapter not to prepend
+        # its recipe EXTRA_<BACKEND>_ARGS a second time. This remains true when
+        # server_launch_flags is empty: the resolver still folded recipe args
+        # into the canonical result.
+        os.environ["EFFECTIVE_SERVER_ARGS_COMPLETE"] = "1"
+    else:
+        os.environ.pop("EFFECTIVE_SERVER_ARGS_COMPLETE", None)
 
     # Magpie's script defaults max-model-len to a value of its own (4096) that
     # has nothing to do with this run, and the orchestrator overrode it via env
@@ -1324,12 +1388,13 @@ _BENCH_PROTOCOL_ENV = {
 def apply_bench_protocol(h: dict) -> dict:
     """Export the caller's measurement protocol so workflow bench_e2e.sh inherits it.
 
-    ``handoff.bench_protocol`` carries the EXACT bench knobs the external
-    orchestrator (Hyperloom) measured with — chiefly ``random_range_ratio``
-    (fixed vs variable sequence lengths), ``num_prompts``, ``num_warmups`` and
-    ``seed``. We export each PROVIDED key into the environment (same mechanism
-    as :func:`apply_bench_client`), so every ``bench_e2e.sh`` invocation the
-    agents make overrides its built-in default with the orchestrator's value.
+    ``handoff.bench_protocol`` carries the recorded bench knobs — chiefly
+    ``random_range_ratio`` (fixed vs variable sequence lengths),
+    ``num_prompts``, ``num_warmups`` and ``seed``. We export each provided key.
+    For schema-v2 Hyperloom handoffs, the actual wrapper lifecycle is
+    authoritative over stale metadata: fixed seed/range and 2*CONC client
+    warmups run inside the single measured invocation, while the separate
+    outer full-round replay is skipped.
 
     IMPORTANT: only keys actually present in the handoff are exported. When
     ``bench_protocol`` is absent (e.g. GEAK run standalone, no external
@@ -1350,6 +1415,28 @@ def apply_bench_protocol(h: dict) -> dict:
             continue
         os.environ[env_var] = str(val)
         exported[env_var] = str(val)
+    if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
+        h.get("baseline_env_spec"), dict
+    ):
+        # Cache-cold parity uses one measured client invocation on a fresh
+        # server. InferenceX still receives 2*concurrency internal warmups,
+        # which repeat prompt[0] to warm kernels/graphs without pre-populating
+        # the remaining timed prompts in the prefix cache.
+        # Some historical handoffs recorded an older small NUM_WARMUPS value;
+        # keep the observed 2*concurrency client behavior while changing only
+        # whether the separate outer full replay runs.
+        workload = h.get("workload") or {}
+        conc = max(1, int(workload.get("conc", 1) or 1))
+        aligned = {
+            "NUM_WARMUPS": str(2 * conc),
+            "SEED": "0",
+            "RANDOM_RANGE_RATIO": "1",
+            "GEAK_REPEAT_MODE": "isolated_server",
+            "REPLICA_RETRIES": "1",
+        }
+        for env_var, value in aligned.items():
+            os.environ[env_var] = value
+            exported[env_var] = value
     return exported
 
 
@@ -4435,6 +4522,12 @@ def main(argv: list[str]) -> int:
         return 2
 
     ps_args = map_args(h, timeout_s)
+    if ps_args.get("effective_config_digest"):
+        os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
+            ps_args["effective_config_digest"]
+        )
+    else:
+        os.environ.pop("EFFECTIVE_CONFIG_DIGEST", None)
     # Pin the single eval_dir into the environment so BOTH the live completion
     # check (_workflow_done_on_disk) and the scrape-independent disk recovery
     # (_discover_eval_dir) target EXACTLY this run's dir, deterministically.
