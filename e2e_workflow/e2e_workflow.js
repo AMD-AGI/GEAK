@@ -10,6 +10,7 @@ export const meta = {
     { title: 'TuningSkillset', detail: 'Tuning Specialist runs the VENDORED tuning skillset whole + standalone (its own pre/post A/B) BEFORE HeadKernel, so its share of the gain is attributable' },
     { title: 'HeadKernel', detail: 'highest-%GPU ops (GEMM/attn): extract_op -> backend bake-off (incl. FlyDSL) + aiter-DB/author tune -> e2e gate' },
     { title: 'Milestone', detail: 'loop over editable kernels ABOVE milestone_min_pct% GPU (default 5): plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
+    { title: 'Finalize-gate', detail: 'finish any e2e A/B left incomplete before the final phase (still OPTIMIZATION work: budget-capped, never runs inside the final reserve)' },
     { title: 'Finalize', detail: 'e2e Integrator assembles the overlay + patch + launch bundle' },
     { title: 'Report', detail: 'System Architect writes the throughput report + grows the playbook' },
     { title: 'Validate', detail: 'e2e Director independently re-measures throughput + arbitrates' },
@@ -989,7 +990,15 @@ function withProcessSafety(prompt) {
 // Finalize/Report/Validate (the #1202 stall was a 62min extract_op running into the SIGKILL). Final-phase
 // agents are EXEMPT — they run INSIDE the reserve by design. The 2min floor lets a deadline-killed agent's
 // retries self-limit instead of burning the reserve. Inert when time_budget_s is absent (byte-identical).
+//
+// The exemption is keyed on the phase LABEL, which is why round 2 slipped through: the Finalize-GATE
+// (the pendingIntegrations drain that runs BEFORE phase('Finalize')) tagged its integrator agents
+// 'Finalize' too, so pure OPTIMIZATION work — a server boot + two benches, ×AB_FINISH_RETRIES, up to
+// 4 × AGENT_TIMEOUT_MS = 8h — claimed an exemption written for the final phase. It is now labelled
+// 'Finalize-gate' (not in this list) so it takes the cap like every other optimization agent. Keep this
+// list to the three phases that genuinely run INSIDE the reserve; anything that measures is not one.
 const FINAL_PHASE_LABELS = ['Finalize', 'Report', 'Validate'];
+const FINALIZE_GATE_PHASE = 'Finalize-gate';   // deliberately NOT exempt; see above
 function agentTimeoutFor(opts) {
   if (TIME_BUDGET_MS == null || (opts && FINAL_PHASE_LABELS.includes(opts.phase))) return AGENT_TIMEOUT_MS;
   return Math.max(120000, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
@@ -3697,7 +3706,7 @@ if (want('final')) {
     `target_callable (or target_file), isolated (= isolated_speedup), pct_gpu_time, plus ` +
     `ref_present (true if ref/bench_runs.jsonl exists) and cand_present (true if ` +
     `cand/bench_runs.jsonl exists). Return ONLY compact JSON {"incomplete":[...]} (empty array if none).`,
-    { phase: 'Finalize', label: 'scan-incomplete-ab', schema: RECON_SCHEMA });
+    { phase: FINALIZE_GATE_PHASE, label: 'scan-incomplete-ab', schema: RECON_SCHEMA });
   const known = new Set(pendingIntegrations.map((p) => p.short_name));
   for (const it of ((scan && scan.incomplete) || [])) {
     if (!it || !it.short_name || known.has(it.short_name)) continue;
@@ -3748,7 +3757,7 @@ if (want('final')) {
       // Pin the CURRENT carried overlay/flags/env/throughput so the A/B is
       // measured against the latest accepted baseline.
       { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
-      `finish-integrate ${p.short_name}`, 'Finalize');
+      `finish-integrate ${p.short_name}`, FINALIZE_GATE_PHASE);
     if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       if (p.track === 'head') {
