@@ -287,8 +287,9 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # budget-unaware (byte-identical to a direct, non-interface invocation).
     if timeout_s is not None and timeout_s > 0:
         ps_args["time_budget_s"] = int(timeout_s)
-    # Final-phase reserve. Default lives in the JS (50min, capped at 20% of the budget);
+    # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget);
     # this lets an operator widen it per run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
+    # Optional: unset means the JS default, so no caller (Hyperloom included) has to set it.
     final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
     if final_reserve_s is not None:
         ps_args["final_reserve_s"] = final_reserve_s

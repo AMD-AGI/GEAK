@@ -106,6 +106,22 @@ new Function('TIME_BUDGET_MS', 'setTimeout', `${clockSrc}\nreturn () => ELAPSED_
   400 * 24 * 3600 * 1000, () => { armed++; return { unref() {} }; });
 ok(armed <= 2049, `a 400-day budget arms ${armed} rungs, not ${Math.round(400 * 24 * 60)}`);
 
+console.log('\n# the default reserve is one hour');
+// Pinned because it has already been moved twice (3600 -> 3000 -> 3600). Large models spend the final
+// phase mostly waiting on server boots, and a p75-sized reserve is what left three of them with no report.
+{
+  const rStart = src.indexOf('const FINAL_RESERVE_CAP_FRAC');
+  const rSrc = src.slice(rStart, src.indexOf('const TIME_BUDGET_EFFECTIVE_MS', rStart));
+  const reserveFor = (TIME_BUDGET_MS, A) => new Function('TIME_BUDGET_MS', 'A',
+    `${rSrc}\nreturn FINAL_RESERVE_MS;`)(TIME_BUDGET_MS, A);
+  ok(reserveFor(12 * 3600 * 1000, {}) === 60 * 60000,
+    'a 12h budget reserves the full 60min default (the 20% cap does not bind)');
+  ok(reserveFor(3 * 3600 * 1000, {}) === Math.floor(0.2 * 3 * 3600 * 1000),
+    'below a 5h budget the 20% cap binds instead of the default (3h -> 36min)');
+  ok(reserveFor(12 * 3600 * 1000, { final_reserve_s: 5400 }) === 90 * 60000,
+    'GEAK_FINAL_RESERVE_S still widens it, up to the same 20% cap');
+}
+
 console.log('\n# the reserve boundary is armed and gates the Finalize-gate');
 ok(/let TIME_FINAL_DEADLINE_HIT = false;/.test(src), 'TIME_FINAL_DEADLINE_HIT exists');
 ok(/TIME_FINAL_DEADLINE_HIT = true;/.test(src) && /}, TIME_BUDGET_EFFECTIVE_MS\);/.test(src),
@@ -140,10 +156,10 @@ const mk = (TIME_BUDGET_MS, ELAPSED_MS) => new Function(
   'TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',
   `${src.slice(aStart, aEnd)}
    return { agentTimeoutFor, enterFinalPhase: () => { FINAL_PHASE_STARTED = true; } };`)(
-  TIME_BUDGET_MS, 2 * 3600 * 1000, 50 * 60000, () => Math.max(0, TIME_BUDGET_MS - ELAPSED_MS));
+  TIME_BUDGET_MS, 2 * 3600 * 1000, 60 * 60000, () => Math.max(0, TIME_BUDGET_MS - ELAPSED_MS));
 
-const RESERVE = 50 * 60000, AGENT_MAX = 2 * 3600 * 1000;
-// 40min left of a 12h budget: less than the 50min reserve, so a capped agent floors at 2min.
+const RESERVE = 60 * 60000, AGENT_MAX = 2 * 3600 * 1000;
+// 40min left of a 12h budget: less than the 60min reserve, so a capped agent floors at 2min.
 const near = mk(H, H - 40 * 60000);
 ok(near.agentTimeoutFor() === 120000,
   'before the final phase, an agent floors at 2min near the deadline — no caller can opt out');
@@ -154,7 +170,7 @@ ok(near.agentTimeoutFor() === AGENT_MAX,
 // Mid-run the cap is the real remaining-minus-reserve, not the flat AGENT_TIMEOUT_MS.
 const mid = mk(H, 10 * 3600 * 1000);
 ok(mid.agentTimeoutFor() === AGENT_MAX - RESERVE,
-  'with 2h left an agent gets 2h minus the 50min reserve, not a flat 2h');
+  'with 2h left an agent gets 2h minus the 60min reserve, not a flat 2h');
 
 // No budget => the feature is inert and every agent keeps the plain timeout.
 const noBudget = new Function('TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',

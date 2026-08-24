@@ -149,13 +149,16 @@ const remainingMin = () => (TIME_BUDGET_MS == null ? Infinity : Math.round(remai
 // ---- FINAL-PHASE RESERVE ----
 // Hard floor of wall-clock held back for the WHOLE final phase (Finalize + Report + Validate + the
 // workflow_return write); no mode starts new work inside it. Without it, three sessions shipped no final
-// report (Hyperloom #1202). 50min ~= p75 of 85 historical final phases (p50 40 / p90 77 / max 86min);
-// since Report writes both reports BEFORE Validate, a longer tail still ships them (only the Validate
-// re-measure is at risk, and run_e2e falls back). The 20% cap stops it eating a short budget whole; at
-// >=5h budgets it never binds. Env override: GEAK_FINAL_RESERVE_S.
+// report (Hyperloom #1202). 60min sits ABOVE the observed max of 85 historical final phases (p50 40 /
+// p75 50 / p90 77 / max 86min) for everything but the tail, and the tail is exactly the case this exists
+// for: big models (DeepSeek-V4-Pro, gpt-oss-120b, Kimi) spend most of the final phase waiting on server
+// boots, so a p75-sized reserve is what left them with no report. Since Report writes both reports BEFORE
+// Validate, an even longer tail still ships them (only the Validate re-measure is at risk, and run_e2e
+// falls back). The 20% cap stops it eating a short budget whole; at >=5h budgets it never binds — below
+// that the cap, not this default, is what you get. Env override: GEAK_FINAL_RESERVE_S.
 const FINAL_RESERVE_CAP_FRAC = 0.2;
 const FINAL_RESERVE_MS = TIME_BUDGET_MS != null
-  ? Math.min(parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3000, 10) * 1000, // 50min
+  ? Math.min(parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3600, 10) * 1000, // 60min
              Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC))
   : null;
 // Effective budget = budget minus the reserve: one definition of time available to optimize.
