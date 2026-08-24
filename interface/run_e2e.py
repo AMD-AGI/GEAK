@@ -1381,12 +1381,13 @@ def apply_bench_protocol(h: dict) -> dict:
     if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
         h.get("baseline_env_spec"), dict
     ):
-        # Hyperloom's actual wrapper protocol is two client invocations on one
-        # fresh server: a discarded warmup_round followed by measure_round.
-        # InferenceX itself receives 2*concurrency warmups in BOTH invocations.
+        # Cache-cold parity uses one measured client invocation on a fresh
+        # server. InferenceX still receives 2*concurrency internal warmups,
+        # which repeat prompt[0] to warm kernels/graphs without pre-populating
+        # the remaining timed prompts in the prefix cache.
         # Some historical handoffs recorded an older small NUM_WARMUPS value;
-        # reproducing that stale metadata is less faithful than reproducing the
-        # wrapper that produced orchestrator_best_tput_same_config.
+        # keep the observed 2*concurrency client behavior while changing only
+        # whether the separate outer full replay runs.
         workload = h.get("workload") or {}
         conc = max(1, int(workload.get("conc", 1) or 1))
         aligned = {

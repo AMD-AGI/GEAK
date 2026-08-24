@@ -88,7 +88,7 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
         with open(self.events, encoding="utf-8") as fh:
             return [json.loads(line) for line in fh if line.strip()]
 
-    def test_search_defaults_to_one_fresh_replica_with_two_full_rounds(self):
+    def test_search_defaults_to_one_fresh_replica_without_outer_warmup(self):
         proc, summary, events = self.run_bench(purpose="search")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(summary["requested"], 1)
@@ -99,8 +99,8 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
         self.assertEqual(summary["observed_median"], 100.0)
         self.assertEqual(sum(e["event"] == "launch" for e in events), 1)
         benches = [e for e in events if e["event"] == "bench"]
-        self.assertEqual(len(benches), 2)
-        self.assertEqual([e["nump"] for e in benches], [7, 7])
+        self.assertEqual(len(benches), 1)
+        self.assertEqual([e["nump"] for e in benches], [7])
 
     def test_parity_defaults_to_one_replica(self):
         proc, summary, _ = self.run_bench(purpose="parity")
@@ -113,7 +113,7 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
         self.assertEqual((summary["requested"], summary["successful"]), (3, 3))
         self.assertEqual(summary["observed_median"], 200.0)
         self.assertEqual(sum(e["event"] == "launch" for e in events), 3)
-        self.assertEqual(sum(e["event"] == "bench" for e in events), 6)
+        self.assertEqual(sum(e["event"] == "bench" for e in events), 3)
 
     def test_explicit_repeats_overrides_purpose_default(self):
         proc, summary, _ = self.run_bench(purpose="validation", repeats=2)
@@ -184,7 +184,7 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
         self.assertEqual(sum(e["event"] == "launch" for e in self.read_events()), 1)
         self.assertIn("single-server profiling lifecycle", proc.stdout)
 
-    def test_inferencex_uses_protocol_warmups_and_seed_for_both_calls(self):
+    def test_inferencex_uses_protocol_warmups_and_seed_for_measured_call(self):
         calls = os.path.join(self.tmp, "inferencex_calls.jsonl")
         fake_client = os.path.join(self.tmp, "fake_inferencex.py")
         with open(fake_client, "w", encoding="utf-8") as fh:
@@ -226,10 +226,10 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         with open(calls, encoding="utf-8") as fh:
             observed = [json.loads(line) for line in fh]
-        self.assertEqual(len(observed), 2)
-        self.assertEqual([item["num_prompts"] for item in observed], [7, 7])
-        self.assertEqual([item["num_warmups"] for item in observed], [6, 6])
-        self.assertEqual([item["seed"] for item in observed], [0, 0])
+        self.assertEqual(len(observed), 1)
+        self.assertEqual([item["num_prompts"] for item in observed], [7])
+        self.assertEqual([item["num_warmups"] for item in observed], [6])
+        self.assertEqual([item["seed"] for item in observed], [0])
         self.assertEqual(summary["observed_median"], 123.0)
 
 

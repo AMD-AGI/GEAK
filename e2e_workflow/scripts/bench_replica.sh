@@ -2,7 +2,8 @@
 # Run one isolated-server measurement replica through bench_e2e.sh's existing
 # single-server implementation.  The parent bench_e2e.sh scheduler may invoke
 # this process twice for one replica (one retry), but every invocation is a
-# complete fresh launch -> full warmup -> full measurement -> teardown lifecycle.
+# complete fresh launch -> client-internal warmup -> measurement -> teardown
+# lifecycle.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,12 +29,13 @@ export REPEATS=1
 export REUSE_SERVER=0
 export PROFILE=0
 export BENCH_COLD_FINAL=0
-export BENCH_OUTER_WARMUP_FULL_ROUND=1
+export BENCH_OUTER_WARMUP_FULL_ROUND=0
 export BENCH_REQUIRE_SUCCESS=1
 
 # InferenceX performs an internal client warmup inside each adapter invocation.
-# The isolated protocol has exactly two invocations (outer warmup + measure), and
-# both must use 2*CONC internal warmups with deterministic seed zero.
+# The cache-cold isolated protocol has one measured invocation on a fresh server.
+# Its 2*CONC internal warmups repeat prompt[0], warming kernels/graphs without
+# pre-populating the other timed prompts in the prefix cache.
 if [ "${BENCH_CLIENT:-native}" = "inferencex" ]; then
   _conc="${CONC:-64}"
   case "$_conc" in
