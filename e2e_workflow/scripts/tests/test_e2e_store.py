@@ -228,7 +228,7 @@ def test_a_mid_ladder_write_failure_stops_and_mirror_is_best_effort(tmp_path, mo
     real = e2e_store.publish
     calls = {"n": 0}
 
-    def flaky(store, recs, files, score_of):
+    def flaky(store, recs, files, score_of, promote=True):
         calls["n"] += 1
         return [], [], "boom"                                   # every publish fails
 

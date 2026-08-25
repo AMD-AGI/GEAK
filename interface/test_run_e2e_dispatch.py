@@ -2118,6 +2118,12 @@ class TestMain(_RunE2ECase):
     def setUp(self):
         super().setUp()
         self.patch_rx("_git_short_sha", lambda root: "abc1234")
+        # The fast-mode flag is a budget input and this suite pins budgets. It is meant to be
+        # exported in a shell, so clear it for every case: otherwise whoever is running fast mode
+        # that day sees a different result here than CI does, and the mode's own tests below are
+        # the only honest way to exercise it.
+        self._pin_env("GEAK_FAST_MODE", None)
+        self._pin_env("GEAK_FAST_MODE_TIMEOUT_S", None)
         self.exp_root = self.tmp / "exp" / "geak"
         self.exp_root.mkdir(parents=True)
         self.eval_dir = self.exp_root / "e2e_main"
@@ -2216,6 +2222,56 @@ class TestMain(_RunE2ECase):
             self.addCleanup(os.environ.pop, "GEAK_E2E_TIMEOUT_S", None)
         if value is not None:
             os.environ["GEAK_E2E_TIMEOUT_S"] = value
+
+    def _pin_env(self, name: str, value: str | None):
+        """Same save/restore as _pin_env_timeout, for the other budget inputs."""
+        saved = os.environ.pop(name, None)
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, name, saved)
+        else:
+            self.addCleanup(os.environ.pop, name, None)
+        if value is not None:
+            os.environ[name] = value
+
+    def test_fast_mode_states_its_own_seven_hour_budget(self):
+        """GEAK_FAST_MODE=1 alone has to be enough to get the 7h box: the mode is sized for
+        4h of tuning plus setup and tail, and a caller that had to pass a matching --timeout-s
+        to make that real would silently run the full 12h default whenever it forgot."""
+        self._pin_env_timeout(None)
+        self._pin_env("GEAK_FAST_MODE", "1")
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        _rc, stdout = self._run(self._handoff(), "--dry-run")
+        plan = json.loads(stdout)
+        self.assertEqual(plan["mapped_args"]["time_budget_s"], 25200)
+        self.assertEqual(plan["mapped_args"]["fast_mode"], "true")
+
+    def test_fast_mode_does_not_stretch_a_shorter_budget(self):
+        """It joins the min() rather than overriding it. A caller that states a kill at 2h means
+        it, and pacing a 7h plan against a 2h kill is how a run dies mid-tuning with no report."""
+        self._pin_env_timeout(None)
+        self._pin_env("GEAK_FAST_MODE", "1")
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        _rc, stdout = self._run(self._handoff(), "--timeout-s", "7200", "--dry-run")
+        self.assertEqual(json.loads(stdout)["mapped_args"]["time_budget_s"], 7200)
+
+    def test_fast_mode_is_off_unless_asked_for(self):
+        """Opt-in: an unset flag must leave both the budget and the mode arg alone."""
+        self._pin_env_timeout(None)
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        _rc, stdout = self._run(self._handoff(), "--dry-run")
+        plan = json.loads(stdout)
+        self.assertEqual(plan["mapped_args"]["time_budget_s"], rx.DEFAULT_E2E_TIMEOUT_S)
+        self.assertNotIn("fast_mode", plan["mapped_args"])
+
+    def test_a_junk_fast_mode_budget_falls_back_instead_of_aborting(self):
+        """Same rule the other budget inputs follow: a bad value states nothing. This one is read
+        before the run starts, so raising here would kill the run over a typo in an env var."""
+        self._pin_env_timeout(None)
+        self._pin_env("GEAK_FAST_MODE", "1")
+        self._pin_env("GEAK_FAST_MODE_TIMEOUT_S", "not-a-number")
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        _rc, stdout = self._run(self._handoff(), "--dry-run")
+        self.assertEqual(json.loads(stdout)["mapped_args"]["time_budget_s"], 25200)
 
     def test_timeout_budget_is_read_from_the_environment(self):
         self._pin_env_timeout("600")

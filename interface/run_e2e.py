@@ -145,14 +145,23 @@ DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
 # its agent is armed with 4h, and Setup/Finalize/Report/Validate run exactly as in
 # the full pipeline. Exposed as an env flag so a caller can select it without
 # rewriting its args dict; the workflow arg (fast_mode) is unchanged and still works.
-FAST_MODE_ENABLED = str(os.environ.get("GEAK_FAST_MODE", "")).strip().lower() in (
-    "1", "true", "yes", "on",
-)
+# Read per call, not once at import, for the same reason GEAK_E2E_TIMEOUT_S is: a budget input
+# frozen at import cannot be exercised by a test, and cannot be corrected by a caller that sets it
+# after importing this module.
+def fast_mode_enabled() -> bool:
+    return str(os.environ.get("GEAK_FAST_MODE", "")).strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 # The wall clock that goes with it. Sized in the JS from measured phases (~1h setup +
 # 4h tuning + ~1.2h final); 7h is the smallest budget a full-length tuning phase fits
 # in with margin. This is a REAL kill like --timeout-s / GEAK_E2E_TIMEOUT_S, so it
 # joins the min() below rather than overriding a caller who asked for LESS.
-FAST_MODE_TIMEOUT_S = int(os.environ.get("GEAK_FAST_MODE_TIMEOUT_S", "25200") or 25200)
+FAST_MODE_DEFAULT_TIMEOUT_S = 25200
+
+
+def fast_mode_timeout_s() -> int:
+    return _int_or_none(os.environ.get("GEAK_FAST_MODE_TIMEOUT_S"),
+                        "GEAK_FAST_MODE_TIMEOUT_S") or FAST_MODE_DEFAULT_TIMEOUT_S
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +372,7 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # Tuning-only mode. Everything else in this mapping is mode-agnostic: the handoff's
     # launch recipe, server args, workload and fidelity knobs are forwarded identically,
     # so a fast run baselines and measures on exactly the config a normal run would.
-    if FAST_MODE_ENABLED:
+    if fast_mode_enabled():
         ps_args["fast_mode"] = "true"
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
@@ -4521,8 +4530,8 @@ def _resolve_timeout_s(argv: list[str]) -> tuple[list[str], set[str], int]:
     # the other two do: a caller who asked for LESS still means it, and a CI budget of
     # 24h must not stretch a mode that is sized for 7. Setting GEAK_FAST_MODE alone is
     # therefore enough to get "4h tuning inside a 7h run" with no other argument.
-    if FAST_MODE_ENABLED:
-        stated["GEAK_FAST_MODE"] = FAST_MODE_TIMEOUT_S
+    if fast_mode_enabled():
+        stated["GEAK_FAST_MODE"] = fast_mode_timeout_s()
     budget = min(stated.values()) if stated else DEFAULT_E2E_TIMEOUT_S
     sys.stderr.write(
         f"[budget] wall-clock {budget}s "

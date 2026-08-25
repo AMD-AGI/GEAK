@@ -26,7 +26,7 @@ yaml = pytest.importorskip("yaml")
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="the loop lands a patch with git")
 
 KERNEL = "fused_moe_kernel"
-CID = "geak:kernel:geak:fused_moe_kernel:rocm:7.2:triton:gfx950"
+CID = "geak:kernel:gfx950:fused_moe_kernel:triton:rocm:7.2"
 BASELINE = "import triton\n\nBLOCK = 64\nNUM_WARPS = 4\n"
 
 

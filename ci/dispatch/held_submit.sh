@@ -70,7 +70,11 @@ LOG="$OUT_DIR/held.out"
 # lane needs; without them kb/store_remote.py reports "no_credentials" and every model
 # silently optimizes cold. The values are supplied by the caller's environment (they are
 # secrets and an internal IP, so they are never committed to this public repo).
-HELD_FORWARD_ENV_RE="${HELD_FORWARD_ENV_RE:-^(LITELLM_|ANTHROPIC_|CLAUDE_|KB_|HF_TOKEN$|HUGGINGFACE_|HUGGING_FACE_|GEAK_PROBE_SKIP_CLAUDE$|GEAK_FORCE_DSTATE_CHECK$|IMAGE$)}"
+# GEAK_FAST_MODE (and its _TIMEOUT_S companion, covered by the same prefix) selects the
+# tuning-only run. It is caller intent, so it belongs here — and the failure mode of
+# omitting it is silent: the step would simply run the FULL pipeline and look normal,
+# which is indistinguishable from a fast-mode run that chose to do everything.
+HELD_FORWARD_ENV_RE="${HELD_FORWARD_ENV_RE:-^(LITELLM_|ANTHROPIC_|CLAUDE_|KB_|HF_TOKEN$|HUGGINGFACE_|HUGGING_FACE_|GEAK_PROBE_SKIP_CLAUDE$|GEAK_FORCE_DSTATE_CHECK$|GEAK_FAST_MODE|IMAGE$)}"
 ENV_PREFIX=""
 ENV_REDACTED=""
 ENV_NAMES=()
