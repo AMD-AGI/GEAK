@@ -62,8 +62,15 @@ def _get():
     if _fn is None:
         with _lock:
             if _fn is None:
-                if _EVOK_LIB and _EVOK_LIB not in sys.path:
-                    sys.path.insert(0, _EVOK_LIB)
+                # _EVOK_LIB may be an os.pathsep-joined list of dirs (e.g. the backend impl dir
+                # AND the '/wekafs/EvoK/library' root that holds the `evok` package). Insert EACH
+                # component as its OWN sys.path entry — inserting the whole joined string as a single
+                # entry matches no directory, so `import evok` fails and the server crashes whenever
+                # PYTHONPATH did not independently carry the library root. reversed() preserves the
+                # original left-to-right precedence after successive insert(0, ...).
+                for _p in reversed([_q for _q in (_EVOK_LIB or "").split(os.pathsep) if _q]):
+                    if _p not in sys.path:
+                        sys.path.insert(0, _p)
                 if _GFX:
                     os.environ.setdefault("EVOK_GFX", _GFX)
                 import evok

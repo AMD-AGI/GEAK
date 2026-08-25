@@ -374,12 +374,20 @@ def bench_blockscale_gemm(args, meta):
                         "ms": None, "raised": False,
                         "note": f"needs a preshuffled weight; {wshuf_err}"})
     # Caller-supplied extras (EvoK library hits, etc.) compete on IDENTICAL terms.
+    _extra_names = set()
     for name, spec, form in _parse_extra_callables(getattr(args, "extra_callables", "")):
+        _extra_names.add(name)
         plan.append((name, spec, form or "sglang5"))
     for name, spec, form in plan:
         if not spec:
+            # An empty spec has two distinct causes; report the true one instead of blaming
+            # --extra-callables for a built-in that the task meta simply did not name. Built-in
+            # candidates draw their spec from meta.baseline_callable/target_callable; extras from
+            # the --extra-callables string.
+            why = ("unparseable --extra-callables item" if name in _extra_names
+                   else "task meta declares no baseline_callable/target_callable for this candidate")
             results.append({"backend": name, "available": False, "correct": False, "ms": None,
-                            "note": "unparseable --extra-callables item", "raised": False})
+                            "note": why, "raised": False})
             continue
         fn = _resolve_callable(spec)
         if fn is None:

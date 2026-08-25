@@ -359,6 +359,7 @@ def main():
     # swallow this: a lookup that cannot read the leaf's own scoreboard is a broken lookup,
     # and it must show up in the JSON, not in the silence.
     measured, stale, results_note = None, [], ""
+    measured_correct = False
     if not a.shape_set:
         # `shape_set` is not optional to `results.load` despite the `or None` reading like it is: it
         # is joined into the record's PATH, so None reaches `shape_set + ".json"` and raises TypeError.
@@ -372,6 +373,7 @@ def main():
             for e in rec.get("entries", []) or []:
                 if e.get("backend") == backend:
                     measured = e.get("weighted_speedup")
+                    measured_correct = bool(e.get("correct"))
             if measured is None and rec:
                 results_note = "no entry for backend %r in results/%s/%s.json" % (
                     backend, gfx, a.shape_set)
@@ -380,6 +382,16 @@ def main():
     for w in why:                            # resolve()'s own staleness note is authoritative
         if w.get("stale"):
             stale = w["stale"]
+
+    # GROUND-TRUTH ARCH OVERRIDE (mirror of EvoK dispatch._dispatchable):
+    # selector.archs is a *hint* about where an impl is expected to run, and it goes stale the
+    # moment an impl is proven on a chip its author never listed. The leaf's own scoreboard is
+    # the authority: a verified candidate that has a `correct` measured result for THIS backend
+    # on the live gfx has demonstrably run correctly here, so a stale arch pin must not veto it.
+    # This keeps deployability driven by evidence, not by an out-of-date label -- and, per the
+    # no-refusal-path rule, it removes a gate that would otherwise strand a working kernel.
+    arch_proven = bool(measured is not None and measured_correct and verified)
+    arch_ok = arch_ok or arch_proven
 
     deployable, reason = NOT_DEPLOYABLE.get(key, (True, ""))
     if deployable and not arch_ok:
