@@ -41,8 +41,14 @@ backward). See [[languages/hipkittens]] and arXiv 2511.08083 Table 1.
 | HK GQA/MQA **forward**, d=64 | arXiv 2511.08083v1 | gfx950; bf16/fp16 | beats baselines (fwd in the 1.0–2.1× vs AITER class); **d=64 a strength** | small-head GQA fwd |
 
 ## Config space / knobs (backend-specific)
-- **Schedule**: 4-wave interleave often wins the backward (full register budget eases dQ/dK/dV pressure);
-  8-wave ping-pong for compact forward.
+- **Schedule**: 4-wave interleave wins **this** backward (symmetric `hdim`, non-causal, MI355X — the full
+  per-wave register budget eases dQ/dK/dV pressure); 8-wave ping-pong for compact forward. **Do not carry
+  the 4-wave conclusion to a register-heavier backward.** On a fused five-GEMM *causal* backward with
+  asymmetric head dims on **gfx942**, every 4-wave build measured **15% slower** than 8-wave and all of them
+  shuttled AGPRs, because halving the waves doubles the per-wave K/V/Kᵀ set against a 256 arch-VGPR cap that
+  does not move — [[optimization/mfma_scheduling]] has the accumulator-bound vs operand-bound split that
+  decides which way this goes, and [[operators/mla_attention/backends/flydsl]] the instance. Pick the wave
+  count by measurement, and read the ISA (`v_accvgpr` move count), not the clock.
 - **Pinned register tiles**: the decisive lever for backward — pin registers, feed AGPRs to MFMA, avoid
   `v_accvgpr_read`. Sharp tool: bypasses the allocator; validate parity.
 - **Head dim** d=64 vs 128 (d=64 underserved by tuned asm → HK win); **GQA group ratio** (KV-head sharing).

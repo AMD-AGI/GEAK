@@ -15,7 +15,8 @@ A trustworthy MI-GPU measurement is: **warm** (discard cold runs), **repeated** 
 perf_knowledge e2e standard is **REPEATS=7**), inside a **noise band** (accept a change only if it clears the
 **~0.5%** e2e band), with **clocks controlled** (or at least monitored), and done as a **same-session,
 non-overlapping A/B** (ref vs candidate back-to-back). If the delta is inside the noise band, it is not
-a result. Profiling perturbs timing, so measure in a *separate, untraced* pass from your counter/trace
+a result. **One scoped exception**: an isolated single-kernel sweep over many build variants should report
+the **minimum** over interleaved replays, not the median — see §scope exception below. Profiling perturbs timing, so measure in a *separate, untraced* pass from your counter/trace
 diagnosis ([`trace_analysis.md`](trace_analysis.md), [`rocprofv3_counters.md`](rocprofv3_counters.md)).
 
 ## Why MI300X is noisy (what you're fighting)
@@ -41,6 +42,31 @@ Net: compute achieved TFLOP/s from *measured time*, never from assumed clock.
    near-zero host overhead, both to *get* the real GPU-bound time and as a perf technique when the trace
    shows host-launch gaps ([`trace_analysis.md`](trace_analysis.md)).
 
+## Scope exception: single-kernel variant sweeps use the MINIMUM, not the median
+The median-with-spread rule above is the **e2e** standard and stays the rule for anything you report as an
+e2e delta. It is the wrong statistic for an **isolated single-kernel sweep over many build variants**,
+where the failure mode is different: sustained back-to-back replays throttle the clocks, so the median
+drifts *within* a run. A measured instance (gfx942 MI300X, attention backward): the median of an
+**unchanged** kernel drifted **438 → 534 µs** across runs — larger than most effects you would be trying
+to measure. The minimum over replays reflects unthrottled capability and is stable enough to rank variants.
+
+Two rules for this scope, and neither is optional:
+1. **Report the minimum over replays**, never the mean or median.
+2. **Build every variant up front, then time them round-robin in one process.** Clock drift then hits all
+   variants equally. Numbers from separate processes are not comparable, and a table you produce is only
+   internally comparable within one invocation — including the ablation rows, so re-derive any single
+   comparison by building both sides in **one** interleaved sweep rather than quoting two old runs.
+
+Print correctness per variant alongside the time, so a fast-but-wrong build is obvious, and print each
+variant's delta against the first — that is the number to reason about. Keep ablation code paths alive
+permanently for this reason: it is what makes a claim re-checkable on new hardware, and lets a regression
+be bisected against a mechanism rather than a commit.
+
+**Do not use graphs for this sweep**: capturing one graph per variant and replaying round-robin faults, and
+at ~1 ms per call launch overhead is far under the noise floor anyway. Graphs remain correct (and
+necessary) for a *separate* small-kernel harness — a 4 µs kernel is otherwise swamped by ~40 µs of Python
+dispatch per launch, so without graphs you are measuring the launch, not the kernel.
+
 ## Per-leg vs 2-launch A/B
 For an e2e serving change, prefer a **2-launch A/B** (full ref launch vs full candidate launch) over
 summing **per-leg** microbenchmarks: per-leg sums miss overlap, caching, and dispatch interactions and
@@ -59,6 +85,8 @@ repeats, with spread; never present theoretical peak as achievable.
 - Cold-cache first run counted in the median; clock not yet ramped.
 - Comparing across sessions/days — clocks, thermals, and background load differ.
 - Trusting summed per-leg microbenchmarks over a real e2e 2-launch A/B.
+- Using the median for a throttling single-kernel variant sweep, or comparing two variants timed in
+  separate processes (§scope exception).
 
 ## Verify
 A real win clears the 0.5% band across REPEATS=7, reproduces on a re-run of the same A/B, and is

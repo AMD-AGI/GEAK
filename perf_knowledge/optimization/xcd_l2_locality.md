@@ -53,12 +53,46 @@ For a tiled GEMM with `T` tiles on 8 XCDs, instead of `xcd = pid % 8` (scatters 
 `group = pid / tiles_per_xcd; xcd = group; local = pid % tiles_per_xcd` so a contiguous run of
 data-sharing tiles stays on one XCD's L2. Tune `tiles_per_xcd` to the L2 working-set size.
 
+## Dispatch order is also a *makespan* lever, not only an L2 lever
+The round-robin assignment is **static**: under SPX, workgroups reach the CUs in **x-fastest linear order**
+and block `i` is handed to XCD `i % 8` with no migration — a block cannot move to whichever XCD happens to
+be idle. Three consequences that are easy to miss if you only think about L2:
+
+- **Put the expensive axis on the SLOWEST grid axis (longest-job-first).** When per-block cost varies
+  systematically along one grid axis — the standard case is a causal attention kernel with a KV-outer
+  schedule, where a block's q-tile count falls monotonically with its KV tile index — having that axis
+  *fast* means the whole cost range of one sequence is dispatched before the next starts, so a maximal
+  block can begin past the halfway point and become the tail. Moving it to the slow axis dispatches all
+  the expensive blocks first. Measured **−20%** on a gfx942 fused attention backward (754 blocks ranging
+  0–114 q-tile iterations), matching the greedy-list-scheduling prediction of 114/144 = **0.79**. Cost:
+  two SALU to decode the block index plus a permuted grid in the launcher.
+- **Model 8 static queues of ~38 CUs, not one global CU pool.** A single-pool model reproduces headline
+  critical paths but mispredicts anything that changes grid *composition*, because the busiest XCD sets
+  the makespan.
+- **Empty workgroups are free at the end of the grid and expensive in the middle.** Appending 5504 wholly
+  empty blocks cost nothing measurable; interleaving the *same* number between live blocks cost **+29%**,
+  because inserting blocks repartitions every later block across the XCDs (XCD load went from a balanced
+  3193–3293 to a skewed 2243–4259 iteration units). Early-exit blocks are cheap, but do not scatter them
+  through the grid. This also qualifies the "≥1024 workgroups" lever above: pad by *extending* the grid,
+  never by interleaving no-op blocks among live ones.
+
+**Confirm the partition mode before trusting any of this** — SPX/NPS1 is what makes the mapping
+predictable, and CPX changes both dispatch and device-scope atomic behaviour. If a dispatch-order ablation
+comes out neutral when the model says it should be ~0.79, suspect the partition mode before the kernel.
+
 ## Pitfalls
 - Default linear pid mapping ⇒ B/A panels re-fetched from HBM/foreign L2 instead of local L2 hits.
 - Tile count not a multiple of 8 ⇒ one or more XCDs finish early (load imbalance, tail latency).
 - <1024 workgroups on prefill ⇒ idle CUs/XCDs (`[[operators/dense_gemm/tuning.md]]`).
 - Over-grouping (too many tiles pinned to one XCD) ⇒ L2 thrash; size groups to the L2 capacity.
 - Assuming a unified L2 (it is **partitioned per XCD**).
+- Optimizing the loop body before checking the grid axis order on a kernel with a structural cost gradient
+  across one axis — the axis order was the single largest and cheapest win in the measured case.
+- **Designing around L2 residency for device-scope atomics.** A private L2 per XCD means such an atomic
+  must carry the uncached bit and execute past the fabric, so it misses L2 by construction (counted as
+  *Write and Atomic (Uncached)*, with equal atomic counts at the L1→L2 and L2→fabric interfaces). Fanning
+  atomics out across more slots to "spread contention" therefore only multiplies the DRAM footprint —
+  measured monotonically worse at 1/2/4/8 slots.
 
 ## Verify
 - Omniperf: L2 hit rate per channel / cross-XCD traffic, HBM read BW; XCD-aware order should *raise* L2
@@ -70,3 +104,6 @@ data-sharing tiles stays on one XCD's L2. Tune `tiles_per_xcd` to the L2 working
 - 8 XCDs, partitioned L2, round-robin dispatch: AMD CDNA3 whitepaper + MI300X Hot Chips 2024 architecture deck.
 - ≥1024 WGs, 8-multiple tiles, XCD/L2 placement levers: ROCm MI300X workload optimization guide.
 - Swizzle mechanics: `[[hardware/shared/l2_xcd_swizzle.md]]`.
+- Longest-job-first grid axis (−20%, 114/144 model), static-XCD-queue modelling, empty-workgroup
+  placement (+29% interleaved vs free appended), and uncached device-scope atomics: first-party on-box
+  gfx942 MI300X SPX/NPS1, ROCm 7.1.0
