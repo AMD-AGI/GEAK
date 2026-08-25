@@ -2204,7 +2204,7 @@ if (want('setup')) {
           ...(kernelVerdicts.length ? kernelVerdicts.map(v =>
             `| ${v.name} | ${v.kind || '?'} | ${v.isolated_speedup ? v.isolated_speedup + 'x' : '—'} | ` +
             `${v.measured_delta_pct != null ? (v.measured_delta_pct >= 0 ? '+' : '') + v.measured_delta_pct + '%' : '—'} | ` +
-            `**${v.outcome}** | ${String(v.why || '').replace(/\|/g, '\\|').slice(0, 160)} |`)
+            `**${v.outcome}** | ${String(v.why || '').slice(0, 160).replace(/[\\|]/g, '\\$&')} |`)
             : ['| _(none recorded)_ | | | | | |']),
           '',
           // The plan's fourth requirement, made concrete: a top-N entry that could not be

@@ -789,7 +789,7 @@ def _render_references(refs_dir: str, address: str, summary: str, views):
     """
     views = list(views)
     key = "|".join(v["key"] for v in views).encode("utf-8", "replace")
-    set_dir = os.path.join(refs_dir, "sets", hashlib.sha1(key).hexdigest()[:7])
+    set_dir = os.path.join(refs_dir, "sets", hashlib.sha256(key).hexdigest()[:7])
     top_bench = views[0]["bench_key"] if views else ""
     index_lines = [
         f"# Warm-start references — {address}", "", summary,

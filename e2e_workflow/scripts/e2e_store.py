@@ -389,7 +389,7 @@ def _render_reference(refs_dir: str, cid: str, tier: str, views) -> str:
     """Mirror the offer into prose the Director can read, or return "" and let the read stand."""
     try:
         os.makedirs(refs_dir, exist_ok=True)
-        key = hashlib.sha1(("|".join(v["session_id"] for v in views)).encode()).hexdigest()[:7]
+        key = hashlib.sha256(("|".join(v["session_id"] for v in views)).encode()).hexdigest()[:7]
         path = os.path.join(refs_dir, "e2e_reference_%s.md" % key)
         lines = ["# e2e warm start — `%s`" % cid, "",
                  "Match tier `%s`, ordered by `%s` (highest first)."
