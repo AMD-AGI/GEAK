@@ -61,11 +61,12 @@ class RemoteKBStore(object):
                  promote_floor: float = 1.0):
         """Build from KB_STORE_URL / KB_STORE_TOKEN, or return (None, reason)."""
         try:
-            from kb.store_client import KBStoreClient
+            from kb.store_client import KBStoreClient, kb_store_token, kb_store_url
         except ImportError as e:
             return None, "store_unavailable: " + str(e)[:120]
-        if not os.environ.get("KB_STORE_URL") or not os.environ.get("KB_STORE_TOKEN"):
-            return None, "no_credentials: KB_STORE_URL / KB_STORE_TOKEN are not both set"
+        if not kb_store_url() or not kb_store_token():
+            return None, ("no_credentials: (GEAK_)KB_STORE_URL / (GEAK_)KB_STORE_TOKEN "
+                          "are not both set")
         try:
             return cls(KBStoreClient.from_env(), scan, metric, promote_floor), ""
         except Exception as e:

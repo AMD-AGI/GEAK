@@ -50,6 +50,21 @@ class KBStoreError(RuntimeError):
     """Any failure talking to the KB store or the object store."""
 
 
+def kb_store_url() -> str:
+    """KB Store base URL from the environment.
+
+    Prefer the ``GEAK_``-prefixed name so a host that also runs Hyperloom (which
+    carries its own ``KB_STORE_*``) can point GEAK at a different store without a
+    collision; fall back to the bare name so existing setups keep working.
+    """
+    return (os.environ.get("GEAK_KB_STORE_URL") or os.environ.get("KB_STORE_URL") or "").strip()
+
+
+def kb_store_token() -> str:
+    """KB Store bearer token; ``GEAK_KB_STORE_TOKEN`` wins, ``KB_STORE_TOKEN`` is the fallback."""
+    return (os.environ.get("GEAK_KB_STORE_TOKEN") or os.environ.get("KB_STORE_TOKEN") or "").strip()
+
+
 #: Must match ``knowledge_base.canonical.RECORD_NAMESPACE``.
 RECORD_NAMESPACE = uuid.UUID("0f4d5e6a-8b7c-4d1e-9f2a-3c5b7d9e1f00")
 
@@ -195,9 +210,10 @@ class KBStoreClient:
 
     @classmethod
     def from_env(cls) -> KBStoreClient:
-        """Build from ``KB_STORE_URL`` / ``KB_STORE_TOKEN``."""
-        base = (os.environ.get("KB_STORE_URL", "") or "").strip()
-        token = (os.environ.get("KB_STORE_TOKEN", "") or "").strip()
+        """Build from ``GEAK_KB_STORE_URL`` / ``GEAK_KB_STORE_TOKEN``, falling back
+        to the un-prefixed ``KB_STORE_URL`` / ``KB_STORE_TOKEN``."""
+        base = kb_store_url()
+        token = kb_store_token()
         if not base:
             raise KBStoreError("KB_STORE_URL is not set")
         return cls(base, token)

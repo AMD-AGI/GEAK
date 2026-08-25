@@ -263,6 +263,12 @@ fi
 # has no DNS on a compute node, and the internal AMD CA, because NODE_TLS_REJECT_UNAUTHORIZED
 # only rescues node while the KB client is python/requests. All values arrive from the
 # forwarded environment; none of them may be committed (this repo is public).
+# GEAK_KB_STORE_* wins over the bare names (letting a host that also runs Hyperloom keep its own
+# KB_STORE_* for a different store); normalise into the bare names the container reads. The token is
+# still forwarded name-only (-e KB_STORE_TOKEN, no value) so it never lands in argv — ps is
+# world-readable on this box.
+export KB_STORE_URL="${GEAK_KB_STORE_URL:-${KB_STORE_URL:-}}"
+export KB_STORE_TOKEN="${GEAK_KB_STORE_TOKEN:-${KB_STORE_TOKEN:-}}"
 KB_DOCKER=()
 if [ -n "${KB_STORE_URL:-}" ] && [ -n "${KB_STORE_TOKEN:-}" ]; then
   KB_DOCKER+=(-e KB_STORE_URL -e KB_STORE_TOKEN)

@@ -1832,7 +1832,8 @@ def main(argv=None):
     def add_plane_args(w):
         # `both` writes locally and mirrors to the service; reads always take exactly one plane.
         w.add_argument("--plane", choices=("local", "remote", "both"), default="local",
-                       help="local dir, the KB Store service (KB_STORE_URL/KB_STORE_TOKEN), or both")
+                       help="local dir, the KB Store service (GEAK_KB_STORE_URL/GEAK_KB_STORE_TOKEN, "
+                            "or the un-prefixed KB_STORE_URL/KB_STORE_TOKEN), or both")
         w.add_argument("--scan", type=int, default=25,
                        help="remote only: candidates hydrated before curation (page cap is 200)")
         return w

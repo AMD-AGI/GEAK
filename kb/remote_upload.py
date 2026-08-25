@@ -19,7 +19,8 @@ never visible referencing bytes the store does not hold yet, and a run interrupt
 uploaded-but-unreferenced blobs rather than a record pointing at nothing.
 
 Needs the upstream client on PYTHONPATH (KernelForge `src/`, or our vendored kb/store_client.py)
-plus KB_STORE_URL / KB_STORE_TOKEN. The token is read from the environment and never printed:
+plus GEAK_KB_STORE_URL / GEAK_KB_STORE_TOKEN (the un-prefixed KB_STORE_URL / KB_STORE_TOKEN are
+accepted as a fallback). The token is read from the environment and never printed:
 --apply logs the canonical id and session id only.
 """
 
@@ -154,8 +155,16 @@ def main(argv=None):
         store = _LocalBackend(a.local)
     elif a.apply:
         KBStoreClient, _KBStoreError = _load_client()
-        if not (os.environ.get("KB_STORE_URL") or "").strip():
+        # Accept the GEAK_-prefixed credential names (fall back to the bare ones),
+        # then normalise into the bare names so whichever client _load_client
+        # returned -- ours or upstream's -- reads them from ``from_env``.
+        url = (os.environ.get("GEAK_KB_STORE_URL") or os.environ.get("KB_STORE_URL") or "").strip()
+        if not url:
             raise SystemExit("KB_STORE_URL is not set; refusing to --apply")
+        os.environ.setdefault("KB_STORE_URL", url)
+        token = (os.environ.get("GEAK_KB_STORE_TOKEN") or os.environ.get("KB_STORE_TOKEN") or "").strip()
+        if token:
+            os.environ.setdefault("KB_STORE_TOKEN", token)
         store = KBStoreClient.from_env()
 
     ok = failed = sent_bytes = 0

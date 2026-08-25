@@ -17,8 +17,11 @@
 # when SSL_CERT_FILE is already set or no bundle is readable (so CI and already-trusting images are
 # byte-identical). DNS (the host has none in-container) is a launch concern, handled with
 # `docker run --add-host`.
-export KB_STORE_URL="${KB_STORE_URL:-https://global.primus-safe.amd.com/knowledge-base}"
-export KB_STORE_TOKEN="${KB_STORE_TOKEN:-$(cat ~/.geak_kb_token 2>/dev/null)}"
+# GEAK_KB_STORE_* wins over the bare KB_STORE_* so a host that also runs Hyperloom (which carries
+# its own KB_STORE_*) can point GEAK at a distinct store; we re-export under the bare names because
+# every downstream reader (Python client, the `[ -n "$KB_STORE_TOKEN" ]` gates below) reads those.
+export KB_STORE_URL="${GEAK_KB_STORE_URL:-${KB_STORE_URL:-https://global.primus-safe.amd.com/knowledge-base}}"
+export KB_STORE_TOKEN="${GEAK_KB_STORE_TOKEN:-${KB_STORE_TOKEN:-$(cat ~/.geak_kb_token 2>/dev/null)}}"
 if [ -z "${SSL_CERT_FILE:-}" ]; then
   for _ca in "${KB_CA_BUNDLE:-}" /shared_nfs/hyperloom/ca/amd-ca-combined.pem \
              "$HOME/amd-extra-ca-bundle.pem"; do
