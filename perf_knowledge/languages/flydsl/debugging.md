@@ -17,8 +17,10 @@ sources:
 This reference covers correctness, stability, and hang triage on runnable FlyDSL kernels.
 
 **Scope**: execution debugging, not performance triage. For kernel-speed work see
-[`authoring_optimization.md`](authoring_optimization.md) (and [`authoring_gemm_levers.md`](authoring_gemm_levers.md)
-for GEMM). Here, "tracing" refers to FlyDSL frontend tracing, not ATT collection.
+[`authoring_optimization.md`](authoring_optimization.md) — in particular its **register-allocation gate**,
+which is the dominant silent failure mode on register-heavy kernels and is invisible from timings — and
+[`authoring_gemm_levers.md`](authoring_gemm_levers.md) for GEMM. Here, "tracing" refers to FlyDSL frontend
+tracing, not ATT collection.
 
 ## Step 0: Decide whether cache is involved
 
