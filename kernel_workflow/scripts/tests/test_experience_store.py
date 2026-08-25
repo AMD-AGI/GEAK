@@ -609,18 +609,24 @@ def stacked(root, exp_id, *, rocm="7.2", **kw):
     return d
 
 
+def exact(recs):
+    """The records at the exact address only. Every measurement is published at each rung of its
+    ladder, so counting raw records counts rungs; a test asking "how many measurements" wants this."""
+    return [r for r in recs if r["rung"] == 0]
+
+
 def test_canonical_id_is_seven_ordered_segments(tmp_path):
     """Order and content of the address. Upstream splits on ':' positionally, so a swapped pair is
     a different identity that still parses."""
     root = str(tmp_path / "kb")
     stacked(root, "20260101_000000_a", kernel="moe_stage1", lang="ck", kclass="ck")
     recs, summary = export(root)
-    assert summary["emitted"] == 1
-    assert recs[0]["canonical_id"] == "geak:kernel:geak:moe_stage1:rocm:7.2:ck:gfx950"
+    assert summary["sessions"] == 1                # one measurement, published at both rungs
+    assert recs[0]["canonical_id"] == "geak:kernel:gfx950:moe_stage1:ck:rocm:7.2"
     # and the echoed identity must reconstruct it, or a reader validating the envelope rejects it
     ident = recs[0]["knowledge"]["identity"]
-    assert ":".join(["kernel", ident["producer"], ident["kernel_name"], ident["framework"],
-                     ident["framework_version"], ident["backend"], ident["gpu"]]) == \
+    assert ":".join(["geak", "kernel", ident["gpu"], ident["kernel_name"], ident["backend"],
+                     ident["framework"], ident["framework_version"]]) == \
         recs[0]["canonical_id"]
 
 
@@ -661,8 +667,8 @@ def test_session_id_is_content_addressed_and_identity_scoped(tmp_path):
     stacked(root, "20260101_000000_a", kernel="k1", lang="triton", kclass="triton", patch=same)
     stacked(root, "20260101_000000_b", kernel="k1", lang="hip", kclass="hip", patch=same)
     recs, _ = export(root)
-    assert len(recs) == 2
-    a, b = sorted(recs, key=lambda r: r["canonical_id"])
+    assert len(exact(recs)) == 2
+    a, b = sorted(exact(recs), key=lambda r: r["canonical_id"])
     assert a["session_id"] != b["session_id"], "same patch, different identity -> different id"
     assert export(root)[0][0]["session_id"] == recs[0]["session_id"], "not stable across runs"
 
@@ -691,7 +697,8 @@ def test_identical_patches_collapse_to_the_best_measurement(tmp_path):
     stacked(root, "20260101_000000_a", kernel="k1", speedup=1.20, patch=same)
     stacked(root, "20260101_000000_b", kernel="k1", speedup=1.90, patch=same)
     recs, summary = export(root)
-    assert len(recs) == 1 and summary["deduped"] == 1
+    # `deduped` counts records like `emitted` does, so the one duplicate is dropped once per rung
+    assert len(exact(recs)) == 1 and len(set(summary["deduped_dirs"])) == 1
     assert recs[0]["knowledge"]["speedup"] == 1.9
     assert summary["deduped_dirs"] and "20260101_000000_a" in summary["deduped_dirs"][0]
 
@@ -704,10 +711,10 @@ def test_retired_entries_are_not_offered_remotely(tmp_path):
             direction="dead-idea")
     stacked(root, "20260101_000000_b", kernel="k1", speedup=1.5, direction="live-idea")
     recs, summary = export(root)
-    assert [r["knowledge"]["value"]["direction"] for r in recs] == ["live-idea"]
+    assert [r["knowledge"]["value"]["direction"] for r in exact(recs)] == ["live-idea"]
     assert summary["skipped"]["retired"] == 1
     recs, _ = export(root, "--include-retired")
-    assert len(recs) == 2
+    assert len(exact(recs)) == 2
 
 
 def test_champion_is_one_per_identity_and_must_beat_baseline(tmp_path):
@@ -717,10 +724,11 @@ def test_champion_is_one_per_identity_and_must_beat_baseline(tmp_path):
     stacked(root, "20260101_000000_b", kernel="k1", speedup=2.5, direction="d2")
     stacked(root, "20260101_000000_c", kernel="k2", speedup=0.9, direction="d3")
     recs, summary = export(root)
-    champs = [r for r in recs if r["champion"]]
+    champs = [r for r in exact(recs) if r["champion"]]
     assert len(champs) == 1 and champs[0]["knowledge"]["speedup"] == 2.5
-    assert summary["identities"] == 2 and summary["champions"] == 1
-    losing = [r for r in recs if r["knowledge"]["value"]["direction"] == "d3"][0]
+    # two identities, one of which earns the pointer — held at both of its rungs
+    assert summary["exact_identities"] == 2 and summary["champions"] == 2
+    losing = [r for r in exact(recs) if r["knowledge"]["value"]["direction"] == "d3"][0]
     assert losing["champion"] is False and losing["champion_eligible"] is False
 
 
@@ -769,11 +777,13 @@ def test_export_filters_and_overrides(tmp_path):
     root = str(tmp_path / "kb")
     stacked(root, "20260101_000000_a", kernel="k1")
     stacked(root, "20260101_000000_b", kernel="k2")
-    assert len(export(root, "--kernel-name", "k1")[0]) == 1
+    assert len(exact(export(root, "--kernel-name", "k1")[0])) == 1
     assert export(root, "--gfx", "gfx942")[1]["emitted"] == 0
     rec = export(root, "--kernel-name", "k1", "--producer", "forge-loop", "--gpu", "MI300X")[0][0]
-    assert rec["canonical_id"].startswith("kernel:forge-loop:k1:")
-    assert rec["canonical_id"].endswith(":gfx942")
+    # the gpu override lands in the address; the producer does not, because who published a result
+    # is not part of what the result is about, and an address that moved with it would scatter one
+    # kernel's history across every lane that ever wrote to it
+    assert rec["canonical_id"] == "geak:kernel:mi300x:k1:triton:rocm:7.2"
     assert rec["session_id"].startswith("geak-")   # the id prefix is ours, not the producer arg
 
 
@@ -819,7 +829,7 @@ def test_both_planes_offer_the_same_candidates(tmp_path):
     assert [{k: c.get(k) for k in keys} for c in remote["candidates"]] == \
            [{k: c.get(k) for k in keys} for c in local["candidates"]]
     assert remote["filtered"]["below_min_speedup"] == local["filtered"]["below_min_speedup"] == 1
-    assert remote["canonical_id"] == "geak:kernel:geak:fused_moe_kernel:rocm:7.2:triton:gfx950"
+    assert remote["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm"
 
 
 def test_the_store_plane_curates_what_the_store_itself_cannot(tmp_path):
@@ -881,14 +891,19 @@ def test_a_store_root_that_is_not_there_is_a_miss_not_an_empty_store(tmp_path):
 
 
 def test_a_key_that_differs_only_in_stack_version_is_reported_not_silently_used(tmp_path):
-    """`unspecified` vs `7.2` splits one kernel's history in two; the read must say so."""
+    """Asking for 6.4 and being served a 7.2 result is usually right — a patch normally survives the
+    hop — but it must never look like an exact hit, or a genuine version-specific regression reads as
+    a kernel that simply did not reproduce."""
     root = str(tmp_path / "kb")
     stacked(root, "20260101_000000_a", speedup=4.0, rocm="7.2")
     store = seed_store(tmp_path, root)
     out = resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel", "triton", "gfx950",
                          "--framework-version", "6.4")
-    assert out["match_tier"] == "other_version"
-    assert any("rocm:7.2" in p for p in out["other_language_pages"])
+    # Rung 2 drops the version rather than naming a different one, so there is no per-version page
+    # to point at: the read lands on the version-agnostic rung and says so in the tier.
+    assert out["match_tier"] == "any_version"
+    assert out["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm"
+    assert [c["speedup"] for c in out["candidates"]] == [4.0], "the coarse rung still serves it"
 
 
 def test_a_write_records_both_planes(tmp_path):
@@ -902,7 +917,7 @@ def test_a_write_records_both_planes(tmp_path):
             "--framework-version", "7.2")
     assert w["written"] is True and os.path.isfile(os.path.join(w["dir"], "meta.yaml"))
     assert w["remote"]["written"] is True
-    assert w["remote"]["canonical_id"] == "geak:kernel:geak:fused_moe_kernel:rocm:7.2:triton:gfx950"
+    assert w["remote"]["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm:7.2"
     assert w["remote"]["champion"] is True and w["remote"]["replaced"] is False
     out = resolve_remote(store, str(tmp_path / "refs"))
     assert [c["speedup"] for c in out["candidates"]] == [2.0]

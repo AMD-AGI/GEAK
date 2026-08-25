@@ -228,7 +228,7 @@ def test_a_mid_ladder_write_failure_stops_and_mirror_is_best_effort(tmp_path, mo
     real = e2e_store.publish
     calls = {"n": 0}
 
-    def flaky(store, recs, files, score_of):
+    def flaky(store, recs, files, score_of, promote=True):
         calls["n"] += 1
         return [], [], "boom"                                   # every publish fails
 
@@ -540,3 +540,98 @@ def test_the_prose_reference_points_at_the_launch_script_and_the_patches(tmp_pat
     assert "- reproduce: " in text and "files/launch.sh" in text
     assert "files/kernels/op1.patch" in text
     assert "- track record: never benched by anyone since it was recorded" in text
+
+
+# -- the identity handoff -----------------------------------------------------------------------
+# The read leaves its ADDRESS on disk, not just its answer. The writer at the end of a run is a
+# different process, and when the workflow dies it is a different program entirely (run_e2e.py
+# salvaging from artifacts) — one that has the measurement but not the dimensions the Director
+# established at preflight. Written from the same argv that formed the read, because two places
+# formatting these dims independently is how a reader and a writer drift onto different pages.
+
+
+def _identity_file(tmp_path, *args):
+    out = tmp_path / "kb_identity.json"
+    _run("resolve", "--store", str(tmp_path / "store"), "--identity-out", str(out), *args)
+    return json.loads(out.read_text())
+
+
+def test_the_read_leaves_its_address_behind_for_the_writer(tmp_path):
+    doc = _identity_file(tmp_path)
+    # `dims` is the raw argv, one key per flag, because its reader hands them straight back
+    assert doc["dims"]["model"] == "M" and doc["dims"]["gfx"] == "gfx950"
+    assert doc["dims"]["framework-version"] == "0.26.0"
+    assert doc["dims"]["tp"] == "8", "the argv value travels verbatim, not reformatted"
+    # `identity` is the derived form, kept so a human — or anyone matching a canonical id — can
+    # read the file without reimplementing e2e_identity() to get there
+    assert doc["identity"]["model"] == "m"
+    assert doc["canonical_id"].startswith("geak:e2e:")
+
+
+def test_the_address_is_written_even_when_there_is_nothing_to_read(tmp_path):
+    """A cold start is exactly when the salvage writer matters most: nothing was read, but the
+    run still produced a measurement that belongs on this page."""
+    doc = _identity_file(tmp_path)
+    assert doc["dims"]["model"] == "M"
+
+
+def test_the_recorded_plane_is_the_runs_plane_not_the_reads(tmp_path):
+    """A `both` run reads remote-first, so the read's own plane would talk the salvage writer
+    out of the local mirror the run was configured to keep."""
+    assert _identity_file(tmp_path, "--plane", "remote", "--identity-plane", "both")["plane"] \
+        == "both", "the run's plane wins over the read's"
+    assert _identity_file(tmp_path, "--plane", "remote")["plane"] == "remote"
+    assert _identity_file(tmp_path)["plane"] == "local", "the read's plane is the fallback"
+
+
+def test_an_unwritable_identity_path_does_not_fail_the_read(tmp_path):
+    """Best-effort by construction: the caller asked for candidates, and it gets them."""
+    _write(tmp_path, "a", "tuned")
+    out = _run("resolve", "--store", str(tmp_path / "store"),
+               "--identity-out", str(tmp_path / "nope" / "deep" / "id.json"))
+    assert out["read_reason"] == "read" and out["candidates"]
+
+
+# -- packing an overlay -------------------------------------------------------------------------
+# A pure-overlay win is a directory, not a patch. It travels as a tarball so the reader gets one
+# predictable directory to point PYTHONPATH at.
+
+
+def _overlay_dir(tmp_path, *, manifest=True, patched=True):
+    d = tmp_path / "overlay"
+    (d / "_patched" / "vllm").mkdir(parents=True)
+    if manifest:
+        (d / e2e_store.OVERLAY_MANIFEST).write_text(json.dumps({"files": ["vllm/layer.py"]}))
+    (d / "sitecustomize.py").write_text("# hook\n")
+    if patched:
+        (d / "_patched" / "vllm" / "layer.py").write_text("BLOCK = 256\n")
+        (d / "_patched" / "vllm" / "layer.pyc").write_text("junk")
+        (d / "_patched" / "vllm" / "__pycache__").mkdir()
+        (d / "_patched" / "vllm" / "__pycache__" / "layer.cpython-311.pyc").write_text("junk")
+    return str(d)
+
+
+def test_a_directory_without_a_manifest_is_not_an_overlay(tmp_path):
+    """The gate refuses the record rather than promise a tarball of something nobody can install."""
+    assert e2e_store._pack_overlay(_overlay_dir(tmp_path, manifest=False)) == ""
+
+
+def test_an_overlay_packs_its_manifest_hook_and_patched_tree(tmp_path):
+    import tarfile
+    out = e2e_store._pack_overlay(_overlay_dir(tmp_path))
+    assert out.endswith(e2e_store.OVERLAY_TARBALL) and os.path.isfile(out)
+    with tarfile.open(out, "r:gz") as tar:
+        names = tar.getnames()
+    assert "overlay/" + e2e_store.OVERLAY_MANIFEST in names
+    assert "overlay/sitecustomize.py" in names
+    assert "overlay/_patched/vllm/layer.py" in names
+
+
+def test_compiled_bytecode_is_left_out_of_the_bundle(tmp_path):
+    """`.pyc` files are built for one interpreter and are stale everywhere else; shipping them
+    is how an overlay installs cleanly and then runs the code it was supposed to replace."""
+    import tarfile
+    with tarfile.open(e2e_store._pack_overlay(_overlay_dir(tmp_path)), "r:gz") as tar:
+        names = tar.getnames()
+    assert not any(n.endswith(".pyc") for n in names)
+    assert not any("__pycache__" in n for n in names)
