@@ -497,7 +497,11 @@ const E2E_REPLAYABLE_KINDS = new Set(['patch', 'env', 'flag']);
 // Which roles are TOLD about the warm start. Deliberately excludes e2e_integrator and
 // director:validate — those two produce the run's authoritative numbers, and a stored prior in their
 // context is contamination with no upside.
-const WARM_START_ROLES = new Set(['system_architect', 'config_tuner']);
+// tuning_specialist is a consumer for the same reason the other two are, and one more: the tuning
+// track is the ONLY one whose output previously had no way back in. A tuned artifact is bulky,
+// deploys outside the git tree, and takes hours of search to rediscover — so a run that re-derives
+// one it already has in the store is the most expensive avoidable thing this workflow does.
+const WARM_START_ROLES = new Set(['system_architect', 'config_tuner', 'tuning_specialist']);
 // Credentials and trust for every emitted KB command. The six lines that do the work live in
 // scripts/kb_env.sh (which explains them), not here, because run_e2e.py runs KB commands too — the
 // salvage write for a run whose workflow died before Module B — and a Python copy of the token path
@@ -849,6 +853,7 @@ function expertSkillsBlock(role) {
 // ---------------------------------------------------------------------------
 let KB_DIMS = null;        // the deployment dimensions the Director established during preflight
 let KB_REF_DIR = '';       // where Module A left its references; '' when it never ran
+let KB_CACHE_DIR = '';     // where Module A materialized the records' FILES (patches, tuned tables)
 let KB_REF_VERDICT = '';   // what we MEASURED about the offer, threaded into later roles' Inputs
 let KB_READ_PLANE = '';    // which plane ANSWERED the read, which `both` alone does not tell you
 
@@ -905,12 +910,30 @@ ${invoke('local')}`;
 // whose read found nothing — never reaches the template at all.
 function warmStartBlock(role) {
   if (!KB_REF_DIR || !WARM_START_ROLES.has(role)) return '';
+  // `tuning_kb=false` is the blind-evaluation switch: it exists so a run can measure what the tuning
+  // track finds with NO prior knowledge in its context. Now that the tuning track's prior knowledge
+  // lives in the shared KB rather than in a private store, the switch has to reach here too — one
+  // flag, one meaning, whichever store the knowledge happens to sit in. Without this, "blind" would
+  // have quietly stopped being blind the moment the two stores merged.
+  if (role === 'tuning_specialist' && !TUNING_KB_ENABLED) return '';
   return `\n\n## Warm start (a PRIOR run's record — already measured on this box)\n` +
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/warm_start.md and follow it. The knowledge base ` +
     `offered prior configurations for this exact deployment; they are in ${KB_REF_DIR}/, and ` +
     `${KB_REF_DIR}/measured_on_this_box.md records what happened when THIS run benched them — that ` +
     `file OVERRIDES the stored claims in its siblings wherever the two disagree. A stored number is ` +
-    `a hypothesis; only the measured column is evidence.`;
+    `a hypothesis; only the measured column is evidence.` +
+    // The tuning track reads the same pages for a different purpose, so it gets the extra paragraph
+    // here rather than a second block: the others are shopping for a CONFIG to adopt, it is checking
+    // whether the search it is about to spend hours on has already been run to completion once.
+    (role === 'tuning_specialist' && KB_CACHE_DIR
+      ? `\n\nFor YOUR track specifically: an accepted-kernel entry marked \`from tuning skillset\` is a ` +
+        `tuned artifact a prior run produced and proved engaged. Its file was downloaded with the ` +
+        `record — look under ${KB_CACHE_DIR}/*/files/tuning/ — and the entry names the env var that ` +
+        `binds it. Before you start searching a shape, check whether it is already there. If it is, ` +
+        `install the artifact, prove engagement the same way you would for your own, and measure it ` +
+        `in your pre/post A/B; a recalled artifact still has to earn its accept on THIS box, but it ` +
+        `costs one measurement instead of a search. Search only the shapes that came back empty.`
+      : '');
 }
 
 function roleAgent(role, phase, intro, inputs) {
@@ -1894,6 +1917,10 @@ if (want('setup')) {
         `champion_metric=${resolved.champion_metric || '-'} reason=${resolved.read_reason || '?'} ` +
         `candidates=${cands.length}`);
       if (cands.length) KB_REF_DIR = refsDir;   // arms warmStartBlock() for the consumer roles
+      // Armed on the same condition and never separately: the cache holds nothing until a candidate
+      // is materialized, and a path to an empty directory reads to an agent as "the file is missing"
+      // rather than "there was no record", which are very different things to act on.
+      if (cands.length) KB_CACHE_DIR = cacheDir;
 
       // How many of the offers are worth a server launch. On a coarser rung the stored numbers were
       // measured on a DIFFERENT workload point, so they are not comparable to this run's baseline at
@@ -2465,6 +2492,12 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       PROFILE_TOPN: profile ? profile.profile_topN_json : '',
       TUNING_TARGETS: (strategy && strategy.head_candidates) || headQueue || [],
       TUNING_SKILLSET_DIR, TUNING_KB_ENABLED, SKILL_DIR: WORKFLOW_DIR,
+      // The always-fires channel, same as the Architect's and the config_tuner's. The prompt BLOCK
+      // above can be empty (no candidates, or the read never ran); these Inputs entries are how the
+      // role learns the store exists at all. Gated by TUNING_KB_ENABLED for the same reason
+      // warmStartBlock() is: blind eval has to stay blind through BOTH channels or through neither.
+      ...(TUNING_KB_ENABLED ? KB_REF_INPUTS : {}),
+      ...(TUNING_KB_ENABLED && KB_CACHE_DIR ? { KB_CACHE_DIR } : {}),
     }),
     { phase: 'TuningSkillset', label: 'tuning_specialist:tune', schema: TUNING_SCHEMA });
 
@@ -2532,11 +2565,18 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
         engaged: o.engaged === true,
         from_tuning_skillset: true,
         tuning_artifact: o.artifact || '',
+        // Whether this op was SEARCHED here or RECALLED from a prior record. Now that the tuning
+        // track reads the store it also writes, the two are indistinguishable downstream without
+        // this field — and a recall re-banked as a discovery would make one original search look
+        // like N independent confirmations to anyone counting records.
+        tuning_source: String(o.source || o.origin || '').trim() || 'search',
       }, {});
     }
     if (tunedOps.length) {
+      const recalled = tunedOps.filter((o) => /recall|kb|knowledge/i.test(String(o.source || o.origin || ''))).length;
       log(`Banked ${tunedOps.length} tuned op(s) as accepted kernels (kind=env) so the KB record ` +
-        `carries the lever: ${tunedOps.map((o) => o.op || o.short_name).join(', ')}.`);
+        `carries the lever: ${tunedOps.map((o) => o.op || o.short_name).join(', ')}` +
+        `${recalled ? ` (${recalled} recalled from the KB rather than searched)` : ''}.`);
     }
 
     // Tuning changed which kernels dominate — re-profile + re-strategize so the head track works the

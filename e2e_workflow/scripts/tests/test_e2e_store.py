@@ -635,3 +635,85 @@ def test_compiled_bytecode_is_left_out_of_the_bundle(tmp_path):
         names = tar.getnames()
     assert not any(n.endswith(".pyc") for n in names)
     assert not any("__pycache__" in n for n in names)
+
+
+# -- the tuning track's lever, carried into the record ---------------------------------------------
+#
+# A tuned table is bound by an env var and deployed INTO the installed package, so it is structurally
+# absent from final.patch. The DeepSeek-V4-Pro 20260823 run banked a 56-row a8w8 table measured at
+# 3.29x isolated and wrote files [final.patch, launch.sh, report.md]: the lever stayed on the box and
+# died with it. These cover the path that carries it instead — and, since the tuning track now READS
+# this store too, the pointers a later run has to follow back to the bytes.
+
+
+def _tuned(tmp_path, *names, gate="accepted", live=()):
+    paths = []
+    for name in names:
+        (tmp_path / name).write_text("M,N,K,kernel\n1024,8192,7168,ck_cshuffle_v3\n")
+        paths.append(str(tmp_path / name))
+    return {"gate": gate, "artifacts": paths, "live_tree_files": [str(tmp_path / n) for n in live]}
+
+
+def test_a_tuned_table_rides_along_with_the_record(tmp_path):
+    out = _write(tmp_path, "a", "tuned", tuning_skillset=_tuned(tmp_path, "gemm.csv"))
+    assert out["files"] == sorted(set(out["files"]))            # deterministic, no duplicate names
+    assert "tuning/00_gemm.csv" in out["files"]
+    view = _run("resolve", "--store", str(tmp_path / "store"),
+                "--cache-dir", str(tmp_path / "cache"))["candidates"][0]
+    landed = tmp_path / "cache" / view["session_id"] / "files" / "tuning" / "00_gemm.csv"
+    assert landed.is_file() and "ck_cshuffle_v3" in landed.read_text()
+
+
+def test_only_an_accepted_tuning_contributes_its_artifacts(tmp_path):
+    """A rejected search leaves files behind too. Carrying them would let a later reader install a
+    table that was measured and turned down, which is worse than having nothing to install."""
+    out = _write(tmp_path, "a", "tuned", tuning_skillset=_tuned(tmp_path, "gemm.csv", gate="no_win"))
+    assert not any(f.startswith("tuning/") for f in out["files"])
+
+
+def test_a_live_tree_table_is_carried_even_though_no_diff_could_see_it(tmp_path):
+    (tmp_path / "installed.csv").write_text("x")
+    out = _write(tmp_path, "a", "tuned",
+                 tuning_skillset=_tuned(tmp_path, "bundled.csv", live=("installed.csv",)))
+    assert "tuning/00_bundled.csv" in out["files"] and "tuning/01_installed.csv" in out["files"]
+
+
+def test_a_shape_named_table_cannot_take_the_whole_record_down_with_it(tmp_path):
+    """`safe_rel_path` REJECTS `:` rather than sanitizing, and both stores build their entire
+    {stored_name: source} map before uploading a byte — so one `gemm_m:1024.csv`, a perfectly
+    ordinary thing for a tuner to emit, would abort the write and lose final.patch and launch.sh
+    along with it. The name is mangled toward the validator; the record survives."""
+    from kb.store_local import safe_rel_path
+    out = _write(tmp_path, "a", "tuned", tuning_skillset=_tuned(tmp_path, "gemm_m:1024_n:8192.csv"))
+    assert "tuning/00_gemm_m_1024_n_8192.csv" in out["files"]
+    assert "launch.sh" in out["files"]                          # the rest of the record is intact
+    for name in out["files"]:
+        assert safe_rel_path(name) == name                      # every stored name is uploadable
+
+
+def test_a_recalled_table_can_be_found_from_the_page_that_advertises_it(tmp_path):
+    """The whole point of banking the lever: a later run reads this prose and has to be able to act
+    on it. The workflow banks the absolute path the tuner wrote, which means nothing on another box,
+    so the record must point at the bundle instead — while still saying where it came from."""
+    out = _write(tmp_path, "a", "tuned",
+                 tuning_skillset=_tuned(tmp_path, "gemm.csv"),
+                 accepted_kernels=[{"name": "gemm_a8w8", "language": "ck", "winner_kind": "env",
+                                    "isolated_speedup": 3.29, "from_tuning_skillset": True,
+                                    "apply_env": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=/x/gemm.csv",
+                                    "tuning_artifact": str(tmp_path / "gemm.csv")}])
+    assert "tuning/00_gemm.csv" in out["files"]
+    resolved = _run("resolve", "--store", str(tmp_path / "store"),
+                    "--cache-dir", str(tmp_path / "cache"), "--refs-dir", str(tmp_path / "refs"))
+    kernel = resolved["candidates"][0]["accepted_kernels"][0]
+    assert kernel["tuning_artifact"] == "tuning/00_gemm.csv"    # resolves inside the bundle
+    assert kernel["tuning_artifact_source"] == str(tmp_path / "gemm.csv")
+    page = "".join(p.read_text() for p in (tmp_path / "refs").glob("e2e_reference_*.md"))
+    assert "tuning/00_gemm.csv" in page and "from tuning skillset" in page
+    assert "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE" in page          # and how to bind it
+
+
+def test_a_patched_kernel_reads_exactly_as_it_did_before(tmp_path):
+    """The tuning branch is additive: a record with no tuning in it must render byte-identically."""
+    assert e2e_store._kernel_line([{"name": "op1", "language": "triton", "isolated_speedup": 1.84,
+                                    "patch": "kernels/op1.patch"}]) \
+        == "op1 (triton, 1.84x, kernels/op1.patch)"

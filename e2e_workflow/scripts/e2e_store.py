@@ -53,6 +53,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -334,12 +335,25 @@ def _kernel_line(kernels) -> str:
 
     Spells out the patch path because the Director reads this prose and then has to go open the
     file; a name alone sends it back to the store to ask a question this page already answered.
+
+    A tuned entry has NEITHER a patch nor a kernel id — its lever is a data file bound by an env
+    var — so before this it rendered as `gemm_a8w8_... (ck, 3.29x)`: a reader was told a 3.29x table
+    exists and given no way to find or apply it, which is the same as not being told. The two things
+    it does have, the bundle path and the env binding, are spelled out for exactly the same reason
+    the patch path is.
     """
     parts = []
     for k in kernels:
+        where = k.get("patch") or k.get("tuning_artifact") or k.get("kernel_canonical_id") or ""
         bits = [b for b in (k.get("language"),
                             "%sx" % k["isolated_speedup"] if k.get("isolated_speedup") else "",
-                            k.get("patch") or k.get("kernel_canonical_id") or "") if b]
+                            where) if b]
+        if k.get("from_tuning_skillset"):
+            # Named, not inferred from the absent patch: "no patch" is also what an env-only config
+            # win looks like, and the two are recalled by different tracks in different ways.
+            bits.append("from tuning skillset")
+            if k.get("apply_env"):
+                bits.append("bind with %s" % k["apply_env"])
         parts.append("%s (%s)" % (k.get("name") or "?", ", ".join(bits)) if bits
                      else str(k.get("name") or "?"))
     return "; ".join(parts)
@@ -532,6 +546,7 @@ def build_record(a, result: dict, workdir=None) -> dict:
     value.update(state)
     files = _artifact_files(a, result)
     files.update(kernel_files)
+    _rebind_tuning_artifacts(kernels, files)
     value["artifacts"] = {k: v[0] for k, v in files.items()}
     # After `artifacts` (it reads the captured launch/overlay names from there) and before the
     # final rebuild (it may ADD the synthesized script and fetched patches to `files`).
@@ -721,6 +736,24 @@ TUNING_FILE_MAX = 24
 TUNING_FILE_MAX_BYTES = 64 * 1024 * 1024
 
 
+_UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_basename(path: str) -> str:
+    """A stored name `kb.store_local.safe_rel_path()` will accept, whatever the box named the file.
+
+    That validator REJECTS (raises) on `:` and `\\` rather than sanitizing, and both stores build
+    their whole `{stored_name: source}` map up front, before a single byte is uploaded. So one tuned
+    table whose name carries a shape spec — `gemm_m:1024_n:8192.csv` is a perfectly ordinary thing
+    for a tuner to emit — would abort the write for the ENTIRE record, taking final.patch, launch.sh
+    and report.md down with it. The record is the thing worth protecting; the exact filename is not.
+    Names are mangled toward the validator, never dropped, and the untouched source path stays in
+    `accepted_kernels[].tuning_artifact_source` so a reader can still say where it came from.
+    """
+    name = _UNSAFE_NAME_RE.sub("_", os.path.basename(path).strip()) or "artifact"
+    return name.lstrip(".") or "artifact"      # ".", ".." and dotfiles are rejected the same way
+
+
 def _tuning_files(result: dict, dropped: list) -> dict:
     """{role: (stored_name, local_path)} for the tuning phase's deployable artifacts.
 
@@ -761,9 +794,30 @@ def _tuning_files(result: dict, dropped: list) -> dict:
             continue
         # Index-prefixed: two tuned tables can share a basename across trees (the deploy bundle's copy
         # and the installed one), and a bare basename would silently drop one of them.
-        stored = "%s%02d_%s" % (TUNING_PREFIX, len(found), os.path.basename(path))
+        stored = "%s%02d_%s" % (TUNING_PREFIX, len(found), _safe_basename(path))
         found["tuning:" + path] = (stored, path)
     return found
+
+
+def _rebind_tuning_artifacts(kernels, files: dict) -> None:
+    """Point each tuned kernel at where its table lives IN THE RECORD, not on the box that made it.
+
+    The workflow banks `tuning_artifact` as the absolute path the tuner wrote — correct at write
+    time, meaningless to every reader afterwards, since the next box has no such file. The bundle
+    name is the only address that survives the trip, so it is substituted here, once, at the one
+    point where both the kernel list and the stored-name map exist. The original is kept as
+    `tuning_artifact_source`: when a recalled table fails to reproduce, the first question is which
+    tree it was captured from, and that answer is otherwise gone.
+    """
+    by_source = {src: stored for stored, src in files.values()}
+    for k in kernels:
+        if not isinstance(k, dict):
+            continue
+        source = str(k.get("tuning_artifact") or "")
+        stored = by_source.get(source) if source else ""
+        if stored:
+            k["tuning_artifact"] = stored
+            k["tuning_artifact_source"] = source
 
 
 def _artifact_files(a, result: dict) -> dict:

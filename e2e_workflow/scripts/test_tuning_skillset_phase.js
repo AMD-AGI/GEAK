@@ -264,6 +264,39 @@ ok(/if tuning_section is not None:\n\s+result\["tuning_skillset"\] = tuning_sect
 ok(/reaches_production_via/.test(runE2e),
   'result.json tells the caller that final_patch/final_launch_script now carry the tuning');
 
+// ---------------------------------------------------------------------------
+// G. the tuning track READS the same KB it writes
+//
+// Before this, tuning was write-only: a run banked a tuned table and the next run on the identical
+// deployment searched for it again from scratch, for hours, with the answer sitting in the store the
+// whole time. The loop only closes if the role is a warm-start consumer AND the reference paths reach
+// its Inputs — the prompt block alone is not enough, since it is empty whenever the read found
+// nothing, which is also when a reader most needs to know the store exists.
+// ---------------------------------------------------------------------------
+console.log('\n## G. the tuning track reads the KB it writes');
+ok(/const WARM_START_ROLES = new Set\(\[[^\]]*'tuning_specialist'/.test(src),
+  'tuning_specialist is a warm-start consumer (the prompt block reaches it)');
+const tunePhase = src.slice(iTune, src.indexOf('schema: TUNING_SCHEMA', iTune));
+ok(/\.\.\.\(TUNING_KB_ENABLED \? KB_REF_INPUTS : \{\}\)/.test(tunePhase),
+  'the always-fires Inputs channel reaches the tuning phase too');
+ok(/KB_CACHE_DIR/.test(tunePhase),
+  'the role is told where the recalled artifacts were materialized, not just that they exist');
+// One switch, both stores. `tuning_kb=false` is the blind-evaluation control; when the tuning
+// knowledge moved into the shared KB, a block gated only on KB_REF_DIR would have kept feeding the
+// role priors in exactly the runs designed to have none.
+ok(/if \(role === 'tuning_specialist' && !TUNING_KB_ENABLED\) return '';/.test(src),
+  'blind eval stays blind: TUNING_KB_ENABLED=false closes the KB block as well as tuning-kb/');
+ok(/\.\.\.\(TUNING_KB_ENABLED && KB_CACHE_DIR \? \{ KB_CACHE_DIR \} : \{\}\)/.test(tunePhase),
+  '...and closes the Inputs channel with it — one flag cannot half-apply');
+ok(iTune > at(/if \(E2E_WARM_START_ON\) \{/),
+  'the warm start runs BEFORE the tuning phase, so KB_REF_DIR is armed by the time the role reads it');
+ok(/tuning_source: String\(o\.source \|\| o\.origin \|\| ''\)/.test(src),
+  'a banked op records whether it was searched or recalled (a recall must not re-bank as a discovery)');
+ok(/Prior tuning knowledge/.test(role) && /KB_REFERENCE_DIR/.test(role),
+  'the role file tells the specialist to check the KB before searching');
+ok(/prove engagement/i.test(role) && /A recall is not an accept/.test(role),
+  'a recalled artifact still has to earn its accept on this box');
+
 console.log(failures === 0
   ? '\nPASS: tuning skillset is vendored whole and runs standalone before HeadKernel.'
   : `\nFAILED: ${failures} assertion(s).`);

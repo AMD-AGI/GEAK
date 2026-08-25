@@ -17,8 +17,19 @@ routes. Decide for yourself which ones apply and how far to take them — that j
 `TUNING_SKILLSET_DIR` is vendored and hash-pinned: **never edit anything inside it.** Everything you
 produce goes under `EVAL_DIR/tuning/`.
 
-`tuning-kb/` in that tree is a per-model answer key. When `TUNING_KB_ENABLED=false` this run is a blind
-evaluation — do not read it. Otherwise it is fair game; say in your return which mode you were in.
+### Prior tuning knowledge — two sources, one switch
+
+Look in both before searching anything. `TUNING_KB_ENABLED=false` closes **both** (blind evaluation —
+say in your return which mode you were in).
+
+1. **The shared KB**, when `KB_REFERENCE_DIR` is in your Inputs: what earlier runs on this deployment
+   measured. An accepted-kernel entry tagged `from tuning skillset` is a tuned artifact a prior run
+   proved engaged; the entry names its bundle path under `KB_CACHE_DIR` and the env var that binds it.
+2. **`tuning-kb/`** in the skillset tree: hand-written per-model priors, not measurements.
+
+Prefer (1) where they overlap. A recall is not an accept — install it, prove engagement, and run your
+own pre/post A/B exactly as for a table you tuned yourself. It skips the *search*, not the proof. Search
+only what came back empty, and mark each tuned op `source: recall|search` in your return.
 
 ---
 
@@ -29,7 +40,9 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `SERVING_TP`, `SERVIN
 `CURRENT_THROUGHPUT`, `CURRENT_FLAGS` / `CURRENT_ENV` / `CURRENT_OVERLAY` (the accepted stack so far),
 `MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, `NOISE_BAND_PCT`, `PROFILE_TOPN`,
 `TUNING_TARGETS` (the Architect's ranked ops — advisory, not a shortlist),
-`TUNING_SKILLSET_DIR`, `TUNING_KB_ENABLED`, `ACCURACY_GATE`, `SKILL_DIR`.
+`TUNING_SKILLSET_DIR`, `TUNING_KB_ENABLED`, `ACCURACY_GATE`, `SKILL_DIR`,
+and — only when the warm start found prior records and `TUNING_KB_ENABLED` is on —
+`KB_REFERENCE_DIR`, `KB_REFERENCE_VERDICT`, `KB_CACHE_DIR` (see "Prior tuning knowledge" above).
 
 There is no cap on how many ops you tune. Work the profile until the remaining candidates are not worth
 the time, and say where you stopped and why.
