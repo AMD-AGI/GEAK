@@ -9,6 +9,7 @@ from typing import Optional
 
 import pytest
 
+from interface import effective_config as ec
 from interface.effective_config import EffectiveConfig, resolve_effective_config
 
 
@@ -257,3 +258,116 @@ def test_schema_v1_is_legacy_accepted_value_passthrough(tmp_path: Path) -> None:
     assert result.final_env == {"LEGACY": "1"}
     assert result.base_overlay_pythonpath == ""
     assert result.source_snapshots == []
+
+
+# ── parser edges ────────────────────────────────────────────────────────────
+# These parsers sit between a recipe written by hand and a server that refuses to start on a
+# malformed argument. Ambiguous text is either canonicalised or rejected with the offending token
+# named — never silently dropped, which is how a run baselines on a config nobody asked for.
+
+
+def test_a_bare_json_argument_survives_shell_splitting() -> None:
+    """shlex would shred `{"a": 1, "b": 2}` into three tokens on the spaces. It is protected,
+    canonicalised (sorted, no spaces) and put back, so two spellings of one value compare equal."""
+    tokens = ec._shell_tokens('--override {"b": 2, "a": 1}')
+    assert tokens[0] == "--override"
+    assert tokens[1] == '{"a":1,"b":2}'
+
+
+def test_a_quote_escaped_inside_json_does_not_end_the_string() -> None:
+    """The scanner tracks its own escapes; a `\\"` that closed the string early would leave the
+    braces unbalanced and drop the argument."""
+    tokens = ec._shell_tokens('--override {"a": "he said \\"hi\\""}')
+    assert json.loads(tokens[1]) == {"a": 'he said "hi"'}
+
+
+def test_an_unbalanced_brace_is_left_alone() -> None:
+    text, protected = ec._protect_bare_json('--override {"a": 1')
+    assert protected == {} and text == '--override {"a": 1'
+
+
+def test_something_that_only_looks_like_json_is_left_alone() -> None:
+    text, protected = ec._protect_bare_json("--override {not json}")
+    assert protected == {} and text == "--override {not json}"
+
+
+def test_a_json_shaped_value_that_will_not_parse_is_passed_through() -> None:
+    assert ec._canonical_value("[1, 2") == "[1, 2"
+    assert ec._canonical_value("[nope]") == "[nope]"
+    assert ec._canonical_value("[2, 1]") == "[2,1]"
+
+
+@pytest.mark.parametrize("token,is_flag", [
+    ("--max-model-len", True),
+    ("-tp", True),
+    ("-", False),          # a lone dash is a value (stdin), not a flag
+    ("-1", False),         # a negative number is a value
+    ("-1.5", False),
+    ("8192", False),
+])
+def test_what_counts_as_a_flag(token: str, is_flag: bool) -> None:
+    assert ec._looks_like_flag(token) is is_flag
+
+
+def test_a_value_with_no_flag_is_rejected_by_name() -> None:
+    """Dropping it would launch a server missing an argument the recipe asked for."""
+    with pytest.raises(ValueError, match="no flag"):
+        ec._parse_flags("8192 --max-model-len")
+
+
+def test_an_environment_entry_must_be_a_pair() -> None:
+    with pytest.raises(ValueError, match="KEY=VALUE"):
+        ec._parse_env("JUST_A_NAME")
+    with pytest.raises(ValueError, match="KEY=VALUE"):
+        ec._parse_env("=novalue")
+
+
+def test_an_env_mapping_is_taken_as_given() -> None:
+    assert ec._parse_env({"A": 1}) == {"A": "1"}
+    assert ec._parse_env("") == {}
+    assert ec._parse_env(None) == {}
+
+
+def test_envs_are_found_at_any_depth_and_absence_is_not_an_error() -> None:
+    """Recipes nest `envs` under the framework block, but not always at the same depth."""
+    assert ec._find_envs({"benchmark": {"envs": {"A": "1"}}}) == {"A": "1"}
+    assert ec._find_envs({"a": {"b": {"c": {"envs": {"X": "9"}}}}}) == {"X": "9"}
+    assert ec._find_envs({"no": "envs here"}) == {}
+    assert ec._find_envs("not a mapping") == {}
+
+
+def test_a_recipe_that_cannot_be_read_names_itself(tmp_path: Path) -> None:
+    """The path is in the message because the usual cause is a recipe that was never mounted
+    into the container, and the next question is always "which one"."""
+    assert ec._recipe_envs("") == {}
+    with pytest.raises(ValueError, match="cannot parse launch recipe"):
+        ec._recipe_envs(tmp_path / "absent.yaml")
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("benchmark: [unclosed\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot parse launch recipe"):
+        ec._recipe_envs(bad)
+
+
+def test_a_handoff_is_read_from_a_path_or_taken_as_a_mapping(tmp_path: Path) -> None:
+    path = tmp_path / "handoff.json"
+    path.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    assert ec._load_handoff(path)["schema_version"] == 2
+    assert ec._load_handoff(str(path))["schema_version"] == 2
+
+    given = {"schema_version": 2}
+    loaded = ec._load_handoff(given)
+    loaded["schema_version"] = 99
+    assert given["schema_version"] == 2, "the caller's dict is copied, not aliased"
+
+
+def test_a_handoff_that_is_not_an_object_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="cannot parse handoff"):
+        ec._load_handoff(tmp_path / "absent.json")
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot parse handoff"):
+        ec._load_handoff(broken)
+    listy = tmp_path / "list.json"
+    listy.write_text("[1, 2]", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        ec._load_handoff(listy)

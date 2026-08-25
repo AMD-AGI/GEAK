@@ -74,6 +74,13 @@ jobs:
       # --cov-fail-under=0 defers the gate to the dedicated step below, so a
       # coverage shortfall is reported as its own named, legible failure rather
       # than as trailing output on the test step.
+      #
+      # test_effective_config / test_bench_replica_lifecycle arrived with the Hyperloom
+      # alignment work and test_roofline_skill / test_vllm_adapter_profiler_config predate
+      # it; none were ever added here. Because the list is explicit, a test file that is
+      # never named is a test file that never runs — the same trap the contract checks
+      # below were added to close. They also measure the modules that were dragging the
+      # coverage gate down, which is what a suite nothing runs looks like from the outside.
       - name: unit tests (no GPU)
         run: |
           python -m pytest -q --cov --cov-report=term --cov-fail-under=0 \
@@ -110,6 +117,10 @@ jobs:
             kb/tests/test_store_local.py \
             kb/tests/test_attest.py \
             kernel_workflow/scripts/tests/test_kb_loop_offline.py \
+            interface/test_effective_config.py \
+            e2e_workflow/scripts/tests/test_bench_replica_lifecycle.py \
+            e2e_workflow/scripts/tests/test_roofline_skill.py \
+            e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
             geak/test_bootstrap.py
 
       - name: expert skill static validation

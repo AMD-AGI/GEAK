@@ -1141,5 +1141,233 @@ def test_a_no_gain_run_reports_as_a_no_gain(tmp_path):
     assert "do-no-harm no-gain" in text
 
 
+# ── KB write-back on salvage ────────────────────────────────────────────────
+# A run that finishes records itself. This path exists only for the ones that died before doing
+# so, and it is the reason a crashed run is still worth something to the next one. Two things are
+# pinned: the ADDRESS it writes to, because a record filed under the wrong dims is invisible to
+# every reader of this deployment, and that no failure here can propagate — the interface files
+# are already on disk by the time this runs, so a missed record must never become a failed run.
+
+
+class _Proc:
+    """Stands in for a CompletedProcess without spawning one."""
+
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+
+def _kb_identity(**over) -> dict:
+    ident = {"dims": {"model": "M", "gfx": "gfx950", "framework": "vllm", "tp": 8},
+             "plane": "remote", "store": ""}
+    ident.update(over)
+    return ident
+
+
+def _kb_eval_dir(tmp_path: Path, *, identity=_kb_identity(), workflow_return=True) -> Path:
+    eval_dir = tmp_path / "e2e_kb"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    if identity is not None:
+        (eval_dir / rx.KB_IDENTITY_FILE).write_text(json.dumps(identity), encoding="utf-8")
+    if workflow_return:
+        (eval_dir / rx.WORKFLOW_RETURN_FILE).write_text(
+            json.dumps({"throughput_tok_s": 535.4}), encoding="utf-8")
+    return eval_dir
+
+
+def _kb_store(monkeypatch, proc=None, raises=None):
+    """Answer for e2e_store.py without running it. Returns the argv it was called with."""
+    monkeypatch.delenv("GEAK_E2E_KB_WRITE_BACK", raising=False)
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        if raises is not None:
+            raise raises
+        return proc if proc is not None else _Proc(
+            stdout=json.dumps({"session_id": "geak-x", "applied": True}))
+
+    monkeypatch.setattr(rx.subprocess, "run", fake_run)
+    return seen
+
+
+def _flag(cmd: list, name: str) -> str:
+    return cmd[cmd.index(name) + 1]
+
+
+def test_kb_write_back_can_be_switched_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("GEAK_E2E_KB_WRITE_BACK", "0")
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})
+    assert out["skipped"] is True and "off" in out["why"]
+
+
+def test_kb_write_back_defers_to_the_workflows_own_receipt(tmp_path, monkeypatch):
+    """Both writers land on the same session id, so running this one after a successful
+    workflow write would replace a validated record with a salvaged one."""
+    _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path)
+    (eval_dir / rx.KB_WRITE_FILE).write_text("{}", encoding="utf-8")
+    out = rx._kb_write_back(eval_dir, {}, {})
+    assert out["skipped"] is True and rx.KB_WRITE_FILE in out["why"]
+
+
+@pytest.mark.parametrize("dims", [
+    {"model": "", "gfx": "gfx950"},     # no model
+    {"model": "M", "gfx": ""},          # no gfx
+])
+def test_an_unaddressable_record_is_not_written_at_all(tmp_path, monkeypatch, dims):
+    """kb/identity folds a missing dimension to `unknown`, which is a page nobody reads.
+    Recording nothing is honest; recording it there looks like a healthy write."""
+    _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path, identity=_kb_identity(dims=dims))
+    assert rx._kb_write_back(eval_dir, {}, {})["skipped"] is True
+
+
+def test_a_run_with_no_identity_file_is_skipped(tmp_path, monkeypatch):
+    """Warm start never ran, or ran before this build wrote the file."""
+    _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path, identity=None)
+    assert rx._kb_write_back(eval_dir, {}, {})["skipped"] is True
+
+
+def test_there_has_to_be_a_measurement_to_send(tmp_path, monkeypatch):
+    _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path, workflow_return=False)
+    out = rx._kb_write_back(eval_dir, {}, {})
+    assert out["skipped"] is True and rx.WORKFLOW_RETURN_FILE in out["why"]
+
+
+def test_the_identity_dims_are_sent_as_the_address(tmp_path, monkeypatch):
+    seen = _kb_store(monkeypatch)
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})
+    cmd = seen["cmd"]
+    assert _flag(cmd, "--model") == "M" and _flag(cmd, "--gfx") == "gfx950"
+    assert _flag(cmd, "--tp") == "8", "a non-string dim still has to travel"
+    assert "--require-win" in cmd and "--apply" in cmd
+    assert _flag(cmd, "--measured-by") == "run_e2e:salvage"
+    assert out["measured_by"] == "run_e2e:salvage" and out["ok"] is True
+
+
+def test_an_empty_dim_is_dropped_rather_than_sent_blank(tmp_path, monkeypatch):
+    """`--precision ''` is not the same request as omitting it: it addresses a page whose
+    precision is literally the empty string."""
+    seen = _kb_store(monkeypatch)
+    dims = {"model": "M", "gfx": "gfx950", "precision": "", "isl": None}
+    rx._kb_write_back(_kb_eval_dir(tmp_path, identity=_kb_identity(dims=dims)), {}, {})
+    assert "--precision" not in seen["cmd"] and "--isl" not in seen["cmd"]
+
+
+def test_a_salvaged_measurement_is_recorded_unverified_and_does_not_promote(tmp_path, monkeypatch):
+    """The numbers came from artifacts, not from a Validate leg that finished. Promoting on
+    them would move the champion pointer onto a result nobody confirmed."""
+    seen = _kb_store(monkeypatch)
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {"recovered_from_disk": True}, {})
+    assert _flag(seen["cmd"], "--validated") == "false"
+    assert _flag(seen["cmd"], "--validation-basis") == "unverified"
+    assert "--no-promote" in seen["cmd"] and out["provisional"] is True
+
+
+def test_a_recovered_validation_status_is_provisional_too(tmp_path, monkeypatch):
+    seen = _kb_store(monkeypatch)
+    rx._kb_write_back(_kb_eval_dir(tmp_path), {"validation_status": "recovered_from_legs"}, {})
+    assert "--no-promote" in seen["cmd"]
+
+
+def test_a_validated_run_promotes(tmp_path, monkeypatch):
+    seen = _kb_store(monkeypatch)
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {"validation_status": "validated"}, {})
+    assert "--no-promote" not in seen["cmd"] and out["provisional"] is False
+
+
+def test_a_store_less_local_plane_falls_back_to_the_service(tmp_path, monkeypatch):
+    """A local plane with nowhere to put it cannot be opened; the remote one still can."""
+    seen = _kb_store(monkeypatch)
+    ident = _kb_identity(plane="local", store="")
+    rx._kb_write_back(_kb_eval_dir(tmp_path, identity=ident), {}, {})
+    assert _flag(seen["cmd"], "--plane") == "remote" and "--store" not in seen["cmd"]
+
+
+def test_a_local_plane_writes_to_the_store_it_names(tmp_path, monkeypatch):
+    seen = _kb_store(monkeypatch)
+    ident = _kb_identity(plane="both", store="/kb/store")
+    rx._kb_write_back(_kb_eval_dir(tmp_path, identity=ident), {}, {})
+    assert _flag(seen["cmd"], "--store") == "/kb/store"
+    assert _flag(seen["cmd"], "--plane") == "both"
+
+
+def test_a_write_that_times_out_is_a_missed_record_not_a_failed_run(tmp_path, monkeypatch):
+    _kb_store(monkeypatch, raises=rx.subprocess.TimeoutExpired(cmd="e2e_store", timeout=120))
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})
+    assert out["ok"] is False and "timed out" in out["why"]
+
+
+def test_a_write_that_crashes_is_a_missed_record_not_a_failed_run(tmp_path, monkeypatch):
+    _kb_store(monkeypatch, raises=OSError("bash is gone"))
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})
+    assert out["ok"] is False and "OSError" in out["why"]
+
+
+def test_output_that_is_not_a_receipt_is_reported_with_its_rc(tmp_path, monkeypatch):
+    _kb_store(monkeypatch, proc=_Proc(stdout="Traceback...", stderr="boom", returncode=2))
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})
+    assert out["ok"] is False and out["rc"] == 2 and "boom" in out["why"]
+
+
+def test_a_nonzero_rc_with_a_receipt_is_still_not_ok(tmp_path, monkeypatch):
+    """The receipt is the store's, so it may not carry `ok` at all; the exit status decides."""
+    _kb_store(monkeypatch, proc=_Proc(stdout=json.dumps({"session_id": "x"}), returncode=1))
+    assert rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})["ok"] is False
+
+
+def test_the_receipt_is_left_where_the_workflow_would_have_left_it(tmp_path, monkeypatch):
+    """One reader finds either writer's receipt, so it has to be the same filename."""
+    _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path)
+    rx._kb_write_back(eval_dir, {}, {})
+    written = json.loads((eval_dir / rx.KB_WRITE_FILE).read_text(encoding="utf-8"))
+    assert written["session_id"] == "geak-x"
+    assert written["measured_by"] == "run_e2e:salvage"
+
+
+def test_an_unwritable_eval_dir_still_returns_the_receipt(tmp_path, monkeypatch):
+    """The record already landed in the store; failing to keep our copy of the receipt is not
+    a reason to report the write as failed."""
+    _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path)
+
+    real_write = Path.write_text
+
+    def no_write(self, *a, **k):
+        if self.name == rx.KB_WRITE_FILE:
+            raise OSError("read-only")
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", no_write)
+    assert rx._kb_write_back(eval_dir, {}, {})["session_id"] == "geak-x"
+
+
+# ── the direction string ────────────────────────────────────────────────────
+# A shortlist key on the KB page. e2e_workflow.js spells it with the same three fragments in the
+# same order; a second spelling would split one deployment's history across two shortlists.
+
+@pytest.mark.parametrize("wf,ps,want", [
+    ({}, {}, ""),
+    ({"accepted_config": {"flags": "--x 1"}}, {}, "config"),
+    ({"accepted_config": {"env": "A=1"}}, {}, "config"),
+    ({"accepted_kernels": ["k"]}, {}, "kernels"),
+    ({"accepted_heads": ["h"]}, {}, "kernels"),
+    ({"accepted_config": {"flags": "--x 1"}, "accepted_kernels": ["k"]}, {}, "config+kernels"),
+])
+def test_the_direction_names_what_the_run_changed(wf, ps, want):
+    assert rx._kb_direction(wf, ps) == want
+
+
+def test_config_that_was_never_moved_is_not_a_direction(tmp_path):
+    """The run started with these flags. Reporting them as a config win would credit the
+    optimizer for the baseline it was handed."""
+    wf = {"accepted_config": {"flags": "--x 1", "env": "A=1"}}
+    ps = {"initial_extra_server_args": "--x 1", "initial_extra_env": "A=1"}
+    assert rx._kb_direction(wf, ps) == ""
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
