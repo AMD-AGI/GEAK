@@ -190,7 +190,8 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
   },
   "report_path": ".../final_report.md",  // human report: per-kernel optimizations, changed params, TTFT/TPOT
   "kernel_journey_path": ".../kernel_journey.json",  // per-kernel journey contract (see below); absent if nothing accepted
-  "recovered_from_disk": true             // present+true only when the handoff was rebuilt from on-disk artifacts
+  "recovered_from_disk": true,            // present+true only when the handoff was rebuilt from on-disk artifacts
+  "tuning_skillset": { /* ADDITIVE; absent unless the tuning phase ran — see below */ }
 }
 ```
 
@@ -251,6 +252,50 @@ mirror what `e2e_workflow.js` requires before it banks a candidate live:
 
 `validation_evidence.recovery` records the pool size, the pick, its gate, its
 delta-over-ceiling ratio, and anything excluded, so the choice is auditable.
+
+### `tuning_skillset` (additive)
+
+Emitted only when the standalone tuning phase ran. It is **purely additive**: every key above keeps its
+name, type and meaning, and a run without the phase produces a byte-identical `result.json`. A consumer
+that does not know about tuning is unaffected.
+
+The tuning gain is **already inside** `throughput_speedup` — the phase runs mid-pipeline and every later
+measurement is taken on top of its accepted config. This block **attributes** part of the headline, it
+does not add to it; summing the two double-counts.
+
+```jsonc
+"tuning_skillset": {
+  "phase": "TuningSkillset",
+  "ran": true,
+  "gate": "accepted | no_win | rejected | incomplete | skipped | not_run",
+  "explanation": "prose: what the phase did and what it means for the headline",
+  "pre_tune_throughput_tok_s": 1000.0,   // the phase's OWN in-session interleaved A/B,
+  "post_tune_throughput_tok_s": 1080.0,  //   not re-derived from the run baseline
+  "tuning_delta_pct": 8.0,
+  "share_of_total_gain_pct": 40.0,       // null when the run had no net gain to apportion
+  "engagement_verified": true,
+  "engagement_evidence": "...",          // an accept is withheld without this
+  "ops_tuned": [ /* per-op: backend, tuner, shapes, isolated speedup, engaged */ ],
+  // Accepted gates only — how the win reaches production:
+  "deploy_bundle": ".../tuning/deploy",
+  "cache_invalidation": ["rm -rf /tmp/aiter_configs"],
+  "live_tree_files": ["aiter/configs/model_configs/..."],  // DATA written inside an installed package
+  "apply_overlay": "",                   // non-empty if tuning also needed a routing/dispatch code
+                                         //   change to make the artifact bind; merged into final_overlay
+
+  "in_final_bundle": true,
+  "reaches_production_via": { "final_patch_includes_tuning": true, "final_launch_runs_deploy": true, ... }
+}
+```
+
+**Deployment.** A tuning win is usually *data* (a config table a library reads from inside its own
+package dir, plus a derived cache that must be dropped or the new rows are silently ignored), so it
+cannot travel in `final_overlay`, which is a `PYTHONPATH` overlay for *code*. It ships through the same
+two handles you already use: its diff is concatenated into `final_patch`, and `final_launch_script` runs
+the bundle's idempotent `deploy.sh` before starting the server. **Reusing `final_launch_script` requires
+no extra steps.** Applying `final_patch` by hand also requires the `cache_invalidation` commands.
+`in_final_bundle: false` means Finalize could not get the tuning into the bundle — the headline number
+will not reproduce from it.
 
 `raw_session_baseline_divergence_pct` compares GEAK's accepted-config baseline
 with the caller's pre-change session baseline. It is audit-only because it

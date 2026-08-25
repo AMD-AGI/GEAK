@@ -21,7 +21,7 @@ e.g. `--attention-backend triton`).
 ## Discipline
 - **One axis at a time.** Change a single flag/env, measure, keep or revert. Never sweep two axes in
   one launch or you can't attribute the delta.
-- Measure with the shared bench script (warm server, repeats, median + spread). A win must exceed the
+- Measure with the shared bench script using an isolated-server search replica. A win must exceed the
   noise band to count.
 - **Always check output parity** for any change that can alter numerics (quant, kv-cache-dtype,
   a different attention/GEMM backend): greedy/temp=0 fixed-seed, diff vs baseline. A faster wrong
@@ -35,7 +35,9 @@ e.g. `--attention-backend triton`).
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `GPU_ID`, `WORKLOAD`,
 `BASELINE_THROUGHPUT`, `NOISE_BAND_PCT`, `CONFIG_DIRECTIONS` (the Architect's ranked axes + swaps,
-each with target kernels + rationale), `CURRENT_FLAGS`/`CURRENT_ENV` (the accepted config so far),
+each with target kernels + rationale), `CURRENT_FLAGS`/`CURRENT_ENV`/`CURRENT_OVERLAY`
+(the accepted stack so far),
+`MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, `EFFECTIVE_CONFIG_DIGEST`,
 `ENABLE_FP8` (bool; gates the FP8 axis), `SKILL_DIR`.
 
 > The exact flags/env are **backend-specific** (e.g. sglang `--attention-backend` + `SGLANG_USE_AITER`
@@ -51,8 +53,9 @@ For EACH direction, in the Architect's order:
    ```bash
    # SERVING config MUST match the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/config/<dir_id>" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
-   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=3 PROFILE=0 \
-   EXTRA_SERVER_ARGS="<current flags + this flag>" EXTRA_ENV="<current env + this env>" \
+   ISL=<isl> OSL=<osl> CONC=<conc> PROFILE=0 \
+   GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=search REPLICAS="${REPLICAS:-1}" \
+   OVERLAY_PYTHONPATH="$CURRENT_OVERLAY" EXTRA_SERVER_ARGS="<current flags + this flag>" EXTRA_ENV="<current env + this env>" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/cfg_<dir_id>.log"
    ```
 3. Read `bench_summary.json`. delta% = `(cand_median - current_median)/current_median*100`.
@@ -77,9 +80,9 @@ even engage the live GEMM path). Your axes:
   `--kv-cache-dtype fp8_e4m3`. Do NOT use byte parity here — run a small task-accuracy probe
   (e.g. a few gsm8k / translation prompts, compare answer quality, not bytes) and keep ONLY if both
   faster AND accuracy within tolerance. Record it as an accuracy-gated accept, never a silent one.
-Each is still "one axis at a time + measure + parity/accuracy gate + compound". Use the tight
-measurement the Integrator uses (E2E_REPEATS, interleaved A/B, non-overlap) when a delta is near the
-0.5% band.
+Each is still "one axis at a time + measure + parity/accuracy gate + compound". Use the same
+isolated-server search-replica protocol as the Integrator; the Director's independent validation
+replicas arbitrate a borderline final result.
 
 Return JSON:
 ```json

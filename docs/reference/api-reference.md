@@ -101,6 +101,8 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 | `ab_finish_retries` | `3` | A/B leg completion retries. |
 | `use_expert_skills` | `false` | Consult `perf_knowledge/expert_skills` (advisory priors). OFF = byte-identical. |
 | `perf_knowledge_dir` | sibling `perf_knowledge/` | Authoring knowledge base. |
+| `kb_artifacts_dir` | sibling `kb_artifacts/` | Warm-start patch store, forwarded to every recursive kernel lane so one run shares one store. |
+| `warm_start`, `warm_start_match`, `warm_start_min_speedup`, `kb_mode`, `kb_store_dir`, `kb_framework_version` | see the kernel-layer table | Forwarded verbatim to the kernel lanes. Corrective re-authors are forced to `reference` (they must keep the isolated win). |
 | `time_budget_s`, `initial_extra_server_args`, `initial_extra_env`, `tracelens`, `agent_timeout_ms` | — | Forwarded from the external orchestrator. |
 | `final_reserve_s` | `3000` (50min), capped at 20% of `time_budget_s` | Hard floor of wall-clock held back for the whole final phase — Finalize + Report + Validate + the `workflow_return.json` write; no mode starts new work inside it, and each optimization agent's hung-guard is tightened so no in-flight step finishes later than `time_budget_s − reserve` (final-phase agents are exempt). Sized off 85 historical runs (p50 40min, p75 50min, p90 77min, max 86min): 50min covers ~p75, and since Report writes both reports before Validate, a longer tail still ships them (only the Validate re-measure is at risk, and `run_e2e.py` falls back). The 20% cap stops the floor from eating a short budget whole; at budgets ≥5h it never binds. Env override: `GEAK_FINAL_RESERVE_S`. |
 
@@ -144,6 +146,13 @@ budget-controlled, each patch independently verified.
 | `op_spec` | `{}` | Op specification (author mode). |
 | `perf_knowledge_dir` | sibling `perf_knowledge/` | Knowledge base. |
 | `update_experience` | `on` | Curate ONE distilled card into `kernel_workflow/knowledge/learned/` after a measured win (every lane run; once centrally per bake-off). `off` skips it. The sink is always this workflow's own `learned/` — an e2e-opened lane never writes into `e2e_workflow/knowledge/learned/`. Cards carry a skill-style discovery header (`name`/`description`/`keywords`/`kernels`/`platforms`/`kernel_class`/`regime`) and `learned/INDEX.md` is regenerated from it by `kernel_workflow/scripts/kb.py ... index` (`--check` = fail-if-stale). Numbers on a card are relative only (ratios, % of achievable peak) — never wall-clock. |
+| `warm_start` | `on` | Local experience reuse from `kb_artifacts/`. `on` = read the top same-arch patches (one per optimization `direction`) through the verify gate; `reference` = prose only, no patch apply; `return_after_read` = apply+validate a candidate then return; `off` = cold start (byte-equivalent to pre-warm-start). |
+| `kb_artifacts_dir` | sibling `kb_artifacts/` | Lossless best-patch sink (machine-produced, code-carrying; gitignored, runtime-accumulated). |
+| `warm_start_match` | `fuzzy` | How a kernel name reaches a stored page: `exact` (canonicalized name only) \| `normalized` \| `fuzzy` (closest containing page; refuses when two pages fit equally well). Names are canonicalized first, so `fused_moe_kernel_task`, `triton_fused_moe_kernel.py` and a full task path all reach the same page. |
+| `warm_start_min_speedup` | `1.05` | Floor on a stored entry's recorded speedup before it is worth a verify slot. |
+| `kb_mode` | `local` | Which plane warm start reads and writes. `local` = the curated `kb_artifacts/` tree, addressed by slug. `store` = a KB Store on disk in the shape the KernelForge service uses, addressed by canonical id (`kernel:geak:<name>:rocm:<ver>:<triton\|hip\|ck>:mi355x`); the write records BOTH planes, so they cannot drift. Phases, schemas and the verify gate are identical either way. |
+| `kb_store_dir` | sibling `kb_store_local/` | Root of the `store`-mode plane. Ignored when `kb_mode=local`. |
+| `kb_framework_version` | measured stack | ROCm `<major>.<minor>` for the key's `framework_version` segment. Set it on a box with no `/opt/rocm`, where the measured stack is empty and every record would otherwise file under `unspecified` — splitting one kernel's history across two keys. Affects the key only, never the recorded stack. |
 | `workload_spec_path` | — | Workload-alignment spec; makes the primary metric the time-weighted ratio-of-sums. |
 | `agent_timeout_ms` | `3600000` | Per-agent timeout (1h). |
 | `agent_retries` | `4` | Agent retry count (min 1). |

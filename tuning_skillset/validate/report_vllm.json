@@ -1,0 +1,131 @@
+{
+  "image": "vllm 0.21.0",
+  "rows": [
+    {
+      "skill": "env-setup",
+      "claim": "GPUs are visible; rocminfo reports a gfx arch",
+      "status": "PASS",
+      "detail": "gfx942",
+      "seconds": 0.32
+    },
+    {
+      "skill": "env-setup",
+      "claim": "neither image ships a bench client; both ship deploy targets",
+      "status": "PASS",
+      "detail": "absent=hipblaslt-bench; aiter configs dir present=True",
+      "seconds": 5.41
+    },
+    {
+      "skill": "env-setup",
+      "claim": "aiter ships as a wheel in vllm and a source checkout in sglang",
+      "status": "PASS",
+      "detail": "wheel (no tuner tree), version 0.1.13, root /usr/local/lib/python3.12/dist-packages",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-triton",
+      "claim": "AMD knobs raise TypeError as kwargs but are accepted in the positional dict",
+      "status": "PASS",
+      "detail": "TypeError on kwarg; all three knobs present in all_kwargs (triton 3.6.0)",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-triton",
+      "claim": "the HIP backend exposes the knobs as HIPOptions fields",
+      "status": "PASS",
+      "detail": "21 fields, all three knobs present",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-hipblaslt",
+      "claim": "hipblaslt-bench replays a solution by index with --algo_method index",
+      "status": "N/A",
+      "detail": "hipblaslt-bench not built in this image (see env-setup)",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-hipblaslt",
+      "claim": "torch exposes TunableOp as the no-build route to solution selection",
+      "status": "PASS",
+      "detail": "torch 2.10.0+git8514f05, tunable API complete",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-ck",
+      "claim": "ckProfiler takes positional args and lists its ops when run bare",
+      "status": "PASS",
+      "detail": "op list printed, gemm present",
+      "seconds": 0.26
+    },
+    {
+      "skill": "tuning-aiter",
+      "claim": "the tuned-config CSV has the documented 18-column schema",
+      "status": "PASS",
+      "detail": "18 columns as documented",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-aiter",
+      "claim": "AITER_LOG_TUNED_CONFIG is the engagement signal, and rows are keyed by cu_num",
+      "status": "PASS",
+      "detail": "83 of 9964 rows across 8 tables reachable at cu_num=304; unreachable: a4w4_blockscale_tuned_gemm.csv 0/1470, a8w8_blockscale_bpreshuffle_tuned_gemm.csv 0/58, a8w8_blockscale_tuned_gemm.csv 0/6630, a8w8_tuned_gemm.csv 0/582",
+      "seconds": 0.02
+    },
+    {
+      "skill": "tuning-flydsl",
+      "claim": "flydsl is importable and exposes a tunable Config surface",
+      "status": "PASS",
+      "detail": "flydsl 0.1.4",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-hip",
+      "claim": "rocprofv3 is present and gives ground truth for which kernel ran",
+      "status": "PASS",
+      "detail": "--kernel-trace supported",
+      "seconds": 0.06
+    },
+    {
+      "skill": "tuning-hip",
+      "claim": "the arch limits the skill reasons about are readable, not assumed",
+      "status": "PASS",
+      "detail": "gfx942: CU=304, warp=64, LDS/workgroup=65536",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-in-vllm",
+      "claim": "vLLM reads tuned configs from VLLM_TUNED_CONFIG_FOLDER",
+      "status": "PASS",
+      "detail": "vllm 0.21.0 reads it in 3 file(s)",
+      "seconds": 5.6
+    },
+    {
+      "skill": "tuning-in-sglang",
+      "claim": "SGLang keys MoE configs by Triton version, and the shipped MI300X set is stale",
+      "status": "N/A",
+      "detail": "sglang not installed in this image",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-in-sglang",
+      "claim": "SGLANG_MOE_CONFIG_DIR is an override the installed code honors",
+      "status": "N/A",
+      "detail": "sglang not installed in this image",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-core",
+      "claim": "an idle-GPU check exists, so 'pin your GPUs' is actionable",
+      "status": "PASS",
+      "detail": "8 GPUs reporting utilization",
+      "seconds": 0.28
+    },
+    {
+      "skill": "tuning-core",
+      "claim": "relative error is the gate; bf16 at K=4096 shows why absolute is not",
+      "status": "PASS",
+      "detail": "abs=0.988 but rel=0.00344 -- absolute error alone would look alarming",
+      "seconds": 5.49
+    }
+  ]
+}

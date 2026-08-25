@@ -1,0 +1,1962 @@
+#!/usr/bin/env python3
+"""Local experience store for the kernel workflow — the machine-produced KB that carries the diff.
+
+Self-contained, stdlib + PyYAML only, so a lane agent can call it over Bash. On-disk layout
+(rooted at --root, default <repo>/kb_artifacts):
+
+    <root>/<gfx>/<kernel_class>/<slug>/<exp_id>/
+        meta.yaml     # identity + metric + prose pointers
+        patch.diff    # the winning diff (verbatim copy)
+        report.md     # optional tech_lead report, copied for prose
+
+    slug = <canon(kernel_name)>__<language>__<gfx>   # deterministic; read and write derive it identically
+
+Subcommands:
+    write      Store one measured win behind the gate (missing_arch / no_improvement / empty_diff).
+    resolve    Rank the top-N same-gfx solutions for a slug and mirror their prose into <refs-dir>.
+    remap      Rewrite a stored patch's paths onto the calling workspace's layout, or refuse and say why.
+    languages  Which languages a kernel has a page in — the store, not a task_type guess, decides.
+    backfill-content
+               Bring imported entries up to the current content shape (dry-run unless --apply).
+    export-remote
+               Render entries as KB Store candidates (one JSON line each); uploads nothing.
+    resolve-remote
+               `resolve`, but addressed by canonical id against a KB store (kb/store_local.py).
+    write-remote
+               `write`, landing the same result in the local store AND under its key.
+    attest / attest-remote
+               Count one attempt to USE a stored entry (validated | failed | not_reproduced), so a
+               later curation pass can retire what nobody can reproduce. Moves no speedup, no rank.
+
+Speedups only compare within one GPU arch, so resolve drops cross-arch entries outright. Neither
+command ever raises: on failure it prints a JSON reason and exits 0 so the caller degrades.
+
+resolve serves a CURATED top-N, not the raw speedup order: entries the curation retired
+(`retained: false`) are never offered, near-ties below `--min-speedup` are not worth a verify slot,
+and only one entry per `direction:` is ranked (same-idea runners-up ride along as `alternates`,
+since they verify or fail together). A speedup only means something against its own
+`metric.bench_key`, so each candidate carries one plus a `comparable` flag against rank 1.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+
+# The shared KB plane lives at the repo root as the `kb` package, not beside this file. Executed as
+# a CLI from an arbitrary cwd, so the root is derived from __file__ and never from the environment.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from kb.attest import OUTCOMES as _OUTCOMES
+from kb.curate import collapse_by_direction
+from kb.ladder import publish
+from kb.plane import open_plane
+from kb.store_local import CHAMPION_METRIC
+
+try:
+    import yaml
+except Exception:  # yaml ships in this env; degrade to json-only meta
+    yaml = None
+
+
+# Identity: read and write MUST derive the slug identically (never via an LLM) or a run
+# can never find its own lineage.
+def _safe(seg: str) -> str:
+    """Slug-safe a path segment: keep [A-Za-z0-9._-], collapse the rest to '-'."""
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", str(seg or "").strip())
+    s = s.strip("-.") or "x"
+    return s[:80]
+
+
+def _norm_gfx(gfx: str) -> str:
+    m = re.search(r"gfx\d+", str(gfx or ""), re.IGNORECASE)
+    return m.group(0).lower() if m else ""
+
+
+# One kernel is named differently per layout: `fused_moe_kernel` (kernel dir), `fused_moe_kernel_task`
+# (e2e head extraction), `triton_fused_moe_kernel.py` (language in the filename). Canonicalizing on
+# BOTH sides is what lets a head run find, and extend, its own lineage instead of forking a new page.
+_NAME_PREFIXES = ("triton_", "hip_", "ck_", "cuda_", "torch_")
+_NAME_SUFFIXES = (".py", ".hip", ".cu", ".cpp", "_task")
+
+
+def canon_name(kernel_name: str) -> str:
+    """Basename, no language prefix, no task/extension suffix. Case kept for readability; matching
+    is case-insensitive via _match_key()."""
+    s = os.path.basename(str(kernel_name or "").strip().rstrip("/"))
+    changed = True
+    while changed:
+        changed = False
+        for p in _NAME_PREFIXES:
+            if len(s) > len(p) and s.lower().startswith(p):
+                s, changed = s[len(p):], True
+        for suf in _NAME_SUFFIXES:
+            if len(s) > len(suf) and s.lower().endswith(suf):
+                s, changed = s[: -len(suf)], True
+    return s or str(kernel_name or "")
+
+
+def _match_key(kernel_name: str) -> str:
+    """Comparison key for slug matching: canonical name, case- and separator-insensitive."""
+    return re.sub(r"[^a-z0-9]+", "", canon_name(kernel_name).lower())
+
+
+def make_slug(kernel_name: str, language: str, gfx: str) -> str:
+    return f"{_safe(canon_name(kernel_name))}__{_safe(language)}__{_norm_gfx(gfx) or 'unknown'}"
+
+
+def _read_meta(meta_path: str):
+    try:
+        with open(meta_path, "r") as f:
+            text = f.read()
+        if yaml is not None:
+            return yaml.safe_load(text) or {}
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _dump_meta(meta: dict) -> str:
+    if yaml is not None:
+        return yaml.safe_dump(meta, sort_keys=False, allow_unicode=True)
+    return json.dumps(meta, indent=2, ensure_ascii=False)
+
+
+def _atomic_write(path: str, data: str):
+    """Crash-safe: same-dir temp -> fsync -> os.replace -> dir fsync."""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp_", suffix=".swap")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    try:
+        dirfd = os.open(d, os.O_RDONLY)
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
+    except OSError:
+        pass
+
+
+def content_signature(patch_text: str) -> str:
+    """Path-INSENSITIVE identity of a diff: added/removed code lines only, no headers or paths.
+
+    A warm-started run re-emits the patch it adopted as its own `git diff`, from a different
+    workspace with different path prefixes — byte-different, same code. Without this the store keeps
+    re-importing its own output as a fresh 'win'; with it, that re-measurement is a REPRODUCTION of
+    the entry it came from, which is what promotes candidate -> active.
+    """
+    body = []
+    for line in (patch_text or "").splitlines():
+        if line.startswith(("+++", "---", "diff ", "index ", "@@", "new file", "deleted file",
+                            "similarity ", "rename ", "old mode", "new mode", "Binary files")):
+            continue
+        if line[:1] in ("+", "-"):
+            s = re.sub(r"\s+", " ", line[1:]).strip()
+            if s:
+                body.append(line[0] + s)
+    if not body:
+        return ""
+    return "csha:" + hashlib.sha256("\n".join(body).encode("utf-8", "replace")).hexdigest()[:32]
+
+
+def bench_key(metric_kind: str, case_names) -> str:
+    """Identity of the MEASUREMENT a speedup came from; two speedups compare only when it matches.
+    Order-insensitive. The `b2:` namespace is deliberate — imported entries carry opaque `b:` keys
+    from whatever harness produced them, which must never be read as comparable to ours."""
+    cases = sorted(c for c in (case_names or []) if c)
+    if not cases and not metric_kind:
+        return ""
+    raw = f"{str(metric_kind or 'unknown')}|{','.join(cases)}"
+    return "b2:" + hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+# --- report prose ------------------------------------------------------------------------------
+# The two sections worth reading first. Heading text varies wildly across the imported backlog
+# (`## What didn't work (dead-ends — do not re-fund)`, `(confirmed dead ends)`, ... 20+ suffixes
+# over 248 reports), so match the stem only and tolerate the typographic apostrophe.
+_SEC_DEAD_ENDS = re.compile(r"^(#{2,3})[^\n]*what\s+didn.?t\s+work[^\n]*$", re.I | re.M)
+_SEC_KEY_OPTS = re.compile(r"^(#{2,3})[^\n]*key\s+optimizations[^\n]*$", re.I | re.M)
+# Structured dead-ends the tech_lead emits alongside the prose. Absent => we keep the prose only,
+# rather than regex-guessing structure out of bullets/tables/paragraphs and inventing empty fields.
+_DEAD_ENDS_BLOCK = re.compile(
+    r"<!--\s*dead-ends:yaml\s*-->\s*```(?:ya?ml)?\n(.*?)```", re.S | re.I)
+
+
+def _split_section(text: str, pattern):
+    """(heading+body, text_without_it) for the first match, else ('', text). The body ends at the
+    next heading of the same or shallower level, so a `###` subsection stays with its parent."""
+    m = pattern.search(text or "")
+    if not m:
+        return "", text
+    level = len(m.group(1))
+    tail = text[m.end():]
+    nxt = re.search(r"^#{1,%d} " % level, tail, re.M)
+    end = m.end() + (nxt.start() if nxt else len(tail))
+    return text[m.start():end].rstrip() + "\n", text[:m.start()] + text[end:]
+
+
+def reorder_report(text: str) -> str:
+    """Hoist 'Key optimizations' and "What didn't work" above everything else. Nothing is dropped —
+    an agent with room still reads the whole report, one that is tight on context reads the two
+    sections that change what it does. Returns the text untouched when neither is present."""
+    if not text:
+        return text
+    key, rest = _split_section(text, _SEC_KEY_OPTS)
+    dead, rest = _split_section(rest, _SEC_DEAD_ENDS)
+    if not key and not dead:
+        return text
+    return "".join(s for s in (key, dead) if s) + "\n---\n\n" + rest.lstrip("\n")
+
+
+def dead_ends_md(text: str) -> str:
+    """The "What didn't work" body verbatim, minus any machine-readable block (that is parsed
+    separately). Kept as text: the 248 imported reports write it as bullets, markdown tables and
+    plain paragraphs, and no regex turns all three into honest structure."""
+    sec, _ = _split_section(text or "", _SEC_DEAD_ENDS)
+    if not sec:
+        return ""
+    body = sec.split("\n", 1)[1] if "\n" in sec else ""
+    return _DEAD_ENDS_BLOCK.sub("", body).strip()
+
+
+def parse_dead_ends(text: str):
+    """The tech_lead's machine-readable dead-end list, or []. Each entry keeps whatever keys the
+    report supplied (idea / measured / mechanism); a malformed block is dropped, never patched up."""
+    m = _DEAD_ENDS_BLOCK.search(text or "")
+    if not m or yaml is None:
+        return []
+    try:
+        data = yaml.safe_load(m.group(1))
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [{str(k): v for k, v in d.items()} for d in data
+            if isinstance(d, dict) and str(d.get("idea") or "").strip()]
+
+
+def _techniques(meta: dict):
+    """The curated one-line summaries of what the patch actually does. Every imported entry has
+    them and until now nothing read them — they are the densest thing in the store."""
+    t = (meta or {}).get("techniques")
+    if not isinstance(t, list):
+        return []
+    return [str(x).strip() for x in t if str(x).strip()]
+
+
+def _techniques_md(items) -> str:
+    if not items:
+        return ""
+    return "- techniques:\n" + "".join(f"    * {i}\n" for i in items)
+
+
+def _stack_str(meta: dict) -> str:
+    st = (meta or {}).get("verified_stack")
+    if not isinstance(st, dict) or not st:
+        return "unrecorded"
+    return ", ".join(f"{k} {v}" for k, v in sorted(st.items()))
+
+
+def _alternates_md(alts) -> str:
+    """Same-direction runners-up. They were collapsed out of the ranking because they verify or fail
+    together, but their techniques are exactly where they differ from rank 1 — so list those."""
+    if not alts:
+        return "- same-direction alternates: 0\n"
+    lines = [f"- same-direction alternates: {len(alts)}\n"]
+    for alt in alts:
+        techs = "; ".join(alt.get("techniques") or []) or "no techniques recorded"
+        lines.append(f"    * {alt['speedup']:.4f}x — {techs}\n")
+    return "".join(lines)
+
+
+def _prose_body(meta: dict, body: str) -> str:
+    """The report, with the two load-bearing sections hoisted. meta's dead-ends copy is a FALLBACK
+    for an entry whose report.md is gone — pasting it next to the report would just duplicate it."""
+    if (body or "").strip():
+        return reorder_report(body)
+    out = []
+    for d in (meta.get("dead_ends") or []):
+        if isinstance(d, dict):
+            bits = [str(d.get(k)) for k in ("measured", "mechanism") if d.get(k)]
+            out.append(f"- {d.get('idea')}" + (f" — {' — '.join(bits)}" if bits else ""))
+    md = str(meta.get("dead_ends_md") or "").strip()
+    if not out and not md:
+        return "(no report recorded for this entry)"
+    head = "## What didn't work (from meta; report.md not available)\n\n"
+    return head + ("\n".join(out) + "\n\n" if out else "") + md + "\n"
+
+
+def _rocm_version() -> str:
+    try:
+        with open("/opt/rocm/.info/version", "r", errors="replace") as f:
+            return f.read().strip().splitlines()[0].strip()
+    except (OSError, IndexError):
+        return ""
+
+
+def detect_stack(language: str) -> dict:
+    """WHAT the speedup was measured on. This runs in the same container as the kernel, so every
+    value is observed, not inferred; anything unobservable is left out rather than guessed."""
+    out = {}
+    if str(language or "").lower() == "triton":
+        for mod in ("triton", "torch"):
+            try:
+                out[mod] = str(__import__(mod).__version__)
+            except Exception:
+                pass
+    rocm = _rocm_version()
+    if rocm:
+        out["rocm"] = rocm
+    return out
+
+
+def _find_by_content(root: str, gfx: str, slug: str, csig: str):
+    """(meta, exp_dir) of the entry on this page holding the same code, or None. Hashes patch.diff
+    for entries written before the signature was recorded (the imported backlog)."""
+    for meta, exp_dir in _iter_solutions(root, gfx, slug):
+        known = meta.get("content_signature")
+        if not known:
+            try:
+                with open(os.path.join(exp_dir, "patch.diff"), "r", errors="replace") as f:
+                    known = content_signature(f.read())
+            except OSError:
+                known = ""
+        if known and known == csig:
+            return meta, exp_dir
+    return None
+
+
+def _record_reproduction(dup, csig: str, speedup: float, a) -> dict:
+    """Count a re-measurement onto the entry that already holds this code. Two of them promote
+    candidate -> active. The original's metric is NOT overwritten: it was measured on its own bench."""
+    meta, exp_dir = dup
+    try:
+        reps = int(meta.get("reproductions") or 1) + 1
+    except (TypeError, ValueError):
+        reps = 2
+    meta["reproductions"] = reps
+    meta["content_signature"] = csig
+    if reps >= 2:
+        meta["lifecycle"] = "active"
+    try:
+        _atomic_write(os.path.join(exp_dir, "meta.yaml"), _dump_meta(meta))
+    except OSError as e:
+        return {"written": False, "reason": "io_error: " + str(e)[:120]}
+    return {
+        "written": False,
+        "reason": "duplicate_impl",
+        "slug": make_slug(a.kernel_name, a.language, _norm_gfx(a.gfx)),
+        "dir": exp_dir,
+        "speedup": round(speedup, 4),
+        "reproduced": os.path.basename(exp_dir),
+        "reproductions": reps,
+        "lifecycle": meta["lifecycle"],
+    }
+
+
+def cmd_write(a) -> dict:
+    gfx = _norm_gfx(a.gfx)
+    if not gfx:
+        return {"written": False, "reason": "missing_arch"}
+
+    try:
+        speedup = float(a.speedup)
+    except (TypeError, ValueError):
+        return {"written": False, "reason": "invalid_speedup"}
+    if not (speedup > 1.0):  # covers NaN, <=1.0
+        return {"written": False, "reason": "no_improvement"}
+
+    patch_text = ""
+    if a.patch and os.path.isfile(a.patch):
+        try:
+            with open(a.patch, "r", errors="replace") as f:
+                patch_text = f.read()
+        except OSError:
+            patch_text = ""
+    if not patch_text.strip():
+        return {"written": False, "reason": "empty_diff"}
+
+    kernel_class = a.kernel_class or "unknown"
+    case_names = [c.strip() for c in (a.case_names or "").split(",") if c.strip()]
+    slug = make_slug(a.kernel_name, a.language, gfx)
+
+    # A re-measurement of code the store already holds is a REPRODUCTION, not a new entry.
+    csig = content_signature(patch_text)
+    dup = _find_by_content(a.root, gfx, slug, csig) if csig else None
+    if dup:
+        return _record_reproduction(dup, csig, speedup, a)
+
+    exp_id = time.strftime("%Y%m%d_%H%M%S") + "_" + hashlib.sha1(
+        (slug + patch_text[:256] + str(time.time())).encode("utf-8", "replace")
+    ).hexdigest()[:6]
+    out_dir = os.path.join(a.root, gfx, _safe(kernel_class), slug, exp_id)
+
+    baseline_ms = None
+    try:
+        baseline_ms = float(a.baseline_wall_ms)
+    except (TypeError, ValueError):
+        baseline_ms = None
+    wall_ms = (baseline_ms / speedup) if (baseline_ms and speedup > 0) else None
+
+    meta = {
+        "lifecycle": "candidate",           # earns 'active' only via independent reproduction
+        "gfx": gfx,
+        "kernel_class": kernel_class,
+        "kernel_name": a.kernel_name,
+        "language": a.language,
+        "metric": {
+            "speedup": round(speedup, 6),
+            "wall_ms": round(wall_ms, 6) if wall_ms is not None else None,
+            "baseline_wall_ms": round(baseline_ms, 6) if baseline_ms is not None else None,
+            "gpu_arch": gfx,
+            # What the speedup was measured against; resolve compares candidates only within one
+            # bench_key. Empty when the caller does not supply them.
+            "metric_kind": a.metric_kind or "",
+            "bench_key": bench_key(a.metric_kind, case_names),
+            "case_names": case_names,
+        },
+        # The optimization IDEA, not the impl: resolve ranks at most one entry per direction.
+        "direction": (a.direction or "")[:120],
+        "content_signature": csig,
+        "reproductions": 1,
+        # exp_dir of the warm-start entry this was built on — tells a later curation pass "the same
+        # idea, one round further" from "an independent second discovery".
+        "derived_from": a.parent or "",
+        "verified_on": time.strftime("%Y-%m-%d"),
+        # Observed here, in the container that took the measurement — a speedup with no stack behind
+        # it cannot be compared to anything later.
+        "verified_stack": detect_stack(a.language),
+        "source_eval_dir": a.eval_dir or "",
+    }
+
+    # Copy the tech_lead report verbatim as prose; lift its first non-empty line as the strategy,
+    # and keep its dead-ends so the next run on this kernel does not re-fund a closed direction.
+    strategy = ""
+    report_copied = None
+    if a.report and os.path.isfile(a.report):
+        try:
+            with open(a.report, "r", errors="replace") as f:
+                report_text = f.read()
+            for line in report_text.splitlines():
+                s = line.strip().lstrip("# ").strip()
+                if s:
+                    strategy = s[:300]
+                    break
+            report_copied = report_text
+            structured = parse_dead_ends(report_text)
+            prose = dead_ends_md(report_text)
+            if structured:
+                meta["dead_ends"] = structured
+            if prose:
+                meta["dead_ends_md"] = prose
+        except OSError:
+            pass
+    if a.strategy:
+        strategy = a.strategy[:300]
+    meta["strategy"] = strategy
+
+    try:
+        _atomic_write(os.path.join(out_dir, "patch.diff"), patch_text)
+        _atomic_write(os.path.join(out_dir, "meta.yaml"), _dump_meta(meta))
+        if report_copied is not None:
+            _atomic_write(os.path.join(out_dir, "report.md"), report_copied)
+    except OSError as e:
+        return {"written": False, "reason": "io_error: " + str(e)[:120]}
+
+    return {
+        "written": True,
+        "reason": "ok",
+        "slug": slug,
+        "exp_id": exp_id,
+        "dir": out_dir,
+        "speedup": round(speedup, 4),
+    }
+
+
+def _iter_solutions(root: str, gfx: str, slug: str):
+    """Yield (meta, exp_dir) for every solution matching (gfx, slug), any kernel_class."""
+    base = os.path.join(root, gfx)
+    if not os.path.isdir(base):
+        return
+    for kernel_class in sorted(os.listdir(base)):
+        slug_dir = os.path.join(base, kernel_class, slug)
+        if not os.path.isdir(slug_dir):
+            continue
+        for exp_id in sorted(os.listdir(slug_dir)):
+            exp_dir = os.path.join(slug_dir, exp_id)
+            meta_path = os.path.join(exp_dir, "meta.yaml")
+            if not os.path.isfile(meta_path):
+                meta_path = os.path.join(exp_dir, "meta.json")
+            meta = _read_meta(meta_path)
+            if isinstance(meta, dict):
+                yield meta, exp_dir
+
+
+def _list_pages(root: str, gfx: str):
+    """Yield (slug, match_key, language) for every page under <root>/<gfx>/<kernel_class>/.
+    The slug splits from the RIGHT: a kernel name may itself contain '__' (e.g. `_w8a8__v2`)."""
+    base = os.path.join(root, gfx)
+    if not os.path.isdir(base):
+        return []
+    out = {}
+    for kernel_class in sorted(os.listdir(base)):
+        kc_dir = os.path.join(base, kernel_class)
+        if not os.path.isdir(kc_dir):
+            continue
+        for slug in sorted(os.listdir(kc_dir)):
+            if slug in out or not os.path.isdir(os.path.join(kc_dir, slug)):
+                continue
+            parts = str(slug).rsplit("__", 2)
+            name, lang = (parts[0], parts[1]) if len(parts) == 3 else (slug, "")
+            out[slug] = (slug, _match_key(name), lang.lower())
+    return [out[s] for s in sorted(out)]
+
+
+def resolve_slug(root: str, gfx: str, kernel_name: str, language: str, match: str = "fuzzy"):
+    """Find the kernel page for (kernel_name, language) on this arch, most-specific tier first:
+      exact       the canonical slug is on disk;
+      normalized  same canonical name up to case/separators (`wvsplitk` -> `wvSplitK`);
+      fuzzy       one canonical name contains the other, unambiguously — this is what turns an e2e
+                  op_kind (`fused_moe`) into the `fused_moe_kernel` page.
+    Returns (slug_or_'', tier, info); info carries the pages NOT served, so a surprising match shows
+    up in the log instead of silently steering the run.
+    """
+    want_slug = make_slug(kernel_name, language, gfx)
+    pages = _list_pages(root, gfx)
+    info = {"other_language_pages": [], "ambiguous": []}
+    if any(s == want_slug for s, _k, _lg in pages):
+        return want_slug, "exact", info
+
+    want_key, want_lang = _match_key(kernel_name), str(language or "").strip().lower()
+    info["other_language_pages"] = [s for s, k, lg in pages if k == want_key and lg != want_lang]
+    if match == "exact":
+        return "", "none", info
+
+    same_key = [s for s, k, lg in pages if k == want_key and lg == want_lang]
+    if same_key:
+        return same_key[0], "normalized", info
+    if match != "fuzzy" or len(want_key) < 6:
+        return "", "none", info
+
+    # Containment, closest name first: `fused_moe` prefers `fused_moe_kernel` over
+    # `fused_moe_kernel_gptq_awq`. Two equally-close pages are AMBIGUOUS -> serve neither.
+    cands = []
+    for s, k, lg in pages:
+        if len(k) < 6 or not (want_key in k or k in want_key):
+            continue
+        if lg != want_lang:
+            info["other_language_pages"].append(s)
+        else:
+            cands.append((abs(len(k) - len(want_key)), s))
+    if not cands:
+        return "", "none", info
+    cands.sort()
+    if len(cands) > 1 and cands[0][0] == cands[1][0]:
+        info["ambiguous"] = [s for d, s in cands if d == cands[0][0]]
+        return "", "ambiguous", info
+    return cands[0][1], "fuzzy", info
+
+
+# ---------------------------------------------------------------------------------------------
+# Path remapping. A stored patch was produced in the workspace that won it — an arena checkout
+# (`source/triton_fused_moe_kernel.py`, `csrc/...`) — while an e2e head run edits an extracted
+# subtree (`kernel_src/.../fused_moe_kernel.py`). Same code, different prefix AND different
+# basename, so no `-p<N>` strip depth reaches the file: without rewriting the paths, every warm
+# start on the head path fails to apply and the KB is dead weight there.
+def _diff_targets(patch_text: str):
+    """Paths the diff touches: {path: is_new_file}. '' if the diff renames (not remappable)."""
+    targets, pending_new = {}, False
+    for line in (patch_text or "").splitlines():
+        if line.startswith("rename from ") or line.startswith("rename to "):
+            return None
+        if line.startswith("new file mode"):
+            pending_new = True
+        elif line.startswith("--- "):
+            pending_new = pending_new or line[4:].strip() in ("/dev/null", "a//dev/null")
+        elif line.startswith("+++ "):
+            p = line[4:].strip().split("\t")[0]
+            if p != "/dev/null":
+                targets[re.sub(r"^b/", "", p)] = pending_new
+            pending_new = False
+    return targets
+
+
+def _match_path(target: str, editable):
+    """Best editable path for one patch target, most-specific tier first: identical path, then one
+    path is the tail of the other, then same basename, then same basename modulo the language
+    prefix/extension (`triton_fused_moe_kernel.py` -> `fused_moe_kernel.py`). A tier with two
+    equally good hits is ambiguous -> no mapping, rather than a guess that verify pays to reject."""
+    t_base = os.path.basename(target)
+    tiers = (
+        [e for e in editable if e == target],
+        [e for e in editable if e.endswith("/" + target) or target.endswith("/" + e)],
+        [e for e in editable if os.path.basename(e) == t_base],
+        [e for e in editable if _match_key(os.path.basename(e)) == _match_key(t_base)
+         and os.path.splitext(e)[1] == os.path.splitext(target)[1]],
+    )
+    for tier in tiers:
+        if len(set(tier)) == 1:
+            return tier[0]
+        if tier:
+            return ""
+    return ""
+
+
+def _rewrite_paths(patch_text: str, mapping: dict) -> str:
+    """Rewrite the a//b/ path on every header line; hunks are copied through untouched."""
+    out = []
+    for line in patch_text.splitlines():
+        if line.startswith("diff --git "):
+            for old, new in mapping.items():
+                line = line.replace(f"a/{old} ", f"a/{new} ").replace(f"b/{old}", f"b/{new}")
+        elif line.startswith("--- a/") or line.startswith("+++ b/"):
+            head, path = line[:6], line[6:].split("\t")[0]
+            if path in mapping:
+                line = head + mapping[path]
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def _drop_sections(patch_text: str, drop: set) -> str:
+    """Remove whole `diff --git` sections for the given target paths."""
+    out, keep = [], True
+    for line in patch_text.splitlines():
+        if line.startswith("diff --git "):
+            tail = line.split(" b/", 1)
+            keep = not (len(tail) == 2 and tail[1].strip() in drop)
+        if keep:
+            out.append(line)
+    return "\n".join(out) + "\n"
+
+
+# A patch that also touches a non-source file this workspace lacks (a .gitignore line, a README
+# note) is still a perfectly good kernel patch. Refusing the whole thing over it wastes the entry;
+# the section is dropped and named in `dropped` so the decision is visible.
+_SOURCE_EXTS = {".py", ".hip", ".cu", ".cuh", ".cpp", ".cc", ".hpp", ".h", ".c", ".jinja",
+                ".s", ".asm", ".json", ".yaml", ".yml", ".sh", ".mk", ".txt"}
+
+
+def cmd_remap(a) -> dict:
+    """Rewrite a stored patch's paths onto THIS workspace's layout, or refuse and say why."""
+    try:
+        with open(a.patch, "r", errors="replace") as f:
+            patch_text = f.read()
+    except OSError as e:
+        return {"remapped": False, "reason": "unreadable_patch: " + str(e)[:80]}
+
+    editable = [p.strip().lstrip("./") for p in (a.editable or "").split(",") if p.strip()]
+    if not editable and a.workspace:
+        editable = _walk_workspace(a.workspace)
+    if not editable:
+        return {"remapped": False, "reason": "no_editable_set"}
+
+    targets = _diff_targets(patch_text)
+    if targets is None:
+        return {"remapped": False, "reason": "rename_not_supported"}
+    if not targets:
+        return {"remapped": False, "reason": "no_paths_in_patch"}
+
+    mapping, unmapped, new_files = {}, [], []
+    for target, is_new in sorted(targets.items()):
+        if is_new:
+            new_files.append(target)
+            continue
+        hit = _match_path(target, editable)
+        if hit and hit != target:
+            mapping[target] = hit
+        elif not hit:
+            unmapped.append(target)
+    # A file the patch CREATES has nothing to match, so it follows the layout shift its edited
+    # siblings underwent. No shift (every edited path already fits here) => this workspace has the
+    # patch's own layout and the new file belongs exactly where the patch puts it.
+    for target in new_files:
+        host = next(iter(mapping.values()), None)
+        if not host and not any(not targets[t] for t in targets):
+            unmapped.append(target)          # a patch of ONLY new files has nothing to anchor to
+        elif host and os.path.dirname(host) != os.path.dirname(target):
+            mapping[target] = os.path.join(os.path.dirname(host), os.path.basename(target))
+
+    dropped = [p for p in unmapped if os.path.splitext(p)[1] not in _SOURCE_EXTS]
+    unmapped = [p for p in unmapped if p not in dropped]
+    # All-or-nothing on SOURCE files: applying the mapped half of a patch leaves the workspace
+    # inconsistent, and verify would pay a full on-box run to discover that.
+    if unmapped:
+        return {"remapped": False, "reason": "unmapped_paths", "unmapped": unmapped,
+                "dropped": dropped, "mapped": mapping}
+    if not mapping and not dropped:
+        return {"remapped": False, "reason": "no_change_needed", "mapped": {}}
+    text = _drop_sections(patch_text, set(dropped)) if dropped else patch_text
+    try:
+        _atomic_write(a.out, _rewrite_paths(text, mapping))
+    except OSError as e:
+        return {"remapped": False, "reason": "io_error: " + str(e)[:80]}
+    return {"remapped": True, "reason": "ok", "out": a.out, "mapped": mapping, "dropped": dropped}
+
+
+_SKIP_DIRS = {".git", "__pycache__", "node_modules", "build", ".venv", "exp"}
+
+
+def _walk_workspace(workspace: str, cap: int = 20000):
+    """Every file under the workspace, repo-relative, as a fallback editable set. Deliberately NOT
+    filtered by extension: a whitelist made real targets invisible (a `.cpp.jinja` template that
+    exists at the patch's exact path) and refused a patch that would have applied verbatim."""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(workspace):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
+        for fn in filenames:
+            out.append(os.path.relpath(os.path.join(dirpath, fn), workspace))
+            if len(out) >= cap:
+                return out
+    return out
+
+
+def _speedup_of(meta: dict) -> float:
+    try:
+        return float((meta.get("metric") or {}).get("speedup"))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_retired(meta: dict) -> bool:
+    """The curation's own verdict, as written into meta.yaml by the pass that built the store."""
+    return meta.get("retained") is False or bool(meta.get("retired_reason"))
+
+
+def _local_attestations(meta: dict) -> dict:
+    """This entry's attestation ledger, or {} when nobody has ever tried it.
+
+    Empty rather than a zeroed ledger because `remote_value` drops empty values, and a record
+    that has never been recalled should carry no ledger at all — four zeroes and no ledger mean
+    the same thing to a reader, and the shorter one does not imply somebody looked.
+    """
+    from kb.attest import attestations_of
+    ledger = attestations_of(meta if isinstance(meta, dict) else {})
+    counted = any(ledger[k] for k in ("recalls", "validations", "failures", "not_reproduced"))
+    return ledger if counted else {}
+
+
+def _rank_key(md):
+    """Recorded speedup, then reproductions, then exp_id for determinism."""
+    meta, exp_dir = md
+    try:
+        reps = int(meta.get("reproductions") or 0)
+    except (TypeError, ValueError):
+        reps = 0
+    return (-_speedup_of(meta), -reps, os.path.basename(exp_dir))
+
+
+def _track_record_md(meta) -> str:
+    """One line on what happened the last times this patch was adopted, or nothing at all.
+
+    Omitted entirely for an untried entry rather than printed as "0 attempts": the reader is an
+    agent about to spend a verify slot, and a line that says nothing still costs it a decision.
+    """
+    ledger = _local_attestations(meta)
+    if not ledger:
+        return ""
+    hint = _retire_hint_of(meta)
+    return ("- track record: adopted %d time(s) — %d reproduced a win, %d did not win, %d would "
+            "not run%s\n" % (ledger["recalls"], ledger["validations"], ledger["failures"],
+                             ledger["not_reproduced"], " (**%s**)" % hint if hint else ""))
+
+
+def _render_references(refs_dir: str, address: str, summary: str, views):
+    """Mirror the offered candidates' prose into `refs_dir` and index it, one prose path per view.
+
+    Written up front, before any verdict, so a warm start that is later rejected stays auditable.
+    Both planes render the same page — a reference reads the same whether the entry came out of a
+    directory or from behind a KB Store key — so only `address` and each view's `origin` line
+    differ between them. A page that cannot be written is reported as "" rather than failing the
+    read: the patch is still adoptable without its prose.
+    """
+    views = list(views)
+    key = "|".join(v["key"] for v in views).encode("utf-8", "replace")
+    set_dir = os.path.join(refs_dir, "sets", hashlib.sha256(key).hexdigest()[:7])
+    top_bench = views[0]["bench_key"] if views else ""
+    index_lines = [
+        f"# Warm-start references — {address}", "", summary,
+        f"Speedups compare only within one bench key; rank 1's is `{top_bench or 'none'}`.", "",
+    ]
+    paths = []
+    for rank, v in enumerate(views, start=1):
+        meta = v["meta"]
+        prose_path = os.path.join(set_dir, f"reference_{rank:02d}.md")
+        try:
+            body = ""
+            if os.path.isfile(v["report_path"]):
+                with open(v["report_path"], "r", errors="replace") as f:
+                    body = f.read()
+            _atomic_write(prose_path, (
+                f"# Reference {rank:02d} — {address}\n\n"
+                f"- speedup: {v['speedup']:.4f}x ({v['metric_kind'] or 'unknown metric'}, "
+                f"bench `{v['bench_key'] or 'none'}`)\n"
+                f"- direction: {v['direction'] or 'unlabeled'}\n"
+                + _techniques_md(_techniques(meta))
+                + f"- strategy: {meta.get('strategy', '')}\n"
+                + v["origin"]
+                + f"- verified_on: {meta.get('verified_on', '')}\n"
+                f"- verified_stack: {_stack_str(meta)}\n"
+                + _track_record_md(meta)
+                + _alternates_md(v["alts"])
+                + f"\n---\n\n{_prose_body(meta, body)}\n"
+            ))
+        except OSError:
+            prose_path = ""
+        paths.append(prose_path)
+        index_lines.append(
+            f"- Rank {rank}: `{prose_path}` | speedup {v['speedup']:.4f}x | direction "
+            f"`{v['direction'] or 'unlabeled'}` | bench `{v['bench_key'] or 'none'}` | "
+            f"patch `{v['patch_path']}` | {len(v['alts'])} alternate(s) | status `read`"
+        )
+    try:
+        _atomic_write(os.path.join(refs_dir, "index.md"), "\n".join(index_lines) + "\n")
+    except OSError:
+        pass
+    return paths
+
+
+def _candidate(rank: int, v: dict, gfx: str, prose_path: str, top_bench: str) -> dict:
+    """The candidate record both planes hand the lane. Extra keys ride in `v['extra']`."""
+    return dict({
+        "rank": rank,
+        "exp_dir": v["exp_dir"],
+        "speedup": round(v["speedup"], 4),
+        "arch": gfx,
+        "patch_path": v["patch_path"],
+        "prose_path": prose_path,
+        "strategy": str(v["meta"].get("strategy") or ""),
+        "direction": v["direction"],
+        "techniques": _techniques(v["meta"]),
+        "bench_key": v["bench_key"],
+        "metric_kind": v["metric_kind"],
+        # False = ranked against rank 1 on a DIFFERENT case set, so their ordering is a prior only.
+        # Adoption is decided by this run's own measurement either way.
+        "comparable": bool(v["bench_key"]) and v["bench_key"] == top_bench,
+        "alternates": v["alts"],
+        # What happened the last times somebody actually adopted this patch, as opposed to the
+        # speedup its own writer measured once. An entry offered at rank 1 that three lanes have
+        # since failed to reproduce should not read identically to an untried one, and before this
+        # it did. Advisory only — nothing here filters on it (see kb/attest.py:retire_hint).
+        "validations": _local_attestations(v["meta"]).get("validations", 0),
+        "recalls": _local_attestations(v["meta"]).get("recalls", 0),
+        "retire_hint": _retire_hint_of(v["meta"]),
+        "status": "read",
+    }, **v["extra"])
+
+
+def _retire_hint_of(meta) -> str:
+    from kb.attest import retire_hint
+    return retire_hint(meta if isinstance(meta, dict) else {})
+
+
+def cmd_resolve(a) -> dict:
+    gfx = _norm_gfx(a.gfx)
+    if not gfx:
+        return {"read_reason": "missing_arch", "candidates": []}
+
+    root = a.root
+    requested_slug = make_slug(a.kernel_name, a.language, gfx)
+    if not os.path.isdir(os.path.join(root, gfx)):
+        return {"read_reason": "kernel_page_not_found", "slug": requested_slug, "candidates": []}
+
+    slug, match_tier, match_info = resolve_slug(root, gfx, a.kernel_name, a.language, a.match)
+    base_out = {
+        "slug": slug or requested_slug,
+        "requested_slug": requested_slug,
+        "match_tier": match_tier,
+        "other_language_pages": sorted(set(match_info["other_language_pages"])),
+        "ambiguous_pages": match_info["ambiguous"],
+        "candidates": [],
+    }
+    if not slug:
+        reason = ("ambiguous_kernel_page" if match_tier == "ambiguous"
+                  else "no_page_for_language" if match_info["other_language_pages"]
+                  else "kernel_page_not_found")
+        return dict(base_out, read_reason=reason)
+
+    # The <gfx> path segment already guarantees same-arch; re-check metric.gpu_arch to catch a mislabeled entry.
+    found = [(m, d) for (m, d) in _iter_solutions(root, gfx, slug)
+             if _norm_gfx((m.get("metric") or {}).get("gpu_arch") or m.get("gfx") or gfx) == gfx]
+    if not found:
+        return dict(base_out, read_reason="no_same_arch")
+
+    # --- curation gate: what this page may OFFER, before any ranking -------------------------
+    total = len(found)
+    servable = found if a.include_retired else [(m, d) for (m, d) in found if not _is_retired(m)]
+    retired_n = total - len(servable)
+    try:
+        min_speedup = float(a.min_speedup)
+    except (TypeError, ValueError):
+        min_speedup = 1.0
+    above = [(m, d) for (m, d) in servable if _speedup_of(m) >= min_speedup]
+    below_n = len(servable) - len(above)
+    stats = {"total": total, "retired": retired_n, "below_min_speedup": below_n,
+             "min_speedup": min_speedup}
+    if not above:
+        return dict(base_out, filtered=stats,
+                    read_reason="all_retired" if not servable else "below_min_speedup")
+
+    top, alternates, collapsed = collapse_by_direction(
+        sorted(above, key=_rank_key), lambda md: md[0].get("direction"), lambda md: md[1], a.top_n)
+    stats["same_direction_collapsed"] = collapsed
+
+    views = []
+    for (meta, exp_dir), alt_of in zip(top, alternates):
+        metric = meta.get("metric") or {}
+        views.append({
+            "key": exp_dir,
+            "meta": meta,
+            "exp_dir": exp_dir,
+            "patch_path": os.path.join(exp_dir, "patch.diff"),
+            "report_path": os.path.join(exp_dir, "report.md"),
+            "speedup": _speedup_of(meta),
+            "direction": str(meta.get("direction") or ""),
+            "bench_key": str(metric.get("bench_key") or ""),
+            "metric_kind": str(metric.get("metric_kind") or ""),
+            "origin": f"- source: {meta.get('source_eval_dir', '')}\n",
+            "alts": [{
+                "exp_dir": d,
+                "patch_path": os.path.join(d, "patch.diff"),
+                "speedup": round(_speedup_of(m), 4),
+                "bench_key": str((m.get("metric") or {}).get("bench_key") or ""),
+                "techniques": _techniques(m),
+            } for (m, d) in alt_of],
+            "extra": {"slug": slug},
+        })
+
+    summary = (f"Matched `{requested_slug}` -> `{slug}` ({match_tier}). {len(top)} direction(s) "
+               f"offered from {total} recorded run(s): {retired_n} retired by curation, "
+               f"{below_n} below {min_speedup:g}x, {collapsed} same-direction re-discoveries "
+               f"moved to `alternates`.")
+    prose = _render_references(a.refs_dir, f"slug `{slug}` (gfx {gfx})", summary, views)
+    candidates = [_candidate(rank, v, gfx, p, views[0]["bench_key"])
+                  for rank, (v, p) in enumerate(zip(views, prose), start=1)]
+    return dict(base_out, read_reason="read", candidates=candidates, filtered=stats)
+
+
+def cmd_languages(a) -> dict:
+    """Which languages this kernel actually has a page in. A caller that guesses `triton` for a
+    kernel the store keeps under `hip`/`ck` gets read_reason=empty and silently loses its history,
+    so let the store answer instead of a task_type mapping that cannot tell hip from ck."""
+    gfx = _norm_gfx(a.gfx)
+    if not gfx:
+        return {"languages": [], "reason": "missing_arch"}
+    pages = _list_pages(a.root, gfx)
+    want = _match_key(a.kernel_name)
+    langs = sorted({lg for _s, k, lg in pages if k == want and lg})
+    if langs:
+        return {"gfx": gfx, "languages": langs, "match_tier": "exact", "reason": "ok"}
+    near = sorted({lg for _s, k, lg in pages if lg and (want in k or k in want)})
+    if near:
+        return {"gfx": gfx, "languages": near, "match_tier": "fuzzy", "reason": "ok"}
+    return {"gfx": gfx, "languages": [], "match_tier": "none", "reason": "no_page"}
+
+
+# Stacks the imported backlog was measured on, recovered from the campaign's own eval dirs
+# (`analysis.json` / `codebase_context.md` device strings). Marked as recovered, not observed —
+# a later reader must be able to tell a backfilled stack from one detect_stack() saw first-hand.
+_BACKFILL_STACK = {
+    # rocm is on all three, not just the two that compile against it directly: the whole campaign
+    # ran in one container image, and rocm is the version the remote identity is keyed on, so a
+    # triton entry without it exports to a different address than the hip entry beside it.
+    "triton": {"triton": "3.6.0", "torch": "2.11.0", "rocm": "7.2"},
+    "hip": {"rocm": "7.2"},
+    "ck": {"rocm": "7.2"},
+}
+
+
+def _backfill_one(meta: dict, exp_dir: str, stacks: dict):
+    """Fields to add/drop for one entry, as (new_meta, changes) — or (meta, {}) when already done."""
+    out = dict(meta)
+    changes = {"add": [], "drop": [], "fix": []}
+
+    if not str(out.get("dead_ends_md") or "").strip():
+        try:
+            with open(os.path.join(exp_dir, "report.md"), "r", errors="replace") as f:
+                report = f.read()
+        except OSError:
+            report = ""
+        prose = dead_ends_md(report)
+        if prose:
+            out["dead_ends_md"] = prose
+            changes["add"].append("dead_ends_md")
+
+    # Fill per KEY, not per dict: an early backfill gave triton entries {triton, torch} and no
+    # rocm, which is exactly the key the remote identity is derived from. Values already present
+    # are never overwritten — an observed stack always outranks a recovered one.
+    st = out.get("verified_stack")
+    st = dict(st) if isinstance(st, dict) else {}
+    known = stacks.get(str(out.get("language") or "").lower()) or {}
+    added = [k for k in known if not str(st.get(k) or "").strip()]
+    if added:
+        st.update({k: known[k] for k in added})
+        st.setdefault("recorded_by", "campaign20_backfill")
+        out["verified_stack"] = st
+        changes["add"].append("verified_stack:" + ",".join(sorted(added)))
+
+    # impl_signature is a different hash under a name nothing reads: _find_by_content() falls back
+    # to re-hashing patch.diff for all 248 entries on every resolve. Recompute under the real name.
+    if not out.get("content_signature"):
+        try:
+            with open(os.path.join(exp_dir, "patch.diff"), "r", errors="replace") as f:
+                csig = content_signature(f.read())
+        except OSError:
+            csig = ""
+        if csig:
+            out["content_signature"] = csig
+            changes["fix"].append("content_signature")
+    if "impl_signature" in out and out.get("content_signature"):
+        out.pop("impl_signature")
+        changes["drop"].append("impl_signature")
+
+    # Never read, and each is either constant or a duplicate of a field right next to it.
+    for dead in ("layer", "platforms", "patch_content"):
+        if dead in out:
+            out.pop(dead)
+            changes["drop"].append(dead)
+
+    if not (changes["add"] or changes["drop"] or changes["fix"]):
+        return meta, {}
+    return out, changes
+
+
+def cmd_backfill_content(a) -> dict:
+    """Bring the imported backlog up to the current content shape. Dry-run by default; only ever
+    adds the fields named above — retained / direction / techniques / metric are never touched."""
+    root = a.root
+    if not os.path.isdir(root):
+        return {"ok": False, "reason": "no_such_root: " + root}
+    stacks = dict(_BACKFILL_STACK)
+    scanned = changed = failed = 0
+    for dirpath, _dirs, files in os.walk(root):
+        if "meta.yaml" not in files:
+            continue
+        scanned += 1
+        meta_path = os.path.join(dirpath, "meta.yaml")
+        meta = _read_meta(meta_path)
+        if not isinstance(meta, dict):
+            failed += 1
+            continue
+        new_meta, changes = _backfill_one(meta, dirpath, stacks)
+        if not changes:
+            continue
+        changed += 1
+        print(json.dumps({"dir": dirpath, **changes}, ensure_ascii=False))
+        if a.apply:
+            try:
+                _atomic_write(meta_path, _dump_meta(new_meta))
+            except OSError as e:
+                failed += 1
+                print(json.dumps({"dir": dirpath, "error": str(e)[:120]}))
+    return {"ok": True, "applied": bool(a.apply), "scanned": scanned,
+            "changed": changed, "failed": failed}
+
+
+# --- remote KB export -------------------------------------------------------------------------
+# Record shape mirrors KernelForge's (knowledge/kernel_identity.py and
+# rewrite_by_flydsl/{identity,agent_kb,record_store}.py @ baabdae); the ADDRESS does not, and
+# kb/identity.py owns it for both workflows and says why. Read and write must both go through it:
+# the store finds nothing if the two sides disagree by one segment, and there is no error to notice
+# — a mistyped dimension just reads as a cold start.
+#
+# The scheme is `geak:`, not `kernel:`, because our credential is scoped to `geak` identities and
+# 403s on both `kernel:` and `inference:`. That scheme is client-defined and exact-lookup only, so
+# every dimension has to be something the READ side can recompute from what it already knows;
+# nothing may be derived from run-local state. Two consequences worth having in view here:
+#
+#   * the serving framework (vllm / sglang), its version and the numeric precision are NOT
+#     dimensions, even though an e2e run knows all three. kernel_lane.js does not — it has no
+#     upstream awareness at all, and pass-through from e2e forwards only `target_language`. A
+#     dimension the reader cannot reconstruct is a permanent silent 404. They ride in
+#     `value.upstream` instead, where a client can filter on them; precision is additionally
+#     already spelled into most kernel names (`fused_moe_int4_w4a16`, `_w8a8_triton_block_scaled_mm`)
+#     so keying on it would double-encode and split those pages.
+#   * every write publishes to BOTH rungs of kernel_canonical_ids(). The service does no prefix
+#     aggregation, so the version-agnostic page exists only because we put records there.
+REMOTE_PRODUCER = "geak"
+REMOTE_ARTIFACT_KIND = "rewrite"        # upstream ARTIFACT_KIND for a recipe bundle
+
+try:
+    from kb import identity as _kbid
+except ImportError:                     # resolve/write stay usable; only the remote pair needs it
+    _kbid = None
+
+REMOTE_SCHEME = "geak"
+REMOTE_DOMAIN = "kernel"
+REMOTE_FRAMEWORK = "rocm"
+REMOTE_UNKNOWN_VERSION = "unspecified"
+
+
+def _identity_module():
+    if _kbid is None:
+        raise RuntimeError("kb_identity_unavailable: kb/identity.py must be importable from the repo root")
+    return _kbid
+
+
+def remote_segment(value, fallback: str) -> str:
+    """Fold a free-form value into one identity dimension. Delegates so there is one folding rule."""
+    return _identity_module().segment(value, fallback)
+
+
+def remote_gpu(gfx: str, override: str = "") -> str:
+    """The compile target (`gfx950`), NOT the product model, and the LEADING dimension.
+
+    Upstream keys this on the marketing name (`mi355x`) and leaves gfx out of the identity. We
+    diverge on both counts. gfx is what every producer and consumer on our side already holds — off
+    the box, out of meta.yaml, out of the e2e harness — whereas the product model exists only as a
+    lookup table someone has to keep current, and an unmapped arch would file half a kernel's
+    history under a name nothing looks up. It leads because an arch mismatch is the quietest way to
+    waste a round: a gfx942-tuned patch compiles clean on gfx950 and is merely slower, where a
+    wrong kernel_name or language at least fails to apply.
+    """
+    return remote_segment(override or _norm_gfx(gfx), fallback="unknown")
+
+
+def remote_framework_version(meta: dict, override: str = "") -> str:
+    """The ROCm version this entry was measured on, cut to `<major>.<minor>` for the address.
+
+    Coarse on purpose, and now additionally droppable: it is the last segment precisely because
+    7.2 -> 7.3 usually keeps a patch applicable, so the second rung of the ladder is the one that
+    keeps 20 kernels warm through an image upgrade instead of cold-starting all of them at once.
+
+    Never guessed: no rocm key exports as `unspecified`. That entry still gets both rungs, so the
+    version-agnostic page sees it even though its exact page is one nobody will construct.
+    """
+    stack = meta.get("verified_stack")
+    raw = str(override or "").strip()
+    if not raw:
+        raw = str((stack or {}).get("rocm") or "").strip() if isinstance(stack, dict) else ""
+    return _identity_module()._short_version(raw)
+
+
+def remote_identity(meta: dict, producer: str = REMOTE_PRODUCER, gpu: str = "",
+                    version: str = "") -> dict:
+    """The four dimensions of the address.
+
+    `producer` is accepted and recorded but is no longer a dimension: it has one value here, the
+    service stamps it on every record, and artifacts are already partitioned under
+    `kb/<producer>/<session_id>/`. `version` overrides only the key, never the record — a box whose
+    ROCm this script cannot detect would otherwise file at `:unspecified` and split one kernel's
+    history in two while `value.verified_stack` keeps saying, correctly, that nothing was observed.
+    """
+    return _identity_module().kernel_identity(
+        gfx=remote_gpu(meta.get("gfx") or (meta.get("metric") or {}).get("gpu_arch") or "", gpu),
+        kernel_name=meta.get("kernel_name"),
+        backend=meta.get("language"),
+        rocm_version=remote_framework_version(meta, version),
+    )
+
+
+def remote_canonical_ids(identity: dict):
+    """Every address this entry is published at, most specific first. Never a subset."""
+    return _identity_module().kernel_canonical_ids(identity)
+
+
+def remote_canonical_id(identity: dict) -> str:
+    """The exact address — rung 1. The one a fresh write is fingerprinted from."""
+    return remote_canonical_ids(identity)[0]
+
+
+def _remote_digest(meta: dict, exp_dir: str) -> str:
+    """The port fingerprint that names the candidate. Reuses content_signature, which already
+    dedups this store by patch content, so re-exporting one entry updates one candidate upstream
+    instead of piling on a new one per run."""
+    sig = str(meta.get("content_signature") or "")
+    if sig:
+        return sig.split(":", 1)[-1]
+    try:
+        with open(os.path.join(exp_dir, "patch.diff"), "r", errors="replace") as f:
+            return content_signature(f.read()).split(":", 1)[-1]
+    except OSError:
+        return ""
+
+
+def remote_session_id(canonical_id: str, kernel_name: str, digest: str) -> str:
+    """`<producer>-<name>-<identity fp>-<port digest>`, upstream's shape.
+
+    Pass the EXACT rung: the id is reused verbatim on the coarser one, which is what lets the two
+    share uploaded artifacts instead of duplicating a 240KB patch. Fingerprinting each rung on its
+    own would give one measurement two unrelated ids and stop the coarse page from being a
+    reproduction of the exact one.
+    """
+    return _identity_module().session_id(canonical_id, kernel_name, digest, REMOTE_PRODUCER)
+
+
+def _sha256_file(path: str):
+    h, size = hashlib.sha256(), 0
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+            size += len(chunk)
+    return h.hexdigest(), size
+
+
+def remote_value(meta: dict, digest: str = "") -> dict:
+    """The producer-owned half of the record. Upstream treats `value` as opaque — no schema to
+    satisfy — so this is our own meta.yaml minus what the identity already carries.
+
+    bench_key and metric_kind are not optional here even though nothing upstream reads them:
+    get_top_sessions ranks purely on the `speedup` number we ourselves declare, so a `b:` entry and
+    a `b2:` one get ordered against each other as if they were comparable. The reader has to filter
+    on these client-side, and it cannot do that if we did not send them."""
+    metric = meta.get("metric") or {}
+    value = {
+        "direction": str(meta.get("direction") or ""),
+        "techniques": _techniques(meta),
+        "strategy": str(meta.get("strategy") or ""),
+        "metric": {
+            "speedup": metric.get("speedup"),
+            "wall_ms": metric.get("wall_ms"),
+            "baseline_wall_ms": metric.get("baseline_wall_ms"),
+            "metric_kind": str(metric.get("metric_kind") or ""),
+            "bench_key": str(metric.get("bench_key") or ""),
+            "case_names": list(metric.get("case_names") or []),
+        },
+        "verified_stack": meta.get("verified_stack") if isinstance(meta.get("verified_stack"), dict) else {},
+        "verified_on": str(meta.get("verified_on") or ""),
+        "measured_by": str(meta.get("measured_by") or ""),
+        "reproductions": meta.get("reproductions"),
+        # NOT the same thing as `reproductions`, and the two are easy to conflate into one wrong
+        # number. `reproductions` counts how many times this lane WROTE the same patch again — a
+        # measure of how often the optimizer rediscovers an idea, produced entirely by the writer.
+        # `attestations` counts what happened when somebody READ this record and took it to a box:
+        # recalls / validations / failures / not_reproduced, in the vocabulary kb/attest.py defines
+        # and both lanes share. A record can be rediscovered five times and never once survive a
+        # recall, and only the second number says so.
+        "attestations": _local_attestations(meta),
+        "lifecycle": str(meta.get("lifecycle") or ""),
+        "retained": meta.get("retained"),
+        # The same two fields the e2e records carry, so one reader can ask "should I believe this"
+        # of either lane without knowing which one wrote it. Derived, not invented: `active` is
+        # earned here only by independent reproduction (see the write path), so it already IS the
+        # validation flag — it was just spelled in a vocabulary nothing outside this file knew.
+        # The basis is named for what actually produced the number rather than mapped onto the
+        # e2e taxonomy: a kernel's speedup comes from its own isolated bench harness, and calling
+        # that a `hot_ab` would claim a serving-level A/B that never ran.
+        "validated": str(meta.get("lifecycle") or "") == "active",
+        "validation_basis": "kernel_bench",
+        # The same digest the session id is built from, so a reader that dedups against its own
+        # store and the address it was filed under can never disagree about what this patch is.
+        "content_signature": ("csha:" + digest) if digest else str(meta.get("content_signature") or ""),
+        "artifacts": {"patch": "patch.diff", "report": "report.md"},
+    }
+    dead = meta.get("dead_ends")
+    if isinstance(dead, list) and dead:
+        value["dead_ends"] = dead
+    # dead_ends_md is deliberately NOT sent: it runs to tens of KB and report.md already carries it
+    # verbatim as an artifact. Structured dead ends are small enough to ride in the record.
+    return {k: v for k, v in value.items() if v not in ("", None, [], {})}
+
+
+def remote_records(meta: dict, exp_dir: str, producer: str = REMOTE_PRODUCER, gpu: str = "",
+                   version: str = ""):
+    """One measurement as upload-ready candidates — one per rung, most specific first.
+
+    All rungs carry the same session id, the same knowledge and the same files. They are not
+    variants of a result; they are one result filed at every address a reader might construct. That
+    is why the caller must publish all of them or none: a coarse page fed by only some runs ranks
+    worse than an empty one, because a reader cannot tell a thin page from a complete one.
+
+    `rung` is stamped on each record so an uploader can skip re-transferring artifacts for rungs
+    after the first — remotely the bytes are shared via the session id, and re-PUTting them would
+    only burn the presign window.
+    """
+    identity = remote_identity(meta, producer, gpu, version)
+    cids = remote_canonical_ids(identity)
+    digest = _remote_digest(meta, exp_dir)
+    sid = remote_session_id(cids[0], identity["kernel_name"], digest)
+    speedup = _speedup_of(meta)
+    files = []
+    for name in ("patch.diff", "report.md"):
+        path = os.path.join(exp_dir, name)
+        if not os.path.isfile(path):
+            continue
+        file_sha, size = _sha256_file(path)
+        files.append({"path": name, "local_path": path, "kind": REMOTE_ARTIFACT_KIND,
+                      "sha256": file_sha, "size": size})
+    # The knowledge document upstream's own writer produces: four keys, everything else under
+    # `value`. `speedup` sits at the top because that is the ranking key the service reads — it
+    # only honours a flat top-level `knowledge.<name>` scalar and rejects a nested path with a 400.
+    knowledge = {
+        "producer": remote_segment(producer, REMOTE_PRODUCER),
+        "speedup": round(speedup, 4) if speedup else None,
+        "identity": identity,
+        "value": remote_value(meta, digest),
+    }
+    return [{
+        "canonical_id": cid,
+        "session_id": sid,
+        "exp_dir": exp_dir,
+        "rung": rung,
+        "knowledge": knowledge,
+        "files": files,
+        # Upstream's own gate: a candidate is always recorded, the pointer moves only on a real win.
+        # Evaluated per rung, since each address keeps its own champion pointer.
+        "champion_eligible": speedup > 1.0,
+        "champion": False,
+    } for rung, cid in enumerate(cids)]
+
+
+def remote_record(meta: dict, exp_dir: str, producer: str = REMOTE_PRODUCER, gpu: str = "",
+                  version: str = "") -> dict:
+    """The exact-rung record alone. Kept for callers that only want the address, never for writing —
+    writing one rung and not the other is the failure mode remote_records() exists to prevent."""
+    return remote_records(meta, exp_dir, producer, gpu, version)[0]
+
+
+def cmd_export_remote(a) -> dict:
+    """Render this store as KB Store candidates, one JSON line each, champion pre-decided.
+
+    Nothing is uploaded here — this only produces what to upload, so the mapping is reviewable and
+    diffable before anything leaves the machine. kb/remote_upload.py consumes the output.
+    """
+    root = a.root
+    if not os.path.isdir(root):
+        return {"ok": False, "reason": "no_such_root: " + root}
+    want_gfx = _norm_gfx(a.gfx) if a.gfx else ""
+    want_name = _match_key(a.kernel_name) if a.kernel_name else ""
+
+    records, scanned, skipped = [], 0, {"retired": 0, "no_patch": 0, "unreadable": 0, "filtered": 0}
+    for dirpath, _dirs, files in sorted(os.walk(root)):
+        if "meta.yaml" not in files:
+            continue
+        scanned += 1
+        meta = _read_meta(os.path.join(dirpath, "meta.yaml"))
+        if not isinstance(meta, dict):
+            skipped["unreadable"] += 1
+            continue
+        gfx = _norm_gfx(meta.get("gfx") or (meta.get("metric") or {}).get("gpu_arch") or "")
+        if (want_gfx and gfx != want_gfx) or (want_name and _match_key(meta.get("kernel_name")) != want_name):
+            skipped["filtered"] += 1
+            continue
+        # Retired entries are dominated duplicates, not negative knowledge, and the service ranks on
+        # the speedup we declare — offering them would put a retired win in someone's top-N.
+        if _is_retired(meta) and not a.include_retired:
+            skipped["retired"] += 1
+            continue
+        if not os.path.isfile(os.path.join(dirpath, "patch.diff")):
+            skipped["no_patch"] += 1
+            continue
+        records.extend(remote_records(meta, dirpath, a.producer, a.gpu))
+
+    # One champion per identity, upstream's rule: must beat 1.0x, and highest wins. Ties break on
+    # session id so two runs of this exporter promote the same candidate.
+    best = {}
+    for rec in records:
+        if not rec["champion_eligible"]:
+            continue
+        cur = best.get(rec["canonical_id"])
+        key = (rec["knowledge"]["speedup"] or 0.0, rec["session_id"])
+        if cur is None or key > cur[0]:
+            best[rec["canonical_id"]] = (key, rec)
+    for _key, rec in best.values():
+        rec["champion"] = True
+
+    # Byte-identical patches under one identity are ONE candidate upstream, so a collision here is
+    # the dedup working. Which of them we send still matters: the record is written with
+    # mode=replace, so keeping the lower of two measurements of the same patch would publish a
+    # speedup we have already beaten. Highest wins, exp_dir breaks ties, and the dropped rows are
+    # named in the summary rather than vanishing.
+    by_id = {}
+    dropped = []
+    for rec in records:
+        ident = (rec["canonical_id"], rec["session_id"])
+        cur = by_id.get(ident)
+        if cur is None:
+            by_id[ident] = rec
+            continue
+        ranked = sorted((cur, rec),
+                        key=lambda r: (-(r["knowledge"]["speedup"] or 0.0), r["exp_dir"]))
+        by_id[ident] = ranked[0]
+        dropped.append(ranked[1]["exp_dir"])
+
+    emitted = 0
+    out = open(a.out, "w") if a.out else None
+    try:
+        for rec in records:
+            if by_id.get((rec["canonical_id"], rec["session_id"])) is not rec:
+                continue
+            line = json.dumps(rec, ensure_ascii=False)
+            (out.write(line + "\n") if out else print(line))
+            emitted += 1
+    finally:
+        if out:
+            out.close()
+    # `emitted` counts records, not measurements: each entry is published at every rung of its
+    # ladder, so the honest headline is both numbers. `sessions` is how many distinct measurements
+    # went out; emitted/sessions should equal the ladder depth for a healthy export.
+    return {"ok": True, "scanned": scanned, "emitted": emitted,
+            "sessions": len({r["session_id"] for r in records}),
+            "identities": len({r["canonical_id"] for r in records}),
+            "exact_identities": len({r["canonical_id"] for r in records if r["rung"] == 0}),
+            "champions": len(best),
+            "deduped": len(dropped), "deduped_dirs": sorted(dropped),
+            "skipped": skipped, "out": a.out or "-"}
+
+
+def _value_as_meta(value: dict, gfx: str) -> dict:
+    """Read a record's `value` back as a meta.
+
+    `remote_value()` produced it FROM a meta, minus what the identity already carries, so the
+    prose helpers below (`_techniques_md`, `_alternates_md`, `_prose_body`) work on it unchanged
+    and a remote-sourced reference reads exactly like a local one.
+    """
+    meta = dict(value or {})
+    metric = dict(meta.get("metric") or {})
+    metric.setdefault("gpu_arch", gfx)
+    meta["metric"] = metric
+    return meta
+
+
+def _store_ladder(a, gfx: str):
+    """The addresses to try, most specific first, each paired with the tier it represents.
+
+    framework_version is the one dimension a reader can get wrong without noticing: the store is
+    keyed on the ROCm an entry was measured on, this box may be on another, and a bare miss looks
+    exactly like a cold start. The ladder is the answer — but only because the WRITER publishes the
+    version-agnostic rung too. Nothing here derives a page that was never written; each rung is a
+    real address that a `write-remote` on this box would also have filled.
+
+    An explicit --canonical-id is taken as given and gets no ladder. A caller that names an address
+    is usually auditing one page, and silently widening the read would misreport which page
+    answered.
+    """
+    if a.canonical_id:
+        return [(a.canonical_id, "exact")]
+    meta = {"kernel_name": a.kernel_name, "language": a.language,
+            "verified_stack": detect_stack(a.language)}
+    identity = remote_identity(meta, a.producer, remote_gpu(gfx, getattr(a, "gpu", "")),
+                               getattr(a, "framework_version", ""))
+    return list(zip(remote_canonical_ids(identity), ("exact", "any_version")))
+
+
+def cmd_retract_remote(a) -> dict:
+    """Take back a key-addressed kernel record. The counterpart to `write-remote`.
+
+    The service has no delete, so this rewrites the session in place: `retained: false`, a reason,
+    the ranking scalar zeroed, and the identity's champion re-pointed at the best survivor. See
+    kb/retract.py for why all three are needed and why any two of them is worse than none.
+
+    Both rungs are visited, because `write-remote` filled both with the SAME session id. Retracting
+    only the exact rung leaves the record live on the version-agnostic page, which is the page a box
+    on a different ROCm reads — i.e. it would survive exactly where it is least verifiable.
+
+    `--canonical-id` addresses one page only, matching `resolve-remote`'s rule: a caller that names
+    an address is auditing it, and quietly widening a WRITE beyond what was asked for is not a
+    behaviour this command should have.
+    """
+    from kb.retract import retract_session, retraction_ok
+    gfx = _norm_gfx(a.gfx)
+    if not gfx and not a.canonical_id:
+        return {"retracted": False, "reason": "missing_arch"}
+    store, mirror, why = open_plane(a, CHAMPION_METRIC, 1.0)
+    planes = [p for p in (store, mirror) if p is not None]
+    if not planes:
+        return {"retracted": False, "reason": why}
+    out = {"applied": bool(a.apply), "session_id": a.session_id, "reason": a.reason,
+           "plane_note": why, "pages": []}
+    for cid, tier in _store_ladder(a, gfx):
+        for plane in planes:
+            report = retract_session(plane, cid, a.session_id, a.reason, CHAMPION_METRIC,
+                                     actor=str(getattr(a, "measured_by", "") or ""),
+                                     scan=int(a.scan), apply=bool(a.apply))
+            out["pages"].append(dict(report, tier=tier))
+    out["retracted"] = retraction_ok(out["pages"], a.apply)
+    return out
+
+
+def _attest_evidence(a) -> dict:
+    """The one-line record of what this box saw, shared by both attest paths."""
+    evidence = {}
+    for key, raw in (("measured_speedup", getattr(a, "measured_speedup", None)),
+                     ("note", getattr(a, "note", "")),
+                     ("canonical_id", getattr(a, "canonical_id", ""))):
+        if raw not in (None, ""):
+            evidence[key] = raw
+    # Argparse hands the ratio over as a string. Stored as one it would land in meta.yaml quoted,
+    # and every later reader comparing it against a speedup would be comparing str to float.
+    if "measured_speedup" in evidence:
+        try:
+            evidence["measured_speedup"] = float(evidence["measured_speedup"])
+        except (TypeError, ValueError):
+            evidence.pop("measured_speedup")
+    return evidence
+
+
+def cmd_attest(a) -> dict:
+    """Count one attempt to actually USE a stored entry, straight into its meta.yaml.
+
+    The local plane has no session ids and no service — an entry IS a directory — so this is a
+    read-modify-atomic-write of the same file the write path owns, using the same arithmetic
+    kb/attest.py applies remotely. Sharing the arithmetic and not the transport is deliberate: the
+    counters have to mean the same thing on both planes or a curation pass cannot compare them,
+    but a local store should not need a KB plane to record that a patch did not apply.
+
+    Like the remote one, this moves nothing: the speedup meta declares is left exactly as it was,
+    and the entry keeps its rank. A patch that failed to apply on one workspace is a fact about
+    that workspace as much as about the patch.
+    """
+    from kb.attest import record_attestation, retire_hint
+    exp_dir = str(getattr(a, "exp_dir", "") or "")
+    meta_path = os.path.join(exp_dir, "meta.yaml")
+    meta = _read_meta(meta_path)
+    if not meta:
+        return {"attested": False, "reason": "no_meta", "exp_dir": exp_dir}
+    try:
+        updated = record_attestation(dict(meta), a.outcome,
+                                     actor=str(getattr(a, "measured_by", "") or ""),
+                                     evidence=_attest_evidence(a))
+    except Exception as e:
+        return {"attested": False, "reason": "bad_outcome: " + str(e)[:120], "exp_dir": exp_dir}
+    out = {"attested": bool(a.apply), "applied": bool(a.apply), "exp_dir": exp_dir,
+           "outcome": a.outcome, "attestations": updated["attestations"],
+           "retire_hint": retire_hint(updated)}
+    if not a.apply:
+        return out
+    try:
+        _atomic_write(meta_path, _dump_meta(updated))
+    except OSError as e:
+        out.update({"attested": False, "reason": "write_failed: " + str(e)[:120]})
+    return out
+
+
+def cmd_attest_remote(a) -> dict:
+    """The same count, against a key-addressed record on either plane.
+
+    Walks BOTH rungs for the same reason `retract-remote` does: `write-remote` filled them with one
+    session id, and a box on a different ROCm reads the version-agnostic rung — leaving it with a
+    stale ledger hides the failures from exactly the readers most likely to hit them.
+    """
+    from kb.attest import attest_session, attestation_ok, retire_hint
+    gfx = _norm_gfx(a.gfx)
+    if not gfx and not a.canonical_id:
+        return {"attested": False, "reason": "missing_arch"}
+    store, mirror, why = open_plane(a, CHAMPION_METRIC, 1.0)
+    planes = [p for p in (store, mirror) if p is not None]
+    if not planes:
+        return {"attested": False, "reason": why}
+    out = {"applied": bool(a.apply), "session_id": a.session_id, "outcome": a.outcome,
+           "plane_note": why, "pages": []}
+    for cid, tier in _store_ladder(a, gfx):
+        for plane in planes:
+            report = attest_session(plane, cid, a.session_id, a.outcome,
+                                    actor=str(getattr(a, "measured_by", "") or ""),
+                                    evidence=_attest_evidence(a), apply=bool(a.apply))
+            out["pages"].append(dict(report, tier=tier))
+    out["attested"] = attestation_ok(out["pages"], a.apply)
+    hints = [p.get("retire_hint") for p in out["pages"] if p.get("retire_hint")]
+    out["retire_hint"] = hints[0] if hints else ""
+    return out
+
+
+def _store_near_misses(store, cid: str):
+    """Identities differing from `cid` only in framework_version, newest-looking last.
+
+    A third tier below the ladder, and only reachable on a store that predates double-writing —
+    once every write fills the version-agnostic rung, that rung answers first and this never runs.
+    Kept because the alternative for such a store is a cold start on a kernel that has history.
+    """
+    parts = cid.split(":")
+    if len(parts) != 7:
+        return []
+    return sorted(other for other in store.identities()
+                  if (lambda s: len(s) == 7 and s[:6] == parts[:6] and s[6] != parts[6])
+                  (other.split(":")))
+
+
+def cmd_resolve_remote(a) -> dict:
+    """Rank the top-N candidates under one canonical id and mirror their prose, like `resolve`.
+
+    Same output shape as `resolve` on purpose: the lane's schema, verify gate and adopt step do not
+    change when the KB moves behind a key. What differs is where curation happens. The local store
+    is curated on disk (`retained: false`, one entry per direction); the KB Store ranks on nothing
+    but the `speedup` a producer declared, so the direction collapse and the bench-key comparability
+    check have to be redone here, client-side, against the records it hands back.
+    """
+    gfx = _norm_gfx(a.gfx)
+    if not gfx and not a.canonical_id:
+        return {"read_reason": "missing_arch", "candidates": []}
+    # Reading takes ONE plane, never both. Merging two rankings would need a comparability rule
+    # across planes that nothing here has, and silently preferring one would make a stale local
+    # mirror shadow the service without saying so.
+    store, _second, why = open_plane(a, CHAMPION_METRIC, 1.0)
+    if store is None:
+        return {"read_reason": why.split(":", 1)[0], "reason": why, "candidates": []}
+
+    ladder = _store_ladder(a, gfx)
+    cid, match_tier = ladder[0]
+    segs = cid.split(":")
+    requested_slug = make_slug(a.kernel_name or (segs[3] if len(segs) > 3 else ""),
+                               a.language or (segs[4] if len(segs) > 4 else ""), gfx)
+    base_out = {"slug": requested_slug, "requested_slug": requested_slug, "canonical_id": cid,
+                "match_tier": match_tier, "tried": [c for c, _t in ladder],
+                "other_language_pages": [], "ambiguous_pages": [], "candidates": []}
+
+    # Descend the ladder, then the pre-ladder near misses. Stopping at the first rung that holds
+    # anything is deliberate: a coarser page is a superset only if every writer double-wrote, and
+    # `tried` records the descent so a thin answer can be told apart from a lucky one.
+    # Retracted records are dropped as the page is read, not after the rung is chosen. The local
+    # `resolve` has filtered on `_is_retired` since it existed; this path did not, and reported a
+    # hardcoded `"retired": 0` while serving them — so a record someone had explicitly taken back
+    # came straight back out of the service. Filtering here rather than below also means a rung
+    # whose every entry has been retracted correctly reads as EMPTY and the ladder descends, instead
+    # of stopping on a page that turns out to have nothing to offer.
+    def live(canonical_id):
+        rows = store.candidates(canonical_id, limit=0)
+        kept = [c for c in rows if not _is_retired(c.value)]
+        return kept, len(rows) - len(kept)
+
+    found, retired = [], 0
+    for cid, match_tier in ladder:
+        found, retired = live(cid)
+        if found:
+            break
+    if not found:
+        near = _store_near_misses(store, ladder[0][0])
+        for other in near:
+            found, retired = live(other)
+            if found:
+                cid, match_tier = other, "other_version"
+                break
+        base_out.update({"other_language_pages": near,
+                         "tried": [c for c, _t in ladder] + near})
+        if not found:
+            return dict(base_out, read_reason="kernel_page_not_found")
+    base_out.update({"canonical_id": cid, "match_tier": match_tier})
+
+    try:
+        min_speedup = float(a.min_speedup)
+    except (TypeError, ValueError):
+        min_speedup = 1.0
+    above = [c for c in found if (c.speedup or 0.0) >= min_speedup]
+    # `total` counts what the page held, `retired` how many of those were taken back — so the two
+    # still sum to the page size even though `found` is already the survivors.
+    stats = {"total": len(found) + retired, "retired": retired,
+             "below_min_speedup": len(found) - len(above), "min_speedup": min_speedup}
+    if not above:
+        return dict(base_out, filtered=stats, read_reason="below_min_speedup")
+
+    # `above` is already speedup-ordered by the store.
+    top, alternates, collapsed = collapse_by_direction(
+        above, lambda c: c.value.get("direction"), lambda c: c.session_id, a.top_n)
+    stats["same_direction_collapsed"] = collapsed
+
+    cache_dir = a.cache_dir or os.path.join(os.path.dirname(os.path.abspath(a.refs_dir)), "kb_cache")
+    views = []
+    for c, alt_of in zip(top, alternates):
+        meta = _value_as_meta(c.value, gfx)
+        metric = meta.get("metric") or {}
+        # Only now do artifact bytes move: the ranking above read knowledge documents alone.
+        bundle = store.materialize(cid, c, cache_dir)
+        views.append({
+            "key": c.session_id,
+            "meta": meta,
+            "exp_dir": bundle,
+            "patch_path": os.path.join(bundle, "files", "patch.diff"),
+            "report_path": os.path.join(bundle, "files", "report.md"),
+            "speedup": c.speedup or 0.0,
+            "direction": str(meta.get("direction") or ""),
+            "bench_key": str(metric.get("bench_key") or ""),
+            "metric_kind": str(metric.get("metric_kind") or ""),
+            "origin": f"- session: {c.session_id}{' (champion)' if c.is_champion else ''}\n",
+            # Alternates are materialized too. They are same-direction runners-up, so there are few
+            # of them, and a candidate listed with a path that resolves to nothing is worse than not
+            # listing it: the next reader cannot tell a missing file from a broken export.
+            "alts": [{
+                "session_id": alt.session_id,
+                "patch_path": os.path.join(store.materialize(cid, alt, cache_dir),
+                                           "files", "patch.diff"),
+                "speedup": round(alt.speedup or 0.0, 4),
+                "bench_key": str((alt.value.get("metric") or {}).get("bench_key") or ""),
+                "techniques": _techniques(alt.value),
+            } for alt in alt_of],
+            "extra": {"slug": requested_slug, "canonical_id": cid,
+                      "session_id": c.session_id, "is_champion": c.is_champion},
+        })
+
+    summary = (
+        f"{len(top)} direction(s) offered from {stats['total']} recorded candidate(s): "
+        f"{stats['below_min_speedup']} below {min_speedup:g}x, "
+        f"{collapsed} same-direction re-discoveries moved to `alternates`."
+        + ({"any_version": f" Served from `{cid}` — the version-agnostic page; nothing was"
+                           " recorded under this box's own ROCm.",
+            "other_version": f" Served from `{cid}` — a DIFFERENT stack version, and not even the"
+                             " version-agnostic page had it."}.get(match_tier, "")))
+    prose = _render_references(a.refs_dir, f"`{cid}`", summary, views)
+    candidates = [_candidate(rank, v, gfx, p, views[0]["bench_key"])
+                  for rank, (v, p) in enumerate(zip(views, prose), start=1)]
+    return dict(base_out, read_reason="read", candidates=candidates, filtered=stats)
+
+
+def cmd_write_remote(a) -> dict:
+    """Store one measured win in BOTH planes, under the same gates as `write`.
+
+    The local entry stays the source of truth — curation, reproductions and dead ends all live
+    there — and the KB record is derived from it, so the two cannot drift into disagreeing about
+    what was measured. What lands under the key depends on the patch, not on the caller:
+
+      * a patch the identity has not seen APPENDS a session, because the session id is a digest of
+        the patch; the champion pointer then moves only if it beat 1.0x and the incumbent.
+      * the same patch measured again REPLACES that one session in place. It is a reproduction,
+        not a second candidate, which is exactly what the local plane already calls it.
+    """
+    local = cmd_write(a)
+    store, also, why = open_plane(a, CHAMPION_METRIC, 1.0, create=True)
+    if store is None:
+        return dict(local, remote={"written": False, "reason": why})
+
+    exp_dir = local.get("dir") or local.get("reproduced") or ""
+    meta = _read_meta(os.path.join(exp_dir, "meta.yaml")) if exp_dir else None
+    if not isinstance(meta, dict):
+        # No local entry means a gate rejected it (no_improvement / empty_diff / duplicate with an
+        # unreadable target). Nothing measured, nothing to publish.
+        return dict(local, remote={"written": False,
+                                   "reason": local.get("reason") or "no_local_entry"})
+
+    recs = remote_records(meta, exp_dir, a.producer,
+                          remote_gpu(_norm_gfx(a.gfx), getattr(a, "gpu", "")),
+                          getattr(a, "framework_version", ""))
+    files = {f["path"]: f["local_path"] for f in recs[0]["files"]}
+    # Asked BEFORE the write: a session that already exists is this same patch measured again, and
+    # the caller deserves to know its result replaced one rather than adding one.
+    replaced = store.get_session(recs[0]["canonical_id"], recs[0]["session_id"]) is not None
+    written, promoted, error = publish(store, recs, files,
+                                       lambda rec: rec["knowledge"].get("speedup"))
+    if error:                                    # a KB write must not fail a measured result
+        return dict(local, remote={"written": False, "partial": written, "reason": error})
+    out = {
+        "written": True, "canonical_id": recs[0]["canonical_id"],
+        "canonical_ids": written, "session_id": recs[0]["session_id"],
+        "speedup": recs[0]["knowledge"].get("speedup"), "champion": bool(promoted),
+        "champion_of": promoted, "files": sorted(files), "store": store.root,
+        # true = this measurement landed on a session that already existed, i.e. the same patch.
+        "replaced": replaced,
+    }
+    if also is not None:
+        # The second plane never gates the first. It reports its own outcome so an unreachable
+        # service is visible as a failed mirror rather than as a silent one.
+        mirrored, mirror_promoted, mirror_error = publish(
+            also, recs, files, lambda rec: rec["knowledge"].get("speedup"))
+        out["mirror"] = {"written": not mirror_error, "store": also.root,
+                         "canonical_ids": mirrored, "champion_of": mirror_promoted,
+                         "reason": mirror_error or ""}
+    elif why:
+        out["mirror"] = {"written": False, "reason": why}
+    return dict(local, remote=out)
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def add_write_args(w):
+        w.add_argument("--root", required=True)
+        w.add_argument("--kernel-name", dest="kernel_name", required=True)
+        w.add_argument("--language", required=True)
+        w.add_argument("--gfx", required=True)
+        w.add_argument("--kernel-class", dest="kernel_class", default="unknown")
+        w.add_argument("--speedup", required=True)
+        w.add_argument("--baseline-wall-ms", dest="baseline_wall_ms", default=None)
+        w.add_argument("--patch", default="")
+        w.add_argument("--eval-dir", dest="eval_dir", default="")
+        w.add_argument("--report", default="")
+        w.add_argument("--strategy", default="")
+        # Curation inputs. Without --direction an entry can never be grouped with its own
+        # re-discoveries; without the bench fields its speedup compares to nothing.
+        w.add_argument("--direction", default="")
+        w.add_argument("--metric-kind", dest="metric_kind", default="")
+        w.add_argument("--case-names", dest="case_names", default="")
+        w.add_argument("--parent", default="",
+                       help="exp_dir of the warm-start entry this win was built on")
+        return w
+
+    add_write_args(sub.add_parser("write", help="store one measured win"))
+
+    r = sub.add_parser("resolve", help="enumerate + rank top-N solutions for a slug")
+    r.add_argument("--root", required=True)
+    r.add_argument("--kernel-name", dest="kernel_name", required=True)
+    r.add_argument("--language", required=True)
+    r.add_argument("--gfx", required=True)
+    r.add_argument("--top-n", dest="top_n", type=int, default=3, help="max DIRECTIONS to offer")
+    r.add_argument("--refs-dir", dest="refs_dir", required=True)
+    r.add_argument("--match", choices=("exact", "normalized", "fuzzy"), default="fuzzy",
+                   help="how hard to try to map the caller's kernel name onto a page (default fuzzy)")
+    r.add_argument("--min-speedup", dest="min_speedup", type=float, default=1.05,
+                   help="never spend an on-box verify on a recorded win below this (default 1.05)")
+    r.add_argument("--include-retired", dest="include_retired", action="store_true",
+                   help="also offer entries the curation retired (audit/debug only)")
+
+    lg = sub.add_parser("languages", help="which languages this kernel has a page in")
+    lg.add_argument("--root", required=True)
+    lg.add_argument("--kernel-name", dest="kernel_name", required=True)
+    lg.add_argument("--gfx", required=True)
+
+    bf = sub.add_parser("backfill-content", help="bring imported entries up to the current shape")
+    bf.add_argument("--root", required=True)
+    bf.add_argument("--apply", action="store_true", help="write; without it, only report the diff")
+
+    xr = sub.add_parser("export-remote", help="render entries as KB Store candidates (JSON lines)")
+    xr.add_argument("--root", required=True)
+    xr.add_argument("--gfx", default="", help="only this arch (default: every arch in the store)")
+    xr.add_argument("--kernel-name", dest="kernel_name", default="", help="only this kernel")
+    xr.add_argument("--producer", default=REMOTE_PRODUCER,
+                    help="the system that owns this candidate stream and its champion pointer")
+    xr.add_argument("--gpu", default="", help="override the gfx dimension; default is the entry's own gfx")
+    xr.add_argument("--include-retired", dest="include_retired", action="store_true",
+                    help="also export entries the curation retired (they would rank as live wins)")
+    xr.add_argument("--out", default="", help="write JSON lines here instead of stdout")
+
+    # The key-addressed pair. Same gates, same output shapes as resolve/write — only the plane
+    # the records live on changes, so the lane can be pointed at either.
+    def add_plane_args(w):
+        # `both` writes locally and mirrors to the service; reads always take exactly one plane.
+        w.add_argument("--plane", choices=("local", "remote", "both"), default="local",
+                       help="local dir, the KB Store service (GEAK_KB_STORE_URL/GEAK_KB_STORE_TOKEN, "
+                            "or the un-prefixed KB_STORE_URL/KB_STORE_TOKEN), or both")
+        w.add_argument("--scan", type=int, default=25,
+                       help="remote only: candidates hydrated before curation (page cap is 200)")
+        return w
+
+    rr = add_plane_args(sub.add_parser("resolve-remote",
+                                       help="rank top-N candidates under one canonical id"))
+    rr.add_argument("--store", default="", help="on-disk KB store root (--plane local/both)")
+    rr.add_argument("--canonical-id", dest="canonical_id", default="",
+                    help="the key to read; derived from kernel/language/gfx when omitted")
+    rr.add_argument("--kernel-name", dest="kernel_name", default="")
+    rr.add_argument("--language", default="")
+    rr.add_argument("--gfx", default="")
+    rr.add_argument("--producer", default=REMOTE_PRODUCER)
+    rr.add_argument("--gpu", default="", help="override the gfx dimension; default is --gfx")
+    rr.add_argument("--framework-version", dest="framework_version", default="",
+                    help="rocm <major>.<minor>; default is detected on this box")
+    rr.add_argument("--top-n", dest="top_n", type=int, default=3, help="max DIRECTIONS to offer")
+    rr.add_argument("--refs-dir", dest="refs_dir", required=True)
+    rr.add_argument("--cache-dir", dest="cache_dir", default="",
+                    help="where selected candidates are materialized (default <refs-dir>/../kb_cache)")
+    rr.add_argument("--min-speedup", dest="min_speedup", type=float, default=1.05)
+
+    wr = add_plane_args(add_write_args(
+        sub.add_parser("write-remote", help="store one win in the local store AND under its key")))
+    wr.add_argument("--store", default="", help="on-disk KB store root (--plane local/both)")
+    wr.add_argument("--producer", default=REMOTE_PRODUCER)
+    wr.add_argument("--gpu", default="", help="override the gfx dimension; default is --gfx")
+    wr.add_argument("--framework-version", dest="framework_version", default="",
+                    help="rocm <major>.<minor> for the key; default is the measured stack")
+
+    tr = add_plane_args(sub.add_parser(
+        "retract-remote", help="take back a written record: retained=false, score zeroed, champion "
+                               "re-pointed (there is no delete — this is a rewrite)"))
+    tr.add_argument("--store", default="", help="on-disk KB store root (--plane local/both)")
+    tr.add_argument("--canonical-id", dest="canonical_id", default="",
+                    help="retract on THIS page only; omit to walk both rungs of the ladder")
+    tr.add_argument("--session-id", dest="session_id", required=True,
+                    help="the session to retract, from the write-remote output")
+    tr.add_argument("--reason", required=True,
+                    help="why the record is wrong; it is all a future reader has to judge by")
+    tr.add_argument("--kernel-name", dest="kernel_name", default="")
+    tr.add_argument("--language", default="")
+    tr.add_argument("--gfx", default="")
+    tr.add_argument("--producer", default=REMOTE_PRODUCER)
+    tr.add_argument("--gpu", default="", help="override the gfx dimension; default is --gfx")
+    tr.add_argument("--framework-version", dest="framework_version", default="")
+    tr.add_argument("--measured-by", dest="measured_by", default="", help="who is retracting it")
+    tr.add_argument("--apply", action="store_true", help="actually rewrite; default is a dry run")
+
+    at = sub.add_parser("attest", help="count one attempt to USE a stored entry (validated | "
+                                       "failed | not_reproduced); changes no speedup, no rank")
+    at.add_argument("--exp-dir", dest="exp_dir", required=True,
+                    help="the entry that was tried, as `resolve` reports it")
+    at.add_argument("--outcome", required=True, choices=_OUTCOMES,
+                    help="validated = reproduced a win; failed = applied but did not win; "
+                         "not_reproduced = would not apply or would not build")
+    at.add_argument("--measured-speedup", dest="measured_speedup", default=None,
+                    help="what it did here, for the history entry")
+    at.add_argument("--note", default="", help="one line a future reader can act on")
+    at.add_argument("--measured-by", dest="measured_by", default="", help="who tried it")
+    at.add_argument("--apply", action="store_true", help="actually record it; default is a dry run")
+
+    ar = add_plane_args(sub.add_parser(
+        "attest-remote", help="the same count, against a key-addressed record on either plane"))
+    ar.add_argument("--store", default="", help="on-disk KB store root (--plane local/both)")
+    ar.add_argument("--canonical-id", dest="canonical_id", default="",
+                    help="attest on THIS page only; omit to walk both rungs of the ladder")
+    ar.add_argument("--session-id", dest="session_id", required=True,
+                    help="the session that was tried, from the write-remote output")
+    ar.add_argument("--outcome", required=True, choices=_OUTCOMES)
+    ar.add_argument("--kernel-name", dest="kernel_name", default="")
+    ar.add_argument("--language", default="")
+    ar.add_argument("--gfx", default="")
+    ar.add_argument("--producer", default=REMOTE_PRODUCER)
+    ar.add_argument("--gpu", default="", help="override the gfx dimension; default is --gfx")
+    ar.add_argument("--framework-version", dest="framework_version", default="")
+    ar.add_argument("--measured-speedup", dest="measured_speedup", default=None)
+    ar.add_argument("--note", default="")
+    ar.add_argument("--measured-by", dest="measured_by", default="", help="who tried it")
+    ar.add_argument("--apply", action="store_true", help="actually record it; default is a dry run")
+
+    m = sub.add_parser("remap", help="rewrite a stored patch's paths onto this workspace's layout")
+    m.add_argument("--patch", required=True)
+    m.add_argument("--out", required=True)
+    m.add_argument("--editable", default="", help="comma-separated workspace-relative editable paths")
+    m.add_argument("--workspace", default="", help="scanned for source files when --editable is empty")
+
+    a = p.parse_args(argv)
+    try:
+        if a.cmd == "write":
+            out = cmd_write(a)
+        elif a.cmd == "resolve":
+            out = cmd_resolve(a)
+        elif a.cmd == "remap":
+            out = cmd_remap(a)
+        elif a.cmd == "languages":
+            out = cmd_languages(a)
+        elif a.cmd == "backfill-content":
+            out = cmd_backfill_content(a)
+        elif a.cmd == "export-remote":
+            out = cmd_export_remote(a)
+        elif a.cmd == "resolve-remote":
+            out = cmd_resolve_remote(a)
+        elif a.cmd == "write-remote":
+            out = cmd_write_remote(a)
+        elif a.cmd == "retract-remote":
+            out = cmd_retract_remote(a)
+        elif a.cmd == "attest":
+            out = cmd_attest(a)
+        elif a.cmd == "attest-remote":
+            out = cmd_attest_remote(a)
+        else:  # pragma: no cover
+            out = {"error": "unknown command"}
+    except Exception as e:  # never crash the caller
+        err = "exception: " + str(e)[:160]
+        out = ({"written": False, "reason": err} if a.cmd in ("write", "write-remote")
+               else {"retracted": False, "reason": err} if a.cmd == "retract-remote"
+               else {"attested": False, "reason": err} if a.cmd in ("attest", "attest-remote")
+               else {"remapped": False, "reason": err} if a.cmd == "remap"
+               else {"read_reason": err, "candidates": []})
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

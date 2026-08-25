@@ -12,9 +12,16 @@
 # =============================================================================
 
 # ---- GEAK e2e budget --------------------------------------------------------
-# Per-model GEAK wall-clock budget. The workflow passes this via --budget; this
-# is only the fallback when nothing is passed.
-export PERFSKILLS_E2E_TIMEOUT_S="${PERFSKILLS_E2E_TIMEOUT_S:-57600}"
+# Per-model GEAK wall-clock budget, 24h. The workflow passes this via --budget;
+# this is only the fallback when nothing is passed.
+#
+# This is the GEAK optimization budget ONLY. It also sizes the SPUR wall clock
+# (budget + SPUR_TIME_HEADROOM_S below), because the job must outlive the budget
+# it is granting; no other timeout on this page is derived from it.
+#
+# run_geak_e2e.sh forwards this to run_e2e.py as GEAK_E2E_TIMEOUT_S, which is the
+# name run_e2e.py actually reads (its own built-in fallback is 12h).
+export PERFSKILLS_E2E_TIMEOUT_S="${PERFSKILLS_E2E_TIMEOUT_S:-86400}"
 
 # ---- Matrix orchestrator (run_matrix.sh) ------------------------------------
 # NB: there is intentionally NO pending timeout — run_matrix.sh waits on PENDING
@@ -81,6 +88,12 @@ export GEAK_MONITOR_MODE="${GEAK_MONITOR_MODE:-stall}"           # stall (determ
 # ---- Preflight (gpu_dstate_check.sh) ----------------------------------------
 export GEAK_DSTATE_SAMPLE_GAP_S="${GEAK_DSTATE_SAMPLE_GAP_S:-3}"  # gap between the two D-state samples
 
+# ---- Agent model ------------------------------------------------------------
+# Single source of truth for the model GEAK drives. run_geak_e2e.sh derives
+# GEAK_CLAUDE_MODEL (what run_e2e.py actually reads) from this, and the preflight
+# scripts point the settings.json aliases at it, so one override moves all three.
+export PERFSKILLS_CLAUDE_MODEL="${PERFSKILLS_CLAUDE_MODEL:-claude-opus-5}"
+
 # ---- Host-side liveness monitor (run_monitor.sh) ----------------------------
 export GEAK_MONITOR_INTERVAL_S="${GEAK_MONITOR_INTERVAL_S:-300}"       # normal poll cadence
 export GEAK_MONITOR_RECHECK_S="${GEAK_MONITOR_RECHECK_S:-300}"         # re-poll gap while confirming a KILL (must span a normal between-phase idle gap, not just a blip)
@@ -88,7 +101,7 @@ export GEAK_MONITOR_CONFIRM="${GEAK_MONITOR_CONFIRM:-2}"               # consecu
 export GEAK_MONITOR_TAIL_LINES="${GEAK_MONITOR_TAIL_LINES:-300}"       # log tail lines fed to the arbiter
 export GEAK_MONITOR_CALL_TIMEOUT_S="${GEAK_MONITOR_CALL_TIMEOUT_S:-180}" # cap a single claude call (claude mode)
 export GEAK_MONITOR_STARTUP_GRACE_S="${GEAK_MONITOR_STARTUP_GRACE_S:-300}" # grace before the first judgement
-export GEAK_MONITOR_MODEL="${GEAK_MONITOR_MODEL:-claude-opus-4-8}"     # arbiter model (claude mode)
+export GEAK_MONITOR_MODEL="${GEAK_MONITOR_MODEL:-claude-opus-5}"       # arbiter model (claude mode)
 # ---- Deterministic stall watchdog (run_monitor.sh MODE=stall) ---------------
 # A wedge is declared ONLY when NO artifact under OUT_DIR has been written AND both
 # GPU and CPU are idle for GEAK_STALL_KILL_S, confirmed GEAK_MONITOR_CONFIRM times.

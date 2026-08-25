@@ -14,3 +14,12 @@ useDefault = true
 [[allowlists]]
 description = "Citation prose in tilelang overview trips generic-api-key"
 paths = ['''perf_knowledge/languages/tilelang/overview\.md''']
+
+# PyTorch dtype names, read as credentials by `generic-api-key`: the keyword half of
+# the rule is satisfied by an adjacent `KeyError:` or `token_to_kv_pool`, and the
+# dtype itself supplies the entropy. Matched on the secret rather than the path, so
+# this excuses only these three literals and leaves every file fully armed —
+# tuning_skillset/ carries real sglang source under tuning-kb/*/artifacts/.
+[[allowlists]]
+description = "torch dtype literals trip generic-api-key near KeyError/token_ prose"
+regexes = ['''^torch\.(bfloat16|float8_e4m3fn|float8_e4m3fnuz)$''']

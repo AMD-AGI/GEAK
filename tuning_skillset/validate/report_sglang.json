@@ -1,0 +1,131 @@
+{
+  "image": "sglang 0.5.12",
+  "rows": [
+    {
+      "skill": "env-setup",
+      "claim": "GPUs are visible; rocminfo reports a gfx arch",
+      "status": "PASS",
+      "detail": "gfx942",
+      "seconds": 0.34
+    },
+    {
+      "skill": "env-setup",
+      "claim": "neither image ships a bench client; both ship deploy targets",
+      "status": "PASS",
+      "detail": "absent=hipblaslt-bench,ckProfiler; aiter configs dir present=True",
+      "seconds": 6.27
+    },
+    {
+      "skill": "env-setup",
+      "claim": "aiter ships as a wheel in vllm and a source checkout in sglang",
+      "status": "PASS",
+      "detail": "source (tuners in place), version 0.1.12.post2.dev150+ga6bb49937.d20260516, root /sgl-workspace/aiter",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-triton",
+      "claim": "AMD knobs raise TypeError as kwargs but are accepted in the positional dict",
+      "status": "PASS",
+      "detail": "TypeError on kwarg; all three knobs present in all_kwargs (triton 3.6.0)",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-triton",
+      "claim": "the HIP backend exposes the knobs as HIPOptions fields",
+      "status": "PASS",
+      "detail": "21 fields, all three knobs present",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-hipblaslt",
+      "claim": "hipblaslt-bench replays a solution by index with --algo_method index",
+      "status": "N/A",
+      "detail": "hipblaslt-bench not built in this image (see env-setup)",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-hipblaslt",
+      "claim": "torch exposes TunableOp as the no-build route to solution selection",
+      "status": "PASS",
+      "detail": "torch 2.9.1+rocm7.2.0.git7e1940d4, tunable API complete",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-ck",
+      "claim": "ckProfiler takes positional args and lists its ops when run bare",
+      "status": "N/A",
+      "detail": "ckProfiler not installed (apt composablekernel-ckprofiler)",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-aiter",
+      "claim": "the tuned-config CSV has the documented 18-column schema",
+      "status": "PASS",
+      "detail": "18 columns as documented",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-aiter",
+      "claim": "AITER_LOG_TUNED_CONFIG is the engagement signal, and rows are keyed by cu_num",
+      "status": "PASS",
+      "detail": "83 of 4416 rows across 8 tables reachable at cu_num=304; unreachable: a4w4_blockscale_tuned_gemm.csv 0/1470, a8w8_blockscale_bpreshuffle_tuned_gemm.csv 0/58, a8w8_blockscale_tuned_gemm.csv 0/5, a8w8_tuned_gemm.csv 0/582",
+      "seconds": 0.01
+    },
+    {
+      "skill": "tuning-flydsl",
+      "claim": "flydsl is importable and exposes a tunable Config surface",
+      "status": "PASS",
+      "detail": "flydsl 0.1.5",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-hip",
+      "claim": "rocprofv3 is present and gives ground truth for which kernel ran",
+      "status": "PASS",
+      "detail": "--kernel-trace supported",
+      "seconds": 0.07
+    },
+    {
+      "skill": "tuning-hip",
+      "claim": "the arch limits the skill reasons about are readable, not assumed",
+      "status": "N/A",
+      "detail": "gfx942: CU=304, warp=64 readable, but torch 2.9.1+rocm7.2.0.git7e1940d4 does not expose LDS/workgroup -- read it from rocminfo/hipDeviceProp instead",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-in-vllm",
+      "claim": "vLLM reads tuned configs from VLLM_TUNED_CONFIG_FOLDER",
+      "status": "N/A",
+      "detail": "vllm not installed in this image",
+      "seconds": 0.0
+    },
+    {
+      "skill": "tuning-in-sglang",
+      "claim": "SGLang keys MoE configs by Triton version, and the shipped MI300X set is stale",
+      "status": "PASS",
+      "detail": "installed=triton_3_6_0 has 0 MI300X files; all dirs: {'triton_ops': 0, 'triton_3_5_1': 0, 'triton_utils': 0, 'triton_3_1_0': 7, 'triton_3_4_0': 0, 'triton_3_6_0': 0, 'triton_3_3_1': 0, 'triton_3_2_0': 0, 'triton_3_3_0': 0}",
+      "seconds": 2.36
+    },
+    {
+      "skill": "tuning-in-sglang",
+      "claim": "SGLANG_MOE_CONFIG_DIR is an override the installed code honors",
+      "status": "PASS",
+      "detail": "referenced in 1 file(s)",
+      "seconds": 0.05
+    },
+    {
+      "skill": "tuning-core",
+      "claim": "an idle-GPU check exists, so 'pin your GPUs' is actionable",
+      "status": "PASS",
+      "detail": "8 GPUs reporting utilization",
+      "seconds": 0.28
+    },
+    {
+      "skill": "tuning-core",
+      "claim": "relative error is the gate; bf16 at K=4096 shows why absolute is not",
+      "status": "PASS",
+      "detail": "abs=0.988 but rel=0.00344 -- absolute error alone would look alarming",
+      "seconds": 6.18
+    }
+  ]
+}
