@@ -712,6 +712,60 @@ def _pack_overlay(dirpath: str) -> str:
     return out
 
 
+TUNING_PREFIX = "tuning/"
+# Bounds on what the tuning phase can drag into a record. Tuned tables are small (the a8w8 blockscale
+# CSVs run 0.5-1 MB), so a path far outside that is a deploy bundle or a built .so that got listed by
+# mistake, and a record is the wrong place to discover it. Both caps report what they dropped rather
+# than truncating quietly — a record that silently carries half its lever is the failure being fixed.
+TUNING_FILE_MAX = 24
+TUNING_FILE_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _tuning_files(result: dict, dropped: list) -> dict:
+    """{role: (stored_name, local_path)} for the tuning phase's deployable artifacts.
+
+    A tuned table is applied through an env var and deployed INTO the installed package
+    (`site-packages/aiter/configs/...`), not into the framework's git tree. It is therefore
+    STRUCTURALLY absent from `final.patch` — no amount of diffing the source tree will pick it up —
+    and a record carrying only the patch reproduces the launch command but not the win. The
+    DeepSeek-V4-Pro 20260823 run wrote files [final.patch, launch.sh, report.md] while its actual
+    lever, a 56-row a8w8 blockscale table measured at 3.29x isolated, stayed on the box and was lost
+    with it. `live_tree_files` exists precisely because these paths sit outside the patchable tree,
+    so it is read here alongside `artifacts`.
+
+    Only an ACCEPTED tuning contributes. A withdrawn or unproven one has no artifact worth carrying,
+    and copying one in would let a reader mistake a rejected search residue for a banked lever.
+    """
+    tuning = result.get("tuning_skillset") or {}
+    if not isinstance(tuning, dict) or str(tuning.get("gate") or "") != "accepted":
+        return {}
+    found, seen = {}, set()
+    for path in (list(tuning.get("artifacts") or []) + list(tuning.get("live_tree_files") or [])):
+        path = str(path or "")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if not os.path.isfile(path):
+            dropped.append("%s (missing)" % path)
+            continue
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            dropped.append("%s (unreadable)" % path)
+            continue
+        if size > TUNING_FILE_MAX_BYTES:
+            dropped.append("%s (%d bytes > cap)" % (path, size))
+            continue
+        if len(found) >= TUNING_FILE_MAX:
+            dropped.append("%s (over %d-file cap)" % (path, TUNING_FILE_MAX))
+            continue
+        # Index-prefixed: two tuned tables can share a basename across trees (the deploy bundle's copy
+        # and the installed one), and a bare basename would silently drop one of them.
+        stored = "%s%02d_%s" % (TUNING_PREFIX, len(found), os.path.basename(path))
+        found["tuning:" + path] = (stored, path)
+    return found
+
+
 def _artifact_files(a, result: dict) -> dict:
     """{role: (stored_name, local_path)} for the run outputs that actually exist on disk.
 
@@ -730,6 +784,10 @@ def _artifact_files(a, result: dict) -> dict:
             packed = _pack_overlay(path)
             if packed:
                 found[role] = (OVERLAY_TARBALL, packed)
+    dropped = []
+    found.update(_tuning_files(result, dropped))
+    for why in dropped:
+        sys.stderr.write("e2e_store: tuning artifact NOT carried into the record: %s\n" % why)
     for extra in (getattr(a, "file", None) or []):   # retract recomputes a record but takes no --file
         path = str(extra)
         if os.path.isfile(path):

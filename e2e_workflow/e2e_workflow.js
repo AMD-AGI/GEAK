@@ -2505,6 +2505,40 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       lesson: `tuning skillset (standalone, pre-head): ${tuning.summary || 'accepted'}`,
     });
 
+    // Bank each tuned op as an accepted kernel, so the KB record carries the LEVER and not just the
+    // launch script that happens to reference it. This is deliberately done HERE, deterministically,
+    // rather than left to Finalize's own accepted_kernels: the DeepSeek-V4-Pro 20260823 run banked a
+    // 3.29x tuned a8w8 blockscale table, returned accepted_kernels:[], and wrote a KB record whose
+    // files were [final.patch, launch.sh, report.md] — the lever itself was never recorded, and the
+    // next run at that canonical id recalls a configuration it cannot reproduce. Gated on tuneOk, so
+    // an unproven tuning claim banks nothing, exactly as it folds nothing into curEnv/curFlags.
+    const tunedOps = (tuning.ops_tuned || []).filter((o) => String(o.op || o.short_name || '').trim());
+    for (const o of tunedOps) {
+      bankAccepted(acceptedKernels, {
+        short_name: String(o.op || o.short_name).trim(),
+        backend: o.backend || '',
+        // A tuned table is applied through env (the deploy's env var IS the engagement mechanism),
+        // which is already a first-class winner_kind in the store alongside patch/authored.
+        kind: 'env',
+        isolated: Number(o.isolated_speedup) || 0,
+        // The phase measured ONE pre/post A/B covering all of its ops, so its delta is attributable
+        // to a single op and only to a single op. With several, the per-op number is left at 0 and
+        // the phase-level figure stands alone in tuning_skillset.tuning_delta_pct — stamping the
+        // whole delta onto each op would double-count it in any consumer that sums the list.
+        e2e_delta_pct: tunedOps.length === 1 ? (tuning.tuning_delta_pct || 0) : 0,
+        apply_env: tuning.apply_env || '',
+        apply_flags: tuning.apply_flags || '',
+        patch: '',
+        engaged: o.engaged === true,
+        from_tuning_skillset: true,
+        tuning_artifact: o.artifact || '',
+      }, {});
+    }
+    if (tunedOps.length) {
+      log(`Banked ${tunedOps.length} tuned op(s) as accepted kernels (kind=env) so the KB record ` +
+        `carries the lever: ${tunedOps.map((o) => o.op || o.short_name).join(', ')}.`);
+    }
+
     // Tuning changed which kernels dominate — re-profile + re-strategize so the head track works the
     // POST-tuning landscape, not the pre-tuning one. Same contract as the post-ConfigSweep re-profile.
     profile = await safeAgent(
