@@ -442,6 +442,12 @@ const AB_FINISH_RETRIES = parseInt(A.ab_finish_retries != null ? A.ab_finish_ret
 // up to this many times; if still missing, the extraction is treated as a FAILURE (flag dominant /
 // skip others) — never a fake speedup. Bump via args.baseline_extract_retries.
 const BASELINE_EXTRACT_RETRIES = parseInt(A.baseline_extract_retries != null ? A.baseline_extract_retries : 3, 10);
+// Issue #429: force capture storage bounds into every extraction EXTRA_ENV (override via args).
+const CAPTURE_BYTE_BUDGET = String(A.capture_byte_budget != null ? A.capture_byte_budget : '8GiB');
+const CAPTURE_CASE_BYTE_LIMIT = String(A.capture_case_byte_limit != null ? A.capture_case_byte_limit : '2GiB');
+const CAPTURE_PERSIST_POLICY = String(A.capture_persist_policy != null ? A.capture_persist_policy : 'share_large');
+const CAPTURE_WORKSPACE_BUDGET = String(A.capture_workspace_budget != null ? A.capture_workspace_budget : '32GiB');
+const CAPTURE_STORAGE_ENV = `CAPTURE_BYTE_BUDGET=${CAPTURE_BYTE_BUDGET} CAPTURE_CASE_BYTE_LIMIT=${CAPTURE_CASE_BYTE_LIMIT} CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY}`;
 const TASK = A.task || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
@@ -1040,7 +1046,17 @@ const hasFrozenBaseline = (ext) =>
 async function extractWithBaseline(role, phase, intro, inputs, opts) {
   const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
   const head = (inputs && inputs.KERNEL) || {};
-  let ext = await safeAgent(roleAgent(role, phase, intro, inputs), opts);
+  const captureIntro = `${intro} CAPTURE STORAGE BOUNDS (issue #429): every capture EXTRA_ENV MUST include ` +
+    `\`${CAPTURE_STORAGE_ENV}\`. Use kernel_selection.py with --task-dir "$TASK" so the selected oracle is ` +
+    `promoted and all capture.pid-* dirs are reclaimed. Unittests for large MoE oracles MUST use ` +
+    `h.iter_eager_cases_from_oracle / h.check_correct_multi_lazy.`;
+  let ext = await safeAgent(roleAgent(role, phase, captureIntro, {
+    ...(inputs || {}),
+    CAPTURE_STORAGE_ENV,
+    CAPTURE_BYTE_BUDGET,
+    CAPTURE_CASE_BYTE_LIMIT,
+    CAPTURE_PERSIST_POLICY,
+  }), opts);
   let tries = 0;
   const attemptedTargets = [];
   const complete = (e) => hasFrozenBaseline(e) && kernelSelectionVerified(head, e).ok;
@@ -1054,9 +1070,12 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
       ` PRIOR ATTEMPT DID NOT SELECT THE PROFILED GPU KERNEL: ${selection.why}. ` +
       'Treat KERNEL.live_call_seam as prose only. Merge KERNEL.seam_candidates with any missing inner ' +
       'launcher found from source/runtime inspection; preserve existing candidate classifications. ' +
+      'BEFORE re-running capture, reclaim prior process-local artifacts: ' +
+      '`python3 "$SKILL_DIR/scripts/capture_shapes.py" --cleanup-task-dir "$TASK" --no-promote` ' +
+      '(issue #429 — never accumulate capture.pid-* oracles across retries). ' +
       'Install safe markers for every relevant candidate, never native/JIT kernel_entry objects. Run ' +
-      'kernel_selection.py over every process-local capture and all root-call traces. Return its JSON ' +
-      'verbatim as selection_validation. Select the deepest live inner_launcher/op_seam across all ' +
+      'kernel_selection.py over every process-local capture and all root-call traces with --task-dir "$TASK". ' +
+      'Return its JSON verbatim as selection_validation. Select the deepest live inner_launcher/op_seam across all ' +
       'calls/ranks; a fused head must select the whole-op op_seam. Rejecting the previous outer wrapper ' +
       'is not success. Do not return any ATTEMPTED_TARGET_CALLABLES value again.';
     const baselineCorrective = needBaseline ?
@@ -1068,9 +1087,27 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
       `(${selection.ok ? 'kernel selected' : selection.why}; ` +
       `${needBaseline ? 'baseline missing (baseline_overlay/ + meta.candidate_bind)' : 'baseline frozen'}). ` +
       `RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
+    // Best-effort reclaim before the agent retries (issue #429 storage amplification).
+    if (ext && ext.task_dir) {
+      try {
+        const { execFileSync } = require('child_process');
+        execFileSync('python3', [
+          `${WORKFLOW_DIR}/scripts/capture_shapes.py`,
+          '--cleanup-task-dir', String(ext.task_dir),
+          '--no-promote',
+        ], { stdio: 'pipe', timeout: 120000 });
+        log(`  ${(opts && opts.label) || role}: reclaimed capture artifacts under ${ext.task_dir}`);
+      } catch (cleanupErr) {
+        log(`  ${(opts && opts.label) || role}: capture reclaim skipped (${cleanupErr && cleanupErr.message ? cleanupErr.message : cleanupErr})`);
+      }
+    }
     ext = await safeAgent(
-      roleAgent(role, phase, intro + selectionCorrective + baselineCorrective, {
+      roleAgent(role, phase, captureIntro + selectionCorrective + baselineCorrective, {
         ...(inputs || {}),
+        CAPTURE_STORAGE_ENV,
+        CAPTURE_BYTE_BUDGET,
+        CAPTURE_CASE_BYTE_LIMIT,
+        CAPTURE_PERSIST_POLICY,
         PRIOR_TARGET_CALLABLE: priorTarget,
         PRIOR_SELECTION_VALIDATION: (ext && ext.selection_validation) || {},
         ATTEMPTED_TARGET_CALLABLES: attemptedTargets.slice(),
@@ -2649,6 +2686,25 @@ let validatedOk = false;   // did the independent Validate produce a usable (pos
 // off the stable overlay/cand_*/integrate_result.json layout. Bounded by
 // AB_FINISH_RETRIES + each agent's agentBounded guard + the outer runner budget.
 if (want('final')) {
+  // Issue #429: reclaim leftover process-local capture dirs before Finalize burns more disk.
+  try {
+    const { execFileSync } = require('child_process');
+    const out = execFileSync('python3', [
+      `${WORKFLOW_DIR}/scripts/capture_shapes.py`,
+      '--reclaim-workspace', EVAL_DIR,
+      '--workspace-budget', CAPTURE_WORKSPACE_BUDGET,
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300000 });
+    log(`Finalize: capture workspace reclaim done (${CAPTURE_WORKSPACE_BUDGET} budget).`);
+    try {
+      const tel = JSON.parse(out);
+      if (tel.over_budget) {
+        log(`Finalize: WARNING authoritative oracles over workspace budget ` +
+          `(${tel.authoritative_oracle_bytes} bytes > ${CAPTURE_WORKSPACE_BUDGET}).`);
+      }
+    } catch (_) { /* telemetry parse best-effort */ }
+  } catch (reclaimErr) {
+    log(`Finalize: capture workspace reclaim skipped (${reclaimErr && reclaimErr.message ? reclaimErr.message : reclaimErr})`);
+  }
   // (1) Disk-reconstruct incomplete A/Bs. The JS has no fs, so a read-only Bash
   // agent enumerates the overlay layout and reports which A/Bs never completed.
   const RECON_SCHEMA = obj({ incomplete: { type: 'array', items: obj({

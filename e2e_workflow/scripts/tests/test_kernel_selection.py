@@ -503,6 +503,7 @@ class TestSelectionVerdict(unittest.TestCase):
                 "--capture-meta", meta_path,
                 "--torch-trace", trace_path,
                 "--out", out_path,
+                "--no-reclaim-captures",
             ])
             self.assertEqual(rc, 1)
             with open(out_path) as fh:
@@ -564,6 +565,7 @@ class TestSelectionVerdict(unittest.TestCase):
                 "--candidate-target", mid,
                 "--candidate-target", inner,
                 "--out", out_path,
+                "--no-reclaim-captures",
             ])
             self.assertEqual(rc, 1)
             with open(out_path) as fh:
@@ -623,6 +625,7 @@ class TestSelectionVerdict(unittest.TestCase):
                 "--candidate-target", mid,
                 "--candidate-target", inner,
                 "--out", out_path,
+                "--no-reclaim-captures",
             ])
             self.assertEqual(rc, 1)
             with open(out_path) as fh:
@@ -735,6 +738,95 @@ class TestMergingProcessTraces(unittest.TestCase):
         self.assertEqual(merged[0]["pid"], "trace-0:1")
         self.assertEqual(merged[0]["args"]["External id"], "trace-0:5")
         self.assertEqual(merged[0]["args"]["correlation"], "trace-0:6")
+
+
+class TestCaptureStorageReclaim(unittest.TestCase):
+    """Issue #429: promote one authoritative oracle and delete process-local capture.pid-* dirs."""
+
+    def meta(self, calls=7, target=TARGET, process_id=111):
+        module, attr = target.split(":", 1)
+        return {
+            "module": module, "attr": attr, "total_calls_observed": calls,
+            "process_id": process_id, "target": target,
+        }
+
+    def _write_capture(self, root, pid, payload=b"ORACLE", rank=0):
+        cap = os.path.join(root, f"capture.pid-{pid}.rank-{rank}")
+        os.makedirs(cap)
+        meta_path = os.path.join(cap, "meta.json")
+        with open(meta_path, "w") as fh:
+            json.dump(self.meta(process_id=pid), fh)
+        with open(os.path.join(cap, "reference_io.pt"), "wb") as fh:
+            fh.write(payload)
+        trace_path = os.path.join(root, f"selection.pid-{pid}.rank-{rank}.call-1.json")
+        with open(trace_path, "w") as fh:
+            json.dump({"traceEvents": trace()}, fh)
+        return meta_path, trace_path
+
+    def test_infer_task_dir_from_process_local_metas(self):
+        with tempfile.TemporaryDirectory() as root:
+            meta_a, _ = self._write_capture(root, 111, b"A" * 100)
+            meta_b, _ = self._write_capture(root, 222, b"B" * 200)
+            self.assertEqual(ks.infer_task_dir([meta_a, meta_b]), root)
+
+    def test_successful_selection_promotes_one_oracle_and_reclaims_ranks(self):
+        with tempfile.TemporaryDirectory() as root:
+            meta_a, trace_a = self._write_capture(root, 111, b"KEEP-ME-ORACLE")
+            meta_b, trace_b = self._write_capture(root, 222, b"DROP-ME-ORACLE-XXXX")
+            # nested retry leftover
+            nested = os.path.join(root, "_selcap", "capture.pid-333.rank-0")
+            os.makedirs(nested)
+            with open(os.path.join(nested, "reference_io.pt"), "wb") as fh:
+                fh.write(b"NESTED-HEAVY")
+            out_path = os.path.join(root, "selection.json")
+            rc = ks.main([
+                "--target", TARGET,
+                "--device-kernel", KERNEL,
+                "--capture-meta", meta_a, meta_b,
+                "--torch-trace", trace_a, trace_b,
+                "--task-dir", root,
+                "--out", out_path,
+            ])
+            self.assertEqual(rc, 0)
+            with open(out_path) as fh:
+                verdict = json.load(fh)
+            self.assertTrue(verdict["ok"])
+            self.assertTrue(verdict["capture_storage"]["promoted"])
+            self.assertTrue(os.path.isfile(os.path.join(root, "reference_io.pt")))
+            self.assertTrue(os.path.isfile(os.path.join(root, "meta.json")))
+            with open(os.path.join(root, "reference_io.pt"), "rb") as fh:
+                # best process is max matched calls; both equal so max() picks one stably
+                self.assertIn(fh.read(), (b"KEEP-ME-ORACLE", b"DROP-ME-ORACLE-XXXX"))
+            remaining = [
+                p for p in os.listdir(root) if p.startswith("capture.pid-")]
+            self.assertEqual(remaining, [])
+            self.assertFalse(os.path.exists(nested))
+            self.assertGreater(verdict["capture_storage"]["bytes_reclaimed"], 0)
+
+    def test_failed_selection_still_reclaims_heavy_captures(self):
+        with tempfile.TemporaryDirectory() as root:
+            meta_path = os.path.join(root, "capture.pid-111.rank-0", "meta.json")
+            os.makedirs(os.path.dirname(meta_path))
+            with open(meta_path, "w") as fh:
+                json.dump(self.meta(), fh)
+            with open(os.path.join(os.path.dirname(meta_path), "reference_io.pt"),
+                      "wb") as fh:
+                fh.write(b"X" * 4096)
+            trace_path = os.path.join(root, "selection.pid-999.rank-0.json")
+            with open(trace_path, "w") as fh:
+                json.dump({"traceEvents": trace()}, fh)
+            out_path = os.path.join(root, "selection.json")
+            rc = ks.main([
+                "--target", TARGET,
+                "--device-kernel", KERNEL,
+                "--capture-meta", meta_path,
+                "--torch-trace", trace_path,
+                "--task-dir", root,
+                "--out", out_path,
+            ])
+            self.assertEqual(rc, 1)
+            self.assertFalse(os.path.exists(os.path.dirname(meta_path)))
+            self.assertFalse(os.path.isfile(os.path.join(root, "reference_io.pt")))
 
 
 if __name__ == "__main__":

@@ -95,6 +95,10 @@ def _reset_state(mod):
         sequence=[], seq_cap=256, in_graph_calls=0,
         shape_counts={}, shape_meta={},
         flush_every=64, oracle_written=False, oracle_sha=None, oracle_records=0,
+        byte_budget=0, case_byte_limit=0, persist_policy="share_large",
+        share_min_bytes=16 << 20, shared_tensors={}, shared_bytes_est=0,
+        oracle_bytes_est=0, budget_exceeded=False,
+        budget_skip_count=0, oracle_save_count=0, meta_flush_count=0,
     )
 
 
@@ -109,6 +113,19 @@ class FakeTensor:
 
     def dim(self):
         return len(self.shape)
+
+    def numel(self):
+        n = 1
+        for dim in self.shape:
+            n *= int(dim)
+        return n
+
+    def element_size(self):
+        name = str(self.dtype).split(".")[-1].lower()
+        return {
+            "float64": 8, "float32": 4, "float16": 2, "bfloat16": 2,
+            "int64": 8, "int32": 4, "int8": 1, "uint8": 1, "bool": 1,
+        }.get(name, 2)
 
     def detach(self):
         return self
@@ -910,6 +927,128 @@ class TestImportTimeInstall(_RecorderTestCase):
         mod, _ = self._fresh("capture_shapes_cutoff", CAPTURE_TARGET=None, CAPTURE_OUT=None,
                              CAPTURE_DECODE_LEAD_MAX="8")
         self.assertEqual(mod._STATE["decode_lead_max"], 8)
+
+
+class TestByteBudgetAndReclaim(_RecorderTestCase):
+    """Issue #429 storage bounds: refuse oversized oracles; reclaim process-local dirs."""
+
+    def test_parse_byte_budget_units(self):
+        self.assertEqual(cs.parse_byte_budget("0"), 0)
+        self.assertEqual(cs.parse_byte_budget("unlimited"), 0)
+        self.assertEqual(cs.parse_byte_budget("512"), 512)
+        self.assertEqual(cs.parse_byte_budget("1KiB"), 1024)
+        self.assertEqual(cs.parse_byte_budget("2MiB"), 2 * 1024 ** 2)
+        self.assertEqual(cs.parse_byte_budget("32GiB"), 32 * 1024 ** 3)
+
+    def test_byte_budget_skips_heavy_oracle_and_writes_manifest(self):
+        # 4*8*2 = 64 bytes per tensor arg; output is a string so ~64 bytes/call.
+        with _env(CAPTURE_BYTE_BUDGET="50"):
+            mod, _ = self._hook()
+        with _stderr() as err:
+            mod.op(FakeTensor((4, 8)))
+            cs._flush()
+        self.assertTrue(cs._STATE["budget_exceeded"])
+        self.assertEqual(cs._STATE["records"], [])
+        self.assertEqual(cs._STATE["budget_skip_count"], 1)
+        self.assertIn("byte budget exceeded", err.getvalue())
+        manifest = os.path.join(self.out_dir, "capture_manifest.json")
+        self.assertTrue(os.path.isfile(manifest))
+        with open(manifest) as fh:
+            body = json.load(fh)
+        self.assertTrue(body["budget_exceeded"])
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "reference_io.pt")))
+
+    def test_byte_budget_allows_cases_that_fit(self):
+        with _env(CAPTURE_BYTE_BUDGET="1MiB"):
+            mod, _ = self._hook()
+        with _stderr():
+            mod.op(FakeTensor((4, 8)))
+            cs._flush()
+        self.assertEqual(len(cs._STATE["records"]), 1)
+        self.assertFalse(cs._STATE["budget_exceeded"])
+        self.assertTrue(os.path.isfile(os.path.join(self.out_dir, "reference_io.pt")))
+        self.assertGreater(cs._STATE["oracle_bytes_est"], 0)
+
+    def test_selection_flush_every_1_does_not_rewrite_oracle_without_new_cases(self):
+        with _env(GEAK_SELECTION_TRACE=os.path.join(self.out_dir, "selection.json"),
+                  CAPTURE_BYTE_BUDGET=None):
+            mod, _ = self._hook()
+        self.assertEqual(cs._STATE["flush_every"], 1)
+        with _stderr():
+            mod.op(FakeTensor((4, 8)))  # records case + flush boundary
+            saves_after_first = len(self.torch.saved)
+            mod.op(FakeTensor((4, 8)))  # same sig: histogram only, no new record
+            mod.op(FakeTensor((4, 8)))
+        self.assertEqual(saves_after_first, 1)
+        self.assertEqual(len(self.torch.saved), 1)  # oracle not rewritten
+        self.assertGreaterEqual(cs._STATE["meta_flush_count"], 2)
+
+    def test_promote_and_reclaim_leaves_one_authoritative_oracle(self):
+        task = self.out_dir
+        keep = None
+        for pid, blob in ((111, b"SELECTED-ORACLE"), (222, b"OTHER-ORACLE-DATA")):
+            cap = os.path.join(task, f"capture.pid-{pid}.rank-0")
+            os.makedirs(cap)
+            meta = os.path.join(cap, "meta.json")
+            with open(meta, "w") as fh:
+                json.dump({"process_id": pid, "target": "m:op"}, fh)
+            with open(os.path.join(cap, "reference_io.pt"), "wb") as fh:
+                fh.write(blob)
+            if pid == 111:
+                keep = meta
+        # leftover atomic tmp
+        with open(os.path.join(task, "reference_io.pt.tmp-1-2"), "wb") as fh:
+            fh.write(b"TMP")
+        tel = cs.promote_and_reclaim(task, keep_meta_path=keep, promote=True)
+        self.assertTrue(tel["promoted"])
+        self.assertTrue(os.path.isfile(os.path.join(task, "reference_io.pt")))
+        with open(os.path.join(task, "reference_io.pt"), "rb") as fh:
+            self.assertEqual(fh.read(), b"SELECTED-ORACLE")
+        self.assertEqual(list(cs.iter_capture_dirs(task)), [])
+        self.assertFalse(os.path.exists(os.path.join(task, "reference_io.pt.tmp-1-2")))
+        self.assertTrue(os.path.isfile(os.path.join(task, "capture_telemetry.json")))
+        self.assertGreater(tel["bytes_reclaimed"], 0)
+
+    def test_cleanup_without_promote_removes_all_capture_dirs(self):
+        task = self.out_dir
+        for pid in (1, 2):
+            cap = os.path.join(task, "_selcap", f"capture.pid-{pid}.rank-0")
+            os.makedirs(cap)
+            with open(os.path.join(cap, "reference_io.pt"), "wb") as fh:
+                fh.write(b"Z" * 1024)
+        tel = cs.cleanup_task_capture_artifacts(task, promote=False)
+        self.assertEqual(list(cs.iter_capture_dirs(task)), [])
+        self.assertFalse(os.path.isfile(os.path.join(task, "reference_io.pt")))
+        self.assertGreaterEqual(tel["bytes_reclaimed"], 2048)
+
+    def test_share_large_stores_weight_kwargs_once(self):
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="0",
+                  CAPTURE_PERSIST_POLICY="share_large",
+                  CAPTURE_SHARE_MIN_BYTES="64"):
+            mod, _ = self._hook(fn=lambda *a, **k: FakeTensor((2, 2)))
+        w = FakeTensor((64, 64))  # 8KiB > 64 share min
+        with _stderr():
+            mod.op(FakeTensor((4, 8)), w1=w, hidden=FakeTensor((4, 8)))
+            mod.op(FakeTensor((8, 8)), w1=w, hidden=FakeTensor((8, 8)))
+            cs._flush()
+        self.assertEqual(len(cs._STATE["records"]), 2)
+        self.assertIn("w1", cs._STATE["shared_tensors"])
+        for rec in cs._STATE["records"]:
+            self.assertEqual(rec["kwargs"]["w1"], {"__shared__": "w1"})
+        payload, _path = self.torch.saved[-1]
+        self.assertIn("shared", payload)
+        self.assertIn("w1", payload["shared"])
+
+    def test_case_byte_limit_skips_oversized_case(self):
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="100",
+                  CAPTURE_PERSIST_POLICY="full"):
+            mod, _ = self._hook()
+        with _stderr() as err:
+            mod.op(FakeTensor((64, 64)))  # 8KiB >> 100
+            cs._flush()
+        self.assertTrue(cs._STATE["budget_exceeded"])
+        self.assertEqual(cs._STATE["records"], [])
+        self.assertIn("case byte limit exceeded", err.getvalue())
 
 
 if __name__ == "__main__":

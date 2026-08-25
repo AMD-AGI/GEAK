@@ -2741,5 +2741,40 @@ class ServedBucketsTest(unittest.TestCase):
         self.assertNotIn(512, [b for _, b, _ in hl.served_buckets(m)])
 
 
+class TestOracleSharedAndLazy(_HarnessTestCase):
+    """Issue #429: shared weight refs + per-case lazy correctness keep MoE oracles from OOM'ing."""
+
+    def test_resolve_oracle_shared_expands_refs(self):
+        shared = {"w1": {"__tensor__": True, "data": _T((2, 2), fill=3.0)}}
+        obj = {"w1": {"__shared__": "w1"}, "hidden": 1}
+        out = hl.resolve_oracle_shared(obj, shared)
+        self.assertIs(out["w1"], shared["w1"])
+        self.assertEqual(out["hidden"], 1)
+
+    def test_resolve_oracle_shared_missing_key_raises(self):
+        with self.assertRaises(KeyError):
+            hl.resolve_oracle_shared({"w1": {"__shared__": "missing"}}, {})
+
+    def test_reconstruct_captured_tensor_leaf(self):
+        leaf = {"__tensor__": True, "data": _T((2,), fill=1.5)}
+        out = hl.reconstruct_captured(leaf, device="cpu")
+        self.assertTrue(hasattr(out, "shape"))
+        self.assertEqual(tuple(out.shape), (2,))
+
+    def test_check_correct_multi_lazy_runs(self):
+        """Smoke: lazy checker iterates cases and returns per-case rows."""
+        def call(args):
+            return args["ref"]
+
+        cases = [
+            {"args": {"ref": _T((2,), fill=1.0)}, "ref": _T((2,), fill=1.0), "sig": "a"},
+        ]
+        _ok, per = hl.check_correct_multi_lazy(
+            call, iter(cases), {"rtol": 1e-5, "atol": 1e-5}, max_keep_live=1)
+        self.assertEqual(len(per), 1)
+        self.assertIn("correct", per[0])
+        self.assertIn("case", per[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
