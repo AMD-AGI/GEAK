@@ -2168,11 +2168,75 @@ class TestMain(_RunE2ECase):
         self.assertIn("1", published)
         self.assertIn(str(os.getpgid(0)), published)
 
+    def _pin_env_timeout(self, value: str | None):
+        """Set/clear GEAK_E2E_TIMEOUT_S for one test and always restore it, so
+        budget tests cannot leak a budget into whatever runs next."""
+        saved = os.environ.pop("GEAK_E2E_TIMEOUT_S", None)
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, "GEAK_E2E_TIMEOUT_S", saved)
+        else:
+            self.addCleanup(os.environ.pop, "GEAK_E2E_TIMEOUT_S", None)
+        if value is not None:
+            os.environ["GEAK_E2E_TIMEOUT_S"] = value
+
     def test_timeout_budget_is_read_from_the_environment(self):
-        os.environ["GEAK_E2E_TIMEOUT_S"] = "600"
+        self._pin_env_timeout("600")
         self.patch_rx("invoke_workflow", lambda *a, **k: {})
         _rc, stdout = self._run(self._handoff(), "--dry-run")
         self.assertEqual(json.loads(stdout)["mapped_args"]["time_budget_s"], 600)
+
+    def test_timeout_budget_is_read_from_the_cli(self):
+        """Hyperloom's coordinator states its REAL kill time as
+        `--timeout-s <runner_timeout>`. We used to drop that value into an
+        ignored third positional and pace against the 12h env default instead,
+        so a caller killing early tore the run down mid-optimization and no
+        final report was written (Hyperloom #1202)."""
+        self._pin_env_timeout(None)
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        for argv in (["--timeout-s", "28800"], ["--timeout-s=28800"]):
+            with self.subTest(argv=argv):
+                _rc, stdout = self._run(self._handoff(), *argv, "--dry-run")
+                plan = json.loads(stdout)
+                self.assertEqual(plan["mapped_args"]["time_budget_s"], 28800)
+                # The value must NOT shift the positionals it sits behind.
+                self.assertEqual(plan["mapped_args"]["eval_dir"],
+                                 str(self.eval_dir))
+
+    def test_smallest_stated_budget_wins(self):
+        """Flag and env var both name a deadline someone actually enforces, so
+        pace against the SMALLER. Junk states nothing, and with nothing stated
+        the 12h default applies — a bad budget must not abort the run."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        default = rx.DEFAULT_E2E_TIMEOUT_S
+        for env, cli, expected in (("14400", "28800", 14400),
+                                   ("28800", "14400", 14400),
+                                   (None, None, default),
+                                   ("not-a-number", "later", default)):
+            with self.subTest(env=env, cli=cli):
+                self._pin_env_timeout(env)
+                argv = ["--timeout-s", cli] if cli else []
+                _rc, stdout = self._run(self._handoff(), *argv, "--dry-run")
+                self.assertEqual(
+                    json.loads(stdout)["mapped_args"]["time_budget_s"], expected)
+
+    def test_final_reserve_is_overridable_from_the_environment(self):
+        """Widening the finalize window must not need a code edit: an operator
+        who measures the final phase taking longer than the 60min default sets
+        GEAK_FINAL_RESERVE_S. Unset => the arg is absent and the JS default wins."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        for env, expected in (("3000", 3000), (None, None)):
+            with self.subTest(env=env):
+                saved = os.environ.pop("GEAK_FINAL_RESERVE_S", None)
+                if saved is not None:
+                    self.addCleanup(
+                        os.environ.__setitem__, "GEAK_FINAL_RESERVE_S", saved)
+                if env is not None:
+                    os.environ["GEAK_FINAL_RESERVE_S"] = env
+                    self.addCleanup(os.environ.pop, "GEAK_FINAL_RESERVE_S", None)
+                _rc, stdout = self._run(self._handoff(), "--dry-run")
+                self.assertEqual(
+                    json.loads(stdout)["mapped_args"].get("final_reserve_s"),
+                    expected)
 
     def test_successful_run_emits_result_and_journey(self):
         report = self.eval_dir / "final_report.md"
@@ -2405,6 +2469,69 @@ class TestMain(_RunE2ECase):
         out = json.loads(self.result_path.read_text())
         self.assertIn("no space left on device", out["kernel_journey_error"])
         self.assertNotIn("kernel_journey_path", out)
+
+
+class TestE2EDenominatorIsPublished(_RunE2ECase):
+    """A journey e2e block must carry the two throughputs its percentage is a
+    ratio of.
+
+    A percentage alone does not compose: two wins measured against different
+    denominators cannot be added. The consumer needs the pair to restate each
+    win in points of one fixed baseline. Both journey builders read the pair
+    off the same A/B that produced the delta, so the three numbers always
+    agree.
+    """
+
+    def _overlay(self, eval_dir, ir):
+        d = eval_dir / "overlay" / "cand_my_kernel_fwd"
+        self.write_json(d / "integrate_result.json", ir)
+        return d
+
+    def test_overlay_path_publishes_the_pair_and_it_reproduces_the_delta(self):
+        eval_dir = self.tmp / "e2e_flat"
+        self._overlay(eval_dir, {"gate": "accepted", "e2e_delta_pct": 25.0,
+                                 "ref_med": 400.0, "cand_med": 500.0})
+        journey = rx.build_kernel_journey({"eval_dir": str(eval_dir)},
+                                          {"eval_dir": str(eval_dir)})
+        e2e = journey["kernels"][0]["e2e"]
+        self.assertEqual(e2e["base_tput"], 400.0)
+        self.assertEqual(e2e["new_tput"], 500.0)
+        self.assertAlmostEqual(
+            (e2e["new_tput"] / e2e["base_tput"] - 1.0) * 100.0,
+            e2e["e2e_gain_pct"], places=6)
+
+    def test_overlay_path_reads_the_pair_from_the_nested_shape_too(self):
+        """The integrator emits either shape; the delta already reads both, and
+        the pair it is a ratio of must not be lost on the nested one."""
+        eval_dir = self.tmp / "e2e_nested"
+        self._overlay(eval_dir, {"gate": "accepted",
+                                 "e2e": {"delta_pct": 25.0,
+                                         "ref_median_tok_s": 400.0,
+                                         "cand_median_tok_s": 500.0}})
+        e2e = rx.build_kernel_journey({"eval_dir": str(eval_dir)},
+                                      {"eval_dir": str(eval_dir)})["kernels"][0]["e2e"]
+        self.assertEqual((e2e["base_tput"], e2e["new_tput"]), (400.0, 500.0))
+
+    def test_return_path_carries_the_pair_from_the_workflow_return(self):
+        eval_dir = self.tmp / "e2e_return"
+        wf = {"eval_dir": str(eval_dir),
+              "accepted_kernels": [{"short_name": "my_kernel_fwd",
+                                    "e2e_delta_pct": 25.0,
+                                    "base_tput": 400.0, "new_tput": 500.0}]}
+        e2e = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})["kernels"][0]["e2e"]
+        self.assertEqual((e2e["base_tput"], e2e["new_tput"]), (400.0, 500.0))
+
+    def test_a_missing_pair_is_null_not_fabricated(self):
+        """An older workflow return has no throughputs. The block must say so
+        rather than invent a denominator the A/B never measured."""
+        eval_dir = self.tmp / "e2e_nopair"
+        wf = {"eval_dir": str(eval_dir),
+              "accepted_kernels": [{"short_name": "my_kernel_fwd",
+                                    "e2e_delta_pct": 25.0}]}
+        e2e = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})["kernels"][0]["e2e"]
+        self.assertIsNone(e2e["base_tput"])
+        self.assertIsNone(e2e["new_tput"])
+        self.assertEqual(e2e["e2e_gain_pct"], 25.0)
 
 
 if __name__ == "__main__":

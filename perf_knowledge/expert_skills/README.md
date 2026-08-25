@@ -38,13 +38,14 @@ kernel, tuned config JSONs, a custom validation manifest — can carry those fil
 
 ## How a skill is selected by the workflows
 
-Each skill's frontmatter has a `match:` block. Expert skills are **opt-in** — the workflows ignore this
-directory entirely unless the run passes `use_expert_skills=true` (default OFF; when OFF the workflow
-behaves byte-identically to a build without this feature). When enabled, the workflow filters
-`index.yaml` by the current bottleneck:
+Each skill's frontmatter has a `match:` block. Expert-skill selection is **opt-in** — the workflows do
+not inject or query this registry unless the run passes `use_expert_skills=true` (default OFF). When
+OFF, the base role prompt remains active, including general `perf_knowledge` guidance that is independent
+of expert-skill selection. When enabled, the workflow filters `index.yaml` by the current bottleneck:
 
 ```
-match.operator == bottleneck.operator
+(match.operator is scalar AND match.operator == bottleneck.operator)
+  OR (match.operator is a list AND bottleneck.operator ∈ match.operator)
 AND gen ∈ match.gens
 AND model_arch_class ∈ match.arch_class   (or match.arch_class contains '*')
 AND (migration skills) from_backend/to_backend fit the live path

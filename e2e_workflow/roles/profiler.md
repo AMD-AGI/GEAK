@@ -100,8 +100,21 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   `<br>` args, `classification`←map from `kernel_category`/`bound_type` (MoE/grouped-GEMM→library_gemm
   or triton per `kernel_kind`; attention→library_attn; etc.), `editable`←`op_to_source_patchable`. Carry
   `source_file`/`kernel_path` into each entry's `notes` (the Architect/Extractor reuse them). Write
-  `profile_topN.json` + `.md` via your own Write (you may shell out to `parse_profile.py` only if you
-  also have a trace; otherwise assemble the JSON yourself) and set `source:"tracelens"`.
+  `profile_topN.json` + `.md` via your own Write and set `source:"tracelens"`.
+  **Then annotate the assembled rows from profiler evidence; never hand-write `entity_kind`:**
+  ```bash
+  TLT=$(ls -1 "$TRACELENS_TRACE_FILE"/*rank0*.pt.trace.json.gz 2>/dev/null | head -1)
+  [ -z "$TLT" ] && TLT=$(ls -1 "$TRACELENS_TRACE_FILE"/*.pt.trace.json.gz \
+    "$TRACELENS_TRACE_FILE"/*.json.gz "$TRACELENS_TRACE_FILE"/*.json 2>/dev/null | head -1)
+  python3 "$EVAL_DIR/parse_profile.py" \
+    --annotate "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json" \
+    --torch-trace "$TLT" \
+    --annotate-out "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json"
+  ```
+  If no trace is available, fall back to the normal collection below instead of guessing a row's
+  entity kind. Annotation expands an outer dispatcher/custom-op row through torch-profiler External-id
+  edges into its concrete device children. Preserve the resulting `device_kernel`, `profile_parent`,
+  and split GPU percentages: rejecting a dispatcher without discovering its children is not success.
 - **If `TRACELENS_TRACE_FILE` is also a non-empty path that EXISTS → run an ADDITIONAL trace-analysis
   pass on top of analysis.md to sharpen the picture** (this is required by contract when the trace is
   present). `TRACELENS_TRACE_FILE` is a `torch_trace` **directory** that holds one steady-state serving

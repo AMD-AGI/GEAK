@@ -1,8 +1,9 @@
 # Fragment: expert_skills (e2e layer) — ADVISORY, injected only when use_expert_skills is ON
 
 > This fragment is appended to a role's prompt by `e2e_workflow.js` **only when `use_expert_skills`
-> is true (opt-in; default OFF)**. When OFF (the default), nothing is injected and behavior is
-> byte-identical to a run without this feature. It is consumed by routing/integration roles (System
+> is true (opt-in; default OFF)**. When OFF, this fragment is not injected; the base role prompt remains active,
+> including general routing and target-backend guidance independent of this registry. It is
+> consumed by routing/integration roles (System
 > Architect, Op Benchmarker, e2e
 > Integrator). It is **advisory**: a matched skill is a high-prior candidate to reproduce, never a
 > mandate, and never overrides your on-box A/B gate.
@@ -18,7 +19,8 @@ the measurement wins (note it so the skill is later marked `stale`).
 
 1. **Read the selector.** Open `EXPERT_SKILLS_DIR/index.yaml`.
 2. **Match against the live bottleneck** you are routing/optimizing. A skill matches when ALL hold:
-   - `match.operator` == the bottleneck operator (same names as `capability_index.yaml`)
+   - `match.operator` is either a scalar equal to the bottleneck operator or a list containing that
+     operator (same names as `capability_index.yaml`)
    - the box `gen` ∈ `match.gens`
    - `env_report.model_arch_class` ∈ `match.arch_class` (or `match.arch_class` contains `'*'`)
    - if the skill is a migration skill (`from_backend`/`to_backend` set), the live path / your author

@@ -241,6 +241,19 @@ class TestShortNameAndNormKey(unittest.TestCase):
 
     def test_truncates_to_60_chars(self):
         self.assertEqual(pp.short_name("k" * 70), "k" * 60)
+        self.assertEqual(pp.SHORT_NAME_LIMIT, 60)
+
+    def test_an_unnamed_namespace_shortens_to_the_kernel_not_its_parameter(self):
+        """ROCm spells the unnamed namespace '(anonymous namespace)', so the symbol opens with '('
+        where the identifier should be. The '[\\w:]+' probe found nothing, the whole signature fell
+        through as the "short" name, and splitting it on '::' handed back the trailing parameter
+        type -- this real symbol used to shorten to 'KdaPackedDecodeParams)'."""
+        self.assertEqual(
+            pp.short_name("void (anonymous namespace)::kda_packed_decode_kernel<8, false>"
+                          "((anonymous namespace)::KdaPackedDecodeParams)"),
+            "kda_packed_decode_kernel")
+        self.assertEqual(pp.norm_key("void (anonymous namespace)::clamp_position_kernel<long>(int)"),
+                         "clamppositionkernel")
 
     def test_non_identifier_name_is_returned_as_is(self):
         self.assertEqual(pp.short_name("<unknown>"), "<unknown>")
@@ -251,6 +264,209 @@ class TestShortNameAndNormKey(unittest.TestCase):
         self.assertEqual(pp.norm_key(GEMM), "gemmkernel")
         self.assertEqual(pp.norm_key("void gemm_kernel<float>(int) [clone .kd]"), "gemmkernel")
         self.assertEqual(pp.norm_key("at::native::Fill_Kernel"), "fillkernel")
+
+
+class TestEntityEvidence(unittest.TestCase):
+    def test_exact_name_host_device_collision_is_unresolved(self):
+        host = {"shared_name": {"calls": 2, "total_us": 5.0,
+                                "cat_counts": {"cpu_op": 2}}}
+        device = {"shared_name": {"calls": 3, "total_us": 7.0,
+                                  "cat_counts": {"kernel": 3}}}
+        merged = pp.merge_entity_evidence(host, device)
+        rows, stats = pp.annotate_rows([{"name": "shared_name"}], merged, "torch-trace")
+        self.assertEqual(rows[0]["entity_kind"], "unresolved")
+        self.assertEqual(rows[0]["entity_evidence"]["basis"],
+                         "exact_name_multiple_entity_kinds")
+        self.assertEqual(stats["unresolved"], 1)
+
+    def test_same_name_device_sources_remain_a_gpu_kernel(self):
+        rocprof = {"kernel_name": {"calls": 2, "total_us": 5.0,
+                                   "src": "rocprof_kernel_stats"}}
+        torch = {"kernel_name": {"calls": 3, "total_us": 7.0,
+                                 "cat_counts": {"kernel": 3}}}
+        merged = pp.merge_entity_evidence(rocprof, torch)
+        rows, _ = pp.annotate_rows([{"name": "kernel_name"}], merged, "merged")
+        self.assertEqual(rows[0]["entity_kind"], "gpu_kernel")
+
+    def test_c9_norm_key_collision_resolves_each_row_by_exact_name(self):
+        # C9 (reviewer's LITERAL scenario): a host dispatcher span 'aten::mul' (cpu_op) and a device
+        # kernel 'mul' (cat="kernel") are DIFFERENT exact names that norm_key() folds to the SAME key
+        # 'mul' (short_name drops the aten:: namespace, then non-alnum is stripped). The old
+        # setdefault(first-collision-wins) fold let whichever was aggregated first stamp its kind onto
+        # the other row. Exact-name resolution must win for BOTH, and a third row that only matches via
+        # the lossy fold must fail closed as ambiguous rather than borrow either neighbor's kind.
+        self.assertEqual(pp.norm_key("aten::mul"), pp.norm_key("mul"))     # the collision premise
+        self.assertEqual(pp.norm_key("aten::Mul"), pp.norm_key("mul"))
+        host = {"aten::mul": {"calls": 2, "total_us": 5.0, "cat_counts": {"cpu_op": 2}}}
+        device = {"mul": {"calls": 3, "total_us": 7.0, "cat_counts": {"kernel": 3}}}
+        merged = pp.merge_entity_evidence(host, device)
+        rows, stats = pp.annotate_rows(
+            [{"name": "mul"}, {"name": "aten::mul"}, {"name": "aten::Mul"}], merged, "torch-trace")
+        by_name = {r["name"]: r for r in rows}
+        # device kernel keeps gpu_kernel — EXACT name wins over the shared fold
+        self.assertEqual(by_name["mul"]["entity_kind"], "gpu_kernel")
+        self.assertEqual(by_name["mul"]["entity_evidence"]["matched_profiled_kernel"], "mul")
+        # host dispatcher keeps dispatcher_op — EXACT name wins (not stamped as a kernel)
+        self.assertEqual(by_name["aten::mul"]["entity_kind"], "dispatcher_op")
+        self.assertEqual(by_name["aten::mul"]["entity_evidence"]["matched_profiled_kernel"],
+                         "aten::mul")
+        # a NON-exact row whose norm_key hits the shared collision is stamped unresolved, refusing to
+        # guess which colliding entity it is — never silently misclassified as either kind.
+        self.assertEqual(by_name["aten::Mul"]["entity_kind"], "unresolved")
+        self.assertEqual(by_name["aten::Mul"]["entity_evidence"]["basis"], "ambiguous_name_match")
+        self.assertNotIn("matched_profiled_kernel", by_name["aten::Mul"]["entity_evidence"])
+        self.assertEqual(stats["gpu_kernel"], 1)
+        self.assertEqual(stats["dispatcher_op"], 1)
+        self.assertEqual(stats["unresolved"], 1)
+
+    def test_a_row_naming_nothing_the_profiler_saw_is_unresolved_not_assumed(self):
+        """The head track routes only gpu_kernel rows. A name the profile never contains has no
+        evidence at all, and defaulting it to "kernel" is exactly how an unverifiable head got in."""
+        rows, stats = pp.annotate_rows(
+            [{"name": "a_kernel_nobody_profiled"}],
+            pp.merge_entity_evidence({"real_kernel": {"calls": 1, "total_us": 5.0,
+                                                      "cat_counts": {"kernel": 1}}}),
+            "torch-trace")
+        self.assertEqual(rows[0]["entity_kind"], "unresolved")
+        self.assertEqual(rows[0]["entity_evidence"]["basis"], "name_not_found_in_profile")
+        self.assertEqual(stats["unresolved"], 1)
+
+    def test_a_decorated_row_name_still_resolves_through_the_normalized_key(self):
+        """Top-N rows arrive with demangled/decorated names ('void ns::k<bf16>(int)'). When the fold
+        is unambiguous that row IS the profiled kernel, and refusing it would drop a real head."""
+        device = {"void ns::gemm_kernel<bf16>(int)": {"calls": 3, "total_us": 9.0,
+                                                      "cat_counts": {"kernel": 3}}}
+        rows, stats = pp.annotate_rows(
+            [{"name": "gemm_kernel"}], pp.merge_entity_evidence(device), "torch-trace")
+        self.assertEqual(rows[0]["entity_kind"], "gpu_kernel")
+        self.assertEqual(rows[0]["entity_evidence"]["matched_profiled_kernel"],
+                         "void ns::gemm_kernel<bf16>(int)")
+        self.assertEqual(stats["gpu_kernel"], 1)
+
+    def test_c9_collision_resolution_is_merge_order_independent(self):
+        # The setdefault bug made the collision winner depend on which aggregate was merged first.
+        # Reversing the merge input order must yield IDENTICAL kinds for every row: neither the
+        # dispatcher nor the kernel may stamp its kind onto the other in EITHER direction.
+        host = {"aten::mul": {"calls": 2, "total_us": 5.0, "cat_counts": {"cpu_op": 2}}}
+        device = {"mul": {"calls": 3, "total_us": 7.0, "cat_counts": {"kernel": 3}}}
+        rowspec = [{"name": "mul"}, {"name": "aten::mul"}, {"name": "aten::Mul"}]
+
+        def kinds(*aggs):
+            merged = pp.merge_entity_evidence(*aggs)
+            rows, _ = pp.annotate_rows([dict(r) for r in rowspec], merged, "torch-trace")
+            return {r["name"]: r["entity_kind"] for r in rows}
+
+        forward = kinds(host, device)
+        reverse = kinds(device, host)   # merge the device kernel FIRST this time
+        self.assertEqual(forward, reverse)
+        self.assertEqual(forward, {"mul": "gpu_kernel", "aten::mul": "dispatcher_op",
+                                   "aten::Mul": "unresolved"})
+
+
+class TestDispatcherExpansion(_TmpMixin, unittest.TestCase):
+    def test_external_id_edges_expand_wrapper_into_device_kernels(self):
+        events = [
+            {"cat": "cpu_op", "name": "vllm::attention",
+             "args": {"External id": 17}},
+            {"cat": "kernel", "name": "kernel_paged_attention_2d",
+             "ts": 10, "dur": 80, "args": {"External id": 17}},
+            {"cat": "kernel", "name": "_fwd_kernel",
+             "ts": 20, "dur": 20, "args": {"External id": 17}},
+        ]
+        edges = pp.index_dispatch_edges(self._trace_file(events))
+        rows, records = pp.expand_dispatcher_rows([{
+            "rank": 1,
+            "name": "vllm::attention",
+            "short_name": "attention (paged + prefill)",
+            "pct_gpu_time": 25.0,
+            "total_ms": 10.0,
+            "calls": 3,
+            "notes": "aggregate",
+        }], edges)
+
+        self.assertEqual([r["short_name"] for r in rows],
+                         ["kernel_paged_attention_2d", "_fwd_kernel"])
+        self.assertEqual([r["pct_gpu_time"] for r in rows], [20.0, 5.0])
+        self.assertTrue(all(r["profile_parent"] == "vllm::attention" for r in rows))
+        self.assertEqual(records[0]["dispatcher"], "vllm::attention")
+
+    def test_nested_launch_external_id_is_attributed_to_outer_dispatcher(self):
+        events = [
+            {"cat": "cpu_op", "name": "vllm::attention", "pid": 1, "tid": 2,
+             "ts": 100, "dur": 100, "args": {"External id": 17}},
+            {"cat": "cpu_op", "name": "triton::launch", "pid": 1, "tid": 2,
+             "ts": 120, "dur": 10, "args": {"External id": 18}},
+            {"cat": "kernel", "name": "kernel_paged_attention_2d",
+             "ts": 250, "dur": 80, "args": {"External id": 18}},
+        ]
+        edges = pp.index_dispatch_edges(self._trace_file(events))
+        self.assertIn("kernel_paged_attention_2d", edges["vllm::attention"])
+        self.assertIn("kernel_paged_attention_2d", edges["triton::launch"])
+
+    def test_unrelated_dispatcher_is_preserved_for_fail_closed_classification(self):
+        original = {"name": "vllm::unknown", "pct_gpu_time": 9.0}
+        rows, records = pp.expand_dispatcher_rows([original], {})
+        self.assertEqual(rows, [original])
+        self.assertEqual(records, [])
+
+    def test_existing_device_row_is_not_duplicated_by_dispatcher_expansion(self):
+        rows, _ = pp.expand_dispatcher_rows([
+            {"name": "vllm::attention", "pct_gpu_time": 20.0, "total_ms": 10.0},
+            {"name": "kernel_paged_attention_2d", "pct_gpu_time": 20.0, "total_ms": 10.0},
+        ], {
+            "vllm::attention": {
+                "kernel_paged_attention_2d": {"calls": 4, "total_us": 100.0},
+            },
+        })
+        self.assertEqual(
+            [row["name"] for row in rows].count("kernel_paged_attention_2d"), 1)
+        self.assertEqual(sum(row["pct_gpu_time"] for row in rows), 20.0)
+
+    def test_a_dispatcher_whose_children_cost_nothing_is_left_alone(self):
+        """Expansion divides the row's Amdahl mass by the children's measured time. With no measured
+        time there is nothing to divide by, and inventing a split would be worse than not expanding."""
+        row = {"name": "vllm::attention", "pct_gpu_time": 20.0, "total_ms": 10.0}
+        rows, records = pp.expand_dispatcher_rows([row], {
+            "vllm::attention": {"kernel_paged_attention_2d": {"calls": 4, "total_us": 0.0}},
+        })
+        self.assertEqual(rows, [row])
+        self.assertEqual(records, [])
+
+    def test_a_trace_that_cannot_be_read_yields_no_edges_rather_than_raising(self):
+        """The trace path is supplied by the caller and may be absent or truncated. parse_profile is
+        the step that TRIAGES a run; it must degrade to "no evidence", never take the run down."""
+        self.assertEqual(pp.index_dispatch_edges(self._trace_file(raw="{not json")), {})
+        self.assertEqual(pp.index_dispatch_edges("/nonexistent/trace.json"), {})
+
+    def test_sibling_spans_do_not_inherit_each_others_kernels(self):
+        """Ancestry is what attributes a kernel to an outer dispatcher. A span that already CLOSED is
+        not an ancestor, so a launch under the second sibling must not be credited to the first."""
+        events = [
+            {"cat": "cpu_op", "name": "outer", "pid": 1, "tid": 2,
+             "ts": 100, "dur": 200, "args": {"External id": 1}},
+            {"cat": "cpu_op", "name": "first_child", "pid": 1, "tid": 2,
+             "ts": 110, "dur": 10, "args": {"External id": 2}},
+            {"cat": "cpu_op", "name": "second_child", "pid": 1, "tid": 2,
+             "ts": 150, "dur": 10, "args": {"External id": 3}},
+            {"cat": "kernel", "name": "second_kernel", "ts": 400, "dur": 5,
+             "args": {"External id": 3}},
+        ]
+        edges = pp.index_dispatch_edges(self._trace_file(events))
+        self.assertIn("second_kernel", edges["second_child"])
+        self.assertIn("second_kernel", edges["outer"])
+        self.assertNotIn("first_child", edges)
+
+    def test_exact_host_device_collision_is_not_expanded(self):
+        row = {"name": "shared", "pct_gpu_time": 20.0}
+        evidence = pp.merge_entity_evidence(
+            {"shared": {"calls": 1, "total_us": 5.0, "cat_counts": {"cpu_op": 1}}},
+            {"shared": {"calls": 1, "total_us": 7.0, "cat_counts": {"kernel": 1}}},
+        )
+        rows, records = pp.expand_dispatcher_rows(
+            [row], {"shared": {"child_kernel": {"calls": 1, "total_us": 7.0}}},
+            evidence, "torch-trace")
+        self.assertEqual(rows, [row])
+        self.assertEqual(records, [])
 
 
 # --------------------------------------------------------------------------- #
@@ -627,7 +843,8 @@ class TestParseRocprofDir(_TmpMixin, unittest.TestCase):
         d = self._rocprof_dir("Name,Calls,TotalDurationNs\nqux_kernel,,\n")
         agg, total_us, launches = pp.parse_rocprof_dir(d)
         self.assertEqual(agg["qux_kernel"], {"calls": 1, "total_us": 0.0,
-                                             "shapes": set(), "dtypes": set()})
+                                             "shapes": set(), "dtypes": set(),
+                                             "src": "rocprof_kernel_stats"})
         self.assertEqual((total_us, launches), (0.0, 1))
 
     def test_repeated_kernel_rows_accumulate(self):
@@ -1059,6 +1276,131 @@ class TestMain(_TmpMixin, unittest.TestCase):
         finally:
             sys.argv = saved
         self.assertIn("# Profile Top-1", out.getvalue())
+
+
+# --------------------------------------------------------------------------- #
+# host-side entity index + the --annotate CLI the architect's head rows go through
+# --------------------------------------------------------------------------- #
+class TestHostEntityIndex(_TmpMixin, unittest.TestCase):
+    """Host spans are deliberately kept OUT of the timing aggregate (a cpu_op's duration subsumes the
+    kernels it dispatched). They are indexed separately so --annotate can say "this claimed head is a
+    dispatcher" instead of the much weaker "not found"."""
+
+    def test_host_spans_are_counted_by_category_and_device_rows_are_not(self):
+        idx = pp.index_host_entities(self._trace_file([
+            {"cat": "cpu_op", "name": "vllm::attention", "dur": 10.0},
+            {"cat": "cpu_op", "name": "vllm::attention", "dur": 5.0},
+            {"cat": "user_annotation", "name": "step", "dur": 100.0},
+            {"cat": "hip_runtime", "name": "hipLaunchKernel", "dur": 1.0},
+            {"cat": "kernel", "name": "gemm_kernel", "dur": 80.0},
+            "not an event",
+        ]))
+        self.assertEqual(idx["vllm::attention"], {
+            "calls": 2, "total_us": 15.0, "cat_counts": {"cpu_op": 2}})
+        self.assertEqual(idx["step"]["cat_counts"], {"user_annotation": 1})
+        self.assertIn("hipLaunchKernel", idx)
+        self.assertNotIn("gemm_kernel", idx)
+
+    def test_an_unreadable_trace_indexes_nothing_rather_than_raising(self):
+        self.assertEqual(pp.index_host_entities("/nonexistent/trace.json"), {})
+        self.assertEqual(pp.index_host_entities(self._trace_file(raw="{not json")), {})
+
+
+class TestAnnotateCli(_TmpMixin, unittest.TestCase):
+    """`--annotate` is how a Top-N doc becomes routable head candidates. It is the step that must
+    refuse a row it cannot prove is a GPU kernel, and its EXIT CODE is what the workflow reads."""
+
+    def _main(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        saved = sys.argv
+        sys.argv = ["parse_profile.py"] + argv
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as caught:
+                    pp.main()
+        finally:
+            sys.argv = saved
+        return caught.exception.code, out.getvalue(), err.getvalue()
+
+    def _doc(self, top_kernels, name="profile_topN.json"):
+        return self._write(name, json.dumps({"top_kernels": top_kernels}))
+
+    def test_a_dispatcher_row_is_replaced_by_the_kernels_it_launched(self):
+        trace = self._trace_file([
+            {"cat": "cpu_op", "name": "vllm::attention", "pid": 1, "tid": 2,
+             "ts": 100, "dur": 100, "args": {"External id": 17}},
+            {"cat": "kernel", "name": "kernel_paged_attention_2d", "pid": 1, "tid": 7,
+             "ts": 110, "dur": 80, "args": {"External id": 17}},
+        ])
+        doc = self._doc([{"name": "vllm::attention", "short_name": "attention",
+                          "pct_gpu_time": 20.0, "total_ms": 10.0, "calls": 2}])
+        out_path = os.path.join(self._dir(), "annotated.json")
+        code, stdout, stderr = self._main(
+            ["--torch-trace", trace, "--annotate", doc, "--annotate-out", out_path])
+
+        self.assertEqual(code, 0)
+        with open(out_path) as fh:
+            annotated = json.load(fh)
+        self.assertEqual(annotated["entity_kind_contract"], "v1")
+        self.assertEqual([r["name"] for r in annotated["top_kernels"]],
+                         ["kernel_paged_attention_2d"])
+        self.assertEqual([r["entity_kind"] for r in annotated["top_kernels"]], ["gpu_kernel"])
+        self.assertEqual(annotated["entity_kind_counts"], {"gpu_kernel": 1})
+        self.assertEqual(annotated["dispatcher_expansions"][0]["dispatcher"], "vllm::attention")
+        self.assertIn("gpu_kernel=1", stderr)
+        self.assertEqual(json.loads(stdout)["annotated"], 1)
+        with open(doc) as fh:                       # --annotate-out leaves the input untouched
+            self.assertNotIn("entity_kind_contract", json.load(fh))
+
+    def test_a_row_that_is_not_a_profiled_kernel_exits_non_zero(self):
+        """The workflow branches on this exit code: a claimed head the profiler never dispatched must
+        stop the head track rather than be routed as if it had been measured."""
+        trace = self._trace_file([
+            {"cat": "kernel", "name": "gemm_kernel", "ts": 10, "dur": 80,
+             "args": {"External id": 1}},
+        ])
+        doc = self._doc([{"name": "gemm_kernel", "pct_gpu_time": 20.0},
+                         {"name": "live_call_seam", "pct_gpu_time": 5.0}])
+        code, stdout, stderr = self._main(["--torch-trace", trace, "--annotate", doc])
+
+        self.assertEqual(code, 1)
+        with open(doc) as fh:                       # no --annotate-out: annotated in place
+            annotated = json.load(fh)
+        kinds = {r["name"]: r["entity_kind"] for r in annotated["top_kernels"]}
+        self.assertEqual(kinds, {"gemm_kernel": "gpu_kernel", "live_call_seam": "unresolved"})
+        self.assertEqual(annotated["entity_kind_counts"], {"gpu_kernel": 1, "unresolved": 1})
+        self.assertIn("unresolved=1", stderr)
+        self.assertEqual(json.loads(stdout)["entity_kind_counts"]["unresolved"], 1)
+
+    def test_a_host_only_row_is_labelled_a_dispatcher_rather_than_reported_missing(self):
+        """A dispatcher that launched nothing this trace can attribute is still IDENTIFIED, which is
+        a successful classification -- the exit code marks rows with no evidence at all. Refusing a
+        dispatcher from the head track is admitHeads' job, and it needs this label to do it."""
+        trace = self._trace_file([
+            {"cat": "cpu_op", "name": "vllm::opaque", "pid": 1, "tid": 2,
+             "ts": 100, "dur": 100},
+            {"cat": "kernel", "name": "gemm_kernel", "ts": 10, "dur": 80},
+        ])
+        doc = self._doc([{"name": "vllm::opaque", "pct_gpu_time": 20.0}])
+        code, _, stderr = self._main(["--torch-trace", trace, "--annotate", doc])
+
+        self.assertEqual(code, 0)
+        with open(doc) as fh:
+            annotated = json.load(fh)
+        self.assertEqual(annotated["top_kernels"][0]["entity_kind"], "dispatcher_op")
+        self.assertEqual(annotated["entity_kind_counts"], {"dispatcher_op": 1})
+        self.assertIn("dispatcher_op=1", stderr)
+
+    def test_annotating_with_rocprof_evidence_needs_no_torch_trace(self):
+        doc = self._doc([{"name": "gemm_kernel", "pct_gpu_time": 20.0}])
+        code, _, _ = self._main(
+            ["--rocprof-dir", self._rocprof_dir(), "--annotate", doc])
+
+        self.assertEqual(code, 0)
+        with open(doc) as fh:
+            annotated = json.load(fh)
+        self.assertEqual(annotated["top_kernels"][0]["entity_kind"], "gpu_kernel")
+        self.assertEqual(annotated["dispatcher_expansions"], [])
 
 
 if __name__ == "__main__":

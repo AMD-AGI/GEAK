@@ -268,6 +268,11 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # budget-unaware (byte-identical to a direct, non-interface invocation).
     if timeout_s is not None and timeout_s > 0:
         ps_args["time_budget_s"] = int(timeout_s)
+    # Final-phase reserve. Default lives in the JS (50min, capped at 20% of the budget);
+    # this lets an operator widen it per run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
+    final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
+    if final_reserve_s is not None:
+        ps_args["final_reserve_s"] = final_reserve_s
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
     # Serving-launch fidelity (see Hyperloom handoff builder / #805): forward the
@@ -3403,6 +3408,12 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
         gpu_pct = gpu_pct_prof
     micro = _ir_get(ir, "isolated_speedup", "micro_speedup", "speedup") if ir else None
     delta = _ir_get(ir, "e2e_delta_pct", "delta_pct") if ir else None
+    # The delta is a ratio; these are the two numbers it is a ratio of, read
+    # off the SAME integrate_result. A consumer holding the pair can restate
+    # the win in points of one fixed baseline. Holding only the percentage it
+    # can do nothing but add figures measured against different denominators.
+    base_tput = _ir_get(ir, "ref_med", "ref_median_tok_s") if ir else None
+    new_tput = _ir_get(ir, "cand_med", "cand_median_tok_s") if ir else None
     winner_kind = str(_ir_get(ir, "winner_kind") or "").lower() if ir else ""
     is_config = winner_kind in ("env", "config", "flags")
     flags = str(_ir_get(ir, "apply_flags") or "") if ir else ""
@@ -3463,6 +3474,8 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
         "kernel_id": kernel_id,
         "integrated": accepted,
         "e2e_gain_pct": delta,
+        "base_tput": base_tput,
+        "new_tput": new_tput,
         "validated": True,                        # an A/B gate ran either way
         "decision": "KEEP" if accepted else "REJECTED",
         "patch_path": patch,
@@ -3507,6 +3520,8 @@ def _journey_return_entry(eval_dir: str, k: dict, idx: int, wf: dict,
         },
         "e2e": {
             "kernel_id": kid, "integrated": True, "e2e_gain_pct": k.get("e2e_delta_pct"),
+            # Same pair as the overlay path, carried through the workflow return.
+            "base_tput": k.get("base_tput"), "new_tput": k.get("new_tput"),
             "validated": True, "decision": "KEEP", "patch_path": patch,
             "target_file": k.get("target_file") or k.get("target_callable"),
             "extra_server_args": str((wf.get("accepted_config") or {}).get("flags") or ""),
@@ -3799,16 +3814,69 @@ def _publish_protected_pgids() -> str:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+DEFAULT_E2E_TIMEOUT_S = 43200  # 12h — used only when NOBODY states a budget
+
+
+def _int_or_none(raw: str | None, what: str) -> int | None:
+    """Positive int, or None (with a note) for junk — never abort on a bad budget."""
+    if not raw:
+        return None
+    try:
+        return int(raw) if int(raw) > 0 else None
+    except ValueError:
+        sys.stderr.write(f"ignoring non-integer {what}: {raw!r}\n")
+        return None
+
+
+def _resolve_timeout_s(argv: list[str]) -> tuple[list[str], set[str], int]:
+    """Split argv into positionals + flags, and resolve the wall-clock budget.
+
+    `--timeout-s N` is the wall-clock kill time. Its VALUE is not a "--" token, so it
+    used to land in an ignored positional and we paced against GEAK_E2E_TIMEOUT_S's 12h
+    default instead (Hyperloom #1202). Flag and env both name a REAL kill, so min() wins;
+    the default applies only when neither is stated.
+    """
+    positional: list[str] = []
+    flags: set[str] = set()
+    stated: dict[str, int] = {}
+    expect_value = False
+    for tok in argv:
+        if expect_value:
+            expect_value = False
+            v = _int_or_none(tok, "--timeout-s value")
+        elif tok == "--timeout-s":
+            expect_value = True
+            continue
+        elif tok.startswith("--timeout-s="):
+            v = _int_or_none(tok.split("=", 1)[1], "--timeout-s value")
+        elif tok.startswith("--"):
+            flags.add(tok)
+            continue
+        else:
+            positional.append(tok)
+            continue
+        if v is not None:
+            stated["--timeout-s"] = v
+    v = _int_or_none(os.environ.get("GEAK_E2E_TIMEOUT_S"), "GEAK_E2E_TIMEOUT_S")
+    if v is not None:
+        stated["GEAK_E2E_TIMEOUT_S"] = v
+    budget = min(stated.values()) if stated else DEFAULT_E2E_TIMEOUT_S
+    sys.stderr.write(
+        f"[budget] wall-clock {budget}s "
+        f"({', '.join(f'{k}={v}' for k, v in stated.items()) or 'nobody stated one; default'})\n"
+    )
+    return positional, flags, budget
+
+
 def main(argv: list[str]) -> int:
-    args = [a for a in argv if not a.startswith("--")]
-    flags = {a for a in argv if a.startswith("--")}
+    args, flags, timeout_s = _resolve_timeout_s(argv)
     if len(args) < 2:
         sys.stderr.write(
-            "usage: run_e2e.py <handoff.json> <result.json> [--dry-run]\n"
+            "usage: run_e2e.py <handoff.json> <result.json> "
+            "[--timeout-s N] [--dry-run]\n"
         )
         return 2
     handoff_path, result_path = Path(args[0]), Path(args[1])
-    timeout_s = int(os.environ.get("GEAK_E2E_TIMEOUT_S", "43200"))  # 12h
 
     h = _read_json(handoff_path)
     if not h:

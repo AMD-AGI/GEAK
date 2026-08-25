@@ -120,7 +120,7 @@ analysis below exactly as before.)
      programming model. (Dir names differ from the ids for the others: triton→`triton_amd`,
      hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`.)
    - **Cross-backend port / migration** (the TASK asks to rewrite the kernel into a DIFFERENT backend —
-     ANY `source→target`, e.g. `ck→flydsl`, `triton→tilelang`, `hip→ck`, `ck→ck_tile`): keep `kk_language`
+     ANY `source→target`, e.g. `ck→flydsl`, `triton→tilelang`, `hip→ck`): keep `kk_language`
      = the CURRENT editable source, but `kk_refs` MUST ALSO include (a) the TARGET backend card
      `operators/<kk_operator>/backends/<target>.md` and (b) the TARGET language's authoring how-to under
      `languages/<dir>/` — map the language id to its dir: triton→`triton_amd`, hip→`hip_cpp`,

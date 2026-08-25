@@ -102,6 +102,7 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 | `use_expert_skills` | `false` | Consult `perf_knowledge/expert_skills` (advisory priors). OFF = byte-identical. |
 | `perf_knowledge_dir` | sibling `perf_knowledge/` | Authoring knowledge base. |
 | `time_budget_s`, `initial_extra_server_args`, `initial_extra_env`, `tracelens`, `agent_timeout_ms` | — | Forwarded from the external orchestrator. |
+| `final_reserve_s` | `3000` (50min), capped at 20% of `time_budget_s` | Hard floor of wall-clock held back for the whole final phase — Finalize + Report + Validate + the `workflow_return.json` write; no mode starts new work inside it, and each optimization agent's hung-guard is tightened so no in-flight step finishes later than `time_budget_s − reserve` (final-phase agents are exempt). Sized off 85 historical runs (p50 40min, p75 50min, p90 77min, max 86min): 50min covers ~p75, and since Report writes both reports before Validate, a longer tail still ships them (only the Validate re-measure is at risk, and `run_e2e.py` falls back). The 20% cap stops the floor from eating a short budget whole; at budgets ≥5h it never binds. Env override: `GEAK_FINAL_RESERVE_S`. |
 
 ### Example
 
@@ -268,7 +269,12 @@ Stable `handoff.json` fields: `model_path`, `framework` (→ `backend`), `tp`, `
 `inferencex_path`, `raw_baseline_tput`, `orchestrator_best_tput_same_config`.
 
 Env knobs: `GEAK_CLAUDE_MODEL` (`claude-opus-4-8`), `GEAK_CLAUDE_EFFORT` (`ultracode`),
-`GEAK_E2E_TIMEOUT_S` (`43200` = 12h), `GEAK_ROOT`, `GEAK_EVAL_DIR`, `INFERENCEX_PATH`.
+`GEAK_E2E_TIMEOUT_S` (`43200` = 12h), `GEAK_FINAL_RESERVE_S`, `GEAK_ROOT`,
+`GEAK_EVAL_DIR`, `INFERENCEX_PATH`.
+
+`--timeout-s <seconds>` states the same wall-clock budget on the command line. When it and
+`GEAK_E2E_TIMEOUT_S` are both given the **smaller** wins (both name a real kill); `43200` applies only
+when neither is. The resolved value is forwarded to the workflow as `time_budget_s`.
 See [External orchestrator contract](./run-e2e-contract.md) for the full contract.
 
 ## Output artifacts
