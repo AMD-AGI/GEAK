@@ -175,13 +175,14 @@ freeze an out-of-regime oracle nobody should trust.
    BACKEND="<backend>" OUT_DIR="$TASK/_capture" GPU="$GPU_ID" MODEL="$MODEL_PATH" \
    ISL=<WORKLOAD.isl> OSL=<WORKLOAD.osl> CONC=<WORKLOAD.conc> REPEATS=0 PROFILE=0 \
    OVERLAY_PYTHONPATH="$TASK/_capture_overlay" \
-   EXTRA_ENV="CAPTURE_TARGET=<selected module:attr> CAPTURE_OUT=$TASK CAPTURE_MAX=5 GEAK_SELECTION_TRACE=$TASK/selection_trace.json" \
+   EXTRA_ENV="CAPTURE_TARGET=<selected module:attr> CAPTURE_OUT=$TASK CAPTURE_MAX=5 GEAK_SELECTION_TRACE=$TASK/selection_trace.json CAPTURE_BYTE_BUDGET=${CAPTURE_BYTE_BUDGET:-8GiB} CAPTURE_CASE_BYTE_LIMIT=${CAPTURE_CASE_BYTE_LIMIT:-2GiB} CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY:-share_large}" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/capture_<short_name>.log"
    python3 "$SKILL_DIR/scripts/kernel_selection.py" \
      --target "<selected module:attr>" --device-kernel "<KERNEL.device_kernel>" \
      --capture-meta "$TASK"/capture.pid-*.rank-*/meta.json \
      --torch-trace "$TASK"/selection_trace.pid-*.rank-*.call-*.json \
      --candidate-target "<candidate module:attr>" \
+     --task-dir "$TASK" \
      --out "$TASK/selection_validation.json"
    ```
    Repeat `--candidate-target` for every relevant candidate. `seam_trace` writes an atomic trace for
@@ -189,8 +190,20 @@ freeze an out-of-regime oracle nobody should trust.
    merges all calls for each PID, isolates External ids between trace files, and requires every capture
    PID to pass. Installation proof is distinct from execution: a marked mutually exclusive branch may
    stay inactive, while a selected outer target fails if a deeper marked candidate launches the same
-   device kernel in any call/rank. Require `deepest_verified:true`, then copy the selected process's
-   `meta.json` and `reference_io.pt` into the task root.
+   device kernel in any call/rank. Require `deepest_verified:true`. On success `kernel_selection.py`
+   **promotes** the selected process's `meta.json` + `reference_io.pt` into the task root and **reclaims**
+   every `capture.pid-*` directory (issue #429 — do NOT leave per-rank oracles around). On failure or
+   before a capture retry, reclaim without promote:
+
+   ```bash
+   python3 "$SKILL_DIR/scripts/capture_shapes.py" --cleanup-task-dir "$TASK" --no-promote
+   ```
+
+   Set `CAPTURE_BYTE_BUDGET` (default `8GiB` per process), `CAPTURE_CASE_BYTE_LIMIT` (default `2GiB`),
+   and `CAPTURE_PERSIST_POLICY=share_large` so large weight kwargs (`w1`/`w2`/…) are stored **once** in
+   the oracle `shared` pool instead of duplicated per case. When exceeded, write `capture_manifest.json`
+   instead of growing `reference_io.pt`. Unittests MUST load via `h.iter_eager_cases_from_oracle` /
+   `h.check_correct_multi_lazy` so multi-GiB MoE oracles are not fully materialized on GPU at once.
 
    🔴 **Capture on the CURRENT stack, not the install.** The oracle you freeze is the truth source the
    candidate is judged against, and the baseline you time against is `baseline_overlay/`. Both must be

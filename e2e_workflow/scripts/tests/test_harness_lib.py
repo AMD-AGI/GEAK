@@ -2741,5 +2741,132 @@ class ServedBucketsTest(unittest.TestCase):
         self.assertNotIn(512, [b for _, b, _ in hl.served_buckets(m)])
 
 
+class TestOracleSharedAndLazy(_HarnessTestCase):
+    """Issue #429: shared weight refs + per-case lazy correctness keep MoE oracles from OOM'ing."""
+
+    def test_resolve_oracle_shared_expands_refs(self):
+        shared = {"w1": {"__tensor__": True, "data": _T((2, 2), fill=3.0)}}
+        obj = {"w1": {"__shared__": "w1"}, "hidden": 1}
+        out = hl.resolve_oracle_shared(obj, shared)
+        self.assertIs(out["w1"], shared["w1"])
+        self.assertEqual(out["hidden"], 1)
+
+    def test_resolve_oracle_shared_missing_key_raises(self):
+        with self.assertRaises(KeyError):
+            hl.resolve_oracle_shared({"w1": {"__shared__": "missing"}}, {})
+
+    def test_reconstruct_captured_tensor_leaf(self):
+        leaf = {"__tensor__": True, "data": _T((2,), fill=1.5)}
+        out = hl.reconstruct_captured(leaf, device="cpu")
+        self.assertTrue(hasattr(out, "shape"))
+        self.assertEqual(tuple(out.shape), (2,))
+
+    def test_check_correct_multi_lazy_runs(self):
+        """Smoke: lazy checker iterates cases and returns per-case rows."""
+        def call(args):
+            return args["ref"]
+
+        cases = [
+            {"args": {"ref": _T((2,), fill=1.0)}, "ref": _T((2,), fill=1.0), "sig": "a"},
+        ]
+        _ok, per = hl.check_correct_multi_lazy(
+            call, iter(cases), {"rtol": 1e-5, "atol": 1e-5}, max_keep_live=1)
+        self.assertEqual(len(per), 1)
+        self.assertIn("correct", per[0])
+        self.assertIn("case", per[0])
+
+    def test_to_device_like_walks_containers(self):
+        leaf = _T((2,), fill=1.0)
+        out = hl.to_device_like({"a": leaf, "b": [leaf]}, "cpu")
+        self.assertIn("a", out)
+        self.assertEqual(len(out["b"]), 1)
+
+    def test_reconstruct_captured_repr_and_containers(self):
+        self.assertEqual(hl.reconstruct_captured({"__repr__": "x"}, "cpu"), "x")
+        nested = hl.reconstruct_captured(
+            {"t": {"__tensor__": True, "data": _T((1,), fill=2.0)},
+             "xs": [{"__tensor__": True, "data": _T((1,), fill=3.0)}]},
+            "cpu")
+        self.assertEqual(tuple(nested["t"].shape), (1,))
+        self.assertEqual(tuple(nested["xs"][0].shape), (1,))
+
+    def test_load_reference_io_supports_legacy_torch_load_signature(self):
+        path = "oracle.pt"
+        calls = []
+
+        def load(p, map_location=None, weights_only=None):
+            calls.append({"weights_only": weights_only})
+            if weights_only is not None:
+                raise TypeError("old torch")
+            return {"records": [], "shared": {}}
+
+        self.torch.load = load
+        blob = hl.load_reference_io(path)
+        self.assertEqual(blob["records"], [])
+        self.assertEqual(calls[0]["weights_only"], False)
+        self.assertIsNone(calls[1]["weights_only"])
+
+        self.torch.load = lambda *a, **k: [1, 2, 3]
+        with self.assertRaises(TypeError):
+            hl.load_reference_io(path)
+
+    def test_iter_eager_cases_from_oracle_resolves_shared_pool(self):
+        shared_w = {"__tensor__": True, "data": _T((2, 2), fill=4.0)}
+        blob = {
+            "shared": {"w1": shared_w},
+            "records": [{
+                "sig": "s0",
+                "regime": "decode",
+                "args": (),
+                "kwargs": {
+                    "w1": {"__shared__": "w1"},
+                    "hidden_states": {"__tensor__": True, "data": _T((2,), fill=1.0)},
+                },
+                "output": {"__tensor__": True, "data": _T((2,), fill=2.0)},
+            }],
+        }
+        self.torch.load = lambda *a, **k: blob
+        cases = hl.eager_cases_from_oracle("ref.pt", device="cpu")
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(cases[0]["sig"], "s0")
+        self.assertEqual(cases[0]["regime"], "decode")
+        self.assertTrue(hasattr(cases[0]["args"]["w1"], "shape"))
+        self.assertEqual(tuple(cases[0]["ref"].shape), (2,))
+
+    def test_iter_eager_cases_merges_positional_moe_names_into_kwargs(self):
+        blob = {
+            "shared": {},
+            "records": [{
+                "sig": "moe",
+                "args": (
+                    {"__tensor__": True, "data": _T((2,), fill=1.0)},
+                    {"__tensor__": True, "data": _T((2,), fill=2.0)},
+                ),
+                "kwargs": {"scale": 1.0},
+                "output": {"__tensor__": True, "data": _T((2,), fill=3.0)},
+            }],
+        }
+        self.torch.load = lambda *a, **k: blob
+        case = next(hl.iter_eager_cases_from_oracle("ref.pt"))
+        self.assertIn("hidden_states", case["args"])
+        self.assertIn("w1", case["args"])
+        self.assertEqual(case["args"]["scale"], 1.0)
+
+    def test_check_correct_multi_lazy_runs_independence_with_two_cases(self):
+        def call(args):
+            # Return the oracle tensor itself so the value check passes; independence is a
+            # separate synthetic row that still exercises the two-case branch.
+            return args["ref"]
+
+        cases = [
+            {"args": {"ref": _T((2,), fill=1.0)}, "ref": _T((2,), fill=1.0), "sig": "a"},
+            {"args": {"ref": _T((2,), fill=2.0)}, "ref": _T((2,), fill=2.0), "sig": "b"},
+        ]
+        _ok, per = hl.check_correct_multi_lazy(
+            call, iter(cases), {"rtol": 1e-5, "atol": 1e-5}, max_keep_live=1)
+        self.assertEqual(per[-1]["case"], "output_independence")
+        self.assertIn("correct", per[-1])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

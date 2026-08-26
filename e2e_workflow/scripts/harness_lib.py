@@ -488,6 +488,100 @@ def to_device_like(ref, dev):
     return ref.to(dev) if hasattr(ref, "to") else ref
 
 
+def reconstruct_captured(obj, device="cpu"):
+    """Inverse of capture_shapes._snapshot (shared refs must already be resolved)."""
+    if isinstance(obj, dict) and obj.get("__tensor__"):
+        t = obj["data"]
+        return t.to(device) if hasattr(t, "to") else t
+    if isinstance(obj, dict) and set(obj.keys()) == {"__repr__"}:
+        return obj["__repr__"]
+    if isinstance(obj, dict):
+        return {k: reconstruct_captured(v, device) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(reconstruct_captured(v, device) for v in obj)
+    return obj
+
+
+def load_reference_io(path, map_location="cpu"):
+    """Load a capture_shapes oracle blob (supports optional ``shared`` weight pool)."""
+    torch = _torch()
+    try:
+        blob = torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        blob = torch.load(path, map_location=map_location)
+    if not isinstance(blob, dict):
+        raise TypeError(f"reference_io.pt must be a dict, got {type(blob)}")
+    return blob
+
+
+def resolve_oracle_shared(obj, shared):
+    """Expand ``{"__shared__": key}`` refs written by capture_shapes share_large/moe_slim."""
+    if isinstance(obj, dict) and set(obj.keys()) == {"__shared__"}:
+        key = obj["__shared__"]
+        if key not in shared:
+            raise KeyError(f"oracle shared ref missing: {key!r}")
+        return shared[key]
+    if isinstance(obj, dict):
+        return {k: resolve_oracle_shared(v, shared) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(resolve_oracle_shared(v, shared) for v in obj)
+    return obj
+
+
+def iter_eager_cases_from_oracle(path, device="cpu"):
+    """Yield ``{args, ref, sig, regime}`` one record at a time (memory-friendly for multi-GiB MoE)."""
+    blob = load_reference_io(path, map_location="cpu")
+    shared = blob.get("shared") or {}
+    for record in blob.get("records") or []:
+        kwargs = resolve_oracle_shared(record.get("kwargs") or {}, shared)
+        args_pos = resolve_oracle_shared(record.get("args") or (), shared)
+        kwargs = reconstruct_captured(kwargs, device=device)
+        args_pos = reconstruct_captured(args_pos, device=device)
+        ref = reconstruct_captured(
+            resolve_oracle_shared(record.get("output"), shared), device=device)
+        args = kwargs if isinstance(kwargs, dict) and kwargs else args_pos
+        if isinstance(args, dict) and isinstance(args_pos, (list, tuple)) and args_pos:
+            names = ["hidden_states", "w1", "w2", "topk_weight", "topk_ids"]
+            for name, value in zip(names, args_pos):
+                args.setdefault(name, value)
+        yield {
+            "args": args,
+            "ref": ref,
+            "sig": record.get("sig", ""),
+            "regime": record.get("regime", ""),
+        }
+
+
+def eager_cases_from_oracle(path, device="cpu"):
+    """Materialize all eager cases; prefer ``iter_eager_cases_from_oracle`` for large oracles."""
+    return list(iter_eager_cases_from_oracle(path, device=device))
+
+
+def check_correct_multi_lazy(call, case_iter, tol, max_keep_live=2):
+    """Like ``check_correct_multi`` but only keeps ``max_keep_live`` outputs resident."""
+    per_case = []
+    all_ok = True
+    live = []
+    first_two_args = []
+    for case in case_iter:
+        out = call(case["args"])
+        ok, err = correct(out, case["ref"], tol)
+        all_ok = all_ok and ok
+        per_case.append({"case": case.get("sig", ""), "correct": ok,
+                         "max_rel_err": round(err, 5) if math.isfinite(err) else None})
+        if len(first_two_args) < 2:
+            first_two_args.append(case["args"])
+        live.append(out)
+        if len(live) > max(1, int(max_keep_live)):
+            live.pop(0)
+    if len(first_two_args) >= 2:
+        ok, reason = assert_independent_outputs(call, first_two_args[0], first_two_args[1])
+        all_ok = all_ok and ok
+        per_case.append({"case": "output_independence", "correct": ok,
+                         "max_rel_err": None, "note": reason})
+    return all_ok, per_case
+
+
 def correct(out, ref, tol):
     """Per-element mixed-tolerance check `|out-ref| <= atol + tol*|ref|`, returns (ok, max_rel_err).
 
