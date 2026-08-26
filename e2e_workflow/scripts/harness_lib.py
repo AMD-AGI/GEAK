@@ -800,6 +800,20 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
         for r in members:
             r["calls"] = total_calls if (dom is not None and r is dom) else 1
 
+    # Wall-clock throughput basis: a DECODE kernel is on every generated token's critical path
+    # (calls == OSL), but a prefill / one-time bucket is paid ONCE per request and amortized over
+    # the OSL tokens it precedes -> weight it baseline_ms*calls/OSL. Prevents a large one-time
+    # prefill GPU cost from diluting the decode-governed serving throughput (which collapses the
+    # downstream Amdahl ceiling and false-kills real decode wins). Self-adjusting via OSL; falls
+    # back to raw GPU-time weighting when no decode OSL is known.
+    _osl = calls_model.get("decode")
+    try:
+        _osl = float(_osl)
+    except (TypeError, ValueError):
+        _osl = None
+    if not _osl or _osl <= 0:
+        _osl = None
+
     suspect, included = [], []
     for r in rows:
         b, o, spd = r["baseline_ms"], r["optimized_ms"], r["speedup"]
@@ -807,6 +821,8 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
                        and abs(b - o) <= identity_eps * max(abs(b), 1e-12))
         r["identity"] = bool(is_identity)
         r["weight"] = (b or 0.0) * r.get("calls", 1)
+        if _osl is not None and r["regime"] and r["regime"] != "decode":
+            r["weight"] = r["weight"] / _osl   # amortize one-time prefill/TTFT over OSL tokens
         if is_identity:
             suspect.append(r["sig"]); r["included"] = False
         elif spd and spd > 0 and r["weight"] > 0:
