@@ -828,6 +828,36 @@ class TestCaptureStorageReclaim(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.dirname(meta_path)))
             self.assertFalse(os.path.isfile(os.path.join(root, "reference_io.pt")))
 
+    def test_reclaim_exception_is_recorded_without_failing_selection(self):
+        with tempfile.TemporaryDirectory() as root:
+            meta_a, trace_a = self._write_capture(root, 111, b"OK")
+            out_path = os.path.join(root, "selection.json")
+            real = ks.sys.modules.get("capture_shapes")
+            # Force promote_and_reclaim to raise while keeping import successful.
+            import capture_shapes as _cs
+            previous = _cs.promote_and_reclaim
+
+            def boom(*_a, **_k):
+                raise RuntimeError("reclaim exploded")
+
+            _cs.promote_and_reclaim = boom
+            try:
+                rc = ks.main([
+                    "--target", TARGET,
+                    "--device-kernel", KERNEL,
+                    "--capture-meta", meta_a,
+                    "--torch-trace", trace_a,
+                    "--task-dir", root,
+                    "--out", out_path,
+                ])
+            finally:
+                _cs.promote_and_reclaim = previous
+            self.assertEqual(rc, 0)
+            with open(out_path) as fh:
+                verdict = json.load(fh)
+            self.assertTrue(verdict["ok"])
+            self.assertIn("reclaim exploded", verdict["capture_storage"]["errors"][0])
+
 
 if __name__ == "__main__":
     unittest.main()
