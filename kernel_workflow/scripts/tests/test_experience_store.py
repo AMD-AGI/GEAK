@@ -1098,3 +1098,117 @@ def test_attest_remote_on_an_unknown_session_reports_rather_than_raises(tmp_path
               "--kernel-name", "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950",
               "--apply")
     assert out["attested"] is False and all(p["found"] is False for p in out["pages"])
+
+
+# --------------------------------------------------------------------------- the tuning carrier
+# A tuning win is a config table plus the env var that binds it, deployed into an installed package —
+# there is no diff, so the store's `empty_diff` gate used to reject it and the knowledge was lost with
+# the run. `carrier: tuned_artifact` is how it is filed instead. What is pinned here is the SEPARATION:
+# the two carriers share one ranking and one page, and a reader is only ever served the one it asked
+# for, because being offered a candidate you cannot install is worse than being offered nothing.
+def tuned_files(tmp_path, name="E=8,N=1024,device_name=AMD Instinct MI355X.json", body='{"1":{}}'):
+    d = tmp_path / "tuned"
+    d.mkdir(exist_ok=True)
+    (d / name).write_text(body)
+    return str(d / name)
+
+
+def write_tuned(root, artifact, *, kernel="fused_moe_kernel", speedup=1.21, **kw):
+    return run("write", "--root", root, "--kernel-name", kernel, "--language", "triton",
+               "--gfx", "gfx950", "--kernel-class", "tuning", "--speedup", speedup,
+               "--carrier", "tuned_artifact", "--artifact", artifact,
+               *[x for k, v in kw.items() for x in ("--" + k.replace("_", "-"), v)])
+
+
+def test_a_tuning_win_with_no_diff_is_stored_not_rejected(tmp_path):
+    """The whole point: before carriers this returned empty_diff and the tuned table was lost."""
+    out = write_tuned(str(tmp_path / "kb"), tuned_files(tmp_path))
+    assert out["written"] is True and out["carrier"] == "tuned_artifact"
+    assert os.path.isdir(os.path.join(out["dir"], "artifact"))
+
+
+def test_the_installed_name_survives_sanitization(tmp_path):
+    """The stored name must satisfy the remote plane's path validator, but the RUNTIME finds a tuned
+    table only under its exact shape-derived name. Losing it does not error — the table is silently
+    ignored and the recall reads as a tuning loss, which is the expensive way to find this bug."""
+    out = write_tuned(str(tmp_path / "kb"), tuned_files(tmp_path))
+    stored = out["artifacts"][0]
+    assert "=" not in stored and " " not in stored          # safe_rel_path would have raised
+    meta = yaml.safe_load(open(os.path.join(out["dir"], "meta.yaml")))
+    assert meta["artifact_names"][stored] == "E=8,N=1024,device_name=AMD Instinct MI355X.json"
+
+
+def test_a_directory_of_tables_is_expanded(tmp_path):
+    """A tuner hands back one file or the dir it filled, and which one is not the caller's problem."""
+    art = tuned_files(tmp_path)
+    (tmp_path / "tuned" / "second.json").write_text('{"2":{}}')
+    out = write_tuned(str(tmp_path / "kb"), os.path.dirname(art))
+    assert len(out["artifacts"]) == 2
+
+
+def test_an_empty_artifact_set_is_refused(tmp_path):
+    """Symmetric with empty_diff: an entry with nothing installable in it is not knowledge."""
+    out = write_tuned(str(tmp_path / "kb"), str(tmp_path / "does_not_exist.json"))
+    assert out["written"] is False and out["reason"] == "no_artifact"
+
+
+def test_re_tuning_the_same_tables_is_a_reproduction(tmp_path):
+    """Content addressing has to work off the artifact bytes, the way it works off patch text —
+    otherwise every run of a deterministic tuner mints a new entry and the page fills with itself."""
+    root, art = str(tmp_path / "kb"), tuned_files(tmp_path)
+    first = write_tuned(root, art)
+    again = write_tuned(root, art, speedup=1.25)
+    assert again["written"] is False and again["reason"] == "duplicate_impl"
+    assert again["reproductions"] == 2 and again["reproduced"] == first["exp_id"]
+    assert again["lifecycle"] == "active"      # an independent second measurement promotes it
+
+
+def test_a_reader_is_served_one_carrier_and_it_defaults_to_patch(tmp_path):
+    """Both carriers on ONE page, and the kernel lane — which passes no --carrier at all — must not
+    see the tuned entry, because `git apply` does nothing with a config table."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_aaaaaa", speedup=1.5)      # a normal patch entry
+    write_tuned(root, tuned_files(tmp_path))
+    default = resolve(root, refs)
+    assert [c["carrier"] for c in default["candidates"]] == ["patch"]
+    assert default["filtered"]["other_carriers"] == 1
+
+    tuned = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950",
+                    "--carrier", "tuned_artifact")
+    assert [c["carrier"] for c in tuned["candidates"]] == ["tuned_artifact"]
+
+
+def test_the_tuned_candidate_carries_what_installing_it_needs(tmp_path):
+    """A path alone is not enough: the table is inert without its env var, and stale without the
+    cache invalidation. The candidate has to hand over all three or the recall cannot succeed."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_tuned(root, tuned_files(tmp_path), apply_env="SGLANG_MOE_CONFIG_DIR=/x/tuned",
+                cache_invalidation="rm -rf ~/.triton/cache", tuner="benchmark_moe.py")
+    c = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950",
+                "--carrier", "tuned_artifact")["candidates"][0]
+    assert c["apply_env"] == "SGLANG_MOE_CONFIG_DIR=/x/tuned"
+    assert c["cache_invalidation"] == "rm -rf ~/.triton/cache"
+    assert c["artifact_paths"] and all(os.path.isfile(p) for p in c["artifact_paths"])
+
+
+def test_a_page_with_only_the_other_carrier_says_so(tmp_path):
+    """read_reason has to distinguish "nothing here" from "nothing here FOR YOU" — a caller that
+    cannot tell them apart will record a cold start where there is knowledge it could not use."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_tuned(root, tuned_files(tmp_path))
+    out = resolve(root, refs)
+    assert out["read_reason"] == "no_such_carrier" and out["other_carriers"] == 1
+
+
+def test_the_tuned_entry_reaches_the_remote_plane_installable(tmp_path):
+    """The kernel lane's export skipped anything without a patch.diff, which is every tuned entry.
+    Round-trip it: the bytes must materialize AND the reader must learn what to name them."""
+    root = str(tmp_path / "kb")
+    write_tuned(root, tuned_files(tmp_path), apply_env="SGLANG_MOE_CONFIG_DIR=/x/tuned")
+    store, _ = _seeded(tmp_path, root)
+    c = resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel", "triton", "gfx950",
+                       "--carrier", "tuned_artifact", "--min-speedup", "1.0")["candidates"][0]
+    assert c["carrier"] == "tuned_artifact" and c["apply_env"] == "SGLANG_MOE_CONFIG_DIR=/x/tuned"
+    assert c["artifact_paths"] and all(os.path.isfile(p) for p in c["artifact_paths"])
+    assert [c["artifact_names"][os.path.basename(p)] for p in c["artifact_paths"]] == \
+        ["E=8,N=1024,device_name=AMD Instinct MI355X.json"]

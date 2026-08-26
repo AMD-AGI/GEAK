@@ -160,6 +160,26 @@ ok(/profiler', 'reprofile'[\s\S]{0,400}ROUND: 'tuning'/.test(src),
 ok(/engagement_verified === true/.test(src),
   'an accept is refused unless engagement was PROVEN (the skillset\'s central claim, enforced in code)');
 
+// The knowledge a tuning run produces outlives the run. Reviewer comment #2 asked for one KB rather
+// than two, and this is the half that could not simply be pointed at the e2e store: that store is keyed
+// on the whole deployment and gated on the run's FINAL throughput, so a proven tuned table in a run that
+// ended flat was discarded with it. Filing per op in the kernel store — which ranks on isolated speedup,
+// the number a tuned op actually has — is what makes the tuning phase a producer instead of a dead end.
+ok(/experience_store\.py/.test(src),
+  "accepted tuning is written into the kernel lane's experience store");
+ok(/--carrier tuned_artifact/.test(src),
+  'it is filed under the tuned_artifact carrier (a tuned table is data, and no diff can express it)');
+ok(/Number\(o\.isolated_speedup\) > 1\.0 && o\.engaged === true/.test(src),
+  'per-op gate: only ops that beat 1.0x AND were proven engaged are filed');
+// The whole point of writing here rather than there: the run's own e2e verdict must not gate it.
+const wb = src.slice(src.indexOf('const kernelKbOps'), src.indexOf('const kernelKbOps') + 3000);
+ok(!/win_gate|throughput_speedup|kbNoWinVerdict/.test(wb),
+  "the tuned-op write does NOT consult the run's e2e verdict (that coupling is what it exists to break)");
+ok(/kernel-kb\] tuned-op write failed \(NON-FATAL/.test(src),
+  'a failed KB write loses a record, never a measurement — it cannot fail the run');
+ok(/TUNED_KB_ROOT: KB_ARTIFACTS_DIR/.test(src) && /TUNING_KB_ENABLED && KB_DIMS && KB_DIMS\.gfx \?/.test(src),
+  'the same store is handed BACK to the role to read, under the same blind-eval switch');
+
 // ---------------------------------------------------------------------------
 // C. OFF is additive-free.
 // ---------------------------------------------------------------------------

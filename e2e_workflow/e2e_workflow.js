@@ -2502,6 +2502,19 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       // warmStartBlock() is: blind eval has to stay blind through BOTH channels or through neither.
       ...(TUNING_KB_ENABLED ? KB_REF_INPUTS : {}),
       ...(TUNING_KB_ENABLED && KB_CACHE_DIR ? { KB_CACHE_DIR } : {}),
+      // The other half of the write below: the kernel store is where THIS phase files its tuned
+      // tables, keyed per (op, backend, gfx), so it is also where a later run finds them — and it
+      // finds them there even when the run that produced them ended below its own e2e baseline and
+      // wrote no deployment-level record at all. Handing over the root and the arch rather than a
+      // pre-computed candidate list is deliberate: the role knows which ops it is about to work on
+      // (that is the judgement the phase exists for) and can ask per op, which no read done up here
+      // before the profile is consulted could do. Same TUNING_KB_ENABLED switch as everything else,
+      // so blind evaluation stays blind through every channel.
+      ...(TUNING_KB_ENABLED && KB_DIMS && KB_DIMS.gfx ? {
+        TUNED_KB_ROOT: KB_ARTIFACTS_DIR,
+        TUNED_KB_GFX: KB_DIMS.gfx,
+        TUNED_KB_SCRIPT: KERNEL_WF_DIR + '/scripts/experience_store.py',
+      } : {}),
     }),
     { phase: 'TuningSkillset', label: 'tuning_specialist:tune', schema: TUNING_SCHEMA });
 
@@ -2581,6 +2594,79 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       log(`Banked ${tunedOps.length} tuned op(s) as accepted kernels (kind=env) so the KB record ` +
         `carries the lever: ${tunedOps.map((o) => o.op || o.short_name).join(', ')}` +
         `${recalled ? ` (${recalled} recalled from the KB rather than searched)` : ''}.`);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Write each tuned op into the KERNEL lane's experience store, one entry per op.
+    //
+    // This is not a duplicate of the e2e KB write at the end of the run, and it exists because that
+    // write cannot carry this result. The e2e record is keyed on the whole deployment and gated on
+    // the run's FINAL throughput_speedup: a tuning win of a few percent that a later phase erases,
+    // or a run that ends below its own baseline for reasons that have nothing to do with tuning,
+    // takes the tuned table down with it — the search happened, it was proven engaged, and the next
+    // run at the same identity searches it again from scratch. The kernel store has no such
+    // coupling. It ranks on ISOLATED per-op speedup, which is exactly what a tuned op has, and it is
+    // addressed per (kernel, language, gfx), which is exactly the granularity at which a tuned table
+    // is reusable. So the durable home for this knowledge is here, and this write is deliberately
+    // independent of the run's e2e outcome.
+    //
+    // Gated on tuneOk, so nothing unproven is filed. Per-op: `isolated_speedup > 1.0` and `engaged`,
+    // because an op the phase could not prove live is not knowledge about that op regardless of what
+    // the phase-level A/B measured. Best-effort throughout — a failure here loses a record, never a
+    // measurement, and must not touch the run.
+    const kernelKbOps = KB_DIMS && KB_DIMS.gfx ? tunedOps.filter((o) =>
+      Number(o.isolated_speedup) > 1.0 && o.engaged === true && String(o.artifact || '').trim()) : [];
+    if (kernelKbOps.length) {
+      const storeScript = KERNEL_WF_DIR + '/scripts/experience_store.py';
+      // `both` mirrors to the shared service; without a store dir there is nothing to mirror INTO,
+      // so it degrades to the plain directory write rather than erroring. Same selection the kernel
+      // lane makes at its own write site.
+      const remoteOn = E2E_KB_PLANE !== 'local' && !!E2E_KB_STORE_DIR;
+      const cmds = kernelKbOps.map((o) => {
+        const op = String(o.op || o.short_name).trim();
+        return `python3 ${shq(storeScript)} ${remoteOn
+            ? `write-remote --plane both --store ${shq(E2E_KB_STORE_DIR)}`
+            : 'write'} \\
+  --root ${shq(KB_ARTIFACTS_DIR)} --kernel-name ${shq(op)} \\
+  --language ${shq(String(o.backend || 'tuned').trim())} --gfx ${shq(KB_DIMS.gfx)} \\
+  --kernel-class tuning --speedup ${Number(o.isolated_speedup)} \\
+  --carrier tuned_artifact --artifact ${shq(String(o.artifact).trim())} \\
+  --tuner ${shq(String(o.tuner || '').trim())} --apply-env ${shq(tuning.apply_env || '')} \\
+  --cache-invalidation ${shq((tuning.cache_invalidation || []).join(' && '))} \\
+  --metric-kind tuning_isolated --case-names ${shq(String(o.shapes || '').replace(/,/g, ';'))} \\
+  --direction ${shq('tuning-' + (String(o.backend || 'op').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-')))} \\
+  --eval-dir ${shq(EVAL_DIR)}${tuning.report_path ? ` --report ${shq(tuning.report_path)}` : ''}`;
+      });
+      try {
+        const kw = await safeAgent(
+          `You are the tuning experience writer. Run EACH of the commands below EXACTLY as written, ` +
+          `in order. Each applies its own gates and prints one line of JSON; collect those lines in ` +
+          `order into \`results\`. Do NOT edit a command, do NOT add or drop flags, and do NOT retry ` +
+          `one that fails` + (remoteOn
+            ? ` — these may reach the shared KB Store service, and every write it accepts is ` +
+              `PERMANENT (it exposes no delete), so a retry creates a second permanent record ` +
+              `instead of fixing the first`
+            : '') + `. For a command that errors, put ` +
+          `{"written": false, "reason": "io_error"} in its place so the list stays aligned with the ` +
+          `command order.\n` +
+          '```bash\n' + (remoteOn ? KB_ENV_PRELUDE + '\n' : '') + cmds.join('\n\n') + '\n```',
+          { phase: 'TuningSkillset', label: 'kernel-kb:write-tuned',
+            schema: obj({ results: arrObj }, ['results']) },
+          1);
+        const rows = (kw && kw.results) || [];
+        const wrote = rows.filter((r) => r && r.written).length;
+        const dup = rows.filter((r) => r && !r.written && /duplicate/.test(String(r.reason || ''))).length;
+        log(`[kernel-kb] tuned ops filed as isolated wins: ${wrote}/${kernelKbOps.length} written` +
+          `${dup ? `, ${dup} already known (counted as reproductions)` : ''}` +
+          `${rows.filter((r) => r && !r.written && !/duplicate/.test(String(r.reason || '')))
+            .map((r) => ` [${r.reason}]`).join('')}. These survive the run's own e2e verdict.`);
+      } catch (e) {
+        log(`[kernel-kb] tuned-op write failed (NON-FATAL — the tuning result itself is unaffected): ` +
+          `${String(e).slice(0, 200)}`);
+      }
+    } else if (tunedOps.length && (!KB_DIMS || !KB_DIMS.gfx)) {
+      log(`[kernel-kb] tuned ops NOT filed: no gfx established, and an arch-less entry is ` +
+        `unattributable (a tuned table is valid for exactly one arch).`);
     }
 
     // Tuning changed which kernels dominate — re-profile + re-strategize so the head track works the
