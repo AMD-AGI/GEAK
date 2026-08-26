@@ -635,6 +635,92 @@ def test_result_source_director_validation(tmp_path):
     assert out["result_source"] == "disk_director_validation"
 
 
+# ── adopted serving-config recovery (config/sweep_results.json) ──────────────
+# A run that crashed AFTER the sweep adopted a warm-start / ck_tune config used to
+# be recovered from baseline/ only, silently discarding the validated config gain
+# (the Qwen3-14B +65.35% case: 5214.3 tok/s adopted -> reported 3153.5, 1.0x).
+
+def _write_sweep(eval_dir: Path, *, baseline_tput: float, best_tput: float,
+                 speedup: float, flags: str = "--max-model-len 6144",
+                 env: str = "VLLM_ROCM_USE_AITER=1",
+                 base_flags: str = "--max-model-len 6144", base_env: str = "") -> None:
+    (eval_dir / "config").mkdir(parents=True, exist_ok=True)
+    (eval_dir / "config" / "sweep_results.json").write_text(json.dumps({
+        "phase": "sweep", "backend": "vllm", "noise_band_pct": 0.5,
+        "baseline": {"throughput_tok_s_median": baseline_tput,
+                     "flags": base_flags, "env": base_env},
+        "accepted_flags": flags, "accepted_env": env,
+        "best_throughput_tok_s": best_tput,
+        "throughput_speedup_vs_baseline": speedup,
+    }), encoding="utf-8")
+
+
+def test_recover_config_only_win_from_sweep(tmp_path):
+    """No accepted kernel, but the sweep adopted a config that beats baseline: the
+    adopted config is the final floor, NOT the default baseline (speedup > 1)."""
+    eval_dir = _make_no_gain_eval_dir(tmp_path)  # baseline + a REJECTED kernel only
+    _write_sweep(eval_dir, baseline_tput=3153.524, best_tput=5214.345, speedup=1.6535)
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    assert wf["recovered_config_only"] is True
+    assert wf["recovered_intermediate"] is True
+    assert not wf.get("recovered_no_gain")
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(3153.524)
+    assert wf["final_throughput_tok_s"] == pytest.approx(5214.345)
+    assert wf["throughput_speedup"] == pytest.approx(1.6535)
+    assert "VLLM_ROCM_USE_AITER=1" in wf["accepted_config"]["env"]
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "ok", "an adopted config gain must never read as no_gain"
+    assert out["result_source"] == "disk_intermediate_win"
+
+
+def test_recover_no_gain_when_sweep_kept_nothing(tmp_path):
+    """A sweep that kept the baseline config (no change / no gain) stays no_gain —
+    the config tier must not manufacture a win."""
+    eval_dir = _make_no_gain_eval_dir(tmp_path)
+    _write_sweep(eval_dir, baseline_tput=604.8, best_tput=604.8, speedup=1.0,
+                 flags="--trust-remote-code --kv-cache-dtype fp8_e4m3", env="",
+                 base_flags="--trust-remote-code --kv-cache-dtype fp8_e4m3", base_env="")
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    assert wf.get("recovered_no_gain") is True
+    assert not wf.get("recovered_config_only")
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "no_gain"
+    assert out["result_source"] == "disk_no_gain_synthesis"
+
+
+def test_intermediate_win_restacks_over_default_baseline(tmp_path):
+    """A kernel win whose ref leg ran ON the adopted config must credit the FULL
+    stack (config ⊕ kernel) vs the default baseline, and carry the config's
+    flags/env forward for a reproducible relaunch."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)  # ref_med 461.314, cand 535.352
+    # Adopted config: default 400 -> config-applied ~461.3 (== the kernel ref leg).
+    _write_sweep(eval_dir, baseline_tput=400.0, best_tput=461.314, speedup=1.1533,
+                 flags="--max-model-len 6144", env="VLLM_ROCM_USE_AITER=1")
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf["config_restacked_over_default"] is True
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(400.0)
+    assert wf["final_throughput_tok_s"] == pytest.approx(535.352)
+    assert wf["throughput_speedup"] == pytest.approx(535.352 / 400.0)  # full stack
+    assert "VLLM_ROCM_USE_AITER=1" in wf["accepted_config"]["env"]
+    assert "--max-model-len 6144" in wf["accepted_config"]["flags"]
+
+
+def test_intermediate_win_no_restack_when_ref_below_config(tmp_path):
+    """If the kernel A/B ran against the RAW baseline (ref leg well below the
+    config-applied throughput), do NOT re-base — that would double-count. The
+    config is still carried in accepted_config as a reproducible lead."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)  # ref_med 461.314
+    # Config-applied best (900) is far above the kernel's ref leg (461.3) => the
+    # kernel was NOT measured on the config; re-basing would fabricate a gain.
+    _write_sweep(eval_dir, baseline_tput=800.0, best_tput=900.0, speedup=1.125,
+                 flags="--max-model-len 6144", env="VLLM_ROCM_USE_AITER=1")
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert not wf.get("config_restacked_over_default")
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(461.314)  # unchanged
+    assert wf["throughput_speedup"] == pytest.approx(535.352 / 461.314)
+    assert "VLLM_ROCM_USE_AITER=1" in wf["accepted_config"]["env"]
+
+
 def test_result_source_live_workflow_return(tmp_path):
     """A live (scraped) workflow return — no recovery flags — is the canonical
     source and stamps result_source=workflow_return."""
@@ -968,6 +1054,319 @@ def test_journey_rejected_overlay_is_reverted(tmp_path):
     k = j["kernels"][0]
     assert k["e2e"]["integrated"] is False and k["e2e"]["decision"] == "REJECTED"
     assert k["backend_result"]["attempts"][0]["decision"] == "REVERT"
+
+
+# ── the final report is a guaranteed interface file ─────────────────────────
+#
+# Hyperloom #1202: the 20260823 Qwen3.5-27B / gpt-oss-120b / DeepSeek-V4-Pro
+# sessions were all killed before the Report phase. Nobody got a report, and
+# result.json still advertised report_path=<eval_dir>/final_report.md — a file
+# that was never written. Two separate contracts: never lie about a path, and
+# always leave a readable report behind.
+
+def test_report_path_is_empty_when_no_report_exists(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    assert out["report_path"] == "", "a path that does not exist must not be advertised"
+
+
+def test_report_path_points_at_a_real_report_when_one_exists(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    (eval_dir / "final_report.md").write_text("# real report\n", encoding="utf-8")
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    assert out["report_path"] == str(eval_dir / "final_report.md")
+
+
+def test_final_launch_script_is_empty_when_finalize_never_ran(tmp_path):
+    """Same rule for the launch script: eval_dir/final/ only exists once the
+    Finalize phase has run. A killed run must not hand back an unopenable path."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    assert out["final_launch_script"] == ""
+    (eval_dir / "final").mkdir()
+    (eval_dir / "final" / "final_launch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    assert out["final_launch_script"] == str(eval_dir / "final" / "final_launch.sh")
+
+
+def test_a_killed_run_still_gets_a_synthesized_report(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    # The shape a timeout actually leaves behind: a real accepted head whose
+    # numbers had to be reconciled off disk because Validate never ran.
+    wf = {
+        "eval_dir": str(eval_dir),
+        "baseline_throughput_tok_s": 255.049,
+        "final_throughput_tok_s": 0, "throughput_speedup": 0,
+        "accepted_heads": [{"short_name": "fused_moe_kernel_gptq_awq",
+                            "op_kind": "gemm", "backend": "triton", "kind": "env",
+                            "e2e_delta_pct": 16.049, "isolated": 1.5902}],
+        "accepted_kernels": [],
+    }
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    path = Path(rx._write_final_report_fallback(eval_dir, out, wf))
+    assert path.is_file() and path.name == "final_report.md"
+    text = path.read_text(encoding="utf-8")
+    # The banner is the whole point: nobody may mistake this for the architect's
+    # report, or an unvalidated number gets promoted off it.
+    assert "SYNTHESIZED" in text
+    assert "no independent Director re-measurement" in text
+    # It must actually carry the recovered numbers, not just apologize.
+    assert "535.35" in text and "disk_intermediate_win" in text
+    assert "fused_moe_kernel_gptq_awq" in text
+
+
+def test_the_synthesized_report_never_overwrites_a_real_one(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    (eval_dir / "final_report.md").write_text("# architect report\n", encoding="utf-8")
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    path = Path(rx._write_final_report_fallback(eval_dir, out, {}))
+    assert path.read_text(encoding="utf-8") == "# architect report\n"
+
+
+def test_the_synthesized_report_surfaces_deferred_ab_work(tmp_path):
+    """A/Bs the Finalize-gate dropped at the reserve boundary are deferred, not
+    rejected — the report has to say so or they read as failures."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    wf = {"pending_integrations": [
+        {"short_name": "_fwd_kernel", "isolated": 2.4, "pct_gpu_time": 31.0}]}
+    text = Path(rx._write_final_report_fallback(eval_dir, out, wf)).read_text(encoding="utf-8")
+    assert "_fwd_kernel" in text and "Deferred" in text
+
+
+def test_a_no_gain_run_reports_as_a_no_gain(tmp_path):
+    eval_dir = _make_no_gain_eval_dir(tmp_path)
+    out = rx.normalize_result(_handoff(eval_dir), {"eval_dir": str(eval_dir)})
+    text = Path(rx._write_final_report_fallback(eval_dir, out, {})).read_text(encoding="utf-8")
+    assert "do-no-harm no-gain" in text
+
+
+# ── KB write-back on salvage ────────────────────────────────────────────────
+# A run that finishes records itself. This path exists only for the ones that died before doing
+# so, and it is the reason a crashed run is still worth something to the next one. Two things are
+# pinned: the ADDRESS it writes to, because a record filed under the wrong dims is invisible to
+# every reader of this deployment, and that no failure here can propagate — the interface files
+# are already on disk by the time this runs, so a missed record must never become a failed run.
+
+
+class _Proc:
+    """Stands in for a CompletedProcess without spawning one."""
+
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+
+def _kb_identity(**over) -> dict:
+    ident = {"dims": {"model": "M", "gfx": "gfx950", "framework": "vllm", "tp": 8},
+             "plane": "remote", "store": ""}
+    ident.update(over)
+    return ident
+
+
+def _kb_eval_dir(tmp_path: Path, *, identity=_kb_identity(), workflow_return=True) -> Path:
+    eval_dir = tmp_path / "e2e_kb"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    if identity is not None:
+        (eval_dir / rx.KB_IDENTITY_FILE).write_text(json.dumps(identity), encoding="utf-8")
+    if workflow_return:
+        (eval_dir / rx.WORKFLOW_RETURN_FILE).write_text(
+            json.dumps({"throughput_tok_s": 535.4}), encoding="utf-8")
+    return eval_dir
+
+
+def _kb_store(monkeypatch, proc=None, raises=None):
+    """Answer for e2e_store.py without running it. Returns the argv it was called with."""
+    monkeypatch.delenv("GEAK_E2E_KB_WRITE_BACK", raising=False)
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        if raises is not None:
+            raise raises
+        return proc if proc is not None else _Proc(
+            stdout=json.dumps({"session_id": "geak-x", "applied": True}))
+
+    monkeypatch.setattr(rx.subprocess, "run", fake_run)
+    return seen
+
+
+def _flag(cmd: list, name: str) -> str:
+    return cmd[cmd.index(name) + 1]
+
+
+def test_kb_write_back_can_be_switched_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("GEAK_E2E_KB_WRITE_BACK", "0")
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})
+    assert out["skipped"] is True and "off" in out["why"]
+
+
+def test_kb_write_back_defers_to_the_workflows_own_receipt(tmp_path, monkeypatch):
+    """Both writers land on the same session id, so running this one after a successful
+    workflow write would replace a validated record with a salvaged one."""
+    _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path)
+    (eval_dir / rx.KB_WRITE_FILE).write_text("{}", encoding="utf-8")
+    out = rx._kb_write_back(eval_dir, {}, {})
+    assert out["skipped"] is True and rx.KB_WRITE_FILE in out["why"]
+
+
+@pytest.mark.parametrize("dims", [
+    {"model": "", "gfx": "gfx950"},     # no model
+    {"model": "M", "gfx": ""},          # no gfx
+])
+def test_an_unaddressable_record_is_not_written_at_all(tmp_path, monkeypatch, dims):
+    """kb/identity folds a missing dimension to `unknown`, which is a page nobody reads.
+    Recording nothing is honest; recording it there looks like a healthy write."""
+    _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path, identity=_kb_identity(dims=dims))
+    assert rx._kb_write_back(eval_dir, {}, {})["skipped"] is True
+
+
+def test_a_run_with_no_identity_file_is_skipped(tmp_path, monkeypatch):
+    """Warm start never ran, or ran before this build wrote the file."""
+    _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path, identity=None)
+    assert rx._kb_write_back(eval_dir, {}, {})["skipped"] is True
+
+
+def test_there_has_to_be_a_measurement_to_send(tmp_path, monkeypatch):
+    _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path, workflow_return=False)
+    out = rx._kb_write_back(eval_dir, {}, {})
+    assert out["skipped"] is True and rx.WORKFLOW_RETURN_FILE in out["why"]
+
+
+def test_the_identity_dims_are_sent_as_the_address(tmp_path, monkeypatch):
+    seen = _kb_store(monkeypatch)
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})
+    cmd = seen["cmd"]
+    assert _flag(cmd, "--model") == "M" and _flag(cmd, "--gfx") == "gfx950"
+    assert _flag(cmd, "--tp") == "8", "a non-string dim still has to travel"
+    assert "--require-win" in cmd and "--apply" in cmd
+    assert _flag(cmd, "--measured-by") == "run_e2e:salvage"
+    assert out["measured_by"] == "run_e2e:salvage" and out["ok"] is True
+
+
+def test_an_empty_dim_is_dropped_rather_than_sent_blank(tmp_path, monkeypatch):
+    """`--precision ''` is not the same request as omitting it: it addresses a page whose
+    precision is literally the empty string."""
+    seen = _kb_store(monkeypatch)
+    dims = {"model": "M", "gfx": "gfx950", "precision": "", "isl": None}
+    rx._kb_write_back(_kb_eval_dir(tmp_path, identity=_kb_identity(dims=dims)), {}, {})
+    assert "--precision" not in seen["cmd"] and "--isl" not in seen["cmd"]
+
+
+def test_a_salvaged_measurement_is_recorded_unverified_and_does_not_promote(tmp_path, monkeypatch):
+    """The numbers came from artifacts, not from a Validate leg that finished. Promoting on
+    them would move the champion pointer onto a result nobody confirmed."""
+    seen = _kb_store(monkeypatch)
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {"recovered_from_disk": True}, {})
+    assert _flag(seen["cmd"], "--validated") == "false"
+    assert _flag(seen["cmd"], "--validation-basis") == "unverified"
+    assert "--no-promote" in seen["cmd"] and out["provisional"] is True
+
+
+def test_a_recovered_validation_status_is_provisional_too(tmp_path, monkeypatch):
+    seen = _kb_store(monkeypatch)
+    rx._kb_write_back(_kb_eval_dir(tmp_path), {"validation_status": "recovered_from_legs"}, {})
+    assert "--no-promote" in seen["cmd"]
+
+
+def test_a_validated_run_promotes(tmp_path, monkeypatch):
+    seen = _kb_store(monkeypatch)
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {"validation_status": "validated"}, {})
+    assert "--no-promote" not in seen["cmd"] and out["provisional"] is False
+
+
+def test_a_store_less_local_plane_falls_back_to_the_service(tmp_path, monkeypatch):
+    """A local plane with nowhere to put it cannot be opened; the remote one still can."""
+    seen = _kb_store(monkeypatch)
+    ident = _kb_identity(plane="local", store="")
+    rx._kb_write_back(_kb_eval_dir(tmp_path, identity=ident), {}, {})
+    assert _flag(seen["cmd"], "--plane") == "remote" and "--store" not in seen["cmd"]
+
+
+def test_a_local_plane_writes_to_the_store_it_names(tmp_path, monkeypatch):
+    seen = _kb_store(monkeypatch)
+    ident = _kb_identity(plane="both", store="/kb/store")
+    rx._kb_write_back(_kb_eval_dir(tmp_path, identity=ident), {}, {})
+    assert _flag(seen["cmd"], "--store") == "/kb/store"
+    assert _flag(seen["cmd"], "--plane") == "both"
+
+
+def test_a_write_that_times_out_is_a_missed_record_not_a_failed_run(tmp_path, monkeypatch):
+    _kb_store(monkeypatch, raises=rx.subprocess.TimeoutExpired(cmd="e2e_store", timeout=120))
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})
+    assert out["ok"] is False and "timed out" in out["why"]
+
+
+def test_a_write_that_crashes_is_a_missed_record_not_a_failed_run(tmp_path, monkeypatch):
+    _kb_store(monkeypatch, raises=OSError("bash is gone"))
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})
+    assert out["ok"] is False and "OSError" in out["why"]
+
+
+def test_output_that_is_not_a_receipt_is_reported_with_its_rc(tmp_path, monkeypatch):
+    _kb_store(monkeypatch, proc=_Proc(stdout="Traceback...", stderr="boom", returncode=2))
+    out = rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})
+    assert out["ok"] is False and out["rc"] == 2 and "boom" in out["why"]
+
+
+def test_a_nonzero_rc_with_a_receipt_is_still_not_ok(tmp_path, monkeypatch):
+    """The receipt is the store's, so it may not carry `ok` at all; the exit status decides."""
+    _kb_store(monkeypatch, proc=_Proc(stdout=json.dumps({"session_id": "x"}), returncode=1))
+    assert rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})["ok"] is False
+
+
+def test_the_receipt_is_left_where_the_workflow_would_have_left_it(tmp_path, monkeypatch):
+    """One reader finds either writer's receipt, so it has to be the same filename."""
+    _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path)
+    rx._kb_write_back(eval_dir, {}, {})
+    written = json.loads((eval_dir / rx.KB_WRITE_FILE).read_text(encoding="utf-8"))
+    assert written["session_id"] == "geak-x"
+    assert written["measured_by"] == "run_e2e:salvage"
+
+
+def test_an_unwritable_eval_dir_still_returns_the_receipt(tmp_path, monkeypatch):
+    """The record already landed in the store; failing to keep our copy of the receipt is not
+    a reason to report the write as failed."""
+    _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path)
+
+    real_write = Path.write_text
+
+    def no_write(self, *a, **k):
+        if self.name == rx.KB_WRITE_FILE:
+            raise OSError("read-only")
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", no_write)
+    assert rx._kb_write_back(eval_dir, {}, {})["session_id"] == "geak-x"
+
+
+# ── the direction string ────────────────────────────────────────────────────
+# A shortlist key on the KB page. e2e_workflow.js spells it with the same three fragments in the
+# same order; a second spelling would split one deployment's history across two shortlists.
+
+@pytest.mark.parametrize("wf,ps,want", [
+    ({}, {}, ""),
+    ({"accepted_config": {"flags": "--x 1"}}, {}, "config"),
+    ({"accepted_config": {"env": "A=1"}}, {}, "config"),
+    ({"accepted_kernels": ["k"]}, {}, "kernels"),
+    ({"accepted_heads": ["h"]}, {}, "kernels"),
+    ({"accepted_config": {"flags": "--x 1"}, "accepted_kernels": ["k"]}, {}, "config+kernels"),
+])
+def test_the_direction_names_what_the_run_changed(wf, ps, want):
+    assert rx._kb_direction(wf, ps) == want
+
+
+def test_config_that_was_never_moved_is_not_a_direction(tmp_path):
+    """The run started with these flags. Reporting them as a config win would credit the
+    optimizer for the baseline it was handed."""
+    wf = {"accepted_config": {"flags": "--x 1", "env": "A=1"}}
+    ps = {"initial_extra_server_args": "--x 1", "initial_extra_env": "A=1"}
+    assert rx._kb_direction(wf, ps) == ""
 
 
 if __name__ == "__main__":

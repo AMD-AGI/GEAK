@@ -715,6 +715,16 @@ entries:
       - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
       - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/mla.py
   - operator: mla_attention
+    backend: flydsl
+    status: sota
+    gens: [gfx942]
+    dtypes: [bf16]
+    regimes: [training]
+    card: ../operators/mla_attention/backends/flydsl.md
+    sources:
+      - Attention-Kernels/geak_trans_py2flydsl/fmha_backward/FMHA_BWD_FlyDSL_Skills.md
+      - https://arxiv.org/abs/2511.08083
+  - operator: mla_attention
     backend: hip
     status: competitive
     gens: [gfx942, gfx950]

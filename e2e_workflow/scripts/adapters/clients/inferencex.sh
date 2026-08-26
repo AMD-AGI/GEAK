@@ -55,6 +55,13 @@ adapter_bench() {
   mkdir -p "$res_dir"
   local res_name="ix_bench_$$_${RANDOM}"
   local num_warmups="${NUM_WARMUPS:-$(( MAXC < 8 ? MAXC : 8 ))}"
+  local bench_seed="${SEED:-0}"
+  if [ "${GEAK_ISOLATED_REPLICA:-0}" = "1" ]; then
+    # The measurement protocol applies identically to both client calls in an
+    # isolated replica: the discarded full outer round and the measured round.
+    num_warmups=$((2 * MAXC))
+    bench_seed=0
+  fi
 
   # --backend vllm: OpenAI-compatible client regardless of the actual serving
   # stack (matches Hyperloom). --request-rate inf + --max-concurrency: the same
@@ -74,7 +81,7 @@ adapter_bench() {
     --ignore-eos \
     --num-warmups "$num_warmups" \
     --percentile-metrics "ttft,tpot,itl,e2el" \
-    --seed "$SEED" \
+    --seed "$bench_seed" \
     --save-result \
     --result-dir "$res_dir" \
     --result-filename "${res_name}.json" || return $?

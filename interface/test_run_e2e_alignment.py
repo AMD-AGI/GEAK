@@ -263,6 +263,61 @@ def test_map_args_omits_serving_fidelity_when_absent(tmp_path: Path) -> None:
     assert "mem_fraction" not in ps
 
 
+def test_map_args_consumes_schema_v2_effective_config(tmp_path: Path) -> None:
+    """The complete current-best descriptor, not only accepted_flags, seeds GEAK."""
+    recipe = tmp_path / "baseline_config.with_envs.yaml"
+    recipe.write_text(
+        "benchmark:\n"
+        "  envs:\n"
+        "    EXTRA_SGLANG_ARGS: --trust-remote-code --context-length 8192\n"
+        "    SGLANG_USE_AITER: '0'\n",
+        encoding="utf-8",
+    )
+    overlay = tmp_path / "base-overlay"
+    snapshot = tmp_path / "snapshot"
+    h = {
+        "schema_version": 2,
+        "model_path": "/models/gemma",
+        "framework": "sglang",
+        "exp_root": str(tmp_path),
+        "eval_dir": str(tmp_path / "e2e"),
+        "launch_recipe": str(recipe),
+        "workload": {"isl": 8192, "osl": 1024, "conc": 64},
+        "max_model_len": 13312,  # stale summary must not replace complete argv
+        "accepted_flags": "--context-length=11264",
+        "accepted_env": "SGLANG_USE_AITER=1",
+        "baseline_env_spec": {
+            "config": {
+                "server_launch_flags": (
+                    "--trust-remote-code --disable-radix-cache "
+                    "--context-length 11264"
+                ),
+                "extra_server_args": "--context-length 11264",
+                "extra_envs": {"SGLANG_USE_AITER": "1"},
+            },
+            "overlay_pythonpath": str(overlay),
+            "source_snapshots": [
+                {
+                    "snapshot_dir": str(snapshot),
+                    "reproducible": True,
+                }
+            ],
+        },
+    }
+
+    ps = rx.map_args(h)
+    flags = ps["initial_extra_server_args"]
+    assert flags.count("--context-length") == 1
+    assert "--context-length 11264" in flags
+    assert "13312" not in flags
+    assert "--disable-radix-cache" in flags
+    assert "SGLANG_USE_AITER=1" in ps["initial_extra_env"]
+    assert ps["initial_overlay_pythonpath"] == f"{overlay}:{snapshot}"
+    assert len(ps["effective_config_digest"]) == 64
+    assert ps["measurement_mode"] == "isolated_server"
+    assert ps["validation_replicas"] == 3
+
+
 def _fidelity_handoff(tmp_path: Path, **extra) -> dict:
     h = {
         "model_path": "/models/gpt-oss-120b",

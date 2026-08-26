@@ -473,7 +473,8 @@ class TestBenchLauncher(_RunE2ECase):
                     "MAGPIE_LAUNCH_SCRIPT_SOURCE", "MAGPIE_VLLM_SCRIPT",
                     "MAGPIE_SGLANG_SCRIPT", "MAX_MODEL_LEN",
                     "RECIPE_ENV_FILE", "RECIPE_ENV_SOURCE", "RECIPE_ENV_REPLAYED",
-                    "RECIPE_ENV_GEAK_OWNED", "GEAK_STRICT_RECIPE_ENV"):
+                    "RECIPE_ENV_GEAK_OWNED", "GEAK_STRICT_RECIPE_ENV",
+                    "EFFECTIVE_SERVER_ARGS_COMPLETE"):
             os.environ.pop(key, None)
 
     def _recipe(self, *, script="vllm_mi355x.sh", subdir="", root=None,
@@ -515,6 +516,24 @@ class TestBenchLauncher(_RunE2ECase):
         self.assertEqual(launcher, "magpie")
         self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], "/magpie/launch.sh")
         self.assertEqual(os.environ["BENCH_LAUNCHER"], "magpie")
+
+    def test_schema_v2_marks_resolved_args_complete_without_launch_flags(self):
+        recipe, _ = self._recipe()
+        rx.apply_bench_launcher({
+            "schema_version": 2,
+            "baseline_env_spec": {"config": {"server_launch_flags": ""}},
+            "launch_recipe": recipe,
+            "framework": "vllm",
+            "eval_dir": str(self.tmp / "eval"),
+        })
+        self.assertEqual(os.environ["EFFECTIVE_SERVER_ARGS_COMPLETE"], "1")
+
+    def test_legacy_launcher_clears_complete_args_marker(self):
+        os.environ["EFFECTIVE_SERVER_ARGS_COMPLETE"] = "1"
+        rx.apply_bench_launcher(
+            {"launch_server_script": "/magpie/launch.sh", "framework": "vllm"}
+        )
+        self.assertNotIn("EFFECTIVE_SERVER_ARGS_COMPLETE", os.environ)
 
     def test_per_backend_env_script_is_discovered(self):
         os.environ["MAGPIE_SGLANG_SCRIPT"] = "/magpie/sglang.sh"
@@ -1037,6 +1056,25 @@ class TestBenchProtocol(_RunE2ECase):
 
     def test_non_dict_protocol_is_ignored(self):
         self.assertEqual(rx.apply_bench_protocol({"bench_protocol": "0.5"}), {})
+
+    def test_schema_v2_uses_actual_hyperloom_wrapper_protocol(self):
+        """Historical metadata cannot override the wrapper's 2*conc policy."""
+        exported = rx.apply_bench_protocol({
+            "schema_version": 2,
+            "workload": {"conc": 64},
+            "baseline_env_spec": {"config": {}},
+            "bench_protocol": {
+                "random_range_ratio": 0,
+                "num_prompts": 192,
+                "num_warmups": 8,
+            },
+        })
+        self.assertEqual(exported["NUM_PROMPTS"], "192")
+        self.assertEqual(exported["NUM_WARMUPS"], "128")
+        self.assertEqual(exported["SEED"], "0")
+        self.assertEqual(exported["RANDOM_RANGE_RATIO"], "1")
+        self.assertEqual(exported["GEAK_REPEAT_MODE"], "isolated_server")
+        self.assertEqual(exported["REPLICA_RETRIES"], "1")
 
 
 class TestAlignmentFlags(_RunE2ECase):

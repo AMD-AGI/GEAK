@@ -229,3 +229,29 @@ e2e_bench_out/
 # launched from this directory. Build output, never source.
 .rocprofv3/
 **/.rocprofv3/
+
+# Machine-produced experience KB (warm-start store, kernel_workflow Part 4/1.7): runtime-accumulated
+# best patches + meta; volume is unbounded, so default-ignore and commit selectively via a whitelist.
+kb_artifacts/
+# Default root of the on-disk KB Store plane (kb/store_local.py): runtime records + artifacts.
+kb_store_local/
+# VENDORED tuning skillset — never subject to the generic rules above.
+# The tree is vendored WHOLE and hash-pinned by e2e_workflow/knowledge/tuning_skillset.manifest.sha256,
+# so the standalone validation applies to what GEAK actually runs. What git commits here must therefore
+# be exactly what the manifest hashes, in BOTH directions:
+#
+#   - A generic rule dropping a file from the tree (`*.log` swallowed six tuning-kb evidence logs, and
+#     `build/`, `lib/`, `dist/`, `target/`, `var/`, `cover/` would each swallow a whole subdirectory)
+#     makes a fresh clone fail --verify while it still passes for whoever ran the sync.
+#   - Committing build/cache noise the manifest does NOT hash is just as bad and quieter: --verify skips
+#     the same noise when it scans the disk, so the junk never shows up as drift.
+#
+# Hence: re-include everything, then re-exclude precisely what tuning_skillset_sync.py's EXCLUDE_DIRS /
+# EXCLUDE_SUFFIXES skip. Keep these two lists in step — running validate/claims.py inside the tree is
+# enough to leave a __pycache__ behind.
+!tuning_skillset/**
+tuning_skillset/**/__pycache__/
+tuning_skillset/**/.pytest_cache/
+tuning_skillset/**/.ruff_cache/
+tuning_skillset/**/*.pyc
+tuning_skillset/**/*.pyo

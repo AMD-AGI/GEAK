@@ -65,6 +65,13 @@ arithmetic intensity (only ~80% of peak BF16 GEMM). The two performant AMD patte
 buys ~22% on backward at ~3× the code.) **8-wave ping-pong is the default** — it already reaches SOTA for
 GEMM and attention-forward on MI355X.
 
+> **The backward row does not generalise.** It is symmetric `hdim=128` non-causal on MI355X. A gfx942
+> counter-measurement on a register-heavier backward (fused five-GEMM causal, asymmetric head dims) has every 4-wave
+> build **15% slower** than 8-wave, all of them shuttling AGPRs — halving the waves doubles the per-wave
+> resident operand set against a 256 arch-VGPR cap that does not move with occupancy. HK's gain also relies
+> on hand-staggered issue, which a compiler DSL can only approximate with `sched_group_barrier` hints.
+> See [[optimization/mfma_scheduling]] and [[operators/mla_attention/backends/flydsl]].
+
 ## XCD-aware grid swizzle (chiplet scheduling)
 MI355X = 256 CUs across **8 XCDs** (32 CUs each); each XCD has a private 4 MB L2, all share an LLC before
 HBM (miss ~300 ns L2, ~500 ns LLC). Blocks are assigned round-robin to XCDs. HK's Algorithm 1:

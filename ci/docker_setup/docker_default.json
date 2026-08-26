@@ -1,18 +1,12 @@
 {
-  "_note": "Container images for GEAK CI e2e runs (repo-tracked). This is the DEFAULT preset; sibling presets live in ci/docker_setup/*.json and are selected per-run by the Actions variable vars.DOCKER_DEFAULT_JSON (a bare filename in this folder; unset -> docker_default.json). The CI resolves it to DOCKER_DEFAULT=ci/docker_setup/<name>, which lib.sh honors. resolve_image(framework, model_key) in ci/lib.sh picks in this precedence: (1) IMAGE=<repo:tag> env override; (2) models[<model_key>] — a per-model pin, either a plain string or an {arch: image} dict; (3) [framework][arch]; (4) [framework].default; (5) first image listed for the framework. arch is MI355 (gfx950/MI35x) or MI300 (gfx942/gfx90a/MI30x), auto-detected on the compute node (override with GEAK_GPU_ARCH). The primussafe 'profilerfix' images (ROCm 7.2.0) are built for both gfx942 and gfx950, fixing the stock vllm/vllm-openai-rocm:v0.21.0 torch eager SIGSEGV on gfx950.",
-  "models": {
-    "moonshotai-Kimi-K2.6-int4": "docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix",
-    "MiniMaxAI-MiniMax-M2.5": "docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix",
-    "MiniMaxAI-MiniMax-M3-MXFP8": "docker.io/vllm/vllm-openai-rocm:nightly",
-    "Qwen-Qwen3-14B-FP8": "docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix",
-    "Qwen-Qwen3.5-27B-FP8": "docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix"
-  },
+  "_note": "Container images for GEAK CI e2e runs (repo-tracked). This is the DEFAULT preset; sibling presets live in ci/docker_setup/*.json and are selected per-run by the Actions variable vars.DOCKER_DEFAULT_JSON (a bare filename in this folder; unset -> docker_default.json). The CI resolves it to DOCKER_DEFAULT=ci/docker_setup/<name>, which lib.sh honors. resolve_image(framework, model_key) in ci/lib.sh picks in this precedence: (1) IMAGE=<repo:tag> env override; (2) models[<model_key>] — a per-model pin, either a plain string or an {arch: image} dict; (3) [framework][arch]; (4) [framework].default; (5) first image listed for the framework. arch is MI355 (gfx950/MI35x) or MI300 (gfx942/gfx90a/MI30x), auto-detected on the compute node (override with GEAK_GPU_ARCH). Defaults now come from the internal harbor.crusoe registry. NOTE: the sglang harbor image is an MI35x build, so MI300 stays on the previous primussafe mi30x 'profilerfix' image (ROCm 7.2.0) until an MI30x build of v0.5.17 is published; swap it here when one exists. 'models' is intentionally EMPTY — every enrolled model resolves via its framework default (framework comes from each model's handoff.json). Add a per-model pin here only to deviate from the default.",
+  "models": {},
   "vllm": {
-    "MI300": "docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix",
-    "MI355": "docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix"
+    "MI300": "harbor.crusoe.primus-safe.amd.com/proxy/vllm/vllm-openai-rocm:v0.26.0",
+    "MI355": "harbor.crusoe.primus-safe.amd.com/proxy/vllm/vllm-openai-rocm:v0.26.0"
   },
   "sglang": {
     "MI300": "docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix",
-    "MI355": "docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix"
+    "MI355": "harbor.crusoe.primus-safe.amd.com/hyperloom-image/sglang:v0.5.17-rocm720-mi35x-profilerfix"
   }
 }

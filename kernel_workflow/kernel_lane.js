@@ -9,6 +9,7 @@ export const meta = {
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
     { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
     { title: 'Research', detail: 'OPT-IN (args.dra_enabled): researcher fans research questions out in parallel via native WebSearch/WebFetch, writes a ranked-directions brief the planner seeds from' },
+    { title: 'WarmStart', detail: 'search the experience KB (remote geak:kernel:* when credentialed, else local kb_artifacts/) for the best curated patch per optimization direction for this (kernel,language,gfx), validate each through the verify gate, adopt the first that passes [warm_start!=off]' },
     { title: 'Optimize', detail: 'budget loop: tech_lead plans, specialist OR deep_explore engineers optimize, reprofile' },
     { title: 'Verify', detail: 'each candidate patch independently re-benchmarked' },
     { title: 'Merge', detail: 'integrator combines the round winners' },
@@ -208,6 +209,79 @@ const KB_COLD_DIRECTION = String(A.kb_cold_direction != null ? A.kb_cold_directi
 let kbCapBound = 0;      // rounds where the cap actually had to strip something
 const UPDATE_EXPERIENCE = String(A.update_experience != null ? A.update_experience : 'on').trim().toLowerCase() || 'on';
 const UPDATE_EXPERIENCE_ON = UPDATE_EXPERIENCE !== 'off' && UPDATE_EXPERIENCE !== 'false' && UPDATE_EXPERIENCE !== 'none';
+
+// ---------------------------------------------------------------------------
+// WARM-START (local experience KB). Before the optimize loop, search the machine-produced
+// kb_artifacts/ store for the top-3 best patches for THIS (kernel, language, gfx), validate
+// each through the SAME verify_engineer gate, and adopt the first that passes; after Validate,
+// write this run's own win back.
+//   on (default)      | read + validate top-3, ADOPT the first that passes.
+//   reference         | read top-3 as prose only, never auto-apply.
+//   return_after_read | adopt then RETURN before the optimize loop.
+//   off/false/none, a STATE_DIR resume, or no arch => cold start (byte-identical to pre-feature).
+const WARM_START = String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on';
+const WARM_START_ON = WARM_START !== 'off' && WARM_START !== 'false' && WARM_START !== 'none';
+const WARM_START_REF_ONLY = WARM_START === 'reference';
+const WARM_START_RETURN_AFTER = WARM_START === 'return_after_read';
+const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
+  (WORKFLOW_DIR ? WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts' : '')).replace(/\/+$/, '');
+const EXPERIENCE_STORE = `${WORKFLOW_DIR}/scripts/experience_store.py`;
+// Every candidate costs a full on-box verify to reject, so a recorded near-tie is not worth reading.
+const WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.warm_start_min_speedup))
+  ? parseFloat(A.warm_start_min_speedup) : 1.05;
+// How hard the resolver may work to map this run's kernel name onto a stored page. The name is
+// layout-derived (`fused_moe_kernel` standalone, `fused_moe_kernel_task` from an e2e head extraction),
+// so `exact` alone would make the head path miss its own history; `fuzzy` also accepts an op_kind.
+const WARM_START_MATCH = ['exact', 'normalized', 'fuzzy'].includes(String(A.warm_start_match || '').trim())
+  ? String(A.warm_start_match).trim() : 'fuzzy';
+// Which PLANE the experience comes from and goes back to. Same phases, same schemas, same verify
+// gate either way — only the two command strings differ, because the store subcommands were built
+// to print the same JSON as the directory ones.
+//   local (default)  the curated kb_artifacts/ tree, keyed by slug.
+//   store            a KB Store on disk in the shape the service uses, keyed by canonical id.
+//                    This is the plane that later becomes the remote service, so a run in this
+//                    mode is the rehearsal for it.
+const KB_MODE = String(A.kb_mode || 'local').trim().toLowerCase() === 'store' ? 'store' : 'local';
+const KB_STORE_DIR = String(A.kb_store_dir ||
+  (KB_ARTIFACTS_DIR ? KB_ARTIFACTS_DIR.replace(/\/[^/]*$/, '') + '/kb_store_local' : '')).replace(/\/+$/, '');
+// The key carries a rocm <major>.<minor>; on a box without /opt/rocm the measured stack is empty and
+// every record would file under `unspecified`, which splits one kernel's history across two keys.
+const KB_FRAMEWORK_VERSION = String(A.kb_framework_version || '').trim();
+const KB_VERSION_FLAG = KB_FRAMEWORK_VERSION ? ` --framework-version ${JSON.stringify(KB_FRAMEWORK_VERSION)}` : '';
+const KB_ROOT_OK = KB_MODE === 'store' ? !!KB_STORE_DIR : !!KB_ARTIFACTS_DIR;
+// Whether this run may also talk to the KB Store SERVICE, on top of whichever local plane KB_MODE
+// selected. `auto` (default) uses it when credentials are present and silently does not when they
+// are not; `off` restores the directory-only behaviour byte for byte.
+const KB_REMOTE = String(A.kb_remote || 'auto').trim().toLowerCase() === 'off' ? 'off' : 'auto';
+// The credentials are NOT visible from this process. They live in the user's profile, and the
+// shells these commands run in are non-interactive, so `process.env.KB_STORE_TOKEN` is empty here
+// even on a box where the service is configured. Deciding the plane in JS would therefore mean
+// deciding it wrong. Instead every emitted command exports its own credentials from the profile's
+// two sources and then branches on what it actually got — the test happens where the answer is
+// knowable. The token is read from a 0600 file into a variable, never passed in argv, because
+// `ps` is world-readable on this box.
+// The gateway's internal AMD CA is not in a stock container trust store, so a KB command run inside
+// one fails TLS (the old workaround was `curl -k`). DETECT then heal: only when the caller has NOT
+// already established trust (SSL_CERT_FILE unset) do we point urllib/requests/curl/node at the first
+// readable AMD-root bundle we find. Most callers here run OUTSIDE the warm-start launcher (which sets
+// these at `docker run`), so this self-heal is what keeps their KB reachable. Path-only, no CA
+// content; overridable with KB_CA_BUNDLE; a no-op when SSL_CERT_FILE is already set or no bundle is
+// readable (so CI and already-trusting images are byte-identical). DNS (the host has none
+// in-container) is a launch concern, handled with `docker run --add-host`.
+// GEAK_KB_STORE_* wins over the bare KB_STORE_* (so a host that also runs Hyperloom, which carries
+// its own KB_STORE_*, can point GEAK at a distinct store); re-exported under the bare names every
+// downstream reader here branches on.
+const KB_ENV_PRELUDE =
+  'export KB_STORE_URL="${GEAK_KB_STORE_URL:-${KB_STORE_URL:-https://global.primus-safe.amd.com/knowledge-base}}"; ' +
+  'export KB_STORE_TOKEN="${GEAK_KB_STORE_TOKEN:-${KB_STORE_TOKEN:-$(cat ~/.geak_kb_token 2>/dev/null)}}"; ' +
+  'if [ -z "${SSL_CERT_FILE:-}" ]; then for _ca in "${KB_CA_BUNDLE:-}" ' +
+  '/shared_nfs/hyperloom/ca/amd-ca-combined.pem "$HOME/amd-extra-ca-bundle.pem"; do ' +
+  '[ -n "$_ca" ] && [ -r "$_ca" ] && { export SSL_CERT_FILE="$_ca" REQUESTS_CA_BUNDLE="$_ca" ' +
+  'CURL_CA_BUNDLE="$_ca" NODE_EXTRA_CA_CERTS="$_ca"; break; }; done; fi; ';
+// Writing in store mode records BOTH planes in one call, so it needs both roots: the directory tree
+// stays the source of truth a curation pass edits, and the store is derived from it.
+const KB_WRITE_OK = KB_ROOT_OK && !!KB_ARTIFACTS_DIR;
+const kebab = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
 
 // ---------------------------------------------------------------------------
 // DEEP-MODE continuation + cross-backend / e2e-feedback hooks. ALL OPTIONAL.
@@ -478,6 +552,47 @@ const VALIDATE_SCHEMA = obj({
   per_case: perCase, applied_to_original: { type: 'string' },
   arbitration_note: { type: 'string' }, final_patch: { type: 'string' },
 }, ['director_verified_speedup_geomean', 'validation_status']);
+
+// Warm-start resolver output = experience_store.py `resolve` JSON, verbatim.
+const WARMSTART_RESOLVE_SCHEMA = obj({
+  read_reason: { type: 'string' }, slug: { type: 'string' },
+  // What this run's name derived to vs the page actually served, so a surprising match is visible.
+  requested_slug: { type: 'string' }, match_tier: { type: 'string' },
+  // store mode only: the key the candidates came from. Declared rather than left to
+  // additionalProperties so the agent relaying this JSON has no reason to drop it.
+  canonical_id: { type: 'string' },
+  // Same kernel, another language: the wrong target_language was passed, not an empty store.
+  other_language_pages: { type: 'array', items: { type: 'string' } },
+  filtered: obj({
+    total: { type: 'number' }, retired: { type: 'number' }, below_min_speedup: { type: 'number' },
+    same_direction_collapsed: { type: 'number' },
+  }),
+  candidates: {
+    type: 'array',
+    items: obj({
+      rank: { type: 'number' }, slug: { type: 'string' }, speedup: { type: 'number' },
+      exp_dir: { type: 'string' }, arch: { type: 'string' },
+      patch_path: { type: 'string' }, prose_path: { type: 'string' },
+      strategy: { type: 'string' }, status: { type: 'string' },
+      // direction = the IDEA (one rank each). comparable=false: recorded on a different bench key
+      // than rank 1's, so the order between them is a prior only.
+      direction: { type: 'string' }, bench_key: { type: 'string' }, comparable: { type: 'boolean' },
+    }, ['rank', 'patch_path']),
+  },
+}, ['read_reason']);
+// Warm-start writer output = experience_store.py `write` JSON, verbatim. written=false with reason
+// "duplicate_impl" is a success: the store already held this code and counted a reproduction.
+const WARMSTART_WRITE_SCHEMA = obj({
+  written: { type: 'boolean' }, reason: { type: 'string' }, slug: { type: 'string' },
+  dir: { type: 'string' }, speedup: { type: 'number' },
+  reproduced: { type: 'string' }, reproductions: { type: 'number' },
+  // store mode only: where the same result landed on the KB plane. `replaced` says which of the
+  // two outcomes it was — a new candidate under the key, or this patch's own one measured again.
+  remote: obj({
+    written: { type: 'boolean' }, reason: { type: 'string' }, canonical_id: { type: 'string' },
+    session_id: { type: 'string' }, champion: { type: 'boolean' }, replaced: { type: 'boolean' },
+  }),
+}, ['written']);
 
 // ---------------------------------------------------------------------------
 // Prompt helpers. Every agent reads its role file from WORKFLOW_DIR and the
@@ -832,7 +947,8 @@ let cumulative = 1.0;        // best verified geomean speedup vs the TRUE baseli
 let bestSeen = 0;            // best verified geomean of any candidate, committed or not
 let noImprove = 0;
 let bestPerCase = BASELINE_PER_CASE;
-let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source}
+let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source} — also set by a warm-start adopt
+let roundsCommitted = 0;     // rounds this run actually landed; a warm-start adopt is NOT one of them
 const history = { insights: [], ledger: [], rounds: [], bottleneck_now: profileSummary ? profileSummary.bottleneck : 'unknown', suggest_next: '' };
 // One row per KB-seeded direction, joined against what the verifier measured (see the push site in
 // the round loop). Fed to update_experience and returned to the caller: a driver aggregating these
@@ -852,7 +968,174 @@ if (setup.resumed && setup.prior_state) {
   log(`RESUMED from STATE_DIR: cumulative=${cumulative.toFixed(3)}x, ${history.insights.length} insights, ${history.ledger.length} ledger entries carried forward.`);
 }
 
-while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
+// ===========================================================================
+// PHASE: WarmStart. The recorded speedup only RANKS; adoption is decided by a fresh
+// measurement through the verify gate here. gfx comes from the baseline profile's
+// on-box `device` string (no extra probe).
+// ===========================================================================
+const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
+let warm_start = { adopted: false, read_reason: WARM_START_ON ? 'read' : 'disabled', candidates: [] };
+let skipLoop = false;
+if (WARM_START_ON && !setup.resumed && KB_ROOT_OK) {
+  phase('WarmStart');
+  if (!GFX) {
+    warm_start.read_reason = 'missing_arch';
+    log('[kb] warm-start skipped: no gfx detected from the baseline profile device string.');
+  } else {
+    // The two planes take a different root flag and a different name→page rule (the store addresses
+    // by canonical id, so there is nothing to match fuzzily), and print the same JSON.
+    const localResolveCmd = KB_MODE === 'store'
+      ? `resolve-remote --plane local --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
+      : `resolve --root ${JSON.stringify(KB_ARTIFACTS_DIR)} --match ${WARM_START_MATCH}`;
+    const commonArgs =
+      `--kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\\n` +
+      `  --gfx ${GFX} --top-n 3 --min-speedup ${WARM_START_MIN_SPEEDUP} \\\n` +
+      `  --refs-dir ${JSON.stringify(EVAL_DIR + '/kb_references')}`;
+    // Remote first, local curated tree as the fallback. The service is the shared plane and should
+    // win when it has an answer, but it is still filling up, while `kb_artifacts/` holds a hand-
+    // curated history (retired entries, one entry per direction) that a thin remote page must not
+    // shadow. An empty remote answer is indistinguishable from a 404 on this scheme, so "no
+    // candidates" — not "no error" — is what triggers the second read. Both reads are seconds and
+    // no GPU; the thing they protect against is a cold start that costs hours.
+    const resolveScript = KB_REMOTE === 'off'
+      ? `python3 ${JSON.stringify(EXPERIENCE_STORE)} ${localResolveCmd} \\\n  ${commonArgs}`
+      : `${KB_ENV_PRELUDE}
+REMOTE_OUT=''
+if [ -n "$KB_STORE_TOKEN" ]; then
+  REMOTE_OUT=$(python3 ${JSON.stringify(EXPERIENCE_STORE)} resolve-remote --plane remote${KB_VERSION_FLAG} \\
+  ${commonArgs} 2>/dev/null || true)
+  if printf '%s' "$REMOTE_OUT" | python3 -c 'import json,sys; sys.exit(0 if (json.load(sys.stdin).get("candidates") or []) else 1)' 2>/dev/null; then
+    printf '%s\\n' "$REMOTE_OUT"; exit 0
+  fi
+fi
+python3 ${JSON.stringify(EXPERIENCE_STORE)} ${localResolveCmd} \\
+  ${commonArgs}`;
+    const resolved = await agentT(
+      `You are the warm-start resolver. Run EXACTLY this ${KB_REMOTE === 'off' ? 'command' : 'script'} ` +
+      `and return its single-line JSON stdout verbatim as StructuredOutput — do not add, drop, reorder, ` +
+      `or reinterpret any field. ` +
+      (KB_REMOTE === 'off' ? '' :
+        `It tries the shared KB Store service first and falls back to the on-disk knowledge base by ` +
+        `itself; run it as one script, do not split it into separate commands. `) +
+      `An empty candidate list is a VALID answer meaning "nothing recorded for this kernel yet". Do not ` +
+      `retry with different flags and do not invent candidates:
+\`\`\`bash
+${resolveScript}
+\`\`\``,
+      { phase: 'WarmStart', label: 'warm_start:resolve', schema: WARMSTART_RESOLVE_SCHEMA }) || {};
+    warm_start.read_reason = resolved.read_reason || 'read';
+    warm_start.slug = resolved.slug || '';
+    warm_start.match_tier = resolved.match_tier || '';
+    warm_start.filtered = resolved.filtered || null;
+    const cands = Array.isArray(resolved.candidates) ? resolved.candidates : [];
+    warm_start.candidates = cands.map(c => ({
+      rank: c.rank, slug: c.slug, speedup: c.speedup, direction: c.direction || '', status: 'read',
+    }));
+    const f = resolved.filtered || {};
+    // Which plane actually answered. Only the key-addressed subcommand emits `canonical_id`, so its
+    // presence separates a store read from a slug-tree read; in `local` KB_MODE the only key-
+    // addressed reader in the script is the remote one, so that is also the remote/fallback tell.
+    // Worth logging either way: the canonical id is the address, and on a scheme with no search a
+    // thin answer and a mis-keyed question look identical from the outside.
+    warm_start.plane = resolved.canonical_id ? (KB_MODE === 'store' ? 'store' : 'remote') : 'local';
+    if (resolved.canonical_id) log(`[kb] plane=${warm_start.plane} key=${resolved.canonical_id}`);
+    else if (KB_REMOTE !== 'off') log('[kb] plane=local (service had no candidates, or no credentials)');
+    log(`[kb] experience read: slug=${resolved.slug || '?'} (${resolved.match_tier || 'exact'} match of ` +
+      `${resolved.requested_slug || KERNEL_NAME}) reason=${warm_start.read_reason} ` +
+      `candidates=${cands.length}${f.total ? ` of ${f.total} recorded [${f.retired || 0} retired, ` +
+      `${f.below_min_speedup || 0} below ${WARM_START_MIN_SPEEDUP}x, ` +
+      `${f.same_direction_collapsed || 0} same-direction]` : ''}`);
+    const otherLangs = Array.isArray(resolved.other_language_pages) ? resolved.other_language_pages : [];
+    if (!cands.length && otherLangs.length) {   // wrong target_language, not an empty store
+      log(`[kb] NOTE: no ${TARGET_LANGUAGE} page, but the store holds ${otherLangs.join(', ')} — ` +
+        `check the target_language this lane was invoked with.`);
+    }
+    // reference-only: prose is already mirrored to EVAL_DIR/kb_references by the resolver; do not apply.
+    if (!WARM_START_REF_ONLY) {
+      const editableCsv = ((analysis && analysis.modifiable_files) || []).join(',');
+      for (const c of cands) {                              // already rank-ordered (fastest first)
+        const rec = warm_start.candidates.find(x => x.rank === c.rank);
+        const remapOut = `${EVAL_DIR}/warm_start/cand_${c.rank}/remapped.diff`;
+        const ver = await agentT(
+          roleAgent('verify_engineer', 'verify',
+            'Validate a HISTORICAL warm-start patch — the SAME gate as any round candidate. The patch was ' +
+            'won in the workspace that produced it, whose paths need not exist here, so FIRST run EXACTLY:\n' +
+            '```bash\n' +
+            `mkdir -p ${JSON.stringify(`${EVAL_DIR}/warm_start/cand_${c.rank}`)}\n` +
+            `python3 ${JSON.stringify(EXPERIENCE_STORE)} remap --patch ${JSON.stringify(c.patch_path)} \\\n` +
+            `  --out ${JSON.stringify(remapOut)} --editable ${JSON.stringify(editableCsv)} \\\n` +
+            `  --workspace ${JSON.stringify(CANONICAL)}\n` +
+            '```\n' +
+            'It prints one line of JSON. remapped=true: apply the REMAPPED patch (its paths were rewritten ' +
+            'onto this workspace). reason "no_change_needed": apply the original PATCH. Any other reason ' +
+            '(notably "unmapped_paths" — the patch touches files this workspace does not have): return ' +
+            'status:"apply_failed", notes "patch_outside_editable_set", and DO NOT apply or benchmark. ' +
+            'Apply with `git apply "$P" || git apply --3way "$P"`. On ANY failure restore the working copy ' +
+            'fully (git checkout -- . and delete untracked files) before returning so the next candidate ' +
+            'starts from a clean tree.', {
+            CANONICAL, PATCH: c.patch_path, REMAP_OUT: remapOut,
+            VERIFY_DIR: `${EVAL_DIR}/warm_start/cand_${c.rank}`,
+            EDITABLE_SET: (analysis && analysis.modifiable_files) || [],
+            GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+            ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
+            ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
+          }),
+          { phase: 'WarmStart', label: `warm_start:verify c${c.rank}`, schema: VERIFY_SCHEMA });
+        const sp = primSpeedup(ver);
+        if (ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && sp > 1.0) {
+          const adopt = await agentT(
+            `You are the TechLead adopting a validated warm-start patch into the canonical workspace.
+\`\`\`bash
+export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
+cd ${CANONICAL}
+git checkout -- .
+# the remapped patch when verify produced one (its paths fit THIS workspace), else the stored one
+P=${JSON.stringify(remapOut)}; [ -f "$P" ] || P=${JSON.stringify(c.patch_path)}
+git apply "$P" || git apply --3way "$P"
+git -c user.email=team@workflow -c user.name=team add -A
+git -c user.email=team@workflow -c user.name=team commit -q -m "warm-start adopt: ${c.slug} (${sp.toFixed(2)}x)"
+git --no-pager diff "$(git rev-list --max-parents=0 HEAD)..HEAD" > ${EVAL_DIR}/current_best.diff
+\`\`\`
+If BOTH applies fail, apply manually to match intent, then add -A + commit and RE-RUN the COMMANDMENT
+correctness check; only report committed=true if it still passes. Return JSON {committed, current_best_diff, note}.`,
+            { phase: 'WarmStart', label: `warm_start:adopt c${c.rank}`, schema: COMMIT_SCHEMA });
+          if (adopt && adopt.committed) {
+            // The optimize loop now builds ON this patch: cumulative starts at the adopted Nx, so this
+            // run's own rounds only earn the delta above it (split out as incremental_speedup below).
+            cumulative = sp;
+            bestPerCase = (ver.per_case && ver.per_case.length) ? ver.per_case : bestPerCase;
+            finalWinner = { source: `warm_start:${c.slug}`, geomean: sp,
+              arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path };
+            if (bestSeen < sp) bestSeen = sp;
+            warm_start.adopted = true;
+            warm_start.adopted_speedup = sp;
+            warm_start.slug = c.slug;
+            // Carried into the write-back: the idea this run started from, and the entry it
+            // descends from — lineage a later curation pass cannot recover from the diff alone.
+            warm_start.direction = c.direction || '';
+            warm_start.exp_dir = c.exp_dir || '';
+            if (rec) rec.status = 'adopted';
+            log(`[kb] warm-start ADOPTED ${c.slug} @ ${sp.toFixed(2)}x — optimizing from the patched state.`);
+            profileSummary = await agentT(
+              roleAgent('profile_engineer', 'reprofile',
+                'Re-profile the adopted warm-start state and classify the new bottleneck.', {
+                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: 0,
+                COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+              }),
+              { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
+            if (history) history.bottleneck_now = profileSummary ? profileSummary.bottleneck : history.bottleneck_now;
+            if (WARM_START_RETURN_AFTER) { skipLoop = true; warm_start.returned_after_read_kb = true; }
+            break;
+          }
+        }
+        if (rec && rec.status !== 'adopted') rec.status = (ver && ver.status) ? `rejected:${ver.status}` : 'rejected:apply_failed';
+        log(`[kb] warm-start candidate c${c.rank} ${rec ? rec.status : 'rejected'} (${sp ? sp.toFixed(2) + 'x' : 'no measure'}).`);
+      }
+    }
+  }
+}
+
+while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
   // is never interrupted — a killed round leaves a half-verified patch and no report.
@@ -1129,6 +1412,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     cumulative = winner.geomean;
     bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
     finalWinner = winner;
+    roundsCommitted += 1;
 
     // --- (f) Re-profile the new best ------------------------------------
     profileSummary = await agentT(
@@ -1283,7 +1567,6 @@ if (kbGate) log(`[kb] not distilling: ${kbGate}.`);
 // run did not earn. Reported in review of #411.
 const kbAccepted = String((validation && validation.validation_status) || '').toLowerCase() === 'accepted';
 if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
-  const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
   try {
     learned_card = await agentT(
       roleAgent('update_experience', 'Validate',
@@ -1351,6 +1634,89 @@ Return {"filed": <the "citations" number the command printed, or 0>}.`,
   }
 }
 
+// ===========================================================================
+// Write this run's outcome back to kb_artifacts/ — the producer half of the loop.
+// The script applies its own gate and never fails the run; the `finalPrimary > 1.0`
+// pre-check just avoids spending an agent on a run that cannot pass the gate anyway.
+// ===========================================================================
+let kb_written = null;
+if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+  const kernelClass = (analysis && analysis.kernel_type) || 'unknown';
+  const finalPatch = report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`;
+  const reportPath = report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`;
+  // What the store cannot infer from a diff but needs to curate this entry later. `direction` is the
+  // IDEA, and only a warm start supplies a real one: a round title is free-form per run, so kebabbing
+  // it would mint a unique label every time and group nothing. Unlabeled is honest — resolve treats
+  // such an entry as its own direction, and a curation pass assigns the shared label later.
+  const winnerDirection = kebab(warm_start.direction || '');
+  const metricKind = HAS_WORKLOAD ? 'time_weighted' : 'geomean';
+  // Commas separate the list, so a case name may not contain one.
+  const caseNames = (bestPerCase || []).map(c => c && String(c.name || '').replace(/,/g, ';'))
+    .filter(Boolean).join(',');
+  // write-remote runs the directory write first and files the same entry in the store, so the two
+  // planes cannot drift; its extra `remote` field rides along under the schema's open object.
+  // `--plane both` extends that ordering one hop further: directory tree, then local store, then the
+  // service. Unlike the read there is no branch on credentials here, because `_open_plane` already
+  // makes the right call — a `both` without them degrades to the local planes and reports
+  // `remote_unavailable` rather than failing, which is the behaviour we would have written by hand.
+  const remoteWriteOn = KB_REMOTE !== 'off' && !!KB_STORE_DIR;
+  const writeCmd = remoteWriteOn
+    ? `write-remote --plane both --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
+    : KB_MODE === 'store'
+      ? `write-remote --plane local --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
+      : 'write';
+  kb_written = await agentT(
+    `You are the experience writer. Run EXACTLY this command (it applies its own gates and prints a ` +
+    `single-line JSON) and return that JSON verbatim as StructuredOutput. If the command errors, return ` +
+    `{"written": false, "reason": "io_error"}` +
+    (remoteWriteOn
+      ? ` — do NOT retry it and do NOT adjust its arguments. It may reach the shared KB Store service, ` +
+        `and every write that service accepts is PERMANENT (it exposes no delete), so a second attempt ` +
+        `creates a second permanent record instead of fixing the first.`
+      : `.`) + `
+\`\`\`bash
+${remoteWriteOn ? KB_ENV_PRELUDE + '\n' : ''}python3 ${JSON.stringify(EXPERIENCE_STORE)} ${writeCmd} --root ${JSON.stringify(KB_ARTIFACTS_DIR)} \\
+  --kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\
+  --gfx ${GFX} --kernel-class ${JSON.stringify(kernelClass)} \\
+  --speedup ${finalPrimary} --baseline-wall-ms ${BASELINE_GEOMEAN_MS} \\
+  --patch ${JSON.stringify(finalPatch)} --eval-dir ${JSON.stringify(EVAL_DIR)} \\
+  --report ${JSON.stringify(reportPath)} --metric-kind ${metricKind} \\
+  --direction ${JSON.stringify(winnerDirection)} --case-names ${JSON.stringify(caseNames)}\
+${warm_start.exp_dir ? ` \\\n  --parent ${JSON.stringify(warm_start.exp_dir)}` : ''}
+\`\`\``,
+    { phase: 'Validate', label: 'kb:write', schema: WARMSTART_WRITE_SCHEMA });
+  const remoteWrite = (kb_written && kb_written.remote) || null;
+  if (remoteWrite) {
+    log(remoteWrite.written
+      // `replaced` distinguishes the two write outcomes the store has: a NEW patch appends a session
+      // under the same key, the SAME patch remeasured lands back on its own content-addressed one.
+      ? `[kb] plane=store ${remoteWrite.replaced ? 'updated' : 'appended'} ` +
+        `${remoteWrite.canonical_id}/${remoteWrite.session_id}${remoteWrite.champion ? ' (champion)' : ''}`
+      : `[kb] plane=store not written: ${remoteWrite.reason || 'unknown'}`);
+  }
+  log(kb_written && kb_written.written
+    ? `[kb] experience written: ${kb_written.slug} (speedup ${finalPrimary.toFixed(2)}, direction ` +
+      `${winnerDirection || 'unlabeled'})`
+    : kb_written && kb_written.reason === 'duplicate_impl'
+      // Not a failure — the expected outcome of adopting a warm start and not beating it.
+      ? `[kb] experience already known — counted as reproduction #${kb_written.reproductions || '?'} of ` +
+        `${kb_written.reproduced || kb_written.dir}`
+      : `[kb] experience not written: ${kb_written ? kb_written.reason : 'writer returned nothing'}`);
+}
+
+// finalPrimary is the total vs the pristine baseline; when a warm-start patch was adopted, split out
+// the delta ABOVE it so a KB-derived gain is never reported as this run's own work.
+//
+// With no round committed after the adopt, the workspace still holds exactly the adopted code, and
+// the two numbers are two measurements of the SAME thing taken at different times — the ratio is
+// bench noise (~2% on this box; `_gemm_a16_w16_kernel` reported 0.98 and read as a regression).
+// Report 1.0 and say why, rather than dressing the noise up as a delta.
+const noRoundsAfterAdopt = !!(warm_start.adopted && roundsCommitted === 0);
+const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
+  ? (noRoundsAfterAdopt ? 1.0
+     : Number.isFinite(finalPrimary) ? finalPrimary / warm_start.adopted_speedup : null)
+  : finalPrimary;
+
 return {
   mode: MODE,
   target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
@@ -1401,4 +1767,25 @@ return {
   learned_card: learned_card && learned_card.card_path
     ? { action: learned_card.action || '', card_path: learned_card.card_path, key: learned_card.key || '' }
     : null,
+  // Warm-start (local experience KB) outcome. adopted=false + read_reason on a cold start.
+  warm_start: {
+    adopted: warm_start.adopted,
+    read_reason: warm_start.read_reason,
+    slug: warm_start.slug || '',
+    // How the store was reached and what it filtered out: tells a genuine cold start from a
+    // name/language mismatch that only looks like an empty KB.
+    match_tier: warm_start.match_tier || '',
+    filtered: warm_start.filtered || null,
+    adopted_speedup: warm_start.adopted ? warm_start.adopted_speedup : null,
+    total_speedup: Number.isFinite(finalPrimary) ? finalPrimary : null,
+    incremental_speedup: incrementalSpeedup,
+    // true = the run adopted a stored patch and never improved on it; incremental is 1.0 by
+    // definition, not by measurement.
+    no_rounds_after_adopt: noRoundsAfterAdopt,
+    rounds_committed: roundsCommitted,
+    incremental_improved: !!(warm_start.adopted && Number.isFinite(incrementalSpeedup) && incrementalSpeedup > 1 + MIN_IMPROVE),
+    returned_after_read_kb: !!warm_start.returned_after_read_kb,
+    candidates: warm_start.candidates,
+  },
+  kb_written: kb_written && kb_written.written ? { slug: kb_written.slug, dir: kb_written.dir } : null,
 };

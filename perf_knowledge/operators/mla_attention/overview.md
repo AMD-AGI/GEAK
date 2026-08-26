@@ -4,13 +4,14 @@ kind: operator_overview
 operator: mla_attention
 gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3]
-regimes: [prefill, decode]
-updated: 2026-06-08
+regimes: [prefill, decode, training]
+updated: 2026-08-12
 sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/mla.py
   - https://rocm.blogs.amd.com/software-tools-optimization/aiter-mla/README.html
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
   - https://arxiv.org/abs/2405.04434
+  - Attention-Kernels/geak_trans_py2flydsl/fmha_backward/FMHA_BWD_FlyDSL_Skills.md
 ---
 
 # mla_attention  (DeepSeek Multi-head Latent Attention)
@@ -44,6 +45,10 @@ backends give **1.2–1.6× faster TPOT** vs Triton MLA.
 ## Shape regimes
 - **Decode** (`sq=1`): the headline — bandwidth-bound MQA over the latent; `mla_decode_fwd` + splitKV.
 - **Prefill** (long sq): `mla_prefill_fwd` (and a persistent variant `mla_prefill_ps_fwd`); GEMM-bound.
+- **Training / backward**: the unabsorbed form with **asymmetric head dims** `qk_head_dim=192`
+  (`qk_nope 128 + qk_rope 64`), `v_head_dim=128`. On gfx942 this asymmetry is a dispatch trap — aiter's
+  ASM backward is gated on `hdim_q == hdim_v` and its ASM forward on `hdim_v == 128`, so **no aiter
+  configuration gets both fast**. See [backends/flydsl.md](backends/flydsl.md).
 - DeepSeek shapes: `num_heads` 16/64/128, `kv_lora_rank=512`, `qk_rope_head_dim=64`, `v_head_dim=128`.
 
 ## Where it matters (Amdahl)
@@ -56,6 +61,7 @@ broadcasts a real KV head) — MLA attends a *compressed latent*.
 | backend | status | card |
 |---|---|---|
 | aiter | 🟢 sota (asm `mla_decode_fwd`, 17×) | [backends/aiter.md](backends/aiter.md) |
+| flydsl | 🟢 sota **backward only**, gfx942 192/128 (715–745 µs vs padded-ASM 984) | [backends/flydsl.md](backends/flydsl.md) |
 | triton | 🟡 (reference + fallback; `mla_decode.py`) | [backends/triton.md](backends/triton.md) |
 | ck | 🟡 (CK-Tile MLA; from-source) | [backends/ck.md](backends/ck.md) |
 | hip | 🟡 (vLLM custom; mostly routes to AITER MLA) | [backends/hip.md](backends/hip.md) |
