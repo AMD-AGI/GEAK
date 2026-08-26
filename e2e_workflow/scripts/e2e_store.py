@@ -695,32 +695,44 @@ def _sibling_imports(path: str) -> list:
     return [a or b for a, b in _IMPORT_RE.findall(source)]
 
 
-def _rebind_modules(manifest_path: str) -> list:
-    """Every overlay-root module a `rebinds` manifest needs, transitively, deduplicated.
+def _overlay_modules(manifest_path: str) -> list:
+    """Every overlay-root module the mechanism needs, transitively, deduplicated.
 
-    The manifest names only the module the rebind binds TO. That is regularly a shim: GLM-5.2's
-    `dsa_engage_c0_triton` is 1.6 KB of `from dsa_authored_c0_triton import tilelang_sparse_fwd`
-    wrapping a 23 KB authored Triton kernel, and packing the manifest's name alone shipped a
-    tarball that raises ImportError the moment sitecustomize.py runs it. So each packed module's
-    own imports are followed, and any that resolves to a sibling at the overlay root is packed
-    too. Names that resolve to nothing at the root are just ordinary third-party imports and are
-    left alone; the closure therefore terminates at the overlay boundary.
+    Two roots, because the overlay has two entry points. The manifest names the module each
+    rebind binds TO, and sitecustomize.py is the code that installs them — an overlay that
+    captures shapes or traces a seam does that work in siblings sitecustomize.py imports
+    directly, with no manifest entry naming them at all.
 
-    A malformed manifest returns [] rather than raising: the caller is packing a best-effort
-    artifact, and `_repro()` is the thing that decides whether what came out is enough.
+    Neither root is the whole story on its own, because what they name is regularly a shim:
+    GLM-5.2's `dsa_engage_c0_triton` is 1.6 KB of `from dsa_authored_c0_triton import
+    tilelang_sparse_fwd` wrapping a 23 KB authored Triton kernel, and packing the manifest's
+    name alone shipped a tarball that raises ImportError the moment sitecustomize.py runs it.
+    So each packed module's own imports are followed, and any that resolves to a sibling at the
+    overlay root is packed too. Names that resolve to nothing at the root are just ordinary
+    third-party imports and are left alone; the closure therefore terminates at the overlay
+    boundary.
+
+    A malformed manifest still yields sitecustomize.py's side of the closure rather than
+    raising: the caller is packing a best-effort artifact, and `_repro()` is the thing that
+    decides whether what came out is enough.
     """
+    root = os.path.dirname(manifest_path)
     try:
         with open(manifest_path) as handle:
             manifest = json.load(handle)
     except (OSError, ValueError):
-        return []
-    root = os.path.dirname(manifest_path)
+        manifest = {}
+    if not isinstance(manifest, dict):
+        manifest = {}
     seen, out = set(), []
     queue = [str((entry or {}).get("impl_module") or "") for entry in (manifest.get("rebinds") or [])]
+    queue.extend(_sibling_imports(os.path.join(root, "sitecustomize.py")))
     while queue:
+        # A submodule rebind (`geak_authored.gemm_flydsl`) is addressed by its top-level package,
+        # which is what sits at the overlay root and what has to be packed. An absolute or
+        # separator-bearing name is not a module name at all and is refused rather than resolved
+        # into somebody's filesystem.
         module = queue.pop(0).split(".")[0]
-        # A dotted name would escape the overlay root, and an absolute/relative path is not a
-        # module name at all; both are refused rather than resolved into somebody's filesystem.
         if not module or module in seen or os.path.isabs(module) or os.sep in module:
             continue
         as_file, as_pkg = os.path.join(root, module + ".py"), os.path.join(root, module)
@@ -793,7 +805,7 @@ def _pack_overlay(dirpath: str) -> str:
             if os.path.isfile(src):
                 tar.add(src, arcname="overlay/" + name)
         _add_tree(tar, os.path.join(dirpath, "_patched"))
-        for module in _rebind_modules(manifest_path):
+        for module in _overlay_modules(manifest_path):
             pkg = os.path.join(dirpath, module)
             if os.path.isdir(pkg):
                 _add_tree(tar, pkg)
