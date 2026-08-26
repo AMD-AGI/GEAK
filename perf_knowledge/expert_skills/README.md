@@ -25,9 +25,13 @@ indexed, and **validated to actually move e2e (or an isolated kernel) without re
 expert_skills/
 ├── README.md                  # this file (the contract)
 ├── index.yaml                 # machine-queryable selector + validation status (AUTO-MAINTAINED)
+├── tuning_index.yaml          # selector metadata for tuning/ (lives OUT here — see below)
 ├── skills/<id>/               # one SUBDIRECTORY per skill
 │   ├── skill.md               #   the main recipe (frontmatter selector + body) — REQUIRED
 │   └── ...                    #   optional extra files: reference kernels, configs, validation manifest
+├── tuning/                    # the VENDORED tuning skillset, hash-pinned WHOLE and unmodified
+│   ├── tuning-<backend>/SKILL.md   #   one skill per backend, upstream layout, byte-for-byte
+│   └── validate/claims.py     #   its own executable validator (drives validation_status)
 ├── _template/                 # SKILL_TEMPLATE.md + validation_manifest.yaml
 └── _contribute/               # the "add a skill to GEAK" skill: scaffold / validate / make_pr / SKILL.md
 ```
@@ -35,6 +39,14 @@ expert_skills/
 Each skill lives in its own directory `skills/<id>/` so a skill that needs more than prose — a reference
 kernel, tuned config JSONs, a custom validation manifest — can carry those files alongside its
 `skill.md`. The selector (`index.yaml`) always points at `skills/<id>/skill.md`.
+
+`tuning/` is the one skill family that does not follow that layout, because it is not ours to lay
+out: it is vendored from upstream and pinned byte-for-byte by
+`e2e_workflow/knowledge/tuning_skillset.manifest.sha256`, so putting GEAK frontmatter inside it would
+break the pin on the next re-sync and quietly turn a vendoring into a fork. Its selector metadata
+therefore lives in `tuning_index.yaml` and is merged into `index.yaml` by the same
+`scaffold.py --reindex` that indexes everything else — same schema, same filter, same gate. Edit
+`tuning_index.yaml`; never `index.yaml`, and never anything under `tuning/`.
 
 ## How a skill is selected by the workflows
 
@@ -49,21 +61,32 @@ of expert-skill selection. When enabled, the workflow filters `index.yaml` by th
 AND gen ∈ match.gens
 AND model_arch_class ∈ match.arch_class   (or match.arch_class contains '*')
 AND (migration skills) from_backend/to_backend fit the live path
+AND scope matches the querying layer     (a kernel lane ignores scope: tuning, and vice versa)
 AND validation.status == validated        (stale/draft/failed are NOT auto-applied)
 ```
 
 There is **no ranking** here (same as `capability_index.yaml`). Every match enters the candidate set;
 the on-box A/B picks the winner.
 
-## scope: kernel vs e2e
+## scope: kernel vs e2e vs tuning
 
-A skill declares `scope: kernel | e2e`. It controls which harness validates it and which workflow layer
-consumes it:
+A skill declares `scope: kernel | e2e | tuning | dependency`. It controls which harness validates it and
+which workflow layer consumes it:
 
 | scope  | validated by      | consumed by                          | pass criteria |
 |--------|-------------------|--------------------------------------|---------------|
 | kernel | `kernel_workflow` (isolated A/B vs the immutable unittest oracle) | `kernel_workflow` author/optimize | `isolated_speedup ≥ expects.isolated_speedup_min` + parity |
 | e2e    | `e2e_workflow` (Director same-session A/B) | `e2e_workflow` routing/integration | `e2e_delta ≥ expects.e2e_delta_min_pct` + parity + non-trigger inertness |
+| tuning | the skillset's own `tuning/validate/claims.py` (one executable check per load-bearing claim) | `e2e_workflow` TuningSkillset phase | every applicable claim PASS, none FAIL — see below |
+
+### How the tuning scope gets its status
+
+Not by hand. `scaffold.py --reindex` reads `tuning/validate/claims.py` output — the four reports the
+skillset ships (both images x both gens) by default, or `--claims-report` from a fresh in-container
+run — and derives: any `FAIL` → `draft`, at least one `PASS` and no `FAIL` → `validated`, nothing but
+`N/A` → `unvalidated`. `N/A` means the precondition is absent (tool not installed, framework not in
+this image), so the image did not answer the question; promoting that to `validated` would be exactly
+the failure the validator exists to catch. Re-run the reindex after an image or upstream bump.
 
 ## Validation status lifecycle
 

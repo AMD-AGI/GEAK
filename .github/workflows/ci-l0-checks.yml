@@ -111,6 +111,7 @@ jobs:
             e2e_workflow/scripts/tests/test_tuning_skillset_sync.py \
             ci/node/test_run_model_material_audit.py \
             perf_knowledge/expert_skills/_contribute/test_flydsl_skill_portability.py \
+            perf_knowledge/expert_skills/_contribute/test_tuning_index.py \
             e2e_workflow/scripts/tests/test_e2e_store.py \
             e2e_workflow/scripts/tests/test_kb_retract.py \
             kernel_workflow/scripts/tests/test_experience_store.py \

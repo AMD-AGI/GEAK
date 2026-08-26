@@ -1,0 +1,244 @@
+# tuning_index.yaml — the selector descriptor for the VENDORED tuning skillset.
+#
+# Why this file exists at all, given that every other expert skill declares its own selector fields in
+# its skill.md frontmatter: the tuning skills are vendored from upstream and hash-pinned as ONE tree
+# (e2e_workflow/knowledge/tuning_skillset.manifest.sha256). Adding GEAK-specific frontmatter inside
+# `tuning/` would make the pin fail on every re-sync and turn a byte-exact vendoring into a fork. So the
+# selector metadata lives OUT here, next to the index it feeds, and the tree underneath stays untouched.
+#
+# `scaffold.py --reindex` reads this file and merges the entries into index.yaml with `scope: tuning`,
+# alongside the skills/ entries — same schema, same filter, same validation gate. Edit the metadata here;
+# never edit index.yaml by hand.
+#
+# validation_status is NOT written here. It is computed at reindex time from validate/claims.py output:
+# the four reports the skillset ships (`tuning/validate/report_*.json`) by default, or a fresh run
+# (`--claims-report out.json`) when you want the status of the image you are actually in. A skill with a
+# FAIL anywhere is demoted to `draft`; a skill with nothing but N/A is `unvalidated`, because an image
+# that cannot answer has not answered. Only `validated` skills are auto-applied.
+
+tree: tuning                     # relative to expert_skills/; the vendored, hash-pinned root
+
+skills:
+- id: tuning_core
+  dir: tuning-core
+  claims_skill: tuning-core
+  summary: The universal six-step tuning loop — scope, baseline, search, correctness, engagement, A/B.
+    Every other tuning skill specializes it; read it first.
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - '*'
+    backend:
+    - '*'
+  expects:
+    engagement_proof: required
+    ab_complete: required
+    parity: required
+
+- id: tuning_aiter
+  dir: tuning-aiter
+  claims_skill: tuning-aiter
+  summary: Race hipblaslt/triton/flydsl/asm/torch through the gradlib tuner, write tuned CSVs where the
+    runtime reads them, prove engagement with AITER_LOG_TUNED_CONFIG.
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - bf16
+    - fp16
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - aiter
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+
+- id: tuning_triton
+  dir: tuning-triton
+  claims_skill: tuning-triton
+  summary: Author and prune a Triton/Gluon config space including the AMD-only knobs (waves_per_eu,
+    matrix_instr_nonkdim, kpack), set the autotune key correctly, clear the noise floor.
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - '*'
+    backend:
+    - triton
+    - gluon
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+
+- id: tuning_hipblaslt
+  dir: tuning-hipblaslt
+  claims_skill: tuning-hipblaslt
+  summary: Capture the exact GEMM problem from a live workload, race all solutions with hipblaslt-bench,
+    replay the winner by solution index; avoids the bracket-number and hot-cache traps.
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - bf16
+    - fp16
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - hipblaslt
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+
+- id: tuning_ck
+  dir: tuning-ck
+  claims_skill: tuning-ck
+  summary: Race CK's pre-compiled instances with ckProfiler, read the instance name to learn what shape
+    of kernel the problem wants, route the result in through aiter's per-op CK tuners.
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - bf16
+    - fp16
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - ck
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+
+- id: tuning_flydsl
+  dir: tuning-flydsl
+  claims_skill: tuning-flydsl
+  summary: Build and prune a FlyDSL Config space, set the autotune key, race FlyDSL against the other
+    backends through aiter's libtype mechanism.
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - '*'
+    backend:
+    - flydsl
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+
+- id: tuning_hip
+  dir: tuning-hip
+  claims_skill: tuning-hip
+  summary: Choose launch geometry against the wave64/CU/LDS limits of the target. §4 is the rocprofv3
+    reference every other tuning skill points at for ground-truth engagement verification.
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - '*'
+    backend:
+    - hip
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+
+- id: tuning_in_vllm
+  dir: tuning-in-vllm
+  claims_skill: tuning-in-vllm
+  summary: Capture the shapes the model actually issues, tune fused-MoE and GEMM paths, deploy where
+    vLLM reads them (VLLM_TUNED_CONFIG_FOLDER), confirm the load from the server log.
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - '*'
+    framework: vllm
+  expects:
+    engagement_proof: required
+    ab_complete: required
+    parity: required
+
+- id: tuning_in_sglang
+  dir: tuning-in-sglang
+  claims_skill: tuning-in-sglang
+  summary: Tune the Triton fused-MoE path into the correct triton_<version> config dir, deploy via
+    SGLANG_MOE_CONFIG_DIR, and tell an exact config hit from a silently degraded version fallback.
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - '*'
+    framework: sglang
+  expects:
+    engagement_proof: required
+    ab_complete: required
+    parity: required

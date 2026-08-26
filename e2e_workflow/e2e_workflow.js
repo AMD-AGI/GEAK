@@ -201,7 +201,8 @@ const MILESTONE_MIN_PCT = parseFloat(A.milestone_min_pct != null ? A.milestone_m
 const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : (FAST_MODE ? 3 : 6), 10); // budget passed DOWN per kernel (fewer rounds in fast mode)
 const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true') === 'true';
 // ---- TUNING SKILLSET phase (default ON) --------------------------------------------------------------
-// The tuning skillset is vendored WHOLE into this repo (default <repo>/tuning_skillset, hash-pinned by
+// The tuning skillset is vendored WHOLE into this repo (default
+// <repo>/perf_knowledge/expert_skills/tuning, hash-pinned as ONE unit by
 // e2e_workflow/scripts/tuning_skillset_sync.py) and is run by ONE role (tuning_specialist) as ONE phase
 // that sits AFTER ConfigSweep and BEFORE HeadKernel. It is deliberately a standalone phase rather than a
 // prompt fragment sprinkled into the head bake-off: (a) the skillset is a complete six-step loop
@@ -213,8 +214,11 @@ const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true
 // tuning_skillset="false" disables the phase entirely: no prompt injection, no report inputs, no state
 // keys -> the run is byte-identical to a build without this feature.
 const TUNING_SKILLSET_ENABLED = String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
+// Lives under expert_skills/ so the tuning skills sit in the same hierarchy, and are selected through
+// the same index.yaml, as every other expert skill. The tree itself stays VENDORED and pinned whole —
+// the index entries that describe it are outside it, which is what lets both things be true at once.
 const TUNING_SKILLSET_DIR = String(A.tuning_skillset_dir ||
-  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/tuning_skillset')).replace(/\/+$/, '');
+  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge/expert_skills/tuning')).replace(/\/+$/, '');
 // tuning-kb/ is the skillset's per-model ANSWER KEY (verified wins + deployable artifacts). Useful in
 // production, contaminating in a blind evaluation — the skillset says so itself. Default ON; pass
 // tuning_kb="false" for eval runs and the role is told not to read it.

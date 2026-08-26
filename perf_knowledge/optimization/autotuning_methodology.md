@@ -13,6 +13,14 @@ sources:
 
 # autotuning methodology
 
+> **Canonical deep version:** [`../expert_skills/tuning/tuning-core/search_strategy.md`](../expert_skills/tuning/tuning-core/search_strategy.md)
+> in the vendored tuning skillset. That copy is the one whose claims are executable
+> (`perf_knowledge/expert_skills/tuning/validate/claims.py`) and re-checked per image, and it is
+> what the e2e tuning phase actually runs. This card stays because the three-tier map and the 9-tuple aiter key are the
+> orientation a reader needs before opening the skillset at all
+> — where the two touch the same ground, the deep version wins and this one is the index entry
+> into it. Do not grow tuning procedure here; send the fix upstream and re-sync the tree.
+
 ## TL;DR
 Three tuner tiers exist, but **only one engages the live sglang/vllm GEMM path: aiter's per-shape DB**.
 The recipe is: capture real shapes with **`AITER_TUNE_GEMM`**, race candidates with **gradlib
@@ -48,14 +56,10 @@ valid when `libtype==asm`. **A single mismatched field (commonly `bias=true` tun
 live) ⇒ 100% lookup miss, 0 engagement** — the most common silent failure.
 
 ## Search-space pruning
-- **Bucket M**: live M varies per batch; round/bucket to a small set instead of tuning every M
-  (racing ~1365 hipBLASLt solutions/shape is slow and can fork-storm the host).
-- **Constrain knobs** to MI300X-good defaults before searching: `mfma_16x16` (`matrix_instr_nonkdim=16`),
-  8-multiple tiles, ≥1024 WGs, `OPTIMIZE_EPILOGUE=1` (`[[optimization/mfma_scheduling.md]]`,
-  `[[optimization/xcd_l2_locality.md]]`). For decode, prioritize small `BLOCK_M` + SPLIT_K
-  (`[[operators/splitk_streamk_gemm/overview.md]]`).
-- **Parallelize** with `--mp <ngpus>` and prune obviously-bad configs (spilling, sub-1024 WG) early via
-  the ISA dump (`[[optimization/occupancy_and_registers.md]]`).
+Superseded in full by [`../expert_skills/tuning/tuning-core/search_strategy.md`](../expert_skills/tuning/tuning-core/search_strategy.md): prune-before-you-race, M bucketing,
+ordering by expected payoff, `--mp` parallelism and its cross-GPU variance trap, and when to stop.
+The three bullets that used to sit here were a subset of it and had already drifted; a subset that
+drifts is worse than a pointer.
 
 ## Caching / reuse
 - Commit the tuned CSV per (model, dtype, hardware) and load via the env var — do **not** edit

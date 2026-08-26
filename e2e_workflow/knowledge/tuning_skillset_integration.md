@@ -1,13 +1,13 @@
 # Tuning skillset — how it is integrated (GEAK side)
 
 This file documents the **wiring**. It deliberately contains **no tuning method**: the method lives in
-the vendored skillset at `<repo>/tuning_skillset/` and is read from there. If you find yourself wanting
+the vendored skillset at `<repo>/perf_knowledge/expert_skills/tuning/` and is read from there. If you find yourself wanting
 to copy a procedure out of the skillset into this file, that is the thing this design exists to prevent.
 
 ## The shape of the integration
 
 ```
-<repo>/tuning_skillset/                      the skillset, VENDORED WHOLE and UNMODIFIED (47 files)
+<repo>/perf_knowledge/expert_skills/tuning/  the skillset, VENDORED WHOLE and UNMODIFIED (47 files)
 e2e_workflow/roles/tuning_specialist.md      the ONLY adapter — a thin role that delegates into it
 e2e_workflow/e2e_workflow.js                 one gated phase block: want('tune'), after config, before head
 e2e_workflow/knowledge/tuning_skillset.manifest.sha256    hash pin for the vendored tree
@@ -30,7 +30,7 @@ re-scatter across GEAK.
 
 Consequences, which are load-bearing:
 
-- **Never edit anything under `tuning_skillset/`.** Fixes go upstream, then come back via `--sync`.
+- **Never edit anything under `perf_knowledge/expert_skills/tuning/`.** Fixes go upstream, then come back via `--sync`.
   `--verify` fails the moment a file inside the tree changes, is added, or goes missing.
 - GEAK-side artifacts belong in `EVAL_DIR/tuning/`, never inside the vendored tree.
 - The tree is invoked through **its own** entry points (`README.md` routes; each `tuning-*/SKILL.md` is
@@ -79,7 +79,7 @@ reference leg of every downstream A/B.
 | arg | default | meaning |
 | --- | --- | --- |
 | `tuning_skillset` | `"true"` | phase on/off. `"false"` injects nothing anywhere → byte-identical to a build without the feature |
-| `tuning_skillset_dir` | `<repo>/tuning_skillset` | override to point at an upstream checkout (e.g. to re-verify standalone) |
+| `tuning_skillset_dir` | `<repo>/perf_knowledge/expert_skills/tuning` | override to point at an upstream checkout (e.g. to re-verify standalone) |
 | `tuning_kb` | `"true"` | consult `tuning-kb/`, the per-model **answer key**. Set `"false"` for blind evaluation runs — the skillset says so itself |
 | `phases` | `all` | the phase key is `tune`, e.g. `phases:"tune"` to run only this phase against carried `state` |
 
@@ -101,7 +101,7 @@ python3 e2e_workflow/scripts/tuning_skillset_sync.py --verify
 python3 e2e_workflow/scripts/tuning_skillset_sync.py --sync /path/to/tuning_skillset
 
 # the skillset's OWN standalone validation, run from inside GEAK, unchanged:
-cd tuning_skillset && python3 validate/claims.py --json /tmp/claims.json
+cd perf_knowledge/expert_skills/tuning && python3 validate/claims.py --json /tmp/claims.json
 ```
 
 The last command is the point of the whole arrangement: the standalone verification loop keeps working

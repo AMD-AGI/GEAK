@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Integrity + re-sync tool for the VENDORED tuning skillset.
 
-The skillset is vendored into GEAK as ONE INTACT TREE (`<repo>/tuning_skillset/`), byte-identical to
-the upstream standalone repo. It is deliberately NOT decomposed into GEAK's own knowledge/ files: it is
-developed and validated standalone (`validate/claims.py`, the per-skill SKILL.md set), and that
-validation only transfers to GEAK if the copy GEAK runs is the copy that was validated.
+The skillset is vendored into GEAK as ONE INTACT TREE
+(`<repo>/perf_knowledge/expert_skills/tuning/`), byte-identical to the upstream standalone repo. It is
+deliberately NOT decomposed into GEAK's own knowledge/ files: it is developed and validated standalone
+(`validate/claims.py`, the per-skill SKILL.md set), and that validation only transfers to GEAK if the
+copy GEAK runs is the copy that was validated.
+
+It sits under expert_skills/ so that the tuning skills are organized, selected and maintained the same
+way as every other expert skill — expert_skills/index.yaml carries an entry per tuning skill, exactly as
+it does for the hand-authored ones. The index is deliberately OUTSIDE this tree: describing a vendored
+skill in GEAK's vocabulary must not require editing the vendored bytes, or the pin below stops meaning
+anything and an upstream re-sync becomes a merge.
 
 This tool is the enforcement point:
 
@@ -25,7 +32,7 @@ import sys
 
 # <repo>/e2e_workflow/scripts/tuning_skillset_sync.py -> <repo>
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DEFAULT_SKILLSET_DIR = os.path.join(REPO_ROOT, "tuning_skillset")
+DEFAULT_SKILLSET_DIR = os.path.join(REPO_ROOT, "perf_knowledge", "expert_skills", "tuning")
 DEFAULT_MANIFEST = os.path.join(
     REPO_ROOT, "e2e_workflow", "knowledge", "tuning_skillset.manifest.sha256"
 )
@@ -148,7 +155,7 @@ def sync(src: str, skillset_dir: str) -> None:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--skillset-dir", default=DEFAULT_SKILLSET_DIR, help="vendored tree (default: <repo>/tuning_skillset)")
+    ap.add_argument("--skillset-dir", default=DEFAULT_SKILLSET_DIR, help="vendored tree (default: <repo>/perf_knowledge/expert_skills/tuning)")
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST, help="manifest path")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--verify", action="store_true", help="check the vendored tree against the manifest (default)")

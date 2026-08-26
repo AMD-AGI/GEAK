@@ -26,7 +26,10 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..', '..');            // .../GEAK
 const FILE = path.join(ROOT, 'e2e_workflow', 'e2e_workflow.js');
 const ROLE = path.join(ROOT, 'e2e_workflow', 'roles', 'tuning_specialist.md');
-const SKILLSET = path.join(ROOT, 'tuning_skillset');
+// Under expert_skills/, so tuning skills share the hierarchy, index and maintenance model of every
+// other expert skill — while the tree itself stays vendored and pinned as one unit.
+const SKILLSET_REL = 'perf_knowledge/expert_skills/tuning';
+const SKILLSET = path.join(ROOT, SKILLSET_REL);
 
 let failures = 0;
 const ok = (cond, msg) => { if (!cond) { console.error('  FAIL:', msg); failures++; } else console.log('  ok:', msg); };
@@ -38,7 +41,7 @@ const src = fs.readFileSync(FILE, 'utf8');
 // A. The skillset is vendored WHOLE, with its own entry points intact.
 // ---------------------------------------------------------------------------
 console.log('\n## A. vendored whole');
-ok(fs.existsSync(SKILLSET), 'tuning_skillset/ is vendored into the repo');
+ok(fs.existsSync(SKILLSET), `${SKILLSET_REL}/ is vendored into the repo`);
 for (const rel of ['README.md', 'tuning-core/SKILL.md', 'validate/claims.py', 'tuning-kb/README.md']) {
   ok(fs.existsSync(path.join(SKILLSET, rel)), `vendored tree keeps its own entry point: ${rel}`);
 }
@@ -58,7 +61,7 @@ for (const rel of ['README.md', 'tuning-core/SKILL.md', 'validate/claims.py', 't
   const manifestPath = path.join(ROOT, 'e2e_workflow', 'knowledge', 'tuning_skillset.manifest.sha256');
   const inManifest = fs.readFileSync(manifestPath, 'utf8').split('\n')
     .filter((l) => l && !l.startsWith('#'))
-    .map((l) => 'tuning_skillset/' + l.split('  ')[1]);
+    .map((l) => SKILLSET_REL + '/' + l.split('  ')[1]);
 
   // check-ignore takes pathnames, not globs, so feed it the manifest itself. --no-index is what makes
   // this assertion mean anything: by default check-ignore consults the index and never calls a TRACKED
@@ -70,7 +73,7 @@ for (const rel of ['README.md', 'tuning-core/SKILL.md', 'validate/claims.py', 't
     (ignored.length ? ` -- e.g. ${ignored.slice(0, 3).join(', ')}` : ''));
 
   // A repo with no git index (tarball export) cannot answer this half; skip rather than fail.
-  const indexed = git(['ls-files', '--', 'tuning_skillset']).split('\n').filter(Boolean);
+  const indexed = git(['ls-files', '--', SKILLSET_REL]).split('\n').filter(Boolean);
   if (indexed.length) {
     const manifestSet = new Set(inManifest);
     const indexedSet = new Set(indexed);
@@ -170,7 +173,7 @@ if (gate) {
   ok(off.TUNING_SKILLSET_ENABLED === false, 'tuning_skillset:"false" disables the phase');
   const on = make({}, '/repo/e2e_workflow');
   ok(on.TUNING_SKILLSET_ENABLED === true, 'default is ON');
-  ok(on.TUNING_SKILLSET_DIR === '/repo/tuning_skillset',
+  ok(on.TUNING_SKILLSET_DIR === '/repo/perf_knowledge/expert_skills/tuning',
     'skillset dir defaults to the vendored tree beside the workflow dir');
   ok(make({ tuning_skillset_dir: '/elsewhere/skillset/' }, '/repo/e2e_workflow').TUNING_SKILLSET_DIR === '/elsewhere/skillset',
     'the vendored tree can be overridden (e.g. point at an upstream checkout to re-verify standalone)');

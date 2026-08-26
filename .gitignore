@@ -249,9 +249,9 @@ kb_store_local/
 # Hence: re-include everything, then re-exclude precisely what tuning_skillset_sync.py's EXCLUDE_DIRS /
 # EXCLUDE_SUFFIXES skip. Keep these two lists in step — running validate/claims.py inside the tree is
 # enough to leave a __pycache__ behind.
-!tuning_skillset/**
-tuning_skillset/**/__pycache__/
-tuning_skillset/**/.pytest_cache/
-tuning_skillset/**/.ruff_cache/
-tuning_skillset/**/*.pyc
-tuning_skillset/**/*.pyo
+!perf_knowledge/expert_skills/tuning/**
+perf_knowledge/expert_skills/tuning/**/__pycache__/
+perf_knowledge/expert_skills/tuning/**/.pytest_cache/
+perf_knowledge/expert_skills/tuning/**/.ruff_cache/
+perf_knowledge/expert_skills/tuning/**/*.pyc
+perf_knowledge/expert_skills/tuning/**/*.pyo

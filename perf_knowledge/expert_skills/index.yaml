@@ -1,6 +1,9 @@
 # index.yaml — expert_skills selector (AUTO-MAINTAINED by _contribute/scaffold.py + validate_skill.py).
 # Regenerate with:  python _contribute/scaffold.py --reindex
 # NOT a ranking. Filter by (operator, gen, arch_class, [from->to], status==validated) -> MEASURE.
+# scope: kernel | e2e | dependency | tuning. 'tuning' entries describe the VENDORED tree under
+# tuning/ and are declared in tuning_index.yaml (the tree is hash-pinned, so its metadata is
+# outside it); their status comes from tuning/validate/claims.py, not from a hand-typed field.
 # Only 'validated' skills are auto-applied by the workflows (advisory priors, never override A/B).
 
 schema: {id, file, scope, match, expects, validation_status}
@@ -251,3 +254,209 @@ skills:
     isolated_speedup_min: 1.15
     parity: required
   validation_status: draft
+- id: tuning_core
+  file: tuning/tuning-core/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - '*'
+    backend:
+    - '*'
+  expects:
+    engagement_proof: required
+    ab_complete: required
+    parity: required
+  validation_status: validated
+- id: tuning_aiter
+  file: tuning/tuning-aiter/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - bf16
+    - fp16
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - aiter
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+  validation_status: validated
+- id: tuning_triton
+  file: tuning/tuning-triton/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - '*'
+    backend:
+    - triton
+    - gluon
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+  validation_status: validated
+- id: tuning_hipblaslt
+  file: tuning/tuning-hipblaslt/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - bf16
+    - fp16
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - hipblaslt
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+  validation_status: validated
+- id: tuning_ck
+  file: tuning/tuning-ck/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - bf16
+    - fp16
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - ck
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+  validation_status: validated
+- id: tuning_flydsl
+  file: tuning/tuning-flydsl/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - '*'
+    backend:
+    - flydsl
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+  validation_status: validated
+- id: tuning_hip
+  file: tuning/tuning-hip/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - '*'
+    backend:
+    - hip
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+  validation_status: validated
+- id: tuning_in_vllm
+  file: tuning/tuning-in-vllm/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - '*'
+    framework: vllm
+  expects:
+    engagement_proof: required
+    ab_complete: required
+    parity: required
+  validation_status: validated
+- id: tuning_in_sglang
+  file: tuning/tuning-in-sglang/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - '*'
+    framework: sglang
+  expects:
+    engagement_proof: required
+    ab_complete: required
+    parity: required
+  validation_status: validated
