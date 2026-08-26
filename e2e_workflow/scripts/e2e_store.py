@@ -53,6 +53,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -665,10 +666,89 @@ _ARTIFACT_KEYS = (("patch", "final_patch", "final.patch"),
 
 OVERLAY_MANIFEST = "_overlay_manifest.json"
 OVERLAY_TARBALL = "overlay.tar.gz"
+# Build/interpreter caches. Neither survives being moved to another reader's box, and both are
+# larger than the source they were derived from.
+OVERLAY_SKIP_DIRS = ("__pycache__", ".torch_ext")
 # Holds the TemporaryDirectory objects alive for the life of the process. The tarball has to still
 # be on disk when the store uploads it, which happens long after _artifact_files() returns, and a
 # TemporaryDirectory that goes out of scope deletes its tree immediately.
 _PACKED = []
+
+
+_IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z_]\w*)\s+import\b|import\s+([A-Za-z_]\w*))",
+                        re.MULTILINE)
+
+
+def _sibling_imports(path: str) -> list:
+    """Top-level module names `path` imports, by source text rather than by importing it.
+
+    Reading the source is the only option here: importing an overlay module off the write path
+    would run its top-level code — which for an authored kernel means compiling Triton against
+    whatever GPU the writer happens to be on. The regex takes plain `import X` / `from X import`
+    only; a dotted or relative form is somebody else's package, not an overlay sibling.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            source = handle.read()
+    except OSError:
+        return []
+    return [a or b for a, b in _IMPORT_RE.findall(source)]
+
+
+def _overlay_modules(manifest_path: str) -> list:
+    """Every overlay-root module the mechanism needs, transitively, deduplicated.
+
+    Two roots, because the overlay has two entry points. The manifest names the module each
+    rebind binds TO, and sitecustomize.py is the code that installs them — an overlay that
+    captures shapes or traces a seam does that work in siblings sitecustomize.py imports
+    directly, with no manifest entry naming them at all.
+
+    Neither root is the whole story on its own, because what they name is regularly a shim:
+    GLM-5.2's `dsa_engage_c0_triton` is 1.6 KB of `from dsa_authored_c0_triton import
+    tilelang_sparse_fwd` wrapping a 23 KB authored Triton kernel, and packing the manifest's
+    name alone shipped a tarball that raises ImportError the moment sitecustomize.py runs it.
+    So each packed module's own imports are followed, and any that resolves to a sibling at the
+    overlay root is packed too. Names that resolve to nothing at the root are just ordinary
+    third-party imports and are left alone; the closure therefore terminates at the overlay
+    boundary.
+
+    A malformed manifest still yields sitecustomize.py's side of the closure rather than
+    raising: the caller is packing a best-effort artifact, and `_repro()` is the thing that
+    decides whether what came out is enough.
+    """
+    root = os.path.dirname(manifest_path)
+    try:
+        with open(manifest_path) as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError):
+        manifest = {}
+    if not isinstance(manifest, dict):
+        manifest = {}
+    seen, out = set(), []
+    queue = [str((entry or {}).get("impl_module") or "") for entry in (manifest.get("rebinds") or [])]
+    queue.extend(_sibling_imports(os.path.join(root, "sitecustomize.py")))
+    while queue:
+        # A submodule rebind (`geak_authored.gemm_flydsl`) is addressed by its top-level package,
+        # which is what sits at the overlay root and what has to be packed. An absolute or
+        # separator-bearing name is not a module name at all and is refused rather than resolved
+        # into somebody's filesystem.
+        module = queue.pop(0).split(".")[0]
+        if not module or module in seen or os.path.isabs(module) or os.sep in module:
+            continue
+        as_file, as_pkg = os.path.join(root, module + ".py"), os.path.join(root, module)
+        if not os.path.isfile(as_file) and not os.path.isdir(as_pkg):
+            continue
+        seen.add(module)
+        out.append(module)
+        if os.path.isfile(as_file):
+            queue.extend(_sibling_imports(as_file))
+        else:
+            for base, dirs, names in os.walk(as_pkg):
+                dirs[:] = [d for d in dirs if d not in OVERLAY_SKIP_DIRS]
+                for name in names:
+                    if name.endswith(".py"):
+                        queue.extend(_sibling_imports(os.path.join(base, name)))
+    return out
 
 
 def _pack_overlay(dirpath: str) -> str:
@@ -680,11 +760,22 @@ def _pack_overlay(dirpath: str) -> str:
     an overlay — the runs that cleared _repro()'s reproducibility gate were the ones that also
     happened to emit a kernel patch, and a pure-overlay win could not be recorded at all.
 
-    Only the mechanism goes in: the manifest, the sitecustomize.py that installs it, and the
-    `_patched/` modules the manifest names. An accepted-candidate directory also holds the A/B
-    evidence it was judged on (`cand/`, `ref/`, server logs, profiles) — that is how the number was
-    arrived at, not how it is reproduced, and it is several times the size of what a reader needs.
-    `__pycache__` is skipped: a .pyc is stale the moment the reader's interpreter differs.
+    Only the mechanism goes in: the manifest, the sitecustomize.py that installs it, and the code
+    the manifest names. The manifest names it two different ways and BOTH have to be packed. A
+    `modules` entry replaces a whole upstream module and points at a file under `_patched/`. A
+    `rebinds` entry leaves the module alone and swaps one symbol for `impl_module`'s — a sibling
+    package or .py file at the overlay's top level, NOT under `_patched/`. Packing only `_patched/`
+    silently produced a tarball with a manifest that rebinds to an import that is not in it: the
+    gpt-oss-120b `_fwd_kernel` win is a `rebinds` overlay whose entire HIP kernel lives in
+    `geak_hip_extend/`, and the record would have promised a reproducible run and shipped nothing
+    to reproduce it with.
+
+    An accepted-candidate directory also holds the A/B evidence it was judged on (`cand/`, `ref/`,
+    server logs, profiles) — that is how the number was arrived at, not how it is reproduced, and
+    it is several times the size of what a reader needs. `__pycache__` is skipped: a .pyc is stale
+    the moment the reader's interpreter differs. `.torch_ext/` is skipped for the same reason one
+    step further along: it is a torch cpp_extension BUILD cache (ninja logs, .o, a gfx-specific
+    .so) that the reader's own load() rebuilds from the .hip source that is packed.
 
     Everything is packed under a single `overlay/` top level so the reader can untar into the
     bundle root and get one predictable directory to point PYTHONPATH at (see _launch_text).
@@ -692,23 +783,34 @@ def _pack_overlay(dirpath: str) -> str:
     No manifest means this is not an overlay directory. Returning "" then is deliberate — the gate
     refuses the record rather than have it promise a tarball of something nobody can install.
     """
-    if not os.path.isfile(os.path.join(dirpath, OVERLAY_MANIFEST)):
+    manifest_path = os.path.join(dirpath, OVERLAY_MANIFEST)
+    if not os.path.isfile(manifest_path):
         return ""
     holder = tempfile.TemporaryDirectory(prefix="e2e_overlay_")
     _PACKED.append(holder)
     out = os.path.join(holder.name, OVERLAY_TARBALL)
-    with tarfile.open(out, "w:gz") as tar:
-        for name in (OVERLAY_MANIFEST, "sitecustomize.py"):
-            src = os.path.join(dirpath, name)
-            if os.path.isfile(src):
-                tar.add(src, arcname="overlay/" + name)
-        for root, dirs, names in os.walk(os.path.join(dirpath, "_patched")):
-            dirs[:] = [d for d in dirs if d != "__pycache__"]
+
+    def _add_tree(tar, root_dir):
+        for root, dirs, names in os.walk(root_dir):
+            dirs[:] = [d for d in dirs if d not in OVERLAY_SKIP_DIRS]
             for name in names:
                 if name.endswith(".pyc"):
                     continue
                 src = os.path.join(root, name)
                 tar.add(src, arcname="overlay/" + os.path.relpath(src, dirpath))
+
+    with tarfile.open(out, "w:gz") as tar:
+        for name in (OVERLAY_MANIFEST, "sitecustomize.py"):
+            src = os.path.join(dirpath, name)
+            if os.path.isfile(src):
+                tar.add(src, arcname="overlay/" + name)
+        _add_tree(tar, os.path.join(dirpath, "_patched"))
+        for module in _overlay_modules(manifest_path):
+            pkg = os.path.join(dirpath, module)
+            if os.path.isdir(pkg):
+                _add_tree(tar, pkg)
+            elif os.path.isfile(pkg + ".py"):
+                tar.add(pkg + ".py", arcname="overlay/" + module + ".py")
     return out
 
 
