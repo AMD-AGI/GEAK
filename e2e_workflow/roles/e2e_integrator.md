@@ -195,10 +195,20 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      need `authored_kernel_eval_dir/workspace/`, which does not exist for a kernel another run authored.
      When this input is set, SKIP them entirely: the record carries the finished overlay, so unpack it
      and bench that directory as the candidate.
+     It is a STANDALONE overlay from another run, so do not untar it over `CURRENT_OVERLAY` — that
+     overwrites `_overlay_manifest.json` and silently drops every rebind already accepted here. Graft
+     its rebinds on top instead:
      ```bash
-     CAND="$EVAL_DIR/overlay/cand_<short_name>"; mkdir -p "$CAND"
-     tar xzf "$KB_OVERLAY_TARBALL" -C "$CAND" --strip-components=1   # the tar's top level is overlay/
-     python3 -c 'import json;print(json.load(open("'"$CAND"'/_overlay_manifest.json"))["rebinds"])'
+     CAND="$EVAL_DIR/overlay/cand_<short_name>"
+     cp -r "$CURRENT_OVERLAY"/. "$CAND"/ 2>/dev/null || mkdir -p "$CAND"
+     KBO=$(mktemp -d); tar xzf "$KB_OVERLAY_TARBALL" -C "$KBO" --strip-components=1  # tar top level is overlay/
+     cp -r "$KBO"/. "$CAND"/                       # modules + _patched/
+     if [ -s "$CURRENT_OVERLAY/_overlay_manifest.json" ]; then
+       cp "$CURRENT_OVERLAY/_overlay_manifest.json" "$CAND/_overlay_manifest.json"
+       # then, per {target,impl_module,impl_attr} in "$KBO/_overlay_manifest.json":
+       python3 "$SKILL_DIR/scripts/overlay_setup.py" add-rebind --overlay "$CAND" \
+         --target "<target>" --impl-module "<impl_module>" --impl-attr "<impl_attr>"
+     fi
      PYTHONPATH="$CAND" python3 "$SKILL_DIR/scripts/overlay_setup.py" check --module "<impl_module>"
      ```
      The manifest lists every rebind as `{target, impl_module, impl_attr}`. **Verify each one actually

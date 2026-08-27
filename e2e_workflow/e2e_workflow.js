@@ -2170,10 +2170,23 @@ if (want('setup')) {
               'workspace does not exist here, so your `authored` recipe (git apply into ' +
               'authored_kernel_eval_dir/workspace, copy kernel_src, add-rebind) cannot run and must not ' +
               'be attempted. The record ships the FINISHED overlay instead. Unpack it and bench THAT ' +
-              'directory as the candidate:\n' +
+              'directory as the candidate. Note the tarball is a STANDALONE overlay from another run: ' +
+              'untarring it over CURRENT_OVERLAY would overwrite `_overlay_manifest.json` and drop every ' +
+              'rebind already accepted here, which turns the A/B into a comparison against a candidate ' +
+              'that is missing part of its own reference. So graft its rebinds ON TOP of the current ' +
+              'overlay rather than replacing it:\n' +
               '```bash\n' +
-              `mkdir -p "$CAND" && tar xzf ${shq(k.overlay_tar)} -C "$CAND" --strip-components=1\n` +
-              'PYTHONPATH="$CAND" python3 "$SKILL_DIR/scripts/overlay_setup.py" check --module <impl_module from $CAND/_overlay_manifest.json>\n' +
+              'CAND="$EVAL_DIR/overlay/cand_<short_name>"\n' +
+              'cp -r "$CURRENT_OVERLAY"/. "$CAND"/ 2>/dev/null || mkdir -p "$CAND"   # empty CURRENT_OVERLAY is the normal case\n' +
+              `KBO=$(mktemp -d) && tar xzf ${shq(k.overlay_tar)} -C "$KBO" --strip-components=1\n` +
+              'cp -r "$KBO"/. "$CAND"/                      # modules + _patched/; manifest handled next\n' +
+              'if [ -s "$CURRENT_OVERLAY/_overlay_manifest.json" ]; then\n' +
+              '  cp "$CURRENT_OVERLAY/_overlay_manifest.json" "$CAND/_overlay_manifest.json"   # restore, then re-add\n' +
+              '  # for each {target,impl_module,impl_attr} in "$KBO/_overlay_manifest.json":\n' +
+              '  python3 "$SKILL_DIR/scripts/overlay_setup.py" add-rebind --overlay "$CAND" \\\n' +
+              '    --target "<target>" --impl-module "<impl_module>" --impl-attr "<impl_attr>"\n' +
+              'fi\n' +
+              'PYTHONPATH="$CAND" python3 "$SKILL_DIR/scripts/overlay_setup.py" check --module "<impl_module>"\n' +
               '```\n' +
               'The manifest names every rebind as `target -> impl_module:impl_attr`. VERIFY EACH REBIND ' +
               'ACTUALLY TOOK on the candidate server (load banner, or the check above) before you believe ' +
