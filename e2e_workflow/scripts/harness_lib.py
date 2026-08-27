@@ -36,9 +36,11 @@ It exists to close two systematic "isolated win / e2e loss" holes that a naive p
       form (observed-vs-ceiling) available to any downstream e2e comparison; an observed delta far above
       the ceiling is box drift / measurement error, not the kernel.
 """
+import bisect
 import json
 import math
 import os
+import random
 import shutil
 import signal
 import subprocess
@@ -478,7 +480,7 @@ def flatten_outputs(out):
 
 
 def to_device_like(ref, dev):
-    """Move a recorded oracle entry (tensor or container of tensors) onto `dev`."""
+    """Move a reference entry (tensor or container of tensors) onto `dev`."""
     if isinstance(ref, dict):
         return {k: to_device_like(v, dev) for k, v in ref.items()}
     if isinstance(ref, tuple) and hasattr(ref, "_fields"):
@@ -488,73 +490,42 @@ def to_device_like(ref, dev):
     return ref.to(dev) if hasattr(ref, "to") else ref
 
 
-def reconstruct_captured(obj, device="cpu"):
-    """Inverse of capture_shapes._snapshot (shared refs must already be resolved)."""
-    if isinstance(obj, dict) and obj.get("__tensor__"):
-        t = obj["data"]
-        return t.to(device) if hasattr(t, "to") else t
-    if isinstance(obj, dict) and set(obj.keys()) == {"__repr__"}:
-        return obj["__repr__"]
-    if isinstance(obj, dict):
-        return {k: reconstruct_captured(v, device) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return type(obj)(reconstruct_captured(v, device) for v in obj)
-    return obj
+def live_oracle_cases(random_shapes, baseline_outputs=None, baseline_call=None, *,
+                      seed=0, draw=0, device=None, limit=0):
+    """Build ``[{sig, args, ref}]`` WITHOUT any stored golden — the ref comes from the LIVE baseline,
+    which must exist anyway as the timing denominator (this replaces the retired ``reference_io.pt``).
 
-
-def load_reference_io(path, map_location="cpu"):
-    """Load a capture_shapes oracle blob (supports optional ``shared`` weight pool)."""
+    Inputs are rebuilt with the SAME seeded generator construction ``check_random_vs_baseline`` uses
+    (``manual_seed(seed + draw)``), so the baseline leg's outputs — keyed ``"<sig>|<draw>"`` by
+    ``baseline_random_outputs`` — line up even though the two legs ran in different processes.
+    ``baseline_call`` is the legacy in-process form (op_bench / single-process tasks). A shape whose
+    baseline output is missing is SKIPPED, not silently compared against nothing; ``limit`` caps the
+    case count."""
     torch = _torch()
-    try:
-        blob = torch.load(path, map_location=map_location, weights_only=False)
-    except TypeError:
-        blob = torch.load(path, map_location=map_location)
-    if not isinstance(blob, dict):
-        raise TypeError(f"reference_io.pt must be a dict, got {type(blob)}")
-    return blob
-
-
-def resolve_oracle_shared(obj, shared):
-    """Expand ``{"__shared__": key}`` refs written by capture_shapes share_large/moe_slim."""
-    if isinstance(obj, dict) and set(obj.keys()) == {"__shared__"}:
-        key = obj["__shared__"]
-        if key not in shared:
-            raise KeyError(f"oracle shared ref missing: {key!r}")
-        return shared[key]
-    if isinstance(obj, dict):
-        return {k: resolve_oracle_shared(v, shared) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return type(obj)(resolve_oracle_shared(v, shared) for v in obj)
-    return obj
-
-
-def iter_eager_cases_from_oracle(path, device="cpu"):
-    """Yield ``{args, ref, sig, regime}`` one record at a time (memory-friendly for multi-GiB MoE)."""
-    blob = load_reference_io(path, map_location="cpu")
-    shared = blob.get("shared") or {}
-    for record in blob.get("records") or []:
-        kwargs = resolve_oracle_shared(record.get("kwargs") or {}, shared)
-        args_pos = resolve_oracle_shared(record.get("args") or (), shared)
-        kwargs = reconstruct_captured(kwargs, device=device)
-        args_pos = reconstruct_captured(args_pos, device=device)
-        ref = reconstruct_captured(
-            resolve_oracle_shared(record.get("output"), shared), device=device)
-        args = kwargs if isinstance(kwargs, dict) and kwargs else args_pos
-        if isinstance(args, dict) and isinstance(args_pos, (list, tuple)) and args_pos:
-            names = ["hidden_states", "w1", "w2", "topk_weight", "topk_ids"]
-            for name, value in zip(names, args_pos):
-                args.setdefault(name, value)
-        yield {
-            "args": args,
-            "ref": ref,
-            "sig": record.get("sig", ""),
-            "regime": record.get("regime", ""),
-        }
-
-
-def eager_cases_from_oracle(path, device="cpu"):
-    """Materialize all eager cases; prefer ``iter_eager_cases_from_oracle`` for large oracles."""
-    return list(iter_eager_cases_from_oracle(path, device=device))
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    cases = []
+    for shape in random_shapes or []:
+        if limit and len(cases) >= int(limit):
+            break
+        sig = shape.get("sig", "")
+        make_inputs = shape.get("make_inputs")
+        if not callable(make_inputs):
+            continue
+        rng = torch.Generator(device=device).manual_seed(int(seed) + int(draw))
+        args = make_inputs(rng)
+        if baseline_outputs is not None:
+            ref = baseline_outputs.get(f"{sig}|{int(draw)}")
+            if ref is None:
+                continue
+            ref = to_device_like(ref, device)
+        elif callable(baseline_call):
+            ref = baseline_call(args)
+            ref = ref.detach().clone() if hasattr(ref, "detach") else ref
+        else:
+            raise ValueError("live_oracle_cases needs baseline_outputs (preferred: recorded by the "
+                             "baseline leg via baseline_random_outputs) or a legacy baseline_call")
+        cases.append({"sig": sig, "regime": shape.get("regime", ""), "args": args, "ref": ref})
+    return cases
 
 
 def check_correct_multi_lazy(call, case_iter, tol, max_keep_live=2):
@@ -762,9 +733,9 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
                              baseline_outputs=None):
     """Validate the candidate against the LIVE frozen baseline on MANY RANDOM INPUT VALUE DRAWS at the
     SAME online-aligned shapes (NOT random shapes — dims are fixed per `sig`, only values vary). The
-    frozen oracle (`reference_io.pt`) pins ONE recorded input+golden; this catches value-dependent bugs
-    that single draw misses (masking, NaN/denormal handling, accumulation across magnitudes) by using the
-    real production kernel as the truth source for each fresh draw — no stored golden needed.
+    eager leg pins ONE draw per shape; this catches value-dependent bugs that a single draw misses
+    (masking, NaN/denormal handling, accumulation across magnitudes) by using the real production
+    kernel as the truth source for each fresh draw — no stored golden needed anywhere.
 
     CORRECTNESS is a HARD GATE: for every shape × every draw, `correct(candidate_out, baseline_out, tol)`
     must pass, else `all_ok=False`. The baseline output is snapshotted (clone) BEFORE the candidate runs,
@@ -1059,6 +1030,24 @@ class HarnessIncompleteError(Exception):
 UT_HARNESS_INCOMPLETE_SENTINEL = "UT_HARNESS_INCOMPLETE"
 
 
+def _independence_only(current_call, random_shapes, seed=0):
+    """Fallback eager leg when no live-baseline ref is available for any shape: still enforce the
+    fresh-output contract (a shared/static return buffer is a cheat), and report the missing refs."""
+    torch = _torch()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    shapes = [sh for sh in (random_shapes or []) if callable(sh.get("make_inputs"))] * 2
+    if not shapes:
+        return True, [{"case": "eager", "correct": None,
+                       "note": "no live-baseline ref and no shapes to build an independence check from"}]
+    args_a = shapes[0]["make_inputs"](torch.Generator(device=device).manual_seed(int(seed)))
+    args_b = shapes[1]["make_inputs"](torch.Generator(device=device).manual_seed(int(seed) + 1))
+    ok, reason = assert_independent_outputs(current_call, args_a, args_b)
+    return ok, [{"case": "output_independence", "correct": ok, "max_rel_err": None, "note": reason},
+                {"case": "eager", "correct": None,
+                 "note": "no live-baseline ref available for any shape; eager value comparison skipped "
+                         "(the random-parity leg below is the authoritative value gate)"}]
+
+
 # --------------------------------------------------------------------------- (c) fail-closed correctness suite
 # WHY: `check_graph_replay` already reproduces the deploy path that faults (capture-once / replay-many /
 # static-buffer reuse across shapes), but it was (1) gated on the fragile `meta.graph_replayed` flag
@@ -1068,10 +1057,14 @@ UT_HARNESS_INCOMPLETE_SENTINEL = "UT_HARNESS_INCOMPLETE"
 # the h2 paged_attention failure. `run_correctness` closes both holes: the trigger is the AUTHORITATIVE
 # deployment fact `deployment_graph_mode(regime)` (regime.cuda_graph, from the launch flags), and a
 # graph-deploy kernel that supplies no >=2-shape replay bundle FAILS CLOSED instead of silently passing.
-def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
-                    baseline_call=None, baseline_outputs=None, replay=None, draws=3):
+def run_correctness(regime, *, current_call, random_shapes, tol, eager_cases=None,
+                    baseline_call=None, baseline_outputs=None, replay=None, draws=3, seed=0):
     """The SINGLE correctness entrypoint every generated unittest must call. Runs, in order:
-      1. eager multi-case vs oracle (`check_correct_multi`) — also the output-independence check;
+      1. eager multi-case vs the LIVE baseline (`check_correct_multi`) — also the output-independence
+         check. Cases are built here by `live_oracle_cases` from `random_shapes` + the baseline leg's
+         recorded outputs; there is no stored `reference_io.pt` golden any more (see
+         `live_oracle_cases` for why it was retired). Pass `eager_cases` explicitly only if the UT has
+         its own case source.
       2. random-value parity vs the frozen live baseline (`check_random_vs_baseline`);
       3. FAIL-CLOSED deployment-context replay: when `deployment_graph_mode(regime)` is True, a
          `replay` bundle with >=2 BOUNDARY shapes is MANDATORY (single-shape replay cannot expose a
@@ -1081,7 +1074,8 @@ def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
         "fill": fn(case)->None (copy case inputs INTO pre-allocated static buffers; never realloc),
         "run":  fn()->None     (one graph-safe launch reading/writing those static buffers),
         "read_out": fn()->Tensor (the static output to compare),
-        "cases": [{"args":..., "ref": <golden>, "sig": <label>}, ...]  (>=2, boundary-spanning),
+        "cases": [{"args":..., "ref": <live-baseline ref>, "sig": <label>}, ...] (>=2, boundary-spanning;
+                 build them with `live_oracle_cases`),
         "capture_idx": <index of the LARGEST case to capture on> (default 0),
     }
     Returns (all_ok, report) where report has keys eager / random / graph_replay.
@@ -1089,13 +1083,21 @@ def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
     report = {}
     ok = True
 
-    c_ok, per = check_correct_multi(current_call, eager_cases, tol)
-    report["eager"] = per
-    ok = ok and c_ok
-
     if baseline_call is None and baseline_outputs is None:
         raise ValueError("run_correctness needs baseline_outputs (preferred: recorded by the baseline "
                          "leg via baseline_random_outputs) or a legacy in-process baseline_call")
+
+    if eager_cases is None:
+        eager_cases = live_oracle_cases(random_shapes, baseline_outputs=baseline_outputs,
+                                        baseline_call=baseline_call, seed=seed, draw=0)
+    if eager_cases:
+        c_ok, per = check_correct_multi(current_call, eager_cases, tol)
+    else:
+        # No shape produced a live baseline ref -> the eager leg has nothing to compare. Do NOT pass
+        # silently: the independence check still runs off the raw shapes, and the gap is reported.
+        c_ok, per = _independence_only(current_call, random_shapes, seed=seed)
+    report["eager"] = per
+    ok = ok and c_ok
     r_ok, perr = check_random_vs_baseline(baseline_call, current_call, random_shapes, tol,
                                           draws=draws, graph=deployment_graph_mode(regime),
                                           baseline_outputs=baseline_outputs)
@@ -1196,6 +1198,87 @@ def shuffled_block_table(num_seqs, blocks_per_seq, pool_blocks=0, seed=0, torch=
     g = torch.Generator(device=device).manual_seed(int(seed))
     perm = torch.randperm(pool, generator=g, device=device)[:need].to(torch.int32)
     return perm.reshape(int(num_seqs), int(blocks_per_seq))
+
+
+# --------------------------------------------------------------------------- MoE routing synthesis
+# Production routing is SKEWED (a hot tail, plus DeepSeek-style shared experts every token hits), and
+# flat routing is not a neutral error: a grouped GEMM is straggler-bound and `moe_align_block_size` pads
+# per NONEMPTY expert, so uniform synthesis makes BOTH legs look faster than the real load. The real
+# histogram is not recorded (capture keeps no tensors), so routing comes from one shared seeded prior
+# instead of every cases.py rolling its own. Correctness is unaffected either way (both legs get the
+# identical routing, the baseline leg is the reference); this only decides whether the TIMING is real.
+def moe_routing_plan(num_tokens, top_k, num_experts, *, skew=1.0, shared_experts=0, seed=0):
+    """Per-token expert ids `[[e0, e1, ...], ...]`, DISTINCT within a token (a real router takes top-k
+    without replacement), shared experts `[0, shared_experts)` first, the rest drawn ~Zipf(`skew`) by
+    rejection. `skew=0` is uniform, ~1.0 a realistic hot tail; hot ids are scattered by a seeded shuffle
+    rather than being 0..k, so a candidate cannot win by assuming contiguous hot experts.
+
+    Pure Python, seeded, O(tokens*top_k): reproducible across boxes and torch builds (unlike the retired
+    recorded oracle) and sub-second at prefill sizes."""
+    E, K = int(num_experts), int(top_k)
+    S = min(max(0, int(shared_experts)), E, K)
+    ids = list(range(S, E))
+    random.Random(int(seed) ^ 0x5EED).shuffle(ids)
+    acc, cdf = 0.0, []
+    for i in range(len(ids)):
+        acc += (i + 1) ** -float(skew)
+        cdf.append(acc)
+    need, rnd, plan = max(0, min(K, E) - S), random.Random(int(seed)), []
+    for _ in range(max(0, int(num_tokens))):
+        row = list(range(S))
+        for _ in range(need * 24):                  # rejection: collisions are rare for K << E
+            if len(row) >= S + need:
+                break
+            e = ids[min(bisect.bisect_left(cdf, rnd.random() * acc), len(ids) - 1)]
+            if e not in row:
+                row.append(e)
+        for e in ids:                               # deterministic top-up if rejection ran dry
+            if len(row) >= S + need:
+                break
+            if e not in row:
+                row.append(e)
+        plan.append(row)
+    return plan
+
+
+def moe_expert_load(plan, num_experts):
+    """Per-expert token counts + the order statistics that drive MoE cost. `mean_all` is the legacy
+    `tokens*top_k/num_experts` figure; the rest are over the NONEMPTY experts, the only population that
+    costs anything (a padded grouped GEMM launches per nonempty expert and finishes with the heaviest)."""
+    counts = [0] * int(num_experts)
+    for row in plan:
+        for e in row:
+            if 0 <= e < len(counts):
+                counts[e] += 1
+    live = sorted(c for c in counts if c) or [0]
+    total = sum(counts)
+    return {"hist": counts, "nonempty": sum(1 for c in counts if c), "total": total,
+            "mean_all": total / float(len(counts) or 1), "mean": total / float(len(live)),
+            "p50": live[(len(live) - 1) // 2], "p95": live[int(0.95 * (len(live) - 1))],
+            "max": live[-1]}
+
+
+def moe_effective_m(num_tokens, top_k, num_experts, *, skew=1.0, shared_experts=0, seed=0,
+                    stat="p95", block_size=0):
+    """The per-expert M to bake into `*_m_buckets` for `op_kind=moe` — NOT `tokens*top_k/num_experts`.
+    That mean averages in the experts that never fire, and a grouped GEMM waits for the heaviest one.
+    `block_size` rounds up to the `moe_align_block_size` padding granularity."""
+    load = moe_expert_load(moe_routing_plan(num_tokens, top_k, num_experts, skew=skew,
+                                            shared_experts=shared_experts, seed=seed), num_experts)
+    m, bs = int(math.ceil(float(load.get(stat) or 0))), int(block_size or 0)
+    return max(int(math.ceil(m / float(bs))) * bs if bs else m, bs or 1)
+
+
+def skewed_topk_ids(num_tokens, top_k, num_experts, *, skew=1.0, shared_experts=0, seed=0,
+                    torch=None, device="cuda", dtype=None):
+    """`topk_ids` [num_tokens, top_k] int32 from `moe_routing_plan` — use this in a MoE task's
+    `make_inputs` instead of `torch.randperm(E)[:top_k]`."""
+    torch = torch or _torch()
+    plan = moe_routing_plan(num_tokens, top_k, num_experts, skew=skew,
+                            shared_experts=shared_experts, seed=seed)
+    flat = [e for row in plan for e in row]
+    t = torch.tensor(flat, dtype=dtype or torch.int32)
+    return t.reshape(len(plan), len(plan[0]) if plan else 0).to(device)
 
 
 # --------------------------------------------------------------------------- (d) two-leg measurement

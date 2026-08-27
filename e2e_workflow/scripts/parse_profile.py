@@ -774,7 +774,7 @@ def build_workload(agg, total_us, top_n, target=""):
 
     This feeds the kernel_workflow harness so it benchmarks the SAME shapes/dtypes the workload
     hits, weighted by their real wall-clock contribution. Correctness is unaffected (it stays on
-    the frozen reference_io.pt oracle); this is a performance-measurement model only.
+    the live baseline-parity oracle); this is a performance-measurement model only.
     """
     items = sorted(agg.items(), key=lambda kv: kv[1]["total_us"], reverse=True)
     if target:

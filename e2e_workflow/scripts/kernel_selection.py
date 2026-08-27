@@ -534,7 +534,8 @@ def main(argv=None):
     verdict["trace_files"] = all_paths
     verdict["trace_files_considered"] = trace_paths
 
-    # Issue #429: after selection, keep one authoritative oracle and reclaim process-local giants.
+    # After selection, promote the winning process's meta.json and reclaim the process-local
+    # capture dirs (light JSON now, but a failed run otherwise leaves one per PID forever).
     task_dir = args.task_dir or infer_task_dir(args.capture_meta)
     if task_dir and not args.no_reclaim_captures:
         try:

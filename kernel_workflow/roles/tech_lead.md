@@ -354,7 +354,7 @@ none of them, so skip this whole block then):**
   mkdir -p "$STATE_DIR"
   # sync the cumulative-best workspace (code + immutable oracle) to STATE_DIR/best (tar-pipe, exclude
   # .git/build/__pycache__/.torch_ext/*.so) so the next wave's director seeds from it. The golden
-  # (reference_io.pt, if present) is an absolute symlink in CANONICAL; this tar carries it verbatim so
+  # any large immutable artifact is an absolute symlink in CANONICAL; this tar carries it verbatim so
   # best/ shares the one physical file — never add -h/--dereference. NO `rm` (it
   # prompts and blocks autonomous runs): stage into a UNIQUE tmp, then atomically swap with mv-aside.
   # Issue #429: materialize_workspace.sh (recursive *.so exclude + optional aiter share). Never -h.

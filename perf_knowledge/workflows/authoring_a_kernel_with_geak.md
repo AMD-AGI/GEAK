@@ -49,8 +49,9 @@ From the single-kernel ladder ([`optimize_single_kernel.md`](optimize_single_ker
 
 ### 0. Get the immutable oracle
 The author works in the canonical `WORKSPACE` (a `kernel_src/`) built from the op `TASK_DIR`,
-which holds the **IMMUTABLE** `unittest.py` + `reference_io.pt` + `meta.json` (anti-cheating;
-re-hash `reference_io_sha256` before trusting anything). `OP_SPEC` from `meta.json` gives
+which holds the **IMMUTABLE** `unittest.py` + `cases.py` + `meta.json` (anti-cheating; re-hash
+`unittest_sha256` before trusting anything). There is no golden-tensor file: correctness is live
+parity against the frozen baseline. `OP_SPEC` from `meta.json` gives
 `op_kind`, shapes, `transpose_b`, `bias`, `dtype`, `math_contract`, `regime`.
 
 ### 1. Load focused authoring knowledge (before writing a line)

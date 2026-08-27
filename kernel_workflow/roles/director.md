@@ -32,16 +32,15 @@ Inputs in your prompt: `KERNEL_PATH_ORIG`, `EXP_ROOT` (base dir for timestamped 
 `STATE_DIR` is a stable per-(kernel,backend) directory carried ACROSS deep-mode waves. It lets a
 continued wave build on the cumulative best instead of restarting. Handle it as follows:
 - **If `STATE_DIR` is set AND `$STATE_DIR/best/` exists and is non-empty** (a prior wave's cumulative-best
-  workspace — it contains the optimized `kernel_src/` AND the immutable oracle `unittest.py`/`meta.json`/
-  `reference_io.pt`): create `EVAL_DIR` as usual, but **seed `baseline/` and `workspace/` by copying from
+  workspace — it contains the optimized `kernel_src/` AND the immutable harness `unittest.py`/`meta.json`/
+  `cases.py`): create `EVAL_DIR` as usual, but **seed `baseline/` and `workspace/` by copying from
   `$STATE_DIR/best/`** (same tar-pipe excludes as the optimize-mode copy) instead of from
-  `KERNEL_PATH_ORIG`. (The golden rides in `best/` as an absolute symlink → `KERNEL_PATH_ORIG/reference_io.pt`;
-  the tar-pipe carries it verbatim — do NOT add `-h/--dereference`, and do NOT re-copy it.) Re-apply
-  `chmod -w` to the oracle files. `git init` + commit this seeded state as
+  `KERNEL_PATH_ORIG`. (Any absolute symlink in `best/` is carried verbatim by the tar-pipe — do NOT add
+  `-h/--dereference`.) Re-apply `chmod -w` to the harness files. `git init` + commit this seeded state as
   HEAD (so this wave's patches diff from the cumulative best). Then read `$STATE_DIR/STATE.json` if present
   and return `resumed: true` plus `prior_state` (its `cumulative`, `insights`, `ledger`, `bottleneck_now`,
-  `best_per_case`). Verify the oracle is intact: `reference_io.pt` sha256 must still match `meta.json`'s
-  `reference_io_sha256` (if present) — if it was tampered, fall back to seeding from `KERNEL_PATH_ORIG` and
+  `best_per_case`). Verify the harness is intact: `unittest.py` sha256 must still match `meta.json`'s
+  `unittest_sha256` (if present) — if it was tampered, fall back to seeding from `KERNEL_PATH_ORIG` and
   set `resumed: false`.
 - **If `STATE_DIR` is set but `$STATE_DIR/best/` is absent** (the FIRST wave): proceed with the normal
   copy from `KERNEL_PATH_ORIG` below, and return `resumed: false` (no `prior_state`). Do NOT create
@@ -50,7 +49,7 @@ continued wave build on the cumulative best instead of restarting. Handle it as 
 
 ### `mode=author` — seed an empty workspace anchored on the immutable oracle
 When `MODE=author`, `KERNEL_PATH_ORIG` is an **op task dir** (holds `meta.json` + immutable
-`unittest.py` + optional `reference_io.pt`), NOT a kernel to optimize. There is no source to copy.
+`unittest.py` + `cases.py`), NOT a kernel to optimize. There is no source to copy.
 Do this instead of the optimize-mode steps below:
 1. Same collision-proof `TS` + `EVAL_DIR` decision as below.
 2. Build the layout WITHOUT copying any kernel source:
@@ -61,18 +60,11 @@ Do this instead of the optimize-mode steps below:
    # This INCLUDES baseline_overlay/ + harness_lib.py: the frozen live serving stack IS the timing-baseline
    # denominator regardless of TARGET_LANGUAGE — it must ride along, immutable, so the unittest can time
    # the authored seed against the live online path (never against the seed's own language scaffold).
-   # reference_io.pt is OPTIONAL and usually ABSENT: only e2e's kernel_extractor records a golden (it
-   # captures unsynthesizable real routing / paged-KV metadata off a live server). An oracle_freezer dir
-   # has no golden — it re-derives operands from meta.cases[] seeds and checks parity against the
-   # frozen baseline live. The [ -e ] guards below already handle both; do not "fix" a missing file.
+   # There is NO golden-tensor file in any task dir: every lane re-derives operands from meta.cases[]
+   # seeds and checks parity against the frozen baseline LIVE. Do not look for or "restore" one.
    for f in meta.json unittest.py cases.py harness_lib.py leg_runner.py overlay_setup.py; do
      [ -e "$KERNEL_PATH_ORIG/$f" ] && cp "$KERNEL_PATH_ORIG/$f" "$EVAL_DIR/workspace/$f"
    done
-   # golden is BIG (~1 GB) and IMMUTABLE — SHARE the single original via an ABSOLUTE symlink instead of
-   # copying it into every workspace. unittest loads it with os.path.join(HERE, "reference_io.pt") and the
-   # sha check hashes the file bytes, both transparent through a symlink. Downstream tars (engineer/verify)
-   # carry the symlink verbatim (no -h/--dereference anywhere), so the whole lane shares one physical file.
-   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    for d in baseline_overlay baseline_ref baseline_src; do
      [ -d "$KERNEL_PATH_ORIG/$d" ] && cp -r "$KERNEL_PATH_ORIG/$d" "$EVAL_DIR/workspace/$d"
    done
@@ -120,15 +112,11 @@ Steps:
    # Issue #429: ALWAYS use materialize_workspace.sh for baseline + workspace. Agents that
    # previously inlined tar sometimes omitted --exclude='*.so' and copied multi-GiB aiter/jit/*.so
    # into every clone. Script excludes nested *.so/*.o and aiter/jit, never -h/--dereference.
-   # reference_io.pt is excluded from the tar and shared via absolute symlink below.
    for d in baseline workspace; do
      bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
        --src "$KERNEL_PATH_ORIG" --dst "$EVAL_DIR/$d" \
        --shared-root "$EVAL_DIR/_shared" --link-aiter
    done
-   # Share the immutable golden by absolute symlink (sha check + torch.load are transparent through it;
-   # downstream engineer/verify tars carry the symlink verbatim — never add -h/--dereference).
-   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
    printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
@@ -206,7 +194,6 @@ baseline latencies recorded at benchmark setup).
    bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
      --src "$KERNEL_PATH_ORIG" --dst "$VWS" \
      --shared-root "$EVAL_DIR/_shared" --link-aiter
-   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$VWS/reference_io.pt"
    cd "$VWS"
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A

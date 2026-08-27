@@ -7,8 +7,8 @@ Run:  python3 -m unittest discover -s e2e_workflow/scripts/tests -v
 op_bench.py produces the isolated GEMM/attention number that the Op Benchmarker routes on and that the
 A/B judge consumes. Everything asserted here is DRIVER LOGIC, not GPU math:
 
-  - operand construction : _resolve_shape (symbolic "M" -> m_buckets), _load_or_synth_gemm (recorded
-                           oracle vs synthesized), _synth_blockscale_case (fp8 block-scale shapes)
+  - operand construction : _resolve_shape (symbolic "M" -> m_buckets), _synth_gemm (operands +
+                           analytic fp32 target), _synth_blockscale_case (fp8 block-scale shapes)
   - op classification    : _is_blockscale_gemm / _is_grouped_or_quant_gemm -- which heads must NOT go
                            through the dense torch-BLAS bake-off at all
   - backend dispatch     : bench_gemm's per-backend ladder (hipblaslt / tunableop / rocblas / ck /
@@ -1066,54 +1066,18 @@ class TestBenchBlockscaleGemm(_FakeStackMixin, unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# _load_or_synth_gemm
+# _synth_gemm
 # --------------------------------------------------------------------------- #
-class TestLoadOrSynthGemm(_FakeStackMixin, unittest.TestCase):
-    def _task_with_io(self, blob):
-        d = self._task_dir()
-        open(os.path.join(d, "reference_io.pt"), "w").close()
-        self.stack.loaded_blob = blob
-        return d
-
-    def test_recorded_oracle_is_preferred_over_synthesis(self):
-        blob = {"A": _T((8, 16), FP32, 0.25), "B": _T((32, 16), FP32, 0.5),
-                "bias": None, "output": _T((8, 32), FP32, 4.0)}
-        d = self._task_with_io(blob)
-        A, B, bias, tb, ref = ob._load_or_synth_gemm(self.stack.torch, d, {"dtype": "bf16"}, "cpu", 0)
-        self.assertIs(A.dtype, BF16)
-        self.assertIs(B.dtype, BF16)
-        self.assertIsNone(bias)
-        self.assertTrue(tb)
-        self.assertIs(ref.dtype, FP32)        # the oracle is compared in fp32
-        self.assertEqual(ref.val, 4.0)
-        self.assertEqual([c for c in self.stack.kernel_names() if c == "torch.load"], ["torch.load"])
-
-    def test_oracle_without_a_recorded_output_is_recomputed_with_bias(self):
-        blob = {"A": _T((8, 16), FP32, 0.5), "B": _T((32, 16), FP32, 2.0),
-                "bias": _T((32,), FP32, 1.0), "output": None}
-        d = self._task_with_io(blob)
-        A, B, bias, tb, ref = ob._load_or_synth_gemm(self.stack.torch, d, {}, "cpu", 0)
-        self.assertEqual(ref.shape, (8, 32))
-        self.assertEqual(ref.val, 0.5 * 2.0 * 16 + 1.0)
-        self.assertIs(bias.dtype, BF16)
-
-    def test_recomputed_oracle_honours_transpose_b_false(self):
-        blob = {"A": _T((8, 16), FP32, 1.0), "B": _T((16, 32), FP32, 1.0)}
-        d = self._task_with_io(blob)
-        _, _, _, tb, ref = ob._load_or_synth_gemm(self.stack.torch, d, {"transpose_b": False},
-                                                  "cpu", 0)
-        self.assertFalse(tb)
-        self.assertEqual(ref.shape, (8, 32))
-
-    def test_unrecognised_blob_falls_back_to_synthesis(self):
-        d = self._task_with_io(["not", "a", "dict"])
-        meta = {"a_shape": [4, 16], "b_shape": [32, 16]}
-        A, B, bias, tb, ref = ob._load_or_synth_gemm(self.stack.torch, d, meta, "cpu", 3)
-        self.assertEqual((A.shape, B.shape, ref.shape), ((4, 16), (32, 16), (4, 32)))
+class TestSynthGemm(_FakeStackMixin, unittest.TestCase):
+    def test_no_operand_file_is_ever_read(self):
+        """Operands are synthesized from meta; nothing is torch.load-ed."""
+        meta = {"a_shape": [8, 16], "b_shape": [32, 16]}
+        ob._synth_gemm(self.stack.torch, meta, "cpu", 0)
+        self.assertEqual([c for c in self.stack.kernel_names() if c == "torch.load"], [])
 
     def test_synthesis_resolves_symbolic_dims_and_seeds_the_generator(self):
         meta = {"a_shape": ["M", 16], "b_shape": [32, 16], "m_buckets": [1, 64]}
-        A, B, bias, tb, ref = ob._load_or_synth_gemm(self.stack.torch, self._task_dir(), meta,
+        A, B, bias, tb, ref = ob._synth_gemm(self.stack.torch, meta,
                                                      "cuda", 11)
         self.assertEqual(A.shape, (64, 16))
         self.assertEqual(A.device, "cuda")
@@ -1122,19 +1086,19 @@ class TestLoadOrSynthGemm(_FakeStackMixin, unittest.TestCase):
 
     def test_bias_width_follows_the_weight_layout(self):
         meta = {"a_shape": [8, 16], "b_shape": [32, 16], "bias": True}
-        _, _, bias, _, ref = ob._load_or_synth_gemm(self.stack.torch, self._task_dir(), meta, "cpu", 0)
+        _, _, bias, _, ref = ob._synth_gemm(self.stack.torch, meta, "cpu", 0)
         self.assertEqual(bias.shape, (32,))                  # N from b_shape[0] under F.linear layout
         self.assertEqual(ref.val, 0.1 * 0.1 * 16 + 0.1)
 
         meta_nt = {"a_shape": [8, 16], "b_shape": [16, 48], "bias": True, "transpose_b": False}
-        _, _, bias_nt, _, _ = ob._load_or_synth_gemm(self.stack.torch, self._task_dir(), meta_nt,
+        _, _, bias_nt, _, _ = ob._synth_gemm(self.stack.torch, meta_nt,
                                                      "cpu", 0)
         self.assertEqual(bias_nt.shape, (48,))               # N from b_shape[-1] for a plain matmul
 
-    def test_missing_oracle_and_missing_shapes_is_a_named_error(self):
+    def test_missing_shapes_is_a_named_error(self):
         with self.assertRaises(ValueError) as cm:
-            ob._load_or_synth_gemm(self.stack.torch, self._task_dir(), {"dtype": "bf16"}, "cpu", 0)
-        self.assertIn("neither reference_io.pt nor a_shape/b_shape", str(cm.exception))
+            ob._synth_gemm(self.stack.torch, {"dtype": "bf16"}, "cpu", 0)
+        self.assertIn("no a_shape/b_shape", str(cm.exception))
 
 
 # --------------------------------------------------------------------------- #
@@ -1493,15 +1457,7 @@ class TestBackendHelpers(_FakeStackMixin, unittest.TestCase):
 # bench_attn
 # --------------------------------------------------------------------------- #
 class TestBenchAttn(_FakeStackMixin, unittest.TestCase):
-    def test_missing_capture_is_reported_as_unavailable(self):
-        res = ob.bench_attn(self._args(task=self._task_dir()), {"op_kind": "attn"})
-        self.assertEqual(len(res), 1)
-        self.assertEqual(res[0]["backend"], "current")
-        self.assertFalse(res[0]["available"])
-        self.assertIsNone(res[0]["ms"])
-        self.assertIn("needs reference_io.pt", res[0]["note"])
-
-    def test_a_captured_oracle_is_a_recorded_skip_and_says_where_the_race_happens(self):
+    def test_attn_is_always_a_recorded_skip_and_says_where_the_race_happens(self):
         """No timing is taken here, so the row must not claim one.
 
         Reporting ``available+correct`` with ``ms: None`` asserted a verdict on a measurement that
@@ -1510,13 +1466,13 @@ class TestBenchAttn(_FakeStackMixin, unittest.TestCase):
         records a skip. That also keeps the shipped attention cards true.
         """
         d = self._task_dir()
-        io_path = os.path.join(d, "reference_io.pt")
-        open(io_path, "w").close()
         res = ob.bench_attn(self._args(task=d), {"op_kind": "attn"})
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["backend"], "current")
         self.assertFalse(res[0]["available"])
         self.assertFalse(res[0]["correct"])
         self.assertIsNone(res[0]["ms"])                     # op-level attention is not raced here
-        self.assertEqual(res[0]["artifact"], io_path)       # the capture is still handed downstream
+        self.assertEqual(res[0]["artifact"], os.path.join(d, "meta.json"))
         self.assertIn("--attention-backend", res[0]["note"])
         self.assertIn("Config Tuner", res[0]["note"])
 

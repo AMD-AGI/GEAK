@@ -187,7 +187,7 @@ Key env vars: `MODEL`, `TP`, `GPU`, `ISL`/`OSL`/`CONC`, `REPEATS` (default 3), `
 ### `e2e_workflow/scripts/op_bench.py`
 
 Single-op multi-backend bake-off and autotune for head kernels (GEMM and attention). Isolated; never touches
-a server. Reads `meta.json` (+ optional `reference_io.pt`).
+a server. Reads `meta.json` and synthesizes operands from its shapes (no recorded operand file).
 
 ```bash
 python op_bench.py --task <op_task_dir> \
@@ -238,8 +238,9 @@ python gsm8k_eval.py --base-url <url> --model <name> \
 
 Reversible-overlay tooling (never edits site-packages). `overlay_setup.py` builds a compounding
 `sitecustomize`/monkeypatch overlay — subcommands `add-module` and `add-rebind`. `capture_shapes.py`
-hooks a live server callable through the overlay to capture real serving shapes + a reference I/O oracle
-(`reference_io.pt` + `meta.json`); imported through the overlay, not a standalone CLI.
+hooks a live server callable through the overlay to catalog real serving shapes/dtypes/regimes into
+`meta.json`. It records NO tensors — correctness is live parity against the frozen baseline leg.
+Imported through the overlay, not a standalone CLI.
 
 ### `kernel_workflow/scripts/gpu_lock.sh`
 
@@ -297,7 +298,7 @@ config/baseline_flags.json               # baseline launch flags
 config/sweep_results.json                # Tier-0 sweep results
 profile/round_*/profile_topN.{json,md}   # standardized Top-N per round
 strategy.md, insight_log.md
-kernels/<name>_task/{kernel_src, reference_io.pt, unittest.py, meta.json}   # extracted tasks
+kernels/<name>_task/{kernel_src, baseline_overlay, cases.py, unittest.py, meta.json}  # extracted tasks
 kernels/_exp/…                           # recursive single-kernel runs (each verified)
 overlay/…                                # candidate + accepted reversible overlays
 final/{overlay, final_patch.diff, final_launch.sh}   # deliverable bundle

@@ -106,10 +106,8 @@ const FREEZE_SCHEMA = obj({
   candidate_backends: arrStr,
   baseline_frozen: { type: 'boolean' },
   baseline_callable: { type: 'string' },
-  // Always "" from oracle_freezer — a freezer-built task dir records NO golden tensors (correctness is
-  // live parity vs baseline_src/). Kept in the schema because an e2e kernel_extractor task dir, which
-  // captures unsynthesizable real routing / paged-KV metadata, does ship a reference_io.pt and fills it.
-  reference_io_sha256: { type: 'string' },
+  // (No golden-tensor hash: no task dir records golden tensors any more — correctness in BOTH lanes
+  // is live parity vs baseline_src/. See kernel_workflow/roles/oracle_freezer.md.)
   op_spec: { type: 'object', additionalProperties: true },
   workload_path: { type: 'string' },
   smoke: { type: 'string' },               // "pass" required to proceed

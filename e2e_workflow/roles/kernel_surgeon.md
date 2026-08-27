@@ -10,7 +10,7 @@ not "run the whole optimization pipeline again".
 
 ## PHASE=surgical_fix
 
-Inputs (in your prompt): `TASK_DIR` (the IMMUTABLE task: `unittest.py`, `reference_io.pt`, `meta.json`,
+Inputs (in your prompt): `TASK_DIR` (the IMMUTABLE task: `unittest.py`, `cases.py`, `meta.json`,
 `kernel_src/`), `KERNEL_EVAL_DIR` (the rejected candidate's workspace, may hold its edited kernel +
 `final_patch.diff`), `CURRENT_PATCH` (the candidate diff text, may be empty), `REJECT_REASON` (the
 integrator's root-cause diagnosis — READ IT CAREFULLY, it usually names the exact bug), `FIX_CLASS`
@@ -23,8 +23,8 @@ Do all work yourself (Read/Edit/Bash). Steps:
    `TASK_DIR/meta.json` for the live seam (`target_callable`, `source_path_in_sglang`, `math_contract`,
    live shapes/dtype) and reconstruct the current candidate kernel: start from `TASK_DIR/kernel_src/`
    and apply `CURRENT_PATCH` (or copy the edited source from `KERNEL_EVAL_DIR`). Work on a COPY under
-   `KERNEL_EVAL_DIR/surgeon/` (never touch `TASK_DIR/kernel_src` originals, never edit `unittest.py` or
-   `reference_io.pt` — anti-cheat; the validator re-checks `reference_io_sha256`).
+   `KERNEL_EVAL_DIR/surgeon/` (never touch `TASK_DIR/kernel_src` originals, never edit `unittest.py`,
+   `cases.py` or `meta.json` — anti-cheat; the validator re-checks `unittest_sha256`).
 
 2. **Make the SMALLEST edit that fixes the named defect.** Keep tiles/algorithm/epilogue identical. Common
    surgical fixes by class (apply the one the diagnosis points to; do not guess broadly):

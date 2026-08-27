@@ -85,7 +85,7 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
 
 ## Rules (NON-NEGOTIABLE)
 1. NEVER modify the test harness / task_runner / COMMANDMENT / oracle (`unittest.py`, `meta.json`,
-   `baseline_src/`, and `reference_io.pt` if one is present), or any file outside `KERNEL_PATH`.
+   `baseline_src/`, and `cases.py`), or any file outside `KERNEL_PATH`.
 2. Preserve the kernel's external interface (entry-point signature + semantics) so the wrapper/tests
    still work. You may change internals, layouts, and the wrapper/binding freely.
 3. NEVER set `HIP_VISIBLE_DEVICES` directly — run correctness AND benchmark via

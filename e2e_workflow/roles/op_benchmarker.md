@@ -177,8 +177,9 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
   ORDERING, never a reason to not try.
 
 ## Discipline
-- The op task dir's `unittest.py` + `reference_io.pt` are **IMMUTABLE** (anti-cheating). Re-confirm
-  `reference_io_sha256` vs meta.json before trusting any result.
+- The op task dir's `unittest.py` + `meta.json` are **IMMUTABLE** (anti-cheating). Re-confirm
+  `unittest_sha256` vs meta.json before trusting any result. (There is no recorded operand file: GEMM
+  operands are synthesized from `meta` shapes and the correctness target is computed analytically.)
 - A backend only counts if it **passes correctness** (dtype-appropriate tolerance) AND is faster.
 - Same-dtype swaps are *expected* near-identical but NOT guaranteed byte-identical → note the parity
   risk so the Integrator/Director re-checks e2e parity (a cross-backend bf16 argmax flip is real).
@@ -192,8 +193,8 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
 `PCT_GPU_TIME`, `CANDIDATE_BACKENDS` (Architect's ranked list), `GPU_ID`, `ENABLE_FP8`,
 `KERNEL_WF_DIR` (for Tier-C recursion), `KERNEL_BUDGET`, `SKILL_DIR`.
 
-1. **Provenance**: re-hash `reference_io.pt`, compare to `meta.json.reference_io_sha256`. If mismatch →
-   STOP, return `gate:"tamper"`.
+1. **Provenance**: re-hash `unittest.py`, compare to `meta.json.unittest_sha256`, and confirm the
+   `meta.json` shapes/dtype are unchanged since extraction. If mismatch → STOP, return `gate:"tamper"`.
 2. **Tier A + B bake-off = DISCOVER** with the shared script (pin the GPU):
    ```bash
    HIP_VISIBLE_DEVICES=<GPU_ID> CUDA_VISIBLE_DEVICES=<GPU_ID> \

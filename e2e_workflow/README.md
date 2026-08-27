@@ -257,7 +257,7 @@ Everything lands under `<exp_root>/e2e_<model>_<timestamp>/`:
 - `baseline/bench_summary.json`, `env_info.txt`, `config/baseline_flags.json` — the TRUE baseline
 - `profile/round_*/profile_topN.{json,md}` — the standardized Top-N each round
 - `strategy.md`, `config/sweep_results.json`, `insight_log.md`
-- `kernels/<short_name>_task/{kernel_src, reference_io.pt, unittest.py, meta.json}` — extracted tasks
+- `kernels/<short_name>_task/{kernel_src, baseline_overlay, cases.py, unittest.py, meta.json}` — extracted tasks
 - `kernels/_exp/…` — the recursive single-kernel runs (each with its own verified result)
 - `overlay/…` — candidate + accepted reversible overlays
 - `tuning/{tuning_report.md, env_audit.txt, claims_report.json, bench_pre/, bench_post/, <op>/}` — the standalone tuning phase + its attributable pre/post A/B

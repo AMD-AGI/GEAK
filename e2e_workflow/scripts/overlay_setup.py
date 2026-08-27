@@ -23,7 +23,8 @@ Commands:
   add-rebind    rebind module:attr -> impl_module.impl_attr (single function/kernel swap; the default)
                 --overlay O --target sglang.srt.layers.activation:silu_and_mul
                 --impl-module fast_act --impl-attr fast_silu_and_mul [--impl-file fast_act.py]
-  add-capture   install a shape/IO capture hook on module:attr (uses capture_shapes.py)
+  add-capture   install a shape-catalog hook on module:attr (uses capture_shapes.py; records
+                shapes/dtypes/regimes only — no tensors)
                 --overlay O --target sglang...:fn --out <task_dir> [--max 5] [--capture-file capture_shapes.py]
   add-marker    install a marker-only hook on one candidate seam (uses seam_trace.py)
                 --overlay O --target sglang...:fn [--marker-file seam_trace.py]
@@ -264,7 +265,7 @@ def main():
     p = sub.add_parser("add-capture")
     p.add_argument("--overlay", required=True)
     p.add_argument("--target", required=True, help="module:attr to hook")
-    p.add_argument("--out", required=True, help="task dir to flush reference_io.pt + meta.json into")
+    p.add_argument("--out", required=True, help="task dir to flush the captured shape meta.json into")
     p.add_argument("--max", type=int, default=5)
     p.add_argument("--capture-file", default="", dest="capture_file")
     p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")

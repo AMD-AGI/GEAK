@@ -39,14 +39,15 @@ of GPU time — GEMM was ~78% on Qwen3.5-27B) always justifies the full ladder.
 
 ## Step 1 — Generate the unittest with REAL shapes (immutable oracle)
 Create the task dir the kernel layer consumes: `unittest.py` (correctness + timing) +
-`reference_io.pt` (golden inputs/outputs) + `meta.json` (shapes, dtype, `bias` flag,
-`reference_io_sha256`).
+`cases.py` (operand construction) + the frozen baseline + `meta.json` (shapes, dtype, `bias`
+flag, `unittest_sha256`). No golden tensors are recorded — correctness is LIVE parity against
+the frozen baseline on fresh in-regime draws.
 - **Capture shapes live**, do not synthesize. For a GEMM the lookup key includes the
   **`bias` flag** and exact `M/N/K/dtype` — sglang issues most dense GEMMs with
   `bias=False` (bias applied separately). A synthesized `bias=True` set mismatches every
   live call → **0 engagement** (see [`gemm_tuning_workflow.md`](gemm_tuning_workflow.md)).
-- The oracle is **IMMUTABLE** (anti-cheating). Re-hash `reference_io.pt` vs
-  `meta.json.reference_io_sha256` before trusting any later result.
+- The harness is **IMMUTABLE** (anti-cheating). Re-hash `unittest.py` vs
+  `meta.json.unittest_sha256` before trusting any later result.
 
 ## Step 2 — Tier A: backend bake-off (DISCOVER, no source)
 Bench **every available backend** on the immutable oracle and record per-backend
@@ -115,7 +116,7 @@ runs at FP4 rate). See [`../quantization/`](../quantization/) and
 
 ## Step 6 — Verify (the isolated gate)
 A candidate is accepted into the bank only if **both** hold on the immutable oracle:
-1. **Correct** — passes dtype-appropriate tolerance vs `reference_io.pt`. Note: same-dtype
+1. **Correct** — passes dtype-appropriate tolerance vs the live baseline. Note: same-dtype
    cross-backend swaps are expected near-identical but NOT byte-identical (a bf16 argmax
    flip is real) → flag the parity risk.
 2. **Faster** — median of ≥3 warm repeats beats `best_known_ms`; note the spread.

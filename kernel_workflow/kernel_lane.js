@@ -125,8 +125,8 @@ const REQUIRE_GRAPH_CAPTURE = !!(OP_SPEC && OP_SPEC.cuda_graph_safe === true);
 //   op_spec.workload   : inline cases, same shape as a workload-v1 "kernels[].cases" list (or the
 //                        full object). Takes precedence; weight_source becomes "caller".
 // Both unset => unweighted behavior, byte-identical to before. Correctness ALWAYS stays on the
-// frozen immutable oracle (parity vs baseline_src/, + a recorded reference_io.pt where the task dir
-// came from e2e's kernel_extractor); this only shapes the PERFORMANCE measurement.
+// frozen immutable oracle (live parity vs baseline_src/ — no recorded golden tensors exist any more);
+// this only shapes the PERFORMANCE measurement.
 const WORKLOAD_SPEC_PATH = String(A.workload_spec_path || (OP_SPEC && OP_SPEC.workload_path) || '').trim();
 const WORKLOAD_SPEC = (OP_SPEC && OP_SPEC.workload) || A.workload || null;
 const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||

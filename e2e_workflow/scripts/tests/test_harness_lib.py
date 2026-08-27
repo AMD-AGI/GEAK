@@ -2741,25 +2741,140 @@ class ServedBucketsTest(unittest.TestCase):
         self.assertNotIn(512, [b for _, b, _ in hl.served_buckets(m)])
 
 
-class TestOracleSharedAndLazy(_HarnessTestCase):
-    """Issue #429: shared weight refs + per-case lazy correctness keep MoE oracles from OOM'ing."""
+class TestMoeRoutingSynthesis(unittest.TestCase):
+    """Shared MoE routing prior: pure Python, no torch, so it is asserted on exact distributions."""
 
-    def test_resolve_oracle_shared_expands_refs(self):
-        shared = {"w1": {"__tensor__": True, "data": _T((2, 2), fill=3.0)}}
-        obj = {"w1": {"__shared__": "w1"}, "hidden": 1}
-        out = hl.resolve_oracle_shared(obj, shared)
-        self.assertIs(out["w1"], shared["w1"])
-        self.assertEqual(out["hidden"], 1)
+    def test_plan_is_distinct_per_token_with_shared_experts_first(self):
+        plan = hl.moe_routing_plan(64, 8, 32, skew=1.0, shared_experts=2, seed=0)
+        self.assertEqual(len(plan), 64)
+        for row in plan:
+            self.assertEqual(len(row), 8)
+            self.assertEqual(len(set(row)), 8)         # top-k WITHOUT replacement, like a real router
+            self.assertEqual(row[:2], [0, 1])          # every token takes the shared experts
 
-    def test_resolve_oracle_shared_missing_key_raises(self):
-        with self.assertRaises(KeyError):
-            hl.resolve_oracle_shared({"w1": {"__shared__": "missing"}}, {})
+    def test_plan_is_deterministic_for_a_seed_and_moves_with_it(self):
+        a = hl.moe_routing_plan(16, 4, 32, seed=3)
+        self.assertEqual(a, hl.moe_routing_plan(16, 4, 32, seed=3))
+        self.assertNotEqual(a, hl.moe_routing_plan(16, 4, 32, seed=4))
 
-    def test_reconstruct_captured_tensor_leaf(self):
-        leaf = {"__tensor__": True, "data": _T((2,), fill=1.5)}
-        out = hl.reconstruct_captured(leaf, device="cpu")
-        self.assertTrue(hasattr(out, "shape"))
-        self.assertEqual(tuple(out.shape), (2,))
+    def test_skew_produces_a_hot_tail_that_uniform_does_not(self):
+        hot = hl.moe_expert_load(hl.moe_routing_plan(256, 8, 64, skew=1.0, seed=0), 64)
+        flat = hl.moe_expert_load(hl.moe_routing_plan(256, 8, 64, skew=0.0, seed=0), 64)
+        self.assertEqual(hot["total"], flat["total"])   # same work, different distribution
+        self.assertGreater(hot["max"], 1.5 * flat["max"])       # a hot tail the straggler waits on
+
+    def test_decode_sized_skew_leaves_a_cold_tail_of_experts_unfired(self):
+        # at decode the padded cost is driven by HOW MANY experts fire, not just how loaded they are
+        hot = hl.moe_expert_load(hl.moe_routing_plan(32, 8, 256, skew=1.2, seed=0), 256)
+        flat = hl.moe_expert_load(hl.moe_routing_plan(32, 8, 256, skew=0.0, seed=0), 256)
+        self.assertLess(hot["nonempty"], flat["nonempty"])
+
+    def test_hot_experts_are_scattered_not_contiguous_low_ids(self):
+        # a candidate must not be able to win by assuming experts 0..k are the hot ones
+        hist = hl.moe_expert_load(hl.moe_routing_plan(512, 8, 64, skew=1.0, seed=0), 64)["hist"]
+        hottest = sorted(sorted(range(64), key=lambda e: -hist[e])[:8])
+        self.assertNotEqual(hottest, list(range(8)))
+
+    def test_load_stats_are_over_nonempty_experts_and_expose_the_legacy_mean(self):
+        load = hl.moe_expert_load([[0, 1], [0, 1], [0, 2]], 8)
+        self.assertEqual(load["hist"], [3, 2, 1, 0, 0, 0, 0, 0])
+        self.assertEqual((load["nonempty"], load["total"], load["max"]), (3, 6, 3))
+        self.assertAlmostEqual(load["mean_all"], 6 / 8.0)     # the tokens*top_k/num_experts figure
+        self.assertAlmostEqual(load["mean"], 2.0)             # ...vs the population that costs anything
+
+    def test_load_of_an_empty_plan_does_not_divide_by_zero(self):
+        self.assertEqual(hl.moe_expert_load([], 4)["p95"], 0)
+
+    def test_effective_m_is_the_straggler_not_the_mean(self):
+        kw = dict(skew=1.0, shared_experts=1, seed=0)
+        legacy_mean = 64 * 8 / 32.0
+        self.assertGreater(hl.moe_effective_m(64, 8, 32, **kw), legacy_mean)
+        self.assertGreaterEqual(hl.moe_effective_m(64, 8, 32, stat="max", **kw),
+                                hl.moe_effective_m(64, 8, 32, stat="p95", **kw))
+
+    def test_effective_m_rounds_up_to_the_align_block_size(self):
+        m = hl.moe_effective_m(64, 8, 32, skew=1.0, seed=0, block_size=64)
+        self.assertEqual(m % 64, 0)
+        self.assertGreaterEqual(m, 64)
+
+    def test_top_k_at_or_above_num_experts_degrades_to_every_expert(self):
+        plan = hl.moe_routing_plan(4, 8, 4, seed=0)
+        self.assertTrue(all(sorted(r) == [0, 1, 2, 3] for r in plan))
+
+    def test_prefill_sized_plan_stays_cheap(self):
+        # O(tokens*top_k), not O(tokens*num_experts) — make_inputs is called once per draw per case
+        self.assertEqual(len(hl.moe_routing_plan(8192, 8, 256, skew=1.0, seed=0)), 8192)
+
+
+class TestSkewedTopkIds(_HarnessTestCase):
+    def test_ids_are_materialized_as_an_int32_tokens_by_topk_tensor(self):
+        got = hl.skewed_topk_ids(4, 3, 16, skew=1.0, shared_experts=1, seed=0,
+                                 torch=self.torch, device="cpu")
+        self.assertEqual(got.shape, (4, 3))
+        self.assertIs(got.dtype, INT32)
+        flat = [int(v) for v in got.tolist()]
+        self.assertEqual(flat, [e for row in hl.moe_routing_plan(4, 3, 16, skew=1.0,
+                                                                 shared_experts=1, seed=0)
+                                for e in row])
+
+
+class TestLiveOracleCases(_HarnessTestCase):
+    """live_oracle_cases: the retired reference_io.pt golden is now derived from the baseline leg."""
+
+    def _shapes(self):
+        seen = []
+
+        def mk(sig):
+            def make_inputs(rng):
+                seen.append((sig, rng.seed))
+                return (1.0, 2.0)
+            return {"sig": sig, "regime": "decode", "make_inputs": make_inputs}
+
+        return [mk("a"), mk("b")], seen
+
+    def test_ref_comes_from_the_baseline_legs_recorded_outputs(self):
+        shapes, seen = self._shapes()
+        base = {"a|0": _T((2,), [1.0, 2.0]), "b|0": _T((2,), [3.0, 4.0])}
+        cases = hl.live_oracle_cases(shapes, baseline_outputs=base, seed=7, device="cpu")
+        self.assertEqual([c["sig"] for c in cases], ["a", "b"])
+        self.assertEqual(cases[0]["args"], (1.0, 2.0))
+        self.assertEqual(cases[1]["ref"].tolist(), [3.0, 4.0])
+        # the SAME seeded-generator construction check_random_vs_baseline uses
+        self.assertEqual([s for _, s in seen], [7, 7])
+
+    def test_a_shape_with_no_recorded_baseline_output_is_skipped_not_faked(self):
+        shapes, _ = self._shapes()
+        cases = hl.live_oracle_cases(shapes, baseline_outputs={"b|0": _T((2,), [3.0, 4.0])},
+                                     device="cpu")
+        self.assertEqual([c["sig"] for c in cases], ["b"])
+
+    def test_legacy_in_process_baseline_call_is_still_accepted(self):
+        shapes, _ = self._shapes()
+        cases = hl.live_oracle_cases(shapes, baseline_call=lambda a: _T((2,), list(a)),
+                                     device="cpu")
+        self.assertEqual(len(cases), 2)
+        self.assertEqual(cases[0]["ref"].tolist(), [1.0, 2.0])
+
+    def test_limit_caps_the_case_count(self):
+        shapes, _ = self._shapes()
+        base = {"a|0": _T((2,), [1.0, 2.0]), "b|0": _T((2,), [3.0, 4.0])}
+        self.assertEqual(len(hl.live_oracle_cases(shapes, baseline_outputs=base, limit=1,
+                                                  device="cpu")), 1)
+
+    def test_no_baseline_at_all_is_a_named_error(self):
+        shapes, _ = self._shapes()
+        with self.assertRaises(ValueError) as cm:
+            hl.live_oracle_cases(shapes, device="cpu")
+        self.assertIn("baseline_outputs", str(cm.exception))
+
+    def test_run_correctness_refuses_to_run_without_any_baseline(self):
+        with self.assertRaises(ValueError) as cm:
+            hl.run_correctness({}, current_call=_echo_call, random_shapes=[], tol=0.01)
+        self.assertIn("baseline_outputs", str(cm.exception))
+
+
+class TestLazyCorrectness(_HarnessTestCase):
+    """Per-case lazy correctness keeps a large multi-case set from being fully resident at once."""
 
     def test_check_correct_multi_lazy_runs(self):
         """Smoke: lazy checker iterates cases and returns per-case rows."""
@@ -2780,77 +2895,6 @@ class TestOracleSharedAndLazy(_HarnessTestCase):
         out = hl.to_device_like({"a": leaf, "b": [leaf]}, "cpu")
         self.assertIn("a", out)
         self.assertEqual(len(out["b"]), 1)
-
-    def test_reconstruct_captured_repr_and_containers(self):
-        self.assertEqual(hl.reconstruct_captured({"__repr__": "x"}, "cpu"), "x")
-        nested = hl.reconstruct_captured(
-            {"t": {"__tensor__": True, "data": _T((1,), fill=2.0)},
-             "xs": [{"__tensor__": True, "data": _T((1,), fill=3.0)}]},
-            "cpu")
-        self.assertEqual(tuple(nested["t"].shape), (1,))
-        self.assertEqual(tuple(nested["xs"][0].shape), (1,))
-
-    def test_load_reference_io_supports_legacy_torch_load_signature(self):
-        path = "oracle.pt"
-        calls = []
-
-        def load(p, map_location=None, weights_only=None):
-            calls.append({"weights_only": weights_only})
-            if weights_only is not None:
-                raise TypeError("old torch")
-            return {"records": [], "shared": {}}
-
-        self.torch.load = load
-        blob = hl.load_reference_io(path)
-        self.assertEqual(blob["records"], [])
-        self.assertEqual(calls[0]["weights_only"], False)
-        self.assertIsNone(calls[1]["weights_only"])
-
-        self.torch.load = lambda *a, **k: [1, 2, 3]
-        with self.assertRaises(TypeError):
-            hl.load_reference_io(path)
-
-    def test_iter_eager_cases_from_oracle_resolves_shared_pool(self):
-        shared_w = {"__tensor__": True, "data": _T((2, 2), fill=4.0)}
-        blob = {
-            "shared": {"w1": shared_w},
-            "records": [{
-                "sig": "s0",
-                "regime": "decode",
-                "args": (),
-                "kwargs": {
-                    "w1": {"__shared__": "w1"},
-                    "hidden_states": {"__tensor__": True, "data": _T((2,), fill=1.0)},
-                },
-                "output": {"__tensor__": True, "data": _T((2,), fill=2.0)},
-            }],
-        }
-        self.torch.load = lambda *a, **k: blob
-        cases = hl.eager_cases_from_oracle("ref.pt", device="cpu")
-        self.assertEqual(len(cases), 1)
-        self.assertEqual(cases[0]["sig"], "s0")
-        self.assertEqual(cases[0]["regime"], "decode")
-        self.assertTrue(hasattr(cases[0]["args"]["w1"], "shape"))
-        self.assertEqual(tuple(cases[0]["ref"].shape), (2,))
-
-    def test_iter_eager_cases_merges_positional_moe_names_into_kwargs(self):
-        blob = {
-            "shared": {},
-            "records": [{
-                "sig": "moe",
-                "args": (
-                    {"__tensor__": True, "data": _T((2,), fill=1.0)},
-                    {"__tensor__": True, "data": _T((2,), fill=2.0)},
-                ),
-                "kwargs": {"scale": 1.0},
-                "output": {"__tensor__": True, "data": _T((2,), fill=3.0)},
-            }],
-        }
-        self.torch.load = lambda *a, **k: blob
-        case = next(hl.iter_eager_cases_from_oracle("ref.pt"))
-        self.assertIn("hidden_states", case["args"])
-        self.assertIn("w1", case["args"])
-        self.assertEqual(case["args"]["scale"], 1.0)
 
     def test_check_correct_multi_lazy_runs_independence_with_two_cases(self):
         def call(args):

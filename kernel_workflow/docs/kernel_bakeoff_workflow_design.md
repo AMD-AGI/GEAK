@@ -107,17 +107,16 @@ worker's job** — it belongs to the **orchestrator layer**, and it happens **be
 | **e2e** | `e2e_workflow` | `kernel_extractor.extract_op` (`e2e_workflow.js:1153`) | live sglang/vllm **server** (monkeypatch capture) | `workflow(kernel_workflow, {kernel_path: ext.task_dir, mode, target_language})` (`:1468`, `:1596`) |
 | **standalone** | `kernel_bakeoff_workflow` | `oracle_freezer` (§4.1) | the **input kernel**, frozen into `baseline_src/` and re-run live per parity draw (no server, no stored golden) | `workflow(kernel_workflow, {kernel_path: oracle.task_dir, mode, target_language})` (§4.3) |
 
-The two differ in ONE respect: `kernel_extractor` also ships a recorded `reference_io.pt`, because its
-operands (real MoE routing tables, paged-KV metadata) are captured off a live server and cannot be
-synthesized. `oracle_freezer` synthesizes its operands from recorded seeds, so it records **no tensors at
-all** — storing a golden there would be redundant (the frozen baseline is already a runnable reference and
-must exist anyway as the timing denominator), would cost hundreds of MB–GB that every lane and every
-engineer workspace then tar-copies, and would add a failure mode of its own (a recorded golden is only
-valid while the operands reproduce bit-for-bit). Downstream roles must therefore treat `reference_io.pt`
-as **optional**. When it IS present (e2e dirs), it is never copied per workspace: the director places it
-as an absolute read-only **symlink** to the single immutable original, and every downstream tar
-(engineer, verify, STATE_DIR/best resume) carries the symlink verbatim — so the whole run shares one
-physical ~1 GB file instead of duplicating it dozens of times.
+Both record **no tensors at all**. `kernel_extractor` captures shapes/dtypes/regimes off a live server
+and synthesizes operands from that spec; `oracle_freezer` synthesizes from recorded seeds. Storing a
+golden in either lane would be redundant (the frozen baseline is already a runnable reference and must
+exist anyway as the timing denominator), would cost hundreds of MB–GB that every lane and every engineer
+workspace then tar-copies, and would add a failure mode of its own (a recorded golden is only valid while
+the operands reproduce bit-for-bit, so a box or torch-build change becomes a hard failure).
+The `reference_io.pt` `kernel_extractor` used to ship for operands thought unsynthesizable (MoE routing
+tables, paged-KV metadata) is retired. The residual cost is PERFORMANCE realism only: MoE routing skew
+is synthesized from a prior (`h.skewed_topk_ids`) and flagged in `notes` — correctness is unaffected,
+since both legs get identical routing and the baseline leg is the reference.
 
 Sequence in both cases: **create oracle → `op_benchmarker` bake-off (on `task_dir`) → fan out lanes.**
 
@@ -165,7 +164,7 @@ Turns an already-runnable kernel dir into a standard **op task dir**, with **no 
      > `benchmark_engineer` is reused only for the *driver plumbing*, never as the correctness source.
   3. Freeze the input source into `baseline_src/`; set `meta.baseline_callable` (`baseline_frozen=true`);
      compute the integrity anchors `baseline_src_sha256` / `harness_lib_sha256` / `unittest_sha256`
-     (`reference_io_sha256` is not computed — there is no such file).
+     (no golden-tensor hash is computed — no such file exists in any lane).
   4. Vendor `harness_lib.py` into the task dir; write immutable `unittest.py` + `meta.json`; detect
      `live_backend` (the input language, e.g. `hip`).
 - **Returns** (`FREEZE_SCHEMA`, a subset of e2e's `EXTRACT_OP_SCHEMA` at `e2e_workflow.js:440-448`):
@@ -178,15 +177,14 @@ Turns an already-runnable kernel dir into a standard **op task dir**, with **no 
   "candidate_backends": ["hip","triton","flydsl"],
   "baseline_frozen": true,
   "baseline_callable": "module:attr",
-  "reference_io_sha256": "",
   "op_spec": { "op_kind": "...", "shapes": {}, "dtype": "bf16", "regime": "both" },
   "workload_path": "",
   "smoke": "pass",
   "notes": "..."
 }
 ```
-`reference_io_sha256` is retained in `FREEZE_SCHEMA` for e2e-produced task dirs; from `oracle_freezer` it
-is always `""`.
+`FREEZE_SCHEMA` carries no golden-tensor hash: the integrity anchors are `baseline_src_sha256` /
+`harness_lib_sha256` / `unittest_sha256`.
 
 > It produces the **same op-task-dir contract** as e2e's `kernel_extractor`, but from a kernel dir
 > instead of a live server. They stay separate on purpose; only the output contract is shared. (A future

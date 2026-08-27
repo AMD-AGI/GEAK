@@ -750,14 +750,14 @@ class TestCaptureStorageReclaim(unittest.TestCase):
             "process_id": process_id, "target": target,
         }
 
-    def _write_capture(self, root, pid, payload=b"ORACLE", rank=0):
+    def _write_capture(self, root, pid, payload=b"", rank=0):
         cap = os.path.join(root, f"capture.pid-{pid}.rank-{rank}")
         os.makedirs(cap)
         meta_path = os.path.join(cap, "meta.json")
+        m = self.meta(process_id=pid)
+        m["pad"] = "x" * 200          # give the dir some bytes so reclaim reports > 0
         with open(meta_path, "w") as fh:
-            json.dump(self.meta(process_id=pid), fh)
-        with open(os.path.join(cap, "reference_io.pt"), "wb") as fh:
-            fh.write(payload)
+            json.dump(m, fh)
         trace_path = os.path.join(root, f"selection.pid-{pid}.rank-{rank}.call-1.json")
         with open(trace_path, "w") as fh:
             json.dump({"traceEvents": trace()}, fh)
@@ -765,19 +765,19 @@ class TestCaptureStorageReclaim(unittest.TestCase):
 
     def test_infer_task_dir_from_process_local_metas(self):
         with tempfile.TemporaryDirectory() as root:
-            meta_a, _ = self._write_capture(root, 111, b"A" * 100)
-            meta_b, _ = self._write_capture(root, 222, b"B" * 200)
+            meta_a, _ = self._write_capture(root, 111)
+            meta_b, _ = self._write_capture(root, 222)
             self.assertEqual(ks.infer_task_dir([meta_a, meta_b]), root)
 
-    def test_successful_selection_promotes_one_oracle_and_reclaims_ranks(self):
+    def test_successful_selection_promotes_one_meta_and_reclaims_ranks(self):
         with tempfile.TemporaryDirectory() as root:
-            meta_a, trace_a = self._write_capture(root, 111, b"KEEP-ME-ORACLE")
-            meta_b, trace_b = self._write_capture(root, 222, b"DROP-ME-ORACLE-XXXX")
+            meta_a, trace_a = self._write_capture(root, 111)
+            meta_b, trace_b = self._write_capture(root, 222)
             # nested retry leftover
             nested = os.path.join(root, "_selcap", "capture.pid-333.rank-0")
             os.makedirs(nested)
-            with open(os.path.join(nested, "reference_io.pt"), "wb") as fh:
-                fh.write(b"NESTED-HEAVY")
+            with open(os.path.join(nested, "meta.json"), "w") as fh:
+                fh.write("{}")
             out_path = os.path.join(root, "selection.json")
             rc = ks.main([
                 "--target", TARGET,
@@ -792,11 +792,11 @@ class TestCaptureStorageReclaim(unittest.TestCase):
                 verdict = json.load(fh)
             self.assertTrue(verdict["ok"])
             self.assertTrue(verdict["capture_storage"]["promoted"])
-            self.assertTrue(os.path.isfile(os.path.join(root, "reference_io.pt")))
             self.assertTrue(os.path.isfile(os.path.join(root, "meta.json")))
-            with open(os.path.join(root, "reference_io.pt"), "rb") as fh:
+            self.assertFalse(os.path.exists(os.path.join(root, "reference_io.pt")))
+            with open(os.path.join(root, "meta.json")) as fh:
                 # best process is max matched calls; both equal so max() picks one stably
-                self.assertIn(fh.read(), (b"KEEP-ME-ORACLE", b"DROP-ME-ORACLE-XXXX"))
+                self.assertIn(json.load(fh)["process_id"], (111, 222))
             remaining = [
                 p for p in os.listdir(root) if p.startswith("capture.pid-")]
             self.assertEqual(remaining, [])
@@ -809,9 +809,9 @@ class TestCaptureStorageReclaim(unittest.TestCase):
             os.makedirs(os.path.dirname(meta_path))
             with open(meta_path, "w") as fh:
                 json.dump(self.meta(), fh)
-            with open(os.path.join(os.path.dirname(meta_path), "reference_io.pt"),
-                      "wb") as fh:
-                fh.write(b"X" * 4096)
+            with open(os.path.join(os.path.dirname(meta_path), "capture_telemetry.json"),
+                      "w") as fh:
+                fh.write("{}")
             trace_path = os.path.join(root, "selection.pid-999.rank-0.json")
             with open(trace_path, "w") as fh:
                 json.dump({"traceEvents": trace()}, fh)
@@ -830,7 +830,7 @@ class TestCaptureStorageReclaim(unittest.TestCase):
 
     def test_reclaim_exception_is_recorded_without_failing_selection(self):
         with tempfile.TemporaryDirectory() as root:
-            meta_a, trace_a = self._write_capture(root, 111, b"OK")
+            meta_a, trace_a = self._write_capture(root, 111)
             out_path = os.path.join(root, "selection.json")
             real = ks.sys.modules.get("capture_shapes")
             # Force promote_and_reclaim to raise while keeping import successful.

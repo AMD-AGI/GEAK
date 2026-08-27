@@ -459,11 +459,17 @@ def attribute_attn(meta, entries, notes):
 
 
 def attribute_moe(meta, entries, notes):
-    """MoE grouped-GEMM = a GEMM whose effective M per expert = tokens*top_k/num_experts (routing-
-    dependent). The extractor bakes that effective M into decode/prefill m_buckets, so MoE reuses the
-    precise grid-based GEMM engine; routing skew makes the weights lower-confidence (noted)."""
+    """MoE grouped-GEMM = a GEMM whose effective M per expert is routing-dependent. The extractor bakes
+    that effective M into decode/prefill m_buckets, so MoE reuses the precise grid-based GEMM engine.
+
+    Those buckets should be the STRAGGLER load (`harness_lib.moe_effective_m`, p95 of the nonempty
+    experts), not the `tokens*top_k/num_experts` mean: a grouped GEMM waits for the heaviest expert, and
+    the mean counts the empty ones. Routing skew is synthesized from a prior, not recorded, so the
+    weights stay lower-confidence either way (noted)."""
     notes.append("op_kind=moe: per-expert token counts are routing-dependent; effective-M buckets "
-                 "from meta drive a GEMM-style regime split. Treat weights as lower-confidence.")
+                 "from meta drive a GEMM-style regime split. Buckets should come from "
+                 "harness_lib.moe_effective_m (straggler p95), not tokens*top_k/num_experts. "
+                 "Treat weights as lower-confidence.")
     return attribute_gemm(meta, entries, notes)
 
 

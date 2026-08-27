@@ -41,10 +41,9 @@ shared `harness_lib.py` to vendor), `GPU_LOCK` (abs path to `gpu_lock.sh`).
   meta.json          # op_kind, dtype, regime, cases[], entry callable, baseline_callable, build,
                      #   random_draws, workload, integrity hashes; IMMUTABLE
 ```
-Same contract as e2e's `kernel_extractor` **minus the recorded golden**: a `kernel_extractor` task dir also
-ships `reference_io.pt` because it captures real, unsynthesizable operands (MoE routing tables, paged-KV
-metadata) off a live server. You synthesize your operands from recorded seeds, so you re-derive them on
-demand instead of storing them. Downstream lanes must handle both dir shapes.
+Same contract as e2e's `kernel_extractor`: neither lane records a golden. `kernel_extractor` captures
+the operand SPEC (shapes/dtypes/regimes) off a live server and synthesizes from it; you synthesize from
+recorded seeds. Both re-derive operands on demand and judge correctness by live parity.
 
 ## PHASE=freeze — steps
 
@@ -121,7 +120,7 @@ values are regenerated from the recorded seed on every run.
   (relpath, content) of the tree, skipping `__pycache__`/`build`/`*.pyc`/`*.so`/`*.o`), `harness_lib_sha256`
   and `unittest_sha256`. Those three ARE the oracle now — a tampered baseline or a tampered unittest is what
   turns a speedup into a fake win, and `unittest.py` re-verifies them on every run (step 4).
-  `reference_io_sha256` is not computed: there is no such file. Leave it `""` if a consumer expects the key.
+  No golden-tensor hash is computed: no such file exists in any lane.
 - `chmod a-w` the immutable surface (`baseline_src/` tree, `harness_lib.py`, `unittest.py`, `meta.json`) so
   an editing lane trips on permissions before it trips the hash gate.
 
@@ -244,14 +243,12 @@ value/layout-dependent op whose inputs cannot be reconstructed), set `smoke:"fai
   "candidate_backends": ["hip","triton","flydsl"],
   "baseline_frozen": true,
   "baseline_callable": "module:attr of the frozen input kernel",
-  "reference_io_sha256": "",
   "op_spec": { "op_kind": "...", "shapes": {}, "dtype": "bf16", "regime": "both" },
   "workload_path": "<task_dir>/workload.json or ''",
   "smoke": "pass|fail",
   "notes": "driver source (which case file it resolved to), step-5 coverage verdict, timing vs parity value distributions, regime, any symbolic dims resolved, anything unusual"
 }
 ```
-`reference_io_sha256` stays in the schema for e2e-produced task dirs; from THIS role it is always `""` —
-you do not record a golden.
+The schema carries no golden-tensor hash: no lane records a golden.
 On any unrecoverable failure return `smoke:"fail"` (+ `baseline_frozen:false`) with the reason; the
 dispatcher aborts the bake-off rather than compare against an untrustworthy baseline.

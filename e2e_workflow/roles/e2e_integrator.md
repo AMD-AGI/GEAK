@@ -11,8 +11,8 @@ You are invoked per kernel result (and once to assemble the final). Read first:
 e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
 
 ## The gate (a change enters e2e only if ALL hold)
-1. The isolated unittest speedup is REAL (kernel-layer Director verified it, oracle untampered —
-   re-check `reference_io_sha256` vs meta.json).
+1. The isolated unittest speedup is REAL (kernel-layer Director verified it, harness untampered —
+   re-check `unittest_sha256` vs meta.json).
 2. **Engagement proof** (the TunableOp lesson): the optimized kernel/config is ACTUALLY used on the live
    serving path — prove it from the server log, don't infer it from a throughput wiggle. For an aiter
    GEMM DB env: `grep -c 'is tuned on cu_num'` must be >0 (and "not found tuned config" must drop). For
@@ -110,9 +110,11 @@ or starve KV), `decode_regressed` (bool + which buckets), `parity`, `e2e_delta_p
 `root_cause` of any isolated-win-but-no-e2e-gain. This is additive — your gate logic and return JSON are
 unchanged; you just also persist the diagnostics the deep feedback/harness-refine step reads.
 
-1. **Verify provenance**: re-compute the oracle checksum and confirm `unittest.py` is unchanged from
-   extraction (anti-cheating). If tampered → REJECT. (For a synthesized-GEMM op task with no
-   `reference_io.pt`, instead confirm `meta.json` shapes/dtype are unchanged.)
+1. **Verify provenance**: confirm `unittest.py` (and the vendored `harness_lib.py`/`cases.py`) are
+   unchanged from extraction, and that `meta.json` shapes/dtype are unchanged (anti-cheating). If
+   tampered → REJECT. No operand file is recorded, so there is no golden checksum to re-compute —
+   the anti-cheat surface is the harness + the meta, and correctness itself is live parity against
+   `baseline_overlay/`, which a tampering candidate cannot move.
 2. **Build the candidate config/overlay** = current accepted + this ONE change, by `winner_kind`:
    > **🔴 If the task dir declares `meta.candidate_bind`, REPLAY IT VERBATIM — do not improvise a seam.**
    > That is the exact overlay entry the isolated unittest measured its win with (`kind:"module"` →

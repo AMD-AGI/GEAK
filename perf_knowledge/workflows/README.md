@@ -64,8 +64,9 @@ format is the one in [`../index/conventions.md`](../index/conventions.md).
    wins **stack** and are gated as a combined cluster.
 4. **TP=1 invariant** for the e2e tuning runs (single-GPU, deterministic Amdahl
    accounting; collective config is tuned separately at bring-up).
-5. **Immutable oracle** — the unittest + `reference_io.pt` are never edited
-   (anti-cheating); re-hash before trusting any result.
+5. **Immutable oracle** — the unittest + `cases.py` + `meta.json` are never edited
+   (anti-cheating); re-hash before trusting any result. No golden tensors are recorded;
+   correctness is live parity against the frozen baseline.
 
 ## Sources
 - e2e doctrine, Amdahl gate, three verdicts: `GEAK/e2e_workflow/roles/e2e_integrator.md`, `GEAK/e2e_workflow/README.md`.

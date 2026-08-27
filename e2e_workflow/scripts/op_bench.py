@@ -11,10 +11,10 @@ plus any tuning artifact. It does NOT touch a server or measure e2e — that is 
 Task-dir contract (written by the Kernel Extractor PHASE=extract_op):
   <op>_task/
     meta.json         # op_kind=gemm|attn, dtype, a_shape/b_shape/transpose_b/bias (gemm) OR captured
-                      # tensor spec (attn), math_contract, reference_io_sha256, regime
-    reference_io.pt   # OPTIONAL golden {inputs..., output} oracle. If absent for GEMM, this script
-                      # synthesizes inputs from meta shapes+dtype and computes the oracle with the
-                      # DEFAULT backend (GEMM perf is value-independent; correctness is C=A·B[ᵀ]).
+                      # tensor spec (attn), math_contract, regime
+                      # NOTE: no recorded oracle file. GEMM operands are synthesized from meta
+                      # shapes+dtype and the correctness target is computed analytically in fp32
+                      # (perf is value-independent; correctness is C=A·B[ᵀ] (+bias)).
 
 Usage:
   python3 op_bench.py --task <op_task_dir> [--backends hipblaslt,tunableop,rocblas,aiter,triton]
@@ -312,32 +312,17 @@ def bench_blockscale_gemm(args, meta, m_override=None):
     return results
 
 
-def _load_or_synth_gemm(torch, task, meta, device, seed, m_override=None):
-    """Return (A, B, bias, transpose_b, ref). Prefer the recorded oracle; else synthesize + compute ref
-    with the default backend (perf is value-independent; this only fixes the correctness target)."""
+def _synth_gemm(torch, meta, device, seed, m_override=None):
+    """Return (A, B, bias, transpose_b, ref): operands synthesized from meta shapes+dtype, correctness
+    target computed analytically in fp32. GEMM perf is value-independent, so synthesized operands time
+    identically to recorded ones, and `C = A·B[ᵀ] (+bias)` cannot go stale the way a recorded blob can."""
     dt = _dtype(torch, meta.get("dtype", "bf16"))
     transpose_b = bool(meta.get("transpose_b", True))  # F.linear style by default
     use_bias = bool(meta.get("bias", False))
-    iopath = os.path.join(task, "reference_io.pt")
-    if os.path.exists(iopath):
-        blob = torch.load(iopath, map_location=device)
-        # accept a few shapes of recorded blob
-        A = blob.get("A") if isinstance(blob, dict) else None
-        B = blob.get("B") if isinstance(blob, dict) else None
-        bias = blob.get("bias") if isinstance(blob, dict) else None
-        ref = blob.get("output") if isinstance(blob, dict) else None
-        if A is not None and B is not None:
-            A = A.to(device); B = B.to(device)
-            bias = bias.to(device) if bias is not None else None
-            if ref is None:
-                ref = (A @ (B.t() if transpose_b else B))
-                if bias is not None:
-                    ref = ref + bias
-            return A.to(dt), B.to(dt), (bias.to(dt) if bias is not None else None), transpose_b, ref.float()
     # synthesize from shapes (resolve any SYMBOLIC dims like "M" via meta.m_buckets -> ints first)
     a_shape0 = meta.get("a_shape"); b_shape0 = meta.get("b_shape")
     if not (a_shape0 and b_shape0):
-        raise ValueError("gemm task has neither reference_io.pt nor a_shape/b_shape in meta.json")
+        raise ValueError("gemm task has no a_shape/b_shape in meta.json")
     a_shape = _resolve_shape(a_shape0, meta, m_override)
     b_shape = _resolve_shape(b_shape0, meta, m_override)
     g = torch.Generator(device="cpu").manual_seed(int(seed))
@@ -472,7 +457,7 @@ def _bench_gemm_at(args, meta, m_override=None):
                      % (meta.get("kernel_class"), meta.get("dtype"))),
         }]
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    A, B, bias, transpose_b, ref = _load_or_synth_gemm(torch, args.task, meta, device, args.seed, m_override)
+    A, B, bias, transpose_b, ref = _synth_gemm(torch, meta, device, args.seed, m_override)
     ref = ref.to(device)
     # Default excludes the experimental triton stub (it's a placeholder; real triton GEMM is a Tier-C
     # kernel-squad rewrite, not a bake-off candidate). Request it explicitly with --backends if wanted.
@@ -735,16 +720,11 @@ def _triton_matmul(torch, A, B, bias, transpose_b, autotune):
 
 # ----------------------------------------------------------------------------- attention (best-effort)
 def bench_attn(args, meta):
-    """Attention op-level timing of the CURRENT captured callable against its oracle. Cross-backend
-    comparison for attention is done at the SERVER level by the Config Tuner (--attention-backend),
-    so here we only (a) confirm the oracle reproduces and (b) time the current path as a reference.
+    """Attention op-level bake-off. Cross-backend comparison for attention is done at the SERVER level
+    by the Config Tuner (--attention-backend), so this takes no op-level timing at all.
     Returns a single-entry result list; backend swaps are reported as 'delegated to config track'."""
     torch = _torch()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    iopath = os.path.join(args.task, "reference_io.pt")
-    if not os.path.exists(iopath):
-        return [{"backend": "current", "available": False, "correct": False, "ms": None,
-                 "note": "attn bake-off needs reference_io.pt (captured q/k/v/meta); none found"}]
     # A recorded SKIP, not a verdict. This path takes no timing at all, so `available: True,
     # correct: True, ms: None` claimed a result it never measured -- which is exactly the
     # self-contradiction main() now flags. Attention is not a contradictory row; it is a deliberate
@@ -754,7 +734,7 @@ def bench_attn(args, meta):
     note = ("attention backend comparison is a SERVER-level flag (--attention-backend) -> delegated to "
             "the Config Tuner fast path; op-level bake-off skipped (no timing taken here)")
     return [{"backend": "current", "available": False, "correct": False, "ms": None,
-             "note": note, "artifact": iopath}]
+             "note": note, "artifact": os.path.join(args.task, "meta.json")}]
 
 
 # ----------------------------------------------------------------------------- main
