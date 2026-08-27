@@ -134,9 +134,9 @@ e2e A/B measurement while a process storm is active — pin it to a quiet window
   of whatever is already accepted.
 - **Verify engagement** (`AITER_LOG_TUNED_CONFIG=1` → `is tuned on cu_num` hits >0) so you know the
   tuned solutions are actually executing on the live path before trusting any throughput delta.
-- **Use the tight interleaved A/B** (E2E_REPEATS per leg, ref vs cand alternating, accept on
-  `delta > 0.5% AND cand_min > ref_max`) — gfx942 boxes drift several % across hours, so only a
-  same-session, drift-cancelled, non-overlapping comparison is decisive at the 0.5% band.
+- **Use the tight interleaved A/B** (ref vs cand alternating, back-to-back in one session, accept on
+  `delta > 0.5%`) — gfx942 boxes drift several % across hours, so only a same-session,
+  drift-cancelled comparison is decisive at the 0.5% band.
 - **Coverage matters**: capture the full real shape set (down-proj K=intermediate, qkv K, lm_head, and
   the decode M-buckets), not just the up/gate trio — uncovered shapes fall back to default and never
   count. Bucket-reduce via `get_padded_m` to bound tuning time.

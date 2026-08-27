@@ -242,12 +242,16 @@ By default the e2e gate accepts a kernel on **throughput delta + greedy output p
 kernel rounds differently and flips a few borderline greedy argmaxes — so you can switch the bar to
 **task accuracy**:
 ```
-args: { ...same..., accuracy_gate:"gsm8k", accuracy_limit:200, accuracy_tol:0.01 }
+args: { ...same..., accuracy_gate:"gsm8k", accuracy_limit:200, accuracy_tol:0.03, accuracy_floor:0.5 }
 ```
 - `accuracy_gate:"gsm8k"` → the Integrator serves a fresh TRUE baseline vs the candidate, runs sampled
-  gsm8k (5-shot, greedy, fixed seed), and accepts iff `cand_em >= baseline_em - accuracy_tol`.
+  gsm8k (5-shot, greedy, fixed seed), and accepts iff both legs clear `accuracy_floor` AND
+  `cand_em >= baseline_em - accuracy_tol`.
 - `accuracy_limit` = #questions (default **200**; deep uses a larger sample at finalize to de-noise the
-  boundary). `accuracy_tol` = allowed exact-match drop (default **0.01**).
+  boundary). `accuracy_tol` = allowed exact-match drop (default **0.03**, sized to the sampling noise
+  at n=200 — a tighter bar rejects kernels whose quality has not moved). `accuracy_floor` = absolute
+  score both legs must clear (default **0.5**), so a broken baseline cannot wave through an equally
+  broken candidate.
 - The eval client is `scripts/gsm8k_eval.py` (model-agnostic; queries the OpenAI-compatible endpoint).
 - Leaving it unset (`"none"`) changes nothing vs before — the gate stays throughput + parity only.
 

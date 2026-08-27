@@ -406,9 +406,21 @@ const DEEP_FINAL_ACCURACY_LIMIT = parseInt(A.deep_final_accuracy_limit != null ?
 // (over-strict) byte-parity. Default 'none' => unchanged byte/greedy parity (normal/fast untouched).
 const ACCURACY_GATE = String(A.accuracy_gate || 'none').trim();          // 'none' | 'gsm8k'
 const ACCURACY_LIMIT = parseInt(A.accuracy_limit != null ? A.accuracy_limit : 200, 10); // sampled gsm8k subset size
-const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01);        // allowed absolute exact_match drop vs baseline
+// Allowed absolute exact_match drop. Set BY the sample size: both legs answer the same seed-pinned
+// subset at temp=0, so the noise scale is the DISCORDANT pairs, sd(delta)=sqrt(d)/n ~= 1.6pt at
+// n=200 / 5% discordance. The old 0.01 sat at 0.6 sd and so rejected ~1 in 4 kernels whose quality
+// had not moved -- the very over-rejection this gate replaces byte-parity to avoid. 0.03 is ~1.9 sd
+// and still tighter than Hyperloom's 0.05; broken quant drops 20-90 points, not 3.
+// To tighten it, do NOT raise accuracy_limit (n=500 buys sd ~1.0pt for 2.5x the eval time) -- use a
+// paired McNemar test over the per-question `ok` flags gsm8k_eval.py already writes, which is free.
+const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.03);
+// Absolute floor on BOTH legs. A purely relative gate is blind when the BASELINE is broken: an
+// equally broken candidate passes. Hyperloom's floor is 0.5 after a run kept a 0.00076 candidate;
+// healthy gsm8k baselines land >= 0.63 and the broken ones scored 0.196 and 0.000.
+const ACCURACY_FLOOR = parseFloat(A.accuracy_floor != null ? A.accuracy_floor : 0.5);
 const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
-  ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
+  ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, ACCURACY_FLOOR,
+      GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
   : {};
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
@@ -574,13 +586,28 @@ const INIT_ENV = String(A.initial_extra_env || '');
 // every later candidate overlay instead of being dropped at Setup.
 const INIT_BASE_OVERLAY = String(A.initial_overlay_pythonpath || '');
 const EFFECTIVE_CONFIG_DIGEST = String(A.effective_config_digest || '');
-// Throughput measurements use independent server replicas.  Search/parity use
-// one Hyperloom-equivalent replica; final validation uses three replicas to
-// estimate variance.  The bench dispatcher owns retry/degraded aggregation.
-const MEASUREMENT_MODE = String(A.measurement_mode || 'isolated_server');
+// One lifecycle for EVERY throughput number (baseline, search A/B, parity, validation), because
+// a cache-cold search number and a cache-warm validation number are not comparable and the gains
+// carried between phases used to mix the two. warm_server = Hyperloom's protocol: one server per
+// leg, round 1 a full warmup that is discarded, round 2 IS the number.
+// isolated_server (REPLICAS fresh servers per leg) stays available when boot-to-boot variance is
+// what must be gated on. The bench dispatcher owns retry/degraded aggregation in both modes.
+const MEASUREMENT_MODE = String(A.measurement_mode || 'warm_server');
 const PARITY_REPLICAS = parseInt(A.parity_replicas != null ? A.parity_replicas : 1, 10);
 const SEARCH_REPLICAS = parseInt(A.search_replicas != null ? A.search_replicas : 1, 10);
 const VALIDATION_REPLICAS = parseInt(A.validation_replicas != null ? A.validation_replicas : 3, 10);
+// Validation keeps its OWN knob so an operator can make the final re-measure stricter than the
+// search that fed it (isolated_server + validation_replicas=3 buys the boot-to-boot dispersion
+// test). Default is warm_server like everything else, which is what the orchestrator rebenches
+// against — and the cheap one: isolated validation is 6-12 cold boots serialized behind the
+// serving-GPU flock, enough to overrun FINAL_RESERVE_MS and ship no validated number at all.
+const VALIDATION_MEASUREMENT_MODE = String(A.validation_measurement_mode || 'warm_server');
+const VALIDATION_ROUNDS = parseInt(A.validation_rounds != null ? A.validation_rounds : 1, 10);
+const VALIDATION_SAMPLES = VALIDATION_MEASUREMENT_MODE === 'warm_server'
+  ? VALIDATION_ROUNDS : VALIDATION_REPLICAS;
+// Too little clock left for a multi-sample re-measure: fall back to one timed round per leg. The
+// ratio stays drift-corrected, only the dispersion test is lost, and one number beats no number.
+const VALIDATION_TIGHT_MS = parseInt(A.validation_tight_s != null ? A.validation_tight_s : 1500, 10) * 1000;
 // CUDA/HIP-graph deployment requirement (general; derived from the serving config, NOT hardcoded).
 // vllm/sglang capture the steady-state decode path into a FULL CUDA graph UNLESS --enforce-eager is set.
 // A kernel that wins only via its OWN per-call graph-capture+replay wrapper falls back to eager inside the
@@ -604,9 +631,8 @@ const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
 // Acceptance noise band (%). Isolated-server ref/candidate measurements, non-overlap, and engagement
 // proof (see e2e_integrator) make a 0.5% default trustworthy. Prompt-tunable.
 const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
-// Legacy timed-repeat input retained for callers that explicitly select the legacy protocol.
-// Isolated-server runs use the purpose-specific replica counts above.
-const E2E_REPEATS = parseInt(A.e2e_repeats != null ? A.e2e_repeats : 2, 10);
+// No timed-repeat knob on purpose: the round count belongs to the lifecycle (bench_e2e.sh derives
+// it from GEAK_REPEAT_MODE + MEASUREMENT_PURPOSE), so a second knob could only disagree with it.
 // Every integrate A/B MUST measure BOTH legs (reference + candidate). When the
 // integrator returns gate:'incomplete'/ab_complete:false (it only ran ref, hung,
 // or degraded), the orchestrator RE-INVOKES it to finish the missing leg up to
@@ -2283,7 +2309,7 @@ if (want('setup')) {
           roleAgent('config_tuner', 'sweep', brief,
             {
               EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, BASELINE_THROUGHPUT: BASELINE_TPUT,
-              NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+              NOISE_BAND_PCT: NOISE_BAND,
               CONFIG_DIRECTIONS: [{
                 rank: 1,
                 direction: 'kb_warm_start:' + (c.direction || 'unlabeled'),
@@ -2517,7 +2543,7 @@ if (want('setup')) {
         if (viaOverlay) overlayReplayed.add(k.bundle);
         const isolated = Number(k.isolated_speedup) || 0;
         const kbIntegrateInputs = {
-          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
           KERNEL_RESULT: {
             short_name: k.name, winner_kind: kind,
             // Both spellings, because the two tracks read different ones and this synthetic result
@@ -2933,7 +2959,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
   const sweep = await safeAgent(
     roleAgent('config_tuner', 'sweep', 'Sweep the ranked config axes one at a time; keep wins.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, BASELINE_THROUGHPUT: BASELINE_TPUT,
-      NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS, CONFIG_DIRECTIONS: strategy.config_directions,
+      NOISE_BAND_PCT: NOISE_BAND, CONFIG_DIRECTIONS: strategy.config_directions,
       CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
       MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
       SKILL_DIR: WORKFLOW_DIR, ...KB_REF_INPUTS,
@@ -3026,7 +3052,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: curTput,
       CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
       MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
-      NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS, ACCURACY_GATE,
+      NOISE_BAND_PCT: NOISE_BAND, ACCURACY_GATE,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '',
       TUNING_TARGETS: (strategy && strategy.head_candidates) || headQueue || [],
       TUNING_SKILLSET_DIR, TUNING_KB_ENABLED, SKILL_DIR: WORKFLOW_DIR,
@@ -3513,7 +3539,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       for (const c of cands) {
         if (opts.final && bankedHeads.has(c.head.short_name)) { log(`  [deep] FINALIZE: skip ${c.uid} -- head ${c.head.short_name} already banked (same module, cannot stack).`); continue; }
         const deepInputs = {
-          EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+          EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
           KERNEL_RESULT: {
             short_name: c.head.short_name, task_dir: c.ext.task_dir, op_kind: c.ext.op_kind, lane: c.key,
             winner_kind: 'patch', winner_backend: c.lang,
@@ -3549,7 +3575,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             gpu_id: SERVING_GPU, kernel_eval_dir: c.lastEval, task_dir: c.ext.task_dir, language: c.lang,
             isolated: c.best, reason: dreason, fix_class: rejectClass(dreason), pct_gpu_time: c.head.pct_gpu_time,
             base_inputs: {
-              EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+              EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
               KERNEL_RESULT: {
                 short_name: c.head.short_name, task_dir: c.ext.task_dir, op_kind: c.ext.op_kind, lane: c.key,
                 winner_kind: 'patch', winner_backend: c.lang,
@@ -3842,7 +3868,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const cand = st.cands[0];
       log(`  ${h.short_name}: best candidate=${cand.source} (${(cand.isolated || 0).toFixed(2)}x, ${cand.kind}). Integrating to e2e (serial, slot {${SERVING_GPU}}).`);
       const headWinnerInputs = {
-        EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+        EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
         KERNEL_RESULT: { short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
           winner_kind: cand.winner_kind, winner_backend: cand.source,
           target_callable: st.ext.target_callable || h.target_callable || '',
@@ -3880,7 +3906,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               gpu_id: SERVING_GPU, kernel_eval_dir: cand.kernel_eval_dir, task_dir: st.ext.task_dir, language: cand.language,
               isolated: cand.isolated, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time, phase_name: 'HeadKernel',
               base_inputs: {
-                EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+                EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
                 KERNEL_RESULT: { short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
                   winner_kind: cand.winner_kind, winner_backend: cand.source,
                   target_callable: st.ext.target_callable || h.target_callable || '',
@@ -4059,7 +4085,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // MEASURED e2e that clears the gate; only if NONE clears do we fall back to corrective/pending/reject on
     // the top candidate. Inputs are built per-candidate so Fix C can re-issue the SAME A/B at Finalize.
     const mkIntegrateInputs = (cand, ci, sharedRefMed) => ({
-      EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+      EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
       KERNEL_RESULT: { short_name: h.short_name, task_dir: ext.task_dir, op_kind: ext.op_kind,
         winner_kind: cand.winner_kind, winner_backend: cand.source,
         target_callable: ext.target_callable || h.target_callable || '',
@@ -4294,7 +4320,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     log(`  ${c.short_name}: kernel layer ${kl.final_geomean.toFixed(2)}x isolated. Integrating to e2e.`);
     // Build inputs ONCE so Fix C can re-issue the SAME A/B for a pending win at Finalize.
     const mileIntegrateInputs = {
-      EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+      EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
       KERNEL_RESULT: { short_name: c.short_name, task_dir: ext.task_dir,
         source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
         final_patch: kl.final_patch, verified_isolated_speedup: kl.final_geomean, pct_gpu_time: c.pct_gpu_time },
@@ -4467,7 +4493,7 @@ if (want('final')) {
       apply_env: it.apply_env || '', apply_flags: it.apply_flags || '',
       op_kind: it.op_kind || '', backend: '', isolated: it.isolated || 0,
       inputs: {
-        EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+        EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
         KERNEL_RESULT: {
           short_name: it.short_name, op_kind: it.op_kind || '', winner_kind: it.winner_kind || '',
           target_callable: it.target_callable || '', apply_env: it.apply_env || '',
@@ -4570,14 +4596,23 @@ if (want('final')) {
   // bounded — Report already wrote architect_report.md + final_report.md, and run_e2e.py falls back
   // (director_e2e_validation.json → best overlay's integrate_result.json), so a real win still reaches the caller.
   phase('Validate');
+  let validationSamples = VALIDATION_SAMPLES;
+  if (TIME_BUDGET_MS != null && remainingMs() < VALIDATION_TIGHT_MS && validationSamples > 1) {
+    log(`[time-budget] only ~${remainingMin()}min left entering Validate — dropping to 1 timed ` +
+        `sample per leg (from ${validationSamples}). The ratio stays drift-corrected and ` +
+        `same-session; the non-overlap dispersion test is forfeited, so a marginal win can only ` +
+        `be reported as within-noise.`);
+    validationSamples = 1;
+  }
   validation = await safeAgent(
     roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
       BASELINE_OVERLAY: INIT_BASE_OVERLAY,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
       FINAL_FLAGS: { flags: curFlags, env: curEnv },
-      CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL, E2E_REPEATS,
-      MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_REPLICAS,
+      CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL,
+      MEASUREMENT_MODE: VALIDATION_MEASUREMENT_MODE,
+      MEASUREMENT_PURPOSE: 'validation', REPLICAS: validationSamples,
       SKILL_DIR: WORKFLOW_DIR,
       // The Report phase already wrote these files with the Finalize-bundle bench (the Director had not
       // run yet). After validation the Director MUST review + rewrite their headline throughput / speedup

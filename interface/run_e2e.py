@@ -326,14 +326,25 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         "initial_extra_server_args": initial_server_args,
         "initial_extra_env": initial_env,
         "initial_overlay_pythonpath": initial_overlay,
-        # One fresh replica matches Hyperloom's compute-warm/cache-cold
-        # lifecycle: the client keeps internal kernel/graph warmups but skips
-        # the outer full-round replay. Three independent servers are reserved
-        # for final validation; the shell dispatcher owns retries/degradation.
-        "measurement_mode": "isolated_server",
+        # ONE protocol for the whole run, and it is Hyperloom's (warmup_round discarded,
+        # measure_round on the re-attached hot server), so the headline GEAK reports and the
+        # number Hyperloom rebenches are the same measurement.  Mixing lifecycles across phases
+        # was worse than either alone: a cache-cold search A/B is not comparable to a cache-warm
+        # validation, yet gains were carried between them.  It is also 2 boots instead of the
+        # 6-12 cold boots isolated validation serializes behind the serving-GPU lock, which on a
+        # large model overruns the final reserve and kills the run mid-bench.
+        # Trade: within-server samples bound CLIENT noise, not boot-to-boot variance.  Anything
+        # that must gate on the latter pins measurement_mode=isolated_server, which brings the
+        # *_replicas knobs below back into play.
+        "measurement_mode": "warm_server",
         "parity_replicas": 1,
         "search_replicas": 1,
         "validation_replicas": 3,
+        # validation_rounds=1 is the whole of Hyperloom's protocol, not a truncation: two client
+        # passes on one server, report the second.  A 3-round median would be a different
+        # statistic from the one it rebenches against.
+        "validation_measurement_mode": "warm_server",
+        "validation_rounds": 1,
         # Hyperloom already did config/param search in EXPLORE; do not double-run.
         "config_tune": "false",
         # Produce the final/ bundle (final_launch.sh + overlay) so the caller can
@@ -398,10 +409,9 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # subset of {setup,profile,config,tune,head,kernel,final} (default unset => "all").
     if h.get("phases"):
         ps_args["phases"] = str(h["phases"])
-    # Legacy A/B repeat override. Isolated-server handoffs use the purpose-specific
-    # replica counts above; retain this pass-through for explicitly legacy runs.
-    if h.get("e2e_repeats") is not None:
-        ps_args["e2e_repeats"] = int(h["e2e_repeats"])
+    # No timed-repeat pass-through: the round count belongs to the lifecycle, not the handoff, so
+    # an `e2e_repeats` key from a stale caller is ignored rather than allowed to pull one leg off
+    # the lifecycle the rest of the run used.
     # Standalone tuning-skillset phase (workflow default ON). This is NOT the
     # config_tune sweep disabled above: Hyperloom's EXPLORE searched server
     # flags/env, whereas this phase runs the vendored tuning skillset's own loop
@@ -1406,8 +1416,8 @@ def apply_bench_protocol(h: dict) -> dict:
     ``num_prompts``, ``num_warmups`` and ``seed``. We export each provided key.
     For schema-v2 Hyperloom handoffs, the actual wrapper lifecycle is
     authoritative over stale metadata: fixed seed/range and 2*CONC client
-    warmups run inside the single measured invocation, while the separate
-    outer full-round replay is skipped.
+    warmups, run on one server per leg whose first full round is a discarded
+    warmup (Hyperloom's warmup_round/measure_round).
 
     IMPORTANT: only keys actually present in the handoff are exported. When
     ``bench_protocol`` is absent (e.g. GEAK run standalone, no external
@@ -1431,10 +1441,10 @@ def apply_bench_protocol(h: dict) -> dict:
     if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
         h.get("baseline_env_spec"), dict
     ):
-        # Cache-cold parity uses one measured client invocation on a fresh
-        # server. InferenceX still receives 2*concurrency internal warmups,
-        # which repeat prompt[0] to warm kernels/graphs without pre-populating
-        # the remaining timed prompts in the prefix cache.
+        # Warm-server parity: one server per leg, a discarded full warmup round, then the timed
+        # round(s) on that hot server -- Hyperloom's warmup_round/measure_round lifecycle.
+        # InferenceX still receives 2*concurrency internal warmups, which repeat prompt[0] to warm
+        # kernels/graphs; the outer full round is what populates the prefix cache.
         # Some historical handoffs recorded an older small NUM_WARMUPS value;
         # keep the observed 2*concurrency client behavior while changing only
         # whether the separate outer full replay runs.
@@ -1444,7 +1454,11 @@ def apply_bench_protocol(h: dict) -> dict:
             "NUM_WARMUPS": str(2 * conc),
             "SEED": "0",
             "RANDOM_RANGE_RATIO": "1",
-            "GEAK_REPEAT_MODE": "isolated_server",
+            "GEAK_REPEAT_MODE": "warm_server",
+            # Pinned as env too (bench_e2e.sh honours it for MEASUREMENT_PURPOSE=validation only)
+            # so pinning measurement_mode=isolated_server for search cannot drag validation off
+            # Hyperloom's protocol, and so a role forwarding the global mode cannot drop it.
+            "GEAK_VALIDATION_REPEAT_MODE": "warm_server",
             "REPLICA_RETRIES": "1",
         }
         # NUM_PROMPTS was the one protocol knob this block did not align, and

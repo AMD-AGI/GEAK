@@ -10,6 +10,18 @@
 #   * median throughput + spread summary (one machine-readable line + JSON).
 # It is config-driven by env so an agent can vary ONE axis at a time. Nothing is model-specific.
 #
+# GEAK_REPEAT_MODE picks the measurement lifecycle:
+#   warm_server (default)  one server per leg; one full untimed round warms the prefix cache, then
+#                     $REPEATS timed rounds on that hot server (median).  $REPEATS defaults to 1
+#                     for every purpose, i.e. Hyperloom's warmup_round/measure_round protocol:
+#                     two client passes, the second is the number.  Spread, if any, is WITHIN-server
+#                     (client noise), not boot-to-boot.  1 boot per leg.
+#   isolated_server   one FRESH server per timed replica (bench_replica.sh), median across
+#                     replicas; spread bounds boot-to-boot variance.  N replicas = N cold boots,
+#                     serialized behind the serving-GPU lock.
+#   legacy            one server, short warmup, $REPEATS timed rounds, median.
+# All three emit the same acceptance contract.
+#
 # The adapter contract (each scripts/adapters/<BACKEND>.sh must define):
 #   adapter_default_port            -> echo a sensible default port for this stack
 #   adapter_launch                  -> launch the server in background; set global SERVER_PID; write $LOG.
@@ -53,16 +65,97 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ---- summary emitter ----
+# Every lifecycle ends by writing bench_summary.json with bench_summarize.py.  Resolved up here,
+# before anything is launched: this script is COPIED into $EVAL_DIR (roles/director.md), and
+# discovering a missing sibling only after a full bench would throw away the very measurement it
+# was supposed to record.  Same staging rule as server_teardown.sh below.
+SUMMARIZE=""
+for _cand in "$HERE/bench_summarize.py" "${SKILL_DIR:-}/scripts/bench_summarize.py" \
+             "${WORKFLOW_DIR:-}/scripts/bench_summarize.py"; do
+  case "$_cand" in /scripts/bench_summarize.py) continue ;; esac   # unset SKILL_DIR/WORKFLOW_DIR
+  [ -f "$_cand" ] && { SUMMARIZE="$_cand"; break; }
+done
+if [ -z "$SUMMARIZE" ]; then
+  echo "!!! bench_summarize.py not found next to this script ($HERE) or under SKILL_DIR/WORKFLOW_DIR." >&2
+  echo "    Stage it alongside bench_e2e.sh: cp \"\$SKILL_DIR/scripts/bench_summarize.py\" \"\$EVAL_DIR/\"" >&2
+  exit 3
+fi
+
+# ---- default lifecycle ----
+# No mode named => the Hyperloom one, since "the caller forgot to forward MEASUREMENT_MODE" is the
+# likeliest way a number ends up measured under a different lifecycle than the rest of the run.
+# bench_replica.sh pins legacy explicitly, so this cannot recurse into it.
+# Carve-out: REPEATS=0 (shape capture, and warm mode rejects zero timed rounds) and PROFILE=1
+# (trace capture) produce no throughput number, so they have no lifecycle to align and an extra
+# full NUM_PROMPTS round buys nothing.  An explicit GEAK_REPEAT_MODE still wins.
+if [ "${REPEATS:-}" = "0" ] || [ "${PROFILE:-0}" = "1" ]; then
+  GEAK_REPEAT_MODE="${GEAK_REPEAT_MODE:-legacy}"
+else
+  GEAK_REPEAT_MODE="${GEAK_REPEAT_MODE:-warm_server}"
+fi
+
 # ---- isolated-server measurement protocol ----
-# Keep the existing body below as the single-server implementation.  In isolated
-# mode this process is only a scheduler: each attempt runs bench_replica.sh,
-# which re-enters this script in legacy mode for exactly one fresh-server
-# warmup+measurement lifecycle.
-# Profiling is not a throughput replica: it intentionally needs one warm server
-# and a sustained load/window.  An aligned run exports isolated mode globally,
-# so profile invocations opt back into the existing single-server body here.
+# In isolated mode this process is only a scheduler: each attempt runs bench_replica.sh,
+# which re-enters this script in legacy mode for one fresh-server lifecycle.  Profiling is
+# not a throughput replica (it needs one warm server and a sustained window), so it opts
+# back into the single-server body below even when a run exports isolated mode globally.
+# Validation's lifecycle is CALLER policy: a pinned GEAK_VALIDATION_REPEAT_MODE outranks
+# whatever the validating role forwarded, so a role prompt cannot silently drop it.
+if [ -n "${GEAK_VALIDATION_REPEAT_MODE:-}" ] \
+   && [ "${MEASUREMENT_PURPOSE:-}" = "validation" ] \
+   && [ "${GEAK_REPEAT_MODE:-legacy}" != "${GEAK_VALIDATION_REPEAT_MODE}" ]; then
+  echo ">>> MEASUREMENT_PURPOSE=validation: pinning GEAK_REPEAT_MODE=${GEAK_VALIDATION_REPEAT_MODE}" \
+       "(caller policy; the invocation asked for ${GEAK_REPEAT_MODE:-legacy})."
+  GEAK_REPEAT_MODE="$GEAK_VALIDATION_REPEAT_MODE"
+fi
 if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ] && [ "${PROFILE:-0}" = "1" ]; then
   echo ">>> PROFILE=1: using the single-server profiling lifecycle (not a timed replica)."
+  GEAK_REPEAT_MODE=legacy
+fi
+
+# ---- warm-server measurement protocol (Hyperloom-aligned) ----
+# ONE server per leg: a full untimed round populates the prefix cache, then $ROUNDS timed rounds on
+# that same hot server (median).  Byte-for-byte baseline.py's warmup_round/measure_round, so both
+# sides measure the same warm state instead of GEAK cache-cold vs Hyperloom cache-warm.
+# ONE timed round is the whole protocol, not a truncation: a 3-round median is a DIFFERENT statistic
+# from the one the orchestrator rebenches against, which is how the two sides used to disagree.
+# Explicit REPEATS/REPLICAS buys within_server_rounds spread back -- client noise only; boot-to-boot
+# variance needs isolated_server.
+if [ "${GEAK_REPEAT_MODE:-legacy}" = "warm_server" ]; then
+  _purpose="${MEASUREMENT_PURPOSE:-search}"
+  if [ -n "${REPEATS+x}" ]; then
+    _rounds="$REPEATS"
+  elif [ -n "${REPLICAS+x}" ]; then
+    _rounds="$REPLICAS"
+  else
+    case "$_purpose" in
+      validation|parity|search|"") _rounds=1 ;;
+      *)
+        echo ">>> Unknown MEASUREMENT_PURPOSE='$_purpose'; using 1 timed round." >&2
+        _rounds=1 ;;
+    esac
+  fi
+  case "$_rounds" in
+    ''|*[!0-9]*|0)
+      echo "!!! REPEATS must be a positive integer in warm-server mode (got '$_rounds')." >&2
+      exit 4 ;;
+  esac
+  REPEATS="$_rounds"
+  BENCH_OUTER_WARMUP_FULL_ROUND=1   # round 1 is a FULL round, and it is discarded
+  BENCH_COLD_FINAL=0                # a cold round would defeat the point of warming
+  GEAK_ISOLATED_REPLICA=0           # not a replica: the outer warmup MUST run
+  WARM_SERVER_ROUNDS="$_rounds"
+  MEASUREMENT_PURPOSE="$_purpose"
+  export REPEATS BENCH_OUTER_WARMUP_FULL_ROUND BENCH_COLD_FINAL \
+         GEAK_ISOLATED_REPLICA WARM_SERVER_ROUNDS MEASUREMENT_PURPOSE
+  if [ "$_rounds" = "1" ]; then
+    echo "Measurement: warm_server  purpose=$_purpose  timed_rounds=1" \
+         "(Hyperloom lifecycle: 1 server, round 1 = full warmup discarded, round 2 = the reported number)"
+  else
+    echo "Measurement: warm_server  purpose=$_purpose  timed_rounds=$_rounds" \
+         "(1 server, 1 discarded full warmup round, median of the timed rounds)"
+  fi
   GEAK_REPEAT_MODE=legacy
 fi
 if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
@@ -143,90 +236,8 @@ PY
     fi
   done
 
-  python3 - "$_aggregate_out" "$_requested" "$_successful" "$_purpose" "${EFFECTIVE_CONFIG_DIGEST:-}" <<'PY'
-import glob
-import json
-import os
-import statistics
-import sys
-
-out_dir, requested_s, successful_s, purpose, effective_digest = sys.argv[1:]
-requested, successful = int(requested_s), int(successful_s)
-selected = sorted(glob.glob(os.path.join(out_dir, "replica_*", "selected_summary.json")))
-summaries = []
-replicas = []
-for path in selected:
-    replica_dir = os.path.dirname(path)
-    replica_index = int(os.path.basename(replica_dir).split("_")[-1])
-    if replica_index > requested:
-        continue
-    with open(path) as fh:
-        item = json.load(fh)
-    summaries.append(item)
-    try:
-        attempt = int(open(os.path.join(replica_dir, "selected_attempt")).read().strip())
-    except (OSError, ValueError):
-        attempt = None
-    replicas.append({
-        "replica": replica_index,
-        "attempt": attempt,
-        "throughput_tok_s": item.get("throughput_tok_s_median"),
-    })
-
-def numbers(key):
-    return [
-        float(item[key]) for item in summaries
-        if isinstance(item.get(key), (int, float)) and not isinstance(item.get(key), bool)
-    ]
-
-def median(key):
-    values = numbers(key)
-    return round(statistics.median(values), 3) if values else None
-
-tputs = numbers("throughput_tok_s_median")
-observed = round(statistics.median(tputs), 3) if tputs else None
-if len(tputs) < 2 or not observed:
-    spread = 0.0
-else:
-    spread = round(100.0 * (max(tputs) - min(tputs)) / observed, 2)
-complete = successful == requested
-metric_bases = {item.get("metric_basis") for item in summaries if item.get("metric_basis")}
-metric_basis = next(iter(metric_bases)) if len(metric_bases) == 1 else None
-summary = {
-    "requested": requested,
-    "successful": successful,
-    "requested_replicas": requested,
-    "successful_replicas": successful,
-    "status": "complete" if complete else "incomplete",
-    "usable_for_acceptance": complete and observed is not None,
-    "measurement_mode": "isolated_server",
-    "measurement_purpose": purpose,
-    "effective_config_digest": effective_digest or None,
-    "observed_median": observed,
-    "throughput_tok_s_median": observed,
-    "throughput_tok_s_spread_pct": spread,
-    "output_throughput_tok_s_median": (
-        observed if metric_basis == "aggregate_output_tok_s" else None
-    ),
-    "output_throughput_tok_s_spread_pct": (
-        spread if metric_basis == "aggregate_output_tok_s" else None
-    ),
-    "ttft_ms_median": median("ttft_ms_median"),
-    "tpot_ms_median": median("tpot_ms_median"),
-    "runs": successful,
-    "all_throughput": tputs,
-    "metric_basis": metric_basis,
-    "replicas": replicas,
-}
-with open(os.path.join(out_dir, "bench_summary.json"), "w") as fh:
-    json.dump(summary, fh, indent=2)
-print(
-    f"E2E_SUMMARY {metric_basis or 'unknown'}={observed} spread={spread}% "
-    f"requested={requested} successful={successful} status={summary['status']} "
-    f"usable_for_acceptance={str(summary['usable_for_acceptance']).lower()} "
-    "measurement_mode=isolated_server"
-)
-PY
+  python3 "$SUMMARIZE" from-replicas "$_aggregate_out" "$_requested" "$_successful" \
+    "$_purpose" "${EFFECTIVE_CONFIG_DIGEST:-}"
   echo ">>> Done. Summary: $_aggregate_out/bench_summary.json"
   # A degraded leg remains observable: callers consume status=incomplete and
   # the successful-replica median.  Only a leg with no measurement at all is a
@@ -280,17 +291,13 @@ if [ "$BENCH_CLIENT" != "native" ]; then
 fi
 
 # ---- optional server-LAUNCHER override (align the SERVER launch RECIPE with an
-# external harness, e.g. Hyperloom/Magpie, so the served stack is byte-identical:
-# same --mem-fraction-static / --disable-radix-cache / --trust-remote-code /
-# SGLANG_USE_AITER / firmware-gated envs). The serving STACK is STILL the BACKEND
-# above; this hook only changes WHO runs launch_server. Default 'native' keeps each
-# backend adapter's own adapter_launch (byte-identical to before). BENCH_LAUNCHER=
-# <name> sources adapters/launchers/<name>.sh which MUST redefine adapter_launch;
-# the native launch/health are preserved as adapter_launch_native / adapter_health_native
-# so a launcher adapter can DELEGATE or FALL BACK. The authored-kernel OVERLAY
-# (OVERLAY_PYTHONPATH) is applied BY the launcher (an external harness usually
-# cannot), so overlay + recipe-parity coexist. Only affects a FRESH launch
-# (REUSE_SERVER=0); nothing else in the measurement changes.
+# external harness, e.g. Hyperloom/Magpie, so the served stack is byte-identical).
+# Changes only WHO runs launch_server, not the BACKEND. BENCH_LAUNCHER=<name> sources
+# adapters/launchers/<name>.sh, which MUST redefine adapter_launch; the native pair stays
+# reachable as adapter_launch_native / adapter_health_native so it can delegate or fall
+# back. The authored-kernel OVERLAY (OVERLAY_PYTHONPATH) is applied BY the launcher, since
+# an external harness usually cannot, so overlay and recipe-parity coexist. FRESH launches
+# only (REUSE_SERVER=0); nothing else in the measurement changes.
 BENCH_LAUNCHER=${BENCH_LAUNCHER:-native}
 if [ "$BENCH_LAUNCHER" != "native" ]; then
   LAUNCHER_ADAPTER="${LAUNCHER_ADAPTER:-$HERE/adapters/launchers/${BENCH_LAUNCHER}.sh}"
@@ -389,14 +396,12 @@ CONC=${CONC:-64}
 # NUM_PROMPTS default.
 #  * native client (standalone GEAK default): keep the original CONC*5 default so
 #    standalone behaviour is byte-identical to before the inferencex integration.
-#  * inferencex client (Hyperloom/Magpie measurement-protocol alignment): default to
-#    Magpie's FIXED CONC*10 (its run_benchmark_serving default is
-#    `--num-prompts $((CONC*10))`), so a GEAK measurement matches the Magpie baseline
-#    prompt count exactly — a differing prompt count changes the saturation regime and
-#    hence the tok/s, so this is a real alignment knob, not cosmetic.
-#    Opt-out: NUM_PROMPTS_ADAPTIVE=1 restores the cost-bounded ADAPTIVE factor that
-#    scales DOWN as per-request seq cost (ISL+OSL) grows {<=1024:10,<=4096:5,<=16384:3,else 2},
-#    for long-sequence standalone runs where CONC*10 is too expensive.
+#  * inferencex client: Magpie's FIXED CONC*10, matching its run_benchmark_serving default.
+#    The prompt count changes the saturation regime and hence the tok/s, so this is a real
+#    alignment knob, not cosmetic.
+#    Opt-out: NUM_PROMPTS_ADAPTIVE=1 restores the cost-bounded ADAPTIVE factor that scales
+#    DOWN as per-request seq cost grows {<=1024:10,<=4096:5,<=16384:3,else 2}, for
+#    long-sequence standalone runs where CONC*10 is too expensive.
 # An explicit NUM_PROMPTS (e.g. Hyperloom's apply_bench_protocol forwarding its own
 # measured count) ALWAYS wins over both defaults.
 if [ -z "${NUM_PROMPTS:-}" ]; then
@@ -554,19 +559,14 @@ echo "Out dir:      $OUT_DIR"
 echo
 
 SERVER_PID=""
-# Server lifecycle: the teardown contract lives in server_teardown.sh so the SAME
-# identity-verified kill is used by this dispatcher and by any role-authored capture
-# script (which previously hand-rolled its own kill). The old cleanup resolved the
-# server's pgid AT KILL TIME and group-killed whenever it differed from ours — a pid
-# that had exited and been recycled resolved to a stranger's group, which is how a
-# teardown can reach the caller's orchestrator / PID 1.
+# Server lifecycle: the teardown contract lives in server_teardown.sh so this dispatcher and
+# any role-authored capture script share ONE identity-verified kill. The old cleanup resolved
+# the pgid AT KILL TIME and group-killed whenever it differed from ours — a recycled pid then
+# resolves to a stranger's group, which is how a teardown reaches the caller's orchestrator.
 #
-# This script is COPIED into $EVAL_DIR (roles/director.md) and run from there, so the
-# library has to be found next to the copy. If it is not, the teardown silently becomes
-# a no-op: `source` fails, the EXIT trap resolves to a missing function, and the served
-# model is left running with its VRAM and port held while the serving-GPU lock is
-# released — the next launch then OOMs. So look next to us, then in the ORIGINAL scripts
-# dir when the caller told us where that is, and REFUSE to run otherwise. A benchmark
+# Same staging rule as SUMMARIZE above, but the failure mode is worse: without the library
+# `source` fails, the EXIT trap binds a missing function, and the server is left holding its
+# VRAM and port after the serving-GPU lock is released, so the next launch OOMs. A benchmark
 # that cannot stop what it starts must not start it.
 TEARDOWN_LIB=""
 for _cand in "$HERE/server_teardown.sh" "${SKILL_DIR:-}/scripts/server_teardown.sh" \
@@ -704,26 +704,18 @@ fi
 
 # ---- optional COLD full-round (DIAGNOSTIC ONLY, off by default) ----
 # One full round (NUM_PROMPTS, no preceding warmup) on the fresh server, recorded
-# separately from the timed(hot) repeats.
+# separately from the timed(hot) repeats. BENCH_COLD_FINAL=1 to enable; costs one extra
+# round, and a reused warm server has no cold state to measure at all.
 #
-# "Cold" here means only "no warmup round preceded it in THIS bench" — it does
-# not mean a cold machine. Only the first bench of a session sees a genuinely
-# cold box; every later bench (the final leg included) starts with the JIT/HIP
-# kernel caches, torch.compile artifacts and page cache already populated by the
-# benches before it. So the baseline's cold round pays the full cache-fill cost
-# and the final's pays almost none, and a ratio of the two reports that
-# asymmetry as speedup. Never compare cold rounds taken at different points in a
-# session, and never promote one as the headline number.
-# Default OFF; set BENCH_COLD_FINAL=1 to measure it as a diagnostic (costs one
-# extra full round per bench). Only meaningful on a fresh launch (a reused warm
-# server has no cold state to measure at all).
+# "Cold" means only "no warmup round preceded it in THIS bench", never a cold machine:
+# every bench after the session's first inherits the JIT/HIP caches and torch.compile
+# artifacts of the ones before it. The baseline's cold round therefore pays the full
+# cache-fill cost and the final's pays almost none, so their ratio reports that
+# asymmetry as speedup. Diagnostic only — never the headline number.
 if [ "${BENCH_COLD_FINAL:-0}" = "1" ] && [ "$REUSE_SERVER" != "1" ]; then
   echo ">>> Cold full round (NUM_PROMPTS=$NUM_PROMPTS, no warmup; cold-baseline parity) ..."
-  # adapter_bench is a shell FUNCTION that reads $RESULT_JSONL — a prefix var
-  # assignment on a function has ambiguous persistence in bash, so point
-  # RESULT_JSONL at the cold sink explicitly and restore it afterwards. The
-  # warmup below re-clears the (restored) hot RESULT_JSONL, so the cold round
-  # never touches the timed(hot) results.
+  # adapter_bench is a FUNCTION reading $RESULT_JSONL, and a prefix assignment on a
+  # function has ambiguous persistence in bash — repoint and restore explicitly.
   _saved_result_jsonl="$RESULT_JSONL"
   RESULT_JSONL="$COLD_JSONL"; export RESULT_JSONL
   adapter_bench "$NUM_PROMPTS" "$CONC" 0 || echo "!!! cold round failed (continuing)"
@@ -731,10 +723,9 @@ if [ "${BENCH_COLD_FINAL:-0}" = "1" ] && [ "$REUSE_SERVER" != "1" ]; then
 fi
 
 # ---- optional outer warmup (never timed) ----
-# Cache-cold isolated replicas skip this invocation: their benchmark client still
-# performs its own internal warmup, but the timed prompt set is not pre-populated
-# by an earlier full replay. Legacy/default runs retain the historical short
-# CONC-prompt warmup, and explicit full-round callers retain the full warmup.
+# Cache-cold isolated replicas skip it (the client still warms itself internally; the
+# timed prompt set just is not pre-replayed). Legacy keeps the short CONC-prompt warmup;
+# warm_server sets BENCH_OUTER_WARMUP_FULL_ROUND=1 for the full discarded round.
 if [ "${GEAK_ISOLATED_REPLICA:-0}" = "1" ] \
    && [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" != "1" ]; then
   echo ">>> Skipping outer warmup (compute-warm/cache-cold isolated replica) ..."
@@ -748,7 +739,8 @@ else
   fi
   if ! adapter_bench "$_warmup_prompts" "$CONC" 0 >/dev/null 2>&1; then
     if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
-      echo "!!! Full outer warmup failed; isolated replica is invalid." >&2
+      echo "!!! Full outer warmup failed; this measurement is invalid" \
+           "(the timed rounds would not be warm)." >&2
       exit 2
     fi
   fi
@@ -854,90 +846,6 @@ PY
 fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----
-python3 - "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL" <<'PY'
-import json, os, sys, statistics
-runs_path, out_path = sys.argv[1], sys.argv[2]
-cold_path = sys.argv[3] if len(sys.argv) > 3 else None
-def pick(d, *keys):
-    for k in keys:
-        if k in d and isinstance(d[k], (int, float)): return float(d[k])
-    return None
-# metric selection: default = OUTPUT-only token throughput (output/s), to match the Hyperloom
-# orchestrator's baseline/explore basis (see collectors/_common.py + collectors/explore.py, both read
-# output_throughput). Set E2E_METRIC=total for total (input+output)/s. Same key is read for
-# baseline+cand so the accept RATIO is consistent; metric_basis records which was used.
-_metric = (os.environ.get("E2E_METRIC") or "output").strip().lower()
-_is_total = _metric in ("total", "total_token", "total_throughput")
-_TPUT_KEYS = (("total_token_throughput", "total_throughput", "total_token_throughput_tok_s")
-              if _is_total else
-              ("output_throughput", "output_token_throughput", "output_throughput_tok_s"))
-def read_tps(path):
-    xs = []
-    if not path: return xs
-    try:
-        with open(path) as fh:
-            for line in fh:
-                line = line.strip()
-                if not line: continue
-                try: d = json.loads(line)
-                except Exception: continue
-                v = pick(d, *_TPUT_KEYS)
-                if v is not None: xs.append(v)
-    except FileNotFoundError:
-        pass
-    return xs
-tps, ttft, tpot = [], [], []
-with open(runs_path) as fh:
-    for line in fh:
-        line = line.strip()
-        if not line: continue
-        try: d = json.loads(line)
-        except Exception: continue
-        v = pick(d, *_TPUT_KEYS)
-        if v is not None: tps.append(v)
-        t = pick(d, "median_ttft_ms", "mean_ttft_ms");   ttft.append(t) if t is not None else None
-        p = pick(d, "median_tpot_ms", "mean_tpot_ms");   tpot.append(p) if p is not None else None
-cold_tps = read_tps(cold_path)
-def med(xs): return statistics.median(xs) if xs else None
-def spread(xs):
-    if len(xs) < 2: return 0.0
-    m = med(xs); return round(100.0 * (max(xs)-min(xs)) / m, 2) if m else 0.0
-_tput_med = round(med(tps), 3) if tps else None
-_tput_spread = spread(tps)
-summ = {
-    # Canonical, metric-neutral throughput of the SELECTED basis (see metric_basis). Downstream should
-    # read this + metric_basis; the accept RATIO is basis-consistent (baseline+cand use the same metric).
-    "throughput_tok_s_median": _tput_med,
-    "throughput_tok_s_spread_pct": _tput_spread,
-    # Legacy output-named alias: populated ONLY in output mode (its literal meaning). In total mode it is
-    # None so nobody silently reads total throughput under an "output" name — read throughput_tok_s_median.
-    "output_throughput_tok_s_median": _tput_med if not _is_total else None,
-    "output_throughput_tok_s_spread_pct": _tput_spread if not _is_total else None,
-    "ttft_ms_median": round(med(ttft), 3) if ttft else None,
-    "tpot_ms_median": round(med(tpot), 3) if tpot else None,
-    "runs": len(tps),
-    "all_throughput": tps,
-    # Optional COLD full-round (BENCH_COLD_FINAL=1): a single fresh-server round with
-    # JIT/graph-capture costs included, for cold-to-cold parity vs Hyperloom's
-    # baseline_tput. None when the cold round was not run (default). The hot median
-    # above stays the primary metric so existing consumers are unaffected. Uses the
-    # SAME metric basis (E2E_METRIC) as the hot median for a consistent comparison.
-    "cold_output_throughput_tok_s": round(med(cold_tps), 3) if cold_tps else None,
-    "cold_runs": len(cold_tps),
-    # Aggregate tok/s (NOT divided by TP). Default matches Hyperloom/Magpie output_throughput protocol;
-    # E2E_METRIC=total switches to total (input+output) token throughput.
-    "metric_basis": ("aggregate_total_token_tok_s" if _is_total else "aggregate_output_tok_s"),
-    "measurement_mode": (
-        "isolated_server_replica"
-        if os.environ.get("GEAK_ISOLATED_REPLICA") == "1"
-        else "legacy_same_server"
-    ),
-    "effective_config_digest": os.environ.get("EFFECTIVE_CONFIG_DIGEST") or None,
-}
-with open(out_path, "w") as fh: json.dump(summ, fh, indent=2)
-print(f"E2E_SUMMARY {summ['metric_basis']}={summ['throughput_tok_s_median']} "
-      f"spread={summ['throughput_tok_s_spread_pct']}% "
-      f"ttft_ms={summ['ttft_ms_median']} tpot_ms={summ['tpot_ms_median']} runs={summ['runs']}")
-PY
+python3 "$SUMMARIZE" from-runs "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL"
 
 echo ">>> Done. Summary: $OUT_DIR/bench_summary.json"

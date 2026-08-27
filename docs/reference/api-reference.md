@@ -90,14 +90,14 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 |---|---|---|
 | `accuracy_gate` | `none` | `none` \| `gsm8k`. For quantized kernels, switch the bar to task accuracy. |
 | `accuracy_limit` | `200` | Number of gsm8k questions. |
-| `accuracy_tol` | `0.01` | Allowed exact-match drop (`cand_em >= baseline_em - tol`). |
+| `accuracy_tol` | `0.03` | Allowed exact-match drop (`cand_em >= baseline_em - tol`); sized to the sampling noise at `accuracy_limit=200`. |
+| `accuracy_floor` | `0.5` | Absolute exact-match both legs must clear, so a broken baseline cannot pass an equally broken candidate. |
 
 ### Measurement and misc args
 
 | Arg | Default | Description |
 |---|---|---|
 | `noise_band_pct` | `0.5` | e2e acceptance band (%). |
-| `e2e_repeats` | `2` | Repeats per timed measurement. |
 | `ab_finish_retries` | `3` | A/B leg completion retries. |
 | `use_expert_skills` | `false` | Consult `perf_knowledge/expert_skills` (advisory priors). OFF = byte-identical. |
 | `perf_knowledge_dir` | sibling `perf_knowledge/` | Authoring knowledge base. |

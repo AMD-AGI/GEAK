@@ -10,7 +10,7 @@ the path that actually *launches* the optimizer, so a break there is invisible
 until a real 12-hour GPU run dies. This module covers:
 
   - handoff -> workflow args (``map_args``): the optional knobs (launch_recipe,
-    phases, e2e_repeats, carried state, time_budget_s), the minted-vs-pinned
+    phases, carried state, time_budget_s), the minted-vs-pinned
     eval_dir, and the TraceLens artifact bridge. A dropped knob here silently
     re-runs a phase that was meant to be resumed, or mints a second abandoned
     eval_dir beside the authoritative one.
@@ -239,8 +239,14 @@ class TestMapArgs(_RunE2ECase):
         return h
 
     def test_optional_workflow_knobs_are_forwarded_verbatim(self):
-        """launch_recipe / phases / e2e_repeats / carried state are the resume
-        channel: dropping one silently re-runs a phase the caller pinned."""
+        """launch_recipe / phases / carried state are the resume channel:
+        dropping one silently re-runs a phase the caller pinned.
+
+        `e2e_repeats` is deliberately NOT in that channel. The timed-round count
+        is a property of the measurement lifecycle (GEAK_REPEAT_MODE +
+        MEASUREMENT_PURPOSE), so a handoff carrying it must be ignored rather
+        than allowed to pull one leg off the lifecycle the rest of the run used.
+        """
         h = self._handoff(
             eval_dir=str(self.tmp / "e2e_pinned"),
             launch_recipe="/recipes/launch_vllm.sh",
@@ -251,7 +257,7 @@ class TestMapArgs(_RunE2ECase):
         ps = rx.map_args(h, timeout_s=3600)
         self.assertEqual(ps["launch_script"], "/recipes/launch_vllm.sh")
         self.assertEqual(ps["phases"], "final")
-        self.assertEqual(ps["e2e_repeats"], 1)
+        self.assertNotIn("e2e_repeats", ps)
         self.assertEqual(ps["state"], {"headQueue": [{"short_name": "h0"}]})
         self.assertEqual(ps["time_budget_s"], 3600)
         self.assertEqual(ps["eval_dir"], str(self.tmp / "e2e_pinned"))
@@ -1073,7 +1079,8 @@ class TestBenchProtocol(_RunE2ECase):
         self.assertEqual(exported["NUM_WARMUPS"], "128")
         self.assertEqual(exported["SEED"], "0")
         self.assertEqual(exported["RANDOM_RANGE_RATIO"], "1")
-        self.assertEqual(exported["GEAK_REPEAT_MODE"], "isolated_server")
+        self.assertEqual(exported["GEAK_REPEAT_MODE"], "warm_server")
+        self.assertEqual(exported["GEAK_VALIDATION_REPEAT_MODE"], "warm_server")
         self.assertEqual(exported["REPLICA_RETRIES"], "1")
         # A pinned count is the caller telling us what it measured.
         self.assertNotIn("NUM_PROMPTS_ADAPTIVE", exported)

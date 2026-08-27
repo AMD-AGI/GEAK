@@ -70,8 +70,8 @@ one-at-a-time would bank NONE of them. So emit one of three gates:
 - **`stack`** — engagement proven, parity holds, and `cand_med >= ref_med` (non-negative) but the delta
   is sub-threshold/overlapping. PROVISIONAL: it doesn't regress and may compound with siblings. The
   orchestrator carries it forward; the Director's FINAL combined validation (full stack vs TRUE
-  baseline, independent-server replicas) is the authoritative gate that decides if the COMBINED stack
-  clears 0.5%.
+  baseline, re-measured in the same warm-server lifecycle) is the authoritative gate that decides if
+  the COMBINED stack clears 0.5%.
 - **`rejected`** — parity fails, OR no engagement, OR `cand_med < ref_med` (a real regression).
 Never `stack` a parity-failure, a regression, or a non-engaging change.
 
@@ -93,11 +93,19 @@ differently → flips borderline argmaxes → over-rejects valid kernels). Inste
   greedy/temp=0, and run `python3 $GSM8K_EVAL_SCRIPT --base-url http://127.0.0.1:<port>/v1 --model <MODEL_PATH>
   --limit $ACCURACY_LIMIT --out <dir>/gsm8k_<tag>.json` against each (it prints `GSM8K_EXACT_MATCH=<s>`).
   The script samples the SAME fixed gsm8k subset for both (seed-pinned), so the scores are comparable.
-- ACCEPT the candidate iff `cand_score >= baseline_score - $ACCURACY_TOL` (quality preserved); otherwise
-  `rejected` with reason `accuracy_regression` (record both scores). This REPLACES byte-parity for the
-  quant gate — a byte-divergent kernel that holds gsm8k accuracy is a LEGITIMATE win. Still apply the
-  throughput + engagement + memory gates as usual. (You can reuse the same two servers for the throughput
-  A/B to avoid extra launches.)
+- FLOOR FIRST: if `baseline_score < $ACCURACY_FLOOR`, the reference itself is broken and NO comparison
+  against it means anything — stop and report `rejected` with reason `baseline_accuracy_below_floor`
+  (record both scores) rather than scoring the candidate against a collapsed baseline. If only
+  `cand_score < $ACCURACY_FLOOR`, that is `rejected` / `accuracy_regression` regardless of the delta.
+- Then ACCEPT the candidate iff `cand_score >= baseline_score - $ACCURACY_TOL` (quality preserved);
+  otherwise `rejected` with reason `accuracy_regression` (record both scores). This REPLACES byte-parity
+  for the quant gate — a byte-divergent kernel that holds gsm8k accuracy is a LEGITIMATE win. Still apply
+  the throughput + engagement + memory gates as usual. (You can reuse the same two servers for the
+  throughput A/B to avoid extra launches.)
+- Do NOT read a sub-tolerance drop as a real regression worth commentary. At `$ACCURACY_LIMIT` questions
+  the two scores differ only on the handful of questions the kernels disagree about, so a 1-2 point gap
+  is within sampling noise; `$ACCURACY_TOL` is sized to that noise. Report the two scores and the verdict,
+  not a narrative about the delta.
 
 **DEEP-MODE feedback (only if `DEEP_FEEDBACK` is in your inputs; a normal/fast run omits it).** Besides
 the gate decision, the deep-mode scheduler needs the WHY so the next co-opt waves can fix the
@@ -258,21 +266,28 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      use the fused-fp8 path (no bf16 re-materialization; compact fp8/preshuffled cache) and/or route
      only the tuned target (N,K) through the seam (pass other shapes to stock). Never accept a net
      usable regression (do-no-harm).
-3. **Measure e2e with isolated server replicas.** Do NOT edit the shared `scripts/bench_e2e.sh` —
-   drive it from the eval dir. Search uses one Hyperloom-equivalent replica per leg by default. Each
-   replica launches a fresh server, retains the client's internal kernel/graph warmups, skips the
-   outer full-round replay, records one cache-cold measured request set, and tears down. Never use
-   multiple timed requests against one server as replicas:
+3. **Measure e2e with the run-wide lifecycle `MEASUREMENT_MODE` selects — pass it through verbatim,
+   never substitute your own.** Do NOT edit the shared `scripts/bench_e2e.sh` — drive it from the
+   eval dir. The default is `warm_server`, the Hyperloom protocol: each leg boots ONE server, runs a
+   full untimed round that populates the prefix cache and is discarded, then runs `REPLICAS` timed
+   round(s) on that same hot server. With the default `REPLICAS=1` that is exactly two client passes
+   per leg and the second one is the number — the same measurement the orchestrator's
+   `warmup_round`/`measure_round` takes, and the same one this run's baseline and final validation
+   take, so every number in the run is comparable.
+   Under `isolated_server` (opt-in) each of the `REPLICAS` samples instead launches its own fresh
+   server, retains the client's internal kernel/graph warmups, skips the outer full-round replay,
+   records one cache-cold measured request set, and tears down — there, never use multiple timed
+   requests against one server as replicas.
    ```bash
    CB="$EVAL_DIR/overlay/cand_<short>"
    # BOTH blocks MUST use the run-wide serving invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
-   # reference block: current accepted config, one fresh-server replica
+   # reference block: current accepted config
    BACKEND="<backend>" OUT_DIR="$CB/ref" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
      GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=search REPLICAS="${REPLICAS:-1}" \
      PROFILE=0 OVERLAY_PYTHONPATH="$CURRENT_OVERLAY" \
      EXTRA_SERVER_ARGS="<cur flags>" EXTRA_ENV="<cur env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
-   # candidate block: + this one change, one fresh-server replica (SAME TP/GPU)
+   # candidate block: + this one change (SAME TP/GPU, SAME lifecycle)
    BACKEND="<backend>" OUT_DIR="$CB/cand" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
      GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=search REPLICAS="${REPLICAS:-1}" \
      PROFILE=0 OVERLAY_PYTHONPATH="<CAND or empty>" \
@@ -296,10 +311,10 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    then **ALWAYS run the candidate block** and update it (adding `cand_med`, the final `gate`,
    `ab_complete:true`, `e2e_throughput_tok_s`, `e2e_delta_pct`). The checkpoint exists ONLY so a CRASH is
    recoverable — it is NOT a licence to stop after the reference leg. If wall-clock is tight, SHRINK the
-   cost (keep one search replica per leg) so that BOTH legs still run — never skip,
+   cost (keep one timed round per leg) so that BOTH legs still run — never skip,
    defer, or "leave for later" the candidate leg. The two blocks run within ~30 min back-to-back, so box
    drift between them is negligible (the box drifts over hours, not minutes). If you want extra drift
-   robustness on a borderline result, defer the authoritative 3-replica estimate to validation.
+   robustness on a borderline result, defer the authoritative estimate to validation.
    **RESUME / finish a cut-off A/B (`RESUME_AB` is set in your inputs, OR a usable
    `$CB/ref/bench_summary.json` already exists on disk):** a summary is reusable only when
    `status=="complete"` and `usable_for_acceptance==true`. When it is usable, do NOT re-run the
@@ -336,7 +351,7 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    sub-threshold → carry forward to compound), `rejected` (parity-fail / no-engagement / regression), or
    `incomplete` — reserved for a HARD fault that genuinely prevented measuring BOTH legs *even after
    retrying* (a server that will not become healthy, a persistent harness/hardware fault). "Ran out of
-   time after the reference leg" is NOT a valid `incomplete`: keep one search replica per leg so both
+   time after the reference leg" is NOT a valid `incomplete`: keep one timed round per leg so both
    legs still run.
    Returning `incomplete` for a leg you simply chose not to run is a defect — both legs are mandatory.
    For `accepted` or `stack`, fold the change into the carried overlay/config and report the measured
@@ -415,10 +430,10 @@ win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, 
    result. If the check fails, the bundle is broken — say so in `note` and set `tuning_in_bundle:false`
    rather than shipping a bundle that silently drops the tuning.
 
-2. Do a final isolated-server search replica of the assembled bundle to confirm the combined result
-   matches the sum of accepted milestones (combined effects can interact). Retain the client's internal
-   kernel/graph warmups, skip the outer full-round replay, and read the result from `bench_summary.json`.
-   The Director's independent validation replicas remain the authoritative estimate.
+2. Do a final search-purpose bench of the assembled bundle, in the SAME `MEASUREMENT_MODE` as every
+   other leg, to confirm the combined result matches the sum of accepted milestones (combined effects
+   can interact). Read the result from `bench_summary.json`. The Director's independent validation
+   remains the authoritative estimate.
 
 Return JSON:
 ```json
