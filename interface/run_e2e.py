@@ -1447,6 +1447,23 @@ def apply_bench_protocol(h: dict) -> dict:
             "GEAK_REPEAT_MODE": "isolated_server",
             "REPLICA_RETRIES": "1",
         }
+        # NUM_PROMPTS was the one protocol knob this block did not align, and
+        # the two sides disagree by default: bench_e2e.sh falls back to Magpie's
+        # fixed CONC*10, while the caller's own materializer scales the count
+        # DOWN as the per-request sequence cost grows
+        # ({<=1024:10, <=4096:5, <=16384:3, else 2} * CONC -- Hyperloom
+        # ``_workload_envs.py``). At ISL+OSL=2048 that is 5*CONC there against
+        # 10*CONC here: a different saturation regime, so a different tok/s,
+        # measured under a header claiming the protocols match.
+        #
+        # bench_e2e.sh already implements that exact table (same thresholds,
+        # same max(CONC*factor, CONC) clamp) behind NUM_PROMPTS_ADAPTIVE, so
+        # aligning means switching it on rather than restating the arithmetic
+        # in a second place that can drift. Only when the handoff did NOT pin a
+        # count: an explicit num_prompts is the caller telling us what it
+        # measured, and it still wins.
+        if not str(protocol.get("num_prompts") or "").strip():
+            aligned["NUM_PROMPTS_ADAPTIVE"] = "1"
         for env_var, value in aligned.items():
             os.environ[env_var] = value
             exported[env_var] = value
@@ -2058,27 +2075,47 @@ def _cold_penalty_pct(cold: Any, hot: Any) -> float | None:
 
 
 def _overlay_has_loadable_code(path: Path) -> bool:
-    """True when ``path`` is an overlay a consumer could actually PYTHONPATH into.
+    """True when ``path`` is an overlay that actually installs something.
 
     The Finalize phase creates ``final/overlay`` unconditionally and drops a
-    marker file (``README.txt``, ``EMPTY_NO_ACCEPTED_OVERLAY.txt``) into it when
-    nothing was accepted, so directory existence proves nothing. What makes an
-    overlay real is importable code: a top-level module, the manifest the
-    overlay loader reads, or an accepted ``cand_*`` subtree.
+    marker file (``README.md``, ``EMPTY_NO_ACCEPTED_OVERLAY.txt``) into it when
+    nothing was accepted, so directory existence proves nothing.
+
+    The test is the mechanism's own contract, not a guess at it. The overlay is
+    activated by putting its ROOT on ``PYTHONPATH``, and the only thing the
+    interpreter runs from there is ``<overlay>/sitecustomize.py`` (see
+    ``e2e_workflow/scripts/overlay_setup.py``: two overlay dirs do NOT compound,
+    because only the first ``sitecustomize`` on the path is imported). So:
+
+      * no ``sitecustomize.py`` at the ROOT  -> inert, whatever else is inside.
+        A loose ``.py`` module is not enough (nothing imports it), and neither
+        is a loadable ``cand_*`` SUBTREE (the consumer is handed this path, not
+        the child; if a candidate is the deliverable, name the candidate).
+      * a manifest that parses and names nothing -> the config-only overlay
+        (``{"modules": [], "rebinds": [], "note": "config-only result ..."}``).
+        It imports cleanly and installs zero kernels, so advertising it books a
+        pure config win as a kernel win.
+      * a manifest that does not parse -> we cannot claim it installs anything.
+
+    This is deliberately the same predicate the downstream consumer applies
+    (Hyperloom's ``_geak_overlay_is_loadable``). Declaring an overlay it will
+    refuse to load costs a revalidation and shows up as an unexplained warning
+    on its side; an empty string tells it the truth.
     """
-    if not path.is_dir():
+    if not path.is_dir() or not (path / "sitecustomize.py").is_file():
         return False
-    if (path / "_overlay_manifest.json").is_file() or (path / "sitecustomize.py").is_file():
+    manifest = path / "_overlay_manifest.json"
+    if not manifest.is_file():
+        # No manifest is the pre-manifest overlay shape: absence of evidence is
+        # not evidence of an empty overlay, and the sitecustomize still runs.
         return True
-    if any(p.suffix == ".py" for p in path.iterdir() if p.is_file()):
-        return True
-    return any(
-        d.is_dir() and (
-            (d / "_overlay_manifest.json").is_file()
-            or (d / "sitecustomize.py").is_file()
-        )
-        for d in path.glob("cand_*")
-    )
+    try:
+        spec = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(spec, dict):
+        return False
+    return bool(spec.get("modules") or spec.get("rebinds") or spec.get("captures"))
 
 
 def _patch_has_hunks(path: Path) -> bool:
@@ -2096,6 +2133,83 @@ def _patch_has_hunks(path: Path) -> bool:
     except OSError:
         return False
     return any(line.startswith("@@") for line in text.splitlines())
+
+
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Shell control characters. A value carrying one of these is not a value: it is
+# a fragment of the launch script that leaked into the assignment string.
+_ENV_VALUE_SHELL_CHARS = ";&|<>()`"
+
+
+def _parse_env_assignments(env: str) -> tuple[dict, list]:
+    """Split an ``A=1 B=2`` string into ``({k: v}, [unparsable fragments])``.
+
+    ``accepted_config.env`` is a shell string, and consumers re-split it to
+    build their own environment. That split is where it goes wrong: the string
+    is assembled from launch-script lines, so syntax travels with it, and a
+    naive ``s.split()`` + ``split("=")`` turns ``)``, ``true;`` and ``sglang;``
+    into environment variables. We have seen exactly that reach a downstream
+    rebench as ``EXTRA_ENV=").", RUN_EVAL="true;", BACKEND="sglang;"``.
+
+    So GEAK does the split itself, once, and publishes the result: a key must
+    be a real identifier and a value must be free of shell control characters.
+    A single trailing ``;`` is stripped first — that is a statement separator
+    the line-joining left behind, not part of the value. Anything that still
+    fails goes to the reject list instead of being silently dropped, so a
+    consumer can see that the string was lossy rather than trusting a map that
+    quietly lost a variable.
+    """
+    ok: dict[str, str] = {}
+    rejected: list[str] = []
+    text = str(env or "").strip()
+    if not text:
+        return ok, rejected
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+
+    def _pair(piece: str) -> tuple[str, str] | None:
+        key, sep, value = piece.partition("=")
+        if (
+            sep
+            and _ENV_KEY_RE.match(key)
+            and not any(c in value for c in _ENV_VALUE_SHELL_CHARS)
+        ):
+            return key, value
+        return None
+
+    for token in tokens:
+        if not token.strip():
+            continue
+        # One token can hold several assignments joined by ``;`` — a
+        # launch-script line that never got re-split. Take the whole token only
+        # if EVERY piece of it is a well-formed assignment, so a half-parsed
+        # fragment is quarantined whole instead of contributing half a truth.
+        pieces = [p for p in token.split(";") if p.strip()]
+        pairs = [_pair(p) for p in pieces]
+        if pairs and all(p is not None for p in pairs):
+            ok.update(dict(pairs))  # type: ignore[arg-type]
+        else:
+            rejected.append(token)
+    return ok, rejected
+
+
+def _accepted_config_with_env_map(config: dict) -> dict:
+    """``accepted_config`` plus a structured, validated ``env_map``.
+
+    ``env`` is kept verbatim (it is what the run actually exported, and older
+    consumers read it), but ``env_map`` is the form a consumer should use:
+    already split, already validated. ``env_unparsed`` is present only when
+    something was dropped, which is the signal that the shell string is
+    malformed at the source.
+    """
+    out = dict(config)
+    env_map, rejected = _parse_env_assignments(out.get("env"))
+    out["env_map"] = env_map
+    if rejected:
+        out["env_unparsed"] = rejected
+    return out
 
 
 def _material_overlay_path(eval_dir: Path, wf: dict) -> str:
@@ -2619,7 +2733,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # What the kernel phase actually did (req: report must carry this).
         "accepted_kernels": wf.get("accepted_kernels") or [],
         "accepted_heads": wf.get("accepted_heads") or [],
-        "accepted_config": wf.get("accepted_config") or {},
+        "accepted_config": _accepted_config_with_env_map(wf.get("accepted_config") or {}),
         # Self-describing baseline measurement-protocol + Hyperloom cross-check (see baseline_basis above).
         "baseline_basis": baseline_basis,
         # Reliability classification is independent of the optimization status.
@@ -4483,6 +4597,14 @@ def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
         parts.append("\n### Accepted config\n\n")
         parts.append(f"- flags: `{config.get('flags') or ''}`\n")
         parts.append(f"- env: `{config.get('env') or ''}`\n")
+        if config.get("env_unparsed"):
+            # Not cosmetic: whatever is listed here is NOT in env_map, so a
+            # consumer replaying this config will not set it. Naming it is the
+            # difference between a lossy replay and an unexplained one.
+            parts.append(
+                "- env fragments that are not assignments (dropped from "
+                f"`env_map`): `{' '.join(config['env_unparsed'])}`\n"
+            )
 
     if pending:
         parts.append("\n## Deferred (verified-isolated, e2e A/B never completed)\n\n")

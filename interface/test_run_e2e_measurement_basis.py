@@ -363,6 +363,69 @@ def test_a_real_overlay_and_a_hunked_patch_report_their_paths(tmp_path: Path) ->
     assert out["final_patch"] == str(eval_dir / "final" / "final_patch.diff")
 
 
+def test_an_overlay_without_a_sitecustomize_is_not_advertised(tmp_path: Path) -> None:
+    """PYTHONPATH activates an overlay through its root ``sitecustomize.py`` and
+    nothing else. A manifest beside no entry point, a loose module, or a
+    loadable ``cand_*`` child are all inert at the path we would hand back."""
+    eval_dir = _eval_dir(tmp_path, setup_base=1000.0, base_leg=1000.0, final_leg=1100.0)
+    overlay = eval_dir / "final" / "overlay"
+    _write(overlay / "_overlay_manifest.json", {"modules": ["m"]})
+    _write(overlay / "fast_norm.py", "# a module nobody imports\n")
+    _write(overlay / "cand_fast_norm" / "sitecustomize.py", "# entry, one level down\n")
+    out = rx.normalize_result({}, _wf(eval_dir, base=1000.0, final=1100.0, speedup=1.1))
+
+    assert out["final_overlay"] == ""
+
+
+def test_a_config_only_overlay_is_not_advertised_as_a_kernel_overlay(
+    tmp_path: Path,
+) -> None:
+    """The config-only overlay imports cleanly and installs nothing. Handing it
+    back books a pure config win as a kernel win on the consumer's side."""
+    eval_dir = _eval_dir(tmp_path, setup_base=1000.0, base_leg=1000.0, final_leg=1100.0)
+    overlay = eval_dir / "final" / "overlay"
+    _write(overlay / "sitecustomize.py", "# entry\n")
+    _write(overlay / "_overlay_manifest.json", {
+        "modules": [], "rebinds": [],
+        "note": "config-only result: no kernel overlay accepted",
+    })
+    out = rx.normalize_result({}, _wf(eval_dir, base=1000.0, final=1100.0, speedup=1.1))
+
+    assert out["final_overlay"] == ""
+
+
+def test_an_unreadable_manifest_is_not_a_loadable_overlay(tmp_path: Path) -> None:
+    eval_dir = _eval_dir(tmp_path, setup_base=1000.0, base_leg=1000.0, final_leg=1100.0)
+    overlay = eval_dir / "final" / "overlay"
+    _write(overlay / "sitecustomize.py", "# entry\n")
+    (overlay / "_overlay_manifest.json").write_text("{ truncated", encoding="utf-8")
+    out = rx.normalize_result({}, _wf(eval_dir, base=1000.0, final=1100.0, speedup=1.1))
+
+    assert out["final_overlay"] == ""
+
+
+def test_accepted_config_publishes_a_validated_env_map(tmp_path: Path) -> None:
+    """The env string is assembled from launch-script lines, so shell syntax
+    rides along with it. Consumers that re-split it have exported ``RUN_EVAL``
+    as ``true;`` and ``)`` as a variable name; GEAK does the split once and
+    says which fragments it could not account for."""
+    eval_dir = _eval_dir(tmp_path, setup_base=1000.0, base_leg=1000.0, final_leg=1100.0)
+    wf = _wf(eval_dir, base=1000.0, final=1100.0, speedup=1.1)
+    wf["accepted_config"] = {
+        "flags": "--mem-fraction-static 0.95",
+        "env": 'SGLANG_USE_AITER=1 RUN_EVAL=true; BACKEND=sglang; GPU=0; EXTRA_ENV=).',
+    }
+    config = rx.normalize_result({}, wf)["accepted_config"]
+
+    assert config["env_map"] == {
+        "SGLANG_USE_AITER": "1", "RUN_EVAL": "true",
+        "BACKEND": "sglang", "GPU": "0",
+    }
+    assert config["env_unparsed"] == ["EXTRA_ENV=)."]
+    # The raw string is preserved: it is what the run actually exported.
+    assert "EXTRA_ENV=)." in config["env"]
+
+
 def test_an_overlay_recorded_at_a_stale_path_is_found_under_the_eval_dir(
     tmp_path: Path,
 ) -> None:
@@ -370,6 +433,7 @@ def test_an_overlay_recorded_at_a_stale_path_is_found_under_the_eval_dir(
     path baked into the return no longer resolves."""
     eval_dir = _eval_dir(tmp_path, setup_base=1000.0, base_leg=1000.0, final_leg=1100.0)
     _write(eval_dir / "final" / "overlay" / "_overlay_manifest.json", {"modules": ["m"]})
+    _write(eval_dir / "final" / "overlay" / "sitecustomize.py", "# entry\n")
     out = rx.normalize_result({}, _wf(
         eval_dir, base=1000.0, final=1100.0, speedup=1.1,
         final_overlay="/gone/e2e_cycle0/final/overlay",

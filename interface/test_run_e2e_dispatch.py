@@ -1075,6 +1075,22 @@ class TestBenchProtocol(_RunE2ECase):
         self.assertEqual(exported["RANDOM_RANGE_RATIO"], "1")
         self.assertEqual(exported["GEAK_REPEAT_MODE"], "isolated_server")
         self.assertEqual(exported["REPLICA_RETRIES"], "1")
+        # A pinned count is the caller telling us what it measured.
+        self.assertNotIn("NUM_PROMPTS_ADAPTIVE", exported)
+
+    def test_schema_v2_without_a_pinned_count_aligns_the_prompt_count(self):
+        """NUM_PROMPTS was the one protocol knob this block left unaligned, and
+        the two defaults disagree: bench_e2e.sh falls back to Magpie's fixed
+        CONC*10 while the caller scales DOWN with sequence cost. Switching on
+        the adaptive table (which is that same rule) is the alignment."""
+        exported = rx.apply_bench_protocol({
+            "schema_version": 2,
+            "workload": {"conc": 64},
+            "baseline_env_spec": {"config": {}},
+            "bench_protocol": {"random_range_ratio": 0},
+        })
+        self.assertEqual(exported["NUM_PROMPTS_ADAPTIVE"], "1")
+        self.assertNotIn("NUM_PROMPTS", exported)
 
 
 class TestAlignmentFlags(_RunE2ECase):
