@@ -191,6 +191,24 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      seam), report `gate:"rejected"` with reason `no_rebind_seam` — an authored kernel that can't be
      wired into the server is not a usable e2e win (record it so the Architect learns the seam is missing).
 
+     **`KB_OVERLAY_TARBALL` — an authored kernel recovered from the knowledge base.** The steps above
+     need `authored_kernel_eval_dir/workspace/`, which does not exist for a kernel another run authored.
+     When this input is set, SKIP them entirely: the record carries the finished overlay, so unpack it
+     and bench that directory as the candidate.
+     ```bash
+     CAND="$EVAL_DIR/overlay/cand_<short_name>"; mkdir -p "$CAND"
+     tar xzf "$KB_OVERLAY_TARBALL" -C "$CAND" --strip-components=1   # the tar's top level is overlay/
+     python3 -c 'import json;print(json.load(open("'"$CAND"'/_overlay_manifest.json"))["rebinds"])'
+     PYTHONPATH="$CAND" python3 "$SKILL_DIR/scripts/overlay_setup.py" check --module "<impl_module>"
+     ```
+     The manifest lists every rebind as `{target, impl_module, impl_attr}`. **Verify each one actually
+     took on the candidate server before you believe a null result** — this overlay was built against a
+     different `framework_version`, and a rebind whose target module was renamed upstream binds nothing,
+     silently, which is indistinguishable from "the kernel made no difference". No rebind taking is
+     `no_rebind_seam`, not a clean no-op. The packed source (e.g. a `.hip`) is rebuilt by this box's own
+     `torch.utils.cpp_extension.load()`, so a build failure is a rejection with the compiler error in the
+     reason, not a retry. The CUDA-graph-safety rule below applies unchanged.
+
    - **CUDA-graph-safe overlay — MANDATORY for any authored/JIT kernel on the decode path.** This is the
      #1 reason a kernel wins isolated yet scores `e2e_delta=null, engagement_hits=0` ("hung on first
      capture batch, never healthy, 0 forwards" → REJECT). sglang captures the decode path into a CUDA

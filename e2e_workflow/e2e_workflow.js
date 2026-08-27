@@ -505,11 +505,19 @@ const E2E_WARM_START_VALIDATE_N_COARSE = parseInt(
 // launches, so this is a budget, not a completeness target — the rest stay references.
 const E2E_WARM_START_KERNELS_N = parseInt(
   A.e2e_warm_start_kernels_n != null ? A.e2e_warm_start_kernels_n : 2, 10);
-// Which recorded win-kinds can be REPLAYED from a record alone. `patch` re-applies a diff through the
+// Which recorded win-kinds can be REBUILT from a record alone. `patch` re-applies a diff through the
 // overlay; `env`/`flag` re-route the op to an implementation that already exists in this install.
-// `authored` cannot: its diff is against the authoring workspace, and rebinding it needs a live seam
-// the record has no way to prove still exists here. An unreplayable entry is demoted to a reference,
-// never reported as a failure — it is still a real datum about what worked on this deployment.
+// `authored` cannot be rebuilt: the integrator's authored recipe git-applies the diff inside
+// `authored_kernel_eval_dir/workspace/` and assembles the module from `kernel_src/`, and that
+// workspace dies with the run that made it.
+//
+// Not-rebuildable is NOT not-replayable, and reading it that way is what kept every authored kernel
+// in the store permanently unverified. The overlay directory — the OUTPUT of that build — is carried
+// in the record as `overlay.tar.gz` (e2e_store._pack_overlay), and it is the complete mechanism:
+// manifest, sitecustomize, the authored source, PYTHONPATH-activated and structurally reversible. So
+// a kind outside this set falls through to the prebuilt-overlay path below when the bundle has one,
+// and is demoted to a reference only when it has neither. A demotion is never reported as a failure —
+// it is still a real datum about what worked on this deployment.
 const E2E_REPLAYABLE_KINDS = new Set(['patch', 'env', 'flag']);
 // Which roles are TOLD about the warm start. Deliberately excludes e2e_integrator and
 // director:validate — those two produce the run's authoritative numbers, and a stored prior in their
@@ -2068,14 +2076,28 @@ if (want('setup')) {
       const seenKernel = new Set();
       for (const c of cands) {
         const bundlePath = (c.bundle && c.bundle.path) || '';
+        // The record's PREBUILT overlay directory, packed by e2e_store._pack_overlay as
+        // `overlay.tar.gz` (manifest + sitecustomize + `_patched/` + every overlay-root module the
+        // rebinds transitively import). Named from the manifest rather than probed, because this
+        // script has no filesystem: a bundle whose upload never carried the tarball simply does not
+        // list it, and the entry stays a reference instead of costing two server launches to find out.
+        const bundleFiles = Array.isArray(c.bundle && c.bundle.files) ? c.bundle.files : [];
+        const overlayTar = (bundlePath && bundleFiles.includes('overlay.tar.gz'))
+          ? `${bundlePath}/files/overlay.tar.gz` : '';
         for (const k of (Array.isArray(c.accepted_kernels) ? c.accepted_kernels : [])) {
           const name = String((k && (k.name || k.short_name)) || '').trim();
           if (!name || seenKernel.has(name)) continue;   // one op recorded by several runs is one op
           seenKernel.add(name);
-          kbKernels.push({ ...k, name, bundle: bundlePath, kb_session_id: c.session_id || '' });
+          kbKernels.push({ ...k, name, bundle: bundlePath, overlay_tar: overlayTar,
+            kb_session_id: c.session_id || '' });
         }
       }
       let replayed = 0;
+      // One overlay tarball is the whole RECORD's final overlay, not one kernel's. If a record banked
+      // three authored kernels, restoring it restores all three at once, so it is benched ONCE and the
+      // remaining kernels of that record are marked as covered by it rather than each buying their own
+      // pair of server launches to measure the identical directory.
+      const overlayReplayed = new Set();
       const kernelVerdicts = [];
       for (const k of kbKernels) {
         const kind = String(k.winner_kind || k.kind || '').trim().toLowerCase();
@@ -2091,11 +2113,24 @@ if (want('setup')) {
         // between two identical configurations: two full server launches to measure nothing, and a
         // 'rejected' verdict that then libels a win which may well have been real.
         const hasRouting = !!(String(k.apply_env || '').trim() || String(k.apply_flags || '').trim());
+        // A kind this lane cannot BUILD from a record can still be REPLAYED when the record ships the
+        // built artifact. `authored` is the case that matters: the integrator's authored path needs
+        // `authored_kernel_eval_dir/workspace/` to git-apply the diff and assemble the module, and that
+        // workspace is gone the moment the run ends — which is what the old blanket exclusion was
+        // about. But the OUTPUT of that build, the overlay directory, is in the record: manifest,
+        // sitecustomize, and the authored source (e.g. `geak_hip_extend/extend_attention_hip.hip`,
+        // rebuilt by the reader's own torch load()). The rebind seam is named in the manifest
+        // (`sglang...extend_attention:extend_attention_fwd` -> `geak_hip_extend:extend_attention_fwd`),
+        // so it is checkable rather than unprovable, and if it does not bind here the A/B says so.
+        const viaOverlay = !E2E_REPLAYABLE_KINDS.has(kind) && !!k.overlay_tar;
         const unreplayable =
           E2E_WARM_START_REF_ONLY ? 'read-only mode'
-          : !E2E_REPLAYABLE_KINDS.has(kind) ? `winner_kind '${kind || 'unrecorded'}' cannot be replayed from a record`
-          : (kind === 'patch' && !patchPath) ? 'the record names a patch but its bundle holds no file'
-          : (kind !== 'patch' && !hasRouting) ? `recorded as a '${kind}' win but carries no apply_env/apply_flags, so there is nothing to re-apply`
+          : (!E2E_REPLAYABLE_KINDS.has(kind) && !k.overlay_tar)
+            ? `winner_kind '${kind || 'unrecorded'}' cannot be rebuilt from a record, and this record ships no overlay.tar.gz to replay instead`
+          : (viaOverlay && overlayReplayed.has(k.bundle))
+            ? "already covered by this record's overlay replay — one tarball is the whole record's overlay, not one kernel's"
+          : (!viaOverlay && kind === 'patch' && !patchPath) ? 'the record names a patch but its bundle holds no file'
+          : (!viaOverlay && kind !== 'patch' && !hasRouting) ? `recorded as a '${kind}' win but carries no apply_env/apply_flags, so there is nothing to re-apply`
           : replayed >= E2E_WARM_START_KERNELS_N ? `replay budget of ${E2E_WARM_START_KERNELS_N} already spent`
           : '';
         if (unreplayable) {
@@ -2104,6 +2139,7 @@ if (want('setup')) {
           continue;
         }
         replayed++;
+        if (viaOverlay) overlayReplayed.add(k.bundle);
         const isolated = Number(k.isolated_speedup) || 0;
         const kbIntegrateInputs = {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
@@ -2119,6 +2155,9 @@ if (want('setup')) {
             // task_dir is deliberately EMPTY and the provenance is declared foreign — see the intro.
             task_dir: '', provenance: 'knowledge_base_replay',
           },
+          // Set only on the prebuilt-overlay path, so the integrator can tell "assemble the candidate
+          // from this patch" from "the candidate already exists, unpack it and bench it".
+          ...(viaOverlay ? { KB_OVERLAY_TARBALL: k.overlay_tar } : {}),
           CURRENT_OVERLAY: kbSeedOverlay || curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
           CURRENT_THROUGHPUT: kbSeedTput || BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
         };
@@ -2126,6 +2165,25 @@ if (want('setup')) {
           'Overlay a kernel RECOVERED FROM THE KNOWLEDGE BASE and gate it on e2e throughput. Run your ' +
           'normal isolated-server A/B — same fresh-server legs, same parity probe. Two things are different ' +
           'and you must honour both:\n' +
+          (viaOverlay
+            ? '(0) DO NOT BUILD THE CANDIDATE OVERLAY. This kernel was authored by another run, whose ' +
+              'workspace does not exist here, so your `authored` recipe (git apply into ' +
+              'authored_kernel_eval_dir/workspace, copy kernel_src, add-rebind) cannot run and must not ' +
+              'be attempted. The record ships the FINISHED overlay instead. Unpack it and bench THAT ' +
+              'directory as the candidate:\n' +
+              '```bash\n' +
+              `mkdir -p "$CAND" && tar xzf ${shq(k.overlay_tar)} -C "$CAND" --strip-components=1\n` +
+              'PYTHONPATH="$CAND" python3 "$SKILL_DIR/scripts/overlay_setup.py" check --module <impl_module from $CAND/_overlay_manifest.json>\n' +
+              '```\n' +
+              'The manifest names every rebind as `target -> impl_module:impl_attr`. VERIFY EACH REBIND ' +
+              'ACTUALLY TOOK on the candidate server (load banner, or the check above) before you believe ' +
+              'a null result: this overlay was built against a different framework_version, and a rebind ' +
+              'whose target module was renamed upstream binds nothing, silently, which is indistinguishable ' +
+              'from "the kernel made no difference". If no rebind takes, report gate:"rejected" with ' +
+              'reason `no_rebind_seam` rather than a clean no-op. An authored/JIT kernel on the decode ' +
+              'path still has to satisfy your CUDA-graph-safety rule — the packed source is rebuilt by ' +
+              "this box's own torch load(), and a build failure is a rejection, not a retry.\n"
+            : '') +
           '(1) There is NO task_dir and therefore NO immutable oracle for this kernel. Your step-1 ' +
           'provenance re-check cannot run, because the workspace that produced this patch does not ' +
           'exist on this box. Do NOT claim provenance was verified. The FRESH parity probe against the ' +
@@ -2143,7 +2201,11 @@ if (want('setup')) {
           kbSeedTput = integ.e2e_throughput_tok_s;
           bankAccepted(kbSeedKernels, {
             short_name: k.name, backend: String(k.language || k.backend || ''), kind,
+            // On the prebuilt-overlay path there is no patch to point at; what reproduces this win is
+            // the accepted overlay the integrator just built from the tarball, and Module B packs that
+            // directory the same way the record we replayed was packed.
             e2e_delta_pct: integ.e2e_delta_pct, isolated, patch: patchPath,
+            replayed_from_overlay: viaOverlay ? k.overlay_tar : '',
             pct_gpu_time: Number(k.pct_gpu_time) || 0,
             apply_env: String(k.apply_env || ''), apply_flags: String(k.apply_flags || ''),
             // Provenance stays ON the banked entry: this kernel is a recovered win re-verified here,
