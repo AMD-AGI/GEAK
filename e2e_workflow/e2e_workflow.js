@@ -488,6 +488,19 @@ const E2E_WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.warm_start_min_s
 const E2E_WARM_START_TOP_N = parseInt(A.e2e_warm_start_top_n != null ? A.e2e_warm_start_top_n : 3, 10);
 const E2E_WARM_START_VALIDATE_N = parseInt(
   A.e2e_warm_start_validate_n != null ? A.e2e_warm_start_validate_n : 1, 10);
+// The same budget for a COARSE rung (`tp_any`/`workload_any`), where the record was measured at a
+// different tp or a different isl/osl/conc. This used to be hard zero, on the argument that a
+// non-comparable stored number is not worth a server launch. That argument confuses the PRIOR with
+// the MEASUREMENT: the bench below runs the recovered config on THIS box against THIS run's
+// baseline, so what the record claimed never enters the verdict — it only decides what is worth
+// trying first. And a config's transferability is exactly what the coarse rungs are for: the store
+// already ranks them by SPEEDUP rather than throughput (e2e_store.rung_metric) because the ratio is
+// the part that survives a workload change. Zero there meant every `tp_any` hit was filed as a lead
+// and then never followed by anyone, which is what the 20260826 gpt-oss-120b and Qwen3.5-122B runs
+// did. Budgeted rather than unbounded because the launch cost is real; set to 0 to restore the old
+// reference-only behaviour.
+const E2E_WARM_START_VALIDATE_N_COARSE = parseInt(
+  A.e2e_warm_start_validate_n_coarse != null ? A.e2e_warm_start_validate_n_coarse : 1, 10);
 // How many stored KERNELS get replayed through a fresh integrate A/B. Each one is another two server
 // launches, so this is a budget, not a completeness target — the rest stay references.
 const E2E_WARM_START_KERNELS_N = parseInt(
@@ -1926,23 +1939,36 @@ if (want('setup')) {
       // rather than "there was no record", which are very different things to act on.
       if (cands.length) KB_CACHE_DIR = cacheDir;
 
-      // How many of the offers are worth a server launch. On a coarser rung the stored numbers were
-      // measured on a DIFFERENT workload point, so they are not comparable to this run's baseline at
-      // all — the configs are still ideas worth handing to the Architect, but benching one on the
-      // strength of a non-comparable number is spending 30min to test a coin flip. Zero there
-      // unless the caller explicitly asks otherwise.
+      // How many of the offers are worth a server launch. A coarse rung gets its own (smaller)
+      // budget rather than zero — see E2E_WARM_START_VALIDATE_N_COARSE for why the stored number's
+      // incomparability bounds how much we spend guessing, not whether the guess can be measured.
       const exactTier = (resolved.match_tier || '') === 'exact';
       const benchN = E2E_WARM_START_REF_ONLY ? 0
-        : (exactTier || A.e2e_warm_start_validate_n != null ? E2E_WARM_START_VALIDATE_N : 0);
+        : exactTier ? E2E_WARM_START_VALIDATE_N
+        : A.e2e_warm_start_validate_n != null ? E2E_WARM_START_VALIDATE_N
+        : E2E_WARM_START_VALIDATE_N_COARSE;
+      // WHICH offers, once we know how many. The page came back ordered by absolute throughput (the
+      // resolve default), and on a coarse rung that throughput was measured at some other tp or
+      // workload point, so it ranks the offers by the one quantity that did not survive the move.
+      // Re-order by the rung's own metric — speedup — so the launch is spent on the record that
+      // claims the biggest RATIO, which is what the store promotes its coarse champions on. Note the
+      // page was still FETCHED by throughput, so this reorders a throughput-biased top-N; making the
+      // fetch itself follow the rung metric belongs in e2e_store.resolve, not here.
+      const benchOrder = exactTier ? cands : [...cands].sort(
+        (x, y) => (Number(y.speedup) || 0) - (Number(x.speedup) || 0));
       if (cands.length && !benchN) {
         log(`[kb] not benching: ${E2E_WARM_START_REF_ONLY
           ? (FAST_MODE ? 'fast mode — all optimization comes from the head track' : 'warm_start=reference')
-          : `match tier '${resolved.match_tier}' is not exact, so the stored numbers are not ` +
-            'comparable to this baseline'}. The offers stay as references.`);
+          : `the caller set e2e_warm_start_validate_n_coarse=0 and match tier ` +
+            `'${resolved.match_tier}' is not exact`}. The offers stay as references.`);
+      } else if (cands.length && !exactTier) {
+        log(`[kb] benching ${Math.min(benchN, cands.length)} of ${cands.length} offer(s) from coarse ` +
+          `tier '${resolved.match_tier}', picked by stored speedup. The stored throughput is not ` +
+          `comparable to this baseline; the A/B below is measured on this box and is what counts.`);
       }
 
       const verdicts = [];
-      for (const c of cands.slice(0, benchN)) {
+      for (const c of benchOrder.slice(0, benchN)) {
         // VALIDATE THROUGH THE ORIGINAL GATE. This is config_tuner:sweep — the same role, the same
         // schema, the same bench_e2e.sh at the same TP/GPU, the same delta-vs-median arithmetic, the
         // same parity check and the same swap-took-effect log grep the flow already trusts for a
