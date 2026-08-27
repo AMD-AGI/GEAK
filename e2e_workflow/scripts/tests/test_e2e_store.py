@@ -637,6 +637,79 @@ def test_compiled_bytecode_is_left_out_of_the_bundle(tmp_path):
     assert not any("__pycache__" in n for n in names)
 
 
+def _rebind_overlay(tmp_path, impl="engage"):
+    """A `rebinds` overlay: the implementation is a sibling at the root, not under `_patched/`."""
+    d = tmp_path / "overlay"
+    d.mkdir()
+    (d / e2e_store.OVERLAY_MANIFEST).write_text(json.dumps(
+        {"modules": [], "rebinds": [{"target": "vllm.attn:fwd", "impl_module": impl,
+                                     "impl_attr": "fwd"}]}))
+    (d / "sitecustomize.py").write_text("# hook\n")
+    return d
+
+
+def test_a_rebind_ships_the_module_it_binds_to(tmp_path):
+    """Packing only `_patched/` gave a manifest that rebinds to an import the tarball lacks."""
+    import tarfile
+    d = _rebind_overlay(tmp_path)
+    (d / "engage.py").write_text("def fwd(): pass\n")
+    with tarfile.open(e2e_store._pack_overlay(str(d)), "r:gz") as tar:
+        names = tar.getnames()
+    assert "overlay/engage.py" in names
+
+
+def test_a_rebind_through_a_shim_ships_the_kernel_behind_it(tmp_path):
+    """The manifest's module is regularly 1 KB re-exporting the real kernel from a sibling."""
+    import tarfile
+    d = _rebind_overlay(tmp_path)
+    (d / "engage.py").write_text("from authored import fwd\n")
+    (d / "authored.py").write_text("import triton\n\ndef fwd(): pass\n")
+    with tarfile.open(e2e_store._pack_overlay(str(d)), "r:gz") as tar:
+        names = tar.getnames()
+    assert "overlay/authored.py" in names, "the shim shipped without the kernel behind it"
+    assert not any("triton" in n for n in names), "a third-party import is not an overlay sibling"
+
+
+def test_a_submodule_rebind_ships_its_package(tmp_path):
+    """`geak_authored.gemm_flydsl` is addressed by the package that sits at the overlay root."""
+    import tarfile
+    d = _rebind_overlay(tmp_path, impl="geak_authored.gemm")
+    (d / "geak_authored").mkdir()
+    (d / "geak_authored" / "__init__.py").write_text("")
+    (d / "geak_authored" / "gemm.py").write_text("def fwd(): pass\n")
+    with tarfile.open(e2e_store._pack_overlay(str(d)), "r:gz") as tar:
+        names = tar.getnames()
+    assert "overlay/geak_authored/__init__.py" in names
+    assert "overlay/geak_authored/gemm.py" in names
+
+
+def test_sitecustomize_siblings_travel_with_it(tmp_path):
+    """A capture or trace overlay names its helpers nowhere but in sitecustomize.py's imports."""
+    import tarfile
+    d = _rebind_overlay(tmp_path)
+    (d / "engage.py").write_text("def fwd(): pass\n")
+    (d / "sitecustomize.py").write_text("import os\ntry:\n    import capture_shapes\n"
+                                        "except Exception:\n    pass\n")
+    (d / "capture_shapes.py").write_text("SHAPES = []\n")
+    with tarfile.open(e2e_store._pack_overlay(str(d)), "r:gz") as tar:
+        names = tar.getnames()
+    assert "overlay/capture_shapes.py" in names
+
+
+def test_a_module_name_that_could_escape_the_root_is_refused(tmp_path):
+    """`impl_module` is a module name; anything path-shaped is not resolved into the filesystem."""
+    import tarfile
+    d = tmp_path / "overlay"
+    d.mkdir()
+    (d / e2e_store.OVERLAY_MANIFEST).write_text(json.dumps(
+        {"rebinds": [{"impl_module": "/etc/passwd"}, {"impl_module": "../escape"},
+                     {"impl_module": "a/b"}]}))
+    (d / "sitecustomize.py").write_text("# hook\n")
+    with tarfile.open(e2e_store._pack_overlay(str(d)), "r:gz") as tar:
+        names = tar.getnames()
+    assert names == ["overlay/" + e2e_store.OVERLAY_MANIFEST, "overlay/sitecustomize.py"]
+
+
 # -- the tuning track's lever, carried into the record ---------------------------------------------
 #
 # A tuned table is bound by an env var and deployed INTO the installed package, so it is structurally

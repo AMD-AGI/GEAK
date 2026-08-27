@@ -16,7 +16,7 @@ dependencies = [
     "requests",
     "datasets",
     # AMD GPU profiling helper (pinned git commit).
-    "metrix @ git+https://github.com/AMDResearch/intellikit.git@bcbfa0252df9d55f3aab68c95dd3ce45ccbe5b46#subdirectory=metrix",
+    "metrix @ git+https://github.com/AMDResearch/intellikit.git@2f61453a779980b00504ea3b772ff4a1a1c3f4ad#subdirectory=metrix",
 ]
 
 [project.optional-dependencies]
