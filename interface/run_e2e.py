@@ -238,6 +238,19 @@ def _fold_serving_fidelity_flags(
 # ---------------------------------------------------------------------------
 # handoff (stable)  ->  e2e_workflow.js args (volatile, owned here)
 # ---------------------------------------------------------------------------
+def _as_float(v, default: float = 0.0) -> float:
+    """Coerce a JSON-ish value to a float, defaulting rather than raising.
+
+    Used on gate arithmetic over agent-authored JSON, where a number can arrive as a string or as
+    null. Defaulting to 0.0 makes a malformed value fail a `> 1.0` gate, which is the safe direction:
+    an unreadable speedup is not evidence of a win.
+    """
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def _as_bool(v) -> bool:
     """Coerce a handoff value to a bool.
 
@@ -3063,6 +3076,103 @@ def _kb_write_back(eval_dir: Path, wf: dict, ps_args: dict) -> dict:
     return receipt
 
 
+TUNING_RESULT_FILE = "tuning/tuning_result.json"   # the role's return, persisted before it returns
+TUNING_KB_WRITE_FILE = "tuning/kb_write_tuned.json"  # the orchestrator's receipt; presence == already filed
+KERNEL_STORE_SCRIPT = GEAK_ROOT / "kernel_workflow" / "scripts" / "experience_store.py"
+
+
+def _kb_write_tuned_ops(eval_dir: Path) -> dict:
+    """File the tuning phase's proven tables when the workflow died before doing it itself.
+
+    The orchestrator's own write-back (e2e_workflow.js, the `kernel-kb:write-tuned` step) runs after
+    the tuning role returns. Under an outer runner that slices wall-clock — which is the normal case,
+    not the exceptional one — a run can finish its A/B, prove engagement, and still be killed with the
+    verdict only in the role's context. The measurement is complete and on disk; only the filing is
+    missing. So the role persists its return to ``tuning/tuning_result.json`` and this reads it.
+
+    Deliberately independent of the run's e2e outcome, exactly as the orchestrator's write is: a
+    per-op tuned table is knowledge about that op, and a run whose end-to-end number went the wrong
+    way for unrelated reasons has not unlearned it.
+
+    Same gates as the orchestrator, per op: ``isolated_speedup > 1.0`` and ``engaged``, plus a phase
+    gate of ``accepted``. Never raises — a missed record is not a failed run.
+    """
+    if str(os.environ.get("GEAK_E2E_KB_WRITE_BACK", "1")).strip().lower() in ("0", "false", "no"):
+        return {"skipped": True, "why": "GEAK_E2E_KB_WRITE_BACK is off"}
+    # The orchestrator got there first. Writing again would not overwrite — the store has no delete —
+    # it would mint a second record with the same content signature, which the page counts as an
+    # independent REPRODUCTION and which can promote a candidate on one measurement seen twice.
+    if (eval_dir / TUNING_KB_WRITE_FILE).exists():
+        return {"skipped": True, "why": "workflow already filed (%s present)" % TUNING_KB_WRITE_FILE}
+    tuning = _read_json(eval_dir / TUNING_RESULT_FILE)
+    if not tuning:
+        return {"skipped": True, "why": "no %s (tuning never ran, or ran before this build)"
+                                        % TUNING_RESULT_FILE}
+    if str(tuning.get("gate") or "") != "accepted":
+        return {"skipped": True, "why": "tuning gate is %r, not accepted" % (tuning.get("gate") or "")}
+
+    dims = (_read_json(eval_dir / KB_IDENTITY_FILE) or {}).get("dims") or {}
+    gfx = str(dims.get("gfx") or "")
+    if not gfx:
+        return {"skipped": True, "why": "no gfx: a tuned table is valid for exactly one arch"}
+
+    ops = [o for o in (tuning.get("ops_tuned") or [])
+           if isinstance(o, dict) and o.get("engaged") is True
+           and _as_float(o.get("isolated_speedup")) > 1.0 and str(o.get("artifact") or "").strip()]
+    if not ops:
+        return {"skipped": True, "why": "no op cleared isolated_speedup>1.0 AND engaged"}
+
+    identity = _read_json(eval_dir / KB_IDENTITY_FILE) or {}
+    plane = str(identity.get("plane") or "remote")
+    store = str(identity.get("store") or "")
+    verb = "write-remote" if (plane != "local" and store) else "write"
+    plane_flags = ["--plane", "both", "--store", store] if verb == "write-remote" else []
+
+    rows = []
+    for op in ops:
+        name = str(op.get("op") or op.get("short_name") or "").strip()
+        if not name:
+            rows.append({"written": False, "reason": "unnamed op"})
+            continue
+        cmd = [sys.executable, str(KERNEL_STORE_SCRIPT), verb, *plane_flags,
+               "--root", str(GEAK_ROOT / "kb_artifacts"),
+               "--kernel-name", name,
+               "--language", str(op.get("backend") or "tuned").strip(),
+               "--gfx", gfx, "--kernel-class", "tuning",
+               "--speedup", str(_as_float(op.get("isolated_speedup"))),
+               "--carrier", "tuned_artifact", "--artifact", str(op.get("artifact")).strip(),
+               "--tuner", str(op.get("tuner") or "").strip(),
+               "--apply-env", str(tuning.get("apply_env") or ""),
+               "--cache-invalidation", " && ".join(tuning.get("cache_invalidation") or []),
+               "--metric-kind", "tuning_isolated",
+               "--case-names", str(op.get("shapes") or "").replace(",", ";"),
+               "--direction", "tuning-" + re.sub(
+                   r"[^a-z0-9]+", "-", str(op.get("backend") or "op").strip().lower()),
+               "--eval-dir", str(eval_dir)]
+        if str(tuning.get("report_path") or "").strip():
+            cmd += ["--report", str(tuning["report_path"]).strip()]
+        shell = '. %s; exec "$@"' % shlex.quote(str(KB_ENV_SCRIPT))
+        try:
+            proc = subprocess.run(["bash", "-c", shell, "bash", *cmd], capture_output=True,
+                                  text=True, timeout=KB_WRITE_TIMEOUT_S, cwd=str(GEAK_ROOT))
+            rows.append(json.loads(proc.stdout))
+        except subprocess.TimeoutExpired:
+            rows.append({"written": False, "reason": "timed out after %ds" % KB_WRITE_TIMEOUT_S})
+        except Exception as exc:
+            rows.append({"written": False, "reason": "%s: %s" % (type(exc).__name__, str(exc)[:160])})
+
+    receipt = {"ok": True, "measured_by": "run_e2e:salvage", "plane": plane, "verb": verb,
+               "ops": len(ops), "written": sum(1 for r in rows if r.get("written")),
+               "results": rows}
+    try:
+        path = eval_dir / TUNING_KB_WRITE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    return receipt
+
+
 def _git_short_sha(root: Path) -> str:
     try:
         out = subprocess.run(
@@ -4671,6 +4781,23 @@ def main(argv: list[str]) -> int:
             except Exception as kb_exc:
                 out["kb_write"] = {"ok": False,
                                    "why": f"{type(kb_exc).__name__}: {kb_exc}"}
+        # The per-op tuned tables, filed on the same terms and for the same reason, but on their own
+        # gate: this one is NOT conditional on `wf`. A run can be cut off with a complete, engagement-
+        # proven tuning A/B on disk and no workflow return at all, and that table is still knowledge
+        # about that op. Runs after the deployment record for the same ordering reason — result.json
+        # first, network second.
+        if _emit_state["done"] and eval_dir_str:
+            try:
+                tuned = _kb_write_tuned_ops(Path(eval_dir_str))
+                if tuned and not tuned.get("skipped"):
+                    out["kb_write_tuned"] = tuned
+                    tmp = result_path.with_name(result_path.name + ".tmp")
+                    tmp.write_text(json.dumps(out, indent=2), encoding="utf-8")
+                    os.replace(tmp, result_path)
+                    _emit_state["out"] = out
+            except Exception as kb_exc:
+                out["kb_write_tuned"] = {"ok": False,
+                                         "why": f"{type(kb_exc).__name__}: {kb_exc}"}
         return out
 
     # Safety net: any exit path that somehow skipped _emit still leaves a file.

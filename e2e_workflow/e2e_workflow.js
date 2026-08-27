@@ -2611,10 +2611,21 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       // (that is the judgement the phase exists for) and can ask per op, which no read done up here
       // before the profile is consulted could do. Same TUNING_KB_ENABLED switch as everything else,
       // so blind evaluation stays blind through every channel.
+      //
+      // PLANE, not root. The write below is `write-remote --plane both` whenever a service is
+      // configured, so the record lands behind a key on the shared store; a directory read against
+      // KB_ARTIFACTS_DIR would look at this run's own checkout, which HL creates empty per run and
+      // deletes with the run, and would report the miss as `kernel_page_not_found` — indistinguishable
+      // from a page that genuinely has nothing. Read and write have to name the same plane or the
+      // lane writes into one store and reads from another forever. A read takes exactly ONE plane
+      // (see kbResolveScript), so `both` is resolved to `remote` here and the local mirror is offered
+      // as the named fallback rather than silently shadowing the service.
       ...(TUNING_KB_ENABLED && KB_DIMS && KB_DIMS.gfx ? {
-        TUNED_KB_ROOT: KB_ARTIFACTS_DIR,
+        TUNED_KB_PLANE: E2E_KB_PLANE === 'both' ? 'remote' : E2E_KB_PLANE,
+        TUNED_KB_STORE: E2E_KB_STORE_DIR,
         TUNED_KB_GFX: KB_DIMS.gfx,
         TUNED_KB_SCRIPT: KERNEL_WF_DIR + '/scripts/experience_store.py',
+        TUNED_KB_ENV_PRELUDE: KB_ENV_PRELUDE,
       } : {}),
     }),
     { phase: 'TuningSkillset', label: 'tuning_specialist:tune', schema: TUNING_SCHEMA });
@@ -2749,7 +2760,14 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
               `instead of fixing the first`
             : '') + `. For a command that errors, put ` +
           `{"written": false, "reason": "io_error"} in its place so the list stays aligned with the ` +
-          `command order.\n` +
+          `command order.\n\n` +
+          `THEN, last, write \`{"results": [...]}\` — the same list — to ` +
+          `\`${EVAL_DIR}/tuning/kb_write_tuned.json\`. That file is the receipt saying this filing ` +
+          `already happened: run_e2e.py refiles these ops from disk when the workflow is killed ` +
+          `before reaching this step, and it skips when the receipt is present. Without it, a run ` +
+          `that dies AFTER this step gets every op written a second time, and the store counts the ` +
+          `copy as an independent reproduction — which can promote a candidate on one measurement ` +
+          `seen twice. Write the receipt even if every command failed.\n` +
           '```bash\n' + (remoteOn ? KB_ENV_PRELUDE + '\n' : '') + cmds.join('\n\n') + '\n```',
           { phase: 'TuningSkillset', label: 'kernel-kb:write-tuned',
             schema: obj({ results: arrObj }, ['results']) },

@@ -21,13 +21,29 @@ produce goes under `EVAL_DIR/tuning/`.
 Look in all three before searching. `TUNING_KB_ENABLED=false` closes **all** (blind evaluation — say in
 your return which mode you were in).
 
-1. **The per-op tuned store** (`TUNED_KB_ROOT`): every table this phase has ever proven, keyed per op,
-   and it survives runs whose e2e number went the wrong way. Ask once per op, before searching it:
+1. **The per-op tuned store**: every table this phase has ever proven, keyed per op, and it survives
+   runs whose e2e number went the wrong way. This is the same store, on the same plane, that the
+   orchestrator writes your accepted ops back into — read it with the key-addressed `resolve-remote`,
+   not the directory-addressed `resolve`. The distinction is load-bearing: the write goes to the
+   shared service, and a directory read looks only at this run's own checkout, which is created
+   empty and deleted with the run. Reading the wrong one is silent — it returns
+   `kernel_page_not_found` exactly like a genuinely empty page.
+
+   Run `TUNED_KB_ENV_PRELUDE` once first (it exports the store credentials; without it a remote read
+   fails as unauthenticated, which also looks like an empty page). Then ask once per op, before
+   searching it:
    ```bash
-   python3 "$TUNED_KB_SCRIPT" resolve --root "$TUNED_KB_ROOT" --kernel-name <op> \
+   eval "$TUNED_KB_ENV_PRELUDE"
+   python3 "$TUNED_KB_SCRIPT" resolve-remote --plane "$TUNED_KB_PLANE" \
+     ${TUNED_KB_STORE:+--store "$TUNED_KB_STORE"} --kernel-name <op> \
      --language <backend> --gfx "$TUNED_KB_GFX" --refs-dir "$EVAL_DIR/tuning/kb_refs" \
      --carrier tuned_artifact --min-speedup 1.05
    ```
+   A read takes exactly ONE plane, so `TUNED_KB_PLANE` is never `both`. When it is `remote` and the
+   answer comes back with no candidates, retry that op once against the local mirror
+   (`--plane local --store "$TUNED_KB_STORE"`) before concluding the page is empty; say in your
+   return which plane answered.
+
    Each candidate hands you `artifact_paths` (copy these), `artifact_names` (**install each under this
    name — the runtime finds it under no other**), `apply_env`, `cache_invalidation`. Your accepted ops
    are written back here by the orchestrator, gated on `isolated_speedup` and `engaged`.
@@ -51,8 +67,8 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `SERVING_TP`, `SERVIN
 `TUNING_TARGETS` (the Architect's ranked ops — advisory, not a shortlist),
 `TUNING_SKILLSET_DIR`, `TUNING_KB_ENABLED`, `ACCURACY_GATE`, `SKILL_DIR`,
 and — only when the warm start found prior records and `TUNING_KB_ENABLED` is on —
-`KB_REFERENCE_DIR`, `KB_REFERENCE_VERDICT`, `KB_CACHE_DIR`, `TUNED_KB_ROOT`, `TUNED_KB_GFX`,
-`TUNED_KB_SCRIPT` (see "Prior tuning knowledge" above).
+`KB_REFERENCE_DIR`, `KB_REFERENCE_VERDICT`, `KB_CACHE_DIR`, `TUNED_KB_PLANE`, `TUNED_KB_STORE`,
+`TUNED_KB_GFX`, `TUNED_KB_SCRIPT`, `TUNED_KB_ENV_PRELUDE` (see "Prior tuning knowledge" above).
 
 There is no cap on how many ops you tune. Work the profile until the remaining candidates are not worth
 the time; say where you stopped and why.
@@ -139,6 +155,14 @@ it), the correctness and engagement evidence, and the isolated-server A/B. The S
 this in the final report, so put real numbers in it and mark absent things as absent.
 
 ### Return JSON
+
+**Write this same object to `EVAL_DIR/tuning/tuning_result.json` BEFORE you return it, byte-identical.**
+Not a convenience copy: the orchestrator's write-back into the per-op store runs after you return, and
+a run whose wall-clock expires while this phase is still working never gets there — every table you
+proved would die with the process even though the measurement was finished and on disk. `run_e2e.py`'s
+salvage path reads this file and files the ops itself, applying the same `isolated_speedup > 1.0` and
+`engaged` gates the orchestrator does, so a proven table survives a run that was cut off. Write it as
+soon as the gate is decided, before writing the report — if you can only do one of the two, do this.
 
 ```json
 {
