@@ -21,11 +21,19 @@ a caller that cannot install a tuned table never sees one.
 
     slug = <canon(kernel_name)>__<language>__<gfx>   # deterministic; read and write derive it identically
 
+Numeric precision is NOT in the slug and NOT in the remote key. It is a FILTER: written into
+`meta.upstream` (and `value.upstream` remotely), applied only when a reader passes `--precision`,
+and an entry that states none is never excluded. That asymmetry is deliberate — a tuned table is
+dtype-specialized and `bench_key` only flags comparability rather than partitioning the ranking, so
+without the filter one dtype's entries can take every top-N slot on a page a reader of the other
+dtype is looking at. Keying on it instead would have moved every existing entry's address on a
+store with no delete.
+
 Subcommands:
     write      Store one measured win behind the gate (missing_arch / no_improvement / empty_diff,
                or no_artifact / unreadable_artifact on the tuned carrier).
     resolve    Rank the top-N same-gfx solutions for a slug and mirror their prose into <refs-dir>,
-               for ONE --carrier (default patch).
+               for ONE --carrier (default patch), optionally narrowed to one --precision.
     remap      Rewrite a stored patch's paths onto the calling workspace's layout, or refuse and say why.
     languages  Which languages a kernel has a page in — the store, not a task_type guess, decides.
     backfill-content
@@ -89,6 +97,74 @@ def _safe(seg: str) -> str:
 def _norm_gfx(gfx: str) -> str:
     m = re.search(r"gfx\d+", str(gfx or ""), re.IGNORECASE)
     return m.group(0).lower() if m else ""
+
+
+# Numeric precision is a FILTER, never a dimension — see the remote-export note on why the address
+# cannot carry it. These two functions are the whole of the folding rule, kept together so read and
+# write cannot disagree about what counts as the same dtype.
+_PRECISION_ALIASES = {"float8": "fp8", "f8": "fp8", "float16": "fp16", "f16": "fp16",
+                      "half": "fp16", "bfloat16": "bf16", "bf": "bf16",
+                      "float32": "fp32", "f32": "fp32", "float": "fp32"}
+
+
+def _norm_precision(value) -> str:
+    """Fold a dtype spelling to a comparable token: `FP8-w8a8` and `fp8_w8a8` are one thing.
+
+    Only the LEADING token is aliased. A quantization scheme suffix (`_w8a8`, `_w4a16`) is kept
+    verbatim because nothing here is qualified to decide that two of them are interchangeable —
+    getting that wrong would offer a reader a table its runtime cannot use, which is the failure
+    this filter exists to prevent.
+    """
+    text = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    if not text:
+        return ""
+    head, sep, rest = text.partition("_")
+    return _PRECISION_ALIASES.get(head, head) + sep + rest
+
+
+def _precision_matches(want: str, have: str) -> bool:
+    """Whether an entry recorded at `have` may be offered to a caller asking for `want`.
+
+    Unstated on EITHER side is a match, not a mismatch. The entire recovered backlog predates this
+    field, so excluding what does not state a precision would empty every page in the store — and an
+    unlabelled entry is still a lead worth a verify slot, exactly as an unvalidated one is.
+
+    A bare base dtype matches its own refinements in both directions: a table recorded as `fp8` is
+    the coarser statement about the same thing an `fp8_w8a8` reader wants, and a caller who only
+    knows it is on `fp8` must still see the `fp8_w8a8` entries. Matching on the token boundary
+    rather than a raw prefix keeps `fp8` from swallowing `fp8x` or `fp16`.
+    """
+    if not want or not have:
+        return True
+    return want == have or want.startswith(have + "_") or have.startswith(want + "_")
+
+
+def _precision_of(meta) -> str:
+    upstream = (meta or {}).get("upstream")
+    return _norm_precision((upstream or {}).get("precision") if isinstance(upstream, dict) else "")
+
+
+def _upstream_of(a) -> dict:
+    """The serving context this win was measured in — recorded, never keyed.
+
+    The remote-export note below spells out why none of this may become an identity dimension: a
+    dimension the READ side cannot recompute is a permanent silent 404, and `kernel_lane.js` has no
+    upstream awareness at all. That note has said since it was written that these ride in
+    `value.upstream` instead — but nothing ever wrote the field, so precision was not merely absent
+    from the address, it was absent from the record. An e2e run that knows it measured `fp8` had
+    nowhere to say so, and the e2e lane's own records (which DO key on precision) could not be
+    joined back to the kernel entries they produced.
+
+    Values are stored verbatim. `_norm_precision` folds only at COMPARISON time, so a later reader
+    that disagrees with today's folding rule still has the original string to re-fold.
+    """
+    out = {}
+    for key, attr in (("precision", "precision"), ("framework", "serving_framework"),
+                      ("framework_version", "serving_framework_version")):
+        value = str(getattr(a, attr, "") or "").strip()[:80]
+        if value:
+            out[key] = value
+    return out
 
 
 # One kernel is named differently per layout: `fused_moe_kernel` (kernel dir), `fused_moe_kernel_task`
@@ -584,6 +660,11 @@ def cmd_write(a) -> dict:
         "verified_stack": detect_stack(a.language),
         "source_eval_dir": a.eval_dir or "",
     }
+    upstream = _upstream_of(a)
+    if upstream:
+        # Omitted entirely when the caller states none, so an entry written by an unmodified caller
+        # is byte-identical to what it was before this field existed.
+        meta["upstream"] = upstream
     if carrier == "tuned_artifact":
         # The three things that make a tuned table usable and that a diff would have carried
         # implicitly: which files, what binds them, and what silently ignores them if skipped.
@@ -1087,6 +1168,25 @@ def cmd_resolve(a) -> dict:
                     other_carriers=other_carrier_n)
     found = of_carrier
 
+    # Precision, on the same footing as carrier and for the same reason: not a dimension of the
+    # address (the reader cannot always recompute it), but a hard fact about whether an entry is
+    # usable here. A tuned table is dtype-specialized, and `bench_key` does NOT partition the
+    # ranking — it only sets a `comparable` flag — so without this an fp8 page's top-N can be taken
+    # entirely by bf16 entries that then lose their direction slot to nothing.
+    #
+    # Off by default. Omitting --precision reproduces the previous behaviour exactly, and an entry
+    # that states no precision is never excluded (see _precision_matches).
+    want_precision = _norm_precision(getattr(a, "precision", ""))
+    other_precision_n = 0
+    if want_precision:
+        of_precision = [(m, d) for (m, d) in found
+                        if _precision_matches(want_precision, _precision_of(m))]
+        other_precision_n = len(found) - len(of_precision)
+        if not of_precision:
+            return dict(base_out, read_reason="no_such_precision", carrier=want_carrier,
+                        precision=want_precision, other_precisions=other_precision_n)
+        found = of_precision
+
     # --- curation gate: what this page may OFFER, before any ranking -------------------------
     total = len(found)
     servable = found if a.include_retired else [(m, d) for (m, d) in found if not _is_retired(m)]
@@ -1099,7 +1199,8 @@ def cmd_resolve(a) -> dict:
     below_n = len(servable) - len(above)
     stats = {"total": total, "retired": retired_n, "below_min_speedup": below_n,
              "min_speedup": min_speedup, "carrier": want_carrier,
-             "other_carriers": other_carrier_n}
+             "other_carriers": other_carrier_n,
+             "precision": want_precision, "other_precisions": other_precision_n}
     if not above:
         return dict(base_out, filtered=stats,
                     read_reason="all_retired" if not servable else "below_min_speedup")
@@ -1284,9 +1385,12 @@ def cmd_backfill_content(a) -> dict:
 #     dimensions, even though an e2e run knows all three. kernel_lane.js does not — it has no
 #     upstream awareness at all, and pass-through from e2e forwards only `target_language`. A
 #     dimension the reader cannot reconstruct is a permanent silent 404. They ride in
-#     `value.upstream` instead, where a client can filter on them; precision is additionally
-#     already spelled into most kernel names (`fused_moe_int4_w4a16`, `_w8a8_triton_block_scaled_mm`)
-#     so keying on it would double-encode and split those pages.
+#     `value.upstream` instead, where a client can filter on them (`resolve`/`resolve-remote
+#     --precision`); precision is additionally already spelled into most kernel names
+#     (`fused_moe_int4_w4a16`, `_w8a8_triton_block_scaled_mm`) so keying on it would double-encode
+#     and split those pages. Being a filter rather than a dimension is also what makes it safe on a
+#     store with no delete: a caller that cannot state its precision loses filtering, not its whole
+#     history, where a wrong key segment would have lost the page.
 #   * every write publishes to BOTH rungs of kernel_canonical_ids(). The service does no prefix
 #     aggregation, so the version-agnostic page exists only because we put records there.
 REMOTE_PRODUCER = "geak"
@@ -1435,6 +1539,10 @@ def remote_value(meta: dict, digest: str = "") -> dict:
             "case_names": list(metric.get("case_names") or []),
         },
         "verified_stack": meta.get("verified_stack") if isinstance(meta.get("verified_stack"), dict) else {},
+        # The dimensions the ADDRESS deliberately does not carry (see the export note above). They
+        # are sent so a client can filter on them, which is the whole reason they were excluded from
+        # the key rather than simply dropped — `resolve-remote --precision` is that client.
+        "upstream": meta.get("upstream") if isinstance(meta.get("upstream"), dict) else {},
         "verified_on": str(meta.get("verified_on") or ""),
         "measured_by": str(meta.get("measured_by") or ""),
         "reproductions": meta.get("reproductions"),
@@ -1856,8 +1964,14 @@ def cmd_resolve_remote(a) -> dict:
     # nothing but the other carrier must read as EMPTY so the ladder descends, rather than stopping
     # on a page whose every entry the caller has no way to install. Records written before carriers
     # existed have no field and are diffs.
+    # Precision is filtered in the same place, and descends the ladder for the same reason: a rung
+    # holding nothing but the other dtype is a page this caller cannot install from, so it must read
+    # EMPTY and let the version-agnostic rung answer instead of stopping here. Off unless asked, and
+    # an entry that states no precision is kept — the whole backlog predates the field.
     want_carrier = str(getattr(a, "carrier", "") or "patch")
+    want_precision = _norm_precision(getattr(a, "precision", ""))
     other_carrier = [0]
+    other_precision = [0]
 
     def live(canonical_id):
         rows = store.candidates(canonical_id, limit=0)
@@ -1865,7 +1979,12 @@ def cmd_resolve_remote(a) -> dict:
         retired_n = len(rows) - len(kept)
         of_carrier = [c for c in kept if str((c.value or {}).get("carrier") or "patch") == want_carrier]
         other_carrier[0] = len(kept) - len(of_carrier)
-        return of_carrier, retired_n
+        if not want_precision:
+            return of_carrier, retired_n
+        of_precision = [c for c in of_carrier
+                        if _precision_matches(want_precision, _precision_of(c.value))]
+        other_precision[0] = len(of_carrier) - len(of_precision)
+        return of_precision, retired_n
 
     found, retired = [], 0
     for cid, match_tier in ladder:
@@ -1894,7 +2013,8 @@ def cmd_resolve_remote(a) -> dict:
     # still sum to the page size even though `found` is already the survivors.
     stats = {"total": len(found) + retired, "retired": retired,
              "below_min_speedup": len(found) - len(above), "min_speedup": min_speedup,
-             "carrier": want_carrier, "other_carriers": other_carrier[0]}
+             "carrier": want_carrier, "other_carriers": other_carrier[0],
+             "precision": want_precision, "other_precisions": other_precision[0]}
     if not above:
         return dict(base_out, filtered=stats, read_reason="below_min_speedup")
 
@@ -2048,6 +2168,15 @@ def main(argv=None):
         w.add_argument("--cache-invalidation", dest="cache_invalidation", default="",
                        help="what must run post-install or the new rows are silently ignored")
         w.add_argument("--tuner", default="", help="which tuner produced it (gradlib, ckProfiler, ...)")
+        # Serving context: recorded in `upstream`, never in the address. Optional everywhere, so a
+        # caller that does not know its precision writes exactly what it wrote before.
+        w.add_argument("--precision", default="",
+                       help="numeric precision this was measured at (fp8, fp8_w8a8, bf16, ...); "
+                            "recorded for filtering, NOT part of the key")
+        w.add_argument("--serving-framework", dest="serving_framework", default="",
+                       help="vllm | sglang — recorded alongside precision, never keyed")
+        w.add_argument("--serving-framework-version", dest="serving_framework_version", default="",
+                       help="the SERVING framework's version, not ROCm's (--framework-version)")
         return w
 
     add_write_args(sub.add_parser("write", help="store one measured win"))
@@ -2067,6 +2196,9 @@ def main(argv=None):
                    help="also offer entries the curation retired (audit/debug only)")
     r.add_argument("--carrier", choices=CARRIERS, default="patch",
                    help="which carrier to offer; one per call (default patch)")
+    r.add_argument("--precision", default="",
+                   help="only offer entries measured at this precision; entries that state none "
+                        "are always offered. Omit to filter on nothing (the default)")
 
     lg = sub.add_parser("languages", help="which languages this kernel has a page in")
     lg.add_argument("--root", required=True)
@@ -2118,6 +2250,10 @@ def main(argv=None):
     rr.add_argument("--min-speedup", dest="min_speedup", type=float, default=1.05)
     rr.add_argument("--carrier", choices=CARRIERS, default="patch",
                     help="which carrier to offer; one per call (default patch)")
+    rr.add_argument("--precision", default="",
+                    help="only offer entries measured at this precision; entries that state none "
+                         "are always offered. A rung holding only other dtypes reads as empty and "
+                         "the ladder descends. Omit to filter on nothing (the default)")
 
     wr = add_plane_args(add_write_args(
         sub.add_parser("write-remote", help="store one win in the local store AND under its key")))

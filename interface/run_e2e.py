@@ -3263,6 +3263,17 @@ def _kb_write_tuned_ops(eval_dir: Path) -> dict:
                "--direction", "tuning-" + re.sub(
                    r"[^a-z0-9]+", "-", str(op.get("backend") or "op").strip().lower()),
                "--eval-dir", str(eval_dir)]
+        # Recorded into `value.upstream`, never part of the key — same as the orchestrator's write,
+        # and it has to stay the same or a salvaged op would be indistinguishable from an unlabelled
+        # backlog entry and would outrank correctly-labelled ones on a mismatched-dtype read. Sourced
+        # from the identity file the warm start already wrote, so this needs no new plumbing.
+        # `dims` is the raw argv of the e2e read, so its keys are the FLAG spellings — hyphenated,
+        # not underscored. Reading `framework_version` here would silently find nothing.
+        for flag, value in (("--precision", dims.get("precision")),
+                            ("--serving-framework", dims.get("framework")),
+                            ("--serving-framework-version", dims.get("framework-version"))):
+            if str(value or "").strip():
+                cmd += [flag, str(value).strip()]
         if str(tuning.get("report_path") or "").strip():
             cmd += ["--report", str(tuning["report_path"]).strip()]
         shell = '. %s; exec "$@"' % shlex.quote(str(KB_ENV_SCRIPT))

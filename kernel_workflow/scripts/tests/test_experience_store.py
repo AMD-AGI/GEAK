@@ -1212,3 +1212,111 @@ def test_the_tuned_entry_reaches_the_remote_plane_installable(tmp_path):
     assert c["artifact_paths"] and all(os.path.isfile(p) for p in c["artifact_paths"])
     assert [c["artifact_names"][os.path.basename(p)] for p in c["artifact_paths"]] == \
         ["E=8,N=1024,device_name=AMD Instinct MI355X.json"]
+
+
+# --------------------------------------------------------------------------- precision
+# The page is keyed on arch and op, NOT on dtype: one `fused_moe` page holds the bf16 and the
+# fp8_w8a8 tables side by side, ranked against each other on speedup alone. Precision could not
+# JOIN the key — the remote store exposes no delete, so moving every existing entry's address
+# would orphan the whole backlog — so it is recorded and filtered instead. What is pinned here is
+# that the filter never costs a caller history it could have used: unstated on either side is a
+# match, and a coarse dtype still reaches its own refinements.
+def tuned_at(root, tmp_path, precision, *, speedup, direction, body):
+    home = tmp_path / (precision or "unstated")
+    home.mkdir(exist_ok=True)
+    return write_tuned(root, tuned_files(home, body=body), speedup=speedup,
+                       direction=direction, metric_kind="tuning_isolated",
+                       **({"precision": precision} if precision else {}))
+
+
+def _offers(out):
+    return [(c["speedup"], c["direction"]) for c in out["candidates"]]
+
+
+def test_precision_is_recorded_but_does_not_move_the_page(tmp_path):
+    """The reason this is a filter and not a key dimension. If stating precision changed the
+    address, every entry written before the field existed would become unreachable — on a store
+    that cannot delete, that is the whole backlog stranded, permanently."""
+    root = str(tmp_path / "kb")
+    plain = tuned_at(root, tmp_path, "", speedup=2.0, direction="d1", body='{"1":{}}')
+    typed = tuned_at(root, tmp_path, "fp8_w8a8", speedup=3.0, direction="d2", body='{"2":{}}')
+    assert os.path.dirname(plain["dir"]) == os.path.dirname(typed["dir"])   # same page
+    assert yaml.safe_load(open(os.path.join(typed["dir"], "meta.yaml")))["upstream"] == \
+        {"precision": "fp8_w8a8"}
+    # An unstated write stays byte-identical to what it was before the field existed.
+    assert "upstream" not in yaml.safe_load(open(os.path.join(plain["dir"], "meta.yaml")))
+
+
+def test_a_reader_that_states_no_precision_sees_what_it_always_saw(tmp_path):
+    """The migration guarantee. Every caller predates this flag; none may lose a candidate by
+    not yet passing it."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    tuned_at(root, tmp_path, "fp8_w8a8", speedup=3.29, direction="tuning-aiter", body='{"1":{}}')
+    tuned_at(root, tmp_path, "bf16", speedup=4.10, direction="tuning-ck", body='{"2":{}}')
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950",
+                  "--carrier", "tuned_artifact", "--min-speedup", "1.0")
+    assert _offers(out) == [(4.1, "tuning-ck"), (3.29, "tuning-aiter")]
+    assert out["filtered"]["other_precisions"] == 0
+
+
+def test_the_other_dtype_is_dropped_before_ranking_not_after(tmp_path):
+    """Why the filter is worth having: bf16 outranks fp8 on raw speedup, so an fp8 deployment
+    reading this page unfiltered spends its first verify slot on a table whose filename encodes
+    a dtype its runtime never looks up. Ranking pollution, not corruption — but it costs a slot."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    tuned_at(root, tmp_path, "fp8_w8a8", speedup=3.29, direction="tuning-aiter", body='{"1":{}}')
+    tuned_at(root, tmp_path, "bf16", speedup=4.10, direction="tuning-ck", body='{"2":{}}')
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950", "--carrier",
+                  "tuned_artifact", "--min-speedup", "1.0", "--precision", "FP8-w8a8")
+    assert _offers(out) == [(3.29, "tuning-aiter")]      # spelling folded: FP8-w8a8 == fp8_w8a8
+    assert out["filtered"]["other_precisions"] == 1   # and it SAYS what it withheld
+
+
+def test_a_coarse_dtype_still_reaches_its_own_refinements(tmp_path):
+    """A caller that only knows it is on fp8 must still see the fp8_w8a8 entries, and vice versa:
+    they are two statements about the same thing at different resolutions. Matching on the token
+    boundary rather than a raw prefix is what keeps `fp8` from also swallowing `fp16`."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    tuned_at(root, tmp_path, "fp8_w8a8", speedup=3.29, direction="tuning-aiter", body='{"1":{}}')
+    tuned_at(root, tmp_path, "fp16", speedup=9.99, direction="tuning-fp16", body='{"2":{}}')
+    for asked in ("fp8", "float8"):
+        out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950", "--carrier",
+                      "tuned_artifact", "--min-speedup", "1.0", "--precision", asked)
+        assert _offers(out) == [(3.29, "tuning-aiter")], asked
+
+
+def test_the_backlog_is_never_excluded_for_saying_nothing(tmp_path):
+    """Every entry recovered before this field existed states no precision. Excluding those would
+    empty every page in the store — and an unlabelled entry is still a lead worth a verify slot,
+    exactly as an unvalidated one is."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    tuned_at(root, tmp_path, "", speedup=2.0, direction="tuning-legacy", body='{"1":{}}')
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950", "--carrier",
+                  "tuned_artifact", "--min-speedup", "1.0", "--precision", "fp8_w8a8")
+    assert _offers(out) == [(2.0, "tuning-legacy")]
+
+
+def test_a_page_with_only_the_wrong_dtype_says_so(tmp_path):
+    """Same contract `no_such_carrier` holds: a caller has to be able to tell "nothing here" from
+    "nothing here FOR YOU", or it records a cold start where there is knowledge it could not use."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    tuned_at(root, tmp_path, "bf16", speedup=4.1, direction="tuning-ck", body='{"1":{}}')
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950", "--carrier",
+                  "tuned_artifact", "--min-speedup", "1.0", "--precision", "int4")
+    assert out["read_reason"] == "no_such_precision" and out["other_precisions"] == 1
+    assert out["candidates"] == []
+
+
+def test_the_filter_survives_the_round_trip_to_the_store_plane(tmp_path):
+    """`upstream` has to cross the export, or the remote plane — the one the tuning role actually
+    reads — filters on a field that is always empty and silently offers everything."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    tuned_at(root, tmp_path, "fp8_w8a8", speedup=3.29, direction="tuning-aiter", body='{"1":{}}')
+    tuned_at(root, tmp_path, "bf16", speedup=4.10, direction="tuning-ck", body='{"2":{}}')
+    store, _ = _seeded(tmp_path, root)
+    common = ("--carrier", "tuned_artifact", "--min-speedup", "1.0")
+    assert _offers(resolve_remote(store, refs, "fused_moe_kernel", "triton", "gfx950", *common)) == \
+        [(4.1, "tuning-ck"), (3.29, "tuning-aiter")]
+    narrowed = resolve_remote(store, refs, "fused_moe_kernel", "triton", "gfx950",
+                              *common, "--precision", "fp8_w8a8")
+    assert _offers(narrowed) == [(3.29, "tuning-aiter")] and narrowed["filtered"]["other_precisions"] == 1

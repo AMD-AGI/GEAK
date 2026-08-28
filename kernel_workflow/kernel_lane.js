@@ -993,6 +993,13 @@ if (WARM_START_ON && !setup.resumed && KB_ROOT_OK) {
       `--kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\\n` +
       `  --gfx ${GFX} --top-n 3 --min-speedup ${WARM_START_MIN_SPEEDUP} \\\n` +
       `  --refs-dir ${JSON.stringify(EVAL_DIR + '/kb_references')}`;
+    // Deliberately NO `--precision` on the read, though the write below states it. The filter earns
+    // its keep on the tuned lane, where a table's destination filename encodes its dtype and a
+    // mismatched one is simply unusable. A PATCH is source: a Triton kernel proven at bf16 is
+    // usually the same code that helps at fp8, so narrowing here would turn a thin page into an
+    // empty one and cost a cold start — the exact hours this read exists to avoid. Recording the
+    // dtype without filtering on it keeps that call reversible once the pages are thick enough to
+    // show whether cross-dtype patches actually carry.
     // Remote first, local curated tree as the fallback. The service is the shared plane and should
     // win when it has an answer, but it is still filling up, while `kb_artifacts/` holds a hand-
     // curated history (retired entries, one entry per direction) that a thin remote page must not
@@ -1684,6 +1691,7 @@ ${remoteWriteOn ? KB_ENV_PRELUDE + '\n' : ''}python3 ${JSON.stringify(EXPERIENCE
   --patch ${JSON.stringify(finalPatch)} --eval-dir ${JSON.stringify(EVAL_DIR)} \\
   --report ${JSON.stringify(reportPath)} --metric-kind ${metricKind} \\
   --direction ${JSON.stringify(winnerDirection)} --case-names ${JSON.stringify(caseNames)}\
+${OP_SPEC.dtype ? ` \\\n  --precision ${JSON.stringify(String(OP_SPEC.dtype))}` : ''}\
 ${warm_start.exp_dir ? ` \\\n  --parent ${JSON.stringify(warm_start.exp_dir)}` : ''}
 \`\`\``,
     { phase: 'Validate', label: 'kb:write', schema: WARMSTART_WRITE_SCHEMA });

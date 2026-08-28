@@ -2661,6 +2661,11 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
         TUNED_KB_PLANE: E2E_KB_PLANE === 'both' ? 'remote' : E2E_KB_PLANE,
         TUNED_KB_STORE: E2E_KB_STORE_DIR,
         TUNED_KB_GFX: KB_DIMS.gfx,
+        // The page is keyed on arch and op, NOT on dtype — one `fused_moe` page holds the bf16 and
+        // the fp8_w8a8 tables side by side, ranked against each other on speedup. Passing this makes
+        // the read drop the other dtype's rows instead of ranking them; leaving it empty is the old
+        // behaviour (everything offered), which is why an unstated precision is never an error.
+        TUNED_KB_PRECISION: KB_DIMS.precision || '',
         TUNED_KB_SCRIPT: KERNEL_WF_DIR + '/scripts/experience_store.py',
         TUNED_KB_ENV_PRELUDE: KB_ENV_PRELUDE,
       } : {}),
@@ -2771,6 +2776,12 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       // so it degrades to the plain directory write rather than erroring. Same selection the kernel
       // lane makes at its own write site.
       const remoteOn = E2E_KB_PLANE !== 'local' && !!E2E_KB_STORE_DIR;
+      // `--precision` and the two `--serving-*` flags are RECORDED, not keyed — they land in
+      // `value.upstream` and never move the entry's address. A tuned table's destination filename
+      // encodes its dtype (`...dtype=fp8_w8a8.json`), so a table measured under one precision offered
+      // to a run on another installs under a name that runtime never looks up: wasted, not wrong. What
+      // it does corrupt is RANKING, by putting an unusable table above a usable one on the same page.
+      // Stating precision here is what lets the reader's `--precision` filter drop it first.
       const cmds = kernelKbOps.map((o) => {
         const op = String(o.op || o.short_name).trim();
         return `python3 ${shq(storeScript)} ${remoteOn
@@ -2783,6 +2794,8 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
   --tuner ${shq(String(o.tuner || '').trim())} --apply-env ${shq(tuning.apply_env || '')} \\
   --cache-invalidation ${shq((tuning.cache_invalidation || []).join(' && '))} \\
   --metric-kind tuning_isolated --case-names ${shq(String(o.shapes || '').replace(/,/g, ';'))} \\
+  --precision ${shq(KB_DIMS.precision || '')} --serving-framework ${shq(BACKEND)} \\
+  --serving-framework-version ${shq(KB_DIMS.framework_version || '')} \\
   --direction ${shq('tuning-' + (String(o.backend || 'op').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-')))} \\
   --eval-dir ${shq(EVAL_DIR)}${tuning.report_path ? ` --report ${shq(tuning.report_path)}` : ''}`;
       });

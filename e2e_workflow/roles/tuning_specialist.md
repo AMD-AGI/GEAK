@@ -37,8 +37,15 @@ your return which mode you were in).
    python3 "$TUNED_KB_SCRIPT" resolve-remote --plane "$TUNED_KB_PLANE" \
      ${TUNED_KB_STORE:+--store "$TUNED_KB_STORE"} --kernel-name <op> \
      --language <backend> --gfx "$TUNED_KB_GFX" --refs-dir "$EVAL_DIR/tuning/kb_refs" \
-     --carrier tuned_artifact --min-speedup 1.05
+     --carrier tuned_artifact --min-speedup 1.05 \
+     ${TUNED_KB_PRECISION:+--precision "$TUNED_KB_PRECISION"}
    ```
+   The page is keyed on arch and op, **not** on dtype: one `fused_moe` page holds this deployment's
+   precision and every other one, ranked against each other on speedup alone. `--precision` drops the
+   rows that cannot apply to you before that ranking — without it the top candidate may be a table
+   whose filename encodes another dtype, which installs under a name your runtime never reads and
+   which you then spend a verify slot disproving. Entries that state no precision (the whole backlog
+   predates the field) are still offered; the filter removes only stated mismatches.
    A read takes exactly ONE plane, so `TUNED_KB_PLANE` is never `both`. When it is `remote` and the
    answer comes back with no candidates, retry that op once against the local mirror
    (`--plane local --store "$TUNED_KB_STORE"`) before concluding the page is empty; say in your
@@ -68,7 +75,8 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `SERVING_TP`, `SERVIN
 `TUNING_SKILLSET_DIR`, `TUNING_KB_ENABLED`, `ACCURACY_GATE`, `SKILL_DIR`,
 and — only when the warm start found prior records and `TUNING_KB_ENABLED` is on —
 `KB_REFERENCE_DIR`, `KB_REFERENCE_VERDICT`, `KB_CACHE_DIR`, `TUNED_KB_PLANE`, `TUNED_KB_STORE`,
-`TUNED_KB_GFX`, `TUNED_KB_SCRIPT`, `TUNED_KB_ENV_PRELUDE` (see "Prior tuning knowledge" above).
+`TUNED_KB_GFX`, `TUNED_KB_PRECISION`, `TUNED_KB_SCRIPT`, `TUNED_KB_ENV_PRELUDE` (see "Prior tuning
+knowledge" above).
 
 There is no cap on how many ops you tune. Work the profile until the remaining candidates are not worth
 the time; say where you stopped and why.
