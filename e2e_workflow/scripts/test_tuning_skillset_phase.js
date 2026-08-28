@@ -264,6 +264,38 @@ ok(/if tuning_section is not None:\n\s+result\["tuning_skillset"\] = tuning_sect
 ok(/reaches_production_via/.test(runE2e),
   'result.json tells the caller that final_patch/final_launch_script now carry the tuning');
 
+// ---------------------------------------------------------------------------
+// F. Recovery checkpoints are written at acceptance boundaries. They are not
+// result.json copies: the writer must snapshot mutable replay assets and use
+// an atomic replace so a timeout cannot leave a parseable-looking partial file.
+// ---------------------------------------------------------------------------
+console.log('\n## F. schema-v2 recovery checkpoints');
+ok(/async function persistE2EValidationCheckpoint\(relativePath, intent\)/.test(src),
+  'one shared schema-v2 checkpoint writer exists');
+ok(/schema_version: 2, checkpoint_type: 'e2e_validation', committed: true/.test(src),
+  'checkpoint intent pins schema version, type, and committed state');
+ok(/checkpoint_assets\/ directory/.test(src) && /checkpoint_sha256/.test(src),
+  'writer snapshots replay assets and records a canonical checkpoint digest');
+ok(/fsync it, os\.replace\(\), and fsync the parent directory/.test(src),
+  'writer requires atomic checkpoint persistence');
+ok(/let lastCommittedCheckpoint = null/.test(src)
+  && /parent_checkpoint: lastCommittedCheckpoint/.test(src)
+  && /!relativePath\.includes\("\/candidate_"\)/.test(src),
+  'only committed full-stack checkpoints advance the parent digest chain');
+for (const rel of [
+  'config/e2e_validation.json',
+  'tuning/e2e_validation.json',
+  'overlay/accepted_stack/e2e_validation.json',
+  'final/e2e_validation.json',
+]) {
+  ok(src.includes(`persistE2EValidationCheckpoint('${rel}'`),
+    `accepted ${rel.split('/')[0]} state writes its recovery checkpoint`);
+}
+ok(/finalTput > BASELINE_TPUT \* \(1 \+ NOISE_BAND \/ 100\)/.test(src),
+  'Finalize writes an accepted checkpoint only after clearing the noise band');
+ok(/kernel_slot: o\.kernel_slot/.test(src) && /from_tuning_skillset: true/.test(src),
+  'tuning checkpoint records stable kernel-slot identity for kernel journey recovery');
+
 console.log(failures === 0
   ? '\nPASS: tuning skillset is vendored whole and runs standalone before HeadKernel.'
   : `\nFAILED: ${failures} assertion(s).`);

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import atexit
 import glob
+import hashlib
 import json
 import math
 import os
@@ -33,6 +34,7 @@ import re
 import shlex
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -50,6 +52,11 @@ except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
 
 SCHEMA_VERSION = 2
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
+E2E_CHECKPOINT_SCHEMA_VERSION = 2
+E2E_CHECKPOINT_FILE = "e2e_validation.json"
+E2E_CHECKPOINT_LEVELS = {
+    "integrator", "config_sweep", "tuning_skillset", "final_pair",
+}
 
 # result.json must never state a speedup its own baseline/final pair
 # contradicts. Anything beyond this absolute gap on final/baseline means the
@@ -2224,7 +2231,12 @@ def normalize_result(h: dict, wf: dict) -> dict:
     #   disk_director_validation — rebuilt from director_e2e_validation.json.
     #   disk_intermediate_win  — best accepted integrate A/B (no final Validate).
     #   disk_no_gain_synthesis — baseline measured, nothing accepted (do-no-harm).
-    if wf.get("recovered_no_gain"):
+    checkpoint_level = str(wf.get("recovered_e2e_checkpoint_level") or "")
+    if checkpoint_level:
+        result_source = f"disk_e2e_checkpoint_{checkpoint_level}"
+    elif wf.get("recovered_tuning_legacy"):
+        result_source = "disk_tuning_skillset_legacy_provisional"
+    elif wf.get("recovered_no_gain"):
         result_source = "disk_no_gain_synthesis"
     elif wf.get("recovered_intermediate"):
         # disk_stack_provisional — salvaged from candidates the integrator gated
@@ -3123,6 +3135,515 @@ def _enumerate_overlay_kernels(eval_dir: Path) -> list[str]:
     return names
 
 
+def _checkpoint_digest(checkpoint: dict) -> str:
+    """Digest canonical checkpoint JSON, excluding its self-referential digest."""
+    payload = dict(checkpoint)
+    payload.pop("checkpoint_sha256", None)
+    raw = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _checkpoint_asset_path(eval_dir: Path, raw_path: object) -> Path | None:
+    """Resolve an asset path only when it stays inside this eval directory."""
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    try:
+        candidate = (eval_dir / raw_path).resolve()
+        candidate.relative_to(eval_dir.resolve())
+    except (OSError, ValueError):
+        return None
+    return candidate
+
+
+def _checkpoint_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _valid_e2e_checkpoint(
+    checkpoint: dict, eval_dir: Path, allowed_levels: set[str]
+) -> tuple[bool, str]:
+    """Validate a recoverable schema-v2 E2E checkpoint without trusting paths.
+
+    This is deliberately stricter than the legacy artifact readers: a checkpoint
+    is the authoritative recovery contract, so a truncated write, a changed replay
+    asset, or an ambiguous selected overlay must make the whole checkpoint ineligible.
+    """
+    if not isinstance(checkpoint, dict):
+        return False, "checkpoint is not an object"
+    if checkpoint.get("schema_version") != E2E_CHECKPOINT_SCHEMA_VERSION:
+        return False, "unsupported schema_version"
+    if checkpoint.get("checkpoint_type") != "e2e_validation":
+        return False, "wrong checkpoint_type"
+    if checkpoint.get("validation_level") not in allowed_levels:
+        return False, "unexpected validation_level"
+    if checkpoint.get("committed") is not True or checkpoint.get("gate") != "accepted":
+        return False, "checkpoint is not a committed accepted result"
+    if checkpoint.get("eval_dir") != str(eval_dir):
+        return False, "eval_dir does not match recovery target"
+    claimed_digest = checkpoint.get("checkpoint_sha256")
+    if not isinstance(claimed_digest, str) or claimed_digest != _checkpoint_digest(checkpoint):
+        return False, "checkpoint_sha256 mismatch"
+    parent = checkpoint.get("parent_checkpoint")
+    if parent is not None:
+        if not isinstance(parent, dict):
+            return False, "invalid parent_checkpoint"
+        parent_path = _checkpoint_asset_path(eval_dir, parent.get("path"))
+        parent_digest = parent.get("checkpoint_sha256")
+        parent_doc = _read_json(parent_path) if parent_path else {}
+        if (
+            parent_path is None
+            or not isinstance(parent_digest, str)
+            or not parent_doc
+            or parent_doc.get("checkpoint_sha256") != parent_digest
+            or _checkpoint_digest(parent_doc) != parent_digest
+        ):
+            return False, "parent checkpoint digest mismatch"
+
+    baseline = _positive_finite_float(checkpoint.get("baseline_throughput_tok_s"))
+    final = _positive_finite_float(checkpoint.get("final_throughput_tok_s"))
+    speedup = _positive_finite_float(checkpoint.get("throughput_speedup"))
+    if baseline <= 0.0 or final <= 0.0 or speedup <= 0.0:
+        return False, "non-positive throughput fields"
+    if final <= baseline:
+        return False, "accepted checkpoint has no positive gain"
+    if abs((final / baseline) - speedup) > SPEEDUP_SELF_CONSISTENCY_TOL:
+        return False, "throughput_speedup does not match throughput pair"
+
+    for key in ("baseline_config", "accepted_config", "measurement", "stack", "replay", "integrity"):
+        if not isinstance(checkpoint.get(key), dict):
+            return False, f"missing {key}"
+    for key in ("accepted_kernels", "accepted_heads"):
+        if not isinstance(checkpoint.get(key), list):
+            return False, f"missing {key}"
+    measurement = checkpoint["measurement"]
+    if not isinstance(measurement.get("workload"), dict):
+        return False, "missing measurement.workload"
+    if measurement.get("measurement_mode") != "isolated_server":
+        return False, "unsupported measurement mode"
+    if not isinstance(measurement.get("legs"), list) or not measurement["legs"]:
+        return False, "missing measurement legs"
+    acceptance = measurement.get("acceptance")
+    if not isinstance(acceptance, dict):
+        return False, "missing measurement.acceptance"
+    if acceptance.get("gain_exceeds_noise") is not True:
+        return False, "checkpoint gain did not exceed noise"
+    if acceptance.get("correctness_passed") is not True:
+        return False, "checkpoint correctness did not pass"
+
+    slots: set[str] = set()
+    for item in checkpoint["stack"].get("kernel_slots") or []:
+        if not isinstance(item, dict) or item.get("selected") is not True:
+            continue
+        slot = item.get("kernel_slot")
+        if not isinstance(slot, str) or not slot:
+            return False, "selected kernel has no kernel_slot"
+        if slot in slots:
+            return False, "multiple selected candidates for one kernel_slot"
+        slots.add(slot)
+
+    assets = checkpoint["integrity"].get("checkpoint_assets")
+    if not isinstance(assets, list):
+        return False, "missing integrity.checkpoint_assets"
+    for asset in assets:
+        if not isinstance(asset, dict):
+            return False, "invalid checkpoint asset"
+        path = _checkpoint_asset_path(eval_dir, asset.get("snapshot") or asset.get("path"))
+        digest = asset.get("sha256")
+        if path is None or not path.is_file() or not isinstance(digest, str):
+            return False, "missing checkpoint asset"
+        if _checkpoint_file_sha256(path) != digest:
+            return False, "checkpoint asset digest mismatch"
+    return True, ""
+
+
+def _checkpoint_path_value(value: object) -> str:
+    """Read an optional path from schema-v2 path metadata."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        path = value.get("path") or value.get("snapshot")
+        return str(path) if path else ""
+    return ""
+
+
+def _recover_e2e_validation_checkpoint(
+    eval_dir: Path,
+) -> dict | None:
+    """Recover the highest-complete non-Director schema-v2 checkpoint."""
+    tiers = (
+        (Path("final") / E2E_CHECKPOINT_FILE, {"final_pair"}),
+        (Path("overlay") / "accepted_stack" / E2E_CHECKPOINT_FILE, {"integrator"}),
+        (Path("tuning") / E2E_CHECKPOINT_FILE, {"tuning_skillset"}),
+        (Path("config") / E2E_CHECKPOINT_FILE, {"config_sweep"}),
+    )
+    for relative_path, levels in tiers:
+        checkpoint_path = eval_dir / relative_path
+        checkpoint = _read_json(checkpoint_path)
+        valid, _reason = _valid_e2e_checkpoint(checkpoint, eval_dir, levels)
+        if not valid:
+            continue
+        level = str(checkpoint["validation_level"])
+        final_overlay = checkpoint.get("final_overlay")
+        if isinstance(final_overlay, dict):
+            final_overlay = _checkpoint_path_value(final_overlay)
+        return {
+            "eval_dir": str(eval_dir),
+            "throughput_speedup": checkpoint["throughput_speedup"],
+            "baseline_throughput_tok_s": checkpoint["baseline_throughput_tok_s"],
+            "final_throughput_tok_s": checkpoint["final_throughput_tok_s"],
+            "output_parity": (checkpoint["measurement"].get("correctness") or {}).get("gate", "n/a"),
+            "validation_status": checkpoint.get("validation_status") or f"recovered_{level}",
+            "final_overlay": final_overlay or "",
+            "final_launch_script": _checkpoint_path_value(checkpoint.get("final_launch_script")),
+            "accepted_config": checkpoint["accepted_config"],
+            "baseline_config": checkpoint["baseline_config"],
+            "accepted_kernels": checkpoint["accepted_kernels"],
+            "accepted_heads": checkpoint["accepted_heads"],
+            "tuning_skillset": checkpoint.get("tuning_skillset"),
+            "recovered_from_disk": True,
+            "recovered_intermediate": level != "final_pair",
+            "recovered_tuning_skillset": level == "tuning_skillset",
+            "recovered_e2e_checkpoint_level": level,
+            "recovery_evidence": {
+                "checkpoint_path": str(relative_path),
+                "checkpoint_sha256": checkpoint["checkpoint_sha256"],
+                "stack_after_digest": checkpoint["stack"].get("stack_after_digest"),
+            },
+        }
+    return None
+
+
+def _legacy_positive_number(doc: dict, *keys: str) -> float:
+    """First positive finite number in a legacy, schema-drifting artifact."""
+    for key in keys:
+        value = _positive_finite_float(doc.get(key))
+        if value > 0.0:
+            return value
+    return 0.0
+
+
+def _legacy_manifest_env(manifest: dict) -> str:
+    """Canonicalize the structured deploy environment for identity comparison."""
+    env = manifest.get("extra_env")
+    if isinstance(env, dict):
+        return json.dumps(env, sort_keys=True, separators=(",", ":"))
+    if isinstance(env, str):
+        return env.strip()
+    return ""
+
+
+def _legacy_tuning_kernels(manifest: dict) -> list[dict]:
+    """Recover tuning identity only from structured manifest fields."""
+    kernels: list[dict] = []
+    ops = manifest.get("ops_tuned") or manifest.get("operations") or []
+    if isinstance(ops, list):
+        for op in ops:
+            if not isinstance(op, dict):
+                continue
+            kernel_id = str(op.get("kernel_id") or "").strip()
+            kernel_slot = str(op.get("kernel_slot") or "").strip()
+            if kernel_id and kernel_slot:
+                kernels.append({
+                    "short_name": kernel_id,
+                    "kernel_id": kernel_id,
+                    "kernel_slot": kernel_slot,
+                    "backend": op.get("backend") or "geak",
+                    "from_tuning_skillset": True,
+                    "recovery_source": "legacy_manifest",
+                    "provisional": True,
+                })
+    if kernels:
+        return kernels
+    # Data-table tuning predates ``ops_tuned``. An explicit config environment
+    # key is still a stable machine-readable identity; do not inspect reports or
+    # free-form log lines to manufacture one.
+    env = manifest.get("extra_env")
+    if not isinstance(env, dict):
+        return kernels
+    for key, value in sorted(env.items()):
+        if not (
+            isinstance(key, str)
+            and key.startswith("AITER_CONFIG_")
+            and isinstance(value, str)
+            and value.strip()
+        ):
+            continue
+        kernel_id = key.removeprefix("AITER_CONFIG_").lower()
+        kernels.append({
+            "short_name": kernel_id,
+            "kernel_id": kernel_id,
+            "kernel_slot": f"aiter_config:{kernel_id}",
+            "backend": "aiter",
+            "from_tuning_skillset": True,
+            "recovery_source": "legacy_manifest",
+            "provisional": True,
+        })
+    return kernels
+
+
+def _legacy_tuning_summary_is_accepted(summary: dict) -> bool:
+    """Validate the archived tuning A/B acceptance evidence conservatively."""
+    if str(summary.get("output_parity") or summary.get("correctness_gate") or "").lower() == "fail":
+        return False
+    legs = summary.get("legs")
+    if not isinstance(legs, list) or not legs:
+        return False
+    arms: dict[str, list[dict]] = {"A": [], "B": []}
+    for leg in legs:
+        if not isinstance(leg, dict):
+            return False
+        arm = str(leg.get("arm") or "").upper()
+        if arm not in arms or leg.get("usable") is not True:
+            return False
+        if str(leg.get("mode") or "") != "isolated_server":
+            return False
+        if _positive_finite_float(leg.get("tput")) <= 0.0:
+            return False
+        arms[arm].append(leg)
+    if not arms["A"] or not arms["B"] or int(summary.get("n_pairs") or 0) < 1:
+        return False
+    if any(int(leg.get("hits") or 0) != 0 for leg in arms["A"]):
+        return False
+    if any(int(leg.get("hits") or 0) <= 0 for leg in arms["B"]):
+        return False
+    return _legacy_positive_number(
+        summary, "paired_mean_delta_pct", "median_pair_delta_pct", "delta_pct"
+    ) > 0.0
+
+
+def _legacy_bench_pair_value(path: Path) -> tuple[float, dict] | None:
+    """Return a usable isolated-server benchmark's throughput and document."""
+    doc = _read_json(path)
+    if (
+        doc.get("status") != "complete"
+        or doc.get("usable_for_acceptance") is not True
+        or doc.get("measurement_mode") != "isolated_server"
+    ):
+        return None
+    throughput = _legacy_positive_number(
+        doc, "throughput_tok_s_median", "output_throughput_tok_s_median", "observed_median"
+    )
+    return (throughput, doc) if throughput > 0.0 else None
+
+
+def _legacy_log_marker_count(path: Path, marker: str) -> int:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").count(marker)
+    except OSError:
+        return -1
+
+
+def _recover_verified_legacy_final_pair(eval_dir: Path, manifest: dict) -> dict | None:
+    """Recover a corroborated historical final tuning pair, never a validated win."""
+    summary = _read_json(eval_dir / "final" / "FINAL_SUMMARY.json")
+    final_manifest = _read_json(eval_dir / "final" / "tuning" / "MANIFEST.json")
+    tuned = _legacy_bench_pair_value(eval_dir / "final" / "bench" / "bench_summary.json")
+    control = _legacy_bench_pair_value(
+        eval_dir / "final" / "bench_control" / "bench_summary.json"
+    )
+    if not summary or tuned is None or control is None:
+        return None
+    if str(summary.get("output_parity") or summary.get("correctness_gate") or "").lower() == "fail":
+        return None
+    if final_manifest and _legacy_manifest_env(final_manifest) != _legacy_manifest_env(manifest):
+        return None
+    final_tput, final_doc = tuned
+    baseline, baseline_doc = control
+    summary_final = _legacy_positive_number(summary, "final_bundle_tok_s")
+    summary_baseline = _legacy_positive_number(summary, "drift_control_same_session_tok_s")
+    if (
+        not math.isclose(final_tput, summary_final, rel_tol=0.005)
+        or not math.isclose(baseline, summary_baseline, rel_tol=0.005)
+        or final_tput <= baseline
+    ):
+        return None
+    speedup = final_tput / baseline
+    reported_speedup = _legacy_positive_number(summary, "paired_in_session_speedup")
+    if reported_speedup and abs(speedup - reported_speedup) > SPEEDUP_SELF_CONSISTENCY_TOL:
+        return None
+    engagement = summary.get("tuning_engagement") or {}
+    summary_tuned = int(((engagement.get("final_bundle") or {}).get("tuned_hits") or 0))
+    summary_control = int(((engagement.get("drift_control") or {}).get("tuned_hits") or 0))
+    tuned_hits = _legacy_log_marker_count(
+        eval_dir / "final" / "bench" / "replica_001" / "attempt_1" / "server.log",
+        "is tuned on cu_num",
+    )
+    control_hits = _legacy_log_marker_count(
+        eval_dir / "final" / "bench_control" / "replica_001" / "attempt_1" / "server.log",
+        "is tuned on cu_num",
+    )
+    if tuned_hits <= 0 or control_hits != 0 or (tuned_hits, control_hits) != (
+        summary_tuned, summary_control
+    ):
+        return None
+    if final_doc.get("effective_config_digest") != baseline_doc.get("effective_config_digest"):
+        return None
+    config = _read_json(eval_dir / "final" / "accepted_config.json")
+    return {
+        "baseline": baseline,
+        "final": final_tput,
+        "speedup": speedup,
+        "ttft_ms": _legacy_positive_number(final_doc, "ttft_ms_median"),
+        "tpot_ms": _legacy_positive_number(final_doc, "tpot_ms_median"),
+        "accepted_config": {
+            "flags": str(config.get("extra_server_args") or ""),
+            "env": str(config.get("extra_env") or _legacy_manifest_env(manifest)),
+        },
+        "final_launch_script": str(eval_dir / "final" / "final_launch.sh"),
+        "evidence": {
+            "measurement": "verified_final_tuning_pair",
+            "summary_path": "final/FINAL_SUMMARY.json",
+            "tuned_bench_path": "final/bench/bench_summary.json",
+            "control_bench_path": "final/bench_control/bench_summary.json",
+            "tuned_hits": tuned_hits,
+            "control_hits": control_hits,
+            "pair_order": "tuned_then_control",
+            "provisional_reason": "single replica and non-counterbalanced final pair",
+        },
+    }
+
+
+def _legacy_tuning_raw_pair(eval_dir: Path) -> tuple[float, float] | None:
+    """Rebuild a conservative tuning A/B from legacy per-leg summaries.
+
+    Some historical tuning roles wrote ``pre[_N]/bench_summary.json`` and
+    ``post[_N]/bench_summary.json`` but never emitted ``ab_summary.json``. A
+    single pre/post comparison is restart noise, not recoverable acceptance
+    evidence; require three matching isolated-server pairs with one effective
+    config digest before considering this legacy format.
+    """
+    ab_dir = eval_dir / "tuning" / "ab"
+    pairs: dict[str, dict[str, tuple[float, str]]] = {}
+    for child in ab_dir.iterdir() if ab_dir.is_dir() else []:
+        if not child.is_dir():
+            continue
+        match = re.fullmatch(r"(pre|post)_?(\d*)", child.name)
+        if not match:
+            continue
+        summary = _read_json(child / "bench_summary.json")
+        if (
+            summary.get("usable_for_acceptance") is not True
+            or summary.get("measurement_mode") != "isolated_server"
+        ):
+            continue
+        throughput = _legacy_positive_number(
+            summary, "throughput_tok_s_median", "output_throughput_tok_s_median"
+        )
+        digest = str(summary.get("effective_config_digest") or "")
+        if throughput <= 0.0 or not digest:
+            continue
+        arm, index = match.groups()
+        hits = _legacy_log_marker_count(
+            child / "replica_001" / "attempt_1" / "server.log", "is tuned on cu_num"
+        )
+        if (arm == "pre" and hits != 0) or (arm == "post" and hits <= 0):
+            continue
+        pairs.setdefault(index or "1", {})[arm] = (throughput, digest)
+    complete = [pair for pair in pairs.values() if {"pre", "post"} <= pair.keys()]
+    if len(complete) < 3:
+        return None
+    digests = {value[1] for pair in complete for value in pair.values()}
+    if len(digests) != 1:
+        return None
+    baseline = statistics.median(pair["pre"][0] for pair in complete)
+    final = statistics.median(pair["post"][0] for pair in complete)
+    return (baseline, final) if final > baseline * 1.01 else None
+
+
+def _recover_tuning_legacy_composite(eval_dir: Path) -> dict | None:
+    """Recover a pre-checkpoint tuning win as explicitly provisional evidence.
+
+    Historical tuning runs wrote a complete interleaved A/B summary and a deploy
+    manifest, but did not serialize the in-memory acceptance gate. Those artifacts
+    are stronger than a no-gain synthesis, yet lack enough information to claim a
+    Director-validated win. Keep the measured pair and deploy replay handle while
+    refusing to fabricate kernel identity when the manifest does not provide it.
+    """
+    summary = _read_json(eval_dir / "tuning" / "ab" / "ab_summary.json")
+    manifest = _read_json(eval_dir / "tuning" / "deploy" / "MANIFEST.json")
+    deploy_script = eval_dir / "tuning" / "deploy" / "deploy.sh"
+    if not manifest or not deploy_script.is_file():
+        return None
+    baseline = final = 0.0
+    evidence_source = "tuning/ab/ab_summary.json"
+    if summary:
+        if not _legacy_tuning_summary_is_accepted(summary):
+            return None
+        baseline = _legacy_positive_number(
+            summary, "pre", "pre_median", "pre_median_tok_s", "baseline_throughput_tok_s"
+        )
+        final = _legacy_positive_number(
+            summary, "post", "post_median", "post_median_tok_s", "final_throughput_tok_s"
+        )
+    else:
+        raw_pair = _legacy_tuning_raw_pair(eval_dir)
+        if raw_pair is not None:
+            baseline, final = raw_pair
+            evidence_source = "tuning/ab/{pre,post}*/bench_summary.json"
+    if baseline <= 0.0 or final <= baseline:
+        return None
+    reported_delta = _legacy_positive_number(
+        summary, "median_pair_delta_pct", "paired_mean_delta_pct", "delta_pct"
+    )
+    speedup = final / baseline
+    if reported_delta and abs((speedup - 1.0) * 100.0 - reported_delta) > 5.0:
+        return None
+
+    accepted_kernels = _legacy_tuning_kernels(manifest)
+    final_pair = _recover_verified_legacy_final_pair(eval_dir, manifest)
+    accepted_config = {
+        "flags": str(manifest.get("apply_flags") or ""),
+        "env": str(manifest.get("apply_env") or _legacy_manifest_env(manifest)),
+    }
+    final_launch_script = str(deploy_script)
+    evidence = {
+        "summary_path": evidence_source,
+        "deploy_manifest_path": "tuning/deploy/MANIFEST.json",
+        "original_gate": "not_persisted",
+    }
+    if final_pair is not None:
+        baseline = final_pair["baseline"]
+        final = final_pair["final"]
+        speedup = final_pair["speedup"]
+        accepted_config = final_pair["accepted_config"]
+        final_launch_script = final_pair["final_launch_script"]
+        evidence.update(final_pair["evidence"])
+    if len(accepted_kernels) == 1:
+        accepted_kernels[0]["e2e_delta_pct"] = (speedup - 1.0) * 100.0
+    return {
+        "eval_dir": str(eval_dir),
+        "throughput_speedup": speedup,
+        "baseline_throughput_tok_s": baseline,
+        "final_throughput_tok_s": final,
+        "output_parity": "unknown",
+        "validation_status": "recovered_tuning_skillset_legacy_provisional",
+        "final_overlay": "",
+        "final_launch_script": final_launch_script,
+        "accepted_config": accepted_config,
+        "accepted_kernels": accepted_kernels,
+        "accepted_heads": [],
+        "tuning_skillset": {
+            "enabled": True, "ran": True, "gate": "accepted_provisional",
+            "pre_tune_throughput_tok_s": baseline,
+            "post_tune_throughput_tok_s": final,
+            "tuning_speedup": speedup,
+            "deploy_bundle": str(deploy_script.parent),
+            "deploy_verified": False,
+            "original_gate": "not_persisted",
+        },
+        "recovered_from_disk": True,
+        "recovered_intermediate": True,
+        "recovered_tuning_legacy": True,
+        "recovery_evidence": evidence,
+    }
+
+
 def _recover_workflow_return(exp_root: Path) -> dict | None:
     """Rebuild the workflow return from on-disk artifacts (scrape-independent).
 
@@ -3149,12 +3670,18 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
         return persisted
     validation = _read_json(eval_dir / "director_e2e_validation.json")
     if not validation:
+        checkpoint_win = _recover_e2e_validation_checkpoint(eval_dir)
+        if checkpoint_win is not None:
+            return checkpoint_win
         # No final Validate marker => the director never synthesized its json
         # (run killed mid-Validate, or torn down before it wrote). Recover in
         # priority order so a COMPLETED run is NEVER discarded as a parse error:
         #   1. the best gate==accepted intermediate win (a real measured gain),
         #   2. else, if a baseline was measured but nothing was accepted, a
         #      legitimate NO_GAIN run (the optimizer correctly did no harm).
+        tuning_win = _recover_tuning_legacy_composite(eval_dir)
+        if tuning_win is not None:
+            return tuning_win
         win = _recover_best_intermediate_win(eval_dir)
         if win is not None:
             return win
@@ -4030,7 +4557,7 @@ def _journey_return_entry(eval_dir: str, k: dict, idx: int, wf: dict,
     isolated = k.get("isolated") or k.get("micro_speedup") or k.get("verified_isolated_speedup")
     patch = k.get("final_patch") or None
     attempt_id = f"{kid}-{backend}-{idx}"
-    return {
+    entry: dict = {
         "kernel_id": kid, "name": name, "gpu_pct": k.get("pct_gpu_time"),
         "micro_speedup": isolated,
         "dispatch": {"dispatched": True, "backends": [backend], "skip_reason": "",
@@ -4057,6 +4584,20 @@ def _journey_return_entry(eval_dir: str, k: dict, idx: int, wf: dict,
             "ts": None,
         },
     }
+    if k.get("from_tuning_skillset"):
+        # Tuning produces kernel-selection/data-table optimizations too. Keep it
+        # in the ordinary kernels[] stream, with source metadata rather than a
+        # separate phase-level journey record.
+        entry["source_phase"] = "TuningSkillset"
+        entry["recovery_source"] = k.get("recovery_source") or "workflow_return"
+        entry["provisional"] = bool(k.get("provisional"))
+        entry["dispatch"]["task_group"] = "tuning_skillset"
+        entry["e2e"]["e2e_gain_scope"] = (
+            "single_tuning_kernel"
+            if k.get("e2e_delta_pct") else "tuning_stack_unattributed"
+        )
+        entry["e2e"]["director_validated"] = False
+    return entry
 
 
 def _overlay_claim(ir: Any) -> dict | None:

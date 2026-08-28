@@ -85,6 +85,7 @@ jobs:
         run: |
           python -m pytest -q --cov --cov-report=term --cov-fail-under=0 \
             interface/test_run_e2e_recovery.py \
+            interface/test_e2e_checkpoint.py \
             interface/test_run_e2e_tuning_result.py \
             interface/test_run_e2e_alignment.py \
             interface/test_run_e2e_dispatch.py \

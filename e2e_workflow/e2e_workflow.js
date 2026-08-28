@@ -826,11 +826,56 @@ const VALIDATE_SCHEMA = obj({
   arbitration_note: { type: 'string' },
 }, ['director_verified_throughput_tok_s', 'validation_status']);
 
+const CHECKPOINT_WRITE_SCHEMA = obj({
+  written: { type: 'boolean' }, path: { type: 'string' }, checkpoint_sha256: { type: 'string' },
+}, ['written', 'path', 'checkpoint_sha256']);
+
 // ---------------------------------------------------------------------------
 // Prompt helpers (mirror the single-kernel workflow).
 // ---------------------------------------------------------------------------
 const cfg = (o) => Object.entries(o).map(([k, v]) =>
   `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
+
+// Workflow scripts have no filesystem API. The writer agent is therefore the
+// one component that can atomically snapshot mutable replay assets while the
+// measured stack still exists. The intent remains structured so every phase
+// feeds the same schema-v2 contract rather than inventing a private summary.
+let lastCommittedCheckpoint = null;
+async function persistE2EValidationCheckpoint(relativePath, intent) {
+  if (!EVAL_DIR) return null;
+  const target = `${EVAL_DIR}/${relativePath}`;
+  const payload = {
+    schema_version: 2, checkpoint_type: 'e2e_validation', committed: true,
+    eval_dir: EVAL_DIR,
+    ...(lastCommittedCheckpoint ? { parent_checkpoint: lastCommittedCheckpoint } : {}),
+    ...intent,
+  };
+  const written = await safeAgent(
+    `You are an E2E checkpoint writer. Materialize the schema-v2 checkpoint intent below at ` +
+    `"${target}". Before writing, inspect the referenced measured artifacts and populate ` +
+    `measurement.legs, replay commands, stack digests, and integrity.checkpoint_assets. Copy every ` +
+    `script/patch/overlay/table/manifest used to reproduce this measurement beneath the checkpoint's ` +
+    `checkpoint_assets/ directory; record each relative snapshot path and SHA-256. Canonicalize JSON ` +
+    `(sorted keys, compact separators), calculate checkpoint_sha256 excluding that field, then write via ` +
+    `a temporary file, fsync it, os.replace(), and fsync the parent directory. Never infer a missing ` +
+    `A/B leg, engagement, correctness, asset, or selected kernel slot. Return the written path and digest.\n\n` +
+    '```json\n' + JSON.stringify(payload, null, 2) + '\n```',
+    { phase: intent.phase || 'Finalize', label: `persist-e2e-checkpoint:${relativePath}`,
+      schema: CHECKPOINT_WRITE_SCHEMA },
+    2
+  );
+  // Candidate-local A/B snapshots are diagnostic evidence, never a replay
+  // parent; only a complete accepted stack may advance the digest chain.
+  if (
+    payload.committed === true && written && written.written === true
+    && !relativePath.includes("/candidate_")
+  ) {
+    lastCommittedCheckpoint = {
+      path: relativePath, checkpoint_sha256: written.checkpoint_sha256,
+    };
+  }
+  return written;
+}
 
 // Expert-skills prompt injection. PURELY ADDITIVE: returns '' whenever the feature is OFF or the role
 // is not a skills consumer, so roleAgent's output is byte-identical to the pre-feature build in those
@@ -1500,6 +1545,31 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
         'replica per leg so BOTH legs still run.',
         { ...withTuning, RESUME_AB: true }),
       { phase: phaseName, label: `${label} (finish ${tries})`, schema: INTEGRATE_SCHEMA });
+  }
+  if (integ && integ.short_name) {
+    const candidateId = String(integ.short_name).replace(/[^A-Za-z0-9_.-]+/g, '_');
+    const accepted = integ.gate === 'accepted' || integ.gate === 'stack';
+    await persistE2EValidationCheckpoint(`overlay/candidate_${candidateId}/e2e_validation.json`, {
+      phase: 'Overlay', validation_level: 'integrator', gate: integ.gate || 'incomplete',
+      committed: accepted, validation_status: accepted ? 'accepted_intermediate' : 'incomplete',
+      baseline_throughput_tok_s: integ.ref_med || 0,
+      final_throughput_tok_s: integ.cand_med || integ.e2e_throughput_tok_s || 0,
+      throughput_speedup: (integ.ref_med && integ.cand_med) ? integ.cand_med / integ.ref_med : 0,
+      baseline_config: { flags: withTuning.EXTRA_SERVER_ARGS || '', env: withTuning.EXTRA_ENV || '' },
+      accepted_config: { flags: withTuning.EXTRA_SERVER_ARGS || '', env: withTuning.EXTRA_ENV || '' },
+      accepted_kernels: accepted ? [{ short_name: integ.short_name,
+        kernel_slot: integ.target_callable || integ.short_name }] : [],
+      accepted_heads: [], final_patch: [], final_overlay: { path: integ.accepted_overlay || '' },
+      final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
+      bench_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
+      measurement: { measurement_mode: MEASUREMENT_MODE, metric_basis: 'aggregate_output_tok_s',
+        workload: WORKLOAD, source_artifact: `${EVAL_DIR}/overlay`,
+        acceptance: { gain_exceeds_noise: accepted, correctness_passed: integ.output_parity !== 'fail' } },
+      stack: { kernel_slots: accepted ? [{ kernel_slot: integ.target_callable || integ.short_name,
+        selected: true, candidate_id: candidateId }] : [] },
+      replay: { asset_paths: [`${EVAL_DIR}/bench_e2e.sh`, integ.accepted_overlay].filter(Boolean) },
+      integrity: { checkpoint_assets: [] },
+    });
   }
   return integ;
 }
@@ -2415,6 +2485,23 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
     curFlags = sweep.accepted_flags || curFlags;
     curEnv = sweep.accepted_env || curEnv;
     curTput = sweep.best_throughput_tok_s;
+    await persistE2EValidationCheckpoint('config/e2e_validation.json', {
+      phase: 'ConfigSweep', validation_level: 'config_sweep', gate: 'accepted',
+      validation_status: 'accepted_config',
+      baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: curTput,
+      throughput_speedup: BASELINE_TPUT ? curTput / BASELINE_TPUT : 1,
+      baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
+      accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+      accepted_kernels: [], accepted_heads: [], final_patch: [], final_overlay: { path: curOverlay },
+      final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
+      bench_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
+      measurement: { measurement_mode: MEASUREMENT_MODE, metric_basis: 'aggregate_output_tok_s',
+        workload: WORKLOAD, source_artifact: `${EVAL_DIR}/config/sweep_results.json`,
+        acceptance: { gain_exceeds_noise: true, correctness_passed: true, noise_floor_pct: NOISE_BAND } },
+      stack: { config_layers: (sweep.trials || []).filter((t) => t && t.kept === true) },
+      replay: { asset_paths: [`${EVAL_DIR}/bench_e2e.sh`, `${EVAL_DIR}/config/sweep_results.json`] },
+      integrity: { checkpoint_assets: [] },
+    });
     log(`Config sweep accepted. throughput ${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x). Re-profiling.`);
     // Re-profile: config changed which kernels dominate.
     profile = await safeAgent(
@@ -2515,6 +2602,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
     tuning.correctness_gate !== 'fail' && tuning.post_tune_throughput_tok_s > 0 &&
     tuning.post_tune_throughput_tok_s > (tuning.pre_tune_throughput_tok_s || 0);
   if (tuneOk) {
+    const tuningBaselineConfig = { flags: curFlags, env: curEnv };
     if (tuning.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + tuning.apply_env;
     if (tuning.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + tuning.apply_flags;
     // Carry the routing/enabling overlay forward exactly as an accepted head patch does. Without this
@@ -2575,6 +2663,37 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       log(`Banked ${tunedOps.length} tuned op(s) as accepted kernels (kind=env) so the KB record ` +
         `carries the lever: ${tunedOps.map((o) => o.op || o.short_name).join(', ')}.`);
     }
+    await persistE2EValidationCheckpoint('tuning/e2e_validation.json', {
+      phase: 'TuningSkillset', validation_level: 'tuning_skillset', gate: 'accepted',
+      validation_status: 'accepted_tuning',
+      baseline_throughput_tok_s: tuning.pre_tune_throughput_tok_s,
+      final_throughput_tok_s: tuning.post_tune_throughput_tok_s,
+      throughput_speedup: tuning.tuning_speedup ||
+        (tuning.post_tune_throughput_tok_s / tuning.pre_tune_throughput_tok_s),
+      baseline_config: tuningBaselineConfig,
+      accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+      accepted_kernels: tunedOps.map((o) => ({
+        kernel_id: o.kernel_id || o.op || o.short_name || '',
+        kernel_slot: o.kernel_slot || o.target_callable || o.target_file || o.op || o.short_name || '',
+        short_name: o.op || o.short_name || '', backend: o.backend || 'geak',
+        from_tuning_skillset: true, isolated: o.isolated_speedup || 0,
+      })),
+      accepted_heads: [], final_patch: [], final_overlay: { path: curOverlay },
+      final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
+      bench_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
+      measurement: { measurement_mode: MEASUREMENT_MODE, metric_basis: 'aggregate_output_tok_s',
+        workload: WORKLOAD, source_artifact: `${EVAL_DIR}/tuning/ab/ab_summary.json`,
+        acceptance: { gain_exceeds_noise: true, correctness_passed: tuning.correctness_gate !== 'fail',
+          noise_floor_pct: tuning.noise_floor_pct || NOISE_BAND } },
+      stack: { kernel_slots: tunedOps.map((o) => ({
+        kernel_slot: o.kernel_slot || o.target_callable || o.target_file || o.op || o.short_name || '',
+        selected: true,
+      })), deployment_layers: [tuning.deploy_bundle].filter(Boolean) },
+      replay: { asset_paths: [tuning.deploy_bundle, ...(tuning.artifacts || [])].filter(Boolean),
+        cache_invalidation: tuning.cache_invalidation || [], requires_server_restart: true },
+      integrity: { checkpoint_assets: [] },
+      tuning_skillset: tuning,
+    });
 
     // Tuning changed which kernels dominate — re-profile + re-strategize so the head track works the
     // POST-tuning landscape, not the pre-tuning one. Same contract as the post-ConfigSweep re-profile.
@@ -3884,6 +4003,29 @@ if (want('final')) {
   }
 }
 allAccepted = acceptedHeads.concat(acceptedKernels);   // refresh after Fix C may have banked a pending win
+if (allAccepted.length) {
+  await persistE2EValidationCheckpoint('overlay/accepted_stack/e2e_validation.json', {
+    phase: 'Overlay', validation_level: 'integrator', gate: 'accepted',
+    validation_status: 'accepted_intermediate',
+    baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: curTput,
+    throughput_speedup: BASELINE_TPUT ? curTput / BASELINE_TPUT : 1,
+    baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
+    accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+    accepted_kernels: acceptedKernels, accepted_heads: acceptedHeads, final_patch: [],
+    final_overlay: { path: curOverlay },
+    final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
+    bench_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
+    measurement: { measurement_mode: MEASUREMENT_MODE, metric_basis: 'aggregate_output_tok_s',
+      workload: WORKLOAD, source_artifact: `${EVAL_DIR}/overlay`,
+      acceptance: { gain_exceeds_noise: true, correctness_passed: true, noise_floor_pct: NOISE_BAND } },
+    stack: { kernel_slots: allAccepted.map((k) => ({
+      kernel_slot: k.target_callable || k.short_name || k.name || '',
+      selected: true, candidate_id: k.short_name || k.name || '',
+    })) },
+    replay: { asset_paths: [`${EVAL_DIR}/bench_e2e.sh`, curOverlay].filter(Boolean) },
+    integrity: { checkpoint_assets: [] },
+  });
+}
 if (want('final')) {
   if (TIME_BUDGET_MS != null) log(`[time-budget] entering the final phase with ~${remainingMin()}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget left (reserve was ${Math.round(FINAL_RESERVE_MS / 60000)}min).`);
   FINAL_PHASE_STARTED = true;   // the one place the reserve exemption is granted — by position, not label
@@ -3896,6 +4038,31 @@ if (want('final')) {
     }),
     { phase: 'Finalize', label: 'e2e_integrator:finalize', schema: FINALIZE_SCHEMA });
   finalTput = (finalize && finalize.final_throughput_tok_s) || curTput;
+  if (finalize && finalTput > BASELINE_TPUT * (1 + NOISE_BAND / 100)) {
+    await persistE2EValidationCheckpoint('final/e2e_validation.json', {
+      phase: 'Finalize', validation_level: 'final_pair', gate: 'accepted',
+      validation_status: 'provisional_final_pair',
+      baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: finalTput,
+      throughput_speedup: BASELINE_TPUT ? finalTput / BASELINE_TPUT : 1,
+      baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
+      accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+      accepted_kernels: acceptedKernels, accepted_heads: acceptedHeads,
+      final_patch: [finalize.final_patch].filter(Boolean),
+      final_overlay: { path: finalize.final_overlay || curOverlay },
+      final_launch_script: { path: finalize.final_launch_script || '' },
+      bench_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
+      measurement: { measurement_mode: MEASUREMENT_MODE, metric_basis: 'aggregate_output_tok_s',
+        workload: WORKLOAD, source_artifact: `${EVAL_DIR}/final/bench/bench_summary.json`,
+        acceptance: { gain_exceeds_noise: true, correctness_passed: true, noise_floor_pct: NOISE_BAND } },
+      stack: { kernel_slots: allAccepted.map((k) => ({
+        kernel_slot: k.target_callable || k.short_name || k.name || '',
+        selected: true, candidate_id: k.short_name || k.name || '',
+      })) },
+      replay: { asset_paths: [finalize.final_patch, finalize.final_overlay,
+        finalize.final_launch_script, `${EVAL_DIR}/bench_e2e.sh`].filter(Boolean) },
+      integrity: { checkpoint_assets: [] },
+    });
+  }
 
   phase('Report');
   report = await safeAgent(
