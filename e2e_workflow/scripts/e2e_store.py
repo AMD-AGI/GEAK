@@ -165,6 +165,10 @@ def _view(candidate, cid: str, tier: str, metric: str, champion_metric: str = ""
         "validations": ledger["validations"],
         "recalls": ledger["recalls"],
         "not_reproduced": ledger["not_reproduced"],
+        # Kept apart from `not_reproduced` all the way out to the reader. "the flag is gone
+        # upstream" and "this box's baseline already pins that knob" look identical in a single
+        # count and mean opposite things about whether the record is worth benching here.
+        "inapplicable": ledger["inapplicable"],
         "last_outcome": ledger["last_outcome"],
         "retire_hint": retire_hint(value),
         # How to actually run this again. Empty for records written before the field existed —
@@ -365,7 +369,9 @@ def _track_record_line(view: dict) -> str:
         return "never benched by anyone since it was recorded"
     parts = ["%d reproduced a win" % view["validations"] if view["validations"] else "",
              "%d could not be run at all" % view["not_reproduced"]
-             if view.get("not_reproduced") else ""]
+             if view.get("not_reproduced") else "",
+             "%d did not fit that box's baseline (no verdict on the record)" % view["inapplicable"]
+             if view.get("inapplicable") else ""]
     detail = ", ".join(p for p in parts if p) or "none reproduced a win"
     hint = view.get("retire_hint") or ""
     return "benched %dx since it was recorded — %s%s" % (
@@ -1559,13 +1565,18 @@ def main(argv=None) -> int:
     q.add_argument("--apply", action="store_true", help="actually write; default is a dry run")
 
     q = sub.add_parser("attest", help="count one attempt to RUN a stored record: validated | "
-                                      "failed | not_reproduced. Moves no score, no champion.")
+                                      "failed | not_reproduced | inapplicable. Moves no score, "
+                                      "no champion.")
     _identity_args(q)
     _plane_args(q)
     q.add_argument("--session-id", required=True, help="the session that was tried")
     q.add_argument("--outcome", required=True, choices=OUTCOMES,
                    help="validated = reproduced a win; failed = ran but did not win; "
-                        "not_reproduced = could not be made to run at all")
+                        "not_reproduced = could not be made to run at all; "
+                        "inapplicable = could not be applied to THIS box's baseline (a knob the "
+                        "record pins is already pinned to something else here) — counted, but "
+                        "kept out of the retire arithmetic, because it judges the pairing and "
+                        "not the record")
     q.add_argument("--measured-tok-s", default=None, help="what it did here, for the history entry")
     q.add_argument("--baseline-tok-s", default=None, help="what this box does without it")
     q.add_argument("--parity", default="", help="pass | fail | n/a on this box")

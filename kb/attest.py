@@ -14,6 +14,9 @@ This module adds that ledger, under `value.attestations`, in one vocabulary both
     validations      of those, how many reproduced a win   <- the retire signal
     failures         of those, how many ran but did not win
     not_reproduced   of those, how many could not be made to run at all
+    inapplicable     of those, how many could not be applied to THIS box's baseline at all — a
+                     verdict on the pairing, not on the record, and so excluded from the retire
+                     arithmetic below
     last_outcome / last_at / last_by     the most recent attempt, for a reader in a hurry
     history          the last HISTORY_LIMIT attempts with their evidence
 
@@ -44,14 +47,24 @@ import time
 from kb.retract import existing_files
 from kb.store_local import KBStoreError
 
-# The three things that can happen when a record is taken off the shelf and run. They are counted
+# The four things that can happen when a record is taken off the shelf and run. They are counted
 # separately because they mean opposite things to a retire pass: `failed` says the claim did not
 # hold HERE (the record may still be right elsewhere), while `not_reproduced` says the record could
 # not even be applied — a much stronger signal that it is missing something it promised.
+#
+# `inapplicable` splits a case that used to be spelled `not_reproduced` and does not belong there.
+# A stored e2e config is a WHOLE launch configuration, and it is replayed on top of whatever
+# baseline configuration the reading run was handed — under Hyperloom, a full flag string this run
+# does not own. When the two pin the same knob to different values, the record could not be applied
+# HERE for a reason that says nothing at all about the record: it may be perfectly right on the box
+# it was written for and on the next box that reads it. Counting that as `not_reproduced` made the
+# environment, not the record, the thing being judged — and two such reads were enough to put a
+# retire hint on a record nobody had ever found anything wrong with.
 VALIDATED = "validated"
 FAILED = "failed"
 NOT_REPRODUCED = "not_reproduced"
-OUTCOMES = (VALIDATED, FAILED, NOT_REPRODUCED)
+INAPPLICABLE = "inapplicable"
+OUTCOMES = (VALIDATED, FAILED, NOT_REPRODUCED, INAPPLICABLE)
 
 # `history` is bounded because it rides inside every knowledge document, and the documents are
 # fetched one-per-candidate to rank a page. An unbounded audit log would make every read of a
@@ -66,8 +79,15 @@ _EVIDENCE_KEYS = ("measured_tok_s", "baseline_tok_s", "delta_pct", "measured_spe
                   "note", "canonical_id", "workload")
 
 
+# Every counter that is a BUCKET of `recalls`, in one place, because four call sites have to agree
+# on the list and three of them fail silently when they disagree: a key missing from
+# `attestations_of` reads as 0 forever, and one missing from `carry_attestations`'s emptiness test
+# drops a whole ledger on the next rewrite.
+BUCKETS = ("validations", "failures", "not_reproduced", "inapplicable")
+
+
 def empty_attestations() -> dict:
-    return {"recalls": 0, "validations": 0, "failures": 0, "not_reproduced": 0,
+    return {"recalls": 0, "validations": 0, "failures": 0, "not_reproduced": 0, "inapplicable": 0,
             "last_outcome": "", "last_at": "", "last_by": "", "history": []}
 
 
@@ -87,7 +107,7 @@ def attestations_of(value) -> dict:
     if not isinstance(raw, dict):
         return empty_attestations()
     ledger = empty_attestations()
-    for key in ("recalls", "validations", "failures", "not_reproduced"):
+    for key in ("recalls",) + BUCKETS:
         ledger[key] = _counter(raw.get(key))
     for key in ("last_outcome", "last_at", "last_by"):
         ledger[key] = str(raw.get(key) or "")
@@ -109,7 +129,7 @@ def carry_attestations(previous_value, fresh_value: dict) -> dict:
     if not isinstance(previous_value, dict) or "attestations" not in previous_value:
         return fresh_value
     ledger = attestations_of(previous_value)
-    if not any(ledger[k] for k in ("recalls", "validations", "failures", "not_reproduced")):
+    if not any(ledger[k] for k in ("recalls",) + BUCKETS):
         return fresh_value
     fresh_value["attestations"] = ledger
     return fresh_value
@@ -129,9 +149,13 @@ def record_attestation(value: dict, outcome: str, *, actor: str = "", evidence=N
                            % (outcome, ", ".join(OUTCOMES)))
     ledger = attestations_of(value)
     stamp = when or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # `inapplicable` increments `recalls` like the rest: the invariant that `recalls` is the sum of
+    # its buckets is what lets a reader check a ledger for consistency, and hiding an attempt would
+    # make a record that keeps failing to fit anywhere look untouched. It is subtracted where it
+    # actually matters instead — see `retire_hint`.
     ledger["recalls"] += 1
     ledger[{VALIDATED: "validations", FAILED: "failures",
-            NOT_REPRODUCED: "not_reproduced"}[outcome]] += 1
+            NOT_REPRODUCED: "not_reproduced", INAPPLICABLE: "inapplicable"}[outcome]] += 1
     ledger.update({"last_outcome": outcome, "last_at": stamp, "last_by": str(actor or "")})
     entry = {"at": stamp, "outcome": outcome}
     if actor:
@@ -154,8 +178,12 @@ def retire_hint(value) -> str:
     read path filters on it — a record with a hint is still offered, still ranked, still adoptable.
     """
     ledger = attestations_of(value)
-    tried = ledger["recalls"]
-    if not tried:
+    # Attempts that TESTED THE RECORD. An `inapplicable` read never got as far as putting the
+    # stored configuration on the box — the box's own baseline pinned a knob the record also pins,
+    # and the pair is what failed. Leaving those in the denominator meant a record could be retired
+    # for being read on the wrong machines, which is the opposite of what the counter is for.
+    tried = ledger["recalls"] - ledger["inapplicable"]
+    if tried <= 0:
         return ""
     if ledger["not_reproduced"] >= 2 and not ledger["validations"]:
         return ("%d attempts could not reproduce it at all and none ever succeeded — the record is "
