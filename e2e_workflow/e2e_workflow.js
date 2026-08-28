@@ -482,6 +482,33 @@ const KB_IDENTITY_BASENAME = 'kb_identity.json';
 // Every candidate costs a full server launch to reject, so a recorded near-tie is not worth benching.
 const E2E_WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.warm_start_min_speedup))
   ? parseFloat(A.warm_start_min_speedup) : 1.05;
+
+// How a local verdict is filed AGAINST THE RECORD.
+//
+// The local bench is authoritative for this run — it alone decides what gets adopted, and a
+// recalled config that does not beat this baseline is not applied, full stop. It is authoritative
+// for nothing else. This box is not the box the record was written on: different baseline, image,
+// driver, neighbours on the node, and as few as one search replica. A no-gain here is a fact about
+// the PAIRING, and reading it as a refutation is how a store of real wins decays into an empty
+// one — the record that does not reproduce on the next box is exactly the one worth keeping until
+// something better replaces it.
+//
+// So only a local WIN moves the record's standing. Every other outcome is filed as `inapplicable`,
+// which kb/attest.py counts as a recall (the attempt happened and stays visible) but keeps out of
+// the retirement denominator, so no number of failed replays can retire a record. The true local
+// verdict is not lost: it leads the attestation note, and it is carried verbatim in `verdicts[]`,
+// in the recall report, and in kb_references/measured_on_this_box.md. It is reported everywhere and
+// counted against the record nowhere.
+//
+// It also closes a silent hole: `rejected` was passed through to `e2e_store.py attest --outcome`,
+// which does not accept it (choices come from kb/attest.py OUTCOMES), so every "ran here and lost"
+// attestation was rejected by argparse and swallowed by the trailing `|| true`.
+const KB_ATTEST_OUTCOME = {
+  adopted: 'validated',
+  rejected: 'inapplicable',
+  not_reproduced: 'inapplicable',
+  inapplicable: 'inapplicable',
+};
 // Read broadly, bench narrowly. Reading is free and breadth is exactly what makes the demoted
 // reference path useful to the Architect; benching is the expensive half. So the default is
 // "offer 3, measure 1".
@@ -2028,6 +2055,60 @@ const mergeFlags = (baseFlags, storedFlags) => mergeConfig(baseFlags, storedFlag
 const mergeEnv = (baseEnv, storedEnv) => mergeConfig(baseEnv, storedEnv,
   { parse: parseEnvString, render: renderEnvItems, repeatable: new Set() });
 
+/**
+ * Which trial actually ran, and what it measured.
+ *
+ * Once a repair pass exists, `trials[0]` and `best_throughput_tok_s` are both the wrong place to
+ * read this from:
+ *   * after a repair the FIRST trial is the corpse of the verbatim replay — the one whose launch
+ *     line argparse rejected — and the LAST is the one that came up. Taking `kept`, `parity` and
+ *     the notes from the corpse makes a repaired configuration unadoptable by construction, and
+ *     hands its launch error to the `inert` regex, which then reads a successful repair as "the
+ *     config never took effect".
+ *   * `best_throughput_tok_s` is the tuner's headline, and the role returns THE BASELINE there
+ *     when nothing was kept. No server in the sweep produced that number, and filing it as
+ *     `measured_tok_s` writes a perfect 0.00% delta onto a record whose own note says no
+ *     measurement was ever taken.
+ *
+ * So: the last trial carrying a positive throughput, and `best` only when it is a number the
+ * baseline cannot be mistaken for.
+ */
+function measuredTrialOf(sweep, baselineTput) {
+  const trials = (sweep && Array.isArray(sweep.trials)) ? sweep.trials : [];
+  const ran = trials.filter((t) => t && Number(t.throughput_tok_s) > 0);
+  const trial = ran.length ? ran[ran.length - 1] : (trials[0] || {});
+  const best = Number(sweep && sweep.best_throughput_tok_s) || 0;
+  const measured = ran.length ? Number(trial.throughput_tok_s)
+    : (best && best !== baselineTput ? best : 0);
+  return { trial, measured };
+}
+
+/**
+ * Knobs the merged configuration asked for that the thing which actually ran does not carry.
+ *
+ * The repair role is asked for `repair.dropped_flags`, and in practice often expresses the repair
+ * as a second trial and leaves the optional field empty. The string it actually benched is on the
+ * trial either way, so the drop list is recoverable by subtraction rather than lost — and without
+ * it `applied_partial` reads false on a run that dropped something, which is exactly the
+ * difference between "the record lost" and "most of the record lost".
+ */
+function droppedByDiff(mergedFlags, mergedEnv, applied) {
+  const app = String(applied || '').trim();
+  if (!app) return [];
+  const keyOf = (t) => {
+    const f = /^(--?[A-Za-z][^=\s]*)/.exec(t);
+    if (f) return f[1];
+    const e = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(t);
+    return e ? e[1] : null;
+  };
+  const have = new Set();
+  app.split(/\s+/).forEach((t) => { const k = keyOf(t); if (k) have.add(k); });
+  const want = [];
+  parseFlagString(mergedFlags).forEach((it) => { if (it.name) want.push(it.name); });
+  parseEnvString(mergedEnv).forEach((it) => { if (it.name) want.push(it.name); });
+  return want.filter((k) => !have.has(k));
+}
+
 /** `--context-length 11264 -> 13312; MAX_MODEL_LEN 13312 -> 16384`, or "". For prompts and logs. */
 const describeOverrides = (overrides) => (overrides || []).map(
   (o) => `${o.flag} ${o.baseline_value == null ? '(unset)' : o.baseline_value} -> ` +
@@ -2294,7 +2375,7 @@ if (want('setup')) {
         // config that cannot run here burns server launches to learn nothing new — and through the
         // SAME accept gate, with no allowance made for having been repaired.
         let repair = null;
-        if (!((sweep && sweep.best_throughput_tok_s) || 0)) {
+        if (!measuredTrialOf(sweep, BASELINE_TPUT).measured) {
           const repaired = await runValidation(
             'A recovered configuration was applied to this box and the server produced NO ' +
             'measurement — it failed to launch, failed to become healthy, or died before the bench. ' +
@@ -2325,12 +2406,16 @@ if (want('setup')) {
           log(`[kb] repair ${c.session_id || '?'}: ` + (repair
             ? `classified ${repair.classification || 'unknown'}` +
               `${(repair.dropped_flags || []).length ? `, dropped ${(repair.dropped_flags || []).join(' ')}` : ''}` +
-              `${(sweep && sweep.best_throughput_tok_s) ? ', server came up' : ', still no measurement'}`
+              `${measuredTrialOf(sweep, BASELINE_TPUT).measured ? ', server came up' : ', still no measurement'}`
             : 'the repair attempt itself produced nothing'));
         }
-        const dropped = (repair && Array.isArray(repair.dropped_flags)) ? repair.dropped_flags : [];
-        const trial = (sweep && (sweep.trials || [])[0]) || {};
-        const measured = (sweep && sweep.best_throughput_tok_s) || 0;
+        const { trial, measured } = measuredTrialOf(sweep, BASELINE_TPUT);
+        // The role's own list when it filled one in; otherwise subtract what ran from what was
+        // asked for. Either way the verdict names the knobs that did not make it onto the box.
+        const dropped = (repair && Array.isArray(repair.dropped_flags) && repair.dropped_flags.length)
+          ? repair.dropped_flags
+          : (repair ? droppedByDiff(mf.merged, me.merged,
+            String(trial.change || [trial.flags, trial.env].filter(Boolean).join(' | '))) : []);
         const parity = String(trial.parity || trial.output_parity || '');
         const deltaPct = BASELINE_TPUT ? ((measured - BASELINE_TPUT) / BASELINE_TPUT) * 100 : 0;
         // Both the tuner's own judgement AND our arithmetic. A warm-start candidate is precisely
@@ -2347,11 +2432,12 @@ if (want('setup')) {
             `${dropped.length ? `, with ${dropped.join(' ')} dropped to make it run here` : ''}.`);
         }
         // FOUR outcomes. "ran and lost", "could not be made to run" and "does not fit this box"
-        // mean three different things to the record: a loss is one box's verdict on a real
-        // configuration; a config that never took effect says the record is missing something — a
-        // flag renamed upstream, an env the build does not honour; a config that collides with a
-        // baseline this run did not choose says nothing about the record at all. Only the middle
-        // one is evidence for retiring it, and the store counts all three apart (kb/attest.py).
+        // mean three different things to the reader: a loss is one box's number on a real
+        // configuration; a config that never took effect says the record may be missing something —
+        // a flag renamed upstream, an env the build does not honour; a config that collides with a
+        // baseline this run did not choose says nothing about the record at all. All three are
+        // REPORTED and counted apart (kb/attest.py); none of them is counted AGAINST the record —
+        // see KB_ATTEST_OUTCOME.
         //
         // `note` and `notes` are both read: the role file's return schema spells it `note`, and
         // reading only `notes` meant the per-trial text never reached this regex at all.
@@ -2369,8 +2455,9 @@ if (want('setup')) {
             `measured ${measured || 'n/a'} tok/s vs baseline ${BASELINE_TPUT}` +
             `${measured ? ` (${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%)` : ''}` +
             `${parity ? `, parity=${parity}` : ''}${inert ? ', the config never took effect' : ''}` +
-            `${outcome === 'inapplicable' ? ", it collides with this run's baseline and is no evidence against the record" : ''}` +
-            ` — kept as a reference, not applied.`);
+            `${outcome === 'inapplicable' ? ", it collides with this run's baseline" : ''}` +
+            ` — kept as a reference, not applied. This is this box's result, not a verdict on the ` +
+            `record: it is filed as evidence and counts nothing against it.`);
         }
         verdicts.push({ ...c, measured_tok_s: measured || null, delta_pct: measured ? deltaPct : null,
           parity: parity || 'unknown', outcome, why: notes,
@@ -2577,12 +2664,13 @@ if (want('setup')) {
       // Tell the STORE what happened. Until now this loop's verdicts died with the run: the next
       // box to resolve this identity saw the same optimistic record, benched it, and failed the
       // same way, forever. `e2e_store.py attest` counts the attempt onto the record itself, at
-      // every rung, so `validations / recalls` becomes something a later curation pass can retire
-      // on. It moves no score and no champion — one box's failure is evidence, not a verdict.
+      // every rung, so a later reader can see how often it has been tried here and how it went.
+      // It moves no score and no champion, and per KB_ATTEST_OUTCOME a non-win moves nothing at
+      // all — one box's failure is evidence, never a verdict on the record.
       //
       // Only candidates that were actually PUT ON THIS BOX are counted. A record listed in the
       // offer and never benched (`skipped`, or below benchN) has learned nothing about itself, and
-      // counting it would decay the very ratio the retire pass reads.
+      // counting it would put an attempt that never happened into the ledger.
       //
       // Config verdicts only. A replayed kernel that failed is evidence against the KERNEL lane's
       // record, not against the e2e run that once used it, and the two have separate ledgers —
@@ -2593,13 +2681,17 @@ if (want('setup')) {
         const cmds = attestable.map(v =>
           `python3 ${shq(E2E_STORE_SCRIPT)} attest ${kbIdentityFlags()} ${kbPlaneFlags()} ` +
           `--session-id ${shq(v.session_id)} ` +
-          `--outcome ${v.outcome === 'adopted' ? 'validated' : v.outcome} ` +
+          `--outcome ${KB_ATTEST_OUTCOME[v.outcome] || 'inapplicable'} ` +
           (v.measured_tok_s ? `--measured-tok-s ${v.measured_tok_s} ` : '') +
           `--baseline-tok-s ${BASELINE_TPUT} --parity ${shq(v.parity || 'n/a')} ` +
           // The note carries what was actually run, not just why it ended: a bare "no win" against
           // a partially-dropped config would read, three months later, as a verdict on the whole
           // record. Overrides first — they are what a reader has to know to interpret the number.
           `--note ${shq([
+            // The local verdict leads the note. It is filed as `inapplicable` so it cannot retire
+            // the record; a reader still has to be able to see what actually happened here.
+            `local verdict: ${v.outcome}` +
+              (v.measured_tok_s ? ` (${v.measured_tok_s} tok/s vs baseline ${BASELINE_TPUT})` : ' (no measurement)'),
             (v.overrides || []).length ? `overrode ${describeOverrides(v.overrides)}` : '',
             (v.dropped_flags || []).length
               ? `dropped ${(v.dropped_flags || []).join(' ')} to make it run here` +
@@ -2613,7 +2705,8 @@ if (want('setup')) {
             `return {"ran": <how many you ran>, "note": "<anything that failed>"}. Each records ` +
             `what THIS box saw when it benched a stored record. Do NOT edit them, do NOT add or ` +
             `drop any, and do NOT retry a failure — a repeat would double-count the attempt, and ` +
-            `an over-counted failure retires a record that may still be right elsewhere.\n` +
+            `the ledger is meant to say how often this record was tried here, not how often the ` +
+            `attestor pressed the button.\n` +
             '```bash\n' + KB_ENV_PRELUDE + cmds.join('\n') + '\n```',
             { phase: 'WarmStart', label: 'kb:attest',
               schema: obj({ ran: { type: 'number' }, note: { type: 'string' } }, []) },
