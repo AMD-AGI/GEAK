@@ -857,6 +857,43 @@ let KB_DIMS = null;        // the deployment dimensions the Director established
 let KB_REF_DIR = '';       // where Module A left its references; '' when it never ran
 let KB_REF_VERDICT = '';   // what we MEASURED about the offer, threaded into later roles' Inputs
 let KB_READ_PLANE = '';    // which plane ANSWERED the read, which `both` alone does not tell you
+// Everything this run RECALLED, in one report-ready object: which address was asked, what came back,
+// what re-measuring it HERE produced, and whether it was accepted. Threaded into the Report role's
+// Inputs because final_report.md was previously silent about recall altogether — a run that recalled
+// nothing and a run that recalled a 1.12x record and then rejected it wrote the same report, and the
+// second is the one a reader most needs to see.
+//
+// `asked` is filled in even when zero candidates come back. On an exact-lookup scheme a miss and a
+// never-recorded page are the SAME 404, so the ladder that was asked IS the finding: it is the only
+// artifact that distinguishes "no prior art" from "prior art exists one segment away".
+let KB_RECALL = { e2e: null, kernel: [] };
+
+// One collection point for the KERNEL plane's recall. Every nested kernel_workflow returns its own
+// `warm_start` block (kernel_lane.js), and until now all of it died inside the lane: the e2e report
+// could say a kernel was authored from scratch while the lane had in fact adopted a stored patch.
+// Called from the two bounded wrappers and the two direct workflow() sites, i.e. every lane call.
+function noteKernelKB(r, label) {
+  const w = r && r.warm_start;
+  if (w && typeof w === 'object') {
+    KB_RECALL.kernel.push({
+      lane: String(label || ''),
+      slug: String(w.slug || ''),
+      read_reason: String(w.read_reason || ''), match_tier: String(w.match_tier || ''),
+      filtered: w.filtered || null,
+      candidates: Array.isArray(w.candidates) ? w.candidates.length : 0,
+      adopted: !!w.adopted,
+      adopted_speedup: w.adopted ? (w.adopted_speedup != null ? w.adopted_speedup : null) : null,
+      // A lane that adopted a stored patch and then committed nothing of its own is where the kernel
+      // plane most often flatters itself, so carry the split rather than just the headline geomean.
+      incremental_speedup: w.incremental_speedup != null ? w.incremental_speedup : null,
+      rounds_committed: w.rounds_committed != null ? w.rounds_committed : null,
+      no_rounds_after_adopt: !!w.no_rounds_after_adopt,
+      final_geomean: r.final_geomean != null ? r.final_geomean : null,
+      validation_status: String(r.validation_status || ''),
+    });
+  }
+  return r;
+}
 
 const shq = (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'";
 
@@ -1687,7 +1724,10 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
 // workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
 // existing null-guards treat it as "no kernel" and continue.
 function fastBoundedWorkflow(ref, wfArgs, label) {
-  const p = workflow(ref, laneArgs(wfArgs));
+  // noteKernelKB is a pass-through recorder: it returns `r` unchanged, so the caller's null-guards
+  // and result handling are untouched. It is attached here (and in deepBoundedWorkflow, and at the
+  // two direct workflow() sites) so EVERY lane call reports its kernel-plane recall exactly once.
+  const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   if (!FAST_MODE || typeof setTimeout !== 'function' || !(FAST_HEAD_WF_MS > 0)) return p;
   let to;
   const guard = new Promise((resolve) => {
@@ -1738,7 +1778,7 @@ if (TIME_BUDGET_EFFECTIVE_MS != null && typeof setTimeout === 'function' && TIME
   }, TIME_BUDGET_EFFECTIVE_MS);
 }
 function deepBoundedWorkflow(ref, wfArgs, label) {
-  const p = workflow(ref, laneArgs(wfArgs));
+  const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   if (!DEEP_MODE || typeof setTimeout !== 'function' || !(DEEP_HEAD_WF_MS > 0)) return p;
   let to;
   const guard = new Promise((resolve) => {
@@ -1788,6 +1828,7 @@ if (!MODEL_PATH && KERNEL_PATH) {
       budget: KERNEL_BUDGET, gpu_ids: GPU_IDS, task: TASK, exp_root: EXP_ROOT,
       apply_to_original: APPLY_TO_ORIGINAL,
     }));
+    noteKernelKB(r, 'single-kernel pass-through');
     passthru = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
       final_geomean: r.final_geomean, validation_status: r.validation_status,
       note: (r.winner && r.winner.source) || '' };
@@ -1891,6 +1932,11 @@ if (want('setup')) {
       // cost of believing one is a 20-40min server launch, not a wasted lookup.
       log('[kb] warm start skipped: read_reason=missing_arch (the Director reported no gfx; a ' +
         'cross-arch config is not a candidate, it is a guess).');
+      // Still a recall FACT worth reporting: "we did not look, and here is why" is not the same
+      // report as "we looked and the store was empty", and the reader cannot tell them apart from
+      // an absent section.
+      KB_RECALL.e2e = { read_reason: 'missing_arch', tried: [], answered: '', match_tier: '',
+        plane: E2E_KB_PLANE, mode: E2E_WARM_START, candidates: 0, configs: [], kernels: [] };
     } else {
       const refsDir = `${EVAL_DIR}/kb_references`;
       const cacheDir = `${EVAL_DIR}/kb_cache`;
@@ -1930,6 +1976,17 @@ if (want('setup')) {
         `sorted_by=${resolved.sorted_by || resolved.ranked_by || '-'} ` +
         `champion_metric=${resolved.champion_metric || '-'} reason=${resolved.read_reason || '?'} ` +
         `candidates=${cands.length}`);
+      // Record the ASK before anything is benched. If this process dies mid-warm-start the report
+      // still knows which ladder was queried, and on a zero-candidate read this is the entire
+      // finding — see KB_RECALL's declaration for why the address matters more than the count.
+      KB_RECALL.e2e = {
+        read_reason: String(resolved.read_reason || ''),
+        tried: Array.isArray(resolved.tried) ? resolved.tried : [],
+        answered: String(resolved.canonical_id || ''),
+        match_tier: String(resolved.match_tier || ''),
+        plane: E2E_KB_PLANE, read_plane: KB_READ_PLANE, mode: E2E_WARM_START,
+        candidates: cands.length, configs: [], kernels: [],
+      };
       if (cands.length) KB_REF_DIR = refsDir;   // arms warmStartBlock() for the consumer roles
 
       // How many of the offers are worth a server launch. On a coarser rung the stored numbers were
@@ -2203,6 +2260,29 @@ if (want('setup')) {
       }
 
       const allVerdicts = verdicts.concat(kernelVerdicts);
+      // Same rows the measured_on_this_box.md tables carry, in machine form, so the Report role
+      // states the recall outcome from the orchestrator's own record rather than from whether an
+      // agent happened to open a reference file. Set OUTSIDE the `if (allVerdicts.length)` guard:
+      // an empty verdict list against a non-empty offer means "offered but not benched", which is
+      // itself a reportable outcome.
+      if (KB_RECALL.e2e) {
+        KB_RECALL.e2e.configs = verdicts.map(v => ({
+          direction: String(v.direction || 'unlabeled'), session_id: String(v.session_id || ''),
+          stored_tok_s: v.throughput_tok_s != null ? v.throughput_tok_s : null,
+          stored_speedup: v.speedup != null ? v.speedup : null,
+          measured_tok_s: v.measured_tok_s != null ? v.measured_tok_s : null,
+          delta_pct: v.delta_pct != null ? v.delta_pct : null,
+          parity: String(v.parity || ''), outcome: String(v.outcome || ''),
+          why: String(v.why || '').slice(0, 300),
+        }));
+        KB_RECALL.e2e.kernels = kernelVerdicts.map(v => ({
+          name: String(v.name || ''), kind: String(v.kind || ''),
+          kb_session_id: String(v.kb_session_id || ''),
+          stored_isolated: v.isolated_speedup != null ? v.isolated_speedup : null,
+          measured_delta_pct: v.measured_delta_pct != null ? v.measured_delta_pct : null,
+          outcome: String(v.outcome || ''), why: String(v.why || '').slice(0, 300),
+        }));
+      }
       if (allVerdicts.length) {
         const adoptedCfg = verdicts.filter(v => v.outcome === 'adopted');
         const adoptedKer = kernelVerdicts.filter(v => v.outcome === 'adopted');
@@ -3616,6 +3696,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
       }));
+      noteKernelKB(r, String(c.short_name || ext.op_kind || 'milestone'));
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
         final_geomean: r.final_geomean, validation_status: r.validation_status,
         note: (r.winner && r.winner.source) || '' };
@@ -3899,8 +3980,15 @@ if (want('final')) {
 
   phase('Report');
   report = await safeAgent(
-    roleAgent('system_architect', 'report', 'Write architect_report.md AND the full final_report.md in English (with the Phases tree + artifacts tree modules).', {
+    roleAgent('system_architect', 'report',
+      'Write architect_report.md AND the full final_report.md in English (with the Phases tree + ' +
+      'artifacts tree modules). final_report.md MUST contain a "## Knowledge-base recall" section ' +
+      'built from KB_RECALL — see your role file. Write it even when nothing was recalled: report ' +
+      'the exact canonical ids that were tried and the read_reason. On an exact-lookup store a miss ' +
+      'and a never-recorded page are the same 404, so the address asked is the finding, and a reader ' +
+      'who cannot see it cannot tell "no prior art" from "prior art one segment away".', {
       EVAL_DIR, HISTORY: history, BASELINE_THROUGHPUT: BASELINE_TPUT, FINAL_THROUGHPUT: finalTput,
+      KB_RECALL,
       ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
@@ -4008,6 +4096,10 @@ const kbWarmStart = (E2E_WARM_START_ON && KB_DIMS) ? {
   // The gain that is genuinely THIS run's: everything after the warm start's own contribution. Null
   // when nothing was adopted, because then the ordinary speedup already answers the question.
   incremental_speedup: kbSeedTput ? Number((finalTput / kbSeedTput).toFixed(6)) : null,
+  // The full recall ledger, both planes. Same object the Report role was handed, so the prose in
+  // final_report.md and whatever a downstream consumer reads cannot disagree about what was
+  // recalled or how it fared.
+  recall: KB_RECALL,
 } : null;
 // Attribution block for the standalone tuning phase. Because the phase measured its OWN interleaved
 // pre/post legs, its contribution can be expressed both absolutely (delta%) and as a SHARE of the run's
@@ -4117,6 +4209,11 @@ const wfReturn = {
   // Conditional spread, never an unconditional key: with the feature off this contributes no own
   // property and both the returned object and the persisted file are byte-identical to before.
   ...(kbWarmStart ? { kb_warm_start: kbWarmStart } : {}),
+  // Emitted independently of kb_warm_start. kbWarmStart is null whenever KB_DIMS was never
+  // established (a preflight that produced no gfx), but the KERNEL lanes can still have recalled by
+  // then — folding recall only into kbWarmStart would drop exactly the runs where knowing what was
+  // recalled matters most. Absent entirely when nothing was recalled on either plane.
+  ...((KB_RECALL.e2e || KB_RECALL.kernel.length) ? { kb_recall: KB_RECALL } : {}),
   state: carryState,
 };
 

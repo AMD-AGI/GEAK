@@ -440,7 +440,8 @@ Return JSON:
 
 Inputs: `EVAL_DIR`, full `HISTORY`, `BASELINE_THROUGHPUT`, `FINAL_THROUGHPUT`, accepted config +
 kernel changes, `MILESTONES`, `BUDGET_USED`, `BUDGET`, `MIN_KERNEL_TASKS`, `PROFILE_TOPN`, `WORKLOAD`,
-`MODEL_NAME`, `SKILL_DIR`, and — when the standalone tuning phase ran — `TUNING_RESULT` (see §2b).
+`MODEL_NAME`, `KB_RECALL` (see §2c), `SKILL_DIR`, and — when the standalone tuning phase ran —
+`TUNING_RESULT` (see §2b).
 
 Write TWO files:
 
@@ -579,6 +580,41 @@ attempt, win or not. REQUIRED sections, in order:
    Source: `EVAL_DIR/tuning/tuning_report.md` (+ `tuning/bench_pre`, `tuning/bench_post`,
    `tuning/env_audit.txt`, `tuning/claims_report.json`). Read the real files; never invent.
 
+2c. **🧠 Knowledge-base recall** — MANDATORY, ALWAYS present, even on a run that recalled nothing.
+   Built from the `KB_RECALL` input, which the orchestrator fills as the warm start runs; cross-check it
+   against `EVAL_DIR/kb_references/measured_on_this_box.md` and `EVAL_DIR/kb_identity.json` when they
+   exist, and say so if the two disagree rather than picking one silently.
+
+   Why it is mandatory even when empty: the e2e store is an EXACT-lookup scheme with no search. "This
+   deployment has no prior art" and "the prior art is filed one segment away under a slightly different
+   framework_version" produce the identical 404, and the ONLY artifact that tells them apart is the list
+   of canonical ids that were actually asked. A report that omits recall lets a silent identity drift
+   look like a cold start forever.
+
+   - **What was asked** — one line per plane. For the e2e plane: `KB_RECALL.e2e.tried` verbatim as a
+     bulleted list of canonical ids (all three rungs, most specific first), plus `read_reason`,
+     `match_tier`, which plane answered (`read_plane`), and the candidate count. For the kernel plane:
+     one row per lane from `KB_RECALL.kernel` with its `slug`, `read_reason`, `match_tier` and count.
+     If `read_reason` is `missing_arch`, say plainly that no lookup was performed and why.
+   - **Configurations recalled** — table
+     `stored direction | session | stored claim | re-measured here | Δ vs baseline | parity | outcome`,
+     one row per `KB_RECALL.e2e.configs[]`. Outcomes are `adopted` / `rejected` / `not_reproduced` /
+     `skipped`, and you must NOT collapse them: `rejected` means it ran here and lost, while
+     `not_reproduced` means it never took effect at all (a flag renamed upstream is accepted silently
+     and then ignored). Those mean opposite things about the record and only the second is evidence the
+     record is stale. Quote the `why` for anything that was not adopted.
+   - **Kernels recalled** — table `kernel | kind | stored isolated× | re-measured e2e Δ% | outcome | why`
+     from `KB_RECALL.e2e.kernels[]`, plus the kernel-lane rows from `KB_RECALL.kernel[]` showing
+     `adopted`, `adopted_speedup`, `rounds_committed` and `incremental_speedup`. A lane that adopted a
+     stored patch and then committed **0** rounds (`no_rounds_after_adopt`) MUST be labelled as inherited,
+     not as this run's work — its incremental is 1.0 by definition, not by measurement.
+   - **Was it accepted?** — one explicit sentence per recalled item, naming whether it reached the final
+     stack. If a recalled item WAS accepted, the headline speedup is partly INHERITED: state the split
+     (`kb_warm_start.adopted_throughput_tok_s` and `incremental_speedup`) in this section and again in
+     section 7, and never present an inherited gain as this run's optimization.
+   - A recalled record that lost here is a **lead, not a dead end** — say so, and give the reader the path
+     to its bundle so they can read what it actually did.
+
 3. **Head-kernel deep-dive** (the centerpiece) — for EACH head op a `####` sub-section titled
    `<id> — <op> (<pct>% GPU) — RESULT: <ACCEPTED +X% | no win | flagged>`, containing:
    - **GPU-time-share table**: rows `stock baseline` vs `accepted config`; columns `live kernel | backend |
@@ -645,6 +681,7 @@ Data sources (read the ACTUAL files, never invent): `director_e2e_validation.jso
 `overlay/cand_*/integrate_result.json`,
 `kernels/_exp/*/*/director_validation.json`, `kernels/*/opbench_result.json` (incl. its `backend_absent[]`),
 `env_report.json` (`absent_backends` → the BACKEND ABSENT section),
+`kb_identity.json` + `kb_references/measured_on_this_box.md` (→ the KNOWLEDGE-BASE RECALL section),
 `profile/round_*/profile_topN.{md,json}`, and artifact mtimes for the timeline.
 Read the actual files under `EVAL_DIR` for real numbers; do not invent. Return JSON (report_path points
 to architect_report.md; also mention `final_report.md` in `note` if the schema lacks a field):
