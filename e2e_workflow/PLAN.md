@@ -41,11 +41,12 @@ Finalize → Report → Validate`.
 
 - **Budget** = number of kernel-optimization tasks (config sweep is free). `noImprove<2` early-stop.
 - Each accepted change compounds into the carried-forward overlay + config.
-- Throughput measured warm, repeated, median, vs TRUE baseline; every kernel gated on e2e delta >
+- Throughput measured warm, same lifecycle as the TRUE baseline; every kernel gated on e2e delta >
   noise band AND output parity.
 
 ## Measurement discipline
-Warm server always; ≥3 repeats, median + spread; profile and bench share ISL/OSL/conc; output parity
+Warm server always; one discarded warmup round then one timed round (`warm_server`), extra samples
+only when a dispersion estimate is needed; profile and bench share ISL/OSL/conc; output parity
 (greedy/temp=0, fixed seed) on every numeric-changing step; accept only deltas above the noise band.
 
 ## Build status

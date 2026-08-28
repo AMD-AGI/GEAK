@@ -73,6 +73,10 @@ class BenchTeardownLookupTest(unittest.TestCase):
             OUT_DIR=os.path.join(self.tmp, "out"),
             REPEATS="1",
             PROFILE="0",
+            # The two cases that get past the gate walk on into the serving-GPU mutex, which is
+            # a real /tmp lock shared with whatever benchmark is live on this box -- without this
+            # the suite blocks for SERVING_LOCK_WAIT behind an unrelated run and reads as a hang.
+            SERVING_GPU_LOCK_DISABLE="1",
         )
         run_env.update(env)
         return subprocess.run(

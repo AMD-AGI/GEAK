@@ -96,5 +96,5 @@ they go straight into the server launch env/flags.
 - Pin the sglang version + commit in the run log; paths above can move between releases.
 - If a flag is unknown to the installed version, `launch_server --help` is the authoritative list —
   the Config Tuner should grep `--help` before sweeping an axis.
-- One axis at a time; keep a warm server across a sweep where possible; record throughput median +
-  spread so a win is distinguishable from noise.
+- One axis at a time; keep a warm server across a sweep where possible; record the throughput of each
+  leg and require the delta to clear the noise band, so a win is distinguishable from noise.

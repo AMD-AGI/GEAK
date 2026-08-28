@@ -110,11 +110,16 @@ Steps:
    flags/env actually took effect (e.g. the chosen attention backend / env var appears in the server
    banner). If a seed flag did not engage, record it loudly in `notes` — a baseline measured on a
    silently-ignored config corrupts every later gain.
-6. If baseline spread > ~5%, re-run — a noisy baseline poisons every later comparison. Set
-   `noise_band_pct = 0.5` (the default accept threshold): the Integrator gates with same-lifecycle
-   reference/candidate legs, non-overlap, and engagement proof.
-   Only widen it (e.g. to 1–2%) if the baseline spread is genuinely large on this box and can't be
-   tightened.
+6. Spread is only a noise signal when there is more than one timed sample. At the default
+   `REPLICAS=1` the summary reports `spread=0.0%` because there is a single timed round — that is an
+   absence of evidence, NOT a quiet box, so do not read it as one and do not gate on it. Judge the
+   baseline instead on engagement proof (step 5) plus a sanity check that the number is in the range
+   this model/box has produced before.
+   Only when the run asked for several samples (`REPLICAS>1`, or `isolated_server`) does spread mean
+   anything: > ~5% then, re-run — a noisy baseline poisons every later comparison.
+   Set `noise_band_pct = 0.5` (the default accept threshold): the Integrator gates with same-lifecycle
+   reference/candidate legs, non-overlap, and engagement proof. Only widen it (e.g. to 1–2%) if a
+   multi-sample measurement showed the spread is genuinely large on this box and can't be tightened.
 
 Return JSON:
 ```json

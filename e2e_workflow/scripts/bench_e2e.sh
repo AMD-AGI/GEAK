@@ -2,12 +2,21 @@
 # Backend-agnostic e2e serving benchmark dispatcher for e2e_workflow.
 #
 # ONE script the Director, Profiler, Config Tuner, and e2e Integrator all share so every throughput
-# number is measured the SAME way (warm server, fixed ISL/OSL/conc, repeated, median reported). The
-# serving STACK (sglang / vllm / ...) is NOT baked in here — it lives in scripts/adapters/<backend>.sh.
-# This dispatcher owns only the stack-INDEPENDENT parts:
+# number is measured the SAME way (warm server, fixed ISL/OSL/conc, same lifecycle for both legs of
+# every comparison). The serving STACK (sglang / vllm / ...) is NOT baked in here — it lives in
+# scripts/adapters/<backend>.sh. This dispatcher owns only the stack-INDEPENDENT parts:
 #   * server lifecycle (launch / health-wait / cleanup), or reuse of a warm server (REUSE_SERVER=1),
-#   * warmup (never timed) + N timed repeats + optional bounded profiling trace,
-#   * median throughput + spread summary (one machine-readable line + JSON).
+#   * warmup (never timed) + N timed rounds + optional bounded profiling trace,
+#   * throughput summary (one machine-readable line + JSON).
+#
+# NUMBERS ARE ONLY COMPARABLE WITHIN ONE LIFECYCLE. warm_server reports a round against a server that
+# has already served a full one, so it differs from the cold-cache isolated_server/legacy number for
+# the SAME config by an amount whose sign and size are not predictable from the config alone: it rises
+# with prefix-cache reuse, and a workload with little shared prefix can land either way (measured on
+# DeepSeek-V4-Pro TP8, RANDOM_RANGE_RATIO=1.0 / ISL 8192: warm 826.9 vs isolated median 833.3 tok/s).
+# So never ratio a warm_server leg against an isolated_server one, and never compare a number produced
+# here against a pre-warm_server record (KB entries, old reports) — re-measure the reference instead.
+# `bench_summary.json.measurement_mode` says which lifecycle produced any given number.
 # It is config-driven by env so an agent can vary ONE axis at a time. Nothing is model-specific.
 #
 # GEAK_REPEAT_MODE picks the measurement lifecycle:
@@ -65,17 +74,21 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ---- summary emitter ----
-# Every lifecycle ends by writing bench_summary.json with bench_summarize.py.  Resolved up here,
-# before anything is launched: this script is COPIED into $EVAL_DIR (roles/director.md), and
-# discovering a missing sibling only after a full bench would throw away the very measurement it
-# was supposed to record.  Same staging rule as server_teardown.sh below.
-SUMMARIZE=""
-for _cand in "$HERE/bench_summarize.py" "${SKILL_DIR:-}/scripts/bench_summarize.py" \
-             "${WORKFLOW_DIR:-}/scripts/bench_summarize.py"; do
-  case "$_cand" in /scripts/bench_summarize.py) continue ;; esac   # unset SKILL_DIR/WORKFLOW_DIR
-  [ -f "$_cand" ] && { SUMMARIZE="$_cand"; break; }
-done
+# ---- staged siblings ----
+# This script is COPIED into $EVAL_DIR (roles/director.md), so its helper libraries resolve from $HERE
+# first, then the skill dir.  Both are resolved up here, before anything is launched: discovering a
+# missing sibling only after a full bench would throw away the very measurement it was meant to record.
+_stage_lookup() {   # _stage_lookup NAME -> print the first copy that exists; rc=1 if none
+  local _n="$1" _c
+  for _c in "$HERE/$_n" "${SKILL_DIR:-}/scripts/$_n" "${WORKFLOW_DIR:-}/scripts/$_n"; do
+    case "$_c" in /scripts/"$_n") continue ;; esac   # unset SKILL_DIR/WORKFLOW_DIR
+    [ -f "$_c" ] && { printf '%s\n' "$_c"; return 0; }
+  done
+  return 1
+}
+
+# Every lifecycle ends by writing bench_summary.json with bench_summarize.py.
+SUMMARIZE="$(_stage_lookup bench_summarize.py)"
 if [ -z "$SUMMARIZE" ]; then
   echo "!!! bench_summarize.py not found next to this script ($HERE) or under SKILL_DIR/WORKFLOW_DIR." >&2
   echo "    Stage it alongside bench_e2e.sh: cp \"\$SKILL_DIR/scripts/bench_summarize.py\" \"\$EVAL_DIR/\"" >&2
@@ -114,6 +127,28 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ] && [ "${PROFILE:-0}" = 
   GEAK_REPEAT_MODE=legacy
 fi
 
+# ---- sample count ----
+# Shared by both multi-sample lifecycles so they cannot drift apart: an explicit REPEATS wins, then
+# REPLICAS, then the purpose default (arg $1; every other purpose gets one sample).
+_resolve_samples() {   # _resolve_samples VALIDATION_DEFAULT NOUN MODE -> sets _samples
+  if [ -n "${REPEATS+x}" ]; then
+    _samples="$REPEATS"
+  elif [ -n "${REPLICAS+x}" ]; then
+    _samples="$REPLICAS"
+  else
+    case "$_purpose" in
+      validation) _samples="$1" ;;
+      parity|search|"") _samples=1 ;;
+      *) echo ">>> Unknown MEASUREMENT_PURPOSE='$_purpose'; using 1 $2." >&2; _samples=1 ;;
+    esac
+  fi
+  case "$_samples" in
+    ''|*[!0-9]*|0)
+      echo "!!! REPEATS must be a positive integer in $3 mode (got '$_samples')." >&2
+      exit 4 ;;
+  esac
+}
+
 # ---- warm-server measurement protocol (Hyperloom-aligned) ----
 # ONE server per leg: a full untimed round populates the prefix cache, then $ROUNDS timed rounds on
 # that same hot server (median).  Byte-for-byte baseline.py's warmup_round/measure_round, so both
@@ -124,23 +159,8 @@ fi
 # variance needs isolated_server.
 if [ "${GEAK_REPEAT_MODE:-legacy}" = "warm_server" ]; then
   _purpose="${MEASUREMENT_PURPOSE:-search}"
-  if [ -n "${REPEATS+x}" ]; then
-    _rounds="$REPEATS"
-  elif [ -n "${REPLICAS+x}" ]; then
-    _rounds="$REPLICAS"
-  else
-    case "$_purpose" in
-      validation|parity|search|"") _rounds=1 ;;
-      *)
-        echo ">>> Unknown MEASUREMENT_PURPOSE='$_purpose'; using 1 timed round." >&2
-        _rounds=1 ;;
-    esac
-  fi
-  case "$_rounds" in
-    ''|*[!0-9]*|0)
-      echo "!!! REPEATS must be a positive integer in warm-server mode (got '$_rounds')." >&2
-      exit 4 ;;
-  esac
+  _resolve_samples 1 "timed round" warm-server
+  _rounds="$_samples"
   REPEATS="$_rounds"
   BENCH_OUTER_WARMUP_FULL_ROUND=1   # round 1 is a FULL round, and it is discarded
   BENCH_COLD_FINAL=0                # a cold round would defeat the point of warming
@@ -149,13 +169,9 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "warm_server" ]; then
   MEASUREMENT_PURPOSE="$_purpose"
   export REPEATS BENCH_OUTER_WARMUP_FULL_ROUND BENCH_COLD_FINAL \
          GEAK_ISOLATED_REPLICA WARM_SERVER_ROUNDS MEASUREMENT_PURPOSE
-  if [ "$_rounds" = "1" ]; then
-    echo "Measurement: warm_server  purpose=$_purpose  timed_rounds=1" \
-         "(Hyperloom lifecycle: 1 server, round 1 = full warmup discarded, round 2 = the reported number)"
-  else
-    echo "Measurement: warm_server  purpose=$_purpose  timed_rounds=$_rounds" \
-         "(1 server, 1 discarded full warmup round, median of the timed rounds)"
-  fi
+  echo "Measurement: warm_server  purpose=$_purpose  timed_rounds=$_rounds" \
+       "(Hyperloom lifecycle: 1 server, round 1 = full warmup discarded," \
+       "$([ "$_rounds" = 1 ] && echo "round 2 = the reported number)" || echo "median of the $_rounds timed rounds)")"
   GEAK_REPEAT_MODE=legacy
 fi
 if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
@@ -169,24 +185,8 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
     exit 4
   fi
   _purpose="${MEASUREMENT_PURPOSE:-search}"
-  if [ -n "${REPEATS+x}" ]; then
-    _requested="$REPEATS"
-  elif [ -n "${REPLICAS+x}" ]; then
-    _requested="$REPLICAS"
-  else
-    case "$_purpose" in
-      validation) _requested=3 ;;
-      parity|search|"") _requested=1 ;;
-      *)
-        echo ">>> Unknown MEASUREMENT_PURPOSE='$_purpose'; using 1 isolated replica." >&2
-        _requested=1 ;;
-    esac
-  fi
-  case "$_requested" in
-    ''|*[!0-9]*|0)
-      echo "!!! REPEATS must be a positive integer in isolated-server mode (got '$_requested')." >&2
-      exit 4 ;;
-  esac
+  _resolve_samples 3 "isolated replica" isolated-server
+  _requested="$_samples"
 
   _aggregate_out="${OUT_DIR:-$(pwd)/e2e_bench_out}"
   mkdir -p "$_aggregate_out"
@@ -563,17 +563,10 @@ SERVER_PID=""
 # any role-authored capture script share ONE identity-verified kill. The old cleanup resolved
 # the pgid AT KILL TIME and group-killed whenever it differed from ours — a recycled pid then
 # resolves to a stranger's group, which is how a teardown reaches the caller's orchestrator.
-#
-# Same staging rule as SUMMARIZE above, but the failure mode is worse: without the library
-# `source` fails, the EXIT trap binds a missing function, and the server is left holding its
-# VRAM and port after the serving-GPU lock is released, so the next launch OOMs. A benchmark
-# that cannot stop what it starts must not start it.
-TEARDOWN_LIB=""
-for _cand in "$HERE/server_teardown.sh" "${SKILL_DIR:-}/scripts/server_teardown.sh" \
-             "${WORKFLOW_DIR:-}/scripts/server_teardown.sh"; do
-  case "$_cand" in /scripts/server_teardown.sh) continue ;; esac   # unset SKILL_DIR/WORKFLOW_DIR
-  [ -f "$_cand" ] && { TEARDOWN_LIB="$_cand"; break; }
-done
+# Missing it is worse than a missing summarizer: `source` fails, the EXIT trap binds a missing
+# function, and the server keeps its VRAM and port after the serving-GPU lock is released, so the
+# next launch OOMs. A benchmark that cannot stop what it starts must not start it.
+TEARDOWN_LIB="$(_stage_lookup server_teardown.sh)"
 if [ -z "$TEARDOWN_LIB" ]; then
   echo "!!! server_teardown.sh not found next to this script ($HERE) or under SKILL_DIR/WORKFLOW_DIR." >&2
   echo "    It carries the server-kill contract; without it the EXIT trap is a no-op and the" >&2

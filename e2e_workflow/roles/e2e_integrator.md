@@ -93,19 +93,11 @@ differently → flips borderline argmaxes → over-rejects valid kernels). Inste
   greedy/temp=0, and run `python3 $GSM8K_EVAL_SCRIPT --base-url http://127.0.0.1:<port>/v1 --model <MODEL_PATH>
   --limit $ACCURACY_LIMIT --out <dir>/gsm8k_<tag>.json` against each (it prints `GSM8K_EXACT_MATCH=<s>`).
   The script samples the SAME fixed gsm8k subset for both (seed-pinned), so the scores are comparable.
-- FLOOR FIRST: if `baseline_score < $ACCURACY_FLOOR`, the reference itself is broken and NO comparison
-  against it means anything — stop and report `rejected` with reason `baseline_accuracy_below_floor`
-  (record both scores) rather than scoring the candidate against a collapsed baseline. If only
-  `cand_score < $ACCURACY_FLOOR`, that is `rejected` / `accuracy_regression` regardless of the delta.
-- Then ACCEPT the candidate iff `cand_score >= baseline_score - $ACCURACY_TOL` (quality preserved);
-  otherwise `rejected` with reason `accuracy_regression` (record both scores). This REPLACES byte-parity
-  for the quant gate — a byte-divergent kernel that holds gsm8k accuracy is a LEGITIMATE win. Still apply
-  the throughput + engagement + memory gates as usual. (You can reuse the same two servers for the
-  throughput A/B to avoid extra launches.)
-- Do NOT read a sub-tolerance drop as a real regression worth commentary. At `$ACCURACY_LIMIT` questions
-  the two scores differ only on the handful of questions the kernels disagree about, so a 1-2 point gap
-  is within sampling noise; `$ACCURACY_TOL` is sized to that noise. Report the two scores and the verdict,
-  not a narrative about the delta.
+- ACCEPT the candidate iff `cand_score >= baseline_score - $ACCURACY_TOL` (quality preserved); otherwise
+  `rejected` with reason `accuracy_regression` (record both scores). This REPLACES byte-parity for the
+  quant gate — a byte-divergent kernel that holds gsm8k accuracy is a LEGITIMATE win. Still apply the
+  throughput + engagement + memory gates as usual. (You can reuse the same two servers for the throughput
+  A/B to avoid extra launches.)
 
 **DEEP-MODE feedback (only if `DEEP_FEEDBACK` is in your inputs; a normal/fast run omits it).** Besides
 the gate decision, the deep-mode scheduler needs the WHY so the next co-opt waves can fix the

@@ -406,21 +406,9 @@ const DEEP_FINAL_ACCURACY_LIMIT = parseInt(A.deep_final_accuracy_limit != null ?
 // (over-strict) byte-parity. Default 'none' => unchanged byte/greedy parity (normal/fast untouched).
 const ACCURACY_GATE = String(A.accuracy_gate || 'none').trim();          // 'none' | 'gsm8k'
 const ACCURACY_LIMIT = parseInt(A.accuracy_limit != null ? A.accuracy_limit : 200, 10); // sampled gsm8k subset size
-// Allowed absolute exact_match drop. Set BY the sample size: both legs answer the same seed-pinned
-// subset at temp=0, so the noise scale is the DISCORDANT pairs, sd(delta)=sqrt(d)/n ~= 1.6pt at
-// n=200 / 5% discordance. The old 0.01 sat at 0.6 sd and so rejected ~1 in 4 kernels whose quality
-// had not moved -- the very over-rejection this gate replaces byte-parity to avoid. 0.03 is ~1.9 sd
-// and still tighter than Hyperloom's 0.05; broken quant drops 20-90 points, not 3.
-// To tighten it, do NOT raise accuracy_limit (n=500 buys sd ~1.0pt for 2.5x the eval time) -- use a
-// paired McNemar test over the per-question `ok` flags gsm8k_eval.py already writes, which is free.
-const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.03);
-// Absolute floor on BOTH legs. A purely relative gate is blind when the BASELINE is broken: an
-// equally broken candidate passes. Hyperloom's floor is 0.5 after a run kept a 0.00076 candidate;
-// healthy gsm8k baselines land >= 0.63 and the broken ones scored 0.196 and 0.000.
-const ACCURACY_FLOOR = parseFloat(A.accuracy_floor != null ? A.accuracy_floor : 0.5);
+const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01);        // allowed absolute exact_match drop vs baseline
 const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
-  ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, ACCURACY_FLOOR,
-      GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
+  ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
   : {};
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from

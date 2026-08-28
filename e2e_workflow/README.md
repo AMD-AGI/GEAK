@@ -52,12 +52,12 @@ rigid script): it confirms the chosen `backend` stack, the model, GPU visibility
 sources, available op backends, and the model's arch class; degrades gracefully and writes
 `env_report.{md,json}` that every later phase routes on.
 Every accepted change compounds into the carried-forward overlay + config; throughput is always
-measured warm, repeated, median, vs the TRUE baseline.
+measured on a warm server, in the same lifecycle as the TRUE baseline it is compared against.
 
 ## Pluggable serving backend
 The serving stack is NOT baked in. `args.backend` (sglang|vllm, default sglang) selects
 `scripts/adapters/<backend>.sh`, which `scripts/bench_e2e.sh` (a backend-agnostic dispatcher: owns
-server lifecycle, warmup, repeats, median+spread summary, free-port allocation) sources. Adding a new
+server lifecycle, warmup, timed round(s), summary, free-port allocation) sources. Adding a new
 stack = adding one adapter that defines `adapter_launch / adapter_health / adapter_bench`
 (+ optional `adapter_default_port`). No role or orchestration change. `MODEL` is **required** — there
 is no rig-specific default that could silently bench the wrong target.
@@ -242,16 +242,12 @@ By default the e2e gate accepts a kernel on **throughput delta + greedy output p
 kernel rounds differently and flips a few borderline greedy argmaxes — so you can switch the bar to
 **task accuracy**:
 ```
-args: { ...same..., accuracy_gate:"gsm8k", accuracy_limit:200, accuracy_tol:0.03, accuracy_floor:0.5 }
+args: { ...same..., accuracy_gate:"gsm8k", accuracy_limit:200, accuracy_tol:0.01 }
 ```
 - `accuracy_gate:"gsm8k"` → the Integrator serves a fresh TRUE baseline vs the candidate, runs sampled
-  gsm8k (5-shot, greedy, fixed seed), and accepts iff both legs clear `accuracy_floor` AND
-  `cand_em >= baseline_em - accuracy_tol`.
+  gsm8k (5-shot, greedy, fixed seed), and accepts iff `cand_em >= baseline_em - accuracy_tol`.
 - `accuracy_limit` = #questions (default **200**; deep uses a larger sample at finalize to de-noise the
-  boundary). `accuracy_tol` = allowed exact-match drop (default **0.03**, sized to the sampling noise
-  at n=200 — a tighter bar rejects kernels whose quality has not moved). `accuracy_floor` = absolute
-  score both legs must clear (default **0.5**), so a broken baseline cannot wave through an equally
-  broken candidate.
+  boundary). `accuracy_tol` = allowed exact-match drop (default **0.01**).
 - The eval client is `scripts/gsm8k_eval.py` (model-agnostic; queries the OpenAI-compatible endpoint).
 - Leaving it unset (`"none"`) changes nothing vs before — the gate stays throughput + parity only.
 

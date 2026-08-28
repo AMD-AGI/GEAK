@@ -31,7 +31,7 @@
 | rocprofv3 absent | **degrade** | Profiler falls back to torch-trace (shapes kept, HW durations approximate) |
 | `amd-smi`/`rocminfo` absent | **degrade** | record gfx as "unknown"; widen tuning, don't trust gfx942 priors |
 | aiter / CK profiler / hipblaslt-bench absent | **degrade** | remove those rungs from the backend ladder; note it |
-| baseline bench spread > ~5% | **degrade→re-measure** | noisy box; re-run, raise the noise band, or pin clocks |
+| baseline bench spread > ~5% **with more than one timed sample** | **degrade→re-measure** | noisy box; re-run, raise the noise band, or pin clocks. At the default single timed round `spread=0.0%` always — no evidence, so nothing to gate on |
 
 ## Probes (run, then reason about the output)
 

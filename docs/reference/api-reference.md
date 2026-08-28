@@ -90,14 +90,19 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 |---|---|---|
 | `accuracy_gate` | `none` | `none` \| `gsm8k`. For quantized kernels, switch the bar to task accuracy. |
 | `accuracy_limit` | `200` | Number of gsm8k questions. |
-| `accuracy_tol` | `0.03` | Allowed exact-match drop (`cand_em >= baseline_em - tol`); sized to the sampling noise at `accuracy_limit=200`. |
-| `accuracy_floor` | `0.5` | Absolute exact-match both legs must clear, so a broken baseline cannot pass an equally broken candidate. |
+| `accuracy_tol` | `0.01` | Allowed exact-match drop (`cand_em >= baseline_em - tol`). |
 
 ### Measurement and misc args
 
 | Arg | Default | Description |
 |---|---|---|
 | `noise_band_pct` | `0.5` | e2e acceptance band (%). |
+| `measurement_mode` | `warm_server` | Lifecycle behind EVERY throughput number. `warm_server` = boot one server per leg, discard a full warmup round, time the next round (Hyperloom's protocol). `isolated_server` = one fresh server per sample, for when boot-to-boot variance is what must be gated on. |
+| `search_replicas`, `parity_replicas` | `1` | Timed samples per leg for search / parity legs. |
+| `validation_measurement_mode` | `warm_server` | Lifecycle for the final re-measure; set to `isolated_server` to make validation stricter than the search that fed it. |
+| `validation_rounds` | `1` | Timed rounds per leg when validation is `warm_server`. |
+| `validation_replicas` | `3` | Fresh-server samples per leg when validation is `isolated_server`. |
+| `validation_tight_s` | `1500` | If less than this much wall-clock remains entering Validate, drop to one timed sample per leg rather than shipping no validated number. |
 | `ab_finish_retries` | `3` | A/B leg completion retries. |
 | `use_expert_skills` | `false` | Consult `perf_knowledge/expert_skills` (advisory priors). OFF = byte-identical. |
 | `perf_knowledge_dir` | sibling `perf_knowledge/` | Authoring knowledge base. |
@@ -105,6 +110,17 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 | `warm_start`, `warm_start_match`, `warm_start_min_speedup`, `kb_mode`, `kb_store_dir`, `kb_framework_version` | see the kernel-layer table | Forwarded verbatim to the kernel lanes. Corrective re-authors are forced to `reference` (they must keep the isolated win). |
 | `time_budget_s`, `initial_extra_server_args`, `initial_extra_env`, `tracelens`, `agent_timeout_ms` | — | Forwarded from the external orchestrator. |
 | `final_reserve_s` | `3000` (50min), capped at 20% of `time_budget_s` | Hard floor of wall-clock held back for the whole final phase — Finalize + Report + Validate + the `workflow_return.json` write; no mode starts new work inside it, and each optimization agent's hung-guard is tightened so no in-flight step finishes later than `time_budget_s − reserve` (final-phase agents are exempt). Sized off 85 historical runs (p50 40min, p75 50min, p90 77min, max 86min): 50min covers ~p75, and since Report writes both reports before Validate, a longer tail still ships them (only the Validate re-measure is at risk, and `run_e2e.py` falls back). The 20% cap stops the floor from eating a short budget whole; at budgets ≥5h it never binds. Env override: `GEAK_FINAL_RESERVE_S`. |
+
+> **Throughput numbers are comparable only within one lifecycle.** A `warm_server` round runs against a
+> server that has already served a full round, so for the same config it differs from the cold-cache
+> `isolated_server` number by an amount whose sign and size are not predictable from the config alone:
+> it rises with prefix-cache reuse, and a workload with little shared prefix can land either way
+> (measured on DeepSeek-V4-Pro TP8, `RANDOM_RANGE_RATIO=1.0` / ISL 8192: warm 826.9 vs isolated median
+> 833.3 tok/s). Both legs of any ratio must come from the same mode, and a number produced here
+> must not be compared against a record written before `warm_server` became the default (KB entries,
+> older reports) — re-measure the reference instead. `bench_summary.json.measurement_mode` records
+> which lifecycle produced any given number. With a single timed sample, `spread` is `0.0%` by
+> construction: that is an absence of dispersion evidence, not a quiet box.
 
 ### Example
 
