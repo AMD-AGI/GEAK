@@ -599,10 +599,14 @@ attempt, win or not. REQUIRED sections, in order:
    - **Configurations recalled** — table
      `stored direction | session | stored claim | re-measured here | Δ vs baseline | parity | outcome`,
      one row per `KB_RECALL.e2e.configs[]`. Outcomes are `adopted` / `rejected` / `not_reproduced` /
-     `skipped`, and you must NOT collapse them: `rejected` means it ran here and lost, while
+     `inapplicable` / `skipped`, and you must NOT collapse them: `rejected` means it ran here and lost;
      `not_reproduced` means it never took effect at all (a flag renamed upstream is accepted silently
-     and then ignored). Those mean opposite things about the record and only the second is evidence the
-     record is stale. Quote the `why` for anything that was not adopted.
+     and then ignored); `inapplicable` means it could not be put on this box's baseline in the first
+     place, which is a verdict on the pairing and not on the record. Those mean different things and
+     only `not_reproduced` is evidence the record is stale. Quote the `why` for anything that was not
+     adopted, and when a row carries `overrides` or `applied_partial`, say which knobs the recalled
+     configuration took over from this run's baseline and which ones had to be dropped to get a server
+     up — a Δ measured from a partly-applied configuration is not a measurement of the record.
    - **Kernels recalled** — table `kernel | kind | stored isolated× | re-measured e2e Δ% | outcome | why`
      from `KB_RECALL.e2e.kernels[]`, plus the kernel-lane rows from `KB_RECALL.kernel[]` showing
      `adopted`, `adopted_speedup`, `rounds_committed` and `incremental_speedup`. A lane that adopted a

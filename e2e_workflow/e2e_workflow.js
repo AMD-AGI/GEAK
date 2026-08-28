@@ -2509,6 +2509,13 @@ if (want('setup')) {
           measured_tok_s: v.measured_tok_s != null ? v.measured_tok_s : null,
           delta_pct: v.delta_pct != null ? v.delta_pct : null,
           parity: String(v.parity || ''), outcome: String(v.outcome || ''),
+          // What the merge and the repair did, in the same row as the number they produced. A
+          // reader who sees a neutral `delta_pct` needs to know whether the recorded value was the
+          // one that ran (`overrides`) and whether all of it ran (`applied_partial`); without them
+          // the row reads as a verdict on the record when it may be a verdict on the pairing.
+          overrides: Array.isArray(v.overrides) ? v.overrides : [],
+          applied_partial: v.applied_partial === true,
+          dropped_flags: Array.isArray(v.dropped_flags) ? v.dropped_flags : [],
           why: String(v.why || '').slice(0, 300),
         }));
         KB_RECALL.e2e.kernels = kernelVerdicts.map(v => ({
