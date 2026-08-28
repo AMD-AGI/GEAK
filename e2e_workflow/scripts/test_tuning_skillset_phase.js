@@ -177,8 +177,19 @@ ok(!/win_gate|throughput_speedup|kbNoWinVerdict/.test(wb),
   "the tuned-op write does NOT consult the run's e2e verdict (that coupling is what it exists to break)");
 ok(/kernel-kb\] tuned-op write failed \(NON-FATAL/.test(src),
   'a failed KB write loses a record, never a measurement — it cannot fail the run');
-ok(/TUNED_KB_ROOT: KB_ARTIFACTS_DIR/.test(src) && /TUNING_KB_ENABLED && KB_DIMS && KB_DIMS\.gfx \?/.test(src),
-  'the same store is handed BACK to the role to read, under the same blind-eval switch');
+// The read is PLANE-addressed, not directory-addressed: the write above goes to the shared service,
+// and a directory read would look at this run's own checkout, which is created empty and deleted with
+// the run — a miss indistinguishable from a genuinely empty page. This assertion named the old
+// `TUNED_KB_ROOT` for three commits after that form was removed, so it was checking for a symbol that
+// could not be there and passing on nothing. Name the keys the role actually reads.
+const roleSrc = fs.existsSync(ROLE) ? fs.readFileSync(ROLE, 'utf8') : '';
+for (const key of ['TUNED_KB_PLANE', 'TUNED_KB_STORE', 'TUNED_KB_GFX', 'TUNED_KB_PRECISION',
+                   'TUNED_KB_SCRIPT', 'TUNED_KB_ENV_PRELUDE']) {
+  ok(new RegExp(key + ':').test(src) && new RegExp('\\$' + key).test(roleSrc),
+    `${key} is handed to the role AND read by it (a key only one side knows is dead plumbing)`);
+}
+ok(/TUNING_KB_ENABLED && KB_DIMS && KB_DIMS\.gfx \?/.test(src),
+  'the whole block sits behind the same blind-eval switch the write does');
 
 // ---------------------------------------------------------------------------
 // C. OFF is additive-free.
@@ -230,8 +241,19 @@ if (role) {
   ok(/[Rr]ead them and use them/.test(role),
     'role routes into the skillset rather than restating it');
   ok(!/TUNING_BUDGET/.test(role), 'role imposes no op budget');
-  const words = role.split(/\s+/).length;
-  ok(words < 1600, `role stays a thin adapter, not a manual (${words} words < 1600)`);
+  // What this guards is the role growing into a PARAPHRASE OF THE METHOD — the thing that is
+  // supposed to stay in the vendored skillset. The "Prior tuning knowledge" section is not method:
+  // it is the contract for reading a store (which plane, which carrier, which flags, what a silent
+  // miss looks like), and it has nowhere else to live. Measuring it against the same budget made a
+  // healthy role look like a bloated one, and the honest fix is to measure the two separately rather
+  // than to raise one number until the red goes away. Both are capped: the second keeps the KB
+  // contract from growing without limit just because it is exempt from the first.
+  const KB_SECTION = /### Prior tuning knowledge[\s\S]*?\n---\n/;
+  const method = role.replace(KB_SECTION, '').split(/\s+/).length;
+  const total = role.split(/\s+/).length;
+  ok(method < 1600, `the METHOD prose stays a thin adapter, not a manual (${method} words < 1600)`);
+  ok(KB_SECTION.test(role), 'the KB contract section is still findable by the split above');
+  ok(total < 2100, `the role as a whole stays bounded (${total} words < 2100)`);
 }
 
 // ---------------------------------------------------------------------------

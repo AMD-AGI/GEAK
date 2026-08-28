@@ -40,12 +40,10 @@ your return which mode you were in).
      --carrier tuned_artifact --min-speedup 1.05 \
      ${TUNED_KB_PRECISION:+--precision "$TUNED_KB_PRECISION"}
    ```
-   The page is keyed on arch and op, **not** on dtype: one `fused_moe` page holds this deployment's
-   precision and every other one, ranked against each other on speedup alone. `--precision` drops the
-   rows that cannot apply to you before that ranking — without it the top candidate may be a table
-   whose filename encodes another dtype, which installs under a name your runtime never reads and
-   which you then spend a verify slot disproving. Entries that state no precision (the whole backlog
-   predates the field) are still offered; the filter removes only stated mismatches.
+   The page is keyed on arch and op, **not** dtype, and ranks on speedup alone — so the top candidate
+   may be a table for another precision, which installs under a name your runtime never reads and
+   costs you a verify slot. `--precision` drops stated mismatches before that ranking; entries stating
+   no precision are still offered.
    A read takes exactly ONE plane, so `TUNED_KB_PLANE` is never `both`. When it is `remote` and the
    answer comes back with no candidates, retry that op once against the local mirror
    (`--plane local --store "$TUNED_KB_STORE"`) before concluding the page is empty; say in your
