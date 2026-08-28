@@ -747,9 +747,9 @@ def _local_attestations(meta: dict) -> dict:
     that has never been recalled should carry no ledger at all — four zeroes and no ledger mean
     the same thing to a reader, and the shorter one does not imply somebody looked.
     """
-    from kb.attest import attestations_of
+    from kb.attest import BUCKETS, attestations_of
     ledger = attestations_of(meta if isinstance(meta, dict) else {})
-    counted = any(ledger[k] for k in ("recalls", "validations", "failures", "not_reproduced"))
+    counted = any(ledger[k] for k in ("recalls",) + BUCKETS)
     return ledger if counted else {}
 
 

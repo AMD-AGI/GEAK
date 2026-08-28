@@ -666,6 +666,16 @@ const SWEEP_SCHEMA = obj({
   trials: arrObj, accepted_flags: { type: 'string' }, accepted_env: { type: 'string' },
   best_throughput_tok_s: { type: 'number' }, throughput_speedup_vs_baseline: { type: 'number' },
   summary: { type: 'string' },
+  // Only the warm-start repair pass fills this, and it stays OUT of `required` so every ordinary
+  // sweep keeps validating unchanged. It is the structured half of "why did this not run here" —
+  // read in place of guessing at the free-text notes with a regex.
+  repair: obj({
+    attempted: { type: 'boolean' },
+    classification: { type: 'string' },   // upstream_gone | conflicts_with_baseline | env_unsupported | mixed | unknown
+    dropped_flags: { type: 'array', items: { type: 'string' } },
+    reason_by_flag: { type: 'object', additionalProperties: true },
+    launch_error: { type: 'string' },
+  }, []),
 }, ['accepted_flags', 'best_throughput_tok_s']);
 
 // `e2e_store.py resolve` output, passed through VERBATIM. Nothing is `required` and no field is
@@ -1865,6 +1875,117 @@ function applyOpIdentityGuard(queue, stage) {
 }
 
 // ===========================================================================
+// MERGING A RECOVERED CONFIGURATION INTO THE ONE THIS RUN WAS HANDED
+// ===========================================================================
+// A stored e2e record holds a WHOLE launch configuration, not a delta, because that is the only
+// form that can be replayed on a box whose baseline nobody recorded. Replaying it means combining
+// it with whatever baseline configuration THIS run was handed — under Hyperloom that is a full
+// flag string the run does not own (interface/run_e2e.py seeds `initial_extra_server_args` from
+// the EXPLORE result and then sets `config_tune: "false"`, so there is no later sweep to correct
+// anything either).
+//
+// That combination used to be a string concatenation performed by an agent, and it was wrong in a
+// way nothing could see. `adapters/sglang.sh` expands `$EXTRA_SERVER_ARGS` straight into argparse
+// and `$EXTRA_ENV` straight into `env`, and both resolve a repeated key by last-wins. So when the
+// baseline and the record each pin `--context-length`, WHICH ONE APPLIES is decided by the order
+// the agent happened to write them in. Lose that coin flip and the server runs the baseline
+// configuration twice: ~0% delta, no complaint in any log — the flag WAS honoured, just not with
+// the recorded value — and the record is filed as `rejected`. A record that wins gets recorded as
+// a loss, which is the one outcome the whole warm start exists to avoid.
+//
+// So the merge is arithmetic, done here, and it reports what it did. Same rule the launcher
+// already applies to one flag by hand (`adapters/sglang.sh`: don't add `--watchdog-timeout` if the
+// caller set one), generalized and moved to where the string is built instead of where it is used.
+// The output names every key exactly once, so last-wins never gets a vote.
+
+// Flags that legitimately appear more than once. Deliberately tiny: `--lora-path` is a list and
+// deduping it would silently drop adapters, while everything else in these configs is a scalar
+// where a second occurrence is a mistake we are here to remove. Grow it only with evidence.
+const REPEATABLE_FLAGS = new Set(['--lora-path', '--lora-paths']);
+
+const _looksLikeFlag = (t) => /^--?[A-Za-z]/.test(t);
+
+/** `--a 1 --b=2 --c` -> [{name,value,eq}]. Unrecognized tokens ride along under name=null. */
+function parseFlagString(s) {
+  const toks = String(s || '').trim().split(/\s+/).filter(Boolean);
+  const items = [];
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (!_looksLikeFlag(t)) { items.push({ name: null, value: t, eq: false }); continue; }
+    const eq = t.indexOf('=');
+    if (eq > 0) { items.push({ name: t.slice(0, eq), value: t.slice(eq + 1), eq: true }); continue; }
+    // Everything up to the next flag is this flag's value; `--foo a b` stays one item so a
+    // multi-valued flag is overridden as a unit rather than half-overridden.
+    const vals = [];
+    while (i + 1 < toks.length && !_looksLikeFlag(toks[i + 1])) vals.push(toks[++i]);
+    items.push({ name: t, value: vals.length ? vals.join(' ') : null, eq: false });
+  }
+  return items;
+}
+
+const renderFlagItems = (items) => items.map(
+  (it) => (it.name == null ? it.value
+    : it.value == null ? it.name
+      : it.eq ? `${it.name}=${it.value}` : `${it.name} ${it.value}`)).join(' ').trim();
+
+/** `K=V K2=V2` -> [{name,value}]. A token that is not an assignment rides along under name=null. */
+function parseEnvString(s) {
+  return String(s || '').trim().split(/\s+/).filter(Boolean).map((t) => {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(t);
+    return m ? { name: m[1], value: m[2] } : { name: null, value: t };
+  });
+}
+
+const renderEnvItems = (items) => items.map(
+  (it) => (it.name == null ? it.value : `${it.name}=${it.value}`)).join(' ').trim();
+
+/**
+ * Key-by-key merge of a recovered configuration onto this run's baseline.
+ *
+ * The recovered value WINS on a collision — it is the thing being tested, and applying the
+ * baseline's value instead would test nothing. It wins IN PLACE, so the baseline's ordering
+ * survives and the output contains each key once.
+ *
+ * Returns `{ merged, overrides, added, unchanged }`. `overrides` is the part that has to reach a
+ * human and the tuner: it is the list of knobs where this box disagreed with the record, and it is
+ * the first thing to look at when a replay comes back neutral.
+ */
+function mergeConfig(baseline, recovered, { parse, render, repeatable }) {
+  const out = parse(baseline).map((it) => ({ ...it }));
+  const at = new Map();
+  out.forEach((it, i) => { if (it.name && !repeatable.has(it.name)) at.set(it.name, i); });
+  const overrides = [], added = [], unchanged = [];
+  for (const it of parse(recovered)) {
+    if (it.name == null || repeatable.has(it.name) || !at.has(it.name)) {
+      out.push({ ...it });
+      if (it.name != null) {
+        added.push(it.name);
+        if (!repeatable.has(it.name)) at.set(it.name, out.length - 1);
+      }
+      continue;
+    }
+    const i = at.get(it.name), prev = out[i];
+    if (String(prev.value == null ? '' : prev.value) === String(it.value == null ? '' : it.value)) {
+      unchanged.push(it.name);
+      continue;
+    }
+    overrides.push({ flag: it.name, baseline_value: prev.value, recalled_value: it.value });
+    out[i] = { ...it };
+  }
+  return { merged: render(out), overrides, added, unchanged };
+}
+
+const mergeFlags = (baseFlags, storedFlags) => mergeConfig(baseFlags, storedFlags,
+  { parse: parseFlagString, render: renderFlagItems, repeatable: REPEATABLE_FLAGS });
+const mergeEnv = (baseEnv, storedEnv) => mergeConfig(baseEnv, storedEnv,
+  { parse: parseEnvString, render: renderEnvItems, repeatable: new Set() });
+
+/** `--context-length 11264 -> 13312; MAX_MODEL_LEN 13312 -> 16384`, or "". For prompts and logs. */
+const describeOverrides = (overrides) => (overrides || []).map(
+  (o) => `${o.flag} ${o.baseline_value == null ? '(unset)' : o.baseline_value} -> ` +
+    `${o.recalled_value == null ? '(set)' : o.recalled_value}`).join('; ');
+
+// ===========================================================================
 // PHASE: Setup + Baseline profile + Strategize  (gated; else load carried state)
 // ===========================================================================
 // Module A's outputs. They are folded into the ORDINARY state variables at those variables' real
@@ -2019,21 +2140,29 @@ if (want('setup')) {
             outcome: 'skipped', why: 'the record carries no config to apply' });
           continue;
         }
-        const sweep = await safeAgent(
-          roleAgent('config_tuner', 'sweep',
-            'Validate ONE historical configuration recovered from the knowledge base. Treat it exactly ' +
-            'as you would a fresh direction: same isolated-server measurement, same parity check, same ' +
-            'swap-took-effect verification. TWO deviations from your role file, both deliberate:\n' +
-            '(1) Do NOT decompose this direction into one-axis-at-a-time trials. A stored config is an ' +
-            'ALREADY-COMPOUNDED whole that was accepted together on another box; benching its knobs ' +
-            'separately measures a configuration nobody has ever run, and the parts can each be ' +
-            'neutral while the whole is a win (or the reverse). Apply all of it, once, as a single ' +
-            'trial.\n' +
-            '(2) Verify the swap TOOK EFFECT before you believe a null result. This config came from a ' +
-            'different framework_version: a flag that was renamed or removed upstream is accepted ' +
-            'silently on the command line and then ignored, which is indistinguishable from "the ' +
-            'config made no difference". Grep the server log for each flag/env actually being ' +
-            'honoured, and if one is not, say so in the trial notes rather than reporting a clean no-op.',
+        // Key-by-key, not string-concatenated — see mergeConfig. The recorded value wins every
+        // collision; `overrides` is the list of knobs where this box and the record disagreed.
+        const mf = mergeFlags(curFlags, storedFlags);
+        const me = mergeEnv(curEnv, storedEnv);
+        const overrides = mf.overrides.concat(me.overrides);
+        if (overrides.length) {
+          log(`[kb] merge ${c.session_id || '?'}: the recorded config overrides ${overrides.length} ` +
+            `knob(s) this run's baseline already pins — ${describeOverrides(overrides)}. ` +
+            'The recorded value is the one under test, so it wins.');
+        }
+        // Nothing left to test. Not a verdict on the record and not worth a server launch: this
+        // run's baseline already IS the recorded configuration, so a bench would compare the
+        // baseline with itself and file the ~0% result as a loss. Left un-attested on purpose —
+        // `recalls` counts attempts on hardware, and this one never reached any.
+        if (mf.merged === renderFlagItems(parseFlagString(curFlags)) &&
+            me.merged === renderEnvItems(parseEnvString(curEnv))) {
+          verdicts.push({ ...c, measured_tok_s: null, delta_pct: null, parity: 'n/a',
+            outcome: 'skipped',
+            why: "this run's baseline already carries the whole recorded configuration" });
+          continue;
+        }
+        const runValidation = (brief, label) => safeAgent(
+          roleAgent('config_tuner', 'sweep', brief,
             {
               EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, BASELINE_THROUGHPUT: BASELINE_TPUT,
               NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
@@ -2041,18 +2170,100 @@ if (want('setup')) {
                 rank: 1,
                 direction: 'kb_warm_start:' + (c.direction || 'unlabeled'),
                 axis: 'compound (recovered configuration — do not split)',
-                flags: storedFlags, env: storedEnv,
+                // ALREADY MERGED with this run's baseline. Use verbatim; do not re-combine with
+                // CURRENT_FLAGS/CURRENT_ENV, or the collisions the merge just resolved come back.
+                flags: mf.merged, env: me.merged,
                 rationale: `Recorded under ${c.canonical_id || resolved.canonical_id} (session ` +
                   `${c.session_id || '?'}), where it measured ${c.throughput_tok_s != null ? c.throughput_tok_s : '?'}` +
                   ` tok/s (${c.speedup != null ? c.speedup + 'x' : 'speedup not recorded'}) against a ` +
                   `baseline of ${c.baseline_throughput_tok_s != null ? c.baseline_throughput_tok_s : '?'} tok/s. ` +
-                  'That number is a HYPOTHESIS about this box, not a measurement of it.',
+                  'That number is a HYPOTHESIS about this box, not a measurement of it.' +
+                  (overrides.length
+                    ? ` NOTE: ${overrides.length} knob(s) in it disagree with this run's baseline and ` +
+                      `the recorded value was taken — ${describeOverrides(overrides)}. If the result is ` +
+                      'neutral, check these first: they are where the recorded config and this box ' +
+                      'were asked to be two different things.'
+                    : ''),
               }],
+              MERGE_OVERRIDES: overrides, MERGE_ADDED: mf.added.concat(me.added),
               CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
               MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
               SKILL_DIR: WORKFLOW_DIR,
             }),
-          { phase: 'WarmStart', label: `warm_start:validate:${c.session_id || 'cand'}`, schema: SWEEP_SCHEMA });
+          { phase: 'WarmStart', label, schema: SWEEP_SCHEMA });
+
+        let sweep = await runValidation(
+          'Validate ONE historical configuration recovered from the knowledge base. Treat it exactly ' +
+          'as you would a fresh direction: same isolated-server measurement, same parity check, same ' +
+          'swap-took-effect verification. THREE deviations from your role file, all deliberate:\n' +
+          '(1) Do NOT decompose this direction into one-axis-at-a-time trials. A stored config is an ' +
+          'ALREADY-COMPOUNDED whole that was accepted together on another box; benching its knobs ' +
+          'separately measures a configuration nobody has ever run, and the parts can each be ' +
+          'neutral while the whole is a win (or the reverse). Apply all of it, once, as a single ' +
+          'trial.\n' +
+          "(2) The direction's `flags`/`env` are ALREADY MERGED with this run's baseline, key by key. " +
+          'Pass them VERBATIM to bench_e2e.sh. Do NOT append CURRENT_FLAGS/CURRENT_ENV to them — those ' +
+          'are shown to you only so you can see what was overridden, and re-combining them puts the ' +
+          'duplicate keys back and hands the outcome to argparse last-wins.\n' +
+          '(3) Verify the swap TOOK EFFECT before you believe a null result. This config came from a ' +
+          'different framework_version: a flag that was renamed or removed upstream is accepted ' +
+          'silently on the command line and then ignored, which is indistinguishable from "the ' +
+          'config made no difference". Grep the server log for each flag/env actually being ' +
+          'honoured, and if one is not, say so in the trial notes rather than reporting a clean no-op. ' +
+          'MERGE_OVERRIDES lists the knobs where the record and this box disagreed — check those in ' +
+          'the log first.',
+          `warm_start:validate:${c.session_id || 'cand'}`);
+
+        // ONE repair attempt, and only when the server produced no number at all.
+        //
+        // A recovered config is replayed on a box whose baseline it has never met, and the first
+        // launch is where that shows up: a flag deleted upstream makes argparse exit before the
+        // model loads, and a knob this run's baseline pins for a reason it did not record can be
+        // incompatible with the recorded value. Both used to end the same way — measured 0, one
+        // shot spent, `not_reproduced` filed against the record. The first of those really is the
+        // record's fault. The second is not, and a record that keeps meeting incompatible
+        // baselines was being retired for it.
+        //
+        // So: hand the launch failure back, make the tuner say WHICH of the two it is, let it
+        // adapt the minimum needed, and bench once more. Exactly once — a repair loop against a
+        // config that cannot run here burns server launches to learn nothing new — and through the
+        // SAME accept gate, with no allowance made for having been repaired.
+        let repair = null;
+        if (!((sweep && sweep.best_throughput_tok_s) || 0)) {
+          const repaired = await runValidation(
+            'A recovered configuration was applied to this box and the server produced NO ' +
+            'measurement — it failed to launch, failed to become healthy, or died before the bench. ' +
+            'This is the ONE repair attempt; there is no second.\n\n' +
+            'Read your own launch log from the attempt you just made. Then, for each knob that came ' +
+            'from the record (MERGE_OVERRIDES and MERGE_ADDED name them), classify it:\n' +
+            '  - `upstream_gone`: this build does not have the flag/env at all — argparse rejected ' +
+            'it, or it is absent from `--help`. This is the RECORD being stale.\n' +
+            "  - `conflicts_with_baseline`: the build has it, but the value cannot hold together with " +
+            "something this run's baseline pins (a length above the served context, a memory " +
+            'fraction the rest of the config cannot fit under, a backend the baseline excludes). ' +
+            'This is the PAIRING failing, and says nothing about the record.\n' +
+            '  - `env_unsupported`: the build ignores or rejects the env var.\n' +
+            'Then drop or adapt the MINIMUM needed to get a running server — keep as much of the ' +
+            'recorded configuration as will run, and never drop a knob you did not have to — and ' +
+            'bench that once, exactly as before.\n\n' +
+            'Return the same JSON, plus a `repair` object: `{"attempted": true, "classification": ' +
+            '"upstream_gone|conflicts_with_baseline|env_unsupported|mixed|unknown", ' +
+            '"dropped_flags": ["--flag", ...], "reason_by_flag": {"--flag": "why"}, ' +
+            '"launch_error": "<the line that actually killed it>"}`. If the server still will not ' +
+            'come up, say so and return `best_throughput_tok_s: 0` — an honest "cannot run here" is ' +
+            'worth more than a number from a configuration that is no longer the record.',
+            `warm_start:repair:${c.session_id || 'cand'}`);
+          if (repaired) {
+            repair = (repaired.repair && typeof repaired.repair === 'object') ? repaired.repair : {};
+            sweep = repaired;
+          }
+          log(`[kb] repair ${c.session_id || '?'}: ` + (repair
+            ? `classified ${repair.classification || 'unknown'}` +
+              `${(repair.dropped_flags || []).length ? `, dropped ${(repair.dropped_flags || []).join(' ')}` : ''}` +
+              `${(sweep && sweep.best_throughput_tok_s) ? ', server came up' : ', still no measurement'}`
+            : 'the repair attempt itself produced nothing'));
+        }
+        const dropped = (repair && Array.isArray(repair.dropped_flags)) ? repair.dropped_flags : [];
         const trial = (sweep && (sweep.trials || [])[0]) || {};
         const measured = (sweep && sweep.best_throughput_tok_s) || 0;
         const parity = String(trial.parity || trial.output_parity || '');
@@ -2063,30 +2274,46 @@ if (want('setup')) {
         const accept = trial.kept === true && measured > BASELINE_TPUT &&
           deltaPct > NOISE_BAND && parity !== 'fail';
         if (accept) {
-          curFlags = sweep.accepted_flags || storedFlags || curFlags;
-          curEnv = sweep.accepted_env || storedEnv || curEnv;
+          curFlags = sweep.accepted_flags || mf.merged || curFlags;
+          curEnv = sweep.accepted_env || me.merged || curEnv;
           kbSeedTput = measured;
           log(`[kb] ADOPTED ${c.session_id || '?'} (${c.direction || 'unlabeled'}): ` +
-            `${measured} tok/s, +${deltaPct.toFixed(2)}% vs baseline ${BASELINE_TPUT} (noise band ${NOISE_BAND}%).`);
+            `${measured} tok/s, +${deltaPct.toFixed(2)}% vs baseline ${BASELINE_TPUT} (noise band ${NOISE_BAND}%)` +
+            `${dropped.length ? `, with ${dropped.join(' ')} dropped to make it run here` : ''}.`);
         }
-        // THREE outcomes, not two. "ran and lost" and "could not be made to run" were both spelled
-        // `rejected`, and they mean opposite things to the record: a loss is one box's verdict on a
-        // real configuration, while a config that never took effect says the record is missing
-        // something — a flag renamed upstream, an env the build does not honour. Only the second is
-        // evidence for retiring it, and the store now counts them separately (kb/attest.py).
-        const notes = String(trial.notes || (sweep && sweep.summary) || '');
+        // FOUR outcomes. "ran and lost", "could not be made to run" and "does not fit this box"
+        // mean three different things to the record: a loss is one box's verdict on a real
+        // configuration; a config that never took effect says the record is missing something — a
+        // flag renamed upstream, an env the build does not honour; a config that collides with a
+        // baseline this run did not choose says nothing about the record at all. Only the middle
+        // one is evidence for retiring it, and the store counts all three apart (kb/attest.py).
+        //
+        // `note` and `notes` are both read: the role file's return schema spells it `note`, and
+        // reading only `notes` meant the per-trial text never reached this regex at all.
+        const notes = String(trial.notes || trial.note || (sweep && sweep.summary) || '');
         const inert = /\b(?:not (?:honou?red|recognized|recognised|applied|supported)|unrecognized|unrecognised|ignored|no such option|unknown (?:option|argument|flag)|renamed|removed upstream|did not take effect)\b/i.test(notes);
-        const outcome = accept ? 'adopted' : (!measured || inert) ? 'not_reproduced' : 'rejected';
+        // The repair's structured verdict outranks the regex: it was reached by reading the launch
+        // error, while the regex is guessing at free text written for a human.
+        const conflicted = String((repair && repair.classification) || '') === 'conflicts_with_baseline';
+        const outcome = accept ? 'adopted'
+          : !measured ? (conflicted ? 'inapplicable' : 'not_reproduced')
+            : inert ? 'not_reproduced' : 'rejected';
         if (!accept) {
-          log(`[kb] ${outcome === 'not_reproduced' ? 'NOT REPRODUCED' : 'rejected'} ` +
+          log(`[kb] ${{ not_reproduced: 'NOT REPRODUCED', inapplicable: 'INAPPLICABLE HERE' }[outcome] || 'rejected'} ` +
             `${c.session_id || '?'} (${c.direction || 'unlabeled'}): ` +
             `measured ${measured || 'n/a'} tok/s vs baseline ${BASELINE_TPUT}` +
             `${measured ? ` (${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%)` : ''}` +
             `${parity ? `, parity=${parity}` : ''}${inert ? ', the config never took effect' : ''}` +
+            `${outcome === 'inapplicable' ? ", it collides with this run's baseline and is no evidence against the record" : ''}` +
             ` — kept as a reference, not applied.`);
         }
         verdicts.push({ ...c, measured_tok_s: measured || null, delta_pct: measured ? deltaPct : null,
-          parity: parity || 'unknown', outcome, why: notes });
+          parity: parity || 'unknown', outcome, why: notes,
+          // What was actually put on the box, as opposed to what the record asked for. A reader
+          // comparing this run's number with the stored one needs both, and `applied_partial`
+          // is the difference between "the record lost" and "most of the record lost".
+          overrides, applied_partial: dropped.length > 0, dropped_flags: dropped,
+          repair_classification: String((repair && repair.classification) || '') });
         if (accept) break;   // adopt the first that passes; the rest stay references
       }
       // ---------------------------------------------------------------------
@@ -2229,7 +2456,7 @@ if (want('setup')) {
       // record, not against the e2e run that once used it, and the two have separate ledgers —
       // `experience_store.py attest` is where that verdict belongs.
       const attestable = verdicts.filter(v => v.session_id &&
-        ['adopted', 'rejected', 'not_reproduced'].includes(v.outcome));
+        ['adopted', 'rejected', 'not_reproduced', 'inapplicable'].includes(v.outcome));
       if (attestable.length) {
         const cmds = attestable.map(v =>
           `python3 ${shq(E2E_STORE_SCRIPT)} attest ${kbIdentityFlags()} ${kbPlaneFlags()} ` +
@@ -2237,7 +2464,16 @@ if (want('setup')) {
           `--outcome ${v.outcome === 'adopted' ? 'validated' : v.outcome} ` +
           (v.measured_tok_s ? `--measured-tok-s ${v.measured_tok_s} ` : '') +
           `--baseline-tok-s ${BASELINE_TPUT} --parity ${shq(v.parity || 'n/a')} ` +
-          `--note ${shq(String(v.why || '').slice(0, 200))} ` +
+          // The note carries what was actually run, not just why it ended: a bare "no win" against
+          // a partially-dropped config would read, three months later, as a verdict on the whole
+          // record. Overrides first — they are what a reader has to know to interpret the number.
+          `--note ${shq([
+            (v.overrides || []).length ? `overrode ${describeOverrides(v.overrides)}` : '',
+            (v.dropped_flags || []).length
+              ? `dropped ${(v.dropped_flags || []).join(' ')} to make it run here` +
+                `${v.repair_classification ? ` (${v.repair_classification})` : ''}` : '',
+            String(v.why || ''),
+          ].filter(Boolean).join('; ').slice(0, 400))} ` +
           `--measured-by ${shq('e2e_workflow:' + BACKEND)} --apply || true`);
         try {
           await safeAgent(
@@ -2290,7 +2526,8 @@ if (want('setup')) {
         // Split out of `rejected` for the reference section below, but deliberately still counted
         // inside it: for the roles that come next, "lost the A/B" and "never ran" are both "do not
         // re-propose this verbatim". The distinction matters to the STORE, not to the Architect.
-        const notReproduced = verdicts.filter(v => v.outcome === 'not_reproduced');
+        const notReproduced = verdicts.filter(
+          v => v.outcome === 'not_reproduced' || v.outcome === 'inapplicable');
         const md = [
           '# Warm start — MEASURED ON THIS BOX',
           '',
@@ -2332,9 +2569,12 @@ if (want('setup')) {
             '## REFERENCE ONLY — recalled but NOT reproduced here',
             '',
             'These were offered by the store and benched on this box, and either produced no number',
-            'at all or never took effect (a flag renamed upstream is accepted silently and then',
-            'ignored). They are NOT results. They are the closest thing this deployment has to a',
-            'record of what someone else got working, and their material is below so you can read',
+            'at all, never took effect (a flag renamed upstream is accepted silently and then',
+            "ignored), or collided with a knob this run's baseline already pins and could not be",
+            'applied here at all. They are NOT results — and the last of those is not evidence',
+            'against the record either, only against the pairing. They are the closest thing this',
+            'deployment has to a record of what someone else got working, and their material is',
+            'below so you can read',
             'what they actually did rather than guess from a direction label.',
             '',
             ...notReproduced.flatMap(v => {
@@ -2344,7 +2584,16 @@ if (want('setup')) {
                 .filter(k => k && k.patch).map(k => root ? `${root}/${k.patch}` : k.patch);
               return [
                 `### ${v.direction || 'unlabeled'} (session \`${v.session_id || '?'}\`)`,
-                `- why it did not reproduce: ${String(v.why || 'no measurement came back').slice(0, 300)}`,
+                `- why it did not reproduce: ${v.outcome === 'inapplicable'
+                  ? "it could not be applied to this run's baseline at all — " : ''}` +
+                  `${String(v.why || 'no measurement came back').slice(0, 300)}`,
+                ...((v.overrides || []).length
+                  ? [`- knobs where it disagreed with this run's baseline (recorded value was ` +
+                     `taken): ${describeOverrides(v.overrides)}`] : []),
+                ...((v.dropped_flags || []).length
+                  ? [`- dropped to get it running here: ${v.dropped_flags.join(' ')}` +
+                     `${v.repair_classification ? ` (${v.repair_classification})` : ''} — so the ` +
+                     'number above, if any, is for LESS than the record asked for'] : []),
                 `- stored claim: ${v.throughput_tok_s != null ? v.throughput_tok_s + ' tok/s' : '?'}` +
                   `${v.speedup != null ? ` (${v.speedup}x)` : ''}, recorded elsewhere`,
                 `- launch script: ${repro.launch
