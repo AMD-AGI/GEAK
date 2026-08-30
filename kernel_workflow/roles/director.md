@@ -117,29 +117,18 @@ Steps:
    ```bash
    mkdir -p "$EVAL_DIR/baseline" "$EVAL_DIR/workspace"
    echo "$KERNEL_PATH_ORIG" > "$EVAL_DIR/original_kernel_path.txt"
-   # Copy the kernel into baseline + workspace while EXCLUDING .git and all build artifacts at copy
-   # time (tar-pipe; rsync may be absent). This means we NEVER run a risky `rm -rf .git` (no approval
-   # friction) AND the source .git — which may carry prior/optimized history — can never leak into a
-   # workspace where an engineer could `git show` it. IMPORTANT: also dropping any `.torch_ext` —
-   # torch's build.ninja stores ABSOLUTE source paths, so an inherited cache would rebuild the wrong
-   # location; each workspace must build its own fresh. ALSO exclude reference_io.pt: the golden is BIG
-   # (~1 GB) and IMMUTABLE, so we SHARE the single original via an absolute symlink (below) instead of
-   # copying it into every workspace. Only `workspace/` needs it (CANONICAL = workspace; the unittest
-   # loads it there and baseline/ never reads a golden).
+   # Issue #429: ALWAYS use materialize_workspace.sh for baseline + workspace. Agents that
+   # previously inlined tar sometimes omitted --exclude='*.so' and copied multi-GiB aiter/jit/*.so
+   # into every clone. Script excludes nested *.so/*.o and aiter/jit, never -h/--dereference.
+   # reference_io.pt is excluded from the tar and shared via absolute symlink below.
    for d in baseline workspace; do
-     ( cd "$KERNEL_PATH_ORIG" && tar \
-         --exclude='./.git' --exclude='*/.git' \
-         --exclude='./build' --exclude='*/build' \
-         --exclude='./__pycache__' --exclude='*/__pycache__' \
-         --exclude='./.torch_ext' --exclude='*/.torch_ext' \
-         --exclude='./.rocprofv3' --exclude='*/.rocprofv3' \
-         --exclude='./reference_io.pt' --exclude='*/reference_io.pt' \
-         --exclude='*.so' --exclude='*.o' \
-         -cf - . ) | ( cd "$EVAL_DIR/$d" && tar -xf - )
+     bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+       --src "$KERNEL_PATH_ORIG" --dst "$EVAL_DIR/$d" \
+       --shared-root "$EVAL_DIR/_shared" --link-aiter
    done
    # Share the immutable golden by absolute symlink (sha check + torch.load are transparent through it;
    # downstream engineer/verify tars carry the symlink verbatim — never add -h/--dereference).
-   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
+   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
    printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
@@ -211,28 +200,20 @@ baseline latencies recorded at benchmark setup).
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
    # NO `rm` (it triggers an approval prompt that blocks autonomous runs). Use a UNIQUE validation
    # workspace each time so nothing is ever deleted; move any pre-existing one aside (mv, not rm).
+   # Issue #429: ALWAYS use materialize_workspace.sh (recursive *.so exclude; never -h).
    VWS="$EVAL_DIR/validation_workspace"
    [ -e "$VWS" ] && mv "$VWS" "${VWS}.old_$(date +%s)_$$" 2>/dev/null || true
-   mkdir -p "$VWS"
-   # Copy from the ORIGINAL excluding .git + build artifacts (tar-pipe), so the source history can't
-   # leak into validation and no build cache is inherited. Exclude the big immutable golden too — it is
-   # shared via an absolute symlink below (validation runs correctness, so it must resolve).
-   ( cd "$KERNEL_PATH_ORIG" && tar \
-       --exclude='./.git' --exclude='*/.git' \
-       --exclude='./build' --exclude='*/build' \
-       --exclude='./__pycache__' --exclude='*/__pycache__' \
-       --exclude='./.torch_ext' --exclude='*/.torch_ext' \
-       --exclude='./.rocprofv3' --exclude='*/.rocprofv3' \
-       --exclude='./reference_io.pt' --exclude='*/reference_io.pt' \
-       --exclude='*.so' --exclude='*.o' \
-       -cf - . ) | ( cd "$EVAL_DIR/validation_workspace" && tar -xf - )
-   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/validation_workspace/reference_io.pt"
-   cd "$EVAL_DIR/validation_workspace"
+   bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+     --src "$KERNEL_PATH_ORIG" --dst "$VWS" \
+     --shared-root "$EVAL_DIR/_shared" --link-aiter
+   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$VWS/reference_io.pt"
+   cd "$VWS"
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A
    git -c user.email=team@workflow -c user.name=team commit -q -m "validation_baseline"
    git apply "$EVAL_DIR/final_patch.diff"
-   # (No artifact cleanup needed — the tar copy excluded build/__pycache__/*.so; git apply adds only source.)
+   # Soft reclaim of prior validation_workspace.old_* (keeps disk bounded across re-validates).
+   bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/reclaim_eval_artifacts.sh" --eval-dir "$EVAL_DIR" --keep-round 0 2>/dev/null || true
    ```
 3. Run CORRECTNESS (from COMMANDMENT, with cwd = validation_workspace). If it fails → status
    `flagged`, record the failure, do NOT report a speedup as accepted.

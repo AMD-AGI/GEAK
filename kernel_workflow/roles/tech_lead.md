@@ -357,11 +357,15 @@ none of them, so skip this whole block then):**
   # (reference_io.pt, if present) is an absolute symlink in CANONICAL; this tar carries it verbatim so
   # best/ shares the one physical file — never add -h/--dereference. NO `rm` (it
   # prompts and blocks autonomous runs): stage into a UNIQUE tmp, then atomically swap with mv-aside.
-  TMP="$STATE_DIR/best.tmp_$(date +%s)_$$"; mkdir -p "$TMP"
-  ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/build' --exclude='*/__pycache__' \
-      --exclude='*/.torch_ext' --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$TMP" && tar -xf - )
+  # Issue #429: materialize_workspace.sh (recursive *.so exclude + optional aiter share). Never -h.
+  TMP="$STATE_DIR/best.tmp_$(date +%s)_$$"
+  bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+    --src "$CANONICAL" --dst "$TMP" \
+    --shared-root "${EVAL_DIR:-$STATE_DIR}/_shared" --link-aiter
   [ -e "$STATE_DIR/best" ] && mv "$STATE_DIR/best" "$STATE_DIR/best.old_$(date +%s)_$$" 2>/dev/null || true
   mv "$TMP" "$STATE_DIR/best"
+  # Soft reclaim of prior best.old_* trees (keep latest one for rollback).
+  bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/reclaim_eval_artifacts.sh" --eval-dir "${EVAL_DIR:-$STATE_DIR}" --keep-round 0 2>/dev/null || true
   ```
   Then write `$STATE_DIR/STATE.json` = `{cumulative: <CUMULATIVE_SPEEDUP>, insights, ledger,
   bottleneck_now, best_per_case: <BEST_PER_CASE>, last_round: <ROUND>}` (the full carried-forward state).
