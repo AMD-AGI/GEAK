@@ -822,14 +822,18 @@ def test_both_planes_offer_the_same_candidates(tmp_path):
 
     local = resolve(root, str(tmp_path / "r1"), "fused_moe_kernel", "triton", "gfx950",
                     "--min-speedup", "1.05")
+    # --framework-version is pinned rather than left to detection: the default reads
+    # /opt/rocm/.info/version off the box, so the address grows a `:7.2` suffix on a ROCm
+    # machine (every GEAK dev box) and has none on the CI runner. Asserting the detected
+    # value makes this test say the same thing in both places.
     remote = resolve_remote(store, str(tmp_path / "r2"), "fused_moe_kernel", "triton", "gfx950",
-                            "--min-speedup", "1.05")
+                            "--min-speedup", "1.05", "--framework-version", "7.2")
     assert remote["read_reason"] == local["read_reason"] == "read"
     keys = ("rank", "speedup", "direction", "comparable", "kernel_name", "language", "gfx")
     assert [{k: c.get(k) for k in keys} for c in remote["candidates"]] == \
            [{k: c.get(k) for k in keys} for c in local["candidates"]]
     assert remote["filtered"]["below_min_speedup"] == local["filtered"]["below_min_speedup"] == 1
-    assert remote["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm"
+    assert remote["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm:7.2"
 
 
 def test_the_store_plane_curates_what_the_store_itself_cannot(tmp_path):

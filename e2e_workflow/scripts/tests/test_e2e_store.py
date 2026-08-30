@@ -790,3 +790,79 @@ def test_a_patched_kernel_reads_exactly_as_it_did_before(tmp_path):
     assert e2e_store._kernel_line([{"name": "op1", "language": "triton", "isolated_speedup": 1.84,
                                     "patch": "kernels/op1.patch"}]) \
         == "op1 (triton, 1.84x, kernels/op1.patch)"
+
+
+# -- the win gate --------------------------------------------------------------------------------
+#
+# ONE implementation, two callers: e2e_workflow.js at the end of a live run and run_e2e.py when it
+# salvages a run whose workflow died first. The gate keys on the Director's VERDICT, not on the raw
+# ratio, because a KB write is permanent — the service exposes no DELETE, so a wrong record cannot
+# be cleaned up, only outranked.
+
+
+def test_win_gate_lets_a_declared_win_through():
+    assert e2e_store.win_gate({"throughput_speedup": 1.07, "final_throughput_tok_s": 787.0,
+                               "validation_status": "validated_win"}) == ""
+
+
+@pytest.mark.parametrize("status", ["validated_no_win", "recovered_no_gain",
+                                    "flagged_parity", "flagged_"])
+def test_win_gate_refuses_a_declared_no_win_however_good_the_ratio(status):
+    """The 20260822 gemma-4-26B shape: 1.0215x same-session while measuring 0.9453x against its
+    provided baseline. Keying on the ratio alone minted that below-baseline number as champion."""
+    why = e2e_store.win_gate({"throughput_speedup": 1.0215, "final_throughput_tok_s": 900.0,
+                              "validation_status": status})
+    assert why
+    assert "box-drift" in why and status in why
+
+
+@pytest.mark.parametrize("status", ["validated_win", "recovered_intermediate", "", None])
+def test_win_gate_does_not_overmatch_verdict_prefixes(status):
+    assert e2e_store.win_gate({"throughput_speedup": 1.2, "final_throughput_tok_s": 900.0,
+                               "validation_status": status}) == ""
+
+
+@pytest.mark.parametrize("speedup", [1.0, 0.9453, 0.0, -1.0, None, "n/a", float("inf"),
+                                     float("nan")])
+def test_win_gate_refuses_anything_that_is_not_above_1x(speedup):
+    why = e2e_store.win_gate({"throughput_speedup": speedup, "final_throughput_tok_s": 900.0,
+                              "validation_status": "validated_win"})
+    assert why.startswith("no win to record")
+
+
+@pytest.mark.parametrize("final", [0.0, None, "", "n/a", float("nan")])
+def test_win_gate_refuses_a_result_with_no_final_number(final):
+    """A ratio with nothing measured under it is a claim, not a measurement — and it is checked
+    FIRST, so the message names the real problem instead of blaming the ratio."""
+    assert e2e_store.win_gate({"throughput_speedup": 1.5, "final_throughput_tok_s": final,
+                               "validation_status": "validated_win"}) \
+        == "no final throughput measured"
+
+
+def test_require_win_declines_the_write_without_failing_the_caller(tmp_path):
+    """A refused write is `ok: True, applied: False` — a no-win is a normal outcome, not an error,
+    and a caller that treated it as one would fail every honest run."""
+    result = _result(tmp_path / "nowin.json", tput=900.0, throughput_speedup=1.0215,
+                     validation_status="recovered_no_gain")
+    out = _run("write", "--store", str(tmp_path / "store"), "--result", result,
+               "--direction", "none", "--apply", "--require-win")
+    assert out["ok"] is True and out["applied"] is False and out["skipped"] is True
+    assert "Director declared no win" in out["why"]
+    assert out["rungs"] == [] and out["files"] == [] and out["session_id"] == ""
+    assert not (tmp_path / "store").exists()           # nothing was published
+
+
+def test_without_require_win_a_human_can_still_backfill(tmp_path):
+    """The gate is opt-in: `write` is also the backfill path, where a human has evidence the result
+    JSON cannot carry (a framework-layer win the sub-run self-judged no-win)."""
+    result = _result(tmp_path / "backfill.json", tput=900.0, throughput_speedup=1.0215,
+                     validation_status="recovered_no_gain")
+    out = _run("write", "--store", str(tmp_path / "store"), "--result", result,
+               "--direction", "none", "--apply")
+    assert out["applied"] is True and out["rungs"]
+
+
+def test_require_win_passes_a_real_win_straight_through(tmp_path):
+    out = _write(tmp_path, "win", "attn-split", "--require-win", throughput_speedup=1.25)
+    assert out["applied"] is True and out.get("skipped") is not True
+    assert out["rungs"]
