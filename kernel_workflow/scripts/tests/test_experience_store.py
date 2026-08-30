@@ -1152,6 +1152,168 @@ def test_attest_remote_on_an_unknown_session_reports_rather_than_raises(tmp_path
     assert out["attested"] is False and all(p["found"] is False for p in out["pages"])
 
 
+# --------------------------------------------------------------------------- one ledger, named
+# `meta.yaml` lives in a checkout created empty and deleted with the run, so a count kept only there
+# is invisible to every other box. `attest` therefore writes both and SAYS which ones took it: a
+# curation pass must not read an uncorroborated local counter as agreement between machines.
+def _keyed_attest(store, session, outcome, *extra):
+    return run("attest", "--plane", "local", "--store", store, "--session-id", session,
+               "--outcome", outcome, "--kernel-name", "fused_moe_kernel", "--language", "triton",
+               "--gfx", "gfx950", "--framework-version", "7.2", *extra)
+
+
+def test_a_count_with_no_keyed_address_is_named_local_only(tmp_path):
+    root = str(tmp_path / "kb")
+    out = attest(root, stacked(root, "20260101_000000_aaaaaa"), "failed", "--apply")
+    assert out["ledger_scope"] == "local_only" and out["attestations"]["failures"] == 1
+
+
+def test_a_keyed_count_lands_on_both_planes_and_says_so(tmp_path):
+    root = str(tmp_path / "kb")
+    d = stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    out = _keyed_attest(store, session, "failed", "--exp-dir", d, "--apply")
+    assert out["ledger_scope"] == "keyed" and out["keyed"]["attested"] is True
+    assert yaml.safe_load(open(os.path.join(d, "meta.yaml")))["attestations"]["failures"] == 1
+    assert resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel"
+                          )["candidates"][0]["recalls"] == 1
+
+
+def test_an_unreachable_keyed_record_degrades_rather_than_pretending(tmp_path):
+    """The local count still lands — it is a real observation — but the scope must not read as
+    agreement, or a sweep retires a record on one box's word."""
+    root = str(tmp_path / "kb")
+    d = stacked(root, "20260101_000000_aaaaaa")
+    store, _ = _seeded(tmp_path, root)
+    out = _keyed_attest(store, "no-such-session", "failed", "--exp-dir", d, "--apply")
+    assert out["ledger_scope"] == "local_only" and "keyed_ledger_missed" in out["reason"]
+    assert yaml.safe_load(open(os.path.join(d, "meta.yaml")))["attestations"]["failures"] == 1
+
+
+def test_a_keyed_candidate_with_no_local_mirror_is_still_attestable(tmp_path):
+    """`resolve-remote` serves out of a hydrated refs dir that has no meta.yaml of its own. That is
+    a missing MIRROR, not a missing record, and it must not swallow the verdict."""
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    out = _keyed_attest(store, session, "failed", "--apply")
+    assert out["ledger_scope"] == "keyed" and out["keyed"]["attested"] is True
+    assert resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel"
+                          )["candidates"][0]["recalls"] == 1
+
+
+# --------------------------------------------------------------------------- the curation sweep
+# The counters are only worth keeping if something eventually acts on them. `curate-remote` is that
+# something, and it is deliberately a SEPARATE command from `attest`: counting evidence and passing
+# a verdict in one pass would make the attestor too dangerous for a lane to run unattended.
+def curate(store, *extra):
+    return run("curate-remote", "--plane", "local", "--store", store,
+               "--kernel-name", "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950",
+               "--framework-version", "7.2", *extra)
+
+
+def _losses(store, session, n, outcome="failed"):
+    for i in range(n):
+        _keyed_attest(store, session, outcome, "--measured-by", "box%d" % i, "--apply")
+
+
+def test_curate_leaves_a_page_nobody_has_tried_alone(tmp_path):
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, _ = _seeded(tmp_path, root)
+    out = curate(store)
+    assert out["ok"] is True and out["scanned"] == 1 and out["kept"] == 1
+    assert out["candidates"] == [] and out["applied"] is False
+
+
+def test_curate_names_a_record_two_boxes_could_not_make_win(tmp_path):
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    _losses(store, session, 2)
+    out = curate(store)
+    assert [c["session_id"] for c in out["candidates"]] == [session]
+    assert "policy threshold is 2" in out["candidates"][0]["reason"]
+    assert out["kept"] == 0
+
+
+def test_curate_is_a_dry_run_until_a_human_says_otherwise(tmp_path):
+    """It acts on a whole page and the store has no delete, so the default must be to say what it
+    would do."""
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    _losses(store, session, 2)
+    assert curate(store)["candidates"]
+    assert resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel")["candidates"]
+
+    out = curate(store, "--apply")
+    assert out["ok"] is True and out["applied"] is True and out["pages"]
+    assert resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel")["candidates"] == []
+
+
+def test_curate_retracts_rather_than_only_flagging(tmp_path):
+    """A `retained: false` beside a live ranking scalar is worse than nothing: the reader that
+    ranks on the scalar still serves it."""
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    _losses(store, session, 2)
+    dry = [p for p in curate(store)["pages"] if p["found"]]
+    assert dry and not any(p["rewritten"] for p in dry)
+    # The dry run hands back the document it WOULD write, so the zeroing is reviewable before it
+    # happens rather than inferred from a reader that has already stopped serving the record.
+    assert all(p["would_write"]["value"]["retained"] is False for p in dry)
+    assert all(not p["would_write"].get("speedup", 0) for p in dry)
+
+    out = curate(store, "--apply")
+    written = [p for p in out["pages"] if p["found"]]
+    assert written and all(p["rewritten"] and not p["error"] for p in written)
+    assert resolve_remote(store, str(tmp_path / "r2"), "fused_moe_kernel")["candidates"] == []
+
+
+def test_curate_skips_what_is_already_retracted_rather_than_rewriting_it(tmp_path):
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    _losses(store, session, 2)
+    curate(store, "--apply")
+    out = curate(store, "--apply")
+    assert out["already_retired"] == 1 and out["candidates"] == [] and out["ok"] is True
+
+
+def test_curate_honours_the_threshold_the_policy_exposes(tmp_path):
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    _losses(store, session, 2)
+    assert curate(store)["candidates"]
+    assert curate(store, "--threshold", "3")["candidates"] == []
+
+
+def test_curate_reports_a_bad_page_rather_than_raising(tmp_path):
+    out = run("curate-remote", "--plane", "local", "--store", str(tmp_path / "nope"),
+              "--kernel-name", "fused_moe_kernel", "--language", "triton", "--apply")
+    assert out["ok"] is False and out["error"] == "missing_arch"
+
+
+def test_a_hinted_candidate_stops_evicting_its_direction_group(tmp_path):
+    """Both entries are `tile-retune`, so the collapse offers exactly one of them. Ranked on the
+    raw speedup that is the suspect one and the clean one is never read at all."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    fast = write_entry(root, "20260101_000000_fast", speedup=3.0,
+                       patch=patch_text(new="BLOCK = 256"))
+    write_entry(root, "20260101_000000_slow", speedup=2.0, patch=patch_text(new="BLOCK = 128"))
+    assert resolve(root, refs)["candidates"][0]["speedup"] == 3.0
+
+    for who in ("boxA", "boxB"):
+        attest(root, fast, "failed", "--measured-by", who, "--apply")
+    out = resolve(root, refs)
+    assert out["candidates"][0]["speedup"] == 2.0
+    assert out["filtered"]["demoted_by_hint"] == 1
+    assert [a["speedup"] for a in out["candidates"][0]["alternates"]] == [3.0]
+
+
 # --------------------------------------------------------------------------- the tuning carrier
 # A tuning win is a config table plus the env var that binds it, deployed into an installed package —
 # there is no diff, so the store's `empty_diff` gate used to reject it and the knowledge was lost with

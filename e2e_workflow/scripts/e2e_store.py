@@ -64,12 +64,14 @@ import time
 # a CLI from an arbitrary cwd, so the root is derived from __file__ and never from the environment.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from kb import identity as kbid                                             # noqa: E402
-from kb.attest import (OUTCOMES, attest_session, attestation_ok,           # noqa: E402
-                       attestations_of, carry_attestations, retire_hint)
-from kb.curate import collapse_by_direction                                 # noqa: E402
+from kb.attest import (OUTCOMES, RETIRE_THRESHOLD, attest_session,         # noqa: E402
+                       attestation_ok, attestations_of, carry_attestations,
+                       record_attestation, retire_hint, should_retire)
+from kb.curate import collapse_by_direction, demote_hinted                  # noqa: E402
 from kb.ladder import publish                                               # noqa: E402
 from kb.plane import open_plane                                             # noqa: E402
-from kb.retract import is_retired, retract_session, retraction_ok           # noqa: E402
+from kb.retract import (is_retired, retract_session, retraction_ok,        # noqa: E402
+                        retracted_document)
 from kb.store_local import (KBStoreError, SAFE_COMPONENT_CHARS,             # noqa: E402
                             finite_speedup)
 
@@ -195,6 +197,7 @@ def _view(candidate, cid: str, tier: str, metric: str, champion_metric: str = ""
         # disagree often enough that collapsing them would be a lie in one direction or the other.
         "validations": ledger["validations"],
         "recalls": ledger["recalls"],
+        "failures": ledger["failures"],
         "not_reproduced": ledger["not_reproduced"],
         # Kept apart from `not_reproduced` all the way out to the reader. "the flag is gone
         # upstream" and "this box's baseline already pins that knob" look identical in a single
@@ -222,10 +225,13 @@ def read_metric(a) -> str:
 
 
 def _sort_key(metric: str):
-    """Rank order for a view list: the chosen metric first, the other as tie-break, id last.
+    """Rank order for a view list: the chosen metric, the other as tie-break, id last.
 
     A record missing the metric sorts last rather than raising — a write cannot produce one (final
     throughput is required), but a document written by hand or by an older lane can.
+
+    Demotion is NOT here; `kb.curate.demote_hinted` applies it to the sorted list afterwards, so
+    both lanes share one definition of it.
     """
     other = SPEEDUP_METRIC if metric == THROUGHPUT_METRIC else THROUGHPUT_METRIC
     low = float("-inf")
@@ -309,8 +315,14 @@ def cmd_resolve(a) -> dict:
         # guaranteed to agree, and collapse_by_direction's contract is that its input is already
         # in rank order — it keeps the FIRST entry per direction, so a wrong order here silently
         # offers the wrong member of every group.
-        ordered = sorted([_view(c, cid, tier, metric, champion_metric) for c in kept],
-                         key=_sort_key(metric))
+        ordered = demote_hinted(sorted([_view(c, cid, tier, metric, champion_metric) for c in kept],
+                                       key=_sort_key(metric)),
+                                lambda v: v.get("retire_hint"))
+        # Reported, because a demotion is invisible in the output otherwise: the record is still
+        # listed, still carries its real numbers, and simply appears lower than the scalars alone
+        # would put it. "Why is the 1.30x record behind the 1.04x one" has to be answerable without
+        # re-deriving the sort key by hand.
+        curation["demoted_by_hint"] = sum(1 for v in ordered if v.get("retire_hint"))
         # top_n=len(kept): e2e filters min_speedup AFTER collapse and slices to top_n below, so
         # collapse must not pre-slice. It consumes only the per-idea best, not the alternates.
         views, _alternates, collapsed = collapse_by_direction(
@@ -401,6 +413,10 @@ def _track_record_line(view: dict) -> str:
     if not view.get("recalls"):
         return "never benched by anyone since it was recorded"
     parts = ["%d reproduced a win" % view["validations"] if view["validations"] else "",
+             # Spelled out rather than folded into "none reproduced a win". Ran-and-lost is the
+             # bucket production actually fills now, and a reader told only that nobody won cannot
+             # tell it from a record nobody has ever managed to launch.
+             "%d ran and did not win" % view["failures"] if view.get("failures") else "",
              "%d could not be run at all" % view["not_reproduced"]
              if view.get("not_reproduced") else "",
              "%d did not fit that box's baseline (no verdict on the record)" % view["inapplicable"]
@@ -1377,20 +1393,66 @@ def _write(a, workdir: str) -> dict:
 
 
 def _carrying_ledger(store, cid: str, sid: str, knowledge: dict) -> dict:
-    """`knowledge` with any attestation ledger the store already holds for this session moved in.
+    """`knowledge` with everything the store's existing copy of this session has EARNED moved in:
+    its attestation ledger, and its retirement.
 
     A store that cannot answer is treated as a store that holds nothing: failing the write over a
     lookup would turn a transient service blip into a lost measurement, and the worst case of
     guessing wrong here is a reset counter, not a wrong number.
+
+    Retirement has to be carried because session ids are content-addressed off the CONFIG and not
+    off the measurement (`_content_digest`), so re-benching a retracted configuration lands on the
+    retracted session and replaces it. `_record_state` writes `retained: True` unconditionally —
+    correctly, since it has never seen the previous document — and the result was that any rewrite
+    silently resurrected a tombstone, ranking scalars and all. This is the only place that holds
+    both documents at once, so it is the only place that can decide.
+
+    A re-measurement that CLEARS THE GATE lifts the retirement. That is the point of retracting
+    rather than deleting: the record was declared wrong on the evidence available, and evidence is
+    the only thing that should overturn it. `value["validated"]` is `_record_state`'s judgement —
+    `validation_status == "validated_win"` AND parity pass — which is a strictly higher bar than
+    the one the retraction was made against, so nothing gets un-retired by a re-run that merely
+    did not lose. The old reason is kept verbatim in `unretired_from_reason`: a record that has
+    been round-tripped through a retraction is not the same as one that never was, and a reader
+    comparing it against a sibling deserves to see that it has a history. The reprieve is also
+    counted onto the ledger as a validation, which is what stops the next curation sweep from
+    retracting it again on the same negatives this win just answered.
     """
     try:
         previous = store.get_session(cid, sid)
     except Exception:
         previous = None
+    previous_value = previous.get("value") if isinstance(previous, dict) else None
     fresh = dict(knowledge)
-    fresh["value"] = carry_attestations(
-        previous.get("value") if isinstance(previous, dict) else None, dict(fresh["value"]))
-    return fresh
+    fresh["value"] = carry_attestations(previous_value, dict(fresh["value"]))
+    if not is_retired(previous_value):
+        return fresh
+    reason = str((previous_value or {}).get("retired_reason") or "").strip() \
+        or "retracted; no reason recorded"
+    if fresh["value"].get("validated"):
+        fresh["value"].update({
+            "unretired_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "unretired_from_reason": reason})
+        # The reprieve counted as what it is: a reproduction, on this box, of the record the
+        # retraction said was wrong. Recorded rather than merely flagged, because `should_retire`
+        # vetoes on `validations` — without this the negatives that earned the retraction are still
+        # the whole ledger, and the very next curation sweep retracts it again, forever.
+        fresh["value"] = record_attestation(
+            fresh["value"], "validated", actor="e2e_store write (un-retire)",
+            evidence={"note": "re-measured into a validated win; lifted: " + reason[:120]})
+        # Preserved rather than dropped: these are the scores the record was carrying when it was
+        # retracted, and the whole point of showing them next to the new ones is that a reviewer
+        # can see whether the re-measurement actually answered the objection or changed the subject.
+        withdrawn = (previous_value or {}).get("withdrawn_scores")
+        if isinstance(withdrawn, dict) and withdrawn:
+            fresh["value"]["withdrawn_scores"] = withdrawn
+        return fresh
+    # Still retracted. Re-applied through retracted_document rather than by copying the flag,
+    # because a tombstone is not one field: retraction zeroes the top-level ranking scalars, and a
+    # `retained: False` sitting on a document that still carries a real `throughput_tok_s` is inert
+    # against every reader that ranks on the scalar (see kb/retract.py).
+    return retracted_document(fresh, reason, (THROUGHPUT_METRIC, SPEEDUP_METRIC),
+                              actor=str((previous_value or {}).get("retracted_by") or ""))
 
 
 def _as_number(value):
@@ -1454,6 +1516,84 @@ def cmd_attest(a) -> dict:
     # caller deciding whether to open a curation ticket should not have to notice that.
     hints = [r.get("retire_hint") for r in out["rungs"] if r.get("retire_hint")]
     out["retire_hint"] = hints[0] if hints else ""
+    return out
+
+
+def cmd_curate(a) -> dict:
+    """Sweep a page, apply the retire policy, and report what has earned a retraction.
+
+    The missing third act. `attest` counts what happened when a record was tried; `retract` takes
+    one named record back. Between them sat a judgement nobody was making: which of the records on
+    this page has accumulated enough evidence against it to be worth removing. Made by hand, that
+    judgement means fetching every session, reading its ledger, and deciding — which is to say it
+    was never made, and a store with no curation pass only grows.
+
+    DRY RUN BY DEFAULT, and deliberately more cautious about it than `retract` is. `retract` acts
+    on one session id a human typed; this acts on everything a scan turns up, so a mistaken --apply
+    costs a page rather than a record, and the store has no delete to undo it with. The dry run
+    prints the full ledger and the policy reason for every candidate, so the decision can be
+    reviewed as evidence rather than trusted as a verdict.
+
+    Retracts on EVERY rung, like `retract` and `attest` do, because one session id addresses all
+    three and a record removed from the exact page while it still ranks on the two coarse ones is
+    still being offered to most readers.
+
+    Scans the FINEST rung only to decide (`ladder_of(a)[0]`). The coarse rungs hold the same
+    documents plus records from other workloads, and judging those from this deployment's page
+    would retire a record for a workload this run knows nothing about.
+    """
+    threshold = max(1, int(getattr(a, "threshold", RETIRE_THRESHOLD) or RETIRE_THRESHOLD))
+    # `ok` is present on EVERY return path, including the two that never reach a record. A sweep
+    # that could not read the page retracted nothing, which is safe, but reporting it as a success
+    # would make a mistyped --store indistinguishable from a clean page — and this is the command
+    # a caller is most likely to run unattended and check one field of.
+    out = {"applied": bool(a.apply), "threshold": threshold, "scanned": 0, "already_retired": 0,
+           "kept": 0, "candidates": [], "rungs": [], "ok": True, "error": ""}
+    cid, _tier, _metric, floor = ladder_of(a)[0]
+    store, _mirror, why = open_plane(a, read_metric(a), floor)
+    if store is None:
+        return dict(out, ok=False, error=why)
+    try:
+        found = store.candidates(cid, limit=max(1, int(a.scan)))
+    except Exception as e:
+        return dict(out, ok=False,
+                    error="read_failed: %s: %s" % (type(e).__name__, str(e)[:160]))
+    out["scanned"] = len(found)
+    for candidate in found:
+        knowledge = candidate.knowledge if isinstance(candidate.knowledge, dict) else {}
+        value = knowledge.get("value") if isinstance(knowledge.get("value"), dict) else {}
+        if is_retired(value):
+            out["already_retired"] += 1
+            continue
+        reason = should_retire(value, threshold=threshold)
+        if not reason:
+            out["kept"] += 1
+            continue
+        out["candidates"].append({
+            "session_id": candidate.session_id,
+            "direction": str(value.get("direction") or ""),
+            "throughput_tok_s": finite_speedup(knowledge.get(THROUGHPUT_METRIC)),
+            "speedup": finite_speedup(knowledge.get(SPEEDUP_METRIC)),
+            "validated": bool(value.get("validated")),
+            "is_champion": bool(candidate.is_champion),
+            # Both signals, because they answer different questions and a reviewer needs to see
+            # them disagree: the hint is why this record drew attention, the reason is why policy
+            # says it is done.
+            "retire_hint": retire_hint(value),
+            "reason": reason,
+            "attestations": attestations_of(value)})
+    for entry in out["candidates"]:
+        for rung_cid, tier, metric, rung_floor in ladder_of(a):
+            plane, mirror, plane_why = open_plane(a, metric, rung_floor)
+            for target in [p for p in (plane, mirror) if p is not None]:
+                report = retract_session(target, rung_cid, entry["session_id"], entry["reason"],
+                                         metric,
+                                         extra_metrics=(THROUGHPUT_METRIC, SPEEDUP_METRIC),
+                                         actor=str(a.measured_by or "e2e_store curate"),
+                                         scan=int(a.scan), apply=bool(a.apply))
+                report.update({"tier": tier, "metric": metric, "plane_note": plane_why})
+                out["rungs"].append(report)
+    out["ok"] = retraction_ok(out["rungs"], a.apply) if out["candidates"] else True
     return out
 
 
@@ -1639,6 +1779,18 @@ def main(argv=None) -> int:
     _state_args(q)
     q.add_argument("--apply", action="store_true", help="actually rewrite; default is a dry run")
 
+    q = sub.add_parser("curate", help="scan a page, apply the retire policy, and retract what has "
+                                      "earned it (dry run unless --apply)")
+    _identity_args(q)
+    _plane_args(q)
+    q.add_argument("--threshold", type=int, default=RETIRE_THRESHOLD,
+                   help="negative attempts, with no validation ever, that retire a record "
+                        "(default %d); `inapplicable` reads never count" % RETIRE_THRESHOLD)
+    q.add_argument("--measured-by", default="", help="who is running the sweep")
+    q.add_argument("--apply", action="store_true",
+                   help="actually retract; default is a dry run. There is no delete and no undo — "
+                        "read the printed ledgers first")
+
     a = p.parse_args(argv)
     if a.command == "identity":
         result = {"identity": identity_of(a),
@@ -1654,6 +1806,8 @@ def main(argv=None) -> int:
         result = cmd_resolve(a)
     elif a.command == "retract":
         result = cmd_retract(a)
+    elif a.command == "curate":
+        result = cmd_curate(a)
     elif a.command == "attest":
         result = cmd_attest(a)
     else:

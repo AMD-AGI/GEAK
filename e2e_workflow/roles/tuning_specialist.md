@@ -52,6 +52,9 @@ your return which mode you were in).
    Each candidate hands you `artifact_paths` (copy these), `artifact_names` (**install each under this
    name — the runtime finds it under no other**), `apply_env`, `cache_invalidation`. Your accepted ops
    are written back here by the orchestrator, gated on `isolated_speedup` and `engaged`.
+   Carry the candidate's `session_id` into the `ops_tuned` entry you return for that op, and set
+   `"source": "recall"`. That is the address the orchestrator attests the outcome back to — without
+   it a recalled table that turns out dead here stays top-ranked for every box after you.
 2. **The deployment KB** (`KB_REFERENCE_DIR`): what earlier runs on this whole deployment measured. An
    accepted-kernel entry tagged `from tuning skillset` names its bundle under `KB_CACHE_DIR` and the
    env var binding it.
@@ -178,7 +181,8 @@ soon as the gate is decided, before writing the report — if you can only do on
   "preflight": {"audit_path": "...", "claims_report": "...", "absent": ["levers this image cannot provide"]},
   "ops_tuned": [
     {"op": "...", "backend": "...", "tuner": "...", "shapes": "...", "isolated_speedup": 1.0,
-     "artifact": "<EVAL_DIR>/tuning/...", "engaged": true, "note": "..."}
+     "artifact": "<EVAL_DIR>/tuning/...", "engaged": true, "note": "...",
+     "source": "search|recall", "session_id": "<the recalled record's id, when source=recall>"}
   ],
   "deploy_bundle": "<EVAL_DIR>/tuning/deploy",
   "deploy_verified": true,

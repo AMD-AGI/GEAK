@@ -483,20 +483,46 @@ const KB_IDENTITY_BASENAME = 'kb_identity.json';
 const E2E_WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.warm_start_min_speedup))
   ? parseFloat(A.warm_start_min_speedup) : 1.05;
 
-// How a local verdict is filed AGAINST THE RECORD. The local bench decides what THIS run adopts and
-// nothing else: this box has a different baseline, image, driver and neighbours, so a no-gain here
-// is a fact about the PAIRING, and reading it as a refutation is how a store of real wins decays
-// into an empty one. So only a local WIN moves the record's standing; every other outcome is filed
-// as `inapplicable`, which kb/attest.py counts as a recall but keeps out of the retirement
-// denominator. The true verdict is not lost — it leads the attestation note and is carried verbatim
-// in `verdicts[]`, in the recall report and in kb_references/measured_on_this_box.md.
+// How a local verdict is filed AGAINST THE RECORD.
 //
-// This also closes a silent hole: `rejected` is not in kb/attest.py OUTCOMES, so every "ran here and
-// lost" attestation was rejected by argparse and swallowed by the trailing `|| true`.
+// The local bench is authoritative for this run — it alone decides what gets adopted, and a
+// recalled config that does not beat this baseline is not applied, full stop. It is authoritative
+// for nothing else. This box is not the box the record was written on: different baseline, image,
+// driver, neighbours on the node, and as few as one search replica. A no-gain here is a fact about
+// the PAIRING, and reading it as a refutation is how a store of real wins decays into an empty
+// one — the record that does not reproduce on the next box is exactly the one worth keeping until
+// something better replaces it.
+//
+// So the local verdict is filed HONESTLY and judged SEPARATELY. Each of the four outcomes goes to
+// the bucket that actually describes it, and none of them retires anything by itself:
+//
+//   rejected        the config was applied, it took effect, and it lost here -> `failed`. This is
+//                   evidence ABOUT THE RECORD and the only bucket that can accumulate into a
+//                   retire decision, which is why it must not be thrown away.
+//   not_reproduced  it could not be made to run, or ran without taking effect (a flag renamed
+//                   upstream, an env the build does not honour) -> the record is missing something.
+//   inapplicable    it collided with a baseline this run did not choose -> a verdict on the
+//                   PAIRING, not the record, and kb/attest.py keeps it out of the arithmetic.
+//
+// The earlier version of this map sent all three to `inapplicable` to protect records from one
+// unlucky box. That protection was total: `tried = recalls - inapplicable` in kb/attest.py is then
+// identically zero, `failures` and `not_reproduced` are never written by production at all, and no
+// record could ever accumulate a retire signal however many times it lost. Protecting a record by
+// discarding the evidence against it protects the wrong ones too.
+//
+// One loss is still evidence, not a verdict — nothing here retracts anything. The judgement is a
+// separate, explicit act with a threshold behind it (kb/attest.py:should_retire, executed by
+// `e2e_store.py curate`, dry-run by default). The true local verdict also remains visible where it
+// always was: it leads the attestation note, and is carried verbatim in `verdicts[]`, in the recall
+// report, and in kb_references/measured_on_this_box.md.
+//
+// Every value here must be one of kb/attest.py:OUTCOMES. `rejected` used to be passed through
+// literally, which argparse refused (the choices come from OUTCOMES) and the trailing `|| true`
+// swallowed — so every "ran here and lost" attestation was silently dropped on the floor.
 const KB_ATTEST_OUTCOME = {
   adopted: 'validated',
-  rejected: 'inapplicable',
-  not_reproduced: 'inapplicable',
+  rejected: 'failed',
+  not_reproduced: 'not_reproduced',
   inapplicable: 'inapplicable',
 };
 // Read broadly, bench narrowly. Reading is free and breadth is exactly what makes the demoted
@@ -2400,11 +2426,13 @@ if (want('setup')) {
             `${measured} tok/s, +${deltaPct.toFixed(2)}% vs baseline ${BASELINE_TPUT} (noise band ${NOISE_BAND}%)` +
             `${dropped.length ? `, with ${dropped.join(' ')} dropped to make it run here` : ''}.`);
         }
-        // FOUR outcomes. "ran and lost" is one box's number on a real configuration; "could not be
-        // made to run" says the record may be missing something (a flag renamed upstream, an env the
-        // build does not honour); "does not fit this box" is a collision with a baseline this run
-        // did not choose and says nothing about the record. All three are REPORTED and counted apart
-        // (kb/attest.py); none is counted AGAINST the record — see KB_ATTEST_OUTCOME.
+        // FOUR outcomes. "ran and lost", "could not be made to run" and "does not fit this box"
+        // mean three different things to the reader: a loss is one box's number on a real
+        // configuration; a config that never took effect says the record may be missing something —
+        // a flag renamed upstream, an env the build does not honour; a config that collides with a
+        // baseline this run did not choose says nothing about the record at all. All three are
+        // REPORTED and counted apart (kb/attest.py). Only the first two are counted against the
+        // record, and even then only as evidence toward a threshold — see KB_ATTEST_OUTCOME.
         //
         // `note` and `notes` are both read: the role file's return schema spells it `note`, and
         // reading only `notes` meant the per-trial text never reached this regex at all.
@@ -2424,7 +2452,7 @@ if (want('setup')) {
             `${parity ? `, parity=${parity}` : ''}${inert ? ', the config never took effect' : ''}` +
             `${outcome === 'inapplicable' ? ", it collides with this run's baseline" : ''}` +
             ` — kept as a reference, not applied. This is this box's result, not a verdict on the ` +
-            `record: it is filed as evidence and counts nothing against it.`);
+            `record: it is filed as evidence toward a threshold, and retires nothing by itself.`);
         }
         verdicts.push({ ...c, measured_tok_s: measured || null, delta_pct: measured ? deltaPct : null,
           parity: parity || 'unknown', outcome, why: notes,
@@ -2632,8 +2660,10 @@ if (want('setup')) {
       // box to resolve this identity saw the same optimistic record, benched it, and failed the
       // same way, forever. `e2e_store.py attest` counts the attempt onto the record itself, at
       // every rung, so a later reader can see how often it has been tried here and how it went.
-      // It moves no score and no champion, and per KB_ATTEST_OUTCOME a non-win moves nothing at
-      // all — one box's failure is evidence, never a verdict on the record.
+      // It moves no score and no champion: one box's failure is evidence, never a verdict on the
+      // record. What the evidence eventually adds up to is decided elsewhere, deliberately — see
+      // KB_ATTEST_OUTCOME for which bucket each verdict lands in, and kb/attest.py:should_retire
+      // for the threshold a separate, human-run `curate` pass acts on.
       //
       // Only candidates that were actually PUT ON THIS BOX are counted. A record listed in the
       // offer and never benched (`skipped`, or below benchN) has learned nothing about itself, and
@@ -3223,6 +3253,48 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
     } else if (tunedOps.length && (!KB_DIMS || !KB_DIMS.gfx)) {
       log(`[kernel-kb] tuned ops NOT filed: no gfx established, and an arch-less entry is ` +
         `unattributable (a tuned table is valid for exactly one arch).`);
+    }
+
+    // The other half of the recall loop. A RECALLED table that installs but never binds looks
+    // exactly like an empty page to the next run unless this box says so on the record itself; the
+    // write above only ever files wins, so without this the ledger only ever grows in one direction.
+    // Searched ops are excluded — they have no prior record to be evidence about.
+    const tuningRecalls = KB_DIMS && KB_DIMS.gfx ? tunedOps.filter((o) =>
+      String(o.session_id || '').trim() &&
+      /recall|kb|knowledge/i.test(String(o.source || o.origin || ''))) : [];
+    if (tuningRecalls.length) {
+      const storeScript = KERNEL_WF_DIR + '/scripts/experience_store.py';
+      // A read takes exactly one plane, and so does the verdict on what it served. `both` would
+      // count the same attempt twice on two ledgers that a curation pass then compares.
+      const remoteOn = E2E_KB_PLANE !== 'local';
+      const cmds = tuningRecalls.map((o) => {
+        const sp = Number(o.isolated_speedup) || 0;
+        const outcome = o.engaged !== true ? 'not_reproduced' : sp > 1.0 ? 'validated' : 'failed';
+        return `python3 ${shq(storeScript)} attest --plane ${remoteOn ? 'remote' : 'local'} ` +
+          (!remoteOn && E2E_KB_STORE_DIR ? `--store ${shq(E2E_KB_STORE_DIR)} ` : '') +
+          `--session-id ${shq(String(o.session_id).trim())} ` +
+          `--kernel-name ${shq(String(o.op || o.short_name).trim())} ` +
+          `--language ${shq(String(o.backend || 'tuned').trim())} --gfx ${shq(KB_DIMS.gfx)} ` +
+          (KB_DIMS.framework_version ? `--framework-version ${shq(KB_DIMS.framework_version)} ` : '') +
+          `--outcome ${outcome} --measured-speedup ${sp} ` +
+          `--note ${shq(`e2e tuning recall: engaged=${o.engaged === true}` +
+            `${o.note ? '; ' + String(o.note) : ''}`.slice(0, 300))} ` +
+          `--measured-by ${shq('e2e_workflow:tuning:' + BACKEND)} --apply || true`;
+      });
+      try {
+        await safeAgent(
+          `You are the tuning knowledge-base attestor. Run EXACTLY these commands in order and ` +
+          `return {"ran": <how many you ran>, "note": "<anything that failed>"}. Each records what ` +
+          `this box saw when it installed a RECALLED tuned artifact. Do NOT edit them, do NOT add ` +
+          `or drop any, and do NOT retry a failure — a repeat would double-count the attempt.\n` +
+          '```bash\n' + (remoteOn ? KB_ENV_PRELUDE + '\n' : '') + cmds.join('\n') + '\n```',
+          { phase: 'TuningSkillset', label: 'kernel-kb:attest-tuned',
+            schema: obj({ ran: { type: 'number' }, note: { type: 'string' } }, []) },
+          1);
+        log(`[kernel-kb] attested ${tuningRecalls.length} recalled tuned op(s).`);
+      } catch (e) {
+        log(`[kernel-kb] tuned attest failed (NON-FATAL): ${String(e).slice(0, 200)}`);
+      }
     }
 
     // Tuning changed which kernels dominate — re-profile + re-strategize so the head track works the

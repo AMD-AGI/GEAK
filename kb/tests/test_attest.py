@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from kb.attest import (HISTORY_LIMIT, attest_session, attestation_ok,           # noqa: E402
                        attestations_of, attested_document, carry_attestations,
-                       empty_attestations, record_attestation, retire_hint)
+                       empty_attestations, record_attestation, retire_hint, should_retire)
 from kb.store_local import KBStoreError, LocalKBStore                           # noqa: E402
 
 
@@ -104,7 +104,7 @@ def test_retire_hint_stays_silent_until_there_is_a_pattern():
     assert retire_hint({}) == ""
     assert retire_hint(record_attestation({}, "failed")) == ""             # one loss is not a case
     twice = record_attestation(record_attestation({}, "failed"), "failed")
-    assert retire_hint(twice) == ""                                        # losing is not failing
+    assert "never reproduced a win" in retire_hint(twice)                  # two is the pattern
 
 
 def test_two_non_reproductions_with_no_win_is_a_hint():
@@ -245,3 +245,72 @@ def test_attestation_ok_needs_the_record_found_somewhere(tmp_path):
 def test_attested_document_refuses_a_non_object():
     with pytest.raises(KBStoreError):
         attested_document("not a document", "validated")
+
+
+# -- the retire POLICY ----------------------------------------------------------------------------
+#
+# `retire_hint` asks whether a record is worth a look; `should_retire` asks whether the ledger meets
+# the bar the project agreed to act on. The pair only works if the hint is the WIDER of the two — a
+# record that can be retracted without ever having been demoted in the read path spends its entire
+# accumulating life evicting the alternatives in its direction group and then vanishes.
+
+
+def _negatives(n, outcome="failed", actor=""):
+    value = {}
+    for i in range(n):
+        value = record_attestation(value, outcome, actor=actor or "box%d" % i)
+    return value
+
+
+def test_one_negative_is_not_enough_and_two_are():
+    assert should_retire(_negatives(1)) == ""
+    assert "policy threshold is 2" in should_retire(_negatives(2))
+
+
+def test_not_reproduced_and_failed_are_added_together():
+    """Two different ways of not working are still two attempts that did not work."""
+    value = record_attestation(record_attestation({}, "failed"), "not_reproduced")
+    assert should_retire(value)
+
+
+def test_one_validation_anywhere_vetoes_the_whole_thing():
+    """A ratio would retire this on the sixth loss. A store this small cannot afford that: one
+    reproduction means the record is right about something, and the losses after it are a statement
+    about the boxes it was replayed on."""
+    value = record_attestation(_negatives(5), "validated")
+    assert should_retire(value) == ""
+
+
+def test_inapplicable_reads_never_retire_anything():
+    value = {}
+    for _ in range(6):
+        value = record_attestation(value, "inapplicable")
+    assert should_retire(value) == ""
+
+
+def test_the_threshold_is_overridable_per_sweep():
+    assert should_retire(_negatives(2), threshold=3) == ""
+    assert should_retire(_negatives(3), threshold=3)
+    assert should_retire(_negatives(1), threshold=0)          # clamped to 1, not to "always"
+    assert should_retire({}, threshold=0) == ""
+
+
+def test_the_hint_is_never_the_later_signal():
+    """Whatever fires `should_retire` must already have fired `retire_hint`, at every count."""
+    for n in range(0, 5):
+        for outcome in ("failed", "not_reproduced"):
+            value = _negatives(n, outcome)
+            if should_retire(value):
+                assert retire_hint(value), "retired at %d %s with no hint" % (n, outcome)
+
+
+def test_a_reprieve_recorded_as_a_validation_stops_the_answered_negatives_counting_again():
+    """Retract, re-bench, win, un-retire, retract, ... The negatives that got a record retracted
+    have been answered by the win that lifted it. `e2e_store.py:_carrying_ledger` records that win
+    as a validation, and the veto every other caller already relies on does the rest — no second
+    notion of "which attempts still count" to keep in step with this one."""
+    value = _negatives(2)
+    assert should_retire(value)
+    value = record_attestation(value, "validated", actor="the box that re-benched it")
+    assert should_retire(value) == ""
+    assert retire_hint(value) == ""          # and it stops being demoted in the read path too

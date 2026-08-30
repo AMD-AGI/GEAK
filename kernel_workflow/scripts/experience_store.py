@@ -69,12 +69,17 @@ import time
 
 # The shared KB plane lives at the repo root as the `kb` package, not beside this file. Executed as
 # a CLI from an arbitrary cwd, so the root is derived from __file__ and never from the environment.
+# Moved to the FRONT even when already present: this script's own directory is sys.path[0], it
+# holds an unrelated `kb.py` (the learned-card CLI), and that shadows the `kb` PACKAGE for anyone
+# who has the repo root on PYTHONPATH — every import below then fails with "kb is not a package".
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+while _REPO_ROOT in sys.path:
+    sys.path.remove(_REPO_ROOT)
+sys.path.insert(0, _REPO_ROOT)
 
 from kb.attest import OUTCOMES as _OUTCOMES
-from kb.curate import collapse_by_direction
+from kb.attest import RETIRE_THRESHOLD as _RETIRE_THRESHOLD
+from kb.curate import collapse_by_direction, demote_hinted
 from kb.ladder import publish
 from kb.plane import open_plane
 from kb.store_local import CHAMPION_METRIC, SAFE_COMPONENT_CHARS
@@ -1100,7 +1105,7 @@ def _candidate(rank: int, v: dict, gfx: str, prose_path: str, top_bench: str) ->
         # What happened the last times somebody actually adopted this patch, as opposed to the
         # speedup its own writer measured once. An entry offered at rank 1 that three lanes have
         # since failed to reproduce should not read identically to an untried one, and before this
-        # it did. Advisory only — nothing here filters on it (see kb/attest.py:retire_hint).
+        # it did. A hint DEMOTES (see kb/curate.py:demote_hinted); only retraction hides a record.
         "validations": _local_attestations(v["meta"]).get("validations", 0),
         "recalls": _local_attestations(v["meta"]).get("recalls", 0),
         "retire_hint": _retire_hint_of(v["meta"]),
@@ -1194,8 +1199,10 @@ def cmd_resolve(a) -> dict:
         return dict(base_out, filtered=stats,
                     read_reason="all_retired" if not servable else "below_min_speedup")
 
+    ordered = demote_hinted(sorted(above, key=_rank_key), lambda md: _retire_hint_of(md[0]))
+    stats["demoted_by_hint"] = sum(1 for md in ordered if _retire_hint_of(md[0]))
     top, alternates, collapsed = collapse_by_direction(
-        sorted(above, key=_rank_key), lambda md: md[0].get("direction"), lambda md: md[1], a.top_n)
+        ordered, lambda md: md[0].get("direction"), lambda md: md[1], a.top_n)
     stats["same_direction_collapsed"] = collapsed
 
     views = []
@@ -1843,6 +1850,67 @@ def cmd_retract_remote(a) -> dict:
     return out
 
 
+def cmd_curate_remote(a) -> dict:
+    """Scan a kernel page, apply the shared retire policy, retract what has earned it.
+
+    The kernel-lane counterpart of `e2e_store.py curate`, and deliberately the same shape: the
+    judgement comes from `kb.attest.should_retire` so the two lanes cannot drift into different
+    bars, and the execution is `retract-remote`'s, on every rung, because one session id addresses
+    both. DRY RUN BY DEFAULT — this acts on a whole page, and the store has no delete.
+
+    Judges from the FINEST rung only. The version-agnostic page holds records from other stack
+    versions, and retiring one of those from this box's page would convict it of a ledger it does
+    not own.
+    """
+    from kb.attest import RETIRE_THRESHOLD, attestations_of, retire_hint, should_retire
+    from kb.retract import is_retired, retract_session, retraction_ok
+    threshold = max(1, int(getattr(a, "threshold", RETIRE_THRESHOLD) or RETIRE_THRESHOLD))
+    out = {"applied": bool(a.apply), "threshold": threshold, "scanned": 0, "already_retired": 0,
+           "kept": 0, "candidates": [], "pages": [], "ok": True, "error": ""}
+    gfx = _norm_gfx(a.gfx)
+    if not gfx and not a.canonical_id:
+        return dict(out, ok=False, error="missing_arch")
+    ladder = _store_ladder(a, gfx)
+    store, mirror, why = open_plane(a, CHAMPION_METRIC, 1.0)
+    planes = [p for p in (store, mirror) if p is not None]
+    if not planes:
+        return dict(out, ok=False, error=why)
+    try:
+        found = planes[0].candidates(ladder[0][0], limit=max(1, int(a.scan)))
+    except Exception as e:
+        return dict(out, ok=False,
+                    error="read_failed: %s: %s" % (type(e).__name__, str(e)[:160]))
+    out["scanned"] = len(found)
+    for candidate in found:
+        value = candidate.value if isinstance(candidate.value, dict) else {}
+        if is_retired(value):
+            out["already_retired"] += 1
+            continue
+        reason = should_retire(value, threshold=threshold)
+        if not reason:
+            out["kept"] += 1
+            continue
+        out["candidates"].append({
+            "session_id": candidate.session_id, "reason": reason,
+            "direction": str(value.get("direction") or ""),
+            "carrier": str(value.get("carrier") or "patch"),
+            "speedup": candidate.speedup or 0.0,
+            "is_champion": bool(candidate.is_champion),
+            "retire_hint": retire_hint(value),
+            "attestations": attestations_of(value)})
+    for entry in out["candidates"]:
+        for cid, tier in ladder:
+            for plane in planes:
+                report = retract_session(plane, cid, entry["session_id"], entry["reason"],
+                                         CHAMPION_METRIC,
+                                         actor=str(getattr(a, "measured_by", "")
+                                                   or "experience_store curate"),
+                                         scan=int(a.scan), apply=bool(a.apply))
+                out["pages"].append(dict(report, tier=tier))
+    out["ok"] = retraction_ok(out["pages"], a.apply) if out["candidates"] else True
+    return out
+
+
 def _attest_evidence(a) -> dict:
     """The one-line record of what this box saw, shared by both attest paths."""
     evidence = {}
@@ -1873,28 +1941,49 @@ def cmd_attest(a) -> dict:
     Like the remote one, this moves nothing: the speedup meta declares is left exactly as it was,
     and the entry keeps its rank. A patch that failed to apply on one workspace is a fact about
     that workspace as much as about the patch.
+
+    The KEYED record is the truth. `meta.yaml` lives in a checkout that is created empty and
+    deleted with the run, so a ledger kept only there is invisible to every other box. Pass
+    `--session-id` (as `resolve-remote` reports it) and this records the same verdict on both, and
+    says which planes took it. Without a reachable plane the count still lands on disk and
+    `ledger_scope` reads `local_only` — a real degradation, named rather than hidden, because a
+    curation pass must not read an uncorroborated local counter as agreement between boxes.
     """
     from kb.attest import record_attestation, retire_hint
     exp_dir = str(getattr(a, "exp_dir", "") or "")
     meta_path = os.path.join(exp_dir, "meta.yaml")
     meta = _read_meta(meta_path)
-    if not meta:
+    session_id = str(getattr(a, "session_id", "") or "")
+    # A keyed candidate is served out of a hydrated refs dir with no meta.yaml of its own. That is
+    # a missing MIRROR, not a missing record, so it must not swallow the verdict.
+    if not meta and not session_id:
         return {"attested": False, "reason": "no_meta", "exp_dir": exp_dir}
-    try:
-        updated = record_attestation(dict(meta), a.outcome,
-                                     actor=str(getattr(a, "measured_by", "") or ""),
-                                     evidence=_attest_evidence(a))
-    except Exception as e:
-        return {"attested": False, "reason": "bad_outcome: " + str(e)[:120], "exp_dir": exp_dir}
     out = {"attested": bool(a.apply), "applied": bool(a.apply), "exp_dir": exp_dir,
-           "outcome": a.outcome, "attestations": updated["attestations"],
-           "retire_hint": retire_hint(updated)}
-    if not a.apply:
+           "outcome": a.outcome, "ledger_scope": "local_only"}
+    if meta:
+        try:
+            updated = record_attestation(dict(meta), a.outcome,
+                                         actor=str(getattr(a, "measured_by", "") or ""),
+                                         evidence=_attest_evidence(a))
+        except Exception as e:
+            return {"attested": False, "reason": "bad_outcome: " + str(e)[:120], "exp_dir": exp_dir}
+        out["attestations"] = updated["attestations"]
+        out["retire_hint"] = retire_hint(updated)
+        if a.apply:
+            try:
+                _atomic_write(meta_path, _dump_meta(updated))
+            except OSError as e:
+                out.update({"attested": False, "reason": "write_failed: " + str(e)[:120]})
+    else:
+        out["ledger_scope"] = "keyed_only"
+    if not session_id:
         return out
-    try:
-        _atomic_write(meta_path, _dump_meta(updated))
-    except OSError as e:
-        out.update({"attested": False, "reason": "write_failed: " + str(e)[:120]})
+    keyed = cmd_attest_remote(a)
+    out["keyed"] = keyed
+    if keyed.get("attested"):
+        out.update({"ledger_scope": "keyed", "retire_hint": keyed.get("retire_hint") or ""})
+    else:
+        out["reason"] = "keyed_ledger_missed: " + str(keyed.get("reason") or "")[:120]
     return out
 
 
@@ -2035,8 +2124,10 @@ def cmd_resolve_remote(a) -> dict:
         return dict(base_out, filtered=stats, read_reason="below_min_speedup")
 
     # `above` is already speedup-ordered by the store.
+    ordered = demote_hinted(above, lambda c: _retire_hint_of(c.value))
+    stats["demoted_by_hint"] = sum(1 for c in ordered if _retire_hint_of(c.value))
     top, alternates, collapsed = collapse_by_direction(
-        above, lambda c: c.value.get("direction"), lambda c: c.session_id, a.top_n)
+        ordered, lambda c: c.value.get("direction"), lambda c: c.session_id, a.top_n)
     stats["same_direction_collapsed"] = collapsed
 
     cache_dir = a.cache_dir or os.path.join(os.path.dirname(os.path.abspath(a.refs_dir)), "kb_cache")
@@ -2298,13 +2389,26 @@ def main(argv=None):
     tr.add_argument("--measured-by", dest="measured_by", default="", help="who is retracting it")
     tr.add_argument("--apply", action="store_true", help="actually rewrite; default is a dry run")
 
-    at = sub.add_parser("attest", help="count one attempt to USE a stored entry (validated | "
-                                       "failed | not_reproduced); changes no speedup, no rank")
-    at.add_argument("--exp-dir", dest="exp_dir", required=True,
-                    help="the entry that was tried, as `resolve` reports it")
+    at = add_plane_args(sub.add_parser(
+        "attest", help="count one attempt to USE a stored entry; changes no speedup, no rank"))
+    at.add_argument("--exp-dir", dest="exp_dir", default="",
+                    help="the entry that was tried, as `resolve` reports it; omit when the "
+                         "candidate came keyed and has no local mirror")
     at.add_argument("--outcome", required=True, choices=_OUTCOMES,
                     help="validated = reproduced a win; failed = applied but did not win; "
-                         "not_reproduced = would not apply or would not build")
+                         "not_reproduced = would not apply or would not build; inapplicable = "
+                         "does not fit THIS workspace")
+    at.add_argument("--session-id", dest="session_id", default="",
+                    help="the keyed record this entry came from, as resolve-remote reports it. "
+                         "The keyed ledger is the truth; without this the count is local_only")
+    at.add_argument("--store", default="", help="on-disk KB store root (--plane local/both)")
+    at.add_argument("--canonical-id", dest="canonical_id", default="")
+    at.add_argument("--kernel-name", dest="kernel_name", default="")
+    at.add_argument("--language", default="")
+    at.add_argument("--gfx", default="")
+    at.add_argument("--producer", default=REMOTE_PRODUCER)
+    at.add_argument("--gpu", default="", help="override the gfx dimension; default is --gfx")
+    at.add_argument("--framework-version", dest="framework_version", default="")
     at.add_argument("--measured-speedup", dest="measured_speedup", default=None,
                     help="what it did here, for the history entry")
     at.add_argument("--note", default="", help="one line a future reader can act on")
@@ -2329,6 +2433,21 @@ def main(argv=None):
     ar.add_argument("--note", default="")
     ar.add_argument("--measured-by", dest="measured_by", default="", help="who tried it")
     ar.add_argument("--apply", action="store_true", help="actually record it; default is a dry run")
+
+    cu = add_plane_args(sub.add_parser(
+        "curate-remote", help="scan a page, apply the retire policy, retract what has earned it"))
+    cu.add_argument("--store", default="", help="on-disk KB store root (--plane local/both)")
+    cu.add_argument("--canonical-id", dest="canonical_id", default="")
+    cu.add_argument("--kernel-name", dest="kernel_name", default="")
+    cu.add_argument("--language", default="")
+    cu.add_argument("--gfx", default="")
+    cu.add_argument("--producer", default=REMOTE_PRODUCER)
+    cu.add_argument("--gpu", default="", help="override the gfx dimension; default is --gfx")
+    cu.add_argument("--framework-version", dest="framework_version", default="")
+    cu.add_argument("--threshold", type=int, default=_RETIRE_THRESHOLD,
+                    help="negative attempts, with no win ever, that make a record a candidate")
+    cu.add_argument("--measured-by", dest="measured_by", default="", help="who is curating")
+    cu.add_argument("--apply", action="store_true", help="actually rewrite; default is a dry run")
 
     m = sub.add_parser("remap", help="rewrite a stored patch's paths onto this workspace's layout")
     m.add_argument("--patch", required=True)
@@ -2360,12 +2479,15 @@ def main(argv=None):
             out = cmd_attest(a)
         elif a.cmd == "attest-remote":
             out = cmd_attest_remote(a)
+        elif a.cmd == "curate-remote":
+            out = cmd_curate_remote(a)
         else:  # pragma: no cover
             out = {"error": "unknown command"}
     except Exception as e:  # never crash the caller
         err = "exception: " + str(e)[:160]
         out = ({"written": False, "reason": err} if a.cmd in ("write", "write-remote")
                else {"retracted": False, "reason": err} if a.cmd == "retract-remote"
+               else {"ok": False, "error": err} if a.cmd == "curate-remote"
                else {"attested": False, "reason": err} if a.cmd in ("attest", "attest-remote")
                else {"remapped": False, "reason": err} if a.cmd == "remap"
                else {"read_reason": err, "candidates": []})

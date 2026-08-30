@@ -934,3 +934,141 @@ def test_the_canonical_ladder_is_still_tried_first(tmp_path, monkeypatch):
     out = _run("resolve", "--store", str(tmp_path / "store"), identity=DEV_IDENTITY)
     # the legacy page ranks HIGHER on throughput, and still must not be the one that answers
     assert out["match_tier"] == "exact" and [c["direction"] for c in out["candidates"]] == ["new"]
+
+
+# -- ranking: a record nobody can reproduce must not evict the ones they can ---------------------
+#
+# The direction collapse keeps exactly ONE entry per direction, the first in rank order. So a record
+# that outranks its group on the raw scalar does not merely lead the group, it deletes the rest of
+# it. A page holding an unreproducible 1.25x and a validated 1.05x, both `direction: kernels`,
+# offered the first and hid the second — and the ranking never looked at which had ever worked.
+
+
+def _fail_twice(tmp_path, sid):
+    for who in ("boxA", "boxB"):
+        _run("attest", "--store", str(tmp_path / "store"), "--session-id", sid,
+             "--outcome", "failed", "--measured-by", who, "--apply")
+
+
+def _offered(tmp_path):
+    out = _run("resolve", "--store", str(tmp_path / "store"))
+    return [c["session_id"] for c in out["candidates"]], out["curation"]
+
+
+def test_a_hinted_record_sorts_behind_an_unhinted_one_whatever_the_numbers(tmp_path):
+    loud = _write(tmp_path, "loud", "kernels", tput=1250.0)["session_id"]
+    quiet = _write(tmp_path, "quiet", "kernels", tput=1050.0, accepted_config={"env": "B=2"})
+    quiet = quiet["session_id"]
+    assert _offered(tmp_path)[0] == [loud]                 # the higher number leads, as it should
+    _fail_twice(tmp_path, loud)
+    offered, curation = _offered(tmp_path)
+    assert offered == [quiet]                              # ...until nobody can reproduce it
+    assert curation["demoted_by_hint"] == 1
+
+
+def test_the_demoted_record_is_still_on_the_page(tmp_path):
+    """Demotion is not filtering. A record nobody has managed to reproduce is exactly the one worth
+    keeping until something better replaces it; only a retraction removes it from a read. Two
+    directions, so the collapse keeps both and the ORDER is the only thing under test."""
+    loud = _write(tmp_path, "loud", "kernels", tput=1250.0)["session_id"]
+    quiet = _write(tmp_path, "quiet", "config", tput=1050.0,
+                   accepted_config={"env": "B=2"})["session_id"]
+    _fail_twice(tmp_path, loud)
+    offered, curation = _offered(tmp_path)
+    assert offered == [quiet, loud]                        # behind, not gone
+    assert curation["demoted_by_hint"] == 1
+    demoted = _run("resolve", "--store", str(tmp_path / "store"))["candidates"][1]
+    assert demoted["throughput_tok_s"] == 1250.0           # with its real number, not zeroed
+    assert "never reproduced a win" in demoted["retire_hint"]
+
+
+# -- curate: the judgement between attesting and retracting --------------------------------------
+
+
+def _curate(tmp_path, *args):
+    return _run("curate", "--store", str(tmp_path / "store"), *args)
+
+
+def test_curate_is_a_dry_run_by_default(tmp_path):
+    """It acts on everything a scan turns up rather than on one id a human typed, so a mistaken
+    --apply costs a page and the store has no delete to undo it with."""
+    sid = _write(tmp_path, "bad", "kernels")["session_id"]
+    _fail_twice(tmp_path, sid)
+    out = _curate(tmp_path)
+    assert out["applied"] is False
+    assert [c["session_id"] for c in out["candidates"]] == [sid]
+    assert not any(r["rewritten"] for r in out["rungs"])
+    assert _offered(tmp_path)[0] == [sid]                  # still there, untouched
+
+
+def test_curate_reports_the_evidence_and_not_just_the_verdict(tmp_path):
+    sid = _write(tmp_path, "bad", "kernels")["session_id"]
+    _fail_twice(tmp_path, sid)
+    candidate = _curate(tmp_path)["candidates"][0]
+    assert candidate["attestations"]["failures"] == 2
+    assert "policy threshold is 2" in candidate["reason"]
+    assert candidate["retire_hint"]                        # why it drew attention, separately
+
+
+def test_curate_leaves_records_that_have_not_earned_it(tmp_path):
+    good = _write(tmp_path, "good", "kernels")["session_id"]
+    _run("attest", "--store", str(tmp_path / "store"), "--session-id", good,
+         "--outcome", "failed", "--measured-by", "boxA", "--apply")
+    out = _curate(tmp_path)
+    assert out["candidates"] == [] and out["kept"] == 1 and out["ok"] is True
+
+
+def test_curate_applies_to_every_rung(tmp_path):
+    """One session id addresses all three. A record removed from the exact page while it still
+    ranks on the two coarse ones is still being offered to most readers."""
+    sid = _write(tmp_path, "bad", "kernels")["session_id"]
+    _fail_twice(tmp_path, sid)
+    out = _curate(tmp_path, "--apply")
+    assert out["ok"] and len(out["rungs"]) == 3 and all(r["rewritten"] for r in out["rungs"])
+    offered, curation = _offered(tmp_path)
+    assert offered == [] and curation["retired"] == 1
+
+
+def test_curate_skips_what_is_already_retracted(tmp_path):
+    sid = _write(tmp_path, "bad", "kernels")["session_id"]
+    _fail_twice(tmp_path, sid)
+    _curate(tmp_path, "--apply")
+    again = _curate(tmp_path)
+    assert again["already_retired"] == 1 and again["candidates"] == []
+
+
+def test_curate_honours_the_threshold(tmp_path):
+    sid = _write(tmp_path, "bad", "kernels")["session_id"]
+    _fail_twice(tmp_path, sid)
+    assert _curate(tmp_path, "--threshold", "3")["candidates"] == []
+    assert _curate(tmp_path)["candidates"]
+
+
+def test_curate_on_an_unreadable_store_reports_rather_than_raises(tmp_path):
+    """And does not report success. This is the command most likely to run unattended, so a
+    mistyped --store must not be indistinguishable from a page with nothing to retire."""
+    out = _curate(tmp_path)
+    assert out["candidates"] == [] and out["ok"] is False and out["error"]
+
+
+def test_curate_does_not_judge_a_page_from_another_workload(tmp_path):
+    """It scans the FINEST rung only. The coarse rungs hold records from other workloads, and
+    retiring one of those on this deployment's evidence judges a shape this run never ran."""
+    sid = _write(tmp_path, "bad", "kernels")["session_id"]
+    _fail_twice(tmp_path, sid)
+    other = ["--model", "M", "--gfx", "gfx950", "--framework", "vllm",
+             "--framework-version", "0.26.0", "--precision", "fp8",
+             "--tp", "8", "--isl", "4096", "--osl", "1024", "--conc", "64"]
+    out = _run("curate", "--store", str(tmp_path / "store"), identity=other)
+    assert out["candidates"] == []
+
+
+def test_the_reference_prose_names_ran_and_lost_separately(tmp_path):
+    """`failures` is the bucket production actually fills now. Folded into "none reproduced a win"
+    it reads identically to a record nobody has ever managed to launch, which is the opposite
+    diagnosis and points at the opposite fix."""
+    sid = _write(tmp_path, "bad", "kernels")["session_id"]
+    _fail_twice(tmp_path, sid)
+    _run("resolve", "--store", str(tmp_path / "store"), "--refs-dir", str(tmp_path / "refs"))
+    prose = "\n".join(p.read_text() for p in (tmp_path / "refs").glob("e2e_reference_*.md"))
+    assert "2 ran and did not win" in prose

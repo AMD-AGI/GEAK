@@ -50,7 +50,8 @@ from kb.store_local import KBStoreError
 # The four things that can happen when a record is taken off the shelf and run. They are counted
 # separately because they mean opposite things to a retire pass: `failed` says the claim did not
 # hold HERE (the record may still be right elsewhere), while `not_reproduced` says the record could
-# not even be applied — a much stronger signal that it is missing something it promised.
+# not even be applied — a much stronger signal that it is missing something it promised. A patch
+# that ran and returned the WRONG ANSWER is `failed` too: it was applied and it did not deliver.
 #
 # `inapplicable` splits a case that used to be spelled `not_reproduced` and does not belong there.
 # A stored e2e config is a WHOLE launch configuration, and it is replayed on top of whatever
@@ -84,6 +85,14 @@ _EVIDENCE_KEYS = ("measured_tok_s", "baseline_tok_s", "delta_pct", "measured_spe
 # `attestations_of` reads as 0 forever, and one missing from `carry_attestations`'s emptiness test
 # drops a whole ledger on the next rewrite.
 BUCKETS = ("validations", "failures", "not_reproduced", "inapplicable")
+
+# How many negative attempts, with no validation ever, make a record a retraction CANDIDATE. Two,
+# not one: a single box can be wrong about anything, and the first loss is the case this store
+# exists to survive. Not three, because the negatives that count here are the ones where the record
+# was actually applied and actually took effect — an `inapplicable` read never reaches this counter
+# — and waiting for a third means a known-bad record occupies its direction slot for one more full
+# run. Overridable per sweep (`curate --threshold`); this is the default the policy agreed on.
+RETIRE_THRESHOLD = 2
 
 
 def empty_attestations() -> dict:
@@ -174,8 +183,15 @@ def retire_hint(value) -> str:
     """Why a curation pass might want to look at this record, or "". Advisory, never enforced.
 
     Deliberately conservative and deliberately not a boolean: this is read by an agent prompt and
-    by a human running a curation sweep, and both need to know WHICH pattern fired. Nothing in the
-    read path filters on it — a record with a hint is still offered, still ranked, still adoptable.
+    by a human running a curation sweep, and both need to know WHICH pattern fired.
+
+    The read path DEMOTES on this, and does not filter on it. A hinted record sorts behind every
+    unhinted one in its group (see kb/curate.py:demote_hinted) — because the direction collapse
+    keeps only the first entry per group, a hinted record that happened to rank first was evicting
+    every good alternative behind it. But it is still on the page, still offered, still adoptable:
+    a record nobody has managed to reproduce is exactly the one worth keeping until something
+    better replaces it. Only `retract` removes a record from a read, and only `should_retire` below
+    is a judgement that one has earned it.
     """
     ledger = attestations_of(value)
     # Attempts that TESTED THE RECORD. An `inapplicable` read never got as far as putting the
@@ -183,14 +199,55 @@ def retire_hint(value) -> str:
     # and the pair is what failed. Leaving those in the denominator meant a record could be retired
     # for being read on the wrong machines, which is the opposite of what the counter is for.
     tried = ledger["recalls"] - ledger["inapplicable"]
-    if tried <= 0:
+    if tried <= 0 or ledger["validations"]:
         return ""
-    if ledger["not_reproduced"] >= 2 and not ledger["validations"]:
+    if ledger["not_reproduced"] >= RETIRE_THRESHOLD:
         return ("%d attempts could not reproduce it at all and none ever succeeded — the record is "
                 "probably missing something it promised" % ledger["not_reproduced"])
-    if tried >= 3 and not ledger["validations"]:
+    # Same count `should_retire` acts on, deliberately. The hint must never be the LATER of the two
+    # signals: a record that can be retracted without ever having been demoted spends its whole
+    # accumulating life evicting the alternatives in its direction group, and then vanishes. Firing
+    # together still leaves a real window, because the demotion is automatic and immediate while
+    # the retraction waits for a human to run `curate --apply` — which may be never.
+    if tried >= RETIRE_THRESHOLD:
         return ("tried %d times, never reproduced a win" % tried)
     return ""
+
+
+def should_retire(value, *, threshold: int = RETIRE_THRESHOLD) -> str:
+    """Why POLICY says this record has earned a retraction, or "". Still only a judgement.
+
+    The narrow sibling of `retire_hint`. The hint asks "is this worth a human's attention"; this
+    asks "does the accumulated ledger meet the bar we agreed to act on", and the bar is:
+
+        no attempt has ever reproduced a win, AND at least `threshold` attempts ran the record
+        and came back negative
+
+    `inapplicable` is excluded from the count, exactly as it is from `retire_hint`'s `tried`: those
+    reads never got the stored configuration onto the box at all — the reading run's own baseline
+    pinned a knob the record also pins — so they judge the pairing and not the record. A record
+    read on the wrong machines must not be retired for it.
+
+    `validations == 0` is a hard veto rather than a ratio. One reproduction anywhere means the
+    record is right about something, and the losses after it are a statement about the boxes it
+    was replayed on. A ratio would retire it on the sixth loss; that is a curation policy for a
+    store big enough to afford being wrong, and this one is not. It is also what stops a record
+    that was retracted and then re-measured into a win from oscillating: the reprieve is recorded
+    as a validation (see e2e_store.py:_carrying_ledger), and the veto holds from then on.
+
+    NEVER acts. Returning a reason is not retracting: `retract_session` zeroes ranking scalars and
+    re-points the champion, and wiring that into the same pass that counts the evidence is exactly
+    the coupling the module docstring argues against. The caller is `e2e_store.py curate`, which is
+    a dry run unless a human passes --apply.
+    """
+    ledger = attestations_of(value)
+    negatives = ledger["failures"] + ledger["not_reproduced"]
+    threshold = max(1, int(threshold))
+    if ledger["validations"] or negatives < threshold:
+        return ""
+    return ("%d attempts ran it and none won (%d failed, %d could not be reproduced), and nothing "
+            "has ever validated it — policy threshold is %d"
+            % (negatives, ledger["failures"], ledger["not_reproduced"], threshold))
 
 
 def attested_document(knowledge: dict, outcome: str, *, actor: str = "", evidence=None) -> dict:
@@ -253,6 +310,8 @@ def attestation_ok(reports, applied: bool) -> bool:
     return bool(found) and all(r.get("rewritten") for r in found)
 
 
-__all__ = ["FAILED", "HISTORY_LIMIT", "NOT_REPRODUCED", "OUTCOMES", "VALIDATED",
+__all__ = ["BUCKETS", "FAILED", "HISTORY_LIMIT", "INAPPLICABLE", "NOT_REPRODUCED",
+           "OUTCOMES", "RETIRE_THRESHOLD", "VALIDATED",
            "attest_session", "attestation_ok", "attestations_of", "attested_document",
-           "carry_attestations", "empty_attestations", "record_attestation", "retire_hint"]
+           "carry_attestations", "empty_attestations", "record_attestation", "retire_hint",
+           "should_retire"]

@@ -565,13 +565,16 @@ const WARMSTART_RESOLVE_SCHEMA = obj({
   other_language_pages: { type: 'array', items: { type: 'string' } },
   filtered: obj({
     total: { type: 'number' }, retired: { type: 'number' }, below_min_speedup: { type: 'number' },
-    same_direction_collapsed: { type: 'number' },
+    same_direction_collapsed: { type: 'number' }, demoted_by_hint: { type: 'number' },
   }),
   candidates: {
     type: 'array',
     items: obj({
       rank: { type: 'number' }, slug: { type: 'string' }, speedup: { type: 'number' },
       exp_dir: { type: 'string' }, arch: { type: 'string' },
+      // Declared for the same reason canonical_id is: without it the relaying agent drops it, and
+      // the attest step below has no address to write this run's verdict back to.
+      session_id: { type: 'string' },
       patch_path: { type: 'string' }, prose_path: { type: 'string' },
       strategy: { type: 'string' }, status: { type: 'string' },
       // direction = the IDEA (one rank each). comparable=false: recorded on a different bench key
@@ -980,6 +983,21 @@ if (setup.resumed && setup.prior_state) {
 // on-box `device` string (no extra probe).
 // ===========================================================================
 const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
+// One benched candidate -> one of kb/attest.py's four outcomes. `inapplicable` is a verdict on the
+// PAIRING and is excluded from the retire arithmetic, so it is where both "this workspace does not
+// have those files" and "it did win but we could not commit it here" belong — neither is evidence
+// against the record. A patch that ran and gave a WRONG ANSWER is `failed`: it applied, it ran, and
+// it did not deliver what the record promised.
+const kbVerdict = (ver, sp) => {
+  if (!ver) return 'not_reproduced';
+  if (says(ver.correctness, 'fail')) return 'failed';
+  if (says(ver.status, 'apply_failed')) {
+    return /outside_editable_set/i.test(String(ver.notes || '')) ? 'inapplicable' : 'not_reproduced';
+  }
+  if (!says(ver.status, 'verified')) return 'not_reproduced';
+  if (!(sp > 1.0)) return 'failed';              // applied, ran, correct, just did not go faster
+  return says(ver.correctness, 'pass') ? 'inapplicable' : 'not_reproduced';   // fast but never adopted
+};
 let warm_start = { adopted: false, read_reason: WARM_START_ON ? 'read' : 'disabled', candidates: [] };
 let skipLoop = false;
 if (WARM_START_ON && !setup.resumed && KB_ROOT_OK) {
@@ -1043,6 +1061,7 @@ ${resolveScript}
     const cands = Array.isArray(resolved.candidates) ? resolved.candidates : [];
     warm_start.candidates = cands.map(c => ({
       rank: c.rank, slug: c.slug, speedup: c.speedup, direction: c.direction || '', status: 'read',
+      session_id: c.session_id || '', exp_dir: c.exp_dir || '',
     }));
     const f = resolved.filtered || {};
     // Which plane actually answered. Only the key-addressed subcommand emits `canonical_id`, so its
@@ -1127,7 +1146,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             // descends from — lineage a later curation pass cannot recover from the diff alone.
             warm_start.direction = c.direction || '';
             warm_start.exp_dir = c.exp_dir || '';
-            if (rec) rec.status = 'adopted';
+            if (rec) { rec.status = 'adopted'; rec.outcome = 'validated'; rec.verified_speedup = sp; }
             log(`[kb] warm-start ADOPTED ${c.slug} @ ${sp.toFixed(2)}x — optimizing from the patched state.`);
             profileSummary = await agentT(
               roleAgent('profile_engineer', 'reprofile',
@@ -1141,8 +1160,40 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             break;
           }
         }
-        if (rec && rec.status !== 'adopted') rec.status = (ver && ver.status) ? `rejected:${ver.status}` : 'rejected:apply_failed';
+        if (rec && rec.status !== 'adopted') {
+          rec.status = (ver && ver.status) ? `rejected:${ver.status}` : 'rejected:apply_failed';
+          rec.outcome = kbVerdict(ver, sp);
+          rec.verified_speedup = sp || 0;
+        }
         log(`[kb] warm-start candidate c${c.rank} ${rec ? rec.status : 'rejected'} (${sp ? sp.toFixed(2) + 'x' : 'no measure'}).`);
+      }
+      // Record what THIS box saw, so the next one reads a ledger and not just a speedup. Only
+      // candidates carrying an `outcome` were actually put on the GPU — the loop breaks after
+      // adopting, and counting a record that was never benched would enter an attempt that never
+      // happened. Non-fatal by construction: the run's own result does not depend on the counter.
+      const benched = warm_start.candidates.filter(x => x.outcome && (x.session_id || x.exp_dir));
+      if (benched.length) {
+        const planeFlags = warm_start.plane === 'remote' ? '--plane remote'
+          : warm_start.plane === 'store' ? `--plane local --store ${JSON.stringify(KB_STORE_DIR)}` : '';
+        const cmds = benched.map(x =>
+          `python3 ${JSON.stringify(EXPERIENCE_STORE)} attest ${planeFlags} ` +
+          (x.exp_dir ? `--exp-dir ${JSON.stringify(x.exp_dir)} ` : '') +
+          (planeFlags && x.session_id ? `--session-id ${JSON.stringify(x.session_id)} ` : '') +
+          `--kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} ` +
+          `--gfx ${GFX}${KB_VERSION_FLAG} --outcome ${x.outcome} ` +
+          `--measured-speedup ${Number(x.verified_speedup) || 0} ` +
+          `--note ${JSON.stringify(`kernel_lane warm-start c${x.rank}: ${x.status}`.slice(0, 200))} ` +
+          `--measured-by ${JSON.stringify('kernel_lane:' + GFX)} --apply || true`);
+        await agentT(
+          `You are the kernel knowledge-base attestor. Run EXACTLY these commands in order and ` +
+          `return {"ran": <how many you ran>, "note": "<anything that failed>"}. Each records what ` +
+          `this box saw when it benched a stored patch. Do NOT edit them, do NOT add or drop any, ` +
+          `and do NOT retry a failure — a repeat would double-count the attempt.\n` +
+          '```bash\n' + KB_ENV_PRELUDE + cmds.join('\n') + '\n```',
+          { phase: 'WarmStart', label: 'kb:attest',
+            schema: obj({ ran: { type: 'number' }, note: { type: 'string' } }, []) });
+        log(`[kb] attested ${benched.length} benched candidate(s): ` +
+          benched.map(x => `c${x.rank}=${x.outcome}`).join(' '));
       }
     }
   }
