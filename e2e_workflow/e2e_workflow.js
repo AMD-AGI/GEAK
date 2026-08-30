@@ -616,6 +616,10 @@ const FAST_SKIP = FAST_MODE ? new Set(['config', 'tune', 'kernel']) : null;
 const DEEP_SKIP = DEEP_MODE ? new Set(['kernel']) : null;
 const want = (p) => (RUN_ALL || PHASES.includes(p)) && !(FAST_SKIP && FAST_SKIP.has(p)) && !(DEEP_SKIP && DEEP_SKIP.has(p));
 const ST = A.state || {};   // carried state from a prior phase invocation
+// WarmStart can replay a kernel through runIntegrateBothLegs() before the
+// TuningSkillset source block is reached. Initialize this carried state before
+// that path becomes reachable; the tuning phase later reassigns it.
+let tuning = ST.tuning || null;
 if (FAST_MODE) log(`[fast-mode] ON: skipping ConfigSweep + Milestone; HeadKernel-only; budget ${Math.round(FAST_BUDGET_MS / 60000)}min (stop new heads at ${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min, per-head workflow cap ${Math.round(FAST_HEAD_WF_MS / 60000)}min).`);
 
 // ---------------------------------------------------------------------------
@@ -873,6 +877,19 @@ async function persistE2EValidationCheckpoint(relativePath, intent) {
     lastCommittedCheckpoint = {
       path: relativePath, checkpoint_sha256: written.checkpoint_sha256,
     };
+  }
+  return written;
+}
+
+// Candidate-local incomplete A/B records stay best-effort diagnostics, but an
+// accepted config/tuning/overlay/final result must never silently continue
+// without the checkpoint that makes it replayable after an interrupted run.
+async function requireE2EValidationCheckpoint(relativePath, intent) {
+  const written = await persistE2EValidationCheckpoint(relativePath, intent);
+  if (!written || written.written !== true || !written.checkpoint_sha256) {
+    throw new Error(
+      `checkpoint_write_failed: ${relativePath}; accepted result cannot be committed without a replayable checkpoint`
+    );
   }
   return written;
 }
@@ -2079,6 +2096,25 @@ if (want('setup')) {
           curFlags = sweep.accepted_flags || storedFlags || curFlags;
           curEnv = sweep.accepted_env || storedEnv || curEnv;
           kbSeedTput = measured;
+          await requireE2EValidationCheckpoint('config/e2e_validation.json', {
+            phase: 'WarmStart', validation_level: 'config_sweep', gate: 'accepted',
+            validation_status: 'accepted_config',
+            baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: measured,
+            throughput_speedup: BASELINE_TPUT ? measured / BASELINE_TPUT : 1,
+            baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
+            accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+            accepted_kernels: [], accepted_heads: [], final_patch: [],
+            final_overlay: { path: curOverlay },
+            final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
+            bench_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
+            measurement: { measurement_mode: MEASUREMENT_MODE, metric_basis: 'aggregate_output_tok_s',
+              workload: WORKLOAD, source_artifact: `${EVAL_DIR}/config/sweep_results.json`,
+              acceptance_source: 'kb_warm_start',
+              acceptance: { gain_exceeds_noise: true, correctness_passed: true, noise_floor_pct: NOISE_BAND } },
+            stack: { config_layers: (sweep.trials || []).filter((t) => t && t.kept === true) },
+            replay: { asset_paths: [`${EVAL_DIR}/bench_e2e.sh`, `${EVAL_DIR}/config/sweep_results.json`] },
+            integrity: { checkpoint_assets: [] },
+          });
           log(`[kb] ADOPTED ${c.session_id || '?'} (${c.direction || 'unlabeled'}): ` +
             `${measured} tok/s, +${deltaPct.toFixed(2)}% vs baseline ${BASELINE_TPUT} (noise band ${NOISE_BAND}%).`);
         }
@@ -2485,7 +2521,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
     curFlags = sweep.accepted_flags || curFlags;
     curEnv = sweep.accepted_env || curEnv;
     curTput = sweep.best_throughput_tok_s;
-    await persistE2EValidationCheckpoint('config/e2e_validation.json', {
+    await requireE2EValidationCheckpoint('config/e2e_validation.json', {
       phase: 'ConfigSweep', validation_level: 'config_sweep', gate: 'accepted',
       validation_status: 'accepted_config',
       baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: curTput,
@@ -2572,7 +2608,6 @@ function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SY
 // An accept is folded into curFlags/curEnv (the deploy's required env IS the engagement mechanism), then
 // the profile is re-taken exactly as it is after a config win, because tuning changes the landscape too.
 // ===========================================================================
-let tuning = ST.tuning || null;
 if (want('tune') && TUNING_SKILLSET_ENABLED) {
   phase('TuningSkillset');
   log(`Tuning skillset: ${TUNING_SKILLSET_DIR} (whole, standalone, pre-HeadKernel); ` +
@@ -2663,7 +2698,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       log(`Banked ${tunedOps.length} tuned op(s) as accepted kernels (kind=env) so the KB record ` +
         `carries the lever: ${tunedOps.map((o) => o.op || o.short_name).join(', ')}.`);
     }
-    await persistE2EValidationCheckpoint('tuning/e2e_validation.json', {
+    await requireE2EValidationCheckpoint('tuning/e2e_validation.json', {
       phase: 'TuningSkillset', validation_level: 'tuning_skillset', gate: 'accepted',
       validation_status: 'accepted_tuning',
       baseline_throughput_tok_s: tuning.pre_tune_throughput_tok_s,
@@ -4004,7 +4039,7 @@ if (want('final')) {
 }
 allAccepted = acceptedHeads.concat(acceptedKernels);   // refresh after Fix C may have banked a pending win
 if (allAccepted.length) {
-  await persistE2EValidationCheckpoint('overlay/accepted_stack/e2e_validation.json', {
+  await requireE2EValidationCheckpoint('overlay/accepted_stack/e2e_validation.json', {
     phase: 'Overlay', validation_level: 'integrator', gate: 'accepted',
     validation_status: 'accepted_intermediate',
     baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: curTput,
@@ -4039,7 +4074,7 @@ if (want('final')) {
     { phase: 'Finalize', label: 'e2e_integrator:finalize', schema: FINALIZE_SCHEMA });
   finalTput = (finalize && finalize.final_throughput_tok_s) || curTput;
   if (finalize && finalTput > BASELINE_TPUT * (1 + NOISE_BAND / 100)) {
-    await persistE2EValidationCheckpoint('final/e2e_validation.json', {
+    await requireE2EValidationCheckpoint('final/e2e_validation.json', {
       phase: 'Finalize', validation_level: 'final_pair', gate: 'accepted',
       validation_status: 'provisional_final_pair',
       baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: finalTput,

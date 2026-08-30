@@ -104,6 +104,29 @@ def test_recovers_tuning_checkpoint_and_preserves_kernel_metadata(tmp_path):
     assert kernel["e2e"]["e2e_gain_scope"] == "tuning_stack_unattributed"
 
 
+def test_recovers_warm_start_config_checkpoint_as_config_sweep(tmp_path):
+    eval_dir = tmp_path / "e2e"
+    checkpoint = _checkpoint(eval_dir, "config_sweep")
+    checkpoint["phase"] = "WarmStart"
+    checkpoint["validation_status"] = "accepted_config"
+    checkpoint["accepted_kernels"] = []
+    checkpoint["stack"] = {
+        "stack_after_digest": "warm-start-config",
+        "config_layers": [{"id": "cfg0", "kept": True}],
+        "kernel_slots": [],
+    }
+    checkpoint["measurement"]["acceptance_source"] = "kb_warm_start"
+    checkpoint["checkpoint_sha256"] = rx._checkpoint_digest(checkpoint)
+    _write(eval_dir, "config/e2e_validation.json", checkpoint)
+
+    recovered = rx._recover_e2e_validation_checkpoint(eval_dir)
+    normalized = rx.normalize_result({}, recovered)
+
+    assert recovered["recovered_e2e_checkpoint_level"] == "config_sweep"
+    assert recovered["accepted_config"]["env"] == "AITER=1"
+    assert normalized["result_source"] == "disk_e2e_checkpoint_config_sweep"
+
+
 def test_final_checkpoint_outranks_tuning_checkpoint(tmp_path):
     eval_dir = tmp_path / "e2e"
     _write(eval_dir, "tuning/e2e_validation.json", _checkpoint(eval_dir, "tuning_skillset"))

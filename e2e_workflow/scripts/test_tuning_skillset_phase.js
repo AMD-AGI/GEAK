@@ -126,9 +126,14 @@ const at = (re) => src.search(re);
 const iConfig = at(/if \(want\('config'\)/);
 const iTune = at(/if \(want\('tune'\) && TUNING_SKILLSET_ENABLED\)/);
 const iHead = at(/if \(want\('head'\)/);
+const iTuningState = src.indexOf('let tuning = ST.tuning || null;');
+const iWarmStart = src.indexOf("if (E2E_WARM_START_ON)");
+const iWarmStartIntegration = src.indexOf('const integ = await runIntegrateBothLegs(', iWarmStart);
 ok(iTune > 0, "a gated `want('tune')` block exists");
 ok(iConfig > 0 && iConfig < iTune, 'the tune block runs AFTER the ConfigSweep block');
 ok(iTune < iHead, 'the tune block runs BEFORE the HeadKernel block');
+ok(iTuningState > 0 && iTuningState < iWarmStartIntegration,
+  'the tuning state is initialized before WarmStart can enter an integration A/B (no TDZ)');
 ok(/phase\('TuningSkillset'\)/.test(src), 'the block announces itself as its own phase');
 ok(/roleAgent\('tuning_specialist', 'tune'/.test(src), 'it dispatches ONE dedicated role (not a fragment on another role)');
 // It must NOT be injected into any OTHER role's prompt — spraying it around is the scattering failure
@@ -272,6 +277,9 @@ ok(/reaches_production_via/.test(runE2e),
 console.log('\n## F. schema-v2 recovery checkpoints');
 ok(/async function persistE2EValidationCheckpoint\(relativePath, intent\)/.test(src),
   'one shared schema-v2 checkpoint writer exists');
+ok(/async function requireE2EValidationCheckpoint\(relativePath, intent\)/.test(src)
+  && /checkpoint_write_failed: \$\{relativePath\}/.test(src),
+  'an accepted result fails explicitly when its checkpoint cannot be written');
 ok(/schema_version: 2, checkpoint_type: 'e2e_validation', committed: true/.test(src),
   'checkpoint intent pins schema version, type, and committed state');
 ok(/checkpoint_assets\/ directory/.test(src) && /checkpoint_sha256/.test(src),
@@ -288,9 +296,14 @@ for (const rel of [
   'overlay/accepted_stack/e2e_validation.json',
   'final/e2e_validation.json',
 ]) {
-  ok(src.includes(`persistE2EValidationCheckpoint('${rel}'`),
-    `accepted ${rel.split('/')[0]} state writes its recovery checkpoint`);
+  ok(src.includes(`requireE2EValidationCheckpoint('${rel}'`),
+    `accepted ${rel.split('/')[0]} state requires its recovery checkpoint`);
 }
+const warmStartBlock = src.slice(iWarmStart, iConfig);
+ok(/requireE2EValidationCheckpoint\('config\/e2e_validation\.json'/.test(warmStartBlock)
+  && /phase: 'WarmStart', validation_level: 'config_sweep'/.test(warmStartBlock)
+  && /acceptance_source: 'kb_warm_start'/.test(warmStartBlock),
+  'an accepted WarmStart config writes an auditable config checkpoint');
 ok(/finalTput > BASELINE_TPUT \* \(1 \+ NOISE_BAND \/ 100\)/.test(src),
   'Finalize writes an accepted checkpoint only after clearing the noise band');
 ok(/kernel_slot: o\.kernel_slot/.test(src) && /from_tuning_skillset: true/.test(src),
