@@ -23,6 +23,7 @@ alignment_metrics):
 
 Run: python3 -m pytest GEAK/interface/test_run_e2e_alignment.py -v
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -45,6 +46,12 @@ rx = _load()
 
 
 def _wf(eval_dir: Path, *, base: float, final: float, speedup: float) -> dict:
+    baseline_path = eval_dir / "baseline" / "bench_summary.json"
+    if not baseline_path.exists():
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_path.write_text(
+            json.dumps({"throughput_tok_s_median": base}), encoding="utf-8"
+        )
     return {
         "eval_dir": str(eval_dir),
         "baseline_throughput_tok_s": base,
@@ -73,9 +80,7 @@ def test_issue6_names_raw_and_same_config_divergence_explicitly(
     out = rx.normalize_result(h, wf)
     bb = out["baseline_basis"]
 
-    assert bb["raw_session_baseline_divergence_pct"] == pytest.approx(
-        7.73, abs=0.01
-    )
+    assert bb["raw_session_baseline_divergence_pct"] == pytest.approx(7.73, abs=0.01)
     assert bb["current_best_same_config_divergence_pct"] == pytest.approx(
         0.04, abs=0.01
     )
@@ -86,6 +91,10 @@ def test_issue6_names_raw_and_same_config_divergence_explicitly(
     assert "baseline_divergence_pct" not in bb
     assert bb["orchestrator_best_tput_same_config"] == pytest.approx(orch_same_cfg)
     assert out["baseline_alignment"]["status"] == "aligned"
+    # An older handoff may have a numeric same-config reference but no observed
+    # server identity. Do not upgrade that number into a verified launch match.
+    assert out["handoff_alignment"]["status"] == "unverified"
+    assert out["server_identity"]["status"] == "unavailable"
 
 
 def test_same_config_divergence_above_threshold_is_warning(
@@ -130,9 +139,7 @@ def test_large_raw_gain_does_not_trigger_alignment_warning(tmp_path: Path) -> No
     out = rx.normalize_result(h, wf)
     bb = out["baseline_basis"]
 
-    assert bb["raw_session_baseline_divergence_pct"] == pytest.approx(
-        20.2, abs=0.01
-    )
+    assert bb["raw_session_baseline_divergence_pct"] == pytest.approx(20.2, abs=0.01)
     assert bb["current_best_same_config_divergence_pct"] == pytest.approx(
         0.17, abs=0.01
     )
@@ -156,6 +163,7 @@ def test_same_config_alignment_unavailable_without_reference(tmp_path: Path) -> 
     assert bb["current_best_same_config_divergence_pct"] is None
     assert bb["raw_session_baseline_divergence_pct"] is not None
     assert out["baseline_alignment"]["status"] == "unavailable"
+    assert out["handoff_alignment"]["status"] == "unavailable"
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
@@ -178,6 +186,89 @@ def test_non_finite_divergence_inputs_are_unavailable(
     assert out["baseline_basis"]["orchestrator_best_tput_same_config"] is None
     assert out["baseline_alignment"]["status"] == "unavailable"
     json.dumps(out, allow_nan=False)
+
+
+def test_handoff_alignment_uses_setup_not_validate_base_and_verifies_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The late optimization denominator cannot overwrite the handoff verdict."""
+    eval_dir = tmp_path / "e2e"
+    (eval_dir / "validation" / "base").mkdir(parents=True)
+    (eval_dir / "validation" / "final").mkdir(parents=True)
+    (eval_dir / "baseline").mkdir()
+    (eval_dir / "baseline" / "bench_summary.json").write_text(
+        json.dumps({"throughput_tok_s_median": 1000.0}), encoding="utf-8"
+    )
+    (eval_dir / "validation" / "base" / "bench_summary.json").write_text(
+        json.dumps({"throughput_tok_s_median": 900.0}), encoding="utf-8"
+    )
+    (eval_dir / "validation" / "final" / "bench_summary.json").write_text(
+        json.dumps({"throughput_tok_s_median": 990.0}), encoding="utf-8"
+    )
+    server_log = eval_dir / "baseline" / "server.log"
+    server_log.write_text(
+        "server_args=ServerArgs(model_path='/models/qwen', tp_size=1, "
+        "mem_fraction_static=0.92, context_length=8192)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BENCH_LAUNCHER", "magpie")
+    handoff = {
+        "orchestrator_best_tput_same_config": 1000.0,
+        "same_config_observed_identity": {
+            "backend": "sglang",
+            "server_args": {
+                "model_path": "/models/qwen",
+                "tp_size": 1,
+                "mem_fraction_static": 0.92,
+            },
+        },
+    }
+
+    out = rx.normalize_result(
+        handoff, _wf(eval_dir, base=1000.0, final=990.0, speedup=1.1)
+    )
+
+    assert out["baseline_throughput_tok_s"] == 900.0
+    assert out["throughput_speedup"] == pytest.approx(1.1)
+    assert out["handoff_alignment"]["status"] == "aligned"
+    assert out["handoff_alignment"]["divergence_pct"] == 0.0
+    assert out["server_identity"]["status"] == "matched"
+    assert out["server_identity"]["observed"]["server_args"]["context_length"] == 8192
+    assert out["server_identity"]["evidence_paths"] == [str(server_log)]
+    # Validation's -10% movement is a separate diagnostic, not handoff evidence.
+    assert out["measurement_drift"]["status"] == "measured"
+    assert out["measurement_drift"]["drift_pct"] == -10.0
+    assert out["baseline_alignment"]["divergence_pct"] == 0.0
+
+
+def test_handoff_identity_mismatch_is_exposed_with_its_evidence(
+    tmp_path: Path,
+) -> None:
+    eval_dir = tmp_path / "e2e"
+    (eval_dir / "baseline").mkdir(parents=True)
+    (eval_dir / "baseline" / "bench_summary.json").write_text(
+        json.dumps({"throughput_tok_s_median": 1000.0}), encoding="utf-8"
+    )
+    server_log = eval_dir / "baseline" / "server.log"
+    server_log.write_text(
+        "server_args=ServerArgs(model_path='/models/qwen', tp_size=1)\n",
+        encoding="utf-8",
+    )
+
+    out = rx.normalize_result(
+        {
+            "orchestrator_best_tput_same_config": 1000.0,
+            "observed_server_identity": {
+                "backend": "sglang",
+                "server_args": {"model_path": "/models/qwen", "tp_size": 2},
+            },
+        },
+        _wf(eval_dir, base=1000.0, final=1000.0, speedup=1.0),
+    )
+
+    assert out["server_identity"]["status"] == "mismatched"
+    assert out["handoff_alignment"]["status"] == "identity_mismatch"
+    assert out["server_identity"]["evidence_paths"] == [str(server_log)]
 
 
 def test_alignment_report_is_same_config_first_and_idempotent(
@@ -289,8 +380,7 @@ def test_map_args_consumes_schema_v2_effective_config(tmp_path: Path) -> None:
         "baseline_env_spec": {
             "config": {
                 "server_launch_flags": (
-                    "--trust-remote-code --disable-radix-cache "
-                    "--context-length 11264"
+                    "--trust-remote-code --disable-radix-cache --context-length 11264"
                 ),
                 "extra_server_args": "--context-length 11264",
                 "extra_envs": {"SGLANG_USE_AITER": "1"},
@@ -397,7 +487,9 @@ def test_fold_noop_when_knobs_absent(tmp_path: Path) -> None:
         framework="vllm",
         accepted_flags="--max-num-batched-tokens 24576",
     )
-    assert rx.map_args(h)["initial_extra_server_args"] == "--max-num-batched-tokens 24576"
+    assert (
+        rx.map_args(h)["initial_extra_server_args"] == "--max-num-batched-tokens 24576"
+    )
 
 
 def test_fold_unknown_backend_left_untouched(tmp_path: Path) -> None:
@@ -421,9 +513,12 @@ def test_fold_helper_dedup_and_forms() -> None:
     assert out.count("--max-model-len") == 1
     assert "2248" not in out
     # Unknown backend returns input verbatim.
-    assert rx._fold_serving_fidelity_flags(
-        "--x 1", backend="mystack", max_model_len=10, mem_fraction=0.5
-    ) == "--x 1"
+    assert (
+        rx._fold_serving_fidelity_flags(
+            "--x 1", backend="mystack", max_model_len=10, mem_fraction=0.5
+        )
+        == "--x 1"
+    )
     # Empty seed + both knobs => clean space-joined string, no leading space.
     out2 = rx._fold_serving_fidelity_flags(
         "", backend="sglang", max_model_len=4096, mem_fraction=0.9
@@ -454,18 +549,25 @@ def test_promoted_final_is_hot_and_cold_stays_a_diagnostic(tmp_path: Path) -> No
     (eval_dir / "baseline").mkdir(parents=True)
     (eval_dir / "validation" / "final").mkdir(parents=True)
     (eval_dir / "baseline" / "bench_summary.json").write_text(
-        json.dumps({"output_throughput_tok_s_median": 450.0,
-                    "cold_output_throughput_tok_s": 460.0}),
+        json.dumps(
+            {
+                "output_throughput_tok_s_median": 450.0,
+                "cold_output_throughput_tok_s": 460.0,
+            }
+        ),
         encoding="utf-8",
     )
     (eval_dir / "validation" / "final" / "bench_summary.json").write_text(
-        json.dumps({"output_throughput_tok_s_median": 500.0,
-                    "cold_output_throughput_tok_s": 480.0}),
+        json.dumps(
+            {
+                "output_throughput_tok_s_median": 500.0,
+                "cold_output_throughput_tok_s": 480.0,
+            }
+        ),
         encoding="utf-8",
     )
     # raw_baseline_tput is the orchestrator's COLD leaderboard anchor.
-    h = {"workload": {"isl": 1024, "osl": 1024, "conc": 64},
-         "raw_baseline_tput": 440.0}
+    h = {"workload": {"isl": 1024, "osl": 1024, "conc": 64}, "raw_baseline_tput": 440.0}
     r = rx.normalize_result(h, _wf(eval_dir, base=450.0, final=500.0, speedup=1.1111))
     am = r["alignment_metrics"]
 
