@@ -2672,6 +2672,11 @@ if (want('setup')) {
       // Config verdicts only. A replayed kernel that failed is evidence against the KERNEL lane's
       // record, not against the e2e run that once used it, and the two have separate ledgers —
       // `experience_store.py attest` is where that verdict belongs.
+      //
+      // A record's headline number is its WHOLE bundle. When the bundle also carries kernels, this
+      // lane benched only the config half, so the stored claim is not what the measurement is a
+      // verdict on — every place that prints the two together has to say which half ran.
+      const configHalfOnly = v => Array.isArray(v.accepted_kernels) && v.accepted_kernels.length > 0;
       const attestable = verdicts.filter(v => v.session_id &&
         ['adopted', 'rejected', 'not_reproduced', 'inapplicable'].includes(v.outcome));
       if (attestable.length) {
@@ -2689,6 +2694,9 @@ if (want('setup')) {
             // the record; a reader still has to be able to see what actually happened here.
             `local verdict: ${v.outcome}` +
               (v.measured_tok_s ? ` (${v.measured_tok_s} tok/s vs baseline ${BASELINE_TPUT})` : ' (no measurement)'),
+            configHalfOnly(v)
+              ? `config half only — the record also claims ${v.accepted_kernels.length} kernel(s), ` +
+                'benched in the kernel lane and NOT covered by this verdict' : '',
             (v.overrides || []).length ? `overrode ${describeOverrides(v.overrides)}` : '',
             (v.dropped_flags || []).length
               ? `dropped ${(v.dropped_flags || []).join(' ')} to make it run here` +
@@ -2728,6 +2736,11 @@ if (want('setup')) {
           direction: String(v.direction || 'unlabeled'), session_id: String(v.session_id || ''),
           stored_tok_s: v.throughput_tok_s != null ? v.throughput_tok_s : null,
           stored_speedup: v.speedup != null ? v.speedup : null,
+          // The baseline the claim was measured against, and whether the claim covers more than
+          // what ran here. Without the first, a lower `delta_pct` reads as decay when the two
+          // baselines were never comparable; without the second it reads as a failed kernel.
+          stored_baseline_tok_s: v.baseline_throughput_tok_s != null ? v.baseline_throughput_tok_s : null,
+          config_half_only: configHalfOnly(v),
           measured_tok_s: v.measured_tok_s != null ? v.measured_tok_s : null,
           delta_pct: v.delta_pct != null ? v.delta_pct : null,
           parity: String(v.parity || ''), outcome: String(v.outcome || ''),
@@ -2767,18 +2780,30 @@ if (want('setup')) {
           `- baseline: **${BASELINE_TPUT} tok/s** (noise band ${NOISE_BAND}%)`,
           `- serving: BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}, workload isl=${ISL} osl=${OSL} conc=${CONC}`,
           `- identity read: \`${resolved.canonical_id || '?'}\` (match tier \`${resolved.match_tier || '-'}\`)`,
+          // `exact` is exact on the identity, which does not encode server flags, env or kv-cache
+          // dtype. A record measured against a slower baseline will reproduce a smaller percentage
+          // here for that reason alone, and without this line that reads as the record decaying.
+          ...(verdicts.some(v => v.baseline_throughput_tok_s != null && BASELINE_TPUT &&
+              Math.abs(v.baseline_throughput_tok_s - BASELINE_TPUT) / BASELINE_TPUT > NOISE_BAND / 100)
+            ? ['- CAUTION: the match tier covers the identity only — not server flags, env or ' +
+               'kv-cache dtype. At least one offer below was recorded against a different baseline ' +
+               '(column `stored baseline`), so its stored percentage and the one measured here are ' +
+               'not the same quantity.']
+            : []),
           '',
           '## Configurations',
           '',
-          '| stored direction | stored claim | measured here | delta vs baseline | parity | outcome |',
-          '|---|---|---|---|---|---|',
+          '| stored direction | stored claim | stored baseline | measured here | delta vs baseline | parity | outcome |',
+          '|---|---|---|---|---|---|---|',
           ...(verdicts.length ? verdicts.map(v =>
             `| ${v.direction || 'unlabeled'} | ${v.throughput_tok_s != null ? v.throughput_tok_s + ' tok/s' : '?'}` +
-            `${v.speedup != null ? ` (${v.speedup}x)` : ''} | ` +
+            `${v.speedup != null ? ` (${v.speedup}x)` : ''}` +
+            `${configHalfOnly(v) ? ` — WHOLE BUNDLE, incl. ${v.accepted_kernels.length} kernel(s); only the config half ran in this row` : ''} | ` +
+            `${v.baseline_throughput_tok_s != null ? v.baseline_throughput_tok_s + ' tok/s' : '—'} | ` +
             `${v.measured_tok_s != null ? v.measured_tok_s + ' tok/s' : 'not benched'} | ` +
             `${v.delta_pct != null ? (v.delta_pct >= 0 ? '+' : '') + v.delta_pct.toFixed(2) + '%' : '—'} | ` +
             `${v.parity || '—'} | **${v.outcome}** |`)
-            : ['| _(none offered)_ | | | | | |']),
+            : ['| _(none offered)_ | | | | | | |']),
           '',
           '## Kernels',
           '',
