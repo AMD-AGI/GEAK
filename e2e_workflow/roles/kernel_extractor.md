@@ -231,11 +231,26 @@ freeze an out-of-regime oracle nobody should trust.
    > Shapes/weights arrive from TraceLens priors, the profiler trace, config M-buckets, AND live capture
    > (`meta.cases` oracle + `meta.shape_counts`). Resolve by PURPOSE, and let the deterministic tools own
    > the merge — never hand-pick:
-   > - **Correctness oracle (exact operands/dtype/LAYOUT): live capture ONLY.** If capture is
-   >   `meta.oracle_complete == false` or empty (server didn't boot / hook missed the seam / OOM), do NOT
-   >   freeze a partial oracle. For value-INDEPENDENT dense GEMM you may synth from config (`GEMM_SYNTH`);
-   >   for anything value/layout-dependent (quant / attn / swizzled-scale) **DROP (`editable:false`) —
-   >   never fabricate an oracle.** Capture is best-effort, never load-bearing.
+   > - **Correctness oracle (exact operands/dtype/LAYOUT).** Two sources are legitimate, in this order:
+   >   **(a) live capture** — real operands recorded off the running server; and, when capture is
+   >   `meta.oracle_complete == false` or empty (server didn't boot / hook missed the seam / OOM),
+   >   **(b) a REPLAYED oracle**: build the operands from `regime.json` and produce the golden outputs by
+   >   RUNNING the frozen real baseline in `baseline_src/`. (b) is not fabrication — the values still come
+   >   from the production kernel, only the inputs are reconstructed — and it is what every large authored
+   >   win in the campaign actually used. It is admissible ONLY with all four guards:
+   >     1. every operand built through `harness_lib` from `regime.json` (dtype, KV layout, scales,
+   >        `pack_x`, fp8 variant) — never from offline defaults, per the ONLINE REGIME section above;
+   >     2. the golden output computed by importing `baseline_src/` and calling it — never written by hand,
+   >        never a re-run of the candidate's own code path;
+   >     3. any seeded operand rebuilt twice and asserted bit-identical, with the fingerprint recorded in
+   >        `meta.json` and re-checked by `unittest.py` before it trusts the oracle (fail loud);
+   >     4. `meta.json` records `oracle_source: "capture" | "replay"` plus the usual sha, so the Validator
+   >        and the dashboard can tell the two apart. Prefer (a) whenever the server is up.
+   >   **Never fabricate an oracle** — hand-written expected values, or a "golden" output produced by the
+   >   code under optimization, remain forbidden under both (a) and (b). If the regime genuinely cannot be
+   >   rebuilt offline (op exists only fused in the compile graph, routing-dependent MoE token counts),
+   >   THEN drop (`editable:false`) and say so in `notes`. **A server that fails to boot is not by itself a
+   >   reason to drop the task.**
    > - **Which shapes exist (coverage): config M-buckets are the deterministic spine** (can't crash);
    >   live capture augments/corrects; profiler + TraceLens are hints you re-verify against capture. The
    >   mandatory both-regimes floor still applies even if a source missed decode.
