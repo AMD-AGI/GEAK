@@ -110,10 +110,9 @@ _PRECISION_ALIASES = {"float8": "fp8", "f8": "fp8", "float16": "fp16", "f16": "f
 def _norm_precision(value) -> str:
     """Fold a dtype spelling to a comparable token: `FP8-w8a8` and `fp8_w8a8` are one thing.
 
-    Only the LEADING token is aliased. A quantization scheme suffix (`_w8a8`, `_w4a16`) is kept
-    verbatim because nothing here is qualified to decide that two of them are interchangeable —
-    getting that wrong would offer a reader a table its runtime cannot use, which is the failure
-    this filter exists to prevent.
+    Only the LEADING token is aliased; a quantization scheme suffix (`_w8a8`, `_w4a16`) is kept
+    verbatim, because calling two of those interchangeable would offer a reader a table its runtime
+    cannot use — the failure this filter exists to prevent.
     """
     text = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
     if not text:
@@ -125,14 +124,11 @@ def _norm_precision(value) -> str:
 def _precision_matches(want: str, have: str) -> bool:
     """Whether an entry recorded at `have` may be offered to a caller asking for `want`.
 
-    Unstated on EITHER side is a match, not a mismatch. The entire recovered backlog predates this
-    field, so excluding what does not state a precision would empty every page in the store — and an
-    unlabelled entry is still a lead worth a verify slot, exactly as an unvalidated one is.
-
-    A bare base dtype matches its own refinements in both directions: a table recorded as `fp8` is
-    the coarser statement about the same thing an `fp8_w8a8` reader wants, and a caller who only
-    knows it is on `fp8` must still see the `fp8_w8a8` entries. Matching on the token boundary
-    rather than a raw prefix keeps `fp8` from swallowing `fp8x` or `fp16`.
+    Unstated on EITHER side is a match: the entire recovered backlog predates this field, so
+    excluding what states no precision would empty every page in the store. A bare base dtype
+    matches its refinements in BOTH directions — `fp8` is the coarser statement about the same
+    thing an `fp8_w8a8` reader wants, and vice versa. On the token boundary, not a raw prefix, so
+    `fp8` cannot swallow `fp8x` or `fp16`.
     """
     if not want or not have:
         return True
@@ -147,16 +143,12 @@ def _precision_of(meta) -> str:
 def _upstream_of(a) -> dict:
     """The serving context this win was measured in — recorded, never keyed.
 
-    The remote-export note below spells out why none of this may become an identity dimension: a
-    dimension the READ side cannot recompute is a permanent silent 404, and `kernel_lane.js` has no
-    upstream awareness at all. That note has said since it was written that these ride in
-    `value.upstream` instead — but nothing ever wrote the field, so precision was not merely absent
-    from the address, it was absent from the record. An e2e run that knows it measured `fp8` had
-    nowhere to say so, and the e2e lane's own records (which DO key on precision) could not be
-    joined back to the kernel entries they produced.
-
-    Values are stored verbatim. `_norm_precision` folds only at COMPARISON time, so a later reader
-    that disagrees with today's folding rule still has the original string to re-fold.
+    The remote-export note below says why none of this may become an identity dimension (a dimension
+    the READ side cannot recompute is a permanent silent 404) and that it rides in `value.upstream`
+    instead — but nothing ever wrote that field, so precision was absent from the RECORD, not just
+    from the address, and the e2e lane's records could not be joined back to the kernel entries they
+    produced. Stored verbatim; `_norm_precision` folds only at COMPARISON time, so a later reader
+    that disagrees with today's folding rule still has the original string.
     """
     out = {}
     for key, attr in (("precision", "precision"), ("framework", "serving_framework"),
@@ -216,13 +208,17 @@ def _dump_meta(meta: dict) -> str:
     return json.dumps(meta, indent=2, ensure_ascii=False)
 
 
-def _atomic_write(path: str, data: str):
-    """Crash-safe: same-dir temp -> fsync -> os.replace -> dir fsync."""
+def _atomic_write(path: str, data):
+    """Crash-safe: same-dir temp -> fsync -> os.replace -> dir fsync.
+
+    `bytes` goes out unencoded, for a tuned table that is not text and must not be re-encoded on
+    the way in.
+    """
     d = os.path.dirname(path) or "."
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp_", suffix=".swap")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "wb" if isinstance(data, bytes) else "w") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
@@ -241,25 +237,6 @@ def _atomic_write(path: str, data: str):
             os.close(dirfd)
     except OSError:
         pass
-
-
-def _atomic_write_bytes(path: str, data: bytes):
-    """_atomic_write for a tuned table, which is not text and must not be re-encoded on the way in."""
-    d = os.path.dirname(path) or "."
-    os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp_", suffix=".swap")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
 
 
 def content_signature(patch_text: str) -> str:
@@ -297,11 +274,10 @@ _MAX_ARTIFACTS = 24
 def _expand_artifact_paths(paths):
     """Flatten the caller's list to actual files, in a stable order.
 
-    A tuner hands back whatever shape its output happened to take — `--artifact <one table>` from one
-    op, `--artifact <the dir the tuner filled>` from the next. Making the caller know which is which
-    would push the whole win/no-win outcome onto a `os.path.isdir` it has no reason to think about, so
-    a directory is expanded here instead. Sorted, so the same set of files signs to the same value on
-    two boxes whose readdir order differs.
+    A tuner hands back whatever shape its output took — `--artifact <one table>` from one op, `<the
+    dir the tuner filled>` from the next — so a directory is expanded here rather than making the
+    caller hang its win/no-win outcome on an `os.path.isdir`. Sorted, so the same set of files signs
+    to the same value on two boxes whose readdir order differs.
     """
     files = []
     for raw in (paths or []):
@@ -349,12 +325,11 @@ def artifact_signature(paths) -> str:
     """Content identity of a tuned artifact set — the `carrier: tuned_artifact` analogue of
     content_signature().
 
-    Same job, same consequence: re-tuning a shape on a later run usually reproduces the same table,
-    and without a signature the store would re-import its own output as a fresh win every time
-    instead of counting a reproduction (which is what promotes candidate -> active). Hashed over the
-    BYTES plus the stored basename, sorted, because a tuned table is binary-ish CSV/JSON whose
-    line-level diff carries no meaning — unlike a patch, where paths must be ignored and code lines
-    must not be.
+    Same job, same consequence: re-tuning a shape usually reproduces the same table, and without a
+    signature the store re-imports its own output as a fresh win instead of counting a reproduction
+    (which is what promotes candidate -> active). Hashed over the BYTES plus the stored basename,
+    sorted, because a tuned table is binary-ish CSV/JSON whose line-level diff carries no meaning —
+    unlike a patch, where paths must be ignored and code lines must not be.
     """
     items = sorted(paths)
     if not items:
@@ -720,7 +695,7 @@ def cmd_write(a) -> dict:
         for name, src in artifacts:
             with open(src, "rb") as f:
                 blob = f.read()
-            _atomic_write_bytes(os.path.join(out_dir, "artifact", name), blob)
+            _atomic_write(os.path.join(out_dir, "artifact", name), blob)
         _atomic_write(os.path.join(out_dir, "meta.yaml"), _dump_meta(meta))
         if report_copied is not None:
             _atomic_write(os.path.join(out_dir, "report.md"), report_copied)
@@ -1984,14 +1959,11 @@ def cmd_resolve_remote(a) -> dict:
     # came straight back out of the service. Filtering here rather than below also means a rung
     # whose every entry has been retracted correctly reads as EMPTY and the ladder descends, instead
     # of stopping on a page that turns out to have nothing to offer.
-    # Carrier is filtered in the same place and for the same reason as retraction: a rung holding
-    # nothing but the other carrier must read as EMPTY so the ladder descends, rather than stopping
-    # on a page whose every entry the caller has no way to install. Records written before carriers
-    # existed have no field and are diffs.
-    # Precision is filtered in the same place, and descends the ladder for the same reason: a rung
-    # holding nothing but the other dtype is a page this caller cannot install from, so it must read
-    # EMPTY and let the version-agnostic rung answer instead of stopping here. Off unless asked, and
-    # an entry that states no precision is kept — the whole backlog predates the field.
+    # Carrier and precision are filtered here for the same reason as retraction: a rung holding
+    # nothing this caller can install must read as EMPTY so the ladder descends, rather than stopping
+    # on a page with nothing to offer. Records written before carriers existed have no field and are
+    # diffs; precision filters only when asked, and an entry that states none is kept — the whole
+    # backlog predates the field.
     want_carrier = str(getattr(a, "carrier", "") or "patch")
     want_precision = _norm_precision(getattr(a, "precision", ""))
     other_carrier = [0]

@@ -483,26 +483,16 @@ const KB_IDENTITY_BASENAME = 'kb_identity.json';
 const E2E_WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.warm_start_min_speedup))
   ? parseFloat(A.warm_start_min_speedup) : 1.05;
 
-// How a local verdict is filed AGAINST THE RECORD.
+// How a local verdict is filed AGAINST THE RECORD. The local bench decides what THIS run adopts and
+// nothing else: this box has a different baseline, image, driver and neighbours, so a no-gain here
+// is a fact about the PAIRING, and reading it as a refutation is how a store of real wins decays
+// into an empty one. So only a local WIN moves the record's standing; every other outcome is filed
+// as `inapplicable`, which kb/attest.py counts as a recall but keeps out of the retirement
+// denominator. The true verdict is not lost — it leads the attestation note and is carried verbatim
+// in `verdicts[]`, in the recall report and in kb_references/measured_on_this_box.md.
 //
-// The local bench is authoritative for this run — it alone decides what gets adopted, and a
-// recalled config that does not beat this baseline is not applied, full stop. It is authoritative
-// for nothing else. This box is not the box the record was written on: different baseline, image,
-// driver, neighbours on the node, and as few as one search replica. A no-gain here is a fact about
-// the PAIRING, and reading it as a refutation is how a store of real wins decays into an empty
-// one — the record that does not reproduce on the next box is exactly the one worth keeping until
-// something better replaces it.
-//
-// So only a local WIN moves the record's standing. Every other outcome is filed as `inapplicable`,
-// which kb/attest.py counts as a recall (the attempt happened and stays visible) but keeps out of
-// the retirement denominator, so no number of failed replays can retire a record. The true local
-// verdict is not lost: it leads the attestation note, and it is carried verbatim in `verdicts[]`,
-// in the recall report, and in kb_references/measured_on_this_box.md. It is reported everywhere and
-// counted against the record nowhere.
-//
-// It also closes a silent hole: `rejected` was passed through to `e2e_store.py attest --outcome`,
-// which does not accept it (choices come from kb/attest.py OUTCOMES), so every "ran here and lost"
-// attestation was rejected by argparse and swallowed by the trailing `|| true`.
+// This also closes a silent hole: `rejected` is not in kb/attest.py OUTCOMES, so every "ran here and
+// lost" attestation was rejected by argparse and swallowed by the trailing `|| true`.
 const KB_ATTEST_OUTCOME = {
   adopted: 'validated',
   rejected: 'inapplicable',
@@ -516,15 +506,11 @@ const E2E_WARM_START_TOP_N = parseInt(A.e2e_warm_start_top_n != null ? A.e2e_war
 const E2E_WARM_START_VALIDATE_N = parseInt(
   A.e2e_warm_start_validate_n != null ? A.e2e_warm_start_validate_n : 1, 10);
 // The same budget for a COARSE rung (`tp_any`/`workload_any`), where the record was measured at a
-// different tp or a different isl/osl/conc. This used to be hard zero, on the argument that a
-// non-comparable stored number is not worth a server launch. That argument confuses the PRIOR with
-// the MEASUREMENT: the bench below runs the recovered config on THIS box against THIS run's
-// baseline, so what the record claimed never enters the verdict — it only decides what is worth
-// trying first. And a config's transferability is exactly what the coarse rungs are for: the store
-// already ranks them by SPEEDUP rather than throughput (e2e_store.rung_metric) because the ratio is
-// the part that survives a workload change. Zero there meant every `tp_any` hit was filed as a lead
-// and then never followed by anyone, which is what the 20260826 gpt-oss-120b and Qwen3.5-122B runs
-// did. Budgeted rather than unbounded because the launch cost is real; set to 0 to restore the old
+// different tp or workload point. It was hard zero, on the argument that a non-comparable stored
+// number is not worth a launch — which confuses the PRIOR with the MEASUREMENT: the bench runs the
+// config on THIS box against THIS baseline, so the stored number only decides what is tried first.
+// Zero meant every `tp_any` hit was filed as a lead nobody followed (the 20260826 gpt-oss-120b and
+// Qwen3.5-122B runs). Budgeted, not unbounded, because the launch cost is real; 0 restores the old
 // reference-only behaviour.
 const E2E_WARM_START_VALIDATE_N_COARSE = parseInt(
   A.e2e_warm_start_validate_n_coarse != null ? A.e2e_warm_start_validate_n_coarse : 1, 10);
@@ -534,25 +520,22 @@ const E2E_WARM_START_KERNELS_N = parseInt(
   A.e2e_warm_start_kernels_n != null ? A.e2e_warm_start_kernels_n : 2, 10);
 // Which recorded win-kinds can be REBUILT from a record alone. `patch` re-applies a diff through the
 // overlay; `env`/`flag` re-route the op to an implementation that already exists in this install.
-// `authored` cannot be rebuilt: the integrator's authored recipe git-applies the diff inside
-// `authored_kernel_eval_dir/workspace/` and assembles the module from `kernel_src/`, and that
-// workspace dies with the run that made it.
+// `authored` cannot be rebuilt: its recipe git-applies the diff inside
+// `authored_kernel_eval_dir/workspace/`, and that workspace dies with the run that made it.
 //
-// Not-rebuildable is NOT not-replayable, and reading it that way is what kept every authored kernel
-// in the store permanently unverified. The overlay directory — the OUTPUT of that build — is carried
-// in the record as `overlay.tar.gz` (e2e_store._pack_overlay), and it is the complete mechanism:
-// manifest, sitecustomize, the authored source, PYTHONPATH-activated and structurally reversible. So
-// a kind outside this set falls through to the prebuilt-overlay path below when the bundle has one,
-// and is demoted to a reference only when it has neither. A demotion is never reported as a failure —
-// it is still a real datum about what worked on this deployment.
+// Not-rebuildable is NOT not-replayable, and reading it that way kept every authored kernel in the
+// store permanently unverified. The OUTPUT of that build travels in the record as `overlay.tar.gz`
+// (e2e_store._pack_overlay) and is the complete, reversible mechanism, so a kind outside this set
+// falls through to the prebuilt-overlay path below when the bundle has one, and is demoted to a
+// reference only when it has neither. A demotion is never reported as a failure — it is still a
+// real datum about what worked on this deployment.
 const E2E_REPLAYABLE_KINDS = new Set(['patch', 'env', 'flag']);
 // Which roles are TOLD about the warm start. Deliberately excludes e2e_integrator and
 // director:validate — those two produce the run's authoritative numbers, and a stored prior in their
 // context is contamination with no upside.
-// tuning_specialist is a consumer for the same reason the other two are, and one more: the tuning
-// track is the ONLY one whose output previously had no way back in. A tuned artifact is bulky,
-// deploys outside the git tree, and takes hours of search to rediscover — so a run that re-derives
-// one it already has in the store is the most expensive avoidable thing this workflow does.
+// tuning_specialist is a consumer for the same reason, plus one: a tuned artifact deploys outside
+// the git tree and takes hours of search to rediscover, so re-deriving one the store already holds
+// is the most expensive avoidable thing this workflow does.
 const WARM_START_ROLES = new Set(['system_architect', 'config_tuner', 'tuning_specialist']);
 // Credentials and trust for every emitted KB command. The six lines that do the work live in
 // scripts/kb_env.sh (which explains them), not here, because run_e2e.py runs KB commands too — the
@@ -1809,9 +1792,7 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
 // workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
 // existing null-guards treat it as "no kernel" and continue.
 function fastBoundedWorkflow(ref, wfArgs, label) {
-  // noteKernelKB is a pass-through recorder: it returns `r` unchanged, so the caller's null-guards
-  // and result handling are untouched. It is attached here (and in deepBoundedWorkflow, and at the
-  // two direct workflow() sites) so EVERY lane call reports its kernel-plane recall exactly once.
+  // noteKernelKB returns `r` unchanged, so the caller's null-guards are untouched.
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   if (!FAST_MODE || typeof setTimeout !== 'function' || !(FAST_HEAD_WF_MS > 0)) return p;
   let to;
@@ -1952,26 +1933,23 @@ function applyOpIdentityGuard(queue, stage) {
 // ===========================================================================
 // MERGING A RECOVERED CONFIGURATION INTO THE ONE THIS RUN WAS HANDED
 // ===========================================================================
-// A stored e2e record holds a WHOLE launch configuration, not a delta, because that is the only
-// form that can be replayed on a box whose baseline nobody recorded. Replaying it means combining
-// it with whatever baseline configuration THIS run was handed — under Hyperloom that is a full
-// flag string the run does not own (interface/run_e2e.py seeds `initial_extra_server_args` from
-// the EXPLORE result and then sets `config_tune: "false"`, so there is no later sweep to correct
-// anything either).
+// A stored e2e record holds a WHOLE launch configuration, not a delta — the only form replayable on
+// a box whose baseline nobody recorded. Replaying it means combining it with the baseline THIS run
+// was handed, which under Hyperloom it does not own (interface/run_e2e.py seeds
+// `initial_extra_server_args` from EXPLORE and sets `config_tune: "false"`, so no later sweep
+// corrects anything either).
 //
 // That combination used to be a string concatenation performed by an agent, and it was wrong in a
-// way nothing could see. `adapters/sglang.sh` expands `$EXTRA_SERVER_ARGS` straight into argparse
-// and `$EXTRA_ENV` straight into `env`, and both resolve a repeated key by last-wins. So when the
-// baseline and the record each pin `--context-length`, WHICH ONE APPLIES is decided by the order
-// the agent happened to write them in. Lose that coin flip and the server runs the baseline
-// configuration twice: ~0% delta, no complaint in any log — the flag WAS honoured, just not with
-// the recorded value — and the record is filed as `rejected`. A record that wins gets recorded as
-// a loss, which is the one outcome the whole warm start exists to avoid.
+// way nothing could see. `adapters/sglang.sh` expands `$EXTRA_SERVER_ARGS`/`$EXTRA_ENV` straight
+// into argparse and `env`, both last-wins. So when the baseline and the record each pin
+// `--context-length`, which one applies is decided by the order the agent happened to write them
+// in. Lose that coin flip and the server runs the baseline twice: ~0% delta, no complaint in any
+// log — the flag WAS honoured, just not with the recorded value — and a record that wins is filed
+// as `rejected`, the one outcome the whole warm start exists to avoid.
 //
-// So the merge is arithmetic, done here, and it reports what it did. Same rule the launcher
-// already applies to one flag by hand (`adapters/sglang.sh`: don't add `--watchdog-timeout` if the
-// caller set one), generalized and moved to where the string is built instead of where it is used.
-// The output names every key exactly once, so last-wins never gets a vote.
+// So the merge is arithmetic, done here, and it reports what it did — the same rule the launcher
+// already applies to one flag by hand (`adapters/sglang.sh` and `--watchdog-timeout`), generalized
+// and moved to where the string is built. The output names every key once, so last-wins never votes.
 
 // Flags that legitimately appear more than once. Deliberately tiny: `--lora-path` is a list and
 // deduping it would silently drop adapters, while everything else in these configs is a scalar
@@ -2056,19 +2034,14 @@ const mergeEnv = (baseEnv, storedEnv) => mergeConfig(baseEnv, storedEnv,
   { parse: parseEnvString, render: renderEnvItems, repeatable: new Set() });
 
 /**
- * Which trial actually ran, and what it measured.
- *
- * Once a repair pass exists, `trials[0]` and `best_throughput_tok_s` are both the wrong place to
- * read this from:
- *   * after a repair the FIRST trial is the corpse of the verbatim replay — the one whose launch
- *     line argparse rejected — and the LAST is the one that came up. Taking `kept`, `parity` and
- *     the notes from the corpse makes a repaired configuration unadoptable by construction, and
- *     hands its launch error to the `inert` regex, which then reads a successful repair as "the
- *     config never took effect".
- *   * `best_throughput_tok_s` is the tuner's headline, and the role returns THE BASELINE there
- *     when nothing was kept. No server in the sweep produced that number, and filing it as
- *     `measured_tok_s` writes a perfect 0.00% delta onto a record whose own note says no
- *     measurement was ever taken.
+ * Which trial actually ran, and what it measured. Once a repair pass exists, `trials[0]` and
+ * `best_throughput_tok_s` are both the wrong place to read it from:
+ *   * after a repair `trials[0]` is the corpse of the verbatim replay and the LAST trial is the one
+ *     that came up. Taking `kept`/`parity`/notes from the corpse makes a repaired config unadoptable
+ *     by construction and feeds its launch error to the `inert` regex, which then reads a successful
+ *     repair as "the config never took effect".
+ *   * the role returns THE BASELINE in `best_throughput_tok_s` when nothing was kept. Filing that as
+ *     `measured_tok_s` writes a perfect 0.00% delta onto a record that was never measured.
  *
  * So: the last trial carrying a positive throughput, and `best` only when it is a number the
  * baseline cannot be mistaken for.
@@ -2086,11 +2059,10 @@ function measuredTrialOf(sweep, baselineTput) {
 /**
  * Knobs the merged configuration asked for that the thing which actually ran does not carry.
  *
- * The repair role is asked for `repair.dropped_flags`, and in practice often expresses the repair
- * as a second trial and leaves the optional field empty. The string it actually benched is on the
- * trial either way, so the drop list is recoverable by subtraction rather than lost — and without
- * it `applied_partial` reads false on a run that dropped something, which is exactly the
- * difference between "the record lost" and "most of the record lost".
+ * `repair.dropped_flags` is optional and the role often expresses the repair as a second trial and
+ * leaves it empty. The string it benched is on the trial either way, so the drop list is recoverable
+ * by subtraction — and without it `applied_partial` reads false on a run that dropped something,
+ * which is the difference between "the record lost" and "most of the record lost".
  */
 function droppedByDiff(mergedFlags, mergedEnv, applied) {
   const app = String(applied || '').trim();
@@ -2362,18 +2334,15 @@ if (want('setup')) {
 
         // ONE repair attempt, and only when the server produced no number at all.
         //
-        // A recovered config is replayed on a box whose baseline it has never met, and the first
-        // launch is where that shows up: a flag deleted upstream makes argparse exit before the
-        // model loads, and a knob this run's baseline pins for a reason it did not record can be
-        // incompatible with the recorded value. Both used to end the same way — measured 0, one
-        // shot spent, `not_reproduced` filed against the record. The first of those really is the
-        // record's fault. The second is not, and a record that keeps meeting incompatible
-        // baselines was being retired for it.
+        // The first launch is where a box the config has never met shows up: a flag deleted upstream
+        // makes argparse exit before the model loads, and a knob this run's baseline pins can be
+        // incompatible with the recorded value. Both used to end as measured 0, one shot spent,
+        // `not_reproduced` filed against the record — but only the first is the record's fault, and
+        // a record that keeps meeting incompatible baselines was being retired for it.
         //
-        // So: hand the launch failure back, make the tuner say WHICH of the two it is, let it
-        // adapt the minimum needed, and bench once more. Exactly once — a repair loop against a
-        // config that cannot run here burns server launches to learn nothing new — and through the
-        // SAME accept gate, with no allowance made for having been repaired.
+        // So: hand the launch failure back, make the tuner say WHICH of the two it is, let it adapt
+        // the minimum needed, and bench once more. Exactly once — a repair loop against a config
+        // that cannot run here learns nothing new — and through the SAME accept gate.
         let repair = null;
         if (!measuredTrialOf(sweep, BASELINE_TPUT).measured) {
           const repaired = await runValidation(
@@ -2431,13 +2400,11 @@ if (want('setup')) {
             `${measured} tok/s, +${deltaPct.toFixed(2)}% vs baseline ${BASELINE_TPUT} (noise band ${NOISE_BAND}%)` +
             `${dropped.length ? `, with ${dropped.join(' ')} dropped to make it run here` : ''}.`);
         }
-        // FOUR outcomes. "ran and lost", "could not be made to run" and "does not fit this box"
-        // mean three different things to the reader: a loss is one box's number on a real
-        // configuration; a config that never took effect says the record may be missing something —
-        // a flag renamed upstream, an env the build does not honour; a config that collides with a
-        // baseline this run did not choose says nothing about the record at all. All three are
-        // REPORTED and counted apart (kb/attest.py); none of them is counted AGAINST the record —
-        // see KB_ATTEST_OUTCOME.
+        // FOUR outcomes. "ran and lost" is one box's number on a real configuration; "could not be
+        // made to run" says the record may be missing something (a flag renamed upstream, an env the
+        // build does not honour); "does not fit this box" is a collision with a baseline this run
+        // did not choose and says nothing about the record. All three are REPORTED and counted apart
+        // (kb/attest.py); none is counted AGAINST the record — see KB_ATTEST_OUTCOME.
         //
         // `note` and `notes` are both read: the role file's return schema spells it `note`, and
         // reading only `notes` meant the per-trial text never reached this regex at all.
@@ -3070,22 +3037,18 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       ...(TUNING_KB_ENABLED ? KB_REF_INPUTS : {}),
       ...(TUNING_KB_ENABLED && KB_CACHE_DIR ? { KB_CACHE_DIR } : {}),
       // The other half of the write below: the kernel store is where THIS phase files its tuned
-      // tables, keyed per (op, backend, gfx), so it is also where a later run finds them — and it
-      // finds them there even when the run that produced them ended below its own e2e baseline and
-      // wrote no deployment-level record at all. Handing over the root and the arch rather than a
-      // pre-computed candidate list is deliberate: the role knows which ops it is about to work on
-      // (that is the judgement the phase exists for) and can ask per op, which no read done up here
-      // before the profile is consulted could do. Same TUNING_KB_ENABLED switch as everything else,
-      // so blind evaluation stays blind through every channel.
+      // tables, keyed per (op, backend, gfx), so it is also where a later run finds them — even when
+      // the run that produced them ended below its own e2e baseline and wrote no deployment record
+      // at all. Handing over the root and the arch rather than a candidate list is deliberate: the
+      // role knows which ops it is about to work on and can ask per op, which no read done up here
+      // before the profile could do. Same TUNING_KB_ENABLED switch as everything else.
       //
       // PLANE, not root. The write below is `write-remote --plane both` whenever a service is
       // configured, so the record lands behind a key on the shared store; a directory read against
-      // KB_ARTIFACTS_DIR would look at this run's own checkout, which HL creates empty per run and
-      // deletes with the run, and would report the miss as `kernel_page_not_found` — indistinguishable
-      // from a page that genuinely has nothing. Read and write have to name the same plane or the
-      // lane writes into one store and reads from another forever. A read takes exactly ONE plane
-      // (see kbResolveScript), so `both` is resolved to `remote` here and the local mirror is offered
-      // as the named fallback rather than silently shadowing the service.
+      // KB_ARTIFACTS_DIR would look at this run's own checkout, which HL creates empty per run, and
+      // would report `kernel_page_not_found` — indistinguishable from a page that has nothing. Read
+      // and write must name the same plane. A read takes exactly ONE (see kbResolveScript), so
+      // `both` resolves to `remote` and the local mirror is the named fallback.
       ...(TUNING_KB_ENABLED && KB_DIMS && KB_DIMS.gfx ? {
         TUNED_KB_PLANE: E2E_KB_PLANE === 'both' ? 'remote' : E2E_KB_PLANE,
         TUNED_KB_STORE: E2E_KB_STORE_DIR,
@@ -3182,21 +3145,16 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
     // ---------------------------------------------------------------------------------------
     // Write each tuned op into the KERNEL lane's experience store, one entry per op.
     //
-    // This is not a duplicate of the e2e KB write at the end of the run, and it exists because that
-    // write cannot carry this result. The e2e record is keyed on the whole deployment and gated on
-    // the run's FINAL throughput_speedup: a tuning win of a few percent that a later phase erases,
-    // or a run that ends below its own baseline for reasons that have nothing to do with tuning,
-    // takes the tuned table down with it — the search happened, it was proven engaged, and the next
-    // run at the same identity searches it again from scratch. The kernel store has no such
-    // coupling. It ranks on ISOLATED per-op speedup, which is exactly what a tuned op has, and it is
-    // addressed per (kernel, language, gfx), which is exactly the granularity at which a tuned table
-    // is reusable. So the durable home for this knowledge is here, and this write is deliberately
-    // independent of the run's e2e outcome.
+    // Not a duplicate of the e2e KB write at the end of the run: that record is keyed on the whole
+    // deployment and gated on the run's FINAL throughput_speedup, so a tuning win a later phase
+    // erases — or a run that ends below its own baseline for unrelated reasons — takes the tuned
+    // table down with it, and the next run at the same identity searches it again from scratch. The
+    // kernel store has no such coupling: it ranks on ISOLATED per-op speedup and is addressed per
+    // (kernel, language, gfx), which is the granularity at which a tuned table is reusable.
     //
     // Gated on tuneOk, so nothing unproven is filed. Per-op: `isolated_speedup > 1.0` and `engaged`,
-    // because an op the phase could not prove live is not knowledge about that op regardless of what
-    // the phase-level A/B measured. Best-effort throughout — a failure here loses a record, never a
-    // measurement, and must not touch the run.
+    // because an op the phase could not prove live is not knowledge about that op whatever the
+    // phase-level A/B measured. Best-effort — a failure here loses a record, never a measurement.
     const kernelKbOps = KB_DIMS && KB_DIMS.gfx ? tunedOps.filter((o) =>
       Number(o.isolated_speedup) > 1.0 && o.engaged === true && String(o.artifact || '').trim()) : [];
     if (kernelKbOps.length) {

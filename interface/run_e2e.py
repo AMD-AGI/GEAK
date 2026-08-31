@@ -2077,30 +2077,25 @@ def _cold_penalty_pct(cold: Any, hot: Any) -> float | None:
 def _overlay_has_loadable_code(path: Path) -> bool:
     """True when ``path`` is an overlay that actually installs something.
 
-    The Finalize phase creates ``final/overlay`` unconditionally and drops a
-    marker file (``README.md``, ``EMPTY_NO_ACCEPTED_OVERLAY.txt``) into it when
-    nothing was accepted, so directory existence proves nothing.
+    Finalize creates ``final/overlay`` unconditionally and drops a marker file
+    into it when nothing was accepted, so directory existence proves nothing.
+    The test is the mechanism's own contract: the overlay is activated by its
+    ROOT on ``PYTHONPATH``, and the only thing the interpreter runs from there
+    is ``<overlay>/sitecustomize.py`` (``e2e_workflow/scripts/overlay_setup.py``
+    — only the FIRST sitecustomize on the path is imported, so two overlay dirs
+    do not compound). So:
 
-    The test is the mechanism's own contract, not a guess at it. The overlay is
-    activated by putting its ROOT on ``PYTHONPATH``, and the only thing the
-    interpreter runs from there is ``<overlay>/sitecustomize.py`` (see
-    ``e2e_workflow/scripts/overlay_setup.py``: two overlay dirs do NOT compound,
-    because only the first ``sitecustomize`` on the path is imported). So:
-
-      * no ``sitecustomize.py`` at the ROOT  -> inert, whatever else is inside.
-        A loose ``.py`` module is not enough (nothing imports it), and neither
-        is a loadable ``cand_*`` SUBTREE (the consumer is handed this path, not
-        the child; if a candidate is the deliverable, name the candidate).
-      * a manifest that parses and names nothing -> the config-only overlay
-        (``{"modules": [], "rebinds": [], "note": "config-only result ..."}``).
-        It imports cleanly and installs zero kernels, so advertising it books a
-        pure config win as a kernel win.
+      * no ``sitecustomize.py`` at the ROOT -> inert, whatever else is inside.
+        Neither a loose ``.py`` module nor a loadable ``cand_*`` SUBTREE counts:
+        the consumer is handed this path, not the child.
+      * a manifest that parses and names nothing -> the config-only overlay,
+        which imports cleanly and installs zero kernels, so advertising it books
+        a pure config win as a kernel win.
       * a manifest that does not parse -> we cannot claim it installs anything.
 
-    This is deliberately the same predicate the downstream consumer applies
-    (Hyperloom's ``_geak_overlay_is_loadable``). Declaring an overlay it will
-    refuse to load costs a revalidation and shows up as an unexplained warning
-    on its side; an empty string tells it the truth.
+    Deliberately the same predicate the consumer applies (Hyperloom's
+    ``_geak_overlay_is_loadable``): declaring an overlay it will refuse to load
+    costs a revalidation, and an empty string tells it the truth.
     """
     if not path.is_dir() or not (path / "sitecustomize.py").is_file():
         return False
@@ -2144,19 +2139,17 @@ _ENV_VALUE_SHELL_CHARS = ";&|<>()`"
 def _parse_env_assignments(env: str) -> tuple[dict, list]:
     """Split an ``A=1 B=2`` string into ``({k: v}, [unparsable fragments])``.
 
-    ``accepted_config.env`` is a shell string, and consumers re-split it to
-    build their own environment. That split is where it goes wrong: the string
-    is assembled from launch-script lines, so syntax travels with it, and a
-    naive ``s.split()`` + ``split("=")`` turns ``)``, ``true;`` and ``sglang;``
-    into environment variables. We have seen exactly that reach a downstream
-    rebench as ``EXTRA_ENV=").", RUN_EVAL="true;", BACKEND="sglang;"``.
+    ``accepted_config.env`` is a shell string assembled from launch-script
+    lines, so syntax travels with it and a consumer's naive ``s.split()`` +
+    ``split("=")`` turns ``)``, ``true;`` and ``sglang;`` into environment
+    variables — which is exactly how ``EXTRA_ENV=").", RUN_EVAL="true;",
+    BACKEND="sglang;"`` reached a downstream rebench.
 
-    So GEAK does the split itself, once, and publishes the result: a key must
-    be a real identifier and a value must be free of shell control characters.
-    A single trailing ``;`` is stripped first — that is a statement separator
-    the line-joining left behind, not part of the value. Anything that still
-    fails goes to the reject list instead of being silently dropped, so a
-    consumer can see that the string was lossy rather than trusting a map that
+    So GEAK does the split once and publishes the result: a key must be a real
+    identifier, a value must be free of shell control characters, and a trailing
+    ``;`` (a statement separator the line-joining left behind) is stripped first.
+    Anything that still fails goes to the reject list rather than being dropped,
+    so a consumer can see the string was lossy instead of trusting a map that
     quietly lost a variable.
     """
     ok: dict[str, str] = {}
