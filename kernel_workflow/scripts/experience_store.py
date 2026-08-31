@@ -1461,7 +1461,13 @@ def remote_identity(meta: dict, producer: str = REMOTE_PRODUCER, gpu: str = "",
     """
     return _identity_module().kernel_identity(
         gfx=remote_gpu(meta.get("gfx") or (meta.get("metric") or {}).get("gpu_arch") or "", gpu),
-        kernel_name=meta.get("kernel_name"),
+        # canon_name for the same reason make_slug uses it: the name is layout-derived, so an e2e
+        # head extraction calls this kernel `<name>_task` and the standalone lane calls it `<name>`.
+        # The slug plane has folded that since it existed; this one did not, so a head published to
+        # an address no reader constructs — and a miss here is a 404 nobody can tell from "never
+        # recorded". e2e_store.py addresses the kernel page with the profiler's (already canonical)
+        # symbol, so folding here is also what makes that cross-reference a live link.
+        kernel_name=canon_name(meta.get("kernel_name")),
         backend=meta.get("language"),
         rocm_version=remote_framework_version(meta, version),
     )
@@ -1789,6 +1795,24 @@ def _store_ladder(a, gfx: str):
     return list(zip(remote_canonical_ids(identity), ("exact", "any_version")))
 
 
+def _legacy_name_ladder(a, gfx: str):
+    """The rungs a pre-canon_name writer used, READ ONLY: `<name>_task`, from a head extraction.
+
+    Those records cannot be moved — no delete, no search — so the spelling they were written with is
+    the only way back to them, and without this rung the write-side fix would strand them for good.
+    Tried after the whole canonical ladder, so a legacy page can rescue but never shadow. NOT in
+    `_store_ladder`: retract-remote and attest-remote WRITE to every rung it returns.
+    """
+    if a.canonical_id:
+        return []
+    meta = {"kernel_name": a.kernel_name, "language": a.language,
+            "verified_stack": detect_stack(a.language)}
+    identity = remote_identity(meta, a.producer, remote_gpu(gfx, getattr(a, "gpu", "")),
+                               getattr(a, "framework_version", ""))
+    identity["kernel_name"] += "_task"      # the fold is idempotent, so appending re-spells it
+    return list(zip(remote_canonical_ids(identity), ("legacy_name", "legacy_name_any_version")))
+
+
 def cmd_retract_remote(a) -> dict:
     """Take back a key-addressed kernel record. The counterpart to `write-remote`.
 
@@ -1942,7 +1966,7 @@ def cmd_resolve_remote(a) -> dict:
     if store is None:
         return {"read_reason": why.split(":", 1)[0], "reason": why, "candidates": []}
 
-    ladder = _store_ladder(a, gfx)
+    ladder = _store_ladder(a, gfx) + _legacy_name_ladder(a, gfx)
     cid, match_tier = ladder[0]
     segs = cid.split(":")
     requested_slug = make_slug(a.kernel_name or (segs[3] if len(segs) > 3 else ""),

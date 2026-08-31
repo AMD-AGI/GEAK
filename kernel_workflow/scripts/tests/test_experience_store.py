@@ -928,6 +928,54 @@ def test_a_write_records_both_planes(tmp_path):
     assert out["candidates"][0]["is_champion"] is True
 
 
+def test_the_key_plane_folds_the_layout_suffix_like_the_slug_plane(tmp_path):
+    """The key-addressed twin of test_one_kernel_is_one_page_across_layouts: an e2e head writes with
+    the `<kernel>_task` dir name, and the profiler's spelling — what e2e_store cross-references —
+    must reach that page."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    p = tmp_path / "p.diff"
+    p.write_text(patch_text())
+    w = run("write-remote", "--root", root, "--store", store, "--kernel-name",
+            "fused_moe_kernel_task", "--language", "triton", "--gfx", "gfx950",
+            "--kernel-class", "triton", "--speedup", "2.0", "--patch", str(p),
+            "--direction", "tile-retune", "--framework-version", "7.2")
+    assert w["remote"]["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm:7.2"
+    out = resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel", "triton", "gfx950",
+                         "--framework-version", "7.2")
+    assert out["match_tier"] == "exact" and [c["speedup"] for c in out["candidates"]] == [2.0]
+
+
+def test_a_page_a_head_published_before_the_fold_is_still_reachable(tmp_path):
+    """Those records cannot be moved (no delete, no search), so the read descends to the spelling
+    they were written with — after the canonical rungs, which must still win when both exist."""
+    root = str(tmp_path / "kb")
+    write_entry(root, "20260101_000000_aaaaaa", speedup=4.0)
+    # Re-address the real export the way a pre-fold writer did, then load it.
+    jsonl = str(tmp_path / "records.jsonl")
+    run("export-remote", "--root", root, "--out", jsonl)
+    with open(jsonl) as f:
+        recs = [json.loads(line) for line in f if line.strip()]
+    with open(jsonl, "w") as f:
+        for rec in recs:
+            rec["canonical_id"] = rec["canonical_id"].replace(":fused_moe_kernel:",
+                                                              ":fused_moe_kernel_task:")
+            f.write(json.dumps(rec) + "\n")
+    store = str(tmp_path / "store")
+    p = subprocess.run([sys.executable, UPLOADER, "--records", jsonl, "--local", store,
+                        "--apply", "--quiet"], capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+
+    # `unspecified` is the version a seeded entry exports at (it records no stack); naming it keeps
+    # the assertion off whatever ROCm the test box happens to have.
+    out = resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel", "triton", "gfx950",
+                         "--framework-version", "unspecified")
+    assert out["match_tier"] == "legacy_name", out
+    assert out["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel_task:triton:rocm:unspecified"
+    assert [c["speedup"] for c in out["candidates"]] == [4.0]
+    assert out["tried"][0] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm:unspecified", \
+        "the canonical rungs are tried FIRST — a legacy page must never outrank a current one"
+
+
 def test_a_new_patch_appends_a_candidate_under_the_same_key(tmp_path):
     root, store = str(tmp_path / "kb"), str(tmp_path / "store")
     first, second = tmp_path / "a.diff", tmp_path / "b.diff"
