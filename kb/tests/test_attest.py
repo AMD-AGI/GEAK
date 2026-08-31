@@ -57,7 +57,8 @@ def test_a_counter_that_is_not_a_number_reads_as_zero():
 
 
 @pytest.mark.parametrize("outcome,field", [("validated", "validations"), ("failed", "failures"),
-                                           ("not_reproduced", "not_reproduced")])
+                                           ("not_reproduced", "not_reproduced"),
+                                           ("inapplicable", "inapplicable")])
 def test_each_outcome_increments_recalls_and_its_own_counter(outcome, field):
     value = record_attestation({}, outcome, actor="boxA")
     ledger = value["attestations"]
@@ -109,6 +110,45 @@ def test_retire_hint_stays_silent_until_there_is_a_pattern():
 def test_two_non_reproductions_with_no_win_is_a_hint():
     value = record_attestation(record_attestation({}, "not_reproduced"), "not_reproduced")
     assert "could not reproduce" in retire_hint(value)
+
+
+def test_a_config_that_never_fit_this_box_is_no_evidence_against_the_record():
+    """The reason `inapplicable` exists at all.
+
+    A stored e2e config is a whole launch configuration, replayed on top of a baseline the reading
+    run did not choose. When the two pin the same knob to different values it could not be applied
+    HERE, which says nothing about whether it is right anywhere. Spelled `not_reproduced`, two such
+    reads put a retire hint on a record nobody had found anything wrong with; spelled `inapplicable`
+    they stay out of the arithmetic however many times they happen.
+    """
+    value = {}
+    for _ in range(5):
+        value = record_attestation(value, "inapplicable")
+    assert value["attestations"]["recalls"] == 5        # the attempts are still counted...
+    assert retire_hint(value) == ""                     # ...they just do not judge the record
+
+
+def test_an_inapplicable_read_does_not_dilute_a_real_pattern():
+    """Removing them from the denominator must not also remove the signal that is there."""
+    value = record_attestation(record_attestation({}, "inapplicable"), "not_reproduced")
+    assert retire_hint(value) == ""                     # one real non-reproduction is not a case
+    value = record_attestation(value, "not_reproduced")
+    assert "could not reproduce" in retire_hint(value)  # two of them still is
+
+
+def test_a_ledger_of_only_inapplicable_reads_survives_a_rewrite():
+    """`carry_attestations` decides "is there anything here" from the bucket list; a bucket missing
+    from it drops the whole ledger on the next re-measurement, silently and well-formed."""
+    previous = record_attestation({}, "inapplicable")
+    fresh = carry_attestations(previous, {"direction": "tuned"})
+    assert fresh["attestations"]["inapplicable"] == 1
+
+
+def test_a_record_written_before_inapplicable_existed_reads_as_zero():
+    old = {"attestations": {"recalls": 3, "validations": 0, "failures": 3}}
+    ledger = attestations_of(old)
+    assert ledger["inapplicable"] == 0
+    assert "tried 3 times" in retire_hint(old)          # and its hint is unchanged
 
 
 def test_a_single_validation_clears_the_hint_however_many_failures():

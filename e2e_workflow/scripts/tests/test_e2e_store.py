@@ -708,3 +708,229 @@ def test_a_module_name_that_could_escape_the_root_is_refused(tmp_path):
     with tarfile.open(e2e_store._pack_overlay(str(d)), "r:gz") as tar:
         names = tar.getnames()
     assert names == ["overlay/" + e2e_store.OVERLAY_MANIFEST, "overlay/sitecustomize.py"]
+
+
+# -- the tuning track's lever, carried into the record ---------------------------------------------
+#
+# A tuned table is bound by an env var and deployed INTO the installed package, so it is structurally
+# absent from final.patch. The DeepSeek-V4-Pro 20260823 run banked a 56-row a8w8 table measured at
+# 3.29x isolated and wrote files [final.patch, launch.sh, report.md]: the lever stayed on the box and
+# died with it. These cover the path that carries it instead — and, since the tuning track now READS
+# this store too, the pointers a later run has to follow back to the bytes.
+
+
+def _tuned(tmp_path, *names, gate="accepted", live=()):
+    paths = []
+    for name in names:
+        (tmp_path / name).write_text("M,N,K,kernel\n1024,8192,7168,ck_cshuffle_v3\n")
+        paths.append(str(tmp_path / name))
+    return {"gate": gate, "artifacts": paths, "live_tree_files": [str(tmp_path / n) for n in live]}
+
+
+def test_a_tuned_table_rides_along_with_the_record(tmp_path):
+    out = _write(tmp_path, "a", "tuned", tuning_skillset=_tuned(tmp_path, "gemm.csv"))
+    assert out["files"] == sorted(set(out["files"]))            # deterministic, no duplicate names
+    assert "tuning/00_gemm.csv" in out["files"]
+    view = _run("resolve", "--store", str(tmp_path / "store"),
+                "--cache-dir", str(tmp_path / "cache"))["candidates"][0]
+    landed = tmp_path / "cache" / view["session_id"] / "files" / "tuning" / "00_gemm.csv"
+    assert landed.is_file() and "ck_cshuffle_v3" in landed.read_text()
+
+
+def test_only_an_accepted_tuning_contributes_its_artifacts(tmp_path):
+    """A rejected search leaves files behind too. Carrying them would let a later reader install a
+    table that was measured and turned down, which is worse than having nothing to install."""
+    out = _write(tmp_path, "a", "tuned", tuning_skillset=_tuned(tmp_path, "gemm.csv", gate="no_win"))
+    assert not any(f.startswith("tuning/") for f in out["files"])
+
+
+def test_a_live_tree_table_is_carried_even_though_no_diff_could_see_it(tmp_path):
+    (tmp_path / "installed.csv").write_text("x")
+    out = _write(tmp_path, "a", "tuned",
+                 tuning_skillset=_tuned(tmp_path, "bundled.csv", live=("installed.csv",)))
+    assert "tuning/00_bundled.csv" in out["files"] and "tuning/01_installed.csv" in out["files"]
+
+
+def test_a_shape_named_table_cannot_take_the_whole_record_down_with_it(tmp_path):
+    """`safe_rel_path` REJECTS `:` rather than sanitizing, and both stores build their entire
+    {stored_name: source} map before uploading a byte — so one `gemm_m:1024.csv`, a perfectly
+    ordinary thing for a tuner to emit, would abort the write and lose final.patch and launch.sh
+    along with it. The name is mangled toward the validator; the record survives."""
+    from kb.store_local import safe_rel_path
+    out = _write(tmp_path, "a", "tuned", tuning_skillset=_tuned(tmp_path, "gemm_m:1024_n:8192.csv"))
+    assert "tuning/00_gemm_m_1024_n_8192.csv" in out["files"]
+    assert "launch.sh" in out["files"]                          # the rest of the record is intact
+    for name in out["files"]:
+        assert safe_rel_path(name) == name                      # every stored name is uploadable
+
+
+def test_a_recalled_table_can_be_found_from_the_page_that_advertises_it(tmp_path):
+    """The whole point of banking the lever: a later run reads this prose and has to be able to act
+    on it. The workflow banks the absolute path the tuner wrote, which means nothing on another box,
+    so the record must point at the bundle instead — while still saying where it came from."""
+    out = _write(tmp_path, "a", "tuned",
+                 tuning_skillset=_tuned(tmp_path, "gemm.csv"),
+                 accepted_kernels=[{"name": "gemm_a8w8", "language": "ck", "winner_kind": "env",
+                                    "isolated_speedup": 3.29, "from_tuning_skillset": True,
+                                    "apply_env": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=/x/gemm.csv",
+                                    "tuning_artifact": str(tmp_path / "gemm.csv")}])
+    assert "tuning/00_gemm.csv" in out["files"]
+    resolved = _run("resolve", "--store", str(tmp_path / "store"),
+                    "--cache-dir", str(tmp_path / "cache"), "--refs-dir", str(tmp_path / "refs"))
+    kernel = resolved["candidates"][0]["accepted_kernels"][0]
+    assert kernel["tuning_artifact"] == "tuning/00_gemm.csv"    # resolves inside the bundle
+    assert kernel["tuning_artifact_source"] == str(tmp_path / "gemm.csv")
+    page = "".join(p.read_text() for p in (tmp_path / "refs").glob("e2e_reference_*.md"))
+    assert "tuning/00_gemm.csv" in page and "from tuning skillset" in page
+    assert "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE" in page          # and how to bind it
+
+
+def test_a_patched_kernel_reads_exactly_as_it_did_before(tmp_path):
+    """The tuning branch is additive: a record with no tuning in it must render byte-identically."""
+    assert e2e_store._kernel_line([{"name": "op1", "language": "triton", "isolated_speedup": 1.84,
+                                    "patch": "kernels/op1.patch"}]) \
+        == "op1 (triton, 1.84x, kernels/op1.patch)"
+
+
+# -- the win gate --------------------------------------------------------------------------------
+#
+# ONE implementation, two callers: e2e_workflow.js at the end of a live run and run_e2e.py when it
+# salvages a run whose workflow died first. The gate keys on the Director's VERDICT, not on the raw
+# ratio, because a KB write is permanent — the service exposes no DELETE, so a wrong record cannot
+# be cleaned up, only outranked.
+
+
+def test_win_gate_lets_a_declared_win_through():
+    assert e2e_store.win_gate({"throughput_speedup": 1.07, "final_throughput_tok_s": 787.0,
+                               "validation_status": "validated_win"}) == ""
+
+
+@pytest.mark.parametrize("status", ["validated_no_win", "recovered_no_gain",
+                                    "flagged_parity", "flagged_"])
+def test_win_gate_refuses_a_declared_no_win_however_good_the_ratio(status):
+    """The 20260822 gemma-4-26B shape: 1.0215x same-session while measuring 0.9453x against its
+    provided baseline. Keying on the ratio alone minted that below-baseline number as champion."""
+    why = e2e_store.win_gate({"throughput_speedup": 1.0215, "final_throughput_tok_s": 900.0,
+                              "validation_status": status})
+    assert why
+    assert "box-drift" in why and status in why
+
+
+@pytest.mark.parametrize("status", ["validated_win", "recovered_intermediate", "", None])
+def test_win_gate_does_not_overmatch_verdict_prefixes(status):
+    assert e2e_store.win_gate({"throughput_speedup": 1.2, "final_throughput_tok_s": 900.0,
+                               "validation_status": status}) == ""
+
+
+@pytest.mark.parametrize("speedup", [1.0, 0.9453, 0.0, -1.0, None, "n/a", float("inf"),
+                                     float("nan")])
+def test_win_gate_refuses_anything_that_is_not_above_1x(speedup):
+    why = e2e_store.win_gate({"throughput_speedup": speedup, "final_throughput_tok_s": 900.0,
+                              "validation_status": "validated_win"})
+    assert why.startswith("no win to record")
+
+
+@pytest.mark.parametrize("final", [0.0, None, "", "n/a", float("nan")])
+def test_win_gate_refuses_a_result_with_no_final_number(final):
+    """A ratio with nothing measured under it is a claim, not a measurement — and it is checked
+    FIRST, so the message names the real problem instead of blaming the ratio."""
+    assert e2e_store.win_gate({"throughput_speedup": 1.5, "final_throughput_tok_s": final,
+                               "validation_status": "validated_win"}) \
+        == "no final throughput measured"
+
+
+def test_require_win_declines_the_write_without_failing_the_caller(tmp_path):
+    """A refused write is `ok: True, applied: False` — a no-win is a normal outcome, not an error,
+    and a caller that treated it as one would fail every honest run."""
+    result = _result(tmp_path / "nowin.json", tput=900.0, throughput_speedup=1.0215,
+                     validation_status="recovered_no_gain")
+    out = _run("write", "--store", str(tmp_path / "store"), "--result", result,
+               "--direction", "none", "--apply", "--require-win")
+    assert out["ok"] is True and out["applied"] is False and out["skipped"] is True
+    assert "Director declared no win" in out["why"]
+    assert out["rungs"] == [] and out["files"] == [] and out["session_id"] == ""
+    assert not (tmp_path / "store").exists()           # nothing was published
+
+
+def test_without_require_win_a_human_can_still_backfill(tmp_path):
+    """The gate is opt-in: `write` is also the backfill path, where a human has evidence the result
+    JSON cannot carry (a framework-layer win the sub-run self-judged no-win)."""
+    result = _result(tmp_path / "backfill.json", tput=900.0, throughput_speedup=1.0215,
+                     validation_status="recovered_no_gain")
+    out = _run("write", "--store", str(tmp_path / "store"), "--result", result,
+               "--direction", "none", "--apply")
+    assert out["applied"] is True and out["rungs"]
+
+
+def test_require_win_passes_a_real_win_straight_through(tmp_path):
+    out = _write(tmp_path, "win", "attn-split", "--require-win", throughput_speedup=1.25)
+    assert out["applied"] is True and out.get("skipped") is not True
+    assert out["rungs"]
+
+
+# -- the version cut's legacy rungs ---------------------------------------------------------------
+# `framework_version` is now the RELEASE (`0.5.15`), not the build string. Every record filed under
+# the old spelling sits on a page the new address cannot name, and no rung here drops the version, so
+# there is no coarse page to catch them. The read gets those addresses back; the write must not.
+DEV_VERSION = "0.5.15.post1.dev20260723+g6c9fd0adc5"
+DEV_IDENTITY = ["--model", "M", "--gfx", "gfx950", "--framework", "sglang",
+                "--framework-version", DEV_VERSION, "--precision", "mxfp4",
+                "--tp", "8", "--isl", "1024", "--osl", "1024", "--conc", "64"]
+
+
+def _as_the_old_lane_did(monkeypatch):
+    """Undo the cut for the duration of a write: the pre-#438 lane segmented the build string whole,
+    so this is what "a record that is already in the store" is spelled like."""
+    monkeypatch.setattr(e2e_store.kbid, "_release_version",
+                        lambda raw: e2e_store.kbid.segment(raw, e2e_store.kbid.UNKNOWN_VERSION))
+
+
+def test_a_record_written_before_the_cut_is_still_reachable(tmp_path, monkeypatch):
+    """The whole point. Without the legacy rung this read is a cold start on a store that has the
+    answer — and a cold start is not an error, so nothing would ever report it."""
+    result = _result(tmp_path / "old.json")
+    _as_the_old_lane_did(monkeypatch)
+    written = _run("write", "--store", str(tmp_path / "store"), "--result", result,
+                   "--direction", "tuned", "--apply", identity=DEV_IDENTITY)
+    assert written["applied"] is True
+    monkeypatch.undo()
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=DEV_IDENTITY)
+    assert out["read_reason"] == "read" and out["candidates"]
+    assert out["match_tier"] == "legacy_version"
+    assert DEV_VERSION in out["canonical_id"]      # the build string verbatim, as it was filed
+
+
+def test_the_legacy_rungs_are_read_only(tmp_path, monkeypatch):
+    """A rescue rung that also accepts writes would keep the old page alive forever, splitting one
+    deployment's history across two addresses — the state the cut exists to end."""
+    out = _run("identity", identity=DEV_IDENTITY)
+    assert [r["tier"] for r in out["ladder"]] == ["exact", "workload_any", "tp_any"]
+    assert all("0.5.15:" in r["canonical_id"] for r in out["ladder"])
+    assert [r["tier"] for r in out["legacy_read_only"]] == \
+        ["legacy_version", "legacy_version_workload_any", "legacy_version_tp_any"]
+    # and a write files at the new address only
+    written = _run("write", "--store", str(tmp_path / "store"),
+                   "--result", _result(tmp_path / "new.json"), "--direction", "tuned", "--apply",
+                   identity=DEV_IDENTITY)
+    assert all("0.5.15:" in r["canonical_id"] for r in written["rungs"])
+    assert not any("dev20260723" in r["canonical_id"] for r in written["rungs"])
+
+
+def test_a_release_shaped_version_grows_no_legacy_rungs(tmp_path):
+    """The cut is a no-op for a version already spelled as its release, and the ladder must be too:
+    duplicate rungs would re-read the same page and count one record twice in `tried`."""
+    out = _run("identity")                       # IDENTITY's version is a bare "0.26.0"
+    assert out["legacy_read_only"] == []
+
+
+def test_the_canonical_ladder_is_still_tried_first(tmp_path, monkeypatch):
+    """Rescue, never shadow. A current record and a legacy one both exist; the current one answers."""
+    _as_the_old_lane_did(monkeypatch)
+    _run("write", "--store", str(tmp_path / "store"), "--result", _result(tmp_path / "o.json",
+         tput=2000.0), "--direction", "old", "--apply", identity=DEV_IDENTITY)
+    monkeypatch.undo()
+    _run("write", "--store", str(tmp_path / "store"), "--result", _result(tmp_path / "n.json",
+         tput=1000.0), "--direction", "new", "--apply", identity=DEV_IDENTITY)
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=DEV_IDENTITY)
+    # the legacy page ranks HIGHER on throughput, and still must not be the one that answers
+    assert out["match_tier"] == "exact" and [c["direction"] for c in out["candidates"]] == ["new"]

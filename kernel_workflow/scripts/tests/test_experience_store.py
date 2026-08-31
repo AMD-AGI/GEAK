@@ -822,14 +822,18 @@ def test_both_planes_offer_the_same_candidates(tmp_path):
 
     local = resolve(root, str(tmp_path / "r1"), "fused_moe_kernel", "triton", "gfx950",
                     "--min-speedup", "1.05")
+    # --framework-version is pinned rather than left to detection: the default reads
+    # /opt/rocm/.info/version off the box, so the address grows a `:7.2` suffix on a ROCm
+    # machine (every GEAK dev box) and has none on the CI runner. Asserting the detected
+    # value makes this test say the same thing in both places.
     remote = resolve_remote(store, str(tmp_path / "r2"), "fused_moe_kernel", "triton", "gfx950",
-                            "--min-speedup", "1.05")
+                            "--min-speedup", "1.05", "--framework-version", "7.2")
     assert remote["read_reason"] == local["read_reason"] == "read"
     keys = ("rank", "speedup", "direction", "comparable", "kernel_name", "language", "gfx")
     assert [{k: c.get(k) for k in keys} for c in remote["candidates"]] == \
            [{k: c.get(k) for k in keys} for c in local["candidates"]]
     assert remote["filtered"]["below_min_speedup"] == local["filtered"]["below_min_speedup"] == 1
-    assert remote["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm"
+    assert remote["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm:7.2"
 
 
 def test_the_store_plane_curates_what_the_store_itself_cannot(tmp_path):
@@ -922,6 +926,54 @@ def test_a_write_records_both_planes(tmp_path):
     out = resolve_remote(store, str(tmp_path / "refs"))
     assert [c["speedup"] for c in out["candidates"]] == [2.0]
     assert out["candidates"][0]["is_champion"] is True
+
+
+def test_the_key_plane_folds_the_layout_suffix_like_the_slug_plane(tmp_path):
+    """The key-addressed twin of test_one_kernel_is_one_page_across_layouts: an e2e head writes with
+    the `<kernel>_task` dir name, and the profiler's spelling — what e2e_store cross-references —
+    must reach that page."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    p = tmp_path / "p.diff"
+    p.write_text(patch_text())
+    w = run("write-remote", "--root", root, "--store", store, "--kernel-name",
+            "fused_moe_kernel_task", "--language", "triton", "--gfx", "gfx950",
+            "--kernel-class", "triton", "--speedup", "2.0", "--patch", str(p),
+            "--direction", "tile-retune", "--framework-version", "7.2")
+    assert w["remote"]["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm:7.2"
+    out = resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel", "triton", "gfx950",
+                         "--framework-version", "7.2")
+    assert out["match_tier"] == "exact" and [c["speedup"] for c in out["candidates"]] == [2.0]
+
+
+def test_a_page_a_head_published_before_the_fold_is_still_reachable(tmp_path):
+    """Those records cannot be moved (no delete, no search), so the read descends to the spelling
+    they were written with — after the canonical rungs, which must still win when both exist."""
+    root = str(tmp_path / "kb")
+    write_entry(root, "20260101_000000_aaaaaa", speedup=4.0)
+    # Re-address the real export the way a pre-fold writer did, then load it.
+    jsonl = str(tmp_path / "records.jsonl")
+    run("export-remote", "--root", root, "--out", jsonl)
+    with open(jsonl) as f:
+        recs = [json.loads(line) for line in f if line.strip()]
+    with open(jsonl, "w") as f:
+        for rec in recs:
+            rec["canonical_id"] = rec["canonical_id"].replace(":fused_moe_kernel:",
+                                                              ":fused_moe_kernel_task:")
+            f.write(json.dumps(rec) + "\n")
+    store = str(tmp_path / "store")
+    p = subprocess.run([sys.executable, UPLOADER, "--records", jsonl, "--local", store,
+                        "--apply", "--quiet"], capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+
+    # `unspecified` is the version a seeded entry exports at (it records no stack); naming it keeps
+    # the assertion off whatever ROCm the test box happens to have.
+    out = resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel", "triton", "gfx950",
+                         "--framework-version", "unspecified")
+    assert out["match_tier"] == "legacy_name", out
+    assert out["canonical_id"] == "geak:kernel:gfx950:fused_moe_kernel_task:triton:rocm:unspecified"
+    assert [c["speedup"] for c in out["candidates"]] == [4.0]
+    assert out["tried"][0] == "geak:kernel:gfx950:fused_moe_kernel:triton:rocm:unspecified", \
+        "the canonical rungs are tried FIRST — a legacy page must never outrank a current one"
 
 
 def test_a_new_patch_appends_a_candidate_under_the_same_key(tmp_path):
@@ -1098,3 +1150,290 @@ def test_attest_remote_on_an_unknown_session_reports_rather_than_raises(tmp_path
               "--kernel-name", "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950",
               "--apply")
     assert out["attested"] is False and all(p["found"] is False for p in out["pages"])
+
+
+# --------------------------------------------------------------------------- the tuning carrier
+# A tuning win is a config table plus the env var that binds it, deployed into an installed package —
+# there is no diff, so the store's `empty_diff` gate used to reject it and the knowledge was lost with
+# the run. `carrier: tuned_artifact` is how it is filed instead. What is pinned here is the SEPARATION:
+# the two carriers share one ranking and one page, and a reader is only ever served the one it asked
+# for, because being offered a candidate you cannot install is worse than being offered nothing.
+def tuned_files(tmp_path, name="E=8,N=1024,device_name=AMD Instinct MI355X.json", body='{"1":{}}'):
+    d = tmp_path / "tuned"
+    d.mkdir(exist_ok=True)
+    (d / name).write_text(body)
+    return str(d / name)
+
+
+def write_tuned(root, artifact, *, kernel="fused_moe_kernel", speedup=1.21, **kw):
+    return run("write", "--root", root, "--kernel-name", kernel, "--language", "triton",
+               "--gfx", "gfx950", "--kernel-class", "tuning", "--speedup", speedup,
+               "--carrier", "tuned_artifact", "--artifact", artifact,
+               *[x for k, v in kw.items() for x in ("--" + k.replace("_", "-"), v)])
+
+
+def test_a_tuning_win_with_no_diff_is_stored_not_rejected(tmp_path):
+    """The whole point: before carriers this returned empty_diff and the tuned table was lost."""
+    out = write_tuned(str(tmp_path / "kb"), tuned_files(tmp_path))
+    assert out["written"] is True and out["carrier"] == "tuned_artifact"
+    assert os.path.isdir(os.path.join(out["dir"], "artifact"))
+
+
+def test_the_installed_name_survives_sanitization(tmp_path):
+    """The stored name must satisfy the remote plane's path validator, but the RUNTIME finds a tuned
+    table only under its exact shape-derived name. Losing it does not error — the table is silently
+    ignored and the recall reads as a tuning loss, which is the expensive way to find this bug."""
+    out = write_tuned(str(tmp_path / "kb"), tuned_files(tmp_path))
+    stored = out["artifacts"][0]
+    assert "=" not in stored and " " not in stored          # safe_rel_path would have raised
+    meta = yaml.safe_load(open(os.path.join(out["dir"], "meta.yaml")))
+    assert meta["artifact_names"][stored] == "E=8,N=1024,device_name=AMD Instinct MI355X.json"
+
+
+def test_a_directory_of_tables_is_expanded(tmp_path):
+    """A tuner hands back one file or the dir it filled, and which one is not the caller's problem."""
+    art = tuned_files(tmp_path)
+    (tmp_path / "tuned" / "second.json").write_text('{"2":{}}')
+    out = write_tuned(str(tmp_path / "kb"), os.path.dirname(art))
+    assert len(out["artifacts"]) == 2
+
+
+def test_an_empty_artifact_set_is_refused(tmp_path):
+    """Symmetric with empty_diff: an entry with nothing installable in it is not knowledge."""
+    out = write_tuned(str(tmp_path / "kb"), str(tmp_path / "does_not_exist.json"))
+    assert out["written"] is False and out["reason"] == "no_artifact"
+
+
+def test_re_tuning_the_same_tables_is_a_reproduction(tmp_path):
+    """Content addressing has to work off the artifact bytes, the way it works off patch text —
+    otherwise every run of a deterministic tuner mints a new entry and the page fills with itself."""
+    root, art = str(tmp_path / "kb"), tuned_files(tmp_path)
+    first = write_tuned(root, art)
+    again = write_tuned(root, art, speedup=1.25)
+    assert again["written"] is False and again["reason"] == "duplicate_impl"
+    assert again["reproductions"] == 2 and again["reproduced"] == first["exp_id"]
+    assert again["lifecycle"] == "active"      # an independent second measurement promotes it
+
+
+def test_a_reader_is_served_one_carrier_and_it_defaults_to_patch(tmp_path):
+    """Both carriers on ONE page, and the kernel lane — which passes no --carrier at all — must not
+    see the tuned entry, because `git apply` does nothing with a config table."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_aaaaaa", speedup=1.5)      # a normal patch entry
+    write_tuned(root, tuned_files(tmp_path))
+    default = resolve(root, refs)
+    assert [c["carrier"] for c in default["candidates"]] == ["patch"]
+    assert default["filtered"]["other_carriers"] == 1
+
+    tuned = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950",
+                    "--carrier", "tuned_artifact")
+    assert [c["carrier"] for c in tuned["candidates"]] == ["tuned_artifact"]
+
+
+def test_the_tuned_candidate_carries_what_installing_it_needs(tmp_path):
+    """A path alone is not enough: the table is inert without its env var, and stale without the
+    cache invalidation. The candidate has to hand over all three or the recall cannot succeed."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_tuned(root, tuned_files(tmp_path), apply_env="SGLANG_MOE_CONFIG_DIR=/x/tuned",
+                cache_invalidation="rm -rf ~/.triton/cache", tuner="benchmark_moe.py")
+    c = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950",
+                "--carrier", "tuned_artifact")["candidates"][0]
+    assert c["apply_env"] == "SGLANG_MOE_CONFIG_DIR=/x/tuned"
+    assert c["cache_invalidation"] == "rm -rf ~/.triton/cache"
+    assert c["artifact_paths"] and all(os.path.isfile(p) for p in c["artifact_paths"])
+
+
+def test_a_page_with_only_the_other_carrier_says_so(tmp_path):
+    """read_reason has to distinguish "nothing here" from "nothing here FOR YOU" — a caller that
+    cannot tell them apart will record a cold start where there is knowledge it could not use."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_tuned(root, tuned_files(tmp_path))
+    out = resolve(root, refs)
+    assert out["read_reason"] == "no_such_carrier" and out["other_carriers"] == 1
+
+
+def test_the_tuned_entry_reaches_the_remote_plane_installable(tmp_path):
+    """The kernel lane's export skipped anything without a patch.diff, which is every tuned entry.
+    Round-trip it: the bytes must materialize AND the reader must learn what to name them."""
+    root = str(tmp_path / "kb")
+    write_tuned(root, tuned_files(tmp_path), apply_env="SGLANG_MOE_CONFIG_DIR=/x/tuned")
+    store, _ = _seeded(tmp_path, root)
+    c = resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel", "triton", "gfx950",
+                       "--carrier", "tuned_artifact", "--min-speedup", "1.0")["candidates"][0]
+    assert c["carrier"] == "tuned_artifact" and c["apply_env"] == "SGLANG_MOE_CONFIG_DIR=/x/tuned"
+    assert c["artifact_paths"] and all(os.path.isfile(p) for p in c["artifact_paths"])
+    assert [c["artifact_names"][os.path.basename(p)] for p in c["artifact_paths"]] == \
+        ["E=8,N=1024,device_name=AMD Instinct MI355X.json"]
+
+
+# --------------------------------------------------------------------------- precision
+# The page is keyed on arch and op, NOT on dtype: one `fused_moe` page holds the bf16 and the
+# fp8_w8a8 tables side by side, ranked against each other on speedup alone. Precision could not
+# JOIN the key — the remote store exposes no delete, so moving every existing entry's address
+# would orphan the whole backlog — so it is recorded and filtered instead. What is pinned here is
+# that the filter never costs a caller history it could have used: unstated on either side is a
+# match, and a coarse dtype still reaches its own refinements.
+def tuned_at(root, tmp_path, precision, *, speedup, direction, body):
+    home = tmp_path / (precision or "unstated")
+    home.mkdir(exist_ok=True)
+    return write_tuned(root, tuned_files(home, body=body), speedup=speedup,
+                       direction=direction, metric_kind="tuning_isolated",
+                       **({"precision": precision} if precision else {}))
+
+
+def _offers(out):
+    return [(c["speedup"], c["direction"]) for c in out["candidates"]]
+
+
+def test_precision_is_recorded_but_does_not_move_the_page(tmp_path):
+    """The reason this is a filter and not a key dimension. If stating precision changed the
+    address, every entry written before the field existed would become unreachable — on a store
+    that cannot delete, that is the whole backlog stranded, permanently."""
+    root = str(tmp_path / "kb")
+    plain = tuned_at(root, tmp_path, "", speedup=2.0, direction="d1", body='{"1":{}}')
+    typed = tuned_at(root, tmp_path, "fp8_w8a8", speedup=3.0, direction="d2", body='{"2":{}}')
+    assert os.path.dirname(plain["dir"]) == os.path.dirname(typed["dir"])   # same page
+    assert yaml.safe_load(open(os.path.join(typed["dir"], "meta.yaml")))["upstream"] == \
+        {"precision": "fp8_w8a8"}
+    # An unstated write stays byte-identical to what it was before the field existed.
+    assert "upstream" not in yaml.safe_load(open(os.path.join(plain["dir"], "meta.yaml")))
+
+
+def test_a_reader_that_states_no_precision_sees_what_it_always_saw(tmp_path):
+    """The migration guarantee. Every caller predates this flag; none may lose a candidate by
+    not yet passing it."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    tuned_at(root, tmp_path, "fp8_w8a8", speedup=3.29, direction="tuning-aiter", body='{"1":{}}')
+    tuned_at(root, tmp_path, "bf16", speedup=4.10, direction="tuning-ck", body='{"2":{}}')
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950",
+                  "--carrier", "tuned_artifact", "--min-speedup", "1.0")
+    assert _offers(out) == [(4.1, "tuning-ck"), (3.29, "tuning-aiter")]
+    assert out["filtered"]["other_precisions"] == 0
+
+
+def test_the_other_dtype_is_dropped_before_ranking_not_after(tmp_path):
+    """Why the filter is worth having: bf16 outranks fp8 on raw speedup, so an fp8 deployment
+    reading this page unfiltered spends its first verify slot on a table whose filename encodes
+    a dtype its runtime never looks up. Ranking pollution, not corruption — but it costs a slot."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    tuned_at(root, tmp_path, "fp8_w8a8", speedup=3.29, direction="tuning-aiter", body='{"1":{}}')
+    tuned_at(root, tmp_path, "bf16", speedup=4.10, direction="tuning-ck", body='{"2":{}}')
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950", "--carrier",
+                  "tuned_artifact", "--min-speedup", "1.0", "--precision", "FP8-w8a8")
+    assert _offers(out) == [(3.29, "tuning-aiter")]      # spelling folded: FP8-w8a8 == fp8_w8a8
+    assert out["filtered"]["other_precisions"] == 1   # and it SAYS what it withheld
+
+
+def test_a_coarse_dtype_still_reaches_its_own_refinements(tmp_path):
+    """A caller that only knows it is on fp8 must still see the fp8_w8a8 entries, and vice versa:
+    they are two statements about the same thing at different resolutions. Matching on the token
+    boundary rather than a raw prefix is what keeps `fp8` from also swallowing `fp16`."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    tuned_at(root, tmp_path, "fp8_w8a8", speedup=3.29, direction="tuning-aiter", body='{"1":{}}')
+    tuned_at(root, tmp_path, "fp16", speedup=9.99, direction="tuning-fp16", body='{"2":{}}')
+    for asked in ("fp8", "float8"):
+        out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950", "--carrier",
+                      "tuned_artifact", "--min-speedup", "1.0", "--precision", asked)
+        assert _offers(out) == [(3.29, "tuning-aiter")], asked
+
+
+def test_the_backlog_is_never_excluded_for_saying_nothing(tmp_path):
+    """Every entry recovered before this field existed states no precision. Excluding those would
+    empty every page in the store — and an unlabelled entry is still a lead worth a verify slot,
+    exactly as an unvalidated one is."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    tuned_at(root, tmp_path, "", speedup=2.0, direction="tuning-legacy", body='{"1":{}}')
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950", "--carrier",
+                  "tuned_artifact", "--min-speedup", "1.0", "--precision", "fp8_w8a8")
+    assert _offers(out) == [(2.0, "tuning-legacy")]
+
+
+def test_a_page_with_only_the_wrong_dtype_says_so(tmp_path):
+    """Same contract `no_such_carrier` holds: a caller has to be able to tell "nothing here" from
+    "nothing here FOR YOU", or it records a cold start where there is knowledge it could not use."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    tuned_at(root, tmp_path, "bf16", speedup=4.1, direction="tuning-ck", body='{"1":{}}')
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950", "--carrier",
+                  "tuned_artifact", "--min-speedup", "1.0", "--precision", "int4")
+    assert out["read_reason"] == "no_such_precision" and out["other_precisions"] == 1
+    assert out["candidates"] == []
+
+
+def test_the_filter_survives_the_round_trip_to_the_store_plane(tmp_path):
+    """`upstream` has to cross the export, or the remote plane — the one the tuning role actually
+    reads — filters on a field that is always empty and silently offers everything."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    tuned_at(root, tmp_path, "fp8_w8a8", speedup=3.29, direction="tuning-aiter", body='{"1":{}}')
+    tuned_at(root, tmp_path, "bf16", speedup=4.10, direction="tuning-ck", body='{"2":{}}')
+    store, _ = _seeded(tmp_path, root)
+    common = ("--carrier", "tuned_artifact", "--min-speedup", "1.0")
+    assert _offers(resolve_remote(store, refs, "fused_moe_kernel", "triton", "gfx950", *common)) == \
+        [(4.1, "tuning-ck"), (3.29, "tuning-aiter")]
+    narrowed = resolve_remote(store, refs, "fused_moe_kernel", "triton", "gfx950",
+                              *common, "--precision", "fp8_w8a8")
+    assert _offers(narrowed) == [(3.29, "tuning-aiter")] and narrowed["filtered"]["other_precisions"] == 1
+
+
+# --------------------------------------------------------------------------- the tuned digest
+# `_remote_digest` names the candidate upstream, and for a tuned entry it is the only thing that can:
+# there is no diff to sign. It has two callers with two spellings of "the artifact set" and they must
+# agree, because the digest is what makes a re-export UPDATE one candidate instead of minting a
+# second. The path below is the one a fresh write never takes (cmd_write stores the signature and the
+# export short-circuits on it) and `backfill-content` cannot repair, since it rebuilds that field from
+# patch.diff and a tuned entry has none.
+def _store_module():
+    """The store as a MODULE — every other case here drives it as a CLI, which is right for behaviour
+    but cannot reach a helper's contract. Loaded by file path with the REPO ROOT on sys.path and its
+    own directory deliberately off it: `kernel_workflow/scripts/kb.py` sits next to the store and
+    would shadow the top-level `kb` package the store imports."""
+    import importlib.util
+    root = os.path.dirname(os.path.dirname(os.path.dirname(STORE)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    spec = importlib.util.spec_from_file_location("experience_store_under_test", STORE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _strip_content_signature(exp_dir):
+    """The shape of an entry that predates content_signature — the backlog's, and the one no repair
+    path reaches for this carrier."""
+    meta_path = os.path.join(exp_dir, "meta.yaml")
+    meta = yaml.safe_load(open(meta_path))
+    meta.pop("content_signature", None)
+    yaml.safe_dump(meta, open(meta_path, "w"))
+
+
+def test_a_tuned_entry_without_a_content_signature_still_exports(tmp_path):
+    """It used to raise `too many values to unpack` from inside the hash loop: the digest was handed
+    bare paths where the signature wants (stored_name, path). The CLI's own never-crash-the-caller
+    handler then turned that into `{"read_reason": "exception: ...", "candidates": []}` and exit 0 —
+    so ONE malformed entry silently emptied the export of the WHOLE root, which reads from the
+    outside exactly like a store that has nothing in it."""
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_a", kernel="unrelated_kernel")     # the collateral damage
+    _strip_content_signature(write_tuned(root, tuned_files(tmp_path))["dir"])
+    recs, summary = export(root)
+    assert summary["sessions"] == 2 and all(r["session_id"] for r in exact(recs))
+
+
+def test_the_digest_is_the_same_one_the_write_side_signed(tmp_path):
+    """Agreement, not merely survival. Re-deriving the artifact names here (from the basename, say)
+    would still produce a digest — a DIFFERENT one — and the entry would land upstream as a second
+    candidate for a table already there, which the page reads as an independent reproduction."""
+    kept, dropped = str(tmp_path / "kb_kept"), str(tmp_path / "kb_dropped")
+    art = tuned_files(tmp_path)
+    write_tuned(kept, art)
+    _strip_content_signature(write_tuned(dropped, art)["dir"])
+    # Same kernel, same identity, same bytes: the only thing that differs is WHICH branch of
+    # _remote_digest ran, so an unequal session id is that branch disagreeing with the writer.
+    assert exact(export(kept)[0])[0]["session_id"] == exact(export(dropped)[0])[0]["session_id"]
+
+
+def test_signing_bare_paths_says_what_is_wrong(tmp_path):
+    """The two callers build this list independently. When the next one gets the shape wrong it
+    should read as a contract violation naming the argument, not as an unpacking error three frames
+    down in a hash loop."""
+    with pytest.raises(TypeError, match=r"\(stored_name, path\) pairs"):
+        _store_module().artifact_signature([tuned_files(tmp_path)])

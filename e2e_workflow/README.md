@@ -99,7 +99,7 @@ Workflow({
                           //   overrides min_kernel_tasks — sub-threshold kernels are skipped (Amdahl)
     config_tune: "true",  // Tier-0 sweep on/off (default ON)
     tuning_skillset: "true", // standalone TuningSkillset phase on/off (default ON). Runs the VENDORED
-                          //   tuning skillset (<repo>/tuning_skillset) WHOLE, as its own phase, AFTER
+                          //   tuning skillset (<repo>/perf_knowledge/expert_skills/tuning) WHOLE, as its own phase, AFTER
                           //   ConfigSweep and BEFORE HeadKernel, with its own pre/post A/B so its share
                           //   of the gain is attributable. "false" injects nothing -> byte-identical.
     tuning_kb: "true",    // consult tuning-kb/ (the per-model ANSWER KEY). Set "false" for blind evals.
@@ -151,7 +151,7 @@ corrupts a measurement).
 ## Tuning skillset (`tuning_skillset`, default ON)
 
 A dedicated phase — **after ConfigSweep, before HeadKernel** — that runs the tuning skillset vendored at
-`<repo>/tuning_skillset/`: an independently-validated method for tuning GPU ops on AMD Instinct (per-op
+`<repo>/perf_knowledge/expert_skills/tuning/`: an independently-validated method for tuning GPU ops on AMD Instinct (per-op
 tuners, deploy paths into a live server, and the engagement checks that prove a tuned artifact is
 actually what the machine runs).
 

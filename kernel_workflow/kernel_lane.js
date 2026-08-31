@@ -707,7 +707,9 @@ function expertSkillsBlock(role) {
   return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/expert_skills.md and follow it: query ` +
     `${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits this op (operator/dtype/regime, and ` +
-    `from_backend->to_backend for migration skills) and whose validation_status is \`validated\`, and ` +
+    `from_backend->to_backend for migration skills), whose \`scope\` is \`kernel\` (\`tuning\` entries ` +
+    `belong to the e2e tuning phase and match every operator), and whose validation_status is ` +
+    `\`validated\`, and ` +
     `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
@@ -740,7 +742,10 @@ const setup = await agentT(
 if (!setup || !setup.eval_dir) throw new Error('Setup failed: director did not return an eval_dir');
 const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
-const KERNEL_NAME = setup.kernel_name;
+// `_task` is the e2e head's DIRECTORY suffix, and the director returns the basename verbatim, so it
+// would otherwise ride into the session id and the stored record. The canonical id is folded store-
+// side (experience_store.remote_identity); this keeps the rest of the run calling it one name.
+const KERNEL_NAME = String(setup.kernel_name || '').replace(/_task$/, '') || setup.kernel_name;
 const COMMANDMENT = `${EVAL_DIR}/COMMANDMENT.md`;
 log(`Setup done. EVAL_DIR=${EVAL_DIR}`);
 
@@ -992,6 +997,13 @@ if (WARM_START_ON && !setup.resumed && KB_ROOT_OK) {
       `--kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\\n` +
       `  --gfx ${GFX} --top-n 3 --min-speedup ${WARM_START_MIN_SPEEDUP} \\\n` +
       `  --refs-dir ${JSON.stringify(EVAL_DIR + '/kb_references')}`;
+    // Deliberately NO `--precision` on the read, though the write below states it. The filter earns
+    // its keep on the tuned lane, where a table's destination filename encodes its dtype and a
+    // mismatched one is simply unusable. A PATCH is source: a Triton kernel proven at bf16 is
+    // usually the same code that helps at fp8, so narrowing here would turn a thin page into an
+    // empty one and cost a cold start — the exact hours this read exists to avoid. Recording the
+    // dtype without filtering on it keeps that call reversible once the pages are thick enough to
+    // show whether cross-dtype patches actually carry.
     // Remote first, local curated tree as the fallback. The service is the shared plane and should
     // win when it has an answer, but it is still filling up, while `kb_artifacts/` holds a hand-
     // curated history (retired entries, one entry per direction) that a thin remote page must not
@@ -1705,6 +1717,7 @@ ${remoteWriteOn ? KB_ENV_PRELUDE + '\n' : ''}python3 ${JSON.stringify(EXPERIENCE
   --patch ${JSON.stringify(finalPatch)} --eval-dir ${JSON.stringify(EVAL_DIR)} \\
   --report ${JSON.stringify(reportPath)} --metric-kind ${metricKind} \\
   --direction ${JSON.stringify(winnerDirection)} --case-names ${JSON.stringify(caseNames)}\
+${OP_SPEC.dtype ? ` \\\n  --precision ${JSON.stringify(String(OP_SPEC.dtype))}` : ''}\
 ${warm_start.exp_dir ? ` \\\n  --parent ${JSON.stringify(warm_start.exp_dir)}` : ''}
 \`\`\``,
     { phase: 'Validate', label: 'kb:write', schema: WARMSTART_WRITE_SCHEMA });

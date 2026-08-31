@@ -201,7 +201,8 @@ const MILESTONE_MIN_PCT = parseFloat(A.milestone_min_pct != null ? A.milestone_m
 const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : (FAST_MODE ? 3 : 6), 10); // budget passed DOWN per kernel (fewer rounds in fast mode)
 const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true') === 'true';
 // ---- TUNING SKILLSET phase (default ON) --------------------------------------------------------------
-// The tuning skillset is vendored WHOLE into this repo (default <repo>/tuning_skillset, hash-pinned by
+// The tuning skillset is vendored WHOLE into this repo (default
+// <repo>/perf_knowledge/expert_skills/tuning, hash-pinned as ONE unit by
 // e2e_workflow/scripts/tuning_skillset_sync.py) and is run by ONE role (tuning_specialist) as ONE phase
 // that sits AFTER ConfigSweep and BEFORE HeadKernel. It is deliberately a standalone phase rather than a
 // prompt fragment sprinkled into the head bake-off: (a) the skillset is a complete six-step loop
@@ -213,8 +214,11 @@ const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true
 // tuning_skillset="false" disables the phase entirely: no prompt injection, no report inputs, no state
 // keys -> the run is byte-identical to a build without this feature.
 const TUNING_SKILLSET_ENABLED = String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
+// Lives under expert_skills/ so the tuning skills sit in the same hierarchy, and are selected through
+// the same index.yaml, as every other expert skill. The tree itself stays VENDORED and pinned whole —
+// the index entries that describe it are outside it, which is what lets both things be true at once.
 const TUNING_SKILLSET_DIR = String(A.tuning_skillset_dir ||
-  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/tuning_skillset')).replace(/\/+$/, '');
+  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge/expert_skills/tuning')).replace(/\/+$/, '');
 // tuning-kb/ is the skillset's per-model ANSWER KEY (verified wins + deployable artifacts). Useful in
 // production, contaminating in a blind evaluation — the skillset says so itself. Default ON; pass
 // tuning_kb="false" for eval runs and the role is told not to read it.
@@ -478,26 +482,61 @@ const KB_IDENTITY_BASENAME = 'kb_identity.json';
 // Every candidate costs a full server launch to reject, so a recorded near-tie is not worth benching.
 const E2E_WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.warm_start_min_speedup))
   ? parseFloat(A.warm_start_min_speedup) : 1.05;
+
+// How a local verdict is filed AGAINST THE RECORD. The local bench decides what THIS run adopts and
+// nothing else: this box has a different baseline, image, driver and neighbours, so a no-gain here
+// is a fact about the PAIRING, and reading it as a refutation is how a store of real wins decays
+// into an empty one. So only a local WIN moves the record's standing; every other outcome is filed
+// as `inapplicable`, which kb/attest.py counts as a recall but keeps out of the retirement
+// denominator. The true verdict is not lost — it leads the attestation note and is carried verbatim
+// in `verdicts[]`, in the recall report and in kb_references/measured_on_this_box.md.
+//
+// This also closes a silent hole: `rejected` is not in kb/attest.py OUTCOMES, so every "ran here and
+// lost" attestation was rejected by argparse and swallowed by the trailing `|| true`.
+const KB_ATTEST_OUTCOME = {
+  adopted: 'validated',
+  rejected: 'inapplicable',
+  not_reproduced: 'inapplicable',
+  inapplicable: 'inapplicable',
+};
 // Read broadly, bench narrowly. Reading is free and breadth is exactly what makes the demoted
 // reference path useful to the Architect; benching is the expensive half. So the default is
 // "offer 3, measure 1".
 const E2E_WARM_START_TOP_N = parseInt(A.e2e_warm_start_top_n != null ? A.e2e_warm_start_top_n : 3, 10);
 const E2E_WARM_START_VALIDATE_N = parseInt(
   A.e2e_warm_start_validate_n != null ? A.e2e_warm_start_validate_n : 1, 10);
+// The same budget for a COARSE rung (`tp_any`/`workload_any`), where the record was measured at a
+// different tp or workload point. It was hard zero, on the argument that a non-comparable stored
+// number is not worth a launch — which confuses the PRIOR with the MEASUREMENT: the bench runs the
+// config on THIS box against THIS baseline, so the stored number only decides what is tried first.
+// Zero meant every `tp_any` hit was filed as a lead nobody followed (the 20260826 gpt-oss-120b and
+// Qwen3.5-122B runs). Budgeted, not unbounded, because the launch cost is real; 0 restores the old
+// reference-only behaviour.
+const E2E_WARM_START_VALIDATE_N_COARSE = parseInt(
+  A.e2e_warm_start_validate_n_coarse != null ? A.e2e_warm_start_validate_n_coarse : 1, 10);
 // How many stored KERNELS get replayed through a fresh integrate A/B. Each one is another two server
 // launches, so this is a budget, not a completeness target — the rest stay references.
 const E2E_WARM_START_KERNELS_N = parseInt(
   A.e2e_warm_start_kernels_n != null ? A.e2e_warm_start_kernels_n : 2, 10);
-// Which recorded win-kinds can be REPLAYED from a record alone. `patch` re-applies a diff through the
+// Which recorded win-kinds can be REBUILT from a record alone. `patch` re-applies a diff through the
 // overlay; `env`/`flag` re-route the op to an implementation that already exists in this install.
-// `authored` cannot: its diff is against the authoring workspace, and rebinding it needs a live seam
-// the record has no way to prove still exists here. An unreplayable entry is demoted to a reference,
-// never reported as a failure — it is still a real datum about what worked on this deployment.
+// `authored` cannot be rebuilt: its recipe git-applies the diff inside
+// `authored_kernel_eval_dir/workspace/`, and that workspace dies with the run that made it.
+//
+// Not-rebuildable is NOT not-replayable, and reading it that way kept every authored kernel in the
+// store permanently unverified. The OUTPUT of that build travels in the record as `overlay.tar.gz`
+// (e2e_store._pack_overlay) and is the complete, reversible mechanism, so a kind outside this set
+// falls through to the prebuilt-overlay path below when the bundle has one, and is demoted to a
+// reference only when it has neither. A demotion is never reported as a failure — it is still a
+// real datum about what worked on this deployment.
 const E2E_REPLAYABLE_KINDS = new Set(['patch', 'env', 'flag']);
 // Which roles are TOLD about the warm start. Deliberately excludes e2e_integrator and
 // director:validate — those two produce the run's authoritative numbers, and a stored prior in their
 // context is contamination with no upside.
-const WARM_START_ROLES = new Set(['system_architect', 'config_tuner']);
+// tuning_specialist is a consumer for the same reason, plus one: a tuned artifact deploys outside
+// the git tree and takes hours of search to rediscover, so re-deriving one the store already holds
+// is the most expensive avoidable thing this workflow does.
+const WARM_START_ROLES = new Set(['system_architect', 'config_tuner', 'tuning_specialist']);
 // Credentials and trust for every emitted KB command. The six lines that do the work live in
 // scripts/kb_env.sh (which explains them), not here, because run_e2e.py runs KB commands too — the
 // salvage write for a run whose workflow died before Module B — and a Python copy of the token path
@@ -666,6 +705,16 @@ const SWEEP_SCHEMA = obj({
   trials: arrObj, accepted_flags: { type: 'string' }, accepted_env: { type: 'string' },
   best_throughput_tok_s: { type: 'number' }, throughput_speedup_vs_baseline: { type: 'number' },
   summary: { type: 'string' },
+  // Only the warm-start repair pass fills this, and it stays OUT of `required` so every ordinary
+  // sweep keeps validating unchanged. It is the structured half of "why did this not run here" —
+  // read in place of guessing at the free-text notes with a regex.
+  repair: obj({
+    attempted: { type: 'boolean' },
+    classification: { type: 'string' },   // upstream_gone | conflicts_with_baseline | env_unsupported | mixed | unknown
+    dropped_flags: { type: 'array', items: { type: 'string' } },
+    reason_by_flag: { type: 'object', additionalProperties: true },
+    launch_error: { type: 'string' },
+  }, []),
 }, ['accepted_flags', 'best_throughput_tok_s']);
 
 // `e2e_store.py resolve` output, passed through VERBATIM. Nothing is `required` and no field is
@@ -855,8 +904,46 @@ function expertSkillsBlock(role) {
 // ---------------------------------------------------------------------------
 let KB_DIMS = null;        // the deployment dimensions the Director established during preflight
 let KB_REF_DIR = '';       // where Module A left its references; '' when it never ran
+let KB_CACHE_DIR = '';     // where Module A materialized the records' FILES (patches, tuned tables)
 let KB_REF_VERDICT = '';   // what we MEASURED about the offer, threaded into later roles' Inputs
 let KB_READ_PLANE = '';    // which plane ANSWERED the read, which `both` alone does not tell you
+// Everything this run RECALLED, in one report-ready object: which address was asked, what came back,
+// what re-measuring it HERE produced, and whether it was accepted. Threaded into the Report role's
+// Inputs because final_report.md was previously silent about recall altogether — a run that recalled
+// nothing and a run that recalled a 1.12x record and then rejected it wrote the same report, and the
+// second is the one a reader most needs to see.
+//
+// `asked` is filled in even when zero candidates come back. On an exact-lookup scheme a miss and a
+// never-recorded page are the SAME 404, so the ladder that was asked IS the finding: it is the only
+// artifact that distinguishes "no prior art" from "prior art exists one segment away".
+let KB_RECALL = { e2e: null, kernel: [] };
+
+// One collection point for the KERNEL plane's recall. Every nested kernel_workflow returns its own
+// `warm_start` block (kernel_lane.js), and until now all of it died inside the lane: the e2e report
+// could say a kernel was authored from scratch while the lane had in fact adopted a stored patch.
+// Called from the two bounded wrappers and the two direct workflow() sites, i.e. every lane call.
+function noteKernelKB(r, label) {
+  const w = r && r.warm_start;
+  if (w && typeof w === 'object') {
+    KB_RECALL.kernel.push({
+      lane: String(label || ''),
+      slug: String(w.slug || ''),
+      read_reason: String(w.read_reason || ''), match_tier: String(w.match_tier || ''),
+      filtered: w.filtered || null,
+      candidates: Array.isArray(w.candidates) ? w.candidates.length : 0,
+      adopted: !!w.adopted,
+      adopted_speedup: w.adopted ? (w.adopted_speedup != null ? w.adopted_speedup : null) : null,
+      // A lane that adopted a stored patch and then committed nothing of its own is where the kernel
+      // plane most often flatters itself, so carry the split rather than just the headline geomean.
+      incremental_speedup: w.incremental_speedup != null ? w.incremental_speedup : null,
+      rounds_committed: w.rounds_committed != null ? w.rounds_committed : null,
+      no_rounds_after_adopt: !!w.no_rounds_after_adopt,
+      final_geomean: r.final_geomean != null ? r.final_geomean : null,
+      validation_status: String(r.validation_status || ''),
+    });
+  }
+  return r;
+}
 
 const shq = (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'";
 
@@ -911,12 +998,30 @@ ${invoke('local')}`;
 // whose read found nothing — never reaches the template at all.
 function warmStartBlock(role) {
   if (!KB_REF_DIR || !WARM_START_ROLES.has(role)) return '';
+  // `tuning_kb=false` is the blind-evaluation switch: it exists so a run can measure what the tuning
+  // track finds with NO prior knowledge in its context. Now that the tuning track's prior knowledge
+  // lives in the shared KB rather than in a private store, the switch has to reach here too — one
+  // flag, one meaning, whichever store the knowledge happens to sit in. Without this, "blind" would
+  // have quietly stopped being blind the moment the two stores merged.
+  if (role === 'tuning_specialist' && !TUNING_KB_ENABLED) return '';
   return `\n\n## Warm start (a PRIOR run's record — already measured on this box)\n` +
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/warm_start.md and follow it. The knowledge base ` +
     `offered prior configurations for this exact deployment; they are in ${KB_REF_DIR}/, and ` +
     `${KB_REF_DIR}/measured_on_this_box.md records what happened when THIS run benched them — that ` +
     `file OVERRIDES the stored claims in its siblings wherever the two disagree. A stored number is ` +
-    `a hypothesis; only the measured column is evidence.`;
+    `a hypothesis; only the measured column is evidence.` +
+    // The tuning track reads the same pages for a different purpose, so it gets the extra paragraph
+    // here rather than a second block: the others are shopping for a CONFIG to adopt, it is checking
+    // whether the search it is about to spend hours on has already been run to completion once.
+    (role === 'tuning_specialist' && KB_CACHE_DIR
+      ? `\n\nFor YOUR track specifically: an accepted-kernel entry marked \`from tuning skillset\` is a ` +
+        `tuned artifact a prior run produced and proved engaged. Its file was downloaded with the ` +
+        `record — look under ${KB_CACHE_DIR}/*/files/tuning/ — and the entry names the env var that ` +
+        `binds it. Before you start searching a shape, check whether it is already there. If it is, ` +
+        `install the artifact, prove engagement the same way you would for your own, and measure it ` +
+        `in your pre/post A/B; a recalled artifact still has to earn its accept on THIS box, but it ` +
+        `costs one measurement instead of a search. Search only the shapes that came back empty.`
+      : '');
 }
 
 function roleAgent(role, phase, intro, inputs) {
@@ -1687,7 +1792,8 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
 // workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
 // existing null-guards treat it as "no kernel" and continue.
 function fastBoundedWorkflow(ref, wfArgs, label) {
-  const p = workflow(ref, laneArgs(wfArgs));
+  // noteKernelKB returns `r` unchanged, so the caller's null-guards are untouched.
+  const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   if (!FAST_MODE || typeof setTimeout !== 'function' || !(FAST_HEAD_WF_MS > 0)) return p;
   let to;
   const guard = new Promise((resolve) => {
@@ -1738,7 +1844,7 @@ if (TIME_BUDGET_EFFECTIVE_MS != null && typeof setTimeout === 'function' && TIME
   }, TIME_BUDGET_EFFECTIVE_MS);
 }
 function deepBoundedWorkflow(ref, wfArgs, label) {
-  const p = workflow(ref, laneArgs(wfArgs));
+  const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   if (!DEEP_MODE || typeof setTimeout !== 'function' || !(DEEP_HEAD_WF_MS > 0)) return p;
   let to;
   const guard = new Promise((resolve) => {
@@ -1788,6 +1894,7 @@ if (!MODEL_PATH && KERNEL_PATH) {
       budget: KERNEL_BUDGET, gpu_ids: GPU_IDS, task: TASK, exp_root: EXP_ROOT,
       apply_to_original: APPLY_TO_ORIGINAL,
     }));
+    noteKernelKB(r, 'single-kernel pass-through');
     passthru = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
       final_geomean: r.final_geomean, validation_status: r.validation_status,
       note: (r.winner && r.winner.source) || '' };
@@ -1822,6 +1929,162 @@ function applyOpIdentityGuard(queue, stage) {
   if (tagged) log(`[op-identity] ${tagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
   return admitted;
 }
+
+// ===========================================================================
+// MERGING A RECOVERED CONFIGURATION INTO THE ONE THIS RUN WAS HANDED
+// ===========================================================================
+// A stored e2e record holds a WHOLE launch configuration, not a delta — the only form replayable on
+// a box whose baseline nobody recorded. Replaying it means combining it with the baseline THIS run
+// was handed, which under Hyperloom it does not own (interface/run_e2e.py seeds
+// `initial_extra_server_args` from EXPLORE and sets `config_tune: "false"`, so no later sweep
+// corrects anything either).
+//
+// That combination used to be a string concatenation performed by an agent, and it was wrong in a
+// way nothing could see. `adapters/sglang.sh` expands `$EXTRA_SERVER_ARGS`/`$EXTRA_ENV` straight
+// into argparse and `env`, both last-wins. So when the baseline and the record each pin
+// `--context-length`, which one applies is decided by the order the agent happened to write them
+// in. Lose that coin flip and the server runs the baseline twice: ~0% delta, no complaint in any
+// log — the flag WAS honoured, just not with the recorded value — and a record that wins is filed
+// as `rejected`, the one outcome the whole warm start exists to avoid.
+//
+// So the merge is arithmetic, done here, and it reports what it did — the same rule the launcher
+// already applies to one flag by hand (`adapters/sglang.sh` and `--watchdog-timeout`), generalized
+// and moved to where the string is built. The output names every key once, so last-wins never votes.
+
+// Flags that legitimately appear more than once. Deliberately tiny: `--lora-path` is a list and
+// deduping it would silently drop adapters, while everything else in these configs is a scalar
+// where a second occurrence is a mistake we are here to remove. Grow it only with evidence.
+const REPEATABLE_FLAGS = new Set(['--lora-path', '--lora-paths']);
+
+const _looksLikeFlag = (t) => /^--?[A-Za-z]/.test(t);
+
+/** `--a 1 --b=2 --c` -> [{name,value,eq}]. Unrecognized tokens ride along under name=null. */
+function parseFlagString(s) {
+  const toks = String(s || '').trim().split(/\s+/).filter(Boolean);
+  const items = [];
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (!_looksLikeFlag(t)) { items.push({ name: null, value: t, eq: false }); continue; }
+    const eq = t.indexOf('=');
+    if (eq > 0) { items.push({ name: t.slice(0, eq), value: t.slice(eq + 1), eq: true }); continue; }
+    // Everything up to the next flag is this flag's value; `--foo a b` stays one item so a
+    // multi-valued flag is overridden as a unit rather than half-overridden.
+    const vals = [];
+    while (i + 1 < toks.length && !_looksLikeFlag(toks[i + 1])) vals.push(toks[++i]);
+    items.push({ name: t, value: vals.length ? vals.join(' ') : null, eq: false });
+  }
+  return items;
+}
+
+const renderFlagItems = (items) => items.map(
+  (it) => (it.name == null ? it.value
+    : it.value == null ? it.name
+      : it.eq ? `${it.name}=${it.value}` : `${it.name} ${it.value}`)).join(' ').trim();
+
+/** `K=V K2=V2` -> [{name,value}]. A token that is not an assignment rides along under name=null. */
+function parseEnvString(s) {
+  return String(s || '').trim().split(/\s+/).filter(Boolean).map((t) => {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(t);
+    return m ? { name: m[1], value: m[2] } : { name: null, value: t };
+  });
+}
+
+const renderEnvItems = (items) => items.map(
+  (it) => (it.name == null ? it.value : `${it.name}=${it.value}`)).join(' ').trim();
+
+/**
+ * Key-by-key merge of a recovered configuration onto this run's baseline.
+ *
+ * The recovered value WINS on a collision — it is the thing being tested, and applying the
+ * baseline's value instead would test nothing. It wins IN PLACE, so the baseline's ordering
+ * survives and the output contains each key once.
+ *
+ * Returns `{ merged, overrides, added, unchanged }`. `overrides` is the part that has to reach a
+ * human and the tuner: it is the list of knobs where this box disagreed with the record, and it is
+ * the first thing to look at when a replay comes back neutral.
+ */
+function mergeConfig(baseline, recovered, { parse, render, repeatable }) {
+  const out = parse(baseline).map((it) => ({ ...it }));
+  const at = new Map();
+  out.forEach((it, i) => { if (it.name && !repeatable.has(it.name)) at.set(it.name, i); });
+  const overrides = [], added = [], unchanged = [];
+  for (const it of parse(recovered)) {
+    if (it.name == null || repeatable.has(it.name) || !at.has(it.name)) {
+      out.push({ ...it });
+      if (it.name != null) {
+        added.push(it.name);
+        if (!repeatable.has(it.name)) at.set(it.name, out.length - 1);
+      }
+      continue;
+    }
+    const i = at.get(it.name), prev = out[i];
+    if (String(prev.value == null ? '' : prev.value) === String(it.value == null ? '' : it.value)) {
+      unchanged.push(it.name);
+      continue;
+    }
+    overrides.push({ flag: it.name, baseline_value: prev.value, recalled_value: it.value });
+    out[i] = { ...it };
+  }
+  return { merged: render(out), overrides, added, unchanged };
+}
+
+const mergeFlags = (baseFlags, storedFlags) => mergeConfig(baseFlags, storedFlags,
+  { parse: parseFlagString, render: renderFlagItems, repeatable: REPEATABLE_FLAGS });
+const mergeEnv = (baseEnv, storedEnv) => mergeConfig(baseEnv, storedEnv,
+  { parse: parseEnvString, render: renderEnvItems, repeatable: new Set() });
+
+/**
+ * Which trial actually ran, and what it measured. Once a repair pass exists, `trials[0]` and
+ * `best_throughput_tok_s` are both the wrong place to read it from:
+ *   * after a repair `trials[0]` is the corpse of the verbatim replay and the LAST trial is the one
+ *     that came up. Taking `kept`/`parity`/notes from the corpse makes a repaired config unadoptable
+ *     by construction and feeds its launch error to the `inert` regex, which then reads a successful
+ *     repair as "the config never took effect".
+ *   * the role returns THE BASELINE in `best_throughput_tok_s` when nothing was kept. Filing that as
+ *     `measured_tok_s` writes a perfect 0.00% delta onto a record that was never measured.
+ *
+ * So: the last trial carrying a positive throughput, and `best` only when it is a number the
+ * baseline cannot be mistaken for.
+ */
+function measuredTrialOf(sweep, baselineTput) {
+  const trials = (sweep && Array.isArray(sweep.trials)) ? sweep.trials : [];
+  const ran = trials.filter((t) => t && Number(t.throughput_tok_s) > 0);
+  const trial = ran.length ? ran[ran.length - 1] : (trials[0] || {});
+  const best = Number(sweep && sweep.best_throughput_tok_s) || 0;
+  const measured = ran.length ? Number(trial.throughput_tok_s)
+    : (best && best !== baselineTput ? best : 0);
+  return { trial, measured };
+}
+
+/**
+ * Knobs the merged configuration asked for that the thing which actually ran does not carry.
+ *
+ * `repair.dropped_flags` is optional and the role often expresses the repair as a second trial and
+ * leaves it empty. The string it benched is on the trial either way, so the drop list is recoverable
+ * by subtraction — and without it `applied_partial` reads false on a run that dropped something,
+ * which is the difference between "the record lost" and "most of the record lost".
+ */
+function droppedByDiff(mergedFlags, mergedEnv, applied) {
+  const app = String(applied || '').trim();
+  if (!app) return [];
+  const keyOf = (t) => {
+    const f = /^(--?[A-Za-z][^=\s]*)/.exec(t);
+    if (f) return f[1];
+    const e = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(t);
+    return e ? e[1] : null;
+  };
+  const have = new Set();
+  app.split(/\s+/).forEach((t) => { const k = keyOf(t); if (k) have.add(k); });
+  const want = [];
+  parseFlagString(mergedFlags).forEach((it) => { if (it.name) want.push(it.name); });
+  parseEnvString(mergedEnv).forEach((it) => { if (it.name) want.push(it.name); });
+  return want.filter((k) => !have.has(k));
+}
+
+/** `--context-length 11264 -> 13312; MAX_MODEL_LEN 13312 -> 16384`, or "". For prompts and logs. */
+const describeOverrides = (overrides) => (overrides || []).map(
+  (o) => `${o.flag} ${o.baseline_value == null ? '(unset)' : o.baseline_value} -> ` +
+    `${o.recalled_value == null ? '(set)' : o.recalled_value}`).join('; ');
 
 // ===========================================================================
 // PHASE: Setup + Baseline profile + Strategize  (gated; else load carried state)
@@ -1891,6 +2154,11 @@ if (want('setup')) {
       // cost of believing one is a 20-40min server launch, not a wasted lookup.
       log('[kb] warm start skipped: read_reason=missing_arch (the Director reported no gfx; a ' +
         'cross-arch config is not a candidate, it is a guess).');
+      // Still a recall FACT worth reporting: "we did not look, and here is why" is not the same
+      // report as "we looked and the store was empty", and the reader cannot tell them apart from
+      // an absent section.
+      KB_RECALL.e2e = { read_reason: 'missing_arch', tried: [], answered: '', match_tier: '',
+        plane: E2E_KB_PLANE, mode: E2E_WARM_START, candidates: 0, configs: [], kernels: [] };
     } else {
       const refsDir = `${EVAL_DIR}/kb_references`;
       const cacheDir = `${EVAL_DIR}/kb_cache`;
@@ -1930,25 +2198,53 @@ if (want('setup')) {
         `sorted_by=${resolved.sorted_by || resolved.ranked_by || '-'} ` +
         `champion_metric=${resolved.champion_metric || '-'} reason=${resolved.read_reason || '?'} ` +
         `candidates=${cands.length}`);
+      // Record the ASK before anything is benched. If this process dies mid-warm-start the report
+      // still knows which ladder was queried, and on a zero-candidate read this is the entire
+      // finding — see KB_RECALL's declaration for why the address matters more than the count.
+      KB_RECALL.e2e = {
+        read_reason: String(resolved.read_reason || ''),
+        tried: Array.isArray(resolved.tried) ? resolved.tried : [],
+        answered: String(resolved.canonical_id || ''),
+        match_tier: String(resolved.match_tier || ''),
+        plane: E2E_KB_PLANE, read_plane: KB_READ_PLANE, mode: E2E_WARM_START,
+        candidates: cands.length, configs: [], kernels: [],
+      };
       if (cands.length) KB_REF_DIR = refsDir;   // arms warmStartBlock() for the consumer roles
+      // Armed on the same condition and never separately: the cache holds nothing until a candidate
+      // is materialized, and a path to an empty directory reads to an agent as "the file is missing"
+      // rather than "there was no record", which are very different things to act on.
+      if (cands.length) KB_CACHE_DIR = cacheDir;
 
-      // How many of the offers are worth a server launch. On a coarser rung the stored numbers were
-      // measured on a DIFFERENT workload point, so they are not comparable to this run's baseline at
-      // all — the configs are still ideas worth handing to the Architect, but benching one on the
-      // strength of a non-comparable number is spending 30min to test a coin flip. Zero there
-      // unless the caller explicitly asks otherwise.
+      // How many of the offers are worth a server launch. A coarse rung gets its own (smaller)
+      // budget rather than zero — see E2E_WARM_START_VALIDATE_N_COARSE for why the stored number's
+      // incomparability bounds how much we spend guessing, not whether the guess can be measured.
       const exactTier = (resolved.match_tier || '') === 'exact';
       const benchN = E2E_WARM_START_REF_ONLY ? 0
-        : (exactTier || A.e2e_warm_start_validate_n != null ? E2E_WARM_START_VALIDATE_N : 0);
+        : exactTier ? E2E_WARM_START_VALIDATE_N
+        : A.e2e_warm_start_validate_n != null ? E2E_WARM_START_VALIDATE_N
+        : E2E_WARM_START_VALIDATE_N_COARSE;
+      // WHICH offers, once we know how many. The page came back ordered by absolute throughput (the
+      // resolve default), and on a coarse rung that throughput was measured at some other tp or
+      // workload point, so it ranks the offers by the one quantity that did not survive the move.
+      // Re-order by the rung's own metric — speedup — so the launch is spent on the record that
+      // claims the biggest RATIO, which is what the store promotes its coarse champions on. Note the
+      // page was still FETCHED by throughput, so this reorders a throughput-biased top-N; making the
+      // fetch itself follow the rung metric belongs in e2e_store.resolve, not here.
+      const benchOrder = exactTier ? cands : [...cands].sort(
+        (x, y) => (Number(y.speedup) || 0) - (Number(x.speedup) || 0));
       if (cands.length && !benchN) {
         log(`[kb] not benching: ${E2E_WARM_START_REF_ONLY
           ? (FAST_MODE ? 'fast mode — all optimization comes from the head track' : 'warm_start=reference')
-          : `match tier '${resolved.match_tier}' is not exact, so the stored numbers are not ` +
-            'comparable to this baseline'}. The offers stay as references.`);
+          : `the caller set e2e_warm_start_validate_n_coarse=0 and match tier ` +
+            `'${resolved.match_tier}' is not exact`}. The offers stay as references.`);
+      } else if (cands.length && !exactTier) {
+        log(`[kb] benching ${Math.min(benchN, cands.length)} of ${cands.length} offer(s) from coarse ` +
+          `tier '${resolved.match_tier}', picked by stored speedup. The stored throughput is not ` +
+          `comparable to this baseline; the A/B below is measured on this box and is what counts.`);
       }
 
       const verdicts = [];
-      for (const c of cands.slice(0, benchN)) {
+      for (const c of benchOrder.slice(0, benchN)) {
         // VALIDATE THROUGH THE ORIGINAL GATE. This is config_tuner:sweep — the same role, the same
         // schema, the same bench_e2e.sh at the same TP/GPU, the same delta-vs-median arithmetic, the
         // same parity check and the same swap-took-effect log grep the flow already trusts for a
@@ -1962,21 +2258,29 @@ if (want('setup')) {
             outcome: 'skipped', why: 'the record carries no config to apply' });
           continue;
         }
-        const sweep = await safeAgent(
-          roleAgent('config_tuner', 'sweep',
-            'Validate ONE historical configuration recovered from the knowledge base. Treat it exactly ' +
-            'as you would a fresh direction: same isolated-server measurement, same parity check, same ' +
-            'swap-took-effect verification. TWO deviations from your role file, both deliberate:\n' +
-            '(1) Do NOT decompose this direction into one-axis-at-a-time trials. A stored config is an ' +
-            'ALREADY-COMPOUNDED whole that was accepted together on another box; benching its knobs ' +
-            'separately measures a configuration nobody has ever run, and the parts can each be ' +
-            'neutral while the whole is a win (or the reverse). Apply all of it, once, as a single ' +
-            'trial.\n' +
-            '(2) Verify the swap TOOK EFFECT before you believe a null result. This config came from a ' +
-            'different framework_version: a flag that was renamed or removed upstream is accepted ' +
-            'silently on the command line and then ignored, which is indistinguishable from "the ' +
-            'config made no difference". Grep the server log for each flag/env actually being ' +
-            'honoured, and if one is not, say so in the trial notes rather than reporting a clean no-op.',
+        // Key-by-key, not string-concatenated — see mergeConfig. The recorded value wins every
+        // collision; `overrides` is the list of knobs where this box and the record disagreed.
+        const mf = mergeFlags(curFlags, storedFlags);
+        const me = mergeEnv(curEnv, storedEnv);
+        const overrides = mf.overrides.concat(me.overrides);
+        if (overrides.length) {
+          log(`[kb] merge ${c.session_id || '?'}: the recorded config overrides ${overrides.length} ` +
+            `knob(s) this run's baseline already pins — ${describeOverrides(overrides)}. ` +
+            'The recorded value is the one under test, so it wins.');
+        }
+        // Nothing left to test. Not a verdict on the record and not worth a server launch: this
+        // run's baseline already IS the recorded configuration, so a bench would compare the
+        // baseline with itself and file the ~0% result as a loss. Left un-attested on purpose —
+        // `recalls` counts attempts on hardware, and this one never reached any.
+        if (mf.merged === renderFlagItems(parseFlagString(curFlags)) &&
+            me.merged === renderEnvItems(parseEnvString(curEnv))) {
+          verdicts.push({ ...c, measured_tok_s: null, delta_pct: null, parity: 'n/a',
+            outcome: 'skipped',
+            why: "this run's baseline already carries the whole recorded configuration" });
+          continue;
+        }
+        const runValidation = (brief, label) => safeAgent(
+          roleAgent('config_tuner', 'sweep', brief,
             {
               EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, BASELINE_THROUGHPUT: BASELINE_TPUT,
               NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
@@ -1984,20 +2288,103 @@ if (want('setup')) {
                 rank: 1,
                 direction: 'kb_warm_start:' + (c.direction || 'unlabeled'),
                 axis: 'compound (recovered configuration — do not split)',
-                flags: storedFlags, env: storedEnv,
+                // ALREADY MERGED with this run's baseline. Use verbatim; do not re-combine with
+                // CURRENT_FLAGS/CURRENT_ENV, or the collisions the merge just resolved come back.
+                flags: mf.merged, env: me.merged,
                 rationale: `Recorded under ${c.canonical_id || resolved.canonical_id} (session ` +
                   `${c.session_id || '?'}), where it measured ${c.throughput_tok_s != null ? c.throughput_tok_s : '?'}` +
                   ` tok/s (${c.speedup != null ? c.speedup + 'x' : 'speedup not recorded'}) against a ` +
                   `baseline of ${c.baseline_throughput_tok_s != null ? c.baseline_throughput_tok_s : '?'} tok/s. ` +
-                  'That number is a HYPOTHESIS about this box, not a measurement of it.',
+                  'That number is a HYPOTHESIS about this box, not a measurement of it.' +
+                  (overrides.length
+                    ? ` NOTE: ${overrides.length} knob(s) in it disagree with this run's baseline and ` +
+                      `the recorded value was taken — ${describeOverrides(overrides)}. If the result is ` +
+                      'neutral, check these first: they are where the recorded config and this box ' +
+                      'were asked to be two different things.'
+                    : ''),
               }],
+              MERGE_OVERRIDES: overrides, MERGE_ADDED: mf.added.concat(me.added),
               CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
               MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
               SKILL_DIR: WORKFLOW_DIR,
             }),
-          { phase: 'WarmStart', label: `warm_start:validate:${c.session_id || 'cand'}`, schema: SWEEP_SCHEMA });
-        const trial = (sweep && (sweep.trials || [])[0]) || {};
-        const measured = (sweep && sweep.best_throughput_tok_s) || 0;
+          { phase: 'WarmStart', label, schema: SWEEP_SCHEMA });
+
+        let sweep = await runValidation(
+          'Validate ONE historical configuration recovered from the knowledge base. Treat it exactly ' +
+          'as you would a fresh direction: same isolated-server measurement, same parity check, same ' +
+          'swap-took-effect verification. THREE deviations from your role file, all deliberate:\n' +
+          '(1) Do NOT decompose this direction into one-axis-at-a-time trials. A stored config is an ' +
+          'ALREADY-COMPOUNDED whole that was accepted together on another box; benching its knobs ' +
+          'separately measures a configuration nobody has ever run, and the parts can each be ' +
+          'neutral while the whole is a win (or the reverse). Apply all of it, once, as a single ' +
+          'trial.\n' +
+          "(2) The direction's `flags`/`env` are ALREADY MERGED with this run's baseline, key by key. " +
+          'Pass them VERBATIM to bench_e2e.sh. Do NOT append CURRENT_FLAGS/CURRENT_ENV to them — those ' +
+          'are shown to you only so you can see what was overridden, and re-combining them puts the ' +
+          'duplicate keys back and hands the outcome to argparse last-wins.\n' +
+          '(3) Verify the swap TOOK EFFECT before you believe a null result. This config came from a ' +
+          'different framework_version: a flag that was renamed or removed upstream is accepted ' +
+          'silently on the command line and then ignored, which is indistinguishable from "the ' +
+          'config made no difference". Grep the server log for each flag/env actually being ' +
+          'honoured, and if one is not, say so in the trial notes rather than reporting a clean no-op. ' +
+          'MERGE_OVERRIDES lists the knobs where the record and this box disagreed — check those in ' +
+          'the log first.',
+          `warm_start:validate:${c.session_id || 'cand'}`);
+
+        // ONE repair attempt, and only when the server produced no number at all.
+        //
+        // The first launch is where a box the config has never met shows up: a flag deleted upstream
+        // makes argparse exit before the model loads, and a knob this run's baseline pins can be
+        // incompatible with the recorded value. Both used to end as measured 0, one shot spent,
+        // `not_reproduced` filed against the record — but only the first is the record's fault, and
+        // a record that keeps meeting incompatible baselines was being retired for it.
+        //
+        // So: hand the launch failure back, make the tuner say WHICH of the two it is, let it adapt
+        // the minimum needed, and bench once more. Exactly once — a repair loop against a config
+        // that cannot run here learns nothing new — and through the SAME accept gate.
+        let repair = null;
+        if (!measuredTrialOf(sweep, BASELINE_TPUT).measured) {
+          const repaired = await runValidation(
+            'A recovered configuration was applied to this box and the server produced NO ' +
+            'measurement — it failed to launch, failed to become healthy, or died before the bench. ' +
+            'This is the ONE repair attempt; there is no second.\n\n' +
+            'Read your own launch log from the attempt you just made. Then, for each knob that came ' +
+            'from the record (MERGE_OVERRIDES and MERGE_ADDED name them), classify it:\n' +
+            '  - `upstream_gone`: this build does not have the flag/env at all — argparse rejected ' +
+            'it, or it is absent from `--help`. This is the RECORD being stale.\n' +
+            "  - `conflicts_with_baseline`: the build has it, but the value cannot hold together with " +
+            "something this run's baseline pins (a length above the served context, a memory " +
+            'fraction the rest of the config cannot fit under, a backend the baseline excludes). ' +
+            'This is the PAIRING failing, and says nothing about the record.\n' +
+            '  - `env_unsupported`: the build ignores or rejects the env var.\n' +
+            'Then drop or adapt the MINIMUM needed to get a running server — keep as much of the ' +
+            'recorded configuration as will run, and never drop a knob you did not have to — and ' +
+            'bench that once, exactly as before.\n\n' +
+            'Return the same JSON, plus a `repair` object: `{"attempted": true, "classification": ' +
+            '"upstream_gone|conflicts_with_baseline|env_unsupported|mixed|unknown", ' +
+            '"dropped_flags": ["--flag", ...], "reason_by_flag": {"--flag": "why"}, ' +
+            '"launch_error": "<the line that actually killed it>"}`. If the server still will not ' +
+            'come up, say so and return `best_throughput_tok_s: 0` — an honest "cannot run here" is ' +
+            'worth more than a number from a configuration that is no longer the record.',
+            `warm_start:repair:${c.session_id || 'cand'}`);
+          if (repaired) {
+            repair = (repaired.repair && typeof repaired.repair === 'object') ? repaired.repair : {};
+            sweep = repaired;
+          }
+          log(`[kb] repair ${c.session_id || '?'}: ` + (repair
+            ? `classified ${repair.classification || 'unknown'}` +
+              `${(repair.dropped_flags || []).length ? `, dropped ${(repair.dropped_flags || []).join(' ')}` : ''}` +
+              `${measuredTrialOf(sweep, BASELINE_TPUT).measured ? ', server came up' : ', still no measurement'}`
+            : 'the repair attempt itself produced nothing'));
+        }
+        const { trial, measured } = measuredTrialOf(sweep, BASELINE_TPUT);
+        // The role's own list when it filled one in; otherwise subtract what ran from what was
+        // asked for. Either way the verdict names the knobs that did not make it onto the box.
+        const dropped = (repair && Array.isArray(repair.dropped_flags) && repair.dropped_flags.length)
+          ? repair.dropped_flags
+          : (repair ? droppedByDiff(mf.merged, me.merged,
+            String(trial.change || [trial.flags, trial.env].filter(Boolean).join(' | '))) : []);
         const parity = String(trial.parity || trial.output_parity || '');
         const deltaPct = BASELINE_TPUT ? ((measured - BASELINE_TPUT) / BASELINE_TPUT) * 100 : 0;
         // Both the tuner's own judgement AND our arithmetic. A warm-start candidate is precisely
@@ -2006,30 +2393,46 @@ if (want('setup')) {
         const accept = trial.kept === true && measured > BASELINE_TPUT &&
           deltaPct > NOISE_BAND && parity !== 'fail';
         if (accept) {
-          curFlags = sweep.accepted_flags || storedFlags || curFlags;
-          curEnv = sweep.accepted_env || storedEnv || curEnv;
+          curFlags = sweep.accepted_flags || mf.merged || curFlags;
+          curEnv = sweep.accepted_env || me.merged || curEnv;
           kbSeedTput = measured;
           log(`[kb] ADOPTED ${c.session_id || '?'} (${c.direction || 'unlabeled'}): ` +
-            `${measured} tok/s, +${deltaPct.toFixed(2)}% vs baseline ${BASELINE_TPUT} (noise band ${NOISE_BAND}%).`);
+            `${measured} tok/s, +${deltaPct.toFixed(2)}% vs baseline ${BASELINE_TPUT} (noise band ${NOISE_BAND}%)` +
+            `${dropped.length ? `, with ${dropped.join(' ')} dropped to make it run here` : ''}.`);
         }
-        // THREE outcomes, not two. "ran and lost" and "could not be made to run" were both spelled
-        // `rejected`, and they mean opposite things to the record: a loss is one box's verdict on a
-        // real configuration, while a config that never took effect says the record is missing
-        // something — a flag renamed upstream, an env the build does not honour. Only the second is
-        // evidence for retiring it, and the store now counts them separately (kb/attest.py).
-        const notes = String(trial.notes || (sweep && sweep.summary) || '');
+        // FOUR outcomes. "ran and lost" is one box's number on a real configuration; "could not be
+        // made to run" says the record may be missing something (a flag renamed upstream, an env the
+        // build does not honour); "does not fit this box" is a collision with a baseline this run
+        // did not choose and says nothing about the record. All three are REPORTED and counted apart
+        // (kb/attest.py); none is counted AGAINST the record — see KB_ATTEST_OUTCOME.
+        //
+        // `note` and `notes` are both read: the role file's return schema spells it `note`, and
+        // reading only `notes` meant the per-trial text never reached this regex at all.
+        const notes = String(trial.notes || trial.note || (sweep && sweep.summary) || '');
         const inert = /\b(?:not (?:honou?red|recognized|recognised|applied|supported)|unrecognized|unrecognised|ignored|no such option|unknown (?:option|argument|flag)|renamed|removed upstream|did not take effect)\b/i.test(notes);
-        const outcome = accept ? 'adopted' : (!measured || inert) ? 'not_reproduced' : 'rejected';
+        // The repair's structured verdict outranks the regex: it was reached by reading the launch
+        // error, while the regex is guessing at free text written for a human.
+        const conflicted = String((repair && repair.classification) || '') === 'conflicts_with_baseline';
+        const outcome = accept ? 'adopted'
+          : !measured ? (conflicted ? 'inapplicable' : 'not_reproduced')
+            : inert ? 'not_reproduced' : 'rejected';
         if (!accept) {
-          log(`[kb] ${outcome === 'not_reproduced' ? 'NOT REPRODUCED' : 'rejected'} ` +
+          log(`[kb] ${{ not_reproduced: 'NOT REPRODUCED', inapplicable: 'INAPPLICABLE HERE' }[outcome] || 'rejected'} ` +
             `${c.session_id || '?'} (${c.direction || 'unlabeled'}): ` +
             `measured ${measured || 'n/a'} tok/s vs baseline ${BASELINE_TPUT}` +
             `${measured ? ` (${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%)` : ''}` +
             `${parity ? `, parity=${parity}` : ''}${inert ? ', the config never took effect' : ''}` +
-            ` — kept as a reference, not applied.`);
+            `${outcome === 'inapplicable' ? ", it collides with this run's baseline" : ''}` +
+            ` — kept as a reference, not applied. This is this box's result, not a verdict on the ` +
+            `record: it is filed as evidence and counts nothing against it.`);
         }
         verdicts.push({ ...c, measured_tok_s: measured || null, delta_pct: measured ? deltaPct : null,
-          parity: parity || 'unknown', outcome, why: notes });
+          parity: parity || 'unknown', outcome, why: notes,
+          // What was actually put on the box, as opposed to what the record asked for. A reader
+          // comparing this run's number with the stored one needs both, and `applied_partial`
+          // is the difference between "the record lost" and "most of the record lost".
+          overrides, applied_partial: dropped.length > 0, dropped_flags: dropped,
+          repair_classification: String((repair && repair.classification) || '') });
         if (accept) break;   // adopt the first that passes; the rest stay references
       }
       // ---------------------------------------------------------------------
@@ -2048,14 +2451,28 @@ if (want('setup')) {
       const seenKernel = new Set();
       for (const c of cands) {
         const bundlePath = (c.bundle && c.bundle.path) || '';
+        // The record's PREBUILT overlay directory, packed by e2e_store._pack_overlay as
+        // `overlay.tar.gz` (manifest + sitecustomize + `_patched/` + every overlay-root module the
+        // rebinds transitively import). Named from the manifest rather than probed, because this
+        // script has no filesystem: a bundle whose upload never carried the tarball simply does not
+        // list it, and the entry stays a reference instead of costing two server launches to find out.
+        const bundleFiles = Array.isArray(c.bundle && c.bundle.files) ? c.bundle.files : [];
+        const overlayTar = (bundlePath && bundleFiles.includes('overlay.tar.gz'))
+          ? `${bundlePath}/files/overlay.tar.gz` : '';
         for (const k of (Array.isArray(c.accepted_kernels) ? c.accepted_kernels : [])) {
           const name = String((k && (k.name || k.short_name)) || '').trim();
           if (!name || seenKernel.has(name)) continue;   // one op recorded by several runs is one op
           seenKernel.add(name);
-          kbKernels.push({ ...k, name, bundle: bundlePath, kb_session_id: c.session_id || '' });
+          kbKernels.push({ ...k, name, bundle: bundlePath, overlay_tar: overlayTar,
+            kb_session_id: c.session_id || '' });
         }
       }
       let replayed = 0;
+      // One overlay tarball is the whole RECORD's final overlay, not one kernel's. If a record banked
+      // three authored kernels, restoring it restores all three at once, so it is benched ONCE and the
+      // remaining kernels of that record are marked as covered by it rather than each buying their own
+      // pair of server launches to measure the identical directory.
+      const overlayReplayed = new Set();
       const kernelVerdicts = [];
       for (const k of kbKernels) {
         const kind = String(k.winner_kind || k.kind || '').trim().toLowerCase();
@@ -2071,11 +2488,24 @@ if (want('setup')) {
         // between two identical configurations: two full server launches to measure nothing, and a
         // 'rejected' verdict that then libels a win which may well have been real.
         const hasRouting = !!(String(k.apply_env || '').trim() || String(k.apply_flags || '').trim());
+        // A kind this lane cannot BUILD from a record can still be REPLAYED when the record ships the
+        // built artifact. `authored` is the case that matters: the integrator's authored path needs
+        // `authored_kernel_eval_dir/workspace/` to git-apply the diff and assemble the module, and that
+        // workspace is gone the moment the run ends — which is what the old blanket exclusion was
+        // about. But the OUTPUT of that build, the overlay directory, is in the record: manifest,
+        // sitecustomize, and the authored source (e.g. `geak_hip_extend/extend_attention_hip.hip`,
+        // rebuilt by the reader's own torch load()). The rebind seam is named in the manifest
+        // (`sglang...extend_attention:extend_attention_fwd` -> `geak_hip_extend:extend_attention_fwd`),
+        // so it is checkable rather than unprovable, and if it does not bind here the A/B says so.
+        const viaOverlay = !E2E_REPLAYABLE_KINDS.has(kind) && !!k.overlay_tar;
         const unreplayable =
           E2E_WARM_START_REF_ONLY ? 'read-only mode'
-          : !E2E_REPLAYABLE_KINDS.has(kind) ? `winner_kind '${kind || 'unrecorded'}' cannot be replayed from a record`
-          : (kind === 'patch' && !patchPath) ? 'the record names a patch but its bundle holds no file'
-          : (kind !== 'patch' && !hasRouting) ? `recorded as a '${kind}' win but carries no apply_env/apply_flags, so there is nothing to re-apply`
+          : (!E2E_REPLAYABLE_KINDS.has(kind) && !k.overlay_tar)
+            ? `winner_kind '${kind || 'unrecorded'}' cannot be rebuilt from a record, and this record ships no overlay.tar.gz to replay instead`
+          : (viaOverlay && overlayReplayed.has(k.bundle))
+            ? "already covered by this record's overlay replay — one tarball is the whole record's overlay, not one kernel's"
+          : (!viaOverlay && kind === 'patch' && !patchPath) ? 'the record names a patch but its bundle holds no file'
+          : (!viaOverlay && kind !== 'patch' && !hasRouting) ? `recorded as a '${kind}' win but carries no apply_env/apply_flags, so there is nothing to re-apply`
           : replayed >= E2E_WARM_START_KERNELS_N ? `replay budget of ${E2E_WARM_START_KERNELS_N} already spent`
           : '';
         if (unreplayable) {
@@ -2084,6 +2514,7 @@ if (want('setup')) {
           continue;
         }
         replayed++;
+        if (viaOverlay) overlayReplayed.add(k.bundle);
         const isolated = Number(k.isolated_speedup) || 0;
         const kbIntegrateInputs = {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
@@ -2099,6 +2530,9 @@ if (want('setup')) {
             // task_dir is deliberately EMPTY and the provenance is declared foreign — see the intro.
             task_dir: '', provenance: 'knowledge_base_replay',
           },
+          // Set only on the prebuilt-overlay path, so the integrator can tell "assemble the candidate
+          // from this patch" from "the candidate already exists, unpack it and bench it".
+          ...(viaOverlay ? { KB_OVERLAY_TARBALL: k.overlay_tar } : {}),
           CURRENT_OVERLAY: kbSeedOverlay || curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
           CURRENT_THROUGHPUT: kbSeedTput || BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
         };
@@ -2106,6 +2540,38 @@ if (want('setup')) {
           'Overlay a kernel RECOVERED FROM THE KNOWLEDGE BASE and gate it on e2e throughput. Run your ' +
           'normal isolated-server A/B — same fresh-server legs, same parity probe. Two things are different ' +
           'and you must honour both:\n' +
+          (viaOverlay
+            ? '(0) DO NOT BUILD THE CANDIDATE OVERLAY. This kernel was authored by another run, whose ' +
+              'workspace does not exist here, so your `authored` recipe (git apply into ' +
+              'authored_kernel_eval_dir/workspace, copy kernel_src, add-rebind) cannot run and must not ' +
+              'be attempted. The record ships the FINISHED overlay instead. Unpack it and bench THAT ' +
+              'directory as the candidate. Note the tarball is a STANDALONE overlay from another run: ' +
+              'untarring it over CURRENT_OVERLAY would overwrite `_overlay_manifest.json` and drop every ' +
+              'rebind already accepted here, which turns the A/B into a comparison against a candidate ' +
+              'that is missing part of its own reference. So graft its rebinds ON TOP of the current ' +
+              'overlay rather than replacing it:\n' +
+              '```bash\n' +
+              'CAND="$EVAL_DIR/overlay/cand_<short_name>"\n' +
+              'cp -r "$CURRENT_OVERLAY"/. "$CAND"/ 2>/dev/null || mkdir -p "$CAND"   # empty CURRENT_OVERLAY is the normal case\n' +
+              `KBO=$(mktemp -d) && tar xzf ${shq(k.overlay_tar)} -C "$KBO" --strip-components=1\n` +
+              'cp -r "$KBO"/. "$CAND"/                      # modules + _patched/; manifest handled next\n' +
+              'if [ -s "$CURRENT_OVERLAY/_overlay_manifest.json" ]; then\n' +
+              '  cp "$CURRENT_OVERLAY/_overlay_manifest.json" "$CAND/_overlay_manifest.json"   # restore, then re-add\n' +
+              '  # for each {target,impl_module,impl_attr} in "$KBO/_overlay_manifest.json":\n' +
+              '  python3 "$SKILL_DIR/scripts/overlay_setup.py" add-rebind --overlay "$CAND" \\\n' +
+              '    --target "<target>" --impl-module "<impl_module>" --impl-attr "<impl_attr>"\n' +
+              'fi\n' +
+              'PYTHONPATH="$CAND" python3 "$SKILL_DIR/scripts/overlay_setup.py" check --module "<impl_module>"\n' +
+              '```\n' +
+              'The manifest names every rebind as `target -> impl_module:impl_attr`. VERIFY EACH REBIND ' +
+              'ACTUALLY TOOK on the candidate server (load banner, or the check above) before you believe ' +
+              'a null result: this overlay was built against a different framework_version, and a rebind ' +
+              'whose target module was renamed upstream binds nothing, silently, which is indistinguishable ' +
+              'from "the kernel made no difference". If no rebind takes, report gate:"rejected" with ' +
+              'reason `no_rebind_seam` rather than a clean no-op. An authored/JIT kernel on the decode ' +
+              'path still has to satisfy your CUDA-graph-safety rule — the packed source is rebuilt by ' +
+              "this box's own torch load(), and a build failure is a rejection, not a retry.\n"
+            : '') +
           '(1) There is NO task_dir and therefore NO immutable oracle for this kernel. Your step-1 ' +
           'provenance re-check cannot run, because the workspace that produced this patch does not ' +
           'exist on this box. Do NOT claim provenance was verified. The FRESH parity probe against the ' +
@@ -2123,7 +2589,11 @@ if (want('setup')) {
           kbSeedTput = integ.e2e_throughput_tok_s;
           bankAccepted(kbSeedKernels, {
             short_name: k.name, backend: String(k.language || k.backend || ''), kind,
+            // On the prebuilt-overlay path there is no patch to point at; what reproduces this win is
+            // the accepted overlay the integrator just built from the tarball, and Module B packs that
+            // directory the same way the record we replayed was packed.
             e2e_delta_pct: integ.e2e_delta_pct, isolated, patch: patchPath,
+            replayed_from_overlay: viaOverlay ? k.overlay_tar : '',
             pct_gpu_time: Number(k.pct_gpu_time) || 0,
             apply_env: String(k.apply_env || ''), apply_flags: String(k.apply_flags || ''),
             // Provenance stays ON the banked entry: this kernel is a recovered win re-verified here,
@@ -2161,26 +2631,40 @@ if (want('setup')) {
       // Tell the STORE what happened. Until now this loop's verdicts died with the run: the next
       // box to resolve this identity saw the same optimistic record, benched it, and failed the
       // same way, forever. `e2e_store.py attest` counts the attempt onto the record itself, at
-      // every rung, so `validations / recalls` becomes something a later curation pass can retire
-      // on. It moves no score and no champion — one box's failure is evidence, not a verdict.
+      // every rung, so a later reader can see how often it has been tried here and how it went.
+      // It moves no score and no champion, and per KB_ATTEST_OUTCOME a non-win moves nothing at
+      // all — one box's failure is evidence, never a verdict on the record.
       //
       // Only candidates that were actually PUT ON THIS BOX are counted. A record listed in the
       // offer and never benched (`skipped`, or below benchN) has learned nothing about itself, and
-      // counting it would decay the very ratio the retire pass reads.
+      // counting it would put an attempt that never happened into the ledger.
       //
       // Config verdicts only. A replayed kernel that failed is evidence against the KERNEL lane's
       // record, not against the e2e run that once used it, and the two have separate ledgers —
       // `experience_store.py attest` is where that verdict belongs.
       const attestable = verdicts.filter(v => v.session_id &&
-        ['adopted', 'rejected', 'not_reproduced'].includes(v.outcome));
+        ['adopted', 'rejected', 'not_reproduced', 'inapplicable'].includes(v.outcome));
       if (attestable.length) {
         const cmds = attestable.map(v =>
           `python3 ${shq(E2E_STORE_SCRIPT)} attest ${kbIdentityFlags()} ${kbPlaneFlags()} ` +
           `--session-id ${shq(v.session_id)} ` +
-          `--outcome ${v.outcome === 'adopted' ? 'validated' : v.outcome} ` +
+          `--outcome ${KB_ATTEST_OUTCOME[v.outcome] || 'inapplicable'} ` +
           (v.measured_tok_s ? `--measured-tok-s ${v.measured_tok_s} ` : '') +
           `--baseline-tok-s ${BASELINE_TPUT} --parity ${shq(v.parity || 'n/a')} ` +
-          `--note ${shq(String(v.why || '').slice(0, 200))} ` +
+          // The note carries what was actually run, not just why it ended: a bare "no win" against
+          // a partially-dropped config would read, three months later, as a verdict on the whole
+          // record. Overrides first — they are what a reader has to know to interpret the number.
+          `--note ${shq([
+            // The local verdict leads the note. It is filed as `inapplicable` so it cannot retire
+            // the record; a reader still has to be able to see what actually happened here.
+            `local verdict: ${v.outcome}` +
+              (v.measured_tok_s ? ` (${v.measured_tok_s} tok/s vs baseline ${BASELINE_TPUT})` : ' (no measurement)'),
+            (v.overrides || []).length ? `overrode ${describeOverrides(v.overrides)}` : '',
+            (v.dropped_flags || []).length
+              ? `dropped ${(v.dropped_flags || []).join(' ')} to make it run here` +
+                `${v.repair_classification ? ` (${v.repair_classification})` : ''}` : '',
+            String(v.why || ''),
+          ].filter(Boolean).join('; ').slice(0, 400))} ` +
           `--measured-by ${shq('e2e_workflow:' + BACKEND)} --apply || true`);
         try {
           await safeAgent(
@@ -2188,7 +2672,8 @@ if (want('setup')) {
             `return {"ran": <how many you ran>, "note": "<anything that failed>"}. Each records ` +
             `what THIS box saw when it benched a stored record. Do NOT edit them, do NOT add or ` +
             `drop any, and do NOT retry a failure — a repeat would double-count the attempt, and ` +
-            `an over-counted failure retires a record that may still be right elsewhere.\n` +
+            `the ledger is meant to say how often this record was tried here, not how often the ` +
+            `attestor pressed the button.\n` +
             '```bash\n' + KB_ENV_PRELUDE + cmds.join('\n') + '\n```',
             { phase: 'WarmStart', label: 'kb:attest',
               schema: obj({ ran: { type: 'number' }, note: { type: 'string' } }, []) },
@@ -2203,6 +2688,36 @@ if (want('setup')) {
       }
 
       const allVerdicts = verdicts.concat(kernelVerdicts);
+      // Same rows the measured_on_this_box.md tables carry, in machine form, so the Report role
+      // states the recall outcome from the orchestrator's own record rather than from whether an
+      // agent happened to open a reference file. Set OUTSIDE the `if (allVerdicts.length)` guard:
+      // an empty verdict list against a non-empty offer means "offered but not benched", which is
+      // itself a reportable outcome.
+      if (KB_RECALL.e2e) {
+        KB_RECALL.e2e.configs = verdicts.map(v => ({
+          direction: String(v.direction || 'unlabeled'), session_id: String(v.session_id || ''),
+          stored_tok_s: v.throughput_tok_s != null ? v.throughput_tok_s : null,
+          stored_speedup: v.speedup != null ? v.speedup : null,
+          measured_tok_s: v.measured_tok_s != null ? v.measured_tok_s : null,
+          delta_pct: v.delta_pct != null ? v.delta_pct : null,
+          parity: String(v.parity || ''), outcome: String(v.outcome || ''),
+          // What the merge and the repair did, in the same row as the number they produced. A
+          // reader who sees a neutral `delta_pct` needs to know whether the recorded value was the
+          // one that ran (`overrides`) and whether all of it ran (`applied_partial`); without them
+          // the row reads as a verdict on the record when it may be a verdict on the pairing.
+          overrides: Array.isArray(v.overrides) ? v.overrides : [],
+          applied_partial: v.applied_partial === true,
+          dropped_flags: Array.isArray(v.dropped_flags) ? v.dropped_flags : [],
+          why: String(v.why || '').slice(0, 300),
+        }));
+        KB_RECALL.e2e.kernels = kernelVerdicts.map(v => ({
+          name: String(v.name || ''), kind: String(v.kind || ''),
+          kb_session_id: String(v.kb_session_id || ''),
+          stored_isolated: v.isolated_speedup != null ? v.isolated_speedup : null,
+          measured_delta_pct: v.measured_delta_pct != null ? v.measured_delta_pct : null,
+          outcome: String(v.outcome || ''), why: String(v.why || '').slice(0, 300),
+        }));
+      }
       if (allVerdicts.length) {
         const adoptedCfg = verdicts.filter(v => v.outcome === 'adopted');
         const adoptedKer = kernelVerdicts.filter(v => v.outcome === 'adopted');
@@ -2210,7 +2725,8 @@ if (want('setup')) {
         // Split out of `rejected` for the reference section below, but deliberately still counted
         // inside it: for the roles that come next, "lost the A/B" and "never ran" are both "do not
         // re-propose this verbatim". The distinction matters to the STORE, not to the Architect.
-        const notReproduced = verdicts.filter(v => v.outcome === 'not_reproduced');
+        const notReproduced = verdicts.filter(
+          v => v.outcome === 'not_reproduced' || v.outcome === 'inapplicable');
         const md = [
           '# Warm start — MEASURED ON THIS BOX',
           '',
@@ -2252,9 +2768,12 @@ if (want('setup')) {
             '## REFERENCE ONLY — recalled but NOT reproduced here',
             '',
             'These were offered by the store and benched on this box, and either produced no number',
-            'at all or never took effect (a flag renamed upstream is accepted silently and then',
-            'ignored). They are NOT results. They are the closest thing this deployment has to a',
-            'record of what someone else got working, and their material is below so you can read',
+            'at all, never took effect (a flag renamed upstream is accepted silently and then',
+            "ignored), or collided with a knob this run's baseline already pins and could not be",
+            'applied here at all. They are NOT results — and the last of those is not evidence',
+            'against the record either, only against the pairing. They are the closest thing this',
+            'deployment has to a record of what someone else got working, and their material is',
+            'below so you can read',
             'what they actually did rather than guess from a direction label.',
             '',
             ...notReproduced.flatMap(v => {
@@ -2264,7 +2783,16 @@ if (want('setup')) {
                 .filter(k => k && k.patch).map(k => root ? `${root}/${k.patch}` : k.patch);
               return [
                 `### ${v.direction || 'unlabeled'} (session \`${v.session_id || '?'}\`)`,
-                `- why it did not reproduce: ${String(v.why || 'no measurement came back').slice(0, 300)}`,
+                `- why it did not reproduce: ${v.outcome === 'inapplicable'
+                  ? "it could not be applied to this run's baseline at all — " : ''}` +
+                  `${String(v.why || 'no measurement came back').slice(0, 300)}`,
+                ...((v.overrides || []).length
+                  ? [`- knobs where it disagreed with this run's baseline (recorded value was ` +
+                     `taken): ${describeOverrides(v.overrides)}`] : []),
+                ...((v.dropped_flags || []).length
+                  ? [`- dropped to get it running here: ${v.dropped_flags.join(' ')}` +
+                     `${v.repair_classification ? ` (${v.repair_classification})` : ''} — so the ` +
+                     'number above, if any, is for LESS than the record asked for'] : []),
                 `- stored claim: ${v.throughput_tok_s != null ? v.throughput_tok_s + ' tok/s' : '?'}` +
                   `${v.speedup != null ? ` (${v.speedup}x)` : ''}, recorded elsewhere`,
                 `- launch script: ${repro.launch
@@ -2502,6 +3030,37 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       PROFILE_TOPN: profile ? profile.profile_topN_json : '',
       TUNING_TARGETS: (strategy && strategy.head_candidates) || headQueue || [],
       TUNING_SKILLSET_DIR, TUNING_KB_ENABLED, SKILL_DIR: WORKFLOW_DIR,
+      // The always-fires channel, same as the Architect's and the config_tuner's. The prompt BLOCK
+      // above can be empty (no candidates, or the read never ran); these Inputs entries are how the
+      // role learns the store exists at all. Gated by TUNING_KB_ENABLED for the same reason
+      // warmStartBlock() is: blind eval has to stay blind through BOTH channels or through neither.
+      ...(TUNING_KB_ENABLED ? KB_REF_INPUTS : {}),
+      ...(TUNING_KB_ENABLED && KB_CACHE_DIR ? { KB_CACHE_DIR } : {}),
+      // The other half of the write below: the kernel store is where THIS phase files its tuned
+      // tables, keyed per (op, backend, gfx), so it is also where a later run finds them — even when
+      // the run that produced them ended below its own e2e baseline and wrote no deployment record
+      // at all. Handing over the root and the arch rather than a candidate list is deliberate: the
+      // role knows which ops it is about to work on and can ask per op, which no read done up here
+      // before the profile could do. Same TUNING_KB_ENABLED switch as everything else.
+      //
+      // PLANE, not root. The write below is `write-remote --plane both` whenever a service is
+      // configured, so the record lands behind a key on the shared store; a directory read against
+      // KB_ARTIFACTS_DIR would look at this run's own checkout, which HL creates empty per run, and
+      // would report `kernel_page_not_found` — indistinguishable from a page that has nothing. Read
+      // and write must name the same plane. A read takes exactly ONE (see kbResolveScript), so
+      // `both` resolves to `remote` and the local mirror is the named fallback.
+      ...(TUNING_KB_ENABLED && KB_DIMS && KB_DIMS.gfx ? {
+        TUNED_KB_PLANE: E2E_KB_PLANE === 'both' ? 'remote' : E2E_KB_PLANE,
+        TUNED_KB_STORE: E2E_KB_STORE_DIR,
+        TUNED_KB_GFX: KB_DIMS.gfx,
+        // The page is keyed on arch and op, NOT on dtype — one `fused_moe` page holds the bf16 and
+        // the fp8_w8a8 tables side by side, ranked against each other on speedup. Passing this makes
+        // the read drop the other dtype's rows instead of ranking them; leaving it empty is the old
+        // behaviour (everything offered), which is why an unstated precision is never an error.
+        TUNED_KB_PRECISION: KB_DIMS.precision || '',
+        TUNED_KB_SCRIPT: KERNEL_WF_DIR + '/scripts/experience_store.py',
+        TUNED_KB_ENV_PRELUDE: KB_ENV_PRELUDE,
+      } : {}),
     }),
     { phase: 'TuningSkillset', label: 'tuning_specialist:tune', schema: TUNING_SCHEMA });
 
@@ -2569,11 +3128,101 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
         engaged: o.engaged === true,
         from_tuning_skillset: true,
         tuning_artifact: o.artifact || '',
+        // Whether this op was SEARCHED here or RECALLED from a prior record. Now that the tuning
+        // track reads the store it also writes, the two are indistinguishable downstream without
+        // this field — and a recall re-banked as a discovery would make one original search look
+        // like N independent confirmations to anyone counting records.
+        tuning_source: String(o.source || o.origin || '').trim() || 'search',
       }, {});
     }
     if (tunedOps.length) {
+      const recalled = tunedOps.filter((o) => /recall|kb|knowledge/i.test(String(o.source || o.origin || ''))).length;
       log(`Banked ${tunedOps.length} tuned op(s) as accepted kernels (kind=env) so the KB record ` +
-        `carries the lever: ${tunedOps.map((o) => o.op || o.short_name).join(', ')}.`);
+        `carries the lever: ${tunedOps.map((o) => o.op || o.short_name).join(', ')}` +
+        `${recalled ? ` (${recalled} recalled from the KB rather than searched)` : ''}.`);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Write each tuned op into the KERNEL lane's experience store, one entry per op.
+    //
+    // Not a duplicate of the e2e KB write at the end of the run: that record is keyed on the whole
+    // deployment and gated on the run's FINAL throughput_speedup, so a tuning win a later phase
+    // erases — or a run that ends below its own baseline for unrelated reasons — takes the tuned
+    // table down with it, and the next run at the same identity searches it again from scratch. The
+    // kernel store has no such coupling: it ranks on ISOLATED per-op speedup and is addressed per
+    // (kernel, language, gfx), which is the granularity at which a tuned table is reusable.
+    //
+    // Gated on tuneOk, so nothing unproven is filed. Per-op: `isolated_speedup > 1.0` and `engaged`,
+    // because an op the phase could not prove live is not knowledge about that op whatever the
+    // phase-level A/B measured. Best-effort — a failure here loses a record, never a measurement.
+    const kernelKbOps = KB_DIMS && KB_DIMS.gfx ? tunedOps.filter((o) =>
+      Number(o.isolated_speedup) > 1.0 && o.engaged === true && String(o.artifact || '').trim()) : [];
+    if (kernelKbOps.length) {
+      const storeScript = KERNEL_WF_DIR + '/scripts/experience_store.py';
+      // `both` mirrors to the shared service; without a store dir there is nothing to mirror INTO,
+      // so it degrades to the plain directory write rather than erroring. Same selection the kernel
+      // lane makes at its own write site.
+      const remoteOn = E2E_KB_PLANE !== 'local' && !!E2E_KB_STORE_DIR;
+      // `--precision` and the two `--serving-*` flags are RECORDED, not keyed — they land in
+      // `value.upstream` and never move the entry's address. A tuned table's destination filename
+      // encodes its dtype (`...dtype=fp8_w8a8.json`), so a table measured under one precision offered
+      // to a run on another installs under a name that runtime never looks up: wasted, not wrong. What
+      // it does corrupt is RANKING, by putting an unusable table above a usable one on the same page.
+      // Stating precision here is what lets the reader's `--precision` filter drop it first.
+      const cmds = kernelKbOps.map((o) => {
+        const op = String(o.op || o.short_name).trim();
+        return `python3 ${shq(storeScript)} ${remoteOn
+            ? `write-remote --plane both --store ${shq(E2E_KB_STORE_DIR)}`
+            : 'write'} \\
+  --root ${shq(KB_ARTIFACTS_DIR)} --kernel-name ${shq(op)} \\
+  --language ${shq(String(o.backend || 'tuned').trim())} --gfx ${shq(KB_DIMS.gfx)} \\
+  --kernel-class tuning --speedup ${Number(o.isolated_speedup)} \\
+  --carrier tuned_artifact --artifact ${shq(String(o.artifact).trim())} \\
+  --tuner ${shq(String(o.tuner || '').trim())} --apply-env ${shq(tuning.apply_env || '')} \\
+  --cache-invalidation ${shq((tuning.cache_invalidation || []).join(' && '))} \\
+  --metric-kind tuning_isolated --case-names ${shq(String(o.shapes || '').replace(/,/g, ';'))} \\
+  --precision ${shq(KB_DIMS.precision || '')} --serving-framework ${shq(BACKEND)} \\
+  --serving-framework-version ${shq(KB_DIMS.framework_version || '')} \\
+  --direction ${shq('tuning-' + (String(o.backend || 'op').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-')))} \\
+  --eval-dir ${shq(EVAL_DIR)}${tuning.report_path ? ` --report ${shq(tuning.report_path)}` : ''}`;
+      });
+      try {
+        const kw = await safeAgent(
+          `You are the tuning experience writer. Run EACH of the commands below EXACTLY as written, ` +
+          `in order. Each applies its own gates and prints one line of JSON; collect those lines in ` +
+          `order into \`results\`. Do NOT edit a command, do NOT add or drop flags, and do NOT retry ` +
+          `one that fails` + (remoteOn
+            ? ` — these may reach the shared KB Store service, and every write it accepts is ` +
+              `PERMANENT (it exposes no delete), so a retry creates a second permanent record ` +
+              `instead of fixing the first`
+            : '') + `. For a command that errors, put ` +
+          `{"written": false, "reason": "io_error"} in its place so the list stays aligned with the ` +
+          `command order.\n\n` +
+          `THEN, last, write \`{"results": [...]}\` — the same list — to ` +
+          `\`${EVAL_DIR}/tuning/kb_write_tuned.json\`. That file is the receipt saying this filing ` +
+          `already happened: run_e2e.py refiles these ops from disk when the workflow is killed ` +
+          `before reaching this step, and it skips when the receipt is present. Without it, a run ` +
+          `that dies AFTER this step gets every op written a second time, and the store counts the ` +
+          `copy as an independent reproduction — which can promote a candidate on one measurement ` +
+          `seen twice. Write the receipt even if every command failed.\n` +
+          '```bash\n' + (remoteOn ? KB_ENV_PRELUDE + '\n' : '') + cmds.join('\n\n') + '\n```',
+          { phase: 'TuningSkillset', label: 'kernel-kb:write-tuned',
+            schema: obj({ results: arrObj }, ['results']) },
+          1);
+        const rows = (kw && kw.results) || [];
+        const wrote = rows.filter((r) => r && r.written).length;
+        const dup = rows.filter((r) => r && !r.written && /duplicate/.test(String(r.reason || ''))).length;
+        log(`[kernel-kb] tuned ops filed as isolated wins: ${wrote}/${kernelKbOps.length} written` +
+          `${dup ? `, ${dup} already known (counted as reproductions)` : ''}` +
+          `${rows.filter((r) => r && !r.written && !/duplicate/.test(String(r.reason || '')))
+            .map((r) => ` [${r.reason}]`).join('')}. These survive the run's own e2e verdict.`);
+      } catch (e) {
+        log(`[kernel-kb] tuned-op write failed (NON-FATAL — the tuning result itself is unaffected): ` +
+          `${String(e).slice(0, 200)}`);
+      }
+    } else if (tunedOps.length && (!KB_DIMS || !KB_DIMS.gfx)) {
+      log(`[kernel-kb] tuned ops NOT filed: no gfx established, and an arch-less entry is ` +
+        `unattributable (a tuned table is valid for exactly one arch).`);
     }
 
     // Tuning changed which kernels dominate — re-profile + re-strategize so the head track works the
@@ -3616,6 +4265,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
       }));
+      noteKernelKB(r, String(c.short_name || ext.op_kind || 'milestone'));
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
         final_geomean: r.final_geomean, validation_status: r.validation_status,
         note: (r.winner && r.winner.source) || '' };
@@ -3899,8 +4549,15 @@ if (want('final')) {
 
   phase('Report');
   report = await safeAgent(
-    roleAgent('system_architect', 'report', 'Write architect_report.md AND the full final_report.md in English (with the Phases tree + artifacts tree modules).', {
+    roleAgent('system_architect', 'report',
+      'Write architect_report.md AND the full final_report.md in English (with the Phases tree + ' +
+      'artifacts tree modules). final_report.md MUST contain a "## Knowledge-base recall" section ' +
+      'built from KB_RECALL — see your role file. Write it even when nothing was recalled: report ' +
+      'the exact canonical ids that were tried and the read_reason. On an exact-lookup store a miss ' +
+      'and a never-recorded page are the same 404, so the address asked is the finding, and a reader ' +
+      'who cannot see it cannot tell "no prior art" from "prior art one segment away".', {
       EVAL_DIR, HISTORY: history, BASELINE_THROUGHPUT: BASELINE_TPUT, FINAL_THROUGHPUT: finalTput,
+      KB_RECALL,
       ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
@@ -4008,6 +4665,10 @@ const kbWarmStart = (E2E_WARM_START_ON && KB_DIMS) ? {
   // The gain that is genuinely THIS run's: everything after the warm start's own contribution. Null
   // when nothing was adopted, because then the ordinary speedup already answers the question.
   incremental_speedup: kbSeedTput ? Number((finalTput / kbSeedTput).toFixed(6)) : null,
+  // The full recall ledger, both planes. Same object the Report role was handed, so the prose in
+  // final_report.md and whatever a downstream consumer reads cannot disagree about what was
+  // recalled or how it fared.
+  recall: KB_RECALL,
 } : null;
 // Attribution block for the standalone tuning phase. Because the phase measured its OWN interleaved
 // pre/post legs, its contribution can be expressed both absolutely (delta%) and as a SHARE of the run's
@@ -4117,6 +4778,11 @@ const wfReturn = {
   // Conditional spread, never an unconditional key: with the feature off this contributes no own
   // property and both the returned object and the persisted file are byte-identical to before.
   ...(kbWarmStart ? { kb_warm_start: kbWarmStart } : {}),
+  // Emitted independently of kb_warm_start. kbWarmStart is null whenever KB_DIMS was never
+  // established (a preflight that produced no gfx), but the KERNEL lanes can still have recalled by
+  // then — folding recall only into kbWarmStart would drop exactly the runs where knowing what was
+  // recalled matters most. Absent entirely when nothing was recalled on either plane.
+  ...((KB_RECALL.e2e || KB_RECALL.kernel.length) ? { kb_recall: KB_RECALL } : {}),
   state: carryState,
 };
 

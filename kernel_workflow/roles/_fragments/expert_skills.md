@@ -17,6 +17,9 @@ faster but can never reduce a result below your measured baseline.
 
 1. Read `EXPERT_SKILLS_DIR/index.yaml`.
 2. A skill matches the current op when ALL hold:
+   - `scope: kernel`. The index also carries `scope: tuning` entries — the vendored tuning skillset,
+     owned by the e2e tuning phase. Those match on `operator: '*'`, so they would otherwise match
+     everything here; they are about tuning an op the stack already dispatches, not authoring one.
    - `match.operator` is either a scalar equal to this op's operator
      (`KK_OPERATOR` / `op_spec.op_kind`) or a list containing that operator
    - box `gen` ∈ `match.gens`; `op_spec.dtype` ∈ `match.dtypes`; `op_spec.regime` ∈ `match.regimes`
