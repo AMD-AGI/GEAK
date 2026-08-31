@@ -48,13 +48,24 @@ ok(/A\.drop_gate != null \? A\.drop_gate : 'on'/.test(src), "drop_gate defaults 
 ok(!/dryrun/i.test(src), "'dryrun' is gone — the only two settings are 'on' and 'off'");
 ok(/const DROP_MAX_FRACTION = 0\.5;/.test(src), 'the bulk-drop circuit breaker exists and is 50%');
 
-if (m) {
+// normalizeQueues delegates its op-identity step to applyOpIdentityGuard, which lives at module scope
+// and is main's, not ours. Extract that block too rather than re-implementing the fused rule here: a
+// hand-written double would be free to drift from the rule the orchestrator actually applies, which is
+// exactly what invariant (g) is supposed to catch.
+const g = src.match(/const _isFusedOp = [\s\S]*?\nfunction applyOpIdentityGuard\(queue, stage\) \{[\s\S]*?\n\}\n/);
+ok(!!g, 'applyOpIdentityGuard block found (normalizeQueues delegates the fused rule to it)');
+
+if (m && g) {
   const make = (dropGate, protectPct, st, maxFraction) => {
     const lines = [];
-    const fn = new Function('ST', 'DROP_GATE', 'HEAD_PROTECT_PCT', 'DROP_MAX_FRACTION', 'log',
-      m[0] + '\nreturn { normalizeQueues, dropDecisions };');
+    // admitHeads is injected as identity on purpose. It is main's SEPARATE gate — it requires
+    // entity_kind='gpu_kernel' plus a device-kernel identity, neither of which these Architect-shaped
+    // fixtures carry, so the real one would reject all four heads and leave nothing for the drop
+    // filter to act on. Admission is out of scope here; the drop gate is what is under test.
+    const fn = new Function('ST', 'DROP_GATE', 'HEAD_PROTECT_PCT', 'DROP_MAX_FRACTION', 'log', 'admitHeads',
+      g[0] + m[0] + '\nreturn { normalizeQueues, dropDecisions };');
     const api = fn(st || {}, dropGate, protectPct,
-      maxFraction == null ? 0.5 : maxFraction, (s) => lines.push(String(s)));
+      maxFraction == null ? 0.5 : maxFraction, (s) => lines.push(String(s)), (q) => q);
     return { ...api, lines };
   };
 
@@ -252,12 +263,17 @@ if (m) {
 // ---- (i) every queue-assignment site routes through normalizeQueues -------------------------------
 // `= normalizeQueues({`, so the function's own declaration is not counted as a call.
 const callSites = (src.match(/= normalizeQueues\(\{/g) || []).length;
-ok(callSites === 3, `all three queue-assignment sites call normalizeQueues (found ${callSites})`);
-for (const origin of ['strategize', 'carried-state', 're-strategize']) {
+ok(callSites === 4, `all four queue-assignment sites call normalizeQueues (found ${callSites})`);
+for (const origin of ['strategize', 'carried-state', 're-strategize', 'post-tuning re-strategize']) {
   ok(src.includes(`origin: '${origin}'`), `call site tagged origin='${origin}'`);
 }
-ok(!/(kernelQueue|headQueue) = \(?(strategy|restrat|ST)\b/.test(src),
+ok(!/(kernelQueue|headQueue) = \(?(strategy|restrat|retune|ST)\b/.test(src),
   'no queue-assignment site bypasses normalizeQueues');
+// The post-tuning site used to assign the queues separately — the guard on the heads, a bare .slice()
+// on the kernels. Pin that it cannot come back: a .slice() there is both a bypassed drop gate and the
+// shallow copy of bug 6.
+ok(!/(headQueue|kernelQueue) = .*\.slice\(\)/.test(src),
+  'no queue is assigned from a shallow .slice() of an Architect response');
 
 // ---- (j) no schema gained a `required` entry ------------------------------------------------------
 // obj() emits additionalProperties:true and nothing validates locally, so `required` only shapes LLM

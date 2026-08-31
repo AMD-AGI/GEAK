@@ -3433,9 +3433,22 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
         ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Strategize', label: 'architect:post-tuning-strategize', schema: STRATEGY_SCHEMA });
-    if (retune && retune.kernel_candidates) kernelQueue = retune.kernel_candidates.slice();
-    if (retune && retune.head_candidates)
-      headQueue = applyOpIdentityGuard(retune.head_candidates.slice(), 'post-tuning re-strategize');
+    // Identity -> op-identity guard (+ admission) -> relevance drop. See normalizeQueues.
+    // This is the FOURTH queue-assignment site and the last one to route through the shared function.
+    // It used to assign the two queues separately: applyOpIdentityGuard on the heads, a bare .slice()
+    // on the kernels. That left this site as the one place a drop_list was still ignored, so an
+    // Architect that re-ranked after tuning could hand back a list of kernels not worth the remaining
+    // budget and be overruled by the site alone. The .slice() was also a shallow copy — it duplicated
+    // the array but not the objects, so downstream mutations wrote through into the Architect's own
+    // candidates and then into carried state. normalizeQueues deep-copies, which closes both.
+    if (retune && (retune.head_candidates || retune.kernel_candidates)) {
+      ({ head: headQueue, kernel: kernelQueue } = normalizeQueues({
+        head: retune.head_candidates || headQueue,
+        kernel: retune.kernel_candidates || kernelQueue,
+        dropList: retune.drop_list || [],
+        origin: 'post-tuning re-strategize',
+      }));
+    }
     if (retune) await ensureFlydslGate();
   } else if (tuned) {
     // Claimed accepted but failed a hard bar. Do NOT bank it — an unproven artifact silently poisons
