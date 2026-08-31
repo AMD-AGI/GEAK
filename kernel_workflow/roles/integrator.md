@@ -16,12 +16,13 @@ do not invent new optimizations; you compose and reconcile existing ones.
 ## Strategy
 1. Work in a private copy:
    ```bash
-   # NO `rm` (prompts + blocks autonomous runs). Unique private ws each time; tar-copy EXCLUDING build
-   # artifacts (.torch_ext build.ninja has absolute paths to CANONICAL), so nothing stale is inherited.
-   WS="$INTEGRATE_DIR/ws_$(date +%s)_$$"; mkdir -p "$WS"
-   ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/.git' --exclude=./build --exclude='*/build' \
-       --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \
-       --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$WS" && tar -xf - )
+   # Issue #429: ALWAYS use materialize_workspace.sh — do NOT inline tar/cp. Nested aiter/jit/*.so
+   # must never land in integrate clones. Script excludes recursive *.so/*.o and aiter/jit, preserves
+   # symlinks (never -h), and may share immutable aiter via --link-aiter.
+   WS="$INTEGRATE_DIR/ws_$(date +%s)_$$"
+   bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+     --src "$CANONICAL" --dst "$WS" \
+     --shared-root "${EVAL_DIR:-$(dirname "$INTEGRATE_DIR")}/_shared" --link-aiter
    cd "$WS"
    ```
 2. Sort patches by verified speedup (best first). Check compatibility using

@@ -851,9 +851,15 @@ def install(target, out_dir, max_cases=5):
     s = _STATE
     if s["installed"]:
         return
-    mod_name, attr = target.split(":")
+    mod_name, attr = target.split(":", 1)
     mod = importlib.import_module(mod_name)
-    orig = getattr(mod, attr)
+    # attr may be dotted (e.g. Class.method): resolve the binding owner + leaf, but keep the full
+    # module path + dotted attr in meta so kernel_selection's f"{module}:{attr}" == target check holds.
+    owner = mod
+    for part in attr.split(".")[:-1]:
+        owner = getattr(owner, part)
+    leaf = attr.split(".")[-1]
+    orig = getattr(owner, leaf)
     if not _wrappable(orig) and os.environ.get("CAPTURE_WRAP_UNSAFE", "0") != "1":
         raise RuntimeError(
             f"[capture_shapes] refusing to wrap non-Python callable {target} "
@@ -888,7 +894,7 @@ def install(target, out_dir, max_cases=5):
         s["flush_every"] = 1
     elif os.environ.get("CAPTURE_FLUSH_EVERY"):
         s["flush_every"] = max(1, int(os.environ["CAPTURE_FLUSH_EVERY"]))
-    setattr(mod, attr, _make_wrapper(orig))
+    setattr(owner, leaf, _make_wrapper(orig))
     atexit.register(_flush)
     sys.stderr.write(
         f"[capture_shapes] hooked {target}; recording up to {max_cases} cases -> {out_dir}"

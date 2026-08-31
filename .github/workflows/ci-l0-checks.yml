@@ -114,6 +114,7 @@ jobs:
             e2e_workflow/scripts/tests/test_e2e_store.py \
             e2e_workflow/scripts/tests/test_kb_retract.py \
             kernel_workflow/scripts/tests/test_experience_store.py \
+            kernel_workflow/scripts/tests/test_eval_storage_reclaim.py \
             kb/tests/test_store_local.py \
             kb/tests/test_attest.py \
             kernel_workflow/scripts/tests/test_kb_loop_offline.py \
