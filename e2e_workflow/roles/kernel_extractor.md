@@ -677,6 +677,22 @@ needs an op task dir the **Op Benchmarker** can bake-off across backends. `edit=
 >   reduce, one dispatcher call), NOT per-GEMM stages timed in isolation — the fusion boundary, the
 >   intermediate-activation residency, and the reduce are part of the op being optimized/measured.
 
+> **`op_kind=attn` with an INDEXER (DSA / sparse MLA / top-k KV) — the same rule, on the other family.**
+> The selected KV rows are the performance signal: a real indexer picks rows that are DISTINCT within a
+> query and CLUSTERED near the recent window, while `torch.randint(0, n_kv_rows, (q, k))` repeats rows and
+> scatters every gather across the whole cache — both legs then pay a uniformly cold gather and the
+> locality a candidate would exploit is gone. Use the SHARED prior:
+> ```python
+> indices = h.local_topk_indices(num_queries, top_k, n_kv_rows,
+>                                locality=0.5, causal=True, seed=seed, device=dev)  # int32 [q, top_k]
+> ```
+> `locality` = the fraction of picks drawn from the recent window; 0.5 is an unvalidated default — override
+> it if the indexer's config says otherwise, and say which you used in `notes`. Carry the gather footprint
+> alongside M (`h.sparse_effective_blocks(...)`, p95 of distinct KV blocks per query, and
+> `h.sparse_gather_footprint(plan)` for `distinct_blocks`/`block_reuse`): top_k is fixed by config, so
+> M alone puts a cache-resident gather and a thrashing one in the same bucket. Dense (non-indexed)
+> attention is unaffected — it reads the whole prefix regardless.
+
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (Architect head candidate: short_name,
 op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for attn, and OPTIONAL
 TraceLens `source_hint`/`launcher_hint`/`bound_type`), `GEMM_SYNTH` (bool, default true),

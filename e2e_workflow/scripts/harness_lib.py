@@ -491,7 +491,7 @@ def to_device_like(ref, dev):
 
 
 def live_oracle_cases(random_shapes, baseline_outputs=None, baseline_call=None, *,
-                      seed=0, draw=0, device=None, limit=0):
+                      seed=0, draw=0, device=None, limit=0, skipped_out=None):
     """Build ``[{sig, args, ref}]`` WITHOUT any stored golden — the ref comes from the LIVE baseline,
     which must exist anyway as the timing denominator (this replaces the retired ``reference_io.pt``).
 
@@ -499,8 +499,10 @@ def live_oracle_cases(random_shapes, baseline_outputs=None, baseline_call=None, 
     (``manual_seed(seed + draw)``), so the baseline leg's outputs — keyed ``"<sig>|<draw>"`` by
     ``baseline_random_outputs`` — line up even though the two legs ran in different processes.
     ``baseline_call`` is the legacy in-process form (op_bench / single-process tasks). A shape whose
-    baseline output is missing is SKIPPED, not silently compared against nothing; ``limit`` caps the
-    case count."""
+    baseline output is missing is SKIPPED, not silently compared against nothing; pass a list as
+    ``skipped_out`` to collect those sigs — a PARTIAL skip otherwise looks exactly like a clean pass
+    on a smaller case set (the all-empty case is caught by `run_correctness`, a partial one was not).
+    ``limit`` caps the case count."""
     torch = _torch()
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     cases = []
@@ -516,6 +518,8 @@ def live_oracle_cases(random_shapes, baseline_outputs=None, baseline_call=None, 
         if baseline_outputs is not None:
             ref = baseline_outputs.get(f"{sig}|{int(draw)}")
             if ref is None:
+                if skipped_out is not None:
+                    skipped_out.append(sig)
                 continue
             ref = to_device_like(ref, device)
         elif callable(baseline_call):
@@ -1087,15 +1091,22 @@ def run_correctness(regime, *, current_call, random_shapes, tol, eager_cases=Non
         raise ValueError("run_correctness needs baseline_outputs (preferred: recorded by the baseline "
                          "leg via baseline_random_outputs) or a legacy in-process baseline_call")
 
+    skipped = []
     if eager_cases is None:
         eager_cases = live_oracle_cases(random_shapes, baseline_outputs=baseline_outputs,
-                                        baseline_call=baseline_call, seed=seed, draw=0)
+                                        baseline_call=baseline_call, seed=seed, draw=0,
+                                        skipped_out=skipped)
     if eager_cases:
         c_ok, per = check_correct_multi(current_call, eager_cases, tol)
     else:
         # No shape produced a live baseline ref -> the eager leg has nothing to compare. Do NOT pass
         # silently: the independence check still runs off the raw shapes, and the gap is reported.
         c_ok, per = _independence_only(current_call, random_shapes, seed=seed)
+    if skipped:
+        # Not a FAIL (the surviving cases were really compared), but coverage shrank silently.
+        per = list(per) + [{"case": "skipped_no_ref", "correct": None, "max_rel_err": None,
+                            "note": f"{len(skipped)} shape(s) had no live baseline ref and were "
+                                    f"NOT compared: {sorted(set(skipped))}"}]
     report["eager"] = per
     ok = ok and c_ok
     r_ok, perr = check_random_vs_baseline(baseline_call, current_call, random_shapes, tol,
@@ -1279,6 +1290,84 @@ def skewed_topk_ids(num_tokens, top_k, num_experts, *, skew=1.0, shared_experts=
     flat = [e for row in plan for e in row]
     t = torch.tensor(flat, dtype=dtype or torch.int32)
     return t.reshape(len(plan), len(plan[0]) if plan else 0).to(device)
+
+
+# --------------------------------------------------------------------------- sparse-attention index synthesis
+# The MoE argument again, on the other op family that reads a synthesized routing decision. A real
+# indexer (DSA / sparse MLA) picks top-k KV rows that are DISTINCT within a query and heavily CLUSTERED
+# (recent tokens dominate); `torch.randint(0, n_kv, (q, k))` gives neither — it repeats rows within one
+# query and scatters every gather across the whole cache, so both legs pay a worst-case, uniformly cold
+# gather. That is not conservative: it flattens exactly the locality a candidate would be optimizing.
+# `locality` (fraction of picks from the recent window) is a PRIOR, not a measurement — the real
+# distribution is model- and prompt-dependent and capture keeps no tensors. 0.5 is a placeholder chosen
+# for having a hot tail at all, NOT a validated figure; a task that knows its indexer should override it.
+def sparse_index_plan(num_queries, top_k, n_kv_rows, *, locality=0.5, window=0, causal=True, seed=0):
+    """Per-query KV row ids `[[i0, i1, ...], ...]`, DISTINCT within a query, drawn as a mixture: a
+    `locality` share from the last `window` rows of that query's horizon, the rest uniform over it.
+    Under `causal` the horizon is the chunked-prefill/decode one (query q sees the first
+    `n_kv_rows - num_queries + q + 1` rows); `window` defaults to an eighth of the horizon.
+
+    Rows are NOT sorted — a candidate must not win by assuming monotone index lists. Pure Python and
+    seeded, like `moe_routing_plan`, so both legs and every box get the same plan."""
+    N, Q, K = int(n_kv_rows), max(0, int(num_queries)), int(top_k)
+    rnd, plan = random.Random(int(seed) ^ 0x5A9E), []
+    for q in range(Q):
+        horizon = max(1, min(N, N - Q + q + 1) if causal else N)
+        k = min(K, horizon)
+        w = max(1, min(int(window) or max(k, horizon // 8), horizon))
+        row, seen = [], set()
+        for _ in range(k * 24):                       # rejection, as in moe_routing_plan
+            if len(row) >= k:
+                break
+            i = (horizon - 1 - rnd.randrange(w)) if rnd.random() < float(locality) else rnd.randrange(horizon)
+            if i not in seen:
+                seen.add(i)
+                row.append(i)
+        for i in range(horizon - 1, -1, -1):          # deterministic top-up
+            if len(row) >= k:
+                break
+            if i not in seen:
+                seen.add(i)
+                row.append(i)
+        plan.append(row)
+    return plan
+
+
+def sparse_gather_footprint(plan, *, block=64):
+    """Distinct KV BLOCKS touched, per query and in total. This — not M — is what a gather-bound sparse
+    kernel pays: top_k is fixed by config, so bucketing on M alone puts a tight, cache-resident gather
+    and a cache-thrashing one in the same bucket. `block_reuse` is picks-per-distinct-block across all
+    queries, i.e. how much of the gather the L2 can serve."""
+    B = max(1, int(block))
+    per = sorted(len({i // B for i in row}) for row in plan) or [0]
+    picks = sum(len(row) for row in plan)
+    touched = len({i // B for row in plan for i in row}) or 1
+    return {"blocks_mean": sum(per) / float(len(per)), "blocks_p50": per[(len(per) - 1) // 2],
+            "blocks_p95": per[int(0.95 * (len(per) - 1))], "blocks_max": per[-1],
+            "distinct_blocks": touched, "block_reuse": picks / float(touched)}
+
+
+def sparse_effective_blocks(num_queries, top_k, n_kv_rows, *, locality=0.5, window=0, causal=True,
+                            seed=0, block=64, stat="blocks_p95"):
+    """The gather-footprint figure to carry alongside M in a sparse-attention task's buckets — p95 for
+    the same reason `moe_effective_m` uses it: the wave finishes with its heaviest query, not its mean."""
+    plan = sparse_index_plan(num_queries, top_k, n_kv_rows, locality=locality, window=window,
+                             causal=causal, seed=seed)
+    return int(math.ceil(float(sparse_gather_footprint(plan, block=block).get(stat) or 0)))
+
+
+def local_topk_indices(num_queries, top_k, n_kv_rows, *, locality=0.5, window=0, causal=True, seed=0,
+                       torch=None, device="cuda", dtype=None):
+    """`indices` [num_queries, top_k] int32 from `sparse_index_plan` — use this in a sparse-attention
+    task's `make_inputs` instead of `torch.randint(0, n_kv_rows, ...)`. Short rows (early queries under
+    a causal horizon) are padded by repeating a valid id, never -1, so the gather stays in bounds."""
+    torch = torch or _torch()
+    plan = sparse_index_plan(num_queries, top_k, n_kv_rows, locality=locality, window=window,
+                             causal=causal, seed=seed)
+    K = int(top_k)
+    flat = [row + [row[-1] if row else 0] * (K - len(row)) for row in plan]
+    t = torch.tensor([i for row in flat for i in row], dtype=dtype or torch.int32)
+    return t.reshape(len(flat), K).to(device)
 
 
 # --------------------------------------------------------------------------- (d) two-leg measurement

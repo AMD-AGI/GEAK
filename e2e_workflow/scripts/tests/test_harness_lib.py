@@ -1817,6 +1817,24 @@ class TestRunCorrectness(_HarnessTestCase):
                          ["m1", "m256", "output_independence"])
         self.assertEqual(report["random"], [])
 
+    def test_a_partial_eager_skip_is_reported_not_swallowed(self):
+        # all-empty already falls to _independence_only; a PARTIAL skip used to look like a clean
+        # pass on a smaller case set.
+        shapes = [{"sig": "a", "make_inputs": lambda rng: (1.0, 2.0)},
+                  {"sig": "b", "make_inputs": lambda rng: (3.0, 4.0)}]
+        _ok, report = self._run(self.EAGER, eager_cases=None, random_shapes=shapes, draws=1,
+                                baseline_call=None,
+                                baseline_outputs={"a|0": _T((2,), [1.0, 2.0])})
+        skipped = [e for e in report["eager"] if e["case"] == "skipped_no_ref"]
+        self.assertEqual(len(skipped), 1)
+        self.assertIsNone(skipped[0]["correct"])
+        self.assertIn("'b'", skipped[0]["note"])
+
+    def test_no_skip_adds_no_row(self):
+        ok, report = self._run(self.EAGER)
+        self.assertTrue(ok)
+        self.assertNotIn("skipped_no_ref", [e["case"] for e in report["eager"]])
+
     def test_an_eager_correctness_failure_fails_the_whole_suite(self):
         def wrong(args):
             return _T((len(args),), [v + 10.0 for v in args])
@@ -2818,6 +2836,75 @@ class TestSkewedTopkIds(_HarnessTestCase):
                                 for e in row])
 
 
+class TestLocalTopkIndices(_HarnessTestCase):
+    def test_indices_are_materialized_as_an_int32_queries_by_topk_tensor(self):
+        got = hl.local_topk_indices(4, 3, 64, seed=0, torch=self.torch, device="cpu")
+        self.assertEqual(got.shape, (4, 3))
+        self.assertIs(got.dtype, INT32)
+        self.assertEqual([int(v) for v in got.tolist()],
+                         [i for row in hl.sparse_index_plan(4, 3, 64, seed=0) for i in row])
+
+    def test_short_causal_rows_are_padded_with_a_valid_id_never_minus_one(self):
+        got = hl.local_topk_indices(4, 8, 3, seed=2, torch=self.torch, device="cpu")
+        self.assertEqual(got.shape, (4, 8))
+        flat = [int(v) for v in got.tolist()]
+        self.assertEqual(len(flat), 32)
+        self.assertTrue(all(0 <= v < 3 for v in flat))     # in bounds: the gather still lands
+
+
+class TestSparseIndexSynthesis(unittest.TestCase):
+    """Shared sparse-attention index prior: pure Python, no torch, asserted on exact distributions."""
+
+    def test_indices_are_distinct_within_a_query_unlike_randint(self):
+        plan = hl.sparse_index_plan(64, 16, 4096, seed=0)
+        self.assertEqual(len(plan), 64)
+        for row in plan:
+            self.assertEqual(len(row), 16)
+            self.assertEqual(len(set(row)), 16)     # a real top-k never repeats a KV row
+
+    def test_plan_is_deterministic_for_a_seed_and_moves_with_it(self):
+        a = hl.sparse_index_plan(16, 8, 512, seed=3)
+        self.assertEqual(a, hl.sparse_index_plan(16, 8, 512, seed=3))
+        self.assertNotEqual(a, hl.sparse_index_plan(16, 8, 512, seed=4))
+
+    def test_the_causal_horizon_is_respected(self):
+        plan = hl.sparse_index_plan(8, 4, 64, seed=1)
+        for q, row in enumerate(plan):
+            self.assertLess(max(row), 64 - 8 + q + 1)
+        self.assertLessEqual(max(max(r) for r in hl.sparse_index_plan(8, 4, 64, causal=False,
+                                                                     seed=1)), 63)
+
+    def test_a_horizon_shorter_than_top_k_shrinks_the_row_instead_of_repeating(self):
+        plan = hl.sparse_index_plan(4, 8, 3, seed=2)
+        self.assertEqual([sorted(r) for r in plan[:2]], [[0], [0]])
+        self.assertEqual(sorted(plan[-1]), [0, 1, 2])
+
+    def test_locality_concentrates_the_gather_that_uniform_scatters(self):
+        kw = dict(seed=0, causal=False)
+        hot = hl.sparse_gather_footprint(hl.sparse_index_plan(16, 32, 8192, locality=0.9, **kw))
+        flat = hl.sparse_gather_footprint(hl.sparse_index_plan(16, 32, 8192, locality=0.0, **kw))
+        self.assertLess(hot["blocks_p95"], flat["blocks_p95"])          # per query...
+        self.assertLess(hot["distinct_blocks"], flat["distinct_blocks"])  # ...and across the wave
+        self.assertGreater(hot["block_reuse"], flat["block_reuse"])
+
+    def test_footprint_stats_count_distinct_blocks_not_picks(self):
+        fp = hl.sparse_gather_footprint([[0, 1, 2, 3], [0, 64]], block=64)
+        self.assertEqual((fp["blocks_p50"], fp["blocks_max"], fp["distinct_blocks"]), (1, 2, 2))
+        self.assertAlmostEqual(fp["block_reuse"], 3.0)
+
+    def test_footprint_of_an_empty_plan_does_not_divide_by_zero(self):
+        self.assertEqual(hl.sparse_gather_footprint([])["blocks_max"], 0)
+
+    def test_effective_blocks_is_the_straggler_not_the_mean(self):
+        kw = dict(num_queries=128, top_k=32, n_kv_rows=8192, seed=0)
+        p95 = hl.sparse_effective_blocks(kw["num_queries"], kw["top_k"], kw["n_kv_rows"], seed=0)
+        mean = hl.sparse_effective_blocks(kw["num_queries"], kw["top_k"], kw["n_kv_rows"], seed=0,
+                                          stat="blocks_mean")
+        self.assertGreaterEqual(p95, mean)
+        self.assertGreaterEqual(
+            hl.sparse_effective_blocks(128, 32, 8192, seed=0, stat="blocks_max"), p95)
+
+
 class TestLiveOracleCases(_HarnessTestCase):
     """live_oracle_cases: the retired reference_io.pt golden is now derived from the baseline leg."""
 
@@ -2847,6 +2934,13 @@ class TestLiveOracleCases(_HarnessTestCase):
         cases = hl.live_oracle_cases(shapes, baseline_outputs={"b|0": _T((2,), [3.0, 4.0])},
                                      device="cpu")
         self.assertEqual([c["sig"] for c in cases], ["b"])
+
+    def test_skipped_shapes_are_collected_when_asked_for(self):
+        shapes, _ = self._shapes()
+        skipped = []
+        hl.live_oracle_cases(shapes, baseline_outputs={"b|0": _T((2,), [3.0, 4.0])},
+                             device="cpu", skipped_out=skipped)
+        self.assertEqual(skipped, ["a"])
 
     def test_legacy_in_process_baseline_call_is_still_accepted(self):
         shapes, _ = self._shapes()
