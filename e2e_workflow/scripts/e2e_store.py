@@ -70,7 +70,8 @@ from kb.curate import collapse_by_direction                                 # no
 from kb.ladder import publish                                               # noqa: E402
 from kb.plane import open_plane                                             # noqa: E402
 from kb.retract import is_retired, retract_session, retraction_ok           # noqa: E402
-from kb.store_local import KBStoreError, finite_speedup                     # noqa: E402
+from kb.store_local import (KBStoreError, SAFE_COMPONENT_CHARS,             # noqa: E402
+                            finite_speedup)
 
 SCHEMA = "geak.e2e.v1"
 THROUGHPUT_METRIC = "throughput_tok_s"      # ranks the exact-workload rung, and every read
@@ -114,6 +115,36 @@ def ladder_of(a):
     tiers = {3: ("exact", "workload_any", "tp_any"), 2: ("exact", "tp_any"), 1: ("exact",)}[len(cids)]
     return [(cid, tier) + rung_metric(i, len(cids))
             for i, (cid, tier) in enumerate(zip(cids, tiers))]
+
+
+_LEGACY_TIERS = {3: ("legacy_version", "legacy_version_workload_any", "legacy_version_tp_any"),
+                 2: ("legacy_version", "legacy_version_tp_any"),
+                 1: ("legacy_version",)}
+
+
+def legacy_version_ladder(a):
+    """The rungs a pre-release-cut writer used, READ ONLY: the full build string as its own segment.
+
+    `framework_version` was `segment(raw, UNKNOWN_VERSION)` before it was cut to `<major>.<minor>.
+    <patch>`, so every record already filed under `0.5.15.post1.dev20260723+g6c9fd0adc5` sits on a
+    page the new address cannot name. Unlike the kernel scheme's ROCm dimension, no rung here drops
+    the version, so there is no coarse page to rescue them — without this the cut would strand the
+    whole existing e2e store the moment it lands, which is the same invisible miss the cut exists
+    to prevent, just caused once.
+
+    The kernel side's `_legacy_name_ladder` is the same shape and the same restrictions: tried after
+    the canonical ladder so a legacy page can rescue but never shadow, and kept OUT of `ladder_of`
+    because write, retract and attest all iterate that one and would start filing new records at an
+    address the reader is only meant to be able to reach backwards.
+    """
+    raw = str(getattr(a, "framework_version", "") or "").strip()
+    identity = identity_of(a)
+    legacy = kbid.segment(raw, kbid.UNKNOWN_VERSION)
+    if not raw or legacy == identity["framework_version"]:
+        return []
+    cids = kbid.e2e_canonical_ids(dict(identity, framework_version=legacy))
+    return [(cid, tier) + rung_metric(i, len(cids))
+            for i, (cid, tier) in enumerate(zip(cids, _LEGACY_TIERS[len(cids)]))]
 
 
 # -- planes --------------------------------------------------------------------------------------
@@ -204,7 +235,9 @@ def _sort_key(metric: str):
 
 
 def cmd_resolve(a) -> dict:
-    ladder = ladder_of(a)
+    # Appended, never merged: `ladder[0]` still has to be the address this run would WRITE, because
+    # it is what lands in identity_out and names the page in the output.
+    ladder = ladder_of(a) + legacy_version_ladder(a)
     metric = read_metric(a)
     # Echo the plane back. A caller that tries the service and falls back to disk otherwise cannot
     # tell from the output which one answered — the ladder, the ranking and the shapes are identical
@@ -843,7 +876,7 @@ TUNING_FILE_MAX = 24
 TUNING_FILE_MAX_BYTES = 64 * 1024 * 1024
 
 
-_UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+_UNSAFE_NAME_RE = re.compile("[^%s]" % SAFE_COMPONENT_CHARS)
 
 
 def _safe_basename(path: str) -> str:
@@ -916,7 +949,15 @@ def _rebind_tuning_artifacts(kernels, files: dict) -> None:
     `tuning_artifact_source`: when a recalled table fails to reproduce, the first question is which
     tree it was captured from, and that answer is otherwise gone.
     """
-    by_source = {src: stored for stored, src in files.values()}
+    # First stored name wins, not last. Two roles can hand back the same source path (the deploy
+    # bundle's copy of a table and the installed one are one file to `artifacts` + `live_tree_files`),
+    # and `files` is built in insertion order, so the first entry is the one whose stored name the
+    # rest of the record already refers to. Taking the last would point the kernel at a bundle name
+    # that is a duplicate copy of its table under a different index prefix — reproducible, but it
+    # makes two names for one artifact and a reader cannot tell which is canonical.
+    by_source = {}
+    for stored, src in files.values():
+        by_source.setdefault(src, stored)
     for k in kernels:
         if not isinstance(k, dict):
             continue
@@ -1602,7 +1643,13 @@ def main(argv=None) -> int:
     if a.command == "identity":
         result = {"identity": identity_of(a),
                   "ladder": [{"canonical_id": c, "tier": t, "ranked_by": m, "promote_floor": f}
-                             for c, t, m, f in ladder_of(a)]}
+                             for c, t, m, f in ladder_of(a)],
+                  # Separate key, not appended to `ladder`: these are read by resolve and written by
+                  # nothing, and a caller auditing where this run will FILE its record must not see
+                  # them in the same list as the addresses it will file at.
+                  "legacy_read_only": [{"canonical_id": c, "tier": t, "ranked_by": m,
+                                        "promote_floor": f}
+                                       for c, t, m, f in legacy_version_ladder(a)]}
     elif a.command == "resolve":
         result = cmd_resolve(a)
     elif a.command == "retract":

@@ -866,3 +866,71 @@ def test_require_win_passes_a_real_win_straight_through(tmp_path):
     out = _write(tmp_path, "win", "attn-split", "--require-win", throughput_speedup=1.25)
     assert out["applied"] is True and out.get("skipped") is not True
     assert out["rungs"]
+
+
+# -- the version cut's legacy rungs ---------------------------------------------------------------
+# `framework_version` is now the RELEASE (`0.5.15`), not the build string. Every record filed under
+# the old spelling sits on a page the new address cannot name, and no rung here drops the version, so
+# there is no coarse page to catch them. The read gets those addresses back; the write must not.
+DEV_VERSION = "0.5.15.post1.dev20260723+g6c9fd0adc5"
+DEV_IDENTITY = ["--model", "M", "--gfx", "gfx950", "--framework", "sglang",
+                "--framework-version", DEV_VERSION, "--precision", "mxfp4",
+                "--tp", "8", "--isl", "1024", "--osl", "1024", "--conc", "64"]
+
+
+def _as_the_old_lane_did(monkeypatch):
+    """Undo the cut for the duration of a write: the pre-#438 lane segmented the build string whole,
+    so this is what "a record that is already in the store" is spelled like."""
+    monkeypatch.setattr(e2e_store.kbid, "_release_version",
+                        lambda raw: e2e_store.kbid.segment(raw, e2e_store.kbid.UNKNOWN_VERSION))
+
+
+def test_a_record_written_before_the_cut_is_still_reachable(tmp_path, monkeypatch):
+    """The whole point. Without the legacy rung this read is a cold start on a store that has the
+    answer — and a cold start is not an error, so nothing would ever report it."""
+    result = _result(tmp_path / "old.json")
+    _as_the_old_lane_did(monkeypatch)
+    written = _run("write", "--store", str(tmp_path / "store"), "--result", result,
+                   "--direction", "tuned", "--apply", identity=DEV_IDENTITY)
+    assert written["applied"] is True
+    monkeypatch.undo()
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=DEV_IDENTITY)
+    assert out["read_reason"] == "read" and out["candidates"]
+    assert out["match_tier"] == "legacy_version"
+    assert DEV_VERSION in out["canonical_id"]      # the build string verbatim, as it was filed
+
+
+def test_the_legacy_rungs_are_read_only(tmp_path, monkeypatch):
+    """A rescue rung that also accepts writes would keep the old page alive forever, splitting one
+    deployment's history across two addresses — the state the cut exists to end."""
+    out = _run("identity", identity=DEV_IDENTITY)
+    assert [r["tier"] for r in out["ladder"]] == ["exact", "workload_any", "tp_any"]
+    assert all("0.5.15:" in r["canonical_id"] for r in out["ladder"])
+    assert [r["tier"] for r in out["legacy_read_only"]] == \
+        ["legacy_version", "legacy_version_workload_any", "legacy_version_tp_any"]
+    # and a write files at the new address only
+    written = _run("write", "--store", str(tmp_path / "store"),
+                   "--result", _result(tmp_path / "new.json"), "--direction", "tuned", "--apply",
+                   identity=DEV_IDENTITY)
+    assert all("0.5.15:" in r["canonical_id"] for r in written["rungs"])
+    assert not any("dev20260723" in r["canonical_id"] for r in written["rungs"])
+
+
+def test_a_release_shaped_version_grows_no_legacy_rungs(tmp_path):
+    """The cut is a no-op for a version already spelled as its release, and the ladder must be too:
+    duplicate rungs would re-read the same page and count one record twice in `tried`."""
+    out = _run("identity")                       # IDENTITY's version is a bare "0.26.0"
+    assert out["legacy_read_only"] == []
+
+
+def test_the_canonical_ladder_is_still_tried_first(tmp_path, monkeypatch):
+    """Rescue, never shadow. A current record and a legacy one both exist; the current one answers."""
+    _as_the_old_lane_did(monkeypatch)
+    _run("write", "--store", str(tmp_path / "store"), "--result", _result(tmp_path / "o.json",
+         tput=2000.0), "--direction", "old", "--apply", identity=DEV_IDENTITY)
+    monkeypatch.undo()
+    _run("write", "--store", str(tmp_path / "store"), "--result", _result(tmp_path / "n.json",
+         tput=1000.0), "--direction", "new", "--apply", identity=DEV_IDENTITY)
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=DEV_IDENTITY)
+    # the legacy page ranks HIGHER on throughput, and still must not be the one that answers
+    assert out["match_tier"] == "exact" and [c["direction"] for c in out["candidates"]] == ["new"]

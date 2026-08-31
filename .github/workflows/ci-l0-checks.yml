@@ -118,6 +118,7 @@ jobs:
             kernel_workflow/scripts/tests/test_experience_store.py \
             kb/tests/test_store_local.py \
             kb/tests/test_attest.py \
+            kb/tests/test_identity.py \
             kernel_workflow/scripts/tests/test_kb_loop_offline.py \
             interface/test_effective_config.py \
             e2e_workflow/scripts/tests/test_bench_replica_lifecycle.py \
