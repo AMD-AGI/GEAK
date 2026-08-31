@@ -585,3 +585,84 @@ def test_promoted_final_is_hot_and_cold_stays_a_diagnostic(tmp_path: Path) -> No
     assert am["cold_speedup"] == pytest.approx(geak_cold_final / orch_cold, abs=1e-4)
     hot_over_cold = am["geak_hot_final_tok_s"] / orch_cold
     assert am["cold_speedup"] < hot_over_cold
+
+
+def test_server_identity_evidence_parsing_and_alignment(tmp_path: Path) -> None:
+    """Launch identity is accepted only when observable fields support it."""
+    complete = (
+        "prefix ServerArgs(model_path='/models/qwen', tp_size=2, "
+        "context_length=8192, dtype=unknown, ignored='value') suffix"
+    )
+    assert rx._balanced_server_args("no record") == ""
+    assert rx._balanced_server_args("ServerArgs(model_path='unterminated'") == ""
+    assert rx._balanced_server_args(complete).startswith("ServerArgs(")
+    assert rx._parse_sglang_server_args("no record") == {}
+    assert rx._parse_sglang_server_args("ServerArgs(") == {}
+    assert rx._parse_sglang_server_args("{'not': 'a call'}") == {}
+    assert rx._parse_sglang_server_args(complete) == {
+        "model_path": "/models/qwen",
+        "tp_size": 2,
+        "context_length": 8192,
+    }
+
+    log = tmp_path / "server.log"
+    log.write_text(
+        "startup\nServerArgs(model_path='/models/qwen', tp_size=2,\n"
+        "context_length=8192)\n",
+        encoding="utf-8",
+    )
+    observed, reason = rx._read_server_identity_evidence(log)
+    assert reason == ""
+    assert observed == {
+        "backend": "sglang",
+        "server_args": {
+            "model_path": "/models/qwen",
+            "tp_size": 2,
+            "context_length": 8192,
+        },
+    }
+
+    identity_log = tmp_path / "identity.log"
+    identity_log.write_text("observed_launch_identity: recipe:deadbeef\n", encoding="utf-8")
+    assert rx._read_server_identity_evidence(identity_log) == (
+        {"launch_identity": "recipe:deadbeef"},
+        "",
+    )
+    assert rx._read_server_identity_evidence(tmp_path / "missing.log") == ({}, "")
+
+    expected = {
+        "backend": "sglang",
+        "server_args": {"model_path": "/models/qwen", "tp_size": 2},
+    }
+    assert rx._handoff_observed_identity({"observed_server_identity": expected}) == (
+        expected,
+        "observed_server_identity",
+    )
+    assert rx._handoff_observed_identity(
+        {"baseline_env_spec": {"launch_identity": "recipe:deadbeef"}}
+    ) == ("recipe:deadbeef", "baseline_env_spec.launch_identity")
+    assert rx._handoff_observed_identity({}) == (None, "")
+    assert rx._identity_value_equal("recipe:deadbeef", {"launch_identity": "recipe:deadbeef"})
+    assert rx._identity_value_equal("recipe:deadbeef", {}) is None
+    assert rx._identity_value_equal(expected, observed)
+    assert not rx._identity_value_equal(
+        expected, {"backend": "sglang", "server_args": {"model_path": "/models/qwen", "tp_size": 4}}
+    )
+    assert rx._identity_value_equal(
+        expected, {"backend": "sglang", "server_args": {"model_path": "/models/qwen"}}
+    ) is None
+    assert rx._identity_value_equal({"backend": "vllm", "server_args": {}}, observed) is None
+
+    eval_dir = tmp_path / "e2e"
+    baseline = eval_dir / "baseline"
+    baseline.mkdir(parents=True)
+    (baseline / "server.log").write_text(complete, encoding="utf-8")
+    matched = rx._server_identity_alignment(
+        {"observed_server_identity": expected}, eval_dir
+    )
+    assert matched["status"] == "matched"
+    assert matched["evidence_paths"] == [str(baseline / "server.log")]
+    assert rx._server_identity_alignment({}, eval_dir)["status"] == "unavailable"
+    assert rx._server_identity_alignment(
+        {"observed_server_identity": "recipe:deadbeef"}, eval_dir
+    )["status"] == "unverified"

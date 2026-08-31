@@ -3543,10 +3543,20 @@ def _discover_eval_dir(exp_root: Path) -> Path | None:
     A pinned ``GEAK_EVAL_DIR`` (set by main() from the single eval_dir
     map_args minted for this run) short-circuits the glob/guess: recovery then
     targets EXACTLY the dir this run used, never a sibling from another run.
+    The pin is only trusted when it belongs to ``exp_root``: callers can reuse
+    this module in one process, and a stale pin from another run must not
+    override the explicit root they passed.
     """
     pinned = os.environ.get("GEAK_EVAL_DIR", "").strip()
-    if pinned and Path(pinned).is_dir():
-        return Path(pinned)
+    if pinned:
+        pinned_path = Path(pinned)
+        try:
+            pinned_path.resolve().relative_to(exp_root.resolve())
+        except (OSError, ValueError):
+            pass
+        else:
+            if pinned_path.is_dir():
+                return pinned_path
     if not exp_root.is_dir():
         return None
     cands = sorted(

@@ -1741,9 +1741,9 @@ class TestRecoveryPlumbing(_RunE2ECase):
         self.assertEqual(rx._discover_eval_dir(empty), empty / "e2e_a")
 
     def test_pinned_eval_dir_short_circuits_the_glob(self):
-        pinned = self.tmp / "e2e_pinned"
-        pinned.mkdir()
         other = self.tmp / "root"
+        pinned = other / "e2e_pinned"
+        pinned.mkdir(parents=True)
         (other / "e2e_other").mkdir(parents=True)
         os.environ["GEAK_EVAL_DIR"] = str(pinned)
         self.assertEqual(rx._discover_eval_dir(other), pinned)

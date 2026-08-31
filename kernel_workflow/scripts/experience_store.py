@@ -50,8 +50,12 @@ import time
 # The shared KB plane lives at the repo root as the `kb` package, not beside this file. Executed as
 # a CLI from an arbitrary cwd, so the root is derived from __file__ and never from the environment.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+# Python prepends this script's directory to sys.path when invoked as a CLI.
+# That directory contains kb.py, which would shadow the repository's kb/
+# package even when the repository root already appears later in sys.path.
+if _REPO_ROOT in sys.path:
+    sys.path.remove(_REPO_ROOT)
+sys.path.insert(0, _REPO_ROOT)
 
 from kb.attest import OUTCOMES as _OUTCOMES
 from kb.curate import collapse_by_direction

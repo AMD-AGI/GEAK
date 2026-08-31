@@ -433,6 +433,18 @@ def test_workflow_done_marker_accepts_canonical_return(tmp_path):
     assert rx._workflow_done_on_disk(str(eval_dir)) is True
 
 
+def test_discover_eval_dir_ignores_a_pin_from_another_root(tmp_path, monkeypatch):
+    """A process-scoped stale pin must not override the caller's explicit root."""
+    exp_root = tmp_path / "requested"
+    expected = exp_root / "e2e_current"
+    expected.mkdir(parents=True)
+    foreign = tmp_path / "other" / "e2e_previous"
+    foreign.mkdir(parents=True)
+    monkeypatch.setenv("GEAK_EVAL_DIR", str(foreign))
+
+    assert rx._discover_eval_dir(exp_root) == expected
+
+
 # ── canonical-artifact contract (the perfect-cooperation handoff) ───────────
 
 def test_recover_trusts_workflow_written_canonical(tmp_path):

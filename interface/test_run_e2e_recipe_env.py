@@ -386,3 +386,41 @@ def test_strict_mode_refuses_when_pyyaml_is_unavailable(
     monkeypatch.setenv("GEAK_STRICT_RECIPE_ENV", "1")
     with pytest.raises(SystemExit, match="PyYAML is unavailable"):
         rx._recipe_env_block(path)
+
+
+def test_recipe_env_helpers_handle_nested_lists_and_typed_scalars() -> None:
+    """List-shaped recipe documents preserve the first non-empty env map."""
+    assert rx._find_envs_map([
+        {"metadata": {"envs": {}}},
+        {"benchmark": {"envs": {"A": "one"}}},
+    ]) == {"A": "one"}
+    assert rx._find_envs_map([{"envs": {}}, {"other": []}]) == {}
+    assert rx._find_envs_map(["not-a-map"]) is None
+    assert rx._stringify_env_value(None) is None
+    assert rx._stringify_env_value({"nested": "map"}) is None
+    assert rx._stringify_env_value(["not", "an", "env"]) is None
+    assert rx._stringify_env_value(True) == "true"
+    assert rx._stringify_env_value(False) == "false"
+    assert rx._stringify_env_value(42) == "42"
+
+
+def test_fidelity_and_boolean_helpers_reject_invalid_typed_values() -> None:
+    """Malformed handoff knobs degrade predictably instead of raising."""
+    assert rx._fold_serving_fidelity_flags(
+        "", backend="vllm", max_model_len="not-an-int", mem_fraction="not-a-float"
+    ) == ""
+    assert rx._as_bool("off") is False
+    assert rx._as_bool("YES") is True
+    assert rx._as_bool("unrecognized") is True
+    assert rx._as_bool(0) is False
+    assert rx._as_bool(True) is True
+
+
+def test_recipe_env_block_degrades_for_unreadable_or_undecodable_files(
+    tmp_path: Path,
+) -> None:
+    """A non-strict launch never replays a partial or corrupt recipe."""
+    assert rx._recipe_env_block(str(tmp_path / "missing.yaml")) == {}
+    corrupt = tmp_path / "corrupt.yaml"
+    corrupt.write_bytes(b"envs:\n  BAD: \xff\n")
+    assert rx._recipe_env_block(str(corrupt)) == {}
