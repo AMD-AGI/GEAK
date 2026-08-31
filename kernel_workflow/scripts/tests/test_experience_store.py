@@ -1372,3 +1372,68 @@ def test_the_filter_survives_the_round_trip_to_the_store_plane(tmp_path):
     narrowed = resolve_remote(store, refs, "fused_moe_kernel", "triton", "gfx950",
                               *common, "--precision", "fp8_w8a8")
     assert _offers(narrowed) == [(3.29, "tuning-aiter")] and narrowed["filtered"]["other_precisions"] == 1
+
+
+# --------------------------------------------------------------------------- the tuned digest
+# `_remote_digest` names the candidate upstream, and for a tuned entry it is the only thing that can:
+# there is no diff to sign. It has two callers with two spellings of "the artifact set" and they must
+# agree, because the digest is what makes a re-export UPDATE one candidate instead of minting a
+# second. The path below is the one a fresh write never takes (cmd_write stores the signature and the
+# export short-circuits on it) and `backfill-content` cannot repair, since it rebuilds that field from
+# patch.diff and a tuned entry has none.
+def _store_module():
+    """The store as a MODULE — every other case here drives it as a CLI, which is right for behaviour
+    but cannot reach a helper's contract. Loaded by file path with the REPO ROOT on sys.path and its
+    own directory deliberately off it: `kernel_workflow/scripts/kb.py` sits next to the store and
+    would shadow the top-level `kb` package the store imports."""
+    import importlib.util
+    root = os.path.dirname(os.path.dirname(os.path.dirname(STORE)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    spec = importlib.util.spec_from_file_location("experience_store_under_test", STORE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _strip_content_signature(exp_dir):
+    """The shape of an entry that predates content_signature — the backlog's, and the one no repair
+    path reaches for this carrier."""
+    meta_path = os.path.join(exp_dir, "meta.yaml")
+    meta = yaml.safe_load(open(meta_path))
+    meta.pop("content_signature", None)
+    yaml.safe_dump(meta, open(meta_path, "w"))
+
+
+def test_a_tuned_entry_without_a_content_signature_still_exports(tmp_path):
+    """It used to raise `too many values to unpack` from inside the hash loop: the digest was handed
+    bare paths where the signature wants (stored_name, path). The CLI's own never-crash-the-caller
+    handler then turned that into `{"read_reason": "exception: ...", "candidates": []}` and exit 0 —
+    so ONE malformed entry silently emptied the export of the WHOLE root, which reads from the
+    outside exactly like a store that has nothing in it."""
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_a", kernel="unrelated_kernel")     # the collateral damage
+    _strip_content_signature(write_tuned(root, tuned_files(tmp_path))["dir"])
+    recs, summary = export(root)
+    assert summary["sessions"] == 2 and all(r["session_id"] for r in exact(recs))
+
+
+def test_the_digest_is_the_same_one_the_write_side_signed(tmp_path):
+    """Agreement, not merely survival. Re-deriving the artifact names here (from the basename, say)
+    would still produce a digest — a DIFFERENT one — and the entry would land upstream as a second
+    candidate for a table already there, which the page reads as an independent reproduction."""
+    kept, dropped = str(tmp_path / "kb_kept"), str(tmp_path / "kb_dropped")
+    art = tuned_files(tmp_path)
+    write_tuned(kept, art)
+    _strip_content_signature(write_tuned(dropped, art)["dir"])
+    # Same kernel, same identity, same bytes: the only thing that differs is WHICH branch of
+    # _remote_digest ran, so an unequal session id is that branch disagreeing with the writer.
+    assert exact(export(kept)[0])[0]["session_id"] == exact(export(dropped)[0])[0]["session_id"]
+
+
+def test_signing_bare_paths_says_what_is_wrong(tmp_path):
+    """The two callers build this list independently. When the next one gets the shape wrong it
+    should read as a contract violation naming the argument, not as an unpacking error three frames
+    down in a hash loop."""
+    with pytest.raises(TypeError, match=r"\(stored_name, path\) pairs"):
+        _store_module().artifact_signature([tuned_files(tmp_path)])

@@ -77,7 +77,7 @@ from kb.attest import OUTCOMES as _OUTCOMES
 from kb.curate import collapse_by_direction
 from kb.ladder import publish
 from kb.plane import open_plane
-from kb.store_local import CHAMPION_METRIC
+from kb.store_local import CHAMPION_METRIC, SAFE_COMPONENT_CHARS
 
 try:
     import yaml
@@ -88,8 +88,11 @@ except Exception:  # yaml ships in this env; degrade to json-only meta
 # Identity: read and write MUST derive the slug identically (never via an LLM) or a run
 # can never find its own lineage.
 def _safe(seg: str) -> str:
-    """Slug-safe a path segment: keep [A-Za-z0-9._-], collapse the rest to '-'."""
-    s = re.sub(r"[^A-Za-z0-9._-]+", "-", str(seg or "").strip())
+    """Slug-safe a path segment: keep what the remote plane's path validator accepts (see
+    kb.store_local.SAFE_COMPONENT_CHARS), collapse the rest to '-'. The '-' and the 80-char cap are
+    load-bearing, not stylistic: a stored artifact name is hashed into its content signature, so
+    respelling either re-addresses every tuned entry already in the store."""
+    s = re.sub("[^%s]+" % SAFE_COMPONENT_CHARS, "-", str(seg or "").strip())
     s = s.strip("-.") or "x"
     return s[:80]
 
@@ -292,9 +295,14 @@ def _expand_artifact_paths(paths):
                 # Byproducts of running the tuner, not the tuning result.
                 dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".git")]
                 files.extend(os.path.join(dirpath, f) for f in sorted(filenames))
-                if len(files) > _MAX_ARTIFACTS:
+                if len(files) >= _MAX_ARTIFACTS:
                     break
-    return files
+        # The cap is the whole list's, not one directory's: breaking out of the walk while the outer
+        # loop kept adding let a caller passing several paths overshoot it. _artifact_sources re-caps,
+        # so this was never wrong downstream — it just meant the number here was not the number.
+        if len(files) >= _MAX_ARTIFACTS:
+            break
+    return files[:_MAX_ARTIFACTS]
 
 
 def _artifact_sources(paths):
@@ -334,6 +342,12 @@ def artifact_signature(paths) -> str:
     items = sorted(paths)
     if not items:
         return ""
+    # Say what is wrong. The two callers build this list independently, one of them from a stored
+    # name list, and a bare path list unpacks as "too many values" three frames down inside a hash
+    # loop — an error that names neither the argument nor the caller.
+    bad = next((i for i in items if not (isinstance(i, tuple) and len(i) == 2)), None)
+    if bad is not None:
+        raise TypeError("artifact_signature wants (stored_name, path) pairs, got %r" % (bad,))
     h = hashlib.sha256()
     for name, path in items:
         try:
@@ -1466,8 +1480,14 @@ def _remote_digest(meta: dict, exp_dir: str) -> str:
     if sig:
         return sig.split(":", 1)[-1]
     if str(meta.get("carrier") or "patch") != "patch":
+        # (stored_name, path), the same shape cmd_write signs through _artifact_sources — and the
+        # same names, since `artifact_files` holds what that pass already collapsed them to. The
+        # name is hashed, so re-deriving it here from the basename would be a second spelling of
+        # one thing and would digest the record differently on the export path than on the write
+        # path: not a raise, a duplicate candidate upstream.
         names = meta.get("artifact_files") or []
-        return artifact_signature([os.path.join(exp_dir, "artifact", n) for n in names]).split(":", 1)[-1]
+        items = [(n, os.path.join(exp_dir, "artifact", n)) for n in names]
+        return artifact_signature(items).split(":", 1)[-1]
     try:
         with open(os.path.join(exp_dir, "patch.diff"), "r", errors="replace") as f:
             return content_signature(f.read()).split(":", 1)[-1]
