@@ -681,6 +681,10 @@ const FAST_SKIP = FAST_MODE ? new Set(['config', 'tune', 'kernel']) : null;
 const DEEP_SKIP = DEEP_MODE ? new Set(['kernel']) : null;
 const want = (p) => (RUN_ALL || PHASES.includes(p)) && !(FAST_SKIP && FAST_SKIP.has(p)) && !(DEEP_SKIP && DEEP_SKIP.has(p));
 const ST = A.state || {};   // carried state from a prior phase invocation
+// Hoisted: tuningIntegrateInputs() is reachable from runIntegrateBothLegs, which runs long before the
+// TuningSkillset phase body. Declaring `tuning` down at that phase left it in the temporal dead zone and
+// threw "Cannot access 'tuning' before initialization" on the first integrate leg.
+let tuning = ST.tuning || null;
 if (FAST_MODE) log(`[fast-mode] ON: skipping ConfigSweep + Milestone; HeadKernel-only; budget ${Math.round(FAST_BUDGET_MS / 60000)}min (stop new heads at ${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min, per-head workflow cap ${Math.round(FAST_HEAD_WF_MS / 60000)}min).`);
 
 // ---------------------------------------------------------------------------
@@ -3068,7 +3072,6 @@ function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SY
 // An accept is folded into curFlags/curEnv (the deploy's required env IS the engagement mechanism), then
 // the profile is re-taken exactly as it is after a config win, because tuning changes the landscape too.
 // ===========================================================================
-let tuning = ST.tuning || null;
 if (want('tune') && TUNING_SKILLSET_ENABLED) {
   phase('TuningSkillset');
   log(`Tuning skillset: ${TUNING_SKILLSET_DIR} (whole, standalone, pre-HeadKernel); ` +
