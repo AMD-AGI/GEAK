@@ -733,7 +733,8 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 phase('Setup');
 const setup = await agentT(
   roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
-    KERNEL_PATH_ORIG, EXP_ROOT, EVAL_DIR_OVERRIDE, KERNEL_NAME_HINT, TASK, SKILL_DIR: WORKFLOW_DIR,
+    KERNEL_PATH_ORIG, EXP_ROOT, EVAL_DIR_OVERRIDE, KERNEL_NAME_HINT, TASK,
+    WORKFLOW_DIR, SKILL_DIR: WORKFLOW_DIR,
     MODE, TARGET_LANGUAGE, OP_SPEC,
     ...(STATE_DIR ? { STATE_DIR } : {}),
   }),
@@ -1270,16 +1271,15 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
 First create YOUR private workspace, then optimize.
 \`\`\`bash
-# Fresh, ISOLATED workspace via tar-copy that EXCLUDES build artifacts (.git/build/__pycache__/.torch_ext/
-# *.so/*.o) — no 'rm' anywhere. Each engineer's out_dir is unique per (round,engineer), so the workspace
-# is clean on creation; the tar excludes mean no stale build cache is ever inherited (torch .torch_ext
-# stores ABSOLUTE paths, so excluding it forces each workspace to build its own fresh). The big immutable
-# golden (reference_io.pt, when present) lives in CANONICAL as an absolute symlink; this tar carries the
-# symlink verbatim, so every workspace shares the one physical file — NEVER add -h/--dereference here.
-mkdir -p ${d.out_dir}/workspace
-( cd ${CANONICAL} && tar --exclude=./.git --exclude='*/.git' --exclude=./build --exclude='*/build' \\
-    --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \\
-    --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd ${d.out_dir}/workspace && tar -xf - )
+# Issue #429: ALWAYS use materialize_workspace.sh — do NOT inline tar/cp. Agents that omitted
+# --exclude='*.so' previously copied multi-GiB aiter/jit/*.so into every engineer/verify clone.
+# The script excludes nested *.so/*.o and aiter/jit, preserves symlinks (never -h), and may
+# share an immutable aiter tree via --link-aiter under EVAL_DIR/_shared. Candidate builds still
+# use per-workspace .torch_ext via gpu_lock.sh (isolation unchanged).
+mkdir -p ${d.out_dir}
+bash ${WORKFLOW_DIR}/scripts/materialize_workspace.sh \\
+  --src ${CANONICAL} --dst ${d.out_dir}/workspace \\
+  --shared-root ${EVAL_DIR}/_shared --link-aiter
 \`\`\`
 ${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
@@ -1335,7 +1335,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       return agentT(
         roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
           CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
-          GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+          EVAL_DIR, WORKFLOW_DIR, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
           ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
@@ -1366,7 +1366,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     integrate = await agentT(
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
         CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
-        GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+        EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
@@ -1516,6 +1516,29 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     improved, cumulative,
   });
   log(`Round ${round} done. winner=${winner ? winner.source + ' ' + winner.geomean.toFixed(2) + 'x' : 'none'}, cumulative=${cumulative.toFixed(2)}x, noImprove=${noImprove}`);
+
+  // Issue #429: reclaim superseded heavy copies after each round, then CONTINUE optimizing.
+  // Disk pressure must never abort the loop — reclaim (and under pressure, --force-heavy) only.
+  // Agents (not this JS runtime) execute the bash; the prompt below is also mirrored into the
+  // next round's tech_lead context via STORAGE_NOTE so it is not dropped on a dry orchestrator.
+  const reclaimCmd =
+    `bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${EVAL_DIR} --keep-round ${round}` +
+    `; bytes=$(du -sb ${EVAL_DIR} 2>/dev/null | awk '{print $1}');` +
+    ` soft=\${GEAK_EVAL_SOFT_BYTES:-34359738368}; hard=\${GEAK_EVAL_HARD_BYTES:-68719476736};` +
+    ` if [ -n "$bytes" ] && [ "$bytes" -gt "$hard" ]; then` +
+    `   bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${EVAL_DIR} --keep-round ${round} --force-heavy;` +
+    ` elif [ -n "$bytes" ] && [ "$bytes" -gt "$soft" ]; then` +
+    `   bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${EVAL_DIR} --keep-round ${round};` +
+    ` fi` +
+    `; echo STORAGE_RECLAIM_DONE round=${round}`;
+  await agentT(
+    `Storage reclaim after round ${round} (issue #429). Run EXACTLY this bash, then return ` +
+    `{ok:true, note:"reclaimed"}. Do NOT stop optimizing — reclaim frees disk so later rounds can run.\n` +
+    `\`\`\`bash\n${reclaimCmd}\n\`\`\``,
+    { phase: 'Optimize', label: `storage:reclaim r${round}`,
+      schema: { type: 'object', additionalProperties: true,
+        properties: { ok: { type: 'boolean' }, note: { type: 'string' } },
+        required: ['ok'] } });
 }
 
 // ===========================================================================
