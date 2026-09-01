@@ -2762,9 +2762,17 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
     a run without the phase produces a byte-identical result.json (we return None and the key is omitted).
 
     The tuning gain is ALREADY inside the headline ``final_throughput_tok_s`` / ``throughput_speedup``:
-    the phase runs mid-pipeline and its accepted config is inherited by every later measurement. This
+    tuning runs mid-pipeline and its accepted config is inherited by every later measurement. This
     block does not restate the headline, it ATTRIBUTES part of it — which is the question the headline
     cannot answer on its own.
+
+    What that attribution can honestly say changed when tuning stopped being a standalone phase. The
+    phase measured its own interleaved pre/post SERVER A/B, so it could report a delta% and a share of
+    the run's total gain. Tuning now runs per head op inside the HeadKernel track, scored on that op's
+    extracted unittest, and takes no server A/B of its own — so ``tuning_delta_pct``,
+    ``tuning_speedup`` and ``share_of_total_gain_pct`` come back as ``None``. They are kept in the
+    shape so an existing consumer does not KeyError, and ``None`` means NOT MEASURED, never zero. The
+    evidence is per-op now: ``ops_tuned[].isolated_speedup``, each from an immutable oracle.
 
     ``reaches_production_via`` is the load-bearing field. The tuning win is usually a data artifact
     (a config table read from inside a library's package dir, plus a cache that must be dropped), which
@@ -2779,52 +2787,57 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
         # Enabled but never executed (e.g. a phase-scoped invocation that skipped it). Record that
         # plainly rather than implying a measured no-win.
         return {
-            "phase": "TuningSkillset",
+            "phase": "Tuning",
             "ran": False,
             "gate": t.get("gate") or "not_run",
-            "explanation": "The standalone tuning-skillset phase was enabled but did not run in this invocation.",
+            "explanation": "Tuning was enabled but banked nothing in this invocation "
+                           "(the HeadKernel track did not run, or no head op had a cheap tuning win).",
         }
 
     gate = t.get("gate") or "unknown"
     accepted = gate == "accepted"
-    delta = t.get("tuning_delta_pct") or 0.0
-    share = t.get("share_of_total_gain_pct")
+    ops = t.get("ops_tuned") or []
 
     if accepted:
+        per_op = ", ".join(
+            f"{o.get('op')}{'/' + o['backend'] if o.get('backend') else ''} "
+            f"{_as_float(o.get('isolated_speedup')):.2f}x"
+            for o in ops if isinstance(o, dict)
+        )
         explanation = (
-            f"The standalone tuning-skillset phase ran before the head-kernel track and measured its own "
-            f"interleaved pre/post A/B on the serving config accepted at that point: "
-            f"{t.get('pre_tune_throughput_tok_s')} -> {t.get('post_tune_throughput_tok_s')} tok/s "
-            f"({delta:+.2f}%). Engagement was verified, so the tuned artifacts were folded into the "
-            f"accepted config and every later phase was measured on top of them. This delta is part of "
-            f"the headline throughput_speedup, not additional to it"
-            + (f"; it accounts for ~{share}% of the run's total gain." if share is not None
-               else " (the run had no net gain to apportion).")
+            f"Tuning ran inside the head-kernel track, per op, on each op's extracted unittest — the "
+            f"same immutable oracle the deep kernel lanes are scored on — before those lanes started. "
+            f"{len(ops)} op(s) banked: {per_op or 'see ops_tuned'}. Engagement was verified, so the "
+            f"tuned artifacts were folded into the accepted config and every later measurement was "
+            f"taken on top of them. That makes this part of the headline throughput_speedup, not "
+            f"additional to it. No separate server A/B was taken for tuning, so its share of the total "
+            f"gain is not measured (null, not zero); the per-op isolated speedups above are the "
+            f"evidence."
         )
     else:
         explanation = (
-            f"The standalone tuning-skillset phase ran before the head-kernel track and did not bank a "
-            f"win (gate={gate}). Nothing from it was folded into the accepted config, so the headline "
-            f"result is unaffected by it. Reason: {t.get('reason') or t.get('summary') or 'not stated'}."
+            f"Tuning ran inside the head-kernel track and did not bank a win (gate={gate}) across "
+            f"{t.get('attempts') if t.get('attempts') is not None else 'the'} op(s) attempted. Nothing "
+            f"from it was folded into the accepted config, so the headline result is unaffected by it. "
+            f"Reason: {t.get('reason') or t.get('summary') or 'not stated'}."
         )
 
     section: dict[str, Any] = {
-        "phase": "TuningSkillset",
+        "phase": "Tuning",
         "ran": True,
         "gate": gate,
         "explanation": explanation,
+        "source": t.get("source") or "head_track",
+        "attempts": t.get("attempts"),
         "mode": t.get("mode") or "",
         "skills_used": t.get("skills_used") or [],
-        "ops_tuned": t.get("ops_tuned") or [],
-        # Attribution — measured by the phase itself, NOT re-derived from the run baseline.
-        "pre_tune_throughput_tok_s": t.get("pre_tune_throughput_tok_s"),
-        "post_tune_throughput_tok_s": t.get("post_tune_throughput_tok_s"),
+        # The attribution. Each entry was measured on that op's own immutable oracle.
+        "ops_tuned": ops,
+        # None = not measured, NOT zero: tuning takes no server A/B of its own any more. Kept in the
+        # shape so a consumer written against the standalone phase still finds its keys.
         "tuning_delta_pct": t.get("tuning_delta_pct"),
         "tuning_speedup": t.get("tuning_speedup"),
-        "share_of_total_gain_pct": share,
-        "noise_floor_pct": t.get("noise_floor_pct"),
-        "ab_interleaved": t.get("ab_interleaved"),
-        "ab_complete": t.get("ab_complete"),
+        "share_of_total_gain_pct": t.get("share_of_total_gain_pct"),
         "correctness_gate": t.get("correctness_gate"),
         "engagement_verified": t.get("engagement_verified"),
         "engagement_evidence": t.get("engagement_evidence") or "",

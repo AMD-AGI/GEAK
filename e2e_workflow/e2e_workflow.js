@@ -7,8 +7,7 @@ export const meta = {
     { title: 'Profile', detail: 'Profiler captures a warm trace -> standardized Top-N' },
     { title: 'Strategize', detail: 'System Architect routes kernels by Amdahl (config vs kernel vs host)' },
     { title: 'ConfigSweep', detail: 'Config Tuner sweeps flags/env/backends FIRST (default ON)' },
-    { title: 'TuningSkillset', detail: 'Tuning Specialist runs the VENDORED tuning skillset whole + standalone (its own pre/post A/B) BEFORE HeadKernel, so its share of the gain is attributable' },
-    { title: 'HeadKernel', detail: 'highest-%GPU ops (GEMM/attn): extract_op -> backend bake-off (incl. FlyDSL) + aiter-DB/author tune -> e2e gate' },
+    { title: 'HeadKernel', detail: 'highest-%GPU ops (GEMM/attn): extract_op -> cheap standalone quick-tune -> backend bake-off (incl. FlyDSL) running the VENDORED tuning skillset scoped to the op -> deep kernel_workflow lanes -> e2e gate' },
     { title: 'Milestone', detail: 'loop over editable kernels ABOVE milestone_min_pct% GPU (default 5): plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
     { title: 'Finalize-gate', detail: 'finish any e2e A/B left incomplete before the final phase (still OPTIMIZATION work: budget-capped, never runs inside the final reserve)' },
     { title: 'Finalize', detail: 'e2e Integrator assembles the overlay + patch + launch bundle' },
@@ -200,19 +199,22 @@ const MIN_KERNEL_TASKS = Math.min(parseInt(A.min_kernel_tasks != null ? A.min_ke
 const MILESTONE_MIN_PCT = parseFloat(A.milestone_min_pct != null ? A.milestone_min_pct : 5);
 const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : (FAST_MODE ? 3 : 6), 10); // budget passed DOWN per kernel (fewer rounds in fast mode)
 const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true') === 'true';
-// ---- TUNING SKILLSET phase (default ON) --------------------------------------------------------------
+// ---- TUNING (default ON) — folded into the HeadKernel track, no phase of its own --------------------
 // The tuning skillset is vendored WHOLE into this repo (default
 // <repo>/perf_knowledge/expert_skills/tuning, hash-pinned as ONE unit by
-// e2e_workflow/scripts/tuning_skillset_sync.py) and is run by ONE role (tuning_specialist) as ONE phase
-// that sits AFTER ConfigSweep and BEFORE HeadKernel. It is deliberately a standalone phase rather than a
-// prompt fragment sprinkled into the head bake-off: (a) the skillset is a complete six-step loop
-// (scope -> baseline -> search -> correctness -> deploy -> engagement verify) and only runs to completion
-// when it owns a phase; (b) taking its own pre/post e2e A/B is what makes "how much did tuning buy us"
-// an attributable number in the final report instead of an unsplittable blob of total gain. Whatever it
-// accepts is folded into curFlags/curEnv, so HeadKernel optimizes ON TOP of a tuned stack and its own
-// A/B reference leg already contains the tuning.
-// tuning_skillset="false" disables the phase entirely: no prompt injection, no report inputs, no state
-// keys -> the run is byte-identical to a build without this feature.
+// e2e_workflow/scripts/tuning_skillset_sync.py). It used to be a STANDALONE phase run by one
+// `tuning_specialist` role between ConfigSweep and HeadKernel, with its own pre/post server A/B. That
+// bought attributability and cost more than it bought: GEMM and attention are exactly the ops the
+// skillset tunes AND exactly the ops HeadKernel optimizes, so the two tracks worked the same kernels
+// from opposite ends with no shared context, and the standalone A/B was paid on a stack HeadKernel then
+// changed underneath it.
+// It is now read PER HEAD OP, by the two agents that already own that op: `quick_tune` (a cheap
+// standalone pass that takes the obvious low-cost wins first) and `op_benchmarker` Tier A/B (backend
+// select + per-backend tune). Both are scored on the extracted op unittest, the same immutable oracle
+// the deep kernel_workflow lanes are scored on, and both run BEFORE those lanes. See the TUNING block
+// above the HeadKernel phase for the full rationale.
+// tuning_skillset="false" disables all of it: no prompt injection, no report inputs, no state keys ->
+// the run is byte-identical to a build without this feature.
 const TUNING_SKILLSET_ENABLED = String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
 // Lives under expert_skills/ so the tuning skills sit in the same hierarchy, and are selected through
 // the same index.yaml, as every other expert skill. The tree itself stays VENDORED and pinned whole —
@@ -533,10 +535,13 @@ const E2E_REPLAYABLE_KINDS = new Set(['patch', 'env', 'flag']);
 // Which roles are TOLD about the warm start. Deliberately excludes e2e_integrator and
 // director:validate — those two produce the run's authoritative numbers, and a stored prior in their
 // context is contamination with no upside.
-// tuning_specialist is a consumer for the same reason, plus one: a tuned artifact deploys outside
+// quick_tune is a consumer for the same reason, plus one: a tuned artifact deploys outside
 // the git tree and takes hours of search to rediscover, so re-deriving one the store already holds
-// is the most expensive avoidable thing this workflow does.
-const WARM_START_ROLES = new Set(['system_architect', 'config_tuner', 'tuning_specialist']);
+// is the most expensive avoidable thing this workflow does. (op_benchmarker is NOT on this list even
+// though it now tunes too — it is the bake-off that ranks backends, and a stored prior in the context
+// of the agent doing the ranking is the same contamination the integrator is kept clear of. quick_tune
+// recalls; the bake-off measures.)
+const WARM_START_ROLES = new Set(['system_architect', 'config_tuner', 'quick_tune']);
 // Credentials and trust for every emitted KB command. The six lines that do the work live in
 // scripts/kb_env.sh (which explains them), not here, because run_e2e.py runs KB commands too — the
 // salvage write for a run whose workflow died before Module B — and a Python copy of the token path
@@ -642,16 +647,16 @@ const MODEL_NAME_HINT = (MODEL_PATH || KERNEL_PATH).replace(/\/+$/, '').split('/
 // ---------------------------------------------------------------------------
 const PHASES = String(A.phases || 'all').split(',').map(s => s.trim()).filter(Boolean);
 const RUN_ALL = PHASES.includes('all');
-// Fast mode SKIPS ConfigSweep ('config'), the tuning skillset ('tune') and the editable-kernel Milestone
-// ('kernel') so all optimization comes from HeadKernel within the wall-clock budget. ('tune' joins the
-// skip set for the same reason 'config' does: fast mode's contract is "best head-kernel wins in N hours",
-// and the tuning loop's tuner sweeps + its own pre/post A/B do not fit that budget.) Default mode:
+// Fast mode SKIPS ConfigSweep ('config') and the editable-kernel Milestone ('kernel') so all
+// optimization comes from HeadKernel within the wall-clock budget. 'tune' stays in the skip set but no
+// longer names a phase: tuning is now part of the head track, and the token survives only so that an
+// explicit `phases=tune` from an older caller still resolves to false instead of throwing. Default mode:
 // FAST_SKIP is null → want() is the original `RUN_ALL || PHASES.includes(p)`, unchanged.
 const FAST_SKIP = FAST_MODE ? new Set(['config', 'tune', 'kernel']) : null;
 // Deep mode concentrates its (20h) HeadKernel budget on cross-backend co-opt: skip the editable-kernel
-// Milestone ('kernel') but KEEP ConfigSweep ('config' — cheap and it stabilizes the baseline) and KEEP
-// the tuning skillset ('tune' — same rationale, and a tuned stack is a strictly better starting point
-// for the co-opt lanes). Null in every other mode, so normal + fast are unchanged.
+// Milestone ('kernel') but KEEP ConfigSweep ('config' — cheap and it stabilizes the baseline). Tuning
+// needs no entry here at all now that it rides inside the head track: a tuned op is a strictly better
+// starting point for the co-opt lanes, and it is reached without a phase to schedule.
 const DEEP_SKIP = DEEP_MODE ? new Set(['kernel']) : null;
 const want = (p) => (RUN_ALL || PHASES.includes(p)) && !(FAST_SKIP && FAST_SKIP.has(p)) && !(DEEP_SKIP && DEEP_SKIP.has(p));
 const ST = A.state || {};   // carried state from a prior phase invocation
@@ -732,14 +737,21 @@ const KB_RESOLVE_SCHEMA = obj({
   // 'speedup' would mis-explain the order it is looking at.
   sorted_by: { type: 'string' }, champion_metric: { type: 'string' },
 }, []);
-// Result of the standalone tuning-skillset phase. pre/post are ITS OWN in-session isolated-server A/B
-// legs (NOT the run baseline), which makes tuning_delta_pct an attributable share of the total gain.
-// engagement_verified is load-bearing: the skillset's own thesis is that an unproven artifact is not a
-// win, so the orchestrator refuses to bank an accept without it.
-const TUNING_SCHEMA = obj({
+// Result of ONE op's cheap standalone tuning pass (`quick_tune`), run on that op's extracted unittest
+// before the bake-off and before the deep lanes. There is no pre/post SERVER A/B in here any more:
+// the pass is scored on the op oracle, which is what makes it cheap, and the honest attribution for a
+// per-op pass is a per-op isolated speedup — a whole-server delta would be measuring the wrong thing at
+// ten times the price. engagement_verified is load-bearing and survives unchanged from the standalone
+// phase: the skillset's own thesis is that an artifact nothing proved the runtime reads is not a win,
+// so the orchestrator refuses to bank an accept without it.
+const QUICKTUNE_SCHEMA = obj({
+  op: { type: 'string' }, op_kind: { type: 'string' }, backend: { type: 'string' },
   ran: { type: 'boolean' }, mode: { type: 'string' }, skills_used: arrStr,
-  preflight: { type: 'object', additionalProperties: true },
-  ops_tuned: arrObj, artifacts: arrStr,
+  levers_tried: arrObj, artifacts: arrStr,
+  // Measured on OP_TASK_DIR's immutable unittest: candidate vs the frozen live kernel. null when
+  // nothing was timed; `measured` is the discriminator, gate on it and not on the number.
+  isolated_speedup: { type: ['number', 'null'] }, measured: { type: 'boolean' },
+  best_ms: { type: 'number' }, baseline_ms: { type: 'number' },
   // Deploy bundle: how a tuned DATA artifact reaches production. GEAK's overlay is a PYTHONPATH
   // mechanism for code, but tuned config tables are data a library reads from its own package dir, and
   // some need a derived cache dropped before they take effect. Neither travels in the overlay — so the
@@ -761,10 +773,8 @@ const TUNING_SCHEMA = obj({
   apply_env: { type: 'string' }, apply_flags: { type: 'string' },
   correctness_gate: { type: 'string' }, accuracy_note: { type: 'string' },
   engagement_verified: { type: 'boolean' }, engagement_evidence: { type: 'string' },
-  pre_tune_throughput_tok_s: { type: 'number' }, post_tune_throughput_tok_s: { type: 'number' },
-  noise_floor_pct: { type: 'number' }, tuning_delta_pct: { type: 'number' },
-  tuning_speedup: { type: 'number' },
-  ab_interleaved: { type: 'boolean' }, ab_complete: { type: 'boolean' },
+  // Handed to op_benchmarker so Tier A/B starts where this pass stopped instead of re-searching it.
+  handoff_note: { type: 'string' },
   gate: { type: 'string', enum: ['accepted', 'no_win', 'rejected', 'incomplete', 'skipped'] },
   report_path: { type: 'string' }, summary: { type: 'string' }, reason: { type: 'string' },
 }, ['gate']);
@@ -1003,7 +1013,7 @@ function warmStartBlock(role) {
   // lives in the shared KB rather than in a private store, the switch has to reach here too — one
   // flag, one meaning, whichever store the knowledge happens to sit in. Without this, "blind" would
   // have quietly stopped being blind the moment the two stores merged.
-  if (role === 'tuning_specialist' && !TUNING_KB_ENABLED) return '';
+  if (role === 'quick_tune' && !TUNING_KB_ENABLED) return '';
   return `\n\n## Warm start (a PRIOR run's record — already measured on this box)\n` +
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/warm_start.md and follow it. The knowledge base ` +
     `offered prior configurations for this exact deployment; they are in ${KB_REF_DIR}/, and ` +
@@ -1013,7 +1023,7 @@ function warmStartBlock(role) {
     // The tuning track reads the same pages for a different purpose, so it gets the extra paragraph
     // here rather than a second block: the others are shopping for a CONFIG to adopt, it is checking
     // whether the search it is about to spend hours on has already been run to completion once.
-    (role === 'tuning_specialist' && KB_CACHE_DIR
+    (role === 'quick_tune' && KB_CACHE_DIR
       ? `\n\nFor YOUR track specifically: an accepted-kernel entry marked \`from tuning skillset\` is a ` +
         `tuned artifact a prior run produced and proved engaged. Its file was downloaded with the ` +
         `record — look under ${KB_CACHE_DIR}/*/files/tuning/ — and the entry names the env var that ` +
@@ -2995,287 +3005,230 @@ const history = ST.history || { insights: [], ledger: [], milestones: [], bottle
 function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
 
 // ===========================================================================
-// PHASE: TuningSkillset — the VENDORED tuning skillset, run WHOLE and STANDALONE, BEFORE HeadKernel.
+// TUNING — folded INTO the head-kernel track, not a module of its own.
 //
-// The skillset lives at TUNING_SKILLSET_DIR as one intact, hash-pinned tree (it is validated standalone,
-// so GEAK must run the copy that was validated — see e2e_workflow/scripts/tuning_skillset_sync.py). It is
-// NOT decomposed into knowledge/ files and NOT injected as an advisory fragment into other roles: ONE role
-// (tuning_specialist) runs its complete six-step loop as ONE phase.
+// This used to be a standalone `TuningSkillset` phase: one `tuning_specialist` role ran the vendored
+// skillset WHOLE, between ConfigSweep and HeadKernel, took its own pre/post e2e A/B, and handed a deploy
+// bundle forward. The argument for that shape was attributability — its own A/B makes "how much did
+// tuning buy us" a separate number — and separation of concerns: a tuning loop folded into a bake-off
+// was said to collapse into "one more candidate config" and never run to completion.
 //
-// Position is deliberate — after ConfigSweep, before HeadKernel:
-//   * BEFORE HeadKernel, because tuning is the cheap lever that reshapes which kernels dominate. Running
-//     it first means the head track spends its (expensive) budget on the ops that are still hot AFTER
-//     tuning, and every head A/B measures against a reference leg that already contains the tuning.
-//   * STANDALONE, because a tuning loop folded into the head bake-off never runs to completion (it
-//     collapses into "one more candidate config") and its contribution becomes unattributable. With its
-//     own in-session pre/post isolated-server A/B, the final report can state tuning's share of the gain.
+// The cost outweighed it. GEMM and attention are exactly the ops the skillset tunes AND exactly the ops
+// the head track optimizes, so the two tracks were working the same kernels from opposite ends with no
+// shared context: the head track could not see which backend tuning had already proven fastest, and the
+// tuning track could not see the roofline or the extracted op oracle the head track had just built. The
+// standalone phase also paid a full server pre/post A/B before HeadKernel had established anything, on a
+// stack it would then change underneath itself.
 //
-// An accept is folded into curFlags/curEnv (the deploy's required env IS the engagement mechanism), then
-// the profile is re-taken exactly as it is after a config win, because tuning changes the landscape too.
+// So tuning now happens PER HEAD OP, inside the head track, on the extracted op unittest — the same
+// immutable oracle the deep lanes are scored on:
+//   * Tier A/B of `op_benchmarker` (DISCOVER backends -> tune the promising ones) IS the skillset's
+//     search, scoped to one op. It reads the skillset directly (HEAD_TUNING_INPUTS below).
+//   * Before that, a cheap standalone pass (`quick_tune`) takes the obvious low-cost wins per op.
+//   * Only then do the expensive `kernel_workflow` lanes run, on top of whatever tuning found.
+// Attribution survives: each op's tuning delta is measured on the op oracle and aggregated into the same
+// `tuning` object the report/finalize/integrate consumers already read, so nothing downstream changes
+// shape. What is gone is the separate phase, the separate role, and the separate server A/B.
+//
+// `tuning` is now an AGGREGATE built during HeadKernel (see finalizeHeadTuning). It stays null until
+// then, and a resumed run picks up whatever the previous invocation banked.
 // ===========================================================================
 let tuning = ST.tuning || null;
-if (want('tune') && TUNING_SKILLSET_ENABLED) {
-  phase('TuningSkillset');
-  log(`Tuning skillset: ${TUNING_SKILLSET_DIR} (whole, standalone, pre-HeadKernel); ` +
-    `no op cap, tuning-kb ${TUNING_KB_ENABLED ? 'ENABLED' : 'DISABLED (blind eval)'}.`);
-  tuning = await safeAgent(
-    roleAgent('tuning_specialist', 'tune',
-      'Tune the live stack with the skillset, measure your OWN in-session isolated-server pre/post A/B, ' +
-      'prove engagement, and hand back a deploy bundle that reaches production through EVAL_DIR/final/.', {
-      EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD,
-      BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: curTput,
-      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
-      MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
-      NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS, ACCURACY_GATE,
-      PROFILE_TOPN: profile ? profile.profile_topN_json : '',
-      TUNING_TARGETS: (strategy && strategy.head_candidates) || headQueue || [],
-      TUNING_SKILLSET_DIR, TUNING_KB_ENABLED, SKILL_DIR: WORKFLOW_DIR,
-      // The always-fires channel, same as the Architect's and the config_tuner's. The prompt BLOCK
-      // above can be empty (no candidates, or the read never ran); these Inputs entries are how the
-      // role learns the store exists at all. Gated by TUNING_KB_ENABLED for the same reason
-      // warmStartBlock() is: blind eval has to stay blind through BOTH channels or through neither.
-      ...(TUNING_KB_ENABLED ? KB_REF_INPUTS : {}),
-      ...(TUNING_KB_ENABLED && KB_CACHE_DIR ? { KB_CACHE_DIR } : {}),
-      // The other half of the write below: the kernel store is where THIS phase files its tuned
-      // tables, keyed per (op, backend, gfx), so it is also where a later run finds them — even when
-      // the run that produced them ended below its own e2e baseline and wrote no deployment record
-      // at all. Handing over the root and the arch rather than a candidate list is deliberate: the
-      // role knows which ops it is about to work on and can ask per op, which no read done up here
-      // before the profile could do. Same TUNING_KB_ENABLED switch as everything else.
-      //
-      // PLANE, not root. The write below is `write-remote --plane both` whenever a service is
-      // configured, so the record lands behind a key on the shared store; a directory read against
-      // KB_ARTIFACTS_DIR would look at this run's own checkout, which HL creates empty per run, and
-      // would report `kernel_page_not_found` — indistinguishable from a page that has nothing. Read
-      // and write must name the same plane. A read takes exactly ONE (see kbResolveScript), so
-      // `both` resolves to `remote` and the local mirror is the named fallback.
-      ...(TUNING_KB_ENABLED && KB_DIMS && KB_DIMS.gfx ? {
-        TUNED_KB_PLANE: E2E_KB_PLANE === 'both' ? 'remote' : E2E_KB_PLANE,
-        TUNED_KB_STORE: E2E_KB_STORE_DIR,
-        TUNED_KB_GFX: KB_DIMS.gfx,
-        // The page is keyed on arch and op, NOT on dtype — one `fused_moe` page holds the bf16 and
-        // the fp8_w8a8 tables side by side, ranked against each other on speedup. Passing this makes
-        // the read drop the other dtype's rows instead of ranking them; leaving it empty is the old
-        // behaviour (everything offered), which is why an unstated precision is never an error.
-        TUNED_KB_PRECISION: KB_DIMS.precision || '',
-        TUNED_KB_SCRIPT: KERNEL_WF_DIR + '/scripts/experience_store.py',
-        TUNED_KB_ENV_PRELUDE: KB_ENV_PRELUDE,
-      } : {}),
-    }),
-    { phase: 'TuningSkillset', label: 'tuning_specialist:tune', schema: TUNING_SCHEMA });
-
-  // An accept must clear EVERY bar the skillset itself sets. Engagement is the load-bearing one: its
-  // stated thesis is that a speedup whose artifact was never proven live has proven nothing, and that
-  // failure mode is silent (the artifact lands where nothing reads it and the timing still moves). A
-  // completed BOTH-leg A/B is required for the same reason it is on the head track — a post-only number
-  // is not a measurement.
-  const tuned = tuning && tuning.gate === 'accepted';
-  const tuneOk = tuned && tuning.engagement_verified === true && tuning.ab_complete !== false &&
-    tuning.correctness_gate !== 'fail' && tuning.post_tune_throughput_tok_s > 0 &&
-    tuning.post_tune_throughput_tok_s > (tuning.pre_tune_throughput_tok_s || 0);
-  if (tuneOk) {
-    if (tuning.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + tuning.apply_env;
-    if (tuning.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + tuning.apply_flags;
-    // Carry the routing/enabling overlay forward exactly as an accepted head patch does. Without this
-    // the code half of a tuning win is silently dropped at the phase boundary and the data half is left
-    // bound to nothing — the failure the skillset spends its longest section on.
-    if (tuning.apply_overlay) curOverlay = tuning.apply_overlay;
-    curTput = tuning.post_tune_throughput_tok_s;
-    log(`Tuning skillset ACCEPTED: ${tuning.pre_tune_throughput_tok_s} -> ${curTput} tok/s ` +
-      `(+${(tuning.tuning_delta_pct || 0).toFixed(2)}% attributable to tuning; ` +
-      `${(tuning.ops_tuned || []).length} op(s), engagement proven` +
-      `${tuning.apply_overlay ? `, carrying routing overlay ${tuning.apply_overlay}` : ''}). Re-profiling.`);
-    // A missing/unverified deploy bundle does NOT withhold the accept: the gain was measured and proven
-    // live, and the artifacts are already installed in this container, so every in-run number stays
-    // valid. What breaks is DELIVERY — final_launch.sh would reproduce less than the headline. Finalize
-    // re-checks and reports it, but warn here too, because this is the point at which it is still cheap
-    // to fix and the easiest failure in this phase to not notice.
-    if (tuning.deploy_verified !== true) {
-      log(`WARNING: tuning accepted WITHOUT a verified deploy bundle (deploy_bundle=` +
-        `${tuning.deploy_bundle || '<none>'}). The in-run measurements stand, but this win may not ` +
-        `reproduce from EVAL_DIR/final/ — Finalize will re-check and report tuning_in_bundle.`);
-    }
-    history.ledger.push({
-      direction: 'tuning_skillset', verdict: 'confirmed',
-      e2e_delta_pct: tuning.tuning_delta_pct || 0,
-      lesson: `tuning skillset (standalone, pre-head): ${tuning.summary || 'accepted'}`,
-    });
-
-    // Bank each tuned op as an accepted kernel, so the KB record carries the LEVER and not just the
-    // launch script that happens to reference it. This is deliberately done HERE, deterministically,
-    // rather than left to Finalize's own accepted_kernels: the DeepSeek-V4-Pro 20260823 run banked a
-    // 3.29x tuned a8w8 blockscale table, returned accepted_kernels:[], and wrote a KB record whose
-    // files were [final.patch, launch.sh, report.md] — the lever itself was never recorded, and the
-    // next run at that canonical id recalls a configuration it cannot reproduce. Gated on tuneOk, so
-    // an unproven tuning claim banks nothing, exactly as it folds nothing into curEnv/curFlags.
-    const tunedOps = (tuning.ops_tuned || []).filter((o) => String(o.op || o.short_name || '').trim());
-    for (const o of tunedOps) {
-      bankAccepted(acceptedKernels, {
-        short_name: String(o.op || o.short_name).trim(),
-        backend: o.backend || '',
-        // A tuned table is applied through env (the deploy's env var IS the engagement mechanism),
-        // which is already a first-class winner_kind in the store alongside patch/authored.
-        kind: 'env',
-        isolated: Number(o.isolated_speedup) || 0,
-        // The phase measured ONE pre/post A/B covering all of its ops, so its delta is attributable
-        // to a single op and only to a single op. With several, the per-op number is left at 0 and
-        // the phase-level figure stands alone in tuning_skillset.tuning_delta_pct — stamping the
-        // whole delta onto each op would double-count it in any consumer that sums the list.
-        e2e_delta_pct: tunedOps.length === 1 ? (tuning.tuning_delta_pct || 0) : 0,
-        apply_env: tuning.apply_env || '',
-        apply_flags: tuning.apply_flags || '',
-        patch: '',
-        engaged: o.engaged === true,
-        from_tuning_skillset: true,
-        tuning_artifact: o.artifact || '',
-        // Whether this op was SEARCHED here or RECALLED from a prior record. Now that the tuning
-        // track reads the store it also writes, the two are indistinguishable downstream without
-        // this field — and a recall re-banked as a discovery would make one original search look
-        // like N independent confirmations to anyone counting records.
-        tuning_source: String(o.source || o.origin || '').trim() || 'search',
-      }, {});
-    }
-    if (tunedOps.length) {
-      const recalled = tunedOps.filter((o) => /recall|kb|knowledge/i.test(String(o.source || o.origin || ''))).length;
-      log(`Banked ${tunedOps.length} tuned op(s) as accepted kernels (kind=env) so the KB record ` +
-        `carries the lever: ${tunedOps.map((o) => o.op || o.short_name).join(', ')}` +
-        `${recalled ? ` (${recalled} recalled from the KB rather than searched)` : ''}.`);
-    }
-
-    // ---------------------------------------------------------------------------------------
-    // Write each tuned op into the KERNEL lane's experience store, one entry per op.
-    //
-    // Not a duplicate of the e2e KB write at the end of the run: that record is keyed on the whole
-    // deployment and gated on the run's FINAL throughput_speedup, so a tuning win a later phase
-    // erases — or a run that ends below its own baseline for unrelated reasons — takes the tuned
-    // table down with it, and the next run at the same identity searches it again from scratch. The
-    // kernel store has no such coupling: it ranks on ISOLATED per-op speedup and is addressed per
-    // (kernel, language, gfx), which is the granularity at which a tuned table is reusable.
-    //
-    // Gated on tuneOk, so nothing unproven is filed. Per-op: `isolated_speedup > 1.0` and `engaged`,
-    // because an op the phase could not prove live is not knowledge about that op whatever the
-    // phase-level A/B measured. Best-effort — a failure here loses a record, never a measurement.
-    const kernelKbOps = KB_DIMS && KB_DIMS.gfx ? tunedOps.filter((o) =>
-      Number(o.isolated_speedup) > 1.0 && o.engaged === true && String(o.artifact || '').trim()) : [];
-    if (kernelKbOps.length) {
-      const storeScript = KERNEL_WF_DIR + '/scripts/experience_store.py';
-      // `both` mirrors to the shared service; without a store dir there is nothing to mirror INTO,
-      // so it degrades to the plain directory write rather than erroring. Same selection the kernel
-      // lane makes at its own write site.
-      const remoteOn = E2E_KB_PLANE !== 'local' && !!E2E_KB_STORE_DIR;
-      // `--precision` and the two `--serving-*` flags are RECORDED, not keyed — they land in
-      // `value.upstream` and never move the entry's address. A tuned table's destination filename
-      // encodes its dtype (`...dtype=fp8_w8a8.json`), so a table measured under one precision offered
-      // to a run on another installs under a name that runtime never looks up: wasted, not wrong. What
-      // it does corrupt is RANKING, by putting an unusable table above a usable one on the same page.
-      // Stating precision here is what lets the reader's `--precision` filter drop it first.
-      const cmds = kernelKbOps.map((o) => {
-        const op = String(o.op || o.short_name).trim();
-        return `python3 ${shq(storeScript)} ${remoteOn
-            ? `write-remote --plane both --store ${shq(E2E_KB_STORE_DIR)}`
-            : 'write'} \\
-  --root ${shq(KB_ARTIFACTS_DIR)} --kernel-name ${shq(op)} \\
-  --language ${shq(String(o.backend || 'tuned').trim())} --gfx ${shq(KB_DIMS.gfx)} \\
-  --kernel-class tuning --speedup ${Number(o.isolated_speedup)} \\
-  --carrier tuned_artifact --artifact ${shq(String(o.artifact).trim())} \\
-  --tuner ${shq(String(o.tuner || '').trim())} --apply-env ${shq(tuning.apply_env || '')} \\
-  --cache-invalidation ${shq((tuning.cache_invalidation || []).join(' && '))} \\
-  --metric-kind tuning_isolated --case-names ${shq(String(o.shapes || '').replace(/,/g, ';'))} \\
-  --precision ${shq(KB_DIMS.precision || '')} --serving-framework ${shq(BACKEND)} \\
-  --serving-framework-version ${shq(KB_DIMS.framework_version || '')} \\
-  --direction ${shq('tuning-' + (String(o.backend || 'op').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-')))} \\
-  --eval-dir ${shq(EVAL_DIR)}${tuning.report_path ? ` --report ${shq(tuning.report_path)}` : ''}`;
-      });
-      try {
-        const kw = await safeAgent(
-          `You are the tuning experience writer. Run EACH of the commands below EXACTLY as written, ` +
-          `in order. Each applies its own gates and prints one line of JSON; collect those lines in ` +
-          `order into \`results\`. Do NOT edit a command, do NOT add or drop flags, and do NOT retry ` +
-          `one that fails` + (remoteOn
-            ? ` — these may reach the shared KB Store service, and every write it accepts is ` +
-              `PERMANENT (it exposes no delete), so a retry creates a second permanent record ` +
-              `instead of fixing the first`
-            : '') + `. For a command that errors, put ` +
-          `{"written": false, "reason": "io_error"} in its place so the list stays aligned with the ` +
-          `command order.\n\n` +
-          `THEN, last, write \`{"results": [...]}\` — the same list — to ` +
-          `\`${EVAL_DIR}/tuning/kb_write_tuned.json\`. That file is the receipt saying this filing ` +
-          `already happened: run_e2e.py refiles these ops from disk when the workflow is killed ` +
-          `before reaching this step, and it skips when the receipt is present. Without it, a run ` +
-          `that dies AFTER this step gets every op written a second time, and the store counts the ` +
-          `copy as an independent reproduction — which can promote a candidate on one measurement ` +
-          `seen twice. Write the receipt even if every command failed.\n` +
-          '```bash\n' + (remoteOn ? KB_ENV_PRELUDE + '\n' : '') + cmds.join('\n\n') + '\n```',
-          { phase: 'TuningSkillset', label: 'kernel-kb:write-tuned',
-            schema: obj({ results: arrObj }, ['results']) },
-          1);
-        const rows = (kw && kw.results) || [];
-        const wrote = rows.filter((r) => r && r.written).length;
-        const dup = rows.filter((r) => r && !r.written && /duplicate/.test(String(r.reason || ''))).length;
-        log(`[kernel-kb] tuned ops filed as isolated wins: ${wrote}/${kernelKbOps.length} written` +
-          `${dup ? `, ${dup} already known (counted as reproductions)` : ''}` +
-          `${rows.filter((r) => r && !r.written && !/duplicate/.test(String(r.reason || '')))
-            .map((r) => ` [${r.reason}]`).join('')}. These survive the run's own e2e verdict.`);
-      } catch (e) {
-        log(`[kernel-kb] tuned-op write failed (NON-FATAL — the tuning result itself is unaffected): ` +
-          `${String(e).slice(0, 200)}`);
-      }
-    } else if (tunedOps.length && (!KB_DIMS || !KB_DIMS.gfx)) {
-      log(`[kernel-kb] tuned ops NOT filed: no gfx established, and an arch-less entry is ` +
-        `unattributable (a tuned table is valid for exactly one arch).`);
-    }
-
-    // Tuning changed which kernels dominate — re-profile + re-strategize so the head track works the
-    // POST-tuning landscape, not the pre-tuning one. Same contract as the post-ConfigSweep re-profile.
-    profile = await safeAgent(
-      roleAgent('profiler', 'reprofile', 'Re-profile after the tuning skillset deployed its artifacts.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'tuning',
-        // curOverlay, not '': tuning may have banked a routing overlay, and profiling without it would
-        // measure a stack where the tuned artifact binds to nothing, then hand the head track a Top-N
-        // for the wrong landscape.
-        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Profile', label: 'profiler:post-tuning', schema: PROFILE_SCHEMA });
-    const retune = await safeAgent(
-      roleAgent('system_architect', 'strategize', 'Re-route after tuning changed the landscape.', {
-        EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
-        WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Strategize', label: 'architect:post-tuning-strategize', schema: STRATEGY_SCHEMA });
-    if (retune && retune.kernel_candidates) kernelQueue = retune.kernel_candidates.slice();
-    if (retune && retune.head_candidates)
-      headQueue = applyOpIdentityGuard(retune.head_candidates.slice(), 'post-tuning re-strategize');
-    if (retune) await ensureFlydslGate();
-  } else if (tuned) {
-    // Claimed accepted but failed a hard bar. Do NOT bank it — an unproven artifact silently poisons
-    // every downstream A/B, which is the exact failure the skillset exists to prevent.
-    log(`Tuning skillset claimed ACCEPTED but did not clear the bar ` +
-      `(engagement_verified=${tuning.engagement_verified}, ab_complete=${tuning.ab_complete}, ` +
-      `correctness=${tuning.correctness_gate}, pre=${tuning.pre_tune_throughput_tok_s}, ` +
-      `post=${tuning.post_tune_throughput_tok_s}) — NOT banked; continuing on the pre-tuning config.`);
-    history.ledger.push({ direction: 'tuning_skillset', verdict: 'flagged',
-      lesson: 'tuning claimed a win it could not prove (engagement/A-B/correctness) — not banked' });
-    tuning = { ...tuning, gate: 'no_win', reason: (tuning.reason || '') + ' [orchestrator: accept withheld — unproven]' };
-  } else {
-    log(`Tuning skillset produced no banked win (gate=${tuning ? tuning.gate : 'null/degraded'}` +
-      `${tuning && tuning.reason ? `: ${tuning.reason}` : ''}).`);
-    history.ledger.push({ direction: 'tuning_skillset', verdict: tuning && tuning.gate === 'skipped' ? 'skipped' : 'dead_end',
-      lesson: (tuning && (tuning.reason || tuning.summary)) || 'tuning phase produced no result' });
-  }
-} else if (want('tune') && !TUNING_SKILLSET_ENABLED) {
-  log('Tuning skillset DISABLED (tuning_skillset=false) — skipping the phase entirely.');
+// Per-head tuning outcomes, accumulated by the head track and folded up at the end of it.
+const headTuning = [];
+// Injected into every op_benchmarker / quick_tune call: the skillset the old phase owned, now read per
+// op. Empty object when tuning is disabled, so those prompts stay byte-identical to a build without the
+// feature. A FUNCTION, not a const, for the same reason tuningIntegrateInputs() is one: KB_REF_INPUTS
+// and KB_CACHE_DIR are `let`s the preflight fills in, and the old code spread them at agent-call time.
+// Snapshotting them here would freeze whatever they happened to be at this line.
+const headTuningInputs = () => (TUNING_SKILLSET_ENABLED ? {
+  TUNING_SKILLSET_DIR, TUNING_KB_ENABLED,
+  ...(TUNING_KB_ENABLED ? KB_REF_INPUTS : {}),
+  ...(TUNING_KB_ENABLED && KB_CACHE_DIR ? { KB_CACHE_DIR } : {}),
+  ...(TUNING_KB_ENABLED && KB_DIMS && KB_DIMS.gfx ? {
+    TUNED_KB_PLANE: E2E_KB_PLANE === 'both' ? 'remote' : E2E_KB_PLANE,
+    TUNED_KB_STORE: E2E_KB_STORE_DIR,
+    TUNED_KB_GFX: KB_DIMS.gfx,
+    TUNED_KB_PRECISION: (KB_DIMS && KB_DIMS.precision) || '',
+    TUNED_KB_SCRIPT: KERNEL_WF_DIR + '/scripts/experience_store.py',
+    TUNED_KB_ENV_PRELUDE: KB_ENV_PRELUDE,
+  } : {}),
+} : {});
+if (!TUNING_SKILLSET_ENABLED) {
+  log('Tuning DISABLED (tuning_skillset=false) — the head track runs without the skillset or quick-tune.');
+} else {
+  log(`Tuning folded into HeadKernel: skillset ${TUNING_SKILLSET_DIR} read per op; ` +
+    `tuning-kb ${TUNING_KB_ENABLED ? 'ENABLED' : 'DISABLED (blind eval)'}.`);
 }
-// Report inputs for the tuning phase. Empty object when the phase is off/absent, so the Report prompt is
+
+// Fold the per-op tuning outcomes into the one `tuning` object every downstream consumer already reads
+// (Report, Finalize, the integrate carve-out, carryState). Called once, at the end of the head track.
+// Deliberately conservative: only ops whose tuning win was measured on the op oracle AND whose artifact
+// was proven to engage are banked, which is the same pair of bars the standalone phase enforced.
+function finalizeHeadTuning() {
+  if (!TUNING_SKILLSET_ENABLED) return;
+  const banked = headTuning.filter((t) => t && t.gate === 'accepted' && t.engagement_verified === true &&
+    Number(t.isolated_speedup) > 1.0);
+  if (!banked.length) {
+    if (headTuning.length) {
+      log(`Tuning (in-head): ${headTuning.length} op(s) attempted, none cleared the measure+engage bar.`);
+      history.ledger.push({ direction: 'tuning_in_head', verdict: 'dead_end',
+        lesson: `tuning attempted on ${headTuning.length} head op(s); nothing banked` });
+    }
+    return;
+  }
+  const applyEnv = [...new Set(banked.map((t) => t.apply_env).filter(Boolean))].join(' ');
+  const applyFlags = [...new Set(banked.map((t) => t.apply_flags).filter(Boolean))].join(' ');
+  tuning = {
+    gate: 'accepted',
+    source: 'head_track',
+    // Keep the per-op shape run_e2e.py's salvage write-back gates on (engaged + artifact): banking an
+    // op here and dropping the two fields that decide whether it is filed would silently stop the
+    // tuned tables from ever reaching the store.
+    ops_tuned: banked.map((t) => ({
+      op: t.op, backend: t.backend || '', isolated_speedup: t.isolated_speedup,
+      engaged: t.engagement_verified === true, artifact: (t.artifacts || [])[0] || '',
+    })),
+    apply_env: applyEnv, apply_flags: applyFlags,
+    // Each op's tuning was measured on its own oracle, so the honest aggregate is per-op isolated
+    // speedups, NOT a single e2e delta. The old phase's `tuning_delta_pct` came from a server A/B it
+    // no longer takes; leaving it null is the truthful answer and the report renders it as such rather
+    // than quoting a number nothing measured.
+    tuning_delta_pct: null,
+    engagement_verified: true,
+    deploy_bundle: `${EVAL_DIR}/tuning/deploy`,
+    live_tree_files: [...new Set(banked.flatMap((t) => t.live_tree_files || []))],
+    artifacts: [...new Set(banked.flatMap((t) => t.artifacts || []))],
+    cache_invalidation: [...new Set(banked.flatMap((t) => t.cache_invalidation || []))],
+    apply_overlay: banked.map((t) => t.apply_overlay).filter(Boolean)[0] || '',
+    deploy_verified: banked.every((t) => t.deploy_verified === true),
+    summary: `${banked.length} head op(s) tuned in-track: ` +
+      banked.map((t) => `${t.op}${t.backend ? `/${t.backend}` : ''} ${Number(t.isolated_speedup).toFixed(2)}x`).join(', '),
+  };
+  if (applyEnv) curEnv = (curEnv ? curEnv + ' ' : '') + applyEnv;
+  if (applyFlags) curFlags = (curFlags ? curFlags + ' ' : '') + applyFlags;
+  if (tuning.apply_overlay) curOverlay = tuning.apply_overlay;
+  log(`Tuning (in-head) BANKED: ${tuning.summary}.`);
+  if (!tuning.deploy_verified) {
+    log('WARNING: an in-head tuning win has no verified deploy bundle — the in-run numbers stand, but ' +
+      'this may not reproduce from EVAL_DIR/final/. Finalize re-checks and reports tuning_in_bundle.');
+  }
+  for (const t of banked) {
+    bankAccepted(acceptedKernels, {
+      short_name: t.op, backend: t.backend || '',
+      // A tuned table is applied through env (the deploy's env var IS the engagement mechanism), which
+      // is already a first-class winner_kind in the store alongside patch/authored.
+      kind: 'env',
+      isolated: Number(t.isolated_speedup) || 0,
+      // No e2e delta is attributable to a single tuned op: the fold takes no server A/B, and the head
+      // track's own gate measures the whole accepted stack. 0 here means "not separately measured",
+      // and the per-op evidence that IS real is `isolated` above.
+      e2e_delta_pct: 0,
+      apply_env: t.apply_env || '', apply_flags: t.apply_flags || '', patch: '',
+      engaged: t.engagement_verified === true,
+      from_tuning_skillset: true,
+      tuning_artifact: (t.artifacts || [])[0] || '',
+      // Whether this op was SEARCHED here or RECALLED from a prior record. The tuning track reads the
+      // store it also writes, so the two are indistinguishable downstream without this field — and a
+      // recall re-banked as a discovery makes one original search look like N independent
+      // confirmations to anyone counting records. `mode` is quick_tune's own kb_assisted|derived.
+      tuning_source: /kb|recall|knowledge/i.test(String(t.mode || '')) ? 'recall' : 'search',
+      note: 'from tuning skillset (in-head)',
+    });
+  }
+  const recalled = banked.filter((t) => /kb|recall|knowledge/i.test(String(t.mode || ''))).length;
+  if (recalled) log(`  (${recalled} of ${banked.length} recalled from the tuning KB rather than searched)`);
+  history.ledger.push({ direction: 'tuning_in_head', verdict: 'confirmed', lesson: tuning.summary });
+}
+// The CHEAP standalone pass, run per head op BEFORE the bake-off and long before the deep lanes.
+//
+// Deliberately a BARE agent rather than a roleAgent: it never launches a server, so the serving-config
+// invariant roleAgent injects into every prompt is noise to it, and the point of this rung is to be the
+// cheapest thing on the ladder. It reads the vendored skillset, tries the low-cost levers (env knobs,
+// backend/kernel selection, an existing tuned table, a config sweep the skillset already knows how to
+// drive) and measures each on OP_TASK_DIR's immutable unittest — the same oracle the lanes are scored
+// on, so its number is directly comparable to theirs and to the bake-off's.
+//
+// Bounded on purpose. Anything it does not find in its budget is not lost: op_benchmarker Tier A/B
+// searches wider next, and the kernel_workflow lanes search widest. The rung exists so the expensive
+// rungs start from a tuned op instead of re-deriving the obvious, and so an op whose whole headroom was
+// a config table costs minutes instead of a full authoring run.
+//
+// Only GEMM and attention (incl. fused-MoE expert GEMM) go through it: those are the ops the skillset
+// has tuners for. Anything else returns null immediately and the ladder is unchanged for it.
+const QUICK_TUNE_KINDS = new Set(['gemm', 'moe', 'attention', 'attn', 'mla', 'gqa']);
+const QUICK_TUNE_MINUTES = parseInt(A.quick_tune_minutes != null ? A.quick_tune_minutes : 25, 10);
+const QUICK_TUNE_ENABLED = TUNING_SKILLSET_ENABLED && QUICK_TUNE_MINUTES > 0;
+async function quickTune(h, ext, gpu) {
+  if (!QUICK_TUNE_ENABLED) return null;
+  const kind = String((ext && ext.op_kind) || (h && h.op_kind) || '').toLowerCase();
+  if (!QUICK_TUNE_KINDS.has(kind)) {
+    log(`  [quick-tune] ${h.short_name}: op_kind=${kind || 'unknown'} — no cheap tuner applies; straight to the bake-off.`);
+    return null;
+  }
+  const res = await safeAgent(
+    `You are the quick_tune agent. PHASE=quick_tune.
+First Read ${WORKFLOW_DIR}/roles/quick_tune.md and follow it. Read any knowledge files it points you to
+under ${WORKFLOW_DIR}/knowledge/. Do all filesystem/shell work yourself (Bash/Read/Write).
+You are the CHEAPEST rung of the ladder for ONE op: take the low-cost tuning wins on it, prove them on
+its unittest, and hand what you learned to the bake-off that runs next. You do NOT author or rewrite a
+kernel and you do NOT launch a serving benchmark — both cost more than your whole budget.
+
+## Inputs
+${cfg({
+      EVAL_DIR, OP: h.short_name, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind || kind,
+      PCT_GPU_TIME: h.pct_gpu_time, GPU_ID: gpu, ENABLE_FP8,
+      CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
+      BASELINE_CALLABLE: ext.baseline_callable || '', TARGET_CALLABLE: ext.target_callable || '',
+      DEVICE_KERNEL: ext.device_kernel || '', DTYPE: ext.dtype || '',
+      CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+      TIME_BUDGET_MIN: QUICK_TUNE_MINUTES, SKILL_DIR: WORKFLOW_DIR,
+      ...headTuningInputs(),
+    })}
+
+Return ONLY the structured JSON roles/quick_tune.md specifies (a StructuredOutput tool is forced).`,
+    // The budget is stated to the agent (TIME_BUDGET_MIN) rather than enforced by a shorter wall clock:
+    // safeAgent's guard is the run-wide hung-agent bound, and cutting an in-flight tuning pass short
+    // loses the measurement it was about to return. The rung stays cheap because of what it is told to
+    // do, not because it gets killed.
+    { phase: 'HeadKernel', label: `quick_tune ${h.short_name}`, schema: QUICKTUNE_SCHEMA });
+  if (!res) { log(`  [quick-tune] ${h.short_name}: agent returned nothing; continuing to the bake-off.`); return null; }
+  const t = { ...res, op: res.op || h.short_name, op_kind: res.op_kind || kind, gpu_id: gpu };
+  headTuning.push(t);
+  const sp = Number(t.isolated_speedup);
+  log(`  [quick-tune] ${h.short_name}: gate=${t.gate}` +
+    (t.measured && Number.isFinite(sp) ? ` isolated=${sp.toFixed(3)}x` : ' (nothing measured)') +
+    ` engaged=${t.engagement_verified === true}. ${t.summary || t.reason || ''}`);
+  // A tuning win that was measured but NOT proven to engage is not banked (finalizeHeadTuning drops it),
+  // but it is still the most useful thing the bake-off can be told, so it is handed on either way.
+  return t;
+}
+// What quick_tune learned, handed to op_benchmarker so Tier A/B starts where it stopped rather than
+// re-searching the same levers. Empty object when the pass did not run, so that prompt is unchanged.
+const quickTuneInputs = (t) => (t ? {
+  QUICK_TUNE: {
+    gate: t.gate, backend: t.backend || '', isolated_speedup: t.isolated_speedup,
+    measured: t.measured === true, best_ms: t.best_ms, baseline_ms: t.baseline_ms,
+    apply_env: t.apply_env || '', apply_flags: t.apply_flags || '', apply_overlay: t.apply_overlay || '',
+    artifacts: t.artifacts || [], levers_tried: t.levers_tried || [],
+    engagement_verified: t.engagement_verified === true,
+    handoff_note: t.handoff_note || t.summary || t.reason || '',
+  },
+} : {});
+// Report inputs for tuning. Empty object when tuning is off or banked nothing, so the Report prompt is
 // byte-identical to a build without this feature.
-const TUNING_REPORT_INPUTS = (TUNING_SKILLSET_ENABLED && tuning) ? { TUNING_RESULT: tuning } : {};
+// FUNCTIONS, not consts, and this is load-bearing now: `tuning` is no longer settled by the time control
+// reaches this line. The standalone phase used to finish just above here, so a const captured its final
+// value; the in-head fold does not populate `tuning` until finalizeHeadTuning() runs at the end of the
+// head track. A const here would freeze `null` and silently drop every banked tuning win out of both the
+// report and the deploy bundle.
+const tuningReportInputs = () => ((TUNING_SKILLSET_ENABLED && tuning) ? { TUNING_RESULT: tuning } : {});
 // Finalize inputs. A tuned DATA artifact cannot ride the PYTHONPATH overlay, so the ONLY way it reaches
 // production is for Finalize to fold this bundle into EVAL_DIR/final/ (concatenate its diff into
 // final_patch.diff, copy its files, and invoke its deploy.sh from final_launch.sh before the server
-// starts). Passed only when the tuning phase actually banked a win, so an unaccepted/absent tuning
-// leaves the Finalize prompt byte-identical.
-const TUNING_FINALIZE_INPUTS = (TUNING_SKILLSET_ENABLED && tuning && tuning.gate === 'accepted')
+// starts). Passed only when tuning actually banked a win, so an unaccepted/absent tuning leaves the
+// Finalize prompt byte-identical.
+const tuningFinalizeInputs = () => ((TUNING_SKILLSET_ENABLED && tuning && tuning.gate === 'accepted')
   ? {
     TUNING_DEPLOY_BUNDLE: tuning.deploy_bundle || `${EVAL_DIR}/tuning/deploy`,
     TUNING_APPLY_ENV: tuning.apply_env || '',
@@ -3284,7 +3237,7 @@ const TUNING_FINALIZE_INPUTS = (TUNING_SKILLSET_ENABLED && tuning && tuning.gate
     TUNING_LIVE_TREE_FILES: tuning.live_tree_files || [],
     TUNING_OVERLAY: tuning.apply_overlay || '',
   }
-  : {};
+  : {});
 
 // The live-tree carve-out, handed to EVERY integrate leg (see roles/e2e_integrator.md, "never mutate
 // site-packages"). That rule asserts `git status --porcelain` is EMPTY in the installed tree before and
@@ -3366,11 +3319,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         history.ledger.push({ direction: h.short_name, verdict: isDominant ? 'flagged' : 'dead_end', lesson: `op extraction failed (${why})` });
         return null;
       }
+      // Cheap rung first: take the low-cost tuning wins on this op, then let the bake-off search wider
+      // from where it stopped, then the kernel_workflow lanes deepest of all.
+      const qt = await quickTune(h, ext, GPU_LIST[0]);
       const bake = await safeAgent(
         roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
           EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
           CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
           GPU_ID: GPU_LIST[0], ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET: DEEP_WAVE_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+          ...headTuningInputs(), ...quickTuneInputs(qt),
         }),
         { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
       // Lane roster: ALWAYS tune the live editable kernel + author EVERY backend the bake-off proposes
@@ -3725,11 +3682,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           },
           { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
         if (!ext || ext.smoke !== 'pass' || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
+        const qt = await quickTune(h, ext, gpu);
         const bake = await safeAgent(
           roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
             EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
             CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
             GPU_ID: gpu, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+            ...headTuningInputs(), ...quickTuneInputs(qt),
           }),
           { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
         return { h, gpu, ext, bake };
@@ -3944,12 +3903,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
       continue;
     }
+    // (h1b) CHEAP rung: quick_tune the op before anything expensive looks at it.
+    const qt = await quickTune(h, ext, h.gpu_id);
     // (h2) DISCOVER existing impls + tune cheap levers + DECIDE an author_plan.
     const bake = await safeAgent(
       roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
         EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
         CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
         GPU_ID: h.gpu_id, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+        ...headTuningInputs(), ...quickTuneInputs(qt),
       }),
       { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
     if (!bake || (bake.gate !== 'have_winner' && bake.gate !== 'author_recommended')) {
@@ -4171,6 +4133,10 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
   }
   } // end serial head track (default path; runs for normal mode and fast-mode-single-GPU)
+  // Fold the per-op tuning outcomes into the one `tuning` object the downstream consumers read, and into
+  // curEnv/curFlags/curOverlay. BEFORE the re-profile on purpose: a banked tuning changes which kernels
+  // are hot, so profiling the untuned stack would hand the Milestone loop a stale ranking.
+  finalizeHeadTuning();
   // Head wins reshape the profile massively (GEMM mass shrinks) — re-profile before the kernel loop.
   if (acceptedHeads.length) {
     profile = await safeAgent(
@@ -4542,7 +4508,7 @@ if (want('final')) {
     roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.', {
       EVAL_DIR, FINAL_OVERLAY: curOverlay, ACCEPTED_FLAGS: curFlags, ACCEPTED_ENV: curEnv,
       ACCEPTED_KERNELS: allAccepted, BASELINE_THROUGHPUT: BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
-      ...TUNING_FINALIZE_INPUTS,
+      ...tuningFinalizeInputs(),
     }),
     { phase: 'Finalize', label: 'e2e_integrator:finalize', schema: FINALIZE_SCHEMA });
   finalTput = (finalize && finalize.final_throughput_tok_s) || curTput;
@@ -4561,7 +4527,7 @@ if (want('final')) {
       ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
-      ...ANALYSIS_SKILL_INPUTS, ...TUNING_REPORT_INPUTS,
+      ...ANALYSIS_SKILL_INPUTS, ...tuningReportInputs(),
     }),
     { phase: 'Report', label: 'architect:report', schema: REPORT_SCHEMA });
 
@@ -4670,20 +4636,20 @@ const kbWarmStart = (E2E_WARM_START_ON && KB_DIMS) ? {
   // recalled or how it fared.
   recall: KB_RECALL,
 } : null;
-// Attribution block for the standalone tuning phase. Because the phase measured its OWN interleaved
-// pre/post legs, its contribution can be expressed both absolutely (delta%) and as a SHARE of the run's
-// total gain — which is the number "how much did the tuning actually help?" is asking for. share is null
-// (not 0) when the run had no net gain to apportion, so a caller never divides by a meaningless total.
+// Attribution block for tuning. The standalone phase measured its OWN interleaved pre/post SERVER legs,
+// so it could report an absolute delta% and a SHARE of the run's total gain. The in-head fold does not
+// take that A/B — deliberately: each op's tuning is measured on that op's oracle, at a fraction of the
+// cost, and the run's ONE server A/B is the head candidate's. So the delta and the share are reported
+// as null rather than as a number nothing measured, and the attributable evidence is per-op:
+// `ops_tuned[].isolated_speedup`, each from the immutable unittest for that op. A consumer that wants a
+// single figure should read `share_of_total_gain_pct: null` as "not measured", never as "zero".
 function tuningReturn() {
   if (!TUNING_SKILLSET_ENABLED) return { enabled: false };
   const base = {
     enabled: true, skillset_dir: TUNING_SKILLSET_DIR, kb_enabled: TUNING_KB_ENABLED, ran: !!tuning,
+    source: 'head_track', attempts: headTuning.length,
   };
-  if (!tuning) return { ...base, gate: want('tune') ? 'not_run' : 'phase_not_selected' };
-  const finalT = validatedOk ? validation.director_verified_throughput_tok_s : finalTput;
-  const totalGain = (finalT || 0) - (BASELINE_TPUT || 0);
-  const tuningGain = (tuning.post_tune_throughput_tok_s || 0) - (tuning.pre_tune_throughput_tok_s || 0);
-  const banked = tuning.gate === 'accepted';
+  if (!tuning) return { ...base, gate: headTuning.length ? 'no_win' : (want('head') ? 'not_run' : 'phase_not_selected') };
   return {
     ...base,
     gate: tuning.gate,
@@ -4707,16 +4673,12 @@ function tuningReturn() {
     correctness_gate: tuning.correctness_gate || 'unknown',
     engagement_verified: tuning.engagement_verified === true,
     engagement_evidence: tuning.engagement_evidence || '',
-    pre_tune_throughput_tok_s: tuning.pre_tune_throughput_tok_s || 0,
-    post_tune_throughput_tok_s: tuning.post_tune_throughput_tok_s || 0,
-    noise_floor_pct: tuning.noise_floor_pct || 0,
-    tuning_delta_pct: tuning.tuning_delta_pct || 0,
-    tuning_speedup: tuning.tuning_speedup ||
-      (tuning.pre_tune_throughput_tok_s ? (tuning.post_tune_throughput_tok_s / tuning.pre_tune_throughput_tok_s) : 1.0),
-    ab_interleaved: tuning.ab_interleaved === true,
-    ab_complete: tuning.ab_complete !== false,
-    // Share of the run's TOTAL gain attributable to the tuning phase (banked wins only).
-    share_of_total_gain_pct: (banked && totalGain > 0) ? +((tuningGain / totalGain) * 100).toFixed(2) : null,
+    // null, not 0: no server A/B is taken for tuning any more (see the header). The per-op numbers in
+    // ops_tuned[] are the measurement; these three keys stay in the shape only so an existing consumer
+    // does not KeyError, and null is the truthful value for "this run did not measure that".
+    tuning_delta_pct: null,
+    tuning_speedup: null,
+    share_of_total_gain_pct: null,
     report_path: tuning.report_path || `${EVAL_DIR}/tuning/tuning_report.md`,
     summary: tuning.summary || '', reason: tuning.reason || '',
   };

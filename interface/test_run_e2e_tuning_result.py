@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Tests for the ADDITIVE ``tuning_skillset`` block in result.json.
 
-CONTRACT under test: result.json is the artifact Hyperloom and every downstream consumer read. The
-standalone tuning phase may ADD to it and may not otherwise touch it.
+CONTRACT under test: result.json is the artifact Hyperloom and every downstream consumer read. Tuning
+may ADD to it and may not otherwise touch it.
 
-  1. A run without the tuning phase produces a result.json that is byte-identical to one from a build
+  1. A run without tuning produces a result.json that is byte-identical to one from a build
      without the feature — the key is absent, not null, not empty.
-  2. A run WITH the tuning phase changes exactly one thing: a new top-level ``tuning_skillset`` key.
+  2. A run WITH tuning changes exactly one thing: a new top-level ``tuning_skillset`` key.
      Every pre-existing key keeps its name, type and value.
   3. The block says how the win reaches production, because a tuned DATA artifact does not ride the
      PYTHONPATH overlay and a caller reproducing the bundle by hand needs the deploy step.
@@ -51,17 +51,18 @@ def _tuning(**extra) -> dict:
         "gate": "accepted",
         "mode": "derived",
         "skills_used": ["tuning-core", "tuning-gemm"],
-        "ops_tuned": [{"op": "gemm_a8w8_bpreshuffle", "engaged": True}],
-        "pre_tune_throughput_tok_s": 1000.0,
-        "post_tune_throughput_tok_s": 1080.0,
-        "tuning_delta_pct": 8.0,
-        "tuning_speedup": 1.08,
-        "share_of_total_gain_pct": 40.0,
+        "source": "head_track",
+        "attempts": 2,
+        "ops_tuned": [{"op": "gemm_a8w8_bpreshuffle", "backend": "aiter", "engaged": True,
+                       "isolated_speedup": 1.31, "artifact": "/eval/tuning/tuned.csv"}],
+        # None, not 0.0: tuning is measured per op on the op oracle and takes no server A/B of its own,
+        # so these three are NOT MEASURED. A consumer that reads null as zero is the bug this guards.
+        "tuning_delta_pct": None,
+        "tuning_speedup": None,
+        "share_of_total_gain_pct": None,
         "engagement_verified": True,
         "engagement_evidence": "kernel_gemm_0 dispatched (CK symbol gone)",
         "correctness_gate": "pass",
-        "ab_interleaved": True,
-        "ab_complete": True,
         "deploy_bundle": "/eval/tuning/deploy",
         "deploy_verified": True,
         "cache_invalidation": ["rm -rf /tmp/aiter_configs"],
@@ -125,13 +126,23 @@ def test_headline_is_not_inflated_by_tuning(tmp_path):
 def test_accepted_block_carries_attribution_and_evidence(tmp_path):
     t = _norm(tmp_path, _wf(tuning_skillset=_tuning()))["tuning_skillset"]
     assert t["gate"] == "accepted"
-    assert t["pre_tune_throughput_tok_s"] == 1000.0
-    assert t["post_tune_throughput_tok_s"] == 1080.0
-    assert t["share_of_total_gain_pct"] == 40.0
+    assert t["source"] == "head_track"
+    # The attribution is per op, measured on that op's own immutable oracle.
+    assert t["ops_tuned"][0]["isolated_speedup"] == 1.31
+    assert "gemm_a8w8_bpreshuffle/aiter 1.31x" in t["explanation"]
     assert t["engagement_verified"] is True
     assert t["engagement_evidence"]
-    assert "1000.0 -> 1080.0" in t["explanation"]
-    assert "40.0%" in t["explanation"]
+
+
+def test_unmeasured_attribution_is_null_not_zero(tmp_path):
+    """The standalone phase reported a delta% and a share of the total gain from its own server A/B.
+    The in-head fold takes no such A/B, so those keys must come back None. Emitting 0.0 would read as
+    "tuning bought nothing", which is a claim nothing measured — the opposite of "not measured"."""
+    t = _norm(tmp_path, _wf(tuning_skillset=_tuning()))["tuning_skillset"]
+    for key in ("tuning_delta_pct", "tuning_speedup", "share_of_total_gain_pct"):
+        assert key in t, f"{key} must stay in the shape for consumers written against the old phase"
+        assert t[key] is None, f"{key} must be None (not measured), never 0"
+    assert "not measured" in t["explanation"]
 
 
 def test_accepted_block_says_how_it_reaches_production(tmp_path):
@@ -173,7 +184,7 @@ def test_no_win_block_omits_deploy_fields(tmp_path):
                 "live_tree_files", "apply_overlay"):
         assert key not in t
     # Attribution fields still present: a measured negative result is a result.
-    assert t["pre_tune_throughput_tok_s"] == 1000.0
+    assert t["ops_tuned"][0]["isolated_speedup"] == 1.31
     assert t["engagement_verified"] is True
 
 
@@ -192,4 +203,4 @@ def test_enabled_but_not_run(tmp_path):
     assert t["ran"] is False
     assert t["gate"] == "not_run"
     assert "did not run" in t["explanation"]
-    assert "pre_tune_throughput_tok_s" not in t
+    assert "ops_tuned" not in t

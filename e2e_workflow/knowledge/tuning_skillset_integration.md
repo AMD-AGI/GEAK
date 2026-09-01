@@ -8,14 +8,16 @@ to copy a procedure out of the skillset into this file, that is the thing this d
 
 ```
 <repo>/perf_knowledge/expert_skills/tuning/  the skillset, VENDORED WHOLE and UNMODIFIED (47 files)
-e2e_workflow/roles/tuning_specialist.md      the ONLY adapter — a thin role that delegates into it
-e2e_workflow/e2e_workflow.js                 one gated phase block: want('tune'), after config, before head
+e2e_workflow/roles/quick_tune.md             the cheap standalone pass — one head op, bare, bounded
+e2e_workflow/roles/op_benchmarker.md         Tier A/B — the wider per-op search, same op, same oracle
+e2e_workflow/e2e_workflow.js                 no phase: quickTune() + headTuningInputs() inside HeadKernel
 e2e_workflow/knowledge/tuning_skillset.manifest.sha256    hash pin for the vendored tree
 e2e_workflow/scripts/tuning_skillset_sync.py --verify|--update|--sync
 ```
 
 That is the whole surface. No other role's prompt receives the skillset, and no part of its method has
-been rewritten into GEAK's `knowledge/` tree.
+been rewritten into GEAK's `knowledge/` tree. The two roles that do receive it are the two that already
+own the op being tuned — which is the point of the change described in the next section.
 
 ## Why vendored whole
 
@@ -36,60 +38,99 @@ Consequences, which are load-bearing:
 - The tree is invoked through **its own** entry points (`README.md` routes; each `tuning-*/SKILL.md` is
   independently invocable; `tuning-core/` is the shared foundation the others assume).
 
-## Why its own phase, before HeadKernel
+## Why it is NOT its own phase (it used to be)
 
-Position: `Setup → Profile → Strategize → ConfigSweep → **TuningSkillset** → HeadKernel → Milestone → Finalize → Report → Validate`.
+Position: `Setup → Profile → Strategize → ConfigSweep → **HeadKernel (extract → quick_tune → bake-off →
+lanes → e2e gate)** → Milestone → Finalize → Report → Validate`.
 
-**Standalone**, because the skillset is a complete six-step loop — scope, baseline, search, correctness
-gate, deploy, engagement verify. Folded into the head-kernel bake-off it collapses into "try a tuned
-config alongside the other candidates": the per-op tuners, the deploy paths and the engagement checks
-never run, which is most of the skillset. Owning a phase is what makes it run end to end.
+It used to be a phase of its own, `TuningSkillset`, between ConfigSweep and HeadKernel, run by one
+`tuning_specialist` role, taking its own interleaved pre/post server A/B. The argument was that the
+skillset is a complete six-step loop — scope, baseline, search, correctness gate, deploy, engagement
+verify — that collapses into "try a tuned config alongside the other candidates" when it is folded into
+a bake-off, and that owning a phase is what makes it run end to end. The second argument was
+attribution: its own A/B is what let the report state what tuning bought as a separate number.
 
-**Before HeadKernel**, for three reasons:
+Both were real. Neither survived contact with what the two tracks were actually doing:
 
-1. Tuning is the cheap lever and it **reshapes the profile**. Run it first and the (expensive) head
-   budget goes to the ops that are still hot *after* tuning. An accepted tuning therefore triggers a
-   re-profile + re-strategize, exactly as an accepted config sweep does.
-2. Its accepted env/flags fold into the carried config, so every later measurement — head A/B reference
-   legs, Finalize, the Director's Validate — happens **on top of** a tuned stack. Head deltas stay honest
-   because tuning is already in their reference leg. (Corollary for readers of the report: the tuning
-   delta and the head deltas must not be summed.)
-3. **Attribution.** The phase takes its own in-session interleaved pre/post A/B, so the report can state
-   what tuning bought, in tok/s and as a share of the run's total gain. Run it inside another phase and
-   that number stops existing.
+- **They were tuning the same ops from opposite ends.** GEMM and attention are exactly what the skillset
+  has tuners for and exactly what HeadKernel optimizes. With a phase boundary between them, the head
+  track could not see which backend tuning had already proven fastest, and the tuning track could not
+  see the roofline or the extracted op oracle the head track was about to build. Each re-derived the
+  other's findings, on different harnesses, and the two numbers were not comparable.
+- **The standalone A/B was the most expensive measurement in the run, taken at the worst moment** —
+  a full server pre/post before HeadKernel had established anything, on a stack HeadKernel would then
+  change underneath it.
+
+So the loop now runs **per head op**, on that op's extracted unittest — the same immutable oracle the
+deep lanes are scored on — as the two cheapest rungs of the head ladder:
+
+1. **`quick_tune`** (`roles/quick_tune.md`): a bare, bounded standalone pass, one op, no server. It
+   recalls a tuned table from the per-op store if one exists, tries the env/dispatch knobs and a small
+   per-shape sweep, proves engagement, writes the deploy bundle, and hands `handoff_note` forward. Bare
+   rather than a `roleAgent` on purpose: it never launches a server, so the serving-config invariant
+   every role prompt carries is noise to it, and the point of this rung is to be the cheapest thing on
+   the ladder.
+2. **`op_benchmarker` Tier A/B**: the wider cross-backend bake-off and per-backend tune, told what rung 1
+   already timed so it does not re-search it.
+
+Then, and only then, the expensive `kernel_workflow` lanes run, on top of whatever tuning found.
+
+The six-step loop is intact — it is scoped to one op instead of to the whole model, which is the scope
+its own per-op tuners work at anyway. What is gone is the separate phase, the separate role, and the
+separate server A/B.
+
+**What that costs, stated plainly.** The attribution number is gone in the form it had:
+`tuning_delta_pct`, `tuning_speedup` and `share_of_total_gain_pct` are now `null`, which means NOT
+MEASURED and never zero. What replaces it is per op and arguably better evidence —
+`ops_tuned[].isolated_speedup`, each measured on an immutable oracle rather than inferred from a server
+delta with a drifting baseline — but it does not answer "what % of the run's gain was tuning", and a
+consumer that needs that number will not find it. Accepted env/flags/overlay are folded into the carried
+config at the end of the head track, **before** the post-head re-profile, so the Milestone loop ranks
+kernels on the tuned stack and every later A/B measures on top of it. The tuning gain is inside the head
+track's reference leg: tuning and head deltas must not be summed.
 
 ## What the orchestrator enforces (rather than trusts)
 
 The role can return `gate:"accepted"` and still not be banked. `e2e_workflow.js` withholds the accept
 unless **all** of these hold, and logs loudly when it does:
 
+`finalizeHeadTuning()` banks an op only when **all** of these hold, and logs loudly when it drops one:
+
 | bar | why |
 | --- | --- |
+| `gate === 'accepted'` | the role's own verdict, which is necessary and not sufficient |
 | `engagement_verified === true` | the skillset's central thesis — an artifact the runtime never loads is not a win, and it fails *silently*, with plausible-looking numbers |
-| `ab_complete !== false` | a post-only number is not a measurement (same rule as the head track) |
-| `correctness_gate !== 'fail'` | a faster wrong server is a regression |
-| `post > pre > 0` | both legs real, and the direction is actually a win |
+| `isolated_speedup > 1.0` | measured on the op's immutable oracle, against the frozen live kernel |
 
-A withheld accept is downgraded to `no_win` with the reason appended, and the run continues on the
-pre-tuning config. This matters more here than elsewhere: an unproven tuning artifact would sit in the
-reference leg of every downstream A/B.
+An op that fails any bar is not folded into `curEnv`/`curFlags`/`curOverlay` and is not banked as an
+accepted kernel; the run continues on the untuned config for that op. This matters more here than
+elsewhere: an unproven tuning artifact would sit in the reference leg of every downstream A/B. Its
+`handoff_note` still reaches the bake-off — a dead end that is explained is worth passing on.
+
+`correctness_gate` is enforced one level down, by the oracle itself: the unittest checks against
+`meta.tol`, so a numerically-wrong candidate never produces a speedup to bank in the first place. That
+is stricter than the old phase's server-level accuracy check and it is why there is no separate row for
+it here.
 
 ## Args
 
 | arg | default | meaning |
 | --- | --- | --- |
-| `tuning_skillset` | `"true"` | phase on/off. `"false"` injects nothing anywhere → byte-identical to a build without the feature |
+| `tuning_skillset` | `"true"` | tuning on/off. `"false"` injects nothing anywhere → byte-identical to a build without the feature |
+| `quick_tune_minutes` | `25` | the budget STATED to the cheap standalone pass, per head op. `0` disables that rung; `op_benchmarker` Tier A/B still reads the skillset |
 | `tuning_skillset_dir` | `<repo>/perf_knowledge/expert_skills/tuning` | override to point at an upstream checkout (e.g. to re-verify standalone) |
 | `tuning_kb` | `"true"` | consult `tuning-kb/`, the per-model **answer key**. Set `"false"` for blind evaluation runs — the skillset says so itself |
-| `phases` | `all` | the phase key is `tune`, e.g. `phases:"tune"` to run only this phase against carried `state` |
+| `phases` | `all` | there is no `tune` phase key any more — tuning runs wherever `head` runs. The token is still recognised (and still skipped in fast mode) so an older caller passing `phases:"tune"` resolves to false rather than throwing |
 
-There is deliberately **no op budget**. The head track caps its ops because each one spends a recursive
-kernel-authoring run; tuning ops are cheap by comparison and their value is cumulative, so a cap would
-only leave measurable wins on the table. The role decides where the returns stop and reports where.
+There is deliberately **no separate op budget**: tuning follows the head budget, because it now tunes
+exactly the ops the head track selected and no others. Within one op, `quick_tune_minutes` is stated to
+the agent rather than enforced as a shorter wall clock — cutting an in-flight tuning pass short loses
+the measurement it was about to return, so the rung stays cheap because of what it is told to do, not
+because it gets killed.
 
-Mode interaction: **fast** mode skips `tune` (its contract is head-kernel-only inside a wall-clock cap).
-**deep** mode keeps it, for the same reason it keeps ConfigSweep — cheap, and a tuned stack is a better
-starting point for the co-optimization lanes.
+Mode interaction: tuning rides the head track, so it runs wherever HeadKernel runs — including **fast**
+mode, which it could not before. **deep** mode gets it on every one of its head ops, which is the case
+the old phase served worst: the co-optimization lanes now start from a tuned op.
 
 ## Verifying, and keeping it verifiable
 
@@ -192,8 +233,10 @@ reported as broken rather than shipped as complete.
 
 The phase result flows out three ways:
 
-- `wfReturn.tuning_skillset` — machine-readable, including `tuning_delta_pct`, `tuning_speedup`,
-  `share_of_total_gain_pct` (null when the run had no net gain to apportion), and the deploy fields.
+- `wfReturn.tuning_skillset` — machine-readable: `ops_tuned[]` (per op: `isolated_speedup`, `engaged`,
+  `artifact`) is the attribution, plus the deploy fields. `tuning_delta_pct`, `tuning_speedup` and
+  `share_of_total_gain_pct` are kept in the shape for consumers written against the old phase and are
+  always `null` — NOT MEASURED, never zero.
 - `result.json` → **`tuning_skillset`**, added by `interface/run_e2e.py`. This is **purely additive**:
   every pre-existing key keeps its name, type and meaning, and a run without the phase produces a
   byte-identical `result.json`. The block carries a prose `explanation` plus `reaches_production_via`,

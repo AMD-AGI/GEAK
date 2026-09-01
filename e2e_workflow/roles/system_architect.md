@@ -440,7 +440,7 @@ Return JSON:
 
 Inputs: `EVAL_DIR`, full `HISTORY`, `BASELINE_THROUGHPUT`, `FINAL_THROUGHPUT`, accepted config +
 kernel changes, `MILESTONES`, `BUDGET_USED`, `BUDGET`, `MIN_KERNEL_TASKS`, `PROFILE_TOPN`, `WORKLOAD`,
-`MODEL_NAME`, `KB_RECALL` (see §2c), `SKILL_DIR`, and — when the standalone tuning phase ran —
+`MODEL_NAME`, `KB_RECALL` (see §2c), `SKILL_DIR`, and — when the head track banked any tuning —
 `TUNING_RESULT` (see §2b).
 
 Write TWO files:
@@ -537,18 +537,23 @@ attempt, win or not. REQUIRED sections, in order:
      still ✘. A **no-win** run closes with `✅ Validate  Director A/B <b>→<f> = 0.9997× · validated_no_win`
      (validated, no regression, NO win). Only `validated_win` earns a `🏁`+`⭐` final stack.
 
-2b. **🎛️ Tuning skillset — attributable contribution** — MANDATORY whenever `TUNING_RESULT` is present
-   (omit the section entirely when it is absent, i.e. the phase did not run). This answers a question the
-   headline speedup cannot: **how much of the gain came from tuning?** The phase runs standalone before
-   HeadKernel and measures its own interleaved pre/post A/B precisely so this number exists — report it,
-   do not fold it into the total and do not re-derive it from the run baseline.
+2b. **🎛️ Tuning — attributable contribution** — MANDATORY whenever `TUNING_RESULT` is present (omit the
+   section entirely when it is absent, i.e. nothing was banked). This answers a question the headline
+   speedup cannot: **how much of the gain came from tuning?**
+
+   Answer it **per op**, and do not invent a whole-run figure. Tuning runs inside the head track now,
+   per op, scored on that op's extracted unittest; it takes no server A/B of its own. So
+   `tuning_delta_pct`, `tuning_speedup` and `share_of_total_gain_pct` come to you as `null`. `null`
+   means **not measured** — write `not measured (no separate server A/B is taken for tuning)`. Do NOT
+   print it as 0%, do NOT re-derive it from the run baseline, and do NOT reach for the Director's
+   validate numbers to fill the hole: those measure the RUN, and attributing them to tuning would be
+   inventing the number this section exists to report honestly.
 
    Write, in this order:
-   - **One-line verdict**: `<pre> → <post> tok/s, +X.XX% (×Y.YYY) — <gate>`, then its **share of the
-     run's total gain** (`TUNING_RESULT.share_of_total_gain_pct`, e.g. `≈41% of the run's total gain`).
-     If the share is `null`, say `no net run gain to apportion` rather than printing a percentage.
-     These legs are the tuning phase's own same-session A/B; the Director's `validate` reconciliation
-     applies to the RUN headline, not to this section — do not overwrite these two numbers with it.
+   - **One-line verdict**: `<N> op(s) tuned in-track — <gate>`, then the per-op isolated speedups from
+     `ops_tuned[]` (e.g. `gemm_a8w8/aiter 1.31×, attn_mla/aiter 1.08×`), then the sentence above about
+     the run-level share being unmeasured. These isolated numbers are on the op oracle, NOT e2e: say so
+     in the same line, so nobody reads a 1.31× op win as a 1.31× run win.
    - **Ops tuned table**: `op | backend | tuner | shapes | isolated× | engaged? | artifact`. One row per
      op in `ops_tuned`, including ops that were attempted and produced nothing (say so).
    - **Engagement evidence** — quote it verbatim from `engagement_evidence`. This is the skillset's

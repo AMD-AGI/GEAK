@@ -47,7 +47,13 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
 ## The ladder (run ALL applicable rungs for a head op; don't early-stop on a cheap win)
 - **Tier A — backend select / DISCOVER** (no source): bench every available backend on the immutable
   oracle; record per-backend ms + whether an existing editable impl exists + `best_known_ms`.
-- **Tier B — per-backend tune** (no source): tune each promising backend to its best.
+- **Tier B — per-backend tune** (no source): tune each promising backend to its best. **This rung owns
+  the vendored tuning skillset** (`TUNING_SKILLSET_DIR`, start at its `README.md`; never edit anything
+  inside it) — it used to be a standalone phase with its own server A/B and is now read here, scoped to
+  the one op you are benching, because the ops it tunes and the ops you bench are the same ops. The
+  cheap standalone pass (`quick_tune`) has already taken the obvious levers on this op and handed you
+  `QUICK_TUNE`; you take the search wider, on the same oracle, with the same engagement bar — an
+  artifact nothing proved the runtime reads is not a win, whatever it timed.
   - **int4_w4a16 fused-MoE (vLLM) — DO THIS FIRST, it is the memory-free win.** vLLM ships NO
     tuned Triton config for an unseen int4 fused-MoE shape, so the expert grouped-GEMM (often the
     single biggest chunk of GPU time on an int4 MoE model) runs on a slow default fallback (server log:
@@ -190,7 +196,18 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
 
 Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_KIND` (gemm|attn),
 `PCT_GPU_TIME`, `CANDIDATE_BACKENDS` (Architect's ranked list), `GPU_ID`, `ENABLE_FP8`,
-`KERNEL_WF_DIR` (for Tier-C recursion), `KERNEL_BUDGET`, `SKILL_DIR`.
+`KERNEL_WF_DIR` (for Tier-C recursion), `KERNEL_BUDGET`, `SKILL_DIR`; plus, when tuning is enabled,
+`TUNING_SKILLSET_DIR` + `TUNING_KB_ENABLED` (and the `TUNED_KB_*` store handles) — the vendored tuning
+skillset, which is YOURS to drive at Tier B; and `QUICK_TUNE`, the result of the cheap standalone pass
+that just ran on this same op.
+
+**Read `QUICK_TUNE` before you plan anything.** It is not advice, it is measurement: `levers_tried`
+lists what has already been timed on this exact oracle and at what `ms`, `handoff_note` says which
+levers are exhausted and which looked promising when the budget ran out, and an `accepted` gate means a
+tuned artifact is already installed and proven engaged — so your Tier A numbers are being taken ON TOP
+of it and the honest thing to report is the increment. Re-running a lever it already crossed off is the
+one thing that makes this rung cost more than it saves. It is absent when tuning is disabled or the op
+kind has no cheap tuner; then this paragraph does not apply and nothing about the ladder changes.
 
 1. **Provenance**: re-hash `reference_io.pt`, compare to `meta.json.reference_io_sha256`. If mismatch →
    STOP, return `gate:"tamper"`.

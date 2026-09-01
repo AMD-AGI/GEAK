@@ -259,23 +259,27 @@ Emitted only when the standalone tuning phase ran. It is **purely additive**: ev
 name, type and meaning, and a run without the phase produces a byte-identical `result.json`. A consumer
 that does not know about tuning is unaffected.
 
-The tuning gain is **already inside** `throughput_speedup` — the phase runs mid-pipeline and every later
-measurement is taken on top of its accepted config. This block **attributes** part of the headline, it
-does not add to it; summing the two double-counts.
+The tuning gain is **already inside** `throughput_speedup` — tuning runs mid-pipeline, inside the
+HeadKernel track, and every later measurement is taken on top of its accepted config. This block
+**attributes** part of the headline, it does not add to it; summing the two double-counts.
 
 ```jsonc
 "tuning_skillset": {
-  "phase": "TuningSkillset",
+  "phase": "Tuning",
   "ran": true,
   "gate": "accepted | no_win | rejected | incomplete | skipped | not_run",
-  "explanation": "prose: what the phase did and what it means for the headline",
-  "pre_tune_throughput_tok_s": 1000.0,   // the phase's OWN in-session interleaved A/B,
-  "post_tune_throughput_tok_s": 1080.0,  //   not re-derived from the run baseline
-  "tuning_delta_pct": 8.0,
-  "share_of_total_gain_pct": 40.0,       // null when the run had no net gain to apportion
+  "explanation": "prose: what tuning did and what it means for the headline",
+  "source": "head_track",                // tuning has no phase of its own; it is the cheap rungs of
+  "attempts": 2,                         //   the head ladder, run per head op
+  // The attribution, per op, each measured on that op's own immutable unittest oracle.
+  "ops_tuned": [ /* per-op: op, backend, isolated_speedup, engaged, artifact */ ],
+  // NOT MEASURED, never zero: no separate server A/B is taken for tuning any more. Kept in the shape
+  // so a consumer written against the old standalone phase still finds its keys.
+  "tuning_delta_pct": null,
+  "tuning_speedup": null,
+  "share_of_total_gain_pct": null,
   "engagement_verified": true,
   "engagement_evidence": "...",          // an accept is withheld without this
-  "ops_tuned": [ /* per-op: backend, tuner, shapes, isolated speedup, engaged */ ],
   // Accepted gates only — how the win reaches production:
   "deploy_bundle": ".../tuning/deploy",
   "cache_invalidation": ["rm -rf /tmp/aiter_configs"],

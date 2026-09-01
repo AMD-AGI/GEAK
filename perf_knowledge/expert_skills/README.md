@@ -77,7 +77,7 @@ which workflow layer consumes it:
 |--------|-------------------|--------------------------------------|---------------|
 | kernel | `kernel_workflow` (isolated A/B vs the immutable unittest oracle) | `kernel_workflow` author/optimize | `isolated_speedup ≥ expects.isolated_speedup_min` + parity |
 | e2e    | `e2e_workflow` (Director same-session A/B) | `e2e_workflow` routing/integration | `e2e_delta ≥ expects.e2e_delta_min_pct` + parity + non-trigger inertness |
-| tuning | the skillset's own `tuning/validate/claims.py` (one executable check per load-bearing claim) | `e2e_workflow` TuningSkillset phase | every applicable claim PASS, none FAIL — see below |
+| tuning | the skillset's own `tuning/validate/claims.py` (one executable check per load-bearing claim) | `e2e_workflow` head track: `quick_tune` + `op_benchmarker` Tier A/B, per op | every applicable claim PASS, none FAIL — see below |
 
 ### How the tuning scope gets its status
 

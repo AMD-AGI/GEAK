@@ -98,13 +98,15 @@ Workflow({
     milestone_min_pct: 5, // Milestone only optimizes editable kernels with pct_gpu_time >= this (default 5);
                           //   overrides min_kernel_tasks — sub-threshold kernels are skipped (Amdahl)
     config_tune: "true",  // Tier-0 sweep on/off (default ON)
-    tuning_skillset: "true", // standalone TuningSkillset phase on/off (default ON). Runs the VENDORED
-                          //   tuning skillset (<repo>/perf_knowledge/expert_skills/tuning) WHOLE, as its own phase, AFTER
-                          //   ConfigSweep and BEFORE HeadKernel, with its own pre/post A/B so its share
-                          //   of the gain is attributable. "false" injects nothing -> byte-identical.
+    tuning_skillset: "true", // tuning on/off (default ON). The VENDORED tuning skillset
+                          //   (<repo>/perf_knowledge/expert_skills/tuning) is read PER HEAD OP inside the
+                          //   HeadKernel track — by quick_tune (the cheap standalone pass) and by
+                          //   op_benchmarker Tier A/B — not as a phase of its own.
+                          //   "false" injects nothing -> byte-identical.
+    quick_tune_minutes: 25, // budget STATED to the cheap standalone pass, per head op (default 25).
+                          //   0 disables that rung; the bake-off still reads the skillset.
     tuning_kb: "true",    // consult tuning-kb/ (the per-model ANSWER KEY). Set "false" for blind evals.
-                          //   No op budget: the tuning loop is uncapped (tuning ops are cheap and their
-                          //   value is cumulative). See "Tuning skillset" below +
+                          //   No op budget: tuning follows the head budget. See "Tuning" below +
                           //   knowledge/tuning_skillset_integration.md.
     analysis_skill: "roofline", // profile-analysis skill (default "roofline"; "none" disables).
                           //   Enriches the Top-N with % of the hardware roofline -> attainable speedup ->
@@ -148,30 +150,48 @@ achievable number (it is broader = more backends, deeper = more/faster rounds, p
 spare GPUs while the e2e gate runs on the serving slot, with matched in-window A/B so parallelism never
 corrupts a measurement).
 
-## Tuning skillset (`tuning_skillset`, default ON)
+## Tuning (`tuning_skillset`, default ON) — inside the head-kernel track
 
-A dedicated phase — **after ConfigSweep, before HeadKernel** — that runs the tuning skillset vendored at
-`<repo>/perf_knowledge/expert_skills/tuning/`: an independently-validated method for tuning GPU ops on AMD Instinct (per-op
-tuners, deploy paths into a live server, and the engagement checks that prove a tuned artifact is
-actually what the machine runs).
+The tuning skillset vendored at `<repo>/perf_knowledge/expert_skills/tuning/` is an
+independently-validated method for tuning GPU ops on AMD Instinct: per-op tuners, deploy paths into a
+live server, and the engagement checks that prove a tuned artifact is actually what the machine runs.
 
-**It is vendored whole and run whole.** The tree is byte-identical to the standalone repo it is validated
-in (37 executable claims in `validate/claims.py`), hash-pinned by
-`e2e_workflow/knowledge/tuning_skillset.manifest.sha256`, and consumed by exactly one thin adapter role,
-`roles/tuning_specialist.md`. Its method is deliberately **not** paraphrased into `knowledge/`: a
-standalone validation is evidence about a specific tree, and scattering it would keep the prose while
-losing the guarantee. Fixes go upstream and come back via
+**It is vendored whole.** The tree is byte-identical to the standalone repo it is validated in (37
+executable claims in `validate/claims.py`) and hash-pinned by
+`e2e_workflow/knowledge/tuning_skillset.manifest.sha256`. Its method is deliberately **not** paraphrased
+into `knowledge/`: a standalone validation is evidence about a specific tree, and scattering it would
+keep the prose while losing the guarantee. Fixes go upstream and come back via
 `scripts/tuning_skillset_sync.py --sync <dir>`; never edit inside the vendored tree.
 
-**Why standalone, and why before the head track.** The skillset is a complete six-step loop (scope →
-baseline → search → correctness gate → deploy → engagement verify). Folded into the head-kernel bake-off
-it degenerates into "one more candidate config" and most of it never runs. As its own phase it runs end
-to end, and — because it takes its **own** in-session interleaved pre/post A/B — the final report can say
-how much of the run's gain came from tuning. Running it first also means the expensive head budget goes
-to the ops still hot *after* tuning (an accept triggers a re-profile, exactly as a config win does), and
-its accepted env/flags fold into the carried config so every later A/B measures on top of a tuned stack.
-Corollary when reading the report: the tuning delta and the head deltas are **not** additive — tuning is
-already in the head track's reference leg.
+**It is read per head op, on the head ladder** — it has no phase of its own. The ladder for each head op
+is now three rungs, cheapest first, all scored on the SAME immutable oracle (that op's extracted
+unittest):
+
+1. `roles/quick_tune.md` — a bare, bounded standalone pass (`quick_tune_minutes`, default 25). Recalls a
+   tuned table from the store if one exists, tries the env/dispatch knobs and a small per-shape sweep,
+   proves engagement, and hands `handoff_note` to the next rung. No server, no authoring.
+2. `roles/op_benchmarker.md` Tier A/B — the wider cross-backend bake-off and per-backend tune, told what
+   rung 1 already timed so it does not re-search it.
+3. the recursive `kernel_workflow` lanes — authoring and deep optimization, on top of whatever tuning
+   found.
+
+**Why it used to be a standalone phase, and why it is not one now.** It ran between ConfigSweep and
+HeadKernel, as one `tuning_specialist` role, taking its own interleaved pre/post server A/B. That bought
+attributability — "how much did tuning buy us" as a separate number — and it cost more than it bought:
+GEMM and attention are exactly the ops the skillset tunes AND exactly the ops HeadKernel optimizes, so
+the two tracks worked the same kernels from opposite ends with no shared context. The head track could
+not see which backend tuning had already proven fastest; the tuning track could not see the roofline or
+the extracted op oracle the head track was about to build. And the standalone A/B was a full server
+pre/post paid before HeadKernel had established anything, on a stack it would then change underneath
+itself.
+
+**What that costs, stated plainly.** There is no tuning delta% and no share-of-total-gain any more:
+`tuning_delta_pct`, `tuning_speedup` and `share_of_total_gain_pct` are `null`, meaning *not measured*,
+never zero. The attribution that replaces them is per op — `ops_tuned[].isolated_speedup`, each measured
+on that op's oracle rather than inferred from a server delta. Accepted env/flags/overlay still fold into
+the carried config (at the end of the head track, before the post-head re-profile), so every later A/B
+measures on top of a tuned stack, and the tuning gain is already inside the head track's reference leg:
+the numbers are **not** additive.
 
 An accept is not taken on trust. The orchestrator withholds it unless engagement was **proven**, both A/B
 legs completed, correctness passed, and `post > pre > 0`; otherwise it is downgraded to `no_win` and the
@@ -195,12 +215,12 @@ into `final_patch.diff`, and `final_launch.sh` runs `deploy.sh` before the serve
 re-checks engagement on the assembled bundle, so a bundle that silently drops the tuning is reported as
 broken instead of shipped as complete. Callers reusing `final_launch.sh` need no extra steps.
 
-Results land in `EVAL_DIR/tuning/`, in `final_report.md` **§2b**, in
-`wfReturn.tuning_skillset` (`tuning_delta_pct`, `tuning_speedup`, `share_of_total_gain_pct`), and in
-`result.json` under a **purely additive** `tuning_skillset` key — no existing key changes name, type or
-meaning, and a run without the phase produces a byte-identical `result.json`.
-Fast mode skips the phase; deep mode keeps it. Full contract:
-`knowledge/tuning_skillset_integration.md`.
+Results land in `EVAL_DIR/tuning/` (`ops/<op>.json` per op, plus the aggregate `tuning_result.json` the
+salvage path reads), in `final_report.md` **§2b**, in `wfReturn.tuning_skillset` (`ops_tuned[]` — the
+three headline-delta keys are `null`, see above), and in `result.json` under a **purely additive**
+`tuning_skillset` key — no existing key changes name, type or meaning, and a run without tuning produces
+a byte-identical `result.json`. Tuning now rides the head track, so it runs wherever HeadKernel runs,
+including fast mode. Full contract: `knowledge/tuning_skillset_integration.md`.
 
 ## Roofline-guided routing (`analysis_skill`, default `roofline`)
 
@@ -260,14 +280,14 @@ Everything lands under `<exp_root>/e2e_<model>_<timestamp>/`:
 - `kernels/<short_name>_task/{kernel_src, reference_io.pt, unittest.py, meta.json}` — extracted tasks
 - `kernels/_exp/…` — the recursive single-kernel runs (each with its own verified result)
 - `overlay/…` — candidate + accepted reversible overlays
-- `tuning/{tuning_report.md, env_audit.txt, claims_report.json, bench_pre/, bench_post/, <op>/}` — the standalone tuning phase + its attributable pre/post A/B
+- `tuning/{tuning_report.md, ops/<op>.json, tuning_result.json, deploy/, <op>/}` — per-op tuning from the head track
 - `final/{overlay, final_patch.diff, final_launch.sh}` — the deliverable bundle
 - `architect_report.md`, `director_e2e_validation.json` — the official verified throughput result
 
 ## Files
 ```
 e2e_workflow.js   orchestration (deterministic; recursively calls ../kernel_workflow/kernel_workflow.js)
-roles/                 director, system_architect, profiler, config_tuner, tuning_specialist, kernel_extractor, op_benchmarker, e2e_integrator
+roles/                 director, system_architect, profiler, config_tuner, quick_tune, kernel_extractor, op_benchmarker, e2e_integrator
 knowledge/             e2e_optimization, profile_parse, preflight (env self-check), backend_playbook + gemm_attention_backends (persistent), sglang_internals, shape_capture
 knowledge/analysis_skills/  pluggable profile-analysis skills (INDEX.md + one dir per skill; `roofline` ships by default)
 knowledge/tuning_skillset_integration.md  how the VENDORED ../tuning_skillset/ is wired in (+ its manifest)
