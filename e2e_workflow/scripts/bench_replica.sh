@@ -45,6 +45,10 @@ if [ "${BENCH_CLIENT:-native}" = "inferencex" ]; then
   esac
   export NUM_WARMUPS=$((2 * _conc))
   export SEED=0
+elif [ "${BENCH_CLIENT:-native}" = "agentx" ]; then
+  # Trace replay owns warmup/duration; one measured window per replica.
+  export REPEATS=1
+  export GEAK_ISL_OSL_INACTIVE=1
 fi
 
 exec bash "$BENCH_E2E"

@@ -447,6 +447,54 @@ class TestBenchClient(_RunE2ECase):
         os.environ["INFERENCEX_PATH"] = "/env/inferencex"
         self.assertEqual(rx.apply_bench_client({"bench_client": "auto"}), "inferencex")
 
+    def test_auto_selects_agentx_when_workload_spec_says_so(self):
+        os.environ.pop("INFERENCEX_PATH", None)
+        h = {
+            "inferencex_path": "/opt/inferencex",
+            "workload_spec": {"kind": rx.WORKLOAD_KIND_AGENTX, "client": "aiperf"},
+        }
+        self.assertEqual(rx.apply_bench_client(h), rx.AGENTX_BENCH_CLIENT)
+        self.assertEqual(os.environ["BENCH_CLIENT"], rx.AGENTX_BENCH_CLIENT)
+
+    def test_agentx_handoff_forces_agentx_over_explicit_inferencex(self):
+        os.environ["INFERENCEX_PATH"] = "/opt/inferencex"
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            client = rx.apply_bench_client(
+                {
+                    "bench_client": "inferencex",
+                    "inferencex_path": "/opt/inferencex",
+                    "workload_spec": {"kind": rx.WORKLOAD_KIND_AGENTX},
+                }
+            )
+        self.assertEqual(client, rx.AGENTX_BENCH_CLIENT)
+        self.assertIn("forcing bench_client", err.getvalue())
+
+    def test_apply_workload_spec_exports_agentx_knobs(self):
+        os.environ.pop("GEAK_WORKLOAD_KIND", None)
+        os.environ.pop("GEAK_ISL_OSL_INACTIVE", None)
+        os.environ.pop("REPEATS", None)
+        exported = rx.apply_workload_spec(
+            {
+                "workload_spec": {
+                    "kind": rx.WORKLOAD_KIND_AGENTX,
+                    "scenario": "inferencex-agentx-mvp",
+                    "corpus": "semianalysis_cc_traces_weka_062126",
+                    "duration_s": 3600,
+                    "geak_loop_duration_s": 900,
+                    "concurrency": 8,
+                }
+            }
+        )
+        self.assertEqual(os.environ["GEAK_WORKLOAD_KIND"], rx.WORKLOAD_KIND_AGENTX)
+        self.assertEqual(os.environ["GEAK_ISL_OSL_INACTIVE"], "1")
+        self.assertEqual(os.environ["AGENTX_DATASET"], "semianalysis_cc_traces_weka_062126")
+        self.assertEqual(exported["REPEATS"], "1")
+
+    def test_apply_workload_spec_noop_on_synthetic_handoff(self):
+        os.environ.pop("GEAK_WORKLOAD_KIND", None)
+        self.assertEqual(rx.apply_workload_spec({"workload": {"isl": 1024}}), {})
+        self.assertNotIn("GEAK_WORKLOAD_KIND", os.environ)
+
     def test_explicit_inferencex_without_path_degrades_loudly(self):
         """Silently measuring with a different client than the orchestrator is
         the failure this warning exists to prevent."""
@@ -1091,6 +1139,169 @@ class TestBenchProtocol(_RunE2ECase):
         })
         self.assertEqual(exported["NUM_PROMPTS_ADAPTIVE"], "1")
         self.assertNotIn("NUM_PROMPTS", exported)
+
+    def test_agentx_keeps_the_fresh_server_lifecycle_but_drops_sweep_knobs(self):
+        """Server hygiene is workload-independent; prompt-sweep knobs are not.
+
+        A fresh server per timed replica is about cache-cold parity, so AgentX
+        needs it just as much. NUM_WARMUPS/SEED/RANDOM_RANGE_RATIO describe a
+        synthetic prompt sweep that the trace replay never performs.
+        """
+        exported = rx.apply_bench_protocol({
+            "schema_version": 2,
+            "workload": {"conc": 64},
+            "baseline_env_spec": {"config": {}},
+            "workload_spec": {"kind": "agentx_trace_replay"},
+            "bench_protocol": {},
+        })
+        self.assertEqual(exported["GEAK_REPEAT_MODE"], "isolated_server")
+        self.assertEqual(exported["REPLICA_RETRIES"], "1")
+        for synthetic in ("NUM_WARMUPS", "SEED", "RANDOM_RANGE_RATIO"):
+            self.assertNotIn(synthetic, exported)
+            self.assertNotIn(synthetic, os.environ)
+
+
+class TestTargetingShape(_RunE2ECase):
+    """isl/osl stop being the measured load on AgentX, but still aim the search.
+
+    The kernel agents read isl/osl as the analytic serving call model when they
+    synthesize GEMM/attention shapes. A trace replay whose corpus averages ~112k
+    input tokens would be optimized for a 1024-token prefill if the synthetic
+    handoff defaults were taken at face value -- honest numbers, wrong target.
+    """
+
+    def test_synthetic_handoff_keeps_the_handoff_workload_shape(self):
+        isl, osl, prov = rx._targeting_shape(
+            {"workload": {"isl": 2048, "osl": 512}}
+        )
+        self.assertEqual((isl, osl), (2048, 512))
+        self.assertEqual(prov, "handoff_workload")
+
+    def test_synthetic_handoff_falls_back_to_1024_defaults(self):
+        isl, osl, prov = rx._targeting_shape({})
+        self.assertEqual((isl, osl), (1024, 1024))
+        self.assertEqual(prov, "handoff_workload")
+
+    def test_agentx_prefers_the_orchestrator_measured_shape(self):
+        isl, osl, prov = rx._targeting_shape({
+            "workload": {"isl": 1024, "osl": 1024},
+            "workload_spec": {
+                "kind": "agentx_trace_replay",
+                "observed_isl": 112020,
+                "observed_osl": 796,
+            },
+        })
+        self.assertEqual((isl, osl), (112020, 796))
+        self.assertEqual(prov, "agentx_observed")
+
+    def test_agentx_without_an_observed_shape_says_so_loudly(self):
+        """Silence here would aim the search 100x low with no trace of why."""
+        isl, osl, prov = rx._targeting_shape({
+            "workload": {"isl": 1024, "osl": 1024},
+            "workload_spec": {"kind": "agentx_trace_replay"},
+        })
+        self.assertEqual((isl, osl), (1024, 1024))
+        self.assertEqual(prov, "synthetic_fallback_on_agentx")
+
+    def test_a_malformed_observed_shape_is_not_trusted(self):
+        for bad in ("", "abc", 0, -5, None):
+            with self.subTest(observed=bad):
+                _isl, _osl, prov = rx._targeting_shape({
+                    "workload": {"isl": 1024, "osl": 1024},
+                    "workload_spec": {
+                        "kind": "agentx_trace_replay",
+                        "observed_isl": bad,
+                        "observed_osl": 796,
+                    },
+                })
+                self.assertEqual(prov, "synthetic_fallback_on_agentx")
+
+    def test_map_args_carries_the_shape_and_its_provenance(self):
+        ps = rx.map_args({
+            "model_path": "/models/Kimi-K3",
+            "workload": {"isl": 1024, "osl": 1024, "conc": 8},
+            "exp_root": str(self.tmp),
+            "eval_dir": str(self.tmp / "eval"),
+            "workload_spec": {
+                "kind": "agentx_trace_replay",
+                "observed_isl": 112020,
+                "observed_osl": 796,
+            },
+        })
+        self.assertEqual(ps["isl"], 112020)
+        self.assertEqual(ps["osl"], 796)
+        self.assertEqual(ps["workload_shape_provenance"], "agentx_observed")
+        # Concurrency still comes from the workload block (the replay honours it).
+        self.assertEqual(ps["conc"], 8)
+
+    def test_map_args_is_byte_identical_for_synthetic_runs(self):
+        base = {
+            "model_path": "/models/m",
+            "workload": {"isl": 4096, "osl": 256, "conc": 32},
+            "exp_root": str(self.tmp),
+            "eval_dir": str(self.tmp / "eval"),
+        }
+        ps = rx.map_args(dict(base))
+        self.assertEqual(ps["isl"], 4096)
+        self.assertEqual(ps["osl"], 256)
+        self.assertEqual(ps["workload_shape_provenance"], "handoff_workload")
+
+
+class TestAgentXPreflight(_RunE2ECase):
+    """An AgentX dispatch should name a missing prerequisite immediately.
+
+    aiperf is absent from the base serving image (the orchestrator installs it
+    when it enables AgentX), and the client adapter cannot notice until it has
+    already launched and warmed a server -- a long detour to reach a one-line
+    error on this model.
+    """
+
+    AGENTX = {"workload_spec": {"kind": "agentx_trace_replay"}}
+
+    def test_synthetic_handoff_is_never_preflighted(self):
+        self.assertEqual(rx.agentx_preflight({}), [])
+        self.assertEqual(
+            rx.agentx_preflight({"workload_spec": {"kind": "synthetic_isl_osl"}}), []
+        )
+
+    def test_missing_aiperf_is_reported_with_the_name_it_looked_for(self):
+        os.environ["PATH"] = "/nonexistent"
+        os.environ["AIPERF_BIN"] = "aiperf-agentx"
+        problems = rx.agentx_preflight(dict(self.AGENTX))
+        self.assertTrue(any("aiperf-agentx" in p for p in problems))
+
+    def test_missing_inferencex_path_is_reported(self):
+        os.environ.pop("INFERENCEX_PATH", None)
+        problems = rx.agentx_preflight(dict(self.AGENTX))
+        self.assertTrue(any("INFERENCEX_PATH is unset" in p for p in problems))
+
+    def test_inferencex_path_without_the_mapper_is_reported(self):
+        os.environ["INFERENCEX_PATH"] = str(self.tmp)
+        problems = rx.agentx_preflight(dict(self.AGENTX))
+        self.assertTrue(any("map_aiperf.py not found" in p for p in problems))
+
+    def test_a_satisfied_environment_reports_no_problems(self):
+        bench = os.path.join(str(self.tmp), "benchmarks")
+        os.makedirs(bench, exist_ok=True)
+        with open(os.path.join(bench, "map_aiperf.py"), "w") as fh:
+            fh.write("# stub\n")
+        bin_dir = os.path.join(str(self.tmp), "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        aiperf = os.path.join(bin_dir, "aiperf")
+        with open(aiperf, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(aiperf, 0o755)
+        os.environ["PATH"] = bin_dir
+        os.environ["INFERENCEX_PATH"] = str(self.tmp)
+        os.environ.pop("AIPERF_BIN", None)
+        self.assertEqual(rx.agentx_preflight(dict(self.AGENTX)), [])
+
+    def test_preflight_is_advisory_and_does_not_raise(self):
+        """PATH here is not always PATH in the bench subprocess."""
+        os.environ["PATH"] = "/nonexistent"
+        os.environ.pop("INFERENCEX_PATH", None)
+        problems = rx.agentx_preflight(dict(self.AGENTX))
+        self.assertEqual(len(problems), 2)
 
 
 class TestAlignmentFlags(_RunE2ECase):

@@ -63,6 +63,19 @@ adapter_bench() {
     bench_seed=0
   fi
 
+  # This client loads the model's tokenizer itself, so it has to trust the same
+  # remote code as the server it measures. bench_e2e.sh already resolves that
+  # across the recipe env and EXTRA_SERVER_ARGS and exports
+  # BENCH_TRUST_REMOTE_CODE; only the flag was missing here, so a
+  # custom-tokenizer model (Kimi-K3, DeepSeek) died in the client at
+  # transformers' resolve_trust_remote_code while the server ran fine. Pass the
+  # bare BooleanOptionalAction spelling: the client rejects
+  # --trust-remote-code=true/false.
+  local -a trust_args=()
+  if [ "${BENCH_TRUST_REMOTE_CODE:-0}" = "1" ]; then
+    trust_args=(--trust-remote-code)
+  fi
+
   # --backend vllm: OpenAI-compatible client regardless of the actual serving
   # stack (matches Hyperloom). --request-rate inf + --max-concurrency: the same
   # saturation driver. --ignore-eos + fixed seed + random-range-ratio: identical
@@ -82,6 +95,7 @@ adapter_bench() {
     --num-warmups "$num_warmups" \
     --percentile-metrics "ttft,tpot,itl,e2el" \
     --seed "$bench_seed" \
+    ${trust_args[@]+"${trust_args[@]}"} \
     --save-result \
     --result-dir "$res_dir" \
     --result-filename "${res_name}.json" || return $?

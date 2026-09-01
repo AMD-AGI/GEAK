@@ -400,7 +400,10 @@ CONC=${CONC:-64}
 # An explicit NUM_PROMPTS (e.g. Hyperloom's apply_bench_protocol forwarding its own
 # measured count) ALWAYS wins over both defaults.
 if [ -z "${NUM_PROMPTS:-}" ]; then
-  if [ "$BENCH_CLIENT" = "inferencex" ]; then
+  if [ "$BENCH_CLIENT" = "agentx" ]; then
+    # AgentX is duration-based; prompt count is owned by the trace corpus.
+    NUM_PROMPTS=1
+  elif [ "$BENCH_CLIENT" = "inferencex" ]; then
     if [ "${NUM_PROMPTS_ADAPTIVE:-0}" = "1" ]; then
       _seq_cost=$((ISL + OSL))
       if   [ "$_seq_cost" -le 1024 ];  then _factor=10
