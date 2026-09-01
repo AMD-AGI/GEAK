@@ -306,7 +306,8 @@ Return JSON:
      "roofline_confidence": "<low|medium|high|'' if none>",
      "byte_reduction_levers": ["only when headroom_class=saturated; see step 1d"]}
   ],
-  "drop_list": [{"short_name": "...", "why": "below Amdahl threshold"}],
+  "drop_list": [{"id": "<the SAME id you gave this candidate above, if you listed it there; else ''>",
+                 "short_name": "...", "pct_gpu_time": 0.0, "why": "below Amdahl threshold"}],
   "order_of_work": ["config fast path first", "then h0 (GEMM #1)", "then k0", "..."],
   "strategy_path": "<EVAL_DIR>/strategy.md"
 }

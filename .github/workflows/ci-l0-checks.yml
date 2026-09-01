@@ -251,13 +251,17 @@ jobs:
           /tmp/gitleaks dir . --no-banner --redact --config .gitleaks.toml
 
   node-regression:
-    name: Node regression (expert_skills, kernel canonicalization, tuning phase, time budget)
+    name: Node regression (expert_skills, kernel canonicalization, tuning phase, time budget, drop_gate)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      # Parse check first: a syntax error in the orchestrator would fail every test
+      # below with a confusing message about the test instead of about the file.
+      - name: e2e_workflow.js parses
+        run: node --check e2e_workflow/e2e_workflow.js
       # Proves the use_expert_skills=OFF path injects nothing (byte-identical).
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
@@ -277,6 +281,11 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      # Proves drop_gate ships as 'on', that 'off' is inert, and that a drop is refused
+      # unless it resolves to exactly one candidate of a KNOWN size below HEAD_PROTECT_PCT
+      # from a list that is not taking out more than DROP_MAX_FRACTION of the queue.
+      - name: drop_gate relevance-gate regression
+        run: node e2e_workflow/scripts/test_drop_gate.js
 
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest
