@@ -353,6 +353,25 @@ const perCase = {
 };
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
 
+// ---------------------------------------------------------------------------
+// Timing PROVENANCE — orthogonal to validation MERIT. See `roles/director.md` step 6.
+// (Duplicated verbatim in kernel_workflow.js: these workflow scripts have no module system, so a
+// shared helper is not expressible. Keep the two copies identical.)
+//
+// `timing_basis` says whether the isolated speedup is provably DEVICE time; `validation_status` says
+// whether we believe the measurement at all. Old directors had no channel for the first question, so
+// they answered it by writing `flagged` — the merit field — and the bake-off, reading merit, dropped
+// a reproduced 3.73x weighted win outright. Legacy validations therefore carry no `timing_basis` at
+// all; treat that as `unknown` (provenance unproven) rather than guessing either way.
+// ---------------------------------------------------------------------------
+const timingBasis = (v) => String((v && v.timing_basis) || 'unknown').toLowerCase();
+const provenanceOk = (v) => {
+  if (!v) return false;
+  // Trust the director's own boolean when it set one; otherwise derive from the label.
+  if (typeof v.timing_provenance_ok === 'boolean') return v.timing_provenance_ok;
+  return timingBasis(v) === 'device_verified';
+};
+
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
   kernel_name: { type: 'string' }, source_files: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
@@ -549,6 +568,18 @@ const VALIDATE_SCHEMA = obj({
   director_verified_speedup_weighted: { type: 'number' }, // PRIMARY when workload_aligned
   tech_lead_reported_speedup_geomean: { type: 'number' },
   validation_status: { type: 'string' }, correctness: { type: 'string' },
+  // MERIT (`validation_status`) and PROVENANCE (`timing_basis`) are ORTHOGONAL and must stay that way.
+  // `timing_basis` has been required of the director prompt since the receipt contract landed, but it
+  // was never in this schema — so the only channel it had into the scripts was by collapsing itself
+  // into `validation_status: "flagged"`, which every consumer reads as "the number is not real". That
+  // sank a reproduced, correctness-passing 3.73x weighted win whose only defect was a task frozen
+  // before the receipt existed. Surfacing it here is what lets the bake-off tell "we do not believe
+  // this number" apart from "we cannot yet prove this number is device time".
+  timing_basis: { type: 'string' },          // device_verified | host_bound | unprimed | unknown
+  timing_provenance_ok: { type: 'boolean' }, // true iff timing_basis == device_verified
+  requires_e2e_confirmation: { type: 'boolean' },
+  // Omitted (not null) when the task emitted no receipt — that omission IS the `unknown` basis.
+  timing_receipt: { type: 'object' },
   per_case: perCase, applied_to_original: { type: 'string' },
   arbitration_note: { type: 'string' }, final_patch: { type: 'string' },
 }, ['director_verified_speedup_geomean', 'validation_status']);
@@ -1601,7 +1632,18 @@ if (kbGate) log(`[kb] not distilling: ${kbGate}.`);
 // no-op, correctness fail, contended box), and curating from it teaches the next run a lesson this
 // run did not earn. Reported in review of #411.
 const kbAccepted = String((validation && validation.validation_status) || '').toLowerCase() === 'accepted';
-if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+// The KB gate ALSO requires provenance, and it is the one place that requirement belongs. A card is
+// read by future runs as a settled fact with no measurement attached, so an unproven-provenance number
+// distilled here is laundered into a claim nobody can re-check. That is the opposite of the bake-off,
+// which hands its winner to a serving benchmark that re-measures it in wall-clock. Same missing
+// receipt, opposite correct response: BLOCK the distillation, ADMIT the candidate to the measurement.
+const kbProvenanceOk = provenanceOk(validation);
+if (kbAccepted && !kbProvenanceOk) {
+  log(`[kb] not distilling: timing_basis=${timingBasis(validation)} — merit accepted, but an isolated ` +
+      `number with unproven device-time provenance must be confirmed e2e before it becomes KB fact.`);
+}
+if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && kbProvenanceOk
+    && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   try {
     learned_card = await agentT(
       roleAgent('update_experience', 'Validate',
@@ -1766,6 +1808,11 @@ return {
   final_arithmetic: validation ? validation.director_verified_speedup_arithmetic : null,
   tech_lead_reported_geomean: report ? report.final_speedup_geomean : cumulative,
   validation_status: validation ? validation.validation_status : 'unknown',
+  // Provenance travels ALONGSIDE merit, never folded into it. The bake-off needs both: merit decides
+  // eligibility to win, provenance decides whether the winner must be confirmed e2e before it counts.
+  timing_basis: validation ? timingBasis(validation) : 'unknown',
+  timing_provenance_ok: provenanceOk(validation),
+  requires_e2e_confirmation: !provenanceOk(validation),
   rounds: report ? report.rounds : round,
   budget_used: dispatched,
   budget_total: BUDGET,

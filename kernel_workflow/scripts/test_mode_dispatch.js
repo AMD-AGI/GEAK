@@ -42,7 +42,13 @@ function build(argsObj, stubs) {
       trace.workflowCalls.push({ scriptPath: ref.scriptPath, args: a });
       trace.lanes.push({ lang: a.target_language, mode: a.mode, gpus: a.gpu_ids });
       const sp = s.lane && s.lane[a.target_language] !== undefined ? s.lane[a.target_language] : 1.0;
-      return { validation_status: 'validated', final_speedup: sp };
+      // `accepted`, not `validated`: `validated` is not a token any director emits, and since the
+      // #411 merit guard landed (only `accepted` lanes may win the bake-off) this stub made case J
+      // unwinnable — the suite has been red on main ever since. A stub lane stands for a HEALTHY
+      // lane, so it carries both axes the bake-off now reads: merit accepted AND device-verified
+      // provenance. Cases that need an unhealthy lane override these explicitly.
+      return { validation_status: 'accepted', final_speedup: sp,
+        timing_basis: 'device_verified', timing_provenance_ok: true };
     },
     agent: async (p, o) => {
       const label = (o && o.label) || '';

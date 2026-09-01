@@ -93,6 +93,19 @@ const KB_PLANE_ARGS = {
 // Schema helpers.
 // ---------------------------------------------------------------------------
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
+
+// ---------------------------------------------------------------------------
+// Timing PROVENANCE — orthogonal to validation MERIT. See `roles/director.md` step 6.
+// (Duplicated verbatim in kernel_lane.js: these workflow scripts have no module system, so a shared
+// helper is not expressible. Keep the two copies identical.)
+// ---------------------------------------------------------------------------
+const timingBasis = (v) => String((v && v.timing_basis) || 'unknown').toLowerCase();
+const provenanceOk = (v) => {
+  if (!v) return false;
+  // Trust the director's own boolean when it set one; otherwise derive from the label.
+  if (typeof v.timing_provenance_ok === 'boolean') return v.timing_provenance_ok;
+  return timingBasis(v) === 'device_verified';
+};
 const arrStr = { type: 'array', items: { type: 'string' } };
 const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
 
@@ -410,6 +423,10 @@ phase('Report');
 const cands = results.map(x => ({
   lang: x.lane.lang, mode: x.lane.mode, kind: 'lane', speedup: x.speedup,
   validation_status: x.r ? x.r.validation_status : 'failed',
+  // MERIT and PROVENANCE are carried as separate columns all the way to the winner. Collapsing them
+  // is exactly the bug this bake-off had: see the eligibility comment below.
+  timing_basis: x.r ? timingBasis(x.r) : 'unknown',
+  timing_provenance_ok: x.r ? provenanceOk(x.r) : false,
   eval_dir: x.r ? x.r.eval_dir : '', patch: x.r ? x.r.final_patch : '', apply_env: '', tuning_artifact: '',
 }));
 // (b) tuned env backend candidate (only if it beat the frozen baseline)
@@ -427,11 +444,27 @@ if (Number.isFinite(tunedSpeedup) && tunedSpeedup > 1.0 && bake.winner_backend &
 // transparency but must never win "by default"; winner=null => validation_status 'no_winner' => keep
 // the original kernel. Without this, a lane that is SLOWER than baseline (e.g. the only non-failed lane
 // at 0.17x) would be mislabeled the winner and mislead downstream automation reading .winner.
-// ...and only if the director ACCEPTED it. Ranking on speed alone let a lane whose validation came
-// back `flagged` (patch did not install, correctness failed, contended box) win the bake-off, be
+// ...and only if the director ACCEPTED it ON MERIT. Ranking on speed alone let a lane whose validation
+// came back `flagged` (patch did not install, correctness failed, contended box) win the bake-off, be
 // applied to the original kernel, and be curated into the KB — a number with a known reason not to
 // be believed, promoted by every downstream step. Reported in review of #411. `laneRows` still
 // carries every lane for transparency; only eligibility to WIN is tightened.
+//
+// ELIGIBILITY IS MERIT, NOT PROVENANCE. Every reason listed above is a reason to disbelieve the
+// MEASUREMENT. "The task was frozen before the timing-receipt contract existed, so we cannot prove the
+// ratio is device time" is not one of them — it is a statement about our evidence, not about the
+// kernel. The old director folded that case into `flagged` for want of any other channel, and this
+// filter, reading merit, discarded it: a reproduced, correctness-passing 3.73x weighted win on
+// dsa_sparse_mla_attn was dropped, `winner` fell to null, the original kernel was never patched, and
+// the e2e bench never ran. Benched by hand afterwards on the same harness, that kernel was worth
+// 1.89x end-to-end serving throughput (636 -> 1201 tok/s). The gate did not catch a bad number; it
+// destroyed a good one, and it did so by refusing to collect the very evidence it was demanding.
+//
+// So: merit decides who may win; provenance decides what winning obliges. A merit-accepted lane whose
+// device-time provenance is unproven IS eligible — and is flagged `requires_e2e_confirmation`, because
+// the serving benchmark measures wall-clock tok/s on the live server and cannot be fooled by the
+// dispatch-latency artefact the receipt exists to rule out. The strict provenance requirement stays
+// where it belongs: KB curation (kernel_lane.js), where a number becomes a fact nobody re-measures.
 const ACCEPTED = (c) => String(c.validation_status || '').toLowerCase() === 'accepted';
 const ranked = cands.filter(c => c.speedup > 1.0 && (c.kind !== 'lane' || ACCEPTED(c)))
   .sort((a, b) => b.speedup - a.speedup);
@@ -441,6 +474,20 @@ if (rejectedByGate.length) {
       `(validation_status != accepted): ${rejectedByGate.map(c => `${c.lang}=${c.validation_status}`).join(', ')}`);
 }
 const winner = ranked[0] || null;
+// Say it out loud in the log, both ways round — an unlabelled speedup is read as a clean device-time
+// win, and a silent admission is how the old collapse went unnoticed for a whole campaign.
+if (winner && winner.kind === 'lane') {
+  if (winner.timing_provenance_ok) {
+    log(`bake-off winner ${winner.lang} ${winner.speedup.toFixed(2)}x — timing_basis=device_verified.`);
+  } else {
+    log(`bake-off winner ${winner.lang} ${winner.speedup.toFixed(2)}x — merit ACCEPTED but ` +
+        `timing_basis=${winner.timing_basis}: the isolated ratio is not provably device time. ` +
+        `Eligible to win and REQUIRES e2e confirmation; not eligible for KB curation.`);
+  }
+}
+// Carried into the return value so the e2e layer can tell "confirmed in isolation" from "needs the
+// serving bench to settle it" without re-parsing director_validation.json.
+const winnerRequiresE2E = !!(winner && winner.kind === 'lane' && !winner.timing_provenance_ok);
 const laneRows = cands;
 const bestSpeedup = cands.reduce((m, c) => Math.max(m, Number(c.speedup) || 0), 0);
 
@@ -497,7 +544,13 @@ log(winner
 // update_experience=off): the reusable lesson is the cross-language routing outcome, which
 // no single lane can see. Sink is THIS workflow's knowledge/learned/ (see its README.md),
 // never e2e's. Only on a measured win, and ADD-only — a failed step is byte-neutral.
-if (winner && winner.speedup > 1.0) {
+// Provenance gate, same as the lane's: winning the bake-off earns an e2e measurement, not a KB card.
+// A card is quoted by later runs with no measurement attached, so a ratio we cannot show to be device
+// time must not become one until the serving bench has confirmed it.
+if (winner && winnerRequiresE2E) {
+  log(`[kb] not distilling bake-off card: winner timing_basis=${winner.timing_basis} — confirm e2e first.`);
+}
+if (winner && winner.speedup > 1.0 && !winnerRequiresE2E) {
   const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
   try {
     const ue = await agentT(
@@ -527,7 +580,10 @@ return {
     lang: winner.lang, mode: winner.mode, kind: winner.kind, speedup: winner.speedup,
     eval_dir: winner.eval_dir, final_patch: winner.patch,
     apply_env: winner.apply_env, tuning_artifact: winner.tuning_artifact,
-    validation_status: winner.validation_status,
+    validation_status: winner.validation_status,           // MERIT
+    timing_basis: winner.timing_basis,                     // PROVENANCE
+    timing_provenance_ok: winner.timing_provenance_ok,
+    requires_e2e_confirmation: winnerRequiresE2E,
   },
   report_path: rep ? rep.report_path : `${EVAL_DIR}/bakeoff_report.md`,
   applied_to_original: rep ? rep.applied_to_original : '',

@@ -249,21 +249,46 @@ baseline latencies recorded at benchmark setup).
    **TIMING RECEIPT GATE — run this BEFORE the comparisons above.** Parse `GEAK_TIMING_RECEIPT` out of the
    FULL_BENCHMARK output (see `oracle_freezer.md` step 4) and copy it verbatim into
    `director_validation.json` as `timing_receipt`. A speedup is a claim about DEVICE time; the receipt is
-   the only evidence that it is one. Then:
-   - `all_primed: true` → proceed normally.
+   the only evidence that it is one.
+
+   **This gate sets `timing_basis`. It NEVER sets `validation_status`.** The two answer different
+   questions and conflating them is what this contract got wrong before:
+   - `validation_status` is the **MERIT** verdict — did the number reproduce under your own measurement,
+     did correctness pass, did the patch install. That is the arbitration in the three bullets above, and
+     it is the ONLY thing that writes this field.
+   - `timing_basis` is the **PROVENANCE** label — can we prove the ratio is device time rather than host
+     dispatch. Unprovable provenance is a reason to go *measure end to end*, not a reason to throw the
+     kernel away. Stamping `flagged` on it made every downstream consumer read "this result is invalid",
+     the bake-off dropped the lane, the original was never patched, and the e2e bench that would have
+     settled the question never fired — discarding a real, reproduced win on the grounds that we had not
+     yet collected the evidence we were in the act of refusing to collect.
+
+   Set `timing_basis` from the receipt:
+   - `all_primed: true` → `timing_basis: "device_verified"`. The ratio is a clean device-time ratio.
    - `all_primed: false` with `timer_unprimed: false` → at least one leg is HOST-BOUND at these dims. The
-     ratio is a dispatch-latency ratio, not a kernel speedup. Still report the number, but set
-     `timing_basis: "host_bound"` and name the affected cases in `arbitration_note` — a host-bound win does
-     NOT survive integration into a server that already replays this op inside its own graph.
+     ratio is a dispatch-latency ratio, not a kernel speedup. Set `timing_basis: "host_bound"` and name the
+     affected cases in `arbitration_note` — a host-bound win often does NOT survive integration into a
+     server that already replays this op inside its own graph.
    - `timer_unprimed: true` → the task was frozen against a `harness_lib.py` that predates dispatch priming,
-     so BOTH legs carry a bubble of unknown sign. Set `timing_basis: "unprimed"` and `status: "flagged"`.
-     Do not attempt a correction factor: the bubble is a constant that inflates whichever leg is relatively
-     smaller, so it moves different cases in different directions. Re-freeze against a current
-     `$HARNESS_LIB` is the only fix.
-   - Receipt ABSENT entirely → the unittest is older than this contract. `timing_basis: "unknown"`,
-     `status: "flagged"`. Absence is not evidence of priming.
-   Whatever the outcome, `timing_basis` is REQUIRED in `director_validation.json`, and any campaign summary
-   that quotes the speedup must carry it — an unlabelled number is read as a clean device-time win.
+     so BOTH legs carry a bubble of unknown sign. Set `timing_basis: "unprimed"`. Do not attempt a
+     correction factor: the bubble is a constant that inflates whichever leg is relatively smaller, so it
+     moves different cases in different directions. Re-freezing against a current `$HARNESS_LIB` is the
+     only way to make the isolated number self-evidencing.
+   - Receipt ABSENT entirely → the unittest is older than this contract. `timing_basis: "unknown"`.
+     Absence is not evidence of priming.
+
+   Then set the two derived fields, which are what downstream automation actually consumes:
+   - `timing_provenance_ok`: `true` only when `timing_basis == "device_verified"`, else `false`.
+   - `requires_e2e_confirmation`: `true` whenever `timing_provenance_ok` is `false`. A merit-`accepted`
+     lane with unproven provenance is **eligible to win the bake-off and MUST be carried to the e2e
+     bench** — the serving benchmark measures wall-clock tok/s on the live server and cannot be fooled by
+     a dispatch-latency artefact, so it answers exactly the question the missing receipt left open. It is
+     **not** eligible for KB curation until an e2e result confirms it.
+
+   `timing_basis` is REQUIRED in `director_validation.json`, and any campaign summary that quotes the
+   speedup must carry it — an unlabelled number is read as a clean device-time win. Never let a
+   provenance label silently become a merit verdict: if you are writing `flagged`, you must be able to
+   name which of the three merit bullets above caused it.
 7. If `APPLY_TO_ORIGINAL=true` AND status is `accepted`:
    ```bash
    cd "$KERNEL_PATH_ORIG"
@@ -288,6 +313,9 @@ Return JSON:
   "tech_lead_reported_speedup_geomean": 0.0,
   "validation_status": "accepted|flagged",
   "correctness": "pass|fail",
+  "timing_basis": "device_verified|host_bound|unprimed|unknown",
+  "timing_provenance_ok": true,
+  "requires_e2e_confirmation": false,
   "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0}],
   "applied_to_original": "true|false",
   "arbitration_note": "accept reason, or what to re-task if flagged",
