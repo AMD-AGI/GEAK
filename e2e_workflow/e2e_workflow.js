@@ -43,12 +43,20 @@ const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 // Off is also the conservative default for the layer that has never been measured with it on.
 // Override per run with args.use_learned_kb=true.
 const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb : 'false');
+// Deep Research is expensive and remains OFF for ordinary e2e runs. The
+// scheduled learned-KB refresh explicitly turns it on; injecting it here keeps
+// every current and future nested kernel-lane call on the same setting.
+const LANE_DRA_ENABLED = String(A.dra_enabled != null ? A.dra_enabled : 'false');
 
 // EVERY nested lane invocation goes through here. Setting the flag at each call site instead would
 // be the defect this repo keeps re-making — there are seven call sites today, and the eighth would
 // silently take the lane's own default (on) with nothing to catch it. test_e2e_lane_defaults.py
 // fails if a `scriptPath: KERNEL_WF_SCRIPT` call is added that does not route through this.
-const laneArgs = (wfArgs) => ({ use_learned_kb: LANE_USE_LEARNED_KB, ...wfArgs });
+const laneArgs = (wfArgs) => ({
+  use_learned_kb: LANE_USE_LEARNED_KB,
+  dra_enabled: LANE_DRA_ENABLED,
+  ...wfArgs,
+});
 
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');

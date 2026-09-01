@@ -70,7 +70,7 @@ LOG="$OUT_DIR/held.out"
 # lane needs; without them kb/store_remote.py reports "no_credentials" and every model
 # silently optimizes cold. The values are supplied by the caller's environment (they are
 # secrets and an internal IP, so they are never committed to this public repo).
-HELD_FORWARD_ENV_RE="${HELD_FORWARD_ENV_RE:-^(LITELLM_|ANTHROPIC_|CLAUDE_|KB_|HF_TOKEN$|HUGGINGFACE_|HUGGING_FACE_|GEAK_PROBE_SKIP_CLAUDE$|GEAK_FORCE_DSTATE_CHECK$|IMAGE$)}"
+HELD_FORWARD_ENV_RE="${HELD_FORWARD_ENV_RE:-^(LITELLM_|ANTHROPIC_|CLAUDE_|KB_|HF_TOKEN$|HUGGINGFACE_|HUGGING_FACE_|GEAK_PROBE_SKIP_CLAUDE$|GEAK_FORCE_DSTATE_CHECK$|GEAK_DRA_ENABLED$|GEAK_USE_LEARNED_KB$|IMAGE$)}"
 ENV_PREFIX=""
 ENV_REDACTED=""
 ENV_NAMES=()

@@ -295,6 +295,46 @@ real measured baseline (`baseline_throughput_tok_s > 0`). Anything else fails:
   fallback (Python `claude_agent_sdk` missing in the container).
 - a `monitor_verdict.json` (watchdog kill) forces the step red.
 
+## Periodic DRA learned-KB refresh
+
+`.github/workflows/dra-kb-refresh.yml` runs on days 1 and 15 (and supports manual
+dispatch). DRA remains off for ordinary e2e runs; this cadence sets
+`GEAK_DRA_ENABLED=true` and `GEAK_USE_LEARNED_KB=true`, runs one enrolled model
+through the existing SPUR matrix driver, and then uses the learned KB's existing
+single-writer path:
+
+```text
+DRA-assisted kernel directions
+  -> Director-accepted update_experience proposals
+  -> knowledge/learned/_inbox/*.json
+  -> kb.py drain --apply
+  -> lint/index/doctor/stats
+  -> automation/dra-kb-refresh-<timestamp> pull request
+```
+
+Only Director-accepted reusable wins and citation-ledger updates are persisted;
+raw Researcher output is not a second knowledge store. If no learned files
+change, the workflow opens no PR.
+
+Configuration:
+
+- `vars.DRA_KB_REFRESH_MODEL` — enrolled model key (fallback `Qwen3-8B`).
+- `vars.DRA_KB_REFRESH_BUDGET_S` — cadence budget (fallback
+  `vars.GEAK_E2E_BUDGET_S`, then 57600 seconds).
+- `vars.GEAK_CI_PATH`, `secrets.LITELLM_API_KEY`, and
+  `secrets.LITELLM_BASE_URL` — the same SPUR workspace/auth used by L1.
+- `secrets.GEAK_KB_PR_TOKEN` — optional fine-grained token for creating refresh
+  PRs whose push/PR events should trigger normal CI. Without it, the workflow
+  uses `github.token`; GitHub suppresses recursive workflow triggers from that
+  token, so repository protection may require a maintainer to re-run checks.
+
+**YET TO TEST — empirical value:** seed the learned KB with cards distilled from
+a previous DRA-enabled refresh, then run the same workload twice with DRA off:
+the treatment uses the seeded learned KB, and the control sets
+`use_learned_kb=false`. Compare Director-verified final speedup on the same
+baseline. The cadence workflow validates storage and provenance but does not
+claim this performance result.
+
 ## Monitor knobs
 
 The host-side liveness monitor (`run_monitor.sh`) is **ON by default** (`GEAK_MONITOR=1`)

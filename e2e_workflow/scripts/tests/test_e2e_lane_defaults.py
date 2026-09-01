@@ -41,9 +41,19 @@ check("e2e defaults the lane's learned KB to off",
 check("the default is overridable per run",
       "A.use_learned_kb" in s, "the caller must be able to turn it back on")
 
+check("e2e defaults nested-lane DRA to off",
+      re.search(r"LANE_DRA_ENABLED\s*=\s*String\(A\.dra_enabled\s*!=\s*null\s*\?\s*"
+                r"A\.dra_enabled\s*:\s*'false'\)", s) is not None,
+      "expected LANE_DRA_ENABLED to fall back to 'false'")
+
+check("the DRA default is overridable per run",
+      "A.dra_enabled" in s, "the cadence workflow must be able to turn DRA on")
+
 check("one injection point, not one per call site",
-      s.count("const laneArgs = (wfArgs) =>") == 1 and "use_learned_kb: LANE_USE_LEARNED_KB" in s,
-      "laneArgs is where the default is applied")
+      s.count("const laneArgs = (wfArgs) =>") == 1
+      and "use_learned_kb: LANE_USE_LEARNED_KB" in s
+      and "dra_enabled: LANE_DRA_ENABLED" in s,
+      "laneArgs is where the learned-KB and DRA defaults are applied")
 
 # Every lane invocation must go through it. Two shapes exist: the bounded wrappers, which inject
 # internally, and raw `workflow(...)` calls, which must wrap their args explicitly.
