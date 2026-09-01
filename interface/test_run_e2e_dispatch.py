@@ -260,6 +260,31 @@ class TestMapArgs(_RunE2ECase):
         self.assertEqual(ps["config_tune"], "false")
         self.assertEqual(ps["apply_to_original"], "true")
 
+    def test_periodic_dra_flags_are_forwarded_from_environment(self):
+        os.environ["GEAK_DRA_ENABLED"] = "true"
+        os.environ["GEAK_USE_LEARNED_KB"] = "1"
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_refresh")))
+        self.assertEqual(ps["dra_enabled"], "true")
+        self.assertEqual(ps["use_learned_kb"], "true")
+
+    def test_handoff_dra_flags_override_environment(self):
+        os.environ["GEAK_DRA_ENABLED"] = "true"
+        os.environ["GEAK_USE_LEARNED_KB"] = "true"
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_refresh"),
+            dra_enabled="off",
+            use_learned_kb="0",
+        ))
+        self.assertEqual(ps["dra_enabled"], "false")
+        self.assertEqual(ps["use_learned_kb"], "false")
+
+    def test_dra_flags_remain_absent_without_explicit_cadence(self):
+        os.environ.pop("GEAK_DRA_ENABLED", None)
+        os.environ.pop("GEAK_USE_LEARNED_KB", None)
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_normal")))
+        self.assertNotIn("dra_enabled", ps)
+        self.assertNotIn("use_learned_kb", ps)
+
     def test_budget_omitted_when_unknown(self):
         """No timeout => the workflow stays budget-unaware (byte-identical to a
         direct, non-interface invocation)."""

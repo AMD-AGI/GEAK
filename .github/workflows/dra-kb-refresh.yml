@@ -1,0 +1,172 @@
+name: DRA learned-KB refresh
+
+# DRA is intentionally too expensive for every run. Twice a month, exercise it
+# on one enrolled model, let Director-accepted kernel wins submit learned-card
+# proposals, then drain those proposals into an ordinary reviewable PR.
+on:
+  schedule:
+    - cron: "0 6 1,15 * *"
+  workflow_dispatch:
+    inputs:
+      model_key:
+        description: "Enrolled ci/models.tsv model. Empty uses vars.DRA_KB_REFRESH_MODEL (fallback Qwen3-8B)."
+        type: string
+        required: false
+        default: ""
+      budget_s:
+        description: "GEAK wall-clock budget in seconds. Empty uses the cadence/repository variable."
+        type: string
+        required: false
+        default: ""
+
+# Share the L1 group: a cadence run must not double-submit beside a smoke/full
+# run to the same SPUR capacity. Let the in-flight run finish.
+concurrency:
+  group: l1-spur-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  GEAK_E2E_BUDGET_S: ${{ vars.GEAK_E2E_BUDGET_S || '57600' }}
+  WS: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace
+  HF_LOGS: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace/geak_runtime
+  INFERENCEX_PATH: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace/InferenceX
+  HF_MODELS_DIR: ${{ vars.GEAK_CI_PATH }}/geak_ci_workspace/hf_models
+  LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+  LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+  PERFSKILLS_CLAUDE_MODEL: ${{ vars.PERFSKILLS_CLAUDE_MODEL || 'claude-opus-5' }}
+  GEAK_DRA_ENABLED: "true"
+  GEAK_USE_LEARNED_KB: "true"
+
+jobs:
+  refresh:
+    name: Periodic DRA campaign and KB proposal
+    runs-on: self-hosted
+    timeout-minutes: 3600
+    steps:
+      - name: Checkout current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GEAK_KB_PR_TOKEN || github.token }}
+
+      - name: Resolve and validate cadence inputs
+        id: plan
+        env:
+          MODEL_IN: ${{ github.event.inputs.model_key || vars.DRA_KB_REFRESH_MODEL || 'Qwen3-8B' }}
+          BUDGET_IN: ${{ github.event.inputs.budget_s || vars.DRA_KB_REFRESH_BUDGET_S || vars.GEAK_E2E_BUDGET_S || '57600' }}
+          DOCKER_JSON_IN: ${{ vars.DOCKER_DEFAULT_JSON }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source ci/lib.sh
+          MODEL="$MODEL_IN"
+          BUDGET="$BUDGET_IN"
+          is_enrolled "$MODEL" || { echo "::error::model '$MODEL' is not enrolled in ci/models.tsv"; exit 1; }
+          case "$BUDGET" in
+            ""|*[!0-9]*) echo "::error::budget_s must be a positive integer (got '$BUDGET')"; exit 1 ;;
+          esac
+          [ "$BUDGET" -gt 0 ] || { echo "::error::budget_s must be > 0"; exit 1; }
+          DOCKER_JSON="${DOCKER_JSON_IN:-docker_default.json}"
+          case "$DOCKER_JSON" in
+            */*|*..*) echo "::error::vars.DOCKER_DEFAULT_JSON must be a bare filename (got '$DOCKER_JSON')"; exit 1 ;;
+          esac
+          PRESET="ci/docker_setup/$DOCKER_JSON"
+          [ -f "$PRESET" ] || { echo "::error::docker preset not found: $PRESET"; exit 1; }
+          python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$PRESET"
+          RUN_TS="$(new_ts)"
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
+          echo "budget=$BUDGET" >> "$GITHUB_OUTPUT"
+          echo "run_ts=$RUN_TS" >> "$GITHUB_OUTPUT"
+          echo "docker_json=$DOCKER_JSON" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Scheduled DRA learned-KB refresh"
+            echo ""
+            echo "- model: \`$MODEL\`"
+            echo "- run: \`$RUN_TS\`"
+            echo "- budget: ${BUDGET}s"
+            echo "- docker preset: \`$DOCKER_JSON\`"
+            echo "- DRA: enabled"
+            echo "- learned KB: enabled"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preflight SPUR and dataset
+        run: |
+          set -euo pipefail
+          command -v sbatch >/dev/null || { echo "::error::sbatch not on PATH"; exit 1; }
+          sinfo -p amd-spur -h >/dev/null || { echo "::error::cannot reach SPUR controller"; exit 1; }
+          test -d "$HF_LOGS" || { echo "::error::missing dataset dir $HF_LOGS"; exit 1; }
+
+      - name: Run DRA-enabled campaign
+        env:
+          RUN_TS: ${{ steps.plan.outputs.run_ts }}
+          DOCKER_DEFAULT: ${{ github.workspace }}/ci/docker_setup/${{ steps.plan.outputs.docker_json }}
+        run: |
+          set -euo pipefail
+          bash ci/dispatch/run_matrix.sh \
+            "${{ steps.plan.outputs.model }}" \
+            --budget "${{ steps.plan.outputs.budget }}"
+
+      - name: Drain and validate learned-KB proposals
+        id: kb
+        run: |
+          set -euo pipefail
+          KB_DIR="kernel_workflow/knowledge/learned"
+          python3 kernel_workflow/scripts/kb.py --kb-dir "$KB_DIR" drain --apply
+          python3 kernel_workflow/scripts/kb.py --kb-dir "$KB_DIR" lint --cards
+          python3 kernel_workflow/scripts/kb.py --kb-dir "$KB_DIR" index --check
+          python3 kernel_workflow/scripts/kb.py --kb-dir "$KB_DIR" doctor
+          python3 kernel_workflow/scripts/kb.py --kb-dir "$KB_DIR" stats
+          git diff --check
+          if [ -n "$(git status --porcelain -- "$KB_DIR")" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No accepted learned-KB changes; no PR will be opened." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Open learned-KB refresh PR
+        if: steps.kb.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GEAK_KB_PR_TOKEN || github.token }}
+          RUN_TS: ${{ steps.plan.outputs.run_ts }}
+          MODEL: ${{ steps.plan.outputs.model }}
+          BUDGET: ${{ steps.plan.outputs.budget }}
+        run: |
+          set -euo pipefail
+          KB_DIR="kernel_workflow/knowledge/learned"
+          BRANCH="automation/dra-kb-refresh-$RUN_TS"
+          git switch -c "$BRANCH"
+          git add -- "$KB_DIR"
+          git -c user.name="geak-kb-bot" \
+              -c user.email="geak-kb-bot@users.noreply.github.com" \
+              commit -m "chore(kb): refresh learned cards from DRA campaign"
+          git push -u origin "$BRANCH"
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore(kb): refresh learned cards from DRA campaign $RUN_TS" \
+            --body-file - <<EOF
+          ## Summary
+          - run the scheduled DRA-enabled refresh on \`$MODEL\`
+          - drain Director-accepted learned-card proposals and citation ledgers
+          - regenerate the learned index through the existing single-writer path
+
+          ## Source run
+          - run: \`$RUN_TS\`
+          - model: \`$MODEL\`
+          - budget: ${BUDGET}s
+          - DRA: enabled
+          - learned KB: enabled
+
+          ## Validation
+          - [x] \`kb.py drain --apply\`
+          - [x] \`kb.py lint --cards\`
+          - [x] \`kb.py index --check\`
+          - [x] \`kb.py doctor\`
+          - [x] \`kb.py stats\`
+          - [ ] Empirical speedup comparison is not performed by this cadence job
+          EOF

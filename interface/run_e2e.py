@@ -415,6 +415,20 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # of deriving it.
     if h.get("tuning_kb") is not None:
         ps_args["tuning_kb"] = "true" if _as_bool(h["tuning_kb"]) else "false"
+    # Periodic learned-KB refreshes enable the expensive Research phase only on
+    # their scheduled run. Handoff values remain authoritative for reproducible
+    # callers; environment variables are the CI-only injection channel. When
+    # both are absent, preserve the workflow defaults (DRA off and, for e2e,
+    # the kernel learned KB off).
+    for key, env_name in (
+        ("dra_enabled", "GEAK_DRA_ENABLED"),
+        ("use_learned_kb", "GEAK_USE_LEARNED_KB"),
+    ):
+        raw = h.get(key)
+        if raw is None:
+            raw = os.environ.get(env_name)
+        if raw is not None:
+            ps_args[key] = "true" if _as_bool(raw) else "false"
     # No op budget is forwarded: the tuning loop is uncapped by design (see e2e_workflow.js).
     # Carried cross-phase state (the prior workflow return's `state`), so a
     # resume continues from where a previous phase invocation left off.
