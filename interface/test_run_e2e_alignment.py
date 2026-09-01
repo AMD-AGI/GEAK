@@ -17,9 +17,11 @@ alignment_metrics):
     same-config metric.
   * ``raw_session_baseline_divergence_pct`` = GEAK baseline vs the orchestrator
     RAW baseline (conflates config gain + residue) — audit only.
-  * ``cold_speedup`` = GEAK cold final / orchestrator COLD baseline — the exact
-    number Hyperloom promotes as its (cross-harness) PROVISIONAL gain, so it must
-    equal current_best.tput / baseline_tput.
+  * ``cold_speedup`` = GEAK cold final / the orchestrator anchor Hyperloom
+    promotes, so it must equal current_best.tput / baseline_tput. Note the
+    anchor is normally a HOT measure round (Hyperloom discards its warmup
+    round); ``orchestrator_baseline_lifecycle`` says which, and
+    ``hot_speedup`` is the hot-to-hot pairing.
 
 Run: python3 -m pytest GEAK/interface/test_run_e2e_alignment.py -v
 """

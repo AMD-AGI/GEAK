@@ -1874,36 +1874,72 @@ def _safe_ratio(num: float | None, den: float | None) -> float | None:
     return round(n / d, 4) if (n > 0 and d > 0) else None
 
 
-def read_orchestrator_hot_baseline(h: dict) -> float:
-    """Read Hyperloom's HOT baseline throughput from its ``state.json`` (best-effort).
+def read_orchestrator_baseline_lifecycle(h: dict) -> tuple[float, str]:
+    """Read Hyperloom's baseline anchor AND its thermal state from ``state.json``.
 
-    Hyperloom's double-run baseline records BOTH a COLD round (``baseline_tput`` —
-    the leaderboard denominator, forwarded to us as ``handoff.raw_baseline_tput``)
-    and a HOT round (``baseline_hot_tput``). Only the cold one rides in the handoff,
-    so for a hot-to-hot cross-check we read the hot one straight off ``state.json``.
+    Hyperloom does NOT keep a cold and a hot baseline side by side. Its double-run
+    baseline runs one full warmup round, DISCARDS it, and anchors on the round
+    measured against the now-hot server — so ``state.baseline_tput`` (the
+    leaderboard denominator, forwarded to us as ``handoff.raw_baseline_tput``) IS
+    the hot number. There is no ``baseline_hot_tput`` key anywhere in Hyperloom;
+    reading one only ever returned nothing.
+
+    What varies is whether the double run happened at all, and Hyperloom records
+    that in two fields written by the same writeback that promotes the anchor:
+
+    * ``baseline_warm_runtime_sec`` — the measure round's wall-clock. Set only on
+      the double-run path and explicitly zeroed when a later baseline lands
+      without one, so ``> 0`` is positive evidence that a warmup round preceded
+      the anchor.
+    * ``baseline_measure_round_dropped`` — True when the budget could not fund
+      the hot pass and the session had to keep the COLD figure as its anchor.
+
     ``state.json`` lives at the SESSION dir (an ancestor of ``exp_root``); probe a
-    couple of levels up. Returns 0.0 when unavailable (standalone / no orchestrator),
-    so the alignment metrics simply degrade to None instead of raising.
+    couple of levels up.
+
+    Returns:
+        ``(hot_tput, lifecycle)``. ``lifecycle`` is one of ``hot_measure_round``,
+        ``cold_single_round`` or ``unknown``, and ``hot_tput`` is 0.0 for anything
+        but the first — so the hot-to-hot alignment metrics degrade to None rather
+        than quietly dividing by a cold denominator. A standalone run with no
+        orchestrator gets ``(0.0, "unknown")``.
     """
     exp_root = str(h.get("exp_root") or "").strip()
     if not exp_root:
-        return 0.0
+        return 0.0, "unknown"
     p = Path(exp_root)
     for cand in (p / "state.json", p.parent / "state.json",
                  p.parent.parent / "state.json"):
         st = _read_json(cand)
         if not st:
             continue
-        v = st.get("baseline_hot_tput")
-        if not v:
-            base = st.get("baseline") if isinstance(st.get("baseline"), dict) else {}
-            v = base.get("baseline_hot_tput")
-        try:
-            if v and float(v) > 0:
-                return float(v)
-        except (TypeError, ValueError):
+        base = st.get("baseline") if isinstance(st.get("baseline"), dict) else {}
+        tput = _positive_finite_float(
+            st.get("baseline_tput") or base.get("baseline_tput")
+        )
+        if tput <= 0.0:
             continue
-    return 0.0
+        warm_sec = _positive_finite_float(
+            st.get("baseline_warm_runtime_sec")
+            or base.get("baseline_warm_runtime_sec")
+        )
+        dropped = bool(
+            st.get("baseline_measure_round_dropped")
+            or base.get("baseline_measure_round_dropped")
+        )
+        if warm_sec > 0.0 and not dropped:
+            return tput, "hot_measure_round"
+        return 0.0, "cold_single_round" if dropped else "unknown"
+    return 0.0, "unknown"
+
+
+def read_orchestrator_hot_baseline(h: dict) -> float:
+    """Hyperloom's baseline anchor, but only when it is a HOT measure round.
+
+    Thin wrapper over :func:`read_orchestrator_baseline_lifecycle`; see there for
+    why the hot number is ``baseline_tput`` and not a separate key.
+    """
+    return read_orchestrator_baseline_lifecycle(h)[0]
 
 
 def _wf_best_accepted_delta_pct(wf: dict) -> float:
@@ -2532,18 +2568,35 @@ def normalize_result(h: dict, wf: dict) -> dict:
 
     # ── cold/hot alignment metrics (double-check; never changes the primary
     # final_throughput_tok_s / throughput_speedup Hyperloom promotes) ─────────
-    # Hyperloom's leaderboard anchor baseline_tput is a COLD single round; GEAK's
-    # final is a HOT median, so the promoted cold-to-... comparison mixes thermal
-    # states. We surface every well-defined speedup so a reviewer can tell a real
-    # win from a warm/cold measurement artefact:
-    #   * hot_speedup      = GEAK hot final  / Hyperloom HOT baseline  (hot-to-hot, cross-harness)
+    # Hyperloom's leaderboard anchor baseline_tput is normally a HOT measure round
+    # (one discarded warmup round, then the timed round on that same server), and
+    # under MEASUREMENT_MODE=warm_server GEAK's final is measured the same way — so
+    # the promoted comparison is hot-to-hot. It is NOT hot when Hyperloom's budget
+    # forced it to keep the cold figure, which is what
+    # orchestrator_baseline_lifecycle reports. We surface every well-defined
+    # speedup so a reviewer can tell a real win from a warm/cold artefact:
+    #   * hot_speedup      = GEAK hot final  / Hyperloom HOT baseline  (hot-to-hot, cross-harness;
+    #                        None when Hyperloom's anchor was not a hot measure round)
     #   * hot_geak_speedup = GEAK hot final  / GEAK  hot baseline      (within-GEAK, harness-internal)
-    #   * cold_speedup     = GEAK cold final / Hyperloom COLD baseline (cold-to-cold, matches leaderboard state)
+    #   * cold_speedup     = GEAK cold final / Hyperloom's anchor      (GEAK-cold over whatever
+    #                        Hyperloom promoted; read it with the lifecycle field, since a hot
+    #                        anchor makes this a cold-over-hot ratio, not a cold-to-cold one)
     #   * cold_geak_speedup= GEAK cold final / GEAK  cold baseline     (within-GEAK cold, if measured)
     # The cold numbers are populated only when BENCH_COLD_FINAL=1 added a cold
     # round to bench_e2e.sh (else None). All ratios are None when an input is
     # missing, so a standalone / orchestrator-less run carries the block harmlessly.
-    orch_hot_baseline = read_orchestrator_hot_baseline(h)
+    orch_state_hot_baseline, orch_baseline_lifecycle = read_orchestrator_baseline_lifecycle(h)
+    # Prefer the handoff's anchor over the one re-read from state.json so
+    # hot_speedup stays the SAME pairing Hyperloom promotes: a re-baseline that
+    # lands after our handoff was minted moves state.json but not the handoff,
+    # and silently reporting the newer number would make the two ratios in this
+    # block disagree for no visible reason. state.json only supplies the verdict
+    # on what the anchor is, plus the value when the handoff carries none.
+    orch_hot_baseline = (
+        (orch_baseline or orch_state_hot_baseline)
+        if orch_baseline_lifecycle == "hot_measure_round"
+        else 0.0
+    )
     geak_hot_final = geak_final
     geak_hot_baseline = geak_baseline
     geak_cold_final = final_summary.get("cold_output_throughput_tok_s")
@@ -2567,7 +2620,15 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "geak_hot_baseline_tok_s": geak_hot_baseline or None,
         "geak_cold_final_tok_s": geak_cold_final,
         "geak_cold_baseline_tok_s": geak_cold_baseline,
-        "orchestrator_cold_baseline_tok_s": orch_baseline or None,   # == handoff.raw_baseline_tput (leaderboard anchor)
+        # == handoff.raw_baseline_tput (the leaderboard anchor). Kept under the
+        # historical "cold" key for the consumers that already read it, but the
+        # anchor is hot whenever orchestrator_baseline_lifecycle says so.
+        "orchestrator_cold_baseline_tok_s": orch_baseline or None,
+        "orchestrator_baseline_tok_s": orch_baseline or None,
+        # hot_measure_round | cold_single_round | unknown — read off Hyperloom's
+        # state.json, so it says what the anchor above ACTUALLY is.
+        "orchestrator_baseline_lifecycle": orch_baseline_lifecycle,
+        # The same anchor, exposed only when it is provably a hot measure round.
         "orchestrator_hot_baseline_tok_s": orch_hot_baseline or None,
         "hot_speedup": _safe_ratio(geak_hot_final, orch_hot_baseline),
         "hot_geak_speedup": _safe_ratio(geak_hot_final, geak_hot_baseline),

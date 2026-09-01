@@ -1578,15 +1578,30 @@ class TestNumericHelpers(_RunE2ECase):
 
 
 class TestOrchestratorHotBaseline(_RunE2ECase):
-    def test_absent_exp_root_is_zero(self):
-        self.assertEqual(rx.read_orchestrator_hot_baseline({}), 0.0)
-        self.assertEqual(rx.read_orchestrator_hot_baseline({"exp_root": "  "}), 0.0)
+    """Hyperloom's anchor is ``baseline_tput``; whether it is HOT is told by
+    ``baseline_warm_runtime_sec`` (the measure round's wall-clock, written only on
+    the double-run path) and ``baseline_measure_round_dropped``."""
+
+    def test_absent_exp_root_is_unknown(self):
+        self.assertEqual(rx.read_orchestrator_baseline_lifecycle({}), (0.0, "unknown"))
+        self.assertEqual(
+            rx.read_orchestrator_baseline_lifecycle({"exp_root": "  "}),
+            (0.0, "unknown"),
+        )
 
     def test_hot_baseline_found_two_levels_up(self):
         session = self.tmp / "session"
         exp_root = session / "run" / "geak"
         exp_root.mkdir(parents=True)
-        self.write_json(session / "state.json", {"baseline_hot_tput": 612.5})
+        self.write_json(session / "state.json", {
+            "baseline_tput": 612.5,
+            "baseline_warm_runtime_sec": 176.4,
+            "baseline_measure_round_dropped": False,
+        })
+        self.assertEqual(
+            rx.read_orchestrator_baseline_lifecycle({"exp_root": str(exp_root)}),
+            (612.5, "hot_measure_round"),
+        )
         self.assertEqual(
             rx.read_orchestrator_hot_baseline({"exp_root": str(exp_root)}), 612.5
         )
@@ -1594,16 +1609,43 @@ class TestOrchestratorHotBaseline(_RunE2ECase):
     def test_nested_baseline_block_is_read(self):
         exp_root = self.tmp / "geak"
         exp_root.mkdir(parents=True)
-        self.write_json(exp_root / "state.json",
-                        {"baseline": {"baseline_hot_tput": "701.25"}})
+        self.write_json(exp_root / "state.json", {"baseline": {
+            "baseline_tput": "701.25",
+            "baseline_warm_runtime_sec": "88.0",
+        }})
         self.assertEqual(
-            rx.read_orchestrator_hot_baseline({"exp_root": str(exp_root)}), 701.25
+            rx.read_orchestrator_baseline_lifecycle({"exp_root": str(exp_root)}),
+            (701.25, "hot_measure_round"),
+        )
+
+    def test_dropped_measure_round_is_cold_and_not_offered_as_hot(self):
+        """Budget could not fund the hot pass, so the anchor is the cold round —
+        dividing GEAK's hot final by it would return the warm-up as speedup."""
+        exp_root = self.tmp / "geak"
+        exp_root.mkdir(parents=True)
+        self.write_json(exp_root / "state.json", {
+            "baseline_tput": 500.0,
+            "baseline_warm_runtime_sec": 0.0,
+            "baseline_measure_round_dropped": True,
+        })
+        self.assertEqual(
+            rx.read_orchestrator_baseline_lifecycle({"exp_root": str(exp_root)}),
+            (0.0, "cold_single_round"),
+        )
+
+    def test_single_round_baseline_is_unknown_not_hot(self):
+        exp_root = self.tmp / "geak"
+        exp_root.mkdir(parents=True)
+        self.write_json(exp_root / "state.json", {"baseline_tput": 500.0})
+        self.assertEqual(
+            rx.read_orchestrator_baseline_lifecycle({"exp_root": str(exp_root)}),
+            (0.0, "unknown"),
         )
 
     def test_unusable_values_degrade_to_zero(self):
         exp_root = self.tmp / "geak"
         exp_root.mkdir(parents=True)
-        self.write_json(exp_root / "state.json", {"baseline_hot_tput": "not-a-number"})
+        self.write_json(exp_root / "state.json", {"baseline_tput": "not-a-number"})
         self.assertEqual(
             rx.read_orchestrator_hot_baseline({"exp_root": str(exp_root)}), 0.0
         )
@@ -1612,7 +1654,8 @@ class TestOrchestratorHotBaseline(_RunE2ECase):
         exp_root = self.tmp / "geak"
         exp_root.mkdir(parents=True)
         self.assertEqual(
-            rx.read_orchestrator_hot_baseline({"exp_root": str(exp_root)}), 0.0
+            rx.read_orchestrator_baseline_lifecycle({"exp_root": str(exp_root)}),
+            (0.0, "unknown"),
         )
 
 
