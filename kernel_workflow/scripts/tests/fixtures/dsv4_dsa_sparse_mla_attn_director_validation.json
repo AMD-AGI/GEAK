@@ -1,0 +1,62 @@
+{
+  "kernel_name": "main_kernel_task (dsv4 fused sparse paged MLA, Triton; author mode)",
+  "director_verified_speedup_weighted": 3.7348,
+  "director_verified_speedup_weighted_own_baselines": [
+    3.7326,
+    3.7301
+  ],
+  "director_verified_speedup_geomean": 2.5483,
+  "director_verified_speedup_arithmetic": 2.8602,
+  "tech_lead_reported_speedup_weighted": 3.7341,
+  "tech_lead_reported_speedup_geomean": 3.7341,
+  "validation_status": "flagged",
+  "correctness": "pass",
+  "timing_receipt": null,
+  "timing_basis": "unknown",
+  "per_case": [
+    {
+      "name": "prefill_m8192_x1024",
+      "baseline_ms": 23.867535,
+      "optimized_ms": 5.014021,
+      "speedup": 4.7602,
+      "count": 1920,
+      "weight": 45825.667,
+      "weight_source": "regime"
+    },
+    {
+      "name": "prefill_m8192_x64",
+      "baseline_ms": 4.5602,
+      "optimized_ms": 1.470351,
+      "speedup": 3.1014,
+      "count": 1984,
+      "weight": 9047.437,
+      "weight_source": "regime"
+    },
+    {
+      "name": "decode_m64_x1024",
+      "baseline_ms": 0.2466,
+      "optimized_ms": 0.1037,
+      "speedup": 2.378,
+      "count": 30720,
+      "weight": 7575.552,
+      "weight_source": "regime"
+    },
+    {
+      "name": "decode_m64_x128",
+      "baseline_ms": 0.05528,
+      "optimized_ms": 0.04602,
+      "speedup": 1.2012,
+      "count": 31744,
+      "weight": 1754.808,
+      "weight_source": "regime"
+    }
+  ],
+  "applied_to_original": "false",
+  "arbitration_note": "Result REPRODUCED independently in a fresh validation_workspace built from KERNEL_PATH_ORIG. Two full unittest.py runs under gpu_lock: CORRECTNESS: PASS / exit 0 both times; GEAK_WEIGHTED_SPEEDUP 3.7326 and 3.7301. Recomputing h.serving_weighted_speedup with the frozen BASELINE_TIMING denominators and my measured optimized ms gives 3.7348 vs TechLead's claimed 3.7341 (+0.02%) -> arbitration on the PRIMARY metric is ACCEPT. My measured baseline_ms also matched BASELINE_TIMING within 1% on every bucket, so the denominator has not drifted. STATUS IS flagged SOLELY BY THE TIMING-RECEIPT GATE: this task's harness_lib.py/unittest.py predate the GEAK_TIMING_RECEIPT contract and emit no receipt at all, so timing_basis must be recorded as 'unknown' (absence is not evidence of priming). Mitigating evidence from direct code inspection: harness_lib.time_op measures CUDA-event DEVICE time (host dispatch excluded) with warmup=10, repeats=50, per-sample 512MB cache flush, medians, and decode timed via cuda_event_graph replay. NO corrective round is warranted (correctness passed, patch applies, numbers reproduce). The only real fix is re-freezing the task against a current harness_lib. SEPARATE OPERATIONAL FINDING: this is an AUTHOR-MODE task. final_patch.diff is a diff of the authored Triton seed (workspace commit a81bf3c) -> final, and does NOT apply to KERNEL_PATH_ORIG/kernel_src/tilelang_kernel.py, which holds an unrelated 2640-line TileLang implementation. `git apply` against a pristine copy of the original FAILS. I reconstructed the correct validation state by materialising the author seed then applying the patch (result md5 6fed9f33... == EVAL_DIR/optimized/tilelang_kernel.py). If APPLY_TO_ORIGINAL is ever set true for this task the orchestrator must install EVAL_DIR/optimized/tilelang_kernel.py wholesale, not git-apply the patch.",
+  "final_patch": "/shared_nfs/zihao/arena/exp/DeepSeek-V4-Pro-bigmoe3/DeepSeek-V4-Pro/20260830T005045Z-433821d2/geak/e2e_cycle0/kernels/_exp/team_main_kernel_task_20260831_010623_684355_4788/main_kernel_task/final_patch.diff",
+  "validation_workspace": "/shared_nfs/zihao/arena/exp/DeepSeek-V4-Pro-bigmoe3/DeepSeek-V4-Pro/20260830T005045Z-433821d2/geak/e2e_cycle0/kernels/_exp/team_main_kernel_task_20260831_010623_684355_4788/main_kernel_task/validation_workspace",
+  "logs": [
+    "director_run1.log",
+    "director_run2.log"
+  ]
+}

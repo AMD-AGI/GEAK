@@ -277,6 +277,19 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      # Bake-off lane routing. Was red on main (its lane stub returned a status no director
+      # emits, which the #411 merit guard then refused) and has never been wired into CI —
+      # which is how it stayed red. Green as of the merit/provenance split.
+      - name: kernel mode dispatch / bake-off routing regression
+        run: node kernel_workflow/scripts/test_mode_dispatch.js
+      # MERIT (validation_status) and PROVENANCE (timing_basis) must stay separate fields.
+      # Folding them cost a campaign a real 3.73x win; these two lock the split in.
+      - name: timing provenance / validation merit split
+        run: node kernel_workflow/scripts/test_provenance_gate.js
+      # Replays that exact discarded win — the real recorded director_validation.json — through
+      # the shipped eligibility block, and fails if it is dropped again.
+      - name: dsv4 discarded-win replay
+        run: node kernel_workflow/scripts/test_dsv4_receipt_replay.js
 
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest

@@ -295,7 +295,13 @@ scripts/             gpu_lock.sh, profile_kernel.sh,
                      frontmatter; sink-agnostic -- takes the dir, so it also serves
                      e2e_workflow/knowledge/learned; `--check` for CI), test_learned_index.js (its guard),
                      test_mode_dispatch.js (regression guard: mode dispatch + bake-off lane
-                     routing; stubs the runtime, no GPU/agent — `node scripts/test_mode_dispatch.js`)
+                     routing; stubs the runtime, no GPU/agent — `node scripts/test_mode_dispatch.js`),
+                     test_provenance_gate.js (guards the MERIT/PROVENANCE split: `validation_status`
+                     says whether we believe the number, `timing_basis` whether we can prove it is
+                     device time; folding the second into the first is what dropped a reproduced
+                     3.73x win), test_dsv4_receipt_replay.js (replays that exact loss from the real
+                     recorded `director_validation.json` in scripts/tests/fixtures/ through the
+                     shipped eligibility block)
 ```
 The bake-off references e2e's `op_benchmarker` role + `harness_lib.py` **in place** at
 `../e2e_workflow/` (single source, no copy).
