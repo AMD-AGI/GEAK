@@ -159,8 +159,10 @@ without asking you a question.
 
 Write `EVAL_DIR/tuning/tuning_report.md`: what you targeted and why, per attempt what you changed and
 what it measured (including the failures — an explained dead end saves the next person from repeating
-it), the correctness and engagement evidence, and the isolated-server A/B. The System Architect quotes
-this in the final report, so put real numbers in it and mark absent things as absent.
+it), the correctness and engagement evidence, and the pre/post A/B — including which
+`MEASUREMENT_MODE` produced it, since a number taken in one lifecycle is not comparable to one taken
+in another. The System Architect quotes this in the final report, so put real numbers in it and mark
+absent things as absent.
 
 ### Return JSON
 

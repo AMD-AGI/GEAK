@@ -234,8 +234,12 @@ if (role) {
     ok(role.includes(key), `role consumes ${key}`);
   }
   ok(/never edit anything inside it/i.test(role), 'role forbids editing the vendored tree');
-  ok(/engagement/i.test(role) && /isolated-server A\/B/i.test(role),
-    'role carries engagement proof and the isolated-server A/B contract');
+  // The A/B contract is now lifecycle-agnostic: the role must NOT name a lifecycle of its own, it
+  // must pass MEASUREMENT_MODE through. Naming one is how this role used to override the run default.
+  ok(/engagement/i.test(role) && /pre\/post A\/B/i.test(role),
+    'role carries engagement proof and the pre/post A/B contract');
+  ok(/MEASUREMENT_MODE/.test(role) && !/isolated-server A\/B/i.test(role),
+    'role defers the lifecycle to MEASUREMENT_MODE instead of pinning isolated-server');
   // The point of vendoring whole is that the METHOD stays in the skillset. The role must route into it
   // and must not grow into a paraphrase of the loop, which is the failure mode this guards.
   ok(/[Rr]ead them and use them/.test(role),
