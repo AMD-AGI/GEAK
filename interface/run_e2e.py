@@ -326,14 +326,25 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         "initial_extra_server_args": initial_server_args,
         "initial_extra_env": initial_env,
         "initial_overlay_pythonpath": initial_overlay,
-        # One fresh replica matches Hyperloom's compute-warm/cache-cold
-        # lifecycle: the client keeps internal kernel/graph warmups but skips
-        # the outer full-round replay. Three independent servers are reserved
-        # for final validation; the shell dispatcher owns retries/degradation.
-        "measurement_mode": "isolated_server",
+        # ONE protocol for the whole run, and it is Hyperloom's (warmup_round discarded,
+        # measure_round on the re-attached hot server), so the headline GEAK reports and the
+        # number Hyperloom rebenches are the same measurement.  Mixing lifecycles across phases
+        # was worse than either alone: a cache-cold search A/B is not comparable to a cache-warm
+        # validation, yet gains were carried between them.  It is also 2 boots instead of the
+        # 6-12 cold boots isolated validation serializes behind the serving-GPU lock, which on a
+        # large model overruns the final reserve and kills the run mid-bench.
+        # Trade: within-server samples bound CLIENT noise, not boot-to-boot variance.  Anything
+        # that must gate on the latter pins measurement_mode=isolated_server, which brings the
+        # *_replicas knobs below back into play.
+        "measurement_mode": "warm_server",
         "parity_replicas": 1,
         "search_replicas": 1,
         "validation_replicas": 3,
+        # validation_rounds=1 is the whole of Hyperloom's protocol, not a truncation: two client
+        # passes on one server, report the second.  A 3-round median would be a different
+        # statistic from the one it rebenches against.
+        "validation_measurement_mode": "warm_server",
+        "validation_rounds": 1,
         # Hyperloom already did config/param search in EXPLORE; do not double-run.
         "config_tune": "false",
         # Produce the final/ bundle (final_launch.sh + overlay) so the caller can
@@ -398,10 +409,9 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # subset of {setup,profile,config,tune,head,kernel,final} (default unset => "all").
     if h.get("phases"):
         ps_args["phases"] = str(h["phases"])
-    # Legacy A/B repeat override. Isolated-server handoffs use the purpose-specific
-    # replica counts above; retain this pass-through for explicitly legacy runs.
-    if h.get("e2e_repeats") is not None:
-        ps_args["e2e_repeats"] = int(h["e2e_repeats"])
+    # No timed-repeat pass-through: the round count belongs to the lifecycle, not the handoff, so
+    # an `e2e_repeats` key from a stale caller is ignored rather than allowed to pull one leg off
+    # the lifecycle the rest of the run used.
     # Standalone tuning-skillset phase (workflow default ON). This is NOT the
     # config_tune sweep disabled above: Hyperloom's EXPLORE searched server
     # flags/env, whereas this phase runs the vendored tuning skillset's own loop
@@ -1406,8 +1416,8 @@ def apply_bench_protocol(h: dict) -> dict:
     ``num_prompts``, ``num_warmups`` and ``seed``. We export each provided key.
     For schema-v2 Hyperloom handoffs, the actual wrapper lifecycle is
     authoritative over stale metadata: fixed seed/range and 2*CONC client
-    warmups run inside the single measured invocation, while the separate
-    outer full-round replay is skipped.
+    warmups, run on one server per leg whose first full round is a discarded
+    warmup (Hyperloom's warmup_round/measure_round).
 
     IMPORTANT: only keys actually present in the handoff are exported. When
     ``bench_protocol`` is absent (e.g. GEAK run standalone, no external
@@ -1431,10 +1441,10 @@ def apply_bench_protocol(h: dict) -> dict:
     if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
         h.get("baseline_env_spec"), dict
     ):
-        # Cache-cold parity uses one measured client invocation on a fresh
-        # server. InferenceX still receives 2*concurrency internal warmups,
-        # which repeat prompt[0] to warm kernels/graphs without pre-populating
-        # the remaining timed prompts in the prefix cache.
+        # Warm-server parity: one server per leg, a discarded full warmup round, then the timed
+        # round(s) on that hot server -- Hyperloom's warmup_round/measure_round lifecycle.
+        # InferenceX still receives 2*concurrency internal warmups, which repeat prompt[0] to warm
+        # kernels/graphs; the outer full round is what populates the prefix cache.
         # Some historical handoffs recorded an older small NUM_WARMUPS value;
         # keep the observed 2*concurrency client behavior while changing only
         # whether the separate outer full replay runs.
@@ -1444,7 +1454,11 @@ def apply_bench_protocol(h: dict) -> dict:
             "NUM_WARMUPS": str(2 * conc),
             "SEED": "0",
             "RANDOM_RANGE_RATIO": "1",
-            "GEAK_REPEAT_MODE": "isolated_server",
+            "GEAK_REPEAT_MODE": "warm_server",
+            # Pinned as env too (bench_e2e.sh honours it for MEASUREMENT_PURPOSE=validation only)
+            # so pinning measurement_mode=isolated_server for search cannot drag validation off
+            # Hyperloom's protocol, and so a role forwarding the global mode cannot drop it.
+            "GEAK_VALIDATION_REPEAT_MODE": "warm_server",
             "REPLICA_RETRIES": "1",
         }
         # NUM_PROMPTS was the one protocol knob this block did not align, and
@@ -1860,36 +1874,72 @@ def _safe_ratio(num: float | None, den: float | None) -> float | None:
     return round(n / d, 4) if (n > 0 and d > 0) else None
 
 
-def read_orchestrator_hot_baseline(h: dict) -> float:
-    """Read Hyperloom's HOT baseline throughput from its ``state.json`` (best-effort).
+def read_orchestrator_baseline_lifecycle(h: dict) -> tuple[float, str]:
+    """Read Hyperloom's baseline anchor AND its thermal state from ``state.json``.
 
-    Hyperloom's double-run baseline records BOTH a COLD round (``baseline_tput`` —
-    the leaderboard denominator, forwarded to us as ``handoff.raw_baseline_tput``)
-    and a HOT round (``baseline_hot_tput``). Only the cold one rides in the handoff,
-    so for a hot-to-hot cross-check we read the hot one straight off ``state.json``.
+    Hyperloom does NOT keep a cold and a hot baseline side by side. Its double-run
+    baseline runs one full warmup round, DISCARDS it, and anchors on the round
+    measured against the now-hot server — so ``state.baseline_tput`` (the
+    leaderboard denominator, forwarded to us as ``handoff.raw_baseline_tput``) IS
+    the hot number. There is no ``baseline_hot_tput`` key anywhere in Hyperloom;
+    reading one only ever returned nothing.
+
+    What varies is whether the double run happened at all, and Hyperloom records
+    that in two fields written by the same writeback that promotes the anchor:
+
+    * ``baseline_warm_runtime_sec`` — the measure round's wall-clock. Set only on
+      the double-run path and explicitly zeroed when a later baseline lands
+      without one, so ``> 0`` is positive evidence that a warmup round preceded
+      the anchor.
+    * ``baseline_measure_round_dropped`` — True when the budget could not fund
+      the hot pass and the session had to keep the COLD figure as its anchor.
+
     ``state.json`` lives at the SESSION dir (an ancestor of ``exp_root``); probe a
-    couple of levels up. Returns 0.0 when unavailable (standalone / no orchestrator),
-    so the alignment metrics simply degrade to None instead of raising.
+    couple of levels up.
+
+    Returns:
+        ``(hot_tput, lifecycle)``. ``lifecycle`` is one of ``hot_measure_round``,
+        ``cold_single_round`` or ``unknown``, and ``hot_tput`` is 0.0 for anything
+        but the first — so the hot-to-hot alignment metrics degrade to None rather
+        than quietly dividing by a cold denominator. A standalone run with no
+        orchestrator gets ``(0.0, "unknown")``.
     """
     exp_root = str(h.get("exp_root") or "").strip()
     if not exp_root:
-        return 0.0
+        return 0.0, "unknown"
     p = Path(exp_root)
     for cand in (p / "state.json", p.parent / "state.json",
                  p.parent.parent / "state.json"):
         st = _read_json(cand)
         if not st:
             continue
-        v = st.get("baseline_hot_tput")
-        if not v:
-            base = st.get("baseline") if isinstance(st.get("baseline"), dict) else {}
-            v = base.get("baseline_hot_tput")
-        try:
-            if v and float(v) > 0:
-                return float(v)
-        except (TypeError, ValueError):
+        base = st.get("baseline") if isinstance(st.get("baseline"), dict) else {}
+        tput = _positive_finite_float(
+            st.get("baseline_tput") or base.get("baseline_tput")
+        )
+        if tput <= 0.0:
             continue
-    return 0.0
+        warm_sec = _positive_finite_float(
+            st.get("baseline_warm_runtime_sec")
+            or base.get("baseline_warm_runtime_sec")
+        )
+        dropped = bool(
+            st.get("baseline_measure_round_dropped")
+            or base.get("baseline_measure_round_dropped")
+        )
+        if warm_sec > 0.0 and not dropped:
+            return tput, "hot_measure_round"
+        return 0.0, "cold_single_round" if dropped else "unknown"
+    return 0.0, "unknown"
+
+
+def read_orchestrator_hot_baseline(h: dict) -> float:
+    """Hyperloom's baseline anchor, but only when it is a HOT measure round.
+
+    Thin wrapper over :func:`read_orchestrator_baseline_lifecycle`; see there for
+    why the hot number is ``baseline_tput`` and not a separate key.
+    """
+    return read_orchestrator_baseline_lifecycle(h)[0]
 
 
 def _wf_best_accepted_delta_pct(wf: dict) -> float:
@@ -2518,18 +2568,35 @@ def normalize_result(h: dict, wf: dict) -> dict:
 
     # ── cold/hot alignment metrics (double-check; never changes the primary
     # final_throughput_tok_s / throughput_speedup Hyperloom promotes) ─────────
-    # Hyperloom's leaderboard anchor baseline_tput is a COLD single round; GEAK's
-    # final is a HOT median, so the promoted cold-to-... comparison mixes thermal
-    # states. We surface every well-defined speedup so a reviewer can tell a real
-    # win from a warm/cold measurement artefact:
-    #   * hot_speedup      = GEAK hot final  / Hyperloom HOT baseline  (hot-to-hot, cross-harness)
+    # Hyperloom's leaderboard anchor baseline_tput is normally a HOT measure round
+    # (one discarded warmup round, then the timed round on that same server), and
+    # under MEASUREMENT_MODE=warm_server GEAK's final is measured the same way — so
+    # the promoted comparison is hot-to-hot. It is NOT hot when Hyperloom's budget
+    # forced it to keep the cold figure, which is what
+    # orchestrator_baseline_lifecycle reports. We surface every well-defined
+    # speedup so a reviewer can tell a real win from a warm/cold artefact:
+    #   * hot_speedup      = GEAK hot final  / Hyperloom HOT baseline  (hot-to-hot, cross-harness;
+    #                        None when Hyperloom's anchor was not a hot measure round)
     #   * hot_geak_speedup = GEAK hot final  / GEAK  hot baseline      (within-GEAK, harness-internal)
-    #   * cold_speedup     = GEAK cold final / Hyperloom COLD baseline (cold-to-cold, matches leaderboard state)
+    #   * cold_speedup     = GEAK cold final / Hyperloom's anchor      (GEAK-cold over whatever
+    #                        Hyperloom promoted; read it with the lifecycle field, since a hot
+    #                        anchor makes this a cold-over-hot ratio, not a cold-to-cold one)
     #   * cold_geak_speedup= GEAK cold final / GEAK  cold baseline     (within-GEAK cold, if measured)
     # The cold numbers are populated only when BENCH_COLD_FINAL=1 added a cold
     # round to bench_e2e.sh (else None). All ratios are None when an input is
     # missing, so a standalone / orchestrator-less run carries the block harmlessly.
-    orch_hot_baseline = read_orchestrator_hot_baseline(h)
+    orch_state_hot_baseline, orch_baseline_lifecycle = read_orchestrator_baseline_lifecycle(h)
+    # Prefer the handoff's anchor over the one re-read from state.json so
+    # hot_speedup stays the SAME pairing Hyperloom promotes: a re-baseline that
+    # lands after our handoff was minted moves state.json but not the handoff,
+    # and silently reporting the newer number would make the two ratios in this
+    # block disagree for no visible reason. state.json only supplies the verdict
+    # on what the anchor is, plus the value when the handoff carries none.
+    orch_hot_baseline = (
+        (orch_baseline or orch_state_hot_baseline)
+        if orch_baseline_lifecycle == "hot_measure_round"
+        else 0.0
+    )
     geak_hot_final = geak_final
     geak_hot_baseline = geak_baseline
     geak_cold_final = final_summary.get("cold_output_throughput_tok_s")
@@ -2553,7 +2620,15 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "geak_hot_baseline_tok_s": geak_hot_baseline or None,
         "geak_cold_final_tok_s": geak_cold_final,
         "geak_cold_baseline_tok_s": geak_cold_baseline,
-        "orchestrator_cold_baseline_tok_s": orch_baseline or None,   # == handoff.raw_baseline_tput (leaderboard anchor)
+        # == handoff.raw_baseline_tput (the leaderboard anchor). Kept under the
+        # historical "cold" key for the consumers that already read it, but the
+        # anchor is hot whenever orchestrator_baseline_lifecycle says so.
+        "orchestrator_cold_baseline_tok_s": orch_baseline or None,
+        "orchestrator_baseline_tok_s": orch_baseline or None,
+        # hot_measure_round | cold_single_round | unknown — read off Hyperloom's
+        # state.json, so it says what the anchor above ACTUALLY is.
+        "orchestrator_baseline_lifecycle": orch_baseline_lifecycle,
+        # The same anchor, exposed only when it is provably a hot measure round.
         "orchestrator_hot_baseline_tok_s": orch_hot_baseline or None,
         "hot_speedup": _safe_ratio(geak_hot_final, orch_hot_baseline),
         "hot_geak_speedup": _safe_ratio(geak_hot_final, geak_hot_baseline),

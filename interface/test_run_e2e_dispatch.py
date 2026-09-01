@@ -10,7 +10,7 @@ the path that actually *launches* the optimizer, so a break there is invisible
 until a real 12-hour GPU run dies. This module covers:
 
   - handoff -> workflow args (``map_args``): the optional knobs (launch_recipe,
-    phases, e2e_repeats, carried state, time_budget_s), the minted-vs-pinned
+    phases, carried state, time_budget_s), the minted-vs-pinned
     eval_dir, and the TraceLens artifact bridge. A dropped knob here silently
     re-runs a phase that was meant to be resumed, or mints a second abandoned
     eval_dir beside the authoritative one.
@@ -239,8 +239,14 @@ class TestMapArgs(_RunE2ECase):
         return h
 
     def test_optional_workflow_knobs_are_forwarded_verbatim(self):
-        """launch_recipe / phases / e2e_repeats / carried state are the resume
-        channel: dropping one silently re-runs a phase the caller pinned."""
+        """launch_recipe / phases / carried state are the resume channel:
+        dropping one silently re-runs a phase the caller pinned.
+
+        `e2e_repeats` is deliberately NOT in that channel. The timed-round count
+        is a property of the measurement lifecycle (GEAK_REPEAT_MODE +
+        MEASUREMENT_PURPOSE), so a handoff carrying it must be ignored rather
+        than allowed to pull one leg off the lifecycle the rest of the run used.
+        """
         h = self._handoff(
             eval_dir=str(self.tmp / "e2e_pinned"),
             launch_recipe="/recipes/launch_vllm.sh",
@@ -251,7 +257,7 @@ class TestMapArgs(_RunE2ECase):
         ps = rx.map_args(h, timeout_s=3600)
         self.assertEqual(ps["launch_script"], "/recipes/launch_vllm.sh")
         self.assertEqual(ps["phases"], "final")
-        self.assertEqual(ps["e2e_repeats"], 1)
+        self.assertNotIn("e2e_repeats", ps)
         self.assertEqual(ps["state"], {"headQueue": [{"short_name": "h0"}]})
         self.assertEqual(ps["time_budget_s"], 3600)
         self.assertEqual(ps["eval_dir"], str(self.tmp / "e2e_pinned"))
@@ -1073,7 +1079,8 @@ class TestBenchProtocol(_RunE2ECase):
         self.assertEqual(exported["NUM_WARMUPS"], "128")
         self.assertEqual(exported["SEED"], "0")
         self.assertEqual(exported["RANDOM_RANGE_RATIO"], "1")
-        self.assertEqual(exported["GEAK_REPEAT_MODE"], "isolated_server")
+        self.assertEqual(exported["GEAK_REPEAT_MODE"], "warm_server")
+        self.assertEqual(exported["GEAK_VALIDATION_REPEAT_MODE"], "warm_server")
         self.assertEqual(exported["REPLICA_RETRIES"], "1")
         # A pinned count is the caller telling us what it measured.
         self.assertNotIn("NUM_PROMPTS_ADAPTIVE", exported)
@@ -1571,15 +1578,30 @@ class TestNumericHelpers(_RunE2ECase):
 
 
 class TestOrchestratorHotBaseline(_RunE2ECase):
-    def test_absent_exp_root_is_zero(self):
-        self.assertEqual(rx.read_orchestrator_hot_baseline({}), 0.0)
-        self.assertEqual(rx.read_orchestrator_hot_baseline({"exp_root": "  "}), 0.0)
+    """Hyperloom's anchor is ``baseline_tput``; whether it is HOT is told by
+    ``baseline_warm_runtime_sec`` (the measure round's wall-clock, written only on
+    the double-run path) and ``baseline_measure_round_dropped``."""
+
+    def test_absent_exp_root_is_unknown(self):
+        self.assertEqual(rx.read_orchestrator_baseline_lifecycle({}), (0.0, "unknown"))
+        self.assertEqual(
+            rx.read_orchestrator_baseline_lifecycle({"exp_root": "  "}),
+            (0.0, "unknown"),
+        )
 
     def test_hot_baseline_found_two_levels_up(self):
         session = self.tmp / "session"
         exp_root = session / "run" / "geak"
         exp_root.mkdir(parents=True)
-        self.write_json(session / "state.json", {"baseline_hot_tput": 612.5})
+        self.write_json(session / "state.json", {
+            "baseline_tput": 612.5,
+            "baseline_warm_runtime_sec": 176.4,
+            "baseline_measure_round_dropped": False,
+        })
+        self.assertEqual(
+            rx.read_orchestrator_baseline_lifecycle({"exp_root": str(exp_root)}),
+            (612.5, "hot_measure_round"),
+        )
         self.assertEqual(
             rx.read_orchestrator_hot_baseline({"exp_root": str(exp_root)}), 612.5
         )
@@ -1587,16 +1609,43 @@ class TestOrchestratorHotBaseline(_RunE2ECase):
     def test_nested_baseline_block_is_read(self):
         exp_root = self.tmp / "geak"
         exp_root.mkdir(parents=True)
-        self.write_json(exp_root / "state.json",
-                        {"baseline": {"baseline_hot_tput": "701.25"}})
+        self.write_json(exp_root / "state.json", {"baseline": {
+            "baseline_tput": "701.25",
+            "baseline_warm_runtime_sec": "88.0",
+        }})
         self.assertEqual(
-            rx.read_orchestrator_hot_baseline({"exp_root": str(exp_root)}), 701.25
+            rx.read_orchestrator_baseline_lifecycle({"exp_root": str(exp_root)}),
+            (701.25, "hot_measure_round"),
+        )
+
+    def test_dropped_measure_round_is_cold_and_not_offered_as_hot(self):
+        """Budget could not fund the hot pass, so the anchor is the cold round —
+        dividing GEAK's hot final by it would return the warm-up as speedup."""
+        exp_root = self.tmp / "geak"
+        exp_root.mkdir(parents=True)
+        self.write_json(exp_root / "state.json", {
+            "baseline_tput": 500.0,
+            "baseline_warm_runtime_sec": 0.0,
+            "baseline_measure_round_dropped": True,
+        })
+        self.assertEqual(
+            rx.read_orchestrator_baseline_lifecycle({"exp_root": str(exp_root)}),
+            (0.0, "cold_single_round"),
+        )
+
+    def test_single_round_baseline_is_unknown_not_hot(self):
+        exp_root = self.tmp / "geak"
+        exp_root.mkdir(parents=True)
+        self.write_json(exp_root / "state.json", {"baseline_tput": 500.0})
+        self.assertEqual(
+            rx.read_orchestrator_baseline_lifecycle({"exp_root": str(exp_root)}),
+            (0.0, "unknown"),
         )
 
     def test_unusable_values_degrade_to_zero(self):
         exp_root = self.tmp / "geak"
         exp_root.mkdir(parents=True)
-        self.write_json(exp_root / "state.json", {"baseline_hot_tput": "not-a-number"})
+        self.write_json(exp_root / "state.json", {"baseline_tput": "not-a-number"})
         self.assertEqual(
             rx.read_orchestrator_hot_baseline({"exp_root": str(exp_root)}), 0.0
         )
@@ -1605,7 +1654,8 @@ class TestOrchestratorHotBaseline(_RunE2ECase):
         exp_root = self.tmp / "geak"
         exp_root.mkdir(parents=True)
         self.assertEqual(
-            rx.read_orchestrator_hot_baseline({"exp_root": str(exp_root)}), 0.0
+            rx.read_orchestrator_baseline_lifecycle({"exp_root": str(exp_root)}),
+            (0.0, "unknown"),
         )
 
 

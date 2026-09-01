@@ -81,7 +81,10 @@ number quickly without re-doing hours of low-value work.
 
 ## Measurement discipline (e2e is noisy)
 - Keep the server WARM across validations; never fold server-startup into the timed window.
-- Run enough requests (≥ 5× concurrency) and repeat the bench ≥ 2–3×; report median + spread.
+- Run enough requests (≥ 5× concurrency). The round count belongs to the lifecycle, not to you: the
+  default `warm_server` spends round 1 warming the prefix cache, discards it, and reports round 2, so
+  there is one timed sample and `spread` is structurally 0.0% — an absence of evidence, not a quiet
+  box. Repeat (`REPLICAS>1` or `isolated_server`) only when you actually need a dispersion estimate.
 - Gate a kernel into e2e only when its isolated speedup is real AND Amdahl says it can move the
   needle. Accept an e2e change only if the throughput delta exceeds the measured noise band.
 - Always check **output parity** (greedy/temp=0, fixed seed) vs baseline — a faster wrong server is
@@ -90,8 +93,9 @@ number quickly without re-doing hours of low-value work.
   same serving config (TP=SERVING_TP GPU=SERVING_GPU), same session** (tear one server fully down before
   launching the next). Do NOT run two
   servers concurrently on one node for the headline ratio: shared-resource contention drags the baseline
-  leg down and **inflates the ratio into a false win**. Trust a delta only when run spreads are tight and
-  the two legs' run ranges are **non-overlapping**.
+  leg down and **inflates the ratio into a false win**. With several samples per leg, trust a delta only
+  when run spreads are tight and the two legs' run ranges are **non-overlapping**; with one timed round
+  per leg there is no range to overlap, so the delta has to clear the noise band on its own.
 - **Harness pitfalls that silently corrupt a leg:** (a) never name an eval-dir output folder after an
   importable package (`triton/`, `flydsl/`, `aiter/`, …) — such a dir on the bench process's CWD
   **shadows** the real package (`import X`→empty namespace) and the bench crashes; looks like a kernel

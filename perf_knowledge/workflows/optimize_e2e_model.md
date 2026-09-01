@@ -90,9 +90,17 @@ negative but sub-threshold → compound later), `rejected` (parity fail / no eng
 regression).
 
 **Tight 2-launch A/B protocol:** one reference block then one candidate block, back-to-
-back on the same GPU, each running `E2E_REPEATS` (default 7) timed repeats on ONE server
-(do NOT relaunch per repeat). Compute `ref_med, cand_med, ref_max, cand_min, delta%` from
-all per-repeat rows.
+back on the same GPU. Each block is ONE `bench_e2e.sh` invocation in the run's
+`MEASUREMENT_MODE`; that mode owns the round count, there is no separate repeats knob.
+Under the `warm_server` default each block is one server, one full round discarded as
+warmup, and one timed round that IS the number (Hyperloom's protocol) — so `ref_med`/
+`ref_max` and `cand_med`/`cand_min` collapse to that single value per leg, and the
+non-overlap clause of the acceptance rule degenerates into `cand > ref`. `delta% >
+NOISE_BAND_PCT` is what carries the decision; the drift protection comes from the two
+blocks being back-to-back in the same session, not from within-leg spread. If you need a
+genuine non-overlap test, pin that leg to `isolated_server` (each replica a fresh server,
+so the spread bounds boot-to-boot variance) and say so in the trial notes, since the
+number is then not comparable to the run's other numbers.
 
 ### 7. Finalize (combined stack)
 Assemble all `accepted` + `stack` changes into one config/overlay.

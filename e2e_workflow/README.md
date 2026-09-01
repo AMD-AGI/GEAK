@@ -52,12 +52,12 @@ rigid script): it confirms the chosen `backend` stack, the model, GPU visibility
 sources, available op backends, and the model's arch class; degrades gracefully and writes
 `env_report.{md,json}` that every later phase routes on.
 Every accepted change compounds into the carried-forward overlay + config; throughput is always
-measured warm, repeated, median, vs the TRUE baseline.
+measured on a warm server, in the same lifecycle as the TRUE baseline it is compared against.
 
 ## Pluggable serving backend
 The serving stack is NOT baked in. `args.backend` (sglang|vllm, default sglang) selects
 `scripts/adapters/<backend>.sh`, which `scripts/bench_e2e.sh` (a backend-agnostic dispatcher: owns
-server lifecycle, warmup, repeats, median+spread summary, free-port allocation) sources. Adding a new
+server lifecycle, warmup, timed round(s), summary, free-port allocation) sources. Adding a new
 stack = adding one adapter that defines `adapter_launch / adapter_health / adapter_bench`
 (+ optional `adapter_default_port`). No role or orchestration change. `MODEL` is **required** — there
 is no rig-specific default that could silently bench the wrong target.

@@ -134,9 +134,16 @@ e2e A/B measurement while a process storm is active — pin it to a quiet window
   of whatever is already accepted.
 - **Verify engagement** (`AITER_LOG_TUNED_CONFIG=1` → `is tuned on cu_num` hits >0) so you know the
   tuned solutions are actually executing on the live path before trusting any throughput delta.
-- **Use the tight interleaved A/B** (E2E_REPEATS per leg, ref vs cand alternating, accept on
+- **Use the tight interleaved A/B** (ref vs cand alternating, back-to-back in one session, accept on
   `delta > 0.5% AND cand_min > ref_max`) — gfx942 boxes drift several % across hours, so only a
-  same-session, drift-cancelled, non-overlapping comparison is decisive at the 0.5% band.
+  same-session, drift-cancelled, non-overlapping comparison is decisive at the 0.5% band. How much the
+  non-overlap clause is worth depends on the lifecycle, so read it with `bench_summary.json`'s
+  `dispersion_basis`: under `isolated_server` the samples are independent boots and the clause bounds
+  real run-to-run variance; under the default `warm_server` they share one boot
+  (`within_server_rounds`), so their spread is narrower than the true spread and the clause clears
+  more easily than it should — when `delta` is inside ~1% and non-overlap is the only thing carrying
+  the win, call it within-noise. At one timed round per leg `min == max` and the clause carries no
+  information at all: `delta > 0.5%` on the medians has to stand on its own, and say so in the notes.
 - **Coverage matters**: capture the full real shape set (down-proj K=intermediate, qkv K, lm_head, and
   the decode M-buckets), not just the up/gate trio — uncovered shapes fall back to default and never
   count. Bucket-reduce via `get_padded_m` to bound tuning time.
