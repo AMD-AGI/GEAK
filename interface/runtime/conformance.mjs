@@ -209,11 +209,18 @@ async function listFiles(dir, ext) {
   catch { return []; }
 }
 
-// Strip comments + string/template literals so heuristics see CODE, not prose.
+// Strip comments + regex/string/template literals so heuristics see CODE, not prose.
 function stripCommentsAndStrings(src) {
   return src
     .replace(/\/\*[\s\S]*?\*\//g, ' ')                 // block comments
     .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')             // line comments (keep http://)
+    // Regex literals. An alternation of English words inside one (e.g. /(?:not (?:applied)|
+    // unknown (?:option))/) otherwise reads as `not(` / `unknown(` to collectCalled and gets
+    // reported as a novel Workflow primitive. Runs before the quote passes so a regex holding
+    // a ' or " is dropped whole; the leading-token guard is what keeps a division (`a / b`)
+    // and a path inside a string from being eaten as a literal.
+    .replace(/([(,=:[!&|?{};]|=>|\breturn\b|^)(\s*)\/(?![*/])(?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\n])+\/[gimsuy]*/gm,
+      '$1$2 /RE/ ')
     .replace(/`(?:\\[\s\S]|[^`\\])*`/g, ' `` ')        // template literals (drops prompt prose)
     .replace(/'(?:\\.|[^'\\])*'/g, ' "" ')             // single-quoted
     .replace(/"(?:\\.|[^"\\])*"/g, ' "" ');            // double-quoted
@@ -223,7 +230,11 @@ function collectDeclared(code) {
   const names = new Set();
   let m;
   const add = (raw) => {
-    let n = raw.trim().replace(/^\.\.\./, '');
+    // Callers split a param/pattern list on commas, so a destructuring pattern arrives in
+    // pieces that still carry its delimiters ("{ parse", "repeatable }"). Drop those first:
+    // otherwise the name at each edge of the pattern fails the identifier test below and is
+    // silently lost — which then surfaces as a phantom "novel primitive" in A-primitive.
+    let n = raw.replace(/[{}[\]]/g, ' ').trim().replace(/^\.\.\./, '').trim();
     n = n.split('=')[0].split(':').pop().trim();       // strip default value / destructure rename
     if (/^[A-Za-z_$][\w$]*$/.test(n)) names.add(n);
   };
