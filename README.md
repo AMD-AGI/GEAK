@@ -103,6 +103,118 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions
 Then just describe what you want in natural language (examples below). Claude Code resolves the paths and
 invokes the `Workflow` tool for you.
 
+### Swappable agent backend (Claude Code ↔ codex / cursor)
+
+The workflows are plain JS that normally run on **Claude Code's `Workflow` tool** (which provides the
+`agent()` / `parallel()` / `pipeline()` / `workflow()` orchestration primitives). To run the **same
+workflows** under a different coding-agent CLI — primarily **codex** or **cursor-agent** — GEAK ships a
+**standalone Node runtime** (`interface/runtime/`) that re-implements those primitives itself and
+dispatches each `agent()` call to a one-shot backend process. All parallelism and one-level nesting
+happen in the runtime, so the agent CLI does **not** need to support parallel or nested subagents.
+
+Two orthogonal axes live in `interface/runtime/registry.json`: **agents** (which CLI: claude / codex /
+cursor / qwen / kimi) × **models** (which endpoint). A **profile** pins one `(agent, model)` combo.
+Select a backend with `--agent` / `--profile` (or `GEAK_AGENT_BACKEND` / `GEAK_AGENT_PROFILE`); the `.js`
+workflows / roles / knowledge are used unmodified. **e2e** always goes through `run_e2e.py` (which
+auto-routes to the runtime once a backend is set) and **single kernels** through `run_workflow.mjs`.
+The two main backends — **codex** and **cursor** — are documented next.
+
+#### codex backend — self-contained setup
+
+The codex provider is auto-configured from the key you provide (no `config.toml` editing, no provider
+selection).
+
+*1. Install the codex CLI* (do not assume it is already present):
+```bash
+node -v                                  # need Node.js v20+ (install via nvm / pkg manager / nodejs.org)
+npm i -g @openai/codex@0.146.1           # pin 0.146.1 — 0.147 breaks with gateways
+#   no write access to /usr/local? use a user-level prefix:
+#   npm config set prefix "$HOME/.npm-global" && export PATH="$HOME/.npm-global/bin:$PATH"
+#   npm i -g @openai/codex@0.146.1
+codex --version                          # expect 0.146.1
+```
+
+*2. Pick a provider by setting its key* — the runtime auto-selects (first match wins):
+```bash
+export OPENAI_API_KEY=sk-...                              # -> OpenAI official (api.openai.com, public CA)
+# export AMDKEY=<32hex>       SSL_CERT_FILE=/path/ca.pem  # -> AMD gateway (adds Ocp-Apim-Subscription-Key)
+# export SAFE_API_KEY=ak-...  SSL_CERT_FILE=/path/ca.pem  # -> SaFE gateway (gpt direct)
+# explicit override for any OpenAI-compatible gateway (wins over the above):
+#   export OPENAI_BASE_URL=https://your-gateway/v1
+```
+
+*3. Run.* codex has **no natural-language mode** (that path needs Claude Code's `Workflow` tool);
+drive it through `run_e2e.py` (e2e) or `run_workflow.mjs` (single kernel). The natural-language
+`use path_to_GEAK/... to optimize ...` examples further below are **Claude-only**.
+
+```bash
+export GEAK_AGENT_BACKEND=codex
+# REQUIRED: a model id the chosen provider actually serves (a wrong id 404s at the first
+# codex turn). Provider-specific — do NOT reuse one gateway's id on another: an OpenAI
+# model (e.g. gpt-5.x) for api.openai.com; gpt-5.6-sol for AMD; gpt-5.6 for SaFE.
+export GEAK_CODEX_MODEL=<your-provider-model-id>
+# thinking level defaults to max; change with GEAK_CODEX_EFFORT (low|medium|high|xhigh|max):
+#   export GEAK_CODEX_EFFORT=xhigh
+
+# --- e2e (whole-model serving throughput): describe the run in a handoff.json ---
+cat > handoff.json <<'JSON'
+{ "schema_version": 2,
+  "model_path": "/models/Qwen3.5-27B-FP8",
+  "framework": "sglang", "tp": 1, "gpu_ids": "0",
+  "workload": { "isl": 1024, "osl": 1024, "conc": 64 },
+  "exp_root": "/abs/work/geak" }
+JSON
+# required: model_path, exp_root (its basename MUST be `geak`); rest has defaults.
+# full schema + fields: interface/run_e2e.md
+python interface/run_e2e.py handoff.json result.json     # auto-routes to the codex runtime
+
+# --- single kernel ---
+node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
+  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
+```
+
+Overrides & troubleshooting: `GEAK_CODEX_AUTOCONFIG=0` disables auto-config (falls back to
+`interface/runtime/codex-home/config.toml`); `GEAK_CODEX_EXTRA_ARGS="-c model_provider=..."` pins a provider
+manually. 401 → key unset/invalid; 404 model → `GEAK_CODEX_MODEL` unavailable or not Responses-API-capable;
+TLS error → intranet gateways need `SSL_CERT_FILE` (public OpenAI does not). claude-via-SaFE needs the
+de-stream shim — see [`interface/runtime/SETUP.md`](interface/runtime/SETUP.md).
+
+#### cursor backend — runs on Cursor cloud (NOT via a gateway)
+
+`cursor-agent` uses **Cursor-side models on Cursor's own cloud**, so it needs no gateway, no
+`SSL_CERT_FILE`, and no shim — but requests + code leave for Cursor's cloud, and the model is a
+Cursor-side id (not one your gateway serves).
+
+```bash
+# 1) install cursor-agent (see Cursor docs), then authenticate ONCE:
+cursor-agent login                          # or: export CURSOR_API_KEY=...
+export GEAK_CURSOR_MODEL=composer-2.5       # a Cursor-side model id (e.g. composer-2.5, sonnet-4-thinking)
+
+# 2) run — single kernel:
+node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent cursor \
+  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
+# e2e:
+export GEAK_AGENT_BACKEND=cursor
+python interface/run_e2e.py handoff.json result.json
+```
+
+> Because cursor uses Cursor-side models + cloud, it **cannot** join a strict "same gateway, same model"
+> comparison against codex/claude. More detail: [`interface/runtime/SETUP.md`](interface/runtime/SETUP.md) §B.
+
+**Controlled (agent × model) comparison experiments are built in** — sweep the matrix, N repeats,
+fixed task/budget, get a comparison table (speedup / success-rate / wall; no token/cost):
+
+```bash
+node interface/runtime/experiment.mjs --script kernel_workflow/kernel_workflow.js \
+  --agents claude,codex,cursor --models default --repeats 3 \
+  --args '{"kernel_path":"/abs/knn","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
+```
+
+Adding a new CLI = a `registry.json` entry (zero code). Full env knobs, the compatibility checklist,
+and a no-GPU smoke test (`node interface/runtime/selftest.mjs`) are in
+[interface/run_e2e.md](interface/run_e2e.md) and
+[interface/runtime/DESIGN.md](interface/runtime/DESIGN.md).
+
 ---
 
 ## e2e_workflow — whole-model serving throughput ⭐

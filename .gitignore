@@ -255,3 +255,12 @@ perf_knowledge/expert_skills/tuning/**/.pytest_cache/
 perf_knowledge/expert_skills/tuning/**/.ruff_cache/
 perf_knowledge/expert_skills/tuning/**/*.pyc
 perf_knowledge/expert_skills/tuning/**/*.pyo
+
+# swappable-backend runtime artifacts (keep code + config, ignore generated state)
+interface/runtime/shim.log
+interface/runtime/shim_req.json
+interface/runtime/shim_upstream.json
+interface/runtime/codex-home/*
+!interface/runtime/codex-home/config.toml
+# per-backend experiment output dirs (exp_codex_knn/, exp_cursor_run/, ...)
+exp_*/

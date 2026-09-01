@@ -1,0 +1,41 @@
+# Portable CODEX_HOME for the GEAK standalone runtime.
+# setup.sh sets CODEX_HOME to this directory. codex then talks to the local
+# responses-shim, which de-streams + normalizes + strips the namespace tool so
+# claude works via the SaFE gateway; gpt models can also go direct (safe_direct).
+#
+# The shim must be running (setup.sh starts responses_shim.mjs on :8791).
+# The API key is read from OPENAI_API_KEY at runtime (never stored here).
+# If your gateway differs, change base_url below (and GEAK_GW_BASE for the shim).
+
+model_provider = "safe_shim"
+preferred_auth_method = "apikey"
+# Default thinking level. The runtime also injects `-c model_reasoning_effort=max`
+# for the codex agent (override via GEAK_CODEX_EFFORT / GEAK_CODEX_EXTRA_ARGS);
+# this line is the fallback when GEAK_CODEX_AUTOCONFIG=0.
+model_reasoning_effort = "max"
+
+# claude (and anything the gateway serves) via the local de-streaming shim.
+[model_providers.safe_shim]
+name = "SaFE via responses-shim"
+base_url = "http://127.0.0.1:8791/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+
+# gpt-* can hit the gateway's /v1/responses directly (no shim needed).
+# Select it per-run with:  GEAK_CODEX_EXTRA_ARGS="-c model_provider=safe_direct"
+[model_providers.safe_direct]
+name = "SaFE gateway direct (gpt only)"
+base_url = "https://global.primus-safe.amd.com/api/v1/llm-proxy/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+
+# Official OpenAI (api.openai.com). Standard Bearer auth via OPENAI_API_KEY
+# (sk-...); public CA, so NO shim, NO SSL_CERT_FILE, NO APIM header needed.
+# This is the simplest provider. Select it per-run with:
+#   GEAK_CODEX_EXTRA_ARGS="-c model_provider=openai"
+# and set GEAK_CODEX_MODEL to a model your account serves over the Responses API.
+[model_providers.openai]
+name = "OpenAI official"
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
