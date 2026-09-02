@@ -1774,3 +1774,173 @@ def test_signing_bare_paths_says_what_is_wrong(tmp_path):
     down in a hash loop."""
     with pytest.raises(TypeError, match=r"\(stored_name, path\) pairs"):
         _store_module().artifact_signature([tuned_files(tmp_path)])
+
+
+# --------------------------------------------------------------------------- one address, two planes
+# The lane now READS by canonical id on both planes, and the slug tree stays behind as the write-side
+# staging area and the surface a curation pass edits. `sync-local` is the hinge: it runs before every
+# read, so what it must guarantee is not "the copy happened" but that running it a thousand times is
+# indistinguishable from running it once — except for the backlog it carried across the first time.
+
+
+def _sync(root, store, *extra):
+    return run("sync-local", "--root", str(root), "--store", str(store), *extra)
+
+
+def _sessions(store, cid="geak:kernel:gfx950:fused_moe_kernel:triton:rocm:unspecified"):
+    import glob
+    return sorted(glob.glob(os.path.join(store, *cid.split(":"), "sessions", "*", "knowledge.json")))
+
+
+def test_the_backlog_only_the_tree_ever_held_becomes_readable_by_key(tmp_path):
+    """Why this exists. Every entry older than the double-write default lives in the tree alone, so
+    pointing the read at the store without this step would read as a cold start on exactly the
+    kernels with the longest history."""
+    root, store, refs = str(tmp_path / "kb"), str(tmp_path / "store"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_a", speedup=2.0, direction="tile-retune")
+    write_entry(root, "20260102_000000_b", speedup=1.6, direction="unroll")
+    assert run("resolve-remote", "--plane", "local", "--store", store, "--kernel-name",
+               "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950",
+               "--refs-dir", refs)["candidates"] == []
+
+    summary = _sync(root, store)
+    assert summary["ok"] and summary["entries"] == 2 and summary["new_sessions"] == 2
+    got = run("resolve-remote", "--plane", "local", "--store", store, "--kernel-name",
+              "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950", "--refs-dir", refs)
+    assert [round(c["speedup"], 2) for c in got["candidates"]] == [2.0, 1.6]
+
+
+def test_a_second_sync_keeps_the_verdicts_the_store_earned_between_them(tmp_path):
+    """It runs before EVERY read, so the interesting case is the second one. A sync that re-derived
+    the document from the tree would hand back a clean ledger to a record two boxes had just failed
+    to reproduce — the same hazard `write-remote` was taught to avoid, on a path that runs far more
+    often."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    write_entry(root, "20260101_000000_a")
+    _sync(root, store)
+    session = os.path.basename(os.path.dirname(_sessions(store)[0]))
+    for _ in range(2):
+        run("attest-remote", "--store", store, "--session-id", session, "--outcome",
+            "not_reproduced", "--kernel-name", "fused_moe_kernel", "--language", "triton",
+            "--gfx", "gfx950", "--apply")
+
+    _sync(root, store)
+    value = json.load(open(_sessions(store)[0]))["value"]
+    assert value["attestations"]["recalls"] == 2
+    assert value["attestations"]["not_reproduced"] == 2
+    # And the counter that says how many boxes rediscovered this patch has not moved either: a sync
+    # copies a measurement that was already counted, it does not report a new one.
+    assert value["reproductions"] == 1
+
+
+def test_a_retired_entry_arrives_as_a_tombstone_and_not_as_a_live_win(tmp_path):
+    """`retained: false` travels on its own — `remote_value` copies it — and that is precisely the
+    inert half-retraction kb/retract.py warns about. What has to travel with it is the zeroed
+    ranking scalar and the withheld champion pointer."""
+    root, store, refs = str(tmp_path / "kb"), str(tmp_path / "store"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_a", speedup=1.4, direction="tile-retune")
+    write_entry(root, "20260102_000000_b", speedup=3.0, direction="unroll", retired=True)
+
+    summary = _sync(root, store)
+    assert summary["retired"] == 1
+    tombstone = [json.load(open(f)) for f in _sessions(store)
+                 if json.load(open(f))["value"].get("retained") is False]
+    assert len(tombstone) == 1
+    # Zeroed, not merely flagged; and the number it was taken back FOR is kept, or the retraction
+    # cannot be reviewed later.
+    assert tombstone[0]["speedup"] == 0.0
+    assert tombstone[0]["value"]["withdrawn_scores"] == {"speedup": 3.0}
+    # The 3.0x tombstone must not have taken the champion pointer from the 1.4x live entry.
+    champion = json.load(open(os.path.join(
+        store, "geak", "kernel", "gfx950", "fused_moe_kernel", "triton", "rocm", "unspecified",
+        "champion.json")))
+    assert champion["value"] == 1.4
+    offered = run("resolve-remote", "--plane", "local", "--store", store, "--kernel-name",
+                  "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950",
+                  "--refs-dir", refs, "--min-speedup", "0")
+    assert [round(c["speedup"], 2) for c in offered["candidates"]] == [1.4]
+
+
+def test_curating_the_tree_still_reaches_a_record_the_store_already_published(tmp_path):
+    """The tree is the surface a human edits, and it stays useful only if an edit made after the
+    record was published still lands."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    exp = write_entry(root, "20260101_000000_a", speedup=2.0)
+    _sync(root, store)
+    assert json.load(open(_sessions(store)[0]))["speedup"] == 2.0
+
+    meta = yaml.safe_load(open(os.path.join(exp, "meta.yaml")))
+    meta.update({"retained": False, "retired_reason": "measured against the wrong baseline"})
+    with open(os.path.join(exp, "meta.yaml"), "w") as f:
+        yaml.safe_dump(meta, f)
+    _sync(root, store)
+    document = json.load(open(_sessions(store)[0]))
+    assert document["speedup"] == 0.0
+    assert document["value"]["retired_reason"] == "measured against the wrong baseline"
+
+
+def test_a_sync_does_not_undo_a_retraction_a_recall_already_lifted(tmp_path):
+    """The one verdict the tree does NOT get to re-impose. A tombstone lifts when somebody read the
+    record, took it to a box and reproduced the win — evidence the tree, which only knows what was
+    curated, cannot have. Re-imposing it once per warm start would revoke that silently and forever."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    write_entry(root, "20260101_000000_a", speedup=2.0, retired=True)
+    _sync(root, store)
+    session = os.path.basename(os.path.dirname(_sessions(store)[0]))
+    assert json.load(open(_sessions(store)[0]))["speedup"] == 0.0
+
+    # A box reproduces the win the retraction distrusted, and a rewrite lifts the tombstone.
+    run("attest-remote", "--store", store, "--session-id", session, "--outcome", "validated",
+        "--kernel-name", "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950", "--apply")
+    _sync(root, store)
+    lifted = json.load(open(_sessions(store)[0]))
+    assert lifted["value"].get("unretired_at")
+    assert lifted["value"].get("retained") is not False
+
+    _sync(root, store)                                    # and it stays lifted on every read after
+    assert json.load(open(_sessions(store)[0]))["value"].get("retained") is not False
+
+
+def test_re_filing_a_tombstone_does_not_re_date_the_retraction(tmp_path):
+    """`retracted_document` stamps the moment it runs. On a path that runs before every read that
+    would date every retraction to the last warm start, which is the one field an auditor uses to
+    decide whether the retraction is still current."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    write_entry(root, "20260101_000000_a", retired=True)
+    _sync(root, store)
+    first = json.load(open(_sessions(store)[0]))["value"]["retracted_at"]
+
+    path = _sessions(store)[0]
+    document = json.load(open(path))
+    document["value"]["retracted_at"] = "2020-01-01T00:00:00Z"       # older than any sync could mint
+    with open(path, "w") as f:
+        json.dump(document, f)
+    _sync(root, store)
+    assert json.load(open(path))["value"]["retracted_at"] == "2020-01-01T00:00:00Z" != first
+
+
+def test_the_sync_names_the_entry_it_could_not_file_and_carries_the_rest(tmp_path):
+    """A catch-up that aborts on the first bad entry leaves the read with a page that is thin for a
+    reason nothing recorded. The rest of the backlog is worth more than the failure is."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    write_entry(root, "20260101_000000_a", speedup=2.0)
+    broken = write_entry(root, "20260102_000000_b", speedup=1.5, direction="unroll")
+    os.chmod(os.path.join(broken, "patch.diff"), 0)      # readable meta, unreadable payload
+    try:
+        summary = _sync(root, store)
+    finally:
+        os.chmod(os.path.join(broken, "patch.diff"), 0o644)
+    assert summary["ok"] is False
+    assert [os.path.basename(e["exp_dir"]) for e in summary["errors"]] == ["20260102_000000_b"]
+    assert summary["new_sessions"] == 1 and len(_sessions(store)) == 1
+
+
+def test_the_sync_can_be_narrowed_to_the_kernel_the_read_is_about(tmp_path):
+    """The lane runs this before every read, so it is scoped: a whole-tree walk per warm start would
+    charge every run for a backlog it is not going to look at."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    write_entry(root, "20260101_000000_a")
+    write_entry(root, "20260102_000000_b", kernel="attention_kernel")
+    summary = _sync(root, store, "--kernel-name", "fused_moe_kernel", "--gfx", "gfx950")
+    assert summary["entries"] == 1 and summary["skipped"]["filtered"] == 1
+    assert len(_sessions(store)) == 1

@@ -40,6 +40,9 @@ Subcommands:
                Bring imported entries up to the current content shape (dry-run unless --apply).
     export-remote
                Render entries as KB Store candidates (one JSON line each); uploads nothing.
+    sync-local Bring the on-disk KB store level with the tree, keyed by canonical id. Idempotent
+               and non-destructive, so the lane runs it before every read: it is what lets the
+               READ address by key without losing the backlog only the tree ever held.
     resolve-remote
                `resolve`, but addressed by canonical id against a KB store (kb/store_local.py).
     write-remote
@@ -1734,6 +1737,12 @@ def _carrying_remote_state(store, rec: dict, local_reproduced: bool):
     # this record, took it to a box, and reproduced the win. Same window `should_retire` reads, so
     # the two cannot disagree about whether the record is currently believed.
     if VALIDATED in recent_verdicts(attestations_of(value)):
+        # Cleared, not merely annotated. The incoming document is derived from a meta.yaml that may
+        # ITSELF say `retained: false` — the sync path re-files curated entries, so it usually does
+        # — and a record carrying both a tombstone flag and an `unretired_at` is a record no reader
+        # can act on: `is_retired` still hides it, while the lift claims it is believed again.
+        for gone in ("retained", "retired_reason", "retracted_at", "retracted_by"):
+            value.pop(gone, None)
         value.update({"unretired_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                       "unretired_from_reason": reason})
         # No attestation is counted for the reprieve, unlike e2e's. There, the write itself is the
@@ -1758,9 +1767,17 @@ def _carrying_remote_state(store, rec: dict, local_reproduced: bool):
     if isinstance(withdrawn, dict) and withdrawn:
         value["withdrawn_scores"] = withdrawn
     report["retracted"] = True
-    return dict(rec, knowledge=retracted_document(
-        knowledge, reason, (CHAMPION_METRIC,),
-        actor=str(previous_value.get("retracted_by") or ""))), report
+    tombstone = retracted_document(knowledge, reason, (CHAMPION_METRIC,),
+                                   actor=str(previous_value.get("retracted_by") or ""))
+    # `retracted_document` stamps the moment it runs, which is right the first time and wrong every
+    # time after: this record was taken back once, and re-stamping it on each rewrite would date the
+    # retraction to whenever somebody last touched the patch. The lane now re-files entries on every
+    # warm start (`sync-local`), so an un-pinned timestamp would read as "curated seconds ago"
+    # forever, which is exactly what an auditor would use to decide the retraction is still current.
+    when = str(previous_value.get("retracted_at") or "").strip()
+    if when:
+        tombstone["value"]["retracted_at"] = when
+    return dict(rec, knowledge=tombstone), report
 
 
 def _carrying_plane(store, recs, local_reproduced: bool):
@@ -1776,19 +1793,17 @@ def _carrying_plane(store, recs, local_reproduced: bool):
     return out, merged
 
 
-def cmd_export_remote(a) -> dict:
-    """Render this store as KB Store candidates, one JSON line each, champion pre-decided.
+def _tree_entries(root: str, want_gfx: str, want_name: str, include_retired: bool):
+    """Every publishable entry in the slug tree as (exp_dir, meta), plus what was passed over.
 
-    Nothing is uploaded here — this only produces what to upload, so the mapping is reviewable and
-    diffable before anything leaves the machine. kb/remote_upload.py consumes the output.
+    Shared by the two readers that take the tree and speak canonical ids back — `export-remote`,
+    which renders them for review, and `sync-local`, which files them straight into the store.
+    The two must not drift about what counts as an entry: the second exists to make the tree
+    redundant for READING, and it can only do that if it carries across everything the first
+    would have offered.
     """
-    root = a.root
-    if not os.path.isdir(root):
-        return {"ok": False, "reason": "no_such_root: " + root}
-    want_gfx = _norm_gfx(a.gfx) if a.gfx else ""
-    want_name = _match_key(a.kernel_name) if a.kernel_name else ""
-
-    records, scanned, skipped = [], 0, {"retired": 0, "no_patch": 0, "unreadable": 0, "filtered": 0}
+    scanned, skipped = 0, {"retired": 0, "no_patch": 0, "unreadable": 0, "filtered": 0}
+    entries = []
     for dirpath, _dirs, files in sorted(os.walk(root)):
         if "meta.yaml" not in files:
             continue
@@ -1803,7 +1818,7 @@ def cmd_export_remote(a) -> dict:
             continue
         # Retired entries are dominated duplicates, not negative knowledge, and the service ranks on
         # the speedup we declare — offering them would put a retired win in someone's top-N.
-        if _is_retired(meta) and not a.include_retired:
+        if _is_retired(meta) and not include_retired:
             skipped["retired"] += 1
             continue
         # An entry with nothing installable in it is not a knowledge record, whatever its speedup
@@ -1817,6 +1832,24 @@ def cmd_export_remote(a) -> dict:
         if not installable:
             skipped["no_patch"] += 1
             continue
+        entries.append((dirpath, meta))
+    return entries, scanned, skipped
+
+
+def cmd_export_remote(a) -> dict:
+    """Render this store as KB Store candidates, one JSON line each, champion pre-decided.
+
+    Nothing is uploaded here — this only produces what to upload, so the mapping is reviewable and
+    diffable before anything leaves the machine. kb/remote_upload.py consumes the output.
+    """
+    root = a.root
+    if not os.path.isdir(root):
+        return {"ok": False, "reason": "no_such_root: " + root}
+    entries, scanned, skipped = _tree_entries(
+        root, _norm_gfx(a.gfx) if a.gfx else "", _match_key(a.kernel_name) if a.kernel_name else "",
+        bool(a.include_retired))
+    records = []
+    for dirpath, meta in entries:
         records.extend(remote_records(meta, dirpath, a.producer, a.gpu))
 
     # One champion per identity, upstream's rule: must beat 1.0x, and highest wins. Ties break on
@@ -1872,6 +1905,106 @@ def cmd_export_remote(a) -> dict:
             "champions": len(best),
             "deduped": len(dropped), "deduped_dirs": sorted(dropped),
             "skipped": skipped, "out": a.out or "-"}
+
+
+def cmd_sync_local(a) -> dict:
+    """File the slug tree's entries into the on-disk KB store, keyed by canonical id.
+
+    The convergence step. Writes on this lane have gone to both address schemes for a while
+    (`write-remote --plane both` files the tree, then the store, then the service), so the store
+    already holds everything measured since that became the default. What it has never held is the
+    BACKLOG: every entry older than that, plus anything a curation pass imported into the tree by
+    hand. Until that is carried across, moving the READ onto the store would be a silent downgrade
+    rather than a change of address — same kernel, thinner page, and no way for the reader to tell.
+
+    Safe to run before every read, which is how the lane runs it. The session id is a digest of the
+    patch's content, so an entry that is already filed lands back on its own session, and the write
+    goes through the same `_carrying_remote_state` a re-measurement does: the store's attestation
+    ledger, its retraction and its cross-box reproduction count all survive being re-synced.
+    `local_reproduced` is TRUE here for that same reason — a sync is a copy of a measurement that
+    was already counted, not a new box reporting one, and a counter that ticked once per read would
+    make the tree's oldest entries look like its most reproduced.
+
+    Retirement travels, and has to be APPLIED rather than copied. `remote_value` already carries
+    `retained: false` across, but a flag alone is inert: ranking reads the top-level scalar, so a
+    tombstone that arrived still declaring 1.9x would sit at the head of the page for every reader
+    that has not been taught the flag (kb/retract.py). `retracted_document` is what makes the three
+    parts — flag, zeroed scalar, no champion pointer — travel together.
+
+    The one thing it will not do is overrule a LIFT. A record the store retired and then un-retired
+    (`unretired_at`, written when a validated recall reproduced the win after the retraction) keeps
+    its reprieve: the tree entry that was curated away is the very record the recall vindicated, and
+    re-imposing that verdict on every read would silently undo the lift once per warm start. An
+    already-retracted record is likewise left to `_carrying_plane`, which re-applies the store's own
+    tombstone — going through `retracted_document` again would only churn `retracted_at`.
+    """
+    from kb.retract import is_retired, retracted_document
+    root = a.root
+    if not os.path.isdir(root):
+        return {"ok": False, "reason": "no_such_root: " + root}
+    a.plane = "local"                       # a sync is a local catch-up; it never talks to anyone
+    store, _also, why = open_plane(a, CHAMPION_METRIC, 1.0, create=True)
+    if store is None:
+        return {"ok": False, "reason": why or "no_store"}
+    entries, scanned, skipped = _tree_entries(
+        root, _norm_gfx(a.gfx) if a.gfx else "", _match_key(a.kernel_name) if a.kernel_name else "",
+        include_retired=True)
+
+    synced, fresh, retired, promoted, errors = [], 0, 0, [], []
+    for exp_dir, meta in entries:
+        # One bad entry must not stop the catch-up. The read that follows is better off with the
+        # rest of the backlog than with none of it, and an entry that cannot be filed is named here
+        # rather than leaving a page thin for a reason nothing recorded. Broad on purpose: hashing
+        # the payload, deriving the identity and writing it all fail differently, and none of them
+        # is worth losing the other entries over.
+        try:
+            recs = remote_records(meta, exp_dir, a.producer, a.gpu)
+            files = {f["path"]: f["local_path"] for f in recs[0]["files"]}
+            previous = store.get_session(recs[0]["canonical_id"], recs[0]["session_id"])
+            held = previous.get("value") if isinstance(previous, dict) else None
+            held = held if isinstance(held, dict) else {}
+            already = isinstance(previous, dict)
+            plane_recs, _carried = _carrying_plane(store, recs, local_reproduced=True)
+            # See the docstring: apply the tree's curation, unless the store has already ruled on
+            # this session — either by holding its own tombstone, or by lifting one.
+            retire_now = (_is_retired(meta) and not is_retired(held)
+                          and not held.get("unretired_at"))
+            if retire_now:
+                reason = (str(meta.get("retired_reason") or "").strip()
+                          or "retired by the local curation")
+                plane_recs = [dict(r, knowledge=retracted_document(
+                    r["knowledge"], reason, (CHAMPION_METRIC,),
+                    actor=str(meta.get("retracted_by") or ""))) for r in plane_recs]
+            elif _is_retired(meta) and not is_retired(held):
+                # The lift again, from the other side. `remote_value` copies `retained: false` out
+                # of the meta verbatim, so a document derived from a curated tree entry arrives
+                # carrying the flag even on the path that decided not to retract — and the flag
+                # alone is enough for `is_retired` to hide the record the recall just vindicated.
+                # Dropping it here is what makes "the store's own state wins" true of the WHOLE
+                # document and not only of the ranking scalar.
+                plane_recs = [dict(r, knowledge=dict(r["knowledge"], value={
+                    k: v for k, v in (r["knowledge"].get("value") or {}).items()
+                    if k not in ("retained", "retired_reason")})) for r in plane_recs]
+            written, moved, error = publish(store, plane_recs, files,
+                                            lambda rec: rec["knowledge"].get("speedup"),
+                                            promote=not retire_now)
+        except Exception as e:
+            errors.append({"exp_dir": exp_dir, "reason": "%s: %s" % (type(e).__name__, str(e)[:160])})
+            continue
+        if error:
+            errors.append({"exp_dir": exp_dir, "reason": error})
+            continue
+        retired += 1 if retire_now else 0
+        fresh += 0 if already else 1
+        synced.extend(written)
+        promoted.extend(moved)
+    return {"ok": not errors, "store": store.root, "scanned": scanned, "entries": len(entries),
+            # `entries` counts measurements, `synced` the addresses they were filed at — one per
+            # ladder rung, so the ratio is the ladder depth for a healthy sync.
+            "synced": len(synced), "identities": len(set(synced)),
+            "new_sessions": fresh, "retired": retired,
+            "champions": len(set(promoted)), "skipped": skipped,
+            "errors": errors}
 
 
 def _value_as_meta(value: dict, gfx: str) -> dict:
@@ -2482,6 +2615,19 @@ def main(argv=None):
                     help="also export entries the curation retired (they would rank as live wins)")
     xr.add_argument("--out", default="", help="write JSON lines here instead of stdout")
 
+    # No `--plane`: a sync is a local catch-up by definition, and offering `remote` here would
+    # invite pushing a whole tree at a service that cannot delete what it accepts.
+    sl = sub.add_parser(
+        "sync-local", help="file the slug tree's entries into the on-disk KB store, keyed by "
+                           "canonical id; idempotent, keeps what the store already earned")
+    sl.set_defaults(plane="local", scan=25)
+    sl.add_argument("--root", required=True, help="the slug tree to read")
+    sl.add_argument("--store", required=True, help="on-disk KB store root to bring level")
+    sl.add_argument("--gfx", default="", help="only this arch (default: every arch in the tree)")
+    sl.add_argument("--kernel-name", dest="kernel_name", default="", help="only this kernel")
+    sl.add_argument("--producer", default=REMOTE_PRODUCER)
+    sl.add_argument("--gpu", default="", help="override the gfx dimension; default is the entry's own")
+
     # The key-addressed pair. Same gates, same output shapes as resolve/write — only the plane
     # the records live on changes, so the lane can be pointed at either.
     def add_plane_args(w):
@@ -2627,6 +2773,8 @@ def main(argv=None):
             out = cmd_backfill_content(a)
         elif a.cmd == "export-remote":
             out = cmd_export_remote(a)
+        elif a.cmd == "sync-local":
+            out = cmd_sync_local(a)
         elif a.cmd == "resolve-remote":
             out = cmd_resolve_remote(a)
         elif a.cmd == "write-remote":
@@ -2645,7 +2793,7 @@ def main(argv=None):
         err = "exception: " + str(e)[:160]
         out = ({"written": False, "reason": err} if a.cmd in ("write", "write-remote")
                else {"retracted": False, "reason": err} if a.cmd == "retract-remote"
-               else {"ok": False, "error": err} if a.cmd == "curate-remote"
+               else {"ok": False, "error": err} if a.cmd in ("curate-remote", "sync-local")
                else {"attested": False, "reason": err} if a.cmd in ("attest", "attest-remote")
                else {"remapped": False, "reason": err} if a.cmd == "remap"
                else {"read_reason": err, "candidates": []})
