@@ -69,7 +69,7 @@ from kb.attest import (OUTCOMES, RETIRE_THRESHOLD, attest_session,         # noq
                        record_attestation, retire_hint, should_retire)
 from kb.curate import collapse_by_direction, demote_hinted                  # noqa: E402
 from kb.ladder import publish                                               # noqa: E402
-from kb.plane import open_plane                                             # noqa: E402
+from kb.plane import open_plane, read_planes                                             # noqa: E402
 from kb.retract import (is_retired, retract_session, retraction_ok,        # noqa: E402
                         retracted_document)
 from kb.store_local import (KBStoreError, SAFE_COMPONENT_CHARS,             # noqa: E402
@@ -80,6 +80,13 @@ THROUGHPUT_METRIC = "throughput_tok_s"      # ranks the exact-workload rung, and
 SPEEDUP_METRIC = "speedup"                  # champion metric on every coarser rung
 DEFAULT_TOP_N = 3
 DEFAULT_SCAN = 25
+# How many same-direction runners-up ride along with each offered record. The collapse keeps one
+# entry per `direction:` so that three offers are three IDEAS rather than three spellings of one,
+# but the ones it drops are not noise: they are the same idea measured at other settings, and a
+# reader that wants to re-bench a direction wants the settings that were already tried. Bounded
+# because a page can hold dozens of re-runs of one direction and a prompt cannot; each alternate
+# is a thin summary — no config, no artifacts — so the cost is a few lines, not a bundle.
+ALTERNATES_LIMIT = 3
 # What `resolve` orders a page by, by name on the CLI. See the module docstring for why a read and
 # a write do not agree on this.
 SORT_METRICS = {"throughput": THROUGHPUT_METRIC, "speedup": SPEEDUP_METRIC}
@@ -245,14 +252,15 @@ def cmd_resolve(a) -> dict:
     # it is what lands in identity_out and names the page in the output.
     ladder = ladder_of(a) + legacy_version_ladder(a)
     metric = read_metric(a)
-    # Echo the plane back. A caller that tries the service and falls back to disk otherwise cannot
-    # tell from the output which one answered — the ladder, the ranking and the shapes are identical
-    # — and "where did this candidate come from" is the first question asked when one turns out to
-    # be wrong. `dict(out, ...)` carries it onto every return path below.
+    # Echo the plane back, both halves of it. `plane` is what the caller ASKED for and `read_plane`
+    # is which one actually answered, and on `both` those differ — the ladder, the ranking and the
+    # shapes are identical whichever spoke, and "where did this candidate come from" is the first
+    # question asked when one turns out to be wrong. `dict(out, ...)` carries them onto every return
+    # path below.
     out = {"tried": [c for c, _t, _m, _f in ladder], "canonical_id": ladder[0][0],
            "match_tier": "", "ranked_by": "", "sorted_by": metric, "champion_metric": "",
            "candidates": [], "read_reason": "",
-           "plane": str(getattr(a, "plane", "local") or "local"), "curation": {}}
+           "plane": str(getattr(a, "plane", "local") or "local"), "read_plane": "", "curation": {}}
     # Leave the ADDRESS behind on disk, not just the answer. The writer at the end of the run is a
     # different process, and when the workflow dies mid-flight it is a different program entirely
     # (run_e2e.py salvaging the run from its artifacts) — one that has the measurement but not the
@@ -286,90 +294,124 @@ def cmd_resolve(a) -> dict:
                            "canonical_id": ladder[0][0]}, handle, indent=2, sort_keys=True)
         except OSError:
             pass
-    last_why = ""
-    for cid, tier, champion_metric, floor in ladder:
-        # The rung's own metric opens nothing here: a read ranks every rung the same way (see
-        # read_metric), and the floor only ever gates a promotion, which a read never performs.
-        store, _mirror, why = open_plane(a, metric, floor)
-        if store is None:
-            last_why = why
-            continue
-        try:
-            found = store.candidates(cid, limit=max(1, int(a.scan)))
-        except Exception as e:
-            last_why = "read_failed: %s: %s" % (type(e).__name__, str(e)[:120])
-            continue
-        # Retracted records are dropped BEFORE anything else looks at them, and before the
-        # direction collapse in particular: a retracted entry that happens to rank first for its
-        # direction would otherwise evict the surviving alternatives for that same direction, so a
-        # single false record could hide every good one behind it. Done client-side because it has
-        # to be — retraction zeroes the ranking scalar and re-points the champion, but the service
-        # still serves the session, and nothing in the scheme lets us ask it not to.
-        kept = [c for c in found if not is_retired(c.value)]
-        curation = {"scanned": len(found), "retired": len(found) - len(kept),
-                    "sorted_by": metric,
-                    # A saturated scan means the page held MORE than was hydrated, and everything
-                    # below is curating a prefix. Retracted records sink on their own (retraction
-                    # zeroes the ranking scalars), but a demoted one keeps its inflated scalar and
-                    # so keeps its slot in the window — enough of those and a good record never
-                    # gets looked at. Reported rather than paged around: widening the window costs
-                    # one document fetch per record, which on the remote plane is one HTTP GET.
-                    "scan_limit": max(1, int(a.scan)),
-                    "scan_saturated": len(found) >= max(1, int(a.scan))}
-        # Re-sorted here even though the store already ordered by this metric, because the two
-        # planes order by slightly different things: the local one ranks on the document scalar,
-        # the remote one on the score the service computed and falls back to the document only
-        # when that is absent. Sorting the hydrated views is the one place both planes are
-        # guaranteed to agree, and collapse_by_direction's contract is that its input is already
-        # in rank order — it keeps the FIRST entry per direction, so a wrong order here silently
-        # offers the wrong member of every group.
-        ordered = demote_hinted(sorted([_view(c, cid, tier, metric, champion_metric) for c in kept],
-                                       key=_sort_key(metric)),
-                                lambda v: v.get("retire_hint"))
-        # Reported, because a demotion is invisible in the output otherwise: the record is still
-        # listed, still carries its real numbers, and simply appears lower than the scalars alone
-        # would put it. "Why is the 1.30x record behind the 1.04x one" has to be answerable without
-        # re-deriving the sort key by hand.
-        curation["demoted_by_hint"] = sum(1 for v in ordered if v.get("retire_hint"))
-        if a.min_speedup:
-            # Applied to `speedup` on every rung, including the throughput-ranked one: the floor
-            # asks "did this run actually improve anything", which is a question about the ratio no
-            # matter what the page is sorted by. A record with no speedup recorded is kept — it may
-            # still be a usable config — rather than silently failing an unanswerable test.
-            #
-            # BEFORE the collapse, not after, and this ordering is the whole point: the collapse
-            # keeps one entry per direction, so a group whose best record is below the floor used
-            # to offer NOTHING for that direction even when a runner-up in the same group cleared
-            # it — the runner-up had already been collapsed away by the record that was then
-            # filtered out. Filtering first means a record that cannot be offered cannot hold a
-            # direction slot hostage either. The kernel lane has always gated in this order.
-            before = len(ordered)
-            ordered = [v for v in ordered
-                       if v["speedup"] is None or v["speedup"] >= float(a.min_speedup)]
-            curation["below_min_speedup"] = before - len(ordered)
-        curation["min_speedup"] = float(a.min_speedup or 0.0)
-        # top_n=len(ordered): the offer is sliced to --top-n below, so collapse must not pre-slice.
-        # It consumes only the per-idea best, not the alternates.
-        views, _alternates, collapsed = collapse_by_direction(
-            ordered, lambda v: v["direction"], lambda v: v["session_id"], len(ordered))
-        curation["same_direction_collapsed"] = collapsed
-        if not views:
-            # A rung whose every candidate was curated away is NOT an empty page, and the next rung
-            # down is about to be tried as if it were. Carry the counts forward so the caller can
-            # tell "nobody has recorded this" from "everything recorded here was retracted" —
-            # identical read_reasons otherwise, opposite meanings.
-            out["curation"] = dict(curation, canonical_id=cid, tier=tier)
-            continue
-        views = views[: max(1, int(a.top_n))]
-        if a.cache_dir:
-            for view in views:
-                view["bundle"] = _materialize(store, cid, found, view, a.cache_dir)
-        if a.refs_dir:
-            _render_reference(a.refs_dir, cid, tier, views)
-        return dict(out, canonical_id=cid, match_tier=tier, ranked_by=metric,
-                    champion_metric=champion_metric, candidates=views, read_reason="read",
-                    curation=dict(curation, canonical_id=cid, tier=tier))
+    planes, plane_why = read_planes(a, metric)
+    last_why = plane_why
+    # Planes OUTSIDE the ladder, not inside it. A `both` read that finds nothing on the service has
+    # to re-descend the WHOLE ladder on the mirror; stopping at the first rung either plane happens
+    # to hold would let a coarse remote page shadow an exact local one. The rung's own floor opens
+    # nothing here either — it gates a promotion, and a read never performs one — so the store is
+    # opened once per plane rather than once per rung.
+    for store, read_plane in planes:
+        for cid, tier, champion_metric, _floor in ladder:
+            try:
+                found = store.candidates(cid, limit=max(1, int(a.scan)))
+            except Exception as e:
+                last_why = "read_failed: %s: %s" % (type(e).__name__, str(e)[:120])
+                continue
+            # Retracted records are dropped BEFORE anything else looks at them, and before the
+            # direction collapse in particular: a retracted entry that happens to rank first for its
+            # direction would otherwise evict the surviving alternatives for that same direction, so a
+            # single false record could hide every good one behind it. Done client-side because it has
+            # to be — retraction zeroes the ranking scalar and re-points the champion, but the service
+            # still serves the session, and nothing in the scheme lets us ask it not to.
+            kept = [c for c in found if not is_retired(c.value)]
+            curation = {"scanned": len(found), "retired": len(found) - len(kept),
+                        "sorted_by": metric,
+                        # A saturated scan means the page held MORE than was hydrated, and everything
+                        # below is curating a prefix. Retracted records sink on their own (retraction
+                        # zeroes the ranking scalars), but a demoted one keeps its inflated scalar and
+                        # so keeps its slot in the window — enough of those and a good record never
+                        # gets looked at. Reported rather than paged around: widening the window costs
+                        # one document fetch per record, which on the remote plane is one HTTP GET.
+                        "scan_limit": max(1, int(a.scan)),
+                        "scan_saturated": len(found) >= max(1, int(a.scan))}
+            # Re-sorted here even though the store already ordered by this metric, because the two
+            # planes order by slightly different things: the local one ranks on the document scalar,
+            # the remote one on the score the service computed and falls back to the document only
+            # when that is absent. Sorting the hydrated views is the one place both planes are
+            # guaranteed to agree, and collapse_by_direction's contract is that its input is already
+            # in rank order — it keeps the FIRST entry per direction, so a wrong order here silently
+            # offers the wrong member of every group.
+            ordered = demote_hinted(sorted([_view(c, cid, tier, metric, champion_metric) for c in kept],
+                                           key=_sort_key(metric)),
+                                    lambda v: v.get("retire_hint"))
+            # Reported, because a demotion is invisible in the output otherwise: the record is still
+            # listed, still carries its real numbers, and simply appears lower than the scalars alone
+            # would put it. "Why is the 1.30x record behind the 1.04x one" has to be answerable without
+            # re-deriving the sort key by hand.
+            curation["demoted_by_hint"] = sum(1 for v in ordered if v.get("retire_hint"))
+            if a.min_speedup:
+                # Applied to `speedup` on every rung, including the throughput-ranked one: the floor
+                # asks "did this run actually improve anything", which is a question about the ratio no
+                # matter what the page is sorted by. A record with no speedup recorded is kept — it may
+                # still be a usable config — rather than silently failing an unanswerable test.
+                #
+                # BEFORE the collapse, not after, and this ordering is the whole point: the collapse
+                # keeps one entry per direction, so a group whose best record is below the floor used
+                # to offer NOTHING for that direction even when a runner-up in the same group cleared
+                # it — the runner-up had already been collapsed away by the record that was then
+                # filtered out. Filtering first means a record that cannot be offered cannot hold a
+                # direction slot hostage either. The kernel lane has always gated in this order.
+                before = len(ordered)
+                ordered = [v for v in ordered
+                           if v["speedup"] is None or v["speedup"] >= float(a.min_speedup)]
+                curation["below_min_speedup"] = before - len(ordered)
+            curation["min_speedup"] = float(a.min_speedup or 0.0)
+            # top_n=len(ordered): the offer is sliced to --top-n below, so collapse must not pre-slice.
+            # It consumes only the per-idea best, not the alternates.
+            views, alternates, collapsed = collapse_by_direction(
+                ordered, lambda v: v["direction"], lambda v: v["session_id"], len(ordered))
+            curation["same_direction_collapsed"] = collapsed
+            if not views:
+                # A rung whose every candidate was curated away is NOT an empty page, and the next rung
+                # down is about to be tried as if it were. Carry the counts forward so the caller can
+                # tell "nobody has recorded this" from "everything recorded here was retracted" —
+                # identical read_reasons otherwise, opposite meanings.
+                #
+                # Only an EMPTY rung descends. A rung holding nothing but demoted records answers and
+                # stops here, deliberately: a demotion is advisory, the record is still offered with
+                # its numbers and its hint, and an exact-workload record that has lost twice is still
+                # better evidence about THIS deployment than a coarse-rung record measured somewhere
+                # else. `demoted_by_hint == scanned` in the curation block is how a reader sees it.
+                out["curation"] = dict(curation, canonical_id=cid, tier=tier)
+                continue
+            views = views[: max(1, int(a.top_n))]
+            # Attached per view, not as one flat list on `curation`: which record an alternate is an
+            # alternate TO is the whole of its meaning, and a flat list throws that away. Zipped after
+            # the slice because the slice keeps a prefix and the two lists share their order.
+            for view, alt_of in zip(views, alternates):
+                view["alternates"] = [_alternate(alt) for alt in alt_of[:ALTERNATES_LIMIT]]
+                view["alternates_omitted"] = max(0, len(alt_of) - ALTERNATES_LIMIT)
+            if a.cache_dir:
+                for view in views:
+                    view["bundle"] = _materialize(store, cid, found, view, a.cache_dir)
+            if a.refs_dir:
+                _render_reference(a.refs_dir, cid, tier, views)
+            return dict(out, canonical_id=cid, match_tier=tier, ranked_by=metric,
+                        champion_metric=champion_metric, candidates=views, read_reason="read",
+                        read_plane=read_plane,
+                        curation=dict(curation, canonical_id=cid, tier=tier))
     return dict(out, read_reason=last_why or "e2e_page_not_found")
+
+
+def _alternate(view: dict) -> dict:
+    """A same-direction runner-up, summarised.
+
+    Deliberately thin. This is not an offer — nothing here is enough to launch a server with, and it
+    is not meant to be: it says "this direction was also tried at another setting, and here is how
+    that went", so the reader can decide whether to go and look the session up. Carrying the full
+    view instead would triple the size of a resolve for records the collapse already decided against.
+
+    `validation_status` and `retire_hint` travel with it because a runner-up is most useful exactly
+    when the leader disappoints, and "the one below it has been tried twice and never reproduced" is
+    the first thing you would want to know before reaching for it.
+    """
+    return {"session_id": view["session_id"],
+            "speedup": view["speedup"],
+            "throughput_tok_s": view["throughput_tok_s"],
+            "validation_status": view["validation_status"],
+            "validations": view["validations"],
+            "retire_hint": view.get("retire_hint") or ""}
 
 
 def _materialize(store, cid: str, found, view: dict, cache_dir: str) -> dict:
@@ -469,6 +511,21 @@ def _repro_line(view: dict) -> str:
     return "; ".join(bits)
 
 
+def _alternates_line(view: dict) -> str:
+    """`also tried under this direction: geak-… 1.11x (validated_win), …`, or a plain none."""
+    alts = view.get("alternates") or []
+    if not alts:
+        return "also tried under this direction: nothing else recorded"
+    parts = ["`%s` %sx%s%s" % (alt["session_id"],
+                               alt["speedup"] if alt["speedup"] is not None else "?",
+                               " (%s)" % alt["validation_status"] if alt["validation_status"] else "",
+                               " **%s**" % alt["retire_hint"] if alt["retire_hint"] else "")
+             for alt in alts]
+    omitted = int(view.get("alternates_omitted") or 0)
+    return "also tried under this direction: %s%s" % (
+        "; ".join(parts), " (+%d more not listed)" % omitted if omitted else "")
+
+
 def _render_reference(refs_dir: str, cid: str, tier: str, views) -> str:
     """Mirror the offer into prose the Director can read, or return "" and let the read stand."""
     try:
@@ -503,6 +560,10 @@ def _render_reference(refs_dir: str, cid: str, tier: str, views) -> str:
                 # bet from an untried one at the same speedup, and only this line says which it is.
                 "- track record: %s" % _track_record_line(v),
                 "- accepted kernels: %s" % (_kernel_line(v["accepted_kernels"]) or "none"),
+                # The same idea at other settings. Named, not offered: the config is not here and
+                # is not meant to be — this line exists so a Director whose first pick disappoints
+                # knows the direction was tried three ways before it reaches for a fourth.
+                "- %s" % _alternates_line(v),
                 "- reproduce: %s" % _repro_line(v),
                 "- config:", "```json",
                 json.dumps(v["accepted_config"], indent=2, sort_keys=True), "```", "",

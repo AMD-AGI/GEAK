@@ -81,7 +81,7 @@ from kb.attest import OUTCOMES as _OUTCOMES
 from kb.attest import RETIRE_THRESHOLD as _RETIRE_THRESHOLD
 from kb.curate import collapse_by_direction, demote_hinted
 from kb.ladder import publish
-from kb.plane import open_plane
+from kb.plane import open_plane, read_planes
 from kb.store_local import CHAMPION_METRIC, SAFE_COMPONENT_CHARS
 
 try:
@@ -2043,12 +2043,14 @@ def cmd_resolve_remote(a) -> dict:
     gfx = _norm_gfx(a.gfx)
     if not gfx and not a.canonical_id:
         return {"read_reason": "missing_arch", "candidates": []}
-    # Reading takes ONE plane, never both. Merging two rankings would need a comparability rule
-    # across planes that nothing here has, and silently preferring one would make a stale local
-    # mirror shadow the service without saying so.
-    store, _second, why = open_plane(a, CHAMPION_METRIC, 1.0)
-    if store is None:
+    # Reading takes ONE plane at a time, never two merged: that would need a comparability rule
+    # across planes that nothing here has. `both` therefore picks, and picks the service first —
+    # `open_plane` would have handed back the local store, letting a stale mirror shadow the shared
+    # one without saying so. See kb/plane.py:read_planes.
+    planes, why = read_planes(a, CHAMPION_METRIC)
+    if not planes:
         return {"read_reason": why.split(":", 1)[0], "reason": why, "candidates": []}
+    store = planes[0][0]
 
     ladder = _store_ladder(a, gfx) + _legacy_name_ladder(a, gfx)
     cid, match_tier = ladder[0]
@@ -2057,7 +2059,9 @@ def cmd_resolve_remote(a) -> dict:
                                a.language or (segs[4] if len(segs) > 4 else ""), gfx)
     base_out = {"slug": requested_slug, "requested_slug": requested_slug, "canonical_id": cid,
                 "match_tier": match_tier, "tried": [c for c, _t in ladder],
-                "other_language_pages": [], "ambiguous_pages": [], "candidates": []}
+                "other_language_pages": [], "ambiguous_pages": [], "candidates": [],
+                # Which plane ANSWERED, which `--plane both` alone does not tell you.
+                "read_plane": ""}
 
     # Descend the ladder, then the pre-ladder near misses. Stopping at the first rung that holds
     # anything is deliberate: a coarser page is a superset only if every writer double-wrote, and
@@ -2091,12 +2095,18 @@ def cmd_resolve_remote(a) -> dict:
         other_precision[0] = len(of_carrier) - len(of_precision)
         return of_precision, retired_n
 
-    found, retired = [], 0
-    for cid, match_tier in ladder:
-        found, retired = live(cid)
+    # The WHOLE descent is redone on the next plane — ladder, then near misses — rather than
+    # stopping at the first page either plane happens to hold: a thin remote page must not shadow
+    # the hand-curated local tree, and a coarse rung on one plane must not shadow an exact rung on
+    # the other. `live` reads `store` from this scope, so rebinding it here re-points the closure.
+    found, retired, read_plane = [], 0, ""
+    for store, read_plane in planes:
+        for cid, match_tier in ladder:
+            found, retired = live(cid)
+            if found:
+                break
         if found:
             break
-    if not found:
         near = _store_near_misses(store, ladder[0][0])
         for other in near:
             found, retired = live(other)
@@ -2105,9 +2115,11 @@ def cmd_resolve_remote(a) -> dict:
                 break
         base_out.update({"other_language_pages": near,
                          "tried": [c for c, _t in ladder] + near})
-        if not found:
-            return dict(base_out, read_reason="kernel_page_not_found")
-    base_out.update({"canonical_id": cid, "match_tier": match_tier})
+        if found:
+            break
+    if not found:
+        return dict(base_out, read_reason="kernel_page_not_found")
+    base_out.update({"canonical_id": cid, "match_tier": match_tier, "read_plane": read_plane})
 
     try:
         min_speedup = float(a.min_speedup)

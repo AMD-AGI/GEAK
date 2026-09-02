@@ -1000,6 +1000,57 @@ def test_the_floor_is_applied_before_the_collapse_not_after(tmp_path):
     assert out["curation"]["same_direction_collapsed"] == 0
 
 
+def test_same_direction_runners_up_ride_along_with_the_record_that_evicted_them(tmp_path):
+    """The collapse offers one entry per IDEA. The settings it dropped are still worth naming.
+
+    Three records under `kernels` and one under `tuned`: the read offers two directions, and the two
+    `kernels` records that lost the slot come back attached to the one that won it - not to the read
+    as a whole, because which record an alternate is an alternate TO is the whole of its meaning.
+    """
+    lead = _write(tmp_path, "lead", "kernels", tput=1300.0)["session_id"]
+    second = _write(tmp_path, "second", "kernels", tput=1200.0,
+                    accepted_config={"env": "B=2"})["session_id"]
+    third = _write(tmp_path, "third", "kernels", tput=1100.0,
+                   accepted_config={"env": "B=3"})["session_id"]
+    other = _write(tmp_path, "other", "tuned", tput=1050.0)["session_id"]
+    out = _run("resolve", "--store", str(tmp_path / "store"))
+    assert [c["session_id"] for c in out["candidates"]] == [lead, other]
+    assert [alt["session_id"] for alt in out["candidates"][0]["alternates"]] == [second, third]
+    assert out["candidates"][0]["alternates"][0]["throughput_tok_s"] == 1200.0
+    assert out["candidates"][1]["alternates"] == []          # nothing else was filed under `tuned`
+    assert out["candidates"][0]["alternates_omitted"] == 0
+    # And the Director reads prose, not JSON, so the runners-up have to reach that file too.
+    text = list_reference_text(tmp_path, str(tmp_path / "store"))
+    assert second in text and third in text
+    assert "nothing else recorded" in text                   # said for `tuned`, not left blank
+
+
+def test_the_alternate_list_is_bounded_and_says_how_much_it_dropped(tmp_path):
+    """A page can hold dozens of re-runs of one direction; a prompt cannot hold dozens of them."""
+    from e2e_store import ALTERNATES_LIMIT
+    for i in range(ALTERNATES_LIMIT + 3):
+        _write(tmp_path, "r%d" % i, "kernels", tput=1300.0 - i,
+               accepted_config={"env": "B=%d" % i})
+    top = _run("resolve", "--store", str(tmp_path / "store"))["candidates"][0]
+    assert len(top["alternates"]) == ALTERNATES_LIMIT
+    # Reported, not silently truncated: a short list that does not say it is short reads as the
+    # whole group, and "this direction was only tried three ways" is then simply false.
+    assert top["alternates_omitted"] == 2
+
+
+def test_an_alternate_carries_the_verdicts_that_would_make_you_skip_it(tmp_path):
+    """A runner-up is most useful when the leader disappoints, which is exactly when you need to
+    know that the runner-up has already been tried twice and never reproduced."""
+    _write(tmp_path, "lead", "kernels", tput=1300.0)
+    dud = _write(tmp_path, "dud", "kernels", tput=1200.0,
+                 accepted_config={"env": "B=2"})["session_id"]
+    for _ in range(2):
+        _run("attest", "--store", str(tmp_path / "store"), "--session-id", dud,
+             "--outcome", "not_reproduced", "--apply")
+    alt = _run("resolve", "--store", str(tmp_path / "store"))["candidates"][0]["alternates"][0]
+    assert alt["session_id"] == dud and "came back negative" in alt["retire_hint"]
+
+
 # -- curate: the judgement between attesting and retracting --------------------------------------
 
 

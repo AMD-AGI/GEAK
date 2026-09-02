@@ -16,8 +16,12 @@ these two openers different functions.
 (`remote_unavailable: ...`) rather than as a refusal: the run already spent GPU hours producing the
 measurement, and a network blip must not discard it. Without that field an unreachable service
 would look exactly like a successful write.
+
+That ordering is a WRITE contract. A read wants the opposite preference and gets it from
+`read_planes()` below; see its docstring.
 """
 
+import copy
 import os
 
 
@@ -48,6 +52,52 @@ def open_plane(a, metric, floor, create=False):
     if plane == "remote":
         return remote, None, remote_why
     return local, remote, ("remote_unavailable: " + remote_why if remote is None else "")
+
+
+def read_planes(a, metric):
+    """The planes a READ should try, in order: [(store, plane_name)], plus why one is missing.
+
+    A read takes ONE plane at a time. Merging two rankings would need a cross-plane comparability
+    rule that nothing here has, so `both` has to CHOOSE — and `open_plane`'s choice is the wrong one
+    for a read. It hands back the local store as the primary because that is the write path's source
+    of truth, which means `--plane both` on a read silently answered from disk and let a stale mirror
+    shadow the service. So the read order is the service FIRST, the mirror only when the service has
+    no answer, and the caller reports which one spoke (`read_plane` in the resolve output).
+
+    "No answer" means no candidates, not merely an error: on a scheme with no search an empty remote
+    page and a 404 are the same response, and the mirror may hold a hand-curated history that a thin
+    remote page must not shadow. Deciding that is the caller's job — it is the one that knows what a
+    candidate is — so this returns both planes and lets it stop at the first that answers.
+
+    No `floor` parameter, unlike `open_plane`: a floor only ever gates a promotion, and a read never
+    performs one.
+
+    Both lanes' JS used to spell this branch out in emitted bash, once each, testing $KB_STORE_TOKEN
+    and re-running the whole resolve. Those copies could not fix the CLI, which had no branch at all.
+    """
+    plane = str(getattr(a, "plane", "local") or "local")
+    if plane != "both":
+        store, _mirror, why = open_plane(a, metric, 1.0)
+        return ([(store, plane)] if store is not None else []), why
+    # NOT open_plane's `both` branch: that one refuses outright when the local store is missing,
+    # which is right for a write (it was asked to file in two places) and wrong for a read, where it
+    # turns "this box keeps no mirror" into a cold start against a service that had the answer.
+    out, why = [], ""
+    for name in ("remote", "local"):
+        store, _mirror, one_why = open_plane(_with_plane(a, name), metric, 1.0)
+        if store is not None:
+            out.append((store, name))
+        elif not why:
+            why = one_why
+    return out, ("" if out else why)
+
+
+def _with_plane(a, plane):
+    """`a` with one field overridden. A shallow copy because argparse namespaces are flat and the
+    caller must not see its own namespace mutated by a read."""
+    clone = copy.copy(a)
+    clone.plane = plane
+    return clone
 
 
 def _open_local(root, metric, floor, create):

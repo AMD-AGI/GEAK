@@ -755,7 +755,9 @@ const SWEEP_SCHEMA = obj({
 const KB_RESOLVE_SCHEMA = obj({
   tried: arrStr, canonical_id: { type: 'string' }, match_tier: { type: 'string' },
   ranked_by: { type: 'string' }, candidates: arrObj, read_reason: { type: 'string' },
-  plane: { type: 'string' },
+  // `plane` is what was ASKED for; `read_plane` is which one answered. Under `both` they differ,
+  // and only the second one explains where the offer came from.
+  plane: { type: 'string' }, read_plane: { type: 'string' },
   // How the offer was ORDERED (throughput, high to low, on every rung) versus which metric that
   // rung crowns its champion on. Two different things that used to share one word: a coarse rung
   // is ranked by absolute throughput here but still promotes on speedup, and a reader told only
@@ -997,29 +999,18 @@ function kbPlaneFlags(plane) {
   return `--plane ${plane}` + (plane === 'remote' ? '' : ` --store ${shq(E2E_KB_STORE_DIR)}`);
 }
 
-// A READ takes exactly one plane — `open_plane()` returns (local, remote) for `both` and cmd_resolve
-// uses only the first, deliberately: merging two rankings needs a cross-plane comparability rule
-// that nothing here has, and silently preferring one would let a stale local mirror shadow the
-// service without saying so. So `--plane both` on a read means LOCAL, which is the opposite of what
-// this workflow wants. The choice is made here instead, in the open: try the service, and fall back
-// to the local store only when it has no answer. `read_reason` in the returned JSON says which one
-// spoke. The credentials cannot be tested from this process (non-interactive shells never source the
-// profile that sets them), so the branch lives in the emitted bash, after the prelude has exported
-// whatever the box actually has.
+// A READ takes exactly one plane, and for `--plane both` that used to mean LOCAL — `open_plane()`
+// returns (local, remote) in write order and cmd_resolve took the first — which is the opposite of
+// what this workflow wants: a stale mirror would shadow the service without saying so. This function
+// used to compensate by emitting the branch in bash, running the resolve twice and preferring the
+// remote answer whenever it had candidates. `cmd_resolve` now does exactly that itself, via
+// kb.plane:read_planes (service first, mirror only when the service has no answer), and reports
+// which one spoke as `read_plane`. So the branch is gone from here: one copy of a rule is better
+// than two, and the copy that lives in Python is also the one the CLI gets when a human runs it.
 function kbResolveScript(args) {
-  const invoke = (plane) =>
+  return KB_ENV_PRELUDE + '\\\n' +
     `python3 ${shq(E2E_STORE_SCRIPT)} resolve ${kbIdentityFlags()} \\\n` +
-    `  ${kbPlaneFlags(plane)} ${args}`;
-  if (E2E_KB_PLANE !== 'both') return KB_ENV_PRELUDE + '\\\n' + invoke(E2E_KB_PLANE);
-  return KB_ENV_PRELUDE + `
-REMOTE_OUT=''
-if [ -n "$KB_STORE_TOKEN" ]; then
-  REMOTE_OUT=$(${invoke('remote')} 2>/dev/null || true)
-  if printf '%s' "$REMOTE_OUT" | python3 -c 'import json,sys; sys.exit(0 if (json.load(sys.stdin).get("candidates") or []) else 1)' 2>/dev/null; then
-    printf '%s\\n' "$REMOTE_OUT"; exit 0
-  fi
-fi
-${invoke('local')}`;
+    `  ${kbPlaneFlags(E2E_KB_PLANE)} ${args}`;
 }
 
 // Warm-start prompt injection, mirroring expertSkillsBlock exactly: returns '' whenever the feature
@@ -2222,8 +2213,11 @@ if (want('setup')) {
       // Log the ladder VERBATIM. On a scheme with no search, "never recorded" and "recorded under an
       // address one segment different" are the same 404, and this line is the only record of which
       // question was actually asked — without it a silent identity drift looks like an empty store.
-      KB_READ_PLANE = String(resolved.plane || '');
-      log(`[kb] e2e read: plane=${resolved.plane || '?'} tried=[${(resolved.tried || []).join(' | ')}] ` +
+      // `read_plane` is which plane ANSWERED; `plane` is only which was asked for, and under `both`
+      // that is not a fact about where the offer came from. Falls back for a resolve emitted by an
+      // older build, whose JSON has no `read_plane` at all.
+      KB_READ_PLANE = String(resolved.read_plane || resolved.plane || '');
+      log(`[kb] e2e read: plane=${KB_READ_PLANE || '?'} tried=[${(resolved.tried || []).join(' | ')}] ` +
         `answered=${resolved.canonical_id || '?'} tier=${resolved.match_tier || '-'} ` +
         `sorted_by=${resolved.sorted_by || resolved.ranked_by || '-'} ` +
         `champion_metric=${resolved.champion_metric || '-'} reason=${resolved.read_reason || '?'} ` +

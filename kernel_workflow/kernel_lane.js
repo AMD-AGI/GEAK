@@ -1028,6 +1028,13 @@ if (WARM_START_ON && !setup.resumed && KB_ROOT_OK) {
     // shadow. An empty remote answer is indistinguishable from a 404 on this scheme, so "no
     // candidates" — not "no error" — is what triggers the second read. Both reads are seconds and
     // no GPU; the thing they protect against is a cold start that costs hours.
+    //
+    // The e2e lane spelled out the same branch and no longer does: `read_planes` moved it into
+    // cmd_resolve, so `--plane both` now tries the service and falls back to the mirror by itself.
+    // This one stays in bash, because the fallback here is a DIFFERENT SUBCOMMAND — off the store
+    // scheme, `localResolveCmd` is `resolve --root kb_artifacts --match`, reading the curated tree
+    // rather than a second plane of the same store. There is no plane list that expresses that, and
+    // faking one would mean teaching resolve-remote to read a directory layout it does not own.
     const resolveScript = KB_REMOTE === 'off'
       ? `python3 ${JSON.stringify(EXPERIENCE_STORE)} ${localResolveCmd} \\\n  ${commonArgs}`
       : `${KB_ENV_PRELUDE}
