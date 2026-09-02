@@ -429,7 +429,8 @@ const KB_ARGS = {
   ...(A.warm_start_match != null ? { warm_start_match: String(A.warm_start_match) } : {}),
   ...(A.warm_start_min_speedup != null ? { warm_start_min_speedup: A.warm_start_min_speedup } : {}),
   // Which plane the lanes read and write. Forwarded like the rest so one run uses one plane; omitted
-  // when unset, which leaves each lane on its own `local` default.
+  // when unset, which leaves each lane on its own default — `store`, the canonical-id plane, since
+  // the kernel read converged on the same addressing the service uses (kernel_lane.js:KB_MODE).
   ...(A.kb_mode != null ? { kb_mode: String(A.kb_mode) } : {}),
   ...(A.kb_store_dir != null ? { kb_store_dir: String(A.kb_store_dir) } : {}),
   ...(A.kb_framework_version != null ? { kb_framework_version: String(A.kb_framework_version) } : {}),
