@@ -566,6 +566,10 @@ const WARMSTART_RESOLVE_SCHEMA = obj({
   filtered: obj({
     total: { type: 'number' }, retired: { type: 'number' }, below_min_speedup: { type: 'number' },
     same_direction_collapsed: { type: 'number' }, demoted_by_hint: { type: 'number' },
+    // The caveat on every number above: the service ignores the limit and pages `--scan` rows, so
+    // a saturated read describes a prefix of the page. Declared or the relaying agent drops it,
+    // and a thin answer off a truncated page reads identically to a thin page.
+    scanned: { type: 'number' }, scan_saturated: { type: 'boolean' },
   }),
   candidates: {
     type: 'array',
@@ -1083,7 +1087,10 @@ ${resolveScript}
       `${resolved.requested_slug || KERNEL_NAME}) reason=${warm_start.read_reason} ` +
       `candidates=${cands.length}${f.total ? ` of ${f.total} recorded [${f.retired || 0} retired, ` +
       `${f.below_min_speedup || 0} below ${WARM_START_MIN_SPEEDUP}x, ` +
-      `${f.same_direction_collapsed || 0} same-direction]` : ''}`);
+      `${f.same_direction_collapsed || 0} same-direction]` : ''}` +
+      // Said out loud rather than left in the trace: every count on this line is a count over the
+      // rows that were fetched, and a saturated scan means the page held more than that.
+      `${f.scan_saturated ? ` (SCAN SATURATED at ${f.scanned} — the page holds more)` : ''}`);
     const otherLangs = Array.isArray(resolved.other_language_pages) ? resolved.other_language_pages : [];
     if (!cands.length && otherLangs.length) {   // wrong target_language, not an empty store
       log(`[kb] NOTE: no ${TARGET_LANGUAGE} page, but the store holds ${otherLangs.join(', ')} — ` +
