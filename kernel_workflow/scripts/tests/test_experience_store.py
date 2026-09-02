@@ -1086,7 +1086,7 @@ def test_attestations_accumulate_and_raise_a_hint_the_read_surfaces(tmp_path):
         attest(root, d, "not_reproduced", "--apply")
     candidate = resolve(root, refs)["candidates"][0]
     assert candidate["recalls"] == 2 and candidate["validations"] == 0
-    assert "could not reproduce" in candidate["retire_hint"]
+    assert "came back negative" in candidate["retire_hint"]
     assert "track record" in open(candidate["prose_path"]).read()
 
 

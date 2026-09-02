@@ -307,7 +307,15 @@ def cmd_resolve(a) -> dict:
         # still serves the session, and nothing in the scheme lets us ask it not to.
         kept = [c for c in found if not is_retired(c.value)]
         curation = {"scanned": len(found), "retired": len(found) - len(kept),
-                    "sorted_by": metric}
+                    "sorted_by": metric,
+                    # A saturated scan means the page held MORE than was hydrated, and everything
+                    # below is curating a prefix. Retracted records sink on their own (retraction
+                    # zeroes the ranking scalars), but a demoted one keeps its inflated scalar and
+                    # so keeps its slot in the window — enough of those and a good record never
+                    # gets looked at. Reported rather than paged around: widening the window costs
+                    # one document fetch per record, which on the remote plane is one HTTP GET.
+                    "scan_limit": max(1, int(a.scan)),
+                    "scan_saturated": len(found) >= max(1, int(a.scan))}
         # Re-sorted here even though the store already ordered by this metric, because the two
         # planes order by slightly different things: the local one ranks on the document scalar,
         # the remote one on the score the service computed and falls back to the document only
@@ -323,21 +331,28 @@ def cmd_resolve(a) -> dict:
         # would put it. "Why is the 1.30x record behind the 1.04x one" has to be answerable without
         # re-deriving the sort key by hand.
         curation["demoted_by_hint"] = sum(1 for v in ordered if v.get("retire_hint"))
-        # top_n=len(kept): e2e filters min_speedup AFTER collapse and slices to top_n below, so
-        # collapse must not pre-slice. It consumes only the per-idea best, not the alternates.
-        views, _alternates, collapsed = collapse_by_direction(
-            ordered, lambda v: v["direction"], lambda v: v["session_id"], len(kept))
-        curation["same_direction_collapsed"] = collapsed
         if a.min_speedup:
             # Applied to `speedup` on every rung, including the throughput-ranked one: the floor
             # asks "did this run actually improve anything", which is a question about the ratio no
             # matter what the page is sorted by. A record with no speedup recorded is kept — it may
             # still be a usable config — rather than silently failing an unanswerable test.
-            before = len(views)
-            views = [v for v in views
-                     if v["speedup"] is None or v["speedup"] >= float(a.min_speedup)]
-            curation["below_min_speedup"] = before - len(views)
+            #
+            # BEFORE the collapse, not after, and this ordering is the whole point: the collapse
+            # keeps one entry per direction, so a group whose best record is below the floor used
+            # to offer NOTHING for that direction even when a runner-up in the same group cleared
+            # it — the runner-up had already been collapsed away by the record that was then
+            # filtered out. Filtering first means a record that cannot be offered cannot hold a
+            # direction slot hostage either. The kernel lane has always gated in this order.
+            before = len(ordered)
+            ordered = [v for v in ordered
+                       if v["speedup"] is None or v["speedup"] >= float(a.min_speedup)]
+            curation["below_min_speedup"] = before - len(ordered)
         curation["min_speedup"] = float(a.min_speedup or 0.0)
+        # top_n=len(ordered): the offer is sliced to --top-n below, so collapse must not pre-slice.
+        # It consumes only the per-idea best, not the alternates.
+        views, _alternates, collapsed = collapse_by_direction(
+            ordered, lambda v: v["direction"], lambda v: v["session_id"], len(ordered))
+        curation["same_direction_collapsed"] = collapsed
         if not views:
             # A rung whose every candidate was curated away is NOT an empty page, and the next rung
             # down is about to be tried as if it were. Carry the counts forward so the caller can

@@ -16,9 +16,10 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from kb.attest import (HISTORY_LIMIT, attest_session, attestation_ok,           # noqa: E402
-                       attestations_of, attested_document, carry_attestations,
-                       empty_attestations, record_attestation, retire_hint, should_retire)
+from kb.attest import (HISTORY_LIMIT, RECENT_WINDOW, attest_session,            # noqa: E402
+                       attestation_ok, attestations_of, attested_document, carry_attestations,
+                       empty_attestations, record_attestation, recent_verdicts, retire_hint,
+                       should_retire)
 from kb.store_local import KBStoreError, LocalKBStore                           # noqa: E402
 
 
@@ -104,12 +105,12 @@ def test_retire_hint_stays_silent_until_there_is_a_pattern():
     assert retire_hint({}) == ""
     assert retire_hint(record_attestation({}, "failed")) == ""             # one loss is not a case
     twice = record_attestation(record_attestation({}, "failed"), "failed")
-    assert "never reproduced a win" in retire_hint(twice)                  # two is the pattern
+    assert "came back negative" in retire_hint(twice)                      # two is the pattern
 
 
 def test_two_non_reproductions_with_no_win_is_a_hint():
     value = record_attestation(record_attestation({}, "not_reproduced"), "not_reproduced")
-    assert "could not reproduce" in retire_hint(value)
+    assert "not_reproduced, not_reproduced" in retire_hint(value)
 
 
 def test_a_config_that_never_fit_this_box_is_no_evidence_against_the_record():
@@ -133,7 +134,7 @@ def test_an_inapplicable_read_does_not_dilute_a_real_pattern():
     value = record_attestation(record_attestation({}, "inapplicable"), "not_reproduced")
     assert retire_hint(value) == ""                     # one real non-reproduction is not a case
     value = record_attestation(value, "not_reproduced")
-    assert "could not reproduce" in retire_hint(value)  # two of them still is
+    assert "came back negative" in retire_hint(value)   # two of them still is
 
 
 def test_a_ledger_of_only_inapplicable_reads_survives_a_rewrite():
@@ -148,14 +149,64 @@ def test_a_record_written_before_inapplicable_existed_reads_as_zero():
     old = {"attestations": {"recalls": 3, "validations": 0, "failures": 3}}
     ledger = attestations_of(old)
     assert ledger["inapplicable"] == 0
-    assert "tried 3 times" in retire_hint(old)          # and its hint is unchanged
+    # No history to read, so the hint falls back to the lifetime counters - the only thing a
+    # document like this can support. See recent_verdicts().
+    assert "3 attempts ran it and none won" in retire_hint(old)
 
 
-def test_a_single_validation_clears_the_hint_however_many_failures():
+def test_a_validation_clears_every_loss_that_came_before_it():
     value = {}
     for outcome in ("not_reproduced", "not_reproduced", "failed", "validated"):
         value = record_attestation(value, outcome)
     assert retire_hint(value) == ""
+
+
+def test_a_win_that_has_aged_out_of_the_window_stops_protecting_the_record():
+    """The reason the verdicts are a window and not a lifetime total.
+
+    Under a lifetime `validations > 0` veto a record that won once and has lost every time since
+    was immune forever: it kept its direction slot against every alternative and no amount of
+    accumulated evidence could ever curate it out. RECENT_WINDOW losses in a row now say what a
+    reader actually wants to know - it does not work here any more.
+    """
+    value = record_attestation({}, "validated")
+    for _ in range(RECENT_WINDOW - 1):                  # the win is still in view
+        value = record_attestation(value, "failed")
+        assert retire_hint(value) == ""
+        assert should_retire(value) == ""
+    value = record_attestation(value, "failed")         # ...and now it is not
+    assert "came back negative" in retire_hint(value)
+    assert should_retire(value) != ""
+    assert value["attestations"]["validations"] == 1    # the lifetime counter is untouched
+
+
+def test_a_fresh_win_re_arms_the_whole_window():
+    """A record does not have to earn its reprieve twice. One validation inside the window clears
+    it outright, and the losses behind it have to fall out again before it can be hinted."""
+    value = {}
+    for _ in range(RECENT_WINDOW + 2):
+        value = record_attestation(value, "failed")
+    assert retire_hint(value) != ""
+    value = record_attestation(value, "validated")
+    assert retire_hint(value) == ""
+
+
+def test_inapplicable_reads_never_push_a_verdict_out_of_the_window():
+    """A window slot spent on a read that never got the record onto the box would reprieve it for
+    having been read on the wrong machine - the same mistake the bucket exists to prevent."""
+    value = record_attestation(record_attestation({}, "failed"), "failed")
+    for _ in range(RECENT_WINDOW + 3):
+        value = record_attestation(value, "inapplicable")
+    assert recent_verdicts(value["attestations"]) == ["failed", "failed"]
+    assert "came back negative" in retire_hint(value)
+
+
+def test_a_threshold_above_the_window_widens_it_instead_of_being_unreachable():
+    value = {}
+    for _ in range(RECENT_WINDOW + 1):
+        value = record_attestation(value, "failed")
+    assert should_retire(value, threshold=RECENT_WINDOW + 1) != ""
+    assert should_retire(value, threshold=RECENT_WINDOW + 2) == ""   # not enough evidence yet
 
 
 # -- carry-forward across a rewrite ---------------------------------------------------------------

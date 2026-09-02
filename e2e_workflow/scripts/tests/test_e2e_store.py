@@ -405,7 +405,7 @@ def test_repeated_failures_raise_a_retire_hint_but_retire_nothing(tmp_path):
         _run("attest", "--store", store, "--session-id", sid,
              "--outcome", "not_reproduced", "--apply")
     view = _run("resolve", "--store", store)["candidates"][0]
-    assert view["not_reproduced"] == 2 and "could not reproduce" in view["retire_hint"]
+    assert view["not_reproduced"] == 2 and "came back negative" in view["retire_hint"]
     assert view["lifecycle"] == "active"                  # advisory only; still offered, still ranked
     assert "**" in list_reference_text(tmp_path, store)   # and the prose says so in bold
 
@@ -979,7 +979,25 @@ def test_the_demoted_record_is_still_on_the_page(tmp_path):
     assert curation["demoted_by_hint"] == 1
     demoted = _run("resolve", "--store", str(tmp_path / "store"))["candidates"][1]
     assert demoted["throughput_tok_s"] == 1250.0           # with its real number, not zeroed
-    assert "never reproduced a win" in demoted["retire_hint"]
+    assert "came back negative" in demoted["retire_hint"]
+
+
+def test_the_floor_is_applied_before_the_collapse_not_after(tmp_path):
+    """A record that cannot be offered must not be able to hold a direction slot hostage.
+
+    The collapse keeps ONE entry per direction, so filtering after it meant the group's best record
+    took the slot and was then dropped by the floor - taking the whole direction with it, including
+    a runner-up in the same group that cleared the floor comfortably. Both records are `kernels`,
+    and the read is ranked on throughput, so the one that leads is the one the floor rejects.
+    """
+    _write(tmp_path, "leader", "kernels", tput=1200.0, baseline_throughput_tok_s=1190.0)
+    solid = _write(tmp_path, "solid", "kernels", tput=1100.0, baseline_throughput_tok_s=800.0,
+                   accepted_config={"env": "B=2"})["session_id"]
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "1.05")
+    assert [c["session_id"] for c in out["candidates"]] == [solid]
+    assert out["curation"]["below_min_speedup"] == 1
+    # The leader was gone before the collapse ran, so it collapsed nothing on its way out.
+    assert out["curation"]["same_direction_collapsed"] == 0
 
 
 # -- curate: the judgement between attesting and retracting --------------------------------------
