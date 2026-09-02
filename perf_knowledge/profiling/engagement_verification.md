@@ -10,6 +10,14 @@ sources:
 
 # Engagement verification: is your kernel/config even running?
 
+> **Canonical deep version:** [`../expert_skills/tuning/tuning-core/engagement_verification.md`](../expert_skills/tuning/tuning-core/engagement_verification.md)
+> in the vendored tuning skillset. That copy is the one whose claims are executable
+> (`perf_knowledge/expert_skills/tuning/validate/claims.py`) and re-checked per image, and it is
+> what the e2e tuning phase actually runs. This card stays because it carries the aiter-DB and TunableOp-bypass facts that the
+> rest of `perf_knowledge` links to, and it is reachable from `capability_index.yaml`
+> — where the two touch the same ground, the deep version wins and this one is the index entry
+> into it. Do not grow tuning procedure here; send the fix upstream and re-sync the tree.
+
 ## TL;DR
 The most common reason a "tuned" kernel shows no speedup is that **it never ran** — the live dispatch
 took a different path. Before you trust *any* A/B, prove engagement: (1) **`AITER_LOG_TUNED_CONFIG=1`**

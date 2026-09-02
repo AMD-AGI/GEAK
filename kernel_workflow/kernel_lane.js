@@ -707,7 +707,9 @@ function expertSkillsBlock(role) {
   return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/expert_skills.md and follow it: query ` +
     `${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits this op (operator/dtype/regime, and ` +
-    `from_backend->to_backend for migration skills) and whose validation_status is \`validated\`, and ` +
+    `from_backend->to_backend for migration skills), whose \`scope\` is \`kernel\` (\`tuning\` entries ` +
+    `belong to the e2e tuning phase and match every operator), and whose validation_status is ` +
+    `\`validated\`, and ` +
     `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
@@ -731,7 +733,8 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 phase('Setup');
 const setup = await agentT(
   roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
-    KERNEL_PATH_ORIG, EXP_ROOT, EVAL_DIR_OVERRIDE, KERNEL_NAME_HINT, TASK, SKILL_DIR: WORKFLOW_DIR,
+    KERNEL_PATH_ORIG, EXP_ROOT, EVAL_DIR_OVERRIDE, KERNEL_NAME_HINT, TASK,
+    WORKFLOW_DIR, SKILL_DIR: WORKFLOW_DIR,
     MODE, TARGET_LANGUAGE, OP_SPEC,
     ...(STATE_DIR ? { STATE_DIR } : {}),
   }),
@@ -739,7 +742,10 @@ const setup = await agentT(
 if (!setup || !setup.eval_dir) throw new Error('Setup failed: director did not return an eval_dir');
 const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
-const KERNEL_NAME = setup.kernel_name;
+// `_task` is the e2e head's DIRECTORY suffix, and the director returns the basename verbatim, so it
+// would otherwise ride into the session id and the stored record. The canonical id is folded store-
+// side (experience_store.remote_identity); this keeps the rest of the run calling it one name.
+const KERNEL_NAME = String(setup.kernel_name || '').replace(/_task$/, '') || setup.kernel_name;
 const COMMANDMENT = `${EVAL_DIR}/COMMANDMENT.md`;
 log(`Setup done. EVAL_DIR=${EVAL_DIR}`);
 
@@ -991,6 +997,13 @@ if (WARM_START_ON && !setup.resumed && KB_ROOT_OK) {
       `--kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\\n` +
       `  --gfx ${GFX} --top-n 3 --min-speedup ${WARM_START_MIN_SPEEDUP} \\\n` +
       `  --refs-dir ${JSON.stringify(EVAL_DIR + '/kb_references')}`;
+    // Deliberately NO `--precision` on the read, though the write below states it. The filter earns
+    // its keep on the tuned lane, where a table's destination filename encodes its dtype and a
+    // mismatched one is simply unusable. A PATCH is source: a Triton kernel proven at bf16 is
+    // usually the same code that helps at fp8, so narrowing here would turn a thin page into an
+    // empty one and cost a cold start — the exact hours this read exists to avoid. Recording the
+    // dtype without filtering on it keeps that call reversible once the pages are thick enough to
+    // show whether cross-dtype patches actually carry.
     // Remote first, local curated tree as the fallback. The service is the shared plane and should
     // win when it has an answer, but it is still filling up, while `kb_artifacts/` holds a hand-
     // curated history (retired entries, one entry per direction) that a thin remote page must not
@@ -1258,16 +1271,15 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
 First create YOUR private workspace, then optimize.
 \`\`\`bash
-# Fresh, ISOLATED workspace via tar-copy that EXCLUDES build artifacts (.git/build/__pycache__/.torch_ext/
-# *.so/*.o) — no 'rm' anywhere. Each engineer's out_dir is unique per (round,engineer), so the workspace
-# is clean on creation; the tar excludes mean no stale build cache is ever inherited (torch .torch_ext
-# stores ABSOLUTE paths, so excluding it forces each workspace to build its own fresh). The big immutable
-# golden (reference_io.pt, when present) lives in CANONICAL as an absolute symlink; this tar carries the
-# symlink verbatim, so every workspace shares the one physical file — NEVER add -h/--dereference here.
-mkdir -p ${d.out_dir}/workspace
-( cd ${CANONICAL} && tar --exclude=./.git --exclude='*/.git' --exclude=./build --exclude='*/build' \\
-    --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \\
-    --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd ${d.out_dir}/workspace && tar -xf - )
+# Issue #429: ALWAYS use materialize_workspace.sh — do NOT inline tar/cp. Agents that omitted
+# --exclude='*.so' previously copied multi-GiB aiter/jit/*.so into every engineer/verify clone.
+# The script excludes nested *.so/*.o and aiter/jit, preserves symlinks (never -h), and may
+# share an immutable aiter tree via --link-aiter under EVAL_DIR/_shared. Candidate builds still
+# use per-workspace .torch_ext via gpu_lock.sh (isolation unchanged).
+mkdir -p ${d.out_dir}
+bash ${WORKFLOW_DIR}/scripts/materialize_workspace.sh \\
+  --src ${CANONICAL} --dst ${d.out_dir}/workspace \\
+  --shared-root ${EVAL_DIR}/_shared --link-aiter
 \`\`\`
 ${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
@@ -1323,7 +1335,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       return agentT(
         roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
           CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
-          GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+          EVAL_DIR, WORKFLOW_DIR, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
           ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
@@ -1354,7 +1366,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     integrate = await agentT(
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
         CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
-        GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+        EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
@@ -1504,6 +1516,29 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     improved, cumulative,
   });
   log(`Round ${round} done. winner=${winner ? winner.source + ' ' + winner.geomean.toFixed(2) + 'x' : 'none'}, cumulative=${cumulative.toFixed(2)}x, noImprove=${noImprove}`);
+
+  // Issue #429: reclaim superseded heavy copies after each round, then CONTINUE optimizing.
+  // Disk pressure must never abort the loop — reclaim (and under pressure, --force-heavy) only.
+  // Agents (not this JS runtime) execute the bash; the prompt below is also mirrored into the
+  // next round's tech_lead context via STORAGE_NOTE so it is not dropped on a dry orchestrator.
+  const reclaimCmd =
+    `bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${EVAL_DIR} --keep-round ${round}` +
+    `; bytes=$(du -sb ${EVAL_DIR} 2>/dev/null | awk '{print $1}');` +
+    ` soft=\${GEAK_EVAL_SOFT_BYTES:-34359738368}; hard=\${GEAK_EVAL_HARD_BYTES:-68719476736};` +
+    ` if [ -n "$bytes" ] && [ "$bytes" -gt "$hard" ]; then` +
+    `   bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${EVAL_DIR} --keep-round ${round} --force-heavy;` +
+    ` elif [ -n "$bytes" ] && [ "$bytes" -gt "$soft" ]; then` +
+    `   bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${EVAL_DIR} --keep-round ${round};` +
+    ` fi` +
+    `; echo STORAGE_RECLAIM_DONE round=${round}`;
+  await agentT(
+    `Storage reclaim after round ${round} (issue #429). Run EXACTLY this bash, then return ` +
+    `{ok:true, note:"reclaimed"}. Do NOT stop optimizing — reclaim frees disk so later rounds can run.\n` +
+    `\`\`\`bash\n${reclaimCmd}\n\`\`\``,
+    { phase: 'Optimize', label: `storage:reclaim r${round}`,
+      schema: { type: 'object', additionalProperties: true,
+        properties: { ok: { type: 'boolean' }, note: { type: 'string' } },
+        required: ['ok'] } });
 }
 
 // ===========================================================================
@@ -1682,6 +1717,7 @@ ${remoteWriteOn ? KB_ENV_PRELUDE + '\n' : ''}python3 ${JSON.stringify(EXPERIENCE
   --patch ${JSON.stringify(finalPatch)} --eval-dir ${JSON.stringify(EVAL_DIR)} \\
   --report ${JSON.stringify(reportPath)} --metric-kind ${metricKind} \\
   --direction ${JSON.stringify(winnerDirection)} --case-names ${JSON.stringify(caseNames)}\
+${OP_SPEC.dtype ? ` \\\n  --precision ${JSON.stringify(String(OP_SPEC.dtype))}` : ''}\
 ${warm_start.exp_dir ? ` \\\n  --parent ${JSON.stringify(warm_start.exp_dir)}` : ''}
 \`\`\``,
     { phase: 'Validate', label: 'kb:write', schema: WARMSTART_WRITE_SCHEMA });

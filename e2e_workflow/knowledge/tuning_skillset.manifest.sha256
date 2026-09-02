@@ -1,5 +1,5 @@
 # sha256 manifest of the VENDORED tuning skillset — do not hand-edit.
-# tree: <repo>/tuning_skillset/   files: 42
+# tree: <repo>/perf_knowledge/expert_skills/tuning/   files: 42
 # regenerate: python3 e2e_workflow/scripts/tuning_skillset_sync.py --update
 # verify:     python3 e2e_workflow/scripts/tuning_skillset_sync.py --verify
 #

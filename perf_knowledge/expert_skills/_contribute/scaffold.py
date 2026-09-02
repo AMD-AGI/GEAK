@@ -9,10 +9,18 @@ Usage:
   # regenerate index.yaml from every skills/*.md frontmatter (no new skill)
   python _contribute/scaffold.py --reindex
 
+  # ...and take the tuning skills' validation status from the image you are actually in
+  python tuning/validate/claims.py --json /tmp/claims.json
+  python _contribute/scaffold.py --reindex --claims-report /tmp/claims.json
+
 The index is AUTO-GENERATED from each skill file's frontmatter, so contributors only ever edit one
 markdown file; the selector stays consistent and merge-conflict-free.
+
+The vendored tuning skillset (`tuning/`) is the one exception, and only in *where* the frontmatter
+lives: that tree is hash-pinned byte-for-byte against upstream, so its selector metadata sits outside it
+in `tuning_index.yaml` and is merged in here. Same schema, same filter, same validation gate.
 """
-import argparse, os, re, sys
+import argparse, glob, os, re, sys
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -20,6 +28,7 @@ ROOT = os.path.dirname(HERE)                       # .../expert_skills
 SKILLS_DIR = os.path.join(ROOT, "skills")
 TEMPLATE = os.path.join(ROOT, "_template", "SKILL_TEMPLATE.md")
 INDEX = os.path.join(ROOT, "index.yaml")
+TUNING_INDEX = os.path.join(ROOT, "tuning_index.yaml")
 CAP_INDEX = os.path.normpath(os.path.join(ROOT, "..", "index", "capability_index.yaml"))
 
 FM_RE = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.S)
@@ -38,7 +47,8 @@ def known_operators():
     """The set of operator names declared in capability_index.yaml (skills must align)."""
     if not os.path.exists(CAP_INDEX):
         return None  # cannot validate -> caller warns, does not block
-    data = yaml.safe_load(open(CAP_INDEX))
+    with open(CAP_INDEX) as f:
+        data = yaml.safe_load(f)
     return {c["operator"] for c in (data.get("candidates") or []) if "operator" in c}
 
 
@@ -59,7 +69,71 @@ def skill_index_entry(sub, fm):
     return entry
 
 
-def reindex():
+def claims_status(tree_dir, report=None):
+    """Map each tuning skill name -> validation_status, from validate/claims.py output.
+
+    Status is DERIVED, never declared, because the skillset's own validator is the only thing that
+    knows whether a claim still holds after an image upgrade. The three outcomes claims.py emits map
+    straight through:
+
+      any FAIL      -> draft        the skill is contradicted here; do not auto-apply it
+      >=1 PASS, 0 FAIL -> validated
+      only N/A      -> unvalidated  the precondition is absent, so this image did not answer. N/A is
+                                    explicitly NOT a pass (claims.py says so in its own docstring), and
+                                    silently promoting it would be exactly the failure the file exists
+                                    to prevent.
+
+    With no --claims-report we read the reports the skillset ships (both images x both gens). Those are
+    evidence from real containers, which beats a status typed into a YAML file by hand; pass a fresh
+    report to get the answer for the box you are on.
+    """
+    reports = [report] if report else sorted(glob.glob(os.path.join(tree_dir, "validate", "report_*.json")))
+    tally = {}
+    for path in reports:
+        try:
+            with open(path) as f:
+                rows = (yaml.safe_load(f) or {}).get("rows") or []   # JSON is a subset of YAML
+        except (OSError, yaml.YAMLError) as exc:
+            print(f"  WARN: unreadable claims report {path}: {exc}", file=sys.stderr)
+            continue
+        for r in rows:
+            c = tally.setdefault(r.get("skill"), {"PASS": 0, "FAIL": 0, "N/A": 0})
+            if r.get("status") in c:
+                c[r["status"]] += 1
+    out = {}
+    for skill, c in tally.items():
+        out[skill] = "draft" if c["FAIL"] else ("validated" if c["PASS"] else "unvalidated")
+    return out
+
+
+def tuning_index_entries(report=None):
+    """Selector entries for the vendored tuning tree, from tuning_index.yaml + claims.py."""
+    if not os.path.exists(TUNING_INDEX):
+        return []
+    with open(TUNING_INDEX) as f:
+        desc = yaml.safe_load(f) or {}
+    tree = desc.get("tree") or "tuning"
+    status = claims_status(os.path.join(ROOT, tree), report)
+    entries = []
+    for s in desc.get("skills") or []:
+        skill_md = os.path.join(ROOT, tree, s["dir"], "SKILL.md")
+        if not os.path.exists(skill_md):
+            print(f"  WARN: tuning_index.yaml lists {s['dir']}, which is not in the vendored tree",
+                  file=sys.stderr)
+            continue
+        entries.append({
+            "id": s["id"],
+            "file": f"{tree}/{s['dir']}/SKILL.md",
+            "scope": "tuning",
+            "match": s.get("match", {}),
+            "expects": s.get("expects", {}),
+            # Unknown to claims.py means nothing has been run against it, which is not validation.
+            "validation_status": status.get(s.get("claims_skill") or s["dir"], "unvalidated"),
+        })
+    return entries
+
+
+def reindex(claims_report=None):
     ops = known_operators()
     entries = []
     # Each skill is a SUBDIRECTORY skills/<id>/ with a main skill.md (plus any extra files it needs).
@@ -75,11 +149,15 @@ def reindex():
                 print(f"  WARN: {sub}/skill.md: operator '{one}' not in capability_index.yaml",
                       file=sys.stderr)
         entries.append(skill_index_entry(sub, fm))
+    entries.extend(tuning_index_entries(claims_report))
     header = (
         "# index.yaml — expert_skills selector (AUTO-MAINTAINED by _contribute/scaffold.py + "
         "validate_skill.py).\n"
         "# Regenerate with:  python _contribute/scaffold.py --reindex\n"
         "# NOT a ranking. Filter by (operator, gen, arch_class, [from->to], status==validated) -> MEASURE.\n"
+        "# scope: kernel | e2e | dependency | tuning. 'tuning' entries describe the VENDORED tree under\n"
+        "# tuning/ and are declared in tuning_index.yaml (the tree is hash-pinned, so its metadata is\n"
+        "# outside it); their status comes from tuning/validate/claims.py, not from a hand-typed field.\n"
         "# Only 'validated' skills are auto-applied by the workflows (advisory priors, never override A/B).\n\n"
         "schema: {id, file, scope, match, expects, validation_status}\n\n"
     )
@@ -127,6 +205,9 @@ def create(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--reindex", action="store_true", help="regenerate index.yaml from skills/*.md")
+    p.add_argument("--claims-report", dest="claims_report", default=None,
+        help="validate/claims.py --json output; sets the tuning skills' validation_status from THIS "
+             "image instead of the reports the skillset ships")
     p.add_argument("--id"); p.add_argument("--operator"); p.add_argument("--scope",
         choices=["kernel", "e2e"], default="kernel")
     p.add_argument("--title", default=""); p.add_argument("--author", default="")
@@ -136,7 +217,7 @@ def main():
     p.add_argument("--to-backend", dest="to_backend", default="")
     a = p.parse_args()
     if a.reindex and not a.id:
-        return reindex()
+        return reindex(a.claims_report)
     if not (a.id and a.operator):
         p.error("provide --id and --operator to create a skill, or --reindex to rebuild the index")
     create(a)

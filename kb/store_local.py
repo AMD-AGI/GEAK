@@ -80,6 +80,17 @@ def validate_session_id(session_id: str) -> str:
     return raw
 
 
+# The character class every caller that MANGLES a filename toward safe_rel_path() builds its regex
+# from. This validator raises rather than sanitizes, and it raises while the whole upload map is being
+# built, so one shape-derived table name (`gemm_m:1024...csv`) aborts the write for every other file
+# in the record — which is why two lanes each grew a sanitizer (experience_store._safe, with '-' and
+# an 80-char cap; e2e_store._safe_basename, with '_'). Those two spellings are NOT interchangeable and
+# are deliberately not merged: the mangled name is hashed into a tuned artifact's signature and stored
+# in records, so swapping either lane's substitute re-addresses entries already in the store. What
+# must not drift is WHICH characters are unsafe, so that lives here, once, next to the validator.
+SAFE_COMPONENT_CHARS = "A-Za-z0-9._-"
+
+
 def safe_rel_path(rel_path: str) -> str:
     """Reject artifact paths that could escape the record's files directory."""
     if not isinstance(rel_path, str):

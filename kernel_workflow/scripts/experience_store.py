@@ -8,12 +8,32 @@ Self-contained, stdlib + PyYAML only, so a lane agent can call it over Bash. On-
         meta.yaml     # identity + metric + prose pointers
         patch.diff    # the winning diff (verbatim copy)
         report.md     # optional tech_lead report, copied for prose
+        artifact/     # carrier=tuned_artifact only: the tuned tables themselves
+
+Two CARRIERS, one ranking. `carrier: patch` is a diff, the original and still the default. A
+`carrier: tuned_artifact` entry is a tuned config table produced by the e2e tuning track: the win is
+data a library reads plus the env var that binds it, and no diff can express it (the file is deployed
+into an installed package, structurally outside any git tree). Both are ranked by the SAME isolated
+speedup on the same page, which is the whole reason tuning writes here — the e2e store gates on the
+Director's serving verdict, so a 3.29x tuned kernel in a run whose e2e came back flat was, until this
+carrier existed, discarded entirely. `resolve` serves ONE carrier per call and defaults to `patch`, so
+a caller that cannot install a tuned table never sees one.
 
     slug = <canon(kernel_name)>__<language>__<gfx>   # deterministic; read and write derive it identically
 
+Numeric precision is NOT in the slug and NOT in the remote key. It is a FILTER: written into
+`meta.upstream` (and `value.upstream` remotely), applied only when a reader passes `--precision`,
+and an entry that states none is never excluded. That asymmetry is deliberate — a tuned table is
+dtype-specialized and `bench_key` only flags comparability rather than partitioning the ranking, so
+without the filter one dtype's entries can take every top-N slot on a page a reader of the other
+dtype is looking at. Keying on it instead would have moved every existing entry's address on a
+store with no delete.
+
 Subcommands:
-    write      Store one measured win behind the gate (missing_arch / no_improvement / empty_diff).
-    resolve    Rank the top-N same-gfx solutions for a slug and mirror their prose into <refs-dir>.
+    write      Store one measured win behind the gate (missing_arch / no_improvement / empty_diff,
+               or no_artifact / unreadable_artifact on the tuned carrier).
+    resolve    Rank the top-N same-gfx solutions for a slug and mirror their prose into <refs-dir>,
+               for ONE --carrier (default patch), optionally narrowed to one --precision.
     remap      Rewrite a stored patch's paths onto the calling workspace's layout, or refuse and say why.
     languages  Which languages a kernel has a page in — the store, not a task_type guess, decides.
     backfill-content
@@ -61,7 +81,7 @@ from kb.attest import OUTCOMES as _OUTCOMES
 from kb.curate import collapse_by_direction
 from kb.ladder import publish
 from kb.plane import open_plane
-from kb.store_local import CHAMPION_METRIC
+from kb.store_local import CHAMPION_METRIC, SAFE_COMPONENT_CHARS
 
 try:
     import yaml
@@ -72,8 +92,11 @@ except Exception:  # yaml ships in this env; degrade to json-only meta
 # Identity: read and write MUST derive the slug identically (never via an LLM) or a run
 # can never find its own lineage.
 def _safe(seg: str) -> str:
-    """Slug-safe a path segment: keep [A-Za-z0-9._-], collapse the rest to '-'."""
-    s = re.sub(r"[^A-Za-z0-9._-]+", "-", str(seg or "").strip())
+    """Slug-safe a path segment: keep what the remote plane's path validator accepts (see
+    kb.store_local.SAFE_COMPONENT_CHARS), collapse the rest to '-'. The '-' and the 80-char cap are
+    load-bearing, not stylistic: a stored artifact name is hashed into its content signature, so
+    respelling either re-addresses every tuned entry already in the store."""
+    s = re.sub("[^%s]+" % SAFE_COMPONENT_CHARS, "-", str(seg or "").strip())
     s = s.strip("-.") or "x"
     return s[:80]
 
@@ -81,6 +104,66 @@ def _safe(seg: str) -> str:
 def _norm_gfx(gfx: str) -> str:
     m = re.search(r"gfx\d+", str(gfx or ""), re.IGNORECASE)
     return m.group(0).lower() if m else ""
+
+
+# Numeric precision is a FILTER, never a dimension — see the remote-export note on why the address
+# cannot carry it. These two functions are the whole of the folding rule, kept together so read and
+# write cannot disagree about what counts as the same dtype.
+_PRECISION_ALIASES = {"float8": "fp8", "f8": "fp8", "float16": "fp16", "f16": "fp16",
+                      "half": "fp16", "bfloat16": "bf16", "bf": "bf16",
+                      "float32": "fp32", "f32": "fp32", "float": "fp32"}
+
+
+def _norm_precision(value) -> str:
+    """Fold a dtype spelling to a comparable token: `FP8-w8a8` and `fp8_w8a8` are one thing.
+
+    Only the LEADING token is aliased; a quantization scheme suffix (`_w8a8`, `_w4a16`) is kept
+    verbatim, because calling two of those interchangeable would offer a reader a table its runtime
+    cannot use — the failure this filter exists to prevent.
+    """
+    text = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    if not text:
+        return ""
+    head, sep, rest = text.partition("_")
+    return _PRECISION_ALIASES.get(head, head) + sep + rest
+
+
+def _precision_matches(want: str, have: str) -> bool:
+    """Whether an entry recorded at `have` may be offered to a caller asking for `want`.
+
+    Unstated on EITHER side is a match: the entire recovered backlog predates this field, so
+    excluding what states no precision would empty every page in the store. A bare base dtype
+    matches its refinements in BOTH directions — `fp8` is the coarser statement about the same
+    thing an `fp8_w8a8` reader wants, and vice versa. On the token boundary, not a raw prefix, so
+    `fp8` cannot swallow `fp8x` or `fp16`.
+    """
+    if not want or not have:
+        return True
+    return want == have or want.startswith(have + "_") or have.startswith(want + "_")
+
+
+def _precision_of(meta) -> str:
+    upstream = (meta or {}).get("upstream")
+    return _norm_precision((upstream or {}).get("precision") if isinstance(upstream, dict) else "")
+
+
+def _upstream_of(a) -> dict:
+    """The serving context this win was measured in — recorded, never keyed.
+
+    The remote-export note below says why none of this may become an identity dimension (a dimension
+    the READ side cannot recompute is a permanent silent 404) and that it rides in `value.upstream`
+    instead — but nothing ever wrote that field, so precision was absent from the RECORD, not just
+    from the address, and the e2e lane's records could not be joined back to the kernel entries they
+    produced. Stored verbatim; `_norm_precision` folds only at COMPARISON time, so a later reader
+    that disagrees with today's folding rule still has the original string.
+    """
+    out = {}
+    for key, attr in (("precision", "precision"), ("framework", "serving_framework"),
+                      ("framework_version", "serving_framework_version")):
+        value = str(getattr(a, attr, "") or "").strip()[:80]
+        if value:
+            out[key] = value
+    return out
 
 
 # One kernel is named differently per layout: `fused_moe_kernel` (kernel dir), `fused_moe_kernel_task`
@@ -132,13 +215,17 @@ def _dump_meta(meta: dict) -> str:
     return json.dumps(meta, indent=2, ensure_ascii=False)
 
 
-def _atomic_write(path: str, data: str):
-    """Crash-safe: same-dir temp -> fsync -> os.replace -> dir fsync."""
+def _atomic_write(path: str, data):
+    """Crash-safe: same-dir temp -> fsync -> os.replace -> dir fsync.
+
+    `bytes` goes out unencoded, for a tuned table that is not text and must not be re-encoded on
+    the way in.
+    """
     d = os.path.dirname(path) or "."
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp_", suffix=".swap")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "wb" if isinstance(data, bytes) else "w") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
@@ -179,6 +266,103 @@ def content_signature(patch_text: str) -> str:
     if not body:
         return ""
     return "csha:" + hashlib.sha256("\n".join(body).encode("utf-8", "replace")).hexdigest()[:32]
+
+
+# `patch` is everything the kernel lane has ever written; `tuned_artifact` is the e2e tuning track's
+# carrier. Kept as a closed set so a typo in --carrier is refused rather than silently minting a third
+# kind of entry that nothing knows how to serve.
+CARRIERS = ("patch", "tuned_artifact")
+
+# One tuned op can deploy several files (a config table plus the cache-invalidation companion the
+# runtime keys on). They travel together or the entry is not adoptable.
+_MAX_ARTIFACTS = 24
+
+
+def _expand_artifact_paths(paths):
+    """Flatten the caller's list to actual files, in a stable order.
+
+    A tuner hands back whatever shape its output took — `--artifact <one table>` from one op, `<the
+    dir the tuner filled>` from the next — so a directory is expanded here rather than making the
+    caller hang its win/no-win outcome on an `os.path.isdir`. Sorted, so the same set of files signs
+    to the same value on two boxes whose readdir order differs.
+    """
+    files = []
+    for raw in (paths or []):
+        path = str(raw or "").strip()
+        if not path:
+            continue
+        if os.path.isfile(path):
+            files.append(path)
+        elif os.path.isdir(path):
+            for dirpath, dirnames, filenames in os.walk(path):
+                dirnames.sort()
+                # Byproducts of running the tuner, not the tuning result.
+                dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".git")]
+                files.extend(os.path.join(dirpath, f) for f in sorted(filenames))
+                if len(files) >= _MAX_ARTIFACTS:
+                    break
+        # The cap is the whole list's, not one directory's: breaking out of the walk while the outer
+        # loop kept adding let a caller passing several paths overshoot it. _artifact_sources re-caps,
+        # so this was never wrong downstream — it just meant the number here was not the number.
+        if len(files) >= _MAX_ARTIFACTS:
+            break
+    return files[:_MAX_ARTIFACTS]
+
+
+def _artifact_sources(paths):
+    """[(stored_name, source_path)] for every readable artifact, deduped by stored name.
+
+    Names are collapsed to what `kb.store_local.safe_rel_path()` accepts BEFORE anything is hashed or
+    copied, because the same names go on to address the file remotely. A shape-derived filename
+    (`fused_moe_M=64,N=...json` is the normal aiter shape) contains characters that make the remote
+    plane's path validator raise, and it raises while building the whole upload map — so one unlucky
+    table would abort the write for every other file in the record.
+    """
+    out, seen = [], set()
+    for path in _expand_artifact_paths(paths):
+        name = _safe(os.path.basename(path)).lstrip(".") or "artifact"
+        base, i = name, 2
+        while name in seen:                       # two dirs, same basename: keep both, say which
+            stem, dot, ext = base.partition(".")
+            name = "%s_%d%s%s" % (stem, i, dot, ext)
+            i += 1
+        seen.add(name)
+        out.append((name, path))
+        if len(out) >= _MAX_ARTIFACTS:
+            break
+    return out
+
+
+def artifact_signature(paths) -> str:
+    """Content identity of a tuned artifact set — the `carrier: tuned_artifact` analogue of
+    content_signature().
+
+    Same job, same consequence: re-tuning a shape usually reproduces the same table, and without a
+    signature the store re-imports its own output as a fresh win instead of counting a reproduction
+    (which is what promotes candidate -> active). Hashed over the BYTES plus the stored basename,
+    sorted, because a tuned table is binary-ish CSV/JSON whose line-level diff carries no meaning —
+    unlike a patch, where paths must be ignored and code lines must not be.
+    """
+    items = sorted(paths)
+    if not items:
+        return ""
+    # Say what is wrong. The two callers build this list independently, one of them from a stored
+    # name list, and a bare path list unpacks as "too many values" three frames down inside a hash
+    # loop — an error that names neither the argument nor the caller.
+    bad = next((i for i in items if not (isinstance(i, tuple) and len(i) == 2)), None)
+    if bad is not None:
+        raise TypeError("artifact_signature wants (stored_name, path) pairs, got %r" % (bad,))
+    h = hashlib.sha256()
+    for name, path in items:
+        try:
+            with open(path, "rb") as f:
+                blob = f.read()
+        except OSError:
+            return ""
+        h.update(name.encode("utf-8", "replace"))
+        h.update(b"\0")
+        h.update(hashlib.sha256(blob).digest())
+    return "asha:" + h.hexdigest()[:32]
 
 
 def bench_key(metric_kind: str, case_names) -> str:
@@ -388,6 +572,10 @@ def cmd_write(a) -> dict:
     if not (speedup > 1.0):  # covers NaN, <=1.0
         return {"written": False, "reason": "no_improvement"}
 
+    carrier = str(getattr(a, "carrier", "") or "patch")
+    if carrier not in CARRIERS:
+        return {"written": False, "reason": "unknown_carrier"}
+
     patch_text = ""
     if a.patch and os.path.isfile(a.patch):
         try:
@@ -395,15 +583,27 @@ def cmd_write(a) -> dict:
                 patch_text = f.read()
         except OSError:
             patch_text = ""
-    if not patch_text.strip():
-        return {"written": False, "reason": "empty_diff"}
+
+    # What must exist for the entry to mean anything differs by carrier, and only by carrier: a patch
+    # entry with no diff is empty, and a tuned-artifact entry with no table is empty. A tuning win MAY
+    # also carry a diff (the routing/dispatch half), and when it does it rides along as prose-adjacent
+    # evidence — it is not what makes the entry adoptable, so it is not what gates the write.
+    artifacts = _artifact_sources(getattr(a, "artifact", None))
+    if carrier == "patch":
+        if not patch_text.strip():
+            return {"written": False, "reason": "empty_diff"}
+    elif not artifacts:
+        return {"written": False, "reason": "no_artifact"}
 
     kernel_class = a.kernel_class or "unknown"
     case_names = [c.strip() for c in (a.case_names or "").split(",") if c.strip()]
     slug = make_slug(a.kernel_name, a.language, gfx)
 
     # A re-measurement of code the store already holds is a REPRODUCTION, not a new entry.
-    csig = content_signature(patch_text)
+    csig = (content_signature(patch_text) if carrier == "patch"
+            else artifact_signature(artifacts))
+    if carrier != "patch" and not csig:
+        return {"written": False, "reason": "unreadable_artifact"}
     dup = _find_by_content(a.root, gfx, slug, csig) if csig else None
     if dup:
         return _record_reproduction(dup, csig, speedup, a)
@@ -422,6 +622,9 @@ def cmd_write(a) -> dict:
 
     meta = {
         "lifecycle": "candidate",           # earns 'active' only via independent reproduction
+        # Absent on every entry written before the tuning track existed, and readers must treat a
+        # missing carrier as `patch` — the whole imported backlog is diffs.
+        "carrier": carrier,
         "gfx": gfx,
         "kernel_class": kernel_class,
         "kernel_name": a.kernel_name,
@@ -450,6 +653,30 @@ def cmd_write(a) -> dict:
         "verified_stack": detect_stack(a.language),
         "source_eval_dir": a.eval_dir or "",
     }
+    upstream = _upstream_of(a)
+    if upstream:
+        # Omitted entirely when the caller states none, so an entry written by an unmodified caller
+        # is byte-identical to what it was before this field existed.
+        meta["upstream"] = upstream
+    if carrier == "tuned_artifact":
+        # The three things that make a tuned table usable and that a diff would have carried
+        # implicitly: which files, what binds them, and what silently ignores them if skipped.
+        meta["artifact_files"] = [name for name, _ in artifacts]
+        # The STORED name is sanitized, because a tuned table's name is derived from its shape
+        # (`E=8,N=1024,device_name=AMD Instinct MI355X.json`) and those characters make the remote
+        # plane's safe_rel_path() raise. But the runtime finds the table only under that exact name
+        # — install it as `E-8-N-1024-...` and it is silently ignored, which looks like a tuning
+        # loss rather than a filing error. So the destination name is carried explicitly.
+        meta["artifact_names"] = {name: os.path.basename(src) for name, src in artifacts}
+        if getattr(a, "apply_env", ""):
+            meta["apply_env"] = str(a.apply_env)[:400]
+        if getattr(a, "cache_invalidation", ""):
+            meta["cache_invalidation"] = str(a.cache_invalidation)[:400]
+        if getattr(a, "tuner", ""):
+            meta["tuner"] = str(a.tuner)[:80]
+        # A tuning win reaches production through deploy.sh, not `git apply`. Saying so in the entry
+        # is what stops a warm start from trying the wrong installation route and calling it a failure.
+        meta["apply_route"] = "deploy_bundle"
 
     # Copy the tech_lead report verbatim as prose; lift its first non-empty line as the strategy,
     # and keep its dead-ends so the next run on this kernel does not re-fund a closed direction.
@@ -478,7 +705,15 @@ def cmd_write(a) -> dict:
     meta["strategy"] = strategy
 
     try:
-        _atomic_write(os.path.join(out_dir, "patch.diff"), patch_text)
+        # A tuning win's optional routing diff still lands as patch.diff — it is real evidence — but
+        # an empty one is not written at all, so `os.path.isfile(patch.diff)` stays a truthful test
+        # of "there is a diff here" for every reader, old and new.
+        if patch_text.strip():
+            _atomic_write(os.path.join(out_dir, "patch.diff"), patch_text)
+        for name, src in artifacts:
+            with open(src, "rb") as f:
+                blob = f.read()
+            _atomic_write(os.path.join(out_dir, "artifact", name), blob)
         _atomic_write(os.path.join(out_dir, "meta.yaml"), _dump_meta(meta))
         if report_copied is not None:
             _atomic_write(os.path.join(out_dir, "report.md"), report_copied)
@@ -491,6 +726,8 @@ def cmd_write(a) -> dict:
         "slug": slug,
         "exp_id": exp_id,
         "dir": out_dir,
+        "carrier": carrier,
+        "artifacts": [name for name, _ in artifacts],
         "speedup": round(speedup, 4),
     }
 
@@ -751,9 +988,9 @@ def _local_attestations(meta: dict) -> dict:
     that has never been recalled should carry no ledger at all — four zeroes and no ledger mean
     the same thing to a reader, and the shorter one does not imply somebody looked.
     """
-    from kb.attest import attestations_of
+    from kb.attest import BUCKETS, attestations_of
     ledger = attestations_of(meta if isinstance(meta, dict) else {})
-    counted = any(ledger[k] for k in ("recalls", "validations", "failures", "not_reproduced"))
+    counted = any(ledger[k] for k in ("recalls",) + BUCKETS)
     return ledger if counted else {}
 
 
@@ -851,6 +1088,15 @@ def _candidate(rank: int, v: dict, gfx: str, prose_path: str, top_bench: str) ->
         "techniques": _techniques(v["meta"]),
         "bench_key": v["bench_key"],
         "metric_kind": v["metric_kind"],
+        # `patch` for every entry the kernel lane has ever written, so a reader that ignores this
+        # key behaves exactly as it did before carriers existed.
+        "carrier": v.get("carrier", "patch"),
+        # Empty for a patch entry. Non-empty means: install these, export apply_env, run the cache
+        # invalidation, restart the server — `git apply` does nothing for this candidate.
+        "artifact_paths": v.get("artifact_paths") or [],
+        "artifact_names": v.get("artifact_names") or {},
+        "apply_env": v.get("apply_env", ""),
+        "cache_invalidation": v.get("cache_invalidation", ""),
         # False = ranked against rank 1 on a DIFFERENT case set, so their ordering is a prior only.
         # Adoption is decided by this run's own measurement either way.
         "comparable": bool(v["bench_key"]) and v["bench_key"] == top_bench,
@@ -902,6 +1148,38 @@ def cmd_resolve(a) -> dict:
     if not found:
         return dict(base_out, read_reason="no_same_arch")
 
+    # ONE carrier per call, `patch` unless asked otherwise. A caller that can `git apply` a diff
+    # generally cannot install a tuned table (it needs the deploy bundle and a server restart), and
+    # the two are not substitutable, so mixing them in one ranked list would offer a kernel lane a
+    # candidate it has no way to adopt. Entries written before carriers existed have no field and
+    # are diffs.
+    want_carrier = str(getattr(a, "carrier", "") or "patch")
+    of_carrier = [(m, d) for (m, d) in found if str(m.get("carrier") or "patch") == want_carrier]
+    other_carrier_n = len(found) - len(of_carrier)
+    if not of_carrier:
+        return dict(base_out, read_reason="no_such_carrier", carrier=want_carrier,
+                    other_carriers=other_carrier_n)
+    found = of_carrier
+
+    # Precision, on the same footing as carrier and for the same reason: not a dimension of the
+    # address (the reader cannot always recompute it), but a hard fact about whether an entry is
+    # usable here. A tuned table is dtype-specialized, and `bench_key` does NOT partition the
+    # ranking — it only sets a `comparable` flag — so without this an fp8 page's top-N can be taken
+    # entirely by bf16 entries that then lose their direction slot to nothing.
+    #
+    # Off by default. Omitting --precision reproduces the previous behaviour exactly, and an entry
+    # that states no precision is never excluded (see _precision_matches).
+    want_precision = _norm_precision(getattr(a, "precision", ""))
+    other_precision_n = 0
+    if want_precision:
+        of_precision = [(m, d) for (m, d) in found
+                        if _precision_matches(want_precision, _precision_of(m))]
+        other_precision_n = len(found) - len(of_precision)
+        if not of_precision:
+            return dict(base_out, read_reason="no_such_precision", carrier=want_carrier,
+                        precision=want_precision, other_precisions=other_precision_n)
+        found = of_precision
+
     # --- curation gate: what this page may OFFER, before any ranking -------------------------
     total = len(found)
     servable = found if a.include_retired else [(m, d) for (m, d) in found if not _is_retired(m)]
@@ -913,7 +1191,9 @@ def cmd_resolve(a) -> dict:
     above = [(m, d) for (m, d) in servable if _speedup_of(m) >= min_speedup]
     below_n = len(servable) - len(above)
     stats = {"total": total, "retired": retired_n, "below_min_speedup": below_n,
-             "min_speedup": min_speedup}
+             "min_speedup": min_speedup, "carrier": want_carrier,
+             "other_carriers": other_carrier_n,
+             "precision": want_precision, "other_precisions": other_precision_n}
     if not above:
         return dict(base_out, filtered=stats,
                     read_reason="all_retired" if not servable else "below_min_speedup")
@@ -931,6 +1211,14 @@ def cmd_resolve(a) -> dict:
             "exp_dir": exp_dir,
             "patch_path": os.path.join(exp_dir, "patch.diff"),
             "report_path": os.path.join(exp_dir, "report.md"),
+            "carrier": str(meta.get("carrier") or "patch"),
+            # Absolute, because the caller installs these from wherever it happens to be running.
+            "artifact_paths": [os.path.join(exp_dir, "artifact", n)
+                               for n in (meta.get("artifact_files") or [])],
+            # stored name -> the name it must be installed under; see the write path.
+            "artifact_names": dict(meta.get("artifact_names") or {}),
+            "apply_env": str(meta.get("apply_env") or ""),
+            "cache_invalidation": str(meta.get("cache_invalidation") or ""),
             "speedup": _speedup_of(meta),
             "direction": str(meta.get("direction") or ""),
             "bench_key": str(metric.get("bench_key") or ""),
@@ -1090,9 +1378,12 @@ def cmd_backfill_content(a) -> dict:
 #     dimensions, even though an e2e run knows all three. kernel_lane.js does not — it has no
 #     upstream awareness at all, and pass-through from e2e forwards only `target_language`. A
 #     dimension the reader cannot reconstruct is a permanent silent 404. They ride in
-#     `value.upstream` instead, where a client can filter on them; precision is additionally
-#     already spelled into most kernel names (`fused_moe_int4_w4a16`, `_w8a8_triton_block_scaled_mm`)
-#     so keying on it would double-encode and split those pages.
+#     `value.upstream` instead, where a client can filter on them (`resolve`/`resolve-remote
+#     --precision`); precision is additionally already spelled into most kernel names
+#     (`fused_moe_int4_w4a16`, `_w8a8_triton_block_scaled_mm`) so keying on it would double-encode
+#     and split those pages. Being a filter rather than a dimension is also what makes it safe on a
+#     store with no delete: a caller that cannot state its precision loses filtering, not its whole
+#     history, where a wrong key segment would have lost the page.
 #   * every write publishes to BOTH rungs of kernel_canonical_ids(). The service does no prefix
 #     aggregation, so the version-agnostic page exists only because we put records there.
 REMOTE_PRODUCER = "geak"
@@ -1163,7 +1454,13 @@ def remote_identity(meta: dict, producer: str = REMOTE_PRODUCER, gpu: str = "",
     """
     return _identity_module().kernel_identity(
         gfx=remote_gpu(meta.get("gfx") or (meta.get("metric") or {}).get("gpu_arch") or "", gpu),
-        kernel_name=meta.get("kernel_name"),
+        # canon_name for the same reason make_slug uses it: the name is layout-derived, so an e2e
+        # head extraction calls this kernel `<name>_task` and the standalone lane calls it `<name>`.
+        # The slug plane has folded that since it existed; this one did not, so a head published to
+        # an address no reader constructs — and a miss here is a 404 nobody can tell from "never
+        # recorded". e2e_store.py addresses the kernel page with the profiler's (already canonical)
+        # symbol, so folding here is also what makes that cross-reference a live link.
+        kernel_name=canon_name(meta.get("kernel_name")),
         backend=meta.get("language"),
         rocm_version=remote_framework_version(meta, version),
     )
@@ -1186,6 +1483,15 @@ def _remote_digest(meta: dict, exp_dir: str) -> str:
     sig = str(meta.get("content_signature") or "")
     if sig:
         return sig.split(":", 1)[-1]
+    if str(meta.get("carrier") or "patch") != "patch":
+        # (stored_name, path), the same shape cmd_write signs through _artifact_sources — and the
+        # same names, since `artifact_files` holds what that pass already collapsed them to. The
+        # name is hashed, so re-deriving it here from the basename would be a second spelling of
+        # one thing and would digest the record differently on the export path than on the write
+        # path: not a raise, a duplicate candidate upstream.
+        names = meta.get("artifact_files") or []
+        items = [(n, os.path.join(exp_dir, "artifact", n)) for n in names]
+        return artifact_signature(items).split(":", 1)[-1]
     try:
         with open(os.path.join(exp_dir, "patch.diff"), "r", errors="replace") as f:
             return content_signature(f.read()).split(":", 1)[-1]
@@ -1238,6 +1544,10 @@ def remote_value(meta: dict, digest: str = "") -> dict:
             "case_names": list(metric.get("case_names") or []),
         },
         "verified_stack": meta.get("verified_stack") if isinstance(meta.get("verified_stack"), dict) else {},
+        # The dimensions the ADDRESS deliberately does not carry (see the export note above). They
+        # are sent so a client can filter on them, which is the whole reason they were excluded from
+        # the key rather than simply dropped — `resolve-remote --precision` is that client.
+        "upstream": meta.get("upstream") if isinstance(meta.get("upstream"), dict) else {},
         "verified_on": str(meta.get("verified_on") or ""),
         "measured_by": str(meta.get("measured_by") or ""),
         "reproductions": meta.get("reproductions"),
@@ -1265,6 +1575,23 @@ def remote_value(meta: dict, digest: str = "") -> dict:
         "content_signature": ("csha:" + digest) if digest else str(meta.get("content_signature") or ""),
         "artifacts": {"patch": "patch.diff", "report": "report.md"},
     }
+    carrier = str(meta.get("carrier") or "patch")
+    if carrier != "patch":
+        # A remote reader ranks on `speedup` alone and would otherwise pull patch.diff, find nothing
+        # installable, and score this as a broken record rather than a differently-shaped one.
+        value["carrier"] = carrier
+        value["apply_route"] = str(meta.get("apply_route") or "")
+        value["artifacts"] = {"report": "report.md",
+                              **{n: "artifact/" + n for n in (meta.get("artifact_files") or [])}}
+        # Both halves travel: the STORED names are how the bytes are addressed under the session,
+        # and artifact_names is how a reader learns what to install each one AS. A reader that gets
+        # one without the other can locate the file or name it, not both.
+        value["artifact_files"] = list(meta.get("artifact_files") or [])
+        if meta.get("artifact_names"):
+            value["artifact_names"] = dict(meta["artifact_names"])
+        for k in ("apply_env", "cache_invalidation", "tuner"):
+            if meta.get(k):
+                value[k] = str(meta[k])
     dead = meta.get("dead_ends")
     if isinstance(dead, list) and dead:
         value["dead_ends"] = dead
@@ -1292,13 +1619,17 @@ def remote_records(meta: dict, exp_dir: str, producer: str = REMOTE_PRODUCER, gp
     sid = remote_session_id(cids[0], identity["kernel_name"], digest)
     speedup = _speedup_of(meta)
     files = []
-    for name in ("patch.diff", "report.md"):
+    # patch.diff is absent on a tuned-artifact entry that shipped no routing fix, and the artifacts
+    # are absent on every patch entry — the isfile() check below is what makes one loop serve both.
+    names = ["patch.diff", "report.md"]
+    names += [os.path.join("artifact", n) for n in (meta.get("artifact_files") or [])]
+    for name in names:
         path = os.path.join(exp_dir, name)
         if not os.path.isfile(path):
             continue
         file_sha, size = _sha256_file(path)
-        files.append({"path": name, "local_path": path, "kind": REMOTE_ARTIFACT_KIND,
-                      "sha256": file_sha, "size": size})
+        files.append({"path": name.replace(os.sep, "/"), "local_path": path,
+                      "kind": REMOTE_ARTIFACT_KIND, "sha256": file_sha, "size": size})
     # The knowledge document upstream's own writer produces: four keys, everything else under
     # `value`. `speedup` sits at the top because that is the ranking key the service reads — it
     # only honours a flat top-level `knowledge.<name>` scalar and rejects a nested path with a 400.
@@ -1359,7 +1690,15 @@ def cmd_export_remote(a) -> dict:
         if _is_retired(meta) and not a.include_retired:
             skipped["retired"] += 1
             continue
-        if not os.path.isfile(os.path.join(dirpath, "patch.diff")):
+        # An entry with nothing installable in it is not a knowledge record, whatever its speedup
+        # says. Which file that is depends on the carrier: a diff for `patch`, the tuned tables for
+        # `tuned_artifact` (whose patch.diff is optional and often absent).
+        if str(meta.get("carrier") or "patch") == "patch":
+            installable = os.path.isfile(os.path.join(dirpath, "patch.diff"))
+        else:
+            installable = any(os.path.isfile(os.path.join(dirpath, "artifact", n))
+                              for n in (meta.get("artifact_files") or []))
+        if not installable:
             skipped["no_patch"] += 1
             continue
         records.extend(remote_records(meta, dirpath, a.producer, a.gpu))
@@ -1453,6 +1792,24 @@ def _store_ladder(a, gfx: str):
     identity = remote_identity(meta, a.producer, remote_gpu(gfx, getattr(a, "gpu", "")),
                                getattr(a, "framework_version", ""))
     return list(zip(remote_canonical_ids(identity), ("exact", "any_version")))
+
+
+def _legacy_name_ladder(a, gfx: str):
+    """The rungs a pre-canon_name writer used, READ ONLY: `<name>_task`, from a head extraction.
+
+    Those records cannot be moved — no delete, no search — so the spelling they were written with is
+    the only way back to them, and without this rung the write-side fix would strand them for good.
+    Tried after the whole canonical ladder, so a legacy page can rescue but never shadow. NOT in
+    `_store_ladder`: retract-remote and attest-remote WRITE to every rung it returns.
+    """
+    if a.canonical_id:
+        return []
+    meta = {"kernel_name": a.kernel_name, "language": a.language,
+            "verified_stack": detect_stack(a.language)}
+    identity = remote_identity(meta, a.producer, remote_gpu(gfx, getattr(a, "gpu", "")),
+                               getattr(a, "framework_version", ""))
+    identity["kernel_name"] += "_task"      # the fold is idempotent, so appending re-spells it
+    return list(zip(remote_canonical_ids(identity), ("legacy_name", "legacy_name_any_version")))
 
 
 def cmd_retract_remote(a) -> dict:
@@ -1608,7 +1965,7 @@ def cmd_resolve_remote(a) -> dict:
     if store is None:
         return {"read_reason": why.split(":", 1)[0], "reason": why, "candidates": []}
 
-    ladder = _store_ladder(a, gfx)
+    ladder = _store_ladder(a, gfx) + _legacy_name_ladder(a, gfx)
     cid, match_tier = ladder[0]
     segs = cid.split(":")
     requested_slug = make_slug(a.kernel_name or (segs[3] if len(segs) > 3 else ""),
@@ -1626,10 +1983,28 @@ def cmd_resolve_remote(a) -> dict:
     # came straight back out of the service. Filtering here rather than below also means a rung
     # whose every entry has been retracted correctly reads as EMPTY and the ladder descends, instead
     # of stopping on a page that turns out to have nothing to offer.
+    # Carrier and precision are filtered here for the same reason as retraction: a rung holding
+    # nothing this caller can install must read as EMPTY so the ladder descends, rather than stopping
+    # on a page with nothing to offer. Records written before carriers existed have no field and are
+    # diffs; precision filters only when asked, and an entry that states none is kept — the whole
+    # backlog predates the field.
+    want_carrier = str(getattr(a, "carrier", "") or "patch")
+    want_precision = _norm_precision(getattr(a, "precision", ""))
+    other_carrier = [0]
+    other_precision = [0]
+
     def live(canonical_id):
         rows = store.candidates(canonical_id, limit=0)
         kept = [c for c in rows if not _is_retired(c.value)]
-        return kept, len(rows) - len(kept)
+        retired_n = len(rows) - len(kept)
+        of_carrier = [c for c in kept if str((c.value or {}).get("carrier") or "patch") == want_carrier]
+        other_carrier[0] = len(kept) - len(of_carrier)
+        if not want_precision:
+            return of_carrier, retired_n
+        of_precision = [c for c in of_carrier
+                        if _precision_matches(want_precision, _precision_of(c.value))]
+        other_precision[0] = len(of_carrier) - len(of_precision)
+        return of_precision, retired_n
 
     found, retired = [], 0
     for cid, match_tier in ladder:
@@ -1657,7 +2032,9 @@ def cmd_resolve_remote(a) -> dict:
     # `total` counts what the page held, `retired` how many of those were taken back — so the two
     # still sum to the page size even though `found` is already the survivors.
     stats = {"total": len(found) + retired, "retired": retired,
-             "below_min_speedup": len(found) - len(above), "min_speedup": min_speedup}
+             "below_min_speedup": len(found) - len(above), "min_speedup": min_speedup,
+             "carrier": want_carrier, "other_carriers": other_carrier[0],
+             "precision": want_precision, "other_precisions": other_precision[0]}
     if not above:
         return dict(base_out, filtered=stats, read_reason="below_min_speedup")
 
@@ -1679,6 +2056,14 @@ def cmd_resolve_remote(a) -> dict:
             "exp_dir": bundle,
             "patch_path": os.path.join(bundle, "files", "patch.diff"),
             "report_path": os.path.join(bundle, "files", "report.md"),
+            "carrier": str(meta.get("carrier") or "patch"),
+            # materialize() lays the record's files out under `files/`, mirroring the paths
+            # remote_records() uploaded them under — so `artifact/<stored name>` round-trips.
+            "artifact_paths": [os.path.join(bundle, "files", "artifact", n)
+                               for n in (meta.get("artifact_files") or [])],
+            "artifact_names": dict(meta.get("artifact_names") or {}),
+            "apply_env": str(meta.get("apply_env") or ""),
+            "cache_invalidation": str(meta.get("cache_invalidation") or ""),
             "speedup": c.speedup or 0.0,
             "direction": str(meta.get("direction") or ""),
             "bench_key": str(metric.get("bench_key") or ""),
@@ -1793,6 +2178,25 @@ def main(argv=None):
         w.add_argument("--case-names", dest="case_names", default="")
         w.add_argument("--parent", default="",
                        help="exp_dir of the warm-start entry this win was built on")
+        # The tuning carrier. Default `patch` keeps every existing caller byte-identical.
+        w.add_argument("--carrier", choices=CARRIERS, default="patch",
+                       help="what this entry ships: a diff (default) or tuned config tables")
+        w.add_argument("--artifact", action="append", default=[],
+                       help="carrier=tuned_artifact: a tuned table to store (repeatable)")
+        w.add_argument("--apply-env", dest="apply_env", default="",
+                       help="KEY=VAL ... the artifact needs to bind; without it the table is inert")
+        w.add_argument("--cache-invalidation", dest="cache_invalidation", default="",
+                       help="what must run post-install or the new rows are silently ignored")
+        w.add_argument("--tuner", default="", help="which tuner produced it (gradlib, ckProfiler, ...)")
+        # Serving context: recorded in `upstream`, never in the address. Optional everywhere, so a
+        # caller that does not know its precision writes exactly what it wrote before.
+        w.add_argument("--precision", default="",
+                       help="numeric precision this was measured at (fp8, fp8_w8a8, bf16, ...); "
+                            "recorded for filtering, NOT part of the key")
+        w.add_argument("--serving-framework", dest="serving_framework", default="",
+                       help="vllm | sglang — recorded alongside precision, never keyed")
+        w.add_argument("--serving-framework-version", dest="serving_framework_version", default="",
+                       help="the SERVING framework's version, not ROCm's (--framework-version)")
         return w
 
     add_write_args(sub.add_parser("write", help="store one measured win"))
@@ -1810,6 +2214,11 @@ def main(argv=None):
                    help="never spend an on-box verify on a recorded win below this (default 1.05)")
     r.add_argument("--include-retired", dest="include_retired", action="store_true",
                    help="also offer entries the curation retired (audit/debug only)")
+    r.add_argument("--carrier", choices=CARRIERS, default="patch",
+                   help="which carrier to offer; one per call (default patch)")
+    r.add_argument("--precision", default="",
+                   help="only offer entries measured at this precision; entries that state none "
+                        "are always offered. Omit to filter on nothing (the default)")
 
     lg = sub.add_parser("languages", help="which languages this kernel has a page in")
     lg.add_argument("--root", required=True)
@@ -1859,6 +2268,12 @@ def main(argv=None):
     rr.add_argument("--cache-dir", dest="cache_dir", default="",
                     help="where selected candidates are materialized (default <refs-dir>/../kb_cache)")
     rr.add_argument("--min-speedup", dest="min_speedup", type=float, default=1.05)
+    rr.add_argument("--carrier", choices=CARRIERS, default="patch",
+                    help="which carrier to offer; one per call (default patch)")
+    rr.add_argument("--precision", default="",
+                    help="only offer entries measured at this precision; entries that state none "
+                         "are always offered. A rung holding only other dtypes reads as empty and "
+                         "the ladder descends. Omit to filter on nothing (the default)")
 
     wr = add_plane_args(add_write_args(
         sub.add_parser("write-remote", help="store one win in the local store AND under its key")))

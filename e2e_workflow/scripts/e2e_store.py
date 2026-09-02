@@ -70,7 +70,8 @@ from kb.curate import collapse_by_direction                                 # no
 from kb.ladder import publish                                               # noqa: E402
 from kb.plane import open_plane                                             # noqa: E402
 from kb.retract import is_retired, retract_session, retraction_ok           # noqa: E402
-from kb.store_local import KBStoreError, finite_speedup                     # noqa: E402
+from kb.store_local import (KBStoreError, SAFE_COMPONENT_CHARS,             # noqa: E402
+                            finite_speedup)
 
 SCHEMA = "geak.e2e.v1"
 THROUGHPUT_METRIC = "throughput_tok_s"      # ranks the exact-workload rung, and every read
@@ -114,6 +115,36 @@ def ladder_of(a):
     tiers = {3: ("exact", "workload_any", "tp_any"), 2: ("exact", "tp_any"), 1: ("exact",)}[len(cids)]
     return [(cid, tier) + rung_metric(i, len(cids))
             for i, (cid, tier) in enumerate(zip(cids, tiers))]
+
+
+_LEGACY_TIERS = {3: ("legacy_version", "legacy_version_workload_any", "legacy_version_tp_any"),
+                 2: ("legacy_version", "legacy_version_tp_any"),
+                 1: ("legacy_version",)}
+
+
+def legacy_version_ladder(a):
+    """The rungs a pre-release-cut writer used, READ ONLY: the full build string as its own segment.
+
+    `framework_version` was `segment(raw, UNKNOWN_VERSION)` before it was cut to `<major>.<minor>.
+    <patch>`, so every record already filed under `0.5.15.post1.dev20260723+g6c9fd0adc5` sits on a
+    page the new address cannot name. Unlike the kernel scheme's ROCm dimension, no rung here drops
+    the version, so there is no coarse page to rescue them — without this the cut would strand the
+    whole existing e2e store the moment it lands, which is the same invisible miss the cut exists
+    to prevent, just caused once.
+
+    The kernel side's `_legacy_name_ladder` is the same shape and the same restrictions: tried after
+    the canonical ladder so a legacy page can rescue but never shadow, and kept OUT of `ladder_of`
+    because write, retract and attest all iterate that one and would start filing new records at an
+    address the reader is only meant to be able to reach backwards.
+    """
+    raw = str(getattr(a, "framework_version", "") or "").strip()
+    identity = identity_of(a)
+    legacy = kbid.segment(raw, kbid.UNKNOWN_VERSION)
+    if not raw or legacy == identity["framework_version"]:
+        return []
+    cids = kbid.e2e_canonical_ids(dict(identity, framework_version=legacy))
+    return [(cid, tier) + rung_metric(i, len(cids))
+            for i, (cid, tier) in enumerate(zip(cids, _LEGACY_TIERS[len(cids)]))]
 
 
 # -- planes --------------------------------------------------------------------------------------
@@ -165,6 +196,10 @@ def _view(candidate, cid: str, tier: str, metric: str, champion_metric: str = ""
         "validations": ledger["validations"],
         "recalls": ledger["recalls"],
         "not_reproduced": ledger["not_reproduced"],
+        # Kept apart from `not_reproduced` all the way out to the reader. "the flag is gone
+        # upstream" and "this box's baseline already pins that knob" look identical in a single
+        # count and mean opposite things about whether the record is worth benching here.
+        "inapplicable": ledger["inapplicable"],
         "last_outcome": ledger["last_outcome"],
         "retire_hint": retire_hint(value),
         # How to actually run this again. Empty for records written before the field existed —
@@ -200,7 +235,9 @@ def _sort_key(metric: str):
 
 
 def cmd_resolve(a) -> dict:
-    ladder = ladder_of(a)
+    # Appended, never merged: `ladder[0]` still has to be the address this run would WRITE, because
+    # it is what lands in identity_out and names the page in the output.
+    ladder = ladder_of(a) + legacy_version_ladder(a)
     metric = read_metric(a)
     # Echo the plane back. A caller that tries the service and falls back to disk otherwise cannot
     # tell from the output which one answered — the ladder, the ranking and the shapes are identical
@@ -335,12 +372,25 @@ def _kernel_line(kernels) -> str:
 
     Spells out the patch path because the Director reads this prose and then has to go open the
     file; a name alone sends it back to the store to ask a question this page already answered.
+
+    A tuned entry has NEITHER a patch nor a kernel id — its lever is a data file bound by an env
+    var — so before this it rendered as `gemm_a8w8_... (ck, 3.29x)`: a reader was told a 3.29x table
+    exists and given no way to find or apply it, which is the same as not being told. The two things
+    it does have, the bundle path and the env binding, are spelled out for exactly the same reason
+    the patch path is.
     """
     parts = []
     for k in kernels:
+        where = k.get("patch") or k.get("tuning_artifact") or k.get("kernel_canonical_id") or ""
         bits = [b for b in (k.get("language"),
                             "%sx" % k["isolated_speedup"] if k.get("isolated_speedup") else "",
-                            k.get("patch") or k.get("kernel_canonical_id") or "") if b]
+                            where) if b]
+        if k.get("from_tuning_skillset"):
+            # Named, not inferred from the absent patch: "no patch" is also what an env-only config
+            # win looks like, and the two are recalled by different tracks in different ways.
+            bits.append("from tuning skillset")
+            if k.get("apply_env"):
+                bits.append("bind with %s" % k["apply_env"])
         parts.append("%s (%s)" % (k.get("name") or "?", ", ".join(bits)) if bits
                      else str(k.get("name") or "?"))
     return "; ".join(parts)
@@ -352,7 +402,9 @@ def _track_record_line(view: dict) -> str:
         return "never benched by anyone since it was recorded"
     parts = ["%d reproduced a win" % view["validations"] if view["validations"] else "",
              "%d could not be run at all" % view["not_reproduced"]
-             if view.get("not_reproduced") else ""]
+             if view.get("not_reproduced") else "",
+             "%d did not fit that box's baseline (no verdict on the record)" % view["inapplicable"]
+             if view.get("inapplicable") else ""]
     detail = ", ".join(p for p in parts if p) or "none reproduced a win"
     hint = view.get("retire_hint") or ""
     return "benched %dx since it was recorded — %s%s" % (
@@ -533,6 +585,7 @@ def build_record(a, result: dict, workdir=None) -> dict:
     value.update(state)
     files = _artifact_files(a, result)
     files.update(kernel_files)
+    _rebind_tuning_artifacts(kernels, files)
     value["artifacts"] = {k: v[0] for k, v in files.items()}
     # After `artifacts` (it reads the captured launch/overlay names from there) and before the
     # final rebuild (it may ADD the synthesized script and fetched patches to `files`).
@@ -823,6 +876,24 @@ TUNING_FILE_MAX = 24
 TUNING_FILE_MAX_BYTES = 64 * 1024 * 1024
 
 
+_UNSAFE_NAME_RE = re.compile("[^%s]" % SAFE_COMPONENT_CHARS)
+
+
+def _safe_basename(path: str) -> str:
+    """A stored name `kb.store_local.safe_rel_path()` will accept, whatever the box named the file.
+
+    That validator REJECTS (raises) on `:` and `\\` rather than sanitizing, and both stores build
+    their whole `{stored_name: source}` map up front, before a single byte is uploaded. So one tuned
+    table whose name carries a shape spec — `gemm_m:1024_n:8192.csv` is a perfectly ordinary thing
+    for a tuner to emit — would abort the write for the ENTIRE record, taking final.patch, launch.sh
+    and report.md down with it. The record is the thing worth protecting; the exact filename is not.
+    Names are mangled toward the validator, never dropped, and the untouched source path stays in
+    `accepted_kernels[].tuning_artifact_source` so a reader can still say where it came from.
+    """
+    name = _UNSAFE_NAME_RE.sub("_", os.path.basename(path).strip()) or "artifact"
+    return name.lstrip(".") or "artifact"      # ".", ".." and dotfiles are rejected the same way
+
+
 def _tuning_files(result: dict, dropped: list) -> dict:
     """{role: (stored_name, local_path)} for the tuning phase's deployable artifacts.
 
@@ -863,9 +934,38 @@ def _tuning_files(result: dict, dropped: list) -> dict:
             continue
         # Index-prefixed: two tuned tables can share a basename across trees (the deploy bundle's copy
         # and the installed one), and a bare basename would silently drop one of them.
-        stored = "%s%02d_%s" % (TUNING_PREFIX, len(found), os.path.basename(path))
+        stored = "%s%02d_%s" % (TUNING_PREFIX, len(found), _safe_basename(path))
         found["tuning:" + path] = (stored, path)
     return found
+
+
+def _rebind_tuning_artifacts(kernels, files: dict) -> None:
+    """Point each tuned kernel at where its table lives IN THE RECORD, not on the box that made it.
+
+    The workflow banks `tuning_artifact` as the absolute path the tuner wrote — correct at write
+    time, meaningless to every reader afterwards, since the next box has no such file. The bundle
+    name is the only address that survives the trip, so it is substituted here, once, at the one
+    point where both the kernel list and the stored-name map exist. The original is kept as
+    `tuning_artifact_source`: when a recalled table fails to reproduce, the first question is which
+    tree it was captured from, and that answer is otherwise gone.
+    """
+    # First stored name wins, not last. Two roles can hand back the same source path (the deploy
+    # bundle's copy of a table and the installed one are one file to `artifacts` + `live_tree_files`),
+    # and `files` is built in insertion order, so the first entry is the one whose stored name the
+    # rest of the record already refers to. Taking the last would point the kernel at a bundle name
+    # that is a duplicate copy of its table under a different index prefix — reproducible, but it
+    # makes two names for one artifact and a reader cannot tell which is canonical.
+    by_source = {}
+    for stored, src in files.values():
+        by_source.setdefault(src, stored)
+    for k in kernels:
+        if not isinstance(k, dict):
+            continue
+        source = str(k.get("tuning_artifact") or "")
+        stored = by_source.get(source) if source else ""
+        if stored:
+            k["tuning_artifact"] = stored
+            k["tuning_artifact_source"] = source
 
 
 def _artifact_files(a, result: dict) -> dict:
@@ -1506,13 +1606,18 @@ def main(argv=None) -> int:
     q.add_argument("--apply", action="store_true", help="actually write; default is a dry run")
 
     q = sub.add_parser("attest", help="count one attempt to RUN a stored record: validated | "
-                                      "failed | not_reproduced. Moves no score, no champion.")
+                                      "failed | not_reproduced | inapplicable. Moves no score, "
+                                      "no champion.")
     _identity_args(q)
     _plane_args(q)
     q.add_argument("--session-id", required=True, help="the session that was tried")
     q.add_argument("--outcome", required=True, choices=OUTCOMES,
                    help="validated = reproduced a win; failed = ran but did not win; "
-                        "not_reproduced = could not be made to run at all")
+                        "not_reproduced = could not be made to run at all; "
+                        "inapplicable = could not be applied to THIS box's baseline (a knob the "
+                        "record pins is already pinned to something else here) — counted, but "
+                        "kept out of the retire arithmetic, because it judges the pairing and "
+                        "not the record")
     q.add_argument("--measured-tok-s", default=None, help="what it did here, for the history entry")
     q.add_argument("--baseline-tok-s", default=None, help="what this box does without it")
     q.add_argument("--parity", default="", help="pass | fail | n/a on this box")
@@ -1538,7 +1643,13 @@ def main(argv=None) -> int:
     if a.command == "identity":
         result = {"identity": identity_of(a),
                   "ladder": [{"canonical_id": c, "tier": t, "ranked_by": m, "promote_floor": f}
-                             for c, t, m, f in ladder_of(a)]}
+                             for c, t, m, f in ladder_of(a)],
+                  # Separate key, not appended to `ladder`: these are read by resolve and written by
+                  # nothing, and a caller auditing where this run will FILE its record must not see
+                  # them in the same list as the addresses it will file at.
+                  "legacy_read_only": [{"canonical_id": c, "tier": t, "ranked_by": m,
+                                        "promote_floor": f}
+                                       for c, t, m, f in legacy_version_ladder(a)]}
     elif a.command == "resolve":
         result = cmd_resolve(a)
     elif a.command == "retract":

@@ -10,6 +10,14 @@ sources:
 
 # Benchmarking methodology on MI GPUs
 
+> **Canonical deep version:** [`../expert_skills/tuning/tuning-core/measurement.md`](../expert_skills/tuning/tuning-core/measurement.md)
+> in the vendored tuning skillset. That copy is the one whose claims are executable
+> (`perf_knowledge/expert_skills/tuning/validate/claims.py`) and re-checked per image, and it is
+> what the e2e tuning phase actually runs. This card stays because benchmarking is not only a tuning activity: kernel authoring,
+> profiling and e2e A/B all cite this card, and the single-kernel-sweep exception below is GEAK's own
+> — where the two touch the same ground, the deep version wins and this one is the index entry
+> into it. Do not grow tuning procedure here; send the fix upstream and re-sync the tree.
+
 ## TL;DR
 A trustworthy MI-GPU measurement is: **warm** (discard cold runs), **repeated** (median of ≥3; the
 perf_knowledge e2e standard is **REPEATS=7**), inside a **noise band** (accept a change only if it clears the

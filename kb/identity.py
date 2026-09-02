@@ -154,6 +154,31 @@ def _short_version(raw: str) -> str:
     return segment(m.group(1) if m else text, UNKNOWN_VERSION)
 
 
+# `0.5.15.post1.dev20260723+g6c9fd0adc5` -> `0.5.15`. Serving stacks are installed from git in these
+# images, so `sglang.__version__` carries a PEP 440 dev/local suffix that changes on every rebuild of
+# the SAME release. Keyed verbatim, a rebuilt wheel opens a fresh set of pages and the previous run's
+# result becomes unreachable — not degraded, invisible, because the lookup is exact and a miss is a
+# plain 404. A long opaque string is also one nobody transcribes correctly: a hand-filed record that
+# dropped the trailing `+g<hash>` was already enough to hide a real result from the next run on the
+# very SAME build. All three rungs missed at once, because framework_version sits in `base` and no
+# rung drops it. Rebuild drift and transcription drift are the same failure; both disappear once the
+# address is the release.
+#
+# Three components, not two: `0.5.15` and `0.5.17` are different SGLang releases with different
+# kernels, so cutting to `0.5` would merge results that genuinely do not transfer. The exact build
+# string still travels in the record's value, so only the address is coarse — same bargain as
+# kernel_identity's ROCm cut, one component wider.
+_RELEASE_VERSION = re.compile(r"\s*v?(\d+(?:\.\d+){0,2})")
+
+
+def _release_version(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return UNKNOWN_VERSION
+    m = _RELEASE_VERSION.match(text)
+    return segment(m.group(1) if m else text, UNKNOWN_VERSION)
+
+
 def kernel_canonical_ids(identity: dict):
     """Both rungs, most specific first.
 
@@ -188,12 +213,16 @@ def e2e_identity(model: str, gfx: str, framework: str, framework_version: str, p
     `tp` sits AFTER precision and before the workload shape so the ladder can drop the measured
     point while keeping the deployment config. Anything unparseable folds to "" and simply removes
     the rung that would have carried it.
+
+    `framework_version` is cut to `<major>.<minor>.<patch>` — see _release_version. It is the one
+    dimension here that a rebuild can change without anything about the deployment changing, and
+    unlike the workload dims it cannot be dropped by a coarser rung.
     """
     return {
         "model": segment(model, UNKNOWN),
         "gpu": segment(gfx, UNKNOWN),
         "framework": segment(framework, UNKNOWN),
-        "framework_version": segment(framework_version, UNKNOWN_VERSION),
+        "framework_version": _release_version(framework_version),
         "precision": segment(precision, UNKNOWN),
         "tp": counted("tp", tp),
         "isl": counted("isl", isl),

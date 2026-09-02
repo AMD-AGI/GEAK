@@ -256,6 +256,14 @@ def _fold_serving_fidelity_flags(
 # ---------------------------------------------------------------------------
 # handoff (stable)  ->  e2e_workflow.js args (volatile, owned here)
 # ---------------------------------------------------------------------------
+def _as_float(v, default: float = 0.0) -> float:
+    """Coerce a JSON-ish value to a float, failing closed for gate arithmetic."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def _as_bool(v) -> bool:
     """Coerce a handoff value to a bool.
 
@@ -1468,6 +1476,10 @@ def apply_bench_protocol(h: dict) -> dict:
             "GEAK_REPEAT_MODE": "isolated_server",
             "REPLICA_RETRIES": "1",
         }
+        # Match Hyperloom's adaptive prompt-count rule when no explicit count
+        # was recorded in the handoff. An explicit protocol value still wins.
+        if not str(protocol.get("num_prompts") or "").strip():
+            aligned["NUM_PROMPTS_ADAPTIVE"] = "1"
         for env_var, value in aligned.items():
             os.environ[env_var] = value
             exported[env_var] = value
@@ -2333,30 +2345,24 @@ def _cold_penalty_pct(cold: Any, hot: Any) -> float | None:
 
 
 def _overlay_has_loadable_code(path: Path) -> bool:
-    """True when ``path`` is an overlay a consumer could actually PYTHONPATH into.
+    """True when a root overlay will install an accepted kernel.
 
-    The Finalize phase creates ``final/overlay`` unconditionally and drops a
-    marker file (``README.txt``, ``EMPTY_NO_ACCEPTED_OVERLAY.txt``) into it when
-    nothing was accepted, so directory existence proves nothing. What makes an
-    overlay real is importable code: a top-level module, the manifest the
-    overlay loader reads, or an accepted ``cand_*`` subtree.
+    Consumers activate only ``<overlay>/sitecustomize.py``. A missing or
+    malformed manifest, or one that explicitly names no modules/rebinds,
+    therefore must not be advertised as a reusable kernel overlay.
     """
-    if not path.is_dir():
+    if not path.is_dir() or not (path / "sitecustomize.py").is_file():
         return False
-    if (path / "_overlay_manifest.json").is_file() or (
-        path / "sitecustomize.py"
-    ).is_file():
+    manifest = path / "_overlay_manifest.json"
+    if not manifest.is_file():
         return True
-    if any(p.suffix == ".py" for p in path.iterdir() if p.is_file()):
-        return True
-    return any(
-        d.is_dir()
-        and (
-            (d / "_overlay_manifest.json").is_file()
-            or (d / "sitecustomize.py").is_file()
-        )
-        for d in path.glob("cand_*")
-    )
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return bool(payload.get("modules") or payload.get("rebinds"))
 
 
 def _patch_has_hunks(path: Path) -> bool:
@@ -2374,6 +2380,50 @@ def _patch_has_hunks(path: Path) -> bool:
     except OSError:
         return False
     return any(line.startswith("@@") for line in text.splitlines())
+
+
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_VALUE_SHELL_CHARS = ";&|<>()`"
+
+
+def _parse_env_assignments(env: str) -> tuple[dict, list]:
+    """Split accepted environment text into validated assignments and rejects."""
+    valid: dict[str, str] = {}
+    rejected: list[str] = []
+    text = str(env or "").strip()
+    if not text:
+        return valid, rejected
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    for token in tokens:
+        pieces = [piece for piece in token.split(";") if piece.strip()]
+        pairs = []
+        for piece in pieces:
+            key, separator, value = piece.partition("=")
+            pairs.append(
+                (key, value)
+                if separator
+                and _ENV_KEY_RE.match(key)
+                and not any(char in value for char in _ENV_VALUE_SHELL_CHARS)
+                else None
+            )
+        if pairs and all(pair is not None for pair in pairs):
+            valid.update(dict(pairs))  # type: ignore[arg-type]
+        else:
+            rejected.append(token)
+    return valid, rejected
+
+
+def _accepted_config_with_env_map(config: dict) -> dict:
+    """Preserve raw accepted config while publishing a safe structured env map."""
+    out = dict(config)
+    env_map, rejected = _parse_env_assignments(out.get("env"))
+    out["env_map"] = env_map
+    if rejected:
+        out["env_unparsed"] = rejected
+    return out
 
 
 def _material_overlay_path(eval_dir: Path, wf: dict) -> str:
@@ -2977,7 +3027,9 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # What the kernel phase actually did (req: report must carry this).
         "accepted_kernels": wf.get("accepted_kernels") or [],
         "accepted_heads": wf.get("accepted_heads") or [],
-        "accepted_config": wf.get("accepted_config") or {},
+        "accepted_config": _accepted_config_with_env_map(
+            wf.get("accepted_config") or {}
+        ),
         # Self-describing baseline measurement-protocol + Hyperloom cross-check (see baseline_basis above).
         "baseline_basis": baseline_basis,
         # Reliability classification is independent of the optimization status.
@@ -3514,6 +3566,140 @@ def _kb_write_back(eval_dir: Path, wf: dict, ps_args: dict) -> dict:
         (eval_dir / KB_WRITE_FILE).write_text(
             json.dumps(receipt, indent=2), encoding="utf-8"
         )
+    except OSError:
+        pass
+    return receipt
+
+
+TUNING_RESULT_FILE = "tuning/tuning_result.json"
+TUNING_KB_WRITE_FILE = "tuning/kb_write_tuned.json"
+KERNEL_STORE_SCRIPT = GEAK_ROOT / "kernel_workflow" / "scripts" / "experience_store.py"
+
+
+def _kb_write_tuned_ops(eval_dir: Path) -> dict:
+    """Salvage proven tuning artifacts when the workflow could not file them."""
+    if str(os.environ.get("GEAK_E2E_KB_WRITE_BACK", "1")).strip().lower() in (
+        "0",
+        "false",
+        "no",
+    ):
+        return {"skipped": True, "why": "GEAK_E2E_KB_WRITE_BACK is off"}
+    if (eval_dir / TUNING_KB_WRITE_FILE).exists():
+        return {
+            "skipped": True,
+            "why": f"workflow already filed ({TUNING_KB_WRITE_FILE} present)",
+        }
+    tuning = _read_json(eval_dir / TUNING_RESULT_FILE)
+    if not tuning:
+        return {
+            "skipped": True,
+            "why": f"no {TUNING_RESULT_FILE} (tuning never ran, or ran before this build)",
+        }
+    if str(tuning.get("gate") or "") != "accepted":
+        return {
+            "skipped": True,
+            "why": f"tuning gate is {tuning.get('gate')!r}, not accepted",
+        }
+
+    identity = _read_json(eval_dir / KB_IDENTITY_FILE) or {}
+    dims = identity.get("dims") or {}
+    gfx = str(dims.get("gfx") or "")
+    if not gfx:
+        return {"skipped": True, "why": "no gfx: a tuned table is arch-specific"}
+    ops = [
+        op
+        for op in (tuning.get("ops_tuned") or [])
+        if isinstance(op, dict)
+        and op.get("engaged") is True
+        and _as_float(op.get("isolated_speedup")) > 1.0
+        and str(op.get("artifact") or "").strip()
+    ]
+    if not ops:
+        return {"skipped": True, "why": "no op cleared isolated_speedup>1.0 AND engaged"}
+
+    plane = str(identity.get("plane") or "remote")
+    store = str(identity.get("store") or "")
+    verb = "write-remote" if plane != "local" and store else "write"
+    plane_flags = ["--plane", "both", "--store", store] if verb == "write-remote" else []
+    rows = []
+    for op in ops:
+        name = str(op.get("op") or op.get("short_name") or "").strip()
+        if not name:
+            rows.append({"written": False, "reason": "unnamed op"})
+            continue
+        cmd = [
+            sys.executable,
+            str(KERNEL_STORE_SCRIPT),
+            verb,
+            *plane_flags,
+            "--root",
+            str(GEAK_ROOT / "kb_artifacts"),
+            "--kernel-name",
+            name,
+            "--language",
+            str(op.get("backend") or "tuned").strip(),
+            "--gfx",
+            gfx,
+            "--kernel-class",
+            "tuning",
+            "--speedup",
+            str(_as_float(op.get("isolated_speedup"))),
+            "--carrier",
+            "tuned_artifact",
+            "--artifact",
+            str(op.get("artifact")).strip(),
+            "--tuner",
+            str(op.get("tuner") or "").strip(),
+            "--apply-env",
+            str(tuning.get("apply_env") or ""),
+            "--cache-invalidation",
+            " && ".join(tuning.get("cache_invalidation") or []),
+            "--metric-kind",
+            "tuning_isolated",
+            "--case-names",
+            str(op.get("shapes") or "").replace(",", ";"),
+            "--direction",
+            "tuning-" + re.sub(r"[^a-z0-9]+", "-", str(op.get("backend") or "op").strip().lower()),
+            "--eval-dir",
+            str(eval_dir),
+        ]
+        for flag, value in (
+            ("--precision", dims.get("precision")),
+            ("--serving-framework", dims.get("framework")),
+            ("--serving-framework-version", dims.get("framework-version")),
+        ):
+            if str(value or "").strip():
+                cmd += [flag, str(value).strip()]
+        if str(tuning.get("report_path") or "").strip():
+            cmd += ["--report", str(tuning["report_path"]).strip()]
+        shell = '. %s; exec "$@"' % shlex.quote(str(KB_ENV_SCRIPT))
+        try:
+            proc = subprocess.run(
+                ["bash", "-c", shell, "bash", *cmd],
+                capture_output=True,
+                text=True,
+                timeout=KB_WRITE_TIMEOUT_S,
+                cwd=str(GEAK_ROOT),
+            )
+            rows.append(json.loads(proc.stdout))
+        except subprocess.TimeoutExpired:
+            rows.append({"written": False, "reason": f"timed out after {KB_WRITE_TIMEOUT_S}s"})
+        except Exception as exc:
+            rows.append({"written": False, "reason": f"{type(exc).__name__}: {str(exc)[:160]}"})
+
+    receipt = {
+        "ok": True,
+        "measured_by": "run_e2e:salvage",
+        "plane": plane,
+        "verb": verb,
+        "ops": len(ops),
+        "written": sum(1 for row in rows if row.get("written")),
+        "results": rows,
+    }
+    try:
+        path = eval_dir / TUNING_KB_WRITE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
     except OSError:
         pass
     return receipt
@@ -5911,6 +6097,22 @@ def main(argv: list[str]) -> int:
                     _emit_state["out"] = out
             except Exception as kb_exc:
                 out["kb_write"] = {
+                    "ok": False,
+                    "why": f"{type(kb_exc).__name__}: {kb_exc}",
+                }
+        # Tuning artifacts use their own per-op gate and may be recoverable even
+        # when no complete workflow return was emitted.
+        if _emit_state["done"] and eval_dir_str:
+            try:
+                tuned = _kb_write_tuned_ops(Path(eval_dir_str))
+                if tuned and not tuned.get("skipped"):
+                    out["kb_write_tuned"] = tuned
+                    tmp = result_path.with_name(result_path.name + ".tmp")
+                    tmp.write_text(json.dumps(out, indent=2), encoding="utf-8")
+                    os.replace(tmp, result_path)
+                    _emit_state["out"] = out
+            except Exception as kb_exc:
+                out["kb_write_tuned"] = {
                     "ok": False,
                     "why": f"{type(kb_exc).__name__}: {kb_exc}",
                 }
