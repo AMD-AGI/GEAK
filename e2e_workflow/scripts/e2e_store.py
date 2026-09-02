@@ -1065,7 +1065,9 @@ def _launch_text(a, result: dict, value: dict, kernels, overlay: str) -> str:
         lines += ["export %s=%s" % (k, _sh_quote(v)) for k, v in sorted(pairs.items())]
         lines.append("")
     lines += ["exec env \\"]
-    for key, val in (("BACKEND", identity["framework"]),
+    for key, val in (("GEAK_REPEAT_MODE", "warm_reuse_server"),
+                     ("BENCH_OUTER_WARMUP_FULL_ROUND", "1"),
+                     ("BACKEND", identity["framework"]),
                      ("MODEL", "${MODEL}"),
                      ("TP", workload.get("tp")), ("ISL", workload.get("isl")),
                      ("OSL", workload.get("osl")), ("CONC", workload.get("conc")),

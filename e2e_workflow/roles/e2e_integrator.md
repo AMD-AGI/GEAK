@@ -230,21 +230,21 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      use the fused-fp8 path (no bf16 re-materialization; compact fp8/preshuffled cache) and/or route
      only the tuned target (N,K) through the seam (pass other shapes to stock). Never accept a net
      usable regression (do-no-harm).
-3. **Measure e2e with isolated server replicas.** Do NOT edit the shared `scripts/bench_e2e.sh` —
-   drive it from the eval dir. Search uses one Hyperloom-equivalent replica per leg by default. Each
-   replica launches a fresh server, retains the client's internal kernel/graph warmups, skips the
-   outer full-round replay, records one cache-cold measured request set, and tears down. Never use
-   multiple timed requests against one server as replicas:
+3. **Measure e2e with independent warm-reuse server replicas.** Do NOT edit the shared
+   `scripts/bench_e2e.sh` — drive it from the eval dir. Search uses one replica per leg by default.
+   Each replica launches a fresh GEAK-owned server, discards one full-workload warmup while retaining
+   the client's internal `2*CONC` kernel/graph warmups, records one timed request set on that same
+   server, and tears down. Never share a server between reference/candidate legs or between replicas:
    ```bash
    CB="$EVAL_DIR/overlay/cand_<short>"
    # BOTH blocks MUST use the run-wide serving invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
-   # reference block: current accepted config, one fresh-server replica
+   # reference block: independent fresh → warmup → timed → teardown replica
    BACKEND="<backend>" OUT_DIR="$CB/ref" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
      GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=search REPLICAS="${REPLICAS:-1}" \
      PROFILE=0 OVERLAY_PYTHONPATH="$CURRENT_OVERLAY" \
      EXTRA_SERVER_ARGS="<cur flags>" EXTRA_ENV="<cur env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
-   # candidate block: + this one change, one fresh-server replica (SAME TP/GPU)
+   # candidate block: independent fresh → warmup → timed → teardown replica (SAME TP/GPU)
    BACKEND="<backend>" OUT_DIR="$CB/cand" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
      GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=search REPLICAS="${REPLICAS:-1}" \
      PROFILE=0 OVERLAY_PYTHONPATH="<CAND or empty>" \
@@ -353,7 +353,10 @@ win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, 
 1. Assemble the deliverable bundle in `EVAL_DIR/final/`: the accepted overlay dir, a concatenated
    `final_patch.diff` (all accepted kernel patches), and a `final_launch.sh` that reproduces the
    optimized server (sets `BACKEND=<backend>`, `PYTHONPATH=<overlay>`, the accepted flags/env, and runs
-   the bench via bench_e2e.sh + its adapter). This is the spec deliverable: "complete patch + launch/benchmark script".
+   the bench via bench_e2e.sh + its adapter). The launch script MUST pass
+   `GEAK_REPEAT_MODE=warm_reuse_server` and `BENCH_OUTER_WARMUP_FULL_ROUND=1`; it must preserve
+   `NUM_WARMUPS=2*CONC` and never set `REUSE_SERVER=1`. This is the spec deliverable:
+   "complete patch + launch/benchmark script".
 
 1b. **Fold in the tuning deploy bundle** (only when `TUNING_DEPLOY_BUNDLE` is present).
 
@@ -387,9 +390,10 @@ win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, 
    result. If the check fails, the bundle is broken — say so in `note` and set `tuning_in_bundle:false`
    rather than shipping a bundle that silently drops the tuning.
 
-2. Do a final isolated-server search replica of the assembled bundle to confirm the combined result
-   matches the sum of accepted milestones (combined effects can interact). Retain the client's internal
-   kernel/graph warmups, skip the outer full-round replay, and read the result from `bench_summary.json`.
+2. Do a final independent warm-reuse search replica of the assembled bundle to confirm the combined
+   result matches the sum of accepted milestones (combined effects can interact). Discard one full
+   workload warmup, retain the client's internal `2*CONC` kernel/graph warmups, and read only the
+   subsequent timed result from `bench_summary.json`.
    The Director's independent validation replicas remain the authoritative estimate.
 
 Return JSON:

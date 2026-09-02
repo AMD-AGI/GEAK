@@ -56,9 +56,14 @@ adapter_bench() {
   local res_name="ix_bench_$$_${RANDOM}"
   local num_warmups="${NUM_WARMUPS:-$(( MAXC < 8 ? MAXC : 8 ))}"
   local bench_seed="${SEED:-0}"
-  if [ "${GEAK_ISOLATED_REPLICA:-0}" = "1" ]; then
-    # The measurement protocol applies identically to both client calls in an
-    # isolated replica: the discarded full outer round and the measured round.
+  local -a trust_remote_code=()
+  case "${BENCH_TRUST_REMOTE_CODE:-0}" in
+    1|true|TRUE|yes|YES|on|ON) trust_remote_code=(--trust-remote-code) ;;
+  esac
+  if [ "${GEAK_ISOLATED_REPLICA:-0}" = "1" ] || [ "${GEAK_WARM_REUSE_REPLICA:-0}" = "1" ]; then
+    # The GEAK replica protocol applies identically to every client call:
+    # isolated replicas retain compute warmups, while warm-reuse replicas apply
+    # them to both the discarded full round and the timed same-server round.
     num_warmups=$((2 * MAXC))
     bench_seed=0
   fi
@@ -82,6 +87,7 @@ adapter_bench() {
     --num-warmups "$num_warmups" \
     --percentile-metrics "ttft,tpot,itl,e2el" \
     --seed "$bench_seed" \
+    "${trust_remote_code[@]}" \
     --save-result \
     --result-dir "$res_dir" \
     --result-filename "${res_name}.json" || return $?

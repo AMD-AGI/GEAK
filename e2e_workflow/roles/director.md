@@ -50,6 +50,7 @@ Steps:
    [ -n "$LAUNCH_SCRIPT" ] && cp "$LAUNCH_SCRIPT" "$EVAL_DIR/launch_baseline.sh"
    cp "$SKILL_DIR/scripts/bench_e2e.sh" "$EVAL_DIR/bench_e2e.sh"
    cp "$SKILL_DIR/scripts/bench_replica.sh" "$EVAL_DIR/bench_replica.sh"
+   cp "$SKILL_DIR/scripts/bench_warm_replica.sh" "$EVAL_DIR/bench_warm_replica.sh"
    cp "$SKILL_DIR/scripts/server_teardown.sh" "$EVAL_DIR/server_teardown.sh"   # the server-kill contract; bench_e2e.sh REFUSES to run without it
    cp -r "$SKILL_DIR/scripts/adapters" "$EVAL_DIR/adapters"   # bench_e2e.sh sources adapters/<backend>.sh next to itself
    cp "$SKILL_DIR/scripts/parse_profile.py" "$EVAL_DIR/parse_profile.py"
@@ -76,9 +77,10 @@ Steps:
    python3 -c "import sglang,os;print('sglang',sglang.__version__,os.path.dirname(sglang.__file__))" >> "$EVAL_DIR/env_info.txt" 2>&1
    (amd-smi list 2>/dev/null || rocminfo 2>/dev/null | grep -m1 gfx) >> "$EVAL_DIR/env_info.txt" || true
    ```
-5. **Record the TRUE baseline throughput** with a fresh isolated-server replica (this is the number
-   every later gain is measured against). InferenceX performs its internal kernel/graph warmups, but
-   there is no outer full-round replay before the measured request set. **Serving is TP=`SERVING_TP`
+5. **Record the TRUE baseline throughput** with a fresh GEAK-owned warm-reuse replica (this is the
+   number every later gain is measured against). Each replica starts its own server, performs one
+   full-workload warmup that is discarded, then measures once on that same server before teardown.
+   InferenceX keeps its `2*CONC` internal kernel/graph warmups in both invocations. **Serving is TP=`SERVING_TP`
    on the GPU set `SERVING_GPU`** (both passed in your inputs / the SERVING CONFIG INVARIANT block of
    your prompt). `GPU_IDS` is the optimization-parallelism
    pool, NOT the serving tensor-parallel size; the serving config is `TP=SERVING_TP GPU=SERVING_GPU`.
@@ -105,7 +107,7 @@ Steps:
    banner). If a seed flag did not engage, record it loudly in `notes` — a baseline measured on a
    silently-ignored config corrupts every later gain.
 6. If baseline spread > ~5%, re-run — a noisy baseline poisons every later comparison. Set
-   `noise_band_pct = 0.5` (the default accept threshold): the Integrator gates with isolated-server
+   `noise_band_pct = 0.5` (the default accept threshold): the Integrator gates with independent warm-reuse
    reference/candidate legs, non-overlap, and engagement proof.
    Only widen it (e.g. to 1–2%) if the baseline spread is genuinely large on this box and can't be
    tightened.
@@ -149,7 +151,7 @@ overlay `FINAL_OVERLAY` (dir) + `FINAL_FLAGS` (json), the Architect/Integrator's
 `APPLY_TO_ORIGINAL`, and the already-written report files `ARCHITECT_REPORT`
 (`architect_report.md`) + `FINAL_REPORT` (`final_report.md`) to reconcile in step 7.
 
-**Do NOT trust the claimed throughput — reproduce it with fresh isolated-server replicas.**
+**Do NOT trust the claimed throughput — reproduce it with fresh GEAK-owned warm-reuse replicas.**
 
 The final overlay may include PROVISIONAL "stack" kernels (each individually sub-0.5% but carried to
 compound). THIS phase is the authoritative gate for the combined stack: measure the FULL bundle vs the
@@ -157,9 +159,9 @@ TRUE baseline with independent-server replicas and decide if the COMBINED result
 
 1. Measure baseline AND final with **independent-server replicas**: a reference block
    (the TRUE baseline current-best stack) and a final block (full overlay + flags), each with
-   `REPLICAS` fresh servers (validation default 3). Every replica retains the client's internal
-   kernel/graph warmups but skips the outer full-round replay, then records one cache-cold measured
-   request set; never replace a failed replica with another repeat on the same server.
+   `REPLICAS` fresh servers (validation default 3). Every replica performs a discarded full-workload
+   warmup plus its internal `2*CONC` client warmups, then records one timed request set on the same
+   server; never replace a failed replica with another repeat on the same server.
    The TRUE-baseline block MUST reproduce the seed config the baseline was measured on (the caller's
    best config = the recorded `baseline` flags/env, i.e. the same `INIT_FLAGS`/`INIT_ENV`) — NOT
    `FINAL_FLAGS` minus GEAK's kernel wins. Use the same `TP=SERVING_TP GPU=SERVING_GPU` as setup.

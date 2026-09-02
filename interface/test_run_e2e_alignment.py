@@ -314,7 +314,7 @@ def test_map_args_consumes_schema_v2_effective_config(tmp_path: Path) -> None:
     assert "SGLANG_USE_AITER=1" in ps["initial_extra_env"]
     assert ps["initial_overlay_pythonpath"] == f"{overlay}:{snapshot}"
     assert len(ps["effective_config_digest"]) == 64
-    assert ps["measurement_mode"] == "isolated_server"
+    assert ps["measurement_mode"] == "warm_reuse_server"
     assert ps["validation_replicas"] == 3
 
 

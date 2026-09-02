@@ -53,26 +53,33 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ---- isolated-server measurement protocol ----
-# Keep the existing body below as the single-server implementation.  In isolated
-# mode this process is only a scheduler: each attempt runs bench_replica.sh,
-# which re-enters this script in legacy mode for exactly one fresh-server
-# warmup+measurement lifecycle.
+# ---- replica measurement protocols ----
+# Keep the existing body below as the single-server implementation.  Replica
+# modes are schedulers: each attempt re-enters this script in legacy mode.  An
+# isolated replica is cache-cold; a warm-reuse replica owns one fresh server,
+# discards a full workload warmup, then measures against that same server.
 # Profiling is not a throughput replica: it intentionally needs one warm server
-# and a sustained load/window.  An aligned run exports isolated mode globally,
+# and a sustained load/window.  An aligned run exports a replica mode globally,
 # so profile invocations opt back into the existing single-server body here.
-if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ] && [ "${PROFILE:-0}" = "1" ]; then
+if { [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ] || [ "${GEAK_REPEAT_MODE:-legacy}" = "warm_reuse_server" ]; } \
+   && [ "${PROFILE:-0}" = "1" ]; then
   echo ">>> PROFILE=1: using the single-server profiling lifecycle (not a timed replica)."
   GEAK_REPEAT_MODE=legacy
 fi
-if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
-  _replica_runner="$HERE/bench_replica.sh"
+if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ] \
+   || [ "${GEAK_REPEAT_MODE:-legacy}" = "warm_reuse_server" ]; then
+  _measurement_mode="${GEAK_REPEAT_MODE}"
+  if [ "$_measurement_mode" = "warm_reuse_server" ]; then
+    _replica_runner="$HERE/bench_warm_replica.sh"
+  else
+    _replica_runner="$HERE/bench_replica.sh"
+  fi
   if [ ! -f "$_replica_runner" ]; then
-    echo "!!! GEAK_REPEAT_MODE=isolated_server requires $_replica_runner" >&2
+    echo "!!! GEAK_REPEAT_MODE=$_measurement_mode requires $_replica_runner" >&2
     exit 3
   fi
   if [ "${REUSE_SERVER:-0}" = "1" ]; then
-    echo "!!! REUSE_SERVER=1 is incompatible with GEAK_REPEAT_MODE=isolated_server; timed replicas must fresh-launch." >&2
+    echo "!!! REUSE_SERVER=1 is incompatible with GEAK_REPEAT_MODE=$_measurement_mode; timed replicas must fresh-launch." >&2
     exit 4
   fi
   _purpose="${MEASUREMENT_PURPOSE:-search}"
@@ -98,7 +105,7 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
   _aggregate_out="${OUT_DIR:-$(pwd)/e2e_bench_out}"
   mkdir -p "$_aggregate_out"
   : > "$_aggregate_out/bench_runs.jsonl"
-  echo "Measurement: isolated_server  purpose=$_purpose  requested_replicas=$_requested"
+  echo "Measurement: $_measurement_mode  purpose=$_purpose  requested_replicas=$_requested"
   _successful=0
   for ((_replica=1; _replica<=_requested; _replica++)); do
     _replica_dir="$_aggregate_out/replica_$(printf '%03d' "$_replica")"
@@ -108,11 +115,11 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
     for _attempt in 1 2; do
       _attempt_dir="$_replica_dir/attempt_$_attempt"
       rm -f "$_attempt_dir/bench_summary.json"
-      echo ">>> Isolated replica $_replica/$_requested (attempt $_attempt/2) ..."
+      echo ">>> $_measurement_mode replica $_replica/$_requested (attempt $_attempt/2) ..."
       OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
         bash "$_replica_runner"
       _rc=$?
-      if [ "$_rc" -eq 0 ] && python3 - "$_attempt_dir/bench_summary.json" "${EFFECTIVE_CONFIG_DIGEST:-}" <<'PY'
+      if [ "$_rc" -eq 0 ] && python3 - "$_attempt_dir/bench_summary.json" "${EFFECTIVE_CONFIG_DIGEST:-}" "$_measurement_mode" <<'PY'
 import json, sys
 try:
     summary = json.load(open(sys.argv[1]))
@@ -120,8 +127,19 @@ try:
     ok = isinstance(value, (int, float)) and not isinstance(value, bool)
     ok = ok and int(summary.get("runs", 0)) == 1
     expected_digest = sys.argv[2]
+    measurement_mode = sys.argv[3]
     if expected_digest:
         ok = ok and summary.get("effective_config_digest") == expected_digest
+    if measurement_mode == "warm_reuse_server":
+        lifecycle = summary.get("measurement_lifecycle") or {}
+        ok = (
+            ok
+            and summary.get("measurement_mode") == "warm_reuse_server"
+            and int(summary.get("warmup_runs", 0)) >= 1
+            and lifecycle.get("owner") == "geak"
+            and lifecycle.get("same_server_for_warmup_and_measure") is True
+            and lifecycle.get("warmup_is_full_round") is True
+        )
 except (OSError, ValueError, TypeError):
     ok = False
 raise SystemExit(0 if ok else 1)
@@ -136,21 +154,21 @@ PY
         _successful=$((_successful + 1))
         break
       fi
-      echo "!!! Isolated replica $_replica attempt $_attempt failed (rc=$_rc)." >&2
+      echo "!!! $_measurement_mode replica $_replica attempt $_attempt failed (rc=$_rc)." >&2
     done
     if [ "$_replica_ok" != "1" ]; then
-      echo "!!! Isolated replica $_replica failed after one retry; continuing without same-server fallback." >&2
+      echo "!!! $_measurement_mode replica $_replica failed after one retry; continuing without same-server fallback." >&2
     fi
   done
 
-  python3 - "$_aggregate_out" "$_requested" "$_successful" "$_purpose" "${EFFECTIVE_CONFIG_DIGEST:-}" <<'PY'
+  python3 - "$_aggregate_out" "$_requested" "$_successful" "$_purpose" "${EFFECTIVE_CONFIG_DIGEST:-}" "$_measurement_mode" <<'PY'
 import glob
 import json
 import os
 import statistics
 import sys
 
-out_dir, requested_s, successful_s, purpose, effective_digest = sys.argv[1:]
+out_dir, requested_s, successful_s, purpose, effective_digest, measurement_mode = sys.argv[1:]
 requested, successful = int(requested_s), int(successful_s)
 selected = sorted(glob.glob(os.path.join(out_dir, "replica_*", "selected_summary.json")))
 summaries = []
@@ -171,6 +189,8 @@ for path in selected:
         "replica": replica_index,
         "attempt": attempt,
         "throughput_tok_s": item.get("throughput_tok_s_median"),
+        "warmup_throughput_tok_s": item.get("warmup_output_throughput_tok_s"),
+        "measurement_lifecycle": item.get("measurement_lifecycle") or None,
     })
 
 def numbers(key):
@@ -185,6 +205,25 @@ def median(key):
 
 tputs = numbers("throughput_tok_s_median")
 observed = round(statistics.median(tputs), 3) if tputs else None
+warmup_tputs = numbers("warmup_output_throughput_tok_s")
+warmup_observed = round(statistics.median(warmup_tputs), 3) if warmup_tputs else None
+warmup_runs = sum(int(item.get("warmup_runs") or 0) for item in summaries)
+lifecycles = [item.get("measurement_lifecycle") for item in summaries]
+shared_lifecycle = (
+    lifecycles[0]
+    if (
+        measurement_mode == "warm_reuse_server"
+        and len(lifecycles) == successful
+        and all(isinstance(item, dict) for item in lifecycles)
+        and all(
+            item.get("owner") == "geak"
+            and item.get("same_server_for_warmup_and_measure") is True
+            and item.get("warmup_is_full_round") is True
+            for item in lifecycles
+        )
+    )
+    else None
+)
 if len(tputs) < 2 or not observed:
     spread = 0.0
 else:
@@ -199,7 +238,7 @@ summary = {
     "successful_replicas": successful,
     "status": "complete" if complete else "incomplete",
     "usable_for_acceptance": complete and observed is not None,
-    "measurement_mode": "isolated_server",
+    "measurement_mode": measurement_mode,
     "measurement_purpose": purpose,
     "effective_config_digest": effective_digest or None,
     "observed_median": observed,
@@ -211,6 +250,9 @@ summary = {
     "output_throughput_tok_s_spread_pct": (
         spread if metric_basis == "aggregate_output_tok_s" else None
     ),
+    "warmup_output_throughput_tok_s": warmup_observed,
+    "warmup_runs": warmup_runs,
+    "measurement_lifecycle": shared_lifecycle,
     "ttft_ms_median": median("ttft_ms_median"),
     "tpot_ms_median": median("tpot_ms_median"),
     "runs": successful,
@@ -224,7 +266,7 @@ print(
     f"E2E_SUMMARY {metric_basis or 'unknown'}={observed} spread={spread}% "
     f"requested={requested} successful={successful} status={summary['status']} "
     f"usable_for_acceptance={str(summary['usable_for_acceptance']).lower()} "
-    "measurement_mode=isolated_server"
+    f"measurement_mode={measurement_mode}"
 )
 PY
   echo ">>> Done. Summary: $_aggregate_out/bench_summary.json"
@@ -472,9 +514,11 @@ if [ -z "${BENCH_TRUST_REMOTE_CODE:-}" ]; then
   # would both flip trust ON. Enable only when a KNOWN trust control is set to a
   # truthy value, or when the CURRENT backend's recorded EXTRA_<BE>_ARGS value
   # carries an actual enable/disable token. Apply layers in the same order as
-  # the launcher: recipe controls -> recipe args -> GEAK EXTRA_SERVER_ARGS.
+  # the launcher: recipe controls -> recipe args -> GEAK accepted environment
+  # -> GEAK EXTRA_SERVER_ARGS.
   _recipe_trust_control=0
   _recipe_trust_state=""
+  _extra_trust_control=0
   _trust_extra_name="EXTRA_${BACKEND^^}_ARGS"
   if [ -n "${RECIPE_ENV_FILE:-}" ] && [ -f "${RECIPE_ENV_FILE}" ]; then
     while IFS= read -r -d '' _trust_kv; do
@@ -493,10 +537,30 @@ if [ -z "${BENCH_TRUST_REMOTE_CODE:-}" ]; then
   fi
   [ "$_recipe_trust_control" = "1" ] && BENCH_TRUST_REMOTE_CODE=1
   [ -n "$_recipe_trust_state" ] && BENCH_TRUST_REMOTE_CODE="$_recipe_trust_state"
+  if [ -n "${EXTRA_ENV:-}" ]; then
+    while IFS= read -r _trust_env_line; do
+      read -ra _trust_env_tokens <<< "$_trust_env_line"
+      for _trust_kv in "${_trust_env_tokens[@]}"; do
+        _trust_name=${_trust_kv%%=*}
+        _trust_val=${_trust_kv#*=}
+        case "$_trust_name" in
+          BENCH_TRUST_REMOTE_CODE|HF_HUB_TRUST_REMOTE_CODE|MAGPIE_TRUST_REMOTE_CODE|TRANSFORMERS_TRUST_REMOTE_CODE)
+            case "${_trust_val,,}" in
+              1|true|yes|on) _extra_trust_control=1 ;;
+            esac ;;
+          "$_trust_extra_name")
+            _state=$(_args_trust_state "$_trust_val")
+            [ -n "$_state" ] && _recipe_trust_state="$_state" ;;
+        esac
+      done
+    done <<< "$EXTRA_ENV"
+  fi
+  [ "$_extra_trust_control" = "1" ] && BENCH_TRUST_REMOTE_CODE=1
+  [ -n "$_recipe_trust_state" ] && BENCH_TRUST_REMOTE_CODE="$_recipe_trust_state"
   _geak_trust_state=$(_args_trust_state "${EXTRA_SERVER_ARGS:-}")
   [ -n "$_geak_trust_state" ] && BENCH_TRUST_REMOTE_CODE="$_geak_trust_state"
-  unset _trust_kv _trust_name _trust_val _trust_extra_name _state
-  unset _recipe_trust_control _recipe_trust_state _geak_trust_state
+  unset _trust_kv _trust_name _trust_val _trust_extra_name _state _trust_env_line _trust_env_tokens
+  unset _recipe_trust_control _recipe_trust_state _extra_trust_control _geak_trust_state
 fi
 # transformers / HF hub honor HF_HUB_TRUST_REMOTE_CODE for tokenizer auto-load.
 [ "$BENCH_TRUST_REMOTE_CODE" = "1" ] && HF_HUB_TRUST_REMOTE_CODE=${HF_HUB_TRUST_REMOTE_CODE:-1}
@@ -529,6 +593,8 @@ PROFILE_DIR="$OUT_DIR/profile"
 BASE_URL="http://${HOST}:${PORT}"
 RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 : > "$RESULT_JSONL"
+WARMUP_JSONL="$OUT_DIR/bench_runs.warmup.jsonl"
+: > "$WARMUP_JSONL"
 # Separate sink for the optional COLD full-round (BENCH_COLD_FINAL=1); kept apart
 # from the timed(hot) repeats so it never pollutes the hot median.
 COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
@@ -539,7 +605,8 @@ export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_P
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
 export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
 export PROFILE_MAX_ITERS PROFILE_DELAY_ITERS
-export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
+export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT WARMUP_JSONL
+export BENCH_OUTER_WARMUP_FULL_ROUND GEAK_WARM_REUSE_REPLICA
 export BENCH_TRUST_REMOTE_CODE HF_HUB_TRUST_REMOTE_CODE
 
 echo "Backend:      $BACKEND  (adapter: $ADAPTER)"
@@ -620,6 +687,7 @@ if [ "$REUSE_SERVER" != "1" ]; then
   # Freeze the server's process identity NOW (pid, pgid, /proc start time) so the
   # EXIT teardown never has to ask "who owns this pid?" after the pid may be gone.
   server_record_identity "$SERVER_PID"
+  export SERVER_PID
 
   echo ">>> Waiting for server health (stall window ${STALL_WINDOW_SEC}s, backstop ${CEILING}s) ..."
   _t0=$SECONDS; _last_tok=""; _last_change=$SECONDS
@@ -746,12 +814,16 @@ else
   else
     echo ">>> Warmup round ..."
   fi
+  _saved_result_jsonl="$RESULT_JSONL"
+  RESULT_JSONL="$WARMUP_JSONL"; export RESULT_JSONL
   if ! adapter_bench "$_warmup_prompts" "$CONC" 0 >/dev/null 2>&1; then
+    RESULT_JSONL="$_saved_result_jsonl"; export RESULT_JSONL
     if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
-      echo "!!! Full outer warmup failed; isolated replica is invalid." >&2
+      echo "!!! Full outer warmup failed; warm-reuse replica is invalid." >&2
       exit 2
     fi
   fi
+  RESULT_JSONL="$_saved_result_jsonl"; export RESULT_JSONL
 fi
 # the warmup line should not pollute the timed results
 : > "$RESULT_JSONL"
@@ -854,10 +926,11 @@ PY
 fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----
-python3 - "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL" <<'PY'
+python3 - "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL" "$WARMUP_JSONL" <<'PY'
 import json, os, sys, statistics
 runs_path, out_path = sys.argv[1], sys.argv[2]
 cold_path = sys.argv[3] if len(sys.argv) > 3 else None
+warmup_path = sys.argv[4] if len(sys.argv) > 4 else None
 def pick(d, *keys):
     for k in keys:
         if k in d and isinstance(d[k], (int, float)): return float(d[k])
@@ -898,6 +971,7 @@ with open(runs_path) as fh:
         t = pick(d, "median_ttft_ms", "mean_ttft_ms");   ttft.append(t) if t is not None else None
         p = pick(d, "median_tpot_ms", "mean_tpot_ms");   tpot.append(p) if p is not None else None
 cold_tps = read_tps(cold_path)
+warmup_tps = read_tps(warmup_path)
 def med(xs): return statistics.median(xs) if xs else None
 def spread(xs):
     if len(xs) < 2: return 0.0
@@ -924,13 +998,35 @@ summ = {
     # SAME metric basis (E2E_METRIC) as the hot median for a consistent comparison.
     "cold_output_throughput_tok_s": round(med(cold_tps), 3) if cold_tps else None,
     "cold_runs": len(cold_tps),
+    # The outer warmup is deliberately excluded from the headline throughput.
+    # It is persisted as evidence that the timed round followed a complete
+    # same-server workload replay.
+    "warmup_output_throughput_tok_s": round(med(warmup_tps), 3) if warmup_tps else None,
+    "warmup_runs": len(warmup_tps),
     # Aggregate tok/s (NOT divided by TP). Default matches Hyperloom/Magpie output_throughput protocol;
     # E2E_METRIC=total switches to total (input+output) token throughput.
     "metric_basis": ("aggregate_total_token_tok_s" if _is_total else "aggregate_output_tok_s"),
     "measurement_mode": (
-        "isolated_server_replica"
-        if os.environ.get("GEAK_ISOLATED_REPLICA") == "1"
-        else "legacy_same_server"
+        "warm_reuse_server"
+        if os.environ.get("GEAK_WARM_REUSE_REPLICA") == "1"
+        else (
+            "isolated_server_replica"
+            if os.environ.get("GEAK_ISOLATED_REPLICA") == "1"
+            else "legacy_same_server"
+        )
+    ),
+    "measurement_lifecycle": (
+        {
+            "owner": "geak",
+            "launches": 1,
+            "same_server_for_warmup_and_measure": True,
+            "warmup_is_full_round": True,
+            "warmup_prompt_count": int(os.environ.get("NUM_PROMPTS") or 0),
+            "port": os.environ.get("PORT") or "",
+            "server_pid": os.environ.get("SERVER_PID") or "",
+        }
+        if os.environ.get("GEAK_WARM_REUSE_REPLICA") == "1"
+        else {}
     ),
     "effective_config_digest": os.environ.get("EFFECTIVE_CONFIG_DIGEST") or None,
 }

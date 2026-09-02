@@ -44,9 +44,10 @@ Everything else is your call. These four are not:
 2. **Measure your own pre-tune baseline in-session.** Do not inherit `CURRENT_THROUGHPUT` as your
    denominator — re-measure it on the current accepted config and `CURRENT_OVERLAY`, now. Your reported delta is
    `post` vs `your own pre`, and it is the whole reason this phase is separate.
-3. **Measure pre/post as isolated-server search replicas**, and complete both legs. Each leg retains
-   internal kernel/graph warmups, skips the outer full-round replay, and records one cache-cold request
-   set. A post-only number is not a result.
+3. **Measure pre/post as independent warm-reuse search replicas**, and complete both legs. Each leg
+   owns a fresh server, discards one full-workload warmup, retains its internal `2*CONC` kernel/graph
+   warmups, records one timed request set on that same server, then tears down. A post-only number is
+   not a result.
 4. **Prove engagement before you claim anything**, and quote the evidence. An unproven artifact is not a
    win here regardless of what the timing said — the orchestrator will refuse the accept without it, and
    an unproven artifact silently poisons every later A/B in the run, since your accepted config becomes
@@ -114,7 +115,7 @@ numbers without asking you a question.
 
 Write `EVAL_DIR/tuning/tuning_report.md`: what you targeted and why, per attempt what you changed and
 what it measured (including the attempts that failed — a dead end that is explained saves the next
-person from repeating it), the correctness evidence, the engagement evidence, and the isolated-server A/B.
+person from repeating it), the correctness evidence, the engagement evidence, and the warm-reuse A/B.
 The System Architect quotes this in the final report, so put real numbers in it and mark absent things
 as absent.
 

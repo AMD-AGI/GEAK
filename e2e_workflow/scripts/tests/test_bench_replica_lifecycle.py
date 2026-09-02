@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lifecycle tests for bench_e2e.sh isolated-server measurement replicas."""
+"""Lifecycle tests for bench_e2e.sh measurement replicas."""
 
 import json
 import os
@@ -102,6 +102,36 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
         self.assertEqual(len(benches), 1)
         self.assertEqual([e["nump"] for e in benches], [7])
 
+    def test_warm_reuse_replica_discards_full_round_on_one_owned_server(self):
+        proc, summary, events = self.run_bench(
+            purpose="search", GEAK_REPEAT_MODE="warm_reuse_server"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(summary["measurement_mode"], "warm_reuse_server")
+        self.assertEqual(summary["observed_median"], 100.0)
+        self.assertEqual(summary["warmup_output_throughput_tok_s"], 100.0)
+        self.assertEqual(summary["warmup_runs"], 1)
+        lifecycle = summary["measurement_lifecycle"]
+        self.assertEqual(lifecycle["owner"], "geak")
+        self.assertEqual(lifecycle["launches"], 1)
+        self.assertTrue(lifecycle["same_server_for_warmup_and_measure"])
+        self.assertTrue(lifecycle["warmup_is_full_round"])
+        self.assertEqual(lifecycle["warmup_prompt_count"], 7)
+        self.assertTrue(lifecycle["port"].isdigit())
+        self.assertEqual(sum(e["event"] == "launch" for e in events), 1)
+        benches = [e for e in events if e["event"] == "bench"]
+        self.assertEqual([e["nump"] for e in benches], [7, 7])
+
+    def test_warm_reuse_validation_keeps_replicas_independent(self):
+        proc, summary, events = self.run_bench(
+            purpose="validation", GEAK_REPEAT_MODE="warm_reuse_server"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual((summary["requested"], summary["successful"]), (3, 3))
+        self.assertEqual(summary["measurement_mode"], "warm_reuse_server")
+        self.assertEqual(sum(e["event"] == "launch" for e in events), 3)
+        self.assertEqual(sum(e["event"] == "bench" for e in events), 6)
+
     def test_parity_defaults_to_one_replica(self):
         proc, summary, _ = self.run_bench(purpose="parity")
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -158,6 +188,20 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 4)
         self.assertIn("isolated", proc.stderr.lower())
 
+    def test_warm_reuse_mode_rejects_external_server_reuse(self):
+        env = dict(os.environ)
+        env.update(
+            GEAK_REPEAT_MODE="warm_reuse_server",
+            MODEL="unused",
+            OUT_DIR=os.path.join(self.tmp, "reject_warm_reuse"),
+            REUSE_SERVER="1",
+        )
+        proc = subprocess.run(
+            [BASH, BENCH], env=env, capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(proc.returncode, 4)
+        self.assertIn("warm_reuse_server", proc.stderr)
+
     def test_profile_uses_single_server_lifecycle_in_aligned_run(self):
         env = dict(os.environ)
         env.update(
@@ -202,6 +246,7 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
                         "num_prompts": int(value("--num-prompts")),
                         "num_warmups": int(value("--num-warmups")),
                         "seed": int(value("--seed")),
+                        "trust_remote_code": "--trust-remote-code" in sys.argv,
                     }
                     with open(os.environ["IX_CALLS"], "a") as out:
                         out.write(json.dumps(call) + "\\n")
@@ -230,7 +275,27 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
         self.assertEqual([item["num_prompts"] for item in observed], [7])
         self.assertEqual([item["num_warmups"] for item in observed], [6])
         self.assertEqual([item["seed"] for item in observed], [0])
+        self.assertEqual([item["trust_remote_code"] for item in observed], [False])
         self.assertEqual(summary["observed_median"], 123.0)
+
+        proc, summary, _ = self.run_bench(
+            GEAK_REPEAT_MODE="warm_reuse_server",
+            BENCH_CLIENT="inferencex",
+            INFERENCEX_BENCH_SERVING=fake_client,
+            IX_CALLS=calls,
+            NUM_WARMUPS="999",
+            SEED="999",
+            EXTRA_ENV="BENCH_TRUST_REMOTE_CODE=1",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(calls, encoding="utf-8") as fh:
+            observed = [json.loads(line) for line in fh]
+        self.assertEqual(len(observed), 3)
+        self.assertEqual([item["num_prompts"] for item in observed], [7, 7, 7])
+        self.assertEqual([item["num_warmups"] for item in observed], [6, 6, 6])
+        self.assertEqual([item["seed"] for item in observed], [0, 0, 0])
+        self.assertEqual([item["trust_remote_code"] for item in observed], [False, True, True])
+        self.assertEqual(summary["measurement_mode"], "warm_reuse_server")
 
 
 if __name__ == "__main__":

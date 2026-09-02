@@ -50,6 +50,7 @@ except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
 
 SCHEMA_VERSION = 2
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
+DEFAULT_E2E_MEASUREMENT_MODE = "warm_reuse_server"
 
 # result.json must never state a speedup its own baseline/final pair
 # contradicts. Anything beyond this absolute gap on final/baseline means the
@@ -313,11 +314,10 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         "initial_extra_server_args": initial_server_args,
         "initial_extra_env": initial_env,
         "initial_overlay_pythonpath": initial_overlay,
-        # One fresh replica matches Hyperloom's compute-warm/cache-cold
-        # lifecycle: the client keeps internal kernel/graph warmups but skips
-        # the outer full-round replay. Three independent servers are reserved
-        # for final validation; the shell dispatcher owns retries/degradation.
-        "measurement_mode": "isolated_server",
+        # Each replica starts a GEAK-owned server, discards one full workload
+        # warmup, then measures against that same server before teardown.
+        # Replicas remain independent; final validation uses three of them.
+        "measurement_mode": DEFAULT_E2E_MEASUREMENT_MODE,
         "parity_replicas": 1,
         "search_replicas": 1,
         "validation_replicas": 3,
@@ -1393,8 +1393,8 @@ def apply_bench_protocol(h: dict) -> dict:
     ``num_prompts``, ``num_warmups`` and ``seed``. We export each provided key.
     For schema-v2 Hyperloom handoffs, the actual wrapper lifecycle is
     authoritative over stale metadata: fixed seed/range and 2*CONC client
-    warmups run inside the single measured invocation, while the separate
-    outer full-round replay is skipped.
+    warmups run for both the discarded full warmup and its same-server timed
+    measurement.
 
     IMPORTANT: only keys actually present in the handoff are exported. When
     ``bench_protocol`` is absent (e.g. GEAK run standalone, no external
@@ -1418,10 +1418,9 @@ def apply_bench_protocol(h: dict) -> dict:
     if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
         h.get("baseline_env_spec"), dict
     ):
-        # Cache-cold parity uses one measured client invocation on a fresh
-        # server. InferenceX still receives 2*concurrency internal warmups,
-        # which repeat prompt[0] to warm kernels/graphs without pre-populating
-        # the remaining timed prompts in the prefix cache.
+        # A GEAK-owned fresh server first receives a full discarded workload
+        # replay, then one timed replay on the same PID/port. InferenceX still
+        # receives 2*concurrency internal warmups in each invocation.
         # Some historical handoffs recorded an older small NUM_WARMUPS value;
         # keep the observed 2*concurrency client behavior while changing only
         # whether the separate outer full replay runs.
@@ -1431,7 +1430,8 @@ def apply_bench_protocol(h: dict) -> dict:
             "NUM_WARMUPS": str(2 * conc),
             "SEED": "0",
             "RANDOM_RANGE_RATIO": "1",
-            "GEAK_REPEAT_MODE": "isolated_server",
+            "GEAK_REPEAT_MODE": DEFAULT_E2E_MEASUREMENT_MODE,
+            "BENCH_OUTER_WARMUP_FULL_ROUND": "1",
             "REPLICA_RETRIES": "1",
         }
         for env_var, value in aligned.items():
@@ -2431,6 +2431,18 @@ def normalize_result(h: dict, wf: dict) -> dict:
     alignment_metrics = {
         "geak_hot_final_tok_s": geak_hot_final or None,
         "geak_hot_baseline_tok_s": geak_hot_baseline or None,
+        # GEAK-owned lifecycle evidence makes the cross-harness comparison
+        # auditable without requiring a handoff-schema change.
+        "geak_setup_measurement_mode": baseline_summary.get("measurement_mode") or None,
+        "geak_final_measurement_mode": final_summary.get("measurement_mode") or None,
+        "geak_setup_measurement_lifecycle": baseline_summary.get(
+            "measurement_lifecycle"
+        )
+        or None,
+        "geak_final_measurement_lifecycle": final_summary.get(
+            "measurement_lifecycle"
+        )
+        or None,
         "geak_cold_final_tok_s": geak_cold_final,
         "geak_cold_baseline_tok_s": geak_cold_baseline,
         "orchestrator_cold_baseline_tok_s": orch_baseline or None,   # == handoff.raw_baseline_tput (leaderboard anchor)

@@ -1073,7 +1073,8 @@ class TestBenchProtocol(_RunE2ECase):
         self.assertEqual(exported["NUM_WARMUPS"], "128")
         self.assertEqual(exported["SEED"], "0")
         self.assertEqual(exported["RANDOM_RANGE_RATIO"], "1")
-        self.assertEqual(exported["GEAK_REPEAT_MODE"], "isolated_server")
+        self.assertEqual(exported["GEAK_REPEAT_MODE"], "warm_reuse_server")
+        self.assertEqual(exported["BENCH_OUTER_WARMUP_FULL_ROUND"], "1")
         self.assertEqual(exported["REPLICA_RETRIES"], "1")
 
 

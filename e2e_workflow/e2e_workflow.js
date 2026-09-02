@@ -535,10 +535,11 @@ const INIT_ENV = String(A.initial_extra_env || '');
 // every later candidate overlay instead of being dropped at Setup.
 const INIT_BASE_OVERLAY = String(A.initial_overlay_pythonpath || '');
 const EFFECTIVE_CONFIG_DIGEST = String(A.effective_config_digest || '');
-// Throughput measurements use independent server replicas.  Search/parity use
-// one Hyperloom-equivalent replica; final validation uses three replicas to
-// estimate variance.  The bench dispatcher owns retry/degraded aggregation.
-const MEASUREMENT_MODE = String(A.measurement_mode || 'isolated_server');
+// Throughput measurements use independent GEAK-owned server replicas.  Every
+// warm-reuse replica starts fresh, discards one full workload warmup, then
+// measures against that same server before teardown. Search/parity use one
+// replica; final validation uses three to estimate variance.
+const MEASUREMENT_MODE = String(A.measurement_mode || 'warm_reuse_server');
 const PARITY_REPLICAS = parseInt(A.parity_replicas != null ? A.parity_replicas : 1, 10);
 const SEARCH_REPLICAS = parseInt(A.search_replicas != null ? A.search_replicas : 1, 10);
 const VALIDATION_REPLICAS = parseInt(A.validation_replicas != null ? A.validation_replicas : 3, 10);

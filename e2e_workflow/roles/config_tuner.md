@@ -49,7 +49,9 @@ each with target kernels + rationale), `CURRENT_FLAGS`/`CURRENT_ENV`/`CURRENT_OV
 
 For EACH direction, in the Architect's order:
 1. Build the candidate config = current accepted config + this ONE change.
-2. Launch + bench via the shared script:
+2. Launch + bench via the shared script. `MEASUREMENT_MODE=warm_reuse_server` means this candidate
+   gets its own fresh GEAK-owned server, one discarded full-workload warmup, one timed same-server
+   measurement, and teardown; it never reuses the previous direction's server:
    ```bash
    # SERVING config MUST match the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/config/<dir_id>" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
