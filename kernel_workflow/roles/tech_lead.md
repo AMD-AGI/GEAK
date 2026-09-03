@@ -14,7 +14,8 @@ Always-available references (Read what's relevant to the phase):
 - `SKILL_DIR/knowledge/geomean_levers.md` — how to beat the wall-clock floor (read every round)
 - `SKILL_DIR/knowledge/hip_optimization.md` / `triton_optimization.md` — per kernel type
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns
-- `SKILL_DIR/knowledge/amd_instinct.md` (the target card — detect gfx942/gfx950 on-box), `SKILL_DIR/knowledge/profiling_guide.md`
+- `SKILL_DIR/knowledge/amd_rdna35.md` for gfx1151/Radeon 8060S or `amd_instinct.md` for gfx942/gfx950; detect on-box first
+- `SKILL_DIR/knowledge/profiling_guide.md`
 - `SKILL_DIR/knowledge/learned/INDEX.md` — **only when the `LEARNED_KB` input says `on`.** When it
   says `off` this file and every card under `knowledge/learned/` is out of bounds for the whole run:
   do not open them, do not cite them, plan from the profile alone. That input is the switch a caller

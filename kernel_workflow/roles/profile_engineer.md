@@ -14,11 +14,10 @@ schema with the cached `bottleneck` / metrics. Re-profile fully only if no prior
 keeps the per-wave fixed cost low so the burst spends its budget on optimization rounds. (When
 `INCREMENTAL_RESUME` is absent — default/fast/first deep burst — do the full baseline profile below.)
 
-Read `SKILL_DIR/knowledge/profiling_guide.md` and `amd_instinct.md` first. **Identify the actual
-accelerator on this box** (`amd_instinct.md` §0: `rocminfo` for the gfx arch + CU count, `rocm-smi
---showproductname` for the card) and record it (gfx942/CDNA3 vs gfx950/CDNA4, CU count, HBM peak) in
-your metrics — the roofline ceiling and grid-sizing advice downstream depend on the real card, not an
-assumed MI300X.
+Read `SKILL_DIR/knowledge/profiling_guide.md` first. Detect the gfx arch with `rocminfo`; read
+`amd_rdna35.md` for gfx1151/Radeon 8060S or `amd_instinct.md` for gfx942/gfx950. Record the detected
+architecture, CU count and applicable memory model in your metrics — roofline and grid advice must use
+the real card, not an assumed Instinct target.
 
 ## Steps
 1. From `EVAL_DIR/COMMANDMENT.md` get the PROFILE and benchmark commands and the parse hint.
@@ -60,7 +59,7 @@ If no profiler is available, fall back to benchmark-only + the per-case table + 
 {
   "bottleneck": "compute|memory|latency|lds|balanced|overhead",
   "profiler_used": "rocprof-compute|omniperf|rocprof|benchmark-only",
-  "device": "detected card, e.g. 'MI300X / gfx942 / CDNA3, 304 CU, ~5.3 TB/s'",
+  "device": "detected card, e.g. 'Radeon 8060S / gfx1151 / RDNA3.5, 40 CU, UMA'",
   "dispatch_count": 0,
   "key_metrics": {"valu_pct": 0.0, "vmem_pct": 0.0, "lds_pct": 0.0, "hbm_gbps": 0.0,
                   "l2_hit_pct": 0.0, "vgpr": 0, "scratch_bytes": 0},
