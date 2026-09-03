@@ -64,8 +64,39 @@ def _lds_limit():
     return 64 * 1024
 
 
+def _wave_size():
+    """Wavefront width of the running part.
+
+    Exactly the same trap as _lds_limit above, and for the same reason: this feeds
+    `threads = warps * WAVE` in the pruner, so a wrong value silently rejects legal tiles
+    rather than raising. Hardcoding 64 was right for CDNA and wrong by 2x on every RDNA
+    part -- on gfx1151 it doubles the apparent thread count, so the `BM * BN < threads`
+    test discards small tiles that in fact run, and the survivors are judged against a
+    per-thread state budget that is off by the same factor.
+
+    Detected, not tabulated: torch reports it directly. The gfx1* prefix is the fallback
+    (gfx10/11/12 are wave32, including CDNA5/gfx1250; gfx7/8/9 are wave64), and only if
+    both fail does it default -- loudly, like the LDS probe.
+    """
+    try:
+        return int(torch.cuda.get_device_properties(
+            torch.cuda.current_device()).warp_size)
+    except Exception:
+        pass
+    try:
+        gfx = torch.cuda.get_device_properties(
+            torch.cuda.current_device()).gcnArchName.split(":")[0].lower()
+        if gfx.startswith("gfx"):
+            return 32 if gfx.startswith("gfx1") else 64
+    except Exception:
+        pass
+    print("WARNING: could not read the wavefront size from torch; assuming 64. "
+          "On an RDNA part (wave32) this silently prunes legal tiles.")
+    return 64
+
+
 LDS_LIMIT = _lds_limit()
-WAVE = 64              # CDNA is wave64, unlike wave32 on RDNA/NVIDIA
+WAVE = _wave_size()    # wave64 on CDNA, wave32 on RDNA/CDNA5 -- detected, never assumed
 
 
 def viable(BM, BN, BK, warps, stages, dtype_bytes=2):

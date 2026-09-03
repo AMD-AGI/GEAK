@@ -27,7 +27,16 @@ from shapes import Shape, corpus, smoke  # noqa: E402
 
 # Rough bf16 dense peaks, TFLOPS. Used only as an implausibility check: a measurement
 # above peak means a broken harness (usually a missing synchronize), not a fast kernel.
-PEAK_TFLOPS = {"gfx942": 1300.0, "gfx950": 2500.0}
+#
+# gfx1151 is the BOOST-clock figure (40 CU x 512 FLOP/clk x 2.9 GHz), NOT the ~43 TFLOPS
+# the part sustains once it throttles to ~2.1 GHz. That is deliberate and it is why this
+# number differs from the gfx1151 row in GEAK's
+# e2e_workflow/knowledge/analysis_skills/roofline/peaks.md, which is sustained on purpose.
+# The two tables answer different questions: a roofline denominator wants the ceiling a
+# kernel can actually reach, whereas this one wants the ceiling physics forbids crossing.
+# Using 43 here would flag a legitimately fast short/cold-cache burst as a broken harness.
+# Do not "reconcile" the two.
+PEAK_TFLOPS = {"gfx942": 1300.0, "gfx950": 2500.0, "gfx1151": 59.4}
 
 DTYPES = {
     "bf16": torch.bfloat16,

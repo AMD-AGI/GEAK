@@ -36,9 +36,18 @@ Regime = Literal["square", "tall_skinny", "short_fat", "k_heavy", "decode", "bat
 # tensor raises "fill_cuda not implemented" even where the matrix core is
 # present, so a probe written with zeros reports the dtype missing on the only
 # part that has it. Use torch.empty.
+#
+# gfx1151 (RDNA3.5, Radeon 8060S / Strix Halo) is a THIRD case, not a subset of
+# either CDNA row: it has no fp8 at all. WMMA there does bf16/fp16/iu8/iu4, and
+# fp8 WMMA only arrives with RDNA4. So the fp8 question on that part is not
+# "which format" -- fnuz vs OCP is the wrong axis, and torch will still hand
+# back a float8_e4m3fn STORAGE dtype, so a probe that only checks allocation
+# reports fp8 present on a part with no fp8 matrix core. It must check that the
+# GEMM completes, which is exactly why the two questions are separated above.
 DTYPES_BY_ARCH = {
     "gfx942": ["bf16", "fp16", "fp8_e4m3_fnuz", "int8"],
     "gfx950": ["bf16", "fp16", "fp8_e4m3", "int8", "mxfp8", "mxfp4"],
+    "gfx1151": ["bf16", "fp16", "int8"],
 }
 
 
