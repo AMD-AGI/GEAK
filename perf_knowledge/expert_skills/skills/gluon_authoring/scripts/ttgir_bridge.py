@@ -95,6 +95,23 @@ _RELAY_OPS = ("tt.trans", "tt.reshape", "tt.join", "tt.split", "tt.cat",
               "ttg.memdesc_trans", "ttg.memdesc_reinterpret")
 
 
+def _amd_wave_size(a: str) -> int:
+    """Wave size for a lowercased AMD arch string. gfx10/11/12 (RDNA, and CDNA5/gfx1250) are
+    wave32; everything older (GCN/CDNA, gfx7/8/9) is wave64.
+
+    This used to be a hardcoded 64 for every gfx target, which is right for CDNA and wrong by 2x
+    for every RDNA part -- and it is not a benign default: it flows into GPUTarget below, so a
+    gfx1151/gfx1201 recovery built EVERY layout against a 64-lane wave and silently produced
+    layouts that cannot be right. Prefer being wrong loudly to being wrong quietly.
+
+    Deliberately a local prefix rule rather than an amd_occupancy import: _backend_key is
+    documented to work on a box with no Triton and is used by the offline half of --selftest, so
+    it stays dependency-free. --selftest cross-checks this against amd_occupancy.model_for()
+    whenever that module IS reachable, which is what stops the two drifting apart.
+    """
+    return 32 if a.startswith("gfx1") else 64
+
+
 def _backend_key(arch: str) -> tuple:
     """(backend_key, driver_name, target_value, default_warp_size) from an arch string.
 
@@ -103,7 +120,7 @@ def _backend_key(arch: str) -> tuple:
     """
     a = arch.strip().lower()
     if a.startswith("gfx"):
-        return "amd", "hip", a, 64
+        return "amd", "hip", a, _amd_wave_size(a)
     cap = a[2:] if a.startswith("sm") else a
     if not cap.isdigit():
         raise SystemExit(f"[ttgir_bridge] unrecognised --arch {arch!r}; "
@@ -2200,8 +2217,51 @@ def _selftest() -> int:
        "INCONCLUSIVE" in v_none, v_none)
 
     ck("_backend_key amd", _backend_key("gfx942") == ("amd", "hip", "gfx942", 64))
+    ck("_backend_key cdna is wave64",
+       all(_backend_key(a)[3] == 64 for a in ("gfx908", "gfx90a", "gfx942", "gfx950")))
+    # The regression this guards: every gfx used to return 64, so an RDNA recovery built its
+    # layouts against a 64-lane wave. gfx1250 is CDNA5 but still wave32 -- the rule is the gfx1*
+    # prefix, not the marketing family.
+    ck("_backend_key rdna and cdna5 are wave32",
+       all(_backend_key(a)[3] == 32
+           for a in ("gfx1100", "gfx1151", "gfx1200", "gfx1201", "gfx1250")))
     ck("_backend_key nvidia via sm90", _backend_key("sm90") == ("nvidia", "cuda", 90, 32))
     ck("_backend_key nvidia via bare capability", _backend_key("100")[0] == "nvidia")
+
+    # _amd_wave_size is a local copy of a fact that amd_occupancy owns. Cross-check it against
+    # the real table for EVERY arch that table knows, so the two cannot drift. Skipped, not
+    # failed, when amd_occupancy is unreachable -- that is the copied-out-scripts layout
+    # USAGE.md invites, and it must not turn a working box into a failing selftest.
+    try:
+        import importlib
+        import sys as _sys
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in _sys.path:
+            _sys.path.insert(0, _here)
+        _occ = importlib.import_module("amd_occupancy")
+    except ImportError:
+        _occ = None
+    if _occ is None:
+        ck("_amd_wave_size vs amd_occupancy (skipped: module unreachable)", True)
+    else:
+        # Prefer every arch hw_constants.json actually lists, so a newly added arch is covered
+        # here the day it lands; fall back to the known set if the file cannot be located.
+        _archs = ["gfx908", "gfx90a", "gfx942", "gfx950",
+                  "gfx1100", "gfx1151", "gfx1200", "gfx1201", "gfx1250"]
+        try:
+            _hw = _occ._find_hw_constants()
+            if _hw:
+                with open(_hw) as _fh:
+                    _archs = sorted(set(_archs) | set(json.load(_fh).get("arch", {})))
+        except (OSError, ValueError, AttributeError):
+            pass
+        _bad = []
+        for _a in _archs:
+            _m = _occ.model_for(_a)
+            if _m and _m.get("wave_size") and _m["wave_size"] != _amd_wave_size(_a):
+                _bad.append(f"{_a}: ours={_amd_wave_size(_a)} theirs={_m['wave_size']}")
+        ck("_amd_wave_size agrees with amd_occupancy on every known arch",
+           not _bad, "; ".join(_bad))
     try:
         _backend_key("hopper")
         ck("_backend_key refuses an unrecognised arch", False)
