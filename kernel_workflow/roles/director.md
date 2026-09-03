@@ -246,24 +246,39 @@ baseline latencies recorded at benchmark setup).
    - Within 10%, or Director higher → `accepted`.
    - Director LOWER than claim by >10% → `flagged` (use Director's measured numbers as official).
    - Correctness fail / patch fails to apply → `flagged`.
-   **TIMING RECEIPT GATE — run this BEFORE the comparisons above.** Parse `GEAK_TIMING_RECEIPT` out of the
-   FULL_BENCHMARK output (see `oracle_freezer.md` step 4) and copy it verbatim into
+   **TIMING RECEIPT GATE — run this BEFORE the comparisons above.**
+   **First check `FROZEN_ORACLE`.** The receipt comes from `oracle_freezer`'s generated `unittest.py`, and
+   `oracle_freezer` runs ONLY in the bake-off dispatcher's Freeze phase. A pass-through lane
+   (`mode=optimize`/`author`, or any caller invoking `kernel_lane.js` directly, e.g. e2e) never freezes,
+   so there is no FULL_BENCHMARK output to parse and nothing to demand.
+   - `FROZEN_ORACLE` is NOT `true` → set `timing_basis: "not_applicable"`, emit `timing_receipt: null`,
+     and note in `arbitration_note` that the baseline came from this lane's own `baseline_timing.json`.
+     Do NOT set `status: "flagged"` on this basis — go straight to the comparisons above and let
+     correctness / patch-install / arbitration decide status on their own merits. A missing receipt here
+     is the SHAPE of the route, not a fault in the run.
+
+   `FROZEN_ORACLE=true` → a receipt is expected and its absence IS a fault. Parse `GEAK_TIMING_RECEIPT`
+   out of the FULL_BENCHMARK output (see `oracle_freezer.md` step 4) and copy it verbatim into
    `director_validation.json` as `timing_receipt`. A speedup is a claim about DEVICE time; the receipt is
    the only evidence that it is one. Then:
-   - `all_primed: true` → proceed normally.
+   - `all_primed: true` → set `timing_basis: "clean"` and proceed normally.
    - `all_primed: false` with `timer_unprimed: false` → at least one leg is HOST-BOUND at these dims. The
      ratio is a dispatch-latency ratio, not a kernel speedup. Still report the number, but set
      `timing_basis: "host_bound"` and name the affected cases in `arbitration_note` — a host-bound win does
      NOT survive integration into a server that already replays this op inside its own graph.
-   - `timer_unprimed: true` → the task was frozen against a `harness_lib.py` that predates dispatch priming,
-     so BOTH legs carry a bubble of unknown sign. Set `timing_basis: "unprimed"` and `status: "flagged"`.
-     Do not attempt a correction factor: the bubble is a constant that inflates whichever leg is relatively
-     smaller, so it moves different cases in different directions. Re-freeze against a current
+   - `timer_unprimed: true` → the task was frozen against a `harness_lib.py` that predates the receipt, so
+     BOTH legs carry a dispatch component of unknown sign. Set `timing_basis: "unprimed"` and
+     `status: "flagged"`. Do not attempt a correction factor: it inflates whichever leg is relatively
+     smaller, so it moves different cases in different directions. Re-freezing against a current
      `$HARNESS_LIB` is the only fix.
    - Receipt ABSENT entirely → the unittest is older than this contract. `timing_basis: "unknown"`,
-     `status: "flagged"`. Absence is not evidence of priming.
+     `status: "flagged"`. Absence is not evidence of priming. Reachable ONLY when `FROZEN_ORACLE=true`;
+     collapsing it with the `not_applicable` case above would hide a stale-unittest fault behind the
+     normal shape of the default mode.
    Whatever the outcome, `timing_basis` is REQUIRED in `director_validation.json`, and any campaign summary
    that quotes the speedup must carry it — an unlabelled number is read as a clean device-time win.
+   `not_applicable` is a label, not a pass: the number is this lane's own baseline ratio, not a
+   receipt-backed device-time claim, and a cross-lane comparison must not treat it as one.
 7. If `APPLY_TO_ORIGINAL=true` AND status is `accepted`:
    ```bash
    cd "$KERNEL_PATH_ORIG"
@@ -287,6 +302,8 @@ Return JSON:
   "director_verified_speedup_weighted": 0.0,
   "tech_lead_reported_speedup_geomean": 0.0,
   "validation_status": "accepted|flagged",
+  "timing_basis": "clean|host_bound|unprimed|unknown|not_applicable",
+  "timing_receipt": null,
   "correctness": "pass|fail",
   "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0}],
   "applied_to_original": "true|false",
