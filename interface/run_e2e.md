@@ -23,6 +23,75 @@ Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
 file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
 
+### Agent backend (swappable: Claude Code ↔ qwen-code/qcoder)
+
+By default `run_e2e.py` drives the JS workflow through **Claude Code's `Workflow`
+tool** (SDK preferred, `claude -p` CLI fallback). Set `GEAK_AGENT_PROFILE` (or
+`GEAK_AGENT_BACKEND`) to run the SAME workflow on the **standalone Node runtime**
+(`interface/runtime/run_workflow.mjs`) with a different agent CLI instead — the
+runtime re-implements the Workflow globals (`agent/parallel/pipeline/phase/
+workflow`) and dispatches each `agent()` to a one-shot backend process, so the
+agent CLI itself does NOT need to support parallel/nested subagents.
+
+**Two orthogonal axes**, defined in `interface/runtime/registry.json`:
+`agents` (how to drive a CLI: claude / qwen / codex / kimi) × `models` (an
+endpoint). A `profile` pins one `(agent, model)` combo.
+
+| Selection (flag or env) | Effect |
+| --- | --- |
+| *(none)* | Native Claude Code `Workflow` tool — unchanged |
+| `GEAK_AGENT_PROFILE=qwen` | runtime, profile's agent+model |
+| `GEAK_AGENT_BACKEND=codex` | runtime, agent `codex` (back-compat alias for `--agent`) |
+| `GEAK_MODEL=<name>` | override the model axis (registry `models` key) |
+
+Precedence: CLI flag (`--profile`/`--agent`/`--model`) > env > `registry.default_profile`.
+
+Env knobs (all optional):
+
+| Env | Meaning | Default |
+| --- | --- | --- |
+| `GEAK_AGENT_PROFILE` | registry profile = (agent, model) | unset (native) |
+| `GEAK_AGENT_BACKEND` | agent name (alias for `--agent`) | unset |
+| `GEAK_MODEL` | model name (registry `models` key) | unset |
+| `GEAK_REGISTRY` | path to a custom registry.json | shipped one |
+| `GEAK_NODE_BIN` | node binary for the runtime | `node` |
+| `GEAK_CONCURRENCY` | max concurrent agent subprocesses | `min(16, cpus-2)` |
+| `GEAK_AGENT_TIMEOUT_MS` | per-agent hard timeout | `3600000` |
+| `GEAK_SCHEMA_RETRIES` | in-call structured-output retries | `2` |
+| `GEAK_<CLI>_BIN` / `GEAK_<CLI>_MODEL` | per-CLI binary / model override | registry |
+| `GEAK_<CLI>_APPROVE` / `GEAK_<CLI>_EXTRA_ARGS` | auto-approve flag / extra CLI args | registry |
+| `OPENAI_BASE_URL` / `OPENAI_API_KEY` | OpenAI-compatible provider auth (qwen/codex/kimi) | inherited |
+| `ANTHROPIC_BASE_URL` / `ANTHROPIC_*` | Anthropic provider auth (claude) | inherited |
+
+Prereqs for a non-native backend: Node ≥ 18 on `PATH`, plus the chosen CLI
+(`npm i -g @qwen-code/qwen-code`, `@openai/codex`, `@moonshotai/kimi-code`, …)
+and a reachable endpoint. The two `.js` workflows, `roles/`, `knowledge/`, and
+`scripts/` are used **unmodified** on every backend. Confirm each CLI's exact
+headless and sandbox flags against the selected CLI's current `--help` at
+bring-up and adjust `runtime/registry.json` when its contract changes.
+
+The single-kernel `kernel_workflow.js` has no Python wrapper; run it on the
+runtime directly:
+
+```bash
+node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js \
+  --profile qwen \
+  --args '{"kernel_path":"/abs/kernel","workflow_dir":"/abs/kernel_workflow","budget":6}'
+```
+
+**Controlled (agent × model) experiments** are built in:
+
+```bash
+node interface/runtime/experiment.mjs \
+  --script ../../kernel_workflow/kernel_workflow.js \
+  --args '{"kernel_path":"/abs/knn","workflow_dir":"/abs/kernel_workflow","budget":6}' \
+  --agents claude,qwen,codex --models default --repeats 3 --out ./exp_compare
+# -> results.jsonl + summary.md/csv (speedup / success-rate / wall / schema-fails; no token/cost)
+```
+
+Runtime primitives + config resolution can be smoke-tested with no CLI/network/GPU:
+`node interface/runtime/selftest.mjs`. See `runtime/DESIGN.md` for the full picture.
+
 The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 (`baseline/`, `validation/final/`, `final/` bundle, `director_e2e_validation.json`).
 

@@ -103,6 +103,54 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions
 Then just describe what you want in natural language (examples below). Claude Code resolves the paths and
 invokes the `Workflow` tool for you.
 
+### Swappable agent backend (Claude Code ↔ Codex / Hermes)
+
+GEAK's JavaScript Workflow remains authoritative. The standalone Node runtime under
+`interface/runtime/` supplies the same `agent()`, `parallel()`, `pipeline()`, `workflow()`,
+`phase()`, `log()`, `args`, `budget`, and file-scoped `require()` primitives, then changes only
+the one-shot agent transport.
+
+#### Codex
+
+```bash
+export GEAK_AGENT_BACKEND=codex
+export GEAK_CODEX_MODEL=<responses-api-model-id>
+export OPENAI_API_KEY=<set-outside-chat>
+# Optional custom OpenAI-compatible endpoint:
+# export OPENAI_BASE_URL=https://your-provider.example/v1
+
+node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
+  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
+```
+
+Codex runs with its native `workspace-write` sandbox. `GEAK_CODEX_EXTRA_ARGS` is the final
+operator override.
+
+#### Hermes
+
+```bash
+export GEAK_AGENT_BACKEND=hermes
+export GEAK_HERMES_PROFILE=haloloom
+export GEAK_HERMES_PROVIDER=openai-codex
+export GEAK_HERMES_MODEL=<model-id>
+export GEAK_HERMES_EXTERNAL_SANDBOX=1  # accepted only inside a detected container
+
+node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent hermes \
+  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
+```
+
+Hermes receives explicit terminal/file/web toolsets and no fallback from GEAK. Writable Hermes
+execution fails closed unless both the declaration and a concrete container marker are present.
+
+For an e2e handoff, set the same backend environment and run
+`python interface/run_e2e.py handoff.json result.json`. This transport port does not by itself
+claim gfx1151 qualification of the separate whole-model e2e workflow.
+
+Adding another CLI remains a registry entry. Architecture and safety details are in
+[`interface/runtime/DESIGN.md`](interface/runtime/DESIGN.md); run
+`node interface/runtime/selftest.mjs` and `node interface/runtime/conformance.mjs --audit-only`
+after any registry/runtime change.
+
 ---
 
 ## e2e_workflow — whole-model serving throughput ⭐

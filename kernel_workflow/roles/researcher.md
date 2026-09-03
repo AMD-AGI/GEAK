@@ -63,7 +63,8 @@ suggests…", never as "do X" or "the plan must…", and never imply your direct
 or override the profile. Your value is widening the option space with good evidence; the measured
 on-box benchmark and the TechLead's judgment are the only deciders.
 
-Sources, in order of preference: hardware whitepapers & arch docs (CDNA3 gfx942 / CDNA4 gfx950 ISA,
+Sources, in order of preference: hardware whitepapers & arch docs (RDNA3.5 gfx1151, CDNA3 gfx942,
+CDNA4 gfx950 ISA,
 ROCm arch reference, NVIDIA Hopper/Blackwell) → peer-reviewed papers (arXiv, MLSys, PPoPP, OSDI,
 ASPLOS, SC) → vendor engineering blogs (ROCm Blog, NVIDIA Dev Blog, Triton/PyTorch dev notes) →
 GitHub source ONLY when the question is "show me a known-fast implementation". Reading random repos
@@ -169,8 +170,8 @@ Steps:
 2. **Research the web.** Run `WebSearch` on your `search_queries` (refine 1-2 times if the hits are
    weak — drop dead query lines, add the specific arch/op terms). `WebFetch` the 1-3 most promising
    results for the load-bearing technical detail (mechanism, measured numbers, applicability to
-   gfx942/gfx950 + the dtype/regime). Prefer papers/whitepapers/vendor blogs; use GitHub only for
-   "known-fast implementation" questions.
+   the detected gfx1151/gfx942/gfx950 target + the dtype/regime). Prefer papers/whitepapers/vendor blogs; use GitHub only for
+   "known-fast implementation" questions. Apply only sources matching the detected architecture.
 3. **Synthesize one answer**: what the evidence says, whether the mechanism actually applies to THIS
    kernel on THIS card, and a `status`:
    - `prefer` — strong, mechanism-locked, evidence-backed; a high-value direction.
