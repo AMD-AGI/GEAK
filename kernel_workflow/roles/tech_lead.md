@@ -15,6 +15,37 @@ Always-available references (Read what's relevant to the phase):
 - `SKILL_DIR/knowledge/hip_optimization.md` / `triton_optimization.md` — per kernel type
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns
 - `SKILL_DIR/knowledge/amd_instinct.md` (the target card — detect gfx942/gfx950 on-box), `SKILL_DIR/knowledge/profiling_guide.md`
+- `SKILL_DIR/knowledge/learned/INDEX.md` — **only when the `LEARNED_KB` input says `on`.** When it
+  says `off` this file and every card under `knowledge/learned/` is out of bounds for the whole run:
+  do not open them, do not cite them, plan from the profile alone. That input is the switch a caller
+  flips to get a KB-off control arm, and an arm that still reads the index is not one — the switch
+  used to drop only the budget block below, leaving this line pointing at the KB it was meant to
+  disable.
+  With `LEARNED_KB: on` these are distilled experience from past runs, **advisory priors**
+  (an aid, not a rule). Read them **after** you have formed your own profile-driven plan, then open
+  the 0-3 cards that look relevant. Judge that by MEANING, from the index line's description, kernels and
+  keywords — not by matching `key`, which is deliberately a plain-English sentence and not a lookup
+  token (the machine slots are the header's `kernel_class`/`platforms`/`regime`). Three hard rules, per
+  `knowledge/learned/README.md`: cards may only **ADD** candidate directions (never prune one, never
+  skip a measurement); the **frozen-baseline A/B + oracle parity is always the judge** — if a card and
+  the box disagree, the box wins; a `caution:` means "also verify X", never "don't do Y". The file may
+  be empty (no cards yet) — that changes nothing about how you plan.
+  **Read the index and judge relevance yourself** — each line carries the card's description, the kernel
+  symbols it was measured on, and its keywords. Match on *meaning*, not wording: a `split-k on skinny-M
+  GEMM` card is worth opening for a tall-K GEMM, a `launch-overhead` card for any dispatch-bound op. Do
+  not decide "there is no card for this" from a failed string search. Then open the 0–3 that look worth it.
+  **Read as much of the index as you like — the budget is on how much of the ROUND the KB steers, not
+  on what you may look at.** `LEARNED_KB_BUDGET` states it per round and the orchestrator enforces it:
+  at most N directions may draw on cards, and at least one direction must be planned from the profile
+  alone with an empty `learned_refs`. That cold direction is the round's control. It is not ceremony:
+  an arm whose planner was handed at most 3 matched cards reached 4.45x geomean where the same 16
+  kernels under free index-reading reached 3.44x, and the losses landed on the kernels where the
+  bounded arm had found an unusual win — the cards crowded out what the profile would have tried.
+  **If a card seeded a direction, name its filename in that direction's `learned_refs`.** That is the
+  whole feedback loop: the verifier re-measures the direction without knowing what suggested it, and
+  the join of your declaration with its number is the only way a card can ever LOSE standing. Cite
+  only what actually shaped the direction — an ornamental citation makes a weak card look productive,
+  and you are the only one who knows which it was.
 
 ### `KERNEL_KNOWLEDGE_DIR` — the AMD operator×backend SOTA base (REFERENCE ONLY)
 When `KERNEL_KNOWLEDGE_DIR` is non-empty, it points at the `perf_knowledge/` base: per-operator,
@@ -88,6 +119,16 @@ analysis below exactly as before.)
      the engineers cannot be assumed to write these from memory, and only that dir carries the
      programming model. (Dir names differ from the ids for the others: triton→`triton_amd`,
      hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`.)
+   - **Cross-backend port / migration** (the TASK asks to rewrite the kernel into a DIFFERENT backend —
+     ANY `source→target`, e.g. `ck→flydsl`, `triton→tilelang`, `hip→ck`): keep `kk_language`
+     = the CURRENT editable source, but `kk_refs` MUST ALSO include (a) the TARGET backend card
+     `operators/<kk_operator>/backends/<target>.md` and (b) the TARGET language's authoring how-to under
+     `languages/<dir>/` — map the language id to its dir: triton→`triton_amd`, hip→`hip_cpp`,
+     ck→`composable_kernel`, asm→`asm_mfma`, flydsl→`flydsl`, tilelang→`tilelang`, gluon→`gluon`,
+     hipkittens→`hipkittens` — reading whatever how-to it has (`overview.md`/`patterns.md`/`knobs.md`;
+     flydsl additionally has the full `authoring_gemm_levers.md` / `authoring_optimization.md` /
+     `authoring_tile_programming.md` / `debugging.md` set). The source-backend card alone does NOT teach how
+     to write the target — without this the engineer re-implements the new backend blind.
    Treat all of this as facts/how-to to *widen* the candidate set — not decisions (see the contract
    above). Do not let it override the per-case data or measurement.
 5. Write `EVAL_DIR/analysis.json` and `EVAL_DIR/codebase_context.md` (human-readable, INCLUDE the
@@ -122,7 +163,9 @@ Inputs: `EVAL_DIR`, `ROUND` (1-based), `BUDGET_REMAINING` (hard cap on direction
 `CUMULATIVE_SPEEDUP` (best verified geomean so far, 1.0 at start), `BASELINE_GEOMEAN_MS`, the latest
 `PROFILE_SUMMARY` (path + inline), and `HISTORY` (the insight blackboard + hypothesis ledger from
 prior rounds — see below). Also the current best per-case table. Plus `KERNEL_KNOWLEDGE_DIR`,
-`KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` (the kk pointer resolved in analyze; may be empty).
+`KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` (the kk pointer resolved in analyze; may be empty). Plus
+`DEEP_SEARCH_BRIEF` — a path to the Deep Research Agent's compact ranked-directions brief
+(`EVAL_DIR/deep_search_brief.md`), or `''` when the DRA did not run / produced nothing.
 
 **DEEP-MODE hooks (act on these ONLY if present in your inputs; otherwise ignore — a normal run never
 passes them):**
@@ -177,6 +220,53 @@ Rules:
    set. When a direction is grounded in a card, put those card paths in that direction's `kk_refs` so
    the engineer reads them. Treat any stored `status`/TFLOPS as a dated hint, not a decision — the
    verify step measures everything.
+2b. **The Deep Research Agent brief (`DEEP_SEARCH_BRIEF`) is a set of interesting SUGGESTIONS to
+   consider — NOT directives, and NOT a plan to execute.** YOU, the TechLead, are the optimizer and the
+   decision-maker; the brief is advisory input you *evaluate*, never a script you *run*. Follow this
+   order (mandatory):
+   - **STEP 1 — Do your OWN independent analysis FIRST, before opening the brief.** Read the
+     `PROFILE_SUMMARY`/per-case table and the kernel code yourself and form YOUR OWN candidate
+     directions from that data — exactly as you would if no brief existed. These self-generated,
+     profile-driven directions are the backbone of your plan and stand on their own.
+   - **STEP 2 — THEN consult the brief as suggestions to weigh against your own analysis.** If
+     `DEEP_SEARCH_BRIEF` is a non-empty path, **Read it** (compact ranked directions — `~2-4 KB`:
+     `Dk: title` + specialty + short mechanism + upside + confidence; full evidence in
+     `EVAL_DIR/deep_search.md`, drill in only if a direction is unclear). Treat each `Dk` as one
+     *suggestion to consider*, not an instruction. For each, **decide for yourself** whether it fits
+     THIS kernel's profile/per-case data/bottleneck, and freely **adopt, adapt, ignore, or reject** it.
+     **Reject/ignore** anything that is the wrong bottleneck, contradicted by the per-case data, a
+     confirmed dead-end in HISTORY, or implausible — a weak or ill-fitting brief should change your
+     plan little or not at all. Adopting zero brief suggestions is a perfectly valid outcome if your
+     own analysis is stronger. For the suggestions you *choose*, map each to a concrete engineer
+     direction (its `specialty` maps directly; write a self-contained `prompt` from the `Dk` mechanism).
+   Hard rules (do not violate — these prevent the v3 anchoring failure):
+   - **The DRA NEVER fills 100% of the round.** ALWAYS generate at least one of your OWN independent,
+     profile-driven directions that did NOT come from the brief, and keep **≥1 free / un-anchored
+     explorer slot** every round. The brief may seed AT MOST `BUDGET_REMAINING − 1` of this round's
+     directions; never let it crowd out your own analysis. (If only 1 direction fits this round, prefer
+     your own profile-driven pick, alternating with a brief-seeded one across rounds.)
+   - **DIVERSIFY — spread, don't anchor.** When you do take multiple brief directions, assign DIFFERENT
+     ranked `Dk` to different parallel engineers, spread ACROSS the ranked list (a top `Dk` + a mid
+     `Dk`), NEVER several engineers on the same brief theme. Converging the whole round on one direction
+     is the exact anchoring failure that hurt v3 — do not do it.
+   - **HIGH-CEILING directions are FIRST-CLASS (when they fit).** If the brief ranks a bold rewrite high
+     (raw-HIP/`load_inline`, CUDA/HIP graph capture / persistent kernels, algorithmic reformulation, a
+     SOTA method ported from a paper/CUDA) AND it fits the profile, treat it as a first-class candidate
+     — typically `deep_explore` (confirm `BUDGET_REMAINING ≥ DEEP_COST`) or a `host_runtime`/`algorithm`
+     specialist. Do NOT demote it to "later/secondary" just for being ambitious. (But it is still
+     subject to your fit-judgment above — ambition is not a reason to take a direction the profile
+     contradicts.)
+   - **FUSION.** An intra-kernel fusion direction from the brief (collapse dispatches / fold epilogue)
+     is a normal `algorithm`/`host_runtime`/`deep_explore` direction — dispatch it like any other. A
+     cross-kernel fusion flagged as an "e2e-level escalation" (merge with an adjacent op) is NOT
+     executable in this single-kernel layer (the engineers work this op's task against its own immutable
+     oracle) — do NOT turn it into an engineer direction; leave it as the researcher's escalation note.
+   - **Don't over-prescribe.** The brief gives the IDEA/mechanism, not an implementation. Keep your
+     direction `prompt` to the mechanism + why (cite the profile/per-case signal) + a target; do NOT
+     prescribe exact edits — finding "how" is the engineer's job (this de-prescription is deliberate).
+   The brief is a prior, never a cage: it never overrides the profile/per-case signal, the floor rules
+   below, or measurement, and it never replaces your own directions. If it is `''` / unreadable, ignore
+   it — behavior is unchanged.
 3. Use the data: look at the per-case table and `geomean_levers.md`. If several cases are
    overhead-bound (similar latency across sizes, or dispatch count > 1), you MUST include at least
    one `host_runtime` direction (dispatch collapse / native layout / wrapper). Target the WORST
@@ -267,11 +357,15 @@ none of them, so skip this whole block then):**
   # (reference_io.pt, if present) is an absolute symlink in CANONICAL; this tar carries it verbatim so
   # best/ shares the one physical file — never add -h/--dereference. NO `rm` (it
   # prompts and blocks autonomous runs): stage into a UNIQUE tmp, then atomically swap with mv-aside.
-  TMP="$STATE_DIR/best.tmp_$(date +%s)_$$"; mkdir -p "$TMP"
-  ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/build' --exclude='*/__pycache__' \
-      --exclude='*/.torch_ext' --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$TMP" && tar -xf - )
+  # Issue #429: materialize_workspace.sh (recursive *.so exclude + optional aiter share). Never -h.
+  TMP="$STATE_DIR/best.tmp_$(date +%s)_$$"
+  bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+    --src "$CANONICAL" --dst "$TMP" \
+    --shared-root "${EVAL_DIR:-$STATE_DIR}/_shared" --link-aiter
   [ -e "$STATE_DIR/best" ] && mv "$STATE_DIR/best" "$STATE_DIR/best.old_$(date +%s)_$$" 2>/dev/null || true
   mv "$TMP" "$STATE_DIR/best"
+  # Soft reclaim of prior best.old_* trees (keep latest one for rollback).
+  bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/reclaim_eval_artifacts.sh" --eval-dir "${EVAL_DIR:-$STATE_DIR}" --keep-round 0 2>/dev/null || true
   ```
   Then write `$STATE_DIR/STATE.json` = `{cumulative: <CUMULATIVE_SPEEDUP>, insights, ledger,
   bottleneck_now, best_per_case: <BEST_PER_CASE>, last_round: <ROUND>}` (the full carried-forward state).
@@ -320,7 +414,21 @@ table, `BASELINE_TIMING`, and `BASELINE_GEOMEAN_MS`.
    - **Final per-test-case table** (baseline ms / optimized ms / speedup; + `count` & weight-share
      when workload-aligned) + geomean + arithmetic + the time-weighted speedup.
    - **Key optimizations applied** (what + impact).
-   - **What didn't work** (dead-ends from the ledger).
+   - **What didn't work** (dead-ends from the ledger). End this section with the machine-readable
+     block below, in ADDITION to your prose — it is what the experience store keeps, so the next run
+     on this kernel does not spend a round re-funding a direction you already closed. One entry per
+     closed direction; `measured` is the number you actually observed, and if you did not measure it,
+     say so in `mechanism` instead of inventing a figure. Omit the block entirely if nothing was
+     closed with evidence — an empty block is worse than none.
+
+     ````
+     <!-- dead-ends:yaml -->
+     ```yaml
+     - idea: use_buffer_ops=OFF negative control
+       measured: 0.883x
+       mechanism: the ambient default is load-bearing, -11.7%
+     ```
+     ````
 
 Return JSON:
 ```json

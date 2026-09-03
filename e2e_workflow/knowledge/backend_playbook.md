@@ -33,6 +33,16 @@ experience; treat the seed as priors, not gospel — the unittest is the judge.
 | activation (silu/gelu + mul) | fused act_and_mul (aiter/triton) | collapse into the producing GEMM epilogue if possible |
 | elementwise/fill/cast/copy | fuse away (host_runtime) / cuda-graph | usually shouldn't be its own kernel |
 
+## Roofline prior calibration (predicted vs measured — one line per direction)
+- 2026-08-19 · gfx950 vLLM mxfp4 grouped fused-MoE (`_matmul_ogs...swiglu`, gpt-oss-120b, decode): roofline
+  predicted `attainable_speedup=1.0`, `expected_e2e_gain_pct=0.0` (memory-bound, `roofline_pct` 0.95–1.0,
+  headroom `saturated`, confidence **low**). MEASURED e2e **+26.9%** via a whole-file Triton rewrite. The
+  device-time byte/FLOP roofline model was WRONG for this seam — it cannot see the win, which is
+  host launch-overhead / decode-seam collapse, not a byte reduction. Correct behavior held (confidence was
+  low → not ranked on, head not dropped). Lesson: for a fused MoE dispatcher at decode, do NOT trust a
+  `saturated`/`attainable=1.0` roofline verdict to size the opportunity; the launch-overhead win is invisible
+  to it. This is the exact "measured EXCEEDS predicted attainable" failure mode — flag loudly.
+
 ## How to use this in a run
 1. Architect reads the Profiler Top-N classification + shapes.
 2. For `library_*` kernels → hand to Config Tuner with the ranked swaps above (no source edit).

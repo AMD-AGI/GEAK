@@ -21,7 +21,7 @@ e.g. `--attention-backend triton`).
 ## Discipline
 - **One axis at a time.** Change a single flag/env, measure, keep or revert. Never sweep two axes in
   one launch or you can't attribute the delta.
-- Measure with the shared bench script (warm server, repeats, median + spread). A win must exceed the
+- Measure with the shared bench script using an isolated-server search replica. A win must exceed the
   noise band to count.
 - **Always check output parity** for any change that can alter numerics (quant, kv-cache-dtype,
   a different attention/GEMM backend): greedy/temp=0 fixed-seed, diff vs baseline. A faster wrong
@@ -35,8 +35,11 @@ e.g. `--attention-backend triton`).
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `GPU_ID`, `WORKLOAD`,
 `BASELINE_THROUGHPUT`, `NOISE_BAND_PCT`, `CONFIG_DIRECTIONS` (the Architect's ranked axes + swaps,
-each with target kernels + rationale), `CURRENT_FLAGS`/`CURRENT_ENV` (the accepted config so far),
-`ENABLE_FP8` (bool; gates the FP8 axis), `SKILL_DIR`.
+each with target kernels + rationale), `CURRENT_FLAGS`/`CURRENT_ENV`/`CURRENT_OVERLAY`
+(the accepted stack so far),
+`MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, `EFFECTIVE_CONFIG_DIGEST`,
+`ENABLE_FP8` (bool; gates the FP8 axis), `SKILL_DIR`. On a warm-start replay you additionally get
+`MERGE_OVERRIDES` / `MERGE_ADDED` — see "A direction that arrives pre-merged" below.
 
 > The exact flags/env are **backend-specific** (e.g. sglang `--attention-backend` + `SGLANG_USE_AITER`
 > vs vllm `--attention-backend` enum + `VLLM_ROCM_USE_AITER`). The Architect's `CONFIG_DIRECTIONS`
@@ -46,13 +49,19 @@ each with target kernels + rationale), `CURRENT_FLAGS`/`CURRENT_ENV` (the accept
 > `BACKEND=<backend>` to bench_e2e.sh.
 
 For EACH direction, in the Architect's order:
-1. Build the candidate config = current accepted config + this ONE change.
+1. Build the candidate config = current accepted config + this ONE change. **Merge it key by key,
+   never by concatenation.** If the flag or env var is already in the current config, REPLACE its
+   value in place; do not let the same key appear twice. Two occurrences are resolved by argparse
+   (and by `env`) as last-wins, so a duplicated key hands the outcome to the order you happened to
+   write the string in, and the losing value vanishes with nothing in any log to say it did.
+   The only exception is a genuinely repeatable flag such as `--lora-path`.
 2. Launch + bench via the shared script:
    ```bash
    # SERVING config MUST match the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/config/<dir_id>" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
-   ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=3 PROFILE=0 \
-   EXTRA_SERVER_ARGS="<current flags + this flag>" EXTRA_ENV="<current env + this env>" \
+   ISL=<isl> OSL=<osl> CONC=<conc> PROFILE=0 \
+   GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=search REPLICAS="${REPLICAS:-1}" \
+   OVERLAY_PYTHONPATH="$CURRENT_OVERLAY" EXTRA_SERVER_ARGS="<current flags, merged with this flag>" EXTRA_ENV="<current env, merged with this env>" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/cfg_<dir_id>.log"
    ```
 3. Read `bench_summary.json`. delta% = `(cand_median - current_median)/current_median*100`.
@@ -62,6 +71,32 @@ For EACH direction, in the Architect's order:
 6. (GEMM tuning is NOT a config axis — it lives in the head-kernel track now.)
 
 Record every trial (kept + rejected) in `EVAL_DIR/config/sweep_results.json`.
+
+### A direction that arrives pre-merged (warm-start replay)
+
+A direction whose `axis` says *compound (recovered configuration — do not split)* comes from the
+knowledge base, and the orchestrator has **already merged it with `CURRENT_FLAGS`/`CURRENT_ENV`, key
+by key**. Its `flags`/`env` are the complete strings to run.
+
+- **Pass them VERBATIM.** Do not append `CURRENT_FLAGS`/`CURRENT_ENV` — those are given to you only
+  so you can see what the merge changed. Re-combining puts the duplicate keys straight back.
+- `MERGE_OVERRIDES` is `[{flag, baseline_value, recalled_value}]`: the knobs where the record and
+  this run's baseline asked for different things, and where the **recorded** value was taken because
+  it is the thing under test. **This is the first place to look when the replay comes back neutral**
+  — a stored config that shows no delta on a box whose baseline already differs from it in four
+  knobs is usually telling you about the four knobs, not about the record.
+- `MERGE_ADDED` is what the record contributed that the baseline did not have at all.
+- Verify in the server log that the OVERRIDDEN knobs took the recorded value, not the baseline's.
+  "The flag was honoured" is not enough; a duplicate key is honoured too, just with the wrong value.
+
+If you are asked for a **repair** pass, the merged config produced no measurement at all. Read your
+own launch log, classify each recorded knob as `upstream_gone` (this build does not have it),
+`conflicts_with_baseline` (it has it, but the value cannot hold together with something the baseline
+pins) or `env_unsupported`, drop or adapt the **minimum** needed to get a running server, bench once,
+and return the `repair` object described below. Never drop a knob you did not have to: every one you
+drop makes the number you report about less of the record. If it still will not come up, say so and
+return `best_throughput_tok_s: 0` — an honest "cannot run here" beats a number from a configuration
+that is no longer the record.
 
 ### Scope: service-level switches ONLY (GEMM tuning is NOT done here)
 You handle pure server-level env/flags that need NO op isolation. **GEMM tuning (aiter per-shape DB,
@@ -77,9 +112,9 @@ even engage the live GEMM path). Your axes:
   `--kv-cache-dtype fp8_e4m3`. Do NOT use byte parity here — run a small task-accuracy probe
   (e.g. a few gsm8k / translation prompts, compare answer quality, not bytes) and keep ONLY if both
   faster AND accuracy within tolerance. Record it as an accuracy-gated accept, never a silent one.
-Each is still "one axis at a time + measure + parity/accuracy gate + compound". Use the tight
-measurement the Integrator uses (E2E_REPEATS, interleaved A/B, non-overlap) when a delta is near the
-0.5% band.
+Each is still "one axis at a time + measure + parity/accuracy gate + compound". Use the same
+isolated-server search-replica protocol as the Integrator; the Director's independent validation
+replicas arbitrate a borderline final result.
 
 Return JSON:
 ```json
@@ -93,6 +128,18 @@ Return JSON:
   "accepted_env": "<final kept extra env KEY=VAL ...>",
   "best_throughput_tok_s": 0.0,
   "throughput_speedup_vs_baseline": 1.0,
-  "summary": "what worked, what didn't, what to re-profile against"
+  "summary": "what worked, what didn't, what to re-profile against",
+  "repair": {
+    "attempted": true,
+    "classification": "upstream_gone|conflicts_with_baseline|env_unsupported|mixed|unknown",
+    "dropped_flags": ["--flag"],
+    "reason_by_flag": {"--flag": "why it had to go"},
+    "launch_error": "the line that actually killed the server"
+  }
 }
 ```
+
+`repair` belongs ONLY to a warm-start repair pass — omit the key entirely on every other sweep. It
+is read in place of guessing at your prose: `conflicts_with_baseline` is what tells the store that
+the record failed to fit THIS box rather than that the record is wrong, which is the difference
+between a note in its ledger and a step toward retiring it.

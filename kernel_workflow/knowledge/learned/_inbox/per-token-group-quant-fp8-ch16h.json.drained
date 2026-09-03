@@ -1,0 +1,140 @@
+{
+  "run_id": "_per_token_group_quant_fp8-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "_per_token_group_quant_fp8"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "wrapper-object-relaunch-frozen-launch-config",
+      "description": "Export a launcher object with the runner's __getitem__(grid) shape to re-tile a frozen num_warps=1 launch: 2.29x geomean, bit-exact, on memory-bound fp8 quant",
+      "keywords": [
+        "launch-config",
+        "wrapper-relaunch",
+        "quantize-cast",
+        "fp8",
+        "memory-bound",
+        "num-warps",
+        "tiling",
+        "bit-exact",
+        "cache-modifier"
+      ],
+      "kernels": [
+        "_per_token_group_quant_fp8"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantize_cast",
+      "regime": "memory-bound",
+      "key": "per-token group fp8 quantize/cast in Triton on gfx950, where the caller pins grid and num_warps at the call site and the tile is therefore not the author's to choose",
+      "lifecycle": "active",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "2.29x geomean isolated vs frozen baseline, bit-exact; per-case 3.10x and 3.23x on the two large token-count cases, 1.19x on the tiny case; nameplate HBM utilisation ~22% -> ~62%",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L2",
+      "roofline": "memory-bound ~22% -> memory-bound ~62% of nameplate HBM bandwidth",
+      "verified_on": "2026-07-30",
+      "last_seen": "2026-08-12",
+      "title": "Reinterpret a frozen launch through an exported wrapper object",
+      "lever": "when the runner resolves an exported symbol and calls it as kern[grid](args), the launch config is reachable: export a wrapper OBJECT whose __getitem__(grid) returns a callable with the identical signature, and have it relaunch an inner jit kernel under your own grid, tile, num_warps and num_stages.",
+      "apply": "inner tile = one program per 32 token-rows x one group width, num_warps=4, num_stages=1, .cs cache modifier on the quantized store only (not on loads, not on the fp32 scale store); expose every knob as an env var so each is A/B-able without a rebuild.",
+      "verify": "oracle parity should stay bit-exact (the arithmetic is unchanged, only the mapping); confirm the config actually engaged by dumping the resolved launch params, and track fraction-of-nameplate bandwidth rather than the ratio alone.",
+      "pitfall": "diff came back empty when generating the patch → the run directory was gitignored → build the patch by diffing against the canonical source instead of via the repo index.",
+      "caution": "also verify the wrapper's outer signature matches the caller's exactly, and re-check parity for a dtype-conversion path folded in at the same time (a fnuz->native-OCP fp8 reinterpret with value correction was bit-exact here but is a separate claim).",
+      "source": "run _per_token_group_quant_fp8-ch16h, 16h per-kernel time-budget campaign, 2026-07-30"
+    },
+    {
+      "name": "bandwidth-knobs-closed-near-nameplate-hbm",
+      "description": "Above ~60% of nameplate HBM, six bandwidth directions all returned ~1.00x on an fp8 quant cast; the store already lowered to one 128-bit instruction",
+      "keywords": [
+        "memory-bound",
+        "quantize-cast",
+        "fp8",
+        "closed-axis",
+        "cache-modifier",
+        "num-warps",
+        "tiling",
+        "store-vectorization",
+        "assembly-inspection"
+      ],
+      "kernels": [
+        "_per_token_group_quant_fp8"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantize_cast",
+      "regime": "memory-bound",
+      "key": "streaming fp8 quantize/cast on gfx950 already running near the practical HBM ceiling, deciding whether another memory round is worth spending",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "~1.00x (inside run-to-run noise) on both large token-count cases across six directions - wider num_warps, larger and smaller tiles, store cache modifiers, load hints, num_stages, flat 1D cross-row tiling, manual store repack; none cleared the >2%-on-both-cases gate at ~62-63% of nameplate HBM bandwidth",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L1",
+      "roofline": "~62-63% of nameplate HBM bandwidth, i.e. at the practical ceiling for a 3-pass traffic mix (bf16 read + fp8 write + fp32 scale)",
+      "verified_on": "2026-07-30",
+      "last_seen": "2026-08-12",
+      "title": "Near the practical HBM ceiling the bandwidth knobs are a closed axis",
+      "lever": "compute fraction-of-nameplate bandwidth from the traffic the op has to move before planning a memory round; once it sits around 60%+, the remaining gap is read/write turnaround plus the fixed traffic mix, so a knob sweep is a low-yield place to spend a round and the budget is better aimed at the launch/host side.",
+      "apply": "if a store-side idea survives that check, settle it from the ISA dump before writing a candidate: read the generated store width, VGPR/SGPR counts, occupancy and spill count.",
+      "verify": "gate any memory candidate on beating the frozen baseline by a margin on EVERY large case, not on a geomean - four of these tied on one case and lost on the other.",
+      "pitfall": "store vectorization looked wide open → the ISA showed the quantized store already lowering to one 128-bit buffer_store_dwordx4 because the output tile is contiguous and gets max-width coalescing → a manual uint32/uint4 repack cannot exceed that width and only adds shift/or work, so it can at best tie.",
+      "caution": "also verify the ceiling claim on your own shapes when counters are unavailable - here bandwidth was derived analytically because the profiler counters were uncollectible, and the derivation was only cross-checked against one earlier measurement.",
+      "source": "run _per_token_group_quant_fp8-ch16h, 16h per-kernel time-budget campaign, 2026-07-30"
+    },
+    {
+      "name": "small-case-floored-by-harness-timing-bracket",
+      "description": "A tiny case that will not move can be floored by the measurement bracket itself, not by the GPU; graph capture and persistent grids both scored ~1.00x there",
+      "keywords": [
+        "launch-bound",
+        "launch-overhead",
+        "closed-axis",
+        "small-batch",
+        "hip-graph",
+        "persistent-grid",
+        "quantize-cast",
+        "measurement"
+      ],
+      "kernels": [
+        "_per_token_group_quant_fp8"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "launch-bound",
+      "key": "a tiny-shape case inside a weighted per-case score on gfx950, where per-call host timing dominates the measured window and caps the achievable geomean",
+      "lifecycle": "active",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "the smallest case stayed at 1.19-1.25x while the two large cases reached 3.10x and 3.23x; graph capture/replay bought ~12% pure throughput on that case but +0.3% scored (noise) and regressed the large cases 4-7%; persistent grid-stride was faster-or-equal never faster on it",
+      "attempts": 2,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "cost": "L2",
+      "verified_on": "2026-07-30",
+      "last_seen": "2026-08-12",
+      "title": "A stuck tiny case may be floored by the timing bracket, not the GPU",
+      "lever": "before spending rounds on dispatch levers for a small shape, measure it twice - once inside the scored bracket and once as pure back-to-back throughput; if the two disagree, the floor is host-side per-call overhead in the bracket and it bounds the best geomean the weighting can ever reach, which is worth knowing at plan time.",
+      "apply": "a graph capture/replay wrapper is still worth one try, but size-gate it to the small shape and treat the scored delta, not the throughput delta, as the result.",
+      "verify": "compare the same candidate under identical warmup with a few repetitions per config, and check the large cases separately - a small-shape win here came with a regression on both large ones.",
+      "pitfall": "a persistent grid-stride rewrite was bit-exact yet never beat the plain one-program-per-row launch → the small case was not ramp-bound at all, so cutting live workgroups only removed parallelism that was hiding tiny compute while the grid-stride divmod added work → reverted, no patch.",
+      "caution": "also verify that any apparent win is not a warmup artifact of the replay path before banking it.",
+      "source": "run _per_token_group_quant_fp8-ch16h, 16h per-kernel time-budget campaign, 2026-07-30"
+    }
+  ]
+}

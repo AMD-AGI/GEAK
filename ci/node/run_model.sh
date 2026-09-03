@@ -55,10 +55,15 @@ log "weights=$MODEL_PATH inferencex=$INFERENCEX_PATH"
 material_audit() {
   local d="$MODEL_DIR" miss_opt=0 name val
   local analysis kc tlr trace
-  analysis="$(find "$d/kernel-agent" -name analysis.md          -path '*tracelens*' 2>/dev/null | head -1)"
-  kc="$(      find "$d/kernel-agent" -name kernel_candidates.json                    2>/dev/null | head -1)"
-  tlr="$(     find "$d/kernel-agent" -name tracelens_report.json -path '*tracelens*' 2>/dev/null | head -1)"
-  trace="$(   find "$d/runs/roofline" -name torch_trace -type d                      2>/dev/null | head -1)"
+  # -print -quit || true: this table is advisory (missing OPTIONAL = WARN, never
+  # fatal), but `find <missing-dir> | head -1` under `set -euo pipefail` exits
+  # non-zero (missing dir, and the SIGPIPE when head closes the pipe early) and
+  # would abort the whole run before the table prints. -print -quit stops at the
+  # first match without the pipe; || true absorbs a missing optional directory.
+  analysis="$(find "$d/kernel-agent" -name analysis.md          -path '*tracelens*' -print -quit 2>/dev/null || true)"
+  kc="$(      find "$d/kernel-agent" -name kernel_candidates.json                    -print -quit 2>/dev/null || true)"
+  tlr="$(     find "$d/kernel-agent" -name tracelens_report.json -path '*tracelens*' -print -quit 2>/dev/null || true)"
+  trace="$(   find "$d/runs/roofline" -name torch_trace -type d                      -print -quit 2>/dev/null || true)"
   echo "-------------------- material audit: $MODEL_KEY --------------------"
   printf '  %-8s %-30s %s\n' CLASS ARTIFACT STATUS
   printf '  %-8s %-30s %s\n' REQUIRED handoff.json OK

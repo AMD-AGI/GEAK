@@ -1,0 +1,142 @@
+{
+  "run_id": "moe_stage2-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "moe_stage2"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "mfma32-plus-a-lds-pad-ck-moe-blockscale-second-gemm",
+      "description": "Widen MFMA 16x16->32x32 on a CK block-scale MoE grouped GEMM (with matching host weight re-preshuffle) and pad A-LDS: ~1.25x, bit-exact.",
+      "keywords": [
+        "mfma",
+        "lds-padding",
+        "bank-conflict",
+        "moe",
+        "block-scale",
+        "composable-kernel",
+        "fp8",
+        "preshuffle",
+        "grouped-gemm"
+      ],
+      "kernels": [
+        "moe_stage2"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "fp8 block-scale MoE second grouped GEMM on gfx950, Composable-Kernel 2-stage codegen behind an aiter JIT include path (gridwise frozen, only the instance .cuh is editable)",
+      "lifecycle": "active",
+      "cost": "L1",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.25x cumulative isolated vs frozen baseline, bit-exact; per-case 1.18x on the smallest token case and 1.29x/1.30x on the two larger cases (non-overlapping)",
+      "roofline": "compute-bound 0.24 -> 0.31 of the empirical roof",
+      "attempts": 2,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "source": "run moe_stage2-ch16h, 2026-08-12, 16h budget, rounds R2 and R6",
+      "title": "MFMA-32 plus A-LDS pad on a frozen-gridwise CK block-scale MoE GEMM",
+      "lever": "On the V1 (M64/N128/K128) block-scale instance, widen the XDL/MFMA shape from 16x16 to 32x32, then de-conflict A-side LDS reads with one extra row of A-block LDS padding.",
+      "apply": "Both live in the editable codegen instance header + its generator: flip the MFMA size and re-preshuffle the second-GEMM weights on the host to the layout the wider MFMA expects; add the A-block-LDS-extra-M=1 knob.",
+      "stack": "stack: total 1.25x isolated (bit-exact) = two directions compounded\n  - 1. compute.mfma-32 + host weight re-preshuffle - 1.26x standalone (verified) - carries the win\n  - 2. mem.lds-pad A-block extra-M 0->1 - +1.4% on top of (1) (verified) - only pays once the MFMA-32 read pattern exists\n  - note: attribution is incremental in landing order; (2) was not measured alone.",
+      "verify": "Re-time every candidate against the baseline frozen at benchmark time, and confirm oracle parity is bit-exact; grep the built artifact for the config/marker delta to prove the instance actually changed.",
+      "pitfall": "Rounds that improved were reported as not-improved by the evaluator -> verdict scraping missed the marker -> grep-confirm the config delta and diff against the canonical instance before discarding a round.\npitfall: MFMA widened without re-preshuffling the host-side weights -> operand layout mismatch -> re-preshuffle to the pairing the wider MFMA expects.",
+      "caution": "Also verify the tile's M-per-block still equals the expert-sort granularity: a larger M-per-block let one tile span two expert groups and silently fetched the wrong expert's weights (error ratio ~0.7)."
+    },
+    {
+      "name": "occupancy-and-host-launch-closed-on-compute-bound-moe-grouped-gemm",
+      "description": "On a register-bound MoE grouped GEMM already at 3 wg/CU, occupancy, K-fill and host-launch directions all returned ~1.00x; read occupancy from the ISA first.",
+      "keywords": [
+        "occupancy",
+        "launch-overhead",
+        "hip-graph",
+        "register-pressure",
+        "moe",
+        "grouped-gemm",
+        "composable-kernel",
+        "isa-inspection",
+        "anti-pattern"
+      ],
+      "kernels": [
+        "moe_stage2"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "both",
+      "key": "compute-bound fp8 MoE grouped GEMM on gfx950 dispatched through a JIT-compiled aiter/CK .so, where the harness times only the GPU region",
+      "lifecycle": "active",
+      "cost": "L1",
+      "type": "anti-pattern",
+      "confidence": "★",
+      "effect": "~1.00x across four directions: LDS halving (reaches 2 wg/CU) flat geomean, K-per-block doubling flat, host dispatch collapse +0.36%, HIP-graph capture/replay +0.75% - both host deltas inside the smallest case's spread",
+      "attempts": 4,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "source": "run moe_stage2-ch16h, 2026-08-12, 16h budget, four dead-end directions",
+      "title": "Measure achieved occupancy from the ISA before spending a round on it",
+      "lever": "Before opening an occupancy or host-latency direction on a JIT-dispatched grouped GEMM, read the achieved occupancy off the shipped binary; here it was already at the register-bound ceiling (3 wg/CU), so the whole axis was a true negative.",
+      "apply": "Pull the .kd note out of the AMDGPU ELF inside the loaded JIT .so (llvm-readelf --notes) and read VGPR/AGPR counts, spill, LDS bytes and block size, then divide the arch register file by the rounded VGPR count.",
+      "verify": "Interleave host-side A/B probes in the same process so drift cannot manufacture a delta, and compare the resulting geomean against the frozen baseline rather than against a fresh re-time.",
+      "pitfall": "Profiler VGPR counter disagreed with the descriptor (76 vs 148) -> sampled counter, not the allocation -> take the register count from the .kd descriptor.\npitfall: the compiler's min-occupancy attribute read as a cap -> it is a floor the hardware can exceed -> compare it with the achieved value before believing a low number.",
+      "caution": "Also verify what the harness clock covers: when it brackets only the GPU region, host dispatch and graph-replay work sit off the measured critical path even where they would help end to end."
+    },
+    {
+      "name": "prove-instance-reachability-before-a-precision-format-round",
+      "description": "Trace dispatch keys to the concrete template instance before authoring a low-precision-B swap: a loose parity gate is worthless if the instance cannot be built.",
+      "keywords": [
+        "reachability",
+        "fp4",
+        "mxfp4",
+        "quantization",
+        "codegen",
+        "composable-kernel",
+        "moe",
+        "grouped-gemm",
+        "anti-pattern",
+        "dispatch"
+      ],
+      "kernels": [
+        "moe_stage2"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "both",
+      "key": "swapping the B operand to a narrower format on a block-scale grouped GEMM whose gridwise and quant layout are pinned by the harness, gfx950 CK/aiter codegen",
+      "lifecycle": "active",
+      "cost": "L2",
+      "type": "anti-pattern",
+      "confidence": "★",
+      "effect": "0 rounds burned and ~1.00x available on this axis for every case: the mixed fp8-A x 4-bit-float-B instance the dispatch keys would select is not emitted by the codegen dtype map, so no build ever existed to measure",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "source": "run moe_stage2-ch16h, 2026-08-12, 16h budget, step-1 reachability check",
+      "title": "Reachability check beats a loose parity gate",
+      "lever": "When a loose correctness tolerance seems to license a narrower B format, first trace the harness's pinned quant mode and scale granularity through the heuristic dispatch to the exact template instance, and check the codegen admits that dtype pair.",
+      "apply": "Follow scale granularity (per-1x128 fp32 vs per-1x32 E8M0 MX) and A/B dtypes into the device-op selection: the two live on separate frozen gridwise templates, and the generator ties B's dtype to A's except for one integer-4 case, so the mixed pair is never emitted.",
+      "verify": "Compile an #error canary into the file you believe you are editing and confirm the build breaks; if it compiles clean and outputs stay bit-exact, that tree is a decorative mirror and the JIT include path reads a different one.",
+      "pitfall": "A mirrored source tree looked like the modifiable surface -> the canary compiled clean and every case stayed bit-exact -> the edits belong in the codegen tree the JIT include path actually consumes.",
+      "caution": "Also verify the traffic cut lands on the critical path: on a dependency-latency-bound dequant/accumulate/epilogue chain the extra unpack work can absorb what the narrower operand saves."
+    }
+  ]
+}

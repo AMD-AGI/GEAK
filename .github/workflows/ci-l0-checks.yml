@@ -37,6 +37,16 @@ jobs:
         continue-on-error: true
         run: ruff check .
 
+      # Blocking, unlike ruff: the shell here is not advisory decoration, it is the
+      # server-kill contract (server_teardown.sh) and the dispatcher that must find it.
+      # A parse error there means the EXIT trap never binds and a served model is left
+      # holding its VRAM and port. `bash -n` catches that in milliseconds; no shellcheck
+      # dependency, so the job keeps its no-install-beyond-ruff shape.
+      - name: bash syntax check (e2e shell contract)
+        run: |
+          find e2e_workflow/scripts kernel_workflow/scripts -name '*.sh' -print0 \
+            | xargs -0 -n1 bash -n
+
   pytest:
     name: Python unit tests + coverage
     runs-on: ubuntu-latest
@@ -45,8 +55,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install pytest pytest-cov coverage
-      # Stdlib-only tests (import run_e2e via importlib; no claude_agent_sdk / GPU).
+      # pyyaml is required, not optional: run_e2e.py parses the recipe envs: block
+      # with it, and the recipe-env tests assert the string-preserving BaseLoader
+      # path (typed scalars, folded multi-line EXTRA_<BE>_ARGS). Without it those
+      # tests would silently exercise the degraded line-scanner fallback instead.
+      # The experience-store tests read/write the on-disk meta.yaml format (that
+      # module degrades to JSON without pyyaml, but then the test would be
+      # asserting a format the real store never uses).
+      - run: pip install pytest pytest-cov coverage pyyaml
+      # CPU-only tests (no claude_agent_sdk / GPU); the expert-skill test also uses PyYAML.
       # Files are listed explicitly rather than discovered, so that adding a test
       # under examples/ (torch/triton + GPU) can never silently break this job.
       #
@@ -57,12 +74,26 @@ jobs:
       # --cov-fail-under=0 defers the gate to the dedicated step below, so a
       # coverage shortfall is reported as its own named, legible failure rather
       # than as trailing output on the test step.
+      #
+      # test_effective_config / test_bench_replica_lifecycle arrived with the Hyperloom
+      # alignment work and test_roofline_skill / test_vllm_adapter_profiler_config predate
+      # it; none were ever added here. Because the list is explicit, a test file that is
+      # never named is a test file that never runs — the same trap the contract checks
+      # below were added to close. They also measure the modules that were dragging the
+      # coverage gate down, which is what a suite nothing runs looks like from the outside.
       - name: unit tests (no GPU)
         run: |
           python -m pytest -q --cov --cov-report=term --cov-fail-under=0 \
             interface/test_run_e2e_recovery.py \
+            interface/test_run_e2e_tuning_result.py \
             interface/test_run_e2e_alignment.py \
             interface/test_run_e2e_dispatch.py \
+            interface/test_run_e2e_recipe_env.py \
+            interface/test_run_e2e_margin.py \
+            interface/test_run_e2e_measurement_basis.py \
+            interface/test_run_e2e_kb_write_tuned.py \
+            e2e_workflow/scripts/tests/test_magpie_launcher_extra_args.py \
+            e2e_workflow/scripts/tests/test_bench_trust_remote_code.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py \
             e2e_workflow/scripts/tests/test_run_correctness_gate.py \
             e2e_workflow/scripts/tests/test_parse_regime_sources.py \
@@ -70,10 +101,57 @@ jobs:
             e2e_workflow/scripts/tests/test_parse_profile.py \
             e2e_workflow/scripts/tests/test_capture_shapes.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
+            e2e_workflow/scripts/tests/test_seam_trace.py \
+            e2e_workflow/scripts/tests/test_kernel_selection.py \
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \
             e2e_workflow/scripts/tests/test_harness_lib.py \
+            e2e_workflow/scripts/tests/test_leg_runner.py \
+            e2e_workflow/scripts/tests/test_server_teardown.py \
+            e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
+            e2e_workflow/scripts/tests/test_tuning_skillset_sync.py \
+            ci/node/test_run_model_material_audit.py \
+            perf_knowledge/expert_skills/_contribute/test_flydsl_skill_portability.py \
+            perf_knowledge/expert_skills/_contribute/test_tuning_index.py \
+            e2e_workflow/scripts/tests/test_e2e_store.py \
+            e2e_workflow/scripts/tests/test_kb_retract.py \
+            kernel_workflow/scripts/tests/test_experience_store.py \
+            kernel_workflow/scripts/tests/test_eval_storage_reclaim.py \
+            kb/tests/test_store_local.py \
+            kb/tests/test_attest.py \
+            kb/tests/test_identity.py \
+            kernel_workflow/scripts/tests/test_kb_loop_offline.py \
+            interface/test_effective_config.py \
+            e2e_workflow/scripts/tests/test_bench_replica_lifecycle.py \
+            e2e_workflow/scripts/tests/test_roofline_skill.py \
+            e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
             geak/test_bootstrap.py
+
+      - name: expert skill static validation
+        run: |
+          for skill in \
+            flydsl_decode_moe_stage1_blkmap \
+            flydsl_prefill_moe_stage2_fp8partial \
+            flydsl_fp8_blockscale_gemm
+          do
+            python perf_knowledge/expert_skills/_contribute/validate_skill.py "$skill" --static
+          done
+
+      # Standalone contract checks. NOT in the pytest list above: each runs its assertions at import
+      # time and exits non-zero, which pytest collection cannot express. They were added with the
+      # learned-KB work and were not wired into CI at all — a regression suite nothing runs is a
+      # comment. Reported in review of #411.
+      - name: KB and workflow contract checks
+        run: |
+          set -e
+          python3 kernel_workflow/scripts/test_kb.py
+          python3 kernel_workflow/scripts/test_lane_refs.py
+          python3 kernel_workflow/scripts/test_kb_switch.py
+          python3 e2e_workflow/scripts/tests/test_e2e_lane_defaults.py
+          # The kernel KB must lint clean and its generated index must match the cards. `lint --cards`
+          # now exits non-zero on failure, so this is a gate rather than a printout.
+          python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned lint --cards
+          python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned index --check
 
       # Renders the per-file table + total into the run's Job Summary, which is
       # where the coverage percentage is read from the GitHub web UI. Runs even
@@ -173,7 +251,7 @@ jobs:
           /tmp/gitleaks dir . --no-banner --redact --config .gitleaks.toml
 
   node-regression:
-    name: Node regression (expert_skills)
+    name: Node regression (expert_skills, kernel canonicalization, tuning phase, time budget)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -184,6 +262,36 @@ jobs:
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
         run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+      # The JS gate and the Python selection verdict canonicalize the same kernel symbols. Only this
+      # job can run the JS half, so without it the two implementations are pinned on the Python side
+      # alone and are free to drift — which lets a kernel pass one side and be refused by the other.
+      # The Python half is TestTheSharedFixtureHoldsOnThisSide in tests/test_kernel_selection.py.
+      - name: kernel canonicalization JS/Python parity
+        run: node e2e_workflow/scripts/test_kernel_canonicalization_parity.js
+      # Structural guard on the TuningSkillset phase: the accept bars, the overlay
+      # carry-forward, and the deploy-bundle handoff to finalize. Node + git only.
+      - name: tuning skillset phase regression
+        run: node e2e_workflow/scripts/test_tuning_skillset_phase.js
+      # The elapsed clock and the final reserve are the only thing standing between a
+      # long run and a hard kill with no report (Hyperloom #1202). Only this job can
+      # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
+      - name: wall-clock budget / final reserve regression
+        run: node e2e_workflow/scripts/test_time_budget_reserve.js
+
+  tuning-skillset-integrity:
+    name: Vendored tuning skillset matches its manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # The skillset is vendored WHOLE so its standalone validation applies to what GEAK runs.
+      # This is the gate that catches drift between the committed tree and the manifest —
+      # including a file the committer can see locally but .gitignore kept out of the commit.
+      # Stdlib only; no GPU, no network.
+      - name: verify vendored tree against manifest
+        run: python3 e2e_workflow/scripts/tuning_skillset_sync.py --verify
 
   dry-run:
     name: run_e2e dry-run mapping
@@ -197,4 +305,30 @@ jobs:
       # fixture (ci/fixtures/handoff.dry.json), so it needs no geak_runtime
       # dataset, GPU, or Claude. Guards the map_args / build_prompt code path.
       - name: handoff -> args mapping (fixture)
-        run: python interface/run_e2e.py ci/fixtures/handoff.dry.json /tmp/l0_result.json --dry-run
+        run: |
+          pip install pyyaml
+          GEAK_STRICT_RECIPE_ENV=1 python interface/run_e2e.py \
+            ci/fixtures/handoff.dry.json /tmp/l0_result.json --dry-run \
+            > /tmp/geak-l0-dry-run.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          plan = json.loads(Path("/tmp/geak-l0-dry-run.json").read_text())
+          assert plan["bench_launcher"] == "magpie"
+          assert plan["magpie_launch_script_source"] == "handoff"
+          assert plan["recipe_env_source"] == "ci/fixtures/baseline_config.with_envs.yaml"
+          replay = Path(plan["recipe_env_file"])
+          assert replay.is_file(), replay
+          raw = replay.read_bytes()
+          assert raw.endswith(b"\0")
+          entries = dict(item.split(b"=", 1) for item in raw.split(b"\0")[:-1])
+          assert b"PORT" not in entries
+          assert b"ROCR_VISIBLE_DEVICES" not in entries
+          assert b"HIP_VISIBLE_DEVICES" not in entries
+          assert b"CUDA_VISIBLE_DEVICES" not in entries
+          assert entries[b"PATH"] == b"/usr/bin:/bin"
+          extra = entries[b"EXTRA_VLLM_ARGS"]
+          assert b"--trust-remote-code" in extra
+          assert b'{"method":"ngram","num_speculative_tokens":3}' in extra
+          PY

@@ -1,0 +1,159 @@
+{
+  "run_id": "fused_moe_kernel_gptq_awq-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "fused_moe_kernel_gptq_awq"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "moe-int4-per-bucket-tiling-and-byte-once-dequant",
+      "description": "Per-bucket BLOCK_M/num_warps/nonkdim plus byte-once dual-nibble int4 dequant stacks to ~4.6x on int4-weight MoE grouped GEMM, gfx950",
+      "keywords": [
+        "moe",
+        "grouped-gemm",
+        "int4",
+        "dequant",
+        "block-m",
+        "num-warps",
+        "mfma-nonkdim",
+        "per-bucket-tuning",
+        "occupancy",
+        "gfx950"
+      ],
+      "kernels": [
+        "fused_moe_kernel_gptq_awq"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "mixed",
+      "key": "int4 group-quantized-weight fused-MoE grouped GEMM on gfx950/CDNA4, per-expert token buckets spanning a tiny-M dispatch-bound case and large-M MFMA-bound cases",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "mem.tile-shape",
+        "compute.mfma-nonkdim16",
+        "mem.dequant-reuse"
+      ],
+      "cost": "L2",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "~4.58x isolated geomean vs frozen baseline, non-overlapping per-case: 3.43x tiny-M, 4.88x mid-M, 5.74x large-M; roofline fraction 0.10 -> 0.60 of its own roof",
+      "attempts": 5,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Per-bucket tile shape carries an int4-weight MoE grouped GEMM",
+      "lever": "Treat each token-count bucket as its own tuning problem, and pay the int4 unpack once per byte instead of once per nibble.",
+      "apply": "Load each packed int4 byte once, extract both nibbles by constant shift over the row block and interleave in registers; then per bucket set BLOCK_M (small/medium/large, e.g. 64/256/512), num_warps (4/4/8), matrix_instr_nonkdim=16 on the largest, and gate the software prefetch off for the small-M bucket.",
+      "stack": "total ~4.58x isolated = four directions compounded\n  - 1. byte-once dual-nibble int4 dequant — 1.82x standalone (verified) — the bulk of the win\n  - 2. num_warps 4->8 + matrix_instr_nonkdim=16 — 2.23x on top of (1) (verified)\n  - 3. per-bucket BLOCK_M enlargement — 1.80x on top of (1,2), 2.23x -> 4.00x (verified)\n  - 4. small-M no-prefetch gate + num_warps re-sweep — 1.13x, tiny-M case only (verified)\n  - note: attribution is incremental in landing order, not independent.",
+      "verify": "Re-time every bucket against the frozen baseline separately: the large-M gain and the tiny-M gain come from opposite levers, and a geomean hides either one flipping.",
+      "pitfall": "num_warps=16 spilled and BLOCK_N=32 regressed → the fp32 [M,64] accumulator VGPR floor is set by the M-side tile, not the N-side → sweep BLOCK_M per bucket and leave BLOCK_N at its default.\n  - pitfall: the harness reported IMPROVED=false on rounds that had actually won → report-script false negative → grep the applied-marker and delta yourself and judge the verified geomean against the ~1-2% run-to-run noise floor.",
+      "caution": "Also verify the per-element relative-error gate before deferring group scales out of the operand: with signed operands and deep K, one cancelling element blew the gate by ~5 orders of magnitude even in full fp32.",
+      "source": "16h per-kernel time-budget campaign, run fused_moe_kernel_gptq_awq-ch16h, 2026-08-12"
+    },
+    {
+      "name": "int4-dequant-feed-path-closed-at-occupancy-2",
+      "description": "Four dequant/feed-path directions all returned ~1.00x or worse on an occupancy-2 VGPR-floored int4 MoE GEMM: that axis is closed on gfx950",
+      "keywords": [
+        "moe",
+        "grouped-gemm",
+        "int4",
+        "dequant",
+        "num-stages",
+        "cache-modifier",
+        "raw-hip",
+        "occupancy",
+        "anti-pattern",
+        "gfx950"
+      ],
+      "kernels": [
+        "fused_moe_kernel_gptq_awq"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "mixed",
+      "key": "int4-dequant feed path of a group-quantized MoE grouped GEMM already pinned at occupancy 2 by its fp32 accumulator, gfx950/CDNA4, Triton with a hand-written register pipeline",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "compute.dequant-opcount",
+        "mem.cache-modifier",
+        "compute.pipeliner"
+      ],
+      "cost": "L1",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "closed axis, same per-case set each time: magic-number bitcast dequant 0.99x (tiny-M case 0.978x) though bit-exact and ISA-confirmed, Triton num_stages>=2 0.85-0.74x at BLOCK_M 256/512 and ns=3 over the LDS cap, '.cg' cache modifier 0.83x/0.89x on the two large-M cases, raw-HIP inner GEMM 1.005x",
+      "attempts": 4,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Dequant op-count is off the critical path once the GEMM is occupancy-pinned",
+      "lever": "When an int4-weight GEMM is already at occupancy 2 with zero spill, budget the round elsewhere than the dequant feed path: its VALU work already overlaps the MFMA pipeline.",
+      "apply": "Cheap discriminator before spending a round: check spill count and occupancy from the compiled ISA. Zero spill at occupancy 2 with the accumulator at the register ceiling means op-count, cache hints and pipeliner settings have no slack to recover.",
+      "verify": "Each of these fails loudly rather than silently, which is what makes them trustworthy negatives: the ISA shows the conversion ops actually disappeared, and the '.cg' regression proves the edit landed.",
+      "pitfall": "Layering the Triton auto-pipeliner on a loop that already has a manual register double-buffer regressed hard → it multi-buffers the dequantized operands through LDS on top of the manual one → keep the manual pipeline and leave num_stages at its default; ns=1 only disables the LDS auto-stage and reads as noise.",
+      "caution": "Also verify any small win here survives a repeat: a ~0.6% flicker on one bucket did not, run-to-run spread on that bucket being ~1-2%.",
+      "source": "16h per-kernel time-budget campaign, run fused_moe_kernel_gptq_awq-ch16h, 2026-08-12"
+    },
+    {
+      "name": "cdna4-unified-vgpr-agpr-occupancy-pool",
+      "description": "On gfx950/CDNA4 occupancy divides one summed ArchVGPR+AGPR pool, so an AGPR-accumulator occupancy escape on an fp32-accum MFMA GEMM cannot exist",
+      "keywords": [
+        "occupancy",
+        "agpr",
+        "vgpr",
+        "mfma",
+        "accumulator",
+        "raw-hip",
+        "anti-pattern",
+        "gfx950",
+        "grouped-gemm"
+      ],
+      "kernels": [
+        "fused_moe_kernel_gptq_awq"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "n/a",
+      "key": "occupancy arithmetic for fp32-accumulator MFMA GEMMs on gfx950/CDNA4, where CDNA3-era AGPR-offload tricks are assumed to still buy a wave",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "compute.occupancy",
+        "compute.agpr-accumulator"
+      ],
+      "cost": "L3",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "1.00x: a raw-HIP AGPR-accumulator rewrite aimed at occupancy 3 returned no advance on either large-M case, and occupancy stayed 2 because waves = 512/(ArchVGPR+AGPR) with a 64-register-per-lane accumulator putting the total at ~242",
+      "attempts": 2,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "CDNA4 sums ArchVGPR and AGPR for occupancy",
+      "lever": "Before planning an occupancy escape by moving an MFMA accumulator into AGPRs, do the arithmetic for this arch: the two files share one budget here, so the move is register-neutral.",
+      "apply": "Compute waves = 512/(ArchVGPR+AGPR) with the accumulator counted once, whichever file holds it; if that lands on the same wave count you already have, the whole rewrite lane is a no-op and a hand-written HIP variant will not change it.",
+      "verify": "Confirm from the compiled ISA that the register total, not scheduling, is the binder: zero spill plus a software-pipelined schedule means the compiler already found the slack a rewrite would be looking for.",
+      "pitfall": "A large expected gain was assigned to this direction from CDNA3 intuition → the max-of-two-files occupancy model no longer holds → derive the wave count from the summed pool before budgeting the round.",
+      "caution": "Also verify the accumulator dtype: the register floor here came from an fp32 accumulator over a large M tile, so a narrower accumulator or a smaller M tile changes the arithmetic and may reopen the lane.",
+      "source": "16h per-kernel time-budget campaign, run fused_moe_kernel_gptq_awq-ch16h, 2026-08-12"
+    }
+  ]
+}

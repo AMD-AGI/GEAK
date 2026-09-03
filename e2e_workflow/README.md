@@ -98,6 +98,14 @@ Workflow({
     milestone_min_pct: 5, // Milestone only optimizes editable kernels with pct_gpu_time >= this (default 5);
                           //   overrides min_kernel_tasks — sub-threshold kernels are skipped (Amdahl)
     config_tune: "true",  // Tier-0 sweep on/off (default ON)
+    tuning_skillset: "true", // standalone TuningSkillset phase on/off (default ON). Runs the VENDORED
+                          //   tuning skillset (<repo>/perf_knowledge/expert_skills/tuning) WHOLE, as its own phase, AFTER
+                          //   ConfigSweep and BEFORE HeadKernel, with its own pre/post A/B so its share
+                          //   of the gain is attributable. "false" injects nothing -> byte-identical.
+    tuning_kb: "true",    // consult tuning-kb/ (the per-model ANSWER KEY). Set "false" for blind evals.
+                          //   No op budget: the tuning loop is uncapped (tuning ops are cheap and their
+                          //   value is cumulative). See "Tuning skillset" below +
+                          //   knowledge/tuning_skillset_integration.md.
     analysis_skill: "roofline", // profile-analysis skill (default "roofline"; "none" disables).
                           //   Enriches the Top-N with % of the hardware roofline -> attainable speedup ->
                           //   expected e2e gain, so budget goes to the kernel with HEADROOM, not merely
@@ -139,6 +147,60 @@ Pick **fast** for a bounded quick pass, **default** for the standard run, **deep
 achievable number (it is broader = more backends, deeper = more/faster rounds, parallel = lanes co-opt
 spare GPUs while the e2e gate runs on the serving slot, with matched in-window A/B so parallelism never
 corrupts a measurement).
+
+## Tuning skillset (`tuning_skillset`, default ON)
+
+A dedicated phase — **after ConfigSweep, before HeadKernel** — that runs the tuning skillset vendored at
+`<repo>/perf_knowledge/expert_skills/tuning/`: an independently-validated method for tuning GPU ops on AMD Instinct (per-op
+tuners, deploy paths into a live server, and the engagement checks that prove a tuned artifact is
+actually what the machine runs).
+
+**It is vendored whole and run whole.** The tree is byte-identical to the standalone repo it is validated
+in (37 executable claims in `validate/claims.py`), hash-pinned by
+`e2e_workflow/knowledge/tuning_skillset.manifest.sha256`, and consumed by exactly one thin adapter role,
+`roles/tuning_specialist.md`. Its method is deliberately **not** paraphrased into `knowledge/`: a
+standalone validation is evidence about a specific tree, and scattering it would keep the prose while
+losing the guarantee. Fixes go upstream and come back via
+`scripts/tuning_skillset_sync.py --sync <dir>`; never edit inside the vendored tree.
+
+**Why standalone, and why before the head track.** The skillset is a complete six-step loop (scope →
+baseline → search → correctness gate → deploy → engagement verify). Folded into the head-kernel bake-off
+it degenerates into "one more candidate config" and most of it never runs. As its own phase it runs end
+to end, and — because it takes its **own** in-session interleaved pre/post A/B — the final report can say
+how much of the run's gain came from tuning. Running it first also means the expensive head budget goes
+to the ops still hot *after* tuning (an accept triggers a re-profile, exactly as a config win does), and
+its accepted env/flags fold into the carried config so every later A/B measures on top of a tuned stack.
+Corollary when reading the report: the tuning delta and the head deltas are **not** additive — tuning is
+already in the head track's reference leg.
+
+An accept is not taken on trust. The orchestrator withholds it unless engagement was **proven**, both A/B
+legs completed, correctness passed, and `post > pre > 0`; otherwise it is downgraded to `no_win` and the
+run continues on the pre-tuning config. An unproven tuning artifact would otherwise sit silently in the
+reference leg of every downstream measurement — which is the exact failure the skillset exists to catch.
+
+**Scope.** The phase does not author kernels — that is the head/Milestone tracks' job, unchanged. It does
+own the dispatch path: which kernel the seam selects, with which parameters, **and the code that makes a
+tuned artifact actually bind** (a routing switch, a wrapper that drops the kernel selection). That code
+half travels as a reversible overlay (`apply_overlay` → carried `curOverlay` → `final/overlay`), never as
+a live-tree source edit. It is not a corner case: the skillset measures a correctly-tuned row deployed
+behind a wrapper that ignores the kernel selection running **85.7% slower than doing nothing**, with every
+engagement gate passing.
+
+**How the win ships.** The data half of a tuning win is a config table a library reads from inside its
+own package dir, often with a derived cache that must be dropped or the new rows are silently ignored.
+That cannot travel in `final/overlay`, which is a `PYTHONPATH` mechanism for *code*. So the phase writes
+a deploy bundle (`EVAL_DIR/tuning/deploy/`: manifest, git-applyable diff, the files, and an idempotent
+`deploy.sh`) and Finalize folds it into the **existing** deliverable handles — the diff is concatenated
+into `final_patch.diff`, and `final_launch.sh` runs `deploy.sh` before the server starts. Finalize then
+re-checks engagement on the assembled bundle, so a bundle that silently drops the tuning is reported as
+broken instead of shipped as complete. Callers reusing `final_launch.sh` need no extra steps.
+
+Results land in `EVAL_DIR/tuning/`, in `final_report.md` **§2b**, in
+`wfReturn.tuning_skillset` (`tuning_delta_pct`, `tuning_speedup`, `share_of_total_gain_pct`), and in
+`result.json` under a **purely additive** `tuning_skillset` key — no existing key changes name, type or
+meaning, and a run without the phase produces a byte-identical `result.json`.
+Fast mode skips the phase; deep mode keeps it. Full contract:
+`knowledge/tuning_skillset_integration.md`.
 
 ## Roofline-guided routing (`analysis_skill`, default `roofline`)
 
@@ -198,16 +260,20 @@ Everything lands under `<exp_root>/e2e_<model>_<timestamp>/`:
 - `kernels/<short_name>_task/{kernel_src, reference_io.pt, unittest.py, meta.json}` — extracted tasks
 - `kernels/_exp/…` — the recursive single-kernel runs (each with its own verified result)
 - `overlay/…` — candidate + accepted reversible overlays
+- `tuning/{tuning_report.md, env_audit.txt, claims_report.json, bench_pre/, bench_post/, <op>/}` — the standalone tuning phase + its attributable pre/post A/B
 - `final/{overlay, final_patch.diff, final_launch.sh}` — the deliverable bundle
 - `architect_report.md`, `director_e2e_validation.json` — the official verified throughput result
 
 ## Files
 ```
 e2e_workflow.js   orchestration (deterministic; recursively calls ../kernel_workflow/kernel_workflow.js)
-roles/                 director, system_architect, profiler, config_tuner, kernel_extractor, op_benchmarker, e2e_integrator
+roles/                 director, system_architect, profiler, config_tuner, tuning_specialist, kernel_extractor, op_benchmarker, e2e_integrator
 knowledge/             e2e_optimization, profile_parse, preflight (env self-check), backend_playbook + gemm_attention_backends (persistent), sglang_internals, shape_capture
 knowledge/analysis_skills/  pluggable profile-analysis skills (INDEX.md + one dir per skill; `roofline` ships by default)
+knowledge/tuning_skillset_integration.md  how the VENDORED ../tuning_skillset/ is wired in (+ its manifest)
 scripts/               bench_e2e.sh (backend-agnostic dispatcher), adapters/{sglang,vllm}.sh, parse_profile.py (Top-N), op_bench.py, capture_shapes.py, overlay_setup.py
+scripts/tuning_skillset_sync.py  integrity gate on the vendored skillset (--verify / --update / --sync)
+scripts/server_teardown.sh  the shared server-kill contract (identity verified at LAUNCH: pid, pgid, /proc start time). Every script that launches a server, including role-authored capture scripts, must source it instead of hand-rolling a kill.
 ```
 
 ## Generality

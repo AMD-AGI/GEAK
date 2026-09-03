@@ -88,10 +88,18 @@ def test_issue6_names_raw_and_same_config_divergence_explicitly(
     assert out["baseline_alignment"]["status"] == "aligned"
 
 
-def test_same_config_divergence_above_threshold_is_warning(tmp_path: Path) -> None:
-    """A real same-config mismatch warns without changing optimization status."""
+def test_same_config_divergence_above_threshold_is_warning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A real same-config mismatch warns without changing optimization status.
+
+    Both harnesses launched through the same script here, so the divergence is
+    a measurement signal and gets the plain `warning`. See
+    test_run_e2e_measurement_basis.py for the unaligned-recipe counterpart.
+    """
     eval_dir = tmp_path / "e2e"
     eval_dir.mkdir()
+    monkeypatch.setenv("BENCH_LAUNCHER", "magpie")
     h = {
         "workload": {"isl": 1024, "osl": 1024, "conc": 64},
         "raw_baseline_tput": 1331.7541295483402,
@@ -255,6 +263,61 @@ def test_map_args_omits_serving_fidelity_when_absent(tmp_path: Path) -> None:
     assert "mem_fraction" not in ps
 
 
+def test_map_args_consumes_schema_v2_effective_config(tmp_path: Path) -> None:
+    """The complete current-best descriptor, not only accepted_flags, seeds GEAK."""
+    recipe = tmp_path / "baseline_config.with_envs.yaml"
+    recipe.write_text(
+        "benchmark:\n"
+        "  envs:\n"
+        "    EXTRA_SGLANG_ARGS: --trust-remote-code --context-length 8192\n"
+        "    SGLANG_USE_AITER: '0'\n",
+        encoding="utf-8",
+    )
+    overlay = tmp_path / "base-overlay"
+    snapshot = tmp_path / "snapshot"
+    h = {
+        "schema_version": 2,
+        "model_path": "/models/gemma",
+        "framework": "sglang",
+        "exp_root": str(tmp_path),
+        "eval_dir": str(tmp_path / "e2e"),
+        "launch_recipe": str(recipe),
+        "workload": {"isl": 8192, "osl": 1024, "conc": 64},
+        "max_model_len": 13312,  # stale summary must not replace complete argv
+        "accepted_flags": "--context-length=11264",
+        "accepted_env": "SGLANG_USE_AITER=1",
+        "baseline_env_spec": {
+            "config": {
+                "server_launch_flags": (
+                    "--trust-remote-code --disable-radix-cache "
+                    "--context-length 11264"
+                ),
+                "extra_server_args": "--context-length 11264",
+                "extra_envs": {"SGLANG_USE_AITER": "1"},
+            },
+            "overlay_pythonpath": str(overlay),
+            "source_snapshots": [
+                {
+                    "snapshot_dir": str(snapshot),
+                    "reproducible": True,
+                }
+            ],
+        },
+    }
+
+    ps = rx.map_args(h)
+    flags = ps["initial_extra_server_args"]
+    assert flags.count("--context-length") == 1
+    assert "--context-length 11264" in flags
+    assert "13312" not in flags
+    assert "--disable-radix-cache" in flags
+    assert "SGLANG_USE_AITER=1" in ps["initial_extra_env"]
+    assert ps["initial_overlay_pythonpath"] == f"{overlay}:{snapshot}"
+    assert len(ps["effective_config_digest"]) == 64
+    assert ps["measurement_mode"] == "isolated_server"
+    assert ps["validation_replicas"] == 3
+
+
 def _fidelity_handoff(tmp_path: Path, **extra) -> dict:
     h = {
         "model_path": "/models/gpt-oss-120b",
@@ -368,37 +431,55 @@ def test_fold_helper_dedup_and_forms() -> None:
     assert out2 == "--context-length 4096 --mem-fraction-static 0.9"
 
 
-def test_cold_speedup_equals_hyperloom_provisional_ratio() -> None:
-    """cold_speedup (what Hyperloom promotes as provisional) == final / orch cold.
+def test_promoted_final_is_hot_and_cold_stays_a_diagnostic(tmp_path: Path) -> None:
+    """The promoted headline is ALWAYS the HOT median; cold is diagnostic only.
 
-    Ground-truth cross-check against the real session artifact: the provisional
-    gain Hyperloom records must be exactly current_best.tput / baseline_tput,
-    i.e. GEAK cold final over the orchestrator COLD baseline — never the hot
-    final over the cold baseline (which would overstate the win).
+    The headline contract is fixed: ``final_throughput_basis == "hot"`` and the
+    promoted final is the hot median (run_e2e.py sets ``final_basis = "hot"``
+    unconditionally; BENCH_COLD_FINAL only adds a diagnostic cold round in
+    alignment_metrics and never switches the headline).
+
+    ``cold_speedup`` remains a SELF-CONSISTENT diagnostic — GEAK's cold final over
+    the orchestrator's COLD baseline (never the hot final over the cold baseline,
+    which would overstate the win) — even though it no longer drives the headline.
+
+    This used to cross-check a real session artifact and was hidden behind a skip
+    when that artifact was absent, so the cold-diagnostic ratio was never
+    continuously exercised. It now builds the cold round synthetically (same shape
+    as TestColdFinalBasis in test_run_e2e_dispatch.py) so it always runs.
     """
-    fixture = Path(
-        "test_results/gemma-4-26B_session/gemma-4-26B-A4B-it"
-        "/result.json"
+    # hot base/final drive the headline; cold rounds are strictly slower (a cold
+    # round pays a cache-fill / JIT cost the hot median never does).
+    eval_dir = tmp_path / "e2e_cold_diag"
+    (eval_dir / "baseline").mkdir(parents=True)
+    (eval_dir / "validation" / "final").mkdir(parents=True)
+    (eval_dir / "baseline" / "bench_summary.json").write_text(
+        json.dumps({"output_throughput_tok_s_median": 450.0,
+                    "cold_output_throughput_tok_s": 460.0}),
+        encoding="utf-8",
     )
-    if not fixture.exists():
-        pytest.skip("session fixture not present")
-    r = json.loads(fixture.read_text(encoding="utf-8"))
+    (eval_dir / "validation" / "final" / "bench_summary.json").write_text(
+        json.dumps({"output_throughput_tok_s_median": 500.0,
+                    "cold_output_throughput_tok_s": 480.0}),
+        encoding="utf-8",
+    )
+    # raw_baseline_tput is the orchestrator's COLD leaderboard anchor.
+    h = {"workload": {"isl": 1024, "osl": 1024, "conc": 64},
+         "raw_baseline_tput": 440.0}
+    r = rx.normalize_result(h, _wf(eval_dir, base=450.0, final=500.0, speedup=1.1111))
     am = r["alignment_metrics"]
 
+    # Headline: hot basis, hot median promoted.
+    assert r["final_throughput_basis"] == "hot"
+    assert r["final_throughput_tok_s"] == 500.0
+    assert r["final_throughput_tok_s"] == pytest.approx(am["geak_hot_final_tok_s"])
+
+    # Cold diagnostic stays internally consistent: cold final over orch cold base,
+    # and strictly below the inflated hot-final-over-cold-baseline ratio.
     geak_cold_final = am["geak_cold_final_tok_s"]
     orch_cold = am["orchestrator_cold_baseline_tok_s"]
-    promoted_final = r["final_throughput_tok_s"]
-
-    # The promoted final IS the cold final (final_throughput_basis == "cold").
-    assert r["final_throughput_basis"] == "cold"
-    assert promoted_final == pytest.approx(geak_cold_final)
-
-    # Hyperloom's provisional gain == cold_speedup == promoted_final / orch_cold.
-    expected_provisional_pct = (promoted_final / orch_cold - 1.0) * 100.0
-    cold_speedup_pct = (am["cold_speedup"] - 1.0) * 100.0
-    assert cold_speedup_pct == pytest.approx(expected_provisional_pct, abs=0.05)
-
-    # And it is STRICTLY below the discarded hot-final-over-cold-baseline ratio
-    # (the inflated number the provisional must NOT use).
-    hot_over_cold_pct = (am["geak_hot_final_tok_s"] / orch_cold - 1.0) * 100.0
-    assert cold_speedup_pct < hot_over_cold_pct
+    assert geak_cold_final == 480.0 and orch_cold == 440.0
+    # cold_speedup is reported rounded (_safe_ratio -> 4 dp), so allow that.
+    assert am["cold_speedup"] == pytest.approx(geak_cold_final / orch_cold, abs=1e-4)
+    hot_over_cold = am["geak_hot_final_tok_s"] / orch_cold
+    assert am["cold_speedup"] < hot_over_cold

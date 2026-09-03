@@ -1,0 +1,97 @@
+{
+  "run_id": "_fwd_grouped_kernel_stage1-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "_fwd_grouped_kernel_stage1"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "launch-meta-occupancy-paged-attention-decode",
+      "description": "Launch-meta is the primary lever on latency-bound paged grouped-attention decode; unpinning waves_per_eu beats a pinned hint, numerically exact.",
+      "keywords": [
+        "launch-meta",
+        "num-stages",
+        "waves-per-eu",
+        "occupancy",
+        "attention-decode",
+        "paged-kv",
+        "latency-bound",
+        "gfx950"
+      ],
+      "kernels": [
+        "_fwd_grouped_kernel_stage1"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "paged / grouped-query attention decode stage-1 in Triton on gfx950, latency-floored at about one workgroup per CU",
+      "lifecycle": "active",
+      "title": "Launch-meta first on latency-floored paged decode, and let the backend pick occupancy",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "~1.21x isolated geomean on decode from launch-meta alone (per-case: mid and large KV-context cases carry it, the tiny-grid case ~1.00x); unpinning waves_per_eu then adds ~+0.7% geomean, carried entirely by the mid case at ~+1.9% with the other two tied; banked total ~1.23x vs frozen baseline",
+      "roofline": "memory/latency-bound at ~0.18 of empirical roofline before -> ~0.39 and compute-bound after",
+      "attempts": 3,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "cost": "L1",
+      "last_seen": "2026-08-12",
+      "source": "GEAK 16h per-kernel time-budget campaign, run _fwd_grouped_kernel_stage1-ch16h, 2026-08-12, 61 passes",
+      "lever": "On a decode attention kernel whose profile says latency-floored at ~1 workgroup/CU, put the round into launcher metadata (num_warps, num_stages, matrix-instr dim) and treat a pinned waves_per_eu hint as one more ablatable field rather than part of the winning set.",
+      "apply": "Tune the launcher meta as a group, then re-ablate each field on its own; leaving waves_per_eu unset lets the compiler choose occupancy. Gate the hint injection behind an env-read flag so both arms come from one build.",
+      "stack": "total ~1.23x isolated (weighted geomean, frozen baseline) = three directions compounded\n  - 1. launch-meta group (num_warps/num_stages/matrix-dim) — ~1.21x standalone, the bulk of the win; 2-stage pipelining is load-bearing\n  - 2. scalar page-index load — ~+1.3% on top of (1), bit-identical, orthogonal\n  - 3. unpinning the occupancy hint — ~+0.7% on top of (1,2), numerically exact\n  - note: attribution is incremental in landing order; (3) was only visible after (1) was banked",
+      "verify": "Sweep the two arms through one env switch so no rebuild separates them, interleave ~a dozen alternating repeats per arm and compare medians against the frozen baseline; for a launch-only change also require bit-exact output (zero error ratio).",
+      "pitfall": "sub-1% launch-only delta came back as not-improved from the automated verdict -> the delta sits inside the harness noise band -> bank it on interleaved medians and grep the built artifact to confirm the config actually flipped\nthe pinned occupancy hint looked like part of the winning launch-meta set -> its gain was carried by the other fields -> re-ablate each launcher field separately once the group is banked",
+      "caution": "Also verify how load-bearing the pipeliner depth is before restructuring the loop: on this shape a loop-split cost ~4-5% on the large case by breaking 2-stage pipelining."
+    },
+    {
+      "name": "closed-memory-host-axes-latency-floored-decode",
+      "description": "On latency-floored paged attention decode at ~1 WG/CU, cache-modifier, sw-prefetch, loop-split and graph replay all measured <=1.00x.",
+      "keywords": [
+        "anti-pattern",
+        "cache-modifier",
+        "software-prefetch",
+        "graph-replay",
+        "launch-overhead",
+        "attention-decode",
+        "paged-kv",
+        "latency-bound",
+        "gfx950"
+      ],
+      "kernels": [
+        "_fwd_grouped_kernel_stage1"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "closed KV-load and host-dispatch axes on a latency-floored paged grouped-attention decode kernel in Triton on gfx950",
+      "lifecycle": "active",
+      "title": "Four axes that stayed closed on a latency-floored paged decode kernel",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "four decode directions returned ~1.00x or worse against the frozen baseline: graph capture/replay left the tiny-grid case tied and regressed the mid/large cases to 0.82x/0.79x; a .cg cache modifier cost +12-20% on the large case; a manual double-buffer prefetch was ~3% worse there; loop-split ~4-5% worse — while the same run banked ~1.23x from launcher metadata",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "source": "GEAK 16h per-kernel time-budget campaign, run _fwd_grouped_kernel_stage1-ch16h, 2026-08-12, 61 passes",
+      "lever": "When the profile says latency-floored at ~1 workgroup/CU and the ISA already shows 128-bit vector loads, the KV-load region and host dispatch are the axes most likely to return ~1.00x; spending the round on launcher metadata and occupancy paid instead.",
+      "apply": "Cheap triage before opening the load region: read the generated ISA for load width, count workgroups per CU, and check whether the pipeliner already overlaps the address chain — then a prefetch or cache-hint round is a measurement, not a plan.",
+      "verify": "Confirm closure the same way as a win: interleaved A/B against the frozen baseline, per case. A genuinely closed axis shows tied medians on every case, not a small positive on one.",
+      "pitfall": "a .cs cache modifier is a hard compile error on this Triton/arch pair -> the modifier is unsupported there -> sweep modifiers behind a try-compile instead of assuming the set\nexp2 substitution in the logsumexp missed the 1e-2 max-relative parity gate -> rebasing error accumulates in the normalizer -> keep the reference exponential for that reduction\nhead-split and a block width unequal to the page size multiplied KV traffic and broke the scalar-page numeric gate -> more waves also spilled -> keep the block width tied to the page size",
+      "caution": "Also verify the structural ceiling before committing to a deep rewrite: a full body/softmax/split-KV restructure reached only ~1.37x/1.34x on the mid/large cases and did not beat the already-banked geomean."
+    }
+  ]
+}

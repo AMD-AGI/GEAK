@@ -185,6 +185,14 @@ class _T:
             shape[shape.index(-1)] = self.numel() // max(1, known)
         return self._like(shape=tuple(shape))
 
+    def view(self, *shape):
+        return self.reshape(*shape)
+
+    def transpose(self, dim0, dim1):
+        shape = list(self.shape)
+        shape[dim0], shape[dim1] = shape[dim1], shape[dim0]
+        return self._like(shape=tuple(shape))
+
     def t(self):
         if self.dim() < 2:
             return self._like()
@@ -331,7 +339,7 @@ class _Stack:
     """
 
     MODULES = ("torch", "torch.nn", "torch.nn.functional", "triton", "triton.language",
-               "aiter", "aiter.ops", "aiter.ops.triton", "aiter.ops.flydsl",
+               "aiter", "aiter.ops", "aiter.ops.shuffle", "aiter.ops.triton", "aiter.ops.flydsl",
                "aiter.ops.flydsl.utils", "aiter.ops.flydsl.gemm_kernels", "aiter.tuned_gemm")
 
     def __init__(self, cuda=False):
@@ -568,6 +576,13 @@ class _Stack:
 
         ops = types.ModuleType("aiter.ops")
         ops.linear = _probe("aiter.ops.linear", True)
+        ops_shuffle = types.ModuleType("aiter.ops.shuffle")
+
+        def _shuffle_weight(w, layout):
+            stack.calls.append(("shuffle_weight", w.shape, layout))
+            return w
+
+        ops_shuffle.shuffle_weight = _shuffle_weight
         ops_triton = types.ModuleType("aiter.ops.triton")
         ops_triton.gemm_a16w16 = _probe("aiter.ops.triton.gemm_a16w16", True)
         flydsl = types.ModuleType("aiter.ops.flydsl")
@@ -585,10 +600,11 @@ class _Stack:
         tuned.tgemm = _probe("aiter.tuned_gemm.tgemm", True)
 
         flydsl.utils, flydsl.gemm_kernels = utils, kernels
-        ops.triton, ops.flydsl = ops_triton, flydsl
+        ops.shuffle, ops.triton, ops.flydsl = ops_shuffle, ops_triton, flydsl
         aiter.ops, aiter.tuned_gemm = ops, tuned
         self.aiter = aiter
-        self._aiter_modules = {"aiter": aiter, "aiter.ops": ops, "aiter.ops.triton": ops_triton,
+        self._aiter_modules = {"aiter": aiter, "aiter.ops": ops, "aiter.ops.shuffle": ops_shuffle,
+                               "aiter.ops.triton": ops_triton,
                                "aiter.ops.flydsl": flydsl, "aiter.ops.flydsl.utils": utils,
                                "aiter.ops.flydsl.gemm_kernels": kernels, "aiter.tuned_gemm": tuned}
 
@@ -1501,15 +1517,22 @@ class TestBenchAttn(_FakeStackMixin, unittest.TestCase):
         self.assertIsNone(res[0]["ms"])
         self.assertIn("needs reference_io.pt", res[0]["note"])
 
-    def test_captured_oracle_is_validated_and_backend_swaps_are_delegated(self):
+    def test_a_captured_oracle_is_a_recorded_skip_and_says_where_the_race_happens(self):
+        """No timing is taken here, so the row must not claim one.
+
+        Reporting ``available+correct`` with ``ms: None`` asserted a verdict on a measurement that
+        never happened -- the same self-contradiction ``main()`` flags as a harness fault. Attention
+        is not a contradictory row, it is a deliberate delegation to the server-level flag, so it
+        records a skip. That also keeps the shipped attention cards true.
+        """
         d = self._task_dir()
         io_path = os.path.join(d, "reference_io.pt")
         open(io_path, "w").close()
         res = ob.bench_attn(self._args(task=d), {"op_kind": "attn"})
-        self.assertTrue(res[0]["available"])
-        self.assertTrue(res[0]["correct"])
+        self.assertFalse(res[0]["available"])
+        self.assertFalse(res[0]["correct"])
         self.assertIsNone(res[0]["ms"])                     # op-level attention is not raced here
-        self.assertEqual(res[0]["artifact"], io_path)
+        self.assertEqual(res[0]["artifact"], io_path)       # the capture is still handed downstream
         self.assertIn("--attention-backend", res[0]["note"])
         self.assertIn("Config Tuner", res[0]["note"])
 
@@ -1756,6 +1779,198 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
         self.assertEqual(summary["task"], args.task)
         self.assertEqual(summary["results"][0]["backend"], "hipblaslt")
         self.assertEqual(summary["apply_flags"], "")
+
+
+def _r(backend, ms, correct=True, **kw):
+    d = {"backend": backend, "available": True, "correct": correct, "ms": ms}
+    d.update(kw)
+    return d
+
+
+class MergeServedTest(unittest.TestCase):
+    """`_merge_served` collapses a per-bucket sweep into ONE served-weighted number.
+
+    The point of the sweep is that a candidate's speedup is shape-dependent: a large-M prefill
+    tile can be much faster at M=8192 and no better -- or worse -- at the M=64 the workload spends
+    94% of its passes on. Benching one shape reported the first number and hid the second."""
+
+    def test_ms_is_the_pass_weighted_mean_not_the_largest_buckets(self):
+        merged = ob._merge_served([("decode", 64, 1024, [_r("cand", 1.0)]),
+                                   ("prefill", 8192, 64, [_r("cand", 10.0)])])
+        self.assertEqual(len(merged), 1)
+        # (1.0*1024 + 10.0*64) / 1088 == 1.5294 ; the single-bucket bench would have said 10.0
+        self.assertAlmostEqual(merged[0]["ms"], 1.5294, places=3)
+
+    def test_a_win_only_at_the_unserved_shape_no_longer_wins(self):
+        """The regression this fix exists for: `cand` is 5x faster at the big prefill bucket and
+        2x SLOWER at the decode bucket the workload runs 1024 of its 1088 passes on. Benching
+        max(m_buckets) alone reports 5x. Served-weighted it is a net LOSS, because the decode
+        penalty (1.0ms x 1024 passes) dwarfs the prefill saving (8.0ms x 64 passes)."""
+        sweep = [("decode", 64, 1024, [_r("base", 1.0), _r("cand", 2.0)]),
+                 ("prefill", 8192, 64, [_r("base", 10.0), _r("cand", 2.0)])]
+        merged = {r["backend"]: r for r in ob._merge_served(sweep)}
+        big_bucket_speedup = 10.0 / 2.0
+        served_speedup = merged["base"]["ms"] / merged["cand"]["ms"]
+        self.assertEqual(big_bucket_speedup, 5.0)
+        self.assertLess(served_speedup, 1.0)
+
+    def test_the_per_bucket_numbers_stay_visible_for_audit(self):
+        merged = ob._merge_served([("decode", 64, 1024, [_r("cand", 1.0)]),
+                                   ("prefill", 8192, 64, [_r("cand", 10.0)])])
+        self.assertEqual(merged[0]["ms_by_bucket"], {"decode:M=64": 1.0, "prefill:M=8192": 10.0})
+        self.assertIn("served-weighted over 2 buckets", merged[0]["note"])
+
+    def test_a_candidate_that_breaks_at_one_served_shape_is_not_correct_anywhere(self):
+        merged = ob._merge_served([("decode", 64, 1024, [_r("cand", 1.0)]),
+                                   ("prefill", 8192, 64, [_r("cand", None, correct=False,
+                                                             note="wrong at large M")])])
+        self.assertFalse(merged[0]["correct"])
+        self.assertIsNone(merged[0]["ms"])                 # never selectable as a winner
+        self.assertIn("[prefill M=8192] wrong at large M", merged[0]["note"])
+
+    def test_a_bucket_that_raised_propagates_and_does_not_poison_the_mean(self):
+        merged = ob._merge_served([("decode", 64, 1024, [_r("cand", 1.0)]),
+                                   ("prefill", 8192, 64, [_r("cand", None, correct=False,
+                                                             raised=True)])])
+        self.assertTrue(merged[0]["raised"])
+        self.assertIsNone(merged[0]["ms"])
+
+    def test_backend_order_is_preserved_so_the_baseline_lookup_still_works(self):
+        merged = ob._merge_served([("decode", 64, 1024, [_r("hipblaslt", 1.0), _r("ck", 2.0)]),
+                                   ("prefill", 8192, 64, [_r("hipblaslt", 3.0), _r("ck", 4.0)])])
+        self.assertEqual([r["backend"] for r in merged], ["hipblaslt", "ck"])
+
+    def test_a_backend_missing_from_one_bucket_is_still_merged(self):
+        merged = {r["backend"]: r for r in
+                  ob._merge_served([("decode", 64, 1024, [_r("a", 1.0), _r("b", 2.0)]),
+                                    ("prefill", 8192, 64, [_r("a", 3.0)])])}
+        self.assertEqual(merged["b"]["ms"], 2.0)
+        self.assertEqual(set(merged["a"]["ms_by_bucket"]), {"decode:M=64", "prefill:M=8192"})
+
+
+class ServedSweepDispatchTest(unittest.TestCase):
+    """bench_gemm sweeps the served buckets; with nothing to sweep it must behave exactly as before."""
+
+    def setUp(self):
+        self.calls = []
+        self._orig = ob._bench_gemm_at
+        ob._bench_gemm_at = lambda args, meta, m=None: (self.calls.append(m) or [_r("x", 1.0)])
+        self.addCleanup(lambda: setattr(ob, "_bench_gemm_at", self._orig))
+
+    def test_two_served_buckets_are_each_benched(self):
+        ob.bench_gemm(None, _swm_meta_ob())
+        self.assertEqual(sorted(c for c in self.calls if c), [64, 8192])
+
+    def test_no_serving_model_benches_once_at_the_old_shape(self):
+        ob.bench_gemm(None, {"m_buckets": [8192]})
+        self.assertEqual(self.calls, [None])
+
+    def test_a_decode_only_kernel_is_benched_at_its_decode_shape(self):
+        """One served bucket is still a served shape.
+
+        A decode-only kernel resolves to exactly one bucket, ``('decode', 64, 1024)``.
+        Falling back to the historical path benched it at ``max(m_buckets)`` = 8192 --
+        a prefill shape it never runs. That is the defect this PR exists to fix, so the
+        single-bucket case must take the served M, not the largest one.
+        """
+        ob.bench_gemm(None, _swm_meta_ob(served_regimes=["decode"]))
+        self.assertEqual(self.calls, [64])
+
+    def test_a_prefill_only_kernel_is_benched_at_its_prefill_shape(self):
+        ob.bench_gemm(None, _swm_meta_ob(served_regimes=["prefill"]))
+        self.assertEqual(self.calls, [8192])
+
+    def test_a_single_bucket_sweep_reports_the_bucket_timing_unchanged(self):
+        """``_merge_served`` over one bucket is the identity on ``ms`` -- collapsing the
+        special case must not perturb the number, only record the shape it came from."""
+        out = ob.bench_gemm(None, _swm_meta_ob(served_regimes=["decode"]))
+        self.assertEqual(out[0]["ms"], 1.0)
+        self.assertEqual(list(out[0]["ms_by_bucket"]), ["decode:M=64"])
+
+
+def _swm_meta_ob(**kw):
+    meta = {"m_buckets": [64, 1024, 8192],
+            "workload": {"serving_weight_model": {
+                "isl": 16384, "osl": 1024, "conc": 64, "prefill_chunk": 8192,
+                "analytic_calls": {"prefill": 64, "decode": 1024}}}}
+    meta.update(kw)
+    return meta
+
+
+class TestUnmeasuredIsNotZero(unittest.TestCase):
+    """``isolated_speedup`` is a measurement, so an unmeasured bake-off publishes none.
+
+    Reporting ``0.0`` for "never timed" made it read exactly like "timed, and not
+    faster". Every attention bake-off in the campaign took that path, so the gate
+    declined kernels it had never benched. Regression cover for that whole class.
+    """
+
+    def setUp(self):
+        self.h = TestMainSummary()
+        self.h.setUp()
+        self._run_main = self.h._run_main
+
+    def tearDown(self):
+        self.h.tearDown()
+
+    @staticmethod
+    def _claims_ran(backend, note=""):
+        """A row asserting available+correct while carrying no timing (bench_attn)."""
+        return {"backend": backend, "available": True, "correct": True, "ms": None, "note": note}
+
+    def test_a_bakeoff_that_timed_nothing_publishes_a_null_speedup(self):
+        summary, _ = self._run_main(
+            {"op_kind": "attn"},
+            results=[self._claims_ran("current", "delegated to the Config Tuner fast path")])
+        self.assertIsNone(summary["isolated_speedup"])
+        self.assertFalse(summary["measured"])
+
+    def test_a_row_claiming_it_ran_without_a_timing_is_a_harness_fault(self):
+        summary, _ = self._run_main(
+            {"op_kind": "attn"}, results=[self._claims_ran("current")])
+        self.assertTrue(summary["harness_suspect"])
+        self.assertIn("no timing", summary["harness_error"])
+
+    def test_a_recorded_skip_still_is_not_a_harness_fault(self):
+        """``available: False`` asserts nothing; only a self-contradicting row does."""
+        summary, _ = self._run_main(
+            {"op_kind": "gemm"},
+            results=[{"backend": "grouped_quant_gemm", "available": False,
+                      "correct": False, "ms": None, "note": "not a candidate"}])
+        self.assertFalse(summary["harness_suspect"])
+
+    def test_the_real_bench_attn_row_is_unmeasured_but_not_a_fault(self):
+        """The two rules together, on the row bench_attn actually emits.
+
+        Every attention bake-off in the campaign flows through here. It must publish no speedup
+        (nothing was timed) AND raise no fault (nothing was claimed) -- 318 silent zeros must not
+        become 318 false alarms.
+        """
+        summary, _ = self._run_main(
+            {"op_kind": "attn"},
+            results=[{"backend": "current", "available": False, "correct": False, "ms": None,
+                      "note": "delegated to the Config Tuner fast path; op-level bake-off skipped"}])
+        self.assertIsNone(summary["isolated_speedup"])
+        self.assertFalse(summary["measured"])
+        self.assertFalse(summary["harness_suspect"])
+
+    def test_a_measured_bakeoff_with_no_correct_backend_still_reports_zero(self):
+        """Timed but all-incorrect is a real verdict and must keep its 0.0."""
+        summary, _ = self._run_main(
+            {"op_kind": "gemm"},
+            results=[{"backend": "triton", "available": True, "correct": False, "ms": 1.5}])
+        self.assertEqual(summary["isolated_speedup"], 0.0)
+        self.assertTrue(summary["measured"])
+        self.assertFalse(summary["harness_suspect"])
+
+    def test_a_real_win_is_unchanged(self):
+        summary, _ = self._run_main(
+            {"op_kind": "gemm"},
+            results=[{"backend": "hipblaslt", "available": True, "correct": True, "ms": 2.0},
+                     {"backend": "triton", "available": True, "correct": True, "ms": 1.0}])
+        self.assertEqual(summary["isolated_speedup"], 2.0)
+        self.assertTrue(summary["measured"])
+        self.assertFalse(summary["harness_suspect"])
 
 
 if __name__ == "__main__":

@@ -7,16 +7,9 @@
 #     equivalents are `python -m vllm.entrypoints.openai.api_server` and
 #     `python benchmarks/benchmark_serving.py` (needs the repo checkout).
 #   - `--gpu-memory-utilization` is the vllm analogue of sglang's `--mem-fraction-static`.
-#   - profiling: vllm >=0.19 MOVED torch-profiler config from the VLLM_TORCH_PROFILER_DIR env var to the
-#     `--profiler-config` CLI flag (the env var is now an UNKNOWN var -> warned + ignored -> NO trace is
-#     written, so TraceLens gets no input). We emit `--profiler-config '{"profiler":"torch",...}'` so the
-#     bench's `--profile` dumps a *.pt.trace.json.gz into PROFILE_DIR.
-#     CROSS-VERSION: we DON'T blindly pass `--profiler-config` — old (<0.19) builds' argparse rejects the
-#     unknown flag and the server never starts. We detect support by importing vllm.config.ProfilerConfig
-#     (only present on builds that have the flag): if it imports -> use the flag (new builds); otherwise
-#     fall back to the VLLM_TORCH_PROFILER_DIR env (old builds). This probe is device-independent (unlike
-#     `vllm serve --help[=all]`, which initializes config/device and CRASHES on a driver-less host -> empty
-#     output -> false-negative -> profiling silently lost) and far cheaper (no full server spin-up).
+#   - profiling: vllm >=0.19 moved torch-profiler config from the VLLM_TORCH_PROFILER_DIR env var to the
+#     `--profiler-config` CLI flag. adapter_launch probes vllm.config.ProfilerConfig to pick the path:
+#     present -> --profiler-config; absent (<0.19) -> the env var (passing the flag would abort argparse).
 # The Director's preflight step should smoke-test these two commands on the target image and record
 # any needed EXTRA_SERVER_ARGS BEFORE the run relies on them. This adapter targets the current CLI.
 
@@ -25,29 +18,54 @@ adapter_default_port() { echo 8000; }
 adapter_launch() {
   # Pin GPU_ARCHS so aiter's JIT skips rocm_agent_enumerator/_detect_native (see sglang.sh / gpu_lock.sh).
   local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
-  # Enable the server-side torch profiler in a version-portable way. Two mutually-exclusive paths:
-  #   new vllm (>=0.19): pass --profiler-config (the env var is rejected/ignored there).
-  #   old vllm (<0.19) : pass VLLM_TORCH_PROFILER_DIR env (the CLI flag does NOT exist -> argparse would
-  #                      abort the launch, so we MUST NOT pass it on old builds).
-  # We pick the path by importing ProfilerConfig (device-independent capability probe). The JSON is held
-  # in an array so it stays ONE argument (no word-split / brace-expansion). When PROFILE_DIR is unset,
-  # profiling is off: the array is empty and we don't export the env var.
+  # Enable the server-side torch profiler version-portably. No PROFILE_DIR -> off. The ProfilerConfig
+  # schema is strict (extra=forbid) and aborts the server on an unknown key, so probe its fields and emit
+  # only what the installed build declares. JSON held in an array so it stays one argument.
   local -a _prof=()
   local -a _prof_env=()
   if [ -n "${PROFILE_DIR:-}" ]; then
-    if python3 -c 'from vllm.config import ProfilerConfig' 2>/dev/null; then
-      # We deliberately DO NOT pass detailed_trace_annotation: current vllm's ProfilerConfig is a strict
-      # (pydantic extra=forbid) schema that ABORTS the server on that key. When a build DOES accept it, it
-      # emits the execute_context_*_generation_* step spans (gpu_user_annotation, torch record_function —
-      # they DO appear on ROCm) that parse_profile.py uses to split prefill/decode; without it the split
-      # falls back to the analytic est_calls / shape path. record_shapes stays on for Input Dims.
-      _prof=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true}")
+    local _prof_fields
+    _prof_fields="$(python3 - <<'PY' 2>/dev/null
+names=set()
+try:
+    from vllm.config import ProfilerConfig
+    import dataclasses
+    try:
+        names |= {f.name for f in dataclasses.fields(ProfilerConfig)}
+    except Exception:
+        pass
+    names |= set(getattr(ProfilerConfig, "model_fields", {}) or {})
+    names |= set(getattr(ProfilerConfig, "__annotations__", {}) or {})
+    print(" ".join(sorted(names)))
+except Exception:
+    pass
+PY
+)"
+    _has() { case " $_prof_fields " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+    if [ -n "$_prof_fields" ]; then
+      local _json="{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true"
+      # stacks default on and are the biggest per-event cost; off keeps the event buffer small.
+      _has torch_profiler_with_stack && _json="$_json,\"torch_profiler_with_stack\":false"
+      # 0.26+: max_iterations self-stops the profiler after N worker steps, bounding the buffer.
+      _has max_iterations   && _json="$_json,\"max_iterations\":${PROFILE_MAX_ITERS:-64}"
+      _has delay_iterations && _json="$_json,\"delay_iterations\":${PROFILE_DELAY_ITERS:-0}"
+      _has ignore_frontend  && _json="$_json,\"ignore_frontend\":true"
+      # 0.26+: per-iteration prefill/decode annotation the parser uses for the phase split. Cheap.
+      _has detailed_trace_annotation && _json="$_json,\"detailed_trace_annotation\":true"
+      # 0.26+ decode-shape capture: opt-in (hardcodes with_stack+profile_memory, needs mem validation).
+      if [ "${PROFILE_CAPTURE_TRACES:-0}" = "1" ]; then
+        _has capture_torch_profiler && _json="$_json,\"capture_torch_profiler\":true"
+      fi
+      _json="$_json}"
+      _prof=(--profiler-config "$_json")
     else
-      _prof_env=(VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR")
+      _prof_env=(VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR")   # <0.19: no flag; the time window is the only bound
     fi
   fi
+  # Launch through $SERVER_LAUNCH_PREFIX (adapter contract): it puts the server in its
+  # own session so teardown can prove the process group is ours. Empty when unset.
   # shellcheck disable=SC2086
-  env $EXTRA_ENV \
+  ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
     ${_ga:+GPU_ARCHS=$_ga} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     "${_prof_env[@]}" \
@@ -91,16 +109,9 @@ adapter_bench() {
   fi
 }
 
-# adapter_profile_window — capture a profiler window on the ALREADY-RUNNING, warm, mid-load server via
-# vllm's HTTP profiler, so the trace reflects the real continuous-batching steady-state mix (prefill
-# chunks + decode interleaved) instead of the cold prefill ramp `vllm bench serve --profile` would catch.
-# Requires the server to have been launched with the torch profiler enabled (adapter_launch does:
-# --profiler-config / VLLM_TORCH_PROFILER_DIR, with record_shapes=true so the parser gets Input Dims).
-#
-# DIFFERS FROM sglang: vllm's /start_profile takes NO num_steps — it runs until /stop_profile. So the
-# window is TIME-controlled: start, sleep PROFILE_WINDOW_SEC of steady-state load, then stop. The trace
-# is flushed on /stop_profile (the server blocks until the flush completes), so we allow a long curl
-# timeout and then confirm a new trace landed.
+# adapter_profile_window — capture a window on the warm, mid-load server via vllm's HTTP profiler (needs
+# the profiler enabled at launch). Unlike sglang, /start_profile takes no num_steps: it runs until
+# /stop_profile, so the window is time-controlled (start, sleep, stop) and the trace flushes on stop.
 adapter_profile_window() {
   local before after
   before=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
@@ -108,8 +119,8 @@ adapter_profile_window() {
     echo "!!! /start_profile request failed (vllm torch profiler not enabled at launch?)" >&2
     return 1
   fi
-  # profile a steady-state window of this duration (no num_steps knob on vllm)
-  sleep "${PROFILE_WINDOW_SEC:-40}"
+  # 0.26+ self-stops at max_iterations, so this sleep is a safety cap; on <0.26 it is the only bound.
+  sleep "${PROFILE_WINDOW_SEC:-20}"
   # /stop_profile flushes the trace; the server waits for the flush, so give curl a generous timeout.
   curl -s --max-time "${PROFILE_WINDOW_TIMEOUT:-180}" -X POST "${BASE_URL}/stop_profile" \
     >/dev/null 2>&1 || echo "!!! /stop_profile request errored (checking for a trace anyway)" >&2

@@ -293,6 +293,13 @@ class TestMapArgs(_RunE2ECase):
         self.assertTrue(minted.name.startswith("e2e_fake-8b_"))
         self.assertTrue(minted.name.endswith("Z"))
 
+    def test_two_unpinned_runs_get_distinct_eval_dirs(self):
+        """Concurrent/same-second runs must not share replay/artifact paths."""
+        os.environ.pop("GEAK_EVAL_DIR", None)
+        first = rx.map_args(self._handoff())["eval_dir"]
+        second = rx.map_args(self._handoff())["eval_dir"]
+        self.assertNotEqual(first, second)
+
     def test_env_pinned_eval_dir_wins_over_minting(self):
         os.environ["GEAK_EVAL_DIR"] = str(self.tmp / "e2e_from_env")
         ps = rx.map_args(self._handoff())
@@ -345,6 +352,55 @@ class TestMapArgs(_RunE2ECase):
         self.assertIn("tracelens_report", prompt)
         # search_root is internal bookkeeping and must never reach the agent.
         self.assertNotIn("search_root", prompt)
+
+    def test_build_prompt_leads_with_process_safety(self):
+        """The driver agent holds Bash under bypassPermissions as a direct child of
+        this process, so it needs the same pattern-kill ban the role agents get: one
+        `pkill -f vllm` from it reaches the caller's orchestrator (issue #397)."""
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_safety")))
+        prompt = rx.build_prompt(ps)
+        self.assertTrue(prompt.startswith("## PROCESS SAFETY"), prompt[:80])
+        for banned in ("pkill -f", "killall", "kill -- -PGID"):
+            self.assertIn(banned, prompt)
+
+
+class TestProtectedPgids(_RunE2ECase):
+    """`_publish_protected_pgids` is the caller-side half of the #397 fix: the
+    teardown in e2e_workflow/scripts/server_teardown.sh vetoes a group kill against
+    any pgid listed in GEAK_PROTECTED_PGIDS, and this is the only publisher."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved = os.environ.get("GEAK_PROTECTED_PGIDS")
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._saved is None:
+            os.environ.pop("GEAK_PROTECTED_PGIDS", None)
+        else:
+            os.environ["GEAK_PROTECTED_PGIDS"] = self._saved
+
+    def test_publishes_own_group_parent_group_and_init(self):
+        os.environ.pop("GEAK_PROTECTED_PGIDS", None)
+        value = rx._publish_protected_pgids()
+        published = value.split()
+        self.assertEqual(value, os.environ["GEAK_PROTECTED_PGIDS"])
+        self.assertIn("1", published)
+        self.assertIn(str(os.getpgid(0)), published)
+        self.assertIn(str(os.getpgid(os.getppid())), published)
+
+    def test_merges_existing_value_and_drops_non_numeric(self):
+        """A caller may pre-export its own pgids; keep them, drop garbage, no dupes."""
+        os.environ["GEAK_PROTECTED_PGIDS"] = "77 bogus 77"
+        published = rx._publish_protected_pgids().split()
+        self.assertIn("77", published)
+        self.assertNotIn("bogus", published)
+        self.assertEqual(len(published), len(set(published)))
+
+    def test_is_idempotent(self):
+        os.environ.pop("GEAK_PROTECTED_PGIDS", None)
+        first = rx._publish_protected_pgids()
+        self.assertEqual(first, rx._publish_protected_pgids())
 
 
 class TestFlagPresent(_RunE2ECase):
@@ -414,8 +470,44 @@ class TestBenchLauncher(_RunE2ECase):
     def setUp(self):
         super().setUp()
         for key in ("BENCH_LAUNCHER", "MAGPIE_LAUNCH_SCRIPT",
-                    "MAGPIE_VLLM_SCRIPT", "MAGPIE_SGLANG_SCRIPT"):
+                    "MAGPIE_LAUNCH_SCRIPT_SOURCE", "MAGPIE_VLLM_SCRIPT",
+                    "MAGPIE_SGLANG_SCRIPT", "MAX_MODEL_LEN",
+                    "RECIPE_ENV_FILE", "RECIPE_ENV_SOURCE", "RECIPE_ENV_REPLAYED",
+                    "RECIPE_ENV_GEAK_OWNED", "GEAK_STRICT_RECIPE_ENV",
+                    "EFFECTIVE_SERVER_ARGS_COMPLETE"):
             os.environ.pop(key, None)
+
+    def _recipe(self, *, script="vllm_mi355x.sh", subdir="", root=None,
+                with_lib=True, write_script=True):
+        """An orchestrator launch recipe next to a checkout it can point at.
+
+        ``write_script=False`` + ``with_lib=False`` leaves the checkout path
+        untouched so callers can point the recipe at a path that does not exist
+        on this box (the orchestrator's host-local checkout). Creating under
+        ``/nonexistent/...`` would PermissionError on CI.
+        """
+        checkout = Path(root) if root else self.tmp / "InferenceX@abc123"
+        bench_dir = checkout / "benchmarks" / subdir if subdir else checkout / "benchmarks"
+        if write_script or with_lib:
+            bench_dir.mkdir(parents=True, exist_ok=True)
+        if write_script:
+            (bench_dir / script).write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        if with_lib:
+            (bench_dir / "benchmark_lib.sh").write_text("# lib\n", encoding="utf-8")
+        recipe = self.tmp / "baseline_config.with_envs.yaml"
+        recipe.write_text(
+            "benchmark:\n"
+            "  framework: vllm\n"
+            "  model: /models/Qwen3-8B\n"
+            "  envs:\n"
+            "    TP: 1\n"
+            "    MAX_MODEL_LEN: 6144\n"
+            "  runner_type: mi355x\n"
+            f"  benchmark_script: {script}\n"
+            f"  inferencex_path: {checkout}\n",
+            encoding="utf-8",
+        )
+        return str(recipe), str(bench_dir / script)
 
     def test_handoff_script_enables_magpie_and_normalises_the_env_var(self):
         launcher = rx.apply_bench_launcher(
@@ -424,6 +516,24 @@ class TestBenchLauncher(_RunE2ECase):
         self.assertEqual(launcher, "magpie")
         self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], "/magpie/launch.sh")
         self.assertEqual(os.environ["BENCH_LAUNCHER"], "magpie")
+
+    def test_schema_v2_marks_resolved_args_complete_without_launch_flags(self):
+        recipe, _ = self._recipe()
+        rx.apply_bench_launcher({
+            "schema_version": 2,
+            "baseline_env_spec": {"config": {"server_launch_flags": ""}},
+            "launch_recipe": recipe,
+            "framework": "vllm",
+            "eval_dir": str(self.tmp / "eval"),
+        })
+        self.assertEqual(os.environ["EFFECTIVE_SERVER_ARGS_COMPLETE"], "1")
+
+    def test_legacy_launcher_clears_complete_args_marker(self):
+        os.environ["EFFECTIVE_SERVER_ARGS_COMPLETE"] = "1"
+        rx.apply_bench_launcher(
+            {"launch_server_script": "/magpie/launch.sh", "framework": "vllm"}
+        )
+        self.assertNotIn("EFFECTIVE_SERVER_ARGS_COMPLETE", os.environ)
 
     def test_per_backend_env_script_is_discovered(self):
         os.environ["MAGPIE_SGLANG_SCRIPT"] = "/magpie/sglang.sh"
@@ -457,6 +567,468 @@ class TestBenchLauncher(_RunE2ECase):
         self.assertEqual(rx.apply_bench_launcher({"framework": "vllm"}), "native")
         self.assertNotIn("MAGPIE_LAUNCH_SCRIPT", os.environ)
 
+    # -- deriving the script from the recipe the orchestrator did send -------- #
+    def test_the_launch_script_is_derived_from_the_recipe(self):
+        """No handoff has ever named the launch script, but every one names the
+        recipe — and the recipe names both the checkout and the script."""
+        recipe, script = self._recipe()
+
+        launcher = rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm", "max_model_len": 6144}
+        )
+
+        self.assertEqual(launcher, "magpie")
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT_SOURCE"], "launch_recipe")
+
+    def test_a_script_in_a_checkout_subdirectory_is_found(self):
+        recipe, script = self._recipe(subdir="single_node")
+
+        rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"})
+
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
+
+    def test_an_explicit_script_outranks_the_recipe(self):
+        recipe, _ = self._recipe()
+
+        rx.apply_bench_launcher({
+            "launch_recipe": recipe,
+            "launch_server_script": "/magpie/explicit.sh",
+            "framework": "vllm",
+        })
+
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], "/magpie/explicit.sh")
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT_SOURCE"], "handoff")
+
+    def test_a_checkout_missing_its_script_library_degrades_to_native(self):
+        """The script sources benchmark_lib.sh from its own directory and dies
+        without it. Better to serve natively than to fail every bench."""
+        recipe, _ = self._recipe(with_lib=False)
+
+        launcher = rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"})
+
+        self.assertEqual(launcher, "native")
+        self.assertNotIn("MAGPIE_LAUNCH_SCRIPT", os.environ)
+
+    def test_an_unreachable_checkout_degrades_to_native(self):
+        """The recipe is written on the orchestrator's box; its checkout path
+        need not exist on ours."""
+        # Under self.tmp but never created — avoids mkdir('/nonexistent') which
+        # PermissionErrors on GitHub Actions while still being a missing path.
+        missing = self.tmp / "InferenceX@dead"
+        self.assertFalse(missing.exists())
+        recipe, _ = self._recipe(
+            root=str(missing), write_script=False, with_lib=False
+        )
+
+        self.assertEqual(
+            rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"}),
+            "native",
+        )
+
+    # -- the recipe's checkout is host-local; the handoff's usually is not ---- #
+    def _checkout(self, name, script="vllm_mi355x.sh"):
+        """A usable InferenceX checkout that no recipe points at."""
+        bench_dir = self.tmp / name / "benchmarks"
+        bench_dir.mkdir(parents=True, exist_ok=True)
+        (bench_dir / script).write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        (bench_dir / "benchmark_lib.sh").write_text("# lib\n", encoding="utf-8")
+        return str(self.tmp / name), str(bench_dir / script)
+
+    def test_a_stale_recipe_checkout_falls_back_to_the_handoff_checkout(self):
+        """The recipe names a container-local, content-hash addressed path. A
+        rebuild invalidates it while the same checkout survives on durable
+        storage — which the handoff names, and which the bench client already
+        resolves against."""
+        recipe, _ = self._recipe(root=str(self.tmp / "stale"),
+                                 write_script=False, with_lib=False)
+        survivor, script = self._checkout("durable")
+
+        launcher = rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "inferencex_path": survivor,
+             "framework": "vllm"}
+        )
+
+        self.assertEqual(launcher, "magpie")
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT_SOURCE"], "launch_recipe")
+
+    def test_the_recipe_checkout_wins_whenever_it_still_resolves(self):
+        """The recipe's path is the only one the orchestrator provably launched
+        from, so a fallback must never displace it."""
+        recipe, recipe_script = self._recipe()
+        other, other_script = self._checkout("durable")
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "inferencex_path": other, "framework": "vllm"}
+        )
+
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], recipe_script)
+        self.assertNotEqual(recipe_script, other_script)
+
+    def test_the_inferencex_path_env_is_the_last_resort(self):
+        recipe, _ = self._recipe(root=str(self.tmp / "stale"),
+                                 write_script=False, with_lib=False)
+        survivor, script = self._checkout("from_env")
+        os.environ["INFERENCEX_PATH"] = survivor
+        self.addCleanup(os.environ.pop, "INFERENCEX_PATH", None)
+
+        self.assertEqual(
+            rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"}),
+            "magpie",
+        )
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
+
+    def test_no_usable_checkout_anywhere_still_degrades_to_native(self):
+        recipe, _ = self._recipe(root=str(self.tmp / "stale"),
+                                 write_script=False, with_lib=False)
+
+        self.assertEqual(
+            rx.apply_bench_launcher(
+                {"launch_recipe": recipe,
+                 "inferencex_path": str(self.tmp / "also_gone"),
+                 "framework": "vllm"}
+            ),
+            "native",
+        )
+        self.assertNotIn("MAGPIE_LAUNCH_SCRIPT", os.environ)
+
+    # -- replaying the orchestrator's recorded launch environment -------------
+    # The launcher running the same SCRIPT only aligns the two servers where
+    # their ${X:-default} expansions agree. These pin the stronger property: what
+    # the orchestrator recorded is applied, what GEAK must own is not, and a
+    # recipe that recorded nothing refuses to launch rather than quietly falling
+    # back onto defaults that merely happened to match once.
+
+    def _recipe_with_envs(self, envs: str):
+        checkout = self.tmp / "InferenceX@abc123"
+        bench = checkout / "benchmarks"
+        bench.mkdir(parents=True, exist_ok=True)
+        (bench / "vllm_mi355x.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        (bench / "benchmark_lib.sh").write_text("# lib\n", encoding="utf-8")
+        recipe = self.tmp / "baseline_config.with_envs.yaml"
+        recipe.write_text(
+            "benchmark:\n"
+            "  framework: vllm\n"
+            f"{envs}"
+            "  runner_type: mi355x\n"
+            "  benchmark_script: vllm_mi355x.sh\n"
+            f"  inferencex_path: {checkout}\n",
+            encoding="utf-8",
+        )
+        return str(recipe)
+
+    def test_the_recorded_env_is_replayed_and_run_scoped_names_are_not(self):
+        # Use real directories for PATH so existence filtering keeps them.
+        venv_bin = self.tmp / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        recipe = self._recipe_with_envs(
+            "  envs:\n"
+            f"    PATH: {venv_bin}:/usr/bin\n"
+            "    VLLM_ROCM_USE_AITER: '1'\n"
+            "    NUM_WARMUPS: 8\n"
+            "    PORT: 8844\n"                    # GEAK-owned: this run's port
+            "    ROCR_VISIBLE_DEVICES: '0'\n"     # GEAK-owned: this run's GPU
+        )
+        self.assertEqual(
+            rx.apply_bench_launcher(
+                {"launch_recipe": recipe, "framework": "vllm",
+                 "eval_dir": str(self.tmp / "eval")}
+            ),
+            "magpie",
+        )
+        replayed = os.environ["RECIPE_ENV_REPLAYED"].split()
+        self.assertEqual(replayed, ["NUM_WARMUPS", "PATH", "VLLM_ROCM_USE_AITER"])
+        self.assertEqual(
+            os.environ["RECIPE_ENV_GEAK_OWNED"].split(),
+            ["PORT", "ROCR_VISIBLE_DEVICES"],
+        )
+        # PATH carries no spaces here, but the file must still be NUL-delimited
+        # so that a value which does carry one survives the launcher's env call.
+        blob = Path(os.environ["RECIPE_ENV_FILE"]).read_bytes()
+        expected_path = f"PATH={venv_bin}:/usr/bin".encode()
+        self.assertEqual(
+            blob.split(b"\0")[:-1],
+            [b"NUM_WARMUPS=8", expected_path, b"VLLM_ROCM_USE_AITER=1"],
+        )
+
+    def test_missing_path_components_are_dropped_from_replay(self):
+        """A host-local venv prefix that is gone on this box must not lead PATH."""
+        alive = self.tmp / "alive_bin"
+        alive.mkdir()
+        dead = self.tmp / "dead_venv" / "bin"   # never created
+        recipe = self._recipe_with_envs(
+            "  envs:\n"
+            f"    PATH: {dead}:{alive}:/usr/bin\n"
+            "    VLLM_ROCM_USE_AITER: '1'\n"
+        )
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm",
+             "eval_dir": str(self.tmp / "eval")}
+        )
+
+        blob = Path(os.environ["RECIPE_ENV_FILE"]).read_bytes()
+        self.assertIn(f"PATH={alive}:/usr/bin".encode(), blob)
+        self.assertNotIn(str(dead).encode(), blob)
+
+    def test_a_fully_missing_path_is_omitted_from_replay(self):
+        """Nothing usable left -> keep the ambient PATH rather than export junk."""
+        dead = self.tmp / "no_such_venv" / "bin"
+        recipe = self._recipe_with_envs(
+            "  envs:\n"
+            f"    PATH: {dead}\n"
+            "    VLLM_ROCM_USE_AITER: '1'\n"
+        )
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm",
+             "eval_dir": str(self.tmp / "eval")}
+        )
+
+        self.assertEqual(
+            os.environ["RECIPE_ENV_REPLAYED"].split(), ["VLLM_ROCM_USE_AITER"]
+        )
+        self.assertNotIn(b"PATH=", Path(os.environ["RECIPE_ENV_FILE"]).read_bytes())
+
+    def test_the_replay_says_nothing_on_stdout(self):
+        """Callers eval this function's stdout as shell (run_ab.sh does), so a
+        progress line on stdout is executed as a command and kills the run."""
+        recipe = self._recipe_with_envs("  envs:\n    VLLM_ROCM_USE_AITER: '1'\n")
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rx.apply_bench_launcher(
+                {"launch_recipe": recipe, "framework": "vllm",
+                 "eval_dir": str(self.tmp / "eval")}
+            )
+        self.assertEqual(out.getvalue(), "")
+
+    def test_what_the_launcher_overrides_is_not_reported_as_replayed(self):
+        """The launcher passes MODEL and TP positionally, after the replay, so
+        the recipe's values lose. Reporting them as replayed would name this run
+        as inheriting a model and a shard count it does not actually serve."""
+        recipe = self._recipe_with_envs(
+            "  envs:\n"
+            "    MODEL: /models/Some-Other-Model\n"
+            "    TP: 8\n"
+            "    VLLM_ROCM_USE_AITER: '1'\n"
+        )
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm",
+             "eval_dir": str(self.tmp / "eval")}
+        )
+
+        self.assertEqual(
+            os.environ["RECIPE_ENV_REPLAYED"].split(), ["VLLM_ROCM_USE_AITER"]
+        )
+        self.assertEqual(os.environ["RECIPE_ENV_GEAK_OWNED"].split(), ["MODEL", "TP"])
+        self.assertNotIn(b"TP=8", Path(os.environ["RECIPE_ENV_FILE"]).read_bytes())
+
+    def test_strict_mode_accepts_an_env_block_containing_only_owned_names(self):
+        """A complete, known override set needs no replay file and is not absent."""
+        recipe = self._recipe_with_envs(
+            "  envs:\n"
+            "    MODEL: /models/reference\n"
+            "    TP: 8\n"
+            "    PORT: 9000\n"
+            "    ROCR_VISIBLE_DEVICES: 7\n"
+        )
+        os.environ["GEAK_STRICT_RECIPE_ENV"] = "1"
+
+        self.assertEqual(
+            rx.apply_bench_launcher(
+                {"launch_recipe": recipe, "framework": "vllm",
+                 "eval_dir": str(self.tmp / "eval")}
+            ),
+            "magpie",
+        )
+        self.assertNotIn("RECIPE_ENV_FILE", os.environ)
+        self.assertEqual(os.environ["RECIPE_ENV_SOURCE"], recipe)
+        self.assertEqual(os.environ["RECIPE_ENV_REPLAYED"], "")
+        self.assertEqual(
+            os.environ["RECIPE_ENV_GEAK_OWNED"].split(),
+            ["MODEL", "PORT", "ROCR_VISIBLE_DEVICES", "TP"],
+        )
+
+    def test_a_nested_map_under_envs_contributes_no_variables(self):
+        """Its children are keys of a structure, not names any shell exports;
+        flattening them would invent variables the orchestrator never set."""
+        recipe = self._recipe_with_envs(
+            "  envs:\n"
+            "    VLLM_ROCM_USE_AITER: '1'\n"
+            "    sweep:\n"
+            "      ISL: 128\n"
+            "      nested_deeper:\n"
+            "        OSL: 256\n"
+            "    NUM_WARMUPS: 8\n"          # the block resumes after the subtree
+        )
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm",
+             "eval_dir": str(self.tmp / "eval")}
+        )
+
+        self.assertEqual(
+            os.environ["RECIPE_ENV_REPLAYED"].split(),
+            ["NUM_WARMUPS", "VLLM_ROCM_USE_AITER"],
+        )
+
+    def test_a_recipe_recording_no_env_warns_but_launches(self):
+        recipe = self._recipe_with_envs("")
+
+        self.assertEqual(
+            rx.apply_bench_launcher(
+                {"launch_recipe": recipe, "framework": "vllm",
+                 "eval_dir": str(self.tmp / "eval")}
+            ),
+            "magpie",
+        )
+        self.assertNotIn("RECIPE_ENV_FILE", os.environ)
+
+    def test_strict_mode_refuses_when_no_env_is_recorded(self):
+        recipe = self._recipe_with_envs("")
+        os.environ["GEAK_STRICT_RECIPE_ENV"] = "1"
+
+        with self.assertRaises(SystemExit) as caught:
+            rx.apply_bench_launcher(
+                {"launch_recipe": recipe, "framework": "vllm",
+                 "eval_dir": str(self.tmp / "eval")}
+            )
+        self.assertIn("records no envs", str(caught.exception))
+
+    def test_strict_mode_also_applies_when_script_source_is_handoff(self):
+        """An explicit script must not bypass strictness for its launch recipe."""
+        recipe = self._recipe_with_envs("")
+        os.environ["GEAK_STRICT_RECIPE_ENV"] = "1"
+        with self.assertRaises(SystemExit) as caught:
+            rx.apply_bench_launcher({
+                "launch_recipe": recipe,
+                "launch_server_script": "/magpie/explicit.sh",
+                "framework": "vllm",
+                "eval_dir": str(self.tmp / "eval"),
+            })
+        self.assertIn("records no envs", str(caught.exception))
+
+    def test_a_script_named_by_the_handoff_is_not_held_to_the_recipe(self):
+        # Nothing was derived from a recipe, so there is no recorded env to be
+        # missing and fail-closed must not fire.
+        self.assertEqual(
+            rx.apply_bench_launcher(
+                {"launch_server_script": "/magpie/launch.sh", "framework": "vllm"}
+            ),
+            "magpie",
+        )
+        self.assertNotIn("RECIPE_ENV_FILE", os.environ)
+
+    def test_the_recorded_max_model_len_outranks_the_handoff_scalar(self):
+        recipe = self._recipe_with_envs("  envs:\n    MAX_MODEL_LEN: 6144\n")
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm", "max_model_len": 4096,
+             "eval_dir": str(self.tmp / "eval")}
+        )
+        # Cleared, so the launcher's pass-through cannot land on top of the
+        # replayed value; the recipe's 6144 reaches the script via the replay.
+        self.assertNotIn("MAX_MODEL_LEN", os.environ)
+        self.assertIn(b"MAX_MODEL_LEN=6144",
+                      Path(os.environ["RECIPE_ENV_FILE"]).read_bytes())
+
+    def test_replay_file_is_atomically_replaced_without_temp_residue(self):
+        recipe = self._recipe_with_envs("  envs:\n    FOO: new value\n")
+        eval_dir = self.tmp / "eval"
+        eval_dir.mkdir()
+        replay = eval_dir / "recipe_env.nul"
+        replay.write_bytes(b"FOO=old\0")
+
+        rx.apply_bench_launcher({
+            "launch_recipe": recipe,
+            "framework": "vllm",
+            "eval_dir": str(eval_dir),
+        })
+
+        self.assertEqual(replay.read_bytes(), b"FOO=new value\0")
+        self.assertEqual(list(eval_dir.glob(".recipe_env.*.tmp")), [])
+
+    def test_a_missing_recipe_file_is_not_an_error(self):
+        self.assertEqual(rx._recipe_fields("/nonexistent/recipe.yaml"), {})
+        self.assertEqual(
+            rx.apply_bench_launcher(
+                {"launch_recipe": "/nonexistent/recipe.yaml", "framework": "vllm"}
+            ),
+            "native",
+        )
+
+    def test_the_escape_hatch_outranks_a_derivable_recipe(self):
+        recipe, _ = self._recipe()
+        os.environ["BENCH_LAUNCHER"] = "native"
+
+        self.assertEqual(
+            rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"}),
+            "native",
+        )
+
+    # -- max-model-len reaches the script as env, not as a duplicate flag ----- #
+    def test_max_model_len_reaches_the_magpie_script(self):
+        """Magpie's script defaults max-model-len to 4096. Left unset, the right
+        value only arrives as a duplicate flag that wins on argparse ordering.
+
+        Which CHANNEL carries it depends on whether the recipe recorded it: the
+        replay when it did, the pass-through when it did not. Asserting the
+        outcome rather than the channel keeps this pinned to the property that
+        matters -- 6144 reaches the script exactly once.
+        """
+        recipe, _ = self._recipe()   # records MAX_MODEL_LEN: 6144
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm", "max_model_len": 6144,
+             "eval_dir": str(self.tmp / "eval")}
+        )
+
+        via_replay = b"MAX_MODEL_LEN=6144" in Path(
+            os.environ.get("RECIPE_ENV_FILE", os.devnull)).read_bytes()
+        via_passthrough = os.environ.get("MAX_MODEL_LEN") == "6144"
+        self.assertTrue(via_replay or via_passthrough)
+        self.assertFalse(via_replay and via_passthrough, "must not arrive twice")
+
+    def test_max_model_len_falls_back_to_the_handoff_when_unrecorded(self):
+        """A recipe that records an env but not this one still gets the value."""
+        recipe = self._recipe_with_envs("  envs:\n    TP: 1\n")
+
+        rx.apply_bench_launcher(
+            {"launch_recipe": recipe, "framework": "vllm", "max_model_len": 6144,
+             "eval_dir": str(self.tmp / "eval")}
+        )
+
+        self.assertEqual(os.environ["MAX_MODEL_LEN"], "6144")
+
+    def test_max_model_len_is_not_forwarded_on_the_native_path(self):
+        """Nothing on the native path reads it, and exporting it would leak a
+        server knob into an unrelated launch."""
+        rx.apply_bench_launcher({"framework": "vllm", "max_model_len": 6144})
+
+        self.assertEqual(rx.apply_bench_launcher({"framework": "vllm"}), "native")
+        self.assertNotIn("MAX_MODEL_LEN", os.environ)
+
+    def test_an_absent_max_model_len_leaves_the_script_default_alone(self):
+        """The script's own default IS what the orchestrator served with."""
+        recipe, _ = self._recipe()
+
+        rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"})
+
+        self.assertNotIn("MAX_MODEL_LEN", os.environ)
+
+    def test_the_recipe_parser_ignores_the_nested_env_map(self):
+        recipe, _ = self._recipe()
+
+        fields = rx._recipe_fields(recipe)
+
+        self.assertEqual(fields["benchmark_script"], "vllm_mi355x.sh")
+        self.assertEqual(fields["framework"], "vllm")
+        self.assertEqual(fields["runner_type"], "mi355x")
+        self.assertNotIn("MAX_MODEL_LEN", fields)
+        self.assertNotIn("TP", fields)
+
 
 class TestBenchProtocol(_RunE2ECase):
     def test_only_provided_keys_are_exported(self):
@@ -485,12 +1057,53 @@ class TestBenchProtocol(_RunE2ECase):
     def test_non_dict_protocol_is_ignored(self):
         self.assertEqual(rx.apply_bench_protocol({"bench_protocol": "0.5"}), {})
 
+    def test_schema_v2_uses_actual_hyperloom_wrapper_protocol(self):
+        """Historical metadata cannot override the wrapper's 2*conc policy."""
+        exported = rx.apply_bench_protocol({
+            "schema_version": 2,
+            "workload": {"conc": 64},
+            "baseline_env_spec": {"config": {}},
+            "bench_protocol": {
+                "random_range_ratio": 0,
+                "num_prompts": 192,
+                "num_warmups": 8,
+            },
+        })
+        self.assertEqual(exported["NUM_PROMPTS"], "192")
+        self.assertEqual(exported["NUM_WARMUPS"], "128")
+        self.assertEqual(exported["SEED"], "0")
+        self.assertEqual(exported["RANDOM_RANGE_RATIO"], "1")
+        self.assertEqual(exported["GEAK_REPEAT_MODE"], "isolated_server")
+        self.assertEqual(exported["REPLICA_RETRIES"], "1")
+        # A pinned count is the caller telling us what it measured.
+        self.assertNotIn("NUM_PROMPTS_ADAPTIVE", exported)
+
+    def test_schema_v2_without_a_pinned_count_aligns_the_prompt_count(self):
+        """NUM_PROMPTS was the one protocol knob this block left unaligned, and
+        the two defaults disagree: bench_e2e.sh falls back to Magpie's fixed
+        CONC*10 while the caller scales DOWN with sequence cost. Switching on
+        the adaptive table (which is that same rule) is the alignment."""
+        exported = rx.apply_bench_protocol({
+            "schema_version": 2,
+            "workload": {"conc": 64},
+            "baseline_env_spec": {"config": {}},
+            "bench_protocol": {"random_range_ratio": 0},
+        })
+        self.assertEqual(exported["NUM_PROMPTS_ADAPTIVE"], "1")
+        self.assertNotIn("NUM_PROMPTS", exported)
+
 
 class TestAlignmentFlags(_RunE2ECase):
-    def test_cold_final_defaults_on(self):
+    def test_cold_final_defaults_off(self):
         os.environ.pop("BENCH_COLD_FINAL", None)
-        self.assertEqual(rx.apply_alignment_flags({}), {"BENCH_COLD_FINAL": "1"})
-        self.assertEqual(os.environ["BENCH_COLD_FINAL"], "1")
+        self.assertEqual(rx.apply_alignment_flags({}), {"BENCH_COLD_FINAL": "0"})
+        self.assertEqual(os.environ["BENCH_COLD_FINAL"], "0")
+
+    def test_explicit_truthy_handoff_enables(self):
+        self.assertEqual(
+            rx.apply_alignment_flags({"bench_cold_final": "1"}),
+            {"BENCH_COLD_FINAL": "1"},
+        )
 
     def test_explicit_falsey_handoff_disables(self):
         self.assertEqual(
@@ -501,8 +1114,9 @@ class TestAlignmentFlags(_RunE2ECase):
     def test_env_value_is_used_when_the_handoff_is_silent(self):
         os.environ["BENCH_COLD_FINAL"] = "yes"
         self.assertEqual(rx.apply_alignment_flags({}), {"BENCH_COLD_FINAL": "1"})
+        # An empty env var carries no intent, so the default (off) applies.
         os.environ["BENCH_COLD_FINAL"] = ""
-        self.assertEqual(rx.apply_alignment_flags({}), {"BENCH_COLD_FINAL": "1"})
+        self.assertEqual(rx.apply_alignment_flags({}), {"BENCH_COLD_FINAL": "0"})
 
 
 # =========================================================================== #
@@ -810,7 +1424,7 @@ class TestInvokeViaCli(_RunE2ECase):
             "--output-format", "json",
             "--settings", rx.WORKFLOW_SETTINGS,
             "--model", rx.CLAUDE_MODEL,
-            "--allowed-tools", "Workflow,Bash,Read,Write",
+            "--allowed-tools", ",".join(rx.ALLOWED_TOOLS),
             "--permission-mode", "auto",
             "--effort", "max",
         ])
@@ -1020,21 +1634,24 @@ class TestColdFinalBasis(_RunE2ECase):
             "output_parity": "pass",
         }
 
-    def test_cold_win_is_promoted_over_the_hot_median(self):
-        """Hyperloom's leaderboard denominator is a COLD round, so when GEAK also
-        measured cold and cold is a real gain, the promoted number must be the
-        cold one — otherwise the reported gain mixes thermal states."""
+    def test_a_cold_win_never_replaces_the_promoted_hot_median(self):
+        """A cold round measured mid-session is a warm round wearing the label,
+        so a flattering cold ratio must not become the headline: the promoted
+        pair stays hot-over-hot and the cold numbers stay diagnostic."""
         eval_dir = self._eval_dir(cold_final=520.0, cold_baseline=460.0)
         out = rx.normalize_result(
             {"raw_baseline_tput": 440.0}, self._wf(eval_dir)
         )
-        self.assertEqual(out["final_throughput_basis"], "cold")
-        self.assertEqual(out["final_throughput_tok_s"], 520.0)
-        self.assertEqual(out["throughput_speedup"], rx._safe_ratio(520.0, 460.0))
+        self.assertEqual(out["final_throughput_basis"], "hot")
+        self.assertEqual(out["final_throughput_tok_s"], 500.0)
+        self.assertEqual(out["throughput_speedup"], 1.1111)
         self.assertEqual(out["status"], "ok")
-        self.assertEqual(out["alignment_metrics"]["final_basis"], "cold")
+        self.assertEqual(out["alignment_metrics"]["final_basis"], "hot")
+        # Still reported, just no longer load-bearing.
         self.assertEqual(out["alignment_metrics"]["cold_speedup"],
                          rx._safe_ratio(520.0, 440.0))
+        self.assertEqual(out["alignment_metrics"]["cold_geak_speedup"],
+                         rx._safe_ratio(520.0, 460.0))
 
     def test_cold_loss_keeps_the_hot_median(self):
         """An authored overlay pays a one-off JIT/graph-capture cost on the cold
@@ -1045,22 +1662,20 @@ class TestColdFinalBasis(_RunE2ECase):
         self.assertEqual(out["final_throughput_tok_s"], 500.0)
         self.assertEqual(out["throughput_speedup"], 1.1111)
 
-    def test_standalone_run_gates_on_the_within_geak_cold_ratio(self):
-        """No orchestrator baseline => cold_speedup is undefined; the gate falls
-        back to GEAK's own cold-to-cold ratio rather than refusing cold."""
+    def test_cold_numbers_alone_never_move_the_promoted_pair(self):
+        """No orchestrator baseline, so the only cold ratio available is GEAK's
+        own — which used to be enough to switch the basis. It no longer is."""
         eval_dir = self._eval_dir(cold_final=520.0, cold_baseline=460.0)
         out = rx.normalize_result({}, self._wf(eval_dir))
-        self.assertEqual(out["final_throughput_basis"], "cold")
+        self.assertEqual(out["final_throughput_basis"], "hot")
         self.assertIsNone(out["alignment_metrics"]["cold_speedup"])
-        self.assertEqual(out["throughput_speedup"], rx._safe_ratio(520.0, 460.0))
+        self.assertEqual(out["throughput_speedup"], 1.1111)
 
-    def test_cold_final_without_a_cold_baseline_keeps_the_reported_speedup(self):
-        """Cold basis is adopted for the promoted number, but with no cold
-        baseline there is no self-consistent cold speedup to overwrite with."""
+    def test_a_cold_final_without_a_cold_baseline_changes_nothing(self):
         eval_dir = self._eval_dir(cold_final=520.0)
         out = rx.normalize_result({"raw_baseline_tput": 440.0}, self._wf(eval_dir))
-        self.assertEqual(out["final_throughput_basis"], "cold")
-        self.assertEqual(out["final_throughput_tok_s"], 520.0)
+        self.assertEqual(out["final_throughput_basis"], "hot")
+        self.assertEqual(out["final_throughput_tok_s"], 500.0)
         self.assertEqual(out["throughput_speedup"], 1.1111)
         self.assertIsNone(out["alignment_metrics"]["cold_geak_speedup"])
 
@@ -1378,6 +1993,126 @@ class TestJourneyReturnPath(_RunE2ECase):
             journey["discovery_runs"][0]["hot_kernels"][0]["selected_for_optimization"]
         )
 
+    # --- overlay-vs-return identity (one acceptance, two spellings) ---------- #
+
+    def _overlay(self, eval_dir: Path, tag: str, ir: dict | None) -> Path:
+        """One candidate overlay dir, with or without its integrate_result."""
+        cand = eval_dir / "overlay" / f"cand_{tag}"
+        cand.mkdir(parents=True, exist_ok=True)
+        if ir is not None:
+            self.write_json(cand / "integrate_result.json", ir)
+        return cand
+
+    def test_return_acceptance_already_on_disk_as_an_overlay_is_not_re_emitted(self):
+        """The overlay dir is named for the CANDIDATE TAG and the workflow return
+        for the KERNEL SYMBOL, so the id dedup never fires and one acceptance is
+        emitted twice — once measured, once with a null gpu%. integrate_result
+        records both spellings, so the symbol it claims must fold them."""
+        eval_dir = self.tmp / "e2e_alias"
+        self._overlay(eval_dir, "c0_triton", {
+            "gate": "accepted", "short_name": "dsa_sparse_attn_prefill_main_kernel",
+            "cand_tag": "c0_triton", "pct_gpu_time": 20.2,
+            "isolated_speedup": 2.2, "e2e_delta_pct": 29.994,
+        })
+        wf = {"eval_dir": str(eval_dir), "accepted_heads": [{
+            "short_name": "dsa_sparse_attn_prefill_main_kernel",
+            "backend": "triton", "isolated": 1.13, "e2e_delta_pct": 29.994,
+        }]}
+        journey = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})
+        self.assertEqual([k["kernel_id"] for k in journey["kernels"]], ["c0_triton"])
+        # The surviving entry is the MEASURED one (gpu% from integrate_result),
+        # not the return's null.
+        self.assertEqual(journey["kernels"][0]["gpu_pct"], 20.2)
+        self.assertEqual(journey["kernels"][0]["e2e"]["e2e_gain_pct"], 29.994)
+
+    def test_sibling_candidates_for_one_symbol_each_stay_their_own_entry(self):
+        """Folding is against the RETURN, not between overlays: two candidate
+        implementations of the same kernel are two real attempts and must both
+        survive, with only the return's duplicate dropped."""
+        eval_dir = self.tmp / "e2e_siblings"
+        self._overlay(eval_dir, "c0_triton", {
+            "gate": "accepted", "short_name": "dsa_fwd", "e2e_delta_pct": 29.994})
+        self._overlay(eval_dir, "c1_tilelang", {
+            "gate": "stack", "short_name": "dsa_fwd", "e2e_delta_pct": 2.818})
+        wf = {"eval_dir": str(eval_dir),
+              "accepted_heads": [{"short_name": "dsa_fwd", "e2e_delta_pct": 29.994}]}
+        journey = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})
+        self.assertEqual([k["kernel_id"] for k in journey["kernels"]],
+                         ["c0_triton", "c1_tilelang"])
+
+    def test_symbol_less_overlay_folds_the_return_on_its_integrated_delta(self):
+        """Some runs record no usable symbol (integrate_result echoes the tag).
+        The return copies the overlay's own A/B delta rather than recomputing it,
+        so an exact, unambiguous hit is the same measurement."""
+        eval_dir = self.tmp / "e2e_delta_fold"
+        self._overlay(eval_dir, "decode_attention_grouped_mla", {
+            "gate": "accepted", "short_name": "decode_attention_grouped_mla",
+            "e2e_delta_pct": 11.71})
+        wf = {"eval_dir": str(eval_dir), "accepted_heads": [
+            {"short_name": "_fwd_grouped_kernel_stage1 (+_fwd_kernel_stage2)",
+             "e2e_delta_pct": 11.71}]}
+        journey = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})
+        self.assertEqual([k["kernel_id"] for k in journey["kernels"]],
+                         ["decode_attention_grouped_mla"])
+
+    def test_an_ambiguous_delta_never_folds_two_kernels(self):
+        """Two overlays sharing a delta cannot identify which acceptance the
+        return meant, so the return entry is kept rather than guessed away."""
+        eval_dir = self.tmp / "e2e_delta_ambig"
+        self._overlay(eval_dir, "c0_triton", {"gate": "accepted", "e2e_delta_pct": 5.0})
+        self._overlay(eval_dir, "c1_ck", {"gate": "accepted", "e2e_delta_pct": 5.0})
+        wf = {"eval_dir": str(eval_dir),
+              "accepted_kernels": [{"short_name": "some_other_gemm",
+                                    "e2e_delta_pct": 5.0}]}
+        journey = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})
+        self.assertIn("some_other_gemm", [k["kernel_id"] for k in journey["kernels"]])
+
+    def test_one_overlay_is_consumed_by_at_most_one_return_acceptance(self):
+        """A single overlay whose delta matches must not swallow BOTH accepted
+        records; the second is a distinct kernel and keeps its entry."""
+        eval_dir = self.tmp / "e2e_claim_once"
+        self._overlay(eval_dir, "c0_aiter", {"gate": "accepted", "e2e_delta_pct": 6.779})
+        wf = {"eval_dir": str(eval_dir), "accepted_kernels": [
+            {"short_name": "gemm_down_proj", "e2e_delta_pct": 6.779},
+            {"short_name": "gemm_gate_up", "e2e_delta_pct": 6.779},
+        ]}
+        journey = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})
+        self.assertEqual([k["kernel_id"] for k in journey["kernels"]],
+                         ["c0_aiter", "gemm_gate_up"])
+
+    def test_a_rejected_overlay_claims_nothing(self):
+        """Do-no-harm: an overlay the A/B REVERTED did not integrate that kernel,
+        so an acceptance the return asserts is new information, not a duplicate."""
+        eval_dir = self.tmp / "e2e_rejected"
+        self._overlay(eval_dir, "c0_triton", {
+            "gate": "rejected", "short_name": "my_gemm", "e2e_delta_pct": 1.5})
+        wf = {"eval_dir": str(eval_dir),
+              "accepted_kernels": [{"short_name": "my_gemm", "e2e_delta_pct": 1.5}]}
+        journey = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})
+        self.assertEqual([k["kernel_id"] for k in journey["kernels"]],
+                         ["c0_triton", "my_gemm"])
+
+    def test_an_incomplete_ab_overlay_claims_nothing(self):
+        """No integrate_result at all (cut off mid-A/B) is not an acceptance."""
+        eval_dir = self.tmp / "e2e_incomplete"
+        self._overlay(eval_dir, "c0_triton", None)
+        wf = {"eval_dir": str(eval_dir),
+              "accepted_kernels": [{"short_name": "my_gemm", "e2e_delta_pct": 1.5}]}
+        journey = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})
+        self.assertEqual([k["kernel_id"] for k in journey["kernels"]],
+                         ["c0_triton", "my_gemm"])
+
+    def test_folded_return_acceptance_is_absent_from_synthetic_discovery(self):
+        """A folded acceptance must not come back as a synthesized hot_kernel,
+        which would re-orphan the duplicate in the discovery substream."""
+        eval_dir = self.tmp / "e2e_fold_disc"
+        self._overlay(eval_dir, "c0_triton", {
+            "gate": "accepted", "short_name": "dsa_fwd", "e2e_delta_pct": 3.0})
+        wf = {"eval_dir": str(eval_dir),
+              "accepted_heads": [{"short_name": "dsa_fwd", "e2e_delta_pct": 3.0}]}
+        journey = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})
+        self.assertEqual(journey["discovery_runs"], [])
+
     def test_journey_without_an_eval_dir_is_empty_but_valid(self):
         journey = rx.build_kernel_journey({}, {})
         self.assertEqual(journey["kernels"], [])
@@ -1462,16 +2197,100 @@ class TestMain(_RunE2ECase):
         self.assertEqual(plan["magpie_launch_script"], "/magpie/launch.sh")
         self.assertEqual(plan["bench_protocol"],
                          {"NUM_PROMPTS": "512", "SEED": "7"})
-        self.assertEqual(plan["alignment_flags"], {"BENCH_COLD_FINAL": "1"})
+        self.assertEqual(plan["alignment_flags"], {"BENCH_COLD_FINAL": "0"})
+        self.assertIn("recipe_env_file", plan)
+        self.assertIn("recipe_env_replayed", plan)
+        self.assertIn("recipe_env_geak_owned", plan)
         self.assertEqual(plan["e2e_script"], str(rx.E2E_SCRIPT))
         self.assertIn("Invoke the Workflow tool exactly once", plan["prompt"])
         self.assertFalse(self.result_path.exists())
 
+    def test_protected_pgids_are_published_before_any_launch(self):
+        """Pins the CALL SITE, not just the helper: the veto must be in the
+        environment before main() can reach a bench, so it is set even on the
+        --dry-run path, which returns before invoke_workflow()."""
+        saved = os.environ.pop("GEAK_PROTECTED_PGIDS", None)
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, "GEAK_PROTECTED_PGIDS", saved)
+        else:
+            self.addCleanup(os.environ.pop, "GEAK_PROTECTED_PGIDS", None)
+        self.patch_rx("invoke_workflow",
+                      lambda *a, **k: self.fail("dry-run must not invoke"))
+        rc, _stdout = self._run(self._handoff(), "--dry-run")
+        self.assertEqual(rc, 0)
+        published = os.environ["GEAK_PROTECTED_PGIDS"].split()
+        self.assertIn("1", published)
+        self.assertIn(str(os.getpgid(0)), published)
+
+    def _pin_env_timeout(self, value: str | None):
+        """Set/clear GEAK_E2E_TIMEOUT_S for one test and always restore it, so
+        budget tests cannot leak a budget into whatever runs next."""
+        saved = os.environ.pop("GEAK_E2E_TIMEOUT_S", None)
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, "GEAK_E2E_TIMEOUT_S", saved)
+        else:
+            self.addCleanup(os.environ.pop, "GEAK_E2E_TIMEOUT_S", None)
+        if value is not None:
+            os.environ["GEAK_E2E_TIMEOUT_S"] = value
+
     def test_timeout_budget_is_read_from_the_environment(self):
-        os.environ["GEAK_E2E_TIMEOUT_S"] = "600"
+        self._pin_env_timeout("600")
         self.patch_rx("invoke_workflow", lambda *a, **k: {})
         _rc, stdout = self._run(self._handoff(), "--dry-run")
         self.assertEqual(json.loads(stdout)["mapped_args"]["time_budget_s"], 600)
+
+    def test_timeout_budget_is_read_from_the_cli(self):
+        """Hyperloom's coordinator states its REAL kill time as
+        `--timeout-s <runner_timeout>`. We used to drop that value into an
+        ignored third positional and pace against the 12h env default instead,
+        so a caller killing early tore the run down mid-optimization and no
+        final report was written (Hyperloom #1202)."""
+        self._pin_env_timeout(None)
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        for argv in (["--timeout-s", "28800"], ["--timeout-s=28800"]):
+            with self.subTest(argv=argv):
+                _rc, stdout = self._run(self._handoff(), *argv, "--dry-run")
+                plan = json.loads(stdout)
+                self.assertEqual(plan["mapped_args"]["time_budget_s"], 28800)
+                # The value must NOT shift the positionals it sits behind.
+                self.assertEqual(plan["mapped_args"]["eval_dir"],
+                                 str(self.eval_dir))
+
+    def test_smallest_stated_budget_wins(self):
+        """Flag and env var both name a deadline someone actually enforces, so
+        pace against the SMALLER. Junk states nothing, and with nothing stated
+        the 12h default applies — a bad budget must not abort the run."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        default = rx.DEFAULT_E2E_TIMEOUT_S
+        for env, cli, expected in (("14400", "28800", 14400),
+                                   ("28800", "14400", 14400),
+                                   (None, None, default),
+                                   ("not-a-number", "later", default)):
+            with self.subTest(env=env, cli=cli):
+                self._pin_env_timeout(env)
+                argv = ["--timeout-s", cli] if cli else []
+                _rc, stdout = self._run(self._handoff(), *argv, "--dry-run")
+                self.assertEqual(
+                    json.loads(stdout)["mapped_args"]["time_budget_s"], expected)
+
+    def test_final_reserve_is_overridable_from_the_environment(self):
+        """Widening the finalize window must not need a code edit: an operator
+        who measures the final phase taking longer than the 60min default sets
+        GEAK_FINAL_RESERVE_S. Unset => the arg is absent and the JS default wins."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        for env, expected in (("3000", 3000), (None, None)):
+            with self.subTest(env=env):
+                saved = os.environ.pop("GEAK_FINAL_RESERVE_S", None)
+                if saved is not None:
+                    self.addCleanup(
+                        os.environ.__setitem__, "GEAK_FINAL_RESERVE_S", saved)
+                if env is not None:
+                    os.environ["GEAK_FINAL_RESERVE_S"] = env
+                    self.addCleanup(os.environ.pop, "GEAK_FINAL_RESERVE_S", None)
+                _rc, stdout = self._run(self._handoff(), "--dry-run")
+                self.assertEqual(
+                    json.loads(stdout)["mapped_args"].get("final_reserve_s"),
+                    expected)
 
     def test_successful_run_emits_result_and_journey(self):
         report = self.eval_dir / "final_report.md"
@@ -1704,6 +2523,69 @@ class TestMain(_RunE2ECase):
         out = json.loads(self.result_path.read_text())
         self.assertIn("no space left on device", out["kernel_journey_error"])
         self.assertNotIn("kernel_journey_path", out)
+
+
+class TestE2EDenominatorIsPublished(_RunE2ECase):
+    """A journey e2e block must carry the two throughputs its percentage is a
+    ratio of.
+
+    A percentage alone does not compose: two wins measured against different
+    denominators cannot be added. The consumer needs the pair to restate each
+    win in points of one fixed baseline. Both journey builders read the pair
+    off the same A/B that produced the delta, so the three numbers always
+    agree.
+    """
+
+    def _overlay(self, eval_dir, ir):
+        d = eval_dir / "overlay" / "cand_my_kernel_fwd"
+        self.write_json(d / "integrate_result.json", ir)
+        return d
+
+    def test_overlay_path_publishes_the_pair_and_it_reproduces_the_delta(self):
+        eval_dir = self.tmp / "e2e_flat"
+        self._overlay(eval_dir, {"gate": "accepted", "e2e_delta_pct": 25.0,
+                                 "ref_med": 400.0, "cand_med": 500.0})
+        journey = rx.build_kernel_journey({"eval_dir": str(eval_dir)},
+                                          {"eval_dir": str(eval_dir)})
+        e2e = journey["kernels"][0]["e2e"]
+        self.assertEqual(e2e["base_tput"], 400.0)
+        self.assertEqual(e2e["new_tput"], 500.0)
+        self.assertAlmostEqual(
+            (e2e["new_tput"] / e2e["base_tput"] - 1.0) * 100.0,
+            e2e["e2e_gain_pct"], places=6)
+
+    def test_overlay_path_reads_the_pair_from_the_nested_shape_too(self):
+        """The integrator emits either shape; the delta already reads both, and
+        the pair it is a ratio of must not be lost on the nested one."""
+        eval_dir = self.tmp / "e2e_nested"
+        self._overlay(eval_dir, {"gate": "accepted",
+                                 "e2e": {"delta_pct": 25.0,
+                                         "ref_median_tok_s": 400.0,
+                                         "cand_median_tok_s": 500.0}})
+        e2e = rx.build_kernel_journey({"eval_dir": str(eval_dir)},
+                                      {"eval_dir": str(eval_dir)})["kernels"][0]["e2e"]
+        self.assertEqual((e2e["base_tput"], e2e["new_tput"]), (400.0, 500.0))
+
+    def test_return_path_carries_the_pair_from_the_workflow_return(self):
+        eval_dir = self.tmp / "e2e_return"
+        wf = {"eval_dir": str(eval_dir),
+              "accepted_kernels": [{"short_name": "my_kernel_fwd",
+                                    "e2e_delta_pct": 25.0,
+                                    "base_tput": 400.0, "new_tput": 500.0}]}
+        e2e = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})["kernels"][0]["e2e"]
+        self.assertEqual((e2e["base_tput"], e2e["new_tput"]), (400.0, 500.0))
+
+    def test_a_missing_pair_is_null_not_fabricated(self):
+        """An older workflow return has no throughputs. The block must say so
+        rather than invent a denominator the A/B never measured."""
+        eval_dir = self.tmp / "e2e_nopair"
+        wf = {"eval_dir": str(eval_dir),
+              "accepted_kernels": [{"short_name": "my_kernel_fwd",
+                                    "e2e_delta_pct": 25.0}]}
+        e2e = rx.build_kernel_journey(wf, {"eval_dir": str(eval_dir)})["kernels"][0]["e2e"]
+        self.assertIsNone(e2e["base_tput"])
+        self.assertIsNone(e2e["new_tput"])
+        self.assertEqual(e2e["e2e_gain_pct"], 25.0)
 
 
 if __name__ == "__main__":

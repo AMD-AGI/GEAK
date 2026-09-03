@@ -9,11 +9,11 @@
 #       subprocess.Popen(cmd, env=dict(os.environ), start_new_session=True)
 #   GEAK:      interface/run_e2e.py::main
 #       - positional args:  args[0]=handoff.json   args[1]=result.json   (only --dry-run flag is read)
-#       - BUDGET is read from env PERFSKILLS_E2E_TIMEOUT_S (default 43200s=12h).
-#         The CLI "--timeout-s" value is DISCARDED by run_e2e (it lands in an ignored positional).
+#       - BUDGET is the min() of "--timeout-s" and env PERFSKILLS_E2E_TIMEOUT_S; 43200s=12h when
+#         neither is stated. (The flag used to be discarded into an ignored positional: Hyperloom #1202.)
 #       - PERFSKILLS_ROOT is derived from run_e2e.py's own location (interface/..), so calling the
 #         real path is enough; it maps the handoff onto e2e_workflow/e2e_workflow.js and drives it
-#         via the Claude SDK (model claude-opus-4-8, effort ultracode).
+#         via the Claude SDK (model claude-opus-5, effort ultracode).
 #
 # Usage:   ./run_geak_e2e.sh <model_dir> [--dry-run]
 #   <model_dir> is one of the per-model folders here (contains handoff.json [+ baseline_config...]).
@@ -21,10 +21,12 @@
 #
 # Optional env overrides:
 #   GEAK_ROOT                 default: the GEAK repo two levels up from this script (ci/..)
-#   PERFSKILLS_E2E_TIMEOUT_S  geak's REAL wall-clock budget in seconds (default in ci/config.sh)
+#   PERFSKILLS_E2E_TIMEOUT_S  geak's REAL wall-clock budget in seconds (default in ci/config.sh);
+#                             forwarded to run_e2e.py as GEAK_E2E_TIMEOUT_S, which can also be set directly
 #   EXP_ROOT                  writable run root; patches handoff.exp_root (default: <model_dir>/repro_out/exp)
 #   MODEL_PATH                real served model dir; patches handoff.model_path (default: keep handoff value)
 #   INFERENCEX_PATH           InferenceX checkout  -> bench_client=inferencex (else geak falls back to native)
+#   BENCH_LAUNCHER            server launcher: native (default, CI baseline) | magpie (recipe parity)
 #   OUT_DIR                   where result.json is written (default <model_dir>/repro_out)
 #   PERFSKILLS_CLAUDE_MODEL / PERFSKILLS_CLAUDE_EFFORT / PERFSKILLS_CLAUDE_BIN  (defaults match run_e2e.py)
 #
@@ -66,6 +68,16 @@ mkdir -p "$EXP_ROOT"
 # so we repoint it here. Default to the local checkout; set INFERENCEX_PATH="" to force native bench.
 INFERENCEX_PATH="${INFERENCEX_PATH-$(dirname "$GEAK_ROOT")/InferenceX}"
 export INFERENCEX_PATH
+
+# ---- Server launcher (explicit; do NOT leave this to recipe discovery) ----
+# run_e2e.py flips to magpie whenever a Magpie script is derivable from
+# launch_recipe. That is correct for Hyperloom alignment, but for GEAK's own
+# CI/repro baseline a shipped baseline_config.with_envs.yaml must NOT silently
+# swap the server start path. Default native; set BENCH_LAUNCHER=magpie only
+# when intentionally testing Magpie recipe parity. Exported BEFORE the handoff
+# patch so the patched JSON can pin the same value (handoff.bench_launcher
+# outranks $BENCH_LAUNCHER inside run_e2e.py).
+export BENCH_LAUNCHER="${BENCH_LAUNCHER:-native}"
 
 # If the local recipe was shipped alongside, repoint launch_recipe at it (the dataset value is a
 # stale /hyperloom/... path that won't exist on your box).
@@ -111,15 +123,22 @@ for key, derive in REWRITES.items():
     elif drop_if_none:
         h.pop(key, None)
 
+# Pin the server launcher from the CI shell (BENCH_LAUNCHER, default native).
+# run_e2e.py prefers handoff.bench_launcher over $BENCH_LAUNCHER, so a stale
+# handoff value would otherwise silently re-enable magpie despite the export
+# above. Force the patched handoff to match the explicit CI choice.
+h["bench_launcher"] = os.environ.get("BENCH_LAUNCHER", "native").strip() or "native"
+
 json.dump(h, open(dst, "w"), indent=2)
 
 # ---- B. reachability check: absolute paths run_e2e.py OPENS as real local
 # files/dirs must EXIST; informational/metadata paths may legitimately be absent.
 # CRITICAL = the keys run_e2e dereferences as real local paths (a stale value here
-# breaks the run). Everything else — e.g. the schema-2 baseline_env_spec.* block,
-# which run_e2e never reads — is advisory: note it, don't block. Existence, not a
-# source-prefix blacklist. Hard-fail on real runs only for CRITICAL leaks; warn in
-# --dry-run (weights/etc. legitimately absent).
+# breaks the run). The schema-2 baseline_env_spec is now consumed to build the
+# effective flags/env/overlay stack. Its nested paths stay informational here
+# because they may be container-visible even when the host cannot stat them;
+# the effective-config resolver still incorporates them into its descriptor.
+# Hard-fail on real runs only for CRITICAL leaks; warn in --dry-run.
 CRITICAL = {"model_path", "exp_root", "launch_recipe", "inferencex_path"}
 def _top(path):   # top-level handoff key for a (possibly nested) scan path
     return path.split(".", 1)[0].split("[", 1)[0]
@@ -147,29 +166,37 @@ if crit:
                  f"likely a new/renamed handoff key not rewritten, or a missing local artifact:\n{msg}\n"
                  f"  Fix: add the key to REWRITES in run_geak_e2e.sh, or provide the file/dir there.")
 
-print(f"patched handoff -> {dst}\n  exp_root={h['exp_root']}\n  model_path={h.get('model_path')}\n  launch_recipe={h.get('launch_recipe')}\n  inferencex_path={h.get('inferencex_path')}")
+print(f"patched handoff -> {dst}\n  exp_root={h['exp_root']}\n  model_path={h.get('model_path')}\n  launch_recipe={h.get('launch_recipe')}\n  inferencex_path={h.get('inferencex_path')}\n  bench_launcher={h.get('bench_launcher')}")
 PY
 
-# ---- Budget: run_e2e reads PERFSKILLS_E2E_TIMEOUT_S (NOT the CLI flag). Export it. ----
+# ---- Budget: reaches run_e2e as the --timeout-s value below (its own env knob is
+# GEAK_E2E_TIMEOUT_S, which this name has never matched). ----
 export PERFSKILLS_E2E_TIMEOUT_S   # value/default from ci/config.sh
+export GEAK_E2E_TIMEOUT_S="${GEAK_E2E_TIMEOUT_S:-$PERFSKILLS_E2E_TIMEOUT_S}"
 
-# ---- Claude workflow knobs (defaults already match run_e2e.py) ----
-export PERFSKILLS_CLAUDE_MODEL="${PERFSKILLS_CLAUDE_MODEL:-claude-opus-4-8}"
+# ---- Claude workflow knobs ----
+export PERFSKILLS_CLAUDE_MODEL="${PERFSKILLS_CLAUDE_MODEL:-claude-opus-5}"
 export PERFSKILLS_CLAUDE_EFFORT="${PERFSKILLS_CLAUDE_EFFORT:-ultracode}"
+# run_e2e.py reads its own GEAK_CLAUDE_MODEL (its built-in default is older than the
+# CI default above), so pin it to the CI model or the SDK dispatch silently uses a
+# different model than claude_setup.sh configured for the CLI path.
+export GEAK_CLAUDE_MODEL="${GEAK_CLAUDE_MODEL:-$PERFSKILLS_CLAUDE_MODEL}"
+export GEAK_CLAUDE_EFFORT="${GEAK_CLAUDE_EFFORT:-$PERFSKILLS_CLAUDE_EFFORT}"
 
-# (INFERENCEX_PATH already exported above; run_e2e exports BENCH_CLIENT from it.)
+# (INFERENCEX_PATH / BENCH_LAUNCHER already exported above.)
 
 echo "=============================================================="
 echo " GEAK e2e reproduction"
 echo "   runner   = $RUNNER"
 echo "   handoff  = $HANDOFF"
 echo "   result   = $RESULT"
-echo "   budget   = PERFSKILLS_E2E_TIMEOUT_S=$PERFSKILLS_E2E_TIMEOUT_S s"
-echo "   claude   = $PERFSKILLS_CLAUDE_MODEL / effort=$PERFSKILLS_CLAUDE_EFFORT"
+echo "   budget   = GEAK_E2E_TIMEOUT_S=$GEAK_E2E_TIMEOUT_S s (from PERFSKILLS_E2E_TIMEOUT_S=$PERFSKILLS_E2E_TIMEOUT_S)"
+echo "   claude   = $GEAK_CLAUDE_MODEL / effort=$GEAK_CLAUDE_EFFORT"
+echo "   bench_launcher = $BENCH_LAUNCHER"
 echo "   inferencex_path = ${INFERENCEX_PATH:-<unset -> native bench>}"
 echo "   dry_run  = ${DRY:-<no>}"
 echo "=============================================================="
 
-# We pass --timeout-s too, purely to mirror Hyperloom's exact argv (run_e2e ignores its value;
-# the effective budget is the PERFSKILLS_E2E_TIMEOUT_S env above).
+# --timeout-s mirrors Hyperloom's exact argv, and is now honoured: set PERFSKILLS_E2E_TIMEOUT_S to
+# the wall-clock at which this run will really be killed and GEAK paces its final phase to fit.
 exec python3 "$RUNNER" "$HANDOFF" "$RESULT" --timeout-s "$PERFSKILLS_E2E_TIMEOUT_S" ${DRY:+$DRY}

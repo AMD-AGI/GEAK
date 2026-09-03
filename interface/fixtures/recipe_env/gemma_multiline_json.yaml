@@ -1,0 +1,7 @@
+benchmark:
+  framework: vllm
+  envs:
+    EXTRA_VLLM_ARGS: --kv-cache-dtype fp8_e4m3 --attention-backend ROCM_AITER_UNIFIED_ATTN
+      --max-num-seqs 64 --async-scheduling --gpu-memory-utilization 0.95 --limit-mm-per-prompt
+      {"image":0,"audio":0} --max-num-batched-tokens 16384
+    VLLM_ROCM_USE_AITER_MOE: "1"

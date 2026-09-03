@@ -23,14 +23,14 @@ absolute per-case latencies. The script trusts only your numbers.
 ## Steps
 1. Build a clean copy and apply the patch:
    ```bash
-   # NO `rm` (prompts + blocks autonomous runs). Unique ws each time; tar-copy EXCLUDING build artifacts
-   # (.torch_ext build.ninja has absolute paths to CANONICAL), so nothing stale is inherited. The big
-   # immutable golden (reference_io.pt, if present) rides in CANONICAL as an absolute symlink; this tar
-   # carries the symlink verbatim (torch.load + the sha check read through it) — never add -h/--dereference.
-   WS="$VERIFY_DIR/ws_$(date +%s)_$$"; mkdir -p "$WS"
-   ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/.git' --exclude=./build --exclude='*/build' \
-       --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \
-       --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$WS" && tar -xf - )
+   # Issue #429: ALWAYS use materialize_workspace.sh — do NOT inline tar/cp. Nested aiter/jit/*.so
+   # must never land in verify clones. Script excludes recursive *.so/*.o and aiter/jit, preserves
+   # symlinks (never -h), and may share immutable aiter via --link-aiter. Candidate builds still use
+   # per-workspace .torch_ext via gpu_lock.sh.
+   WS="$VERIFY_DIR/ws_$(date +%s)_$$"
+   bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+     --src "$CANONICAL" --dst "$WS" \
+     --shared-root "${EVAL_DIR:-$(dirname "$VERIFY_DIR")}/_shared" --link-aiter
    cd "$WS"
    git checkout -- . 2>/dev/null || true
    git apply "$PATCH" || { echo "PATCH_APPLY_FAILED"; }

@@ -1,7 +1,8 @@
 # Fragment: expert_skills (kernel layer) — ADVISORY, injected only when use_expert_skills is ON
 
 > Appended to a role's prompt by `kernel_workflow.js` **only when `use_expert_skills` is true
-> (opt-in; default OFF)**. When OFF (the default), nothing is injected and behavior is byte-identical.
+> (opt-in; default OFF)**. When OFF, this fragment is not injected; the base role prompt remains active,
+> including general target-backend and language guidance from `perf_knowledge`.
 > Consumed by the
 > tech_lead (planning) and author/engineer roles. **Advisory**: a matched skill is a high-prior
 > candidate to reproduce, never a mandate, and never overrides your isolated A/B vs the oracle.
@@ -16,7 +17,11 @@ faster but can never reduce a result below your measured baseline.
 
 1. Read `EXPERT_SKILLS_DIR/index.yaml`.
 2. A skill matches the current op when ALL hold:
-   - `match.operator` == this op's operator (`KK_OPERATOR` / `op_spec.op_kind`)
+   - `scope: kernel`. The index also carries `scope: tuning` entries — the vendored tuning skillset,
+     owned by the e2e tuning phase. Those match on `operator: '*'`, so they would otherwise match
+     everything here; they are about tuning an op the stack already dispatches, not authoring one.
+   - `match.operator` is either a scalar equal to this op's operator
+     (`KK_OPERATOR` / `op_spec.op_kind`) or a list containing that operator
    - box `gen` ∈ `match.gens`; `op_spec.dtype` ∈ `match.dtypes`; `op_spec.regime` ∈ `match.regimes`
    - migration skills: `from_backend`→`to_backend` fits this run's `mode`/`target_language`
      (e.g. authoring Triton from a TileLang source → a `tilelang→triton` skill applies)

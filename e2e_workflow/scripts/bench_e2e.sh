@@ -15,6 +15,16 @@
 #   adapter_launch                  -> launch the server in background; set global SERVER_PID; write $LOG.
 #                                      Reads: MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS
 #                                             EXTRA_ENV OVERLAY_PYTHONPATH PROFILE PROFILE_DIR
+#                                      MUST launch through the shared prefix:
+#                                        ${SERVER_LAUNCH_PREFIX:-} env ... <server> ... & SERVER_PID=$!
+#                                      That prefix (server_teardown.sh) puts the server in its OWN
+#                                      session, which is the ONLY thing that lets teardown PROVE the
+#                                      process group belongs to this launch and reap the whole tree.
+#                                      An adapter that launches without it still works, but its
+#                                      teardown degrades to pid+descendants. A launcher that cannot
+#                                      control the launch (it delegates to an external script) must
+#                                      instead set SERVER_GROUP_UNVERIFIED=1 unless it can show the
+#                                      pid leads its own group.
 #   adapter_health                  -> return 0 iff $BASE_URL is serving (e.g. curl /health)
 #   adapter_bench  NUMP MAXC PROF   -> run ONE bench (random ISL/OSL), append a result JSON line to
 #                                      $RESULT_JSONL with canonical keys (output_throughput,
@@ -31,6 +41,9 @@
 #                                      saturated PROF=1 bench.
 #
 # KEY OUTPUTS (written to $OUT_DIR):
+#   server_start.json      {status, reason, phase_hint, wait_sec, ceiling_sec, ...} — ALWAYS
+#                          written when we launch, so a failed cold start is a readable REASON
+#                          downstream instead of a silently empty output dir
 #   bench_runs.jsonl       one bench result object per repeat
 #   bench_summary.json     {throughput_tok_s_median (metric-neutral; see metric_basis), metric_basis,
 #                           ttft_ms_median, tpot_ms_median, spread, runs}  (E2E_METRIC=output default)
@@ -39,6 +52,188 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---- isolated-server measurement protocol ----
+# Keep the existing body below as the single-server implementation.  In isolated
+# mode this process is only a scheduler: each attempt runs bench_replica.sh,
+# which re-enters this script in legacy mode for exactly one fresh-server
+# warmup+measurement lifecycle.
+# Profiling is not a throughput replica: it intentionally needs one warm server
+# and a sustained load/window.  An aligned run exports isolated mode globally,
+# so profile invocations opt back into the existing single-server body here.
+if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ] && [ "${PROFILE:-0}" = "1" ]; then
+  echo ">>> PROFILE=1: using the single-server profiling lifecycle (not a timed replica)."
+  GEAK_REPEAT_MODE=legacy
+fi
+if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
+  _replica_runner="$HERE/bench_replica.sh"
+  if [ ! -f "$_replica_runner" ]; then
+    echo "!!! GEAK_REPEAT_MODE=isolated_server requires $_replica_runner" >&2
+    exit 3
+  fi
+  if [ "${REUSE_SERVER:-0}" = "1" ]; then
+    echo "!!! REUSE_SERVER=1 is incompatible with GEAK_REPEAT_MODE=isolated_server; timed replicas must fresh-launch." >&2
+    exit 4
+  fi
+  _purpose="${MEASUREMENT_PURPOSE:-search}"
+  if [ -n "${REPEATS+x}" ]; then
+    _requested="$REPEATS"
+  elif [ -n "${REPLICAS+x}" ]; then
+    _requested="$REPLICAS"
+  else
+    case "$_purpose" in
+      validation) _requested=3 ;;
+      parity|search|"") _requested=1 ;;
+      *)
+        echo ">>> Unknown MEASUREMENT_PURPOSE='$_purpose'; using 1 isolated replica." >&2
+        _requested=1 ;;
+    esac
+  fi
+  case "$_requested" in
+    ''|*[!0-9]*|0)
+      echo "!!! REPEATS must be a positive integer in isolated-server mode (got '$_requested')." >&2
+      exit 4 ;;
+  esac
+
+  _aggregate_out="${OUT_DIR:-$(pwd)/e2e_bench_out}"
+  mkdir -p "$_aggregate_out"
+  : > "$_aggregate_out/bench_runs.jsonl"
+  echo "Measurement: isolated_server  purpose=$_purpose  requested_replicas=$_requested"
+  _successful=0
+  for ((_replica=1; _replica<=_requested; _replica++)); do
+    _replica_dir="$_aggregate_out/replica_$(printf '%03d' "$_replica")"
+    mkdir -p "$_replica_dir"
+    rm -f "$_replica_dir/selected_summary.json" "$_replica_dir/selected_attempt"
+    _replica_ok=0
+    for _attempt in 1 2; do
+      _attempt_dir="$_replica_dir/attempt_$_attempt"
+      rm -f "$_attempt_dir/bench_summary.json"
+      echo ">>> Isolated replica $_replica/$_requested (attempt $_attempt/2) ..."
+      OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
+        bash "$_replica_runner"
+      _rc=$?
+      if [ "$_rc" -eq 0 ] && python3 - "$_attempt_dir/bench_summary.json" "${EFFECTIVE_CONFIG_DIGEST:-}" <<'PY'
+import json, sys
+try:
+    summary = json.load(open(sys.argv[1]))
+    value = summary.get("throughput_tok_s_median")
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    ok = ok and int(summary.get("runs", 0)) == 1
+    expected_digest = sys.argv[2]
+    if expected_digest:
+        ok = ok and summary.get("effective_config_digest") == expected_digest
+except (OSError, ValueError, TypeError):
+    ok = False
+raise SystemExit(0 if ok else 1)
+PY
+      then
+        cp "$_attempt_dir/bench_summary.json" "$_replica_dir/selected_summary.json"
+        if [ -f "$_attempt_dir/bench_runs.jsonl" ]; then
+          cat "$_attempt_dir/bench_runs.jsonl" >> "$_aggregate_out/bench_runs.jsonl"
+        fi
+        printf '%s\n' "$_attempt" > "$_replica_dir/selected_attempt"
+        _replica_ok=1
+        _successful=$((_successful + 1))
+        break
+      fi
+      echo "!!! Isolated replica $_replica attempt $_attempt failed (rc=$_rc)." >&2
+    done
+    if [ "$_replica_ok" != "1" ]; then
+      echo "!!! Isolated replica $_replica failed after one retry; continuing without same-server fallback." >&2
+    fi
+  done
+
+  python3 - "$_aggregate_out" "$_requested" "$_successful" "$_purpose" "${EFFECTIVE_CONFIG_DIGEST:-}" <<'PY'
+import glob
+import json
+import os
+import statistics
+import sys
+
+out_dir, requested_s, successful_s, purpose, effective_digest = sys.argv[1:]
+requested, successful = int(requested_s), int(successful_s)
+selected = sorted(glob.glob(os.path.join(out_dir, "replica_*", "selected_summary.json")))
+summaries = []
+replicas = []
+for path in selected:
+    replica_dir = os.path.dirname(path)
+    replica_index = int(os.path.basename(replica_dir).split("_")[-1])
+    if replica_index > requested:
+        continue
+    with open(path) as fh:
+        item = json.load(fh)
+    summaries.append(item)
+    try:
+        attempt = int(open(os.path.join(replica_dir, "selected_attempt")).read().strip())
+    except (OSError, ValueError):
+        attempt = None
+    replicas.append({
+        "replica": replica_index,
+        "attempt": attempt,
+        "throughput_tok_s": item.get("throughput_tok_s_median"),
+    })
+
+def numbers(key):
+    return [
+        float(item[key]) for item in summaries
+        if isinstance(item.get(key), (int, float)) and not isinstance(item.get(key), bool)
+    ]
+
+def median(key):
+    values = numbers(key)
+    return round(statistics.median(values), 3) if values else None
+
+tputs = numbers("throughput_tok_s_median")
+observed = round(statistics.median(tputs), 3) if tputs else None
+if len(tputs) < 2 or not observed:
+    spread = 0.0
+else:
+    spread = round(100.0 * (max(tputs) - min(tputs)) / observed, 2)
+complete = successful == requested
+metric_bases = {item.get("metric_basis") for item in summaries if item.get("metric_basis")}
+metric_basis = next(iter(metric_bases)) if len(metric_bases) == 1 else None
+summary = {
+    "requested": requested,
+    "successful": successful,
+    "requested_replicas": requested,
+    "successful_replicas": successful,
+    "status": "complete" if complete else "incomplete",
+    "usable_for_acceptance": complete and observed is not None,
+    "measurement_mode": "isolated_server",
+    "measurement_purpose": purpose,
+    "effective_config_digest": effective_digest or None,
+    "observed_median": observed,
+    "throughput_tok_s_median": observed,
+    "throughput_tok_s_spread_pct": spread,
+    "output_throughput_tok_s_median": (
+        observed if metric_basis == "aggregate_output_tok_s" else None
+    ),
+    "output_throughput_tok_s_spread_pct": (
+        spread if metric_basis == "aggregate_output_tok_s" else None
+    ),
+    "ttft_ms_median": median("ttft_ms_median"),
+    "tpot_ms_median": median("tpot_ms_median"),
+    "runs": successful,
+    "all_throughput": tputs,
+    "metric_basis": metric_basis,
+    "replicas": replicas,
+}
+with open(os.path.join(out_dir, "bench_summary.json"), "w") as fh:
+    json.dump(summary, fh, indent=2)
+print(
+    f"E2E_SUMMARY {metric_basis or 'unknown'}={observed} spread={spread}% "
+    f"requested={requested} successful={successful} status={summary['status']} "
+    f"usable_for_acceptance={str(summary['usable_for_acceptance']).lower()} "
+    "measurement_mode=isolated_server"
+)
+PY
+  echo ">>> Done. Summary: $_aggregate_out/bench_summary.json"
+  # A degraded leg remains observable: callers consume status=incomplete and
+  # the successful-replica median.  Only a leg with no measurement at all is a
+  # process-level failure.
+  [ "$_successful" -gt 0 ] && exit 0
+  exit 2
+fi
 
 # ---- backend selection (the only thing that picks the stack) ----
 BACKEND=${BACKEND:-sglang}
@@ -238,15 +433,70 @@ SEED=${SEED:-0}                       # fixed seed for reproducibility / parity
 # ---- client trust-remote-code (general, model-agnostic) ----
 # The benchmark CLIENT loads the model's tokenizer; for custom-tokenizer models
 # transformers raises ValueError unless trust_remote_code is allowed. Mirror the
-# SERVER's trust setting: if the server is launched with --trust-remote-code
-# (via EXTRA_SERVER_ARGS), the client measuring it must trust the same remote
-# code. Stays OFF (no implicit remote-code execution) for models that don't need
-# it, so standalone behaviour is unchanged. An explicit caller value always wins.
+# SERVER's effective trust setting across recipe args and EXTRA_SERVER_ARGS,
+# including a later --no-trust-remote-code override. The client measuring it
+# must use the same state. Stays OFF (no implicit remote-code execution) for
+# models that don't need it. An explicit caller value always wins.
+_args_trust_state() {
+  # Print the effective state contributed by this argument string: "1" for
+  # enable, "0" for disable, or nothing when it carries no trust option. vLLM
+  # exposes argparse.BooleanOptionalAction spellings --trust-remote-code and
+  # --no-trust-remote-code; it rejects `--trust-remote-code=true/false`, so those
+  # lookalikes must not influence the benchmark client. SGLang/Magpie recipes
+  # also use the underscore spelling, whose matching --no_ form is accepted here.
+  #
+  # Keep scanning after a match: argparse applies repeated store-style boolean
+  # options in argv order, so the LAST enable/disable token is authoritative.
+  # `read -ra` splits without pathname expansion.
+  local _args=${1//$'\n'/ } _tok _state=""
+  local -a _toks=()
+  read -ra _toks <<< "$_args"
+  for _tok in "${_toks[@]}"; do
+    case "$_tok" in
+      --trust-remote-code|--trust_remote_code)
+        _state=1 ;;
+      --no-trust-remote-code|--no_trust_remote_code)
+        _state=0 ;;
+    esac
+  done
+  printf '%s' "$_state"
+}
 if [ -z "${BENCH_TRUST_REMOTE_CODE:-}" ]; then
-  case "$EXTRA_SERVER_ARGS" in
-    *trust-remote-code*|*trust_remote_code*) BENCH_TRUST_REMOTE_CODE=1 ;;
-    *) BENCH_TRUST_REMOTE_CODE=0 ;;
-  esac
+  BENCH_TRUST_REMOTE_CODE=0
+  # The server may inherit --trust-remote-code from the REPLAYED recipe env
+  # (EXTRA_<BE>_ARGS recorded by the orchestrator) rather than from
+  # EXTRA_SERVER_ARGS. The client that measures such a server has to trust the
+  # same remote code, so also honor a trust setting recorded in the recipe env
+  # file (NUL-delimited). Parse it BY KEY: a value-blind substring match fails
+  # OPEN -- e.g. `DO_NOT_TRUST_REMOTE_CODE=1` or a disabling `HF_HUB_TRUST_REMOTE_CODE=0`
+  # would both flip trust ON. Enable only when a KNOWN trust control is set to a
+  # truthy value, or when the CURRENT backend's recorded EXTRA_<BE>_ARGS value
+  # carries an actual enable/disable token. Apply layers in the same order as
+  # the launcher: recipe controls -> recipe args -> GEAK EXTRA_SERVER_ARGS.
+  _recipe_trust_control=0
+  _recipe_trust_state=""
+  _trust_extra_name="EXTRA_${BACKEND^^}_ARGS"
+  if [ -n "${RECIPE_ENV_FILE:-}" ] && [ -f "${RECIPE_ENV_FILE}" ]; then
+    while IFS= read -r -d '' _trust_kv; do
+      _trust_name=${_trust_kv%%=*}
+      _trust_val=${_trust_kv#*=}
+      case "$_trust_name" in
+        BENCH_TRUST_REMOTE_CODE|HF_HUB_TRUST_REMOTE_CODE|MAGPIE_TRUST_REMOTE_CODE|TRANSFORMERS_TRUST_REMOTE_CODE)
+          case "${_trust_val,,}" in
+            1|true|yes|on) _recipe_trust_control=1 ;;
+          esac ;;
+        "$_trust_extra_name")
+          _state=$(_args_trust_state "$_trust_val")
+          [ -n "$_state" ] && _recipe_trust_state="$_state" ;;
+      esac
+    done < "$RECIPE_ENV_FILE"
+  fi
+  [ "$_recipe_trust_control" = "1" ] && BENCH_TRUST_REMOTE_CODE=1
+  [ -n "$_recipe_trust_state" ] && BENCH_TRUST_REMOTE_CODE="$_recipe_trust_state"
+  _geak_trust_state=$(_args_trust_state "${EXTRA_SERVER_ARGS:-}")
+  [ -n "$_geak_trust_state" ] && BENCH_TRUST_REMOTE_CODE="$_geak_trust_state"
+  unset _trust_kv _trust_name _trust_val _trust_extra_name _state
+  unset _recipe_trust_control _recipe_trust_state _geak_trust_state
 fi
 # transformers / HF hub honor HF_HUB_TRUST_REMOTE_CODE for tokenizer auto-load.
 [ "$BENCH_TRUST_REMOTE_CODE" = "1" ] && HF_HUB_TRUST_REMOTE_CODE=${HF_HUB_TRUST_REMOTE_CODE:-1}
@@ -254,43 +504,23 @@ fi
 # ---- modes ----
 REUSE_SERVER=${REUSE_SERVER:-0}       # 1 = a warm server is already up at HOST:PORT; don't launch/kill
 PROFILE=${PROFILE:-0}                 # 1 = also capture a profiler trace
-# Profiling is meant to capture the REAL continuous-batching steady state — prefill chunks and decode
-# steps interleaved as the scheduler actually runs them — NOT a cold prefill burst. So we profile a
-# WINDOW in the middle of a sustained, saturated load (see the PROFILE block below). Tunables:
-PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-40}   # forward steps to capture (sglang; step-controlled). Floor;
-                                             # auto-sizing below raises it to TARGET_STEPS (RAMP+STEADY+10)
-                                             # from ISL/OSL/CONC, then CLAMPS to PROFILE_NUM_STEPS_MAX.
-PROFILE_NUM_STEPS_MAX=${PROFILE_NUM_STEPS_MAX:-64}  # CAP on captured steps (sglang). At low conc STEADY
-                                             # = 5*ceil(OSL/CONC) explodes (e.g. 172 at conc2/osl64), and
-                                             # the sglang/ROCm trace is ~MBs PER STEP -> a multi-hundred-MB
-                                             # trace whose roctracer flush takes minutes AND BLOCKS the
-                                             # server (health drops, requests time out). 64 steps still
-                                             # spans the prefill ramp + a decode sample. Raise if needed.
-PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-0}  # 0 = arm the profiler AT load start so the capture INCLUDES
-                                             # the initial prefill burst. A non-zero warmup lets the load
-                                             # pass the prefill ramp first, so the window lands in decode
-                                             # only and prefill kernels are NEVER captured (Bug 1). The
-                                             # window is sized (below) to span the prefill ramp AND decode.
-PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}  # >CONC so the queue stays full and short
-                                             # (range-ratio>0) requests get replaced -> phases de-sync.
-PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}            # optional req/s to stagger arrivals; empty
-                                             # = inf (max_concurrency still caps in-flight at CONC).
-PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}     # max wait for the trace file to appear.
-PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-40}             # capture DURATION FLOOR for time-windowed
-                                             # backends (vllm: /start_profile has no num_steps, so the
-                                             # window is controlled by start -> sleep this long ->
-                                             # /stop_profile). sglang ignores this (uses PROFILE_NUM_STEPS).
-                                             # This is a FLOOR: when TPOT_MS is known (auto-derived from
-                                             # the timed bench below) the window auto-scales to
-                                             # TARGET_STEPS*TPOT*1.5 so it spans the prefill ramp (warmup=0)
-                                             # AND a steady decode sample, then is CLAMPED to
-                                             # [40, PROFILE_WINDOW_SEC_MAX]. Longer is NOT free: a torch
-                                             # trace grows ~linearly with the window (must stay <
-                                             # PROFILE_WINDOW_TIMEOUT, and can OOM the profiler buffer).
-PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-60}     # CAP for the auto-scaled vllm window. Bounds
-                                             # trace size: with warmup=0 the whole prefill ramp is recorded,
-                                             # so a heavy/low-TPOT workload could otherwise size a multi-GB
-                                             # trace that fails to flush. Raise if you need a longer window.
+# Profile a window mid-load so the trace holds the real prefill+decode steady state, not a cold burst.
+PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-40}          # sglang step count (floor; auto-raised to target below)
+PROFILE_NUM_STEPS_MAX=${PROFILE_NUM_STEPS_MAX:-64}  # step cap: sglang trace is ~MBs/step and its flush blocks the server
+# Step target from the workload: RAMP=ceil(CONC*ISL/chunk) prefill passes + STEADY=max(30,5*ceil(OSL/CONC))
+# decode steps + margin, so a capture bounded to it always spans a decode steady sample. Drives the sglang
+# step count, the vllm time window, and the vllm 0.26+ step cap.
+PROFILE_TARGET_STEPS=$(python3 -c "import math;print(math.ceil($CONC*$ISL/max(${PREFILL_CHUNK:-$ISL},1))+max(30,5*math.ceil($OSL/max($CONC,1)))+10)" 2>/dev/null || echo "$PROFILE_NUM_STEPS_MAX")
+# vllm 0.26+ ProfilerConfig knobs (adapters/vllm.sh), fixed at server launch. max_iterations self-stops the
+# profiler after N worker steps; default to the workload target clamped to the step cap (bounds the buffer).
+PROFILE_MAX_ITERS=${PROFILE_MAX_ITERS:-$(( PROFILE_TARGET_STEPS < PROFILE_NUM_STEPS_MAX ? PROFILE_TARGET_STEPS : PROFILE_NUM_STEPS_MAX ))}
+PROFILE_DELAY_ITERS=${PROFILE_DELAY_ITERS:-0}       # steps to skip before arming; 0 keeps the prefill burst
+PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-0}         # 0 = arm at load start so prefill is captured too
+PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}   # >CONC so the queue stays saturated
+PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}      # optional req/s to stagger arrivals; empty = inf
+PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}      # max wait for the trace file to land
+PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-20}        # vllm time window (floor; auto-scaled below). Sole bound on <0.26
+PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-30}      # cap for the auto-scaled window (bounds trace size)
 OUT_DIR=${OUT_DIR:-$(pwd)/e2e_bench_out}
 LOG=${LOG:-$OUT_DIR/server.log}
 
@@ -308,6 +538,7 @@ COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
 export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
+export PROFILE_MAX_ITERS PROFILE_DELAY_ITERS
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
 export BENCH_TRUST_REMOTE_CODE HF_HUB_TRUST_REMOTE_CODE
 
@@ -323,32 +554,37 @@ echo "Out dir:      $OUT_DIR"
 echo
 
 SERVER_PID=""
-cleanup() {
-  [ -n "${SERVER_PID:-}" ] || return 0
-  echo ">>> Shutting down server (pid $SERVER_PID) ..."
-  # A launcher that starts the server in its OWN process group / session (e.g.
-  # the Magpie launcher uses `setsid`) leaves the worker/child procs OUTSIDE
-  # $SERVER_PID, so a bare `kill $SERVER_PID` orphans them (leaked VRAM, ghost
-  # listeners on the port). When the server's process group differs from OURS,
-  # reap the WHOLE group (TERM, then KILL after a grace window). The own-group
-  # guard is critical: for a NATIVE launch the server shares our group, so we
-  # must NOT group-kill (that would kill bench_e2e.sh itself) — fall back to the
-  # single-pid kill, byte-identical to before.
-  local _pgid _self
-  _pgid="$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')"
-  _self="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
-  if [ -n "$_pgid" ] && [ "$_pgid" != "$_self" ]; then
-    kill -TERM "-$_pgid" 2>/dev/null || kill -TERM "$SERVER_PID" 2>/dev/null || true
-    for _i in $(seq 1 "${SERVER_STOP_GRACE_S:-10}"); do
-      kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 1
-    done
-    kill -0 "$SERVER_PID" 2>/dev/null && kill -KILL "-$_pgid" 2>/dev/null || true
-  else
-    kill "$SERVER_PID" 2>/dev/null || true
-  fi
-  wait "$SERVER_PID" 2>/dev/null || true
-}
-trap cleanup EXIT
+# Server lifecycle: the teardown contract lives in server_teardown.sh so the SAME
+# identity-verified kill is used by this dispatcher and by any role-authored capture
+# script (which previously hand-rolled its own kill). The old cleanup resolved the
+# server's pgid AT KILL TIME and group-killed whenever it differed from ours — a pid
+# that had exited and been recycled resolved to a stranger's group, which is how a
+# teardown can reach the caller's orchestrator / PID 1.
+#
+# This script is COPIED into $EVAL_DIR (roles/director.md) and run from there, so the
+# library has to be found next to the copy. If it is not, the teardown silently becomes
+# a no-op: `source` fails, the EXIT trap resolves to a missing function, and the served
+# model is left running with its VRAM and port held while the serving-GPU lock is
+# released — the next launch then OOMs. So look next to us, then in the ORIGINAL scripts
+# dir when the caller told us where that is, and REFUSE to run otherwise. A benchmark
+# that cannot stop what it starts must not start it.
+TEARDOWN_LIB=""
+for _cand in "$HERE/server_teardown.sh" "${SKILL_DIR:-}/scripts/server_teardown.sh" \
+             "${WORKFLOW_DIR:-}/scripts/server_teardown.sh"; do
+  case "$_cand" in /scripts/server_teardown.sh) continue ;; esac   # unset SKILL_DIR/WORKFLOW_DIR
+  [ -f "$_cand" ] && { TEARDOWN_LIB="$_cand"; break; }
+done
+if [ -z "$TEARDOWN_LIB" ]; then
+  echo "!!! server_teardown.sh not found next to this script ($HERE) or under SKILL_DIR/WORKFLOW_DIR." >&2
+  echo "    It carries the server-kill contract; without it the EXIT trap is a no-op and the" >&2
+  echo "    launched server would be LEAKED (VRAM + port held, serving-GPU lock released)." >&2
+  echo "    Stage it alongside bench_e2e.sh: cp \"\$SKILL_DIR/scripts/server_teardown.sh\" \"\$EVAL_DIR/\"" >&2
+  exit 3
+fi
+[ "$TEARDOWN_LIB" = "$HERE/server_teardown.sh" ] || echo ">>> teardown contract: $TEARDOWN_LIB (not staged next to this copy)"
+# shellcheck disable=SC1090
+source "$TEARDOWN_LIB"
+trap server_teardown EXIT
 
 # ---- serving-GPU mutex ----
 # TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
@@ -369,29 +605,70 @@ if [ "${SERVING_GPU_LOCK_DISABLE:-0}" != "1" ] && [ "${REUSE_SERVER:-0}" != "1" 
 fi
 
 # ---- launch (unless reusing a warm server) ----
+# A server is declared dead when it stops MAKING PROGRESS, not when it has taken "too long": wedged
+# shows up as SILENCE, while a legitimately slow cold start keeps printing. CEILING is only a backstop
+# against a server that spins printing forever, not a per-purpose budget.
 if [ "$REUSE_SERVER" != "1" ]; then
   mkdir -p "$PROFILE_DIR"
+  STALL_WINDOW_SEC=${STALL_WINDOW_SEC:-600}
+  case "${SERVER_STARTUP_TIMEOUT_SEC:-}" in ''|*[!0-9]*) CEILING=7200 ;; *) CEILING="$SERVER_STARTUP_TIMEOUT_SEC" ;; esac
+
+  _up=0; _reason=""
   echo ">>> Launching $BACKEND server (log: $LOG) ..."
   adapter_launch
   if [ -z "${SERVER_PID:-}" ]; then echo "!!! adapter_launch did not set SERVER_PID"; exit 2; fi
+  # Freeze the server's process identity NOW (pid, pgid, /proc start time) so the
+  # EXIT teardown never has to ask "who owns this pid?" after the pid may be gone.
+  server_record_identity "$SERVER_PID"
 
-  echo ">>> Waiting for server health ..."
-  # An overlaid candidate can wedge: process stays alive but /health 503s forever (JIT deadlock /
-  # cuda-graph capture failure). Don't burn the whole window while holding the serving-GPU lock —
-  # fail fast on a fatal server-log marker, and use a TIGHTER budget when an overlay is active so a
-  # broken candidate is rejected quickly instead of starving the box. Non-overlay runs keep 180*5s.
-  HEALTH_TRIES=${HEALTH_TRIES:-180}
-  [ -n "$OVERLAY_PYTHONPATH" ] && HEALTH_TRIES=${OVERLAY_HEALTH_TRIES:-72}   # ~6min for overlays
-  _up=0
-  for i in $(seq 1 "$HEALTH_TRIES"); do
-    if adapter_health >/dev/null 2>&1; then echo ">>> Server up after ~$((i*5))s."; _up=1; break; fi
-    if ! kill -0 "$SERVER_PID" 2>/dev/null; then echo "!!! Server died. Last log:"; tail -n 60 "$LOG"; exit 2; fi
-    if grep -Eq 'CUDA out of memory|HIP out of memory|watchdog timeout|Capturing cuda graph failed|FATAL' "$LOG" 2>/dev/null; then
-      echo "!!! Fatal server-log marker before health; aborting wait. Last log:"; tail -n 60 "$LOG"; exit 2
+  echo ">>> Waiting for server health (stall window ${STALL_WINDOW_SEC}s, backstop ${CEILING}s) ..."
+  _t0=$SECONDS; _last_tok=""; _last_change=$SECONDS
+  while :; do
+    if adapter_health >/dev/null 2>&1; then _up=1; break; fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then _reason="died_early"; break; fi
+    if grep -Eq 'CUDA out of memory|HIP out of memory' "$LOG" 2>/dev/null; then _reason="oom"; break; fi
+    # FATAL must look like an EMITTED record ('[FATAL]' or a 'FATAL:' prefix), not the bare word:
+    # unanchored, it also matches a --log-level legend or a help line and kills a healthy start.
+    if grep -Eq 'watchdog timeout|Capturing cuda graph failed|\[FATAL\]|(^|[[:space:]])FATAL:' "$LOG" 2>/dev/null; then
+      _reason="fatal_marker"; break
     fi
+    _tok=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
+    if [ "$_tok" != "$_last_tok" ]; then
+      _last_tok="$_tok"; _last_change=$SECONDS
+    elif [ $((SECONDS-_last_change)) -ge "$STALL_WINDOW_SEC" ]; then
+      _reason="stalled"; break
+    fi
+    if [ $((SECONDS-_t0)) -ge "$CEILING" ]; then _reason="ceiling_exceeded"; break; fi
     sleep 5
   done
-  [ "$_up" = "1" ] || { echo "!!! Server not healthy within $((HEALTH_TRIES*5))s."; tail -n 60 "$LOG"; exit 2; }
+  _waited=$((SECONDS-_t0))
+  if [ "$_up" = "1" ]; then
+    echo ">>> Server up after ~${_waited}s."
+  else
+    case "$_reason" in
+      died_early|ceiling_exceeded|stalled)
+        if grep -Eq 'ngine ?[Cc]ore.*([Tt]imed out|TimeoutError)|frontend.*handshake.*timed out' "$LOG" 2>/dev/null; then
+          _reason="engine_core_timeout"
+        elif grep -Eq 'NCCL error|RCCL error|rendezvous|Timed out initializing process group|ProcessGroup.*[Tt]imeout' "$LOG" 2>/dev/null; then
+          _reason="dist_init_fail"
+        fi ;;
+    esac
+    echo "!!! Server did not come up (reason=$_reason) after ~${_waited}s. Last log:"; tail -n 60 "$LOG"
+    server_teardown; SERVER_PID=""
+  fi
+  # Structured outcome, ALWAYS written (success too), so a failed start is a REASON downstream can
+  # read rather than an empty task dir that looks like "authored and found no gain".
+  _phase=$(tail -n 1 "$LOG" 2>/dev/null | tr -d '\r\\' | tr '"' "'" | cut -c1-200)
+  printf '{"status":"%s","reason":"%s","phase_hint":"%s","wait_sec":%d,"ceiling_sec":%d,"stall_window_sec":%d,"port":"%s","backend":"%s","log":"%s"}\n' \
+    "$([ "$_up" = "1" ] && echo ok || echo failed)" "${_reason:-none}" "$_phase" \
+    "$_waited" "$CEILING" "$STALL_WINDOW_SEC" "$PORT" "$BACKEND" "$LOG" \
+    > "$OUT_DIR/server_start.json"
+  if [ "$_up" != "1" ]; then
+    echo "!!! Server start FAILED (reason=$_reason) — see $OUT_DIR/server_start.json" >&2
+    [ "$_reason" = "ceiling_exceeded" ] && \
+      echo "    Still progressing at the ${CEILING}s backstop; raise it with SERVER_STARTUP_TIMEOUT_SEC." >&2
+    exit 2
+  fi
 else
   echo ">>> Reusing warm server at $BASE_URL"
   adapter_health >/dev/null 2>&1 || { echo "!!! No healthy server at $BASE_URL"; exit 2; }
@@ -425,18 +702,22 @@ except Exception:
   echo ">>> overlay memory-parity OK (free ${_free_mb:-?}MB >= floor ${MEM_HEADROOM_MIN_MB}MB)"
 fi
 
-# ---- optional COLD full-round (align with Hyperloom's COLD baseline_tput) ----
-# Hyperloom's leaderboard denominator baseline_tput is a COLD single fresh-server
-# round (first-token / JIT / cuda-graph capture costs INCLUDED, no prior warmup).
-# GEAK's own final is a HOT median (warmup discarded). Comparing GEAK's hot final
-# to Hyperloom's cold baseline mixes thermal states. When BENCH_COLD_FINAL=1 we
-# also measure ONE cold full round (NUM_PROMPTS, no preceding warmup) on the fresh
-# server BEFORE the warmup+timed(hot) rounds, and record it separately, so the
-# caller can compute a fair cold-to-cold speedup (and keep the hot median as a
-# double-check). Default ON (BENCH_COLD_FINAL=1) — set BENCH_COLD_FINAL=0 to skip
-# the cold round (e.g. to save the one extra full round per bench). Only meaningful
-# on a fresh launch (a reused warm server has no cold state to measure).
-if [ "${BENCH_COLD_FINAL:-1}" = "1" ] && [ "$REUSE_SERVER" != "1" ]; then
+# ---- optional COLD full-round (DIAGNOSTIC ONLY, off by default) ----
+# One full round (NUM_PROMPTS, no preceding warmup) on the fresh server, recorded
+# separately from the timed(hot) repeats.
+#
+# "Cold" here means only "no warmup round preceded it in THIS bench" — it does
+# not mean a cold machine. Only the first bench of a session sees a genuinely
+# cold box; every later bench (the final leg included) starts with the JIT/HIP
+# kernel caches, torch.compile artifacts and page cache already populated by the
+# benches before it. So the baseline's cold round pays the full cache-fill cost
+# and the final's pays almost none, and a ratio of the two reports that
+# asymmetry as speedup. Never compare cold rounds taken at different points in a
+# session, and never promote one as the headline number.
+# Default OFF; set BENCH_COLD_FINAL=1 to measure it as a diagnostic (costs one
+# extra full round per bench). Only meaningful on a fresh launch (a reused warm
+# server has no cold state to measure at all).
+if [ "${BENCH_COLD_FINAL:-0}" = "1" ] && [ "$REUSE_SERVER" != "1" ]; then
   echo ">>> Cold full round (NUM_PROMPTS=$NUM_PROMPTS, no warmup; cold-baseline parity) ..."
   # adapter_bench is a shell FUNCTION that reads $RESULT_JSONL — a prefix var
   # assignment on a function has ambiguous persistence in bash, so point
@@ -449,17 +730,45 @@ if [ "${BENCH_COLD_FINAL:-1}" = "1" ] && [ "$REUSE_SERVER" != "1" ]; then
   RESULT_JSONL="$_saved_result_jsonl"; export RESULT_JSONL
 fi
 
-# ---- warmup (one short round; never timed) ----
-echo ">>> Warmup round ..."
-adapter_bench "$CONC" "$CONC" 0 >/dev/null 2>&1 || true
+# ---- optional outer warmup (never timed) ----
+# Cache-cold isolated replicas skip this invocation: their benchmark client still
+# performs its own internal warmup, but the timed prompt set is not pre-populated
+# by an earlier full replay. Legacy/default runs retain the historical short
+# CONC-prompt warmup, and explicit full-round callers retain the full warmup.
+if [ "${GEAK_ISOLATED_REPLICA:-0}" = "1" ] \
+   && [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" != "1" ]; then
+  echo ">>> Skipping outer warmup (compute-warm/cache-cold isolated replica) ..."
+else
+  _warmup_prompts="$CONC"
+  if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
+    _warmup_prompts="$NUM_PROMPTS"
+    echo ">>> Warmup full round (prompts=$_warmup_prompts) ..."
+  else
+    echo ">>> Warmup round ..."
+  fi
+  if ! adapter_bench "$_warmup_prompts" "$CONC" 0 >/dev/null 2>&1; then
+    if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
+      echo "!!! Full outer warmup failed; isolated replica is invalid." >&2
+      exit 2
+    fi
+  fi
+fi
 # the warmup line should not pollute the timed results
 : > "$RESULT_JSONL"
 
 # ---- timed repeats ----
+_bench_failed=0
 for r in $(seq 1 "$REPEATS"); do
   echo ">>> Bench repeat $r/$REPEATS ..."
-  adapter_bench "$NUM_PROMPTS" "$CONC" 0 || echo "!!! bench repeat $r failed (continuing)"
+  if ! adapter_bench "$NUM_PROMPTS" "$CONC" 0; then
+    echo "!!! bench repeat $r failed (continuing)"
+    _bench_failed=1
+  fi
 done
+if [ "${BENCH_REQUIRE_SUCCESS:-0}" = "1" ] && [ "$_bench_failed" = "1" ]; then
+  echo "!!! Required isolated measurement round failed." >&2
+  exit 2
+fi
 
 # ---- optional profile trace (STEADY-STATE MIX, not a cold prefill burst) ----
 # Real serving is continuous batching: at any instant some sequences are prefilling (chunks) and others
@@ -489,43 +798,27 @@ PY
     case "${TPOT_MS:-}" in ''|*[!0-9.]*) TPOT_MS="" ;; esac   # keep only a clean number
     [ -n "${TPOT_MS:-}" ] && echo ">>> steady-state sizing: derived TPOT_MS=${TPOT_MS}ms from timed bench (vllm window auto-scale)"
   fi
-  # ---- workload-aware steady-state window sizing (this is the ONLY sizing; adaptive re-capture is off) ----
-  # Reaching batch≈CONC = clear the prefill ramp, then sample steady decode:
-  #   RAMP   = ceil(CONC*ISL / chunk)     forward passes to prefill all CONC in-flight requests
-  #   STEADY = max(30, 5*ceil(OSL/CONC))  decode steps for a stable, representative sample
-  # TARGET = RAMP + STEADY + margin. Sized deterministically UP FRONT for BOTH backends (the old reactive
-  # re-capture gate is DISABLED — no reliable per-step signal without annotations). The ISL/OSL/CONC/prompts
-  # math is the guarantee: PROFILE_NUM_STEPS -> TARGET (sglang, step-controlled), and PROFILE_WINDOW_SEC is
-  # auto-scaled from the derived TPOT and clamped to [40, PROFILE_WINDOW_SEC_MAX] (vllm, time-controlled),
-  # so the single window spans the prefill ramp (warmup=0) + a steady decode sample.
-  # Assumes a saturated queue + KV headroom for CONC concurrent decodes (else batch can't reach CONC).
-  _CHUNK="${PREFILL_CHUNK:-$ISL}"
-  _RAMP=$(python3 -c "import math;print(math.ceil($CONC*$ISL/max($_CHUNK,1)))" 2>/dev/null || echo "$CONC")
-  _STEADYN=$(python3 -c "import math;print(max(30,5*math.ceil($OSL/max($CONC,1))))" 2>/dev/null || echo 30)
-  _TARGET_STEPS=$(( _RAMP + _STEADYN + 10 ))
-  if [ "${PROFILE_NUM_STEPS:-0}" -lt "$_TARGET_STEPS" ]; then
-    echo ">>> steady-state sizing: RAMP=${_RAMP}+STEADY=${_STEADYN}+10 -> PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${_TARGET_STEPS}"
-    PROFILE_NUM_STEPS=$_TARGET_STEPS
+  # Size the single capture to PROFILE_TARGET_STEPS (computed at launch): raise the sglang step count
+  # (clamped to the cap) and scale the vllm window to target*TPOT*1.5. vllm 0.26+ is already step-bounded
+  # by PROFILE_MAX_ITERS; the window is a safety cap there, the sole bound on <0.26.
+  if [ "${PROFILE_NUM_STEPS:-0}" -lt "$PROFILE_TARGET_STEPS" ]; then
+    echo ">>> sizing: PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${PROFILE_TARGET_STEPS}"
+    PROFILE_NUM_STEPS=$PROFILE_TARGET_STEPS
   fi
-  # CLAMP steps (sglang: ~MBs/step -> avoid a huge trace + server-blocking flush at low conc).
   if [ -n "${PROFILE_NUM_STEPS_MAX:-}" ] && [ "$PROFILE_NUM_STEPS" -gt "$PROFILE_NUM_STEPS_MAX" ]; then
-    echo ">>> steady-state sizing: PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${PROFILE_NUM_STEPS_MAX} (capped at PROFILE_NUM_STEPS_MAX)"
+    echo ">>> sizing: PROFILE_NUM_STEPS capped ${PROFILE_NUM_STEPS}->${PROFILE_NUM_STEPS_MAX}"
     PROFILE_NUM_STEPS=$PROFILE_NUM_STEPS_MAX
   fi
   _NEED_PROMPTS=$(python3 -c "import math;print($CONC + math.ceil($CONC*$PROFILE_NUM_STEPS/max($OSL,1)) + $CONC)" 2>/dev/null || echo "$PROFILE_NUM_PROMPTS")
   if [ "${PROFILE_NUM_PROMPTS:-0}" -lt "$_NEED_PROMPTS" ]; then
-    echo ">>> steady-state sizing: PROFILE_NUM_PROMPTS ${PROFILE_NUM_PROMPTS}->${_NEED_PROMPTS} (keep the queue full through the window)"
+    echo ">>> sizing: PROFILE_NUM_PROMPTS ${PROFILE_NUM_PROMPTS}->${_NEED_PROMPTS}"
     PROFILE_NUM_PROMPTS=$_NEED_PROMPTS
   fi
-  # vLLM time-window auto-scale (needs TPOT_MS, derived above): size the window to span the prefill ramp
-  # + a steady decode sample = TARGET_STEPS * per-step time, x1.5 margin, then CLAMP to
-  # [PROFILE_WINDOW_SEC floor, PROFILE_WINDOW_SEC_MAX cap]. The cap bounds trace size (warmup=0 records the
-  # whole ramp, so a heavy/low-TPOT workload could otherwise size a multi-GB trace that fails to flush).
   if [ -n "${TPOT_MS:-}" ]; then
-    _WMAX="${PROFILE_WINDOW_SEC_MAX:-60}"
-    _WSEC=$(python3 -c "import math;print(min($_WMAX, max(${PROFILE_WINDOW_SEC:-40}, math.ceil($_TARGET_STEPS*$TPOT_MS/1000.0*1.5))))" 2>/dev/null || echo "${PROFILE_WINDOW_SEC:-40}")
+    _WMAX="${PROFILE_WINDOW_SEC_MAX:-30}"
+    _WSEC=$(python3 -c "import math;print(min($_WMAX, max(${PROFILE_WINDOW_SEC:-20}, math.ceil($PROFILE_TARGET_STEPS*$TPOT_MS/1000.0*1.5))))" 2>/dev/null || echo "${PROFILE_WINDOW_SEC:-20}")
     if [ "$_WSEC" != "${PROFILE_WINDOW_SEC}" ]; then
-      echo ">>> steady-state sizing: PROFILE_WINDOW_SEC ${PROFILE_WINDOW_SEC}->${_WSEC}s (TPOT=${TPOT_MS}ms x ${_TARGET_STEPS} steps x1.5, clamped [${PROFILE_WINDOW_SEC:-40},${_WMAX}]s)"
+      echo ">>> sizing: PROFILE_WINDOW_SEC ${PROFILE_WINDOW_SEC}->${_WSEC}s"
       PROFILE_WINDOW_SEC=$_WSEC
     fi
   fi
@@ -634,6 +927,12 @@ summ = {
     # Aggregate tok/s (NOT divided by TP). Default matches Hyperloom/Magpie output_throughput protocol;
     # E2E_METRIC=total switches to total (input+output) token throughput.
     "metric_basis": ("aggregate_total_token_tok_s" if _is_total else "aggregate_output_tok_s"),
+    "measurement_mode": (
+        "isolated_server_replica"
+        if os.environ.get("GEAK_ISOLATED_REPLICA") == "1"
+        else "legacy_same_server"
+    ),
+    "effective_config_digest": os.environ.get("EFFECTIVE_CONFIG_DIGEST") or None,
 }
 with open(out_path, "w") as fh: json.dump(summ, fh, indent=2)
 print(f"E2E_SUMMARY {summ['metric_basis']}={summ['throughput_tok_s_median']} "

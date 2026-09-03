@@ -1,0 +1,154 @@
+{
+  "run_id": "paged_attention_ragged-ch16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "paged_attention_ragged"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "genuine-nontemporal-128bit-kv-load",
+      "description": "Read-once paged KV on gfx950: the shipped 16-byte non-temporal helper drops the nt bit; one 128-bit vector builtin load restores it for ~1.07x, all cases up.",
+      "keywords": [
+        "attention-decode",
+        "paged-kv",
+        "non-temporal-loads",
+        "cache-modifier",
+        "kv-cache",
+        "memory-bound",
+        "isa-inspection",
+        "gfx950"
+      ],
+      "kernels": [
+        "paged_attention_ragged"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "both",
+      "key": "ragged/mixed-batch paged attention in HIP C++ on gfx950/CDNA4, where the bf16 KV stream is read exactly once and has no L2 reuse",
+      "lifecycle": "active",
+      "levers": [
+        "mem.non-temporal-load"
+      ],
+      "cost": "L2",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.066x weighted geomean isolated vs frozen baseline, non-overlapping, bit-gate correct; every case improved: +2.6% on the long-context prefill-shaped case up to +7.6% on the short decode-shaped cases",
+      "verified_on": "2026-07-29",
+      "last_seen": "2026-08-12",
+      "attempts": 1,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "title": "Get the nt bit onto KV loads by loading one native 128-bit vector",
+      "lever": "Issue a single non-temporal builtin load on a native 128-bit vector type (a 4-wide int ext_vector) for each KV chunk so the compiler emits one 16-byte global load carrying the nt modifier.",
+      "apply": "Loads only, no math change, so oracle parity comes for free; the edit is at the KV fetch site, replacing the multi-scalar 16-byte non-temporal helper.",
+      "verify": "Disassemble and confirm the 16-byte global load actually carries the nt modifier, then run the interleaved per-case A/B against the frozen baseline and require every case up, not just the geomean.",
+      "pitfall": "A helper whose name says non-temporal produced nothing -> on this arch it re-vectorizes four scalar nt loads and the nt modifier is dropped in the process -> read the emitted ISA rather than the source before concluding the hint does not pay.",
+      "caution": "Also verify the KV stream is genuinely read-once with no L2 reuse: on a sibling paged decode kernel the same nt bit flipped sign with streamed-set size (about +7% at one concurrency, about -7% at another), so uniform favorability here is a property of zero reuse.",
+      "source": "run paged_attention_ragged-ch16h, 2026-07-29, 16h time-scaling campaign, direction r1_d0 (non-temporal KV loads)"
+    },
+    {
+      "name": "host-and-graph-axis-closed-on-gpu-bound-attention",
+      "description": "GPU-bound paged attention: wrapper-level HIP-graph capture and host marshalling memoization both land at or below 1.00x - the launch/host axis is closed.",
+      "keywords": [
+        "anti-pattern",
+        "closed-axis",
+        "launch-overhead",
+        "hip-graph",
+        "graph-replay",
+        "host-runtime",
+        "attention-decode",
+        "paged-kv",
+        "gfx950"
+      ],
+      "kernels": [
+        "paged_attention_ragged"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "both",
+      "key": "launch and host-side overhead on a paged attention kernel on gfx950 whose per-call GPU work is several times the host plus two-dispatch cost",
+      "lifecycle": "active",
+      "levers": [
+        "host.launch-overhead",
+        "host.graph-capture"
+      ],
+      "cost": "L2",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "closed axis over two directions: wrapper graph capture 0.986x weighted geomean (net regression - helps one short decode-shaped case about +3% and costs about 2% on the seven others), host memoization 1.009x, inside the harness noise band",
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "attempts": 2,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "title": "Price the host fraction before spending a round on the launch floor",
+      "lever": "Before planning a launch-overhead round, express per-call GPU work as a multiple of host plus dispatch cost; here GPU work was several times larger, and both host-side directions returned about 1.00x even though each was implemented correctly.",
+      "apply": "Capture both launches of the split-KV pair into one graph at the wrapper level (not the launcher) and replay it; separately, memoize the per-call host marshalling.",
+      "verify": "Require graph-off to reproduce the baseline exactly so the capture is not the variable, then ask whether the metric window (per-call GPU events) can see host time at all before believing either sign.",
+      "pitfall": "Capture was real and correct and collapsed both dispatches, yet geomean fell below 1 -> the async queue already hides host and dispatch cost behind GPU work, and a GPU-event window measures none of it -> measure the host fraction first.\nA per-shape never-regress gate was added to rescue it -> the true replay-vs-eager delta of about 1-2% sits under the harness noise band of about 1.2% -> when a lever's true delta is below the noise floor, no per-shape selection gate converts it into a reliable win.",
+      "caution": "Also verify whether the wrapper allocates per call: a sibling paged decode kernel whose wrapper did gained a large multi-x win from caching those allocations, so 'the host is invisible' is conditioned on there being no wrapper-side allocation to remove.",
+      "source": "run paged_attention_ragged-ch16h, 16h time-scaling campaign, 2026-08-12, directions r1_d1 (host memoization) and r2_d0 (wrapper graph capture)"
+    },
+    {
+      "name": "lds-counters-off-critical-path-near-hbm-ceiling",
+      "description": "Near the achievable HBM ceiling, paged attention LDS-conflict/wait counters and occupancy are not levers: four body directions returned ~1.00x or regressed.",
+      "keywords": [
+        "anti-pattern",
+        "closed-axis",
+        "roofline",
+        "hardware-counters",
+        "lds",
+        "bank-conflict",
+        "occupancy",
+        "waves-per-eu",
+        "split-kv",
+        "attention-decode",
+        "paged-kv",
+        "gfx950"
+      ],
+      "kernels": [
+        "paged_attention_ragged"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "both",
+      "key": "the frozen QKV body of a paged attention kernel on gfx950 already at about 80% of achievable HBM bandwidth with non-temporal KV loads applied",
+      "lifecycle": "active",
+      "levers": [
+        "mem.lds-tiling",
+        "compute.occupancy",
+        "algo.split-kv-granularity"
+      ],
+      "cost": "L3",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "closed axis over four directions at about 80% of achievable HBM bandwidth: forcing one more wave of occupancy cost about 6% on both the short and long-context cases, removing an apparently redundant barrier about 1%, vectorizing the transpose readback about 4.5% on the long-context case, and the reduce phase is only 3.6% (short) / 2% (long) of call time so its whole ceiling is about 1.037x",
+      "roofline": "memory-bound at roughly 0.8 of achievable HBM bandwidth before and after; the residual is ramp-up/down, not an attackable stall",
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "attempts": 4,
+      "confirms_blind": 0,
+      "confirms_cited": 0,
+      "losses": 0,
+      "title": "High LDS-wait counters next to a high roofline fraction can be a compute tail",
+      "lever": "Classify with the VALU:VMEM issue ratio and the memory-stall percentage before planning a bandwidth, LDS-padding or occupancy attack: a high fraction of achievable bandwidth alongside a near-zero memory-stall percentage means the residual is a compute/ramp tail rather than headroom.",
+      "apply": "Take register and LDS usage from the ELF metadata rather than the profiler's register counter, and take the reduce phase's share of call time from a trace before treating it as a target.",
+      "verify": "Re-time each candidate per case against the frozen baseline and expect the counters to stay high while the time does not move; that combination is the signature of an overlapped, off-critical-path cost.",
+      "pitfall": "LDS bank conflicts around 10.75% and multi-cycle LDS waits read as headroom -> at the free occupancy point with many co-resident waves the LDS traffic is fully overlapped by the KV stream -> both a barrier removal and a transpose-readback vectorization regressed.\nCoarsening the split-KV partition size silently corrupted results (max abs diff around 3) -> the frozen body sizes a shared-memory logits array from that constant, so a larger partition overflows its inner dimension -> treat partition size as a body change with an LDS budget, not a config knob.",
+      "caution": "Also verify the free-occupancy register point before chasing another wave: here trimming accumulator registers to reach one more wave removed all spills and was still uniformly slower.",
+      "source": "run paged_attention_ragged-ch16h, 16h time-scaling campaign, 2026-08-12, directions r2_d0/r2_d1 and the deep-explore round"
+    }
+  ]
+}

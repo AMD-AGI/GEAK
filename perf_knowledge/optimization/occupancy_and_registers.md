@@ -76,14 +76,50 @@ report and the profiler:
   (`[[profiling/]]`, `[[hardware/cdna3_mi300/occupancy.md]]`).
 - Rule of thumb: prefer **2 waves/EU with no spills** over 3 waves/EU that spill, for GEMM-class kernels.
 
+### Count `v_accvgpr` moves, not scratch — scratch under-reports the spill
+Scratch is not the whole spill surface. When arch VGPRs run out, the compiler's *first* move is to park
+values in the **accumulator file** and shuttle them with `v_accvgpr_read/write`, which costs issue slots
+and serialises against MFMA **but never appears as `private_seg_size`, `scratch_` or `buffer_store`**.
+A build can therefore report *less* scratch than its rival and be materially slower.
+
+Measured instance (gfx942 MI300X, fused attention backward, same kernel, one interleaved process):
+
+| waves | `private_seg_size` | vgpr | agpr | `v_accvgpr` moves | µs |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 | 16 B | 256 | 0 | **0** | **902** |
+| 4 | **0 B** | 379 | 123 | 75 | 1055 |
+
+The 4-wave build has *zero* scratch and is 15% slower. Read the arch-VGPR count, the AGPR count **and**
+the `v_accvgpr` move count together:
+
+```bash
+grep -E 'vgpr_count|agpr_count|private_seg_size' <final_isa>.s
+grep -c v_accvgpr <final_isa>.s        # the number that actually discriminates
+```
+
+A small non-zero `private_seg_size` (e.g. 16 B) is often a fixed prologue slot rather than spill — confirm
+by checking there is no `scratch_`/`buffer_store` targeting it.
+
+**Corollary for occupancy hunting:** the arch-VGPR cap is **256 per wave regardless of occupancy** — only
+the accumulator file effectively grows as you drop to 1 wave/SIMD, and an MFMA cannot take an AGPR as an A
+or B operand. So dropping the wave count does *not* relieve pressure on operands that must be arch VGPRs;
+in a kernel whose per-wave resident operand set scales with its work slice, halving the waves *doubles*
+that set against a fixed cap. `[[optimization/mfma_scheduling.md]]` has the accumulator-bound vs
+operand-bound split and which way each resolves.
+
 ## Pitfalls
 - Treating "more occupancy = faster" as universal. MFMA-bound kernels run great at 1–2 waves/EU.
 - Forgetting AGPRs count against the 512 budget — a fat accumulator silently caps occupancy.
 - Setting `waves_per_eu` high without checking the ISA dump for spills.
+- **Judging spill by scratch alone** — AGPR shuttling is invisible there (see the cliff section above).
+- Reading a low total-wave-cycle "occupancy %" as free headroom. If the block count is pinned by the
+  register cap, the usual way to collect it (split the work into more, smaller blocks) changes nothing:
+  in the measured case a 2-way split of the longest blocks landed at 747 vs 743 µs.
 - Assuming CUDA "blocks/SM" math; CDNA granularity is **16 VGPR**, slots are **8/SIMD**, wave is **64**.
 
 ## Verify
-- ISA/asm: confirm VGPR/AGPR counts and zero scratch (`amdgpu-arch` dump; triton `TRITON_CACHE`/`AMDGCN`).
+- ISA/asm: confirm VGPR/AGPR counts, zero scratch **and zero `v_accvgpr` moves** (`amdgpu-arch` dump;
+  triton `TRITON_CACHE`/`AMDGCN`; FlyDSL `FLYDSL_DUMP_IR=1` — see `[[languages/flydsl/debugging.md]]`).
 - Profiler: occupancy and `VALUBusy` from Omniperf; compare across `waves_per_eu` settings.
 - A/B: sweep `waves_per_eu ∈ {1,2,3,4}` and `num_warps ∈ {4,8}`, keep the lowest latency with no spill.
 
@@ -91,3 +127,7 @@ report and the profiler:
 - 512 VGPR/EU, 16-granule, worked 170→176→2-waves example, `waves_per_eu` hint: ROCm MI300X workload guide.
 - 256 architected + 256 AGPR pools, allocation granularity, `v_accvgpr_*`: AMD CDNA3 (MI300) ISA reference.
 - Register-pressure / occupancy reasoning (CDNA lab notes): AMD GPUOpen register-pressure note.
+- `v_accvgpr`-vs-scratch table, the 256-arch-VGPR-cap-regardless-of-occupancy corollary, and the
+  occupancy-%-is-not-headroom result: first-party on-box gfx942 MI300X, ROCm 7.1.0 —
+  `Attention-Kernels/geak_trans_py2flydsl/fmha_backward/FMHA_BWD_FlyDSL_Skills.md` §9–§12, mirrored in
+  `[[operators/mla_attention/backends/flydsl]]`.

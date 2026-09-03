@@ -36,7 +36,7 @@ by an agent returning **structured JSON**.
   `verify_engineer`, and `integrator`.
 
 ## Pipeline
-`Setup → Analyze+Roadmap → Benchmark(COMMANDMENT+baseline) → Baseline Profile →`
+`Setup → Analyze+Roadmap → Benchmark(COMMANDMENT+baseline) → Baseline Profile → [Research (opt-in)] →`
 `LOOP[ Plan round → (Optimize ‖ Verify, pipelined) → Integrate → Commit winner → Re-profile → Update memory ] →`
 `Final Report → Director Validation`.
 
@@ -94,6 +94,13 @@ Workflow({
                                //   unweighted geomean is kept as a secondary diagnostic). Correctness is
                                //   unaffected (it stays on the frozen immutable oracle).
                                //   Also accepted as op_spec.workload_path, or op_spec.workload (inline).
+    // --- Deep Research Agent (DRA) — opt-in web-grounded research phase before the optimize loop ---
+    dra_enabled: "false",      // optional, default "false" (OFF → behavior byte-identical). "true" runs
+                               //   the Research phase after Profile / before the optimize loop.
+    dra_max_questions: 8,      // optional, default 8: max research questions fanned out in parallel
+    dra_blindspot: "false",    // optional, default "false": run an extra blindspot-critique + 2nd
+                               //   parallel research wave (Stage 5/6) — budget-permitting
+    dra_max_blindspots: 4      // optional, default 4: cap on blindspots / 2nd-wave follow-ups
   }
 })
 ```
@@ -120,6 +127,36 @@ writes the simplest correct implementation in `target_language` (correctness-jud
 oracle), commits it as the baseline, and then the **same optimize loop** improves it. Returns
 `authored:false` / `validation_status:"author_failed"` if no correct baseline can be produced (the
 caller drops that language). `mode="optimize"` (default) is unchanged and fully backward compatible.
+
+### Deep Research Agent / Research phase (NEW, opt-in)
+`dra_enabled="true"` inserts a **`Research` phase AFTER Profile and BEFORE the optimize loop** (so the
+COMMANDMENT + baseline profile + analysis already exist). It lives in the `kernel_lane.js` worker
+alongside the rest of the pipeline, and the dispatcher forwards `dra_*` through unchanged. The
+**`researcher`** persona (`roles/researcher.md`) runs a v4-native deep-research pass:
+1. **Stage 0 + 1/2** (`research_plan`, one agent): extract facts from the kernel source +
+   `profiling_summary.md` + `analysis.json` + the `COMMANDMENT`, then generate & rank research
+   QUESTIONS spanning BOTH grounded bottleneck questions AND design-space / "is there a fundamentally
+   faster algorithm or execution strategy?" questions.
+2. **Stages 3/4** (`research_question`, fanned out in **parallel** — one agent per question): each
+   researches its question on the live web via **native `WebSearch`/`WebFetch`** and synthesizes one
+   judgment. Every research agent is wrapped in the `agentT()` hang-guard, so a hung research agent
+   resolves to `null` and the parallel round-barrier still proceeds (it cannot wedge the run).
+3. **Stage 5/6** (`research_blindspot`, optional, `dra_blindspot="true"`): a blindspot critique + a
+   second parallel research wave on the follow-ups.
+4. **Stage 7** (`research_synthesize`, one agent): a ranked **portfolio of optimization directions**,
+   written as `deep_search.md` (full evidence), `deep_search_brief.md` (compact, ~2-4 KB ranked
+   directions only — what the planner reads), and `deep_search.json` (structured).
+
+The TechLead's `plan_round` then **Reads `EVAL_DIR/deep_search_brief.md` (if present)** and seeds
+`directions[]` from the ranked DRA directions — **diversifying** them across parallel engineers (with
+≥1 free explorer slot, never anchoring all engineers on one theme) and treating **high-ceiling
+rewrites (raw-HIP/`load_inline`, HIP/CUDA graph capture, algorithmic reformulation) as first-class**,
+not secondary. The brief is a prior, never a cage: profile/per-case data and measurement still rule.
+
+**Web tools:** the research agents need `WebSearch`/`WebFetch`. They are on the e2e allowlist
+(`interface/run_e2e.py` `ALLOWED_TOOLS`). For a standalone `claude -p` invocation of this workflow
+with `dra_enabled`, pass them on the allowlist too (`--allowed-tools Workflow,Bash,Read,Write,WebSearch,WebFetch`).
+With `dra_enabled` off (the default) nothing opts into the web tools and behavior is unchanged.
 
 ### Bake-off mode (NEW) — one kernel, many backend languages, keep the fastest
 `kernel_workflow.js` is now the single **ENTRY POINT / dispatcher**; the single-language pipeline lives
@@ -152,6 +189,46 @@ in the sibling **`kernel_lane.js` worker**:
      actually beat the frozen baseline (speedup > 1.0x); if none did, `winner=null` and the ORIGINAL kernel
      is kept. Optional `apply_to_original` (a lane winner applies its patch; an env winner records its
      `apply_env` + tuning artifact).
+  5. **UpdateExperience** (`roles/update_experience.md`): on a measured win only, the TechLead distills
+     **at most one** reusable principle into `knowledge/learned/` (curate/merge, never blind-append; see
+     `knowledge/learned/README.md`). In bake-off this runs **once, centrally** — the lanes are launched
+     with `update_experience: 'off'`, and the lesson worth keeping is the cross-language routing outcome
+     the dispatcher alone can see.
+
+### Learned knowledge (every run, not just bake-off)
+`kernel_lane.js` curates a card at the end of **every** lane run that earned a measured win — standalone,
+dispatcher passthrough (`mode=optimize|author`), or a lane opened by `e2e_workflow`. The sink is always
+`<this workflow>/knowledge/learned/`, derived from `workflow_dir`, so an e2e-driven lane writes its
+kernel-level lesson **here**, never into `e2e_workflow/knowledge/learned/` (that sink is e2e-gated and
+owned by e2e's own `system_architect`; it cites these cards instead of copying them). The cards are read
+back as **advisory priors** by `tech_lead` and `author_engineer` — ADD-only, always overruled by on-box
+measurement. Disable with `update_experience: 'off'`.
+
+Each card is **self-describing**: it opens with a skill-style discovery header (`name`, `description`,
+`keywords`, `kernels`, `platforms`, `kernel_class`, `regime`, `confidence`).
+`knowledge/learned/INDEX.md` is a **generated** projection of those headers — rebuild it with
+`python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned index` (`--check` fails when it is stale). Nothing appends to the index by
+hand, which is also why concurrent lanes can no longer drop each other's entries.
+
+Retrieval is **semantic and done by the reading role**, not by a matcher: the index is ≤40 cards, each
+line already carries the description + kernel symbols + keywords, so the role reads it and judges
+relevance by meaning (a `split-k on skinny-M GEMM` card is worth opening for a tall-K GEMM). `grep` is a
+shortcut for an exact kernel symbol, never the lookup path. Keyword drift (`split-k`/`split_k`/`splitk`)
+is contained three ways: the reader is semantic so a synonym costs ranking not retrieval; the generator
+normalizes spelling mechanically; and the index publishes a `## keyword vocabulary` appendix (every term
+in use + counts) that curators pick from, with surviving near-duplicates flagged for a human call rather
+than auto-merged.
+
+A card's `key:` is **one line of plain English** (`MXFP8 E8M0 dense linear, decode-bound · gfx950`), not a
+rigid `class · gfx · regime` triple — the triple collapses genuinely different cards (vLLM MXFP8 vs sglang
+bf16) onto one merge target. The machine-readable slots are the discovery-header fields. `e2e_workflow`'s
+`learned/` uses the same contract; its cards predate the discovery header, so its index stays hand-kept
+until they are backfilled (see that folder's README).
+
+Card content is sanitized: **relative numbers only** (speedup ratios, percent deltas, % of achievable
+peak, roofline bound class) — never wall-clock `ms` or absolute `TFLOP/s`/`GB/s`, which vary by box and
+stay in `EVAL_DIR`. A card also records the **pitfalls actually hit** (`symptom → root cause → fix`) and,
+when several directions compounded, a `stack:` block giving the **total first, then each direction**.
 
 Available backend languages: `triton` (always) · `flydsl` (SOTA GEMM DSL) · `hip` · `ck`, plus the
 skeletons under `../perf_knowledge/languages/` — a language absent on the image is dropped with an
@@ -181,6 +258,9 @@ Everything lands under `<exp_root>/team_<kernel>_<timestamp>/<kernel>/` (default
 the `exp/` folder sibling to `workflow_dir`):
 - `COMMANDMENT.md`, `baseline_timing.json`, `analysis.json`, `codebase_context.md`, `roadmap.md`
 - `baseline_metrics.json`, `profiling_summary.md`
+- (DRA, when `dra_enabled`) `deep_search.md` (full research), `deep_search_brief.md` (compact ranked
+  directions — the planner's input), `deep_search.json` (structured portfolio), and
+  `research/{facts.json, questions.json, answers/<id>.json, blindspots.json}` (the research trail)
 - `round_N/engineer_i/{worker_result.json, report.md, best_patch.diff}` — each engineer's mini-report
 - `round_N/integrate/`, `insight_log.md`, `current_best.diff`
 - `tech_lead_report.md` — round-by-round narrative + final per-case table (the TechLead summary)
@@ -200,10 +280,20 @@ kernel_lane.js         single-language WORKER (the deterministic optimize/author
 kernel_workflow_bmk.js batch orchestrator (runs kernel_lane on a list of kernels, one batch per GPU)
 roles/               director, tech_lead, engineer, deep_engineer (deep_explore),
                      author_engineer, benchmark_engineer, profile_engineer,
-                     verify_engineer, integrator, oracle_freezer (bake-off freeze)
+                     verify_engineer, integrator, oracle_freezer (bake-off freeze),
+                     update_experience (learned-card curation, every run),
+                     researcher (DRA, opt-in)
 knowledge/           optimization_strategies, hip/triton/wrapper, profiling_guide,
                      amd_instinct (multi-card: gfx942/gfx950), self_monitoring, geomean_levers
+knowledge/learned/   distilled experience cards (ADVISORY priors; each card self-describing via its
+                     discovery header, INDEX.md GENERATED from them; written by the
+                     TechLead update_experience step at the end of EVERY run). This sink is
+                     kernel-gated (frozen-baseline isolated A/B); e2e-gated lessons stay in
+                     e2e_workflow/knowledge/learned/ and cite these cards -- see learned/README.md
 scripts/             gpu_lock.sh, profile_kernel.sh,
+                     kb.py ... index      (regenerate a learned/INDEX.md from the cards' discovery
+                     frontmatter; sink-agnostic -- takes the dir, so it also serves
+                     e2e_workflow/knowledge/learned; `--check` for CI), test_learned_index.js (its guard),
                      test_mode_dispatch.js (regression guard: mode dispatch + bake-off lane
                      routing; stubs the runtime, no GPU/agent — `node scripts/test_mode_dispatch.js`)
 ```

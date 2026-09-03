@@ -1,0 +1,138 @@
+{
+  "run_id": "paged_attention_large-own16h",
+  "date": "2026-08-12",
+  "kernel_names": [
+    "paged_attention_large"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "decode-attention-collapse-partitions-into-one-workgroup",
+      "description": "Let one workgroup walk every KV partition of a sequence: the split-K round trip and its reduce dispatch both vanish; 1.27x on the large-context half.",
+      "keywords": [
+        "decode",
+        "paged-attention",
+        "split-kv",
+        "dispatch-collapse",
+        "online-softmax",
+        "grid-gating",
+        "hip"
+      ],
+      "kernels": [
+        "paged_attention_ll4mi_QKV_mfma16_kernel",
+        "paged_attention_ll4mi_reduce_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "split-KV paged decode attention in HIP/C++ on gfx950 whose large-context shapes launch thousands of workgroups across a partition grid and then a second reduce dispatch",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L3",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.2042x geomean over 16 cases, 15/16 >= 1.00x, non-overlapping vs the frozen baseline; split by regime the large-context half is 1.3738x (per case 1.32-1.46x) while the launch-floored small-batch half is 1.0556x",
+      "attempts": 6,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Collapse the partition grid instead of optimizing the round trip it creates",
+      "lever": "one workgroup walks all partitions of a sequence with gridDim.y -> 1, carrying online-softmax max/sum/accumulator in registers and writing the final output directly",
+      "apply": "gate the collapsed path on a workgroup-count threshold so only large grids take it; keep the two-dispatch path for small grids; three effects compound - the partial-output/exp-sums/max-logits round trip is deleted, the reduce dispatch is deleted, and per-partition Q fetch and scale setup hoist to once per sequence",
+      "stack": "total 1.2042x geomean = four directions compounded, attribution incremental in landing order\n  - 1. partition collapse - 1.2737x on the large-context half standalone (verified) - the bulk of the win\n  - 2. grid-gated fused reduce epilogue - 1.0525x (verified), and it is what carries the small-batch half (+7% by ablation)\n  - 3. occupancy: one fewer wave requested so the register budget stops spilling - 1.0388x (verified)\n  - 4. software-pipelined collapsed loop with Q staged in LDS - +4.2% on top (verified, 16/16 positive)\n  - note: the last merge was exactly multiplicative in its parts (1.0501 measured vs 1.0544 predicted), earlier ones were not",
+      "verify": "confirm the collapsed path actually engages per shape (a path trace beats a speedup), check the reduce dispatch count drops to zero on the shapes you expect, and re-time against the frozen baseline interleaved with an unpatched copy",
+      "pitfall": "collapse forced onto small grids measured 0.58x, worst case 0.475x -> one workgroup per sequence starves a 256-CU grid -> keep it behind a minimum-workgroup gate; an epilogue edit that never changed timing -> it landed in the build-regenerated HIP copy of the .cu and never reached the compiler -> diff the .cu and grep the saved patch for generated-file hunks",
+      "caution": "also verify the caller's allocation contract before shrinking the partition size: the partial-output buffers are sized by the caller for a fixed partition count, so a smaller one corrupts memory silently unless it uses private scratch; and also verify against the other engineer's base arm, since identical binaries swung bimodally on two large-context cases",
+      "source": "run paged_attention_large-own16h, 2026-08-12, director-validated (geomean 1.1965 re-measured vs 1.2042 reported), correctness PASS"
+    },
+    {
+      "name": "dispatch-floor-outside-the-kernel-is-closed",
+      "description": "Closed axis: graph capture at launcher and wrapper level both lose on a launch-floored decode kernel - the replay floor exceeds the whole op.",
+      "keywords": [
+        "decode",
+        "paged-attention",
+        "launch-overhead",
+        "graph-capture",
+        "small-batch",
+        "dispatch-collapse",
+        "anti-pattern"
+      ],
+      "kernels": [
+        "paged_attention_ll4mi_QKV_mfma16_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "small-batch paged decode attention on gfx950 whose per-call cost is already at a two-dispatch hardware floor, considered for host-side graph capture",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L2",
+      "type": "anti-pattern",
+      "confidence": "★★",
+      "effect": "closed axis over two independent arms: launcher-level capture 0.80x on all 8 small-batch cases, wrapper-level capture 0.61-0.70x; the measured empty-graph replay floor on this box is longer than the entire baseline of every one of those cases, so no capture placement can win",
+      "attempts": 2,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Measure the empty-graph replay floor before funding a capture round",
+      "lever": "before spending a direction on graph capture, time an empty capture-and-replay on the same box and compare it to the op's own per-call baseline as a ratio; if replay costs more than the op, the axis is decided in minutes instead of two rounds",
+      "apply": "one throwaway harness that captures nothing and replays it; the same number then settles launcher-level and wrapper-level placement together, since wrapper level adds strictly more per-call work than launcher level",
+      "verify": "compare the replay floor against the per-call baseline of the smallest shape in the suite; on this run wrapper level lost about twice as hard as launcher level, which is the signature of the floor rather than of a bad implementation",
+      "pitfall": "the first capture arm was read as an implementation problem and re-issued at a different level seven rounds later -> the cost is in the replay mechanism, not the placement -> measure the floor once and reuse the number for every placement",
+      "caution": "also verify this on kernels whose per-call cost is well above the replay floor - the conclusion here is a ratio between the two, not a property of capture; on a launch-floored decode kernel the dispatch collapse that did pay lived inside the kernel",
+      "source": "run paged_attention_large-own16h, 2026-08-12, rounds 2 and 9, director-validated run (accepted, correctness PASS)"
+    },
+    {
+      "name": "cache-hints-pay-only-on-irreducible-traffic",
+      "description": "Non-temporal / cache-policy hints move a decode kernel only on read-once traffic no restructure can delete, and only when the working set exceeds cache.",
+      "keywords": [
+        "decode",
+        "paged-attention",
+        "non-temporal-loads",
+        "cache-modifier",
+        "kv-cache",
+        "memory-bound",
+        "size-gating"
+      ],
+      "kernels": [
+        "paged_attention_ll4mi_QKV_mfma16_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "choosing cache policy for the KV stream and the split-KV scratch round trip of a paged decode attention kernel on gfx950, across cache-resident small shapes and streaming large ones",
+      "lifecycle": "active",
+      "layer": "learned",
+      "cost": "L1",
+      "type": "method",
+      "confidence": "★★",
+      "effect": "size-gated non-temporal KV loads gave +2.5% on the cache-resident small-batch cases with the large-context cases provably untouched (0.9997), and dropping the hint everywhere costs the large-context half 0.9644; the same class of hint on the split-KV scratch round trip measured an increment of 0.00 +/- 0.01, while deleting that stream outright was worth +18.6%",
+      "attempts": 4,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "verified_on": "2026-08-12",
+      "last_seen": "2026-08-12",
+      "title": "Ask whether the traffic is removable before you tune how it is cached",
+      "lever": "split the candidate streams into removable and irreducible first; spend the cache-policy direction only on the irreducible one, and host-select the hint per call on a working-set threshold via a template bool rather than baking it in",
+      "apply": "compute the working-set footprint on the host from the shape, pass a compile-time flag to the kernel, and let cache-resident shapes keep normal caching while streaming shapes bypass the last-level cache",
+      "verify": "carry an A/A null inside the same measurement, and ablate the hint off everywhere - if off-everywhere costs the streaming shapes, the hint is load-bearing where it applies; if the threshold sweep is byte-identical across a wide window, say so rather than reporting a tuned value",
+      "pitfall": "a cache-policy direction on the scratch round trip returned a flat null twice in consecutive rounds -> that traffic was an artifact of the two-phase decomposition, not of the problem -> the restructure that deleted the stream landed in the same round and was worth an order of magnitude more; also verify a redundant-load reduction is not just L1 hits on one cacheline before costing it",
+      "caution": "also verify how the harness re-calls the op: replaying the same tensors makes small shapes cache-resident across calls, so a non-temporal hint discards residency the next call wants - the gate, not the hint, is what transfers",
+      "source": "run paged_attention_large-own16h, 2026-08-12, rounds 4/5/6/9, director-validated (accepted, correctness PASS)"
+    }
+  ]
+}

@@ -59,6 +59,34 @@ footprint — feasible for many tiles on CDNA3's 64 KB, much easier on CDNA4's 1
 Pre-permuting B into the MFMA-native layout (aiter `bpreshuffle`, `[[operators/dense_gemm/tuning.md]]`)
 moves the shuffle off the hot path so the LDS read pattern is already conflict-free.
 
+### 5. When an operand is needed in two orientations: read the awkward one, don't materialise it
+A kernel that contracts the same staged tile over two different axes (classic case: attention backward,
+where the score GEMM contracts over the head dim while dV/dK contract over q rows) appears to need **two**
+LDS copies of that tile — the convenient orientation plus a transposed one, written by a second global
+read. **Prefer reading the awkward orientation out of the single copy.**
+
+The assumption worth dropping is that an MFMA operand needs its contraction-axis elements to arrive in one
+load. It does not: a fragment assembled from four 2-byte `ds_read`s walking a **column** of a
+row-major tile is the same operand. Make it conflict-free by construction rather than swizzling — if
+consecutive lanes differ only in the MFMA column and the four lane groups sit `4·pad` elements apart, the
+64 lanes cover 32 distinct banks and the two lanes sharing a bank also share its dword. **No XOR swizzle
+is needed**, because the feared many-way conflict lives on the *scatter* side of a materialised transpose,
+which this removes entirely.
+
+Measured instance (first-party, gfx942 MI300X, fused attention backward with asymmetric head dims;
+authoring guidance in
+[`languages/flydsl/authoring_attention_levers.md`](../languages/flydsl/authoring_attention_levers.md)):
+worth **−19% wall clock**. It trades ~160
+extra `ds_read` per loop iteration against a whole second global read of both tiles and **23 KB of LDS** —
+LDS instructions went 12.7M → 42.4M (3.3×) while vL1D read requests fell 322.6M → 66.0M (**−80%**) and
+VMEM instructions −54%, with MFMA count identical.
+
+> **On CDNA3, LDS read instructions are cheap enough that reading an operand in the awkward orientation
+> beats materialising it in the convenient one, by a wide margin, as long as the awkward read is
+> conflict-free.** Check this before spending LDS on a transposed copy — and note the freed LDS usually
+> buys a second *staging* buffer (`§3`), not a second resident block, since the block count is normally
+> pinned by registers anyway (`[[optimization/occupancy_and_registers.md]]`).
+
 ## Sizing budget (capacity → tile)
 LDS bytes per stage ≈ `(BM·BK + BK·BN) · sizeof(dtype) · num_stages · (2 if double-buffer)`.
 On CDNA3 (64 KB) a bf16 256×64 + 64×128 double-buffered tile is already tight; CDNA4 (160 KB) lets you

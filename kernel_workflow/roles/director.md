@@ -58,14 +58,14 @@ Do this instead of the optimize-mode steps below:
    mkdir -p "$EVAL_DIR/workspace/kernel_src" "$EVAL_DIR/baseline"
    echo "$KERNEL_PATH_ORIG" > "$EVAL_DIR/original_kernel_path.txt"
    # Copy the IMMUTABLE oracle in read-only (the Author/optimize loop judge against it, never edit it).
-   # This INCLUDES baseline_src/ + harness_lib.py: the frozen REAL ONLINE kernel is the timing-baseline
+   # This INCLUDES baseline_overlay/ + harness_lib.py: the frozen live serving stack IS the timing-baseline
    # denominator regardless of TARGET_LANGUAGE — it must ride along, immutable, so the unittest can time
    # the authored seed against the live online path (never against the seed's own language scaffold).
    # reference_io.pt is OPTIONAL and usually ABSENT: only e2e's kernel_extractor records a golden (it
    # captures unsynthesizable real routing / paged-KV metadata off a live server). An oracle_freezer dir
-   # has no golden — it re-derives operands from meta.cases[] seeds and checks parity against
-   # baseline_src/ live. The [ -e ] guards below already handle both; do not "fix" a missing file.
-   for f in meta.json unittest.py harness_lib.py; do
+   # has no golden — it re-derives operands from meta.cases[] seeds and checks parity against the
+   # frozen baseline live. The [ -e ] guards below already handle both; do not "fix" a missing file.
+   for f in meta.json unittest.py cases.py harness_lib.py leg_runner.py overlay_setup.py; do
      [ -e "$KERNEL_PATH_ORIG/$f" ] && cp "$KERNEL_PATH_ORIG/$f" "$EVAL_DIR/workspace/$f"
    done
    # golden is BIG (~1 GB) and IMMUTABLE — SHARE the single original via an ABSOLUTE symlink instead of
@@ -73,9 +73,13 @@ Do this instead of the optimize-mode steps below:
    # sha check hashes the file bytes, both transparent through a symlink. Downstream tars (engineer/verify)
    # carry the symlink verbatim (no -h/--dereference anywhere), so the whole lane shares one physical file.
    [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
-   [ -d "$KERNEL_PATH_ORIG/baseline_src" ] && cp -r "$KERNEL_PATH_ORIG/baseline_src" "$EVAL_DIR/workspace/baseline_src"
+   for d in baseline_overlay baseline_ref baseline_src; do
+     [ -d "$KERNEL_PATH_ORIG/$d" ] && cp -r "$KERNEL_PATH_ORIG/$d" "$EVAL_DIR/workspace/$d"
+   done
    chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
-   [ -d "$EVAL_DIR/workspace/baseline_src" ] && chmod -R -w "$EVAL_DIR/workspace/baseline_src" 2>/dev/null || true
+   for d in baseline_overlay baseline_ref baseline_src; do
+     [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
+   done
    cd "$EVAL_DIR/workspace"
    printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
@@ -85,16 +89,16 @@ Do this instead of the optimize-mode steps below:
    ```
    `kernel_src/` is the empty dir the Author Engineer will write its fresh implementation into. HEAD is
    the empty seed; the Author's first commit becomes the optimize loop's **CODE starting point** (what it
-   diffs its edits against) — NOT the speedup denominator. The speedup denominator is ALWAYS the frozen
-   REAL ONLINE kernel in `baseline_src/` (via `meta.baseline_callable`), regardless of `TARGET_LANGUAGE`.
+   diffs its edits against) — NOT the speedup denominator. The speedup denominator is ALWAYS the live
+   serving stack reached through `baseline_overlay/` on `PYTHONPATH`, regardless of `TARGET_LANGUAGE`.
    Authoring a naive same-language impl and letting the optimize loop beat THAT (optimized-HIP vs naive-HIP)
    is the fake-win bug this harness exists to prevent; the seed competes against the live online path.
 3. Return the same JSON shape as below, with `kernel_name` = `OP_SPEC.op_kind` (+ language), and
    `source_files` listing the oracle files present. Note in `notes` that this is an author-mode seed.
    > **🔴 REPORT THE FROZEN-BASELINE VERDICT (the script aborts the run without it).** Set
    > `baseline_frozen: true` and `baseline_callable: "<module:attr>"` ONLY when the frozen real online
-   > kernel is actually available — i.e. `baseline_src/` was copied in (the `[ -d ... ] && cp -r` above
-   > succeeded) OR `meta.json` carries a resolvable `baseline_callable`. If NEITHER holds (the live op
+   > kernel is actually available — i.e. `baseline_overlay/` was copied in (the loop above succeeded)
+   > OR `meta.json` carries a resolvable `baseline_callable`. If NEITHER holds (the live op
    > only exists fused in the compile graph, so the extractor could not freeze it), set
    > `baseline_frozen: false` and explain in `notes`: the orchestrator will ABORT rather than let the
    > unittest time the seed against `kernel_src/` (the fake-win bug). Do NOT fabricate a baseline.
@@ -113,29 +117,18 @@ Steps:
    ```bash
    mkdir -p "$EVAL_DIR/baseline" "$EVAL_DIR/workspace"
    echo "$KERNEL_PATH_ORIG" > "$EVAL_DIR/original_kernel_path.txt"
-   # Copy the kernel into baseline + workspace while EXCLUDING .git and all build artifacts at copy
-   # time (tar-pipe; rsync may be absent). This means we NEVER run a risky `rm -rf .git` (no approval
-   # friction) AND the source .git — which may carry prior/optimized history — can never leak into a
-   # workspace where an engineer could `git show` it. IMPORTANT: also dropping any `.torch_ext` —
-   # torch's build.ninja stores ABSOLUTE source paths, so an inherited cache would rebuild the wrong
-   # location; each workspace must build its own fresh. ALSO exclude reference_io.pt: the golden is BIG
-   # (~1 GB) and IMMUTABLE, so we SHARE the single original via an absolute symlink (below) instead of
-   # copying it into every workspace. Only `workspace/` needs it (CANONICAL = workspace; the unittest
-   # loads it there and baseline/ never reads a golden).
+   # Issue #429: ALWAYS use materialize_workspace.sh for baseline + workspace. Agents that
+   # previously inlined tar sometimes omitted --exclude='*.so' and copied multi-GiB aiter/jit/*.so
+   # into every clone. Script excludes nested *.so/*.o and aiter/jit, never -h/--dereference.
+   # reference_io.pt is excluded from the tar and shared via absolute symlink below.
    for d in baseline workspace; do
-     ( cd "$KERNEL_PATH_ORIG" && tar \
-         --exclude='./.git' --exclude='*/.git' \
-         --exclude='./build' --exclude='*/build' \
-         --exclude='./__pycache__' --exclude='*/__pycache__' \
-         --exclude='./.torch_ext' --exclude='*/.torch_ext' \
-         --exclude='./.rocprofv3' --exclude='*/.rocprofv3' \
-         --exclude='./reference_io.pt' --exclude='*/reference_io.pt' \
-         --exclude='*.so' --exclude='*.o' \
-         -cf - . ) | ( cd "$EVAL_DIR/$d" && tar -xf - )
+     bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+       --src "$KERNEL_PATH_ORIG" --dst "$EVAL_DIR/$d" \
+       --shared-root "$EVAL_DIR/_shared" --link-aiter
    done
    # Share the immutable golden by absolute symlink (sha check + torch.load are transparent through it;
    # downstream engineer/verify tars carry the symlink verbatim — never add -h/--dereference).
-   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
+   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
    printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
@@ -152,15 +145,18 @@ Steps:
 3a. **Freeze the real-online baseline (MANDATORY — same rule as author mode).** The immutable unittest
    times + random-value-parity-checks the candidate against the frozen online kernel, NEVER against the
    mutating `kernel_src/`. Resolve it in this order and record the verdict for the return JSON:
-   - If `KERNEL_PATH_ORIG` is an EXTRACTED task dir that already carries `baseline_src/` and/or
+   - If `KERNEL_PATH_ORIG` is an EXTRACTED task dir that already carries `baseline_overlay/` and/or
      `meta.json:baseline_callable`, the tar-pipe already copied them into `workspace/`. Make them
-     immutable and read the callable:
+     immutable:
      ```bash
-     [ -d "$EVAL_DIR/workspace/baseline_src" ] && chmod -R -w "$EVAL_DIR/workspace/baseline_src" 2>/dev/null || true
+     for d in baseline_overlay baseline_ref; do
+       [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
+     done
      [ -e "$EVAL_DIR/workspace/meta.json" ] && chmod -w "$EVAL_DIR/workspace/meta.json" 2>/dev/null || true
      ```
-     Set `baseline_frozen: true` + `baseline_callable` from `meta.json`.
-   - Else (a plain hand-written kernel dir with no `baseline_src/`/`baseline_callable`): the frozen
+     Set `baseline_frozen: true` + `baseline_callable` from `meta.json` (empty on the kernel track —
+     there the denominator is `baseline_overlay/`, not a callable name).
+   - Else (a plain hand-written kernel dir with no `baseline_overlay/`/`baseline_callable`): the frozen
      baseline IS the pristine `EVAL_DIR/baseline` copy + the initial git commit (same-language original =
      the real path). That always exists, so set `baseline_frozen: true` and note the baseline source is
      the pristine original (set `baseline_callable` from `meta.json:target_callable` if present, else "").
@@ -204,28 +200,20 @@ baseline latencies recorded at benchmark setup).
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
    # NO `rm` (it triggers an approval prompt that blocks autonomous runs). Use a UNIQUE validation
    # workspace each time so nothing is ever deleted; move any pre-existing one aside (mv, not rm).
+   # Issue #429: ALWAYS use materialize_workspace.sh (recursive *.so exclude; never -h).
    VWS="$EVAL_DIR/validation_workspace"
    [ -e "$VWS" ] && mv "$VWS" "${VWS}.old_$(date +%s)_$$" 2>/dev/null || true
-   mkdir -p "$VWS"
-   # Copy from the ORIGINAL excluding .git + build artifacts (tar-pipe), so the source history can't
-   # leak into validation and no build cache is inherited. Exclude the big immutable golden too — it is
-   # shared via an absolute symlink below (validation runs correctness, so it must resolve).
-   ( cd "$KERNEL_PATH_ORIG" && tar \
-       --exclude='./.git' --exclude='*/.git' \
-       --exclude='./build' --exclude='*/build' \
-       --exclude='./__pycache__' --exclude='*/__pycache__' \
-       --exclude='./.torch_ext' --exclude='*/.torch_ext' \
-       --exclude='./.rocprofv3' --exclude='*/.rocprofv3' \
-       --exclude='./reference_io.pt' --exclude='*/reference_io.pt' \
-       --exclude='*.so' --exclude='*.o' \
-       -cf - . ) | ( cd "$EVAL_DIR/validation_workspace" && tar -xf - )
-   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/validation_workspace/reference_io.pt"
-   cd "$EVAL_DIR/validation_workspace"
+   bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+     --src "$KERNEL_PATH_ORIG" --dst "$VWS" \
+     --shared-root "$EVAL_DIR/_shared" --link-aiter
+   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$VWS/reference_io.pt"
+   cd "$VWS"
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A
    git -c user.email=team@workflow -c user.name=team commit -q -m "validation_baseline"
    git apply "$EVAL_DIR/final_patch.diff"
-   # (No artifact cleanup needed — the tar copy excluded build/__pycache__/*.so; git apply adds only source.)
+   # Soft reclaim of prior validation_workspace.old_* (keeps disk bounded across re-validates).
+   bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/reclaim_eval_artifacts.sh" --eval-dir "$EVAL_DIR" --keep-round 0 2>/dev/null || true
    ```
 3. Run CORRECTNESS (from COMMANDMENT, with cwd = validation_workspace). If it fails → status
    `flagged`, record the failure, do NOT report a speedup as accepted.

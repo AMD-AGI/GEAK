@@ -26,8 +26,13 @@ Commands:
                 [--impl-file fast_act.py | --impl-dir <dir with entry + sibling modules>]
   add-capture   install a shape/IO capture hook on module:attr (uses capture_shapes.py)
                 --overlay O --target sglang...:fn --out <task_dir> [--max 5] [--capture-file capture_shapes.py]
+  add-marker    install a marker-only hook on one candidate seam (uses seam_trace.py)
+                --overlay O --target sglang...:fn [--marker-file seam_trace.py]
   check         print where a module resolves from (run with the overlay on PYTHONPATH)
-                --module sglang.srt.layers.activation
+                --module sglang.srt.layers.activation [--path-only]
+  Every add-* takes --from BASE to SEED a new overlay from an existing one, so a candidate overlay is
+  "the live stack + ONE entry". Stacking by PYTHONPATH does NOT work: only the first sitecustomize on
+  sys.path is imported, so a second overlay dir is silently dead. Seeding by copy is the only way.
 
 Back-compat aliases: `monkeypatch` == add-rebind, `copy-subtree` == add-module (file granularity).
 Stdlib only.
@@ -43,7 +48,7 @@ try:
     with open(_MAN) as _fh:
         _m = json.load(_fh)
 except Exception as _e:
-    _m = {"modules": [], "rebinds": [], "captures": []}
+    _m = {"modules": [], "rebinds": [], "markers": [], "captures": []}
 
 # (a) inject patched submodules under their dotted names BEFORE anything imports them.
 for _e in _m.get("modules", []):
@@ -75,13 +80,23 @@ for _e in _m.get("rebinds", []):
     except Exception as _ex:
         sys.stderr.write("[overlay] rebind FAILED %r: %r\n" % (_e, _ex))
 
-# (c) capture hooks (shape/IO oracle recording).
+# (c) capture hooks (shape/IO oracle recording) go on FIRST, so the capture wrapper is the innermost
+# stand-in and is already bound before any marker install imports a module that does
+# `from <capture target module> import <attr>` (which would otherwise alias the un-captured function).
 for _e in _m.get("captures", []):
     try:
         import capture_shapes
         capture_shapes.install(_e["target"], _e["out"], int(_e.get("max", 5)))
     except Exception as _ex:
         sys.stderr.write("[overlay] capture install FAILED %r: %r\n" % (_e, _ex))
+
+# (d) marker-only hooks used to compare every candidate seam in one trace.
+for _e in _m.get("markers", []):
+    try:
+        import seam_trace
+        seam_trace.install(_e["target"])
+    except Exception as _ex:
+        sys.stderr.write("[overlay] seam marker install FAILED %r: %r\n" % (_e, _ex))
 '''
 
 
@@ -104,7 +119,12 @@ def module_file(dotted):
     return spec.origin
 
 
-def _ensure_overlay(overlay):
+def _ensure_overlay(overlay, base=""):
+    # Two overlay dirs on PYTHONPATH do NOT compound (only the first sitecustomize is imported), so
+    # --from BASE stacks by seeding a copy.
+    if base and not os.path.exists(os.path.join(overlay, "_overlay_manifest.json")):
+        if os.path.isdir(base):
+            shutil.copytree(base, overlay, dirs_exist_ok=True)
     os.makedirs(overlay, exist_ok=True)
     sc = os.path.join(overlay, "sitecustomize.py")
     if not os.path.exists(sc):
@@ -113,7 +133,7 @@ def _ensure_overlay(overlay):
     man = os.path.join(overlay, "_overlay_manifest.json")
     if not os.path.exists(man):
         with open(man, "w") as fh:
-            json.dump({"modules": [], "rebinds": [], "captures": []}, fh, indent=2)
+            json.dump({"modules": [], "rebinds": [], "markers": [], "captures": []}, fh, indent=2)
     return man
 
 
@@ -146,7 +166,7 @@ def _try_apply(patch, target_file=None, cwd=None):
 
 
 def cmd_add_module(a):
-    man = _ensure_overlay(a.overlay)
+    man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     patched_dir = os.path.join(a.overlay, "_patched")
     os.makedirs(patched_dir, exist_ok=True)
     dst = os.path.join(patched_dir, a.module + ".py")
@@ -167,7 +187,7 @@ def cmd_add_module(a):
 
 
 def cmd_add_rebind(a):
-    man = _ensure_overlay(a.overlay)
+    man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     if a.impl_file:
         shutil.copy2(a.impl_file, os.path.join(a.overlay, os.path.basename(a.impl_file)))
     # An implementation that spans several files (sibling modules loaded relative to __file__ —
@@ -196,7 +216,7 @@ def cmd_add_rebind(a):
 
 
 def cmd_add_capture(a):
-    man = _ensure_overlay(a.overlay)
+    man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     cap = a.capture_file or os.path.join(os.path.dirname(os.path.abspath(__file__)), "capture_shapes.py")
     shutil.copy2(cap, os.path.join(a.overlay, "capture_shapes.py"))
     m = _load_man(man)
@@ -208,8 +228,24 @@ def cmd_add_capture(a):
     print(f"launch with: PYTHONPATH={a.overlay}:$PYTHONPATH")
 
 
+def cmd_add_marker(a):
+    man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
+    marker = a.marker_file or os.path.join(os.path.dirname(os.path.abspath(__file__)), "seam_trace.py")
+    shutil.copy2(marker, os.path.join(a.overlay, "seam_trace.py"))
+    m = _load_man(man)
+    m["markers"] = [e for e in m.get("markers", []) if e["target"] != a.target]
+    m["markers"].append({"target": a.target})
+    _save_man(man, m)
+    print(f"OVERLAY_DIR={a.overlay}")
+    print(f"add-marker {a.target}")
+    print(f"launch with: PYTHONPATH={a.overlay}:$PYTHONPATH")
+
+
 def cmd_check(a):
     f = module_file(a.module)
+    if getattr(a, "path_only", False):
+        print(f)
+        return
     print(f"{a.module} -> {f}")
     print("OVERLAY_ACTIVE" if os.sep + "_patched" + os.sep in f else
           ("INJECTED" if f.endswith(a.module + ".py") else "INSTALL (overlay not shadowing this module)"))
@@ -229,6 +265,7 @@ def main():
         p.add_argument("--patched-file", default="")
         p.add_argument("--src-file", default="")
         p.add_argument("--patch", default="")
+        p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
         p.set_defaults(func=_dispatch_add_module)
 
     for name in ("add-rebind", "monkeypatch"):
@@ -241,6 +278,7 @@ def main():
         p.add_argument("--impl-dir", default="", dest="impl_dir",
                        help="copy an ENTIRE impl dir (flat) into the overlay — for implementations "
                             "whose entry loads sibling modules relative to __file__")
+        p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
         p.set_defaults(func=cmd_add_rebind)
 
     p = sub.add_parser("add-capture")
@@ -249,10 +287,19 @@ def main():
     p.add_argument("--out", required=True, help="task dir to flush reference_io.pt + meta.json into")
     p.add_argument("--max", type=int, default=5)
     p.add_argument("--capture-file", default="", dest="capture_file")
+    p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
     p.set_defaults(func=cmd_add_capture)
+
+    p = sub.add_parser("add-marker")
+    p.add_argument("--overlay", required=True)
+    p.add_argument("--target", required=True, help="module:attr to mark without capturing I/O")
+    p.add_argument("--marker-file", default="", dest="marker_file")
+    p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
+    p.set_defaults(func=cmd_add_marker)
 
     p = sub.add_parser("check")
     p.add_argument("--module", required=True)
+    p.add_argument("--path-only", action="store_true", dest="path_only")
     p.set_defaults(func=cmd_check)
 
     a = ap.parse_args()

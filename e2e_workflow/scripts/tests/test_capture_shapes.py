@@ -95,6 +95,10 @@ def _reset_state(mod):
         sequence=[], seq_cap=256, in_graph_calls=0,
         shape_counts={}, shape_meta={},
         flush_every=64, oracle_written=False, oracle_sha=None, oracle_records=0,
+        byte_budget=0, case_byte_limit=0, persist_policy="share_large",
+        share_min_bytes=16 << 20, shared_tensors={}, shared_bytes_est=0,
+        oracle_bytes_est=0, budget_exceeded=False,
+        budget_skip_count=0, oracle_save_count=0, meta_flush_count=0,
     )
 
 
@@ -109,6 +113,19 @@ class FakeTensor:
 
     def dim(self):
         return len(self.shape)
+
+    def numel(self):
+        n = 1
+        for dim in self.shape:
+            n *= int(dim)
+        return n
+
+    def element_size(self):
+        name = str(self.dtype).split(".")[-1].lower()
+        return {
+            "float64": 8, "float32": 4, "float16": 2, "bfloat16": 2,
+            "int64": 8, "int32": 4, "int8": 1, "uint8": 1, "bool": 1,
+        }.get(name, 2)
 
     def detach(self):
         return self
@@ -576,7 +593,7 @@ class TestFlush(_RecorderTestCase):
         io_path = os.path.join(self.out_dir, "reference_io.pt")
         self.assertTrue(os.path.exists(io_path))
         payload, path = self.torch.saved[-1]
-        self.assertEqual(path, io_path)
+        self.assertTrue(path.startswith(io_path + ".tmp-"))
         self.assertEqual(payload["target"], "fake_serving_layer:op")
         self.assertEqual([r["regime"] for r in payload["records"]], ["decode", "prefill"])
         sha = self._meta()["reference_io_sha256"]
@@ -857,6 +874,15 @@ class TestInstall(_RecorderTestCase):
         self.assertEqual(cs._STATE["out_dir"], self.out_dir)
         self.assertIsNot(mod.op, cs._STATE["orig"])
 
+    def test_selection_capture_uses_a_process_local_artifact_directory(self):
+        self._target_module()
+        with _env(GEAK_SELECTION_TRACE=os.path.join(self.out_dir, "selection.json")):
+            with _stderr():
+                cs.install("fake_serving_layer:op", self.out_dir)
+        expected_prefix = os.path.join(
+            self.out_dir, f"capture.pid-{os.getpid()}.rank-")
+        self.assertTrue(cs._STATE["out_dir"].startswith(expected_prefix))
+
 
 # --------------------------------------------------------------------------- #
 # import-time self-install (the overlay PYTHONPATH / sitecustomize entry point)
@@ -901,6 +927,616 @@ class TestImportTimeInstall(_RecorderTestCase):
         mod, _ = self._fresh("capture_shapes_cutoff", CAPTURE_TARGET=None, CAPTURE_OUT=None,
                              CAPTURE_DECODE_LEAD_MAX="8")
         self.assertEqual(mod._STATE["decode_lead_max"], 8)
+
+
+class TestByteBudgetAndReclaim(_RecorderTestCase):
+    """Issue #429 storage bounds: refuse oversized oracles; reclaim process-local dirs."""
+
+    def test_parse_byte_budget_units(self):
+        self.assertEqual(cs.parse_byte_budget("0"), 0)
+        self.assertEqual(cs.parse_byte_budget("unlimited"), 0)
+        self.assertEqual(cs.parse_byte_budget("512"), 512)
+        self.assertEqual(cs.parse_byte_budget("1KiB"), 1024)
+        self.assertEqual(cs.parse_byte_budget("2MiB"), 2 * 1024 ** 2)
+        self.assertEqual(cs.parse_byte_budget("32GiB"), 32 * 1024 ** 3)
+
+    def test_byte_budget_skips_heavy_oracle_and_writes_manifest(self):
+        # 4*8*2 = 64 bytes per tensor arg; output is a string so ~64 bytes/call.
+        with _env(CAPTURE_BYTE_BUDGET="50"):
+            mod, _ = self._hook()
+        with _stderr() as err:
+            mod.op(FakeTensor((4, 8)))
+            cs._flush()
+        self.assertTrue(cs._STATE["budget_exceeded"])
+        self.assertEqual(cs._STATE["records"], [])
+        self.assertEqual(cs._STATE["budget_skip_count"], 1)
+        self.assertIn("byte budget exceeded", err.getvalue())
+        manifest = os.path.join(self.out_dir, "capture_manifest.json")
+        self.assertTrue(os.path.isfile(manifest))
+        with open(manifest) as fh:
+            body = json.load(fh)
+        self.assertTrue(body["budget_exceeded"])
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "reference_io.pt")))
+
+    def test_byte_budget_allows_cases_that_fit(self):
+        with _env(CAPTURE_BYTE_BUDGET="1MiB"):
+            mod, _ = self._hook()
+        with _stderr():
+            mod.op(FakeTensor((4, 8)))
+            cs._flush()
+        self.assertEqual(len(cs._STATE["records"]), 1)
+        self.assertFalse(cs._STATE["budget_exceeded"])
+        self.assertTrue(os.path.isfile(os.path.join(self.out_dir, "reference_io.pt")))
+        self.assertGreater(cs._STATE["oracle_bytes_est"], 0)
+
+    def test_selection_flush_every_1_does_not_rewrite_oracle_without_new_cases(self):
+        with _env(GEAK_SELECTION_TRACE=os.path.join(self.out_dir, "selection.json"),
+                  CAPTURE_BYTE_BUDGET=None):
+            mod, _ = self._hook()
+        self.assertEqual(cs._STATE["flush_every"], 1)
+        with _stderr():
+            mod.op(FakeTensor((4, 8)))  # records case + flush boundary
+            saves_after_first = len(self.torch.saved)
+            mod.op(FakeTensor((4, 8)))  # same sig: histogram only, no new record
+            mod.op(FakeTensor((4, 8)))
+        self.assertEqual(saves_after_first, 1)
+        self.assertEqual(len(self.torch.saved), 1)  # oracle not rewritten
+        self.assertGreaterEqual(cs._STATE["meta_flush_count"], 2)
+
+    def test_promote_and_reclaim_leaves_one_authoritative_oracle(self):
+        task = self.out_dir
+        keep = None
+        for pid, blob in ((111, b"SELECTED-ORACLE"), (222, b"OTHER-ORACLE-DATA")):
+            cap = os.path.join(task, f"capture.pid-{pid}.rank-0")
+            os.makedirs(cap)
+            meta = os.path.join(cap, "meta.json")
+            with open(meta, "w") as fh:
+                json.dump({"process_id": pid, "target": "m:op"}, fh)
+            with open(os.path.join(cap, "reference_io.pt"), "wb") as fh:
+                fh.write(blob)
+            if pid == 111:
+                keep = meta
+        # leftover atomic tmp
+        with open(os.path.join(task, "reference_io.pt.tmp-1-2"), "wb") as fh:
+            fh.write(b"TMP")
+        tel = cs.promote_and_reclaim(task, keep_meta_path=keep, promote=True)
+        self.assertTrue(tel["promoted"])
+        self.assertTrue(os.path.isfile(os.path.join(task, "reference_io.pt")))
+        with open(os.path.join(task, "reference_io.pt"), "rb") as fh:
+            self.assertEqual(fh.read(), b"SELECTED-ORACLE")
+        self.assertEqual(list(cs.iter_capture_dirs(task)), [])
+        self.assertFalse(os.path.exists(os.path.join(task, "reference_io.pt.tmp-1-2")))
+        self.assertTrue(os.path.isfile(os.path.join(task, "capture_telemetry.json")))
+        self.assertGreater(tel["bytes_reclaimed"], 0)
+
+    def test_cleanup_without_promote_removes_all_capture_dirs(self):
+        task = self.out_dir
+        for pid in (1, 2):
+            cap = os.path.join(task, "_selcap", f"capture.pid-{pid}.rank-0")
+            os.makedirs(cap)
+            with open(os.path.join(cap, "reference_io.pt"), "wb") as fh:
+                fh.write(b"Z" * 1024)
+        tel = cs.cleanup_task_capture_artifacts(task, promote=False)
+        self.assertEqual(list(cs.iter_capture_dirs(task)), [])
+        self.assertFalse(os.path.isfile(os.path.join(task, "reference_io.pt")))
+        self.assertGreaterEqual(tel["bytes_reclaimed"], 2048)
+
+    def test_share_large_stores_weight_kwargs_once(self):
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="0",
+                  CAPTURE_PERSIST_POLICY="share_large",
+                  CAPTURE_SHARE_MIN_BYTES="64"):
+            mod, _ = self._hook(fn=lambda *a, **k: FakeTensor((2, 2)))
+        w = FakeTensor((64, 64))  # 8KiB > 64 share min
+        with _stderr():
+            mod.op(FakeTensor((4, 8)), w1=w, hidden=FakeTensor((4, 8)))
+            mod.op(FakeTensor((8, 8)), w1=w, hidden=FakeTensor((8, 8)))
+            cs._flush()
+        self.assertEqual(len(cs._STATE["records"]), 2)
+        self.assertIn("w1", cs._STATE["shared_tensors"])
+        for rec in cs._STATE["records"]:
+            self.assertEqual(rec["kwargs"]["w1"], {"__shared__": "w1"})
+        payload, _path = self.torch.saved[-1]
+        self.assertIn("shared", payload)
+        self.assertIn("w1", payload["shared"])
+
+    def test_case_byte_limit_skips_oversized_case(self):
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="100",
+                  CAPTURE_PERSIST_POLICY="full"):
+            mod, _ = self._hook()
+        with _stderr() as err:
+            mod.op(FakeTensor((64, 64)))  # 8KiB >> 100
+            cs._flush()
+        self.assertTrue(cs._STATE["budget_exceeded"])
+        self.assertEqual(cs._STATE["records"], [])
+        self.assertIn("case byte limit exceeded", err.getvalue())
+
+    def test_parse_byte_budget_none_and_invalid(self):
+        self.assertEqual(cs.parse_byte_budget(None), 0)
+        self.assertEqual(cs.parse_byte_budget(""), 0)
+        self.assertEqual(cs.parse_byte_budget("none"), 0)
+        self.assertEqual(cs.parse_byte_budget("1.5MiB"), int(1.5 * 1024 ** 2))
+        with self.assertRaises(ValueError):
+            cs.parse_byte_budget("not-a-size")
+
+    def test_dtype_itemsize_and_tensor_nbytes_fallbacks(self):
+        self.assertEqual(cs._dtype_itemsize("torch.float32"), 4)
+        self.assertEqual(cs._dtype_itemsize("half"), 2)
+        self.assertEqual(cs._dtype_itemsize("float8_e4m3fn"), 1)
+        self.assertEqual(cs._dtype_itemsize("mystery"), 2)  # default
+
+        class NoElementSize:
+            shape = (2, 4)
+            dtype = "torch.float32"
+
+            def numel(self):
+                raise RuntimeError("no numel")
+
+        self.assertEqual(cs._tensor_nbytes(NoElementSize()), 32)
+
+        class BrokenShape:
+            dtype = "torch.float16"
+
+            @property
+            def shape(self):
+                raise RuntimeError("no shape")
+
+            def numel(self):
+                raise RuntimeError("no numel")
+
+            def element_size(self):
+                raise RuntimeError("no es")
+
+        self.assertEqual(cs._tensor_nbytes(BrokenShape()), 0)
+
+    def test_estimate_object_bytes_walks_snapshot_dicts(self):
+        leaf = {"__tensor__": True, "shape": [4, 8], "dtype": "torch.float16"}
+        self.assertEqual(cs._estimate_object_bytes(leaf), 64)
+        nested = {"a": [leaf, FakeTensor((2, 2))], "b": 7}
+        # FakeTensor has element_size; 4*2=8 plus leaf 64
+        self.assertEqual(cs._estimate_object_bytes(nested), 72)
+        self.assertEqual(cs._estimate_object_bytes("scalar"), 0)
+
+    def test_dir_bytes_skips_missing_links_and_link_children(self):
+        self.assertEqual(cs._dir_bytes(""), 0)
+        missing = os.path.join(self.out_dir, "nope")
+        self.assertEqual(cs._dir_bytes(missing), 0)
+        file_path = os.path.join(self.out_dir, "one.bin")
+        with open(file_path, "wb") as fh:
+            fh.write(b"abcd")
+        self.assertEqual(cs._dir_bytes(file_path), 4)
+        link = os.path.join(self.out_dir, "alink")
+        os.symlink(file_path, link)
+        self.assertEqual(cs._dir_bytes(link), 0)
+        tree = os.path.join(self.out_dir, "tree")
+        os.makedirs(tree)
+        with open(os.path.join(tree, "a.bin"), "wb") as fh:
+            fh.write(b"12345")
+        os.symlink(file_path, os.path.join(tree, "skip.link"))
+        self.assertEqual(cs._dir_bytes(tree), 5)
+
+    def test_iter_capture_dirs_and_remove_path_edge_cases(self):
+        self.assertEqual(list(cs.iter_capture_dirs(os.path.join(self.out_dir, "missing"))), [])
+        tel = {"removed_paths": [], "bytes_reclaimed": 0}
+        self.assertEqual(cs._remove_path("", tel), 0)
+        self.assertEqual(cs._remove_path(os.path.join(self.out_dir, "gone"), tel), 0)
+        lonely = os.path.join(self.out_dir, "lonely.bin")
+        with open(lonely, "wb") as fh:
+            fh.write(b"ZZ")
+        self.assertEqual(cs._remove_path(lonely, tel), 2)
+        self.assertFalse(os.path.exists(lonely))
+
+        bad = os.path.join(self.out_dir, "capture.pid-9.rank-0")
+        os.makedirs(bad)
+        with open(os.path.join(bad, "x"), "wb") as fh:
+            fh.write(b"abc")
+        real_rmtree = shutil.rmtree
+
+        def boom(path, ignore_errors=False):
+            raise OSError("denied")
+
+        shutil.rmtree = boom
+        try:
+            tel2 = {"removed_paths": [], "bytes_reclaimed": 0, "errors": []}
+            self.assertEqual(cs._remove_path(bad, tel2), 0)
+            self.assertTrue(tel2["errors"])
+        finally:
+            shutil.rmtree = real_rmtree
+
+    def test_promote_copies_when_destination_oracle_already_exists(self):
+        task = self.out_dir
+        with open(os.path.join(task, "reference_io.pt"), "wb") as fh:
+            fh.write(b"OLD")
+        cap = os.path.join(task, "capture.pid-1.rank-0")
+        os.makedirs(cap)
+        meta = os.path.join(cap, "meta.json")
+        with open(meta, "w") as fh:
+            json.dump({"process_id": 1}, fh)
+        with open(os.path.join(cap, "reference_io.pt"), "wb") as fh:
+            fh.write(b"NEW-ORACLE")
+        got = cs.promote_selected_oracle(task, meta)
+        self.assertTrue(got["promoted_oracle"])
+        with open(os.path.join(task, "reference_io.pt"), "rb") as fh:
+            self.assertEqual(fh.read(), b"NEW-ORACLE")
+
+    def test_promote_falls_back_to_copy_when_replace_fails(self):
+        task = self.out_dir
+        cap = os.path.join(task, "capture.pid-2.rank-0")
+        os.makedirs(cap)
+        meta = os.path.join(cap, "meta.json")
+        with open(meta, "w") as fh:
+            json.dump({"process_id": 2}, fh)
+        src = os.path.join(cap, "reference_io.pt")
+        with open(src, "wb") as fh:
+            fh.write(b"COPY-ME")
+        real_replace = os.replace
+
+        def fail_replace(a, b):
+            raise OSError("cross-device")
+
+        os.replace = fail_replace
+        try:
+            got = cs.promote_selected_oracle(task, meta)
+        finally:
+            os.replace = real_replace
+        self.assertTrue(got["promoted_oracle"])
+        with open(os.path.join(task, "reference_io.pt"), "rb") as fh:
+            self.assertEqual(fh.read(), b"COPY-ME")
+
+    def test_cleanup_missing_task_dir_and_telemetry_write_failure(self):
+        missing = os.path.join(self.out_dir, "no-task")
+        tel = cs.cleanup_task_capture_artifacts(missing)
+        self.assertIn("missing task_dir", tel["errors"][0])
+
+        task = os.path.join(self.out_dir, "task")
+        os.makedirs(task)
+        real_write = cs._write_json
+
+        def boom(_path, _payload):
+            raise OSError("ro fs")
+
+        cs._write_json = boom
+        try:
+            tel2 = cs.cleanup_task_capture_artifacts(task, promote=False)
+        finally:
+            cs._write_json = real_write
+        self.assertTrue(any("telemetry write failed" in e for e in tel2["errors"]))
+
+    def test_reclaim_workspace_captures_reports_over_budget(self):
+        eval_dir = self.out_dir
+        kernels = os.path.join(eval_dir, "kernels")
+        os.makedirs(kernels)
+        # non-task noise
+        with open(os.path.join(kernels, "README"), "w") as fh:
+            fh.write("x")
+        task = os.path.join(kernels, "demo_task")
+        os.makedirs(task)
+        with open(os.path.join(task, "reference_io.pt"), "wb") as fh:
+            fh.write(b"O" * 1000)
+        leftover = os.path.join(task, "capture.pid-77.rank-0")
+        os.makedirs(leftover)
+        with open(os.path.join(leftover, "reference_io.pt"), "wb") as fh:
+            fh.write(b"L" * 500)
+        tel = cs.reclaim_workspace_captures(eval_dir, workspace_budget=100)
+        self.assertGreater(tel["bytes_reclaimed"], 0)
+        self.assertTrue(tel["over_budget"])
+        self.assertTrue(tel["largest_oracles"])
+        self.assertFalse(os.path.isdir(leftover))
+        self.assertTrue(os.path.isfile(
+            os.path.join(eval_dir, "capture_workspace_telemetry.json")))
+
+        empty = os.path.join(self.out_dir, "empty_eval")
+        os.makedirs(empty)
+        tel2 = cs.reclaim_workspace_captures(empty)
+        self.assertIn("missing kernels dir", tel2["errors"][0])
+
+    def test_resolve_shared_refs_and_snapshot_kwargs_policies(self):
+        shared = {"w1": {"__tensor__": True, "shape": [2, 2]}}
+        self.assertEqual(
+            cs.resolve_shared_refs({"w1": {"__shared__": "w1"}}, shared),
+            {"w1": shared["w1"]})
+        self.assertEqual(
+            cs.resolve_shared_refs([{"__shared__": "w1"}], shared),
+            [shared["w1"]])
+        with self.assertRaises(KeyError):
+            cs.resolve_shared_refs({"__shared__": "missing"}, {})
+
+        store = {}
+        snap, added, keys = cs._snapshot_kwargs(
+            {"w1": FakeTensor((1024, 1024)), "scale": 1.0},
+            store, "moe_slim", share_min_bytes=1 << 20)
+        self.assertEqual(keys, ["w1"])
+        self.assertEqual(snap["w1"], {"__shared__": "w1"})
+        self.assertIn("w1", store)
+        self.assertGreater(added, 0)
+
+        full_snap, full_added, full_keys = cs._snapshot_kwargs(
+            {"w1": FakeTensor((4, 4))}, {}, "full", 1)
+        self.assertEqual(full_keys, [])
+        self.assertEqual(full_added, 0)
+        self.assertIn("__tensor__", full_snap["w1"])
+
+    def test_wrapper_uses_record_function_when_available(self):
+        entered = []
+
+        @contextlib.contextmanager
+        def rf(name):
+            entered.append(name)
+            yield
+
+        self.torch.profiler = types.SimpleNamespace(record_function=rf)
+        mod, _ = self._hook()
+        with _stderr():
+            mod.op(FakeTensor((2, 2)))
+        self.assertTrue(any(n.startswith("GEAK_TARGET::") for n in entered))
+
+    def test_install_rejects_bad_budget_and_policy_and_honors_flush_every(self):
+        mod = self._target_module(name="bad_budget_mod")
+        with _env(CAPTURE_BYTE_BUDGET="bogus"):
+            with self.assertRaises(RuntimeError):
+                cs.install("bad_budget_mod:op", self.out_dir)
+        _reset_state(cs)
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_PERSIST_POLICY="nope"):
+            with self.assertRaises(RuntimeError):
+                cs.install("bad_budget_mod:op", self.out_dir)
+        _reset_state(cs)
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="0",
+                  CAPTURE_PERSIST_POLICY="full", CAPTURE_FLUSH_EVERY="3"):
+            with _stderr():
+                cs.install("bad_budget_mod:op", self.out_dir)
+        self.assertEqual(cs._STATE["flush_every"], 3)
+
+    def test_cli_cleanup_task_dir_and_reclaim_workspace(self):
+        task = os.path.join(self.out_dir, "cli_task")
+        os.makedirs(task)
+        cap = os.path.join(task, "capture.pid-5.rank-0")
+        os.makedirs(cap)
+        meta = os.path.join(cap, "meta.json")
+        with open(meta, "w") as fh:
+            json.dump({"process_id": 5}, fh)
+        with open(os.path.join(cap, "reference_io.pt"), "wb") as fh:
+            fh.write(b"CLI")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cs._cli([
+                "--cleanup-task-dir", task,
+                "--keep-meta", meta,
+                "--promote",
+            ])
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.isfile(os.path.join(task, "reference_io.pt")))
+
+        eval_dir = os.path.join(self.out_dir, "cli_eval")
+        kernels = os.path.join(eval_dir, "kernels", "x_task")
+        os.makedirs(kernels)
+        leftover = os.path.join(kernels, "capture.pid-8.rank-0")
+        os.makedirs(leftover)
+        with open(os.path.join(leftover, "reference_io.pt"), "wb") as fh:
+            fh.write(b"WS")
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            rc2 = cs._cli([
+                "--reclaim-workspace", eval_dir,
+                "--workspace-budget", "1KiB",
+            ])
+        self.assertEqual(rc2, 0)
+        self.assertFalse(os.path.isdir(leftover))
+
+        with self.assertRaises(SystemExit):
+            cs._cli([])
+
+    def test_dir_bytes_tolerates_getsize_oserror(self):
+        tree = os.path.join(self.out_dir, "getsize_tree")
+        os.makedirs(tree)
+        victim = os.path.join(tree, "a.bin")
+        with open(victim, "wb") as fh:
+            fh.write(b"abc")
+        real_getsize = os.path.getsize
+
+        def flaky(path):
+            if path == victim:
+                raise OSError("vanished")
+            return real_getsize(path)
+
+        os.path.getsize = flaky
+        try:
+            self.assertEqual(cs._dir_bytes(tree), 0)
+        finally:
+            os.path.getsize = real_getsize
+
+    def test_reclaim_workspace_telemetry_write_failure(self):
+        eval_dir = os.path.join(self.out_dir, "tel_fail_eval")
+        kernels = os.path.join(eval_dir, "kernels", "y_task")
+        os.makedirs(kernels)
+        real_write = cs._write_json
+
+        def boom(_path, _payload):
+            raise OSError("disk full")
+
+        cs._write_json = boom
+        try:
+            tel = cs.reclaim_workspace_captures(eval_dir)
+        finally:
+            cs._write_json = real_write
+        self.assertTrue(any("disk full" in e for e in tel["errors"]))
+
+    def test_resolve_shared_refs_tuple_branch(self):
+        shared = {"w": {"__tensor__": True, "shape": [1]}}
+        self.assertEqual(
+            cs.resolve_shared_refs(({"__shared__": "w"},), shared),
+            (shared["w"],))
+        self.assertEqual(cs.resolve_shared_refs(7, shared), 7)
+
+    def test_flush_oracle_tmp_unlink_oserror_is_swallowed(self):
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="0",
+                  CAPTURE_PERSIST_POLICY="full"):
+            mod, _ = self._hook(name="fake_serving_unlink_fail")
+        with _stderr():
+            mod.op(FakeTensor((2, 2)))
+        real_replace = os.replace
+        real_unlink = os.unlink
+        real_exists = os.path.exists
+
+        def fail_replace(src, dst):
+            raise OSError("oracle replace failed")
+
+        def exists_yes(path):
+            if ".tmp-" in os.path.basename(path) and path.endswith(".pt") or (
+                    ".tmp-" in path and "reference_io" in path):
+                return True
+            return real_exists(path)
+
+        def unlink_boom(path):
+            if ".tmp-" in path:
+                raise OSError("unlink busy")
+            return real_unlink(path)
+
+        os.replace = fail_replace
+        os.path.exists = exists_yes
+        os.unlink = unlink_boom
+        try:
+            with self.assertRaises(OSError):
+                cs._flush(write_oracle=True)
+        finally:
+            os.replace = real_replace
+            os.path.exists = real_exists
+            os.unlink = real_unlink
+
+    def test_flush_meta_tmp_cleanup_paths(self):
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="0",
+                  CAPTURE_PERSIST_POLICY="full"):
+            mod, _ = self._hook(name="fake_serving_meta_cleanup")
+        with _stderr():
+            mod.op(FakeTensor((2, 2)))
+        # Force meta write to fail after oracle is on disk; cover except + unlink.
+        real_replace = os.replace
+        real_unlink = os.unlink
+        real_exists = os.path.exists
+
+        def fail_meta(src, dst):
+            if os.path.basename(dst) == "meta.json":
+                raise OSError("meta replace failed")
+            return real_replace(src, dst)
+
+        os.replace = fail_meta
+        try:
+            with self.assertRaises(OSError):
+                cs._flush(write_oracle=True)
+        finally:
+            os.replace = real_replace
+
+        # Second pass: unlink of meta tmp itself raises.
+        _reset_state(cs)
+        atexit.unregister(cs._flush)
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="0",
+                  CAPTURE_PERSIST_POLICY="full"):
+            mod2, _ = self._hook(name="fake_serving_meta_unlink")
+        with _stderr():
+            mod2.op(FakeTensor((2, 2)))
+
+        def fail_meta2(src, dst):
+            if os.path.basename(dst) == "meta.json":
+                raise OSError("meta replace failed")
+            return real_replace(src, dst)
+
+        def exists_tmp(path):
+            if "meta.json.tmp-" in path:
+                return True
+            return real_exists(path)
+
+        def unlink_meta_tmp(path):
+            if "meta.json.tmp-" in path:
+                raise OSError("meta unlink busy")
+            return real_unlink(path)
+
+        os.replace = fail_meta2
+        os.path.exists = exists_tmp
+        os.unlink = unlink_meta_tmp
+        try:
+            with self.assertRaises(OSError):
+                cs._flush(write_oracle=True)
+        finally:
+            os.replace = real_replace
+            os.path.exists = real_exists
+            os.unlink = real_unlink
+
+    def test_manifest_write_failure_is_logged_for_budget_skips(self):
+        with _env(CAPTURE_BYTE_BUDGET="50", CAPTURE_CASE_BYTE_LIMIT="0",
+                  CAPTURE_PERSIST_POLICY="full"):
+            mod, _ = self._hook()
+        real = cs._write_capture_manifest
+
+        def boom(*_a, **_k):
+            raise OSError("manifest fs")
+
+        cs._write_capture_manifest = boom
+        try:
+            with _stderr() as err:
+                mod.op(FakeTensor((4, 8)))
+                cs._flush()
+        finally:
+            cs._write_capture_manifest = real
+        self.assertIn("manifest write failed", err.getvalue())
+
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="50",
+                  CAPTURE_PERSIST_POLICY="full"):
+            _reset_state(cs)
+            atexit.unregister(cs._flush)
+            mod2, _ = self._hook(name="fake_serving_layer_case")
+        cs._write_capture_manifest = boom
+        try:
+            with _stderr() as err2:
+                mod2.op(FakeTensor((64, 64)))
+                cs._flush()
+        finally:
+            cs._write_capture_manifest = real
+        self.assertIn("manifest write failed", err2.getvalue())
+
+    def test_flush_cleans_tmp_when_oracle_or_meta_replace_fails(self):
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="0",
+                  CAPTURE_PERSIST_POLICY="full"):
+            mod, _ = self._hook(name="fake_serving_flush_fail")
+        with _stderr():
+            mod.op(FakeTensor((2, 2)))
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def fail_first(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("oracle replace failed")
+            return real_replace(src, dst)
+
+        os.replace = fail_first
+        try:
+            with self.assertRaises(OSError):
+                cs._flush(write_oracle=True)
+        finally:
+            os.replace = real_replace
+        leftovers = [n for n in os.listdir(self.out_dir) if ".tmp-" in n]
+        self.assertEqual(leftovers, [])
+
+        # Oracle write succeeds; meta replace fails and cleans its tmp.
+        _reset_state(cs)
+        atexit.unregister(cs._flush)
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="0",
+                  CAPTURE_PERSIST_POLICY="full"):
+            mod2, _ = self._hook(name="fake_serving_meta_fail")
+        with _stderr():
+            mod2.op(FakeTensor((3, 3)))
+
+        def fail_meta(src, dst):
+            if dst.endswith("meta.json"):
+                raise OSError("meta replace failed")
+            return real_replace(src, dst)
+
+        os.replace = fail_meta
+        try:
+            with self.assertRaises(OSError):
+                cs._flush(write_oracle=True)
+        finally:
+            os.replace = real_replace
+        leftovers = [n for n in os.listdir(self.out_dir) if ".tmp-" in n]
+        self.assertEqual(leftovers, [])
 
 
 if __name__ == "__main__":

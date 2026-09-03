@@ -49,6 +49,30 @@ Practical prior: on gfx942/gfx950, reach for 8-wave ping-pong or 4-wave interlea
 compute, full register budget, no producer/consumer split). See `[[languages/hipkittens]]`,
 `[[operators/dense_gemm]]`, `[[operators/scaled_quant_gemm/tuning.md]]`.
 
+### Which wave count: decide it against the register cap, not from the prior
+**Rule: pick the wave count by what each wave must keep resident, and judge the choice from the ISA
+rather than the clock.** Fewer waves gives each wave more of the register file but a *larger* slice of the
+split axis, so whatever operands it holds across the loop scale up — against an **arch-VGPR cap of 256
+that does not move with occupancy**. Only the accumulator file effectively grows as you approach
+1 wave/SIMD, and an MFMA cannot take an AGPR as an A or B operand, so a kernel whose *operands* (not just
+accumulators) grow with the slice gets no relief from dropping waves. Which way this resolves depends on
+one property of the kernel:
+
+| the per-wave resident set is | fewer waves | typical case |
+| --- | --- | --- |
+| dominated by accumulators you can retile | often wins — more registers per wave, deeper unroll | GEMM, GEMM-epilogue fusions |
+| dominated by long-lived **operands** that scale with the slice | often loses — the operand set outgrows the 256 cap | fused multi-GEMM attention backward |
+
+The GEMM prior above is unchanged: 4-wave interleave and 8-wave ping-pong both remain the right starting
+points, and for dense/scaled GEMM the ranking between them stands as documented.  
+Note the 4-wave builds report *lower* scratch than the 8-wave build while being slower — the spill moved
+into the accumulator file, where `private_seg_size` cannot see it. Count `v_accvgpr` moves
+(`[[optimization/occupancy_and_registers.md]]`). HK's gain also comes from **hand-staggered instruction
+issue**, available in a compiler DSL only as `sched_group_barrier` hints, which measure neutral at both
+wave counts once the loop body is a single branch-free region. Authoring guidance:
+[`languages/flydsl/authoring_attention_levers.md`](../languages/flydsl/authoring_attention_levers.md);
+instance: `[[operators/mla_attention/backends/flydsl]]`.
+
 ## Concepts (the hardware)
 - **MFMA instruction**: `D = A·B + C`, one instruction per wave processes a fixed M×N×K block.
   Common CDNA3 shapes: `mfma_16x16x16` and `mfma_32x32x8` (bf16/fp16); fp8 variants pack 2× K;

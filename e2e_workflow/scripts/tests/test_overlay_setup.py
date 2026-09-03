@@ -59,7 +59,7 @@ def _load(mod_name, filename):
 
 ov = _load("overlay_setup", "overlay_setup.py")
 
-EMPTY_MANIFEST = {"modules": [], "rebinds": [], "captures": []}
+EMPTY_MANIFEST = {"modules": [], "rebinds": [], "markers": [], "captures": []}
 
 
 class _RecordingRun:
@@ -209,6 +209,13 @@ class TestEnsureOverlay(_OverlayCase):
                       ov.SITECUSTOMIZE)
         self.assertIn("def install(target, out_dir, max_cases=5):",
                       self._read(os.path.join(SCRIPTS_DIR, "capture_shapes.py")))
+
+    def test_shim_installs_captures_before_markers(self):
+        # A marker on any module that does `from <capture module> import <attr>` imports that module
+        # and freezes the alias. If markers ran first, the later capture hook would rebind only the
+        # defining module and the live call (through the alias) would never be recorded.
+        shim = ov.SITECUSTOMIZE
+        self.assertLess(shim.index('_m.get("captures", [])'), shim.index('_m.get("markers", [])'))
 
     def test_rerun_preserves_an_edited_shim_and_an_existing_manifest(self):
         # Re-running any add-* must not reset an overlay that already carries accepted kernels.
@@ -596,6 +603,54 @@ class TestAddCapture(_OverlayCase):
         self.assertEqual([e["target"] for e in self._manifest()["captures"]], ["m:a", "m:b"])
 
 
+class TestAddMarker(_OverlayCase):
+    def test_marker_targets_compound_and_copy_the_probe(self):
+        marker = self._write("custom_marker.py", "def install(target):\n    pass\n")
+        self._run(ov.cmd_add_marker, self._ns(target="m:outer", marker_file=marker))
+        self._run(ov.cmd_add_marker, self._ns(target="m:inner", marker_file=marker))
+        self.assertEqual(
+            [entry["target"] for entry in self._manifest()["markers"]],
+            ["m:outer", "m:inner"],
+        )
+        self.assertEqual(
+            self._read(os.path.join(self.overlay, "seam_trace.py")),
+            "def install(target):\n    pass\n",
+        )
+
+    def test_readding_a_marker_is_idempotent(self):
+        marker = self._write("custom_marker.py", "def install(target):\n    pass\n")
+        self._run(ov.cmd_add_marker, self._ns(target="m:inner", marker_file=marker))
+        self._run(ov.cmd_add_marker, self._ns(target="m:inner", marker_file=marker))
+        self.assertEqual(self._manifest()["markers"], [{"target": "m:inner"}])
+
+    def test_a_marker_overlay_seeds_from_the_base_like_every_other_add(self):
+        """Two overlay dirs on PYTHONPATH do not compound, so an overlay that was not seeded from the
+        live stack IS the pristine install. A probe-only overlay that skipped --from would move the
+        seam onto a different build of the code than the one the profile came from."""
+        marker = self._write("custom_marker.py", "def install(target):\n    pass\n")
+        base = os.path.join(self.tmp, "current_overlay")
+        ov._ensure_overlay(base)
+        self._run(ov.cmd_add_rebind, self._ns(
+            overlay=base, target="m:accepted", impl_module="fast", impl_attr="go", impl_file=""))
+
+        probe = os.path.join(self.tmp, "probe_overlay")
+        self._run(ov.cmd_add_marker,
+                  self._ns(overlay=probe, target="m:inner", marker_file=marker, base=base))
+
+        self.assertEqual([e["target"] for e in self._manifest(probe)["rebinds"]], ["m:accepted"],
+                         "the accepted kernel from the base overlay was dropped")
+        self.assertEqual([e["target"] for e in self._manifest(probe)["markers"]], ["m:inner"])
+
+    def test_add_marker_accepts_from_on_the_command_line(self):
+        marker = self._write("custom_marker.py", "def install(target):\n    pass\n")
+        base = os.path.join(self.tmp, "current_overlay")
+        ov._ensure_overlay(base)
+        probe = os.path.join(self.tmp, "probe_overlay")
+        self._main(["add-marker", "--overlay", probe, "--target", "m:inner",
+                    "--marker-file", marker, "--from", base])
+        self.assertEqual([e["target"] for e in self._manifest(probe)["markers"]], ["m:inner"])
+
+
 # --------------------------------------------------------------------------- #
 # check -- "is the overlay actually shadowing this module?"
 # --------------------------------------------------------------------------- #
@@ -659,6 +714,17 @@ class TestMain(_OverlayCase):
                          [{"target": "sglang.srt.layers.activation:silu_and_mul",
                            "impl_module": "fast_act", "impl_attr": "fast_silu_and_mul"}])
         self.assertEqual(out[0], "OVERLAY_DIR=%s" % self.overlay)
+
+    def test_add_rebind_accepts_and_copies_an_impl_directory(self):
+        impl_dir = os.path.join(self.tmp, "impl")
+        self._write(os.path.join("impl", "entry.py"), "from .helper import run\n")
+        self._write(os.path.join("impl", "helper.py"), "def run(): return 1\n")
+        self._main(["add-rebind", "--overlay", self.overlay, "--target", "m:f",
+                    "--impl-module", "entry", "--impl-attr", "run", "--impl-dir", impl_dir])
+        self.assertEqual(self._read(os.path.join(self.overlay, "entry.py")),
+                         "from .helper import run\n")
+        self.assertEqual(self._read(os.path.join(self.overlay, "helper.py")),
+                         "def run(): return 1\n")
 
     def test_monkeypatch_alias_is_identical_to_add_rebind(self):
         args = ["--target", "m:f", "--impl-module", "impl", "--impl-attr", "g"]

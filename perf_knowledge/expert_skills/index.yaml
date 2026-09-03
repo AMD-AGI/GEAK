@@ -1,25 +1,14 @@
 # index.yaml — expert_skills selector (AUTO-MAINTAINED by _contribute/scaffold.py + validate_skill.py).
 # Regenerate with:  python _contribute/scaffold.py --reindex
 # NOT a ranking. Filter by (operator, gen, arch_class, [from->to], status==validated) -> MEASURE.
+# scope: kernel | e2e | dependency | tuning. 'tuning' entries describe the VENDORED tree under
+# tuning/ and are declared in tuning_index.yaml (the tree is hash-pinned, so its metadata is
+# outside it); their status comes from tuning/validate/claims.py, not from a hand-typed field.
 # Only 'validated' skills are auto-applied by the workflows (advisory priors, never override A/B).
 
 schema: {id, file, scope, match, expects, validation_status}
 
 skills:
-- id: ensure_flydsl
-  file: skills/ensure_flydsl/skill.md
-  scope: dependency          # build/dependency skill: makes flydsl importable; invoked BY the flydsl skills, not profile-matched
-  match:
-    needs: flydsl
-    arch_class:
-    - '*'
-    gens:
-    - gfx942
-    - gfx950
-    dtypes:
-    - int4_w4a16
-    - fp8_e4m3_fnuz
-  validation_status: n/a
 - id: apply_flydsl_moe_to_vllm
   file: skills/apply_flydsl_moe_to_vllm/skill.md
   scope: e2e
@@ -43,6 +32,77 @@ skills:
     e2e_delta_min_pct: 1.0
     parity: required
   validation_status: validated
+- id: ensure_flydsl
+  file: skills/ensure_flydsl/skill.md
+  scope: dependency
+  match:
+    needs: flydsl
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - int4_w4a16
+    - fp8_e4m3_fnuz
+  validation_status: n/a
+- id: flydsl_decode_moe_stage1_blkmap
+  file: skills/flydsl_decode_moe_stage1_blkmap/skill.md
+  scope: kernel
+  match:
+    operator:
+    - grouped_gemm_moe
+    - fused_moe_grouped_gemm
+    arch_class:
+    - '*'
+    gens:
+    - gfx950
+    dtypes:
+    - mxfp4
+    - fp4_e2m1
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - decode
+    from_backend: flydsl
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: ''
+      min_pct_gpu: 0.0
+  expects:
+    isolated_speedup_min: 1.05
+    isolated_scope: stage-1 ISOLATED SEGMENT = the gate+up GEMM kernel PLUS the descriptor-producer kernel
+      this recipe adds. Do not include pre-existing sort/align/quant helpers in this isolated gate; report
+      the full stage-1 window separately. The producer has an unrelated name, so a GEMM-only filter drops
+      it and overstates the win (1.124x GEMM-only vs 1.104x with producer on FlyDSL 0.2.2).
+    parity: required
+  validation_status: validated
+- id: flydsl_fp8_blockscale_gemm
+  file: skills/flydsl_fp8_blockscale_gemm/skill.md
+  scope: kernel
+  match:
+    operator:
+    - dense_gemm
+    - scaled_quant_gemm
+    arch_class:
+    - '*'
+    gens:
+    - gfx950
+    dtypes:
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    from_backend: ck
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: kernel_gemm_xdl.*blockscale|gemm_a8w8_blockscale
+      min_pct_gpu: 0.0
+  expects:
+    isolated_speedup_min: 1.05
+    parity: required
+  validation_status: validated
 - id: flydsl_fp8_gemm_playbook
   file: skills/flydsl_fp8_gemm_playbook/skill.md
   scope: e2e
@@ -64,6 +124,65 @@ skills:
   expects:
     e2e_delta_min_pct: 1.0
     parity: required
+  validation_status: validated
+- id: flydsl_fused_attention_backward
+  file: skills/flydsl_fused_attention_backward/skill.md
+  scope: kernel
+  match:
+    operator:
+    - attention_prefill_fmha
+    - gqa_mqa_attention
+    - mla_attention
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - bf16
+    - fp16
+    regimes:
+    - training
+    from_backend: ''
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: fmha_bwd|mha_bwd|_bwd_kernel|flash.*bwd|attn.*backward
+      min_pct_gpu: 15.0
+  expects:
+    isolated_speedup_min: 1.1
+    parity: required
+  validation_status: draft
+- id: flydsl_prefill_moe_stage2_fp8partial
+  file: skills/flydsl_prefill_moe_stage2_fp8partial/skill.md
+  scope: kernel
+  match:
+    operator:
+    - grouped_gemm_moe
+    - fused_moe_grouped_gemm
+    arch_class:
+    - '*'
+    gens:
+    - gfx950
+    dtypes:
+    - mxfp4
+    - fp4_e2m1
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    from_backend: flydsl
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: ''
+      min_pct_gpu: 0.0
+  expects:
+    isolated_speedup_min: 1.15
+    isolated_scope: 'stage-2 SEGMENT = the down-proj GEMM kernel PLUS the separate top-k reduce kernel,
+      summed. Do NOT score the GEMM kernel alone: ~75% of the win is the halved partial READ, which happens
+      in the reduce kernel, so a GEMM-only measurement tops out at a measured 1.053x and fails this gate
+      even when the recipe is correctly reproduced. A per-kernel timing filter matched on the GEMM name
+      will not match the reduce kernel name -- verify your filter catches both.'
+    parity: relaxed
   validation_status: validated
 - id: flydsl_rewrite_quantized_moe
   file: skills/flydsl_rewrite_quantized_moe/skill.md
@@ -135,3 +254,209 @@ skills:
     isolated_speedup_min: 1.15
     parity: required
   validation_status: draft
+- id: tuning_core
+  file: tuning/tuning-core/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - '*'
+    backend:
+    - '*'
+  expects:
+    engagement_proof: required
+    ab_complete: required
+    parity: required
+  validation_status: validated
+- id: tuning_aiter
+  file: tuning/tuning-aiter/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - bf16
+    - fp16
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - aiter
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+  validation_status: validated
+- id: tuning_triton
+  file: tuning/tuning-triton/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - '*'
+    backend:
+    - triton
+    - gluon
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+  validation_status: validated
+- id: tuning_hipblaslt
+  file: tuning/tuning-hipblaslt/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - bf16
+    - fp16
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - hipblaslt
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+  validation_status: validated
+- id: tuning_ck
+  file: tuning/tuning-ck/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - bf16
+    - fp16
+    - fp8_e4m3
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - ck
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+  validation_status: validated
+- id: tuning_flydsl
+  file: tuning/tuning-flydsl/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - '*'
+    backend:
+    - flydsl
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+  validation_status: validated
+- id: tuning_hip
+  file: tuning/tuning-hip/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - '*'
+    backend:
+    - hip
+  expects:
+    isolated_speedup_min: 1.05
+    engagement_proof: required
+    parity: required
+  validation_status: validated
+- id: tuning_in_vllm
+  file: tuning/tuning-in-vllm/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - '*'
+    framework: vllm
+  expects:
+    engagement_proof: required
+    ab_complete: required
+    parity: required
+  validation_status: validated
+- id: tuning_in_sglang
+  file: tuning/tuning-in-sglang/SKILL.md
+  scope: tuning
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    - gfx950
+    dtypes:
+    - '*'
+    regimes:
+    - prefill
+    - decode
+    backend:
+    - '*'
+    framework: sglang
+  expects:
+    engagement_proof: required
+    ab_complete: required
+    parity: required
+  validation_status: validated
