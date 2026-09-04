@@ -1067,6 +1067,8 @@ def _launch_text(a, result: dict, value: dict, kernels, overlay: str) -> str:
     lines += ["exec env \\"]
     for key, val in (("GEAK_REPEAT_MODE", "warm_reuse_server"),
                      ("BENCH_OUTER_WARMUP_FULL_ROUND", "1"),
+                     ("GEAK_WARMUP_SEED", "0"),
+                     ("GEAK_TIMED_SEED", "1"),
                      ("BACKEND", identity["framework"]),
                      ("MODEL", "${MODEL}"),
                      ("TP", workload.get("tp")), ("ISL", workload.get("isl")),

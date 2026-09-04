@@ -815,15 +815,23 @@ else
     echo ">>> Warmup round ..."
   fi
   _saved_result_jsonl="$RESULT_JSONL"
+  _saved_seed="$SEED"
+  if [ -n "${BENCH_OUTER_WARMUP_SEED:-}" ]; then
+    SEED="$BENCH_OUTER_WARMUP_SEED"
+    export SEED
+    echo ">>> Outer warmup seed=$SEED (timed seed=$_saved_seed) ..."
+  fi
   RESULT_JSONL="$WARMUP_JSONL"; export RESULT_JSONL
   if ! adapter_bench "$_warmup_prompts" "$CONC" 0 >/dev/null 2>&1; then
     RESULT_JSONL="$_saved_result_jsonl"; export RESULT_JSONL
+    SEED="$_saved_seed"; export SEED
     if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
       echo "!!! Full outer warmup failed; warm-reuse replica is invalid." >&2
       exit 2
     fi
   fi
   RESULT_JSONL="$_saved_result_jsonl"; export RESULT_JSONL
+  SEED="$_saved_seed"; export SEED
 fi
 # the warmup line should not pollute the timed results
 : > "$RESULT_JSONL"
@@ -1022,6 +1030,9 @@ summ = {
             "same_server_for_warmup_and_measure": True,
             "warmup_is_full_round": True,
             "warmup_prompt_count": int(os.environ.get("NUM_PROMPTS") or 0),
+            "warmup_seed": int(os.environ.get("BENCH_OUTER_WARMUP_SEED")
+                               or os.environ.get("SEED") or 0),
+            "timed_seed": int(os.environ.get("SEED") or 0),
             "port": os.environ.get("PORT") or "",
             "server_pid": os.environ.get("SERVER_PID") or "",
         }

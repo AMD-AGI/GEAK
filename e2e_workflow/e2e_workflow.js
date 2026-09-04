@@ -535,10 +535,11 @@ const INIT_ENV = String(A.initial_extra_env || '');
 // every later candidate overlay instead of being dropped at Setup.
 const INIT_BASE_OVERLAY = String(A.initial_overlay_pythonpath || '');
 const EFFECTIVE_CONFIG_DIGEST = String(A.effective_config_digest || '');
-// Throughput measurements use independent GEAK-owned server replicas.  Every
-// warm-reuse replica starts fresh, discards one full workload warmup, then
-// measures against that same server before teardown. Search/parity use one
-// replica; final validation uses three to estimate variance.
+// Throughput measurements use independent GEAK-owned server replicas. Every
+// warm-reuse replica starts fresh, discards a full seed-0 workload warmup, then
+// measures a seed-1 workload against that same server before teardown. This
+// retains server/JIT warmth without replaying cached benchmark prefixes.
+// Search/parity use one replica; final validation uses three to estimate variance.
 const MEASUREMENT_MODE = String(A.measurement_mode || 'warm_reuse_server');
 const PARITY_REPLICAS = parseInt(A.parity_replicas != null ? A.parity_replicas : 1, 10);
 const SEARCH_REPLICAS = parseInt(A.search_replicas != null ? A.search_replicas : 1, 10);

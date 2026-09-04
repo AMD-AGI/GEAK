@@ -117,6 +117,7 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
         self.assertTrue(lifecycle["same_server_for_warmup_and_measure"])
         self.assertTrue(lifecycle["warmup_is_full_round"])
         self.assertEqual(lifecycle["warmup_prompt_count"], 7)
+        self.assertEqual((lifecycle["warmup_seed"], lifecycle["timed_seed"]), (0, 1))
         self.assertTrue(lifecycle["port"].isdigit())
         self.assertEqual(sum(e["event"] == "launch" for e in events), 1)
         benches = [e for e in events if e["event"] == "bench"]
@@ -293,9 +294,24 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
         self.assertEqual(len(observed), 3)
         self.assertEqual([item["num_prompts"] for item in observed], [7, 7, 7])
         self.assertEqual([item["num_warmups"] for item in observed], [6, 6, 6])
-        self.assertEqual([item["seed"] for item in observed], [0, 0, 0])
+        # Isolated mode retains seed=0. Warm-reuse's default 0/1 corpus pair
+        # prevents the timed pass from directly replaying warmup prefixes.
+        self.assertEqual([item["seed"] for item in observed], [0, 0, 1])
         self.assertEqual([item["trust_remote_code"] for item in observed], [False, True, True])
         self.assertEqual(summary["measurement_mode"], "warm_reuse_server")
+
+        proc, _, _ = self.run_bench(
+            GEAK_REPEAT_MODE="warm_reuse_server",
+            BENCH_CLIENT="inferencex",
+            INFERENCEX_BENCH_SERVING=fake_client,
+            IX_CALLS=calls,
+            GEAK_WARMUP_SEED="17",
+            GEAK_TIMED_SEED="19",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(calls, encoding="utf-8") as fh:
+            observed = [json.loads(line) for line in fh]
+        self.assertEqual([item["seed"] for item in observed[-2:]], [17, 19])
 
 
 if __name__ == "__main__":

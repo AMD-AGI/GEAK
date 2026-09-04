@@ -23,8 +23,10 @@ if [ "${PROFILE:-0}" = "1" ]; then
 fi
 
 # Re-enter the legacy single-server body rather than recursively scheduling
-# more replicas.  REUSE_SERVER remains 0: the body launches once and leaves
-# that GEAK-owned server running across its warmup and timed rounds.
+# more replicas. REUSE_SERVER remains 0: the body launches once and leaves
+# that GEAK-owned server running across its warmup and timed rounds. The
+# default full warmup/timed corpora use seeds 0/1 respectively, so the timed
+# round does not inflate output throughput through direct prefix-cache replay.
 export GEAK_REPEAT_MODE=legacy
 unset GEAK_ISOLATED_REPLICA
 export GEAK_WARM_REUSE_REPLICA=1
@@ -44,6 +46,19 @@ case "$_conc" in
     exit 4 ;;
 esac
 export NUM_WARMUPS=$((2 * _conc))
-export SEED=0
+_warmup_seed="${GEAK_WARMUP_SEED:-0}"
+_timed_seed="${GEAK_TIMED_SEED:-1}"
+case "$_timed_seed" in
+  -[0-9]*|[0-9]*) ;;
+  *) echo "!!! GEAK_TIMED_SEED must be an integer (got '$_timed_seed')." >&2; exit 4 ;;
+esac
+case "$_warmup_seed" in
+  -[0-9]*|[0-9]*) ;;
+  *) echo "!!! GEAK_WARMUP_SEED must be an integer (got '$_warmup_seed')." >&2; exit 4 ;;
+esac
+# Defaults seed the full warmup at 0 and the timed corpus at 1. Callers may
+# override either seed for a deliberately selected corpus pair.
+export SEED="$_timed_seed"
+export BENCH_OUTER_WARMUP_SEED="$_warmup_seed"
 
 exec bash "$BENCH_E2E"

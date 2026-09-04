@@ -64,8 +64,9 @@ adapter_bench() {
     # The GEAK replica protocol applies identically to every client call:
     # isolated replicas retain compute warmups, while warm-reuse replicas apply
     # them to both the discarded full round and the timed same-server round.
+    # Keep the caller's seed: warm-reuse may intentionally make the outer
+    # warmup and timed request corpus distinct with GEAK_*_SEED.
     num_warmups=$((2 * MAXC))
-    bench_seed=0
   fi
 
   # --backend vllm: OpenAI-compatible client regardless of the actual serving
