@@ -305,6 +305,34 @@ class TestMapArgs(_RunE2ECase):
         ps = rx.map_args(self._handoff())
         self.assertEqual(ps["eval_dir"], str(self.tmp / "e2e_from_env"))
 
+    def test_evok_root_omitted_when_unset(self):
+        """No handoff/env => the JS workflow stays lookup-OFF (byte-identical)."""
+        os.environ.pop("EVOK_ROOT", None)
+        os.environ.pop("GEAK_EVOK_ROOT", None)
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
+        self.assertNotIn("evok_root", ps)
+
+    def test_evok_root_from_process_env(self):
+        """Hyperloom does not put evok_root on the handoff; the launcher-shell
+        export is the channel (geak_runner copies os.environ into run_e2e)."""
+        os.environ.pop("GEAK_EVOK_ROOT", None)
+        os.environ["EVOK_ROOT"] = "/wekafs/EvoK/"
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
+        self.assertEqual(ps["evok_root"], "/wekafs/EvoK")
+
+    def test_evok_root_handoff_wins_over_env(self):
+        os.environ["EVOK_ROOT"] = "/from/env"
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_x"), evok_root="/from/handoff",
+        ))
+        self.assertEqual(ps["evok_root"], "/from/handoff")
+
+    def test_evok_root_geak_alias_when_evok_root_unset(self):
+        os.environ.pop("EVOK_ROOT", None)
+        os.environ["GEAK_EVOK_ROOT"] = "/wekafs/EvoK"
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
+        self.assertEqual(ps["evok_root"], "/wekafs/EvoK")
+
     def test_tracelens_artifacts_are_bridged_into_workflow_args(self):
         """The four upstream kernel-agent artifacts live BESIDE ``geak`` under the
         experiment root; they must reach args.tracelens (not just the prompt) or

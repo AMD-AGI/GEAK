@@ -450,6 +450,20 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
     if tl_paths:
         ps_args["tracelens"] = tl_paths
+    # EvoK library lookup (optional, default OFF). Hyperloom's handoff has no
+    # evok_root field; geak_runner copies the orchestrator process env wholesale
+    # into this process, so `export EVOK_ROOT=/path/to/EvoK` in the launcher
+    # shell is enough. Handoff key wins when present; GEAK_EVOK_ROOT is an alias
+    # for GEAK_* dotenv allowlists. Absent => omit the arg so the JS run is
+    # byte-identical (e2e_workflow logs "EvoK library lookup: OFF").
+    evok_root = str(
+        h.get("evok_root")
+        or os.environ.get("EVOK_ROOT")
+        or os.environ.get("GEAK_EVOK_ROOT")
+        or ""
+    ).strip().rstrip("/")
+    if evok_root:
+        ps_args["evok_root"] = evok_root
     return ps_args
 
 

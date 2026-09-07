@@ -87,6 +87,7 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 | `bench_protocol.{random_range_ratio,num_prompts,num_warmups,seed}` | env `RANDOM_RANGE_RATIO` / `NUM_PROMPTS` / `NUM_WARMUPS` / `SEED` | `run_e2e.py:apply_bench_protocol` exports ONLY the provided keys, overriding `bench_e2e.sh` standalone defaults; absent ⇒ defaults kept (not a JS arg) |
 | — | `config_tune="false"` | caller already did config search; never double-run |
 | — | `apply_to_original="true"` | so `final/final_launch.sh` + overlay are emitted for sweep reuse |
+| `evok_root` (optional) **or** env `EVOK_ROOT` / `GEAK_EVOK_ROOT` | `evok_root` | EvoK library root for HeadKernel bake-off lookup. Hyperloom does not currently emit the handoff key; `export EVOK_ROOT` in the launcher shell is enough because `geak_runner` copies the process env into `run_e2e.py`. Absent ⇒ omitted (lookup OFF, byte-identical). Do **not** pass this via Hyperloom `--extra-env` (that is serving-process env, not Workflow args). |
 
 ### TraceLens prior auto-discovery (owned by `run_e2e.py:resolve_tracelens_report`)
 
