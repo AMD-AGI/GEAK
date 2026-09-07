@@ -106,6 +106,36 @@ _gpu_is_idle() {
     [ "${busy:-0}" -le "${GEAK_GPU_MAX_BUSY_PCT:-5}" ] && [ "$vram" -le "${GEAK_GPU_MAX_VRAM_MB:-1024}" ]
 }
 
+# THE LOCK decides whether another GEAK job is running. `gpu_busy_percent` must NOT be used for that
+# question, and using it as a proxy was a bug:
+#
+#   `gpu_busy_percent` is a DECAYING AVERAGE, not an instantaneous flag. After a job exits it reads
+#   26 -> 17 -> 11 -> 8 -> 5 -> 3 over ~2-3 s (measured on gfx1151 / Radeon 8060S, an integrated
+#   APU; discrete cards decay faster but not instantly). The normal call pattern is back-to-back --
+#   correctness then benchmark, or a benchmark repeated 3x -- so the NEXT invocation would acquire
+#   the flock legitimately (the previous holder had exited and released it) and then abort against
+#   the decaying tail of ITS OWN predecessor, reporting "foreign work running". Observed on this box
+#   producing EMPTY benchmark output for three consecutive runs, silently.
+#
+# Once we hold the flock, no other GEAK job can be running, so residual busy% is exactly one of:
+#   (a) our own just-finished job's decaying tail -- transient, gone within a few seconds, or
+#   (b) a genuine foreign tenant -- persistent, and the thing this check exists to catch.
+# Those are distinguished by TIME, not by an instantaneous read. So the check becomes settle-then-
+# decide: poll until the counter falls under the threshold, and only call it foreign if it never
+# does. This keeps the foreign-tenant protection intact (a real co-tenant does not settle) while
+# removing the false positive against ourselves.
+#
+# GEAK_GPU_SETTLE_S bounds the wait. It is deliberately short in pool mode (stepping to another lane
+# is cheaper than waiting) and longer in single-GPU mode (there is nowhere to step).
+_gpu_settle_idle() {
+    local id="$1" timeout="$2" t0=$SECONDS
+    while :; do
+        _gpu_is_idle "$id" && return 0
+        [ "$(( SECONDS - t0 ))" -ge "$timeout" ] && return 1
+        sleep 0.25
+    done
+}
+
 case "$GPU_SPEC" in
   *,*)
     # --- pool mode: block until some lane is free AND idle, then hold it for the whole command ---
@@ -122,7 +152,10 @@ case "$GPU_SPEC" in
             exec {_fd}>"${LOCK_DIR}/gpu_${_g}.lock"
             if flock -n -x "$_fd"; then
                 # We hold the lane. Only now check idleness -- checking before locking would race.
-                if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] && ! _gpu_is_idle "$_g"; then
+                # Settle briefly (our own tail from a previous command on this lane), then step
+                # to the next lane if it does not clear -- in pool mode stepping beats waiting.
+                if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] \
+                   && ! _gpu_settle_idle "$_g" "${GEAK_GPU_SETTLE_S:-5}"; then
                     flock -u "$_fd"; exec {_fd}>&-   # foreign job on this GPU: try the next lane
                     continue
                 fi
@@ -217,8 +250,14 @@ else
         # was that a single GPU has no alternative to step to, which is true -- but it argues for a
         # loud failure, not for measuring on a contaminated card. Set GEAK_GPU_REQUIRE_IDLE=0 to
         # restore the old behavior for deliberately co-tenanted runs.
-        if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] && ! _gpu_is_idle "$GPU_ID"; then
-            echo "ERROR: GPU $GPU_ID has foreign work running (busy/VRAM above threshold); refusing to measure on it" >&2
+        # We hold the lock, so nothing of OURS is running. Give the counter time to settle before
+        # calling it foreign -- see _gpu_settle_idle. Longer budget than pool mode: no lane to step to.
+        if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] \
+           && ! _gpu_settle_idle "$GPU_ID" "${GEAK_GPU_SETTLE_S:-30}"; then
+            echo "ERROR: GPU $GPU_ID still shows foreign work after ${GEAK_GPU_SETTLE_S:-30}s" \
+                 "(busy>${GEAK_GPU_MAX_BUSY_PCT:-5}% or VRAM>${GEAK_GPU_MAX_VRAM_MB:-1024}MB); refusing to measure on it." >&2
+            echo "       This is a real co-tenant, not our own decaying tail -- that clears in ~3s." >&2
+            echo "       Raise GEAK_GPU_SETTLE_S, or set GEAK_GPU_REQUIRE_IDLE=0 to measure anyway." >&2
             exit 1
         fi
         [ -n "${GEAK_GPU_USE_LOG:-}" ] && \
