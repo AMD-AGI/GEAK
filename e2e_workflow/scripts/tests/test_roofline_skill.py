@@ -112,6 +112,67 @@ class TestPeaks(unittest.TestCase):
         self.assertIsNone(rt.load_peaks("/nonexistent/peaks.md", "gfx950"))
 
 
+class _FakeProps:
+    """Stand-in for torch.cuda.get_device_properties, so the derived path is testable on CPU."""
+
+    def __init__(self, arch, mp, clock_khz=4000000, bus_bits=256):
+        self.gcnArchName = arch
+        self.multi_processor_count = mp
+        self.memory_clock_rate = clock_khz
+        self.memory_bus_width = bus_bits
+
+
+class TestDerivedCuIsRealComputeUnits(unittest.TestCase):
+    """`cu` must mean the same thing in the derived path as in peaks.md.
+
+    torch reports WGPs in multi_processor_count on RDNA: measured on a Radeon 8060S, rocminfo says
+    "Compute Unit: 40" while torch says 20. Left unconverted, the derived fallback disagrees with
+    the gfx1151 table row by exactly 2x -- and since the row's 43 TFLOP/s is 40 CU x 512 x 2.1 GHz,
+    the table is the one that is right.
+    """
+
+    def test_rdna_multi_processor_count_is_doubled_to_cus(self):
+        p = rt.derive_peaks_from_props(props=_FakeProps("gfx1151", 20))
+        self.assertEqual(p["cu"], 40)
+        self.assertEqual(p["wgp"], 20)
+        self.assertEqual(p["cu_basis"], "wgp_x2")
+
+    def test_derived_cu_matches_the_table_row_for_the_same_part(self):
+        """The regression that motivated this: the two sources must not disagree."""
+        derived = rt.derive_peaks_from_props(props=_FakeProps("gfx1151", 20))
+        self.assertEqual(derived["cu"], rt.load_peaks(PEAKS_MD, "gfx1151")["cu"])
+
+    def test_cdna_is_left_alone(self):
+        for arch, mp in (("gfx942", 304), ("gfx950", 256), ("gfx90a", 104)):
+            p = rt.derive_peaks_from_props(props=_FakeProps(arch, mp))
+            self.assertEqual(p["cu"], mp, arch)
+            self.assertNotIn("wgp", p)
+            self.assertEqual(p["cu_basis"], "multi_processor_count")
+
+    def test_cdna5_is_wave32_but_not_wgp_paired(self):
+        """gfx1250 matches the gfx1* prefix but is CDNA5, not RDNA -- doubling it would be wrong.
+        This is why the discriminator is the family table, not a prefix test on 'gfx1'."""
+        self.assertEqual(rt.cus_per_mp("gfx1250"), 1)
+        self.assertEqual(rt.derive_peaks_from_props(props=_FakeProps("gfx1250", 128))["cu"], 128)
+
+    def test_rdna_families_are_all_paired(self):
+        for arch in ("gfx1030", "gfx1100", "gfx1151", "gfx1200", "gfx1201"):
+            self.assertEqual(rt.cus_per_mp(arch), 2, arch)
+
+    def test_unknown_arch_reports_the_raw_count(self):
+        """Reporting the raw number is a smaller error than doubling something never paired."""
+        self.assertEqual(rt.cus_per_mp("gfx9999"), 1)
+        self.assertEqual(rt.cus_per_mp(""), 1)
+        self.assertEqual(rt.cus_per_mp(None), 1)
+
+    def test_arch_target_features_are_stripped(self):
+        p = rt.derive_peaks_from_props(props=_FakeProps("gfx1151:xnack-", 20))
+        self.assertEqual(p["cu"], 40)
+
+    def test_a_zero_bandwidth_device_still_returns_none(self):
+        self.assertIsNone(rt.derive_peaks_from_props(props=_FakeProps("gfx1151", 20, clock_khz=0)))
+
+
 class TestCalibrationMoE(unittest.TestCase):
     """The 26%-of-GPU head that was, in fact, already at the bandwidth wall."""
 

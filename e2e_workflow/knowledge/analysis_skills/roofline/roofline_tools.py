@@ -139,30 +139,72 @@ def load_peaks(peaks_md_path, gfx):
     return None
 
 
-def derive_peaks_from_props(device=0):
+# RDNA pairs two CUs into a Work-Group Processor, and torch reports the WGP count in
+# `multi_processor_count` -- so on gfx1151 torch says 20 where rocminfo says "Compute Unit: 40"
+# (measured on a Radeon 8060S: 20 x 2 = 40, SIMDs per CU: 2). peaks.md stores REAL CUs, so the
+# derived path must convert or the two disagree by exactly 2x on every RDNA part.
+#
+# The discriminator is family, NOT the gfx1* prefix: gfx1250 is CDNA5, which is wave32 like RDNA
+# but has no WGP pairing, so doubling it would be wrong. Longest-prefix-first, so gfx125* is
+# classified before the gfx12* rule catches it -- same ordering amd_occupancy.py uses.
+_WGP_PAIRED_PREFIXES = (("gfx125", False), ("gfx10", True), ("gfx11", True), ("gfx12", True))
+
+CUS_PER_WGP = 2
+
+
+def cus_per_mp(arch):
+    """CUs per unit of torch's `multi_processor_count` for `arch`: 2 on RDNA, 1 elsewhere.
+
+    Returns 1 for an unknown arch -- reporting the raw number is a smaller error than doubling
+    something that was never paired.
+    """
+    a = (arch or "").lower()
+    for prefix, paired in sorted(_WGP_PAIRED_PREFIXES, key=lambda kv: -len(kv[0])):
+        if a.startswith(prefix):
+            return CUS_PER_WGP if paired else 1
+    return 1
+
+
+def derive_peaks_from_props(device=0, props=None):
     """Fallback peaks from torch device properties. confidence='low' -- see peaks.md.
 
     The derived HBM figure is frequently wrong for HBM3/3E (understates the pin rate), which is
     exactly why the caller must treat this as display-only.
+
+    `cu` is normalised to REAL compute units so it means the same thing as the `cu` field in
+    peaks.md; `wgp` carries the raw torch number when the part is WGP-paired, and `cu_basis`
+    records which happened, so a surprising figure can be traced rather than guessed at.
+
+    `props` is an injection point for testing without a GPU (same idea as harness_lib's
+    `torch=None` parameter); production callers leave it None.
     """
-    try:
-        import torch  # noqa: PLC0415 - optional, lazily imported on purpose
-        p = torch.cuda.get_device_properties(device)
-    except Exception:
-        return None
+    if props is None:
+        try:
+            import torch  # noqa: PLC0415 - optional, lazily imported on purpose
+            props = torch.cuda.get_device_properties(device)
+        except Exception:
+            return None
+    p = props
     try:
         bw = float(getattr(p, "memory_clock_rate", 0)) * 1e3 * (float(getattr(p, "memory_bus_width", 0)) / 8.0) * 2.0
     except Exception:
         bw = 0.0
     if bw <= 0:
         return None
-    return {
+    arch = str(getattr(p, "gcnArchName", "") or "").split(":")[0].lower()
+    mp = int(getattr(p, "multi_processor_count", 0) or 0)
+    per_mp = cus_per_mp(arch)
+    out = {
         "hbm_bw_bytes_s": bw,
         "flops": {},
-        "cu": int(getattr(p, "multi_processor_count", 0) or 0),
+        "cu": mp * per_mp,
+        "cu_basis": "wgp_x2" if per_mp == CUS_PER_WGP else "multi_processor_count",
         "source": "derived",
         "confidence": "low",
     }
+    if per_mp == CUS_PER_WGP:
+        out["wgp"] = mp
+    return out
 
 
 def peak_flops_for(peaks, dtype_name):

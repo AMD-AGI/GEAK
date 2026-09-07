@@ -46,7 +46,8 @@ l2_bytes: 4194304
 ## gfx1151 — RDNA3.5, Radeon 8060S (Strix Halo APU) class
 ```yaml
 gfx: gfx1151
-cu: 40
+cu: 40                        # REAL CUs (rocminfo "Compute Unit: 40"); torch reports 20 — see below
+wgp: 20                       # RDNA pairs 2 CUs per work-group processor
 hbm_bw_bytes_s: 256.0e9       # LPDDR5X-8000, 256-bit — pin rate, NOT HBM
 flops:                         # dense WMMA peaks, FLOP/s — theoretical
   fp32: 3.0e13
@@ -56,6 +57,14 @@ flops:                         # dense WMMA peaks, FLOP/s — theoretical
 l2_bytes: 2097152
 mall_bytes: 33554432
 ```
+
+- **`cu` here means REAL compute units, and torch does not agree.** Measured on this part:
+  `rocminfo` reports `Compute Unit: 40` (`SIMDs per CU: 2`), while
+  `torch.cuda.get_device_properties(0).multi_processor_count` reports **20** — RDNA pairs two CUs
+  into a work-group processor and torch counts WGPs. The rocminfo number is the one stored.
+  `derive_peaks_from_props()` normalises the torch figure (`cus_per_mp()`, `cu_basis: "wgp_x2"`) so
+  both paths report the same unit; anything else reading `multi_processor_count` directly on RDNA is
+  2× low. The CDNA rows are unaffected — there `multi_processor_count` already counts CUs.
 
 ## Unknown gfx — derived fallback (confidence: low)
 
@@ -70,3 +79,8 @@ flops[dtype]   ≈ multi_processor_count × clock_rate_hz × mfma_flops_per_cycl
 The derived bandwidth is **frequently wrong for HBM3/3E** — the reported memory clock often understates
 the effective pin rate (on gfx950 it derives ~4.1 TB/s against a real ~8 TB/s). Treat any derived-peak
 result as `confidence: low`, which per `SKILL.md` means **display only, do not rank on it**.
+
+`multi_processor_count` also counts **WGPs, not CUs, on RDNA** (gfx10/11/12), so a raw read is 2× low
+there. `derive_peaks_from_props()` converts via `cus_per_mp()` and records `cu_basis`/`wgp`; any
+other consumer of that property must do the same. Note the discriminator is the arch *family*, not
+the `gfx1*` prefix — gfx1250 is CDNA5, wave32 but **not** WGP-paired, so it must not double.
