@@ -40,6 +40,9 @@ Subcommands:
                Bring imported entries up to the current content shape (dry-run unless --apply).
     export-remote
                Render entries as KB Store candidates (one JSON line each); uploads nothing.
+    sync-local Bring the on-disk KB store level with the tree, keyed by canonical id. Idempotent
+               and non-destructive, so the lane runs it before every read: it is what lets the
+               READ address by key without losing the backlog only the tree ever held.
     resolve-remote
                `resolve`, but addressed by canonical id against a KB store (kb/store_local.py).
     write-remote
@@ -69,14 +72,19 @@ import time
 
 # The shared KB plane lives at the repo root as the `kb` package, not beside this file. Executed as
 # a CLI from an arbitrary cwd, so the root is derived from __file__ and never from the environment.
+# Moved to the FRONT even when already present: this script's own directory is sys.path[0], it
+# holds an unrelated `kb.py` (the learned-card CLI), and that shadows the `kb` PACKAGE for anyone
+# who has the repo root on PYTHONPATH — every import below then fails with "kb is not a package".
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+while _REPO_ROOT in sys.path:
+    sys.path.remove(_REPO_ROOT)
+sys.path.insert(0, _REPO_ROOT)
 
 from kb.attest import OUTCOMES as _OUTCOMES
-from kb.curate import collapse_by_direction
+from kb.attest import RETIRE_THRESHOLD as _RETIRE_THRESHOLD
+from kb.curate import collapse_by_direction, demote_hinted
 from kb.ladder import publish
-from kb.plane import open_plane
+from kb.plane import open_plane, read_planes
 from kb.store_local import CHAMPION_METRIC, SAFE_COMPONENT_CHARS
 
 try:
@@ -1100,7 +1108,7 @@ def _candidate(rank: int, v: dict, gfx: str, prose_path: str, top_bench: str) ->
         # What happened the last times somebody actually adopted this patch, as opposed to the
         # speedup its own writer measured once. An entry offered at rank 1 that three lanes have
         # since failed to reproduce should not read identically to an untried one, and before this
-        # it did. Advisory only — nothing here filters on it (see kb/attest.py:retire_hint).
+        # it did. A hint DEMOTES (see kb/curate.py:demote_hinted); only retraction hides a record.
         "validations": _local_attestations(v["meta"]).get("validations", 0),
         "recalls": _local_attestations(v["meta"]).get("recalls", 0),
         "retire_hint": _retire_hint_of(v["meta"]),
@@ -1194,8 +1202,10 @@ def cmd_resolve(a) -> dict:
         return dict(base_out, filtered=stats,
                     read_reason="all_retired" if not servable else "below_min_speedup")
 
+    ordered = demote_hinted(sorted(above, key=_rank_key), lambda md: _retire_hint_of(md[0]))
+    stats["demoted_by_hint"] = sum(1 for md in ordered if _retire_hint_of(md[0]))
     top, alternates, collapsed = collapse_by_direction(
-        sorted(above, key=_rank_key), lambda md: md[0].get("direction"), lambda md: md[1], a.top_n)
+        ordered, lambda md: md[0].get("direction"), lambda md: md[1], a.top_n)
     stats["same_direction_collapsed"] = collapsed
 
     views = []
@@ -1656,19 +1666,144 @@ def remote_record(meta: dict, exp_dir: str, producer: str = REMOTE_PRODUCER, gpu
     return remote_records(meta, exp_dir, producer, gpu, version)[0]
 
 
-def cmd_export_remote(a) -> dict:
-    """Render this store as KB Store candidates, one JSON line each, champion pre-decided.
+def _int_or(value, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
 
-    Nothing is uploaded here — this only produces what to upload, so the mapping is reviewable and
-    diffable before anything leaves the machine. kb/remote_upload.py consumes the output.
+
+def _carrying_remote_state(store, rec: dict, local_reproduced: bool):
+    """`rec` with everything the store's existing copy of this session has EARNED moved onto it:
+    its attestation ledger, its reproduction count, and its retirement. Returns (rec, report).
+
+    Every field `remote_value` sends is derived from the LOCAL meta.yaml, and the session id is a
+    digest of the patch's content — path-independent by design, so the same patch measured again
+    from a fresh `--root` lands on the same session and `mode="replace"` rewrites the document
+    whole. Without this, that rewrite silently resets the record's ledger to zero, drops its
+    reproduction count back to 1, and resurrects a tombstone `curate-remote` wrote. The new
+    document looks perfectly well-formed, which is what makes the loss invisible.
+
+    Called per plane and per rung, never once for all of them: the planes drift, and each ladder
+    rung keeps its own copy of the session, so each has to be asked what it already holds.
     """
-    root = a.root
-    if not os.path.isdir(root):
-        return {"ok": False, "reason": "no_such_root: " + root}
-    want_gfx = _norm_gfx(a.gfx) if a.gfx else ""
-    want_name = _match_key(a.kernel_name) if a.kernel_name else ""
+    from kb.attest import VALIDATED, attestations_of, carry_attestations, recent_verdicts
+    from kb.retract import is_retired, retracted_document
 
-    records, scanned, skipped = [], 0, {"retired": 0, "no_patch": 0, "unreadable": 0, "filtered": 0}
+    report = {"carried_attestations": False, "retracted": False, "unretired": False}
+    try:
+        previous = store.get_session(rec["canonical_id"], rec["session_id"])
+    except Exception:
+        previous = None                          # an unreadable copy is treated as no copy
+    previous_value = previous.get("value") if isinstance(previous, dict) else None
+    if not isinstance(previous_value, dict):
+        return rec, report
+
+    knowledge = dict(rec["knowledge"])
+    fresh_value = dict(knowledge.get("value") or {})
+    value = carry_attestations(previous_value, dict(fresh_value))
+    # Reported as "this write would otherwise have lost a ledger", not merely "a ledger is present":
+    # a local meta.yaml can carry its own counts, and those were never at risk.
+    report["carried_attestations"] = value.get("attestations") != fresh_value.get("attestations")
+
+    # Monotone, and it counts BOXES. The local number only ever knows what this tree has seen, so
+    # a rewrite from a clean tree carries 1; the remote number is the cross-box total and must not
+    # go backwards. When the remote already held this session but the local write filed a fresh
+    # entry rather than a `duplicate_impl`, this is a rediscovery the remote had not heard about,
+    # so it is worth one — otherwise the local write already counted it (see _record_reproduction).
+    previous_reps = _int_or(previous_value.get("reproductions"), 0)
+    reps = max(_int_or(value.get("reproductions"), 1),
+               previous_reps + (0 if local_reproduced else 1))
+    value["reproductions"] = reps
+    # The same threshold _record_reproduction applies on disk, applied to the cross-box count.
+    if reps >= 2:
+        value["lifecycle"] = "active"
+        value["validated"] = True
+    report["reproductions"] = reps
+    knowledge["value"] = value
+
+    if not is_retired(previous_value):
+        return dict(rec, knowledge=knowledge), report
+    reason = str(previous_value.get("retired_reason") or "").strip() \
+        or "retracted; no reason recorded"
+    # A different bar to lift than e2e's, and it has to be. e2e un-retires when the incoming write
+    # is itself `validated`, which for that lane means a hot A/B strictly stronger than the gate its
+    # writes pass. This lane's write gate is only "beat 1.0x on the producer's own bench" — the very
+    # claim the retraction distrusted — so lifting on the write would let any re-run undo curation,
+    # which is the hazard being fixed here, just slower. Nor can it be the reproduction count: a
+    # retraction is normally written onto a record that already has one, so "one more write" would
+    # clear every tombstone on its next visit.
+    # What DOES clear it is the one signal a retraction is built from the absence of: somebody read
+    # this record, took it to a box, and reproduced the win. Same window `should_retire` reads, so
+    # the two cannot disagree about whether the record is currently believed.
+    if VALIDATED in recent_verdicts(attestations_of(value)):
+        # Cleared, not merely annotated. The incoming document is derived from a meta.yaml that may
+        # ITSELF say `retained: false` — the sync path re-files curated entries, so it usually does
+        # — and a record carrying both a tombstone flag and an `unretired_at` is a record no reader
+        # can act on: `is_retired` still hides it, while the lift claims it is believed again.
+        for gone in ("retained", "retired_reason", "retracted_at", "retracted_by"):
+            value.pop(gone, None)
+        value.update({"unretired_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                      "unretired_from_reason": reason})
+        # No attestation is counted for the reprieve, unlike e2e's. There, the write itself is the
+        # new evidence and has to enter the ledger or the next sweep re-retracts on the unchanged
+        # negatives. Here the evidence is a validated recall that is ALREADY in the window, so the
+        # veto already holds — and counting a recall nobody performed would break the one invariant
+        # the ledger has, that `recalls` is attempts on hardware.
+        withdrawn = previous_value.get("withdrawn_scores")
+        if isinstance(withdrawn, dict) and withdrawn:
+            value["withdrawn_scores"] = withdrawn
+        knowledge["value"] = value
+        report["unretired"] = True
+        return dict(rec, knowledge=knowledge), report
+    # Still retracted. Re-applied through retracted_document rather than by copying the flag,
+    # because a tombstone is not one field: retraction also zeroes the top-level ranking scalar,
+    # and `retained: False` on a document still carrying a real speedup is inert against every
+    # reader that ranks on the scalar (see kb/retract.py).
+    # The scores it was ORIGINALLY taken back for are moved across first, so retracted_document's
+    # setdefault leaves them alone: a reviewer judging the retraction needs the number that was
+    # retracted, not whatever this rewrite happened to measure onto the tombstone.
+    withdrawn = previous_value.get("withdrawn_scores")
+    if isinstance(withdrawn, dict) and withdrawn:
+        value["withdrawn_scores"] = withdrawn
+    report["retracted"] = True
+    tombstone = retracted_document(knowledge, reason, (CHAMPION_METRIC,),
+                                   actor=str(previous_value.get("retracted_by") or ""))
+    # `retracted_document` stamps the moment it runs, which is right the first time and wrong every
+    # time after: this record was taken back once, and re-stamping it on each rewrite would date the
+    # retraction to whenever somebody last touched the patch. The lane now re-files entries on every
+    # warm start (`sync-local`), so an un-pinned timestamp would read as "curated seconds ago"
+    # forever, which is exactly what an auditor would use to decide the retraction is still current.
+    when = str(previous_value.get("retracted_at") or "").strip()
+    if when:
+        tombstone["value"]["retracted_at"] = when
+    return dict(rec, knowledge=tombstone), report
+
+
+def _carrying_plane(store, recs, local_reproduced: bool):
+    """`recs` rebuilt against one plane, plus the merged report. See _carrying_remote_state."""
+    out, merged = [], {"carried_attestations": False, "retracted": False, "unretired": False}
+    for rec in recs:
+        carried, report = _carrying_remote_state(store, rec, local_reproduced)
+        out.append(carried)
+        for key in ("carried_attestations", "retracted", "unretired"):
+            merged[key] = merged[key] or report[key]
+        if "reproductions" in report:
+            merged["reproductions"] = max(merged.get("reproductions", 0), report["reproductions"])
+    return out, merged
+
+
+def _tree_entries(root: str, want_gfx: str, want_name: str, include_retired: bool):
+    """Every publishable entry in the slug tree as (exp_dir, meta), plus what was passed over.
+
+    Shared by the two readers that take the tree and speak canonical ids back — `export-remote`,
+    which renders them for review, and `sync-local`, which files them straight into the store.
+    The two must not drift about what counts as an entry: the second exists to make the tree
+    redundant for READING, and it can only do that if it carries across everything the first
+    would have offered.
+    """
+    scanned, skipped = 0, {"retired": 0, "no_patch": 0, "unreadable": 0, "filtered": 0}
+    entries = []
     for dirpath, _dirs, files in sorted(os.walk(root)):
         if "meta.yaml" not in files:
             continue
@@ -1683,7 +1818,7 @@ def cmd_export_remote(a) -> dict:
             continue
         # Retired entries are dominated duplicates, not negative knowledge, and the service ranks on
         # the speedup we declare — offering them would put a retired win in someone's top-N.
-        if _is_retired(meta) and not a.include_retired:
+        if _is_retired(meta) and not include_retired:
             skipped["retired"] += 1
             continue
         # An entry with nothing installable in it is not a knowledge record, whatever its speedup
@@ -1697,6 +1832,24 @@ def cmd_export_remote(a) -> dict:
         if not installable:
             skipped["no_patch"] += 1
             continue
+        entries.append((dirpath, meta))
+    return entries, scanned, skipped
+
+
+def cmd_export_remote(a) -> dict:
+    """Render this store as KB Store candidates, one JSON line each, champion pre-decided.
+
+    Nothing is uploaded here — this only produces what to upload, so the mapping is reviewable and
+    diffable before anything leaves the machine. kb/remote_upload.py consumes the output.
+    """
+    root = a.root
+    if not os.path.isdir(root):
+        return {"ok": False, "reason": "no_such_root: " + root}
+    entries, scanned, skipped = _tree_entries(
+        root, _norm_gfx(a.gfx) if a.gfx else "", _match_key(a.kernel_name) if a.kernel_name else "",
+        bool(a.include_retired))
+    records = []
+    for dirpath, meta in entries:
         records.extend(remote_records(meta, dirpath, a.producer, a.gpu))
 
     # One champion per identity, upstream's rule: must beat 1.0x, and highest wins. Ties break on
@@ -1752,6 +1905,106 @@ def cmd_export_remote(a) -> dict:
             "champions": len(best),
             "deduped": len(dropped), "deduped_dirs": sorted(dropped),
             "skipped": skipped, "out": a.out or "-"}
+
+
+def cmd_sync_local(a) -> dict:
+    """File the slug tree's entries into the on-disk KB store, keyed by canonical id.
+
+    The convergence step. Writes on this lane have gone to both address schemes for a while
+    (`write-remote --plane both` files the tree, then the store, then the service), so the store
+    already holds everything measured since that became the default. What it has never held is the
+    BACKLOG: every entry older than that, plus anything a curation pass imported into the tree by
+    hand. Until that is carried across, moving the READ onto the store would be a silent downgrade
+    rather than a change of address — same kernel, thinner page, and no way for the reader to tell.
+
+    Safe to run before every read, which is how the lane runs it. The session id is a digest of the
+    patch's content, so an entry that is already filed lands back on its own session, and the write
+    goes through the same `_carrying_remote_state` a re-measurement does: the store's attestation
+    ledger, its retraction and its cross-box reproduction count all survive being re-synced.
+    `local_reproduced` is TRUE here for that same reason — a sync is a copy of a measurement that
+    was already counted, not a new box reporting one, and a counter that ticked once per read would
+    make the tree's oldest entries look like its most reproduced.
+
+    Retirement travels, and has to be APPLIED rather than copied. `remote_value` already carries
+    `retained: false` across, but a flag alone is inert: ranking reads the top-level scalar, so a
+    tombstone that arrived still declaring 1.9x would sit at the head of the page for every reader
+    that has not been taught the flag (kb/retract.py). `retracted_document` is what makes the three
+    parts — flag, zeroed scalar, no champion pointer — travel together.
+
+    The one thing it will not do is overrule a LIFT. A record the store retired and then un-retired
+    (`unretired_at`, written when a validated recall reproduced the win after the retraction) keeps
+    its reprieve: the tree entry that was curated away is the very record the recall vindicated, and
+    re-imposing that verdict on every read would silently undo the lift once per warm start. An
+    already-retracted record is likewise left to `_carrying_plane`, which re-applies the store's own
+    tombstone — going through `retracted_document` again would only churn `retracted_at`.
+    """
+    from kb.retract import is_retired, retracted_document
+    root = a.root
+    if not os.path.isdir(root):
+        return {"ok": False, "reason": "no_such_root: " + root}
+    a.plane = "local"                       # a sync is a local catch-up; it never talks to anyone
+    store, _also, why = open_plane(a, CHAMPION_METRIC, 1.0, create=True)
+    if store is None:
+        return {"ok": False, "reason": why or "no_store"}
+    entries, scanned, skipped = _tree_entries(
+        root, _norm_gfx(a.gfx) if a.gfx else "", _match_key(a.kernel_name) if a.kernel_name else "",
+        include_retired=True)
+
+    synced, fresh, retired, promoted, errors = [], 0, 0, [], []
+    for exp_dir, meta in entries:
+        # One bad entry must not stop the catch-up. The read that follows is better off with the
+        # rest of the backlog than with none of it, and an entry that cannot be filed is named here
+        # rather than leaving a page thin for a reason nothing recorded. Broad on purpose: hashing
+        # the payload, deriving the identity and writing it all fail differently, and none of them
+        # is worth losing the other entries over.
+        try:
+            recs = remote_records(meta, exp_dir, a.producer, a.gpu)
+            files = {f["path"]: f["local_path"] for f in recs[0]["files"]}
+            previous = store.get_session(recs[0]["canonical_id"], recs[0]["session_id"])
+            held = previous.get("value") if isinstance(previous, dict) else None
+            held = held if isinstance(held, dict) else {}
+            already = isinstance(previous, dict)
+            plane_recs, _carried = _carrying_plane(store, recs, local_reproduced=True)
+            # See the docstring: apply the tree's curation, unless the store has already ruled on
+            # this session — either by holding its own tombstone, or by lifting one.
+            retire_now = (_is_retired(meta) and not is_retired(held)
+                          and not held.get("unretired_at"))
+            if retire_now:
+                reason = (str(meta.get("retired_reason") or "").strip()
+                          or "retired by the local curation")
+                plane_recs = [dict(r, knowledge=retracted_document(
+                    r["knowledge"], reason, (CHAMPION_METRIC,),
+                    actor=str(meta.get("retracted_by") or ""))) for r in plane_recs]
+            elif _is_retired(meta) and not is_retired(held):
+                # The lift again, from the other side. `remote_value` copies `retained: false` out
+                # of the meta verbatim, so a document derived from a curated tree entry arrives
+                # carrying the flag even on the path that decided not to retract — and the flag
+                # alone is enough for `is_retired` to hide the record the recall just vindicated.
+                # Dropping it here is what makes "the store's own state wins" true of the WHOLE
+                # document and not only of the ranking scalar.
+                plane_recs = [dict(r, knowledge=dict(r["knowledge"], value={
+                    k: v for k, v in (r["knowledge"].get("value") or {}).items()
+                    if k not in ("retained", "retired_reason")})) for r in plane_recs]
+            written, moved, error = publish(store, plane_recs, files,
+                                            lambda rec: rec["knowledge"].get("speedup"),
+                                            promote=not retire_now)
+        except Exception as e:
+            errors.append({"exp_dir": exp_dir, "reason": "%s: %s" % (type(e).__name__, str(e)[:160])})
+            continue
+        if error:
+            errors.append({"exp_dir": exp_dir, "reason": error})
+            continue
+        retired += 1 if retire_now else 0
+        fresh += 0 if already else 1
+        synced.extend(written)
+        promoted.extend(moved)
+    return {"ok": not errors, "store": store.root, "scanned": scanned, "entries": len(entries),
+            # `entries` counts measurements, `synced` the addresses they were filed at — one per
+            # ladder rung, so the ratio is the ladder depth for a healthy sync.
+            "synced": len(synced), "identities": len(set(synced)),
+            "new_sessions": fresh, "retired": retired,
+            "champions": len(set(promoted)), "skipped": skipped,
+            "errors": errors}
 
 
 def _value_as_meta(value: dict, gfx: str) -> dict:
@@ -1843,6 +2096,67 @@ def cmd_retract_remote(a) -> dict:
     return out
 
 
+def cmd_curate_remote(a) -> dict:
+    """Scan a kernel page, apply the shared retire policy, retract what has earned it.
+
+    The kernel-lane counterpart of `e2e_store.py curate`, and deliberately the same shape: the
+    judgement comes from `kb.attest.should_retire` so the two lanes cannot drift into different
+    bars, and the execution is `retract-remote`'s, on every rung, because one session id addresses
+    both. DRY RUN BY DEFAULT — this acts on a whole page, and the store has no delete.
+
+    Judges from the FINEST rung only. The version-agnostic page holds records from other stack
+    versions, and retiring one of those from this box's page would convict it of a ledger it does
+    not own.
+    """
+    from kb.attest import RETIRE_THRESHOLD, attestations_of, retire_hint, should_retire
+    from kb.retract import is_retired, retract_session, retraction_ok
+    threshold = max(1, int(getattr(a, "threshold", RETIRE_THRESHOLD) or RETIRE_THRESHOLD))
+    out = {"applied": bool(a.apply), "threshold": threshold, "scanned": 0, "already_retired": 0,
+           "kept": 0, "candidates": [], "pages": [], "ok": True, "error": ""}
+    gfx = _norm_gfx(a.gfx)
+    if not gfx and not a.canonical_id:
+        return dict(out, ok=False, error="missing_arch")
+    ladder = _store_ladder(a, gfx)
+    store, mirror, why = open_plane(a, CHAMPION_METRIC, 1.0)
+    planes = [p for p in (store, mirror) if p is not None]
+    if not planes:
+        return dict(out, ok=False, error=why)
+    try:
+        found = planes[0].candidates(ladder[0][0], limit=max(1, int(a.scan)))
+    except Exception as e:
+        return dict(out, ok=False,
+                    error="read_failed: %s: %s" % (type(e).__name__, str(e)[:160]))
+    out["scanned"] = len(found)
+    for candidate in found:
+        value = candidate.value if isinstance(candidate.value, dict) else {}
+        if is_retired(value):
+            out["already_retired"] += 1
+            continue
+        reason = should_retire(value, threshold=threshold)
+        if not reason:
+            out["kept"] += 1
+            continue
+        out["candidates"].append({
+            "session_id": candidate.session_id, "reason": reason,
+            "direction": str(value.get("direction") or ""),
+            "carrier": str(value.get("carrier") or "patch"),
+            "speedup": candidate.speedup or 0.0,
+            "is_champion": bool(candidate.is_champion),
+            "retire_hint": retire_hint(value),
+            "attestations": attestations_of(value)})
+    for entry in out["candidates"]:
+        for cid, tier in ladder:
+            for plane in planes:
+                report = retract_session(plane, cid, entry["session_id"], entry["reason"],
+                                         CHAMPION_METRIC,
+                                         actor=str(getattr(a, "measured_by", "")
+                                                   or "experience_store curate"),
+                                         scan=int(a.scan), apply=bool(a.apply))
+                out["pages"].append(dict(report, tier=tier))
+    out["ok"] = retraction_ok(out["pages"], a.apply) if out["candidates"] else True
+    return out
+
+
 def _attest_evidence(a) -> dict:
     """The one-line record of what this box saw, shared by both attest paths."""
     evidence = {}
@@ -1873,28 +2187,49 @@ def cmd_attest(a) -> dict:
     Like the remote one, this moves nothing: the speedup meta declares is left exactly as it was,
     and the entry keeps its rank. A patch that failed to apply on one workspace is a fact about
     that workspace as much as about the patch.
+
+    The KEYED record is the truth. `meta.yaml` lives in a checkout that is created empty and
+    deleted with the run, so a ledger kept only there is invisible to every other box. Pass
+    `--session-id` (as `resolve-remote` reports it) and this records the same verdict on both, and
+    says which planes took it. Without a reachable plane the count still lands on disk and
+    `ledger_scope` reads `local_only` — a real degradation, named rather than hidden, because a
+    curation pass must not read an uncorroborated local counter as agreement between boxes.
     """
     from kb.attest import record_attestation, retire_hint
     exp_dir = str(getattr(a, "exp_dir", "") or "")
     meta_path = os.path.join(exp_dir, "meta.yaml")
     meta = _read_meta(meta_path)
-    if not meta:
+    session_id = str(getattr(a, "session_id", "") or "")
+    # A keyed candidate is served out of a hydrated refs dir with no meta.yaml of its own. That is
+    # a missing MIRROR, not a missing record, so it must not swallow the verdict.
+    if not meta and not session_id:
         return {"attested": False, "reason": "no_meta", "exp_dir": exp_dir}
-    try:
-        updated = record_attestation(dict(meta), a.outcome,
-                                     actor=str(getattr(a, "measured_by", "") or ""),
-                                     evidence=_attest_evidence(a))
-    except Exception as e:
-        return {"attested": False, "reason": "bad_outcome: " + str(e)[:120], "exp_dir": exp_dir}
     out = {"attested": bool(a.apply), "applied": bool(a.apply), "exp_dir": exp_dir,
-           "outcome": a.outcome, "attestations": updated["attestations"],
-           "retire_hint": retire_hint(updated)}
-    if not a.apply:
+           "outcome": a.outcome, "ledger_scope": "local_only"}
+    if meta:
+        try:
+            updated = record_attestation(dict(meta), a.outcome,
+                                         actor=str(getattr(a, "measured_by", "") or ""),
+                                         evidence=_attest_evidence(a))
+        except Exception as e:
+            return {"attested": False, "reason": "bad_outcome: " + str(e)[:120], "exp_dir": exp_dir}
+        out["attestations"] = updated["attestations"]
+        out["retire_hint"] = retire_hint(updated)
+        if a.apply:
+            try:
+                _atomic_write(meta_path, _dump_meta(updated))
+            except OSError as e:
+                out.update({"attested": False, "reason": "write_failed: " + str(e)[:120]})
+    else:
+        out["ledger_scope"] = "keyed_only"
+    if not session_id:
         return out
-    try:
-        _atomic_write(meta_path, _dump_meta(updated))
-    except OSError as e:
-        out.update({"attested": False, "reason": "write_failed: " + str(e)[:120]})
+    keyed = cmd_attest_remote(a)
+    out["keyed"] = keyed
+    if keyed.get("attested"):
+        out.update({"ledger_scope": "keyed", "retire_hint": keyed.get("retire_hint") or ""})
+    else:
+        out["reason"] = "keyed_ledger_missed: " + str(keyed.get("reason") or "")[:120]
     return out
 
 
@@ -1954,12 +2289,14 @@ def cmd_resolve_remote(a) -> dict:
     gfx = _norm_gfx(a.gfx)
     if not gfx and not a.canonical_id:
         return {"read_reason": "missing_arch", "candidates": []}
-    # Reading takes ONE plane, never both. Merging two rankings would need a comparability rule
-    # across planes that nothing here has, and silently preferring one would make a stale local
-    # mirror shadow the service without saying so.
-    store, _second, why = open_plane(a, CHAMPION_METRIC, 1.0)
-    if store is None:
+    # Reading takes ONE plane at a time, never two merged: that would need a comparability rule
+    # across planes that nothing here has. `both` therefore picks, and picks the service first —
+    # `open_plane` would have handed back the local store, letting a stale mirror shadow the shared
+    # one without saying so. See kb/plane.py:read_planes.
+    planes, why = read_planes(a, CHAMPION_METRIC)
+    if not planes:
         return {"read_reason": why.split(":", 1)[0], "reason": why, "candidates": []}
+    store = planes[0][0]
 
     ladder = _store_ladder(a, gfx) + _legacy_name_ladder(a, gfx)
     cid, match_tier = ladder[0]
@@ -1968,7 +2305,9 @@ def cmd_resolve_remote(a) -> dict:
                                a.language or (segs[4] if len(segs) > 4 else ""), gfx)
     base_out = {"slug": requested_slug, "requested_slug": requested_slug, "canonical_id": cid,
                 "match_tier": match_tier, "tried": [c for c, _t in ladder],
-                "other_language_pages": [], "ambiguous_pages": [], "candidates": []}
+                "other_language_pages": [], "ambiguous_pages": [], "candidates": [],
+                # Which plane ANSWERED, which `--plane both` alone does not tell you.
+                "read_plane": ""}
 
     # Descend the ladder, then the pre-ladder near misses. Stopping at the first rung that holds
     # anything is deliberate: a coarser page is a superset only if every writer double-wrote, and
@@ -1984,15 +2323,26 @@ def cmd_resolve_remote(a) -> dict:
     # on a page with nothing to offer. Records written before carriers existed have no field and are
     # diffs; precision filters only when asked, and an entry that states none is kept — the whole
     # backlog predates the field.
+    # `--include-retired` keeps them instead, for an audit: the local `resolve` has had that escape
+    # hatch since it existed, and without it here there is no way to ask the service what curation
+    # took back. It also changes the DESCENT — a rung of nothing but tombstones now stops the ladder
+    # rather than reading empty — which is exactly what an auditor wants and exactly why it is a
+    # flag and not the default.
     want_carrier = str(getattr(a, "carrier", "") or "patch")
     want_precision = _norm_precision(getattr(a, "precision", ""))
+    include_retired = bool(getattr(a, "include_retired", False))
     other_carrier = [0]
     other_precision = [0]
+    # What the page handed back before any of these filters ran, which is not the same as what the
+    # page HOLDS: the service ignores the `limit` argument and pages `--scan` rows (kb/store_remote
+    # .py:candidates), so a busy identity can be read through a keyhole with nothing saying so.
+    scanned = [0]
 
     def live(canonical_id):
         rows = store.candidates(canonical_id, limit=0)
-        kept = [c for c in rows if not _is_retired(c.value)]
-        retired_n = len(rows) - len(kept)
+        scanned[0] = len(rows)
+        retired_n = sum(1 for c in rows if _is_retired(c.value))
+        kept = rows if include_retired else [c for c in rows if not _is_retired(c.value)]
         of_carrier = [c for c in kept if str((c.value or {}).get("carrier") or "patch") == want_carrier]
         other_carrier[0] = len(kept) - len(of_carrier)
         if not want_precision:
@@ -2002,12 +2352,18 @@ def cmd_resolve_remote(a) -> dict:
         other_precision[0] = len(of_carrier) - len(of_precision)
         return of_precision, retired_n
 
-    found, retired = [], 0
-    for cid, match_tier in ladder:
-        found, retired = live(cid)
+    # The WHOLE descent is redone on the next plane — ladder, then near misses — rather than
+    # stopping at the first page either plane happens to hold: a thin remote page must not shadow
+    # the hand-curated local tree, and a coarse rung on one plane must not shadow an exact rung on
+    # the other. `live` reads `store` from this scope, so rebinding it here re-points the closure.
+    found, retired, read_plane = [], 0, ""
+    for store, read_plane in planes:
+        for cid, match_tier in ladder:
+            found, retired = live(cid)
+            if found:
+                break
         if found:
             break
-    if not found:
         near = _store_near_misses(store, ladder[0][0])
         for other in near:
             found, retired = live(other)
@@ -2016,9 +2372,11 @@ def cmd_resolve_remote(a) -> dict:
                 break
         base_out.update({"other_language_pages": near,
                          "tried": [c for c, _t in ladder] + near})
-        if not found:
-            return dict(base_out, read_reason="kernel_page_not_found")
-    base_out.update({"canonical_id": cid, "match_tier": match_tier})
+        if found:
+            break
+    if not found:
+        return dict(base_out, read_reason="kernel_page_not_found")
+    base_out.update({"canonical_id": cid, "match_tier": match_tier, "read_plane": read_plane})
 
     try:
         min_speedup = float(a.min_speedup)
@@ -2026,17 +2384,28 @@ def cmd_resolve_remote(a) -> dict:
         min_speedup = 1.0
     above = [c for c in found if (c.speedup or 0.0) >= min_speedup]
     # `total` counts what the page held, `retired` how many of those were taken back — so the two
-    # still sum to the page size even though `found` is already the survivors.
-    stats = {"total": len(found) + retired, "retired": retired,
+    # still sum to the page size even though `found` is already the survivors. Under
+    # `--include-retired` the tombstones ARE in `found`, so adding them again would double-count;
+    # `retired` still reports them, it just no longer names a set that was removed.
+    # `scan_saturated` is the honest caveat on all of the above: it says the numbers describe as
+    # much of the page as was fetched. Only the service truncates — LocalKBStore.candidates with
+    # limit=0 returns everything — so the local plane reports no limit rather than a false one.
+    scan_limit = max(1, int(getattr(a, "scan", 25) or 25)) if read_plane == "remote" else 0
+    stats = {"total": len(found) + (0 if include_retired else retired), "retired": retired,
+             "include_retired": include_retired,
              "below_min_speedup": len(found) - len(above), "min_speedup": min_speedup,
              "carrier": want_carrier, "other_carriers": other_carrier[0],
-             "precision": want_precision, "other_precisions": other_precision[0]}
+             "precision": want_precision, "other_precisions": other_precision[0],
+             "scanned": scanned[0], "scan_limit": scan_limit,
+             "scan_saturated": bool(scan_limit and scanned[0] >= scan_limit)}
     if not above:
         return dict(base_out, filtered=stats, read_reason="below_min_speedup")
 
     # `above` is already speedup-ordered by the store.
+    ordered = demote_hinted(above, lambda c: _retire_hint_of(c.value))
+    stats["demoted_by_hint"] = sum(1 for c in ordered if _retire_hint_of(c.value))
     top, alternates, collapsed = collapse_by_direction(
-        above, lambda c: c.value.get("direction"), lambda c: c.session_id, a.top_n)
+        ordered, lambda c: c.value.get("direction"), lambda c: c.session_id, a.top_n)
     stats["same_direction_collapsed"] = collapsed
 
     cache_dir = a.cache_dir or os.path.join(os.path.dirname(os.path.abspath(a.refs_dir)), "kb_cache")
@@ -2126,7 +2495,13 @@ def cmd_write_remote(a) -> dict:
     # Asked BEFORE the write: a session that already exists is this same patch measured again, and
     # the caller deserves to know its result replaced one rather than adding one.
     replaced = store.get_session(recs[0]["canonical_id"], recs[0]["session_id"]) is not None
-    written, promoted, error = publish(store, recs, files,
+    # `duplicate_impl` means the LOCAL tree already held this patch, so cmd_write already counted
+    # this measurement as a reproduction; a fresh local entry has not been counted anywhere yet.
+    local_reproduced = str(local.get("reason") or "") == "duplicate_impl"
+    # Each plane is asked separately what it already holds, because the two drift — the mirror can
+    # carry a ledger, or a retraction, that the primary has never seen.
+    plane_recs, carried = _carrying_plane(store, recs, local_reproduced)
+    written, promoted, error = publish(store, plane_recs, files,
                                        lambda rec: rec["knowledge"].get("speedup"))
     if error:                                    # a KB write must not fail a measured result
         return dict(local, remote={"written": False, "partial": written, "reason": error})
@@ -2137,15 +2512,19 @@ def cmd_write_remote(a) -> dict:
         "champion_of": promoted, "files": sorted(files), "store": store.root,
         # true = this measurement landed on a session that already existed, i.e. the same patch.
         "replaced": replaced,
+        # What the existing copy had earned and this write kept rather than overwrote. `retracted`
+        # is the one to read: it says the result landed on a tombstone and stayed a tombstone.
+        **carried,
     }
     if also is not None:
         # The second plane never gates the first. It reports its own outcome so an unreachable
         # service is visible as a failed mirror rather than as a silent one.
+        mirror_recs, mirror_carried = _carrying_plane(also, recs, local_reproduced)
         mirrored, mirror_promoted, mirror_error = publish(
-            also, recs, files, lambda rec: rec["knowledge"].get("speedup"))
+            also, mirror_recs, files, lambda rec: rec["knowledge"].get("speedup"))
         out["mirror"] = {"written": not mirror_error, "store": also.root,
                          "canonical_ids": mirrored, "champion_of": mirror_promoted,
-                         "reason": mirror_error or ""}
+                         "reason": mirror_error or "", **mirror_carried}
     elif why:
         out["mirror"] = {"written": False, "reason": why}
     return dict(local, remote=out)
@@ -2236,6 +2615,19 @@ def main(argv=None):
                     help="also export entries the curation retired (they would rank as live wins)")
     xr.add_argument("--out", default="", help="write JSON lines here instead of stdout")
 
+    # No `--plane`: a sync is a local catch-up by definition, and offering `remote` here would
+    # invite pushing a whole tree at a service that cannot delete what it accepts.
+    sl = sub.add_parser(
+        "sync-local", help="file the slug tree's entries into the on-disk KB store, keyed by "
+                           "canonical id; idempotent, keeps what the store already earned")
+    sl.set_defaults(plane="local", scan=25)
+    sl.add_argument("--root", required=True, help="the slug tree to read")
+    sl.add_argument("--store", required=True, help="on-disk KB store root to bring level")
+    sl.add_argument("--gfx", default="", help="only this arch (default: every arch in the tree)")
+    sl.add_argument("--kernel-name", dest="kernel_name", default="", help="only this kernel")
+    sl.add_argument("--producer", default=REMOTE_PRODUCER)
+    sl.add_argument("--gpu", default="", help="override the gfx dimension; default is the entry's own")
+
     # The key-addressed pair. Same gates, same output shapes as resolve/write — only the plane
     # the records live on changes, so the lane can be pointed at either.
     def add_plane_args(w):
@@ -2264,6 +2656,9 @@ def main(argv=None):
     rr.add_argument("--cache-dir", dest="cache_dir", default="",
                     help="where selected candidates are materialized (default <refs-dir>/../kb_cache)")
     rr.add_argument("--min-speedup", dest="min_speedup", type=float, default=1.05)
+    rr.add_argument("--include-retired", dest="include_retired", action="store_true",
+                    help="also offer entries the curation retired, and let a rung of nothing but "
+                         "tombstones stop the ladder instead of reading empty (audit/debug only)")
     rr.add_argument("--carrier", choices=CARRIERS, default="patch",
                     help="which carrier to offer; one per call (default patch)")
     rr.add_argument("--precision", default="",
@@ -2298,13 +2693,26 @@ def main(argv=None):
     tr.add_argument("--measured-by", dest="measured_by", default="", help="who is retracting it")
     tr.add_argument("--apply", action="store_true", help="actually rewrite; default is a dry run")
 
-    at = sub.add_parser("attest", help="count one attempt to USE a stored entry (validated | "
-                                       "failed | not_reproduced); changes no speedup, no rank")
-    at.add_argument("--exp-dir", dest="exp_dir", required=True,
-                    help="the entry that was tried, as `resolve` reports it")
+    at = add_plane_args(sub.add_parser(
+        "attest", help="count one attempt to USE a stored entry; changes no speedup, no rank"))
+    at.add_argument("--exp-dir", dest="exp_dir", default="",
+                    help="the entry that was tried, as `resolve` reports it; omit when the "
+                         "candidate came keyed and has no local mirror")
     at.add_argument("--outcome", required=True, choices=_OUTCOMES,
                     help="validated = reproduced a win; failed = applied but did not win; "
-                         "not_reproduced = would not apply or would not build")
+                         "not_reproduced = would not apply or would not build; inapplicable = "
+                         "does not fit THIS workspace")
+    at.add_argument("--session-id", dest="session_id", default="",
+                    help="the keyed record this entry came from, as resolve-remote reports it. "
+                         "The keyed ledger is the truth; without this the count is local_only")
+    at.add_argument("--store", default="", help="on-disk KB store root (--plane local/both)")
+    at.add_argument("--canonical-id", dest="canonical_id", default="")
+    at.add_argument("--kernel-name", dest="kernel_name", default="")
+    at.add_argument("--language", default="")
+    at.add_argument("--gfx", default="")
+    at.add_argument("--producer", default=REMOTE_PRODUCER)
+    at.add_argument("--gpu", default="", help="override the gfx dimension; default is --gfx")
+    at.add_argument("--framework-version", dest="framework_version", default="")
     at.add_argument("--measured-speedup", dest="measured_speedup", default=None,
                     help="what it did here, for the history entry")
     at.add_argument("--note", default="", help="one line a future reader can act on")
@@ -2330,6 +2738,21 @@ def main(argv=None):
     ar.add_argument("--measured-by", dest="measured_by", default="", help="who tried it")
     ar.add_argument("--apply", action="store_true", help="actually record it; default is a dry run")
 
+    cu = add_plane_args(sub.add_parser(
+        "curate-remote", help="scan a page, apply the retire policy, retract what has earned it"))
+    cu.add_argument("--store", default="", help="on-disk KB store root (--plane local/both)")
+    cu.add_argument("--canonical-id", dest="canonical_id", default="")
+    cu.add_argument("--kernel-name", dest="kernel_name", default="")
+    cu.add_argument("--language", default="")
+    cu.add_argument("--gfx", default="")
+    cu.add_argument("--producer", default=REMOTE_PRODUCER)
+    cu.add_argument("--gpu", default="", help="override the gfx dimension; default is --gfx")
+    cu.add_argument("--framework-version", dest="framework_version", default="")
+    cu.add_argument("--threshold", type=int, default=_RETIRE_THRESHOLD,
+                    help="negative attempts, with no win ever, that make a record a candidate")
+    cu.add_argument("--measured-by", dest="measured_by", default="", help="who is curating")
+    cu.add_argument("--apply", action="store_true", help="actually rewrite; default is a dry run")
+
     m = sub.add_parser("remap", help="rewrite a stored patch's paths onto this workspace's layout")
     m.add_argument("--patch", required=True)
     m.add_argument("--out", required=True)
@@ -2350,6 +2773,8 @@ def main(argv=None):
             out = cmd_backfill_content(a)
         elif a.cmd == "export-remote":
             out = cmd_export_remote(a)
+        elif a.cmd == "sync-local":
+            out = cmd_sync_local(a)
         elif a.cmd == "resolve-remote":
             out = cmd_resolve_remote(a)
         elif a.cmd == "write-remote":
@@ -2360,12 +2785,15 @@ def main(argv=None):
             out = cmd_attest(a)
         elif a.cmd == "attest-remote":
             out = cmd_attest_remote(a)
+        elif a.cmd == "curate-remote":
+            out = cmd_curate_remote(a)
         else:  # pragma: no cover
             out = {"error": "unknown command"}
     except Exception as e:  # never crash the caller
         err = "exception: " + str(e)[:160]
         out = ({"written": False, "reason": err} if a.cmd in ("write", "write-remote")
                else {"retracted": False, "reason": err} if a.cmd == "retract-remote"
+               else {"ok": False, "error": err} if a.cmd in ("curate-remote", "sync-local")
                else {"attested": False, "reason": err} if a.cmd in ("attest", "attest-remote")
                else {"remapped": False, "reason": err} if a.cmd == "remap"
                else {"read_reason": err, "candidates": []})

@@ -7,6 +7,18 @@ is its own group — unlabeled is honest, not a group.
 """
 
 
+def demote_hinted(ordered, hint_of):
+    """`ordered` with every hinted item moved behind every unhinted one, order preserved.
+
+    Applied between the ranking and `collapse_by_direction`, because the collapse keeps only the
+    FIRST entry per direction: a hinted record that outranks its group on the raw scalar does not
+    merely lead the group, it deletes the rest of it. A stable partition rather than a sort key so
+    both lanes can share it whatever they rank on.
+    """
+    ordered = list(ordered)
+    return ([i for i in ordered if not hint_of(i)] + [i for i in ordered if hint_of(i)])
+
+
 def collapse_by_direction(ordered, direction_of, unique_of, top_n):
     """One rank per IDEA, best first. Input must already be in rank order.
 
