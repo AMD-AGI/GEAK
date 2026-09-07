@@ -179,12 +179,15 @@ values are regenerated from the recorded seed on every run.
     that true and then reports whether it actually held. Throw the receipt away and you are back to
     asserting a guarantee you never checked — which is the hole a candidate exploits by collapsing dispatch
     instead of shortening the kernel. Read `primed` as THREE states, never as a bool:
-    - `True` → every event window brackets kernel time only. Score normally.
+    - `True` → dispatch is cheaper than the kernel, so the number is dominated by device work. Score
+      normally. NOT a claim the window is overhead-free: a window costs a few us beyond the kernel —
+      nothing for a 100us GEMM, most of the number for a 5us op. Raise `inner` if the op is that small;
+      the overhead is per-window, so it divides away.
     - `False` → this op dispatches slower than it computes even at full run-ahead. `ms` is a HOST-BOUND
       latency, not a kernel time. Still print it, but mark that case `host_bound`.
-    - **absent** → the vendored `harness_lib.py` predates priming, so every number in this run carries a
-      dispatch bubble whose SIGN is not knowable from the number alone (it inflates whichever leg is
-      relatively smaller). Mark that case `timer_unprimed`.
+    - **absent** → the vendored `harness_lib.py` predates the receipt (or there is no CUDA device), so
+      every number in this run carries a dispatch component whose SIGN is not knowable from the number
+      alone (it inflates whichever leg is relatively smaller). Mark that case `timer_unprimed`.
     Do NOT collapse absent into `False`: "this op is host-bound" and "this timer cannot tell" call for
     different fixes — accept the label vs. re-freeze against a current `$HARNESS_LIB`.
   - Print ONE machine-readable receipt line after the score lines, covering BOTH legs of EVERY case:

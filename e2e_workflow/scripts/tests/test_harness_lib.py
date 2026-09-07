@@ -504,7 +504,9 @@ class _HarnessTestCase(unittest.TestCase):
 
     CUDA = False
     EVENT_MS = (1.0,)
-    WALL_MS = None                      # per-sample wall ms; None -> a flat 1.0 ms every sample
+    # Per-sample wall ms; None -> a flat 1.0 ms every sample. On the CUDA paths the LAST entry is the
+    # host-dispatch probe's span, not a sample.
+    WALL_MS = None
 
     def setUp(self):
         self.stack = _Stack(cuda=self.CUDA, event_ms=self.EVENT_MS)
@@ -947,7 +949,9 @@ class TestTimeOpWall(_HarnessTestCase):
 
 class TestTimeOpEvents(_CudaTestCase):
     EVENT_MS = (6.0, 2.0, 4.0)
-    WALL_MS = (30.0, 10.0, 20.0)
+    # three samples, then the probe: it issues a fixed number of launches, so scale by the constant
+    # rather than hard-coding it -- the last entry reads as "1.0 ms to issue one launch".
+    WALL_MS = (30.0, 10.0, 20.0, 1.0 * hl._HOST_PROBE_LAUNCHES)
 
     def test_device_time_is_the_cuda_event_median_and_wall_is_reported_alongside(self):
         box, call = self._counting_call()
@@ -955,32 +959,56 @@ class TestTimeOpEvents(_CudaTestCase):
         self.assertEqual(got["timer"], "cuda_event")
         self.assertEqual(got["ms"], 4.0)                    # median of the scripted 6, 2, 4
         self.assertAlmostEqual(got["wall_ms"], 20.0)        # host+device reference, measured alongside
-        self.assertEqual(box["n"], 5)
+        # warmup 2 + 3 samples + the host probe's own 3 warmups + its timed launches
+        self.assertEqual(box["n"], 5 + 3 + hl._HOST_PROBE_LAUNCHES)
 
     def test_device_and_wall_are_both_divided_by_inner(self):
         got = hl.time_op(lambda: None, warmup=1, repeats=3, inner=2, detail=True)
         self.assertEqual(got["ms"], 2.0)
         self.assertAlmostEqual(got["wall_ms"], 10.0)
+        self.assertAlmostEqual(got["host_ms"], 1.0)         # eager call() is one launch -> no division
 
     def test_the_cache_is_flushed_once_per_sample_outside_the_event_window(self):
         hl.time_op(lambda: None, warmup=1, repeats=3)
         self.assertIsNotNone(hl._CACHE_FLUSH_BUF)
-        # sync() before each sample plus the post-warmup sync
-        self.assertEqual(self.stack.syncs, 4)
+        # sync() before each sample, the post-warmup sync, and the host probe's own two
+        self.assertEqual(self.stack.syncs, 6)
 
     def test_flush_can_be_disabled_for_a_deliberately_hot_measurement(self):
         hl.time_op(lambda: None, warmup=1, repeats=2, flush_cache=False)
         self.assertIsNone(hl._CACHE_FLUSH_BUF)
 
     def test_each_sample_records_start_and_end_and_waits_on_the_end_event(self):
+        # Pinned deliberately: a batched variant dropping these syncs measured WORSE per-window overhead
+        # (see _time_events). The host probe adds no events -- it times the issue path only.
         hl.time_op(lambda: None, warmup=1, repeats=2)
         self.assertEqual([k for k, _ in self.stack.events],
                          ["record", "record", "synchronize"] * 2)
 
+    def test_a_receipt_says_the_window_held_when_dispatch_outruns_the_kernel(self):
+        got = hl.time_op(lambda: None, warmup=1, repeats=3, detail=True)
+        self.assertAlmostEqual(got["host_ms"], 1.0)         # host issues a launch in 1ms...
+        self.assertEqual(got["ms"], 4.0)                    # ...the GPU needs 4ms to run it
+        self.assertIs(got["primed"], True)                  # so the number is dominated by device work
+
+
+class TestTimeOpEventsHostBound(_CudaTestCase):
+    """The op the receipt exists to catch: dispatch costs MORE than the kernel, so no amount of
+    run-ahead keeps the queue full and `ms` is a host latency wearing a device number's clothes."""
+
+    EVENT_MS = (2.0,)
+    WALL_MS = (30.0, 10.0, 20.0, 5.0 * hl._HOST_PROBE_LAUNCHES)  # 5ms to issue vs a 2ms kernel
+
+    def test_primed_is_false_when_the_host_cannot_keep_the_queue_full(self):
+        got = hl.time_op(lambda: None, warmup=1, repeats=3, detail=True)
+        self.assertAlmostEqual(got["host_ms"], 5.0)
+        self.assertEqual(got["ms"], 2.0)
+        self.assertIs(got["primed"], False)                 # NOT absent -- the timer answered, negatively
+
 
 class TestTimeOpGraph(_CudaTestCase):
     EVENT_MS = (9.0, 3.0, 6.0)
-    WALL_MS = (90.0, 30.0, 60.0)
+    WALL_MS = (90.0, 30.0, 60.0, 3.0 * hl._HOST_PROBE_LAUNCHES)  # samples, then the probe
 
     def test_a_captured_graph_is_replayed_and_timed_with_the_same_event_method(self):
         box, call = self._counting_call()
@@ -990,7 +1018,15 @@ class TestTimeOpGraph(_CudaTestCase):
         self.assertAlmostEqual(got["wall_ms"], 60.0)
         # capture warms up on a side stream (3 launches) then records `inner` launches
         self.assertEqual(box["n"], 4)
-        self.assertEqual(self.stack.replays, 5)             # 2 warmup replays + 3 timed replays
+        # 2 warmup + 3 timed + the host probe's 3 warmups and its timed launches
+        self.assertEqual(self.stack.replays, 5 + 3 + hl._HOST_PROBE_LAUNCHES)
+
+    def test_the_replay_carries_the_same_receipt_as_the_eager_path(self):
+        # Collapsing dispatch is the point of a graph, so this reads as primed -- but it is MEASURED,
+        # not assumed: a replay slower to issue than to execute is still host-bound.
+        got = hl.time_op(lambda: None, warmup=1, repeats=3, graph=True, detail=True)
+        self.assertAlmostEqual(got["host_ms"], 3.0)
+        self.assertIs(got["primed"], True)                  # 3ms to issue a replay vs 6ms of kernel
 
     def test_capture_runs_on_a_side_stream_that_is_joined_before_recording(self):
         hl.time_op(lambda: None, warmup=1, repeats=1, graph=True)
@@ -1004,7 +1040,8 @@ class TestTimeOpGraph(_CudaTestCase):
         box, call = self._counting_call()
         got = hl.time_op(call, warmup=1, repeats=3, inner=3, graph=True, detail=True)
         self.assertEqual(got["ms"], 2.0)                    # 6.0 scripted / inner 3
-        self.assertAlmostEqual(got["wall_ms"], 20.0)
+        self.assertAlmostEqual(got["wall_ms"], 20.0)        # 60ms sample median / inner 3
+        self.assertAlmostEqual(got["host_ms"], 1.0)         # one replay issues all 3 -> 3ms / 3
         self.assertEqual(box["n"], 6)                       # 3 side-stream warmups + 3 captured
 
     def test_an_uncapturable_op_falls_back_to_eager_event_timing(self):
@@ -1014,7 +1051,8 @@ class TestTimeOpGraph(_CudaTestCase):
         self.assertEqual(got["timer"], "cuda_event")        # the `timer` field is how the UT sees it
         self.assertEqual(got["ms"], 6.0)
         self.assertEqual(self.stack.replays, 0)
-        self.assertEqual(box["n"], 8)                       # 3 failed-capture warmups + 2 + 3
+        # 3 failed-capture warmups + 2 warmup + 3 samples + the host probe's warmups and launches
+        self.assertEqual(box["n"], 8 + 3 + hl._HOST_PROBE_LAUNCHES)
 
     def test_graph_replay_can_also_be_timed_hot(self):
         hl.time_op(lambda: None, warmup=1, repeats=2, graph=True, flush_cache=False)
@@ -1028,6 +1066,21 @@ class TestTimingResult(unittest.TestCase):
 
     def test_the_bare_form_is_the_device_ms_the_speedup_is_scored_on(self):
         self.assertEqual(hl._timing_result(1.5, 2.25, "cuda_event", False), 1.5)
+
+    def test_the_receipt_keys_travel_together_or_not_at_all(self):
+        # A consumer tells "host-bound" from "cannot tell" by PRESENCE, so half a receipt reads as a
+        # whole one. host_ms is the sole gate on both keys.
+        self.assertEqual(hl._timing_result(1.5, 2.25, "cuda_event", True, 0.5, True),
+                         {"ms": 1.5, "wall_ms": 2.25, "timer": "cuda_event",
+                          "host_ms": 0.5, "primed": True})
+        self.assertEqual(set(hl._timing_result(1.5, 2.25, "cuda_event", True, None, True)),
+                         {"ms", "wall_ms", "timer"})
+
+    def test_primed_is_serialized_as_a_real_bool_for_the_receipt_json(self):
+        # The receipt is a JSON line the gate parses; an int here serializes as 0/1 and misses `=== true`.
+        got = hl._timing_result(1.5, 2.25, "cuda_event", True, 0.5, 1)
+        self.assertIs(got["primed"], True)
+        self.assertIn('"primed": true', json.dumps(got))
 
 
 # --------------------------------------------------------------------------- #
