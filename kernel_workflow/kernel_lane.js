@@ -209,6 +209,10 @@ const KB_COLD_DIRECTION = String(A.kb_cold_direction != null ? A.kb_cold_directi
 let kbCapBound = 0;      // rounds where the cap actually had to strip something
 const UPDATE_EXPERIENCE = String(A.update_experience != null ? A.update_experience : 'on').trim().toLowerCase() || 'on';
 const UPDATE_EXPERIENCE_ON = UPDATE_EXPERIENCE !== 'off' && UPDATE_EXPERIENCE !== 'false' && UPDATE_EXPERIENCE !== 'none';
+// Did the CALLER freeze this kernel through oracle_freezer? Only the bake-off dispatcher does, so this
+// tells director whether a GEAK_TIMING_RECEIPT is producible at all before it gates on one. Must be an
+// ARG: this file never runs Freeze itself, and a workflow script has no filesystem access to go looking.
+const FROZEN_ORACLE = String(A.frozen_oracle != null ? A.frozen_oracle : 'false') === 'true';
 
 // ---------------------------------------------------------------------------
 // WARM-START (local experience KB). Before the optimize loop, search the machine-produced
@@ -549,6 +553,9 @@ const VALIDATE_SCHEMA = obj({
   director_verified_speedup_weighted: { type: 'number' }, // PRIMARY when workload_aligned
   tech_lead_reported_speedup_geomean: { type: 'number' },
   validation_status: { type: 'string' }, correctness: { type: 'string' },
+  // clean | host_bound | unprimed | unknown | not_applicable. Declared so the relaying agent has no
+  // reason to drop it -- the gate calls it REQUIRED so a speedup never travels downstream unlabelled.
+  timing_basis: { type: 'string' },
   per_case: perCase, applied_to_original: { type: 'string' },
   arbitration_note: { type: 'string' }, final_patch: { type: 'string' },
 }, ['director_verified_speedup_geomean', 'validation_status']);
@@ -1672,7 +1679,7 @@ phase('Validate');
 const validation = await agentT(
   roleAgent('director', 'validate', 'Independently validate the final patch vs the TRUE baseline.', {
     KERNEL_PATH_ORIG, EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
-    APPLY_TO_ORIGINAL, COMMANDMENT,
+    APPLY_TO_ORIGINAL, COMMANDMENT, FROZEN_ORACLE: FROZEN_ORACLE ? 'true' : 'false',
     FINAL_PATCH: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
     TECH_LEAD_REPORTED_GEOMEAN: report ? report.final_speedup_geomean : cumulative,
     ...(HAS_WORKLOAD && report && report.final_speedup_weighted != null
@@ -1878,6 +1885,10 @@ return {
   final_arithmetic: validation ? validation.director_verified_speedup_arithmetic : null,
   tech_lead_reported_geomean: report ? report.final_speedup_geomean : cumulative,
   validation_status: validation ? validation.validation_status : 'unknown',
+  // What KIND of number `final_speedup` is, so bake-off ranking and campaign summaries don't read a
+  // host_bound/unprimed float as a clean device-time win. 'not_applicable' = this lane's own baseline
+  // ratio, no frozen-oracle receipt behind it.
+  timing_basis: validation ? validation.timing_basis || 'unknown' : 'unknown',
   rounds: report ? report.rounds : round,
   budget_used: dispatched,
   budget_total: BUDGET,
