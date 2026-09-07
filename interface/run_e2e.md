@@ -42,6 +42,10 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "launch_recipe": "/path/baseline_config.with_envs.yaml",  // optional launch script/recipe
   "raw_baseline_tput": 1485.4,           // caller's pre-change session baseline (audit reference)
   "orchestrator_best_tput_same_config": 1550.8, // caller best measured with accepted_flags/env
+  "same_config_observed_identity": {     // optional observed upstream server facts
+    "backend": "sglang",
+    "server_args": { "model_path": "/models/Qwen-Qwen3.5-27B", "tp_size": 8 }
+  },
   "exp_root": "/work/experiment/geak",   // basename MUST be `geak`; the timestamped run dir is created here
   "bench_client": "auto",                // auto|inferencex|native — see口径 alignment below
   "inferencex_path": "/opt/InferenceX",  // optional; else taken from $INFERENCEX_PATH
@@ -81,6 +85,7 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 | `launch_recipe` | `launch_script` | optional |
 | `raw_baseline_tput` | result audit metadata | pre-change session baseline; never used as the measurement-alignment signal |
 | `orchestrator_best_tput_same_config` | result alignment metadata | caller throughput on the accepted config GEAK uses for its baseline |
+| `same_config_observed_identity` | result identity metadata | optional upstream observed server facts; compared to GEAK's Setup `ServerArgs` / Magpie launch evidence |
 | `exp_root` | `exp_root` | run dir root |
 | (derived from `exp_root`) | `tracelens` | auto-discovered upstream TraceLens / kernel-agent artifacts (see below); only non-null paths forwarded; key omitted entirely when none found |
 | `bench_client` / `inferencex_path` | env `BENCH_CLIENT` + `INFERENCEX_PATH` | exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
@@ -152,17 +157,37 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
     "orchestrator_baseline_tok_s": 1485.4,
     "raw_session_baseline_divergence_pct": 4.44, // audit only; includes accepted config gain
     "orchestrator_best_tput_same_config": 1550.8,
-    "current_best_same_config_divergence_pct": 0.04, // primary alignment metric
+    "current_best_same_config_divergence_pct": 0.04, // Setup seed vs upstream same-config reference
     "measurement_divergence_pct": 0.04 // backward-compatible alias
   },
   "baseline_alignment": {
+    // compatibility alias: numeric Setup-seed comparison only
     "status": "aligned | warning | warning_recipe_unaligned | unavailable",
-    "primary_metric": "current_best_same_config_divergence_pct",
+    "primary_metric": "setup_seed_same_config_divergence_pct",
     "divergence_pct": 0.04,
     "warning_threshold_pct": 3.0,
     "raw_session_divergence_is_measurement_signal": false,
     "recipe_aligned_with_orchestrator": true   // false => the two harnesses served different stacks
   },
+  "handoff_alignment": {                // authoritative cross-handoff verdict
+    "status": "aligned | warning | warning_recipe_unaligned | identity_mismatch | unverified | unavailable",
+    "metric_status": "aligned | warning | warning_recipe_unaligned | unavailable",
+    "primary_metric": "setup_seed_same_config_divergence_pct",
+    "server_identity": {
+      "expected": { /* upstream handoff observation */ },
+      "observed": { /* GEAK Setup ServerArgs or Magpie identity */ },
+      "status": "matched | mismatched | unverified | unavailable",
+      "evidence_paths": [".../baseline/server.log", ".../baseline/magpie_launch.log"]
+    }
+  },
+  "measurement_drift": {                // Setup vs Validate/base, never cross-handoff alignment
+    "status": "measured | unavailable",
+    "setup_baseline_tok_s": 1498.2,
+    "validation_base_tok_s": 1551.4,
+    "drift_pct": 3.55,
+    "evidence_paths": [".../baseline/bench_summary.json", ".../validation/base/bench_summary.json"]
+  },
+  "server_identity": { /* same identity block as handoff_alignment.server_identity */ },
   "serving_stack": {                       // WHO launched the servers, and what they picked
     "launcher": "magpie | native",
     "launch_script": "/.../benchmarks/vllm_mi355x.sh",  // "" on the native path
@@ -297,16 +322,28 @@ no extra steps.** Applying `final_patch` by hand also requires the `cache_invali
 `in_final_bundle: false` means Finalize could not get the tuning into the bundle — the headline number
 will not reproduce from it.
 
-`raw_session_baseline_divergence_pct` compares GEAK's accepted-config baseline
+`raw_session_baseline_divergence_pct` compares GEAK's Setup seed baseline
 with the caller's pre-change session baseline. It is audit-only because it
 includes configuration gains accepted before GEAK started.
 
-`current_best_same_config_divergence_pct` compares the same accepted
-configuration in both harnesses and is the primary alignment metric.
+`current_best_same_config_divergence_pct` compares the Setup seed and the same
+accepted configuration in both harnesses. It is the numeric compatibility
+metric for the cross-handoff comparison; `handoff_alignment` is the
+authoritative verdict and is `unverified` until actual Setup launch evidence
+matches an upstream observed identity. GEAK reads that evidence from
+`baseline/server.log` (parsed SGLang `ServerArgs`) or
+`baseline/magpie_launch.log` (an emitted launch identity) and records every
+existing evidence path in `server_identity.evidence_paths`.
 `measurement_divergence_pct` remains an exact compatibility alias for existing
 callers. If the handoff omits `orchestrator_best_tput_same_config`, both
-same-config fields are `null` and `baseline_alignment.status` is `unavailable`;
+same-config fields are `null` and `handoff_alignment.status` is `unavailable`;
 GEAK never falls back to the raw-session divergence as a drift signal.
+
+`measurement_drift` separately compares the Setup baseline with the
+Validate/base leg. It is `unavailable`, not zero, when Validate did not
+re-measure a base leg. The Validate/base → final pair remains the optimization
+metric and the source of the headline `throughput_speedup`; it cannot replace
+the Setup-derived handoff verdict.
 
 ### Same config is not the same stack
 

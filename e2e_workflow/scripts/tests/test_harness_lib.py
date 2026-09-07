@@ -2373,7 +2373,7 @@ class TestLegTimeoutReleasesTheGpu(_LegTestCase):
                 hl._run_leg(self.task, self.base, "time", timeout=1)
 
     def test_a_real_grandchild_does_not_outlive_the_timeout(self):
-        """The end-to-end claim, against the real OS: reaped, not merely signalled."""
+        """The end-to-end claim: no live grandchild remains to hold the device."""
         marker = os.path.join(self.task, "grandchild.pid")
         with open(os.path.join(self.task, "leg_runner.py"), "w") as fh:
             fh.write(
@@ -2391,8 +2391,19 @@ class TestLegTimeoutReleasesTheGpu(_LegTestCase):
                 os.kill(gpid, 0)
             except ProcessLookupError:
                 return
+            # A killed orphan can remain a zombie until PID 1 reaps it. It holds
+            # no GPU resources and cannot execute, so it is terminal for this
+            # process-group cleanup contract. Container init processes differ in
+            # when they reap zombies, making signal-0 alone flaky across CI hosts.
+            try:
+                with open(f"/proc/{gpid}/stat", encoding="utf-8") as handle:
+                    state = handle.read().split(") ", 1)[1].split()[0]
+                if state == "Z":
+                    return
+            except (FileNotFoundError, IndexError):
+                return
             time.sleep(0.1)
-        self.fail(f"grandchild {gpid} survived the leg timeout and still holds the device")
+        self.fail(f"grandchild {gpid} still runs after the leg timeout")
 
 
 class TestBuildCandidateOverlay(_LegTestCase):

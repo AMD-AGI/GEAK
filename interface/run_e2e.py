@@ -22,10 +22,13 @@ All Claude-SDK / ``--effort`` / args-mapping detail lives HERE, inside this
 repo, so the external caller only deals with two JSON files + one command
 path. See interface/run_e2e.md for the full contract.
 """
+
 from __future__ import annotations
 
+import ast
 import atexit
 import glob
+import hashlib
 import json
 import math
 import os
@@ -33,6 +36,7 @@ import re
 import shlex
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -50,6 +54,14 @@ except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
 
 SCHEMA_VERSION = 2
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
+E2E_CHECKPOINT_SCHEMA_VERSION = 2
+E2E_CHECKPOINT_FILE = "e2e_validation.json"
+E2E_CHECKPOINT_LEVELS = {
+    "integrator",
+    "config_sweep",
+    "tuning_skillset",
+    "final_pair",
+}
 
 # result.json must never state a speedup its own baseline/final pair
 # contradicts. Anything beyond this absolute gap on final/baseline means the
@@ -151,8 +163,14 @@ DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
 # case-by-case patch. A knob whose backend has no mapping is left to the adapter
 # default (we never guess a flag name for an unknown stack).
 _SERVING_FIDELITY_FLAGS: dict[str, dict[str, str]] = {
-    "vllm": {"max_model_len": "--max-model-len", "mem_fraction": "--gpu-memory-utilization"},
-    "sglang": {"max_model_len": "--context-length", "mem_fraction": "--mem-fraction-static"},
+    "vllm": {
+        "max_model_len": "--max-model-len",
+        "mem_fraction": "--gpu-memory-utilization",
+    },
+    "sglang": {
+        "max_model_len": "--context-length",
+        "mem_fraction": "--mem-fraction-static",
+    },
 }
 
 
@@ -239,12 +257,7 @@ def _fold_serving_fidelity_flags(
 # handoff (stable)  ->  e2e_workflow.js args (volatile, owned here)
 # ---------------------------------------------------------------------------
 def _as_float(v, default: float = 0.0) -> float:
-    """Coerce a JSON-ish value to a float, defaulting rather than raising.
-
-    Used on gate arithmetic over agent-authored JSON, where a number can arrive as a string or as
-    null. Defaulting to 0.0 makes a malformed value fail a `> 1.0` gate, which is the safe direction:
-    an unreadable speedup is not evidence of a win.
-    """
+    """Coerce a JSON-ish value to a float, failing closed for gate arithmetic."""
     try:
         return float(v)
     except (TypeError, ValueError):
@@ -289,8 +302,7 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     )
     initial_env = (
         " ".join(
-            shlex.quote(f"{key}={value}")
-            for key, value in effective.final_env.items()
+            shlex.quote(f"{key}={value}") for key, value in effective.final_env.items()
         )
         if effective is not None
         else (h.get("accepted_env", "") or "")
@@ -356,7 +368,9 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget);
     # this lets an operator widen it per run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
     # Optional: unset means the JS default, so no caller (Hyperloom included) has to set it.
-    final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
+    final_reserve_s = _int_or_none(
+        os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S"
+    )
     if final_reserve_s is not None:
         ps_args["final_reserve_s"] = final_reserve_s
     if h.get("launch_recipe"):
@@ -409,7 +423,9 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # not do. So it stays enabled by default and is only overridden on request.
     # Omitted keys => the workflow's own defaults, byte-identical to a direct call.
     if h.get("tuning_skillset") is not None:
-        ps_args["tuning_skillset"] = "true" if _as_bool(h["tuning_skillset"]) else "false"
+        ps_args["tuning_skillset"] = (
+            "true" if _as_bool(h["tuning_skillset"]) else "false"
+        )
     # tuning-kb is the skillset's per-model ANSWER KEY: right for production, but it
     # must be off for a blind evaluation or the agent can look the result up instead
     # of deriving it.
@@ -544,8 +560,7 @@ def build_prompt(ps_args: dict) -> str:
     # budget; enforcement lives entirely in the JS (the time_budget_s arg drives the
     # setTimeout deadlines), and the value is already passed via args.time_budget_s.
     return (
-        PROCESS_SAFETY
-        + "Invoke the Workflow tool exactly once with:\n"
+        PROCESS_SAFETY + "Invoke the Workflow tool exactly once with:\n"
         f'  scriptPath: "{E2E_SCRIPT}"\n'
         f"  args: {json.dumps(ps_args)}\n"
         "CRITICAL: pass `args` as a real JSON OBJECT (a mapping), NOT as a "
@@ -563,8 +578,7 @@ def build_prompt(ps_args: dict) -> str:
         "accepted_kernels, accepted_config). If for ANY reason "
         f'"{eval_dir}/workflow_return.json" does not exist when the tool returns, '
         "write that exact return value there yourself with the Write tool before "
-        "printing. Print nothing after the JSON line."
-        + tracelens_block
+        "printing. Print nothing after the JSON line." + tracelens_block
     )
 
 
@@ -581,7 +595,9 @@ def apply_bench_client(h: dict) -> str:
     environment so every ``bench_e2e.sh`` invocation the agents make inherits it.
     """
     requested = str(h.get("bench_client", "auto") or "auto").strip().lower()
-    ix_path = str(h.get("inferencex_path") or os.environ.get("INFERENCEX_PATH", "")).strip()
+    ix_path = str(
+        h.get("inferencex_path") or os.environ.get("INFERENCEX_PATH", "")
+    ).strip()
     if ix_path:
         os.environ["INFERENCEX_PATH"] = ix_path
     if requested == "auto":
@@ -620,22 +636,35 @@ _RECIPE_KEYS = ("inferencex_path", "benchmark_script", "framework", "runner_type
 #
 # The overlay is on the list for a different reason: applying it is the entire
 # purpose of a GEAK run, so the orchestrator's PYTHONPATH must not displace it.
-_RECIPE_ENV_GEAK_OWNED = frozenset({
-    "PORT", "RESULT_DIR", "SERVER_LOG", "PROFILE", "PROFILE_DIR", "PYTHONPATH",
-    "MAGPIE_RUN_PHASE", "MAGPIE_SERVER_PID_FILE", "BENCHMARK_BASE_URL",
-    # What this run was asked to serve, not what the recipe happened to record.
-    # The launcher passes both explicitly and so overrides them by ordering
-    # anyway; naming them here is what keeps RECIPE_ENV_REPLAYED honest instead
-    # of advertising a variable a later layer silently displaces.
-    "MODEL", "TP",
-    # GPU pinning: the recipe names whichever of these its own runner used, and
-    # any of them left at the orchestrator's value would fight the device this
-    # run was allocated. Filtering them from the RECIPE replay is independent of
-    # how the launcher pins devices (ROCR-only on a bare box vs HIP-on-top when
-    # an outer ROCR mask is already set — see magpie.sh).
-    "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
-    "VLLM_TORCH_PROFILER_DIR", "SGLANG_TORCH_PROFILER_DIR",
-})
+_RECIPE_ENV_GEAK_OWNED = frozenset(
+    {
+        "PORT",
+        "RESULT_DIR",
+        "SERVER_LOG",
+        "PROFILE",
+        "PROFILE_DIR",
+        "PYTHONPATH",
+        "MAGPIE_RUN_PHASE",
+        "MAGPIE_SERVER_PID_FILE",
+        "BENCHMARK_BASE_URL",
+        # What this run was asked to serve, not what the recipe happened to record.
+        # The launcher passes both explicitly and so overrides them by ordering
+        # anyway; naming them here is what keeps RECIPE_ENV_REPLAYED honest instead
+        # of advertising a variable a later layer silently displaces.
+        "MODEL",
+        "TP",
+        # GPU pinning: the recipe names whichever of these its own runner used, and
+        # any of them left at the orchestrator's value would fight the device this
+        # run was allocated. Filtering them from the RECIPE replay is independent of
+        # how the launcher pins devices (ROCR-only on a bare box vs HIP-on-top when
+        # an outer ROCR mask is already set — see magpie.sh).
+        "HIP_VISIBLE_DEVICES",
+        "CUDA_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
+        "VLLM_TORCH_PROFILER_DIR",
+        "SGLANG_TORCH_PROFILER_DIR",
+    }
+)
 
 
 # A shell environment-variable name: a leading letter/underscore then word
@@ -804,8 +833,10 @@ def _recipe_env_block_scan(text: str) -> dict[str, str]:
         # followed by chomping/indent indicators (+, -, digits). Consume the
         # more-indented block, joining folded scalars with spaces and literal
         # scalars with newlines (both word-split harmlessly as server args).
-        if value and value[0] in "|>" and (
-            len(value) == 1 or set(value[1:]) <= set("+-0123456789")
+        if (
+            value
+            and value[0] in "|>"
+            and (len(value) == 1 or set(value[1:]) <= set("+-0123456789"))
         ):
             folded = value[0] == ">"
             block_lines: list[str] = []
@@ -836,9 +867,7 @@ def _recipe_env_block_scan(text: str) -> dict[str, str]:
             # ahead so the fallback preserves that same set-but-empty semantic
             # while still skipping nested values and their children.
             j = i
-            while j < n and (
-                not lines[j].strip() or lines[j].lstrip().startswith("#")
-            ):
+            while j < n and (not lines[j].strip() or lines[j].lstrip().startswith("#")):
                 j += 1
             if j < n and (len(lines[j]) - len(lines[j].lstrip())) > indent:
                 nested_indent = indent
@@ -897,9 +926,7 @@ def _recipe_env_block(recipe_path: str) -> dict[str, str]:
     except OSError:
         return {}
     except UnicodeDecodeError as exc:
-        return _recipe_env_fail_closed(
-            recipe_path, f"is not valid UTF-8 ({exc})"
-        )
+        return _recipe_env_fail_closed(recipe_path, f"is not valid UTF-8 ({exc})")
     try:
         parsed = _recipe_envs_from_yaml(text)
     except _RecipeYAMLError as exc:
@@ -1148,9 +1175,11 @@ def apply_bench_launcher(h: dict) -> str:
 
     Returns the resolved launcher name (for --dry-run / logging).
     """
-    requested = str(
-        h.get("bench_launcher") or os.environ.get("BENCH_LAUNCHER", "") or ""
-    ).strip().lower()
+    requested = (
+        str(h.get("bench_launcher") or os.environ.get("BENCH_LAUNCHER", "") or "")
+        .strip()
+        .lower()
+    )
     backend = str(h.get("framework", "sglang") or "sglang").strip().lower()
     # Discover the Magpie launch script, most explicit source first: handoff,
     # generic env, per-backend env (MAGPIE_SGLANG_SCRIPT / MAGPIE_VLLM_SCRIPT),
@@ -1447,21 +1476,8 @@ def apply_bench_protocol(h: dict) -> dict:
             "GEAK_REPEAT_MODE": "isolated_server",
             "REPLICA_RETRIES": "1",
         }
-        # NUM_PROMPTS was the one protocol knob this block did not align, and
-        # the two sides disagree by default: bench_e2e.sh falls back to Magpie's
-        # fixed CONC*10, while the caller's own materializer scales the count
-        # DOWN as the per-request sequence cost grows
-        # ({<=1024:10, <=4096:5, <=16384:3, else 2} * CONC -- Hyperloom
-        # ``_workload_envs.py``). At ISL+OSL=2048 that is 5*CONC there against
-        # 10*CONC here: a different saturation regime, so a different tok/s,
-        # measured under a header claiming the protocols match.
-        #
-        # bench_e2e.sh already implements that exact table (same thresholds,
-        # same max(CONC*factor, CONC) clamp) behind NUM_PROMPTS_ADAPTIVE, so
-        # aligning means switching it on rather than restating the arithmetic
-        # in a second place that can drift. Only when the handoff did NOT pin a
-        # count: an explicit num_prompts is the caller telling us what it
-        # measured, and it still wins.
+        # Match Hyperloom's adaptive prompt-count rule when no explicit count
+        # was recorded in the handoff. An explicit protocol value still wins.
         if not str(protocol.get("num_prompts") or "").strip():
             aligned["NUM_PROMPTS_ADAPTIVE"] = "1"
         for env_var, value in aligned.items():
@@ -1602,10 +1618,10 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
         # types exist in both old and new SDKs, so name-matching keeps one code
         # path working across versions without import coupling).
         chunks: list[str] = []
-        pending: set[str] = set()   # started-but-unfinished background tasks
-        bg_started = False          # did the workflow ever background a task?
-        terminal_task = False       # saw a TaskNotification (completed/failed)
-        saw_result = False          # the main turn's ResultMessage arrived
+        pending: set[str] = set()  # started-but-unfinished background tasks
+        bg_started = False  # did the workflow ever background a task?
+        terminal_task = False  # saw a TaskNotification (completed/failed)
+        saw_result = False  # the main turn's ResultMessage arrived
         # Enforce the orchestrator's budget INSIDE the SDK path so we self-stop
         # before Hyperloom's outer kill_timeout SIGKILLs us (a SIGKILL would
         # skip result.json flushing entirely). anyio raises TimeoutError on
@@ -1691,6 +1707,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
         # Legacy fallback for SDKs lacking ClaudeSDKClient. Behaves like the
         # original one-shot query (works for the synchronous in-turn path).
         from claude_agent_sdk import query
+
         chunks: list[str] = []
         with anyio.fail_after(timeout_s):
             async for msg in query(prompt=prompt, options=_opts()):
@@ -1703,18 +1720,29 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
 def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
     claude = shutil.which("claude") or os.environ.get("CLAUDE_BIN", "claude")
     cmd = [
-        claude, "-p", prompt,
-        "--output-format", "json",
-        "--settings", WORKFLOW_SETTINGS,
-        "--model", CLAUDE_MODEL,
-        "--allowed-tools", ",".join(ALLOWED_TOOLS),
-        "--permission-mode", "auto",
+        claude,
+        "-p",
+        prompt,
+        "--output-format",
+        "json",
+        "--settings",
+        WORKFLOW_SETTINGS,
+        "--model",
+        CLAUDE_MODEL,
+        "--allowed-tools",
+        ",".join(ALLOWED_TOOLS),
+        "--permission-mode",
+        "auto",
     ]
     if CLAUDE_EFFORT in VALID_EFFORTS:
         cmd += ["--effort", CLAUDE_EFFORT]
     env = dict(os.environ, IS_SANDBOX="1")
     proc = subprocess.run(
-        cmd, cwd=str(E2E_DIR), env=env, capture_output=True, text=True,
+        cmd,
+        cwd=str(E2E_DIR),
+        env=env,
+        capture_output=True,
+        text=True,
         timeout=timeout_s,
     )
     if proc.returncode != 0:
@@ -1736,6 +1764,7 @@ def invoke_workflow(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
     """Run the JS workflow and return its parsed JSON return value."""
     try:
         import claude_agent_sdk  # noqa: F401
+
         raw = _invoke_via_sdk(prompt, timeout_s, eval_dir)
     except ImportError:
         raw = _invoke_via_cli(prompt, timeout_s)
@@ -1790,7 +1819,7 @@ def _iter_json_objects(raw: str):
                     start = -1
     # 2) Per-line fallback (cheap; catches compact single-line returns the scan
     #    above already covers, but keeps behaviour stable on odd inputs).
-    for line in (text.splitlines()):
+    for line in text.splitlines():
         s = line.strip()
         if not (s.startswith("{") and s.endswith("}")):
             continue
@@ -1875,8 +1904,11 @@ def read_orchestrator_hot_baseline(h: dict) -> float:
     if not exp_root:
         return 0.0
     p = Path(exp_root)
-    for cand in (p / "state.json", p.parent / "state.json",
-                 p.parent.parent / "state.json"):
+    for cand in (
+        p / "state.json",
+        p.parent / "state.json",
+        p.parent.parent / "state.json",
+    ):
         st = _read_json(cand)
         if not st:
             continue
@@ -1923,7 +1955,7 @@ def _best_ledger_win(wf: dict) -> dict | None:
     dropped. Returns ``None`` when the ledger is absent or holds no positive
     direction (never fabricates a winner).
     """
-    ledger = (((wf.get("state") or {}).get("history") or {}).get("ledger") or [])
+    ledger = ((wf.get("state") or {}).get("history") or {}).get("ledger") or []
     best: dict | None = None
     best_delta = 0.0
     for entry in ledger:
@@ -1943,7 +1975,7 @@ def _best_ledger_win(wf: dict) -> dict | None:
 def _state_op_names(wf: dict, queue: str) -> set[str]:
     """``short_name`` set of the return's ``state.<queue>`` (headQueue|kernelQueue)."""
     names: set[str] = set()
-    for op in ((wf.get("state") or {}).get(queue) or []):
+    for op in (wf.get("state") or {}).get(queue) or []:
         if isinstance(op, dict) and op.get("short_name"):
             names.add(str(op["short_name"]))
     return names
@@ -2007,6 +2039,244 @@ def _build_baseline_alignment(
         "warning_threshold_pct": SAME_CONFIG_DIVERGENCE_WARN_PCT,
         "raw_session_divergence_is_measurement_signal": False,
         "recipe_aligned_with_orchestrator": recipe_aligned,
+    }
+
+
+_HANDOFF_IDENTITY_KEYS = (
+    # Newer handoffs can name the upstream observation explicitly. Keep the
+    # historical names too: they are opaque hashes in older handoffs, but can
+    # still be matched if Magpie's launch evidence records the same hash.
+    "same_config_observed_identity",
+    "observed_server_identity",
+    "same_config_reference_observed_identity",
+    "same_config_reference_identity",
+    "same_config_expected_identity",
+)
+_SERVER_ARGS_IDENTITY_KEYS = (
+    "model_path",
+    "tokenizer_path",
+    "served_model_name",
+    "tp_size",
+    "dp_size",
+    "mem_fraction_static",
+    "context_length",
+    "chunked_prefill_size",
+    "quantization",
+    "dtype",
+    "kv_cache_dtype",
+    "attention_backend",
+    "prefill_attention_backend",
+    "decode_attention_backend",
+    "disable_radix_cache",
+    "trust_remote_code",
+)
+
+
+def _balanced_server_args(text: str) -> str:
+    """Return one complete ``ServerArgs(...)`` expression from log text."""
+    start = text.find("ServerArgs(")
+    if start < 0:
+        return ""
+    depth, quote, escaped = 0, "", False
+    for index, char in enumerate(text[start:], start):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return ""
+
+
+def _parse_sglang_server_args(text: str) -> dict[str, Any]:
+    """Extract stable, observable launch fields from SGLang's startup record."""
+    expression = _balanced_server_args(text)
+    if not expression:
+        return {}
+    try:
+        node = ast.parse(expression, mode="eval").body
+    except (SyntaxError, ValueError):
+        return {}
+    if not isinstance(node, ast.Call):
+        return {}
+    observed: dict[str, Any] = {}
+    for keyword in node.keywords:
+        if keyword.arg not in _SERVER_ARGS_IDENTITY_KEYS:
+            continue
+        try:
+            value = ast.literal_eval(keyword.value)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            observed[keyword.arg] = value
+    return observed
+
+
+def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]:
+    """Read direct launch identity evidence without loading an unbounded log."""
+    try:
+        with log_path.open(encoding="utf-8", errors="ignore") as handle:
+            lines = iter(handle)
+            for line in lines:
+                if "ServerArgs(" not in line:
+                    continue
+                # SGLang normally emits one line. Permit a wrapped startup
+                # record too, but cap it so a malformed log cannot grow memory.
+                record = line
+                while not _balanced_server_args(record) and len(record) < 65536:
+                    try:
+                        record += next(lines)
+                    except StopIteration:
+                        break
+                server_args = _parse_sglang_server_args(record)
+                if server_args:
+                    return {"backend": "sglang", "server_args": server_args}, ""
+    except OSError:
+        return {}, ""
+
+    # A Magpie recipe can log its immutable identity directly. This is useful
+    # for backends other than SGLang and for opaque upstream digest identities.
+    try:
+        with log_path.open(encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                match = re.search(
+                    r"\b(?:observed_)?(?:server_|launch_)?identity\s*[:=]\s*"
+                    r"['\"]?([A-Za-z0-9][A-Za-z0-9:._-]*)",
+                    line,
+                )
+                if match:
+                    return {"launch_identity": match.group(1)}, ""
+    except OSError:
+        pass
+    return {}, ""
+
+
+def _handoff_observed_identity(handoff: dict) -> tuple[Any, str]:
+    """Return the upstream identity exactly as supplied, never synthesized."""
+    for key in _HANDOFF_IDENTITY_KEYS:
+        value = handoff.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip(), key
+        if isinstance(value, dict) and value:
+            return value, key
+    baseline_spec = handoff.get("baseline_env_spec")
+    if isinstance(baseline_spec, dict):
+        value = baseline_spec.get("launch_identity")
+        if isinstance(value, str) and value.strip():
+            return value.strip(), "baseline_env_spec.launch_identity"
+    return None, ""
+
+
+def _identity_value_equal(expected: Any, observed: Any) -> bool | None:
+    """Compare an upstream identity to observed launch facts conservatively.
+
+    ``None`` means the two records cannot be compared, rather than a mismatch.
+    That distinction prevents a partial ServerArgs record from being presented
+    as a verified identity check.
+    """
+    if isinstance(expected, str):
+        if not isinstance(observed, dict) or not observed.get("launch_identity"):
+            return None
+        return expected == observed["launch_identity"]
+    if not isinstance(expected, dict) or not isinstance(observed, dict):
+        return None
+    expected_token = expected.get("launch_identity") or expected.get("identity")
+    if isinstance(expected_token, str):
+        observed_token = observed.get("launch_identity")
+        if not observed_token:
+            return None
+        return expected_token == observed_token
+    expected_args = expected.get("server_args", expected)
+    observed_args = observed.get("server_args", observed)
+    if not isinstance(expected_args, dict) or not isinstance(observed_args, dict):
+        return None
+    # An upstream observation may intentionally include only a subset. Missing
+    # observed fields are a verification failure, never silently ignored.
+    comparable_keys = [
+        key
+        for key in expected_args
+        if key
+        not in {"backend", "launch_identity", "identity", "source", "evidence_paths"}
+    ]
+    if not comparable_keys:
+        return None
+    if any(key not in observed_args for key in comparable_keys):
+        return None
+    for key, expected_value in expected_args.items():
+        if key not in comparable_keys:
+            continue
+        if observed_args[key] != expected_value:
+            return False
+    expected_backend = expected.get("backend")
+    observed_backend = observed.get("backend")
+    return not expected_backend or expected_backend == observed_backend
+
+
+def _server_identity_alignment(handoff: dict, eval_dir: Path) -> dict[str, Any]:
+    """Compare upstream identity with actual Setup-server launch evidence."""
+    expected, expected_source = _handoff_observed_identity(handoff)
+    candidates = [
+        eval_dir / "baseline" / "server.log",
+        eval_dir / "baseline" / "magpie_launch.log",
+    ]
+    evidence_paths = [str(path) for path in candidates if path.is_file()]
+    observed: dict[str, Any] = {}
+    for path in candidates:
+        observed, _ = _read_server_identity_evidence(path)
+        if observed:
+            break
+
+    if expected is None:
+        status = "unavailable"
+    elif not observed:
+        status = "unverified"
+    else:
+        equal = _identity_value_equal(expected, observed)
+        status = "unverified" if equal is None else "matched" if equal else "mismatched"
+    return {
+        "expected": expected,
+        "expected_source": expected_source or None,
+        "observed": observed or None,
+        "status": status,
+        "evidence_paths": evidence_paths,
+    }
+
+
+def _build_handoff_alignment(
+    setup_same_config_divergence_pct: float | None,
+    *,
+    recipe_aligned: bool,
+    server_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Classify the Setup-to-upstream comparison independently of Validate."""
+    metric = _build_baseline_alignment(setup_same_config_divergence_pct, recipe_aligned)
+    identity_status = server_identity.get("status")
+    if metric["status"] == "unavailable":
+        status = "unavailable"
+    elif identity_status == "mismatched":
+        status = "identity_mismatch"
+    elif identity_status != "matched":
+        # Older handoffs lack an upstream observed identity. A close throughput
+        # number alone is not proof that the same server was launched.
+        status = "unverified"
+    else:
+        status = metric["status"]
+    return {
+        **metric,
+        "status": status,
+        "metric_status": metric["status"],
+        "primary_metric": "setup_seed_same_config_divergence_pct",
+        "server_identity": server_identity,
     }
 
 
@@ -2075,42 +2345,24 @@ def _cold_penalty_pct(cold: Any, hot: Any) -> float | None:
 
 
 def _overlay_has_loadable_code(path: Path) -> bool:
-    """True when ``path`` is an overlay that actually installs something.
+    """True when a root overlay will install an accepted kernel.
 
-    Finalize creates ``final/overlay`` unconditionally and drops a marker file
-    into it when nothing was accepted, so directory existence proves nothing.
-    The test is the mechanism's own contract: the overlay is activated by its
-    ROOT on ``PYTHONPATH``, and the only thing the interpreter runs from there
-    is ``<overlay>/sitecustomize.py`` (``e2e_workflow/scripts/overlay_setup.py``
-    — only the FIRST sitecustomize on the path is imported, so two overlay dirs
-    do not compound). So:
-
-      * no ``sitecustomize.py`` at the ROOT -> inert, whatever else is inside.
-        Neither a loose ``.py`` module nor a loadable ``cand_*`` SUBTREE counts:
-        the consumer is handed this path, not the child.
-      * a manifest that parses and names nothing -> the config-only overlay,
-        which imports cleanly and installs zero kernels, so advertising it books
-        a pure config win as a kernel win.
-      * a manifest that does not parse -> we cannot claim it installs anything.
-
-    Deliberately the same predicate the consumer applies (Hyperloom's
-    ``_geak_overlay_is_loadable``): declaring an overlay it will refuse to load
-    costs a revalidation, and an empty string tells it the truth.
+    Consumers activate only ``<overlay>/sitecustomize.py``. A missing or
+    malformed manifest, or one that explicitly names no modules/rebinds,
+    therefore must not be advertised as a reusable kernel overlay.
     """
     if not path.is_dir() or not (path / "sitecustomize.py").is_file():
         return False
     manifest = path / "_overlay_manifest.json"
     if not manifest.is_file():
-        # No manifest is the pre-manifest overlay shape: absence of evidence is
-        # not evidence of an empty overlay, and the sitecustomize still runs.
         return True
     try:
-        spec = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
         return False
-    if not isinstance(spec, dict):
+    if not isinstance(payload, dict):
         return False
-    return bool(spec.get("modules") or spec.get("rebinds") or spec.get("captures"))
+    return bool(payload.get("modules") or payload.get("rebinds"))
 
 
 def _patch_has_hunks(path: Path) -> bool:
@@ -2131,72 +2383,41 @@ def _patch_has_hunks(path: Path) -> bool:
 
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# Shell control characters. A value carrying one of these is not a value: it is
-# a fragment of the launch script that leaked into the assignment string.
 _ENV_VALUE_SHELL_CHARS = ";&|<>()`"
 
 
 def _parse_env_assignments(env: str) -> tuple[dict, list]:
-    """Split an ``A=1 B=2`` string into ``({k: v}, [unparsable fragments])``.
-
-    ``accepted_config.env`` is a shell string assembled from launch-script
-    lines, so syntax travels with it and a consumer's naive ``s.split()`` +
-    ``split("=")`` turns ``)``, ``true;`` and ``sglang;`` into environment
-    variables — which is exactly how ``EXTRA_ENV=").", RUN_EVAL="true;",
-    BACKEND="sglang;"`` reached a downstream rebench.
-
-    So GEAK does the split once and publishes the result: a key must be a real
-    identifier, a value must be free of shell control characters, and a trailing
-    ``;`` (a statement separator the line-joining left behind) is stripped first.
-    Anything that still fails goes to the reject list rather than being dropped,
-    so a consumer can see the string was lossy instead of trusting a map that
-    quietly lost a variable.
-    """
-    ok: dict[str, str] = {}
+    """Split accepted environment text into validated assignments and rejects."""
+    valid: dict[str, str] = {}
     rejected: list[str] = []
     text = str(env or "").strip()
     if not text:
-        return ok, rejected
+        return valid, rejected
     try:
         tokens = shlex.split(text)
     except ValueError:
         tokens = text.split()
-
-    def _pair(piece: str) -> tuple[str, str] | None:
-        key, sep, value = piece.partition("=")
-        if (
-            sep
-            and _ENV_KEY_RE.match(key)
-            and not any(c in value for c in _ENV_VALUE_SHELL_CHARS)
-        ):
-            return key, value
-        return None
-
     for token in tokens:
-        if not token.strip():
-            continue
-        # One token can hold several assignments joined by ``;`` — a
-        # launch-script line that never got re-split. Take the whole token only
-        # if EVERY piece of it is a well-formed assignment, so a half-parsed
-        # fragment is quarantined whole instead of contributing half a truth.
-        pieces = [p for p in token.split(";") if p.strip()]
-        pairs = [_pair(p) for p in pieces]
-        if pairs and all(p is not None for p in pairs):
-            ok.update(dict(pairs))  # type: ignore[arg-type]
+        pieces = [piece for piece in token.split(";") if piece.strip()]
+        pairs = []
+        for piece in pieces:
+            key, separator, value = piece.partition("=")
+            pairs.append(
+                (key, value)
+                if separator
+                and _ENV_KEY_RE.match(key)
+                and not any(char in value for char in _ENV_VALUE_SHELL_CHARS)
+                else None
+            )
+        if pairs and all(pair is not None for pair in pairs):
+            valid.update(dict(pairs))  # type: ignore[arg-type]
         else:
             rejected.append(token)
-    return ok, rejected
+    return valid, rejected
 
 
 def _accepted_config_with_env_map(config: dict) -> dict:
-    """``accepted_config`` plus a structured, validated ``env_map``.
-
-    ``env`` is kept verbatim (it is what the run actually exported, and older
-    consumers read it), but ``env_map`` is the form a consumer should use:
-    already split, already validated. ``env_unparsed`` is present only when
-    something was dropped, which is the signal that the shell string is
-    malformed at the source.
-    """
+    """Preserve raw accepted config while publishing a safe structured env map."""
     out = dict(config)
     env_map, rejected = _parse_env_assignments(out.get("env"))
     out["env_map"] = env_map
@@ -2276,7 +2497,9 @@ def normalize_result(h: dict, wf: dict) -> dict:
     baseline_summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
     final_summary = _read_json(eval_dir / "validation" / "final" / "bench_summary.json")
     # The unpatched leg re-measured during Validate, next to the final leg.
-    base_leg_summary = _read_json(eval_dir / "validation" / "base" / "bench_summary.json")
+    base_leg_summary = _read_json(
+        eval_dir / "validation" / "base" / "bench_summary.json"
+    )
 
     # ── Reconcile a return with NO final measurement (do-no-harm guard for the
     # Hyperloom interface) ───────────────────────────────────────────────────
@@ -2294,39 +2517,53 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # itself. Overriding it here would promote the number the arbitration just
     # rejected, so the trigger is the ABSENCE of a final, never a low one. The
     # disagreement is still worth recording — see intermediate_win_not_confirmed.
-    wf_speedup_raw = float(wf.get("throughput_speedup") or validation.get("throughput_speedup") or 1.0)
+    wf_speedup_raw = float(
+        wf.get("throughput_speedup") or validation.get("throughput_speedup") or 1.0
+    )
     wf_final_raw = float(
         wf.get("final_throughput_tok_s")
         or validation.get("director_verified_throughput_tok_s")
         or 0.0
     )
     live_accepted_win = (
-        not wf.get("recovered_from_disk")
-        and _wf_best_accepted_delta_pct(wf) > 0.0
+        not wf.get("recovered_from_disk") and _wf_best_accepted_delta_pct(wf) > 0.0
     )
     intermediate_win_not_confirmed = (
         live_accepted_win and wf_final_raw > 0.0 and wf_speedup_raw <= 1.0
     )
     if live_accepted_win and wf_final_raw <= 0.0:
         recovered = _recover_best_intermediate_win(eval_dir)
-        if recovered is not None and float(recovered.get("throughput_speedup") or 0.0) > 1.0:
+        if (
+            recovered is not None
+            and float(recovered.get("throughput_speedup") or 0.0) > 1.0
+        ):
             merged = dict(wf)
-            for k in ("throughput_speedup", "baseline_throughput_tok_s",
-                      "final_throughput_tok_s", "output_parity", "ttft_ms", "tpot_ms"):
+            for k in (
+                "throughput_speedup",
+                "baseline_throughput_tok_s",
+                "final_throughput_tok_s",
+                "output_parity",
+                "ttft_ms",
+                "tpot_ms",
+            ):
                 if recovered.get(k) is not None:
                     merged[k] = recovered[k]
             # The recovered win's own overlay (C7); "" means config-only, in
             # which case whatever the return already carried still stands.
             if recovered.get("final_overlay"):
                 merged["final_overlay"] = recovered["final_overlay"]
-            merged["recovered_intermediate"] = True   # provenance -> disk_intermediate_win
+            merged["recovered_intermediate"] = (
+                True  # provenance -> disk_intermediate_win
+            )
             merged["validate_final_missing"] = True
             wf = merged
             # The Director json (the crashed bench) is kept, not erased: it is
             # the evidence for WHY we fell back here, and validation_evidence
             # reports it. Every number above is already sourced from wf first.
 
-    speedup = float(wf.get("throughput_speedup") or validation.get("throughput_speedup") or 1.0)
+    speedup = float(
+        wf.get("throughput_speedup") or validation.get("throughput_speedup") or 1.0
+    )
     status = "ok" if speedup > 1.0 else "no_gain"
 
     # Same rule as report_path: never advertise a path that does not exist.
@@ -2344,14 +2581,20 @@ def normalize_result(h: dict, wf: dict) -> dict:
     #   disk_director_validation — rebuilt from director_e2e_validation.json.
     #   disk_intermediate_win  — best accepted integrate A/B (no final Validate).
     #   disk_no_gain_synthesis — baseline measured, nothing accepted (do-no-harm).
-    if wf.get("recovered_no_gain"):
+    checkpoint_level = str(wf.get("recovered_e2e_checkpoint_level") or "")
+    if checkpoint_level:
+        result_source = f"disk_e2e_checkpoint_{checkpoint_level}"
+    elif wf.get("recovered_tuning_legacy"):
+        result_source = "disk_tuning_skillset_legacy_provisional"
+    elif wf.get("recovered_no_gain"):
         result_source = "disk_no_gain_synthesis"
     elif wf.get("recovered_intermediate"):
         # disk_stack_provisional — salvaged from candidates the integrator gated
         # "stack" (carry forward to compound), i.e. none of them cleared its bar
         # for a standalone win and no Director ever arbitrated the combination.
         result_source = (
-            "disk_stack_provisional" if wf.get("recovered_stack_provisional")
+            "disk_stack_provisional"
+            if wf.get("recovered_stack_provisional")
             else "disk_intermediate_win"
         )
     elif wf.get("recovered_from_disk"):
@@ -2376,8 +2619,10 @@ def normalize_result(h: dict, wf: dict) -> dict:
     if (
         result_source == "workflow_return"
         and speedup > 1.0
-        and (validation.get("validation_status") == "validated_win"
-             or wf.get("validation_status") == "validated_win")
+        and (
+            validation.get("validation_status") == "validated_win"
+            or wf.get("validation_status") == "validated_win"
+        )
         and not (wf.get("accepted_kernels") or wf.get("accepted_heads"))
     ):
         _win = _best_ledger_win(wf)
@@ -2393,20 +2638,17 @@ def normalize_result(h: dict, wf: dict) -> dict:
             }
             _kernels = _state_op_names(wf, "kernelQueue")
             _heads = _state_op_names(wf, "headQueue")
-            wf = dict(wf)   # don't mutate the caller's return object
+            wf = dict(wf)  # don't mutate the caller's return object
             if _name and _name in _kernels and _name not in _heads:
                 wf["accepted_kernels"] = [_entry]
             else:
                 wf["accepted_heads"] = [_entry]
             wf["attribution_backfilled"] = True
 
-    # Cross-harness measurement-protocol check. GEAK's measured baseline is
-    # seeded with the upstream orchestrator's accepted config, so compare it
-    # separately with the raw session baseline and the same-config current best.
-    # The A/B pair must be measured in the same session (see
-    # _same_session_baseline). A recovered intermediate win already carries its
-    # own paired legs (ref_med/cand_med from one integrate A/B) and a synthesized
-    # no-gain deliberately reports baseline == final, so neither may be re-based.
+    # The validation base/final pair is the optimization denominator. It is
+    # deliberately NOT the cross-handoff denominator: Validate may run long
+    # after Setup and the box's movement between them is measurement drift, not
+    # a difference between Hyperloom and GEAK.
     same_session_base, baseline_basis_source = 0.0, ""
     if not (wf.get("recovered_intermediate") or wf.get("recovered_no_gain")):
         same_session_base, baseline_basis_source = _same_session_baseline(
@@ -2414,6 +2656,11 @@ def normalize_result(h: dict, wf: dict) -> dict:
         )
     setup_baseline = _positive_finite_float(
         baseline_summary.get("throughput_tok_s_median")
+        or baseline_summary.get("output_throughput_tok_s_median")
+        # The canonical workflow return's baseline is the Setup seed. This
+        # fallback keeps disk-recovered/older runs comparable when their Setup
+        # summary was not retained; it never takes a Validate-time value.
+        or wf.get("baseline_throughput_tok_s")
     )
     geak_baseline = _positive_finite_float(
         same_session_base
@@ -2447,11 +2694,18 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # cross-harness measurement residue (identical config, both harnesses) from
     # the explore/framework config gain that is baked into the raw-baseline
     # comparison. It remains unavailable when absent from older handoffs.
-    orch_same_cfg = _positive_finite_float(
-        h.get("orchestrator_best_tput_same_config")
-    )
-    raw_session_divergence_pct = _divergence_pct(geak_baseline, orch_baseline)
-    same_config_divergence_pct = _divergence_pct(geak_baseline, orch_same_cfg)
+    orch_same_cfg = _positive_finite_float(h.get("orchestrator_best_tput_same_config"))
+    # Cross-handoff alignment is fixed to the Setup seed measurement. Never
+    # replace it with the late Validate base leg: doing so turns intra-session
+    # drift into a verdict about the handoff.
+    raw_session_divergence_pct = _divergence_pct(setup_baseline, orch_baseline)
+    same_config_divergence_pct = _divergence_pct(setup_baseline, orch_same_cfg)
+    # Only a Validate-time base leg can measure drift. ``geak_baseline`` may
+    # legitimately fall back to Setup (or an intermediate A/B) for the
+    # optimization result, and calling that a drift measurement would invent a
+    # zero-percent observation.
+    validation_base_for_drift = _positive_finite_float(same_session_base)
+    measurement_drift_pct = _divergence_pct(validation_base_for_drift, setup_baseline)
 
     # ── serving-stack provenance ─────────────────────────────────────────────
     # WHO launched the server, and WHAT kernels it selected. A cross-harness
@@ -2472,9 +2726,38 @@ def normalize_result(h: dict, wf: dict) -> dict:
             eval_dir / "validation" / "base" / "server.log"
         ),
     }
+    server_identity = _server_identity_alignment(h, eval_dir)
+    handoff_alignment = _build_handoff_alignment(
+        same_config_divergence_pct,
+        recipe_aligned=recipe_aligned,
+        server_identity=server_identity,
+    )
+    # Compatibility for callers that adopted the earlier name. Its metric now
+    # has the correct (Setup-seed) handoff semantics, while handoff_alignment
+    # carries the stricter server-identity verification verdict.
     baseline_alignment = _build_baseline_alignment(
         same_config_divergence_pct, recipe_aligned
     )
+    setup_evidence_path = eval_dir / "baseline" / "bench_summary.json"
+    validation_evidence_path = eval_dir / "validation" / "base" / "bench_summary.json"
+    measurement_drift = {
+        "status": (
+            "measured"
+            if (setup_baseline > 0.0 and validation_base_for_drift > 0.0)
+            else "unavailable"
+        ),
+        "setup_baseline_tok_s": setup_baseline or None,
+        "validation_base_tok_s": validation_base_for_drift or None,
+        "validation_base_source": (
+            baseline_basis_source if validation_base_for_drift > 0.0 else None
+        ),
+        "drift_pct": measurement_drift_pct,
+        "evidence_paths": [
+            str(path)
+            for path in (setup_evidence_path, validation_evidence_path)
+            if path.is_file()
+        ],
+    }
     baseline_basis = {
         # GEAK's own measured baseline (Hyperloom-accepted config = fair engagement baseline; gating uses this).
         "geak_measured_baseline_tok_s": geak_baseline or None,
@@ -2485,9 +2768,15 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # denominator, plus how far the box moved between Setup and Validate.
         # A large drift means the Setup number was never a valid denominator.
         "setup_baseline_tok_s": setup_baseline or None,
+        # Legacy field: a Setup-only result historically rendered as 0.0.
+        # New consumers should use measurement_drift, whose unavailable status
+        # distinguishes that absence from an actual zero-drift remeasurement.
         "baseline_drift_pct": (
-            round((geak_baseline - setup_baseline) / setup_baseline * 100.0, 3)
-            if (geak_baseline > 0.0 and setup_baseline > 0.0) else None
+            measurement_drift_pct
+            if measurement_drift_pct is not None
+            else 0.0
+            if (geak_baseline > 0.0 and geak_baseline == setup_baseline)
+            else None
         ),
         # Hyperloom's own measured baseline forwarded in the handoff (the orchestrator reference).
         "orchestrator_baseline_tok_s": orch_baseline or None,
@@ -2505,7 +2794,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # Gain measured against the ORCHESTRATOR baseline (what Hyperloom sees end-to-end).
         "gain_vs_orchestrator_baseline": (
             round(geak_final / orch_baseline, 4)
-            if (geak_final > 0 and orch_baseline > 0) else None
+            if (geak_final > 0 and orch_baseline > 0)
+            else None
         ),
         # Measurement-protocol provenance so the comparison is self-describing.
         "bench_client": os.environ.get("BENCH_CLIENT", "native"),
@@ -2553,7 +2843,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "geak_hot_baseline_tok_s": geak_hot_baseline or None,
         "geak_cold_final_tok_s": geak_cold_final,
         "geak_cold_baseline_tok_s": geak_cold_baseline,
-        "orchestrator_cold_baseline_tok_s": orch_baseline or None,   # == handoff.raw_baseline_tput (leaderboard anchor)
+        "orchestrator_cold_baseline_tok_s": orch_baseline
+        or None,  # == handoff.raw_baseline_tput (leaderboard anchor)
         "orchestrator_hot_baseline_tok_s": orch_hot_baseline or None,
         "hot_speedup": _safe_ratio(geak_hot_final, orch_hot_baseline),
         "hot_geak_speedup": _safe_ratio(geak_hot_final, geak_hot_baseline),
@@ -2635,9 +2926,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
     significance_threshold_pct = max(noise_band_pct, base_spread_pct, final_spread_pct)
     validation_evidence = {
         "validation_status": (
-            validation.get("validation_status")
-            or wf.get("validation_status")
-            or None
+            validation.get("validation_status") or wf.get("validation_status") or None
         ),
         "speedup_basis": speedup_basis,
         "delta_pct": delta_pct,
@@ -2647,7 +2936,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "significance_threshold_pct": significance_threshold_pct or None,
         "delta_exceeds_noise": (
             abs(delta_pct) > significance_threshold_pct
-            if significance_threshold_pct > 0.0 else None
+            if significance_threshold_pct > 0.0
+            else None
         ),
         # Stricter than the threshold above: do the two legs' spread intervals
         # (median +/- spread/2) stay apart? Overlapping intervals mean a single
@@ -2656,8 +2946,13 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "spreads_non_overlapping": (
             geak_baseline * (1.0 + base_spread_pct / 200.0)
             < promoted_final * (1.0 - final_spread_pct / 200.0)
-            if (geak_baseline > 0.0 and promoted_final > 0.0
-                and base_spread_pct > 0.0 and final_spread_pct > 0.0) else None
+            if (
+                geak_baseline > 0.0
+                and promoted_final > 0.0
+                and base_spread_pct > 0.0
+                and final_spread_pct > 0.0
+            )
+            else None
         ),
         "beats_orchestrator_same_config": (
             promoted_final > orch_same_cfg if orch_same_cfg > 0.0 else None
@@ -2687,12 +2982,18 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "final_throughput_tok_s": float(final_tput_out or 0.0),
         "final_throughput_basis": final_basis,
         "throughput_speedup": speedup,
-        "output_parity": wf.get("output_parity") or validation.get("output_parity") or "unknown",
+        "output_parity": wf.get("output_parity")
+        or validation.get("output_parity")
+        or "unknown",
         # Latency measurement protocol (median ms), aligned field names with Hyperloom. Prefer the
         # value carried on the workflow return / recovered win (e.g. the accepted
         # A/B's candidate leg), then the same-session final/baseline summaries.
-        "ttft_ms": wf.get("ttft_ms") or final_summary.get("ttft_ms_median") or baseline_summary.get("ttft_ms_median"),
-        "tpot_ms": wf.get("tpot_ms") or final_summary.get("tpot_ms_median") or baseline_summary.get("tpot_ms_median"),
+        "ttft_ms": wf.get("ttft_ms")
+        or final_summary.get("ttft_ms_median")
+        or baseline_summary.get("ttft_ms_median"),
+        "tpot_ms": wf.get("tpot_ms")
+        or final_summary.get("tpot_ms_median")
+        or baseline_summary.get("tpot_ms_median"),
         # Sweep-reuse handles (see interface/run_e2e.md).
         "final_launch_script": final_launch,
         "bench_script": str(eval_dir / "bench_e2e.sh"),
@@ -2726,15 +3027,27 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # What the kernel phase actually did (req: report must carry this).
         "accepted_kernels": wf.get("accepted_kernels") or [],
         "accepted_heads": wf.get("accepted_heads") or [],
-        "accepted_config": _accepted_config_with_env_map(wf.get("accepted_config") or {}),
+        "accepted_config": _accepted_config_with_env_map(
+            wf.get("accepted_config") or {}
+        ),
         # Self-describing baseline measurement-protocol + Hyperloom cross-check (see baseline_basis above).
         "baseline_basis": baseline_basis,
         # Reliability classification is independent of the optimization status.
         "baseline_alignment": baseline_alignment,
+        # Cross-handoff Setup-to-upstream comparison. Unlike the legacy
+        # baseline_alignment alias above, this cannot claim an aligned server
+        # unless actual launch evidence verifies its identity.
+        "handoff_alignment": handoff_alignment,
+        # Intra-session movement between Setup and Validate only. It explains
+        # denominator changes but never changes handoff_alignment's verdict.
+        "measurement_drift": measurement_drift,
         # WHO launched the servers these numbers were measured on, and which
         # kernels those servers selected. This is what tells a reviewer whether
         # baseline_alignment's divergence is a measurement signal at all.
         "serving_stack": serving_stack,
+        # Actual server identity inferred from the Setup launch, compared with
+        # the upstream observation when the handoff carried one.
+        "server_identity": server_identity,
         # Whether the reported delta is distinguishable from measurement noise,
         # and what the arbitration actually concluded (see above). Audit only.
         "validation_evidence": validation_evidence,
@@ -2798,8 +3111,11 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
             f"({delta:+.2f}%). Engagement was verified, so the tuned artifacts were folded into the "
             f"accepted config and every later phase was measured on top of them. This delta is part of "
             f"the headline throughput_speedup, not additional to it"
-            + (f"; it accounts for ~{share}% of the run's total gain." if share is not None
-               else " (the run had no net gain to apportion).")
+            + (
+                f"; it accounts for ~{share}% of the run's total gain."
+                if share is not None
+                else " (the run had no net gain to apportion)."
+            )
         )
     else:
         explanation = (
@@ -2828,7 +3144,8 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
         "correctness_gate": t.get("correctness_gate"),
         "engagement_verified": t.get("engagement_verified"),
         "engagement_evidence": t.get("engagement_evidence") or "",
-        "report_path": t.get("report_path") or str(eval_dir / "tuning" / "tuning_report.md"),
+        "report_path": t.get("report_path")
+        or str(eval_dir / "tuning" / "tuning_report.md"),
     }
 
     if accepted:
@@ -2842,9 +3159,13 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
         # Non-empty when tuning also needed a code change to make the artifact bind (a routing switch).
         # It is merged into the run's accepted overlay, so it ships via the existing final_overlay key.
         section["apply_overlay"] = t.get("apply_overlay") or ""
-        section["deploy_bundle"] = t.get("deploy_bundle") or str(eval_dir / "tuning" / "deploy")
+        section["deploy_bundle"] = t.get("deploy_bundle") or str(
+            eval_dir / "tuning" / "deploy"
+        )
         section["in_final_bundle"] = t.get("in_final_bundle")
-        section["final_bundle_engagement_recheck"] = t.get("final_bundle_engagement_recheck") or ""
+        section["final_bundle_engagement_recheck"] = (
+            t.get("final_bundle_engagement_recheck") or ""
+        )
         section["reaches_production_via"] = {
             "note": (
                 "Tuned artifacts are DATA (config tables a library reads from its own package dir, plus "
@@ -2859,7 +3180,8 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
             "final_patch_includes_tuning": t.get("in_final_bundle"),
             "final_launch_runs_deploy": t.get("in_final_bundle"),
             "deploy_script": (
-                str(Path(t["deploy_bundle"]) / "deploy.sh") if t.get("deploy_bundle")
+                str(Path(t["deploy_bundle"]) / "deploy.sh")
+                if t.get("deploy_bundle")
                 else str(eval_dir / "final" / "tuning" / "deploy.sh")
             ),
         }
@@ -2888,11 +3210,15 @@ def _format_optional_number(
 
 
 def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
-    """Render a deterministic, same-config-first report section."""
+    """Render a deterministic, Setup-seed-first handoff report section."""
     basis = result.get("baseline_basis") or {}
-    alignment = result.get("baseline_alignment") or {}
+    alignment = (
+        result.get("handoff_alignment") or result.get("baseline_alignment") or {}
+    )
     geak_baseline = _format_optional_number(
-        basis.get("geak_measured_baseline_tok_s"), digits=3, suffix=" tok/s"
+        basis.get("setup_baseline_tok_s") or basis.get("geak_measured_baseline_tok_s"),
+        digits=3,
+        suffix=" tok/s",
     )
     same_config_baseline = _format_optional_number(
         basis.get("orchestrator_best_tput_same_config"),
@@ -2916,6 +3242,9 @@ def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
         alignment.get("warning_threshold_pct"), digits=1, suffix="%"
     )
     status = str(alignment.get("status") or "unavailable")
+    identity = alignment.get("server_identity") or result.get("server_identity") or {}
+    identity_status = str(identity.get("status") or "unavailable")
+    identity_paths = identity.get("evidence_paths") or []
     stack = result.get("serving_stack") or {}
     launcher = str(stack.get("launcher") or "unknown")
     recipe_aligned = bool(alignment.get("recipe_aligned_with_orchestrator", True))
@@ -2942,15 +3271,24 @@ def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
             BASELINE_ALIGNMENT_BEGIN,
             "## Baseline alignment",
             "",
-            "Primary same-config comparison:",
+            "Primary same-config comparison (Setup seed):",
             "",
-            f"- GEAK measured baseline: {geak_baseline}",
+            f"- GEAK measured baseline: {geak_baseline} (Setup seed)",
             (
                 "- Upstream current-best baseline on the same config: "
                 f"{same_config_baseline}"
             ),
             f"- Same-config divergence: {same_config_divergence}",
             f"- Alignment status: `{status}` (warning threshold: ±{threshold})",
+            f"- Observed server identity: `{identity_status}`",
+            (
+                "- Server identity evidence: "
+                + (
+                    ", ".join(f"`{path}`" for path in identity_paths)
+                    if identity_paths
+                    else "unavailable"
+                )
+            ),
             f"- Server launch recipe: `{launcher}`",
             *recipe_caveat,
             "",
@@ -3084,8 +3422,12 @@ FINAL_REPORT_FILE = "final_report.md"
 # on arithmetic alone (publish() compares scores and never consults
 # `validated`), so it is written with --no-promote and marked unverified.
 # ---------------------------------------------------------------------------
-KB_IDENTITY_FILE = "kb_identity.json"   # spelled in e2e_workflow.js as KB_IDENTITY_BASENAME
-KB_WRITE_FILE = "kb_write.json"         # Module B's receipt; its presence means "already written"
+KB_IDENTITY_FILE = (
+    "kb_identity.json"  # spelled in e2e_workflow.js as KB_IDENTITY_BASENAME
+)
+KB_WRITE_FILE = (
+    "kb_write.json"  # Module B's receipt; its presence means "already written"
+)
 E2E_STORE_SCRIPT = E2E_DIR / "scripts" / "e2e_store.py"
 KB_ENV_SCRIPT = E2E_DIR / "scripts" / "kb_env.sh"
 # The salvage write runs on the way out, sometimes inside a SIGTERM flush that the outer runner is
@@ -3102,13 +3444,20 @@ def _kb_direction(wf: dict, ps_args: dict) -> str:
     appear here: those are workflow modes, and this path is not the workflow.
     """
     accepted = wf.get("accepted_config") or {}
-    changed_config = (
-        str(accepted.get("flags") or "") != str(ps_args.get("initial_extra_server_args") or "")
-        or str(accepted.get("env") or "") != str(ps_args.get("initial_extra_env") or "")
-    )
+    changed_config = str(accepted.get("flags") or "") != str(
+        ps_args.get("initial_extra_server_args") or ""
+    ) or str(accepted.get("env") or "") != str(ps_args.get("initial_extra_env") or "")
     changed_kernels = bool(wf.get("accepted_kernels") or wf.get("accepted_heads"))
-    return "+".join([f for f in ("config" if changed_config else "",
-                                 "kernels" if changed_kernels else "") if f])
+    return "+".join(
+        [
+            f
+            for f in (
+                "config" if changed_config else "",
+                "kernels" if changed_kernels else "",
+            )
+            if f
+        ]
+    )
 
 
 def _kb_write_back(eval_dir: Path, wf: dict, ps_args: dict) -> dict:
@@ -3117,17 +3466,27 @@ def _kb_write_back(eval_dir: Path, wf: dict, ps_args: dict) -> dict:
     Returns a small dict for result.json — always, never raises: a KB failure is a missed record,
     not a failed run, and the interface files are already on disk by the time we get here.
     """
-    if str(os.environ.get("GEAK_E2E_KB_WRITE_BACK", "1")).strip().lower() in ("0", "false", "no"):
+    if str(os.environ.get("GEAK_E2E_KB_WRITE_BACK", "1")).strip().lower() in (
+        "0",
+        "false",
+        "no",
+    ):
         return {"skipped": True, "why": "GEAK_E2E_KB_WRITE_BACK is off"}
     if (eval_dir / KB_WRITE_FILE).exists():
-        return {"skipped": True, "why": "workflow already wrote (kb_write.json present)"}
+        return {
+            "skipped": True,
+            "why": "workflow already wrote (kb_write.json present)",
+        }
     identity = _read_json(eval_dir / KB_IDENTITY_FILE)
     dims = (identity or {}).get("dims") or {}
     # No gfx, no address: kb/identity folds it to `unknown` and the record lands on a page no
     # reader of this deployment will ever look at. Better to record nothing than to record it there.
     if not dims.get("model") or not dims.get("gfx"):
-        return {"skipped": True,
-                "why": "no %s (warm start never ran, or ran before this build)" % KB_IDENTITY_FILE}
+        return {
+            "skipped": True,
+            "why": "no %s (warm start never ran, or ran before this build)"
+            % KB_IDENTITY_FILE,
+        }
     if not (eval_dir / WORKFLOW_RETURN_FILE).exists():
         return {"skipped": True, "why": "no %s to write" % WORKFLOW_RETURN_FILE}
 
@@ -3140,29 +3499,51 @@ def _kb_write_back(eval_dir: Path, wf: dict, ps_args: dict) -> dict:
     if plane in ("local", "both") and store:
         flags += ["--store", store]
     elif plane in ("local", "both"):
-        plane = "remote"   # a store-less local plane cannot be opened; the service still can
+        plane = (
+            "remote"  # a store-less local plane cannot be opened; the service still can
+        )
     flags += ["--plane", plane]
 
     # Provisional until proven otherwise. `recovered_from_disk` means the numbers came from the
     # artifacts rather than from a Validate leg that finished, so the record says so (unverified)
     # and declines to move the champion pointer.
-    provisional = bool(wf.get("recovered_from_disk")) or \
-        str(wf.get("validation_status") or "").startswith("recovered")
+    provisional = bool(wf.get("recovered_from_disk")) or str(
+        wf.get("validation_status") or ""
+    ).startswith("recovered")
     if provisional:
-        flags += ["--validated", "false", "--validation-basis", "unverified", "--no-promote"]
+        flags += [
+            "--validated",
+            "false",
+            "--validation-basis",
+            "unverified",
+            "--no-promote",
+        ]
 
-    cmd = [sys.executable, str(E2E_STORE_SCRIPT), "write", *flags,
-           "--result", str(eval_dir / WORKFLOW_RETURN_FILE),
-           "--direction", _kb_direction(wf, ps_args),
-           "--measured-by", "run_e2e:salvage",
-           "--require-win", "--apply"]
+    cmd = [
+        sys.executable,
+        str(E2E_STORE_SCRIPT),
+        "write",
+        *flags,
+        "--result",
+        str(eval_dir / WORKFLOW_RETURN_FILE),
+        "--direction",
+        _kb_direction(wf, ps_args),
+        "--measured-by",
+        "run_e2e:salvage",
+        "--require-win",
+        "--apply",
+    ]
     # Sourced, not reimplemented: the token path and CA fallback list live in kb_env.sh, which
     # e2e_workflow.js sources too. `exec` so the timeout below kills python, not just the shell.
     shell = '. %s; exec "$@"' % shlex.quote(str(KB_ENV_SCRIPT))
     try:
-        proc = subprocess.run(["bash", "-c", shell, "bash", *cmd],
-                              capture_output=True, text=True, timeout=KB_WRITE_TIMEOUT_S,
-                              cwd=str(GEAK_ROOT))
+        proc = subprocess.run(
+            ["bash", "-c", shell, "bash", *cmd],
+            capture_output=True,
+            text=True,
+            timeout=KB_WRITE_TIMEOUT_S,
+            cwd=str(GEAK_ROOT),
+        )
     except subprocess.TimeoutExpired:
         return {"ok": False, "why": "timed out after %ds" % KB_WRITE_TIMEOUT_S}
     except Exception as exc:
@@ -3171,117 +3552,150 @@ def _kb_write_back(eval_dir: Path, wf: dict, ps_args: dict) -> dict:
     try:
         receipt = json.loads(proc.stdout)
     except Exception:
-        return {"ok": False, "rc": proc.returncode,
-                "why": (proc.stderr or proc.stdout or "no output from e2e_store write")[-400:]}
+        return {
+            "ok": False,
+            "rc": proc.returncode,
+            "why": (proc.stderr or proc.stdout or "no output from e2e_store write")[
+                -400:
+            ],
+        }
     receipt.setdefault("ok", proc.returncode == 0)
     receipt["measured_by"] = "run_e2e:salvage"
     receipt["provisional"] = provisional
-    try:   # same receipt filename the workflow writes, so one reader finds either
-        (eval_dir / KB_WRITE_FILE).write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    try:  # same receipt filename the workflow writes, so one reader finds either
+        (eval_dir / KB_WRITE_FILE).write_text(
+            json.dumps(receipt, indent=2), encoding="utf-8"
+        )
     except OSError:
         pass
     return receipt
 
 
-TUNING_RESULT_FILE = "tuning/tuning_result.json"   # the role's return, persisted before it returns
-TUNING_KB_WRITE_FILE = "tuning/kb_write_tuned.json"  # the orchestrator's receipt; presence == already filed
+TUNING_RESULT_FILE = "tuning/tuning_result.json"
+TUNING_KB_WRITE_FILE = "tuning/kb_write_tuned.json"
 KERNEL_STORE_SCRIPT = GEAK_ROOT / "kernel_workflow" / "scripts" / "experience_store.py"
 
 
 def _kb_write_tuned_ops(eval_dir: Path) -> dict:
-    """File the tuning phase's proven tables when the workflow died before doing it itself.
-
-    The orchestrator's own write-back (e2e_workflow.js, the `kernel-kb:write-tuned` step) runs after
-    the tuning role returns. Under an outer runner that slices wall-clock — which is the normal case,
-    not the exceptional one — a run can finish its A/B, prove engagement, and still be killed with the
-    verdict only in the role's context. The measurement is complete and on disk; only the filing is
-    missing. So the role persists its return to ``tuning/tuning_result.json`` and this reads it.
-
-    Deliberately independent of the run's e2e outcome, exactly as the orchestrator's write is: a
-    per-op tuned table is knowledge about that op, and a run whose end-to-end number went the wrong
-    way for unrelated reasons has not unlearned it.
-
-    Same gates as the orchestrator, per op: ``isolated_speedup > 1.0`` and ``engaged``, plus a phase
-    gate of ``accepted``. Never raises — a missed record is not a failed run.
-    """
-    if str(os.environ.get("GEAK_E2E_KB_WRITE_BACK", "1")).strip().lower() in ("0", "false", "no"):
+    """Salvage proven tuning artifacts when the workflow could not file them."""
+    if str(os.environ.get("GEAK_E2E_KB_WRITE_BACK", "1")).strip().lower() in (
+        "0",
+        "false",
+        "no",
+    ):
         return {"skipped": True, "why": "GEAK_E2E_KB_WRITE_BACK is off"}
-    # The orchestrator got there first. Writing again would not overwrite — the store has no delete —
-    # it would mint a second record with the same content signature, which the page counts as an
-    # independent REPRODUCTION and which can promote a candidate on one measurement seen twice.
     if (eval_dir / TUNING_KB_WRITE_FILE).exists():
-        return {"skipped": True, "why": "workflow already filed (%s present)" % TUNING_KB_WRITE_FILE}
+        return {
+            "skipped": True,
+            "why": f"workflow already filed ({TUNING_KB_WRITE_FILE} present)",
+        }
     tuning = _read_json(eval_dir / TUNING_RESULT_FILE)
     if not tuning:
-        return {"skipped": True, "why": "no %s (tuning never ran, or ran before this build)"
-                                        % TUNING_RESULT_FILE}
+        return {
+            "skipped": True,
+            "why": f"no {TUNING_RESULT_FILE} (tuning never ran, or ran before this build)",
+        }
     if str(tuning.get("gate") or "") != "accepted":
-        return {"skipped": True, "why": "tuning gate is %r, not accepted" % (tuning.get("gate") or "")}
+        return {
+            "skipped": True,
+            "why": f"tuning gate is {tuning.get('gate')!r}, not accepted",
+        }
 
-    dims = (_read_json(eval_dir / KB_IDENTITY_FILE) or {}).get("dims") or {}
+    identity = _read_json(eval_dir / KB_IDENTITY_FILE) or {}
+    dims = identity.get("dims") or {}
     gfx = str(dims.get("gfx") or "")
     if not gfx:
-        return {"skipped": True, "why": "no gfx: a tuned table is valid for exactly one arch"}
-
-    ops = [o for o in (tuning.get("ops_tuned") or [])
-           if isinstance(o, dict) and o.get("engaged") is True
-           and _as_float(o.get("isolated_speedup")) > 1.0 and str(o.get("artifact") or "").strip()]
+        return {"skipped": True, "why": "no gfx: a tuned table is arch-specific"}
+    ops = [
+        op
+        for op in (tuning.get("ops_tuned") or [])
+        if isinstance(op, dict)
+        and op.get("engaged") is True
+        and _as_float(op.get("isolated_speedup")) > 1.0
+        and str(op.get("artifact") or "").strip()
+    ]
     if not ops:
         return {"skipped": True, "why": "no op cleared isolated_speedup>1.0 AND engaged"}
 
-    identity = _read_json(eval_dir / KB_IDENTITY_FILE) or {}
     plane = str(identity.get("plane") or "remote")
     store = str(identity.get("store") or "")
-    verb = "write-remote" if (plane != "local" and store) else "write"
+    verb = "write-remote" if plane != "local" and store else "write"
     plane_flags = ["--plane", "both", "--store", store] if verb == "write-remote" else []
-
     rows = []
     for op in ops:
         name = str(op.get("op") or op.get("short_name") or "").strip()
         if not name:
             rows.append({"written": False, "reason": "unnamed op"})
             continue
-        cmd = [sys.executable, str(KERNEL_STORE_SCRIPT), verb, *plane_flags,
-               "--root", str(GEAK_ROOT / "kb_artifacts"),
-               "--kernel-name", name,
-               "--language", str(op.get("backend") or "tuned").strip(),
-               "--gfx", gfx, "--kernel-class", "tuning",
-               "--speedup", str(_as_float(op.get("isolated_speedup"))),
-               "--carrier", "tuned_artifact", "--artifact", str(op.get("artifact")).strip(),
-               "--tuner", str(op.get("tuner") or "").strip(),
-               "--apply-env", str(tuning.get("apply_env") or ""),
-               "--cache-invalidation", " && ".join(tuning.get("cache_invalidation") or []),
-               "--metric-kind", "tuning_isolated",
-               "--case-names", str(op.get("shapes") or "").replace(",", ";"),
-               "--direction", "tuning-" + re.sub(
-                   r"[^a-z0-9]+", "-", str(op.get("backend") or "op").strip().lower()),
-               "--eval-dir", str(eval_dir)]
-        # Recorded into `value.upstream`, never part of the key — same as the orchestrator's write,
-        # and it has to stay the same or a salvaged op would be indistinguishable from an unlabelled
-        # backlog entry and would outrank correctly-labelled ones on a mismatched-dtype read. Sourced
-        # from the identity file the warm start already wrote, so this needs no new plumbing.
-        # `dims` is the raw argv of the e2e read, so its keys are the FLAG spellings — hyphenated,
-        # not underscored. Reading `framework_version` here would silently find nothing.
-        for flag, value in (("--precision", dims.get("precision")),
-                            ("--serving-framework", dims.get("framework")),
-                            ("--serving-framework-version", dims.get("framework-version"))):
+        cmd = [
+            sys.executable,
+            str(KERNEL_STORE_SCRIPT),
+            verb,
+            *plane_flags,
+            "--root",
+            str(GEAK_ROOT / "kb_artifacts"),
+            "--kernel-name",
+            name,
+            "--language",
+            str(op.get("backend") or "tuned").strip(),
+            "--gfx",
+            gfx,
+            "--kernel-class",
+            "tuning",
+            "--speedup",
+            str(_as_float(op.get("isolated_speedup"))),
+            "--carrier",
+            "tuned_artifact",
+            "--artifact",
+            str(op.get("artifact")).strip(),
+            "--tuner",
+            str(op.get("tuner") or "").strip(),
+            "--apply-env",
+            str(tuning.get("apply_env") or ""),
+            "--cache-invalidation",
+            " && ".join(tuning.get("cache_invalidation") or []),
+            "--metric-kind",
+            "tuning_isolated",
+            "--case-names",
+            str(op.get("shapes") or "").replace(",", ";"),
+            "--direction",
+            "tuning-" + re.sub(r"[^a-z0-9]+", "-", str(op.get("backend") or "op").strip().lower()),
+            "--eval-dir",
+            str(eval_dir),
+        ]
+        for flag, value in (
+            ("--precision", dims.get("precision")),
+            ("--serving-framework", dims.get("framework")),
+            ("--serving-framework-version", dims.get("framework-version")),
+        ):
             if str(value or "").strip():
                 cmd += [flag, str(value).strip()]
         if str(tuning.get("report_path") or "").strip():
             cmd += ["--report", str(tuning["report_path"]).strip()]
         shell = '. %s; exec "$@"' % shlex.quote(str(KB_ENV_SCRIPT))
         try:
-            proc = subprocess.run(["bash", "-c", shell, "bash", *cmd], capture_output=True,
-                                  text=True, timeout=KB_WRITE_TIMEOUT_S, cwd=str(GEAK_ROOT))
+            proc = subprocess.run(
+                ["bash", "-c", shell, "bash", *cmd],
+                capture_output=True,
+                text=True,
+                timeout=KB_WRITE_TIMEOUT_S,
+                cwd=str(GEAK_ROOT),
+            )
             rows.append(json.loads(proc.stdout))
         except subprocess.TimeoutExpired:
-            rows.append({"written": False, "reason": "timed out after %ds" % KB_WRITE_TIMEOUT_S})
+            rows.append({"written": False, "reason": f"timed out after {KB_WRITE_TIMEOUT_S}s"})
         except Exception as exc:
-            rows.append({"written": False, "reason": "%s: %s" % (type(exc).__name__, str(exc)[:160])})
+            rows.append({"written": False, "reason": f"{type(exc).__name__}: {str(exc)[:160]}"})
 
-    receipt = {"ok": True, "measured_by": "run_e2e:salvage", "plane": plane, "verb": verb,
-               "ops": len(ops), "written": sum(1 for r in rows if r.get("written")),
-               "results": rows}
+    receipt = {
+        "ok": True,
+        "measured_by": "run_e2e:salvage",
+        "plane": plane,
+        "verb": verb,
+        "ops": len(ops),
+        "written": sum(1 for row in rows if row.get("written")),
+        "results": rows,
+    }
     try:
         path = eval_dir / TUNING_KB_WRITE_FILE
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3295,7 +3709,9 @@ def _git_short_sha(root: Path) -> str:
     try:
         out = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return out.stdout.strip() if out.returncode == 0 else ""
     except Exception:
@@ -3313,10 +3729,20 @@ def _discover_eval_dir(exp_root: Path) -> Path | None:
     A pinned ``GEAK_EVAL_DIR`` (set by main() from the single eval_dir
     map_args minted for this run) short-circuits the glob/guess: recovery then
     targets EXACTLY the dir this run used, never a sibling from another run.
+    The pin is only trusted when it belongs to ``exp_root``: callers can reuse
+    this module in one process, and a stale pin from another run must not
+    override the explicit root they passed.
     """
     pinned = os.environ.get("GEAK_EVAL_DIR", "").strip()
-    if pinned and Path(pinned).is_dir():
-        return Path(pinned)
+    if pinned:
+        pinned_path = Path(pinned)
+        try:
+            pinned_path.resolve().relative_to(exp_root.resolve())
+        except (OSError, ValueError):
+            pass
+        else:
+            if pinned_path.is_dir():
+                return pinned_path
     if not exp_root.is_dir():
         return None
     cands = sorted(
@@ -3345,10 +3771,585 @@ def _enumerate_overlay_kernels(eval_dir: Path) -> list[str]:
             continue
         for d in sorted(base.glob("cand_*")):
             if d.is_dir():
-                name = d.name[len("cand_"):]
+                name = d.name[len("cand_") :]
                 if name and name not in names:
                     names.append(name)
     return names
+
+
+def _checkpoint_digest(checkpoint: dict) -> str:
+    """Digest canonical checkpoint JSON, excluding its self-referential digest."""
+    payload = dict(checkpoint)
+    payload.pop("checkpoint_sha256", None)
+    raw = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _checkpoint_asset_path(eval_dir: Path, raw_path: object) -> Path | None:
+    """Resolve an asset path only when it stays inside this eval directory."""
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    try:
+        candidate = (eval_dir / raw_path).resolve()
+        candidate.relative_to(eval_dir.resolve())
+    except (OSError, ValueError):
+        return None
+    return candidate
+
+
+def _checkpoint_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _valid_e2e_checkpoint(
+    checkpoint: dict, eval_dir: Path, allowed_levels: set[str]
+) -> tuple[bool, str]:
+    """Validate a recoverable schema-v2 E2E checkpoint without trusting paths.
+
+    This is deliberately stricter than the legacy artifact readers: a checkpoint
+    is the authoritative recovery contract, so a truncated write, a changed replay
+    asset, or an ambiguous selected overlay must make the whole checkpoint ineligible.
+    """
+    if not isinstance(checkpoint, dict):
+        return False, "checkpoint is not an object"
+    if checkpoint.get("schema_version") != E2E_CHECKPOINT_SCHEMA_VERSION:
+        return False, "unsupported schema_version"
+    if checkpoint.get("checkpoint_type") != "e2e_validation":
+        return False, "wrong checkpoint_type"
+    if checkpoint.get("validation_level") not in allowed_levels:
+        return False, "unexpected validation_level"
+    if checkpoint.get("committed") is not True or checkpoint.get("gate") != "accepted":
+        return False, "checkpoint is not a committed accepted result"
+    if checkpoint.get("eval_dir") != str(eval_dir):
+        return False, "eval_dir does not match recovery target"
+    claimed_digest = checkpoint.get("checkpoint_sha256")
+    if not isinstance(claimed_digest, str) or claimed_digest != _checkpoint_digest(
+        checkpoint
+    ):
+        return False, "checkpoint_sha256 mismatch"
+    parent = checkpoint.get("parent_checkpoint")
+    if parent is not None:
+        if not isinstance(parent, dict):
+            return False, "invalid parent_checkpoint"
+        parent_path = _checkpoint_asset_path(eval_dir, parent.get("path"))
+        parent_digest = parent.get("checkpoint_sha256")
+        parent_doc = _read_json(parent_path) if parent_path else {}
+        if (
+            parent_path is None
+            or not isinstance(parent_digest, str)
+            or not parent_doc
+            or parent_doc.get("checkpoint_sha256") != parent_digest
+            or _checkpoint_digest(parent_doc) != parent_digest
+        ):
+            return False, "parent checkpoint digest mismatch"
+
+    baseline = _positive_finite_float(checkpoint.get("baseline_throughput_tok_s"))
+    final = _positive_finite_float(checkpoint.get("final_throughput_tok_s"))
+    speedup = _positive_finite_float(checkpoint.get("throughput_speedup"))
+    if baseline <= 0.0 or final <= 0.0 or speedup <= 0.0:
+        return False, "non-positive throughput fields"
+    if final <= baseline:
+        return False, "accepted checkpoint has no positive gain"
+    if abs((final / baseline) - speedup) > SPEEDUP_SELF_CONSISTENCY_TOL:
+        return False, "throughput_speedup does not match throughput pair"
+
+    for key in (
+        "baseline_config",
+        "accepted_config",
+        "measurement",
+        "stack",
+        "replay",
+        "integrity",
+    ):
+        if not isinstance(checkpoint.get(key), dict):
+            return False, f"missing {key}"
+    for key in ("accepted_kernels", "accepted_heads"):
+        if not isinstance(checkpoint.get(key), list):
+            return False, f"missing {key}"
+    measurement = checkpoint["measurement"]
+    if not isinstance(measurement.get("workload"), dict):
+        return False, "missing measurement.workload"
+    if measurement.get("measurement_mode") != "isolated_server":
+        return False, "unsupported measurement mode"
+    if not isinstance(measurement.get("legs"), list) or not measurement["legs"]:
+        return False, "missing measurement legs"
+    acceptance = measurement.get("acceptance")
+    if not isinstance(acceptance, dict):
+        return False, "missing measurement.acceptance"
+    if acceptance.get("gain_exceeds_noise") is not True:
+        return False, "checkpoint gain did not exceed noise"
+    if acceptance.get("correctness_passed") is not True:
+        return False, "checkpoint correctness did not pass"
+
+    slots: set[str] = set()
+    for item in checkpoint["stack"].get("kernel_slots") or []:
+        if not isinstance(item, dict) or item.get("selected") is not True:
+            continue
+        slot = item.get("kernel_slot")
+        if not isinstance(slot, str) or not slot:
+            return False, "selected kernel has no kernel_slot"
+        if slot in slots:
+            return False, "multiple selected candidates for one kernel_slot"
+        slots.add(slot)
+
+    assets = checkpoint["integrity"].get("checkpoint_assets")
+    if not isinstance(assets, list):
+        return False, "missing integrity.checkpoint_assets"
+    for asset in assets:
+        if not isinstance(asset, dict):
+            return False, "invalid checkpoint asset"
+        path = _checkpoint_asset_path(
+            eval_dir, asset.get("snapshot") or asset.get("path")
+        )
+        digest = asset.get("sha256")
+        if path is None or not path.is_file() or not isinstance(digest, str):
+            return False, "missing checkpoint asset"
+        if _checkpoint_file_sha256(path) != digest:
+            return False, "checkpoint asset digest mismatch"
+    return True, ""
+
+
+def _checkpoint_path_value(value: object) -> str:
+    """Read an optional path from schema-v2 path metadata."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        path = value.get("path") or value.get("snapshot")
+        return str(path) if path else ""
+    return ""
+
+
+def _recover_e2e_validation_checkpoint(
+    eval_dir: Path,
+) -> dict | None:
+    """Recover the highest-complete non-Director schema-v2 checkpoint."""
+    tiers = (
+        (Path("final") / E2E_CHECKPOINT_FILE, {"final_pair"}),
+        (Path("overlay") / "accepted_stack" / E2E_CHECKPOINT_FILE, {"integrator"}),
+        (Path("tuning") / E2E_CHECKPOINT_FILE, {"tuning_skillset"}),
+        (Path("config") / E2E_CHECKPOINT_FILE, {"config_sweep"}),
+    )
+    for relative_path, levels in tiers:
+        checkpoint_path = eval_dir / relative_path
+        checkpoint = _read_json(checkpoint_path)
+        valid, _reason = _valid_e2e_checkpoint(checkpoint, eval_dir, levels)
+        if not valid:
+            continue
+        level = str(checkpoint["validation_level"])
+        final_overlay = checkpoint.get("final_overlay")
+        if isinstance(final_overlay, dict):
+            final_overlay = _checkpoint_path_value(final_overlay)
+        return {
+            "eval_dir": str(eval_dir),
+            "throughput_speedup": checkpoint["throughput_speedup"],
+            "baseline_throughput_tok_s": checkpoint["baseline_throughput_tok_s"],
+            "final_throughput_tok_s": checkpoint["final_throughput_tok_s"],
+            "output_parity": (checkpoint["measurement"].get("correctness") or {}).get(
+                "gate", "n/a"
+            ),
+            "validation_status": checkpoint.get("validation_status")
+            or f"recovered_{level}",
+            "final_overlay": final_overlay or "",
+            "final_launch_script": _checkpoint_path_value(
+                checkpoint.get("final_launch_script")
+            ),
+            "accepted_config": checkpoint["accepted_config"],
+            "baseline_config": checkpoint["baseline_config"],
+            "accepted_kernels": checkpoint["accepted_kernels"],
+            "accepted_heads": checkpoint["accepted_heads"],
+            "tuning_skillset": checkpoint.get("tuning_skillset"),
+            "recovered_from_disk": True,
+            "recovered_intermediate": level != "final_pair",
+            "recovered_tuning_skillset": level == "tuning_skillset",
+            "recovered_e2e_checkpoint_level": level,
+            "recovery_evidence": {
+                "checkpoint_path": str(relative_path),
+                "checkpoint_sha256": checkpoint["checkpoint_sha256"],
+                "stack_after_digest": checkpoint["stack"].get("stack_after_digest"),
+            },
+        }
+    return None
+
+
+def _legacy_positive_number(doc: dict, *keys: str) -> float:
+    """First positive finite number in a legacy, schema-drifting artifact."""
+    for key in keys:
+        value = _positive_finite_float(doc.get(key))
+        if value > 0.0:
+            return value
+    return 0.0
+
+
+def _legacy_manifest_env(manifest: dict) -> str:
+    """Canonicalize the structured deploy environment for identity comparison."""
+    env = manifest.get("extra_env")
+    if isinstance(env, dict):
+        return json.dumps(env, sort_keys=True, separators=(",", ":"))
+    if isinstance(env, str):
+        return env.strip()
+    return ""
+
+
+def _legacy_tuning_kernels(manifest: dict) -> list[dict]:
+    """Recover tuning identity only from structured manifest fields."""
+    kernels: list[dict] = []
+    ops = manifest.get("ops_tuned") or manifest.get("operations") or []
+    if isinstance(ops, list):
+        for op in ops:
+            if not isinstance(op, dict):
+                continue
+            kernel_id = str(op.get("kernel_id") or "").strip()
+            kernel_slot = str(op.get("kernel_slot") or "").strip()
+            if kernel_id and kernel_slot:
+                kernels.append(
+                    {
+                        "short_name": kernel_id,
+                        "kernel_id": kernel_id,
+                        "kernel_slot": kernel_slot,
+                        "backend": op.get("backend") or "geak",
+                        "from_tuning_skillset": True,
+                        "recovery_source": "legacy_manifest",
+                        "provisional": True,
+                    }
+                )
+    if kernels:
+        return kernels
+    # Data-table tuning predates ``ops_tuned``. An explicit config environment
+    # key is still a stable machine-readable identity; do not inspect reports or
+    # free-form log lines to manufacture one.
+    env = manifest.get("extra_env")
+    if not isinstance(env, dict):
+        return kernels
+    for key, value in sorted(env.items()):
+        if not (
+            isinstance(key, str)
+            and key.startswith("AITER_CONFIG_")
+            and isinstance(value, str)
+            and value.strip()
+        ):
+            continue
+        kernel_id = key.removeprefix("AITER_CONFIG_").lower()
+        kernels.append(
+            {
+                "short_name": kernel_id,
+                "kernel_id": kernel_id,
+                "kernel_slot": f"aiter_config:{kernel_id}",
+                "backend": "aiter",
+                "from_tuning_skillset": True,
+                "recovery_source": "legacy_manifest",
+                "provisional": True,
+            }
+        )
+    return kernels
+
+
+def _legacy_tuning_summary_is_accepted(summary: dict) -> bool:
+    """Validate the archived tuning A/B acceptance evidence conservatively."""
+    if (
+        str(
+            summary.get("output_parity") or summary.get("correctness_gate") or ""
+        ).lower()
+        == "fail"
+    ):
+        return False
+    legs = summary.get("legs")
+    if not isinstance(legs, list) or not legs:
+        return False
+    arms: dict[str, list[dict]] = {"A": [], "B": []}
+    for leg in legs:
+        if not isinstance(leg, dict):
+            return False
+        arm = str(leg.get("arm") or "").upper()
+        if arm not in arms or leg.get("usable") is not True:
+            return False
+        if str(leg.get("mode") or "") != "isolated_server":
+            return False
+        if _positive_finite_float(leg.get("tput")) <= 0.0:
+            return False
+        arms[arm].append(leg)
+    if not arms["A"] or not arms["B"] or int(summary.get("n_pairs") or 0) < 1:
+        return False
+    if any(int(leg.get("hits") or 0) != 0 for leg in arms["A"]):
+        return False
+    if any(int(leg.get("hits") or 0) <= 0 for leg in arms["B"]):
+        return False
+    return (
+        _legacy_positive_number(
+            summary, "paired_mean_delta_pct", "median_pair_delta_pct", "delta_pct"
+        )
+        > 0.0
+    )
+
+
+def _legacy_bench_pair_value(path: Path) -> tuple[float, dict] | None:
+    """Return a usable isolated-server benchmark's throughput and document."""
+    doc = _read_json(path)
+    if (
+        doc.get("status") != "complete"
+        or doc.get("usable_for_acceptance") is not True
+        or doc.get("measurement_mode") != "isolated_server"
+    ):
+        return None
+    throughput = _legacy_positive_number(
+        doc,
+        "throughput_tok_s_median",
+        "output_throughput_tok_s_median",
+        "observed_median",
+    )
+    return (throughput, doc) if throughput > 0.0 else None
+
+
+def _legacy_log_marker_count(path: Path, marker: str) -> int:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").count(marker)
+    except OSError:
+        return -1
+
+
+def _recover_verified_legacy_final_pair(eval_dir: Path, manifest: dict) -> dict | None:
+    """Recover a corroborated historical final tuning pair, never a validated win."""
+    summary = _read_json(eval_dir / "final" / "FINAL_SUMMARY.json")
+    final_manifest = _read_json(eval_dir / "final" / "tuning" / "MANIFEST.json")
+    tuned = _legacy_bench_pair_value(
+        eval_dir / "final" / "bench" / "bench_summary.json"
+    )
+    control = _legacy_bench_pair_value(
+        eval_dir / "final" / "bench_control" / "bench_summary.json"
+    )
+    if not summary or tuned is None or control is None:
+        return None
+    if (
+        str(
+            summary.get("output_parity") or summary.get("correctness_gate") or ""
+        ).lower()
+        == "fail"
+    ):
+        return None
+    if final_manifest and _legacy_manifest_env(final_manifest) != _legacy_manifest_env(
+        manifest
+    ):
+        return None
+    final_tput, final_doc = tuned
+    baseline, baseline_doc = control
+    summary_final = _legacy_positive_number(summary, "final_bundle_tok_s")
+    summary_baseline = _legacy_positive_number(
+        summary, "drift_control_same_session_tok_s"
+    )
+    if (
+        not math.isclose(final_tput, summary_final, rel_tol=0.005)
+        or not math.isclose(baseline, summary_baseline, rel_tol=0.005)
+        or final_tput <= baseline
+    ):
+        return None
+    speedup = final_tput / baseline
+    reported_speedup = _legacy_positive_number(summary, "paired_in_session_speedup")
+    if (
+        reported_speedup
+        and abs(speedup - reported_speedup) > SPEEDUP_SELF_CONSISTENCY_TOL
+    ):
+        return None
+    engagement = summary.get("tuning_engagement") or {}
+    summary_tuned = int(((engagement.get("final_bundle") or {}).get("tuned_hits") or 0))
+    summary_control = int(
+        ((engagement.get("drift_control") or {}).get("tuned_hits") or 0)
+    )
+    tuned_hits = _legacy_log_marker_count(
+        eval_dir / "final" / "bench" / "replica_001" / "attempt_1" / "server.log",
+        "is tuned on cu_num",
+    )
+    control_hits = _legacy_log_marker_count(
+        eval_dir
+        / "final"
+        / "bench_control"
+        / "replica_001"
+        / "attempt_1"
+        / "server.log",
+        "is tuned on cu_num",
+    )
+    if (
+        tuned_hits <= 0
+        or control_hits != 0
+        or (tuned_hits, control_hits) != (summary_tuned, summary_control)
+    ):
+        return None
+    if final_doc.get("effective_config_digest") != baseline_doc.get(
+        "effective_config_digest"
+    ):
+        return None
+    config = _read_json(eval_dir / "final" / "accepted_config.json")
+    return {
+        "baseline": baseline,
+        "final": final_tput,
+        "speedup": speedup,
+        "ttft_ms": _legacy_positive_number(final_doc, "ttft_ms_median"),
+        "tpot_ms": _legacy_positive_number(final_doc, "tpot_ms_median"),
+        "accepted_config": {
+            "flags": str(config.get("extra_server_args") or ""),
+            "env": str(config.get("extra_env") or _legacy_manifest_env(manifest)),
+        },
+        "final_launch_script": str(eval_dir / "final" / "final_launch.sh"),
+        "evidence": {
+            "measurement": "verified_final_tuning_pair",
+            "summary_path": "final/FINAL_SUMMARY.json",
+            "tuned_bench_path": "final/bench/bench_summary.json",
+            "control_bench_path": "final/bench_control/bench_summary.json",
+            "tuned_hits": tuned_hits,
+            "control_hits": control_hits,
+            "pair_order": "tuned_then_control",
+            "provisional_reason": "single replica and non-counterbalanced final pair",
+        },
+    }
+
+
+def _legacy_tuning_raw_pair(eval_dir: Path) -> tuple[float, float] | None:
+    """Rebuild a conservative tuning A/B from legacy per-leg summaries.
+
+    Some historical tuning roles wrote ``pre[_N]/bench_summary.json`` and
+    ``post[_N]/bench_summary.json`` but never emitted ``ab_summary.json``. A
+    single pre/post comparison is restart noise, not recoverable acceptance
+    evidence; require three matching isolated-server pairs with one effective
+    config digest before considering this legacy format.
+    """
+    ab_dir = eval_dir / "tuning" / "ab"
+    pairs: dict[str, dict[str, tuple[float, str]]] = {}
+    for child in ab_dir.iterdir() if ab_dir.is_dir() else []:
+        if not child.is_dir():
+            continue
+        match = re.fullmatch(r"(pre|post)_?(\d*)", child.name)
+        if not match:
+            continue
+        summary = _read_json(child / "bench_summary.json")
+        if (
+            summary.get("usable_for_acceptance") is not True
+            or summary.get("measurement_mode") != "isolated_server"
+        ):
+            continue
+        throughput = _legacy_positive_number(
+            summary, "throughput_tok_s_median", "output_throughput_tok_s_median"
+        )
+        digest = str(summary.get("effective_config_digest") or "")
+        if throughput <= 0.0 or not digest:
+            continue
+        arm, index = match.groups()
+        hits = _legacy_log_marker_count(
+            child / "replica_001" / "attempt_1" / "server.log", "is tuned on cu_num"
+        )
+        if (arm == "pre" and hits != 0) or (arm == "post" and hits <= 0):
+            continue
+        pairs.setdefault(index or "1", {})[arm] = (throughput, digest)
+    complete = [pair for pair in pairs.values() if {"pre", "post"} <= pair.keys()]
+    if len(complete) < 3:
+        return None
+    digests = {value[1] for pair in complete for value in pair.values()}
+    if len(digests) != 1:
+        return None
+    baseline = statistics.median(pair["pre"][0] for pair in complete)
+    final = statistics.median(pair["post"][0] for pair in complete)
+    return (baseline, final) if final > baseline * 1.01 else None
+
+
+def _recover_tuning_legacy_composite(eval_dir: Path) -> dict | None:
+    """Recover a pre-checkpoint tuning win as explicitly provisional evidence.
+
+    Historical tuning runs wrote a complete interleaved A/B summary and a deploy
+    manifest, but did not serialize the in-memory acceptance gate. Those artifacts
+    are stronger than a no-gain synthesis, yet lack enough information to claim a
+    Director-validated win. Keep the measured pair and deploy replay handle while
+    refusing to fabricate kernel identity when the manifest does not provide it.
+    """
+    summary = _read_json(eval_dir / "tuning" / "ab" / "ab_summary.json")
+    manifest = _read_json(eval_dir / "tuning" / "deploy" / "MANIFEST.json")
+    deploy_script = eval_dir / "tuning" / "deploy" / "deploy.sh"
+    if not manifest or not deploy_script.is_file():
+        return None
+    baseline = final = 0.0
+    evidence_source = "tuning/ab/ab_summary.json"
+    if summary:
+        if not _legacy_tuning_summary_is_accepted(summary):
+            return None
+        baseline = _legacy_positive_number(
+            summary,
+            "pre",
+            "pre_median",
+            "pre_median_tok_s",
+            "baseline_throughput_tok_s",
+        )
+        final = _legacy_positive_number(
+            summary,
+            "post",
+            "post_median",
+            "post_median_tok_s",
+            "final_throughput_tok_s",
+        )
+    else:
+        raw_pair = _legacy_tuning_raw_pair(eval_dir)
+        if raw_pair is not None:
+            baseline, final = raw_pair
+            evidence_source = "tuning/ab/{pre,post}*/bench_summary.json"
+    if baseline <= 0.0 or final <= baseline:
+        return None
+    reported_delta = _legacy_positive_number(
+        summary, "median_pair_delta_pct", "paired_mean_delta_pct", "delta_pct"
+    )
+    speedup = final / baseline
+    if reported_delta and abs((speedup - 1.0) * 100.0 - reported_delta) > 5.0:
+        return None
+
+    accepted_kernels = _legacy_tuning_kernels(manifest)
+    final_pair = _recover_verified_legacy_final_pair(eval_dir, manifest)
+    accepted_config = {
+        "flags": str(manifest.get("apply_flags") or ""),
+        "env": str(manifest.get("apply_env") or _legacy_manifest_env(manifest)),
+    }
+    final_launch_script = str(deploy_script)
+    evidence = {
+        "summary_path": evidence_source,
+        "deploy_manifest_path": "tuning/deploy/MANIFEST.json",
+        "original_gate": "not_persisted",
+    }
+    if final_pair is not None:
+        baseline = final_pair["baseline"]
+        final = final_pair["final"]
+        speedup = final_pair["speedup"]
+        accepted_config = final_pair["accepted_config"]
+        final_launch_script = final_pair["final_launch_script"]
+        evidence.update(final_pair["evidence"])
+    if len(accepted_kernels) == 1:
+        accepted_kernels[0]["e2e_delta_pct"] = (speedup - 1.0) * 100.0
+    return {
+        "eval_dir": str(eval_dir),
+        "throughput_speedup": speedup,
+        "baseline_throughput_tok_s": baseline,
+        "final_throughput_tok_s": final,
+        "output_parity": "unknown",
+        "validation_status": "recovered_tuning_skillset_legacy_provisional",
+        "final_overlay": "",
+        "final_launch_script": final_launch_script,
+        "accepted_config": accepted_config,
+        "accepted_kernels": accepted_kernels,
+        "accepted_heads": [],
+        "tuning_skillset": {
+            "enabled": True,
+            "ran": True,
+            "gate": "accepted_provisional",
+            "pre_tune_throughput_tok_s": baseline,
+            "post_tune_throughput_tok_s": final,
+            "tuning_speedup": speedup,
+            "deploy_bundle": str(deploy_script.parent),
+            "deploy_verified": False,
+            "original_gate": "not_persisted",
+        },
+        "recovered_from_disk": True,
+        "recovered_intermediate": True,
+        "recovered_tuning_legacy": True,
+        "recovery_evidence": evidence,
+    }
 
 
 def _recover_workflow_return(exp_root: Path) -> dict | None:
@@ -3377,12 +4378,18 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
         return persisted
     validation = _read_json(eval_dir / "director_e2e_validation.json")
     if not validation:
+        checkpoint_win = _recover_e2e_validation_checkpoint(eval_dir)
+        if checkpoint_win is not None:
+            return checkpoint_win
         # No final Validate marker => the director never synthesized its json
         # (run killed mid-Validate, or torn down before it wrote). Recover in
         # priority order so a COMPLETED run is NEVER discarded as a parse error:
         #   1. the best gate==accepted intermediate win (a real measured gain),
         #   2. else, if a baseline was measured but nothing was accepted, a
         #      legitimate NO_GAIN run (the optimizer correctly did no harm).
+        tuning_win = _recover_tuning_legacy_composite(eval_dir)
+        if tuning_win is not None:
+            return tuning_win
         win = _recover_best_intermediate_win(eval_dir)
         if win is not None:
             return win
@@ -3427,29 +4434,29 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
     final_block = validation.get("final_block") or {}
     base_block = validation.get("base_block") or {}
     baseline_tput = _first(
-        validation.get("baseline_throughput_tok_s"),       # current flat
-        validation.get("provided_baseline_throughput"),    # 20260615 flat
+        validation.get("baseline_throughput_tok_s"),  # current flat
+        validation.get("provided_baseline_throughput"),  # 20260615 flat
         _nest("drift_corrected_baseline"),
-        vs_base.get("baseline_throughput_tok_s"),           # nested (legacy)
+        vs_base.get("baseline_throughput_tok_s"),  # nested (legacy)
         base_block.get("warm_median_tok_s"),
     )
     final_tput = _first(
         validation.get("director_verified_throughput_tok_s"),  # current flat
-        _nest("final"),                                        # 20260615 flat
+        _nest("final"),  # 20260615 flat
         validation.get("claimed_throughput"),
-        arb.get("director_verified_throughput_tok_s"),         # nested (legacy)
+        arb.get("director_verified_throughput_tok_s"),  # nested (legacy)
         vs_base.get("final_warm_median_tok_s"),
         final_block.get("warm_median_tok_s"),
     )
     speedup = _first(
-        validation.get("throughput_speedup"),               # current + 20260615 flat
+        validation.get("throughput_speedup"),  # current + 20260615 flat
         vs_base.get("speedup"),
         drift.get("speedup_warm"),
     )
     if speedup is None and baseline_tput and final_tput:
         speedup = final_tput / baseline_tput
     overall_delta_pct = _first(
-        validation.get("delta_pct_drift_corrected"),        # 20260615 flat
+        validation.get("delta_pct_drift_corrected"),  # 20260615 flat
         vs_base.get("delta_pct"),
         drift.get("delta_pct_warm"),
     )
@@ -3598,31 +4605,36 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
                 separated = (ir.get("pooled_all_repeats") or {}).get("separated")
             if separated is None:
                 separated = _ir_get(ir, "non_overlapping")
-            records.append({
-                "dir": cand,
-                "ir": ir,
-                "short_name": str(ir.get("short_name") or cand.name[len("cand_"):]),
-                "gate": gate,
-                "delta_pct": delta_pct,
-                "ref_med": _ir_float(ir, "ref_med", "ref_median_tok_s"),
-                "cand_med": _ir_float(ir, "cand_med", "cand_median_tok_s"),
-                "stack_tput": _ir_float(ir, "e2e_throughput_tok_s"),
-                "amdahl_ceiling_pct": (
-                    round(ceiling_pct, 3) if math.isfinite(ceiling_pct) else None
-                ),
-                "implausible": implausible,
-                "output_parity": parity or None,
-                "separated": separated,
-                # winner_kind in {"env","config","flags"} => config-only.
-                "is_kernel": _ir_get(ir, "winner_kind") not in ("env", "config", "flags"),
-                "eligible": (
-                    gate in ("accepted", "stack")
-                    and delta_pct > 0.0
-                    and parity != "fail"
-                    and ir.get("ab_complete") is not False
-                    and not implausible
-                ),
-            })
+            records.append(
+                {
+                    "dir": cand,
+                    "ir": ir,
+                    "short_name": str(
+                        ir.get("short_name") or cand.name[len("cand_") :]
+                    ),
+                    "gate": gate,
+                    "delta_pct": delta_pct,
+                    "ref_med": _ir_float(ir, "ref_med", "ref_median_tok_s"),
+                    "cand_med": _ir_float(ir, "cand_med", "cand_median_tok_s"),
+                    "stack_tput": _ir_float(ir, "e2e_throughput_tok_s"),
+                    "amdahl_ceiling_pct": (
+                        round(ceiling_pct, 3) if math.isfinite(ceiling_pct) else None
+                    ),
+                    "implausible": implausible,
+                    "output_parity": parity or None,
+                    "separated": separated,
+                    # winner_kind in {"env","config","flags"} => config-only.
+                    "is_kernel": _ir_get(ir, "winner_kind")
+                    not in ("env", "config", "flags"),
+                    "eligible": (
+                        gate in ("accepted", "stack")
+                        and delta_pct > 0.0
+                        and parity != "fail"
+                        and ir.get("ab_complete") is not False
+                        and not implausible
+                    ),
+                }
+            )
     return records
 
 
@@ -3664,8 +4676,10 @@ def _recover_accepted_serving_config(eval_dir: Path) -> dict | None:
     # baseline — otherwise a real config win (mixtral +6.97%, qwen27b +17.56%) is
     # missed just because this one field was null.
     baseline_tput = 0.0
-    for v in (base.get("throughput_tok_s_median"),
-              base.get("output_throughput_tok_s_median")):
+    for v in (
+        base.get("throughput_tok_s_median"),
+        base.get("output_throughput_tok_s_median"),
+    ):
         try:
             baseline_tput = float(v)
         except (TypeError, ValueError):
@@ -3677,10 +4691,12 @@ def _recover_accepted_serving_config(eval_dir: Path) -> dict | None:
     if baseline_tput <= 0.0:
         official = _read_json(eval_dir / "baseline" / "baseline_official.json")
         summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
-        for v in (official.get("baseline_throughput_tok_s"),
-                  official.get("plateau_median_tok_s"),
-                  summary.get("output_throughput_tok_s_median"),
-                  summary.get("throughput_tok_s_median")):
+        for v in (
+            official.get("baseline_throughput_tok_s"),
+            official.get("plateau_median_tok_s"),
+            summary.get("output_throughput_tok_s_median"),
+            summary.get("throughput_tok_s_median"),
+        ):
             try:
                 baseline_tput = float(v)
             except (TypeError, ValueError):
@@ -3702,8 +4718,12 @@ def _recover_accepted_serving_config(eval_dir: Path) -> dict | None:
         return None
     speedup = sweep_speedup if sweep_speedup > 1.0 else best_tput / baseline_tput
     return {
-        "flags": flags, "env": env, "baseline_tput": baseline_tput,
-        "best_tput": best_tput, "speedup": speedup, "band_pct": band,
+        "flags": flags,
+        "env": env,
+        "baseline_tput": baseline_tput,
+        "best_tput": best_tput,
+        "speedup": speedup,
+        "band_pct": band,
     }
 
 
@@ -3814,7 +4834,9 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
     recorded_overlay = str(_ir_get(ir, "accepted_overlay") or "").strip()
     for cand_path in (
         Path(recorded_overlay) if recorded_overlay else None,
-        (eval_dir / "overlay" / Path(recorded_overlay).name) if recorded_overlay else None,
+        (eval_dir / "overlay" / Path(recorded_overlay).name)
+        if recorded_overlay
+        else None,
         best["dir"],
     ):
         if cand_path is not None and _overlay_has_loadable_code(cand_path):
@@ -3825,10 +4847,16 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
     # stacked kernels loses both the attribution and the fact that more than one
     # change is live.
     accepted_kernels = [
-        {"short_name": c["short_name"], "kind": "authored", "backend": "geak",
-         "e2e_delta_pct": c["delta_pct"], "gate": c["gate"],
-         "headline": c is best}
-        for c in banked if c["is_kernel"] and c["short_name"]
+        {
+            "short_name": c["short_name"],
+            "kind": "authored",
+            "backend": "geak",
+            "e2e_delta_pct": c["delta_pct"],
+            "gate": c["gate"],
+            "headline": c is best,
+        }
+        for c in banked
+        if c["is_kernel"] and c["short_name"]
     ]
     # Same reasoning for env/flags: a config win banked before a later kernel win
     # is still live on the server, and dropping it makes every downstream reuse
@@ -3907,13 +4935,15 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
             "amdahl_ceiling_pct": best["amdahl_ceiling_pct"],
             "delta_over_amdahl_ceiling": (
                 round(delta_pct / best["amdahl_ceiling_pct"], 2)
-                if best["amdahl_ceiling_pct"] else None
+                if best["amdahl_ceiling_pct"]
+                else None
             ),
             "distributions_separated": best["separated"],
             "stack_only": stack_only or None,
             "excluded_as_implausible": [
                 c["short_name"] for c in candidates if c["implausible"]
-            ] or None,
+            ]
+            or None,
         },
     }
 
@@ -3979,7 +5009,8 @@ def _persist_workflow_return(eval_dir: Path, wf: dict) -> None:
     """Persist the authoritative workflow return beside the artifacts (best-effort)."""
     try:
         (eval_dir / WORKFLOW_RETURN_FILE).write_text(
-            json.dumps(wf, indent=2), encoding="utf-8")
+            json.dumps(wf, indent=2), encoding="utf-8"
+        )
     except OSError:
         pass
 
@@ -4046,7 +5077,9 @@ def _fuzzy_kid_key(s: Any) -> str:
     vs ``fwd_grouped_stage1``) and the assembler splits ONE kernel into two journey
     entries. Used ONLY to MATCH the two substreams — the emitted ``kernel_id`` stays
     the profiler's :func:`_canon_kid` spelling so discovery and kernels[] fold into one."""
-    toks = [t for t in str(s or "").lstrip("_").lower().split("_") if t and t != "kernel"]
+    toks = [
+        t for t in str(s or "").lstrip("_").lower().split("_") if t and t != "kernel"
+    ]
     return "_".join(toks)
 
 
@@ -4072,7 +5105,7 @@ def _journey_selected_names(eval_dir: Path) -> set[str]:
         if base.is_dir():
             for d in base.glob("cand_*"):
                 if d.is_dir():
-                    short = d.name[len("cand_"):]
+                    short = d.name[len("cand_") :]
                     sel.add(_norm_kname(short))
                     sel.add(_fuzzy_kid_key(short))
     return sel
@@ -4105,41 +5138,54 @@ def _journey_discovery_runs(eval_dir: Path, selected: set[str]) -> list[dict]:
         # repeat; the full unmangled name is preserved in ``name``.
         seen_ids[canon] = seen_ids.get(canon, 0) + 1
         kid = canon if seen_ids[canon] == 1 else f"{canon}#{k.get('rank') or i}"
-        hot.append({
-            "kernel_id": kid,
-            "name": str(k.get("name") or short),
-            "gpu_pct": k.get("pct_gpu_time"),
-            "time_ms": k.get("total_ms"),
-            "bound_type": "",                     # rocprofv3 carries no roofline bound; backfilled later
-            "arithmetic_intensity": None,
-            "flops_per_byte": None,
-            "efficiency_percent": None,
-            "reusable_native_kernel": bool(k.get("editable")),
-            "source_file": None,
-            # GEAK is the only optimization backend; recommend it only for the
-            # editable kernels it actually selected (overlay built).
-            "recommended_backends": ["geak"] if (sel and k.get("editable")) else [],
-            "selected_for_optimization": sel,
-            # schema §5 ❌ field the producer is asked to backfill (kernel class).
-            "kernel_category": k.get("classification"),
-        })
-    return [{
-        "source": "bypass",
-        "status": "success",
-        "duration_sec": None,
-        "scan": {"candidates_path": f"geak:{eval_dir}",
-                 "profiler": prof.get("source") or "rocprofv3",
-                 "num_distinct_kernels": prof.get("num_distinct_kernels")},
-        "hot_kernel_count": len(hot),
-        "hot_kernels": hot,
-        "error": None,
-    }]
+        hot.append(
+            {
+                "kernel_id": kid,
+                "name": str(k.get("name") or short),
+                "gpu_pct": k.get("pct_gpu_time"),
+                "time_ms": k.get("total_ms"),
+                "bound_type": "",  # rocprofv3 carries no roofline bound; backfilled later
+                "arithmetic_intensity": None,
+                "flops_per_byte": None,
+                "efficiency_percent": None,
+                "reusable_native_kernel": bool(k.get("editable")),
+                "source_file": None,
+                # GEAK is the only optimization backend; recommend it only for the
+                # editable kernels it actually selected (overlay built).
+                "recommended_backends": ["geak"] if (sel and k.get("editable")) else [],
+                "selected_for_optimization": sel,
+                # schema §5 ❌ field the producer is asked to backfill (kernel class).
+                "kernel_category": k.get("classification"),
+            }
+        )
+    return [
+        {
+            "source": "bypass",
+            "status": "success",
+            "duration_sec": None,
+            "scan": {
+                "candidates_path": f"geak:{eval_dir}",
+                "profiler": prof.get("source") or "rocprofv3",
+                "num_distinct_kernels": prof.get("num_distinct_kernels"),
+            },
+            "hot_kernel_count": len(hot),
+            "hot_kernels": hot,
+            "error": None,
+        }
+    ]
 
 
-def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
-                           geak_sha: str, overall_parity: bool | None,
-                           gpu_pct_prof: Any, display_name: str | None = None,
-                           kernel_id_override: str | None = None) -> dict:
+def _journey_overlay_entry(
+    eval_dir: Path,
+    short: str,
+    ir: dict,
+    wf: dict,
+    geak_sha: str,
+    overall_parity: bool | None,
+    gpu_pct_prof: Any,
+    display_name: str | None = None,
+    kernel_id_override: str | None = None,
+) -> dict:
     """One ``kernels[]`` entry for an optimization overlay, driven by its
     integrate_result.json. Honest per gate state:
       * accepted/stack -> succeeded + KEEP + integrated e2e (config win routes its
@@ -4175,10 +5221,19 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
     is_config = winner_kind in ("env", "config", "flags")
     flags = str(_ir_get(ir, "apply_flags") or "") if ir else ""
     tuned_file = _ir_get(ir, "tuned_config_file") if ir else None
-    patch = None if (is_config or not ir) else (_ir_get(ir, "final_patch", "patch_path"))
-    target_file = (tuned_file if is_config else _ir_get(ir, "target_file", "target_callable")) if ir else None
-    parity = (_parity_passed(ir.get("output_parity"))
-              if (ir and ir.get("output_parity") is not None) else overall_parity)
+    patch = (
+        None if (is_config or not ir) else (_ir_get(ir, "final_patch", "patch_path"))
+    )
+    target_file = (
+        (tuned_file if is_config else _ir_get(ir, "target_file", "target_callable"))
+        if ir
+        else None
+    )
+    parity = (
+        _parity_passed(ir.get("output_parity"))
+        if (ir and ir.get("output_parity") is not None)
+        else overall_parity
+    )
 
     entry: dict = {
         "kernel_id": kernel_id,
@@ -4198,10 +5253,15 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
         # WAS dispatched, but no measured backend/e2e result exists. Record only
         # what is true; leave attempts empty and emit no e2e (not KEEP, not FAIL).
         entry["backend_result"] = {
-            "kernel_id": kernel_id, "run_id": str(eval_dir),
-            "attempts": [], "verification": {},
-            "metadata": {"root_dir": str(GEAK_ROOT), "version": geak_sha,
-                         "note": "e2e A/B incomplete (cut off before result)"},
+            "kernel_id": kernel_id,
+            "run_id": str(eval_dir),
+            "attempts": [],
+            "verification": {},
+            "metadata": {
+                "root_dir": str(GEAK_ROOT),
+                "version": geak_sha,
+                "note": "e2e A/B incomplete (cut off before result)",
+            },
         }
         entry["dispatch"]["task_group"] = "ab_incomplete"
         return entry
@@ -4209,22 +5269,33 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
     accepted = gate in ("accepted", "stack")
     attempt_id = f"{kernel_id}-{backend}-0"
     entry["backend_result"] = {
-        "kernel_id": kernel_id, "run_id": str(eval_dir),
-        "attempts": [{
-            "backend": backend, "attempt_id": attempt_id,
-            "status": "succeeded",
-            "decision": "KEEP" if accepted else "REVERT",
+        "kernel_id": kernel_id,
+        "run_id": str(eval_dir),
+        "attempts": [
+            {
+                "backend": backend,
+                "attempt_id": attempt_id,
+                "status": "succeeded",
+                "decision": "KEEP" if accepted else "REVERT",
+                "micro_speedup": micro,
+                # A config tune is not compiled -> null (not fabricated True); an
+                # authored kernel that reached the A/B did compile.
+                "compile_passed": None if is_config else True,
+                "correctness_passed": parity,
+                "optimized_files": [tuned_file]
+                if (is_config and tuned_file)
+                else ([patch] if patch else []),
+                "error": None,
+                "error_type": None,
+                "ts": None,
+                "duration_sec": None,
+            }
+        ],
+        "verification": {
             "micro_speedup": micro,
-            # A config tune is not compiled -> null (not fabricated True); an
-            # authored kernel that reached the A/B did compile.
-            "compile_passed": None if is_config else True,
-            "correctness_passed": parity,
-            "optimized_files": [tuned_file] if (is_config and tuned_file)
-                               else ([patch] if patch else []),
-            "error": None, "error_type": None, "ts": None, "duration_sec": None,
-        }],
-        "verification": {"micro_speedup": micro, "best_attempt_id": attempt_id,
-                         "best_backend": backend},
+            "best_attempt_id": attempt_id,
+            "best_backend": backend,
+        },
         "metadata": {"root_dir": str(GEAK_ROOT), "version": geak_sha},
     }
     entry["e2e"] = {
@@ -4233,7 +5304,7 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
         "e2e_gain_pct": delta,
         "base_tput": base_tput,
         "new_tput": new_tput,
-        "validated": True,                        # an A/B gate ran either way
+        "validated": True,  # an A/B gate ran either way
         "decision": "KEEP" if accepted else "REJECTED",
         "patch_path": patch,
         "target_file": target_file,
@@ -4243,48 +5314,103 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
     return entry
 
 
-def _journey_return_entry(eval_dir: str, k: dict, idx: int, wf: dict,
-                          geak_sha: str, parity: bool | None,
-                          kernel_id_override: str | None = None) -> dict:
+def _journey_return_entry(
+    eval_dir: str,
+    k: dict,
+    idx: int,
+    wf: dict,
+    geak_sha: str,
+    parity: bool | None,
+    kernel_id_override: str | None = None,
+) -> dict:
     """One ``kernels[]`` entry from an accepted kernel named in the workflow return
     (used when there is no overlay on disk to read — e.g. the live path)."""
-    name = str(k.get("short_name") or k.get("name") or k.get("op_kind") or f"kernel{idx}")
+    name = str(
+        k.get("short_name") or k.get("name") or k.get("op_kind") or f"kernel{idx}"
+    )
     # Canonical id (matches the discovery + overlay substreams); ``name`` keeps
     # the raw spelling so the assembler folds this kernel into a single entry.
     # An override adopts the profiler symbol's id when this kernel was fuzzy-matched
     # to a discovery hot_kernel (infix/underscore divergence) — see build_kernel_journey.
     kid = kernel_id_override or _canon_kid(name)
     backend = _norm_backend(k.get("backend") or k.get("source"))
-    isolated = k.get("isolated") or k.get("micro_speedup") or k.get("verified_isolated_speedup")
+    isolated = (
+        k.get("isolated")
+        or k.get("micro_speedup")
+        or k.get("verified_isolated_speedup")
+    )
     patch = k.get("final_patch") or None
     attempt_id = f"{kid}-{backend}-{idx}"
-    return {
-        "kernel_id": kid, "name": name, "gpu_pct": k.get("pct_gpu_time"),
+    entry: dict = {
+        "kernel_id": kid,
+        "name": name,
+        "gpu_pct": k.get("pct_gpu_time"),
         "micro_speedup": isolated,
-        "dispatch": {"dispatched": True, "backends": [backend], "skip_reason": "",
-                     "orchestration_commit": "", "task_group": None},
+        "dispatch": {
+            "dispatched": True,
+            "backends": [backend],
+            "skip_reason": "",
+            "orchestration_commit": "",
+            "task_group": None,
+        },
         "backend_result": {
-            "kernel_id": kid, "run_id": str(k.get("kernel_eval_dir") or eval_dir),
-            "attempts": [{
-                "backend": backend, "attempt_id": attempt_id, "status": "succeeded",
-                "decision": "KEEP", "micro_speedup": isolated, "compile_passed": True,
-                "correctness_passed": parity, "optimized_files": [patch] if patch else [],
-                "error": None, "error_type": None, "ts": None, "duration_sec": None,
-            }],
-            "verification": {"micro_speedup": isolated, "best_attempt_id": attempt_id,
-                             "best_backend": backend},
+            "kernel_id": kid,
+            "run_id": str(k.get("kernel_eval_dir") or eval_dir),
+            "attempts": [
+                {
+                    "backend": backend,
+                    "attempt_id": attempt_id,
+                    "status": "succeeded",
+                    "decision": "KEEP",
+                    "micro_speedup": isolated,
+                    "compile_passed": True,
+                    "correctness_passed": parity,
+                    "optimized_files": [patch] if patch else [],
+                    "error": None,
+                    "error_type": None,
+                    "ts": None,
+                    "duration_sec": None,
+                }
+            ],
+            "verification": {
+                "micro_speedup": isolated,
+                "best_attempt_id": attempt_id,
+                "best_backend": backend,
+            },
             "metadata": {"root_dir": str(GEAK_ROOT), "version": geak_sha},
         },
         "e2e": {
-            "kernel_id": kid, "integrated": True, "e2e_gain_pct": k.get("e2e_delta_pct"),
+            "kernel_id": kid,
+            "integrated": True,
+            "e2e_gain_pct": k.get("e2e_delta_pct"),
             # Same pair as the overlay path, carried through the workflow return.
-            "base_tput": k.get("base_tput"), "new_tput": k.get("new_tput"),
-            "validated": True, "decision": "KEEP", "patch_path": patch,
+            "base_tput": k.get("base_tput"),
+            "new_tput": k.get("new_tput"),
+            "validated": True,
+            "decision": "KEEP",
+            "patch_path": patch,
             "target_file": k.get("target_file") or k.get("target_callable"),
-            "extra_server_args": str((wf.get("accepted_config") or {}).get("flags") or ""),
+            "extra_server_args": str(
+                (wf.get("accepted_config") or {}).get("flags") or ""
+            ),
             "ts": None,
         },
     }
+    if k.get("from_tuning_skillset"):
+        # Tuning produces kernel-selection/data-table optimizations too. Keep it
+        # in the ordinary kernels[] stream, with source metadata rather than a
+        # separate phase-level journey record.
+        entry["source_phase"] = "TuningSkillset"
+        entry["recovery_source"] = k.get("recovery_source") or "workflow_return"
+        entry["provisional"] = bool(k.get("provisional"))
+        entry["dispatch"]["task_group"] = "tuning_skillset"
+        entry["e2e"]["e2e_gain_scope"] = (
+            "single_tuning_kernel"
+            if k.get("e2e_delta_pct")
+            else "tuning_stack_unattributed"
+        )
+        entry["e2e"]["director_validated"] = False
+    return entry
 
 
 def _overlay_claim(ir: Any) -> dict | None:
@@ -4304,8 +5430,9 @@ def _overlay_claim(ir: Any) -> dict | None:
     gain = ir.get("e2e_delta_pct")
     return {
         "sym": _norm_kname(str(ir.get("short_name") or "")),
-        "gain": float(gain) if isinstance(gain, (int, float))
-                and not isinstance(gain, bool) else None,
+        "gain": float(gain)
+        if isinstance(gain, (int, float)) and not isinstance(gain, bool)
+        else None,
         "used": False,
     }
 
@@ -4351,7 +5478,9 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
     eval_dir_str = str(normalized.get("eval_dir") or wf.get("eval_dir") or "")
     eval_dir = Path(eval_dir_str) if eval_dir_str else None
     geak_sha = _git_short_sha(GEAK_ROOT)
-    overall_parity = _parity_passed(wf.get("output_parity") or normalized.get("output_parity"))
+    overall_parity = _parity_passed(
+        wf.get("output_parity") or normalized.get("output_parity")
+    )
 
     selected = _journey_selected_names(eval_dir) if eval_dir else set()
     discovery_runs = _journey_discovery_runs(eval_dir, selected) if eval_dir else []
@@ -4373,11 +5502,15 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
         canon = _canon_kid(sh)
         _seen_canon[canon] = _seen_canon.get(canon, 0) + 1
         kid_p = canon if _seen_canon[canon] == 1 else f"{canon}#{k.get('rank') or i}"
-        prof_index.append({
-            "norm": _norm_kname(sh), "fuzzy": _fuzzy_kid_key(sh),
-            "kid": kid_p, "name": str(k.get("name") or sh),
-            "pct": k.get("pct_gpu_time"),
-        })
+        prof_index.append(
+            {
+                "norm": _norm_kname(sh),
+                "fuzzy": _fuzzy_kid_key(sh),
+                "kid": kid_p,
+                "name": str(k.get("name") or sh),
+                "pct": k.get("pct_gpu_time"),
+            }
+        )
 
     def _match_profiler(short: str) -> dict | None:
         """Resolve an overlay/return short_name to its profiler symbol: exact norm
@@ -4409,7 +5542,7 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
             for cand in sorted(base.glob("cand_*")):
                 if not cand.is_dir():
                     continue
-                short = cand.name[len("cand_"):]
+                short = cand.name[len("cand_") :]
                 if not short:
                     continue
                 ir = _read_json(cand / "integrate_result.json")
@@ -4421,21 +5554,34 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
                 if kid in seen:
                     continue
                 seen.add(kid)
-                kernels.append(_journey_overlay_entry(
-                    eval_dir, short, ir, wf, geak_sha, overall_parity,
-                    m["pct"] if m else None, m["name"] if m else None,
-                    kernel_id_override=kid))
+                kernels.append(
+                    _journey_overlay_entry(
+                        eval_dir,
+                        short,
+                        ir,
+                        wf,
+                        geak_sha,
+                        overall_parity,
+                        m["pct"] if m else None,
+                        m["name"] if m else None,
+                        kernel_id_override=kid,
+                    )
+                )
 
     # 2) Augment with accepted kernels named only in the workflow return (live path
     #    / no overlay on disk), deduped against the overlay entries above: by id,
     #    and by the identity those overlays claimed, which is what catches the same
     #    acceptance spelled as a candidate tag on disk and as a symbol in the return.
-    accepted = list(wf.get("accepted_kernels") or []) + list(wf.get("accepted_heads") or [])
+    accepted = list(wf.get("accepted_kernels") or []) + list(
+        wf.get("accepted_heads") or []
+    )
     synth_hot: list[dict] = []
     for idx, k in enumerate(accepted):
         if not isinstance(k, dict):
             continue
-        name = str(k.get("short_name") or k.get("name") or k.get("op_kind") or f"kernel{idx}")
+        name = str(
+            k.get("short_name") or k.get("name") or k.get("op_kind") or f"kernel{idx}"
+        )
         claimed = _claim_for(name, k.get("e2e_delta_pct"), claims)
         if claimed is not None:
             claimed["used"] = True
@@ -4445,25 +5591,44 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
         if kid in seen:
             continue
         seen.add(kid)
-        kernels.append(_journey_return_entry(
-            eval_dir_str, k, idx, wf, geak_sha, overall_parity,
-            kernel_id_override=kid))
-        synth_hot.append({
-            "kernel_id": kid, "name": (m["name"] if m else name),
-            "gpu_pct": k.get("pct_gpu_time"),
-            "bound_type": str(k.get("bound_type") or k.get("op_kind") or ""),
-            "source_file": k.get("target_file") or k.get("target_callable"),
-            "recommended_backends": [_norm_backend(k.get("backend") or k.get("source"))],
-            "selected_for_optimization": True,
-        })
+        kernels.append(
+            _journey_return_entry(
+                eval_dir_str,
+                k,
+                idx,
+                wf,
+                geak_sha,
+                overall_parity,
+                kernel_id_override=kid,
+            )
+        )
+        synth_hot.append(
+            {
+                "kernel_id": kid,
+                "name": (m["name"] if m else name),
+                "gpu_pct": k.get("pct_gpu_time"),
+                "bound_type": str(k.get("bound_type") or k.get("op_kind") or ""),
+                "source_file": k.get("target_file") or k.get("target_callable"),
+                "recommended_backends": [
+                    _norm_backend(k.get("backend") or k.get("source"))
+                ],
+                "selected_for_optimization": True,
+            }
+        )
     # When there is no on-disk profiler discovery (live path), synthesize a minimal
     # discovery run from the accepted kernels so they are not orphaned.
     if not discovery_runs and synth_hot:
-        discovery_runs = [{
-            "source": "bypass", "status": "success", "duration_sec": None,
-            "scan": {"candidates_path": f"geak:{eval_dir_str}"},
-            "hot_kernel_count": len(synth_hot), "hot_kernels": synth_hot, "error": None,
-        }]
+        discovery_runs = [
+            {
+                "source": "bypass",
+                "status": "success",
+                "duration_sec": None,
+                "scan": {"candidates_path": f"geak:{eval_dir_str}"},
+                "hot_kernel_count": len(synth_hot),
+                "hot_kernels": synth_hot,
+                "error": None,
+            }
+        ]
 
     return {
         "schema_version": KERNEL_JOURNEY_SCHEMA_VERSION,
@@ -4523,8 +5688,11 @@ def _write_kernel_journey(eval_dir: Path, wf: dict | None, normalized: dict) -> 
     ``kernel_journey_error`` instead of letting it pass silently.
     """
     try:
-        journey = build_kernel_journey(wf, normalized) if wf is not None \
+        journey = (
+            build_kernel_journey(wf, normalized)
+            if wf is not None
             else _empty_journey(eval_dir, normalized)
+        )
     except Exception:  # full build failed: degrade to a valid empty journey.
         journey = _empty_journey(eval_dir, normalized)
     eval_dir.mkdir(parents=True, exist_ok=True)
@@ -4569,20 +5737,27 @@ def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
         "> the headline as provisional and re-bench before promoting it.\n"
     )
     parts.append("\n## Result\n")
-    parts.append(_md_table([
-        ("status", status),
-        ("result_source", normalized.get("result_source")),
-        ("baseline tok/s", normalized.get("baseline_throughput_tok_s")),
-        ("final tok/s", normalized.get("final_throughput_tok_s")),
-        ("speedup", f"{speedup:.4f}x" if isinstance(speedup, (int, float)) else None),
-        ("output parity", normalized.get("output_parity")),
-        ("TTFT ms", normalized.get("ttft_ms")),
-        ("TPOT ms", normalized.get("tpot_ms")),
-        ("validation_status", evidence.get("validation_status")),
-        ("speedup basis", evidence.get("speedup_basis")),
-        ("bench client", normalized.get("bench_client")),
-        ("eval_dir", normalized.get("eval_dir")),
-    ]))
+    parts.append(
+        _md_table(
+            [
+                ("status", status),
+                ("result_source", normalized.get("result_source")),
+                ("baseline tok/s", normalized.get("baseline_throughput_tok_s")),
+                ("final tok/s", normalized.get("final_throughput_tok_s")),
+                (
+                    "speedup",
+                    f"{speedup:.4f}x" if isinstance(speedup, (int, float)) else None,
+                ),
+                ("output parity", normalized.get("output_parity")),
+                ("TTFT ms", normalized.get("ttft_ms")),
+                ("TPOT ms", normalized.get("tpot_ms")),
+                ("validation_status", evidence.get("validation_status")),
+                ("speedup basis", evidence.get("speedup_basis")),
+                ("bench client", normalized.get("bench_client")),
+                ("eval_dir", normalized.get("eval_dir")),
+            ]
+        )
+    )
 
     parts.append("\n\n## Accepted work\n")
     if not kernels and not heads:
@@ -4591,24 +5766,23 @@ def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
         if not entries:
             continue
         parts.append(f"\n### Accepted {label}\n\n")
-        parts.append(_md_table([
-            (str(e.get("short_name") or "?"),
-             f"{e.get('e2e_delta_pct')}% e2e, backend={e.get('backend') or '?'}, gate={e.get('gate') or '?'}")
-            for e in entries if isinstance(e, dict)
-        ]))
+        parts.append(
+            _md_table(
+                [
+                    (
+                        str(e.get("short_name") or "?"),
+                        f"{e.get('e2e_delta_pct')}% e2e, backend={e.get('backend') or '?'}, gate={e.get('gate') or '?'}",
+                    )
+                    for e in entries
+                    if isinstance(e, dict)
+                ]
+            )
+        )
         parts.append("\n")
     if config.get("flags") or config.get("env"):
         parts.append("\n### Accepted config\n\n")
         parts.append(f"- flags: `{config.get('flags') or ''}`\n")
         parts.append(f"- env: `{config.get('env') or ''}`\n")
-        if config.get("env_unparsed"):
-            # Not cosmetic: whatever is listed here is NOT in env_map, so a
-            # consumer replaying this config will not set it. Naming it is the
-            # difference between a lossy replay and an unexplained one.
-            parts.append(
-                "- env fragments that are not assignments (dropped from "
-                f"`env_map`): `{' '.join(config['env_unparsed'])}`\n"
-            )
 
     if pending:
         parts.append("\n## Deferred (verified-isolated, e2e A/B never completed)\n\n")
@@ -4627,14 +5801,17 @@ def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
     parts.append("\n## Artifacts\n\n")
     parts.append(f"- `{KERNEL_JOURNEY_FILE}` — per-kernel journey\n")
     parts.append(f"- `{WORKFLOW_RETURN_FILE}` — recovered workflow return\n")
-    parts.append("- `result.json` — the full normalized result this report was rendered from\n")
+    parts.append(
+        "- `result.json` — the full normalized result this report was rendered from\n"
+    )
     if normalized.get("final_overlay"):
         parts.append(f"- `{normalized['final_overlay']}` — final overlay\n")
     return "".join(parts)
 
 
-def _write_final_report_fallback(eval_dir: Path, normalized: dict,
-                                 wf: dict | None) -> str:
+def _write_final_report_fallback(
+    eval_dir: Path, normalized: dict, wf: dict | None
+) -> str:
     """Guarantee a readable final report; return its path ("" on failure).
 
     Same guaranteed-emit contract as ``result.json`` / ``kernel_journey.json``.
@@ -4678,7 +5855,9 @@ def _publish_protected_pgids() -> str:
         except OSError:  # racing parent exit / unsupported platform
             pass
     protected.update(
-        tok for tok in os.environ.get("GEAK_PROTECTED_PGIDS", "").split() if tok.isdigit()
+        tok
+        for tok in os.environ.get("GEAK_PROTECTED_PGIDS", "").split()
+        if tok.isdigit()
     )
     value = " ".join(sorted(protected, key=int))
     os.environ["GEAK_PROTECTED_PGIDS"] = value
@@ -4759,9 +5938,7 @@ def main(argv: list[str]) -> int:
 
     ps_args = map_args(h, timeout_s)
     if ps_args.get("effective_config_digest"):
-        os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
-            ps_args["effective_config_digest"]
-        )
+        os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(ps_args["effective_config_digest"])
     else:
         os.environ.pop("EFFECTIVE_CONFIG_DIGEST", None)
     # Pin the single eval_dir into the environment so BOTH the live completion
@@ -4776,18 +5953,31 @@ def main(argv: list[str]) -> int:
     prompt = build_prompt(ps_args)
 
     if "--dry-run" in flags:
-        print(json.dumps({"mapped_args": ps_args, "bench_client": bench_client,
-                          "bench_launcher": bench_launcher,
-                          "magpie_launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
-                          "magpie_launch_script_source": os.environ.get("MAGPIE_LAUNCH_SCRIPT_SOURCE", ""),
-                          "recipe_env_file": os.environ.get("RECIPE_ENV_FILE", ""),
-                          "recipe_env_source": os.environ.get("RECIPE_ENV_SOURCE", ""),
-                          "recipe_env_replayed": os.environ.get("RECIPE_ENV_REPLAYED", ""),
-                          "recipe_env_geak_owned": os.environ.get("RECIPE_ENV_GEAK_OWNED", ""),
-                          "bench_protocol": bench_protocol,
-                          "alignment_flags": alignment_flags,
-                          "inferencex_path": os.environ.get("INFERENCEX_PATH", ""),
-                          "prompt": prompt, "e2e_script": str(E2E_SCRIPT)}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "mapped_args": ps_args,
+                    "bench_client": bench_client,
+                    "bench_launcher": bench_launcher,
+                    "magpie_launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
+                    "magpie_launch_script_source": os.environ.get(
+                        "MAGPIE_LAUNCH_SCRIPT_SOURCE", ""
+                    ),
+                    "recipe_env_file": os.environ.get("RECIPE_ENV_FILE", ""),
+                    "recipe_env_source": os.environ.get("RECIPE_ENV_SOURCE", ""),
+                    "recipe_env_replayed": os.environ.get("RECIPE_ENV_REPLAYED", ""),
+                    "recipe_env_geak_owned": os.environ.get(
+                        "RECIPE_ENV_GEAK_OWNED", ""
+                    ),
+                    "bench_protocol": bench_protocol,
+                    "alignment_flags": alignment_flags,
+                    "inferencex_path": os.environ.get("INFERENCEX_PATH", ""),
+                    "prompt": prompt,
+                    "e2e_script": str(E2E_SCRIPT),
+                },
+                indent=2,
+            )
+        )
         return 0
 
     exp_root = Path(h.get("exp_root") or "")
@@ -4804,8 +5994,9 @@ def main(argv: list[str]) -> int:
     #     explicit workflow return is available.
     _emit_state: dict[str, Any] = {"done": False, "out": {}}
 
-    def _emit(wf: dict | None = None, *, error: object = None,
-              error_class: str | None = None) -> dict:
+    def _emit(
+        wf: dict | None = None, *, error: object = None, error_class: str | None = None
+    ) -> dict:
         if _emit_state["done"]:
             return _emit_state["out"]
         # A second SIGTERM must not interrupt the flush we are about to do.
@@ -4905,13 +6096,12 @@ def main(argv: list[str]) -> int:
                     os.replace(tmp, result_path)
                     _emit_state["out"] = out
             except Exception as kb_exc:
-                out["kb_write"] = {"ok": False,
-                                   "why": f"{type(kb_exc).__name__}: {kb_exc}"}
-        # The per-op tuned tables, filed on the same terms and for the same reason, but on their own
-        # gate: this one is NOT conditional on `wf`. A run can be cut off with a complete, engagement-
-        # proven tuning A/B on disk and no workflow return at all, and that table is still knowledge
-        # about that op. Runs after the deployment record for the same ordering reason — result.json
-        # first, network second.
+                out["kb_write"] = {
+                    "ok": False,
+                    "why": f"{type(kb_exc).__name__}: {kb_exc}",
+                }
+        # Tuning artifacts use their own per-op gate and may be recoverable even
+        # when no complete workflow return was emitted.
         if _emit_state["done"] and eval_dir_str:
             try:
                 tuned = _kb_write_tuned_ops(Path(eval_dir_str))
@@ -4922,21 +6112,28 @@ def main(argv: list[str]) -> int:
                     os.replace(tmp, result_path)
                     _emit_state["out"] = out
             except Exception as kb_exc:
-                out["kb_write_tuned"] = {"ok": False,
-                                         "why": f"{type(kb_exc).__name__}: {kb_exc}"}
+                out["kb_write_tuned"] = {
+                    "ok": False,
+                    "why": f"{type(kb_exc).__name__}: {kb_exc}",
+                }
         return out
 
     # Safety net: any exit path that somehow skipped _emit still leaves a file.
     atexit.register(
-        lambda: None if _emit_state["done"]
-        else _emit(error="process exiting without an emit",
-                   error_class="interrupted")
+        lambda: (
+            None
+            if _emit_state["done"]
+            else _emit(
+                error="process exiting without an emit", error_class="interrupted"
+            )
+        )
     )
 
     # SIGTERM (the outer runner's graceful-stop) -> break out of the workflow
     # wait as a TimeoutError so the finally below emits from on-disk artifacts.
     def _on_term(signum, _frame):
         raise TimeoutError(f"signal {signum}: self-stop to flush interface files")
+
     signal.signal(signal.SIGTERM, _on_term)
 
     # ── Resume-from-cache short-circuit ──────────────────────────────────────
@@ -4957,9 +6154,15 @@ def main(argv: list[str]) -> int:
         except Exception:
             cached_wf = None
         cached_out = _emit(wf=cached_wf)
-        print(json.dumps({"status": cached_out.get("status"),
-                          "result_json": str(result_path),
-                          "speedup": cached_out.get("throughput_speedup")}))
+        print(
+            json.dumps(
+                {
+                    "status": cached_out.get("status"),
+                    "result_json": str(result_path),
+                    "speedup": cached_out.get("throughput_speedup"),
+                }
+            )
+        )
         return 0 if cached_out.get("status") != "error" else 1
 
     out: dict = {}
@@ -4985,9 +6188,15 @@ def main(argv: list[str]) -> int:
     finally:
         out = _emit(wf=wf, error=err, error_class=err_class)
 
-    print(json.dumps({"status": out.get("status"),
-                      "result_json": str(result_path),
-                      "speedup": out.get("throughput_speedup")}))
+    print(
+        json.dumps(
+            {
+                "status": out.get("status"),
+                "result_json": str(result_path),
+                "speedup": out.get("throughput_speedup"),
+            }
+        )
+    )
     return 0 if out.get("status") != "error" else 1
 
 
