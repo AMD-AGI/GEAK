@@ -17,8 +17,10 @@ It exists to close two systematic "isolated win / e2e loss" holes that a naive p
     in the LIVE server is ALREADY gone (decode runs inside the server's own CUDA graph). Result: a huge
     isolated "speedup" that evaporates on integration.
     Fix: `time_op` scores CUDA-EVENT DEVICE time (the GPU timeline between two events), which excludes
-    host launch/dispatch entirely — so collapsing dispatch buys nothing and no `inner` amortization is
-    needed (inner=1). WALL time is measured alongside as a reference only. It also FLUSHES the last-level/
+    host launch/dispatch — so collapsing dispatch buys nothing and no `inner` amortization is
+    needed (inner=1). That exclusion is CONDITIONAL, so `time_op` also reports `primed`/`host_ms` saying
+    how far it holds (the receipt `oracle_freezer` prints and `director` gates on).
+    WALL time is measured alongside as a reference only. It also FLUSHES the last-level/
     Infinity cache before each sample so a memory-bound decode kernel reads its weights cold from HBM,
     matching deployment (the model working set >> cache, evicted between decode steps). `graph=True` times
     a captured-graph replay (the exact decode deployment context) with the same event+flush method.
@@ -322,8 +324,19 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=True,
     `graph=True` times a captured CUDA-graph replay (the decode deployment context) with the same
     event+flush method; falls back to eager event timing if capture is unavailable (see the `timer` field).
 
-    Returns median device ms (float), or {ms, wall_ms, timer} when detail=True. None if `call` raises.
-    On a box without CUDA, device time is unavailable so ms == wall_ms and timer='wall'."""
+    The device-time guarantee is CONDITIONAL, and `primed` says how far it holds. Read it as THREE
+    states, never a bool (see `_host_dispatch_ms`):
+      True    -> dispatch is cheaper than the kernel, so `ms` is dominated by device work. Score it.
+      False   -> this op dispatches slower than it computes; `ms` is a HOST-BOUND latency, not a kernel
+                 time, and a candidate can "win" on it by collapsing dispatch alone.
+      ABSENT  -> the timer could not tell (no CUDA). NOT the same as False.
+    `primed=True` does NOT mean the window is overhead-free: a window costs a few us beyond the kernel
+    either way, negligible for a 100us GEMM and most of the number for a 5us op. Raise `inner` when that
+    matters — the overhead is per-window, so it divides away.
+
+    Returns median device ms (float), or {ms, wall_ms, timer} when detail=True — plus {primed, host_ms}
+    whenever the timer can produce them. None if `call` raises. On a box without CUDA, device time is
+    unavailable so ms == wall_ms and timer='wall'."""
     torch = _torch()
     inner = max(1, int(inner))
     try:
@@ -335,20 +348,60 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=True,
             g = _try_capture(torch, call, inner)
             if g is not None:
                 dev, wall = _time_graph(torch, g, warmup, repeats, flush_cache)
-                return _timing_result(dev, wall, "cuda_event_graph", detail)
+                # One replay issues all `inner` launches, so divide to put host on the SAME per-launch
+                # basis as `dev` -- otherwise a clean inner>1 graph reads as host-bound.
+                host = _host_dispatch_ms(torch, lambda: g[0].replay()) / g[1]
+                return _timing_result(dev, wall, "cuda_event_graph", detail, host, host < dev)
         if have_cuda:
             dev, wall = _time_events(torch, call, warmup, repeats, inner, flush_cache)
-            return _timing_result(dev, wall, "cuda_event", detail)
+            host = _host_dispatch_ms(torch, call)
+            return _timing_result(dev, wall, "cuda_event", detail, host, host < dev)
         wall = _time_wall(torch, call, warmup, repeats, inner)   # no device timeline -> wall only
         return _timing_result(wall, wall, "wall", detail)
     except Exception:
         return None
 
 
-def _timing_result(dev_ms, wall_ms, timer, detail):
-    if detail:
-        return {"ms": dev_ms, "wall_ms": wall_ms, "timer": timer}
-    return dev_ms
+def _timing_result(dev_ms, wall_ms, timer, detail, host_ms=None, primed=None):
+    if not detail:
+        return dev_ms
+    d = {"ms": dev_ms, "wall_ms": wall_ms, "timer": timer}
+    if host_ms is not None:
+        # Both keys or neither. A consumer distinguishes "host-bound" from "cannot tell" by PRESENCE
+        # (oracle_freezer.md step 4), so half a receipt would be read as a whole one.
+        d["host_ms"] = host_ms
+        d["primed"] = bool(primed)
+    return d
+
+
+_HOST_PROBE_LAUNCHES = 30
+
+
+def _host_dispatch_ms(torch, call):
+    """Host cost of issuing ONE `call()`, measured on a DRAINED queue.
+
+    Deliberately not derived from `wall_ms`: that is host+device together, so on a long kernel it is
+    essentially the device time and every slow kernel would look slow to dispatch too. `primed =
+    host_ms < dev_ms` then reads as director.md states it — a host that cannot issue faster than the GPU
+    executes cannot keep the queue full, so the event window measures host latency, not kernel time.
+
+    `_HOST_PROBE_LAUNCHES` is fixed and owned here. It used to be the caller's `inner`, which defaults to
+    1, making the estimate a single cold read of a Python dispatch path; on MI355X that overstated a
+    512^3 GEMM's dispatch ~2x and flipped a genuinely primed measurement to False. It stays small so the
+    launches do not backpressure the host, which would reintroduce that inflation.
+
+    Callers put the result on the same per-launch basis as `dev`: eager `call()` is one launch; a graph
+    replay is `inner`, so that caller divides."""
+    n = max(1, _HOST_PROBE_LAUNCHES)
+    for _ in range(3):
+        call()                      # the dispatch path must be HOT: we want steady-state issue cost
+    sync(torch)
+    t0 = time.perf_counter()
+    for _ in range(n):
+        call()
+    ms = (time.perf_counter() - t0) * 1e3 / n
+    sync(torch)
+    return ms
 
 
 _CACHE_FLUSH_BUF = None
@@ -376,7 +429,14 @@ def flush_cache(torch=None, mb=None):
 def _time_events(torch, call, warmup, repeats, inner, flush):
     """Median (device_ms, wall_ms) over `repeats` samples of `inner` back-to-back launches: device via
     cuda.Event (host-free), wall via perf_counter (reference). Cache flushed before each sample when
-    `flush`, so a memory-bound kernel is timed cold."""
+    `flush`, so a memory-bound kernel is timed cold.
+
+    The per-sample sync is deliberate. Batching the samples into one queue with no intervening sync was
+    tried and REJECTED on measurement: fitting per-launch ms against 1/inner on MI355X (torch 2.9 / ROCm
+    7.2) to separate kernel time K from per-window overhead E showed batching RAISED E in 5 of 6
+    configurations, and under `flush` let the two timers disagree on K itself by up to 2.8x -- flush and
+    kernel become two commands in a packed queue, so the cold-HBM guarantee stops holding. Do not
+    reintroduce it without re-running that fit."""
     for _ in range(max(1, warmup)):
         call()
     sync(torch)

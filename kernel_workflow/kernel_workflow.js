@@ -375,6 +375,11 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
   try {
     const r = await workflow({ scriptPath: WORKER }, {
       kernel_path: oracle.task_dir, workflow_dir: WORKFLOW_DIR,
+      // This lane runs on an oracle_freezer-frozen task dir, so a GEAK_TIMING_RECEIPT is EXPECTED and
+      // its absence is a real fault. The optimize/author path spreads {...A} and never sets this, so a
+      // pass-through lane (and e2e, which calls this worker directly) correctly defaults to false —
+      // there is no Freeze on those routes, so director must not demand a receipt they cannot produce.
+      frozen_oracle: 'true',
       mode: l.mode, target_language: l.lang,
       op_spec: oracle.op_spec || OP_SPEC, workload_spec_path: oracle.workload_path || WORKLOAD_SPEC_PATH || '',
       budget: BUDGET, gpu_ids: gpu, gpu_mode: GPU_MODE, task: TASK, apply_to_original: 'false',
