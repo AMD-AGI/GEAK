@@ -558,6 +558,40 @@ warns and continues, always. Note that `CLAUDE_CONFIG_DIR` is read by Claude
 Code **at session start**: exporting it after the fact has no effect, which is
 precisely why the mirror does not depend on anyone having set it.
 
+## Outcome report (what the run bought)
+
+The call telemetry above answers what a run *cost*. `interface/geak_outcome_report.py`
+answers the other half — what each phase *bought* — and `_emit()` writes it at
+the end of every run:
+
+```
+<eval_dir>/reports/geak_outcome.json     machine-readable
+<eval_dir>/reports/geak_outcome.md       the tables
+<eval_dir>/reports/SKILL.md              how to rebuild and read both reports
+```
+
+It reads only this run's own measured artifacts — `baseline/bench_summary.json`,
+`config/sweep_results.json`, `kernels/*/opbench_result.json`,
+`tuning/tuning_result.json` — and joins them to the per-phase spend when
+`reports/geak_calls.jsonl` is present. Two rules keep it honest:
+
+- **Absent is not zero.** A missing artifact renders as `—`. "We did not measure
+  it" and "it contributed nothing" are different claims and conflating them is
+  how a phase that spends most of the budget for a measured 0.00 % ceiling stays
+  invisible.
+- **Phases do not join end to end.** Each measures its own before/after in its
+  own server session, so one phase's `after` need not equal the next phase's
+  `before`. Those seams are printed, and the compounded speedup is marked an
+  estimate whenever one exists. `observed_delta_pct_first_to_last` is the
+  measured figure.
+
+It runs on a run whose Claude ledger was lost, since it needs none of it, and it
+can be re-run over an archived run at any time:
+
+```bash
+python3 interface/geak_outcome_report.py <EVAL_DIR> [--stdout]
+```
+
 ## `kernel_journey.json` (per-kernel journey contract → orchestrator)
 
 Because GEAK-e2e is a whole-pipeline e2e optimizer (not a per-kernel backend),
