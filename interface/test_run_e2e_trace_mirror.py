@@ -331,13 +331,13 @@ def test_max_bytes_env_knob(monkeypatch, raw, expected):
 def test_render_is_skipped_when_no_renderer_is_reachable(tmp_path, monkeypatch):
     monkeypatch.delenv("GEAK_LLM_REPORT_CMD", raising=False)
     monkeypatch.setenv("HYPERLOOM_SRC", str(tmp_path / "nowhere"))
-    out = ctm.render_report(tmp_path / "mirror", tmp_path / "reports")
+    out = ctm.render_report(tmp_path / "mirror", tmp_path / "reports", tmp_path)
     assert out["status"] == "skipped"
 
 
 def test_render_failure_is_recorded_not_raised(tmp_path, monkeypatch):
     monkeypatch.setenv("GEAK_LLM_REPORT_CMD", "false")
-    out = ctm.render_report(tmp_path / "mirror", tmp_path / "reports")
+    out = ctm.render_report(tmp_path / "mirror", tmp_path / "reports", tmp_path)
     assert out["status"] in {"failed", "error", "skipped"}
 
 
@@ -420,7 +420,7 @@ def test_an_unwritable_manifest_does_not_raise(tmp_path):
 def test_no_renderer_without_hyperloom_src(tmp_path, monkeypatch):
     monkeypatch.delenv("GEAK_LLM_REPORT_CMD", raising=False)
     monkeypatch.delenv("HYPERLOOM_SRC", raising=False)
-    assert ctm._report_command(tmp_path, tmp_path) is None
+    assert ctm._report_command(tmp_path, tmp_path, tmp_path) is None
 
 
 def test_renderer_is_built_when_the_tool_is_present(tmp_path, monkeypatch):
@@ -429,7 +429,7 @@ def test_renderer_is_built_when_the_tool_is_present(tmp_path, monkeypatch):
     tool.mkdir(parents=True)
     (tool / "dump_geak_call_report.py").write_text("", encoding="utf-8")
     monkeypatch.setenv("HYPERLOOM_SRC", str(tmp_path / "src"))
-    argv = ctm._report_command(tmp_path / "mirror", tmp_path / "out")
+    argv = ctm._report_command(tmp_path / "mirror", tmp_path / "out", tmp_path)
     assert argv is not None
     assert argv[0] == "python3"
     assert "--claude-home" in argv and str(tmp_path / "mirror") in argv
@@ -437,7 +437,7 @@ def test_renderer_is_built_when_the_tool_is_present(tmp_path, monkeypatch):
 
 def test_a_renderer_that_cannot_be_executed_is_reported(tmp_path, monkeypatch):
     monkeypatch.setenv("GEAK_LLM_REPORT_CMD", str(tmp_path / "not-an-executable"))
-    out = ctm.render_report(tmp_path / "mirror", tmp_path / "reports")
+    out = ctm.render_report(tmp_path / "mirror", tmp_path / "reports", tmp_path)
     assert out["status"] == "error"
 
 
@@ -446,7 +446,7 @@ def test_a_nonzero_renderer_is_reported(tmp_path, monkeypatch):
     script.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
     script.chmod(0o755)
     monkeypatch.setenv("GEAK_LLM_REPORT_CMD", str(script))
-    out = ctm.render_report(tmp_path / "mirror", tmp_path / "reports")
+    out = ctm.render_report(tmp_path / "mirror", tmp_path / "reports", tmp_path)
     assert out["status"] == "error" and out.get("returncode") == 3
 
 
@@ -664,3 +664,20 @@ def test_run_converts_an_os_error_into_a_status(monkeypatch):
     monkeypatch.setattr(ctm.subprocess, "run", explode)
     result = ctm._run(["nope"], 1.0, {})
     assert result["status"] == "error" and "no such binary" in result["error"]
+
+
+def test_report_command_carries_a_selector_and_asks_for_the_text_sidecar(tmp_path, monkeypatch):
+    """Regression: the renderer refuses to run without a selector.
+
+    ``--claude-home`` appends a search root, it does not select a run, and the
+    report tool exits 2 when no selector is given -- so a command built without
+    ``--eval-dir`` silently produces no report at all. ``--include-text`` is what
+    writes ``geak_calls.jsonl``, which is the only file the HTML report reads.
+    """
+    monkeypatch.setenv("GEAK_LLM_REPORT_CMD", "/bin/true")
+    argv = ctm._report_command(tmp_path / "mirror", tmp_path / "reports", tmp_path / "eval")
+    assert argv is not None
+    assert "--eval-dir" in argv
+    assert argv[argv.index("--eval-dir") + 1] == str(tmp_path / "eval")
+    assert "--include-text" in argv
+    assert "--claude-home" in argv

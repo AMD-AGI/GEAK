@@ -20,8 +20,11 @@ to the record it found — per-agent transcripts at
 ``<record>/../../subagents/workflows/<runId>/``, the orchestrator conversation at
 ``<session_dir>.jsonl``. The slug and session names are wildcards and are never
 parsed; only the depth matters, and there is no flat-directory escape hatch. So
-the mirror reproduces that shape verbatim and is readable unchanged with
-``--claude-home <eval_dir>/llm_trace``.
+the mirror reproduces that shape verbatim and is readable with
+``--claude-home <eval_dir>/llm_trace --eval-dir <eval_dir>``. Both halves are
+needed: ``--claude-home`` appends a search root, it does not select a run, and
+the reader refuses to run without a selector. The record is copied byte for byte
+precisely so the eval dir it names still selects it from the mirror.
 
 Everything here is best effort. An 18-hour optimization run must never die over
 telemetry, so no function in this module raises to its caller: failures are
@@ -421,21 +424,37 @@ def warn_if_volatile(home: Path, exp_root: Path) -> str | None:
 # --------------------------------------------------------------------------- #
 # Rendering (best effort)
 # --------------------------------------------------------------------------- #
-def _report_command(mirror_root: Path, out_dir: Path) -> list[str] | None:
+def _report_command(mirror_root: Path, out_dir: Path, eval_dir: Path) -> list[str] | None:
     """Build the command that renders a report from the mirror, if available.
 
     GEAK cannot import Hyperloom, so the renderer is reached by subprocess when
     a checkout happens to be present and skipped entirely when it is not. The
     raw mirror is the durable artifact; the rendered report is a convenience.
 
+    ``--claude-home`` *appends* a search root rather than replacing the default
+    ones, and the tool refuses to run without a selector, so ``--eval-dir`` is
+    not optional here: without it the renderer exits 2 having written nothing.
+    The mirrored record keeps the eval dir it was written with -- the copy is
+    verbatim, deliberately -- so this run's own eval dir is what selects it.
+
+    ``--include-text`` is likewise required rather than a nicety: it is what
+    writes ``geak_calls.jsonl``, and the HTML report that runs next reads only
+    that file.
+
     Args:
         mirror_root: The mirror directory to read.
         out_dir: Where the report should be written.
+        eval_dir: This run's eval dir, which selects its record.
 
     Returns:
         An argv list, or ``None`` when no renderer can be located.
     """
-    tail = ["--claude-home", str(mirror_root), "--output-dir", str(out_dir)]
+    tail = [
+        "--claude-home", str(mirror_root),
+        "--eval-dir", str(eval_dir),
+        "--include-text",
+        "--output-dir", str(out_dir),
+    ]
     override = os.environ.get("GEAK_LLM_REPORT_CMD", "").strip()
     if override:
         return override.split() + tail
@@ -512,19 +531,22 @@ def install_skill(out_dir: Path) -> dict[str, Any]:
     return {"status": "ok", "path": str(dest)}
 
 
-def render_report(mirror_root: Path, out_dir: Path, *, timeout_s: float = 600.0) -> dict[str, Any]:
+def render_report(
+    mirror_root: Path, out_dir: Path, eval_dir: Path, *, timeout_s: float = 600.0
+) -> dict[str, Any]:
     """Render a per-call report from the mirror, if a renderer is reachable.
 
     Args:
         mirror_root: The mirror directory to read.
         out_dir: Where the report should be written.
+        eval_dir: This run's eval dir, which selects its record.
         timeout_s: Ceiling on the renderer's runtime.
 
     Returns:
         A status dict; ``{"status": "skipped"}`` when no renderer was found.
         Never raises — a failed render leaves the raw mirror untouched.
     """
-    argv = _report_command(mirror_root, out_dir)
+    argv = _report_command(mirror_root, out_dir, eval_dir)
     if not argv:
         return {"status": "skipped", "reason": "no renderer (set HYPERLOOM_SRC or GEAK_LLM_REPORT_CMD)"}
     return _run(argv, timeout_s, {"output_dir": str(out_dir)})
@@ -629,7 +651,7 @@ def mirror_run_trace(
         }
         if render:
             reports_dir = eval_path / "reports"
-            report = render_report(dest, reports_dir)
+            report = render_report(dest, reports_dir, eval_path)
             skill = install_skill(reports_dir)
             html = render_html_report(reports_dir)
             manifest["report"] = report
