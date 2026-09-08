@@ -439,21 +439,49 @@ def _report_command(mirror_root: Path, out_dir: Path) -> list[str] | None:
     override = os.environ.get("GEAK_LLM_REPORT_CMD", "").strip()
     if override:
         return override.split() + tail
+    return _hyperloom_command(REPORT_MODULE, tail)
+
+
+HTML_MODULE = "hyperloom.inference_optimizer.tools.render_geak_html_report"
+REPORT_MODULE = "hyperloom.inference_optimizer.tools.dump_geak_call_report"
+
+
+def _hyperloom_command(module: str, tail: list[str]) -> list[str] | None:
+    """Build an argv that runs a Hyperloom tool out of ``HYPERLOOM_SRC``.
+
+    GEAK cannot import Hyperloom, so its tools are reached by subprocess when a
+    checkout happens to be present and skipped entirely when it is not.
+
+    Args:
+        module: Dotted module path to run as ``__main__``.
+        tail: Arguments appended after the module.
+
+    Returns:
+        An argv list, or ``None`` when no checkout can be located.
+    """
     src = os.environ.get("HYPERLOOM_SRC", "").strip()
     if not src:
         return None
-    tool = Path(src) / "hyperloom" / "inference_optimizer" / "tools" / "dump_geak_call_report.py"
-    if not tool.is_file():
+    relative = Path(module.replace(".", "/")).with_suffix(".py")
+    if not (Path(src) / relative).is_file():
         return None
     return [
         "python3",
         "-c",
         "import sys,runpy; sys.path.insert(0, sys.argv.pop(1)); "
-        "runpy.run_module('hyperloom.inference_optimizer.tools.dump_geak_call_report', "
-        "run_name='__main__')",
+        f"runpy.run_module({module!r}, run_name='__main__')",
         src,
         *tail,
     ]
+
+
+def _html_command(out_dir: Path) -> list[str] | None:
+    """Build the command that turns the rendered ledger into the HTML report."""
+    override = os.environ.get("GEAK_HTML_REPORT_CMD", "").strip()
+    tail = ["--reports-dir", str(out_dir)]
+    if override:
+        return override.split() + tail
+    return _hyperloom_command(HTML_MODULE, tail)
 
 
 SKILL_RELPATH = Path("e2e_workflow") / "knowledge" / "analysis_skills" / "run-report" / "SKILL.md"
@@ -499,13 +527,41 @@ def render_report(mirror_root: Path, out_dir: Path, *, timeout_s: float = 600.0)
     argv = _report_command(mirror_root, out_dir)
     if not argv:
         return {"status": "skipped", "reason": "no renderer (set HYPERLOOM_SRC or GEAK_LLM_REPORT_CMD)"}
+    return _run(argv, timeout_s, {"output_dir": str(out_dir)})
+
+
+def render_html_report(out_dir: Path, *, timeout_s: float = 600.0) -> dict[str, Any]:
+    """Turn the rendered ledger into the structured HTML report, if possible.
+
+    Runs after :func:`render_report` has written ``geak_calls.jsonl`` and after
+    the outcome report has written ``geak_outcome.json``, because the HTML joins
+    the two: what each phase cost, beside what it measured. With only the ledger
+    present it still renders, and says in its coverage banner that the outcome
+    half is missing rather than implying the phases bought nothing.
+
+    Args:
+        out_dir: The run's ``reports`` directory — both input and output.
+        timeout_s: Ceiling on the renderer's runtime.
+
+    Returns:
+        A status dict; ``{"status": "skipped"}`` when no renderer was found.
+        Never raises.
+    """
+    argv = _html_command(out_dir)
+    if not argv:
+        return {"status": "skipped", "reason": "no renderer (set HYPERLOOM_SRC or GEAK_HTML_REPORT_CMD)"}
+    return _run(argv, timeout_s, {"output_dir": str(out_dir)})
+
+
+def _run(argv: list[str], timeout_s: float, extra: dict[str, Any]) -> dict[str, Any]:
+    """Run a renderer subprocess, converting every failure into a status dict."""
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
     if proc.returncode != 0:
         return {"status": "error", "returncode": proc.returncode, "stderr": (proc.stderr or "")[-2000:]}
-    return {"status": "ok", "output_dir": str(out_dir)}
+    return {"status": "ok", **extra}
 
 
 # --------------------------------------------------------------------------- #
@@ -544,7 +600,8 @@ def mirror_run_trace(
             ``eval_dir`` is not what the record wrote down.
         session_id: The SDK session id, used only to disambiguate.
         homes: Override the searched homes (tests).
-        render: Also attempt a rendered report beside the raw copy.
+        render: Also attempt a rendered report and the HTML report beside the
+            raw copy.
 
     Returns:
         A status dict carrying ``path`` on success. Never raises.
@@ -574,11 +631,14 @@ def mirror_run_trace(
             reports_dir = eval_path / "reports"
             report = render_report(dest, reports_dir)
             skill = install_skill(reports_dir)
+            html = render_html_report(reports_dir)
             manifest["report"] = report
             manifest["skill"] = skill
+            manifest["html"] = html
             _write_manifest(dest, manifest)
             result["report"] = report
             result["skill"] = skill
+            result["html"] = html
         return result
     except Exception as exc:  # never let telemetry kill a run
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}

@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -593,3 +594,73 @@ def test_install_skill_reports_an_oserror(tmp_path, monkeypatch):
     result = ctm.install_skill(tmp_path / "reports")
     assert result["status"] == "error"
     assert "OSError" in result["error"]
+
+
+def test_html_command_prefers_the_explicit_override(monkeypatch, tmp_path):
+    """GEAK_HTML_REPORT_CMD wins over any checkout discovery."""
+    monkeypatch.setenv("GEAK_HTML_REPORT_CMD", "my-renderer --flag")
+    argv = ctm._html_command(tmp_path / "reports")
+    assert argv == ["my-renderer", "--flag", "--reports-dir", str(tmp_path / "reports")]
+
+
+def test_html_command_is_none_without_a_checkout(monkeypatch, tmp_path):
+    """No Hyperloom checkout means no HTML step, not a crash."""
+    monkeypatch.delenv("GEAK_HTML_REPORT_CMD", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SRC", raising=False)
+    assert ctm._html_command(tmp_path) is None
+    monkeypatch.setenv("HYPERLOOM_SRC", str(tmp_path / "absent"))
+    assert ctm._html_command(tmp_path) is None
+
+
+def test_html_command_finds_the_tool_in_a_checkout(monkeypatch, tmp_path):
+    """A checkout that actually carries the module produces a runnable argv."""
+    tool = tmp_path / "hyperloom" / "inference_optimizer" / "tools" / "render_geak_html_report.py"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("")
+    monkeypatch.delenv("GEAK_HTML_REPORT_CMD", raising=False)
+    monkeypatch.setenv("HYPERLOOM_SRC", str(tmp_path))
+    argv = ctm._html_command(tmp_path / "reports")
+    assert argv[0] == "python3" and str(tmp_path) in argv
+    assert argv[-2:] == ["--reports-dir", str(tmp_path / "reports")]
+
+
+def test_render_html_report_skips_when_no_renderer(monkeypatch, tmp_path):
+    """Skipped is a status, not an error — the ledger is the durable artifact."""
+    monkeypatch.delenv("GEAK_HTML_REPORT_CMD", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SRC", raising=False)
+    assert ctm.render_html_report(tmp_path)["status"] == "skipped"
+
+
+def test_render_html_report_runs_the_renderer(monkeypatch, tmp_path):
+    """A renderer that succeeds is reported ok with the directory it wrote to."""
+    monkeypatch.setenv("GEAK_HTML_REPORT_CMD", "python3 -c pass --ignored")
+    monkeypatch.setattr(
+        ctm.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    result = ctm.render_html_report(tmp_path)
+    assert result == {"status": "ok", "output_dir": str(tmp_path)}
+
+
+def test_render_html_report_reports_a_failing_renderer(monkeypatch, tmp_path):
+    """A renderer that fails is recorded, never raised — telemetry must not kill a run."""
+    monkeypatch.setenv("GEAK_HTML_REPORT_CMD", "false")
+    monkeypatch.setattr(
+        ctm.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=3, stdout="", stderr="boom"),
+    )
+    result = ctm.render_html_report(tmp_path)
+    assert result["status"] == "error" and result["returncode"] == 3 and "boom" in result["stderr"]
+
+
+def test_run_converts_an_os_error_into_a_status(monkeypatch):
+    """A renderer that cannot even be spawned is a status dict too."""
+
+    def explode(*_a, **_k):
+        raise OSError("no such binary")
+
+    monkeypatch.setattr(ctm.subprocess, "run", explode)
+    result = ctm._run(["nope"], 1.0, {})
+    assert result["status"] == "error" and "no such binary" in result["error"]

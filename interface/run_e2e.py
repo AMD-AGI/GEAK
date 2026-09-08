@@ -6977,6 +6977,14 @@ def main(argv: list[str]) -> int:
                     out["final_report_synthesized"] = not had_report
             except Exception as fr_exc:
                 out["final_report_error"] = f"{type(fr_exc).__name__}: {fr_exc}"
+            # What the run bought, beside what it cost: the throughput each
+            # phase measured, read from this run's own artifacts. This runs
+            # before the trace mirror because the mirror's HTML report joins the
+            # two, and a join needs both halves on disk first.
+            try:
+                out["outcome_report"] = geak_outcome_report.write(eval_dir)
+            except Exception as or_exc:
+                out["outcome_report_error"] = f"{type(or_exc).__name__}: {or_exc}"
             # Claude Code's LLM ledger lives in a home this run does not own and
             # whose lifetime it does not control. Mirror it into eval_dir so the
             # run's cost record shares the run's own durability. Local-filesystem
@@ -6985,12 +6993,6 @@ def main(argv: list[str]) -> int:
                 out["claude_trace"] = _mirror_trace(eval_dir)
             except Exception as ct_exc:
                 out["claude_trace_error"] = f"{type(ct_exc).__name__}: {ct_exc}"
-            # What the run bought, beside what it cost: the throughput each
-            # phase measured, read from this run's own artifacts.
-            try:
-                out["outcome_report"] = geak_outcome_report.write(eval_dir)
-            except Exception as or_exc:
-                out["outcome_report_error"] = f"{type(or_exc).__name__}: {or_exc}"
         if out.get("baseline_basis"):
             try:
                 updated_reports = _update_baseline_alignment_reports(out)
