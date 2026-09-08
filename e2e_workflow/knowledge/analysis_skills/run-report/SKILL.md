@@ -75,14 +75,24 @@ mirror has the run's durability, the home does not.
 
    It is written automatically at the end of a run when a Hyperloom checkout is
    reachable (`HYPERLOOM_SRC`, or `GEAK_HTML_REPORT_CMD` to override), so on a
-   normal run there is nothing to do but open it. Its sections:
+   normal run there is nothing to do but open it. The page is self-contained and pure ASCII, so it
+   survives being copied to shared storage and cannot render as mojibake in a
+   viewer that ignores the charset declaration. Its sections:
 
    | Section | Answers |
    | --- | --- |
-   | What each phase bought | Cost beside measured throughput, and `$ per +1%` |
+   | Headline cards | Throughput gained, baseline -> final tok/s, spend, calls, wall-clock |
+   | What each phase contributed to throughput | The ladder in run order: from/to tok/s, the gain, and each phase's share of the summed measured gain |
+   | What each phase bought | The same gains put beside what they cost, and `$ per +1%` |
    | Spend by phase | Where the bill is, ranked |
    | Inside each phase | Cost by position in the conversation, how few agents carry the total, what tools the work consisted of, and every agent drillable to its own API calls |
    | Delegation signals | Input/output ratio and tool variety per agent |
+
+   **Share of measured gain is arithmetic, not attribution.** A phase's own
+   tok/s gain over the summed tok/s gains of the phases that measured one. It
+   does not reconcile with the end-to-end figure and is not meant to: a phase
+   does not always start from where the previous one finished, and the page
+   names the handoff seam that accounts for the gap.
 
    **Reading the deep dive.** Every call re-sends the conversation so far, so an
    agent's input grows as it works — on the Qwen3 run, median ISL went from
