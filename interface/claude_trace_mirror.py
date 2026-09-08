@@ -456,6 +456,34 @@ def _report_command(mirror_root: Path, out_dir: Path) -> list[str] | None:
     ]
 
 
+SKILL_RELPATH = Path("e2e_workflow") / "knowledge" / "analysis_skills" / "run-report" / "SKILL.md"
+
+
+def install_skill(out_dir: Path) -> dict[str, Any]:
+    """Drop the report-building skill beside the reports it describes.
+
+    A report is only as useful as the instructions for rebuilding and reading
+    it, and those instructions must travel with the artifacts — a run archived
+    to shared storage months later has no checkout beside it.
+
+    Args:
+        out_dir: The run's ``reports`` directory.
+
+    Returns:
+        A status dict. Never raises.
+    """
+    src = Path(__file__).resolve().parent.parent / SKILL_RELPATH
+    try:
+        if not src.is_file():
+            return {"status": "skipped", "reason": f"skill not found at {src}"}
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dest = out_dir / "SKILL.md"
+        shutil.copy2(src, dest)
+    except OSError as exc:
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    return {"status": "ok", "path": str(dest)}
+
+
 def render_report(mirror_root: Path, out_dir: Path, *, timeout_s: float = 600.0) -> dict[str, Any]:
     """Render a per-call report from the mirror, if a renderer is reachable.
 
@@ -543,10 +571,14 @@ def mirror_run_trace(
             "bytes_copied": manifest["bytes_copied"],
         }
         if render:
-            report = render_report(dest, eval_path / "reports")
+            reports_dir = eval_path / "reports"
+            report = render_report(dest, reports_dir)
+            skill = install_skill(reports_dir)
             manifest["report"] = report
+            manifest["skill"] = skill
             _write_manifest(dest, manifest)
             result["report"] = report
+            result["skill"] = skill
         return result
     except Exception as exc:  # never let telemetry kill a run
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
