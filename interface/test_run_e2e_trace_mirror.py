@@ -564,3 +564,32 @@ def test_mirror_trace_never_lets_telemetry_kill_a_run(monkeypatch, tmp_path):
     monkeypatch.setattr(rx.claude_trace_mirror, "mirror_run_trace", _boom)
     out = rx._mirror_trace(tmp_path)
     assert out["status"] == "error" and "mirror exploded" in out["error"]
+
+
+# --------------------------------------------------------------------------- #
+# install_skill — the report's own instructions travel with the artifacts
+# --------------------------------------------------------------------------- #
+def test_install_skill_copies_the_shipped_skill(tmp_path):
+    out = tmp_path / "reports"
+    result = ctm.install_skill(out)
+    assert result["status"] == "ok"
+    text = (out / "SKILL.md").read_text(encoding="utf-8")
+    assert text.startswith("---")
+    assert "name: run-report" in text
+
+
+def test_install_skill_skips_when_the_source_is_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(ctm, "SKILL_RELPATH", Path("no") / "such" / "SKILL.md")
+    result = ctm.install_skill(tmp_path / "reports")
+    assert result["status"] == "skipped"
+    assert "not found" in result["reason"]
+
+
+def test_install_skill_reports_an_oserror(tmp_path, monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(ctm.Path, "mkdir", boom)
+    result = ctm.install_skill(tmp_path / "reports")
+    assert result["status"] == "error"
+    assert "OSError" in result["error"]
