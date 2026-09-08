@@ -172,6 +172,50 @@ rely on `chmod` (the agent is root) — restore-before-measure is the hard guara
 absent, skip this entire paragraph.)
 
 The COMMANDMENT MUST contain, with concrete commands (not placeholders):
+- `HARDWARE` — gfx target, CU count and wavefront size, **detected, never assumed**, each quoted next
+  to the command that produced it.
+
+  Use `amd-smi`, not `rocminfo` parsing. It enumerates **GPUs only**, emits JSON, and takes the GPU
+  index — so there is no agent list to mis-scope, no regex to get wrong, and it honours `GPU_ID`:
+
+  ```bash
+  amd-smi static --asic --json -g $GPU_ID | python3 -c \
+    'import json,sys; a=json.load(sys.stdin)["gpu_data"][0]["asic"]; \
+     print(a["target_graphics_version"], a["num_compute_units"])'      # -> gfx1151 40
+  ```
+
+  `jq` is **not** installed in the ROCm images — parse with `python3`.
+
+  Wavefront size is not exposed by `amd-smi`; take it from torch, which is right about this one:
+
+  ```bash
+  python3 -c "import torch; print(torch.cuda.get_device_properties($GPU_ID).warp_size)"   # -> 32
+  ```
+
+  **Never take the CU count from torch.** `multi_processor_count` reports work-group processors on
+  RDNA, which is half the CUs (measured on a Radeon 8060S: 20 vs 40).
+
+  Fall back to `rocminfo` only if `amd-smi` is missing, and know the two traps you are re-entering:
+
+  ```bash
+  rocminfo 2>/dev/null | awk '/Name:.*gfx/{f=1} f&&/Compute Unit:/{print $3; exit}'   # CU count
+  rocminfo 2>/dev/null | awk '/Name:.*gfx/{f=1} f&&/Wavefront Size:/{print $3; exit}' # wavefront
+  ```
+
+  1. `rocminfo` lists the **CPU agent first**, so a bare `grep -m1 'Compute Unit'` returns the CPU's
+     core count. Scoping by product name does not save you: on an APU the CPU agent is *named after
+     the GPU* (`Name: AMD RYZEN AI MAX+ 395 w/ Radeon 8060S`, `Device Type: CPU`, `Compute Unit: 32`)
+     while the GPU agent is the plain `gfx` one (`Name: gfx1151`, `Compute Unit: 40`). Only
+     `Device Type` / `Name: gfx…` separates them.
+  2. The `exit` takes the **first** gfx agent, so on a multi-GPU box this silently ignores `GPU_ID`
+     and describes a card you are not benchmarking.
+
+  Neither error announces itself. 32 is a *valid* `gfx1151` CU count — the Radeon 8050S really has 32
+  — so no downstream check rejects it, and a CU count that is low silently passes the grid-fill test
+  it should have failed.
+
+  If the detected target is `gfx11*`, read `knowledge/amd_ryzen.md` before filling this in; it is the
+  arch reference for these parts.
 - `SETUP` — `cd <workspace>`. Do NOT use `rm` anywhere in the COMMANDMENT (it triggers an approval
   prompt that blocks autonomous/background runs). Each workspace is already a fresh artifact-free copy
   (build/__pycache__/*.so/.torch_ext excluded at copy time), so there is nothing stale to clear; ninja
