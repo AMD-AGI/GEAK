@@ -21,6 +21,7 @@ both.
 | --- | --- | --- |
 | Outcome / throughput | GEAK itself | `<eval_dir>/reports/geak_outcome.{json,md}` |
 | Per-LLM-call tree | Claude Code | `<eval_dir>/llm_trace/` (mirrored), rendered to `<eval_dir>/reports/` |
+| Both, joined and readable | the HTML renderer | `<eval_dir>/reports/geak_report.html` |
 
 GEAK issues almost no LLM calls itself: `interface/run_e2e.py` opens one
 `ClaudeSDKClient` and hands a single prompt to Claude Code, which runs
@@ -61,7 +62,41 @@ mirror has the run's durability, the home does not.
    `args.exp_root`), never a guess by mtime. `--list` with no selector lists
    every record in every home.
 
-3. **Join them.** `geak_outcome.md` already carries the per-phase spend table
+3. **The HTML report — start here when someone asks "where did the money go?"**
+   The tree from step 2 is exhaustive but flat: thousands of call rows answer
+   *what happened*, not *where the cost is*. This renderer arranges the same
+   data as a handful of questions, and joins in the outcome from step 1:
+
+   ```bash
+   PYTHONPATH=<HYPERLOOM_SRC> python3 -m \
+     hyperloom.inference_optimizer.tools.render_geak_html_report \
+     --reports-dir <EVAL_DIR>/reports
+   ```
+
+   It is written automatically at the end of a run when a Hyperloom checkout is
+   reachable (`HYPERLOOM_SRC`, or `GEAK_HTML_REPORT_CMD` to override), so on a
+   normal run there is nothing to do but open it. Its sections:
+
+   | Section | Answers |
+   | --- | --- |
+   | What each phase bought | Cost beside measured throughput, and `$ per +1%` |
+   | Spend by phase | Where the bill is, ranked |
+   | Inside each phase | Cost by position in the conversation, how few agents carry the total, what tools the work consisted of, and every agent drillable to its own API calls |
+   | Delegation signals | Input/output ratio and tool variety per agent |
+
+   **Reading the deep dive.** Every call re-sends the conversation so far, so an
+   agent's input grows as it works — on the Qwen3 run, median ISL went from
+   51k tokens in the first tenth of a conversation to 164k in the last. That is
+   the mechanism behind most of a long phase's bill, and it is why the position
+   table is the first thing in each phase block.
+
+   **The delegation table is signals, not a verdict.** A low output-to-input
+   ratio means an agent spent its budget reading rather than writing, and a
+   single-tool agent ran a mechanical loop. Both are reasons to *look*. Neither
+   is evidence a smaller model would have reached the same result — only running
+   the arm and comparing measured throughput settles that.
+
+4. **Join them yourself if you need a number, not a page.** `geak_outcome.md` already carries the per-phase spend table
    when `geak_calls.jsonl` sits beside it. Rank phases by
    `USD ÷ measured delta`, and treat any phase with a measured Amdahl ceiling of
    0.00% as having bought nothing however much it cost.
@@ -79,6 +114,14 @@ mirror has the run's durability, the home does not.
   `before`. The outcome report prints those seams and marks the compounded
   speedup an estimate when they exist. Quote the observed first-to-last figure
   when you want a measured number.
+- **Read the HTML's Coverage banner before quoting anything from it.** It names
+  what the ledger does not contain for that run — unpriced calls, calls with no
+  recorded duration (wall-clock sums are then lower bounds, not elapsed time),
+  and agents whose role could not be read.
+- **Roles in the HTML are derived**, inferred from each agent's first prompt
+  because `geak_calls.jsonl` truncates prompts and carries no label. The
+  authoritative `{phase,label}` pair lives in the `wf_*.json` record. An agent
+  whose role could not be read is shown `unlabelled`, never guessed at.
 - **Check coverage before quoting anything.** A run still in flight reports
   partial coverage and phase labels inferred from artifact mtimes; the
   authoritative `{phase,label}` tags only exist once the `wf_*.json` record is
