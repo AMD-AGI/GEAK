@@ -56,6 +56,11 @@ try:
 except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
     import claude_trace_mirror
 
+try:
+    from interface import geak_outcome_report
+except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
+    import geak_outcome_report
+
 SCHEMA_VERSION = 2
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
 E2E_CHECKPOINT_SCHEMA_VERSION = 2
@@ -6980,6 +6985,12 @@ def main(argv: list[str]) -> int:
                 out["claude_trace"] = _mirror_trace(eval_dir)
             except Exception as ct_exc:
                 out["claude_trace_error"] = f"{type(ct_exc).__name__}: {ct_exc}"
+            # What the run bought, beside what it cost: the throughput each
+            # phase measured, read from this run's own artifacts.
+            try:
+                out["outcome_report"] = geak_outcome_report.write(eval_dir)
+            except Exception as or_exc:
+                out["outcome_report_error"] = f"{type(or_exc).__name__}: {or_exc}"
         if out.get("baseline_basis"):
             try:
                 updated_reports = _update_baseline_alignment_reports(out)
