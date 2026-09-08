@@ -495,6 +495,69 @@ disk. `run_e2e.py` now removes that fragility, layered:
 These are general (no model/run-specific assumptions) and key only off the
 stable artifact layout the workflow always writes.
 
+## Claude call telemetry (mirrored into the run)
+
+GEAK issues almost no LLM calls itself: `run_e2e.py` hands one prompt to Claude
+Code, which runs `e2e_workflow.js` and tags every `agent()` call with its phase
+and label. The token, cost and tool-call record of the entire run therefore
+lives in **Claude Code's** config home — `$CLAUDE_CONFIG_DIR` if set, else
+`~/.claude` — as `projects/<slug>/<session>/workflows/wf_*.json` plus the
+per-agent transcripts under `subagents/workflows/<runId>/`.
+
+That home is a directory the run does not own and whose lifetime it does not
+control. When it is a container overlay, an 18-hour run's entire cost record
+dies with the container while `exp_root`, on durable storage, sits there
+holding everything except the bill.
+
+So the run mirrors it into its own output:
+
+```
+<eval_dir>/llm_trace/
+  manifest.json
+  projects/<slug>/<session>.jsonl
+  projects/<slug>/<session>/workflows/wf_<id>.json
+  projects/<slug>/<session>/subagents/workflows/wf_<id>/agent-*.jsonl
+```
+
+The layout is not free-form — it reproduces the Claude home from `projects/`
+down, because the report tool discovers records by globbing
+`projects/*/*/workflows/wf_*.json` and derives the transcript directory
+*relative to the record it found*. A flat dump would be unreadable. Read it
+back with:
+
+```bash
+PYTHONPATH=src python3 -m hyperloom.inference_optimizer.tools.dump_geak_call_report \
+    --claude-home <eval_dir>/llm_trace --list
+```
+
+| When | What happens |
+| --- | --- |
+| Every `TaskNotificationMessage`, at most once per `GEAK_TRACE_MIRROR_INTERVAL_S` | Incremental copy of whatever grew. Cheap: unchanged files are skipped by size+mtime. |
+| `_emit()` — the guaranteed final flush | Full pass, then a rendered report if one can be produced. Reported in `result.json` as `claude_trace`. |
+
+Selection is an identity match on the record's own `args.eval_dir` /
+`args.exp_root`, never a guess by mtime, so a session driving several runs
+mirrors each run's transcripts into that run's directory and no other's.
+
+The whole path is best-effort by construction: every failure is recorded in the
+manifest or in `result.claude_trace_error` and none of it can raise into the
+run. Telemetry must never be the thing that kills an optimization job.
+
+| Env var | Default | Effect |
+| --- | --- | --- |
+| `GEAK_TRACE_MIRROR_INTERVAL_S` | `900` | Mid-run mirror period. `0` disables the mid-run pass; the final one always runs. |
+| `GEAK_TRACE_MIRROR_MAX_MB` | 4096 | Per-pass byte ceiling. An over-budget file is named in the manifest, never truncated — a truncated `wf_*.json` fails to parse and a truncated transcript silently understates a token total. |
+| `GEAK_TELEMETRY_WARN` | `1` | `0` silences the startup durability warning. |
+| `GEAK_CLAUDE_CONFIG_DIR` | unset | Opt-in: sets `CLAUDE_CONFIG_DIR` for the Claude child process only. Point it at a *seeded* directory — a fresh empty one has no credentials. |
+| `HYPERLOOM_SRC` / `GEAK_LLM_REPORT_CMD` | unset | Where to find the report renderer. Absent, the raw mirror is still written. |
+
+At startup the runner compares the filesystem of the resolved Claude home with
+that of `exp_root` and warns on stderr when they differ, since a ledger on a
+different device has a different lifetime from the run that produced it. It
+warns and continues, always. Note that `CLAUDE_CONFIG_DIR` is read by Claude
+Code **at session start**: exporting it after the fact has no effect, which is
+precisely why the mirror does not depend on anyone having set it.
+
 ## `kernel_journey.json` (per-kernel journey contract → orchestrator)
 
 Because GEAK-e2e is a whole-pipeline e2e optimizer (not a per-kernel backend),
