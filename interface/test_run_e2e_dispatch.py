@@ -290,6 +290,34 @@ class TestMapArgs(_RunE2ECase):
         self.assertNotIn("mem_fraction", ps)
         self.assertEqual(ps["initial_extra_server_args"], "")
 
+    def test_an_agentx_handoff_forwards_its_declaration_to_the_workflow(self):
+        """The workflow declares the workload for standalone runs; forwarding the
+        handoff's spec through the same arg means one mechanism serves both entry
+        points, rather than the environment for one and args for the other."""
+        spec = {
+            "kind": rx.WORKLOAD_KIND_AGENTX,
+            "corpus": "semianalysis_cc_traces_weka_062126_256k",
+            "metric_basis": "aggregate_total_token_tok_s",
+        }
+        ps = rx.map_args(self._handoff(workload_spec=spec))
+        self.assertEqual(ps["workload_spec"], spec)
+
+    def test_a_synthetic_handoff_forwards_no_declaration(self):
+        """Absent the arg, the workflow's channel stays inert and the fixed
+        ISL/OSL path is unchanged."""
+        self.assertNotIn("workload_spec", rx.map_args(self._handoff()))
+
+    def test_a_non_agentx_workload_spec_is_not_forwarded(self):
+        ps = rx.map_args(self._handoff(workload_spec={"kind": "synthetic_isl_osl"}))
+        self.assertNotIn("workload_spec", ps)
+
+    def test_a_malformed_workload_spec_is_not_forwarded(self):
+        for bad in (None, "agentx_trace_replay", 7, []):
+            with self.subTest(spec=bad):
+                self.assertNotIn(
+                    "workload_spec", rx.map_args(self._handoff(workload_spec=bad))
+                )
+
     def test_eval_dir_is_minted_under_exp_root_when_unpinned(self):
         os.environ.pop("GEAK_EVAL_DIR", None)
         exp_root = self.tmp / "exp" / "geak"
@@ -506,6 +534,53 @@ class TestBenchClient(_RunE2ECase):
         os.environ.pop("GEAK_WORKLOAD_KIND", None)
         self.assertEqual(rx.apply_workload_spec({"workload": {"isl": 1024}}), {})
         self.assertNotIn("GEAK_WORKLOAD_KIND", os.environ)
+
+    def _agentx_spec(self, **extra):
+        return {"workload_spec": {"kind": rx.WORKLOAD_KIND_AGENTX, **extra}}
+
+    def test_a_total_token_basis_selects_the_axis_bench_e2e_reads(self):
+        """GEAK_METRIC_BASIS records the declared basis; E2E_METRIC selects the
+        axis bench_e2e.sh medians, and it defaults to output. Nothing inside
+        GEAK used to set it, so a handoff-driven run graded a 140:1
+        prefill-heavy trace on the axis that barely moves."""
+        for var in ("E2E_METRIC", "GEAK_METRIC_BASIS"):
+            os.environ.pop(var, None)
+        exported = rx.apply_workload_spec(
+            self._agentx_spec(metric_basis="aggregate_total_token_tok_s")
+        )
+        self.assertEqual(os.environ["E2E_METRIC"], "total")
+        self.assertEqual(exported["E2E_METRIC"], "total")
+        self.assertEqual(
+            os.environ["GEAK_METRIC_BASIS"], "aggregate_total_token_tok_s"
+        )
+
+    def test_an_output_basis_keeps_the_output_axis(self):
+        for var in ("E2E_METRIC", "GEAK_METRIC_BASIS"):
+            os.environ.pop(var, None)
+        rx.apply_workload_spec(
+            self._agentx_spec(metric_basis="aggregate_output_tok_s")
+        )
+        self.assertEqual(os.environ["E2E_METRIC"], "output")
+
+    def test_an_inherited_axis_is_never_overwritten(self):
+        """The orchestrator injects E2E_METRIC itself and stays authoritative."""
+        os.environ["E2E_METRIC"] = "output"
+        exported = rx.apply_workload_spec(
+            self._agentx_spec(metric_basis="aggregate_total_token_tok_s")
+        )
+        self.assertEqual(os.environ["E2E_METRIC"], "output")
+        self.assertNotIn("E2E_METRIC", exported)
+
+    def test_no_declared_basis_leaves_the_axis_alone(self):
+        for var in ("E2E_METRIC", "GEAK_METRIC_BASIS"):
+            os.environ.pop(var, None)
+        rx.apply_workload_spec(self._agentx_spec())
+        self.assertNotIn("E2E_METRIC", os.environ)
+
+    def test_a_synthetic_handoff_never_touches_the_axis(self):
+        os.environ.pop("E2E_METRIC", None)
+        rx.apply_workload_spec({"workload": {"isl": 1024}})
+        self.assertNotIn("E2E_METRIC", os.environ)
 
     def test_explicit_inferencex_without_path_degrades_loudly(self):
         """Silently measuring with a different client than the orchestrator is
@@ -1181,9 +1256,11 @@ class TestTargetingShape(_RunE2ECase):
     """isl/osl stop being the measured load on AgentX, but still aim the search.
 
     The kernel agents read isl/osl as the analytic serving call model when they
-    synthesize GEMM/attention shapes. A trace replay whose corpus averages ~112k
-    input tokens would be optimized for a 1024-token prefill if the synthetic
+    synthesize GEMM/attention shapes. A trace replay whose corpus averages far
+    longer inputs would be optimized for a 1024-token prefill if the synthetic
     handoff defaults were taken at face value -- honest numbers, wrong target.
+    The real average is measured, never quoted here: it moves with the corpus,
+    the tokenizer and the window.
     """
 
     def test_synthetic_handoff_keeps_the_handoff_workload_shape(self):
@@ -1286,15 +1363,40 @@ class TestAgentXPreflight(_RunE2ECase):
         problems = rx.agentx_preflight(dict(self.AGENTX))
         self.assertTrue(any("aiperf-agentx" in p for p in problems))
 
-    def test_missing_inferencex_path_is_reported(self):
+    def test_no_inferencex_checkout_is_not_a_problem_on_its_own(self):
+        """GEAK vendors map_aiperf.py beside the client adapter, so a standalone
+        run needs no InferenceX checkout. Reporting its absence would send an
+        operator hunting for something they do not need."""
         os.environ.pop("INFERENCEX_PATH", None)
         problems = rx.agentx_preflight(dict(self.AGENTX))
-        self.assertTrue(any("INFERENCEX_PATH is unset" in p for p in problems))
+        self.assertFalse(
+            any("map_aiperf" in p for p in problems),
+            msg=f"the vendored mapper should satisfy this: {problems}",
+        )
 
-    def test_inferencex_path_without_the_mapper_is_reported(self):
+    def test_an_inferencex_path_without_the_mapper_falls_back_quietly(self):
         os.environ["INFERENCEX_PATH"] = str(self.tmp)
         problems = rx.agentx_preflight(dict(self.AGENTX))
-        self.assertTrue(any("map_aiperf.py not found" in p for p in problems))
+        self.assertFalse(any("map_aiperf" in p for p in problems))
+
+    def test_the_mapper_is_reported_only_when_the_vendored_copy_is_gone_too(self):
+        """The real gap: no checkout AND nothing vendored to fall back to.
+
+        Point E2E_DIR at an empty tree so the vendored copy genuinely is not
+        there, rather than patching a stdlib predicate out from under the code.
+        """
+        os.environ.pop("INFERENCEX_PATH", None)
+        original = rx.E2E_DIR
+        rx.E2E_DIR = rx.Path(str(self.tmp)) / "no_such_workflow"
+        self.addCleanup(setattr, rx, "E2E_DIR", original)
+        problems = rx.agentx_preflight(dict(self.AGENTX))
+        self.assertTrue(
+            any("no map_aiperf.py" in p for p in problems), msg=str(problems)
+        )
+        self.assertTrue(
+            any("map_aiperf.py is missing" in p for p in problems),
+            msg=f"the message must name the path that was missing: {problems}",
+        )
 
     def test_a_satisfied_environment_reports_no_problems(self):
         bench = os.path.join(str(self.tmp), "benchmarks")
@@ -1317,7 +1419,9 @@ class TestAgentXPreflight(_RunE2ECase):
         os.environ["PATH"] = "/nonexistent"
         os.environ.pop("INFERENCEX_PATH", None)
         problems = rx.agentx_preflight(dict(self.AGENTX))
-        self.assertEqual(len(problems), 2)
+        # aiperf only: the vendored mapper covers the other prerequisite.
+        self.assertEqual(len(problems), 1)
+        self.assertIn("aiperf", problems[0])
 
 
 class TestAlignmentFlags(_RunE2ECase):

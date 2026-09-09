@@ -288,8 +288,10 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     aiperf's trace replay, which owns the sequence lengths. But the agents still
     read isl/osl as the analytic serving call model when they synthesize
     GEMM/attention shapes, so on a trace replay the synthetic 1024/1024
-    defaults would aim the whole search two orders of magnitude below the real
-    load (the corpus averages ~112k input tokens per request).
+    defaults would aim the whole search orders of magnitude below the real load
+    (a trace corpus's average input length dwarfs a synthetic prompt). The real
+    figure is deliberately not quoted here: it moves with the corpus, the
+    tokenizer and the window, so it is measured, never asserted.
 
     ``workload_spec.observed_isl/observed_osl`` carry the shape the orchestrator
     MEASURED on its own baseline. Prefer them; fall back to the synthetic
@@ -374,6 +376,20 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         "osl": target_osl,
         "workload_shape_provenance": shape_provenance,
         "conc": int(workload.get("conc", 64)),
+        # Forward the workload declaration into the workflow rather than relying
+        # only on the environment exported below. It is the SAME mechanism the
+        # standalone entry point uses, which is the point: one declaration, one
+        # set of defaults, one place where roles are told what they are
+        # measuring. The workflow's own channel assigns nothing that is already
+        # exported, so everything set here still wins -- this only closes the gap
+        # where a bench runs in a context that did not inherit the environment.
+        # Absent/synthetic workload_spec => omitted, and the args are unchanged.
+        **(
+            {"workload_spec": h["workload_spec"]}
+            if isinstance(h.get("workload_spec"), dict)
+            and str(h["workload_spec"].get("kind") or "") == WORKLOAD_KIND_AGENTX
+            else {}
+        ),
         # Seed the baseline with Hyperloom's accepted best config so the
         # baseline == Hyperloom best config (fair engagement start).
         "initial_extra_server_args": initial_server_args,
@@ -726,6 +742,19 @@ def apply_workload_spec(h: dict) -> dict:
     if metric_basis:
         os.environ["GEAK_METRIC_BASIS"] = metric_basis
         exported["GEAK_METRIC_BASIS"] = metric_basis
+        # GEAK_METRIC_BASIS records the DECLARED basis; it is not what selects
+        # the axis. bench_e2e.sh medians whichever throughput E2E_METRIC names
+        # and defaults it to "output". Under Hyperloom that variable arrives in
+        # our own environment (the orchestrator injects it), which is why this
+        # was never noticed -- but nothing inside GEAK was setting it, so a run
+        # driven from a handoff alone graded a 140:1 prefill-heavy trace on the
+        # output axis, where a large change in total work barely moves the
+        # number. Derive it here, and never overwrite an inherited value so the
+        # orchestrator stays authoritative over its own runs.
+        if "E2E_METRIC" not in os.environ:
+            axis = "total" if "total" in metric_basis else "output"
+            os.environ["E2E_METRIC"] = axis
+            exported["E2E_METRIC"] = axis
     return exported
 
 
@@ -757,19 +786,22 @@ def agentx_preflight(h: dict) -> list[str]:
             "client cannot replay traces. Install the AgentX-capable aiperf "
             "into this environment, or set AIPERF_BIN to its path."
         )
+    # The mapper is only a real gap when the vendored fallback is missing too.
+    # GEAK ships a copy beside the client adapter precisely so a run without an
+    # InferenceX checkout is not a failure; reporting its absence as a problem
+    # would send an operator hunting for a checkout they do not need.
+    vendored_mapper = E2E_DIR / "scripts" / "adapters" / "clients" / "map_aiperf.py"
     ix_root = os.environ.get("INFERENCEX_PATH", "").strip()
-    if not ix_root:
-        problems.append(
-            "INFERENCEX_PATH is unset, so map_aiperf.py cannot be located to "
-            "convert the aiperf export into a canonical result."
-        )
-    elif not any(
+    ix_mapper = ix_root and any(
         os.path.isfile(os.path.join(ix_root, rel))
         for rel in ("benchmarks/map_aiperf.py", "assets/agentx/map_aiperf.py")
-    ):
+    )
+    if not ix_mapper and not vendored_mapper.is_file():
         problems.append(
-            f"map_aiperf.py not found under INFERENCEX_PATH={ix_root!r} "
-            "(expected benchmarks/ or assets/agentx/)."
+            "no map_aiperf.py to convert the aiperf export into a canonical "
+            f"result: INFERENCEX_PATH={ix_root or '<unset>'} has none (expected "
+            f"benchmarks/ or assets/agentx/) and the vendored copy at "
+            f"{vendored_mapper} is missing."
         )
     for problem in problems:
         sys.stderr.write(f"!!! AgentX preflight: {problem}\n")

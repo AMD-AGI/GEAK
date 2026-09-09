@@ -99,7 +99,13 @@ class AgentXClientCanonicalityTest(unittest.TestCase):
         )
         # A stale value from the orchestrator's environment must never survive.
         env.pop("AGENTX_NONCANONICAL_REASONS", None)
-        env.update({k: str(v) for k, v in env_overrides.items()})
+        # None means "leave it unset", so a test can exercise the adapter's own
+        # defaults instead of the ones this helper pins.
+        for k, v in env_overrides.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = str(v)
         proc = subprocess.run(
             [BASH, "-c", f'source "{ADAPTER}"; adapter_bench 1 8 0'],
             env=env,
@@ -145,6 +151,44 @@ class AgentXClientCanonicalityTest(unittest.TestCase):
             AGENTX_DATASET="semianalysis_cc_traces_weka_061526",
         )
         self.assertIn("corpus=semianalysis_cc_traces_weka_061526", rec["noncanonical_reasons_seen"])
+
+    def test_the_adapters_own_default_corpus_is_the_campaign_corpus(self):
+        """Every other test here pins AGENTX_DATASET, so none of them exercised
+        the default -- which is where a wrong corpus hides. The campaign and the
+        19h HL+GEAK run both replayed semianalysis_cc_traces_weka_062126, the
+        full-context parent, against a server at --max-model-len 1048576."""
+        rec = self._run(
+            MEASUREMENT_PURPOSE="parity",
+            AGENTX_DATASET=None,
+            AGENTX_CANONICAL_DATASET=None,
+        )
+        self.assertIn("semianalysis_cc_traces_weka_062126", rec["_argv"])
+        self.assertNotIn("semianalysis_cc_traces_weka_062126_256k", rec["_argv"])
+        self.assertEqual(rec["noncanonical_reasons_seen"], "")
+
+    def test_the_256k_sibling_is_not_the_canonical_corpus(self):
+        """It drops every request over 256k tokens (98.8k -> 68.3k) and targets
+        ~256k-context servers, so it is a different workload, not a variant."""
+        rec = self._run(
+            MEASUREMENT_PURPOSE="parity",
+            AGENTX_DATASET="semianalysis_cc_traces_weka_062126_256k",
+            AGENTX_CANONICAL_DATASET=None,
+        )
+        self.assertIn(
+            "corpus=semianalysis_cc_traces_weka_062126_256k",
+            rec["noncanonical_reasons_seen"],
+        )
+
+    def test_pinning_the_loader_is_a_deviation_even_when_the_name_matches(self):
+        """launch_agentx.sh:65 -- WEKA_LOADER_OVERRIDE bypasses the scenario's own
+        corpus resolution, so it counts even when it names the canonical set."""
+        rec = self._run(
+            MEASUREMENT_PURPOSE="parity",
+            AGENTX_DATASET=None,
+            AGENTX_CANONICAL_DATASET=None,
+            WEKA_LOADER_OVERRIDE="semianalysis_cc_traces_weka_062126",
+        )
+        self.assertIn("weka_loader_override_pinned", rec["noncanonical_reasons_seen"])
 
     def test_a_shrunken_corpus_is_stamped_even_at_canonical_duration(self):
         rec = self._run(MEASUREMENT_PURPOSE="parity", AGENTX_NUM_ENTRIES="50")

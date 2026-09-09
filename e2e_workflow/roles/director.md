@@ -36,8 +36,9 @@ Inputs: `LAUNCH_SCRIPT` (path to a bench/launch script; may be empty), `MODEL_PA
 (ISL/OSL/conc), `INIT_FLAGS` (seed `--server` flags from the caller's best config; may be empty),
 `INIT_ENV` (seed `KEY=VAL` env from the caller's best config; may be empty),
 `INIT_BASE_OVERLAY` (the caller's current-best Python overlay/source stack),
-`MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, and
-`EFFECTIVE_CONFIG_DIGEST`.
+`MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`,
+`EFFECTIVE_CONFIG_DIGEST`, and `BENCH_ENV_CONTENT` (present ONLY when the run measures a
+workload that owns its own load — an AgentX trace replay; absent on a fixed ISL/OSL run).
 
 Steps:
 1. Collision-proof run id: `TS=$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}`.
@@ -53,8 +54,18 @@ Steps:
    cp "$SKILL_DIR/scripts/server_teardown.sh" "$EVAL_DIR/server_teardown.sh"   # the server-kill contract; bench_e2e.sh REFUSES to run without it
    cp "$SKILL_DIR/scripts/bench_summarize.py" "$EVAL_DIR/bench_summarize.py"   # writes bench_summary.json; also refused without it
    cp -r "$SKILL_DIR/scripts/adapters" "$EVAL_DIR/adapters"   # bench_e2e.sh sources adapters/<backend>.sh next to itself
-   cp "$SKILL_DIR/scripts/parse_profile.py" "$EVAL_DIR/parse_profile.py"
-   ```
+     cp "$SKILL_DIR/scripts/parse_profile.py" "$EVAL_DIR/parse_profile.py"
+     ```
+   - **If `BENCH_ENV_CONTENT` is non-empty**, write it VERBATIM to `$EVAL_DIR/bench_env.sh` in this
+     same step — before you bench anything. `bench_e2e.sh` and `bench_replica.sh` source that file
+     from beside themselves on every invocation; it is what selects the trace-replay client and the
+     graded metric axis for the whole run, **including your own baseline in step 5**. Skip it and the
+     baseline silently becomes a synthetic ISL/OSL sweep on the wrong axis, which makes every later
+     delta in the run meaningless. Do not edit, reorder, or add to its contents, and do not set
+     `BENCH_CLIENT` / `E2E_METRIC` / `AGENTX_*` on any bench command line yourself — the file owns
+     them. Verify it landed (`test -s "$EVAL_DIR/bench_env.sh"`) and report the path.
+     When `BENCH_ENV_CONTENT` is absent, write NOTHING: the absence of that file is what keeps a
+     fixed ISL/OSL run on its normal synthetic path.
    - If `LAUNCH_SCRIPT` is empty, the baseline is the stack's default config + `MODEL_PATH` +
      `WORKLOAD` (bench_e2e.sh needs no model default — `MODEL` is passed). Record the resolved server
      flags in `EVAL_DIR/config/baseline_flags.json`.
