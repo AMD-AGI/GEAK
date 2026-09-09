@@ -311,13 +311,18 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     except (TypeError, ValueError):
         obs_isl = obs_osl = 0
     if obs_isl <= 0 or obs_osl <= 0:
+        # Not an error, and no longer a dead end: the workflow measures the shape
+        # it actually served off its own baseline and adopts it before any kernel
+        # work is scheduled (adoptMeasuredShape). So the honest label here is
+        # "pending", which the workflow reads as "you may replace me", not
+        # "synthetic_fallback", which reads as a decision already made.
         sys.stderr.write(
-            "!!! AgentX workload carries no observed_isl/observed_osl; kernel "
-            f"targeting falls back to the synthetic {syn_isl}/{syn_osl}, which "
-            "is far below the real replay shape. Kernel choices may be aimed at "
-            "the wrong regime (the MEASUREMENT is unaffected).\n"
+            "note: AgentX workload carries no observed_isl/observed_osl, so the "
+            f"kernel-targeting shape starts at the synthetic {syn_isl}/{syn_osl} "
+            "and is replaced by what the baseline actually serves. Pass "
+            "observed_isl/observed_osl only to target a regime deliberately.\n"
         )
-        return syn_isl, syn_osl, "synthetic_fallback_on_agentx"
+        return syn_isl, syn_osl, "agentx_pending_baseline"
     return obs_isl, obs_osl, "agentx_observed"
 
 

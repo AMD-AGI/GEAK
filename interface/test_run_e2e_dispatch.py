@@ -1287,14 +1287,19 @@ class TestTargetingShape(_RunE2ECase):
         self.assertEqual((isl, osl), (112020, 796))
         self.assertEqual(prov, "agentx_observed")
 
-    def test_agentx_without_an_observed_shape_says_so_loudly(self):
-        """Silence here would aim the search 100x low with no trace of why."""
+    def test_agentx_without_an_observed_shape_is_marked_pending(self):
+        """Pending, not fallback: the workflow replaces this from its baseline.
+
+        The label is what the workflow keys on. "synthetic_fallback" reads as a
+        decision already taken and would leave the search aimed 100x low;
+        "pending" tells it to adopt the shape the baseline actually serves.
+        """
         isl, osl, prov = rx._targeting_shape({
             "workload": {"isl": 1024, "osl": 1024},
             "workload_spec": {"kind": "agentx_trace_replay"},
         })
         self.assertEqual((isl, osl), (1024, 1024))
-        self.assertEqual(prov, "synthetic_fallback_on_agentx")
+        self.assertEqual(prov, "agentx_pending_baseline")
 
     def test_a_malformed_observed_shape_is_not_trusted(self):
         for bad in ("", "abc", 0, -5, None):
@@ -1307,7 +1312,7 @@ class TestTargetingShape(_RunE2ECase):
                         "observed_osl": 796,
                     },
                 })
-                self.assertEqual(prov, "synthetic_fallback_on_agentx")
+                self.assertEqual(prov, "agentx_pending_baseline")
 
     def test_map_args_carries_the_shape_and_its_provenance(self):
         ps = rx.map_args({
