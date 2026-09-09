@@ -13,27 +13,96 @@
 # Requires: aiperf on PATH (or AIPERF_BIN), INFERENCEX_PATH with map_aiperf.py
 # deployed under benchmarks/ (Hyperloom's AgentX runtime copies it there).
 
+# _agentx_duration — the measured window for THIS leg.
+# Shared by the bench and by the profile-window placement below so the two can
+# never disagree about how long the replay actually runs.
+_agentx_duration() {
+  local purpose="${MEASUREMENT_PURPOSE:-search}"
+  case "$purpose" in
+    parity|validation) echo "${GEAK_AGENTX_DURATION_S:-3600}" ;;
+    *)                 echo "${GEAK_AGENTX_LOOP_DURATION_S:-900}" ;;
+  esac
+}
+
+# adapter_profile_warmup_s — OPTIONAL hook read by bench_e2e.sh: how long to wait
+# after load start before opening the profiler window.
+#
+# bench_e2e.sh defaults PROFILE_WARMUP_SEC to 0, which is right for a synthetic
+# sweep -- arming at load start keeps the initial prefill burst in the trace. It
+# is wrong here. At load start aiperf has not begun serving the measured window
+# at all: it is still resolving the corpus (minutes on an mmap cache miss),
+# replaying per-lane cache warmups, and draining them. A window opened then
+# records the RAMP (decode batch of 1, no steady-state MoE/attention mix) and
+# every kernel decision downstream is made on a shape the graded workload never
+# runs. That is not hypothetical -- it is how a full campaign came to route its
+# whole kernel budget off 12 seconds of ramp-up trace.
+#
+# So the window is placed inside steady state, scaled to the leg it runs in:
+# 75% of the replay duration, capped at the 2700s the InferenceX reference client
+# uses for the canonical 3600s window, and pulled back far enough that the window
+# itself still fits before the replay ends. Override with AGENTX_PROFILE_WARMUP_S.
+adapter_profile_warmup_s() {
+  if [ -n "${AGENTX_PROFILE_WARMUP_S:-}" ]; then
+    echo "$AGENTX_PROFILE_WARMUP_S"
+    return 0
+  fi
+  local dur win
+  dur="$(_agentx_duration)"
+  # Leave room for the capture plus the stop_profile flush.
+  win=$(( ${PROFILE_WINDOW_SEC:-20} + 60 ))
+  "${PYTHON_BIN:-python3}" - "$dur" "$win" <<'PY'
+import sys
+dur, reserve = int(float(sys.argv[1])), int(float(sys.argv[2]))
+# 75% into the replay, never past 2700s (the reference client's canonical delay),
+# and never so late that the window cannot complete before the replay stops.
+print(max(0, min(int(dur * 0.75), 2700, dur - reserve)))
+PY
+}
+
 adapter_bench() {
   local NUMP="$1" MAXC="$2" PROF="${3:-0}"
 
   # NUMP/ISL/OSL are owned by the trace corpus, not the synthetic sweep knobs
   # bench_e2e.sh also exports for the inferencex/native clients.
 
-  if [ "$PROF" = "1" ] && declare -F adapter_bench_native >/dev/null; then
-    adapter_bench_native "$NUMP" "$MAXC" 1
-    return $?
+  # PROF=1 asks the CLIENT to profile its own run. The synthetic client can do
+  # that; this one deliberately does not delegate to it. bench_e2e.sh's windowed
+  # path (adapter_profile_window) drives the load at PROF=0 and brackets the
+  # capture itself, which is the faithful path and the one that runs for
+  # vllm/sglang. Reaching here with PROF=1 means either a backend with no HTTP
+  # profiler hook or an explicit profiled call -- and answering it with a
+  # synthetic ISL/OSL sweep would write a trace of a DIFFERENT workload into this
+  # run's profile dir, where every consumer would read it as the AgentX trace.
+  # Run the real replay instead, and say plainly that the trace depends on
+  # someone else opening the window.
+  if [ "$PROF" = "1" ]; then
+    if [ "${AGENTX_PROFILE_VIA_SYNTHETIC:-0}" = "1" ] && declare -F adapter_bench_native >/dev/null; then
+      echo "!!! agentx client: AGENTX_PROFILE_VIA_SYNTHETIC=1 -- profiling a SYNTHETIC ISL/OSL sweep, " \
+           "NOT the trace replay. The resulting trace describes a different workload; debugging only." >&2
+      adapter_bench_native "$NUMP" "$MAXC" 1
+      return $?
+    fi
+    echo ">>> agentx client: PROF=1 replays the trace as usual; the server-side profiler must be" \
+         "bracketed by adapter_profile_window (no client-side /start_profile in aiperf)." >&2
   fi
 
   local py="${PYTHON_BIN:-python3}"
   local ix_root="${INFERENCEX_PATH:-}"
   local mapper=""
+  # A real InferenceX checkout wins: under Hyperloom its AgentX runtime deploys
+  # the mapper itself, and an orchestrated run must map its result with exactly
+  # the file that runtime placed. GEAK's vendored copy is the LAST resort, so a
+  # standalone run needs no checkout instead of failing here -- which it would
+  # only do AFTER launching and warming a server.
   for cand in \
-    "${ix_root}/benchmarks/map_aiperf.py" \
-    "${ix_root}/assets/agentx/map_aiperf.py"; do
-    [ -n "$ix_root" ] && [ -f "$cand" ] && { mapper="$cand"; break; }
+    "${ix_root:+${ix_root}/benchmarks/map_aiperf.py}" \
+    "${ix_root:+${ix_root}/assets/agentx/map_aiperf.py}" \
+    "${BASH_SOURCE[0]%/*}/map_aiperf.py"; do
+    [ -n "$cand" ] && [ -f "$cand" ] && { mapper="$cand"; break; }
   done
   if [ -z "$mapper" ]; then
-    echo "!!! agentx client: map_aiperf.py not found under INFERENCEX_PATH=${ix_root:-<unset>}." >&2
+    echo "!!! agentx client: no map_aiperf.py (INFERENCEX_PATH=${ix_root:-<unset>}, and the copy" \
+         "vendored beside this adapter is missing)." >&2
     return 5
   fi
 
@@ -51,16 +120,20 @@ adapter_bench() {
   mkdir -p "$art_dir"
 
   local scenario="${GEAK_AGENTX_SCENARIO:-inferencex-agentx-mvp}"
-  local corpus="${AGENTX_DATASET:-${WEKA_LOADER_OVERRIDE:-semianalysis_cc_traces_weka_062126_256k}}"
+  # The campaign corpus is the full-context parent: 393 traces, 56.8k main turns,
+  # 98.8k total requests, per-request input capped at 990,016 tokens. It matches
+  # the campaign server's --max-model-len 1048576, and launch_agentx.sh names it
+  # as canonical. The _256k sibling drops every request over 256k tokens (98.8k
+  # requests -> 68.3k) for ~256k-context servers; replaying that here measures a
+  # lighter workload and yields a baseline that cannot be compared to the
+  # campaign's.
+  local canon_ds="${AGENTX_CANONICAL_DATASET:-semianalysis_cc_traces_weka_062126}"
+  local corpus="${AGENTX_DATASET:-${WEKA_LOADER_OVERRIDE:-$canon_ds}}"
   local nent="${AGENTX_NUM_ENTRIES:-393}"
   local conc="${CONC:-${MAXC:-8}}"
-  local full_dur="${GEAK_AGENTX_DURATION_S:-3600}"
-  local loop_dur="${GEAK_AGENTX_LOOP_DURATION_S:-900}"
   local purpose="${MEASUREMENT_PURPOSE:-search}"
-  local duration="$loop_dur"
-  if [ "$purpose" = "parity" ] || [ "$purpose" = "validation" ]; then
-    duration="$full_dur"
-  fi
+  local duration
+  duration="$(_agentx_duration)"
 
   # ── Non-canonical workloads may run, but may never look submittable ────────
   # Mirrors aiperf_client.sh: the SCENARIO cannot police this for us. It has no
@@ -74,9 +147,12 @@ adapter_bench() {
   # map_aiperf.py forces submission_valid=false with them attached.
   local canon_entries=393
   local canon_duration="${AGENTX_CANONICAL_DURATION:-3600}"
-  local canon_ds="${AGENTX_CANONICAL_DATASET:-$corpus}"
   local -a noncanon=()
   [ "$corpus" != "$canon_ds" ] && noncanon+=("corpus=${corpus}(canonical ${canon_ds})")
+  # launch_agentx.sh:65 -- pinning the loader through WEKA_LOADER_OVERRIDE is a
+  # deviation in its own right, even when the name it pins matches the canonical
+  # one, because it bypasses the scenario's own corpus resolution.
+  [ -n "${WEKA_LOADER_OVERRIDE:-}" ] && noncanon+=("weka_loader_override_pinned")
   [ "$nent" != "$canon_entries" ] && noncanon+=("entries=${nent}(canonical ${canon_entries})")
   [ "$duration" != "$canon_duration" ] && noncanon+=("duration=${duration}s(canonical ${canon_duration}s)")
   [ -n "${AGENTX_MAX_CTX:-}" ] && noncanon+=("client_context_cap=${AGENTX_MAX_CTX}")
