@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -494,10 +495,68 @@ def _hyperloom_command(module: str, tail: list[str]) -> list[str] | None:
     ]
 
 
-def _html_command(out_dir: Path) -> list[str] | None:
+def _model_name(eval_dir: Path) -> str:
+    """The model this run optimized, named the way the run itself named it.
+
+    Three sources in falling order of authority, because a report filename must
+    never be the reason a run's telemetry step fails:
+
+    1. ``kb_identity.json`` -> ``dims.model``. This is the canonical identity the
+       run registers itself under in the knowledge base, so it is the same string
+       used to match this run against previous ones.
+    2. ``env_report.json`` -> ``model``, which is a filesystem path; its basename
+       is the model directory name.
+    3. The trailing part of the eval dir name, which is ``e2e_<model>_<stamp>``.
+
+    Returns:
+        A filename-safe name, or ``"run"`` when nothing on disk identifies the
+        model. Never raises.
+    """
+    candidates: list[str] = []
+    try:
+        kb = json.loads((eval_dir / "kb_identity.json").read_text(encoding="utf-8"))
+        candidates.append(str((kb.get("dims") or {}).get("model") or ""))
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    try:
+        env = json.loads((eval_dir / "env_report.json").read_text(encoding="utf-8"))
+        candidates.append(Path(str(env.get("model") or "")).name)
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    name = eval_dir.name
+    if name.startswith("e2e_"):
+        # e2e_<model>_<date>_<time>_<pid>_<n> -- strip the four trailing stamp fields.
+        candidates.append("_".join(name[4:].split("_")[:-4]))
+    for candidate in candidates:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", candidate).strip("-.")
+        if safe:
+            return safe
+    return "run"
+
+
+def report_basename(eval_dir: Path) -> str:
+    """Name the HTML report after the harness that ran it and the model it ran on.
+
+    A reports directory accumulates: several models are optimized into sibling
+    dirs, archives get flattened together, and a file called ``geak_report.html``
+    tells the reader nothing about which run it belongs to. The prefix says who
+    drove the run -- ``hl_`` when Hyperloom invoked GEAK as its KERNEL_AGENT
+    phase, ``geak_`` when GEAK ran standalone -- because the two answer different
+    questions and their numbers are not comparable.
+
+    Hyperloom announces itself by exporting ``GEAK_INVOKED_BY=hyperloom`` in the
+    child environment. Absence means standalone: an older Hyperloom that does not
+    set it produces a ``geak_``-prefixed report, which understates the context but
+    never misattributes a standalone run to Hyperloom.
+    """
+    prefix = "hl" if os.environ.get("GEAK_INVOKED_BY", "").strip().lower() == "hyperloom" else "geak"
+    return f"{prefix}_run_report_{_model_name(eval_dir)}.html"
+
+
+def _html_command(out_dir: Path, eval_dir: Path) -> list[str] | None:
     """Build the command that turns the rendered ledger into the HTML report."""
     override = os.environ.get("GEAK_HTML_REPORT_CMD", "").strip()
-    tail = ["--reports-dir", str(out_dir)]
+    tail = ["--reports-dir", str(out_dir), "-o", str(out_dir / report_basename(eval_dir))]
     if override:
         return override.split() + tail
     return _hyperloom_command(HTML_MODULE, tail)
@@ -552,7 +611,7 @@ def render_report(
     return _run(argv, timeout_s, {"output_dir": str(out_dir)})
 
 
-def render_html_report(out_dir: Path, *, timeout_s: float = 600.0) -> dict[str, Any]:
+def render_html_report(out_dir: Path, eval_dir: Path, *, timeout_s: float = 600.0) -> dict[str, Any]:
     """Turn the rendered ledger into the structured HTML report, if possible.
 
     Runs after :func:`render_report` has written ``geak_calls.jsonl`` and after
@@ -563,16 +622,17 @@ def render_html_report(out_dir: Path, *, timeout_s: float = 600.0) -> dict[str, 
 
     Args:
         out_dir: The run's ``reports`` directory — both input and output.
+        eval_dir: The run directory, read only to name the output file.
         timeout_s: Ceiling on the renderer's runtime.
 
     Returns:
         A status dict; ``{"status": "skipped"}`` when no renderer was found.
         Never raises.
     """
-    argv = _html_command(out_dir)
+    argv = _html_command(out_dir, eval_dir)
     if not argv:
         return {"status": "skipped", "reason": "no renderer (set HYPERLOOM_SRC or GEAK_HTML_REPORT_CMD)"}
-    return _run(argv, timeout_s, {"output_dir": str(out_dir)})
+    return _run(argv, timeout_s, {"output": str(out_dir / report_basename(eval_dir))})
 
 
 def _run(argv: list[str], timeout_s: float, extra: dict[str, Any]) -> dict[str, Any]:
@@ -653,7 +713,7 @@ def mirror_run_trace(
             reports_dir = eval_path / "reports"
             report = render_report(dest, reports_dir, eval_path)
             skill = install_skill(reports_dir)
-            html = render_html_report(reports_dir)
+            html = render_html_report(reports_dir, eval_path)
             manifest["report"] = report
             manifest["skill"] = skill
             manifest["html"] = html

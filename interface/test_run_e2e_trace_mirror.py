@@ -599,17 +599,19 @@ def test_install_skill_reports_an_oserror(tmp_path, monkeypatch):
 def test_html_command_prefers_the_explicit_override(monkeypatch, tmp_path):
     """GEAK_HTML_REPORT_CMD wins over any checkout discovery."""
     monkeypatch.setenv("GEAK_HTML_REPORT_CMD", "my-renderer --flag")
-    argv = ctm._html_command(tmp_path / "reports")
-    assert argv == ["my-renderer", "--flag", "--reports-dir", str(tmp_path / "reports")]
+    argv = ctm._html_command(tmp_path / "reports", tmp_path)
+    reports = tmp_path / "reports"
+    assert argv == ["my-renderer", "--flag", "--reports-dir", str(reports),
+                    "-o", str(reports / "geak_run_report_run.html")]
 
 
 def test_html_command_is_none_without_a_checkout(monkeypatch, tmp_path):
     """No Hyperloom checkout means no HTML step, not a crash."""
     monkeypatch.delenv("GEAK_HTML_REPORT_CMD", raising=False)
     monkeypatch.delenv("HYPERLOOM_SRC", raising=False)
-    assert ctm._html_command(tmp_path) is None
+    assert ctm._html_command(tmp_path, tmp_path) is None
     monkeypatch.setenv("HYPERLOOM_SRC", str(tmp_path / "absent"))
-    assert ctm._html_command(tmp_path) is None
+    assert ctm._html_command(tmp_path, tmp_path) is None
 
 
 def test_html_command_finds_the_tool_in_a_checkout(monkeypatch, tmp_path):
@@ -619,16 +621,17 @@ def test_html_command_finds_the_tool_in_a_checkout(monkeypatch, tmp_path):
     tool.write_text("")
     monkeypatch.delenv("GEAK_HTML_REPORT_CMD", raising=False)
     monkeypatch.setenv("HYPERLOOM_SRC", str(tmp_path))
-    argv = ctm._html_command(tmp_path / "reports")
+    argv = ctm._html_command(tmp_path / "reports", tmp_path)
     assert argv[0] == "python3" and str(tmp_path) in argv
-    assert argv[-2:] == ["--reports-dir", str(tmp_path / "reports")]
+    assert argv[-4:-2] == ["--reports-dir", str(tmp_path / "reports")]
+    assert argv[-2] == "-o" and argv[-1].endswith("geak_run_report_run.html")
 
 
 def test_render_html_report_skips_when_no_renderer(monkeypatch, tmp_path):
     """Skipped is a status, not an error — the ledger is the durable artifact."""
     monkeypatch.delenv("GEAK_HTML_REPORT_CMD", raising=False)
     monkeypatch.delenv("HYPERLOOM_SRC", raising=False)
-    assert ctm.render_html_report(tmp_path)["status"] == "skipped"
+    assert ctm.render_html_report(tmp_path, tmp_path)["status"] == "skipped"
 
 
 def test_render_html_report_runs_the_renderer(monkeypatch, tmp_path):
@@ -639,8 +642,8 @@ def test_render_html_report_runs_the_renderer(monkeypatch, tmp_path):
         "run",
         lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
-    result = ctm.render_html_report(tmp_path)
-    assert result == {"status": "ok", "output_dir": str(tmp_path)}
+    result = ctm.render_html_report(tmp_path, tmp_path)
+    assert result == {"status": "ok", "output": str(tmp_path / "geak_run_report_run.html")}
 
 
 def test_render_html_report_reports_a_failing_renderer(monkeypatch, tmp_path):
@@ -651,7 +654,7 @@ def test_render_html_report_reports_a_failing_renderer(monkeypatch, tmp_path):
         "run",
         lambda *a, **k: SimpleNamespace(returncode=3, stdout="", stderr="boom"),
     )
-    result = ctm.render_html_report(tmp_path)
+    result = ctm.render_html_report(tmp_path, tmp_path)
     assert result["status"] == "error" and result["returncode"] == 3 and "boom" in result["stderr"]
 
 
@@ -681,3 +684,49 @@ def test_report_command_carries_a_selector_and_asks_for_the_text_sidecar(tmp_pat
     assert argv[argv.index("--eval-dir") + 1] == str(tmp_path / "eval")
     assert "--include-text" in argv
     assert "--claude-home" in argv
+
+
+def test_the_report_is_named_after_the_model_the_run_optimized(tmp_path):
+    """kb_identity.json is the canonical name, so it wins over every other source."""
+    (tmp_path / "kb_identity.json").write_text(json.dumps({"dims": {"model": "Qwen3-14B-FP8"}}))
+    (tmp_path / "env_report.json").write_text(json.dumps({"model": "/models/something-else"}))
+    assert ctm.report_basename(tmp_path) == "geak_run_report_Qwen3-14B-FP8.html"
+
+
+def test_the_model_name_falls_back_through_env_report_then_the_dir_name(tmp_path):
+    """Each fallback is used only when the one above it is absent or unusable."""
+    run = tmp_path / "e2e_gpt-oss-120b_20260908_194500_123_4"
+    run.mkdir()
+    assert ctm._model_name(run) == "gpt-oss-120b"
+    (run / "env_report.json").write_text(json.dumps({"model": "/shared/models/Llama-3-8B"}))
+    assert ctm._model_name(run) == "Llama-3-8B"
+    (run / "kb_identity.json").write_text("{ not json")
+    assert ctm._model_name(run) == "Llama-3-8B"
+
+
+def test_an_unidentifiable_run_is_named_rather_than_left_unnamed(tmp_path):
+    """A filename must never be the reason the telemetry step fails."""
+    assert ctm._model_name(tmp_path) == "run"
+
+
+def test_hyperloom_prefixes_the_report_and_absence_means_standalone(monkeypatch, tmp_path):
+    """The prefix records who drove the run, because the two are not comparable.
+
+    An older Hyperloom that does not export the marker yields a ``geak_`` report:
+    that understates the context, but it never claims a standalone run was
+    Hyperloom's.
+    """
+    (tmp_path / "kb_identity.json").write_text(json.dumps({"dims": {"model": "Qwen3-14B-FP8"}}))
+    monkeypatch.setenv("GEAK_INVOKED_BY", "hyperloom")
+    assert ctm.report_basename(tmp_path) == "hl_run_report_Qwen3-14B-FP8.html"
+    monkeypatch.setenv("GEAK_INVOKED_BY", "HyperLoom")
+    assert ctm.report_basename(tmp_path).startswith("hl_")
+    monkeypatch.delenv("GEAK_INVOKED_BY")
+    assert ctm.report_basename(tmp_path).startswith("geak_")
+
+
+def test_a_model_name_cannot_escape_the_reports_directory(tmp_path):
+    """The name reaches a filesystem path, so separators must not survive it."""
+    (tmp_path / "kb_identity.json").write_text(json.dumps({"dims": {"model": "../../etc/passwd"}}))
+    name = ctm.report_basename(tmp_path)
+    assert "/" not in name and ".." not in name
