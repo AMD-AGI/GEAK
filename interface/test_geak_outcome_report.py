@@ -327,3 +327,58 @@ def test_main_accepts_reports_dir_override(run_dir: Path, tmp_path: Path, capsys
     assert gor.main([str(run_dir), "--reports-dir", str(out)]) == 0
     capsys.readouterr()
     assert (out / gor.OUTCOME_MD).is_file()
+
+
+def test_integration_result_is_read_beside_opbench(tmp_path):
+    """opbench and the end-to-end A/B answer different questions.
+
+    opbench races library backends, so an unbeaten incumbent records 1.0000x and
+    a 0.00% ceiling. The kernel the run itself wrote is validated separately and
+    lands in _capture_overlay/integrate_result.json. Reading only opbench reports
+    a task that produced a real measured win as having produced nothing.
+    """
+    task = tmp_path / "kernels" / "h2_task"
+    (task / "_capture_overlay").mkdir(parents=True)
+    (task / "opbench_result.json").write_text(
+        json.dumps({
+            "winner_backend": "ck_tuned_live", "baseline_backend": "ck_tuned_live",
+            "isolated_speedup": 1.0, "pct_gpu_time": 19.02,
+            "amdahl_ceiling_e2e_pct": 0.0, "measured": True,
+        })
+    )
+    (task / "_capture_overlay" / "integrate_result.json").write_text(
+        json.dumps({
+            "cand_tag": "c0_triton", "isolated_speedup": 1.3143, "e2e_delta_pct": 3.538,
+            "e2e_throughput_tok_s": 6078.752, "amdahl_ceiling_pct": 5.86, "gate": "stack",
+            "gsm8k": {"ref": 0.89, "cand": 0.89}, "reason": "provisional stack",
+        })
+    )
+    stage = gor.headkernel_stages(tmp_path)[0]
+    assert stage["isolated_speedup"] == 1.0
+    assert stage["amdahl_ceiling_e2e_pct"] == 0.0
+    integ = stage["integration"]
+    assert integ["e2e_delta_pct"] == 3.538
+    assert integ["candidate"] == "c0_triton"
+    assert integ["gsm8k_ref"] == 0.89 and integ["gsm8k_cand"] == 0.89
+    assert integ["reason"] == "provisional stack"
+
+
+def test_integration_is_none_when_no_candidate_reached_validation(tmp_path):
+    """The common case, and not a failure."""
+    task = tmp_path / "kernels" / "h0_task"
+    task.mkdir(parents=True)
+    task.joinpath("opbench_result.json").write_text(json.dumps({"measured": True, "isolated_speedup": 1.0}))
+    assert gor.headkernel_stages(tmp_path)[0]["integration"] is None
+    assert gor.integration_result(task) is None
+
+
+def test_integration_is_kept_when_opbench_is_missing(tmp_path):
+    """A validated kernel must not be lost because the opbench file was not written."""
+    task = tmp_path / "kernels" / "h3_task"
+    (task / "_capture_overlay").mkdir(parents=True)
+    (task / "_capture_overlay" / "integrate_result.json").write_text(
+        json.dumps({"cand_tag": "c1", "e2e_delta_pct": 1.25})
+    )
+    stage = gor.headkernel_stages(tmp_path)[0]
+    assert stage["present"] is False
+    assert stage["integration"]["e2e_delta_pct"] == 1.25

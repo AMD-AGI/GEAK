@@ -7,6 +7,9 @@ from the run's own measured artifacts only:
     baseline/bench_summary.json      the round-0 serving baseline
     config/sweep_results.json        the ConfigSweep accepted stack
     kernels/*/opbench_result.json    each HeadKernel task's isolated result
+    kernels/*/_capture_overlay/integrate_result.json
+                                    the end-to-end A/B for a kernel the run
+                                    authored, when one reached validation
     tuning/tuning_result.json        the TuningSkillset A/B
 
 Nothing here is modelled, extrapolated or defaulted.  A stage whose artifact is
@@ -112,12 +115,52 @@ def sweep_stage(run_dir: Path) -> dict[str, Any]:
     }
 
 
+def integration_result(task_dir: Path) -> dict[str, Any] | None:
+    """The end-to-end A/B for a kernel this run authored, if it got that far.
+
+    ``opbench_result.json`` and this file answer different questions and are
+    routinely in tension. Opbench races the available *library backends* against
+    each other, so when the incumbent stays fastest it records a 1.0000x speedup
+    and a 0.00% ceiling. That says nothing about the kernel the run itself
+    wrote: that candidate is validated separately, served end to end against the
+    reference, and its result lands here. Reading only opbench therefore reports
+    a task that produced a real measured win as having produced nothing.
+
+    Returns ``None`` when no candidate reached validation, which is the common
+    case and is not a failure.
+    """
+    data = _load(task_dir / "_capture_overlay" / "integrate_result.json")
+    if not isinstance(data, dict):
+        return None
+    gsm8k = data.get("gsm8k") if isinstance(data.get("gsm8k"), dict) else {}
+    return {
+        "source": str(task_dir / "_capture_overlay" / "integrate_result.json"),
+        "candidate": data.get("cand_tag"),
+        "isolated_speedup": _num(data.get("isolated_speedup")),
+        "e2e_delta_pct": _num(data.get("e2e_delta_pct")),
+        "e2e_throughput_tok_s": _num(data.get("e2e_throughput_tok_s")),
+        "amdahl_ceiling_pct": _num(data.get("amdahl_ceiling_pct")),
+        "gate": data.get("gate"),
+        "ab_complete": data.get("ab_complete"),
+        "provenance_ok": data.get("provenance_ok"),
+        "output_parity": data.get("output_parity"),
+        "gsm8k_ref": _num(gsm8k.get("ref")),
+        "gsm8k_cand": _num(gsm8k.get("cand")),
+        "accepted_overlay": data.get("accepted_overlay"),
+        "reason": data.get("reason"),
+    }
+
+
 def headkernel_stages(run_dir: Path) -> list[dict[str, Any]]:
     """One entry per kernel task directory, ordered by name.
 
     ``amdahl_ceiling_e2e_pct`` is the ceiling the task's own harness computed
     from its measured share of GPU time; it is the honest upper bound on what
     the task could have contributed end-to-end, not a claim that it did.
+
+    ``integration`` carries the separate end-to-end A/B of a kernel the run
+    wrote, when there was one -- see :func:`integration_result` for why that is
+    not the same measurement as the opbench fields beside it.
     """
     kernels_dir = run_dir / "kernels"
     out: list[dict[str, Any]] = []
@@ -130,6 +173,7 @@ def headkernel_stages(run_dir: Path) -> list[dict[str, Any]]:
             continue
         path = task_dir / "opbench_result.json"
         data = _load(path)
+        integration = integration_result(task_dir)
         if not isinstance(data, dict):
             out.append({
                 "phase": PHASE_HEADKERNEL,
@@ -137,6 +181,7 @@ def headkernel_stages(run_dir: Path) -> list[dict[str, Any]]:
                 "present": False,
                 "source": str(path),
                 "kind": "kernel",
+                "integration": integration,
             })
             continue
         out.append({
@@ -154,6 +199,7 @@ def headkernel_stages(run_dir: Path) -> list[dict[str, Any]]:
             "amdahl_ceiling_e2e_pct": _num(data.get("amdahl_ceiling_e2e_pct")),
             "winner_editable": data.get("winner_editable"),
             "measured": data.get("measured"),
+            "integration": integration,
         })
     return out
 
