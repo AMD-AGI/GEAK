@@ -21,7 +21,18 @@ both.
 | --- | --- | --- |
 | Outcome / throughput | GEAK itself | `<eval_dir>/reports/geak_outcome.{json,md}` |
 | Per-LLM-call tree | Claude Code | `<eval_dir>/llm_trace/` (mirrored), rendered to `<eval_dir>/reports/` |
-| Both, joined and readable | the HTML renderer | `<eval_dir>/reports/geak_report.html` |
+| Both, joined and readable | the HTML renderer | `<eval_dir>/reports/<harness>_run_report_<model>.html` |
+
+**The report names itself after the run.** One page per run, named for the
+model it optimized and the harness that drove it: `geak_run_report_<model>.html`
+when GEAK ran standalone, `hl_run_report_<model>.html` when Hyperloom invoked
+GEAK as its KERNEL_AGENT phase. Both modes exist and their numbers are not
+comparable, so the two must not collide in a directory someone reads later
+without that context. The model name comes from `kb_identity.json`
+(`dims.model`), falling back to `env_report.json` and then the eval dir name.
+Hyperloom announces itself with `GEAK_INVOKED_BY=hyperloom` in GEAK's
+environment; absence means standalone, so an older Hyperloom yields a
+`geak_`-prefixed report rather than a wrong one.
 
 GEAK issues almost no LLM calls itself: `interface/run_e2e.py` opens one
 `ClaudeSDKClient` and hands a single prompt to Claude Code, which runs
