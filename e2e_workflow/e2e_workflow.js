@@ -673,6 +673,53 @@ function adoptMeasuredShape(isl, osl, where) {
     + `(ratio ${(ISL / Math.max(1, OSL)).toFixed(1)}:1). Roles size kernels against this.`);
   return true;
 }
+// The Setup probe reads the baseline summary ONCE, at the instant Setup returns,
+// and that instant is not guaranteed to contain one. An agent whose leg dies to a
+// hardware fault moves the wreckage aside and relaunches, so `baseline/` is
+// legitimately EMPTY while a replacement leg runs, and the summary lands minutes
+// after Setup reports done. A single read then loses the shape for the whole run
+// rather than for a moment: on the 20260909 standalone run Setup returned at
+// 10:40:49 with the directory just renamed away, the good summary was written at
+// 11:57, and every later phase kept the 1024/1024 placeholder. "Not written yet"
+// is a retryable state, not a verdict, so adoption is ALSO attempted lazily from
+// the prompt builder every role passes through: the first prompt built after the
+// summary appears installs the real shape. A no-op once measured, so a run that
+// adopted at Setup pays nothing and its prompts are unchanged.
+function ensureMeasuredShape() {
+  if (SHAPE_IS_MEASURED || !IS_AGENTX) return SHAPE_IS_MEASURED;
+  // EVAL_DIR is a `let` declared further down and only assigned by Setup, so it
+  // is read through typeof: a prompt built before that declaration is evaluated
+  // would otherwise die in the temporal dead zone, turning a missing shape into
+  // a crashed run. Nothing to read before Setup anyway — the baseline is what
+  // Setup produces.
+  const evalDir = typeof EVAL_DIR === 'undefined' ? '' : (EVAL_DIR || '');
+  if (!evalDir) return SHAPE_IS_MEASURED;
+  let shape = null;
+  try {
+    // Same execFileSync/python3 route the Setup probe uses: this JS has no fs.
+    const { execFileSync } = require('child_process');
+    const out = execFileSync('python3', ['-c', `
+import json, os, sys
+p = os.path.join(sys.argv[1], 'baseline', 'bench_summary.json')
+def _num(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+try:
+    with open(p) as fh:
+        s = json.load(fh) or {}
+    print(json.dumps([_num(s.get('observed_isl')), _num(s.get('observed_osl'))]))
+except Exception:
+    print('[null, null]')
+`, evalDir], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 });
+    shape = JSON.parse(out);
+  } catch (err) {
+    return SHAPE_IS_MEASURED;   // unreadable right now; a later prompt retries
+  }
+  if (shape && shape[0] > 0 && shape[1] > 0) {
+    adoptMeasuredShape(shape[0], shape[1],
+      'the baseline bench (read after Setup returned, which had no summary yet)');
+  }
+  return SHAPE_IS_MEASURED;
+}
 // Which of the two throughput axes bench_e2e.sh medians. On a ~140:1
 // prefill:output trace, output-only tok/s moves almost not at all for a large
 // change in total work, so grading an AgentX run on the output axis reads real
@@ -1281,6 +1328,9 @@ function warmStartBlock(role) {
 // gets byte-identical prompts.
 function workloadIdentityBlock() {
   if (!IS_AGENTX) return '';
+  // Late-adopt here rather than only at Setup: this block is the one path every
+  // role prompt takes, so the shape can never be stale by more than one agent.
+  ensureMeasuredShape();
   return `
 ## WORKLOAD IDENTITY — this run measures a TRACE REPLAY, not a fixed ISL/OSL sweep
 The served load is the AgentX corpus \`${AGENTX.corpus}\` replayed by aiperf under scenario
@@ -1379,6 +1429,10 @@ const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_m
 // inherits it automatically instead of having to remember it. Bash-capable agents own
 // server lifecycles, and a pattern-matched kill is indistinguishable from a correct one
 // until it TERMs the caller's orchestrator and fails the whole task.
+// The detachment rule rides along for the same reason: EVERY bash-capable role runs a long
+// serving leg (director's baseline, tuner's launch+bench cycles, the head e2e A/B), and each
+// one otherwise rediscovers at ~1h that a tool-managed background shell gets group-reaped
+// mid-measurement — an hour of budget and a booted server lost per role that learns it.
 const PROCESS_SAFETY = `## PROCESS SAFETY (a violation can kill the caller's orchestrator, failing the whole task)
 This container's PID 1 is the CALLER's orchestrator process, not yours, and it is NOT restartable.
 NEVER run global or pattern-matched process cleanup: no \`pkill -f\` / \`pgrep -f ... | xargs kill\` /
@@ -1392,6 +1446,19 @@ identity (pid, pgid, /proc start time) before signalling anything:
     \${SERVER_LAUNCH_PREFIX:-} <launch server> &   # own session => pgid == pid
     SERVER_PID=\$!; server_record_identity "\$SERVER_PID"
 
+## LONG MEASUREMENTS OUTLIVE YOUR TOOL CALL — DETACH THEM FROM THE SHELL MANAGER
+A serving measurement is longer than any bound your Bash tool can give it. One canonical trace-replay
+leg is a 3600s window PLUS warmup and finalization (~70min wall), and a cold server boot alone is ~9min.
+Your foreground bound is BASH_MAX_TIMEOUT_MS, and your tool's OWN background mode is worse: a shell the
+tool manages for you is reaped on the manager's schedule, and the reap is a GROUP kill that takes the
+server down with the client — you get a truncated log, an unloaded GPU, and no summary, from a leg that
+was measuring perfectly. Do NOT run a bench through your tool's background/\`run_in_background\` mode.
+Launch it so it is orphaned to init, OUTSIDE the manager's reach, then poll its log:
+    cd "\$EVAL_DIR" && setsid nohup bash run_bench.sh > run_bench.out 2>&1 < /dev/null &
+    # returns immediately; the leg's parent becomes PID 1 and no tool-call bound applies
+Then poll in SEPARATE short calls (\`sleep 300; tail -5 run_bench.out\`) until the summary lands. Before
+you conclude a leg died, check whether it is still alive (\`ps -o pid,stat,etime -p <pid>\`) and whether
+the GPUs still hold weights — a reaped wrapper with a live leg underneath looks identical to a crash.
 `;
 function withProcessSafety(prompt) {
   return typeof prompt === 'string' ? PROCESS_SAFETY + prompt : prompt;
@@ -2525,10 +2592,13 @@ print(json.dumps(res))
           `isl=${verdict.observed_isl || '?'} osl=${verdict.observed_osl || '?'}.`);
       } else if (!adoptMeasuredShape(verdict.observed_isl, verdict.observed_osl,
                                      'the baseline bench')) {
-        log(`Setup: WARNING the baseline summary reported no served request shape, so kernel ` +
-          `targeting stays at the synthetic ${ISL}/${OSL} placeholder — far below a trace ` +
-          `replay's real lengths. Kernel choices may be aimed at the wrong regime (the ` +
-          `MEASUREMENT is unaffected). Pass workload_spec.observed_isl/observed_osl to set it.`);
+        log(`Setup: the baseline summary carried no served request shape yet, so kernel ` +
+          `targeting is still the synthetic ${ISL}/${OSL} placeholder — far below a trace ` +
+          `replay's real lengths. This is expected when a relaunched leg has not written its ` +
+          `summary yet: every later role prompt retries the read and installs the shape as ` +
+          `soon as it appears (watch for "Kernel-targeting shape measured"). If that line ` +
+          `never comes, kernel choices are aimed at the wrong regime (the MEASUREMENT is ` +
+          `unaffected) — pass workload_spec.observed_isl/observed_osl to set it explicitly.`);
       }
     }
   }

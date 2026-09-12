@@ -1721,6 +1721,37 @@ def apply_bench_protocol(h: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Invocation: SDK preferred, CLI fallback.
 # ---------------------------------------------------------------------------
+# Everything the agent says is CAPTURED for the life of the run: the SDK path
+# accumulates fragments and joins them at the end, and the CLI path asks for
+# --output-format json, which emits one blob on exit. Either way a multi-hour run
+# prints nothing to its container log, so the workflow's own log() lines -- the
+# phase transitions, and the "Kernel-targeting shape measured" line that says
+# whether kernel work is aimed at the right regime -- are unreadable until it is
+# over. Both consumption paths funnel through _iter_message_text(), so teeing
+# there makes a run watchable with one write and no change to what is returned.
+# Unset GEAK_LIVE_LOG => byte-identical behaviour.
+_LIVE_LOG_PATH = os.environ.get("GEAK_LIVE_LOG", "")
+_LIVE_LOG_BROKEN = False
+
+
+def _live_log(texts: list[str]) -> None:
+    """Append streamed agent text to a watchable file. Never raises.
+
+    Observability must not be able to fail a run, so the first write error
+    disables the tee for good rather than retrying on every message.
+    """
+    global _LIVE_LOG_BROKEN
+    if not _LIVE_LOG_PATH or _LIVE_LOG_BROKEN or not texts:
+        return
+    try:
+        with open(_LIVE_LOG_PATH, "a", encoding="utf-8", errors="replace") as fh:
+            for text in texts:
+                fh.write(text if text.endswith("\n") else text + "\n")
+            fh.flush()
+    except Exception:
+        _LIVE_LOG_BROKEN = True
+
+
 def _iter_message_text(msg: Any) -> list[str]:
     """Best-effort extraction of every text fragment from one SDK message.
 
@@ -1763,6 +1794,7 @@ def _iter_message_text(msg: Any) -> list[str]:
     if isinstance(msg, dict):
         _take(msg.get("text"))
         _take(msg.get("result"))
+    _live_log(out)
     return out
 
 
