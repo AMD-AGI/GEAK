@@ -107,7 +107,7 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 | `kb_artifacts_dir` | sibling `kb_artifacts/` | Warm-start patch store, forwarded to every recursive kernel lane so one run shares one store. |
 | `warm_start`, `warm_start_match`, `warm_start_min_speedup`, `kb_mode`, `kb_store_dir`, `kb_framework_version` | see the kernel-layer table | Forwarded verbatim to the kernel lanes. Corrective re-authors are forced to `reference` (they must keep the isolated win). |
 | `time_budget_s`, `initial_extra_server_args`, `initial_extra_env`, `tracelens`, `agent_timeout_ms` | — | Forwarded from the external orchestrator. |
-| `final_reserve_s` | `3000` (50min), capped at 20% of `time_budget_s` | Hard floor of wall-clock held back for the whole final phase — Finalize + Report + Validate + the `workflow_return.json` write; no mode starts new work inside it, and each optimization agent's hung-guard is tightened so no in-flight step finishes later than `time_budget_s − reserve` (final-phase agents are exempt). Sized off 85 historical runs (p50 40min, p75 50min, p90 77min, max 86min): 50min covers ~p75, and since Report writes both reports before Validate, a longer tail still ships them (only the Validate re-measure is at risk, and `run_e2e.py` falls back). The 20% cap stops the floor from eating a short budget whole; at budgets ≥5h it never binds. Env override: `GEAK_FINAL_RESERVE_S`. |
+| `final_reserve_s` | `3600` (60min), capped at 20% of `time_budget_s` | Hard floor of wall-clock held back for the whole final phase — Finalize + Report + Validate + the `workflow_return.json` write; no mode starts new work inside it, and each optimization agent's hung-guard is tightened so no in-flight step finishes later than `time_budget_s − reserve` (final-phase agents are exempt). Sized off 85 historical runs (p50 40min, p75 50min, p90 77min, max 86min): 60min sits above p75 and below p90, and since Report writes both reports before Validate, a longer tail still ships them (only the Validate re-measure is at risk, and `run_e2e.py` falls back). The 20% cap stops the floor from eating a short budget whole; at budgets ≥5h it never binds. Env override: `GEAK_FINAL_RESERVE_S`. **Raise this when Validate must re-measure a long leg**: a canonical 3600s AgentX leg is ~70min end to end (boot + warmup + window), so the 60min default cannot fit the very leg it protects — set `GEAK_FINAL_RESERVE_S=5400` (90min) for those runs. |
 
 > **Throughput numbers are comparable only within one lifecycle**, and both legs of any ratio must
 > come from the same one. `bench_summary.json.measurement_mode` records which produced a given number;
@@ -288,6 +288,12 @@ Stable `handoff.json` fields: `model_path`, `framework` (→ `backend`), `tp`, `
 Env knobs: `GEAK_CLAUDE_MODEL` (`claude-opus-4-8`), `GEAK_CLAUDE_EFFORT` (`ultracode`),
 `GEAK_E2E_TIMEOUT_S` (`43200` = 12h), `GEAK_FINAL_RESERVE_S`, `GEAK_ROOT`,
 `GEAK_EVAL_DIR`, `INFERENCEX_PATH`.
+
+`BENCH_MAX_ATTEMPTS` (`2`) is read by `bench_e2e.sh` in `isolated_server` mode and bounds the
+attempts spent on one replica before it is given up. The default of 2 (one retry) assumes a failed
+leg means a bad config; raise it when the stack itself faults independently of the config — an
+intermittent GPU fault hitting ~20% of server launches will exhaust 2 attempts on ~1 replica in 25
+and lose the phase that needed it. A non-numeric or `<1` value falls back to `2`.
 
 `--timeout-s <seconds>` states the same wall-clock budget on the command line. When it and
 `GEAK_E2E_TIMEOUT_S` are both given the **smaller** wins (both name a real kill); `43200` applies only

@@ -208,6 +208,17 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
     echo "!!! REUSE_SERVER=1 is incompatible with GEAK_REPEAT_MODE=isolated_server; timed replicas must fresh-launch." >&2
     exit 4
   fi
+  # Attempts per replica. Default 2 (one retry) keeps existing behavior; raise it
+  # where the stack faults independently of the config. Two is one too few against
+  # an intermittent hardware fault: on the 20260909 run an HSA queue abort hit
+  # ~22% of server launches, both baseline attempts faulted 30min apart, and
+  # exhausting the budget cost the entire Setup phase. A rejected value falls back
+  # to 2 rather than failing the measurement.
+  _max_attempts="${BENCH_MAX_ATTEMPTS:-2}"
+  case "$_max_attempts" in
+    ''|*[!0-9]*) _max_attempts=2 ;;
+    *) [ "$_max_attempts" -ge 1 ] || _max_attempts=2 ;;
+  esac
   _purpose="${MEASUREMENT_PURPOSE:-search}"
   _resolve_samples 3 "isolated replica" isolated-server
   _requested="$_samples"
@@ -222,10 +233,10 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
     mkdir -p "$_replica_dir"
     rm -f "$_replica_dir/selected_summary.json" "$_replica_dir/selected_attempt"
     _replica_ok=0
-    for _attempt in 1 2; do
+    for ((_attempt=1; _attempt<=_max_attempts; _attempt++)); do
       _attempt_dir="$_replica_dir/attempt_$_attempt"
       rm -f "$_attempt_dir/bench_summary.json"
-      echo ">>> Isolated replica $_replica/$_requested (attempt $_attempt/2) ..."
+      echo ">>> Isolated replica $_replica/$_requested (attempt $_attempt/$_max_attempts) ..."
       OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
         bash "$_replica_runner"
       _rc=$?
@@ -256,7 +267,7 @@ PY
       echo "!!! Isolated replica $_replica attempt $_attempt failed (rc=$_rc)." >&2
     done
     if [ "$_replica_ok" != "1" ]; then
-      echo "!!! Isolated replica $_replica failed after one retry; continuing without same-server fallback." >&2
+      echo "!!! Isolated replica $_replica failed after $_max_attempts attempt(s); continuing without same-server fallback." >&2
     fi
   done
 
