@@ -153,7 +153,7 @@ AGENT_BACKEND = os.environ.get("GEAK_AGENT_BACKEND", "").strip()   # == --agent 
 AGENT_PROFILE = os.environ.get("GEAK_AGENT_PROFILE", "").strip()   # a registry profile = (agent, model)
 AGENT_MODEL = os.environ.get("GEAK_MODEL", "").strip()             # override the model axis
 RUNTIME_SCRIPT = INTERFACE_DIR / "runtime" / "engine" / "run_workflow.mjs"
-RUNTIME_REGISTRY = INTERFACE_DIR / "runtime" / "registry.json"
+RUNTIME_REGISTRY = INTERFACE_DIR / "runtime" / "engine" / "registry.json"
 NODE_BIN = os.environ.get("GEAK_NODE_BIN", "node")
 
 

@@ -180,18 +180,10 @@ supports. Implement the missing capability first, *then* move the baseline const
 
 ## What each file is
 
-**`engine/`** — the orchestration engine; nothing in here is codex-specific.
+Two files, then a directory:
 
-| File | Role |
-|---|---|
-| `engine/run_workflow.mjs` | primitives, semaphore, nesting, script loader, CLI entry, metrics |
-| `engine/schema.mjs` | structured-output contract + extraction + validation (incl. enum) |
-| `engine/config.mjs` | registry loading, `(agent,model,profile)` resolution, invocation build, neutralization |
-| `engine/registry.json` | agents × models × profiles data |
-| `engine/backends/base.mjs` | backend contract + `spawnAgent` + `defaultConcurrency` |
-| `engine/backends/generic.mjs` | config-driven backend for any CLI |
-| `engine/selftest.mjs` | no-GPU/no-network unit tests of the primitives (105 checks) |
-| `engine/conformance.mjs` | backend capability probes + static contract-drift audit |
-| `engine/experiment.mjs` | `(agent × model)` comparison runner |
-
-| `../run_e2e.py` | programmatic entry; routes native vs runtime by env |
+- **`SETUP.md`** — this file: how to get codex running.
+- **`../run_e2e.py`** — the programmatic entry point; picks native Claude Code vs this runtime from
+  the environment.
+- **`engine/`** — the orchestration engine. See [`engine/README.md`](engine/README.md) for what each
+  file in it does.
