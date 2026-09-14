@@ -843,8 +843,21 @@ const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   'speedup holds when the op is replayed under a CUDA graph, not just in eager timing.'
 ) : '';
 // Acceptance noise band (%). Isolated-server ref/candidate measurements, non-overlap, and engagement
-// proof (see e2e_integrator) make a 0.5% default trustworthy. Prompt-tunable.
-const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
+// proof (see e2e_integrator) make a 0.5% default trustworthy for a fixed-shape workload, where a
+// replica is a fixed amount of identical work. Prompt-tunable.
+//
+// A trace replay is not that workload. It is client-paced over trajectories of wildly unequal size
+// (ISL p50 83k, p99 491k) against a prefix cache running 85-96% hits, so a replica completes a
+// whole number of trajectories and the throughput it reports quantises on which ones it got
+// through. The 20260912 validation measured that directly: three replicas of the BASELINE, same
+// config, same box, spread 3.43% (24054.0 / 23255.9). A 0.5% band against a 3.4% measurement is
+// 5-7x too permissive -- it would call a pure-noise difference a win -- so this workload carries
+// its own floor. Hardcoding it is a placeholder for deriving it from the replica spread Setup
+// already measures; until then the number is at least the measured one rather than an
+// inapplicable default.
+const NOISE_BAND_AGENTX = 3.5;
+const NOISE_BAND_DEFAULT = parseFloat(
+  A.noise_band_pct != null ? A.noise_band_pct : (IS_AGENTX ? NOISE_BAND_AGENTX : 0.5));
 // No timed-repeat knob on purpose: the round count belongs to the lifecycle (bench_e2e.sh derives
 // it from GEAK_REPEAT_MODE + MEASUREMENT_PURPOSE), so a second knob could only disagree with it.
 // Every integrate A/B MUST measure BOTH legs (reference + candidate). When the
