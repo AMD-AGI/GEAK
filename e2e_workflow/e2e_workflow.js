@@ -429,7 +429,8 @@ const KB_ARGS = {
   ...(A.warm_start_match != null ? { warm_start_match: String(A.warm_start_match) } : {}),
   ...(A.warm_start_min_speedup != null ? { warm_start_min_speedup: A.warm_start_min_speedup } : {}),
   // Which plane the lanes read and write. Forwarded like the rest so one run uses one plane; omitted
-  // when unset, which leaves each lane on its own `local` default.
+  // when unset, which leaves each lane on its own default — `store`, the canonical-id plane, since
+  // the kernel read converged on the same addressing the service uses (kernel_lane.js:KB_MODE).
   ...(A.kb_mode != null ? { kb_mode: String(A.kb_mode) } : {}),
   ...(A.kb_store_dir != null ? { kb_store_dir: String(A.kb_store_dir) } : {}),
   ...(A.kb_framework_version != null ? { kb_framework_version: String(A.kb_framework_version) } : {}),
@@ -479,24 +480,42 @@ const E2E_STORE_SCRIPT = `${WORKFLOW_DIR}/scripts/e2e_store.py`;
 // here and once in interface/run_e2e.py (KB_IDENTITY_FILE), which is the same arrangement
 // workflow_return.json already has.
 const KB_IDENTITY_BASENAME = 'kb_identity.json';
-// Every candidate costs a full server launch to reject, so a recorded near-tie is not worth benching.
-const E2E_WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.warm_start_min_speedup))
-  ? parseFloat(A.warm_start_min_speedup) : 1.05;
+// TWO questions, TWO floors: "worth KNOWING about" and "worth a 20-40min server launch". A single
+// floor dropped a small stored win from the offer entirely, losing the tuning table and env var it
+// carried, not just the launch. Reading is free, so the read floor only drops records that LOST.
+// `e2e_`-prefixed because the kernel lane's `warm_start_min_speedup` means its own thing; the bare
+// name stays honoured for callers raising this floor.
+const E2E_WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.e2e_warm_start_min_speedup))
+  ? parseFloat(A.e2e_warm_start_min_speedup)
+  : Number.isFinite(parseFloat(A.warm_start_min_speedup))
+    ? parseFloat(A.warm_start_min_speedup) : 1.0;
+// The floor that spends money. Session-to-session drift on one box is the size of a near-tie
+// claim, so benching a 1.01x is a coin flip against its own noise; below this the offer stays a
+// reference. Not applied to the kernel replay below — an accepted-kernel entry carries an ISOLATED
+// speedup measured on a different harness, budgeted by E2E_WARM_START_KERNELS_N instead.
+const E2E_WARM_START_BENCH_MIN_SPEEDUP =
+  Number.isFinite(parseFloat(A.e2e_warm_start_bench_min_speedup))
+    ? parseFloat(A.e2e_warm_start_bench_min_speedup) : 1.02;
 
-// How a local verdict is filed AGAINST THE RECORD. The local bench decides what THIS run adopts and
-// nothing else: this box has a different baseline, image, driver and neighbours, so a no-gain here
-// is a fact about the PAIRING, and reading it as a refutation is how a store of real wins decays
-// into an empty one. So only a local WIN moves the record's standing; every other outcome is filed
-// as `inapplicable`, which kb/attest.py counts as a recall but keeps out of the retirement
-// denominator. The true verdict is not lost — it leads the attestation note and is carried verbatim
-// in `verdicts[]`, in the recall report and in kb_references/measured_on_this_box.md.
+// How a local verdict is filed AGAINST THE RECORD. The local bench decides what THIS run adopts
+// and nothing else — a different box means a different baseline, image, driver and neighbours — so
+// each outcome goes to the bucket that describes it, and none retires anything by itself:
 //
-// This also closes a silent hole: `rejected` is not in kb/attest.py OUTCOMES, so every "ran here and
-// lost" attestation was rejected by argparse and swallowed by the trailing `|| true`.
+//   rejected        applied, took effect, lost here -> `failed`. The only bucket that can
+//                   accumulate toward a retire decision, which is why it must not be discarded.
+//   not_reproduced  never ran, or ran without taking effect (a flag renamed upstream) -> the
+//                   record is missing something.
+//   inapplicable    collided with a baseline this run did not choose -> a verdict on the PAIRING,
+//                   which kb/attest.py keeps out of the arithmetic.
+//
+// Mapping all three to `inapplicable` protected records too well: `tried = recalls - inapplicable`
+// is then identically zero and nothing can ever accumulate a retire signal. The judgement stays a
+// separate act (kb/attest.py:should_retire, run by `e2e_store.py curate`, dry-run by default).
+// Every value must be one of kb/attest.py:OUTCOMES.
 const KB_ATTEST_OUTCOME = {
   adopted: 'validated',
-  rejected: 'inapplicable',
-  not_reproduced: 'inapplicable',
+  rejected: 'failed',
+  not_reproduced: 'not_reproduced',
   inapplicable: 'inapplicable',
 };
 // Read broadly, bench narrowly. Reading is free and breadth is exactly what makes the demoted
@@ -674,9 +693,9 @@ const FAST_SKIP = FAST_MODE ? new Set(['config', 'tune', 'kernel']) : null;
 const DEEP_SKIP = DEEP_MODE ? new Set(['kernel']) : null;
 const want = (p) => (RUN_ALL || PHASES.includes(p)) && !(FAST_SKIP && FAST_SKIP.has(p)) && !(DEEP_SKIP && DEEP_SKIP.has(p));
 const ST = A.state || {};   // carried state from a prior phase invocation
-// WarmStart can replay a kernel through runIntegrateBothLegs() before the
-// TuningSkillset source block is reached. Initialize this carried state before
-// that path becomes reachable; the tuning phase later reassigns it.
+// Hoisted: tuningIntegrateInputs() is reachable from runIntegrateBothLegs, which WarmStart drives
+// long before the TuningSkillset phase body — declaring `tuning` there left it in the temporal dead
+// zone on the first integrate leg. The tuning phase later reassigns it.
 let tuning = ST.tuning || null;
 if (FAST_MODE) log(`[fast-mode] ON: skipping ConfigSweep + Milestone; HeadKernel-only; budget ${Math.round(FAST_BUDGET_MS / 60000)}min (stop new heads at ${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min, per-head workflow cap ${Math.round(FAST_HEAD_WF_MS / 60000)}min).`);
 
@@ -748,12 +767,19 @@ const SWEEP_SCHEMA = obj({
 const KB_RESOLVE_SCHEMA = obj({
   tried: arrStr, canonical_id: { type: 'string' }, match_tier: { type: 'string' },
   ranked_by: { type: 'string' }, candidates: arrObj, read_reason: { type: 'string' },
-  plane: { type: 'string' },
+  // `plane` is what was ASKED for; `read_plane` is which one answered. Under `both` they differ,
+  // and only the second one explains where the offer came from.
+  plane: { type: 'string' }, read_plane: { type: 'string' },
   // How the offer was ORDERED (throughput, high to low, on every rung) versus which metric that
   // rung crowns its champion on. Two different things that used to share one word: a coarse rung
   // is ranked by absolute throughput here but still promotes on speedup, and a reader told only
   // 'speedup' would mis-explain the order it is looking at.
   sorted_by: { type: 'string' }, champion_metric: { type: 'string' },
+  // Why a rung came back empty, in counts — the only thing separating "nobody recorded this
+  // deployment" from "the floor ate the records". Named explicitly so the resolver agent cannot
+  // summarise it away. Its `read_plane` is the FIRST rung that saw anything, not necessarily the
+  // one that answered.
+  curation: { type: 'object', additionalProperties: true },
 }, []);
 // Result of the standalone tuning-skillset phase. pre/post are ITS OWN in-session isolated-server A/B
 // legs (NOT the run baseline), which makes tuning_delta_pct an attributable share of the total gain.
@@ -1048,29 +1074,14 @@ function kbPlaneFlags(plane) {
   return `--plane ${plane}` + (plane === 'remote' ? '' : ` --store ${shq(E2E_KB_STORE_DIR)}`);
 }
 
-// A READ takes exactly one plane — `open_plane()` returns (local, remote) for `both` and cmd_resolve
-// uses only the first, deliberately: merging two rankings needs a cross-plane comparability rule
-// that nothing here has, and silently preferring one would let a stale local mirror shadow the
-// service without saying so. So `--plane both` on a read means LOCAL, which is the opposite of what
-// this workflow wants. The choice is made here instead, in the open: try the service, and fall back
-// to the local store only when it has no answer. `read_reason` in the returned JSON says which one
-// spoke. The credentials cannot be tested from this process (non-interactive shells never source the
-// profile that sets them), so the branch lives in the emitted bash, after the prelude has exported
-// whatever the box actually has.
+// A READ takes exactly one plane. `cmd_resolve` now picks it via kb.plane:read_planes (service
+// first, local mirror only when the service has no answer) and reports which one spoke as
+// `read_plane`, so the bash branch that used to do it here is gone — one copy of the rule, and it
+// is the copy a human gets from the CLI too.
 function kbResolveScript(args) {
-  const invoke = (plane) =>
+  return KB_ENV_PRELUDE + '\\\n' +
     `python3 ${shq(E2E_STORE_SCRIPT)} resolve ${kbIdentityFlags()} \\\n` +
-    `  ${kbPlaneFlags(plane)} ${args}`;
-  if (E2E_KB_PLANE !== 'both') return KB_ENV_PRELUDE + '\\\n' + invoke(E2E_KB_PLANE);
-  return KB_ENV_PRELUDE + `
-REMOTE_OUT=''
-if [ -n "$KB_STORE_TOKEN" ]; then
-  REMOTE_OUT=$(${invoke('remote')} 2>/dev/null || true)
-  if printf '%s' "$REMOTE_OUT" | python3 -c 'import json,sys; sys.exit(0 if (json.load(sys.stdin).get("candidates") or []) else 1)' 2>/dev/null; then
-    printf '%s\\n' "$REMOTE_OUT"; exit 0
-  fi
-fi
-${invoke('local')}`;
+    `  ${kbPlaneFlags(E2E_KB_PLANE)} ${args}`;
 }
 
 // Warm-start prompt injection, mirroring expertSkillsBlock exactly: returns '' whenever the feature
@@ -2298,12 +2309,26 @@ if (want('setup')) {
       // Log the ladder VERBATIM. On a scheme with no search, "never recorded" and "recorded under an
       // address one segment different" are the same 404, and this line is the only record of which
       // question was actually asked — without it a silent identity drift looks like an empty store.
-      KB_READ_PLANE = String(resolved.plane || '');
-      log(`[kb] e2e read: plane=${resolved.plane || '?'} tried=[${(resolved.tried || []).join(' | ')}] ` +
+      // `read_plane` is which plane ANSWERED, `plane` only which was asked for. Falls back for a
+      // resolve emitted by an older build, whose JSON has no `read_plane`.
+      KB_READ_PLANE = String(resolved.read_plane || resolved.plane || '');
+      log(`[kb] e2e read: plane=${KB_READ_PLANE || '?'} tried=[${(resolved.tried || []).join(' | ')}] ` +
         `answered=${resolved.canonical_id || '?'} tier=${resolved.match_tier || '-'} ` +
         `sorted_by=${resolved.sorted_by || resolved.ranked_by || '-'} ` +
         `champion_metric=${resolved.champion_metric || '-'} reason=${resolved.read_reason || '?'} ` +
         `candidates=${cands.length}`);
+      // The counts BEHIND a zero: nobody wrote this page, everything was retracted, everything was
+      // under the floor — all `candidates=0` above. Logged separately so that line stays greppable.
+      const curation = (resolved.curation && typeof resolved.curation === 'object') ? resolved.curation : {};
+      if (!cands.length && Number(curation.scanned) > 0) {
+        log(`[kb] the page was NOT empty: ${curation.scanned} record(s) scanned on plane ` +
+          `'${curation.read_plane || KB_READ_PLANE || '?'}' at ` +
+          `'${curation.canonical_id || resolved.canonical_id || '?'}' (tier ${curation.tier || '-'}), ` +
+          `all curated away — retired=${curation.retired || 0} ` +
+          `same_direction_collapsed=${curation.same_direction_collapsed || 0} ` +
+          `below_min_speedup=${curation.below_min_speedup || 0} (floor ${curation.min_speedup}). ` +
+          'This is a FLOOR result, not a cold deployment.');
+      }
       // Record the ASK before anything is benched. If this process dies mid-warm-start the report
       // still knows which ladder was queried, and on a zero-candidate read this is the entire
       // finding — see KB_RECALL's declaration for why the address matters more than the count.
@@ -2314,6 +2339,11 @@ if (want('setup')) {
         match_tier: String(resolved.match_tier || ''),
         plane: E2E_KB_PLANE, read_plane: KB_READ_PLANE, mode: E2E_WARM_START,
         candidates: cands.length, configs: [], kernels: [],
+        // Both floors, always: "what did this run decline to see, and at what threshold" is not
+        // answerable after the fact from a candidate list.
+        read_min_speedup: E2E_WARM_START_MIN_SPEEDUP,
+        bench_min_speedup: E2E_WARM_START_BENCH_MIN_SPEEDUP,
+        curation,
       };
       if (cands.length) KB_REF_DIR = refsDir;   // arms warmStartBlock() for the consumer roles
       // Armed on the same condition and never separately: the cache holds nothing until a candidate
@@ -2338,19 +2368,40 @@ if (want('setup')) {
       // fetch itself follow the rung metric belongs in e2e_store.resolve, not here.
       const benchOrder = exactTier ? cands : [...cands].sort(
         (x, y) => (Number(y.speedup) || 0) - (Number(x.speedup) || 0));
+      // The floor that spends money, applied HERE and not in the read. A record under it keeps its
+      // place in the offer, its bundle in the cache and its paragraph in the roles' context, and
+      // loses only the launch. No speedup recorded stays benchable: an unanswerable test is not a
+      // failed one.
+      const aboveBenchFloor = (c) =>
+        c.speedup == null || Number(c.speedup) >= E2E_WARM_START_BENCH_MIN_SPEEDUP;
+      const benchable = benchOrder.filter(aboveBenchFloor);
+      const belowBenchFloor = benchN ? benchOrder.filter(c => !aboveBenchFloor(c)) : [];
+      if (belowBenchFloor.length) {
+        log(`[kb] ${belowBenchFloor.length} offer(s) stay references, not benched: stored speedup ` +
+          `below the bench floor of ${E2E_WARM_START_BENCH_MIN_SPEEDUP}x — ` +
+          belowBenchFloor.map(c => `${String(c.session_id || '?').slice(-12)}=${c.speedup}x`).join(' ') +
+          '. A claim that size is this box\'s own drift; the config and any tuned artifact it ' +
+          'carries are still offered to the roles that can use them without a launch.');
+      }
       if (cands.length && !benchN) {
         log(`[kb] not benching: ${E2E_WARM_START_REF_ONLY
           ? (FAST_MODE ? 'fast mode — all optimization comes from the head track' : 'warm_start=reference')
           : `the caller set e2e_warm_start_validate_n_coarse=0 and match tier ` +
             `'${resolved.match_tier}' is not exact`}. The offers stay as references.`);
-      } else if (cands.length && !exactTier) {
-        log(`[kb] benching ${Math.min(benchN, cands.length)} of ${cands.length} offer(s) from coarse ` +
+      } else if (benchable.length && !exactTier) {
+        log(`[kb] benching ${Math.min(benchN, benchable.length)} of ${benchable.length} offer(s) from coarse ` +
           `tier '${resolved.match_tier}', picked by stored speedup. The stored throughput is not ` +
           `comparable to this baseline; the A/B below is measured on this box and is what counts.`);
       }
 
-      const verdicts = [];
-      for (const c of benchOrder.slice(0, benchN)) {
+      // Seeded with the records the bench floor declined. `skipped` is outside the attestable set
+      // on purpose: the ledger counts what was TRIED on hardware, and this was not.
+      const verdicts = belowBenchFloor.map(c => ({
+        ...c, measured_tok_s: null, delta_pct: null, parity: 'n/a', outcome: 'skipped',
+        why: `stored speedup ${c.speedup}x is below the bench floor of ` +
+          `${E2E_WARM_START_BENCH_MIN_SPEEDUP}x — offered as a reference, not measured`,
+      }));
+      for (const c of benchable.slice(0, benchN)) {
         // VALIDATE THROUGH THE ORIGINAL GATE. This is config_tuner:sweep — the same role, the same
         // schema, the same bench_e2e.sh at the same TP/GPU, the same delta-vs-median arithmetic, the
         // same parity check and the same swap-took-effect log grep the flow already trusts for a
@@ -2525,11 +2576,9 @@ if (want('setup')) {
             `${measured} tok/s, +${deltaPct.toFixed(2)}% vs baseline ${BASELINE_TPUT} (noise band ${NOISE_BAND}%)` +
             `${dropped.length ? `, with ${dropped.join(' ')} dropped to make it run here` : ''}.`);
         }
-        // FOUR outcomes. "ran and lost" is one box's number on a real configuration; "could not be
-        // made to run" says the record may be missing something (a flag renamed upstream, an env the
-        // build does not honour); "does not fit this box" is a collision with a baseline this run
-        // did not choose and says nothing about the record. All three are REPORTED and counted apart
-        // (kb/attest.py); none is counted AGAINST the record — see KB_ATTEST_OUTCOME.
+        // FOUR outcomes, three different things — see KB_ATTEST_OUTCOME. All counted apart
+        // (kb/attest.py); only a loss and a no-effect count against the record, and then only as
+        // evidence toward a threshold.
         //
         // `note` and `notes` are both read: the role file's return schema spells it `note`, and
         // reading only `notes` meant the per-trial text never reached this regex at all.
@@ -2549,7 +2598,7 @@ if (want('setup')) {
             `${parity ? `, parity=${parity}` : ''}${inert ? ', the config never took effect' : ''}` +
             `${outcome === 'inapplicable' ? ", it collides with this run's baseline" : ''}` +
             ` — kept as a reference, not applied. This is this box's result, not a verdict on the ` +
-            `record: it is filed as evidence and counts nothing against it.`);
+            `record: it is filed as evidence toward a threshold, and retires nothing by itself.`);
         }
         verdicts.push({ ...c, measured_tok_s: measured || null, delta_pct: measured ? deltaPct : null,
           parity: parity || 'unknown', outcome, why: notes,
@@ -2757,8 +2806,9 @@ if (want('setup')) {
       // box to resolve this identity saw the same optimistic record, benched it, and failed the
       // same way, forever. `e2e_store.py attest` counts the attempt onto the record itself, at
       // every rung, so a later reader can see how often it has been tried here and how it went.
-      // It moves no score and no champion, and per KB_ATTEST_OUTCOME a non-win moves nothing at
-      // all — one box's failure is evidence, never a verdict on the record.
+      // It moves no score and no champion: one box's failure is evidence, never a verdict. What it
+      // adds up to is decided elsewhere — KB_ATTEST_OUTCOME for the buckets, and
+      // kb/attest.py:should_retire for the threshold a separate `curate` pass acts on.
       //
       // Only candidates that were actually PUT ON THIS BOX are counted. A record listed in the
       // offer and never benched (`skipped`, or below benchN) has learned nothing about itself, and
@@ -2767,6 +2817,10 @@ if (want('setup')) {
       // Config verdicts only. A replayed kernel that failed is evidence against the KERNEL lane's
       // record, not against the e2e run that once used it, and the two have separate ledgers —
       // `experience_store.py attest` is where that verdict belongs.
+      //
+      // A record's headline number covers its WHOLE bundle. When that includes kernels this lane
+      // benched only the config half, so every place printing both has to say which half ran.
+      const configHalfOnly = v => Array.isArray(v.accepted_kernels) && v.accepted_kernels.length > 0;
       const attestable = verdicts.filter(v => v.session_id &&
         ['adopted', 'rejected', 'not_reproduced', 'inapplicable'].includes(v.outcome));
       if (attestable.length) {
@@ -2784,6 +2838,9 @@ if (want('setup')) {
             // the record; a reader still has to be able to see what actually happened here.
             `local verdict: ${v.outcome}` +
               (v.measured_tok_s ? ` (${v.measured_tok_s} tok/s vs baseline ${BASELINE_TPUT})` : ' (no measurement)'),
+            configHalfOnly(v)
+              ? `config half only — the record also claims ${v.accepted_kernels.length} kernel(s), ` +
+                'benched in the kernel lane and NOT covered by this verdict' : '',
             (v.overrides || []).length ? `overrode ${describeOverrides(v.overrides)}` : '',
             (v.dropped_flags || []).length
               ? `dropped ${(v.dropped_flags || []).join(' ')} to make it run here` +
@@ -2823,6 +2880,10 @@ if (want('setup')) {
           direction: String(v.direction || 'unlabeled'), session_id: String(v.session_id || ''),
           stored_tok_s: v.throughput_tok_s != null ? v.throughput_tok_s : null,
           stored_speedup: v.speedup != null ? v.speedup : null,
+          // Without the stored baseline a lower `delta_pct` reads as decay when the two baselines
+          // were never comparable; without the half-flag it reads as a failed kernel.
+          stored_baseline_tok_s: v.baseline_throughput_tok_s != null ? v.baseline_throughput_tok_s : null,
+          config_half_only: configHalfOnly(v),
           measured_tok_s: v.measured_tok_s != null ? v.measured_tok_s : null,
           delta_pct: v.delta_pct != null ? v.delta_pct : null,
           parity: String(v.parity || ''), outcome: String(v.outcome || ''),
@@ -2862,18 +2923,30 @@ if (want('setup')) {
           `- baseline: **${BASELINE_TPUT} tok/s** (noise band ${NOISE_BAND}%)`,
           `- serving: BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}, workload isl=${ISL} osl=${OSL} conc=${CONC}`,
           `- identity read: \`${resolved.canonical_id || '?'}\` (match tier \`${resolved.match_tier || '-'}\`)`,
+          // `exact` is exact on the IDENTITY, which encodes no server flags, env or kv-cache
+          // dtype — a record measured against a slower baseline reproduces smaller here for that
+          // reason alone.
+          ...(verdicts.some(v => v.baseline_throughput_tok_s != null && BASELINE_TPUT &&
+              Math.abs(v.baseline_throughput_tok_s - BASELINE_TPUT) / BASELINE_TPUT > NOISE_BAND / 100)
+            ? ['- CAUTION: the match tier covers the identity only — not server flags, env or ' +
+               'kv-cache dtype. At least one offer below was recorded against a different baseline ' +
+               '(column `stored baseline`), so its stored percentage and the one measured here are ' +
+               'not the same quantity.']
+            : []),
           '',
           '## Configurations',
           '',
-          '| stored direction | stored claim | measured here | delta vs baseline | parity | outcome |',
-          '|---|---|---|---|---|---|',
+          '| stored direction | stored claim | stored baseline | measured here | delta vs baseline | parity | outcome |',
+          '|---|---|---|---|---|---|---|',
           ...(verdicts.length ? verdicts.map(v =>
             `| ${v.direction || 'unlabeled'} | ${v.throughput_tok_s != null ? v.throughput_tok_s + ' tok/s' : '?'}` +
-            `${v.speedup != null ? ` (${v.speedup}x)` : ''} | ` +
+            `${v.speedup != null ? ` (${v.speedup}x)` : ''}` +
+            `${configHalfOnly(v) ? ` — WHOLE BUNDLE, incl. ${v.accepted_kernels.length} kernel(s); only the config half ran in this row` : ''} | ` +
+            `${v.baseline_throughput_tok_s != null ? v.baseline_throughput_tok_s + ' tok/s' : '—'} | ` +
             `${v.measured_tok_s != null ? v.measured_tok_s + ' tok/s' : 'not benched'} | ` +
             `${v.delta_pct != null ? (v.delta_pct >= 0 ? '+' : '') + v.delta_pct.toFixed(2) + '%' : '—'} | ` +
             `${v.parity || '—'} | **${v.outcome}** |`)
-            : ['| _(none offered)_ | | | | | |']),
+            : ['| _(none offered)_ | | | | | | |']),
           '',
           '## Kernels',
           '',
@@ -3214,6 +3287,85 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
   const tuneOk = tuned && tuning.engagement_verified === true && tuning.ab_complete !== false &&
     tuning.correctness_gate !== 'fail' && tuning.post_tune_throughput_tok_s > 0 &&
     tuning.post_tune_throughput_tok_s > (tuning.pre_tune_throughput_tok_s || 0);
+
+  // Every op the skillset named, read twice below: by the accepted-kernel banking (gated on
+  // `tuneOk`) and by the attestation under it (deliberately not). `tuning &&`, not just
+  // `.ops_tuned ||`: `safeAgent` returns null by DESIGN, and this read sits outside the `tuneOk`
+  // short-circuit that used to screen the null off.
+  const tunedOps = ((tuning && tuning.ops_tuned) || [])
+    .filter((o) => String(o.op || o.short_name || '').trim());
+
+  // The other half of the recall loop: the write below only files wins, so without this the ledger
+  // grows in one direction. OUTSIDE `tuneOk` on purpose — a verdict on a stored record is a per-op
+  // fact, while the PHASE gate is an aggregate with different inputs; one op can reproduce
+  // perfectly inside a run that banks nothing. Before the write, since `write-remote` carries the
+  // ledger across its rewrite (experience_store.py `_carry_remote`).
+  //
+  // Searched ops are excluded — no prior record to be evidence about. So are recalled ops that
+  // never reached the GPU: `recalls` counts ATTEMPTS ON HARDWARE (kb/attest.py), proven by an
+  // installed `artifact`, engagement, or a measurement.
+  const tuningAttestable = KB_DIMS && KB_DIMS.gfx ? tunedOps.filter((o) =>
+    String(o.session_id || '').trim() &&
+    /recall|kb|knowledge/i.test(String(o.source || o.origin || ''))) : [];
+  const tuningRecalls = tuningAttestable.filter((o) =>
+    o.engaged === true || Number(o.isolated_speedup) > 0 || String(o.artifact || '').trim());
+  const tuningUnattempted = tuningAttestable.length - tuningRecalls.length;
+  if (tuningUnattempted) {
+    log(`[kernel-kb] ${tuningUnattempted} recalled op(s) NOT attested: no artifact, engagement, or ` +
+      `measurement, so they never reached the GPU — an offer nobody benched is not evidence.`);
+  }
+  if (tuningRecalls.length) {
+    const storeScript = KERNEL_WF_DIR + '/scripts/experience_store.py';
+    // One plane per verdict — `both` would count one attempt twice on two ledgers a curation pass
+    // then compares. The plane that ANSWERED is not the one ASKED FOR (the tuning role retries a
+    // remote miss locally), so the op names its own plane; the requested one is the fallback.
+    const askedRemote = E2E_KB_PLANE !== 'local';
+    const planeOf = (o) => {
+      const said = String(o.read_plane || o.recall_plane || o.plane || '').trim().toLowerCase();
+      return said === 'local' || said === 'remote' ? said : (askedRemote ? 'remote' : 'local');
+    };
+    const cmds = tuningRecalls.map((o) => {
+      const sp = Number(o.isolated_speedup) || 0;
+      const outcome = o.engaged !== true ? 'not_reproduced' : sp > 1.0 ? 'validated' : 'failed';
+      const plane = planeOf(o);
+      return `python3 ${shq(storeScript)} attest --plane ${plane} ` +
+        (plane === 'local' && E2E_KB_STORE_DIR ? `--store ${shq(E2E_KB_STORE_DIR)} ` : '') +
+        `--session-id ${shq(String(o.session_id).trim())} ` +
+        `--kernel-name ${shq(String(o.op || o.short_name).trim())} ` +
+        `--language ${shq(String(o.backend || 'tuned').trim())} --gfx ${shq(KB_DIMS.gfx)} ` +
+        (KB_DIMS.framework_version ? `--framework-version ${shq(KB_DIMS.framework_version)} ` : '') +
+        `--outcome ${outcome} --measured-speedup ${sp} ` +
+        // `claimed_gate`, not `gate`: the orchestrator's downgrade of an unproven accept happens
+        // below this, so what is readable here is the skillset's claim. `banked` sits beside the
+        // outcome rather than gating it — an auditor wants both facts, not one instead of the other.
+        `--note ${shq(`e2e tuning recall: engaged=${o.engaged === true}; banked=${!!tuneOk}` +
+          `; claimed_gate=${tuning.gate}` +
+          `${o.note ? '; ' + String(o.note) : ''}`.slice(0, 300))} ` +
+        `--measured-by ${shq('e2e_workflow:tuning:' + BACKEND)} --apply || true`;
+    });
+    // The prelude authenticates the service, needed when ANY op attests remotely — the set is
+    // mixed by construction.
+    const anyRemote = tuningRecalls.some((o) => planeOf(o) === 'remote');
+    try {
+      await safeAgent(
+        `You are the tuning knowledge-base attestor. Run EXACTLY these commands in order and ` +
+        `return {"ran": <how many you ran>, "note": "<anything that failed>"}. Each records what ` +
+        `this box saw when it installed a RECALLED tuned artifact. Do NOT edit them, do NOT add ` +
+        `or drop any, and do NOT retry a failure — a repeat would double-count the attempt.\n` +
+        '```bash\n' + (anyRemote ? KB_ENV_PRELUDE + '\n' : '') + cmds.join('\n') + '\n```',
+        { phase: 'TuningSkillset', label: 'kernel-kb:attest-tuned',
+          schema: obj({ ran: { type: 'number' }, note: { type: 'string' } }, []) },
+        1);
+      const planes = tuningRecalls.map(planeOf);
+      log(`[kernel-kb] attested ${tuningRecalls.length} recalled tuned op(s) ` +
+        `(${planes.filter((p) => p === 'remote').length} remote, ` +
+        `${planes.filter((p) => p === 'local').length} local; claimed gate=${tuning.gate}` +
+        `${tuneOk ? '' : ', not banked by this phase'}).`);
+    } catch (e) {
+      log(`[kernel-kb] tuned attest failed (NON-FATAL): ${String(e).slice(0, 200)}`);
+    }
+  }
+
   if (tuneOk) {
     const tuningBaselineConfig = { flags: curFlags, env: curEnv };
     if (tuning.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + tuning.apply_env;
@@ -3250,7 +3402,8 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
     // files were [final.patch, launch.sh, report.md] — the lever itself was never recorded, and the
     // next run at that canonical id recalls a configuration it cannot reproduce. Gated on tuneOk, so
     // an unproven tuning claim banks nothing, exactly as it folds nothing into curEnv/curFlags.
-    const tunedOps = (tuning.ops_tuned || []).filter((o) => String(o.op || o.short_name || '').trim());
+    // (`tunedOps` is computed above the branch: the attestation needs it on every path, banking only
+    // on this one.)
     for (const o of tunedOps) {
       bankAccepted(acceptedKernels, {
         short_name: String(o.op || o.short_name).trim(),
@@ -4776,7 +4929,9 @@ if (want('final')) {
       'built from KB_RECALL — see your role file. Write it even when nothing was recalled: report ' +
       'the exact canonical ids that were tried and the read_reason. On an exact-lookup store a miss ' +
       'and a never-recorded page are the same 404, so the address asked is the finding, and a reader ' +
-      'who cannot see it cannot tell "no prior art" from "prior art one segment away".', {
+      'who cannot see it cannot tell "no prior art" from "prior art one segment away". Zero candidates ' +
+      'is NOT the same as an empty page: report KB_RECALL.e2e.curation (scanned/retired/' +
+      'same_direction_collapsed/below_min_speedup, and its own read_plane) with both floors.', {
       EVAL_DIR, HISTORY: history, BASELINE_THROUGHPUT: BASELINE_TPUT, FINAL_THROUGHPUT: finalTput,
       KB_RECALL,
       ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,

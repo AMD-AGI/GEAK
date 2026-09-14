@@ -99,22 +99,13 @@ fi
 # No mode named => the Hyperloom one, since "the caller forgot to forward MEASUREMENT_MODE" is the
 # likeliest way a number ends up measured under a different lifecycle than the rest of the run.
 # bench_replica.sh pins legacy explicitly, so this cannot recurse into it.
-# Carve-out: REPEATS=0 (shape capture, and warm mode rejects zero timed rounds) and PROFILE=1
-# (trace capture) produce no throughput number, so they have no lifecycle to align and an extra
-# full NUM_PROMPTS round buys nothing.  An explicit GEAK_REPEAT_MODE still wins.
-if [ "${REPEATS:-}" = "0" ] || [ "${PROFILE:-0}" = "1" ]; then
-  GEAK_REPEAT_MODE="${GEAK_REPEAT_MODE:-legacy}"
-else
-  GEAK_REPEAT_MODE="${GEAK_REPEAT_MODE:-warm_server}"
-fi
+GEAK_REPEAT_MODE="${GEAK_REPEAT_MODE:-warm_server}"
 
-# ---- isolated-server measurement protocol ----
-# In isolated mode this process is only a scheduler: each attempt runs bench_replica.sh,
-# which re-enters this script in legacy mode for one fresh-server lifecycle.  Profiling is
-# not a throughput replica (it needs one warm server and a sustained window), so it opts
-# back into the single-server body below even when a run exports isolated mode globally.
+# ---- validation lifecycle pin ----
 # Validation's lifecycle is CALLER policy: a pinned GEAK_VALIDATION_REPEAT_MODE outranks
 # whatever the validating role forwarded, so a role prompt cannot silently drop it.
+# (The no-throughput carve-out below still outranks THIS, since a trace or a shape capture
+# is not a validation measurement no matter what MEASUREMENT_PURPOSE says.)
 if [ -n "${GEAK_VALIDATION_REPEAT_MODE:-}" ] \
    && [ "${MEASUREMENT_PURPOSE:-}" = "validation" ] \
    && [ "${GEAK_REPEAT_MODE:-legacy}" != "${GEAK_VALIDATION_REPEAT_MODE}" ]; then
@@ -122,8 +113,24 @@ if [ -n "${GEAK_VALIDATION_REPEAT_MODE:-}" ] \
        "(caller policy; the invocation asked for ${GEAK_REPEAT_MODE:-legacy})."
   GEAK_REPEAT_MODE="$GEAK_VALIDATION_REPEAT_MODE"
 fi
-if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ] && [ "${PROFILE:-0}" = "1" ]; then
-  echo ">>> PROFILE=1: using the single-server profiling lifecycle (not a timed replica)."
+# ---- no-throughput carve-out ----
+# An invocation that produces no throughput number has no lifecycle to align, and the alignment
+# costs real money: warm_server prepends a full NUM_PROMPTS round and clamps REPEATS to the sample
+# count.  Two such invocations exist -- PROFILE=1 (trace capture, which needs a sustained window,
+# not a timed round) and REPEATS=0 (shape capture, which warm mode rejects outright).
+#
+# UNCONDITIONAL rather than a `${GEAK_REPEAT_MODE:-legacy}` default, and it runs LAST so it also
+# outranks the validation pin above: run_e2e.py pins GEAK_REPEAT_MODE into os.environ for the whole
+# process tree, so in an orchestrated run the mode is ALWAYS already set and a default-only
+# carve-out was a no-op exactly where it was needed.
+if [ "${PROFILE:-0}" = "1" ] && [ "${GEAK_REPEAT_MODE:-legacy}" != "legacy" ]; then
+  echo ">>> PROFILE=1: using the single-server profiling lifecycle (not a timed measurement;" \
+       "was ${GEAK_REPEAT_MODE})."
+  GEAK_REPEAT_MODE=legacy
+fi
+if [ "${REPEATS:-}" = "0" ] && [ "${GEAK_REPEAT_MODE:-legacy}" != "legacy" ]; then
+  echo ">>> REPEATS=0: shape capture, no timed round -- using the single-server lifecycle" \
+       "(was ${GEAK_REPEAT_MODE})."
   GEAK_REPEAT_MODE=legacy
 fi
 
@@ -174,6 +181,9 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "warm_server" ]; then
        "$([ "$_rounds" = 1 ] && echo "round 2 = the reported number)" || echo "median of the $_rounds timed rounds)")"
   GEAK_REPEAT_MODE=legacy
 fi
+# ---- isolated-server measurement protocol ----
+# In isolated mode this process is only a scheduler: each attempt runs bench_replica.sh, which
+# re-enters this script in legacy mode for one fresh-server lifecycle.
 if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
   _replica_runner="$HERE/bench_replica.sh"
   if [ ! -f "$_replica_runner" ]; then
