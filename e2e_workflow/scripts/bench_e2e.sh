@@ -208,16 +208,27 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
     echo "!!! REUSE_SERVER=1 is incompatible with GEAK_REPEAT_MODE=isolated_server; timed replicas must fresh-launch." >&2
     exit 4
   fi
-  # Attempts per replica. Default 2 (one retry) keeps existing behavior; raise it
-  # where the stack faults independently of the config. Two is one too few against
-  # an intermittent hardware fault: on the 20260909 run an HSA queue abort hit
-  # ~22% of server launches, both baseline attempts faulted 30min apart, and
-  # exhausting the budget cost the entire Setup phase. A rejected value falls back
-  # to 2 rather than failing the measurement.
-  _max_attempts="${BENCH_MAX_ATTEMPTS:-2}"
+  # Attempts per replica. Two (one retry) is right for the fixed-shape workloads,
+  # whose launches do not fault on their own, and stays their default.
+  #
+  # The agentx trace replay is the exception, so it gets three. It drives ~113k-token
+  # contexts for an hour at a time, and the HSA queue abort that comes with it
+  # (HSA_STATUS_ERROR_EXCEPTION 0x1016) has now reproduced on three separate nodes,
+  # which makes it a property of this workload on this stack rather than of one box
+  # or one candidate. Two attempts is one too few against a fault that is independent
+  # of the config being measured: on the 20260909 run both baseline attempts faulted
+  # 30 minutes apart, and exhausting the budget cost the entire Setup phase.
+  #
+  # A rejected value falls back to the workload's default rather than failing the
+  # measurement.
+  case "${GEAK_WORKLOAD_KIND:-}" in
+    agentx_trace_replay) _attempts_default=3 ;;
+    *) _attempts_default=2 ;;
+  esac
+  _max_attempts="${BENCH_MAX_ATTEMPTS:-$_attempts_default}"
   case "$_max_attempts" in
-    ''|*[!0-9]*) _max_attempts=2 ;;
-    *) [ "$_max_attempts" -ge 1 ] || _max_attempts=2 ;;
+    ''|*[!0-9]*) _max_attempts="$_attempts_default" ;;
+    *) [ "$_max_attempts" -ge 1 ] || _max_attempts="$_attempts_default" ;;
   esac
   _purpose="${MEASUREMENT_PURPOSE:-search}"
   _resolve_samples 3 "isolated replica" isolated-server
