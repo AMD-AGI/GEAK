@@ -201,7 +201,6 @@ GEAK also runs on the **codex CLI**, with the same `.js` workflows unmodified.
 node -v                            # need Node.js v20+
 npm i -g @openai/codex@0.146.1     # pin 0.146.1 -- 0.147 breaks with gateways
 codex --version                    # expect 0.146.1
-# EACCES on /usr/local?  npm config set prefix "$HOME/.npm-global" && export PATH="$HOME/.npm-global/bin:$PATH"
 node interface/runtime/selftest.mjs  # optional: runtime checks, needs no GPU and no key
 ```
 
@@ -213,11 +212,6 @@ One variable is the whole configuration: it **selects codex** *and* **configures
 export OPENAI_API_KEY=sk-...        # -> OpenAI official (api.openai.com)
 # export AMDKEY=<32hex>             # -> AMD gateway (llm-api.amd.com/Unified)
 # export OPENAI_BASE_URL=...        # -> any other OpenAI-compatible endpoint; wins over both
-
-# A key selects codex only while NO other backend's credentials are set -- an ANTHROPIC_* or
-# CLAUDE_CODE_OAUTH_TOKEN in the same env keeps the run on Claude. To override:
-# export GEAK_AGENT_BACKEND=codex   # force codex anyway
-# export GEAK_AGENT_AUTO=0          # or switch key-based selection off entirely
 ```
 
 ### 3. Run
