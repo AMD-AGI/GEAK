@@ -201,8 +201,7 @@ GEAK also runs on the **codex CLI**, with the same `.js` workflows unmodified.
 node -v                            # need Node.js v20+
 npm i -g @openai/codex@0.146.1     # pin 0.146.1 -- 0.147 breaks with gateways
 codex --version                    # expect 0.146.1
-# no write access to /usr/local?   npm config set prefix "$HOME/.npm-global"
-#                                  export PATH="$HOME/.npm-global/bin:$PATH"
+# EACCES on /usr/local?           npm config set prefix "$HOME/.npm-global" && export PATH="$HOME/.npm-global/bin:$PATH"
 ```
 
 ### 2. Configure — one provider key
