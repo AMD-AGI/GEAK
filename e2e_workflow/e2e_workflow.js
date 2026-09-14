@@ -561,7 +561,14 @@ const FAST_PATH_FIRST = String(A.fast_path_first != null ? A.fast_path_first : '
 const ISL = parseInt(A.isl != null ? A.isl : 1024, 10);
 const OSL = parseInt(A.osl != null ? A.osl : 1024, 10);
 const CONC = parseInt(A.conc != null ? A.conc : 64, 10);
-const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC };
+// On an AgentX trace replay there is no single ISL -- the corpus spans ~89k at
+// p50 past 500k at p99 -- so isl/osl describe the shape to OPTIMIZE FOR (the
+// average the orchestrator measured on its own baseline), not the shape anything
+// is measured at. The bench client replays the corpus and ignores them. Roles
+// must therefore use isl/osl for kernel/GEMM shape synthesis only, and never
+// treat them as a benchmark they can reproduce.
+const WORKLOAD_SHAPE_PROVENANCE = String(A.workload_shape_provenance || 'handoff_workload');
+const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC, shape_provenance: WORKLOAD_SHAPE_PROVENANCE };
 // Seed config: when an external orchestrator (e.g. Hyperloom) already did
 // config/param search, it passes its accepted best flags/env so the GEAK
 // baseline is measured ON that config (fair engagement start), not the stack
