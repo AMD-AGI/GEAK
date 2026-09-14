@@ -63,7 +63,8 @@ Env knobs (all optional):
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` | OpenAI-compatible provider auth (qwen/codex/kimi) | inherited |
 | `ANTHROPIC_BASE_URL` / `ANTHROPIC_*` | Anthropic provider auth (claude) | inherited |
 
-Prereqs for a non-native backend: Node ≥ 18 on `PATH`, plus the chosen CLI
+Prereqs for a non-native backend: Node 20+ on `PATH` (the runtime itself needs
+only 18; the codex CLI needs 20), plus the chosen CLI
 (`npm i -g @qwen-code/qwen-code`, `@openai/codex`, `@moonshotai/kimi-code`, …)
 and a reachable endpoint. The two `.js` workflows, `roles/`, `knowledge/`, and
 `scripts/` are used **unmodified** on every backend. Confirm each CLI's exact
@@ -83,7 +84,7 @@ node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.j
 
 ```bash
 node interface/runtime/engine/experiment.mjs \
-  --script ../../kernel_workflow/kernel_workflow.js \
+  --script kernel_workflow/kernel_workflow.js \
   --args '{"kernel_path":"/abs/knn","workflow_dir":"/abs/kernel_workflow","budget":6}' \
   --agents claude,qwen,codex --models default --repeats 3 --out ./exp_compare
 # -> results.jsonl + summary.md/csv (speedup / success-rate / wall / schema-fails; no token/cost)

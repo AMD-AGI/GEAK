@@ -214,6 +214,11 @@ export OPENAI_API_KEY=sk-...        # -> OpenAI official (api.openai.com)
 # export OPENAI_BASE_URL=...        # -> any other OpenAI-compatible endpoint; wins over both
 ```
 
+> A key selects codex only while **no Anthropic-side credential is also set**. If the environment
+> also carries `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` /
+> `CLAUDE_CODE_OAUTH_TOKEN`, the run stays on Claude rather than hijacking it — pass `--agent codex`
+> or set `GEAK_AGENT_BACKEND=codex` to force it. See [`SETUP.md`](interface/runtime/SETUP.md).
+
 ### 3. Run
 
 Natural-language launch is **not wired up for codex yet** (it needs Claude Code's `Workflow` tool), so

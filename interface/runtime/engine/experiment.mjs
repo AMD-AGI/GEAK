@@ -6,8 +6,11 @@
 // all combos) so the only thing that varies is the axis you sweep. Collects
 // per-run metrics (NO token/cost by design) and writes a comparison table.
 //
-//   node experiment.mjs \
-//     --script ../../kernel_workflow/kernel_workflow.js \
+// Run from the repo root; --script is resolved against the CURRENT DIRECTORY,
+// not against this file:
+//
+//   node interface/runtime/engine/experiment.mjs \
+//     --script kernel_workflow/kernel_workflow.js \
 //     --args '{"kernel_path":"/abs/knn","workflow_dir":"/abs/kernel_workflow","budget":6}' \
 //     --agents claude,qwen,codex --models default --repeats 3 \
 //     --out ./exp_compare
