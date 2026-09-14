@@ -125,12 +125,12 @@ grep -rn '"invoke_workflow"' --include=*.py .
 
 Runtime-internal, only reachable on the codex path:
 
-- `interface/runtime/backends/base.mjs:71` — `child.stdin.write(prompt)` is wrapped in `try/catch`,
+- `interface/runtime/engine/backends/base.mjs:71` — `child.stdin.write(prompt)` is wrapped in `try/catch`,
   but an EPIPE from a CLI that exits before reading the prompt arrives as an **asynchronous
   `'error'` event on the stream**, which `try/catch` cannot intercept. With no `child.stdin.on
   ('error', ...)` listener that is still an uncaught exception: the runtime dies instead of
   surfacing the CLI's own error message.
-- `interface/runtime/experiment.mjs:83` — `spawn('node', ...)` with no `'error'` listener, so an
+- `interface/runtime/engine/experiment.mjs:83` — `spawn('node', ...)` with no `'error'` listener, so an
   ENOENT (no `node` on PATH) is likewise uncaught rather than reported.
 - `interface/runtime/setup.sh:32` — `export OPENAI_API_KEY="${OPENAI_API_KEY:-$ANTHROPIC_API_KEY}"`
   copies the Anthropic key into the OpenAI slot. Sourcing this on a Claude-configured box sends

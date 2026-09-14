@@ -2,7 +2,7 @@
 // Self-test for the standalone runtime primitives + schema emulation.
 // Runs WITHOUT any real agent CLI, network, or GPU — uses a fake backend.
 //
-//   node interface/runtime/selftest.mjs
+//   node interface/runtime/engine/selftest.mjs
 //
 // Exits non-zero on the first failed assertion.
 

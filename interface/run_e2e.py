@@ -142,7 +142,7 @@ CLAUDE_BIN = os.environ.get("GEAK_CLAUDE_BIN", "").strip()
 # When a backend is selected — explicitly via GEAK_AGENT_BACKEND (e.g. "codex")
 # or derived from a configured provider key (see _derive_agent_from_env below) —
 # the JS workflow is NOT run through Claude Code's Workflow tool. Instead it runs
-# on the standalone Node runtime (interface/runtime/run_workflow.mjs), which
+# on the standalone Node runtime (interface/runtime/engine/run_workflow.mjs), which
 # re-implements the Workflow globals (agent/parallel/pipeline/phase/workflow)
 # itself and dispatches each agent() call to the named backend's one-shot CLI
 # (codex exec / claude -p). This is what lets GEAK use a CLI that cannot itself
@@ -152,12 +152,12 @@ CLAUDE_BIN = os.environ.get("GEAK_CLAUDE_BIN", "").strip()
 AGENT_BACKEND = os.environ.get("GEAK_AGENT_BACKEND", "").strip()   # == --agent (back-compat alias)
 AGENT_PROFILE = os.environ.get("GEAK_AGENT_PROFILE", "").strip()   # a registry profile = (agent, model)
 AGENT_MODEL = os.environ.get("GEAK_MODEL", "").strip()             # override the model axis
-RUNTIME_SCRIPT = INTERFACE_DIR / "runtime" / "run_workflow.mjs"
+RUNTIME_SCRIPT = INTERFACE_DIR / "runtime" / "engine" / "run_workflow.mjs"
 RUNTIME_REGISTRY = INTERFACE_DIR / "runtime" / "registry.json"
 NODE_BIN = os.environ.get("GEAK_NODE_BIN", "node")
 
 
-# Credential-derived backend, mirroring deriveAgentFromEnv() in runtime/config.mjs:
+# Credential-derived backend, mirroring deriveAgentFromEnv() in runtime/engine/config.mjs:
 # configuring a provider key is by itself enough to select the CLI that key
 # belongs to, so a key-only setup does not additionally have to set
 # GEAK_AGENT_BACKEND. Both the trigger names and the per-agent credential sides

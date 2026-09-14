@@ -2,9 +2,10 @@
 
 > The runtime in this directory is **self-contained and has zero npm dependencies** (Node built-ins
 > only). After a `git pull` you only need the CLI installed and a couple of environment variables.
-> For the design and architecture, see [`DESIGN.md`](DESIGN.md).
 
-This layer lives in `interface/runtime/`. All commands below assume you are at the **repo root**.
+This layer lives in `interface/runtime/`: the orchestration engine that runs GEAK's `.js` workflows
+sits in `engine/`, and everything around it here is environment setup. All commands below assume you
+are at the **repo root**.
 
 ---
 
@@ -112,7 +113,7 @@ The key from step 1 has already selected codex, so just run it.
 python3 interface/run_e2e.py run_spec.json result.json
 
 # single kernel:
-node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
+node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
   --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
 ```
 
@@ -151,35 +152,56 @@ runtime does **not** auto-override it, preserving the `local_shim` path from `co
 
 ```bash
 # is the runtime itself sound? no network, no GPU, no key required
-node interface/runtime/selftest.mjs                          # expect 105/105
+node interface/runtime/engine/selftest.mjs                          # expect 105/105
 
 # can codex actually drive GEAK, and has GEAK stayed inside the contract?
-node interface/runtime/conformance.mjs --profile codex
+node interface/runtime/engine/conformance.mjs --profile codex
 #   --fake         self-check the harness with no CLI at all
 #   --audit-only   run only the static contract-drift audit (no CLI needed)
 #   --quick        skip the concurrency probe
 #   --geak-root D  point the audit at another tree
 ```
 
-A failing probe names the requirement it violated (R1–R7, defined in
-[`DESIGN.md`](DESIGN.md) §7.1). A failing *audit* means GEAK has grown past what this runtime
-supports — implement the missing capability first, then move the baseline constant in
-`conformance.mjs`, never the other way round.
+A failing *probe* names the requirement it violated. The **R-items** are what the backend contract
+asks of any CLI — the probes and `registry.json` refer to them by name:
+
+| # | Requirement |
+|---|---|
+| R1 | **Structured output.** Nearly every `agent()` call carries a schema. A *native* JSON/schema mode is used where it exists; otherwise `schema.mjs` extract + retry, whose failure rate has to be measured. |
+| R2 | **Headless one-shot.** One command runs the full agentic loop, exits, and leaves the final answer cleanly on stdout. |
+| R3 | **Auto-approval + sandbox.** Roles write outside cwd and run `hipcc` / `rocprof` / `git`; codex's default sandbox blocks both. |
+| R4 | **Per-command timeout.** A build or bench runs minutes to hours, so any built-in cap must be raisable. |
+| R5 | **Context window.** Largest single prompt is role + knowledge + source, ≈16K tokens and up (63KB `kernel_extractor` is the worst case). |
+| R6 | **Provider auth / endpoint.** Env-nameable base_url and key — a same-model-different-CLI comparison needs both pointed at one endpoint. |
+| R7 | **cwd / absolute paths.** The CLI honours cwd and can do FS work on absolute paths outside it (tied to R3). |
+
+R1 and R3 are the blocking pair: unsolved, no CLI finishes a single round.
+
+A failing *audit* is the drift detector, not a backend problem: GEAK has grown past what this runtime
+supports. Implement the missing capability first, *then* move the baseline constant in
+`conformance.mjs` — never the other way round, or parity silently stops meaning anything.
 
 ## What each file is
 
+**`engine/`** — the orchestration engine; nothing in here is codex-specific.
+
 | File | Role |
 |---|---|
-| `run_workflow.mjs` | runtime: primitives, semaphore, nesting, script loader, CLI entry, metrics |
-| `schema.mjs` | structured-output contract + extraction + validation (incl. enum) |
-| `config.mjs` | registry loading, `(agent,model,profile)` resolution, invocation build, neutralization |
-| `registry.json` | agents × models × profiles data |
-| `backends/base.mjs` | backend contract + `spawnAgent` + `defaultConcurrency` |
-| `backends/generic.mjs` | config-driven backend for any CLI |
-| `selftest.mjs` | no-GPU/no-network unit tests of the primitives (105 checks) |
-| `conformance.mjs` | backend capability probes + static contract-drift audit |
-| `experiment.mjs` | `(agent × model)` comparison runner |
-| `responses_shim.mjs` | de-streaming proxy, only for a gateway that cannot stream `/v1/responses` |
+| `engine/run_workflow.mjs` | primitives, semaphore, nesting, script loader, CLI entry, metrics |
+| `engine/schema.mjs` | structured-output contract + extraction + validation (incl. enum) |
+| `engine/config.mjs` | registry loading, `(agent,model,profile)` resolution, invocation build, neutralization |
+| `engine/registry.json` | agents × models × profiles data |
+| `engine/backends/base.mjs` | backend contract + `spawnAgent` + `defaultConcurrency` |
+| `engine/backends/generic.mjs` | config-driven backend for any CLI |
+| `engine/selftest.mjs` | no-GPU/no-network unit tests of the primitives (105 checks) |
+| `engine/conformance.mjs` | backend capability probes + static contract-drift audit |
+| `engine/experiment.mjs` | `(agent × model)` comparison runner |
+
+**Environment setup** — this directory:
+
+| File | Role |
+|---|---|
 | `setup.sh` | optional env bring-up; exports the in-repo `CODEX_HOME` |
 | `codex-home/config.toml` | in-repo `CODEX_HOME` (providers: `openai` default, optional `local_shim`) |
+| `responses_shim.mjs` | de-streaming proxy, only for a gateway that cannot stream `/v1/responses` |
 | `../run_e2e.py` | programmatic entry; routes native vs runtime by env |

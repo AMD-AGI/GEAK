@@ -28,12 +28,12 @@ hard-coded handle.
 By default `run_e2e.py` drives the JS workflow through **Claude Code's `Workflow`
 tool** (SDK preferred, `claude -p` CLI fallback). Set `GEAK_AGENT_PROFILE` (or
 `GEAK_AGENT_BACKEND`) to run the SAME workflow on the **standalone Node runtime**
-(`interface/runtime/run_workflow.mjs`) with a different agent CLI instead — the
+(`interface/runtime/engine/run_workflow.mjs`) with a different agent CLI instead — the
 runtime re-implements the Workflow globals (`agent/parallel/pipeline/phase/
 workflow`) and dispatches each `agent()` to a one-shot backend process, so the
 agent CLI itself does NOT need to support parallel/nested subagents.
 
-**Two orthogonal axes**, defined in `interface/runtime/registry.json`:
+**Two orthogonal axes**, defined in `interface/runtime/engine/registry.json`:
 `agents` (how to drive a CLI: claude / qwen / codex / kimi) × `models` (an
 endpoint). A `profile` pins one `(agent, model)` combo.
 
@@ -68,13 +68,13 @@ Prereqs for a non-native backend: Node ≥ 18 on `PATH`, plus the chosen CLI
 and a reachable endpoint. The two `.js` workflows, `roles/`, `knowledge/`, and
 `scripts/` are used **unmodified** on every backend. Confirm each CLI's exact
 headless / auto-approve / sandbox flags against the R1–R7 bring-up checklist
-in `runtime/DESIGN.md` §13 and adjust `registry.json`.
+in `runtime/SETUP.md` and adjust `registry.json`.
 
 The single-kernel `kernel_workflow.js` has no Python wrapper; run it on the
 runtime directly:
 
 ```bash
-node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js \
+node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.js \
   --profile qwen \
   --args '{"kernel_path":"/abs/kernel","workflow_dir":"/abs/kernel_workflow","budget":6}'
 ```
@@ -82,7 +82,7 @@ node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js \
 **Controlled (agent × model) experiments** are built in:
 
 ```bash
-node interface/runtime/experiment.mjs \
+node interface/runtime/engine/experiment.mjs \
   --script ../../kernel_workflow/kernel_workflow.js \
   --args '{"kernel_path":"/abs/knn","workflow_dir":"/abs/kernel_workflow","budget":6}' \
   --agents claude,qwen,codex --models default --repeats 3 --out ./exp_compare
@@ -90,7 +90,7 @@ node interface/runtime/experiment.mjs \
 ```
 
 Runtime primitives + config resolution can be smoke-tested with no CLI/network/GPU:
-`node interface/runtime/selftest.mjs`. See `runtime/DESIGN.md` for the full picture.
+`node interface/runtime/engine/selftest.mjs`. See `runtime/SETUP.md` for the full picture.
 
 The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 (`baseline/`, `validation/final/`, `final/` bundle, `director_e2e_validation.json`).

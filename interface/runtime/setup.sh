@@ -62,4 +62,4 @@ elif command -v node >/dev/null 2>&1; then
 fi
 
 echo "[setup] CODEX_HOME=$CODEX_HOME"
-echo "[setup] run: node $GEAK_RT_DIR/run_workflow.mjs <workflow.js> --agent codex"
+echo "[setup] run: node $GEAK_RT_DIR/engine/run_workflow.mjs <workflow.js> --agent codex"

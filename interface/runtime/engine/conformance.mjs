@@ -12,7 +12,7 @@
 //   node conformance.mjs --fake            # self-check the harness (no real CLI)
 //   node conformance.mjs --profile qwen --quick   # skip the concurrency probe
 //
-// Each probe maps to an R-item (DESIGN.md §7.1) so a failure is actionable.
+// Each probe maps to an R-item (see SETUP.md) so a failure is actionable.
 // Exit code 0 = CONFORMS, 1 = one or more required probes failed, 2 = usage.
 
 import { mkdtemp, writeFile, readFile, rm, readdir } from 'node:fs/promises';
@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { createRuntime, selectBackend } from './run_workflow.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const GEAK_ROOT = resolvePath(HERE, '..', '..');   // interface/runtime -> repo root
+const GEAK_ROOT = resolvePath(HERE, '..', '..', '..');   // interface/runtime/engine -> repo root
 
 // ---------------------------------------------------------------------------
 // CLI parsing (same convention as run_workflow.mjs)
@@ -410,7 +410,7 @@ async function main() {
     process.exit(0);
   } else {
     console.log(`\nDOES NOT CONFORM ❌  — ${failed.length} required check(s) failed: ${failed.map((f) => `${f.id}[${f.rItem}]`).join(', ')}`);
-    console.log(`Probes -> see DESIGN.md §7.1 (R-items). Audit -> handle the new capability, then update the baseline constant in conformance.mjs.`);
+    console.log(`Probes -> see SETUP.md (R-items). Audit -> handle the new capability, then update the baseline constant in conformance.mjs.`);
     process.exit(1);
   }
 }

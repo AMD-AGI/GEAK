@@ -201,7 +201,7 @@ GEAK also runs on the **codex CLI**, with the same `.js` workflows unmodified.
 node -v                            # need Node.js v20+
 npm i -g @openai/codex@0.146.1     # pin 0.146.1 -- 0.147 breaks with gateways
 codex --version                    # expect 0.146.1
-node interface/runtime/selftest.mjs  # optional: runtime checks, needs no GPU and no key
+node interface/runtime/engine/selftest.mjs  # optional: runtime checks, needs no GPU and no key
 ```
 
 ### 2. Configure
@@ -233,13 +233,12 @@ JSON
 python interface/run_e2e.py run_spec.json result.json    # auto-routes to the codex runtime
 
 # single kernel:
-node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
+node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
   --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
 ```
 
 Going further: [`interface/runtime/SETUP.md`](interface/runtime/SETUP.md),
-[`interface/run_e2e.md`](interface/run_e2e.md),
-[`interface/runtime/DESIGN.md`](interface/runtime/DESIGN.md).
+[`interface/run_e2e.md`](interface/run_e2e.md).
 
 ## Approaches compared
 
