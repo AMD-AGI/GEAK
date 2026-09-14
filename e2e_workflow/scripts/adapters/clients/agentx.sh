@@ -175,7 +175,29 @@ adapter_bench() {
 
   local warm_lane="${AGENTX_WARMUP_REQUESTS_PER_LANE:-10}"
   local warm_grace="${AGENTX_WARMUP_GRACE_PERIOD:-1800}"
-  local fail_thresh="${AGENTX_FAILED_REQUEST_THRESHOLD:-0.10}"
+  # ── Failed-request tolerance, set by what the measurement is FOR ──────────
+  # aiperf enforces this itself: on breach it logs "exceeding the
+  # --failed-request-threshold limit" and broadcasts ProfileCancelCommand, and
+  # the profile call above propagates that non-zero exit, so this is the gate
+  # that decides whether a crashed leg can come back as a clean number.
+  #
+  # One flat number cannot serve both kinds of leg. A search leg is exploring
+  # and a bad tail costs only that probe. A leg whose number will be COMPARED --
+  # parity, validation, canonical -- cannot absorb failures at all, because the
+  # requests that fail are the long/large trajectories, so dropping them
+  # flatters whichever leg did the crashing. On the 20260912 run a candidate
+  # killed EngineCore and failed 7.368% of its requests, stayed under the flat
+  # 10%, and was accepted as usable against a clean reference.
+  #
+  # Values below the grace floor are equivalent: aiperf only cancels once at
+  # least 10 requests have failed AS WELL as the rate being exceeded, and at
+  # these volumes (~200-900 requests/leg) 10 failures is already 1-5%. So 0.01
+  # means "cancel at the grace floor", not "cancel at 1%".
+  local fail_thresh_default=0.10
+  case "$purpose" in
+    parity|validation|canonical) fail_thresh_default=0.01 ;;
+  esac
+  local fail_thresh="${AGENTX_FAILED_REQUEST_THRESHOLD:-$fail_thresh_default}"
   local idle_gap="${AGENTX_TRACE_IDLE_GAP_CAP_SECONDS:-300}"
   local aiperf="${AIPERF_BIN:-aiperf}"
 
