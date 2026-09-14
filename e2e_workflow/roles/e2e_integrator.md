@@ -393,6 +393,10 @@ win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, 
    variable `GEAK_UNSET_ENVS`, including when the accepted assignment string is
    empty. For intermediate comparisons, pass `CURRENT_UNSET_ENVS` the same way
    to both arms. Explicit candidate assignments may re-add a removed name.
+   Preserve the supplied `GEAK_REMOVE_ARGS` JSON string in both benchmark arms
+   and the final script, including `[]` when clearing old controls. A failed
+   live-argument check rejects that launch before measurement; it is not an
+   inconclusive speed result to replay through another harness.
 
 1b. **Fold in tuning data** (when `TUNING_DEPLOY_BUNDLE` or `TUNING_RUNTIME_CSV_MANIFESTS` is present).
 

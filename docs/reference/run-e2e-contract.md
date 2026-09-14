@@ -93,6 +93,7 @@ The mapping is owned by `run_e2e.py:map_args`.
 | `accepted_env` | `initial_extra_env` | seeds baseline env |
 | resolved schema-v2 configuration | `initial_args_mode="replace"`, `initial_env_complete=true` | resolved args and env, including intentional empty strings, seed setup without restoring recipe values |
 | `baseline_env_spec.config.unset_envs` | `initial_unset_envs`, env `GEAK_UNSET_ENVS` | explicit removals from recipe and inherited launcher env; current assignments may re-add a name |
+| `baseline_env_spec.config.remove_args` | `initial_remove_args`, env `GEAK_REMOVE_ARGS` | remaining flag removals; the benchmark verifies that the live server honors them before measurement |
 | `launch_recipe` | `launch_script` | optional |
 | `raw_baseline_tput` | result audit metadata | pre-change session baseline; never used as the measurement-alignment signal |
 | `orchestrator_best_tput_same_config` | result alignment metadata | caller throughput on the accepted config GEAK uses for its baseline |
@@ -119,6 +120,36 @@ recipe replay. Run-owned coordinates (GPU masks, model, port, profiler path and
 overlay import path) remain under the adapter's control. Setup, carried state and
 returned `accepted_config.unset_envs` preserve the removal controls; a final launch
 bundle must reproduce them.
+
+`GEAK_REMOVE_ARGS` is a JSON array of flag specifications. The resolver removes
+them from inherited arguments, and the benchmark checks remaining removals
+against the actual server argv before warmup, profiling or timed measurement.
+Flag parsing and explicit re-addition use the same implementation at both
+boundaries. A key removes that option; a key/value pair removes only the matching
+effective value. Later explicit assignments may re-enable it. Empty controls
+clear an inherited seed when resuming a different saved configuration.
+If the live argv repeats an option and contains the removed value, verification
+rejects it as ambiguous: the backend might append values instead of replacing
+them. A single replacement value and repeated values that do not match the
+removal remain valid.
+
+The live check supports direct local SGLang and vLLM entrypoints with a matching
+port and unchanged process identity. If an external script restores a removed
+default, or its command cannot be verified, the launch fails with
+`server_args_unverified` and is torn down before measurement. GEAK does not rewrite
+external scripts or guess inverse flags. A script that cannot honor the requested
+removal must be corrected in its owning component. The detailed outcome is in
+`OUT_DIR/server_args_validation.json`.
+This verifies active removals and process identity, not equality of every
+accepted argument, environment value or overlay. A conclusive rejection in
+either final-validation leg prevents carried throughput, disk recovery and
+deployment knowledge-base write-back from publishing that run as a win.
+
+For `REUSE_SERVER=1` with active removals, pass `GEAK_SERVER_ARGS_RECEIPT` pointing
+to a successful validation for that still-live server. The benchmark rechecks the
+process, arguments, controls and source identity; an old result or a remote
+endpoint is insufficient. Runs with no active removals retain their existing
+launch/reuse behavior. Final bundles must export the accepted removal controls.
 
 ### TraceLens prior autodiscovery
 

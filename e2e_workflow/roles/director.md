@@ -24,6 +24,15 @@ including when it is empty. Do not fill it from the original recipe. Apply
 JSON array as `GEAK_UNSET_ENVS` for `bench_e2e.sh`. The adapter removes those names
 before current assignments; omitting an assignment alone does not remove it.
 
+Pass the supplied `GEAK_REMOVE_ARGS` JSON string to the benchmark as well,
+including `[]` when it clears a previous seed. The benchmark verifies remaining
+flag removals against the live server before measuring. Treat
+`server_args_unverified` as a rejected launch; do not substitute another harness
+or report a throughput for it. Keep the validation receipt with the launch.
+In final validation, persist and return `validation_status="server_args_unverified"`
+with zero verified throughput when either leg fails this check. This rejection
+must not be replaced by an earlier throughput or an intermediate win.
+
 ## Isolation contract (non-negotiable)
 - The user's model weights and the installed serving-stack packages (sglang/vllm/aiter/…) are
   **READ-ONLY**. Never edit site-packages. Every change reaches the server through a reversible

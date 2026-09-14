@@ -885,6 +885,83 @@ def test_emit_on_success(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("route", ["live", "cached", "interrupted"])
+@pytest.mark.parametrize("failure_source", ["workflow", "director", "base", "final", "startup_base", "startup_final"])
+def test_final_launch_rejection_cannot_recover_positive_throughput(
+    monkeypatch, tmp_path, route, failure_source
+):
+    eval_dir = _make_eval_dir(tmp_path)
+    wf = {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
+          "final_throughput_tok_s": 535.352, "baseline_throughput_tok_s": 461.314}
+    if failure_source == "workflow":
+        wf["validation_status"] = "server_args_unverified"
+
+    def write_rejection():
+        if failure_source == "workflow":
+            (eval_dir / rx.WORKFLOW_RETURN_FILE).write_text(json.dumps(wf))
+        elif failure_source == "director":
+            (eval_dir / "director_e2e_validation.json").write_text(json.dumps({
+                **wf, "validation_status": "server_args_unverified",
+            }))
+        else:
+            startup = failure_source.startswith("startup_")
+            leg = failure_source.removeprefix("startup_")
+            proof = eval_dir / "validation" / leg / (
+                "server_start.json" if startup else "server_args_validation.json")
+            proof.parent.mkdir(parents=True, exist_ok=True)
+            proof.write_text(json.dumps({
+                "schema_version": "geak.server_args_validation.v1",
+                "status": "failed",
+                "reason": "server_args_unverified" if startup else "removal_mismatch",
+            }))
+            # A stale positive summary must not outrank a conclusive rejection.
+            (proof.parent / "bench_summary.json").write_text(json.dumps({
+                "throughput_tok_s": 999.0,
+            }))
+
+    if route == "cached":
+        write_rejection()
+        (eval_dir / rx.WORKFLOW_RETURN_FILE).write_text(json.dumps(wf))
+
+    def invoke(*args):
+        assert route != "cached", "A cached result must not invoke another worker"
+        write_rejection()
+        if route == "interrupted":
+            raise RuntimeError("Interrupted after final launch rejection")
+        return wf
+
+    rc, result_path = _run_main(monkeypatch, tmp_path, eval_dir, invoke=invoke)
+    result = json.loads(result_path.read_text())
+    assert rc == 1
+    assert result["status"] == "error"
+    assert "failed argument verification" in result["error"]
+    assert "throughput_speedup" not in result
+    assert "final_throughput_tok_s" not in result
+    assert (eval_dir / rx.KERNEL_JOURNEY_FILE).is_file()
+
+
+@pytest.mark.parametrize("proof", [None, [], {"status": "failed"}, {
+    "schema_version": "geak.server_args_validation.v1", "status": "verified",
+}])
+def test_unrelated_or_successful_argument_receipts_preserve_valid_recovery(tmp_path, proof):
+    eval_dir = _make_eval_dir(tmp_path)
+    trial_proof = eval_dir / "overlay" / "rejected_trial" / "server_args_validation.json"
+    trial_proof.parent.mkdir()
+    trial_proof.write_text(json.dumps({
+        "schema_version": "geak.server_args_validation.v1", "status": "failed",
+    }))
+    final_proof = eval_dir / "validation" / "final" / "server_args_validation.json"
+    final_proof.parent.mkdir(parents=True)
+    final_proof.write_text(json.dumps(proof))
+    (final_proof.parent / "server_start.json").write_text(json.dumps({
+        "status": "failed", "reason": "health_timeout",
+    }))
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "ok"
+    assert out["final_throughput_tok_s"] == pytest.approx(535.352)
+
+
+@pytest.mark.parametrize("route", ["live", "cached", "interrupted"])
 @pytest.mark.parametrize("runtime_csv", [False, True])
 def test_tuning_delivery_is_verified_on_live_cached_and_interrupted_emission(
     monkeypatch, tmp_path, route, runtime_csv
@@ -1379,6 +1456,33 @@ def test_kb_write_back_can_be_switched_off(tmp_path, monkeypatch):
     monkeypatch.setenv("GEAK_E2E_KB_WRITE_BACK", "0")
     out = rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})
     assert out["skipped"] is True and "off" in out["why"]
+
+
+@pytest.mark.parametrize("failure_source", ["workflow", "director", "base", "final", "startup_base", "startup_final"])
+def test_kb_write_back_does_not_publish_final_argument_rejection(tmp_path, monkeypatch, failure_source):
+    seen = _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path)
+    wf = {"throughput_speedup": 1.16, "final_throughput_tok_s": 535.352}
+    if failure_source == "workflow":
+        wf["validation_status"] = "server_args_unverified"
+    elif failure_source == "director":
+        (eval_dir / "director_e2e_validation.json").write_text(json.dumps({
+            "validation_status": "server_args_unverified",
+        }))
+    else:
+        startup = failure_source.startswith("startup_")
+        leg = failure_source.removeprefix("startup_")
+        proof = eval_dir / "validation" / leg / (
+            "server_start.json" if startup else "server_args_validation.json")
+        proof.parent.mkdir(parents=True)
+        proof.write_text(json.dumps({
+            "schema_version": "geak.server_args_validation.v1", "status": "failed",
+            "reason": "server_args_unverified" if startup else "removal_mismatch",
+        }))
+    receipt = rx._kb_write_back(eval_dir, wf, {})
+    assert receipt["skipped"] is True
+    assert "failed argument verification" in receipt["why"]
+    assert seen == {}
 
 
 def test_kb_write_back_defers_to_the_workflows_own_receipt(tmp_path, monkeypatch):

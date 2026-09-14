@@ -74,6 +74,15 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Invalidate previous results before any preflight can fail. Reuse keeps its
+# existing proof until the validator has read and rechecked the live process.
+_run_artifacts="${OUT_DIR:-$(pwd)/e2e_bench_out}"
+mkdir -p "$_run_artifacts"
+rm -f "$_run_artifacts/bench_summary.json" "$_run_artifacts/server_start.json"
+if [ "${REUSE_SERVER:-0}" != "1" ]; then
+  rm -f "$_run_artifacts/server_args_validation.json"
+fi
+
 # ---- staged siblings ----
 # This script is COPIED into $EVAL_DIR (roles/director.md), so its helper libraries resolve from $HERE
 # first, then the skill dir.  Both are resolved up here, before anything is launched: discovering a
@@ -205,6 +214,32 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
       OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
         bash "$_replica_runner"
       _rc=$?
+      if [ "$_rc" -ne 0 ] && python3 - "$_attempt_dir/server_args_validation.json" \
+        "$_attempt_dir/server_start.json" <<'PY'
+import json, sys
+failed = False
+for path in sys.argv[1:]:
+    try:
+        with open(path) as stream:
+            result = json.load(stream)
+    except (OSError, ValueError):
+        continue
+    if isinstance(result, dict) and result.get("status") == "failed":
+        failed = failed or path == sys.argv[1] or result.get("reason") == "server_args_unverified"
+raise SystemExit(0 if failed else 1)
+PY
+      then
+        # Writing the argv receipt can itself fail. The dispatcher still writes
+        # the structured startup rejection; preserve it and stop the whole leg
+        # rather than retrying or aggregating an earlier successful replica.
+        for _failure_file in server_args_validation.json server_start.json; do
+          if [ -f "$_attempt_dir/$_failure_file" ]; then
+            cp "$_attempt_dir/$_failure_file" "$_aggregate_out/$_failure_file"
+          fi
+        done
+        echo "!!! Isolated replica launch failed argument verification; no retry or aggregate gain." >&2
+        exit 2
+      fi
       if [ "$_rc" -eq 0 ] && python3 - "$_attempt_dir/bench_summary.json" "${EFFECTIVE_CONFIG_DIGEST:-}" <<'PY'
 import json, sys
 try:
@@ -579,6 +614,36 @@ fi
 source "$TEARDOWN_LIB"
 trap server_teardown EXIT
 
+# Guards can reject before launching, or while reusing a server whose receipt
+# cannot be rewritten. Preserve that terminal rejection independently of the
+# receipt so isolated aggregation and interrupted-run recovery cannot salvage
+# an earlier gain. These paths did not wait for a fresh launch, hence zero times.
+_server_args_guard_failed() {
+  python3 - "$1" "$PORT" "$BACKEND" "$LOG" > "$OUT_DIR/server_start.json" <<'PY'
+import json, sys
+print(json.dumps({
+    "status": "failed", "reason": "server_args_unverified", "phase_hint": sys.argv[1],
+    "wait_sec": 0, "ceiling_sec": 0, "stall_window_sec": 0,
+    "port": sys.argv[2], "backend": sys.argv[3], "log": sys.argv[4],
+}))
+PY
+}
+
+_active_remove_args='[]'
+if [ -n "${GEAK_REMOVE_ARGS:-}" ]; then
+  _server_args_validator="$HERE/adapters/server_args.py"
+  if [ ! -f "$_server_args_validator" ]; then
+    echo "!!! Stage adapters/server_args.py with bench_e2e.sh to verify GEAK_REMOVE_ARGS." >&2
+    _server_args_guard_failed "Missing staged argument validator"
+    exit 3
+  fi
+  if ! _active_remove_args="$(python3 "$_server_args_validator" resolve \
+    --remove-args="$GEAK_REMOVE_ARGS" --current-args="$EXTRA_SERVER_ARGS")"; then
+    _server_args_guard_failed "Invalid argument-removal controls"
+    exit 2
+  fi
+fi
+
 # ---- serving-GPU mutex ----
 # TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
 # Profiler / config-sweep / integrate ref·cand / validation all share it, so
@@ -635,6 +700,16 @@ if [ "$REUSE_SERVER" != "1" ]; then
     sleep 5
   done
   _waited=$((SECONDS-_t0))
+  if [ "$_up" = "1" ] && [ "$_active_remove_args" != '[]' ]; then
+    if ! python3 "$_server_args_validator" validate \
+      --pid "$SERVER_PID" --start-ticks "$SERVER_START_TICKS" \
+      --backend "$BACKEND" --host "$HOST" --port "$PORT" \
+      --remove-args="$GEAK_REMOVE_ARGS" --current-args="$EXTRA_SERVER_ARGS" \
+      --receipt "$OUT_DIR/server_args_validation.json"; then
+      _up=0
+      _reason="server_args_unverified"
+    fi
+  fi
   if [ "$_up" = "1" ]; then
     echo ">>> Server up after ~${_waited}s."
   else
@@ -664,6 +739,16 @@ if [ "$REUSE_SERVER" != "1" ]; then
   fi
 else
   echo ">>> Reusing warm server at $BASE_URL"
+  if [ "$_active_remove_args" != '[]' ]; then
+    if ! python3 "$_server_args_validator" validate-reuse \
+      --launch-receipt "${GEAK_SERVER_ARGS_RECEIPT:-$OUT_DIR/server_args_validation.json}" \
+      --backend "$BACKEND" --host "$HOST" --port "$PORT" \
+      --remove-args="$GEAK_REMOVE_ARGS" --current-args="$EXTRA_SERVER_ARGS" \
+      --receipt "$OUT_DIR/server_args_validation.json"; then
+      _server_args_guard_failed "Reused server argument proof failed"
+      exit 2
+    fi
+  fi
   adapter_health >/dev/null 2>&1 || { echo "!!! No healthy server at $BASE_URL"; exit 2; }
 fi
 

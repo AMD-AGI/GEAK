@@ -9,18 +9,29 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import shlex
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, MutableMapping, Optional, Union
+from typing import Any, Mapping, MutableMapping, Optional, Union
 
 import yaml
 
+from e2e_workflow.scripts.adapters import server_args
 from e2e_workflow.scripts.adapters.extra_env import (
     _protect_bare_json as _protect_bare_json,
 )
 from e2e_workflow.scripts.adapters.extra_env import _shell_tokens, parse_unset_envs
+from e2e_workflow.scripts.adapters.server_args import (
+    _Flag,
+    _flag_map,
+    _parse_flags,
+    _remove_flags,
+    _render_flags,
+    resolve_remove_args,
+)
+
+_canonical_value = server_args._canonical_value
+_looks_like_flag = server_args._looks_like_flag
 
 _RECIPE_ARG_ENVS = {
     "vllm": "EXTRA_VLLM_ARGS",
@@ -51,93 +62,6 @@ class EffectiveConfig:
         return copy.deepcopy(asdict(self))
 
 
-@dataclass(frozen=True)
-class _Flag:
-    name: str
-    value: Optional[str]
-
-
-def _looks_like_flag(token: str) -> bool:
-    if token == "-" or not token.startswith("-"):
-        return False
-    try:
-        float(token)
-    except ValueError:
-        return True
-    return False
-
-
-def _parse_flags(text: Any) -> list[_Flag]:
-    """Parse long/unknown flags, equals forms, booleans, and JSON values."""
-
-    tokens = _shell_tokens(text)
-    flags: list[_Flag] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if not _looks_like_flag(token):
-            raise ValueError(f"server argument has no flag: {token!r}")
-        if "=" in token:
-            name, value = token.split("=", 1)
-            flags.append(_Flag(name, _canonical_value(value)))
-            index += 1
-            continue
-        value: Optional[str] = None
-        if index + 1 < len(tokens) and not _looks_like_flag(tokens[index + 1]):
-            value = _canonical_value(tokens[index + 1])
-            index += 1
-        flags.append(_Flag(token, value))
-        index += 1
-    return flags
-
-
-def _canonical_value(value: str) -> str:
-    stripped = value.strip()
-    if stripped[:1] in "[{" and stripped[-1:] in "]}":
-        try:
-            return json.dumps(
-                json.loads(stripped),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            )
-        except json.JSONDecodeError:
-            pass
-    return value
-
-
-def _flag_map(text: Any) -> "OrderedDict[str, _Flag]":
-    result: "OrderedDict[str, _Flag]" = OrderedDict()
-    for flag in _parse_flags(text):
-        result[flag.name] = flag
-    return result
-
-
-def _render_flags(flags: Iterable[_Flag]) -> str:
-    tokens: list[str] = []
-    for flag in flags:
-        tokens.append(flag.name)
-        if flag.value is not None:
-            tokens.append(flag.value)
-    return shlex.join(tokens)
-
-
-def _remove_flags(flags: MutableMapping[str, _Flag], specs: Any) -> None:
-    """Apply explicit key or key/value removals before current assignments."""
-    if specs is None:
-        return
-    if isinstance(specs, str):
-        specs = [specs]
-    if not isinstance(specs, (list, tuple)):
-        raise TypeError("remove_args must be a string or list of flag specs")
-    for spec in specs:
-        if not isinstance(spec, str):
-            raise TypeError("remove_args entries must be strings")
-        for flag in _parse_flags(spec):
-            if flag.value is None or flags.get(flag.name) == flag:
-                flags.pop(flag.name, None)
-
-
 def _parse_env(value: Any) -> "OrderedDict[str, str]":
     if value is None or value == "":
         return OrderedDict()
@@ -151,23 +75,6 @@ def _parse_env(value: Any) -> "OrderedDict[str, str]":
             raise ValueError(f"environment entry must be KEY=VALUE: {token!r}")
         result[key] = item
     return result
-
-
-def resolve_remove_args(specs: Any, *assignments: Any) -> tuple[str, ...]:
-    """Keep removals that explicit current assignments have not re-enabled."""
-    if specs is None:
-        return ()
-    if isinstance(specs, str):
-        specs = [specs]
-    if not isinstance(specs, (list, tuple)) or any(not isinstance(s, str) for s in specs):
-        raise TypeError("remove_args must be a string or list of flag specs")
-    current = OrderedDict()
-    for args in assignments:
-        current.update(_flag_map(args))
-    return tuple(sorted({
-        _render_flags([flag]) for spec in specs for flag in _parse_flags(spec)
-        if flag.name not in current or (flag.value is not None and current[flag.name] != flag)
-    }))
 
 
 def resolve_unset_envs(names: Any, *environments: Any) -> tuple[str, ...]:

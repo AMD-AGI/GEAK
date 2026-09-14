@@ -1234,6 +1234,10 @@ def apply_bench_launcher(h: dict) -> str:
         os.environ["GEAK_UNSET_ENVS"] = json.dumps(list(effective.unset_envs))
     else:
         os.environ.pop("GEAK_UNSET_ENVS", None)
+    if effective is not None and effective.remove_args:
+        os.environ["GEAK_REMOVE_ARGS"] = json.dumps(list(effective.remove_args))
+    else:
+        os.environ.pop("GEAK_REMOVE_ARGS", None)
 
     # Magpie's script defaults max-model-len to a value of its own (4096) that
     # has nothing to do with this run, and the orchestrator overrode it via env
@@ -2656,8 +2660,32 @@ def _same_session_baseline(
     return 0.0, ""
 
 
+def _final_server_args_failure(eval_dir: Path, wf: dict) -> str | None:
+    """A conclusive final launch rejection outranks carried/intermediate wins."""
+    validation = _read_json(eval_dir / "director_e2e_validation.json")
+    if (wf.get("validation_status") == "server_args_unverified"
+            or (isinstance(validation, dict)
+                and validation.get("validation_status") == "server_args_unverified")):
+        return "Final server launch failed argument verification; refusing carried throughput"
+    for leg in ("base", "final"):
+        startup_path = eval_dir / "validation" / leg / "server_start.json"
+        startup = _read_json(startup_path)
+        if (isinstance(startup, dict) and startup.get("status") == "failed"
+                and startup.get("reason") == "server_args_unverified"):
+            return f"Final {leg} launch failed argument verification: {startup_path}"
+        proof_path = eval_dir / "validation" / leg / "server_args_validation.json"
+        proof = _read_json(proof_path)
+        if (isinstance(proof, dict)
+                and proof.get("schema_version") == "geak.server_args_validation.v1"
+                and proof.get("status") == "failed"):
+            return f"Final {leg} launch failed argument verification: {proof_path}"
+    return None
+
+
 def normalize_result(h: dict, wf: dict) -> dict:
     eval_dir = Path(wf["eval_dir"])
+    if failure := _final_server_args_failure(eval_dir, wf):
+        raise ValueError(failure)
     validation = _read_json(eval_dir / "director_e2e_validation.json")
     baseline_summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
     final_summary = _read_json(eval_dir / "validation" / "final" / "bench_summary.json")
@@ -3698,6 +3726,8 @@ def _kb_write_back(eval_dir: Path, wf: dict, ps_args: dict) -> dict:
     """
     if str(os.environ.get("GEAK_E2E_KB_WRITE_BACK", "1")).strip().lower() in ("0", "false", "no"):
         return {"skipped": True, "why": "GEAK_E2E_KB_WRITE_BACK is off"}
+    if failure := _final_server_args_failure(eval_dir, wf):
+        return {"skipped": True, "why": failure}
     if (eval_dir / KB_WRITE_FILE).exists():
         return {"skipped": True, "why": "workflow already wrote (kb_write.json present)"}
     identity = _read_json(eval_dir / KB_IDENTITY_FILE)

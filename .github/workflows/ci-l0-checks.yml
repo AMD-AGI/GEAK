@@ -95,6 +95,8 @@ jobs:
             interface/test_run_e2e_kb_write_tuned.py \
             e2e_workflow/scripts/tests/test_magpie_launcher_extra_args.py \
             e2e_workflow/scripts/tests/test_extra_env_transport.py \
+            e2e_workflow/scripts/tests/test_server_args.py \
+            e2e_workflow/scripts/tests/test_bench_server_args.py \
             e2e_workflow/scripts/tests/test_bench_trust_remote_code.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py \
             e2e_workflow/scripts/tests/test_run_correctness_gate.py \
