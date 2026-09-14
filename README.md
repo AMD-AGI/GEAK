@@ -201,10 +201,11 @@ GEAK also runs on the **codex CLI**, with the same `.js` workflows unmodified.
 node -v                            # need Node.js v20+
 npm i -g @openai/codex@0.146.1     # pin 0.146.1 -- 0.147 breaks with gateways
 codex --version                    # expect 0.146.1
-# EACCES on /usr/local?           npm config set prefix "$HOME/.npm-global" && export PATH="$HOME/.npm-global/bin:$PATH"
+# EACCES on /usr/local?  npm config set prefix "$HOME/.npm-global" && export PATH="$HOME/.npm-global/bin:$PATH"
+node interface/runtime/selftest.mjs  # optional: runtime checks, needs no GPU and no key
 ```
 
-### 2. Configure — one provider key
+### 2. Configure
 
 One variable is the whole configuration: it **selects codex** *and* **configures its provider**.
 
@@ -219,21 +220,10 @@ export OPENAI_API_KEY=sk-...        # -> OpenAI official (api.openai.com)
 # export GEAK_AGENT_AUTO=0          # or switch key-based selection off entirely
 ```
 
-### 3. Verify
+### 3. Run
 
-```bash
-node interface/runtime/selftest.mjs      # runtime unit checks; no GPU, no key needed
-
-# once you have a run_spec.json (step 4), resolve the run without executing it:
-python interface/run_e2e.py run_spec.json result.json --dry-run | grep agent_backend
-#   "agent_backend": "agent=codex (from key)"    -> wired up
-#   "agent_backend": "native (claude/Workflow)"  -> not selected; see the shape rule above
-```
-
-### 4. Run
-
-codex has **no natural-language mode** (that path needs Claude Code's `Workflow` tool), so drive it
-from the command line — `run_e2e.py` for a whole model, `run_workflow.mjs` for a single kernel:
+Natural-language launch is **not wired up for codex yet** (it needs Claude Code's `Workflow` tool), so
+drive it from the command line — `run_e2e.py` for a whole model, `run_workflow.mjs` for a single kernel:
 
 ```bash
 # e2e (whole-model serving throughput). A JSON says WHAT to optimize -- the same information the
