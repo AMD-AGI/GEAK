@@ -121,6 +121,44 @@ grep -rn '"invoke_workflow"' --include=*.py .
 
 ---
 
+## Finding 3 — the shipped `codex-home/config.toml` made codex refuse to start (FIXED by deletion)
+
+### Problem
+
+`interface/runtime/codex-home/config.toml` (PR-added; no such file on `main`) defined
+`[model_providers.openai]`. codex 0.146.1 rejects that outright:
+
+```
+Error loading config.toml: model_providers contains reserved built-in provider IDs:
+`openai`. Built-in providers cannot be overridden.
+```
+
+codex refuses to load the **whole file**, so it never starts — independent of which provider is
+selected. Anyone following `setup.sh` (which exported `CODEX_HOME` to that directory) got a hard
+failure. Measured against the AMD gateway with a real key, deterministic 2/2, and reproduced on the
+pre-rewrite revision `5bdbea3c^` as well, so it was broken from the moment the file was introduced.
+
+### Why it went unnoticed
+
+The default path never reads it. With `GEAK_CODEX_AUTOCONFIG=1` the runtime passes the provider as
+`-c model_providers.geak_auto.*` overrides and codex needs no `config.toml` and no `CODEX_HOME` at
+all. `setup.sh` was optional, so only someone who actually sourced it hit the bug. Same probe with
+`CODEX_HOME` unset or pointed at an empty directory: 4/4 clean round-trips on the AMD gateway.
+
+### Fix
+
+Deleted the whole SaFE-era shim chain, which is what `config.toml` existed to configure:
+`codex-home/`, `responses_shim.mjs`, `setup.sh`, the `127.0.0.1`/`localhost` autoconfig
+short-circuit in `config.mjs`, and the matching `.gitignore` rules. Only the AMD gateway and an
+OpenAI API key are supported, and neither needs a shim or a config file.
+
+A side effect worth knowing: that short-circuit used to *skip* autoconfig for any localhost
+`base_url`, so pointing `OPENAI_BASE_URL` at a local OpenAI-compatible server (vLLM, llama.cpp)
+left codex with no provider at all. It is now autoconfigured like any other endpoint; `selftest.mjs`
+locks that in.
+
+---
+
 ## Open items (not addressed in this PR)
 
 Runtime-internal, only reachable on the codex path:
@@ -132,9 +170,6 @@ Runtime-internal, only reachable on the codex path:
   surfacing the CLI's own error message.
 - `interface/runtime/engine/experiment.mjs:83` — `spawn('node', ...)` with no `'error'` listener, so an
   ENOENT (no `node` on PATH) is likewise uncaught rather than reported.
-- `interface/runtime/setup.sh:32` — `export OPENAI_API_KEY="${OPENAI_API_KEY:-$ANTHROPIC_API_KEY}"`
-  copies the Anthropic key into the OpenAI slot. Sourcing this on a Claude-configured box sends
-  that key to an OpenAI-shaped endpoint.
 - Schema-validation retry re-runs the whole agent turn rather than just re-asking for the JSON.
 - `registry.json` pins the `claude` agent to `--allowedTools Bash Read Write`; the baseline
   workflow's WebSearch/WebFetch are unavailable under the runtime path.

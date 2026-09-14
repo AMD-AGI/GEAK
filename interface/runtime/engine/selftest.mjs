@@ -211,9 +211,10 @@ async function testConfig() {
   eq(cval(invAuto.args, 'model_provider'), '"geak_auto"', 'autoconfig sets model_provider');
   eq(cval(invAuto.args, 'model_providers.geak_auto.base_url'), '"https://api.openai.com/v1"', 'autoconfig base_url from OPENAI_BASE_URL');
   eq(cval(invAuto.args, 'model_providers.geak_auto.wire_api'), '"responses"', 'autoconfig wire_api=responses');
-  // (b) shim base_url -> NO autoconfig (preserve config.toml local_shim path)
-  const invShim = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'http://127.0.0.1:8791/v1' } });
-  eq(cval(invShim.args, 'model_provider'), undefined, 'autoconfig skipped for local shim base_url');
+  // (b) a localhost base_url is autoconfigured like any other: point OPENAI_BASE_URL
+  //     at a local OpenAI-compatible server and it just works, no config.toml needed
+  const invLocal = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'http://127.0.0.1:8000/v1' } });
+  eq(cval(invLocal.args, 'model_providers.geak_auto.base_url'), '"http://127.0.0.1:8000/v1"', 'autoconfig also covers a localhost base_url');
   // (c) key-driven auto-select: a header-carrying provider (no base_url) supplies
   //     its own endpoint, key env AND custom auth header
   const invGw = buildInvocation(c.agent, null, 'P', { env: { FIXTURE_GW_KEY: 'x' } });
@@ -227,8 +228,8 @@ async function testConfig() {
   const invOff = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'https://api.openai.com/v1', GEAK_CODEX_AUTOCONFIG: '0' } });
   eq(cval(invOff.args, 'model_provider'), undefined, 'autoconfig disabled by GEAK_CODEX_AUTOCONFIG=0');
   // (f) caller pins model_provider via extra args -> skip autoconfig
-  const invPin = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'https://api.openai.com/v1', GEAK_CODEX_EXTRA_ARGS: '-c model_provider=local_shim' } });
-  eq(cval(invPin.args, 'model_provider'), 'local_shim', 'extra_args model_provider wins over autoconfig');
+  const invPin = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'https://api.openai.com/v1', GEAK_CODEX_EXTRA_ARGS: '-c model_provider=my_provider' } });
+  eq(cval(invPin.args, 'model_provider'), 'my_provider', 'extra_args model_provider wins over autoconfig');
   // codex thinking level: default xhigh (its true maximum — it has no 'max'),
   // GEAK_CODEX_EFFORT override, extra_args pin not double-emitted
   eq(cval(invOai.args, 'model_reasoning_effort'), 'xhigh', 'codex effort defaults to xhigh');

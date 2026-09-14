@@ -187,9 +187,8 @@ export function buildInvocation(agent, model, prompt, opts = {}) {
   //       OpenAI". The same list drives deriveAgentFromEnv, which picks the agent
   //       itself from the key.
   // Emitted BEFORE extra_args so GEAK_CODEX_EXTRA_ARGS still wins. Skipped when
-  // disabled (GEAK_CODEX_AUTOCONFIG=0), the base_url is the local responses-shim
-  // (127.0.0.1/localhost — keep the config.toml local_shim path), or the caller
-  // already pins model_provider via extra_args. OPENAI_CUSTOM_HEADERS (JSON
+  // disabled (GEAK_CODEX_AUTOCONFIG=0) or when the caller already pins
+  // model_provider via extra_args. OPENAI_CUSTOM_HEADERS (JSON
   // {"Header":"ENV_VAR_NAME"}) overrides a selected provider's headers.
   if (agent.provider_autoconfig === 'codex'
       && String(penv.GEAK_CODEX_AUTOCONFIG ?? '1') !== '0') {
@@ -204,10 +203,9 @@ export function buildInvocation(agent, model, prompt, opts = {}) {
     // explicit OPENAI_CUSTOM_HEADERS wins over an auto-selected provider's headers
     try { const h = JSON.parse(penv.OPENAI_CUSTOM_HEADERS || 'null'); if (h && typeof h === 'object') headers = h; } catch { /* ignore */ }
 
-    const isShim = /^(https?:\/\/)?(127\.0\.0\.1|localhost)([:/]|$)/i.test(baseUrl);
     const extra = (agent.extra_args_env && penv[agent.extra_args_env]) || '';
     const providerPinned = /model_provider\s*=/.test(extra);
-    if (baseUrl && !isShim && !providerPinned) {
+    if (baseUrl && !providerPinned) {
       const P = 'geak_auto';
       const ts = (s) => '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
       args.push('-c', `model_provider=${ts(P)}`);

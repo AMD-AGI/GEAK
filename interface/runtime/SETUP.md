@@ -3,16 +3,16 @@
 > The runtime in this directory is **self-contained and has zero npm dependencies** (Node built-ins
 > only). After a `git pull` you only need the CLI installed and a couple of environment variables.
 
-This layer lives in `interface/runtime/`: the orchestration engine that runs GEAK's `.js` workflows
-sits in `engine/`, and everything around it here is environment setup. All commands below assume you
-are at the **repo root**.
+The orchestration engine that runs GEAK's `.js` workflows lives in `interface/runtime/engine/`.
+There is nothing to install or configure beyond the CLI and one key — no `config.toml`, no
+`CODEX_HOME`, no setup script. All commands below assume you are at the **repo root**.
 
 ---
 
 ## How a key selects codex and configures its provider
 
-codex's provider is configured **automatically** — no hand-written `config.toml`, no `setup.sh`, no
-provider to pick. Setting the key also **selects codex as the backend**, so you do not even need
+codex's provider is configured **automatically** — no hand-written `config.toml`, no `CODEX_HOME`,
+no provider to pick. Setting the key also **selects codex as the backend**, so you do not even need
 `GEAK_AGENT_BACKEND=codex`. When launching codex the runtime resolves, first match wins, and emits
 `-c model_providers.geak_auto.*` overrides:
 
@@ -78,7 +78,7 @@ codex --version        # expect 0.146.1
 export AMDKEY="<32-hex subscription key>"
 # its certificate is publicly trusted -- no SSL_CERT_FILE needed
 
-# or -- official OpenAI (public CA; no shim, no SSL_CERT_FILE, no config.toml)
+# or -- official OpenAI (public CA; no SSL_CERT_FILE needed)
 # export OPENAI_API_KEY="sk-....."
 ```
 
@@ -126,7 +126,7 @@ node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.j
 | `GEAK_AGENT_PROFILE` / `--profile` | — | Pin an `(agent, model)` combo including its endpoint. |
 | `GEAK_AGENT_BACKEND` / `--agent` | — | Pin the agent only; the model still resolves by key. |
 | `GEAK_AGENT_AUTO` | `1` | `0` disables key-based backend selection. |
-| `GEAK_CODEX_AUTOCONFIG` | `1` | `0` disables provider auto-config (falls back to `codex-home/config.toml`). |
+| `GEAK_CODEX_AUTOCONFIG` | `1` | `0` disables provider auto-config (codex then falls back to its own `~/.codex/config.toml`). |
 | `GEAK_CODEX_EXTRA_ARGS` | — | Raw `-c key=value` overrides passed to codex; wins over auto-config. |
 | `OPENAI_BASE_URL` | — | Any OpenAI-compatible gateway; wins over key-based selection. |
 
@@ -136,9 +136,6 @@ node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.j
 `xhigh` (the same mapping as hyperloom's `resolve_codex_reasoning_effort`); any other off-scale value
 is rejected up front rather than passed through to codex. To pin it explicitly instead, use
 `GEAK_CODEX_EXTRA_ARGS="-c model_reasoning_effort=high"`.
-
-One special case: when `base_url` points at `127.0.0.1` / `localhost` (i.e. the local shim), the
-runtime does **not** auto-override it, preserving the `local_shim` path from `config.toml`.
 
 ## Troubleshooting
 
@@ -197,11 +194,4 @@ supports. Implement the missing capability first, *then* move the baseline const
 | `engine/conformance.mjs` | backend capability probes + static contract-drift audit |
 | `engine/experiment.mjs` | `(agent × model)` comparison runner |
 
-**Environment setup** — this directory:
-
-| File | Role |
-|---|---|
-| `setup.sh` | optional env bring-up; exports the in-repo `CODEX_HOME` |
-| `codex-home/config.toml` | in-repo `CODEX_HOME` (providers: `openai` default, optional `local_shim`) |
-| `responses_shim.mjs` | de-streaming proxy, only for a gateway that cannot stream `/v1/responses` |
 | `../run_e2e.py` | programmatic entry; routes native vs runtime by env |
