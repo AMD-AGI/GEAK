@@ -313,7 +313,7 @@ would reject+resample, silently mis-routing logic. It is enforced (deep-equal me
 > **Deliberate gaps:** `additionalProperties`, numeric ranges, `pattern`, `oneOf/anyOf` are not
 > checked — GEAK doesn't use them (grep) and enforcing them adds no parity value. This is the
 > one **inherent** non-parity: the success path is best-effort emulation, not a hard guarantee.
-> See §10 R1 and §14.
+> See §14.
 
 ---
 
@@ -344,29 +344,12 @@ success-rate / wall; no token/cost). This is the payoff of the whole design.
 
 ## 10. Parity with native Claude Code
 
-The audit compares each documented Workflow-tool behavior against the runtime, and against
-whether GEAK actually exercises it.
+Every documented Workflow-tool behavior was audited against the runtime. The primitives GEAK
+actually uses (§5) are aligned; the opts it does not use are stubbed or ignored, which is safe for
+the same reason. What is left over is listed in §14 — latent guardrails with no current effect, plus
+the one inherent non-parity (structured output, §8).
 
-| Behavior | Native | Runtime | GEAK exercises? | Status |
-|---|---|---|---|---|
-| `parallel` barrier + throw→null | ✔ | ✔ | yes | ✅ aligned |
-| `pipeline` no-barrier + `(prev,item,idx)` + throw→null | ✔ | ✔ | yes | ✅ aligned |
-| concurrency cap `min(16,cpu-2)` | ✔ | ✔ | yes | ✅ aligned |
-| lifetime cap 1000 agents | ✔ | ✔ | no | ✅ aligned |
-| `workflow()` one level + shared cap/counter | ✔ | ✔ | yes (e2e→kernel) | ✅ aligned |
-| `args` verbatim | ✔ | ✔ | yes | ✅ aligned |
-| `effort` / `isolation` / `agentType` opts | supported | ignored | **no** | ✅ irrelevant |
-| `budget.total/spent/remaining` | real | stub | **no** | ✅ irrelevant |
-| resume (`resumeFromRunId`) | yes | none | no (self-checkpoints via STATE_DIR) | ✅ irrelevant |
-| `agent()` terminal failure | returns **null** | **throws** | yes, but GEAK wrappers tolerate both | 🟡 converges to null; retry counts differ |
-| `Date.now`/`Math.random`/`new Date` in script | **throw** | allowed | **no** (GEAK avoids them) | 🟡 latent — no runtime guard |
-| Node/FS API (`process`/`require`) | forbidden | reachable | **no** | 🟡 latent — no runtime guard |
-| single `parallel/pipeline` ≤ 4096 items | error | unchecked | no | 🟡 latent |
-| **per-agent timeout** | none (GEAK owns it) | spawn hard-kill | **yes** | ✅ **fixed** (see below) |
-| **schema `enum`** | enforced | not checked | **yes** | ✅ **fixed** (see below) |
-| schema richness beyond enum | enforced | not checked | no | 🟡 documented gap (§8) |
-
-**The two divergences that affected GEAK's *results* — now fixed** (commit on this branch):
+**Two divergences did affect GEAK's *results*. Both are fixed on this branch:**
 
 1. **Agent timeout.** Native imposes no per-agent timeout; GEAK owns it via its own hang-guards
    (`agentT` ~60min in kernel, `agentBounded` ~120min in e2e). The runtime's spawn timeout
@@ -378,9 +361,6 @@ whether GEAK actually exercises it.
    `Number.isFinite`).
 2. **Schema `enum`.** Added enum membership to `validate()` so out-of-enum values are rejected +
    resampled, as native — preventing silent misclassification of outcomes/specialties.
-
-Everything else either doesn't change results or isn't exercised by GEAK. The latent items are
-guardrail opportunities (§14), not result bugs.
 
 ---
 
@@ -403,10 +383,10 @@ flowchart TD
 ```
 
 Two retry layers, by design: the runtime retries schema extraction *within* one `agent()` call
-(mirrors native "model retries on mismatch"); GEAK's wrapper adds an *outer* retry on thrown
-errors and a hang-guard that resolves null. Everything degrades to `null`, which every GEAK
-consumer already tolerates. The runtime surfaces terminal failures as **throw** (native: null);
-both converge to null via the wrapper, differing only in retry count.
+(mirrors native "model retries on mismatch"); GEAK's wrapper adds an *outer* retry on thrown errors
+and a hang-guard that resolves null. Native returns `null` on terminal failure where the runtime
+throws — both converge to `null` at the wrapper, differing only in retry count, and every GEAK
+consumer already tolerates `null`.
 
 ---
 
