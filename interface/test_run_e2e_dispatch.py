@@ -2469,7 +2469,7 @@ class TestMain(_RunE2ECase):
              "output_parity": "pass"},
         )
 
-        def boom(prompt, timeout_s, eval_dir):
+        def boom(prompt, timeout_s, eval_dir, ps_args=None):
             raise rx.WorkflowParseError("agent printed prose")
 
         self.patch_rx("invoke_workflow", boom)
