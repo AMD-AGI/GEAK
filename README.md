@@ -224,8 +224,8 @@ export OPENAI_API_KEY=sk-...        # -> OpenAI official (api.openai.com)
 ```bash
 node interface/runtime/selftest.mjs      # runtime unit checks; no GPU, no key needed
 
-# once you have a handoff.json (step 4), resolve the run without executing it:
-python interface/run_e2e.py handoff.json result.json --dry-run | grep agent_backend
+# once you have a run_spec.json (step 4), resolve the run without executing it:
+python interface/run_e2e.py run_spec.json result.json --dry-run | grep agent_backend
 #   "agent_backend": "agent=codex (from key)"    -> wired up
 #   "agent_backend": "native (claude/Workflow)"  -> not selected; see the shape rule above
 ```
@@ -236,8 +236,9 @@ codex has **no natural-language mode** (that path needs Claude Code's `Workflow`
 from the command line — `run_e2e.py` for a whole model, `run_workflow.mjs` for a single kernel:
 
 ```bash
-# e2e (whole-model serving throughput) -- the run is described by a handoff.json:
-cat > handoff.json <<'JSON'
+# e2e (whole-model serving throughput). A JSON says WHAT to optimize -- the same information the
+# natural-language example above carries. Filename is yours (run_e2e.py's usage calls it a handoff).
+cat > run_spec.json <<'JSON'
 { "schema_version": 2,
   "model_path": "/models/Qwen3.5-27B-FP8",
   "framework": "sglang", "tp": 1, "gpu_ids": "0",
@@ -245,7 +246,7 @@ cat > handoff.json <<'JSON'
   "exp_root": "/abs/work/geak" }
 JSON
 # required: model_path, exp_root (basename MUST be `geak`); rest has defaults -- interface/run_e2e.md
-python interface/run_e2e.py handoff.json result.json     # auto-routes to the codex runtime
+python interface/run_e2e.py run_spec.json result.json    # auto-routes to the codex runtime
 
 # single kernel:
 node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
