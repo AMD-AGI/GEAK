@@ -94,6 +94,49 @@ class FromRunsTest(unittest.TestCase):
         with open(self.out, encoding="utf-8") as fh:
             return json.load(fh), line
 
+    def write_runs_with_shape(self, path, rows):
+        """Rows carrying the per-round token totals a real client reports."""
+        with open(path, "w", encoding="utf-8") as fh:
+            for completed, total_in, total_out in rows:
+                fh.write(json.dumps({"output_throughput": 100.0,
+                                     "completed": completed,
+                                     "total_input_tokens": total_in,
+                                     "total_output_tokens": total_out}) + "\n")
+
+    def summarize_shape(self, rows):
+        self.write_runs_with_shape(self.runs, rows)
+        _run(["from-runs", self.runs, self.out])
+        with open(self.out, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_the_served_shape_is_measured_from_the_token_totals(self):
+        """On a trace replay the corpus owns the sequence lengths, so the shape is only
+        knowable from what a measured round actually served: totals / completed."""
+        s = self.summarize_shape([(10, 1120200, 7960)])
+        self.assertEqual(s["observed_isl"], 112020.0)
+        self.assertEqual(s["observed_osl"], 796.0)
+
+    def test_the_shape_is_the_median_across_rounds(self):
+        s = self.summarize_shape([(10, 1000000, 5000),
+                                  (10, 1120200, 7960),
+                                  (10, 1200000, 9000)])
+        self.assertEqual(s["observed_isl"], 112020.0)
+        self.assertEqual(s["observed_osl"], 796.0)
+
+    def test_a_round_reporting_no_completions_cannot_divide(self):
+        """completed=0 would be a ZeroDivisionError, and guessing a shape from a round
+        that served nothing is worse than reporting it as unmeasured."""
+        s = self.summarize_shape([(0, 1120200, 7960)])
+        self.assertIsNone(s["observed_isl"])
+        self.assertIsNone(s["observed_osl"])
+
+    def test_a_client_that_reports_no_token_totals_leaves_the_shape_unmeasured(self):
+        """None must stay distinguishable from a measured value: a consumer aims kernel
+        work at this shape, and a fabricated number aims it at the wrong regime."""
+        s, _ = self.summarize([100.0, 110.0])
+        self.assertIsNone(s["observed_isl"])
+        self.assertIsNone(s["observed_osl"])
+
     def test_median_spread_and_basis(self):
         s, line = self.summarize([100.0, 103.5, 107.0])
         self.assertEqual(s["throughput_tok_s_median"], 103.5)

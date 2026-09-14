@@ -2967,5 +2967,53 @@ class TestE2EDenominatorIsPublished(_RunE2ECase):
         self.assertEqual(e2e["e2e_gain_pct"], 25.0)
 
 
+# =========================================================================== #
+# live-log tee
+# =========================================================================== #
+class TestLiveLogTee(_RunE2ECase):
+    """A multi-hour run prints nothing to its container log until it is over, so the
+    agent's streamed text is teed to a watchable file. Observability must not be able
+    to fail the run it is observing."""
+
+    def test_streamed_text_is_appended_one_line_per_fragment(self):
+        path = self.tmp / "live.log"
+        self.patch_rx("_LIVE_LOG_PATH", str(path))
+        self.patch_rx("_LIVE_LOG_BROKEN", False)
+        rx._live_log(["first", "second\n"])
+        rx._live_log(["third"])
+        # A fragment that already ends in a newline must not gain a second one:
+        # the file is read by a human tailing it, and blank lines between every
+        # message make a long run unreadable.
+        self.assertEqual(path.read_text(encoding="utf-8"),
+                         "first\nsecond\nthird\n")
+
+    def test_an_unset_path_writes_nothing(self):
+        """Unset GEAK_LIVE_LOG => byte-identical behaviour, no file created."""
+        self.patch_rx("_LIVE_LOG_PATH", "")
+        self.patch_rx("_LIVE_LOG_BROKEN", False)
+        rx._live_log(["anything"])
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_nothing_to_say_is_not_a_write(self):
+        path = self.tmp / "empty.log"
+        self.patch_rx("_LIVE_LOG_PATH", str(path))
+        self.patch_rx("_LIVE_LOG_BROKEN", False)
+        rx._live_log([])
+        self.assertFalse(path.exists())
+
+    def test_a_write_failure_disables_the_tee_for_good_and_never_raises(self):
+        """The first error stops the tee rather than retrying on every message: a run
+        must not die, or spend its time failing, because a log file went away."""
+        unwritable = self.tmp / "a_directory"
+        unwritable.mkdir()
+        self.patch_rx("_LIVE_LOG_PATH", str(unwritable))
+        self.patch_rx("_LIVE_LOG_BROKEN", False)
+        rx._live_log(["this cannot be written"])
+        self.assertTrue(rx._LIVE_LOG_BROKEN)
+        # Still inert on the next call, and still silent.
+        rx._live_log(["nor this"])
+        self.assertTrue(rx._LIVE_LOG_BROKEN)
+
+
 if __name__ == "__main__":
     raise SystemExit(0 if unittest.main(exit=False).result.wasSuccessful() else 1)

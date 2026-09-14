@@ -248,6 +248,20 @@ class _T:
     def __le__(self, other):
         return self._bin(other, lambda x, y: float(x <= y))
 
+    def __ne__(self, other):
+        """Elementwise, like a real tensor. `nan != nan` is True, which is exactly what
+        makes a NaN position a MISMATCH rather than a match in the non-finite check."""
+        if not isinstance(other, (_T, int, float)):
+            return NotImplemented    # leave odd comparisons on the default behaviour
+        return self._bin(other, lambda x, y: float(x != y))
+
+    def __and__(self, other):
+        return self._bin(other, lambda x, y: float(bool(x) and bool(y)))
+
+    def __invert__(self):
+        return _T(self.shape, [0.0 if v else 1.0 for v in self.tolist()],
+                  dtype=self.dtype, device=self.device)
+
     def div(self, other):
         return self.__truediv__(other)
 
@@ -284,11 +298,35 @@ class _T:
     def all(self):
         return all(v != 0.0 for v in self.tolist())
 
+    def any(self):
+        return any(v != 0.0 for v in self.tolist())
+
+    def sum(self):
+        return self._reduce(sum)
+
     def item(self):
         return self.tolist()[0]
 
     def __repr__(self):
         return "_T(shape=%s, dtype=%s, data=%s)" % (self.shape, self.dtype, self.tolist())
+
+
+def _isfinite(t):
+    """Mask of the finite positions, 1.0/0.0 like a real bool tensor."""
+    return _T(t.shape, [float(math.isfinite(v)) for v in t.tolist()],
+              dtype=t.dtype, device=t.device)
+
+
+def _where(cond, a, b):
+    """Elementwise select. `b` is a 0-d fill in the non-finite path, so it broadcasts."""
+    mask = cond.tolist()
+    av, bv = a.tolist(), b.tolist()
+    if len(av) == 1:
+        av = av * len(mask)
+    if len(bv) == 1:
+        bv = bv * len(mask)
+    return _T(cond.shape, [x if m else y for m, x, y in zip(mask, av, bv)],
+              dtype=a.dtype, device=a.device)
 
 
 # --------------------------------------------------------------------------- #
@@ -448,6 +486,8 @@ class _Stack:
         torch.randperm = _randperm
         torch.equal = _equal
         torch.tensor = lambda data, dtype=None: _T((len(data),), list(data), dtype=dtype or FP32)
+        torch.isfinite = _isfinite
+        torch.where = _where
         return torch
 
 
@@ -1187,6 +1227,56 @@ class TestCorrect(_HarnessTestCase):
         self.assertFalse(ok)
         self.assertEqual(err, float("inf"))
 
+    # ---- non-finite references (attention LSE over an EMPTY KV slice is exactly -inf) ----
+    def test_a_bit_identical_infinite_element_passes_instead_of_failing_on_nan(self):
+        """`-inf - -inf` is NaN and `nan <= x` is False, so the plain path used to FAIL a
+        bit-identical output. The non-finite path compares those positions for identity."""
+        ref = _T((3,), [float("-inf"), 2.0, 2.0])
+        ok, err = hl.correct(ref.clone(), ref, 0.5)
+        self.assertTrue(ok)
+        self.assertEqual(err, 0.0)
+
+    def test_the_floor_is_the_rms_of_the_finite_bulk_not_an_infinite_budget(self):
+        """RMS over a tensor containing an inf is inf, which made atol inf and passed EVERY
+        element -- a silent false-PASS hole. The floor here is the RMS of the finite bulk:
+        finite part is [4, 0, 0] -> sum(x^2)/n = 16/3 -> RMS 2.309, atol = 1.1547. A 1.5
+        error on a near-zero element must still FAIL."""
+        ref = _T((4,), [float("-inf"), 4.0, 0.0, 0.0])
+        ok, err = hl.correct(_T((4,), [float("-inf"), 4.0, 1.5, 0.0]), ref, 0.5)
+        self.assertFalse(ok)
+        self.assertAlmostEqual(err, 1.5 / 1.1547005383792515, places=9)
+
+    def test_an_infinity_against_a_finite_element_is_a_real_mismatch(self):
+        """inf-vs-finite must never pass: the position is where the two sides disagree most."""
+        ref = _T((2,), [float("-inf"), 2.0])
+        ok, err = hl.correct(_T((2,), [0.0, 2.0]), ref, 0.5)
+        self.assertFalse(ok)
+        self.assertEqual(err, float("inf"))
+
+    def test_a_nan_never_matches_even_against_itself(self):
+        """`nan != nan`, so a NaN position is a mismatch on both sides -- a kernel that
+        produced NaN where the reference did must not be certified as agreeing."""
+        nan = float("nan")
+        ok, err = hl.correct(_T((2,), [nan, 2.0]), _T((2,), [nan, 2.0]), 0.5)
+        self.assertFalse(ok)
+        self.assertEqual(err, float("inf"))
+
+    def test_opposite_infinities_are_a_mismatch(self):
+        ref = _T((2,), [float("-inf"), 2.0])
+        ok, err = hl.correct(_T((2,), [float("inf"), 2.0]), ref, 0.5)
+        self.assertFalse(ok)
+        self.assertEqual(err, float("inf"))
+
+    def test_a_failure_inside_the_non_finite_path_fails_closed(self):
+        """A check that cannot complete must report INCORRECT, never raise: an exception
+        escaping here aborts the whole suite instead of rejecting one candidate. Only the
+        slow path is broken, so the plain path still routes into it first."""
+        def _boom(*_a, **_kw):
+            raise RuntimeError("no masked select on this device")
+        self.torch.where = _boom            # fresh fake torch per test; nothing to restore
+        ref = _T((2,), [float("-inf"), 2.0])
+        self.assertEqual(hl.correct(ref.clone(), ref, 0.5), (False, float("inf")))
+
     def test_a_non_tensor_output_is_incorrect_rather_than_an_exception(self):
         self.assertEqual(hl.correct(None, _T((2,), [1.0, 1.0]), 0.5), (False, float("inf")))
 
@@ -1252,6 +1342,13 @@ class TestAssertIndependentOutputs(_HarnessTestCase):
     def test_a_fresh_output_per_call_passes_with_no_reason(self):
         self.assertEqual(hl.assert_independent_outputs(_echo_call, (1.0, 2.0), (3.0, 4.0)),
                          (True, ""))
+
+    def test_a_launcher_returning_no_tensor_is_named_rather_than_passing_vacuously(self):
+        """Nothing to compare is not evidence of independence. A launcher that returns no
+        tensor must be reported by name, not silently certified."""
+        ok, reason = hl.assert_independent_outputs(lambda args: None, (1.0,), (2.0,))
+        self.assertFalse(ok)
+        self.assertIn("no_tensor_output", reason)
 
     def test_a_shared_return_buffer_is_named_with_its_storage_address(self):
         call = _StaticOutCall()
