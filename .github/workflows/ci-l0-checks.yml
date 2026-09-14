@@ -108,7 +108,9 @@ jobs:
             e2e_workflow/scripts/tests/test_parse_profile.py \
             e2e_workflow/scripts/tests/test_capture_shapes.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
+            e2e_workflow/scripts/tests/test_overlay_injection_runtime.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
+            e2e_workflow/scripts/tests/test_seam_trace_capture_guard.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \
@@ -293,6 +295,11 @@ jobs:
       # ever assigns with `:=` so an orchestrated run's exported values still win.
       - name: standalone workload declaration regression
         run: node e2e_workflow/scripts/test_agentx_declaration.js
+      # The acceptance noise band decides what counts as a win, and the 0.5% default was measured
+      # on fixed-shape work. A trace replay's replica spread is ~7x that, so the band is scoped per
+      # workload; this reads the real source expression to check a fixed-shape run is unchanged.
+      - name: acceptance noise band scoping
+        run: node e2e_workflow/scripts/test_noise_band_scope.js
 
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest
