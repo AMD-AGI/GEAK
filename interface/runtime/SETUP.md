@@ -147,15 +147,39 @@ runtime does **not** auto-override it, preserving the `local_shim` path from `co
 | `404` on the model | `GEAK_CODEX_MODEL` not served by that endpoint, or not Responses-API-capable |
 | TLS error | a private intranet gateway needs `SSL_CERT_FILE` (neither official OpenAI nor the AMD gateway does) |
 
-To check the runtime itself is not broken — no network, no GPU, no key required:
+## Verifying
 
 ```bash
-node interface/runtime/selftest.mjs      # expect 105/105
+# is the runtime itself sound? no network, no GPU, no key required
+node interface/runtime/selftest.mjs                          # expect 105/105
+
+# can codex actually drive GEAK, and has GEAK stayed inside the contract?
+node interface/runtime/conformance.mjs --profile codex
+#   --fake         self-check the harness with no CLI at all
+#   --audit-only   run only the static contract-drift audit (no CLI needed)
+#   --quick        skip the concurrency probe
+#   --geak-root D  point the audit at another tree
 ```
+
+A failing probe names the requirement it violated (R1–R7, defined in
+[`DESIGN.md`](DESIGN.md) §7.1). A failing *audit* means GEAK has grown past what this runtime
+supports — implement the missing capability first, then move the baseline constant in
+`conformance.mjs`, never the other way round.
 
 ## What each file is
 
-- `run_workflow.mjs` — runtime core · `config.mjs` + `registry.json` — backend/model configuration
-- `backends/` — the backend contract and its generic implementation · `schema.mjs` — structured output
-- `responses_shim.mjs` — de-streaming proxy · `setup.sh` — one-shot environment bring-up
-- `codex-home/config.toml` — in-repo `CODEX_HOME` (providers: `openai` default, optional `local_shim`)
+| File | Role |
+|---|---|
+| `run_workflow.mjs` | runtime: primitives, semaphore, nesting, script loader, CLI entry, metrics |
+| `schema.mjs` | structured-output contract + extraction + validation (incl. enum) |
+| `config.mjs` | registry loading, `(agent,model,profile)` resolution, invocation build, neutralization |
+| `registry.json` | agents × models × profiles data |
+| `backends/base.mjs` | backend contract + `spawnAgent` + `defaultConcurrency` |
+| `backends/generic.mjs` | config-driven backend for any CLI |
+| `selftest.mjs` | no-GPU/no-network unit tests of the primitives (105 checks) |
+| `conformance.mjs` | backend capability probes + static contract-drift audit |
+| `experiment.mjs` | `(agent × model)` comparison runner |
+| `responses_shim.mjs` | de-streaming proxy, only for a gateway that cannot stream `/v1/responses` |
+| `setup.sh` | optional env bring-up; exports the in-repo `CODEX_HOME` |
+| `codex-home/config.toml` | in-repo `CODEX_HOME` (providers: `openai` default, optional `local_shim`) |
+| `../run_e2e.py` | programmatic entry; routes native vs runtime by env |

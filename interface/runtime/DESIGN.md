@@ -166,7 +166,7 @@ result, and top-level `await` legal.
 > **Sharp edge (documented):** the `export`-strip regex is line-anchored and *not*
 > string-context-aware. A `export const foo` on its own line *inside a prompt template literal*
 > would be mangled. Currently no GEAK script does this (only the top-level `export const meta`
-> matches). Flagged as latent; see §14.
+> matches). Flagged as latent; see §13.
 
 ### 6.2 `agent()`
 
@@ -258,6 +258,23 @@ The shared `spawnAgent()` helper feeds the prompt on **stdin** (avoids ARG_MAX),
 stdout/stderr, and enforces a hard timeout. A non-zero exit becomes a thrown error so the
 runtime's retry/degrade path handles it.
 
+That contract is deliberately the smallest surface GEAK can be driven through. Expanded, it is
+seven requirements on a candidate CLI — the **R-items**, which `conformance.mjs` and
+`registry.json` refer to by name:
+
+| # | Requirement |
+|---|---|
+| R1 | **Structured output.** Nearly every `agent()` call carries a schema. A *native* JSON/schema mode is used where it exists; otherwise `schema.mjs` extract + retry, whose failure rate has to be measured. |
+| R2 | **Headless one-shot.** One command runs the full agentic loop, exits, and leaves the final answer cleanly on stdout. |
+| R3 | **Auto-approval + sandbox.** Roles write outside cwd and run `hipcc` / `rocprof` / `git`; codex's default sandbox blocks both. |
+| R4 | **Per-command timeout.** A build or bench runs minutes to hours, so any built-in cap must be raisable. |
+| R5 | **Context window.** Largest single prompt is role + knowledge + source, ≈16K tokens and up (63KB `kernel_extractor` is the worst case). |
+| R6 | **Provider auth / endpoint.** Env-nameable base_url and key — a same-model-different-CLI comparison needs both pointed at one endpoint. |
+| R7 | **cwd / absolute paths.** The CLI honours cwd and can do FS work on absolute paths outside it (tied to R3). |
+
+R1 and R3 are the blocking pair: unsolved, no CLI finishes a single round. R5–R7 are usually
+satisfied by configuration alone — which is why they are registry data rather than code.
+
 ### 7.2 Generic, config-driven backend (`backends/generic.mjs`)
 
 One backend drives **any** CLI from a resolved registry recipe — the differences (binary,
@@ -313,7 +330,7 @@ would reject+resample, silently mis-routing logic. It is enforced (deep-equal me
 > **Deliberate gaps:** `additionalProperties`, numeric ranges, `pattern`, `oneOf/anyOf` are not
 > checked — GEAK doesn't use them (grep) and enforcing them adds no parity value. This is the
 > one **inherent** non-parity: the success path is best-effort emulation, not a hard guarantee.
-> See §14.
+> See §13.
 
 ---
 
@@ -346,7 +363,7 @@ success-rate / wall; no token/cost). This is the payoff of the whole design.
 
 Every documented Workflow-tool behavior was audited against the runtime. The primitives GEAK
 actually uses (§5) are aligned; the opts it does not use are stubbed or ignored, which is safe for
-the same reason. What is left over is listed in §14 — latent guardrails with no current effect, plus
+the same reason. What is left over is listed in §13 — latent guardrails with no current effect, plus
 the one inherent non-parity (structured output, §8).
 
 **Two divergences did affect GEAK's *results*. Both are fixed on this branch:**
@@ -392,78 +409,32 @@ consumer already tolerates `null`.
 
 ## 12. Testing
 
-Two complementary tests:
+Two layers, both runnable with no GPU, no network and no real CLI.
 
-**`selftest.mjs`** — runs the primitives against a **fake backend** (no CLI / network / GPU):
-`extractJson`, `validate` (incl. enum), `parallel`/`pipeline` degradation, semaphore cap,
-`agent` schema retry-count, `runScript` export-strip + one-level nesting, config resolution +
-`buildInvocation` + `neutralizeForBackend` + the shipped `registry.json`. Run:
-`node interface/runtime/selftest.mjs` (105 checks, all passing).
+**`selftest.mjs`** — the primitives against a fake backend: `extractJson`, `validate` (incl.
+enum), `parallel`/`pipeline` degradation, semaphore cap, `agent` schema retry-count, `runScript`
+export-strip + one-level nesting, and config resolution + `buildInvocation` +
+`neutralizeForBackend` against the shipped `registry.json`. 105 checks.
 
-**`conformance.mjs`** — "does this backend actually support GEAK, and has GEAK stayed within the
-contract?" Two halves:
+**`conformance.mjs`** — two halves. *Capability probes* drive a real CLI through exactly what
+GEAK requires, one per R-item (§7.1): headless one-shot, structured output + enum, Bash executing
+a nonce it cannot guess (which also proves it isn't hallucinating the result), Write outside cwd,
+and a schema under `parallel()`. *Contract audit* is a static read of the GEAK sources that fails
+when the contract grows beyond what the runtime supports — a new injected global, a role needing a
+tool beyond Read/Write/Bash, a script using `Date.now`/`process`, a new un-neutralized
+Claude-specific phrase.
 
-The **R-items** are the per-CLI bring-up checklist the probes and `registry.json` refer to by name —
-the only things a new CLI has to answer before it can drive GEAK:
+The audit is the half worth arguing for. Parity is not a one-time check: GEAK keeps evolving, and
+an edit that quietly assumes a new Workflow-tool capability would otherwise surface months later
+as an unexplained behavior difference. So a pass means "the backend conforms **and** GEAK has not
+drifted", and going green again is always deliberate — handle the new capability, *then* move the
+baseline, never the other way round.
 
-| # | What to confirm with `<cli> --help` |
-|---|---|
-| R1 | **Structured output.** Nearly every `agent()` call carries a schema. Does the CLI have a *native* JSON/schema mode? If not it falls back to `schema.mjs` extract + retry, and the failure rate has to be measured. |
-| R2 | **Headless one-shot + output format.** The exact command (`codex exec`, …); does it run the full agentic loop and exit; does the final answer reach stdout cleanly. |
-| R3 | **Auto-approval + sandbox.** Roles write outside cwd and run `hipcc` / `rocprof` / `git`. codex's default sandbox blocks both, so it needs `--dangerously-bypass-approvals-and-sandbox` (or workspace-write + network). |
-| R4 | **Per-command timeout.** One build or bench can run minutes to hours — can the CLI's built-in cap be raised or removed? |
-| R5 | **Context window.** Largest single prompt is role + knowledge + source, ≈16K tokens and up (the 63KB `kernel_extractor` role is the worst case). |
-| R6 | **Provider auth / endpoint.** Which env vars name the base_url and key — same-model-different-CLI comparisons need both pointed at one endpoint. |
-| R7 | **cwd / absolute-path semantics.** Does the CLI honour cwd and allow FS work on absolute paths outside it (tied to R3). |
-
-R1 and R3 are the blocking pair: unsolved, no CLI finishes a single round. R2 and R4 are next; R5–R7
-are usually satisfied by configuration alone.
-
-- *Capability probes* (need a real/fake backend) — drive the real CLI through exactly what GEAK
-  requires, each mapped to an R-item: P1 headless one-shot (R2), P2 structured output +
-  enum (R1), P3 Bash executes + reads a nonce it can't guess (R2/R3, proves no hallucination),
-  P4 Write outside cwd (R3/R7), P5 schema under `parallel()` (concurrency).
-- *Contract audit* (static, no CLI) — the drift detector. Reads the actual GEAK sources and
-  fails when the contract grows beyond what this runtime + probe set support:
-  `A-primitive` (a new injected global the runtime doesn't implement — snake_case names are
-  skipped since primitives are lowerCamelCase; a small reviewed baseline in `ACK_NONPRIMITIVE`
-  absorbs the heuristic's known locals), `A-tools` (a role now needs a tool beyond
-  Read/Write/Bash — WebFetch/WebSearch/MCP/…), `A-forbidden` (a script uses
-  Date.now/Math.random/new Date/process/require — native-forbidden), `A-wording` (a NEW
-  Claude-specific phrase not neutralized — WARN).
-
-  Pass = the backend conforms **and** GEAK hasn't drifted. When the audit fires, the fix is to
-  handle the new capability (implement the primitive / add a probe / add a neutralize rule) and
-  then update the baseline constant so it goes green on purpose, never by accident.
-
-  Run: `node interface/runtime/conformance.mjs --profile codex` (or `--agent cursor`);
-  `--fake` self-checks the harness with no CLI; `--audit-only` runs just the drift audit;
-  `--quick` skips the concurrency probe; `--geak-root DIR` points the audit at a tree.
-
-Calibrated so the current GEAK tree is all-green; a simulated upgrade (a new `superAgent()`
-call, a role using `WebFetch`, a `Date.now()` in a script, `ultracode` wording) trips the
-matching checks by name.
+Running both harnesses, and what to do when one fails: [`SETUP.md`](SETUP.md).
 
 ---
 
-## 13. Extending — add a new CLI
-
-1. `<cli> --help` → determine the headless one-shot command, the auto-approve/sandbox flags, and
-   the provider auth env. Add an `agents.<name>` entry to `registry.json` (+ a `models`/`profiles`
-   entry if needed). **Zero code.**
-2. `node selftest.mjs` to confirm the runtime still passes.
-3. Smoke a single schema agent (e.g. `director:setup`) → check you get valid JSON (R1).
-4. End-to-end on `examples/tasks/knn`; watch schema-failure rate and that no legit agent is
-   killed by the backstop (R4).
-5. Parity-compare against the claude backend via `experiment.mjs`.
-
-If a CLI's behavior can't be expressed in registry data, drop in a hand-written
-`backends/<name>.mjs` exporting `{ name, runAgent }` — it takes precedence over the generic
-backend.
-
----
-
-## 14. Known divergences & future work
+## 13. Known divergences & future work
 
 - **R1 — structured output is best-effort, not guaranteed** (§8). The one inherent non-parity.
   Mitigation: strict contract + extraction + enum validation + retry. Future: use a backend's
@@ -481,31 +452,9 @@ backend.
 - **No NL entry for swapped backends** (§9). A "NL + `meta.whenToUse` → args JSON" pre-step would
   give non-claude backends a one-prompt UX too. New feature, out of scope for parity.
 
-### Empirical findings (early bring-up)
-
-- **The shell affects results, not just plumbing.** Early parity runs showed **codex (+ the
-  responses shim) noticeably weaker / early-stopping**, while **qwen-code ≈ native**. So a green
-  conformance means "can drive GEAK," not "matches native quality" — always confirm result parity
-  with `experiment.mjs` (claude vs the swapped backend) on a real task.
-- **Backend-specific operational caveats:**
-  - *codex + claude via the gateway* needs the external `responses_shim.mjs` running first, and a
-    **readable** `CODEX_HOME` config (a root-created 0600 file inside a container won't load the
-    provider — use `~/.codex` or `chown` it).
+- **A green conformance is not result parity.** Early runs showed codex (through the responses
+  shim) noticeably weaker / early-stopping versus native, while qwen-code tracked native closely.
+  Conformance proves a backend *can* drive GEAK, not that it produces the same wins — confirm with
+  `experiment.mjs` on a real task before trusting a swapped backend's numbers.
 
 ---
-
-## Appendix — file map
-
-| File | Role |
-|---|---|
-| `run_workflow.mjs` | runtime: primitives, semaphore, nesting, script loader, CLI entry, metrics |
-| `schema.mjs` | structured-output contract + extraction + validation (incl. enum) |
-| `config.mjs` | registry loading, `(agent,model,profile)` resolution, invocation build, neutralization |
-| `registry.json` | agents × models × profiles data |
-| `backends/base.mjs` | backend contract + `spawnAgent` + `defaultConcurrency` |
-| `backends/generic.mjs` | config-driven backend for any CLI |
-| `experiment.mjs` | `(agent × model)` comparison runner |
-| `selftest.mjs` | no-GPU/no-network unit tests of the primitives (105 checks) |
-| `conformance.mjs` | backend acceptance test (capability probes) + static contract-drift audit |
-| `responses_shim.mjs` | de-streaming shim so codex can drive claude via the gateway |
-| `../run_e2e.py` | programmatic entry; routes native vs runtime by env |
