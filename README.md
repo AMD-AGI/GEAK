@@ -237,24 +237,7 @@ node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --age
   --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
 ```
 
-### Optional knobs
-
-```bash
-export GEAK_CODEX_EFFORT=xhigh            # none|low|medium|high|xhigh (default xhigh; there is no "max")
-export GEAK_CODEX_MODEL=gpt-5.6-sol       # default, on both endpoints. Model ids are ENDPOINT-SPECIFIC:
-                                          # a gateway id 404s on api.openai.com and vice versa.
-# export GEAK_AGENT_PROFILE=codex-gpt56   # instead of the above: pin (agent, model) + its endpoint.
-                                          # codex-gpt56 = official OpenAI's suffixless gpt-5.6, so it
-                                          # holds even when a gateway key is also exported.
-                                          # single kernel: --profile codex-gpt56
-```
-
-Troubleshooting: 401 → key unset or invalid. 404 model → not served by that endpoint, or not
-Responses-API-capable. TLS error → only a private gateway needs `SSL_CERT_FILE`.
-`GEAK_CODEX_AUTOCONFIG=0` falls back to `interface/runtime/codex-home/config.toml`;
-`GEAK_CODEX_EXTRA_ARGS="-c model_provider=..."` pins a provider manually.
-
-Full env knobs and the compatibility checklist:
+Model / thinking-level knobs, troubleshooting and the compatibility checklist:
 [`interface/runtime/SETUP.md`](interface/runtime/SETUP.md),
 [`interface/run_e2e.md`](interface/run_e2e.md),
 [`interface/runtime/DESIGN.md`](interface/runtime/DESIGN.md).
