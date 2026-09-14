@@ -207,17 +207,15 @@ codex --version                    # expect 0.146.1
 
 ### 2. Configure — one provider key
 
-One variable is the whole configuration: it **selects codex** *and* **configures its provider** — no
-`config.toml` to edit, no backend flag to pass.
+One variable is the whole configuration: it **selects codex** *and* **configures its provider**.
 
 ```bash
 export OPENAI_API_KEY=sk-...        # -> OpenAI official (api.openai.com)
 # export AMDKEY=<32hex>             # -> AMD gateway (llm-api.amd.com/Unified)
 # export OPENAI_BASE_URL=...        # -> any other OpenAI-compatible endpoint; wins over both
-# no SSL_CERT_FILE needed: both endpoints present publicly-trusted certificates.
 
-# The key selects codex only while NO other backend's credentials are set: an ANTHROPIC_* or
-# CLAUDE_CODE_OAUTH_TOKEN variable in the same env keeps the run on the native Claude path.
+# A key selects codex only while NO other backend's credentials are set -- an ANTHROPIC_* or
+# CLAUDE_CODE_OAUTH_TOKEN in the same env keeps the run on Claude. To override:
 # export GEAK_AGENT_BACKEND=codex   # force codex anyway
 # export GEAK_AGENT_AUTO=0          # or switch key-based selection off entirely
 ```
