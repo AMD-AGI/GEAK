@@ -9,7 +9,7 @@ export const meta = {
     { title: 'ConfigSweep', detail: 'Config Tuner sweeps flags/env/backends FIRST (default ON)' },
     { title: 'TuningSkillset', detail: 'Tuning Specialist runs the VENDORED tuning skillset whole + standalone (its own pre/post A/B) BEFORE HeadKernel, so its share of the gain is attributable' },
     { title: 'HeadKernel', detail: 'highest-%GPU ops (GEMM/attn): extract_op -> backend bake-off (incl. FlyDSL) + aiter-DB/author tune -> e2e gate' },
-    { title: 'Milestone', detail: 'loop over editable kernels ABOVE milestone_min_pct% GPU (default 5): plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
+    { title: 'Milestone', detail: 'loop over editable kernels ABOVE milestone_min_pct% GPU (default 2) with roofline headroom left: plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
     { title: 'Finalize-gate', detail: 'finish any e2e A/B left incomplete before the final phase (still OPTIMIZATION work: budget-capped, never runs inside the final reserve)' },
     { title: 'Finalize', detail: 'e2e Integrator assembles the overlay + patch + launch bundle' },
     { title: 'Report', detail: 'System Architect writes the throughput report + grows the playbook' },
@@ -57,8 +57,11 @@ const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/
 // After parse_profile.py emits the standardized Top-N, the Profiler may run ONE analysis skill to
 // enrich it with a headroom estimate the Architect can route on. Default `roofline`: per-kernel % of
 // the hardware ceiling -> attainable speedup -> expected e2e gain, so budget goes to the kernel with
-// HEADROOM rather than merely the biggest one. STRICTLY ADVISORY: it annotates and suggests an
-// ordering, never prunes a candidate and never overrides the measured pct_gpu_time.
+// HEADROOM rather than merely the biggest one. ADVISORY except for ONE declared gate: it annotates,
+// suggests an ordering, and never overrides the measured pct_gpu_time -- but a kernel already at or
+// above its class `target_eff` is dropped from both optimization tracks (`rooflineSkip` below;
+// predicate in the skill's SKILL.md section 3 step 7). That gate fires only on a full-confidence
+// verdict, so a degraded/suspect/low-confidence estimate still only reorders.
 // `analysis_skill=none` (or a missing/unreadable skill dir) disables the step and the run behaves
 // exactly as it did before the feature existed -> ANALYSIS_SKILL_* are '' and nothing is injected.
 const ANALYSIS_SKILL = String(A.analysis_skill != null ? A.analysis_skill : 'roofline').trim();
@@ -67,7 +70,7 @@ const ANALYSIS_SKILL_INPUTS = ANALYSIS_SKILL_ON ? {
   ANALYSIS_SKILL: ANALYSIS_SKILL,
   ANALYSIS_SKILL_DIR: `${WORKFLOW_DIR}/knowledge/analysis_skills/${ANALYSIS_SKILL}`,
 } : { ANALYSIS_SKILL: '', ANALYSIS_SKILL_DIR: '' };
-if (ANALYSIS_SKILL_ON) log(`Profile-analysis skill: ${ANALYSIS_SKILL} (advisory; annotates + reorders, never prunes).`);
+if (ANALYSIS_SKILL_ON) log(`Profile-analysis skill: ${ANALYSIS_SKILL} (advisory for ordering; ONE gate: at/above target_eff -> not optimized).`);
 
 // ---- Upstream TraceLens / kernel-agent prior (OPTIONAL; forwarded by run_e2e.py as args.tracelens) ----
 // run_e2e.py resolves these paths beside the geak handoff and forwards ONLY the non-null ones.
@@ -195,9 +198,9 @@ const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);       // max kerne
 const MIN_KERNEL_TASKS = Math.min(parseInt(A.min_kernel_tasks != null ? A.min_kernel_tasks : 4, 10), BUDGET);
 // Milestone only optimizes editable kernels whose profiled share is worth it: skip any candidate with
 // pct_gpu_time below this threshold (Amdahl — a kernel a few % of GPU can't move e2e past the noise band).
-// Configurable via args.milestone_min_pct (default 5). This OVERRIDES the MIN_KERNEL_TASKS floor: if no
+// Configurable via args.milestone_min_pct (default 2). This OVERRIDES the MIN_KERNEL_TASKS floor: if no
 // candidate clears the bar, the milestone stops rather than grinding low-value kernels.
-const MILESTONE_MIN_PCT = parseFloat(A.milestone_min_pct != null ? A.milestone_min_pct : 5);
+const MILESTONE_MIN_PCT = parseFloat(A.milestone_min_pct != null ? A.milestone_min_pct : 2);
 const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : (FAST_MODE ? 3 : 6), 10); // budget passed DOWN per kernel (fewer rounds in fast mode)
 const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true') === 'true';
 // ---- TUNING SKILLSET phase (default ON) --------------------------------------------------------------
@@ -227,7 +230,7 @@ const TUNING_KB_ENABLED = String(A.tuning_kb != null ? A.tuning_kb : 'true') ===
 // recursive kernel-authoring run; tuning ops are cheap by comparison and their value is cumulative, so
 // a cap would just leave measurable wins on the table. The role decides where the returns stop.
 // Head-kernel track (GEMM/attention) — the highest-pct_gpu_time ops, optimized regardless of edit flag.
-const HEAD_THRESHOLD_PCT = parseFloat(A.head_threshold_pct != null ? A.head_threshold_pct : 5);
+const HEAD_THRESHOLD_PCT = parseFloat(A.head_threshold_pct != null ? A.head_threshold_pct : 2);
 // max head-op bake-offs. FAST MODE: the head track is parallelized across the GPU pool (one exclusive
 // lane per card), so scale the default up to the lane count (>=3) to keep every card busy in opt-A.
 // Default mode is UNCHANGED (3).
@@ -1489,6 +1492,41 @@ function kernelSelectionVerified(h, ext) {
   return { ok: true, why: `${target} launches profiled kernel ${required}` };
 }
 
+// ---- roofline skip gate ------------------------------------------------------------------------
+// A kernel already executing its byte/FLOP budget at its class target has no recoverable time left,
+// so an optimization budget spent on it buys nothing. It is dropped from BOTH tracks (head here,
+// milestone kernels below) regardless of pct_gpu_time. Source of truth for these numbers is
+// knowledge/analysis_skills/roofline/SKILL.md §7; roofline_tools.TARGET_EFF and this table are held
+// in sync by scripts/tests/test_roofline_skill.py.
+const ROOFLINE_TARGET_EFF = { gemm: 0.85, moe: 0.85, elementwise: 0.85, attn: 0.60 };
+
+// The gate fires ONLY on a full-confidence verdict. roofline_pct is a model, and the skill's own §6/§8
+// catalogue how it goes wrong: an infeasible byte model clamps to 1.0, and an unvalidated compute peak
+// can read a 43%-of-roofline kernel as 85%. Skipping on either would silently delete the largest kernel
+// in the profile — a far worse failure than tuning a saturated one. So anything degraded, suspect,
+// unclassified or low-confidence falls through to ordinary Amdahl ordering, as does a run with no
+// analysis skill at all (no fields -> no skip -> `analysis_skill=none` behaves exactly as before).
+function rooflineSkip(cand) {
+  if (!cand || cand.skip_optimization === false) return null;
+  const pct = Number(cand.roofline_pct);
+  if (!Number.isFinite(pct) || pct <= 0) return null;
+  if (cand.suspect === true) return null;
+  const klass = String(cand.headroom_class || '').trim().toLowerCase();
+  if (!klass || klass === 'unknown') return null;
+  const conf = String(cand.roofline_confidence || '').trim().toLowerCase();
+  if (conf !== 'medium' && conf !== 'high') return null;
+  // Prefer the target the analysis actually used; fall back to the class table only when absent, so
+  // a recalibrated target (SKILL.md §8 rule 5) reaches the gate without a code change.
+  let tgt = Number(cand.target_eff);
+  if (!Number.isFinite(tgt) || tgt <= 0) {
+    const kind = String(cand.op_kind || cand.classification || '').trim().toLowerCase();
+    tgt = ROOFLINE_TARGET_EFF[Object.keys(ROOFLINE_TARGET_EFF).find(k => kind.includes(k))];
+  }
+  if (!Number.isFinite(tgt) || tgt <= 0) return null;   // unknown op class -> no bar -> no skip
+  if (pct < tgt) return null;
+  return `roofline ${pct.toFixed(3)} >= target_eff ${tgt.toFixed(3)} (${klass}, confidence=${conf})`;
+}
+
 const PRE_FLAGGED_HEADS = [];
 function admitHeads(queue, stage) {
   const admitted = [];
@@ -1511,6 +1549,17 @@ function admitHeads(queue, stage) {
       PRE_FLAGGED_HEADS.push({ short_name: label,
         pct_gpu_time: head.pct_gpu_time, stage, gate: 'missing_kernel_identity',
         reason: 'gpu_kernel head carries no device_kernel/short_name/name' });
+      continue;
+    }
+    // Saturated heads are recorded, not silently dropped: a run that skipped the biggest kernel in
+    // its profile must say so in the report rather than look like it found nothing to do.
+    const saturated = rooflineSkip(head);
+    if (saturated) {
+      log(`  ⏭️  SKIP ${label} (${(+head.pct_gpu_time || 0).toFixed(1)}% GPU): ${saturated} — ` +
+        `no recoverable time, not worth a head-track budget (${stage}).`);
+      PRE_FLAGGED_HEADS.push({ short_name: label,
+        pct_gpu_time: head.pct_gpu_time, stage, gate: 'roofline_saturated',
+        reason: saturated });
       continue;
     }
     admitted.push(prepareHeadSelection(head));
@@ -4547,11 +4596,14 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   const planCandsRaw = (plan && plan.kernel_candidates) ? plan.kernel_candidates : [];
   // pct_gpu_time gate: only optimize kernels above MILESTONE_MIN_PCT (a candidate missing pct is kept,
   // not silently dropped — but logged). This gate OVERRIDES the min-floor: low-pct kernels are not worth it.
-  const planCands = planCandsRaw.filter(c => c.pct_gpu_time == null || c.pct_gpu_time >= MILESTONE_MIN_PCT);
-  const skipped = planCandsRaw.filter(c => c.pct_gpu_time != null && c.pct_gpu_time < MILESTONE_MIN_PCT);
-  if (skipped.length) log(`Milestone ${milestone}: skipped ${skipped.length} kernel(s) below ${MILESTONE_MIN_PCT}% GPU [${skipped.map(c => `${c.short_name || '?'}@${(+c.pct_gpu_time).toFixed(1)}%`).join(', ')}].`);
+  // Second gate, same place: a kernel already at its roofline target has no time left to recover, so
+  // clearing the pct bar is necessary but not sufficient. Both reasons are reported in one line.
+  const belowBar = c => c.pct_gpu_time != null && c.pct_gpu_time < MILESTONE_MIN_PCT;
+  const planCands = planCandsRaw.filter(c => !belowBar(c) && !rooflineSkip(c));
+  const skipped = planCandsRaw.filter(c => belowBar(c) || rooflineSkip(c));
+  if (skipped.length) log(`Milestone ${milestone}: skipped ${skipped.length} kernel(s) [${skipped.map(c => `${c.short_name || '?'}@${(+c.pct_gpu_time || 0).toFixed(1)}%${belowBar(c) ? ` <${MILESTONE_MIN_PCT}% GPU` : ` saturated: ${rooflineSkip(c)}`}`).join(', ')}].`);
   if (!planCands.length) {
-    if (planCandsRaw.length) log(`Milestone ${milestone}: stop — no remaining kernel clears the ${MILESTONE_MIN_PCT}% GPU bar (Amdahl: sub-threshold kernels can't move e2e). Floor is overridden by the pct gate.`);
+    if (planCandsRaw.length) log(`Milestone ${milestone}: stop — no remaining kernel both clears the ${MILESTONE_MIN_PCT}% GPU bar and has roofline headroom. Floor is overridden by these gates.`);
     else if (belowFloor) log(`Milestone ${milestone}: below floor (${dispatched}/${MIN_KERNEL_TASKS}) but Architect nominated nothing — cannot fabricate candidates; stopping.`);
     else log(`Milestone ${milestone}: stop (floor ${MIN_KERNEL_TASKS} met). ${plan ? plan.reasoning || '' : ''}`);
     break;

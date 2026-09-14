@@ -31,17 +31,22 @@ _DTYPE_BYTES = {
 }
 
 # target_eff priors -- SKILL.md section 7 is the source of truth; keep the two in sync.
+# These are ALSO the skip bar: a kernel at or above its class target is not optimized at all
+# (see `skip_optimization` below), so moving one of these numbers moves what the run works on.
 TARGET_EFF = {
-    "gemm": 0.90,
-    "moe": 0.90,
-    "elementwise": 0.875,
-    "attn": 0.50,
+    "gemm": 0.85,
+    "moe": 0.85,
+    "elementwise": 0.85,
+    "attn": 0.60,
 }
 
 #: Only kernels big enough for a headroom estimate to change a decision are worth analysing.
 #: Below this the Amdahl ceiling is under the noise band anyway, so modelling them adds failure
 #: modes without adding information. Callers should pass the run's HEAD_THRESHOLD_PCT.
-DEFAULT_MIN_PCT_GPU = 5.0
+#: Tracks the orchestrator's pct_gpu_time bar (milestone_min_pct / head_threshold_pct, both 2):
+#: analysing a NARROWER band than the run optimizes would hand the skip gate a kernel with no
+#: roofline entry at all, which reads as "no verdict" and silently disables the gate for it.
+DEFAULT_MIN_PCT_GPU = 2.0
 DEFAULT_TOP_N = 8
 
 #: Kernel launch + scheduling overhead. A launch whose duration is within a small multiple of this
@@ -206,6 +211,11 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
       * dispatch-bound -- the launch is timed by overhead, not by its transfer or its math;
       * infeasible (`raw_pct` outside (0,1]) -- the byte/FLOP model is wrong. A clamped 100% must
         never be read as "saturated"; that would turn a modelling failure into a routing decision.
+
+    `skip_optimization` is the run-level gate: a kernel at or above its class `target_eff` has no
+    recoverable time left and is dropped from BOTH optimization tracks. It is only ever True on a
+    real verdict -- every no-verdict path above sets it False explicitly, so a wrong byte model can
+    never silently delete the biggest kernel in the profile.
     """
     try:
         b, f, t = float(bytes_moved or 0), float(flops or 0), float(t_seconds or 0)
@@ -235,6 +245,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
         "hbm_util": hbm_util, "compute_util": compute_util,
         "arithmetic_intensity": ai, "ridge_point": ridge,
         "roofline_pct_raw": raw_pct, "target_eff": tgt, "suspect": False,
+        "skip_optimization": False, "skip_reason": "",
     }
 
     # (1) Dispatch-bound by time: the launch is timed by scheduling overhead, not by its own transfer
@@ -242,7 +253,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
     if t <= float(launch_overhead_s or 0) * LATENCY_BOUND_FACTOR:
         out.update(bound_type="latency", roofline_pct=min(max(raw_pct, 0.0), 1.0),
                    attainable_speedup=1.0, expected_e2e_gain_pct=0.0,
-                   headroom_class="unknown",
+                   headroom_class="unknown", skip_optimization=False,
                    note="per-launch time is within launch-overhead scale -> dispatch-bound; "
                         "roofline not applicable, lever is fusion / graph capture")
         return out
@@ -254,7 +265,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
     if not (0.001 <= raw_pct <= 1.0):
         out.update(bound_type=roof_axis, roofline_pct=min(max(raw_pct, 0.0), 1.0),
                    attainable_speedup=1.0, expected_e2e_gain_pct=0.0,
-                   headroom_class="unknown", suspect=True,
+                   headroom_class="unknown", suspect=True, skip_optimization=False,
                    bytes_upper_bound=pbw * t, flops_upper_bound=(pfl * t) if pfl > 0 else None,
                    note="model infeasible (raw %.3f outside (0,1]) -> NOT a saturation verdict; "
                         "re-estimate with a tighter model or measure with counters (stage C)"
@@ -275,6 +286,10 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
     out.update(bound_type=bound, roofline_pct=raw_pct, attainable_speedup=attainable,
                expected_e2e_gain_pct=float(pct_gpu_time or 0.0) * (1.0 - 1.0 / attainable),
                headroom_class=classify_headroom(raw_pct, tgt))
+    if raw_pct >= tgt:
+        out.update(skip_optimization=True,
+                   skip_reason="roofline %.3f >= target_eff %.3f -> no recoverable time; "
+                               "not worth an optimization budget" % (raw_pct, tgt))
     return out
 
 
@@ -283,7 +298,11 @@ def classify_headroom(roofline_pct, target_eff):
 
     Banded against `target_eff`, NOT against the raw roofline: what matters is the distance to what
     a good implementation of this class can realistically reach. Within 10% of that target means
-    tuning has nothing left to give (88% vs a 90% target is saturated, not "nearly there").
+    tuning has nothing left to give (0.80 against a 0.85 target is saturated, not "nearly there").
+
+    This is a THREE-BAND DESCRIPTION and is deliberately wider than the skip gate, which fires only
+    at `>= target_eff`. The band `0.9*target <= p < target` is therefore "saturated but still
+    optimized" -- reported as having little left, yet not dropped.
     """
     try:
         p, t = float(roofline_pct), float(target_eff)
@@ -383,11 +402,15 @@ def _selftest():
     moe = roofline_metrics(wbytes, 2 * M * tk * (2 * I * H + H * I), t_layer,
                            peaks["hbm_bw_bytes_s"], peak_flops_for(peaks, "fp8"),
                            TARGET_EFF["moe"], pct_gpu_time=26.45)
-    print("MoE   : hit %.0f/%d, %.0f MB/layer -> %.0f%% of roofline, %s, %.3fx, +%.2f%% e2e (%s)"
+    print("MoE   : hit %.0f/%d, %.0f MB/layer -> %.0f%% of roofline, %s, %.3fx, +%.2f%% e2e (%s, skip=%s)"
           % (hit, E, wbytes / 1e6, 100 * moe["roofline_pct"], moe["bound_type"],
-             moe["attainable_speedup"], moe["expected_e2e_gain_pct"], moe["headroom_class"]))
+             moe["attainable_speedup"], moe["expected_e2e_gain_pct"], moe["headroom_class"],
+             moe["skip_optimization"]))
     ok &= (moe["bound_type"] == "memory" and moe["headroom_class"] == "saturated"
            and 0.85 <= moe["roofline_pct"] <= 0.92 and moe["expected_e2e_gain_pct"] < 1.0)
+    # The gate on the case that motivated it: this head owns 26.45% of GPU time and optimizing it
+    # measured -0.064% e2e. At 0.88 against a 0.85 target it is now skipped outright.
+    ok &= moe["skip_optimization"] is True and "target_eff" in moe["skip_reason"]
 
     B, S, kvh, hd = 64, 1024 + 1024 // 2, 2, 256
     attn = roofline_metrics(B * S * kvh * hd * 2 * dtype_bytes("bf16"),
@@ -399,9 +422,10 @@ def _selftest():
              attn["bound_type"], attn["attainable_speedup"], attn["expected_e2e_gain_pct"],
              attn["headroom_class"]))
     # low util on both axes above the dispatch floor -> latency/occupancy-bound, but the verdict is
-    # KEPT (real headroom) so the ranking inversion below survives.
+    # KEPT (real headroom) so the ranking inversion below survives. Far below its 0.60 target, so
+    # the skip gate does not fire -- the head the profile ranked SECOND is the one that gets worked.
     ok &= (attn["bound_type"] == "latency" and attn["headroom_class"] == "underperforming"
-           and attn["attainable_speedup"] > 1.4
+           and attn["attainable_speedup"] > 1.4 and attn["skip_optimization"] is False
            and attn["expected_e2e_gain_pct"] > moe["expected_e2e_gain_pct"])
 
     # the whole point: the two rankings disagree, and roofline is the one that matched reality
@@ -413,7 +437,10 @@ def _selftest():
     allx = roofline_metrics(E * (2 * I * H + H * I) * 1, 1.0, t_layer, peaks["hbm_bw_bytes_s"],
                             peak_flops_for(peaks, "fp8"), TARGET_EFF["moe"], pct_gpu_time=26.45)
     assert allx["suspect"] and allx["roofline_pct"] <= 1.0, allx
-    print("L3    : all-expert bytes -> raw %.2f clamped to %.2f, suspect=True  OK"
+    # The clamp lands ABOVE target_eff. If the gate read roofline_pct alone it would now delete the
+    # biggest kernel in the profile on the strength of a broken byte model -- it must not.
+    assert allx["skip_optimization"] is False, allx
+    print("L3    : all-expert bytes -> raw %.2f clamped to %.2f, suspect=True, skip=False  OK"
           % (allx["roofline_pct_raw"], allx["roofline_pct"]))
 
     # degradation: unusable inputs return None instead of raising

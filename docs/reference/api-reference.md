@@ -62,9 +62,9 @@ extraction, and reversible reintegration; recursively calls `kernel_workflow.js`
 | `budget` | `6` | Max kernel-optimization tasks (config sweep is free). |
 | `kernel_budget` | `6` (`3` in fast) | Budget passed down to each recursive single-kernel run. |
 | `min_kernel_tasks` | `4` (capped by `budget`) | Milestone floor. |
-| `milestone_min_pct` | `5` | Skip editable kernels below this %GPU time (Amdahl). |
+| `milestone_min_pct` | `2` | Skip editable kernels below this %GPU time (Amdahl). Kernels at/above their roofline `target_eff` are skipped too. |
 | `config_tune` | `true` | Tier-0 flag/env/backend sweep on/off (runs FIRST). |
-| `head_threshold_pct` | `5` | Head-kernel selection threshold. |
+| `head_threshold_pct` | `2` | Head-kernel selection threshold. |
 | `head_budget` | `3` (≥ GPU count in fast) | Max head bake-offs. |
 | `head_author_max` | `2` | Author languages per head (FlyDSL + Triton). |
 | `head_protect_pct` | `30` | A dominant head is never silently dropped. |
