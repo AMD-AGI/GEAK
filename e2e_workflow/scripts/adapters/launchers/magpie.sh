@@ -78,6 +78,14 @@ adapter_launch() {
     [ "$_name" = "-u" ] || _removed_env["$_name"]=1
   done
 
+  # Replay the recipe below an explicit run value, and leave candidate EXTRA_ENV
+  # assignments above both. The capability probe and server must see the same
+  # value, including an explicit removal or a later candidate re-add.
+  local -a _max_model_env=()
+  if [ -n "${MAX_MODEL_LEN:-}" ] && ! geak_env_is_unset MAX_MODEL_LEN "${_config_env_unset[@]}"; then
+    _max_model_env=(MAX_MODEL_LEN="$MAX_MODEL_LEN")
+  fi
+
   # The orchestrator's RECORDED launch environment, replayed as the BASE layer.
   # Without it the two servers agree only where their ${X:-default} expansions
   # happen to agree -- true today only because both run in the same image, and
@@ -185,6 +193,7 @@ adapter_launch() {
     local _prof_fields
     _prof_fields="$(env "${_config_env_unset[@]}" -- \
       ${_recipe_env[@]+"${_recipe_env[@]}"} \
+      "${_max_model_env[@]}" \
       ${_extra_env[@]+"${_extra_env[@]}"} \
       PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
       python3 - <<'PY' 2>/dev/null
@@ -219,9 +228,9 @@ PY
   fi
 
   # Map GEAK's env onto Magpie's server-phase env. Ordering IS the precedence
-  # policy: recipe replay first, then the accepted env under test, then the
-  # run-scoped names GEAK owns -- so a later layer knowingly overrides an
-  # earlier one and nothing GEAK sets can be silently displaced by the recipe.
+  # policy: recipe replay first, then an explicit run MAX_MODEL_LEN, then the
+  # accepted env under test, then the run-scoped names GEAK owns -- so a later
+  # layer knowingly overrides an earlier one and the recipe cannot displace it.
   # Overlay is prepended so the launch_server child imports the patched subtree
   # first. EXTRA_<BE>_ARGS carries the accepted extra flags; Magpie dedupes them
   # against its own DEFAULT_ARGS.
@@ -267,13 +276,10 @@ PY
   # be an assignment-or-command operand, so no recipe/EXTRA_ENV value beginning
   # with `-` can be reparsed as an env option (belt-and-braces with the
   # allowlists above). `-u` unsets must precede `--`, hence the split.
-  local -a _max_model_env=()
-  if [ -n "${MAX_MODEL_LEN:-}" ] && ! geak_env_is_unset MAX_MODEL_LEN "${_config_env_unset[@]}"; then
-    _max_model_env=(MAX_MODEL_LEN="$MAX_MODEL_LEN")
-  fi
   env "${_config_env_unset[@]}" "${_env_unset[@]}" -- \
+    ${_recipe_env[@]+"${_recipe_env[@]}"} \
     "${_max_model_env[@]}" \
-    ${_recipe_env[@]+"${_recipe_env[@]}"} ${_extra_env[@]+"${_extra_env[@]}"} \
+    ${_extra_env[@]+"${_extra_env[@]}"} \
     "${_gpu_env[@]}" \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     MAGPIE_RUN_PHASE=server \
