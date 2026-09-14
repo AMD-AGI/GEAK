@@ -95,6 +95,12 @@ class BenchWarmServerLifecycleTest(unittest.TestCase):
                 summary = json.load(fh)
         return proc, summary, self.read_events()
 
+    def _reset_recorders(self):
+        """Clear the shared event log / call counter between runs in one test."""
+        for path in (self.events, self.counter):
+            if os.path.exists(path):
+                os.remove(path)
+
     def read_events(self):
         if not os.path.exists(self.events):
             return []
@@ -168,9 +174,16 @@ class BenchWarmServerLifecycleTest(unittest.TestCase):
         self.assertIsNone(summary)
         self.assertIn("warmup failed", proc.stderr)
 
-    def test_rejects_a_non_positive_round_count(self):
-        proc, _, _ = self.run_bench(purpose="validation", repeats=0, expect_rc=4)
-        self.assertIn("positive integer", proc.stderr)
+    def test_rejects_an_unusable_round_count(self):
+        # A garbage count must not silently become 1.  REPEATS=0 is NOT garbage --
+        # it is the documented shape-capture call site and has its own carve-out
+        # below -- so the guard is pinned on values that mean nothing at all.
+        for bad in ("-1", "abc", "1.5"):
+            with self.subTest(repeats=bad):
+                proc, _, _ = self.run_bench(
+                    purpose="validation", repeats=bad, expect_rc=4
+                )
+                self.assertIn("positive integer", proc.stderr)
 
     def test_caller_policy_overrides_the_mode_the_role_forwarded(self):
         # The validating role forwarded isolated_server (e.g. it echoed the
@@ -218,28 +231,66 @@ class BenchWarmServerLifecycleTest(unittest.TestCase):
         self.assertEqual([e["nump"] for e in benches], [7, 7])
 
     def test_repeats_zero_keeps_the_legacy_capture_lifecycle(self):
-        # REPEATS=0 is "warmup only, no timed round" -- the shape-capture /
-        # profile-window call sites.  The warm-mode default must not turn that
-        # into a hard "positive integer" reject.
-        out_dir = os.path.join(self.tmp, "out_capture")
-        env = dict(os.environ)
-        env.update(
-            ADAPTER=self.adapter, BACKEND="fake",
-            MODEL=os.path.join(self.tmp, "model"), OUT_DIR=out_dir,
-            EVENT_LOG=self.events, CALL_COUNTER=self.counter,
-            MEASUREMENT_PURPOSE="search", NUM_PROMPTS="7", CONC="3", PROFILE="0",
-            REPEATS="0", REUSE_SERVER="0", SERVING_GPU_LOCK_DISABLE="1",
-            SERVER_STOP_GRACE_S="0",
+        # REPEATS=0 is "warmup only, no timed round" -- the shape-capture call
+        # site (roles/kernel_extractor.md).  The warm-mode default must not turn
+        # that into a hard "positive integer" reject.
+        #
+        # Both spellings are exercised, and the SECOND is the one that actually
+        # ships: run_e2e.py pins GEAK_REPEAT_MODE into os.environ for the whole
+        # process tree, so under the orchestrator the mode is always already
+        # set -- a carve-out that merely supplied a default would be a no-op in
+        # exactly the configuration that needs it.
+        for label, mode in (("mode_unset", None), ("mode_pinned", "warm_server")):
+            with self.subTest(mode=label):
+                self._reset_recorders()
+                out_dir = os.path.join(self.tmp, f"out_capture_{label}")
+                env = dict(os.environ)
+                env.update(
+                    ADAPTER=self.adapter, BACKEND="fake",
+                    MODEL=os.path.join(self.tmp, "model"), OUT_DIR=out_dir,
+                    EVENT_LOG=self.events, CALL_COUNTER=self.counter,
+                    MEASUREMENT_PURPOSE="search", NUM_PROMPTS="7", CONC="3",
+                    PROFILE="0", REPEATS="0", REUSE_SERVER="0",
+                    SERVING_GPU_LOCK_DISABLE="1", SERVER_STOP_GRACE_S="0",
+                )
+                env.pop("GEAK_REPEAT_MODE", None)
+                if mode is not None:
+                    env["GEAK_REPEAT_MODE"] = mode
+                proc = subprocess.run(
+                    [BASH, BENCH], env=env, capture_output=True, text=True,
+                    timeout=60,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertNotIn("positive integer", proc.stderr)
+                # Short CONC warmup only -- no full round, no timed round.
+                benches = [e for e in self.read_events() if e["event"] == "bench"]
+                self.assertEqual([e["nump"] for e in benches], [3])
+
+    def test_profile_capture_keeps_the_legacy_lifecycle(self):
+        # A trace capture produces no throughput number, so it has nothing to
+        # align -- and the alignment is not free: warm mode would prepend a full
+        # NUM_PROMPTS round and publish an acceptance contract for a run that
+        # never timed anything.  Same os.environ pinning as above, so the mode
+        # is set explicitly here.
+        proc, _, events = self.run_bench(PROFILE=1)
+        self.assertIn("PROFILE=1", proc.stdout)
+        self.assertEqual(sum(e["event"] == "launch" for e in events), 1)
+        benches = [e for e in events if e["event"] == "bench"]
+        # Legacy's short CONC warmup, NOT warm mode's full NUM_PROMPTS round.
+        self.assertEqual(benches[0]["nump"], 3)
+
+    def test_profile_capture_outranks_the_validation_pin(self):
+        # GEAK_VALIDATION_REPEAT_MODE is caller policy over which measurement
+        # lifecycle validation uses -- but a trace capture is not a measurement,
+        # so the carve-out has to run after the pin, not before it.
+        proc, _, events = self.run_bench(
+            purpose="validation",
+            PROFILE=1,
+            GEAK_VALIDATION_REPEAT_MODE="warm_server",
         )
-        env.pop("GEAK_REPEAT_MODE", None)
-        proc = subprocess.run(
-            [BASH, BENCH], env=env, capture_output=True, text=True, timeout=60
-        )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertNotIn("positive integer", proc.stderr)
-        # Short CONC warmup only -- no full round, no timed round.
-        benches = [e for e in self.read_events() if e["event"] == "bench"]
-        self.assertEqual([e["nump"] for e in benches], [3])
+        self.assertIn("PROFILE=1", proc.stdout)
+        benches = [e for e in events if e["event"] == "bench"]
+        self.assertEqual(benches[0]["nump"], 3)
 
     def test_unknown_purpose_falls_back_to_one_round(self):
         proc, summary, _ = self.run_bench(purpose="nonsense")
