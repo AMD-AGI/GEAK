@@ -137,7 +137,7 @@ is rejected up front rather than passed through to codex. To pin it explicitly i
 `GEAK_CODEX_EXTRA_ARGS="-c model_reasoning_effort=high"`.
 
 One special case: when `base_url` points at `127.0.0.1` / `localhost` (i.e. the local shim), the
-runtime does **not** auto-override it, preserving the `safe_shim` path from `config.toml`.
+runtime does **not** auto-override it, preserving the `local_shim` path from `config.toml`.
 
 ## Troubleshooting
 
@@ -150,7 +150,7 @@ runtime does **not** auto-override it, preserving the `safe_shim` path from `con
 To check the runtime itself is not broken — no network, no GPU, no key required:
 
 ```bash
-node interface/runtime/selftest.mjs      # expect 50/50
+node interface/runtime/selftest.mjs      # expect 105/105
 ```
 
 ## What each file is
@@ -158,4 +158,4 @@ node interface/runtime/selftest.mjs      # expect 50/50
 - `run_workflow.mjs` — runtime core · `config.mjs` + `registry.json` — backend/model configuration
 - `backends/` — the backend contract and its generic implementation · `schema.mjs` — structured output
 - `responses_shim.mjs` — de-streaming proxy · `setup.sh` — one-shot environment bring-up
-- `codex-home/config.toml` — in-repo `CODEX_HOME` (providers: `safe_shim` default, `openai` official)
+- `codex-home/config.toml` — in-repo `CODEX_HOME` (providers: `openai` default, optional `local_shim`)

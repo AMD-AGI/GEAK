@@ -188,7 +188,7 @@ export function buildInvocation(agent, model, prompt, opts = {}) {
   //       itself from the key.
   // Emitted BEFORE extra_args so GEAK_CODEX_EXTRA_ARGS still wins. Skipped when
   // disabled (GEAK_CODEX_AUTOCONFIG=0), the base_url is the local responses-shim
-  // (127.0.0.1/localhost — keep the config.toml safe_shim path), or the caller
+  // (127.0.0.1/localhost — keep the config.toml local_shim path), or the caller
   // already pins model_provider via extra_args. OPENAI_CUSTOM_HEADERS (JSON
   // {"Header":"ENV_VAR_NAME"}) overrides a selected provider's headers.
   if (agent.provider_autoconfig === 'codex'

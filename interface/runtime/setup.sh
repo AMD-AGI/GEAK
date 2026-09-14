@@ -1,18 +1,22 @@
 #!/bin/sh
-# Portable env for the GEAK standalone runtime's OpenAI-dialect backends
-# (codex now; qwen/kimi share the same gateway pattern). No hardcoded paths:
-# node comes from PATH, key/CA come from YOUR environment, CODEX_HOME points at
-# the in-repo codex-home next to this script.
+# Portable env for the GEAK standalone runtime's codex backend. No hardcoded
+# paths: node comes from PATH, the key comes from YOUR environment, CODEX_HOME
+# points at the in-repo codex-home next to this script.
+#
+# Optional: on the common paths (AMD gateway, official OpenAI) the runtime
+# auto-configures codex and you do not need this file at all -- exporting AMDKEY
+# or OPENAI_API_KEY is enough. Source it when you want the in-repo CODEX_HOME or
+# the de-streaming shim. See SETUP.md.
 #
 # SOURCE it (do not execute in a subshell), so the exports reach your shell:
 #     . interface/runtime/setup.sh      # bash / sh / zsh
 #
 # REQUIRED (from your environment — never committed):
-#   OPENAI_API_KEY   gateway key (falls back to ANTHROPIC_API_KEY)
-#   SSL_CERT_FILE    CA bundle for gateway TLS (if your gateway needs one)
+#   AMDKEY | OPENAI_API_KEY   provider key; the runtime picks the endpoint from it
 # OPTIONAL:
-#   GEAK_GW_BASE     upstream base_url for the shim. No default (the old SaFE
-#                    gateway is decommissioned); unset means the shim is not started.
+#   SSL_CERT_FILE    CA bundle, only for a private gateway whose CA is not public
+#   GEAK_GW_BASE     upstream base_url for the shim. No default; unset means the
+#                    shim is not started (the common endpoints do not need it).
 #   SHIM_PORT        shim listen port (default: 8791)
 #
 # Requires `node` on PATH. No npm install needed (runtime + shim use only builtins).
@@ -29,23 +33,17 @@ _geak_here() {
 }
 GEAK_RT_DIR=$(_geak_here)
 
-export OPENAI_API_KEY="${OPENAI_API_KEY:-$ANTHROPIC_API_KEY}"
 export NODE_EXTRA_CA_CERTS="${NODE_EXTRA_CA_CERTS:-$SSL_CERT_FILE}"
 export CODEX_HOME="$GEAK_RT_DIR/codex-home"
 GEAK_GW_BASE="${GEAK_GW_BASE:-}"
 SHIM_PORT="${SHIM_PORT:-8791}"
 
-# qwen non-interactive auth selection (idempotent; harmless if qwen unused)
-mkdir -p "$HOME/.qwen"
-[ -f "$HOME/.qwen/settings.json" ] || printf '{"security":{"auth":{"selectedType":"openai"}}}\n' > "$HOME/.qwen/settings.json"
-export QWEN_CODE_SUPPRESS_YOLO_WARNING=1
-
 # Preflight checks (warn, do not exit — this file is sourced).
 if ! command -v node >/dev/null 2>&1; then
   echo "[setup] WARNING: 'node' not on PATH — install Node.js before running the runtime." >&2
 fi
-if [ -z "$OPENAI_API_KEY" ] && [ -z "$AMDKEY" ]; then
-  echo "[setup] WARNING: no provider key set (AMDKEY / OPENAI_API_KEY / ANTHROPIC_API_KEY) — codex/qwen will 401." >&2
+if [ -z "$AMDKEY" ] && [ -z "$OPENAI_API_KEY" ]; then
+  echo "[setup] WARNING: no provider key set (AMDKEY / OPENAI_API_KEY) — codex will 401." >&2
 fi
 
 # Start the de-streaming shim only when an upstream was named. The common paths
@@ -65,8 +63,3 @@ fi
 
 echo "[setup] CODEX_HOME=$CODEX_HOME"
 echo "[setup] run: node $GEAK_RT_DIR/run_workflow.mjs <workflow.js> --agent codex"
-
-# cursor is unrelated to the shim/gateway (it uses Cursor's private cloud).
-if command -v cursor-agent >/dev/null 2>&1; then
-  echo "[setup] note: cursor-agent found — for --profile cursor, run 'cursor-agent login' (your own Cursor account); it does NOT use this gateway/shim."
-fi

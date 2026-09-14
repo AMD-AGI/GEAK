@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Responses "de-streaming" shim: lets codex (which streams /v1/responses) drive
-// claude via the SaFE gateway. The gateway's NON-streaming /v1/responses for
-// claude is correct+complete, but its STREAMING variant makes codex reconnect-
-// loop. So: take codex's request, call the gateway with stream:false, then
+// a gateway whose STREAMING /v1/responses makes codex reconnect-loop while its
+// NON-streaming one is correct+complete. Not needed for the AMD gateway or
+// api.openai.com, which stream fine. So: take codex's request, call the upstream
+// with stream:false, then
 // synthesize the standard OpenAI Responses SSE event sequence from the complete
 // result. No protocol translation — everything stays in Responses schema.
 //
@@ -12,7 +13,7 @@
 // Fully env-parameterized (no hardcoded paths) so it is portable across machines:
 //   SHIM_PORT       listen port (default 8791)
 //   GW_BASE         upstream gateway base_url — REQUIRED, no default
-//   OPENAI_API_KEY  gateway key (falls back to ANTHROPIC_API_KEY)
+//   OPENAI_API_KEY  gateway key — REQUIRED
 //   SSL_CERT_FILE   CA bundle for gateway TLS (optional)
 //   SHIM_DEBUG      when set, dump last req/upstream JSON for debugging
 //   SHIM_DEBUG_DIR  dir for those dumps (default: cwd)
@@ -23,14 +24,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const PORT = parseInt(process.env.SHIM_PORT || '8791', 10);
-// No default upstream: the SaFE gateway this used to point at is decommissioned,
-// and guessing a replacement would send the key somewhere the caller never named.
+// No default upstream: guessing one would send the key somewhere the caller
+// never named.
 const GW_BASE = String(process.env.GW_BASE || '').trim().replace(/\/$/, '');
 if (!GW_BASE) {
   process.stderr.write('[shim] GW_BASE is required (upstream gateway base_url, e.g. https://gw.example.com/api/v1)\n');
   process.exit(2);
 }
-const KEY = process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY;
+const KEY = process.env.OPENAI_API_KEY;
 const ca = process.env.SSL_CERT_FILE ? fs.readFileSync(process.env.SSL_CERT_FILE) : undefined;
 const DEBUG_DIR = process.env.SHIM_DEBUG_DIR || process.cwd();
 const log = (...a) => process.stderr.write('[shim] ' + a.join(' ') + '\n');
@@ -64,7 +65,7 @@ function callGateway(path, bodyObj) {
 
 const sse = (res, event, obj) => res.write(`event: ${event}\ndata: ${JSON.stringify(obj)}\n\n`);
 
-// The SaFE gateway's /responses returns object:"chat.completion" and other
+// Some gateways' /responses return object:"chat.completion" and other
 // chat-ish fields; codex's Responses client expects a canonical Responses object
 // (object:"response", proper item ids, text.format, reasoning object). Normalize.
 let __idc = 0;

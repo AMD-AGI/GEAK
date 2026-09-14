@@ -398,7 +398,7 @@ Two complementary tests:
 `extractJson`, `validate` (incl. enum), `parallel`/`pipeline` degradation, semaphore cap,
 `agent` schema retry-count, `runScript` export-strip + one-level nesting, config resolution +
 `buildInvocation` + `neutralizeForBackend` + the shipped `registry.json`. Run:
-`node interface/runtime/selftest.mjs` (54 checks, all passing).
+`node interface/runtime/selftest.mjs` (105 checks, all passing).
 
 **`conformance.mjs`** — "does this backend actually support GEAK, and has GEAK stayed within the
 contract?" Two halves:
@@ -491,8 +491,6 @@ backend.
   - *codex + claude via the gateway* needs the external `responses_shim.mjs` running first, and a
     **readable** `CODEX_HOME` config (a root-created 0600 file inside a container won't load the
     provider — use `~/.codex` or `chown` it).
-  - *cursor* runs on Cursor cloud (not the SaFE gateway), so it can't do a strict same-model
-    comparison and sends data off-box; verify its `--output-format`/model at bring-up (registry note).
 
 ---
 
@@ -507,7 +505,7 @@ backend.
 | `backends/base.mjs` | backend contract + `spawnAgent` + `defaultConcurrency` |
 | `backends/generic.mjs` | config-driven backend for any CLI |
 | `experiment.mjs` | `(agent × model)` comparison runner |
-| `selftest.mjs` | no-GPU/no-network unit tests of the primitives (54 checks) |
+| `selftest.mjs` | no-GPU/no-network unit tests of the primitives (105 checks) |
 | `conformance.mjs` | backend acceptance test (capability probes) + static contract-drift audit |
 | `responses_shim.mjs` | de-streaming shim so codex can drive claude via the gateway |
 | `../run_e2e.py` | programmatic entry; routes native vs runtime by env |

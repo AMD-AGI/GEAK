@@ -211,7 +211,7 @@ async function testConfig() {
   eq(cval(invAuto.args, 'model_provider'), '"geak_auto"', 'autoconfig sets model_provider');
   eq(cval(invAuto.args, 'model_providers.geak_auto.base_url'), '"https://api.openai.com/v1"', 'autoconfig base_url from OPENAI_BASE_URL');
   eq(cval(invAuto.args, 'model_providers.geak_auto.wire_api'), '"responses"', 'autoconfig wire_api=responses');
-  // (b) shim base_url -> NO autoconfig (preserve config.toml safe_shim path)
+  // (b) shim base_url -> NO autoconfig (preserve config.toml local_shim path)
   const invShim = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'http://127.0.0.1:8791/v1' } });
   eq(cval(invShim.args, 'model_provider'), undefined, 'autoconfig skipped for local shim base_url');
   // (c) key-driven auto-select: a header-carrying provider (no base_url) supplies
@@ -227,8 +227,8 @@ async function testConfig() {
   const invOff = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'https://api.openai.com/v1', GEAK_CODEX_AUTOCONFIG: '0' } });
   eq(cval(invOff.args, 'model_provider'), undefined, 'autoconfig disabled by GEAK_CODEX_AUTOCONFIG=0');
   // (f) caller pins model_provider via extra args -> skip autoconfig
-  const invPin = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'https://api.openai.com/v1', GEAK_CODEX_EXTRA_ARGS: '-c model_provider=safe_shim' } });
-  eq(cval(invPin.args, 'model_provider'), 'safe_shim', 'extra_args model_provider wins over autoconfig');
+  const invPin = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'https://api.openai.com/v1', GEAK_CODEX_EXTRA_ARGS: '-c model_provider=local_shim' } });
+  eq(cval(invPin.args, 'model_provider'), 'local_shim', 'extra_args model_provider wins over autoconfig');
   // codex thinking level: default xhigh (its true maximum — it has no 'max'),
   // GEAK_CODEX_EFFORT override, extra_args pin not double-emitted
   eq(cval(invOai.args, 'model_reasoning_effort'), 'xhigh', 'codex effort defaults to xhigh');
