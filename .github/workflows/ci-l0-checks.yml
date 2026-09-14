@@ -94,6 +94,11 @@ jobs:
             interface/test_run_e2e_margin.py \
             interface/test_run_e2e_measurement_basis.py \
             interface/test_run_e2e_kb_write_tuned.py \
+            interface/test_run_e2e_workload_comparability.py \
+            e2e_workflow/scripts/tests/test_agentx_client_canonicality.py \
+            e2e_workflow/scripts/tests/test_agentx_profile_and_mapper.py \
+            e2e_workflow/scripts/tests/test_agentx_smoke.py \
+            e2e_workflow/scripts/tests/test_bench_env_channel.py \
             e2e_workflow/scripts/tests/test_magpie_launcher_extra_args.py \
             e2e_workflow/scripts/tests/test_bench_trust_remote_code.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py \
@@ -103,7 +108,9 @@ jobs:
             e2e_workflow/scripts/tests/test_parse_profile.py \
             e2e_workflow/scripts/tests/test_capture_shapes.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
+            e2e_workflow/scripts/tests/test_overlay_injection_runtime.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
+            e2e_workflow/scripts/tests/test_seam_trace_capture_guard.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \
@@ -256,7 +263,7 @@ jobs:
           /tmp/gitleaks dir . --no-banner --redact --config .gitleaks.toml
 
   node-regression:
-    name: Node regression (expert_skills, kernel canonicalization, tuning phase, time budget)
+    name: Node regression (expert_skills, kernel canonicalization, tuning phase, time budget, workload declaration)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -282,6 +289,17 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      # Standalone GEAK has no orchestrator to export BENCH_CLIENT / E2E_METRIC / AGENTX_*, so the
+      # workflow declares the workload itself. Two things must hold and only node can check them:
+      # an absent declaration leaves the fixed ISL/OSL path byte-identical, and a present one only
+      # ever assigns with `:=` so an orchestrated run's exported values still win.
+      - name: standalone workload declaration regression
+        run: node e2e_workflow/scripts/test_agentx_declaration.js
+      # The acceptance noise band decides what counts as a win, and the 0.5% default was measured
+      # on fixed-shape work. A trace replay's replica spread is ~7x that, so the band is scoped per
+      # workload; this reads the real source expression to check a fixed-shape run is unchanged.
+      - name: acceptance noise band scoping
+        run: node e2e_workflow/scripts/test_noise_band_scope.js
 
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest

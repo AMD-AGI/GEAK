@@ -670,6 +670,17 @@ def correct(out, ref, tol):
 
 
 def _correct_one(out, ref, tol):
+    """Element check with EXPLICIT non-finite handling.
+
+    A legitimately non-finite reference element exists in real ops — an attention LSE over an EMPTY
+    KV slice (varlen `cu_seqlens_k=[...,n,n]`) is exactly -inf. Two failure modes are handled here
+    instead of being papered over:
+      * `-inf - -inf = nan`, and `nan <= x` is False, so a bit-identical output used to FAIL;
+      * `RMS(ref)` over a tensor containing an inf is inf, so `atol` became inf and EVERY element
+        passed — a silent false-PASS hole that hid real drift on any output with an inf.
+    Rule: non-finite positions must be IDENTICAL (`-inf` vs `-inf`) to pass — NaN never matches
+    (`nan != nan`), inf-vs-finite never matches — and the tolerance floor is the RMS of the FINITE
+    bulk only."""
     torch = _torch()
     try:
         if tuple(out.shape) != tuple(ref.shape):
@@ -677,6 +688,31 @@ def _correct_one(out, ref, tol):
         out = out.float()
         ref = ref.float()
         atol = tol * ref.pow(2).mean().sqrt().clamp_min(1e-6)   # noise floor = tol * RMS(ref)
+        diff = (out - ref).abs()
+        ok = bool((diff <= (atol + tol * ref.abs())).all())
+        err = diff.div(ref.abs() + atol).max().item()
+        if math.isfinite(err) and math.isfinite(float(atol.item())):
+            return ok, err                                      # all-finite: unchanged behavior
+        return _correct_one_nonfinite(out, ref, tol)
+    except Exception:
+        return False, float("inf")
+
+
+def _correct_one_nonfinite(out, ref, tol):
+    """Slow path for tensors carrying inf/NaN — entered ONLY when the plain path produced a
+    non-finite error or a non-finite tolerance floor."""
+    torch = _torch()
+    try:
+        finite = torch.isfinite(out) & torch.isfinite(ref)
+        # A non-finite position passes only if the two sides are IDENTICAL there (-inf vs -inf, which
+        # `==` reports True and NaN never does). Otherwise it is a real mismatch.
+        if bool(((~finite) & (out != ref)).any()):
+            return False, float("inf")
+        zero = torch.zeros((), device=ref.device, dtype=ref.dtype)
+        ref = torch.where(finite, ref, zero)
+        out = torch.where(finite, out, zero)
+        n = max(1, int(finite.sum().item()))
+        atol = tol * (ref.pow(2).sum() / n).sqrt().clamp_min(1e-6)
         diff = (out - ref).abs()
         ok = bool((diff <= (atol + tol * ref.abs())).all())
         err = diff.div(ref.abs() + atol).max().item()
@@ -690,18 +726,33 @@ def assert_independent_outputs(call, args_a, args_b):
     shortcut). Call with two DIFFERENT inputs and verify:
       1. the first output is NOT mutated by the second call (snapshot compare), and
       2. the two outputs do not share storage (distinct data_ptr).
-    A correct `fn(args) -> fresh out` launcher passes both. Returns (ok, reason)."""
+    A correct `fn(args) -> fresh out` launcher passes both. Returns (ok, reason).
+
+    A MULTI-TENSOR return (attention's `(out, lse)`, a dict) is flattened and every component is
+    checked — the contract applies to each of them, and treating the return as a bare tensor used to
+    raise AttributeError here and fail an otherwise-correct multi-output op."""
     torch = _torch()
     try:
-        out_a = call(args_a)
-        snap = out_a.detach().clone()
-        out_b = call(args_b)
-        if out_a.data_ptr() == out_b.data_ptr():
-            return False, ("shared_output_buffer: two calls returned the SAME storage "
-                           f"(data_ptr={out_a.data_ptr():#x}) — a persistent/static return buffer. "
-                           "The launcher contract is fn(args) -> FRESH out; a shared buffer is a "
-                           "tight-loop cheat that is incorrect for any real (batched) caller.")
-        if not torch.equal(out_a, snap):
+        parts_a = flatten_outputs(call(args_a))
+        if not parts_a:
+            return False, "no_tensor_output: the launcher returned no tensor to check"
+        snap = [t.detach().clone() for t in parts_a]
+        parts_b = flatten_outputs(call(args_b))
+        for out_a, out_b in zip(parts_a, parts_b):
+            if out_a.data_ptr() == out_b.data_ptr():
+                return False, ("shared_output_buffer: two calls returned the SAME storage "
+                               f"(data_ptr={out_a.data_ptr():#x}) — a persistent/static return "
+                               "buffer. The launcher contract is fn(args) -> FRESH out; a shared "
+                               "buffer is a tight-loop cheat that is incorrect for any real "
+                               "(batched) caller.")
+        unchanged = all(torch.equal(a, s) for a, s in zip(parts_a, snap))
+        if not unchanged:
+            try:    # NaN-safe retry: torch.equal reports a NaN-carrying (unmutated) output as changed
+                unchanged = all(bool(((a == s) | (a.ne(a) & s.ne(s))).all())
+                                for a, s in zip(parts_a, snap))
+            except Exception:
+                pass
+        if not unchanged:
             return False, ("mutated_prior_output: the second call overwrote the first call's returned "
                            "tensor — the launcher aliases a persistent buffer instead of allocating a "
                            "fresh output. Incorrect for real callers.")
