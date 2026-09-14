@@ -193,9 +193,7 @@ GEAK/
 
 ## Running GEAK on the codex CLI
 
-The **same** workflows also run on the **codex CLI**: a standalone Node runtime
-(`interface/runtime/`) supplies the orchestration primitives and dispatches each agent turn to a
-one-shot `codex exec` process, so the `.js` workflows / roles / knowledge are used unmodified.
+GEAK also runs on the **codex CLI**, with the same `.js` workflows unmodified.
 
 ### 1. Install
 
