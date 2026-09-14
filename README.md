@@ -209,22 +209,20 @@ codex --version                    # expect 0.146.1
 
 ### 2. Configure — one provider key
 
-That single variable is the whole configuration: it **selects codex** *and* **auto-configures its
-provider**, so there is no `config.toml` to edit and no backend flag to pass.
+One variable is the whole configuration: it **selects codex** *and* **configures its provider** — no
+`config.toml` to edit, no backend flag to pass.
 
 ```bash
-export OPENAI_API_KEY=sk-...    # -> OpenAI official (api.openai.com)
-# export AMDKEY=<32hex>         # -> AMD gateway (llm-api.amd.com/Unified)
-# another OpenAI-compatible endpoint? set OPENAI_BASE_URL -- it wins over both.
+export OPENAI_API_KEY=sk-...        # -> OpenAI official (api.openai.com)
+# export AMDKEY=<32hex>             # -> AMD gateway (llm-api.amd.com/Unified)
+# export OPENAI_BASE_URL=...        # -> any other OpenAI-compatible endpoint; wins over both
+# no SSL_CERT_FILE needed: both endpoints present publicly-trusted certificates.
+
+# The key selects codex only while NO other backend's credentials are set: an ANTHROPIC_* or
+# CLAUDE_CODE_OAUTH_TOKEN variable in the same env keeps the run on the native Claude path.
+# export GEAK_AGENT_BACKEND=codex   # force codex anyway
+# export GEAK_AGENT_AUTO=0          # or switch key-based selection off entirely
 ```
-
-Neither needs `SSL_CERT_FILE`; both endpoints present publicly-trusted certificates.
-
-Selection reads the **shape** of the credential environment, not one key's presence: a key picks codex
-only while no *other* backend's credentials are set. An `ANTHROPIC_*` / `CLAUDE_CODE_OAUTH_TOKEN`
-variable sitting next to `AMDKEY` is ambiguous, so the run stays on the native Claude path rather than
-being moved onto codex silently. Force it with `GEAK_AGENT_BACKEND=codex`, or switch key-based
-selection off with `GEAK_AGENT_AUTO=0`.
 
 ### 3. Verify
 
@@ -259,20 +257,22 @@ node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --age
   --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
 ```
 
-### Knobs and troubleshooting
+### Optional knobs
 
-The defaults are meant to be left alone:
+```bash
+export GEAK_CODEX_EFFORT=xhigh            # none|low|medium|high|xhigh (default xhigh; there is no "max")
+export GEAK_CODEX_MODEL=gpt-5.6-sol       # default, on both endpoints. Model ids are ENDPOINT-SPECIFIC:
+                                          # a gateway id 404s on api.openai.com and vice versa.
+# export GEAK_AGENT_PROFILE=codex-gpt56   # instead of the above: pin (agent, model) + its endpoint.
+                                          # codex-gpt56 = official OpenAI's suffixless gpt-5.6, so it
+                                          # holds even when a gateway key is also exported.
+                                          # single kernel: --profile codex-gpt56
+```
 
-| Knob | Default | Why change it |
-| --- | --- | --- |
-| `GEAK_CODEX_MODEL` | the provider's `default_model` (`gpt-5.6-sol`) | Model ids are **endpoint-specific** — reusing one gateway's id on another 404s on the first turn. |
-| `GEAK_AGENT_PROFILE=codex-gpt56` (e2e) / `--profile codex-gpt56` (kernel) | — | Pins OpenAI's suffixless `gpt-5.6`; a pinned model carries its own endpoint, so it survives a stray gateway key. |
-| `GEAK_CODEX_EFFORT` | `xhigh` | codex's scale is `none`…`xhigh` and has **no** `max` (accepted as an alias); off-scale values are rejected up front. |
-
-401 → key unset or invalid. 404 model → not served by that endpoint, or not Responses-API-capable.
-TLS error → only a private gateway needs `SSL_CERT_FILE`. `GEAK_CODEX_AUTOCONFIG=0` falls back to
-`interface/runtime/codex-home/config.toml`; `GEAK_CODEX_EXTRA_ARGS="-c model_provider=..."` pins a
-provider manually.
+Troubleshooting: 401 → key unset or invalid. 404 model → not served by that endpoint, or not
+Responses-API-capable. TLS error → only a private gateway needs `SSL_CERT_FILE`.
+`GEAK_CODEX_AUTOCONFIG=0` falls back to `interface/runtime/codex-home/config.toml`;
+`GEAK_CODEX_EXTRA_ARGS="-c model_provider=..."` pins a provider manually.
 
 Full env knobs and the compatibility checklist:
 [`interface/runtime/SETUP.md`](interface/runtime/SETUP.md),
