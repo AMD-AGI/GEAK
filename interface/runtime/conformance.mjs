@@ -12,7 +12,7 @@
 //   node conformance.mjs --fake            # self-check the harness (no real CLI)
 //   node conformance.mjs --profile qwen --quick   # skip the concurrency probe
 //
-// Each probe maps to a COMPAT_findings R-item so a failure is actionable.
+// Each probe maps to an R-item (DESIGN.md §13) so a failure is actionable.
 // Exit code 0 = CONFORMS, 1 = one or more required probes failed, 2 = usage.
 
 import { mkdtemp, writeFile, readFile, rm, readdir } from 'node:fs/promises';
@@ -410,7 +410,7 @@ async function main() {
     process.exit(0);
   } else {
     console.log(`\nDOES NOT CONFORM ❌  — ${failed.length} required check(s) failed: ${failed.map((f) => `${f.id}[${f.rItem}]`).join(', ')}`);
-    console.log(`Probes -> see COMPAT_findings.md (R-items). Audit -> handle the new capability, then update the baseline constant in conformance.mjs.`);
+    console.log(`Probes -> see DESIGN.md §13 (R-items). Audit -> handle the new capability, then update the baseline constant in conformance.mjs.`);
     process.exit(1);
   }
 }

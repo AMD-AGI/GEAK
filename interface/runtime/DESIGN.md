@@ -423,8 +423,24 @@ Two complementary tests:
 **`conformance.mjs`** — "does this backend actually support GEAK, and has GEAK stayed within the
 contract?" Two halves:
 
+The **R-items** are the per-CLI bring-up checklist the probes and `registry.json` refer to by name —
+the only things a new CLI has to answer before it can drive GEAK:
+
+| # | What to confirm with `<cli> --help` |
+|---|---|
+| R1 | **Structured output.** Nearly every `agent()` call carries a schema. Does the CLI have a *native* JSON/schema mode? If not it falls back to `schema.mjs` extract + retry, and the failure rate has to be measured. |
+| R2 | **Headless one-shot + output format.** The exact command (`codex exec`, …); does it run the full agentic loop and exit; does the final answer reach stdout cleanly. |
+| R3 | **Auto-approval + sandbox.** Roles write outside cwd and run `hipcc` / `rocprof` / `git`. codex's default sandbox blocks both, so it needs `--dangerously-bypass-approvals-and-sandbox` (or workspace-write + network). |
+| R4 | **Per-command timeout.** One build or bench can run minutes to hours — can the CLI's built-in cap be raised or removed? |
+| R5 | **Context window.** Largest single prompt is role + knowledge + source, ≈16K tokens and up (the 63KB `kernel_extractor` role is the worst case). |
+| R6 | **Provider auth / endpoint.** Which env vars name the base_url and key — same-model-different-CLI comparisons need both pointed at one endpoint. |
+| R7 | **cwd / absolute-path semantics.** Does the CLI honour cwd and allow FS work on absolute paths outside it (tied to R3). |
+
+R1 and R3 are the blocking pair: unsolved, no CLI finishes a single round. R2 and R4 are next; R5–R7
+are usually satisfied by configuration alone.
+
 - *Capability probes* (need a real/fake backend) — drive the real CLI through exactly what GEAK
-  requires, each mapped to a COMPAT R-item: P1 headless one-shot (R2), P2 structured output +
+  requires, each mapped to an R-item: P1 headless one-shot (R2), P2 structured output +
   enum (R1), P3 Bash executes + reads a nonce it can't guess (R2/R3, proves no hallucination),
   P4 Write outside cwd (R3/R7), P5 schema under `parallel()` (concurrency).
 - *Contract audit* (static, no CLI) — the drift detector. Reads the actual GEAK sources and

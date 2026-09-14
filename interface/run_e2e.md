@@ -67,8 +67,8 @@ Prereqs for a non-native backend: Node ≥ 18 on `PATH`, plus the chosen CLI
 (`npm i -g @qwen-code/qwen-code`, `@openai/codex`, `@moonshotai/kimi-code`, …)
 and a reachable endpoint. The two `.js` workflows, `roles/`, `knowledge/`, and
 `scripts/` are used **unmodified** on every backend. Confirm each CLI's exact
-headless / auto-approve / sandbox flags against `runtime/COMPAT_findings.md`
-(R1–R7) at bring-up and adjust `registry.json`.
+headless / auto-approve / sandbox flags against the R1–R7 bring-up checklist
+in `runtime/DESIGN.md` §13 and adjust `registry.json`.
 
 The single-kernel `kernel_workflow.js` has no Python wrapper; run it on the
 runtime directly:
