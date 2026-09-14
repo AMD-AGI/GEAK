@@ -103,142 +103,8 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions
 Then just describe what you want in natural language (examples below). Claude Code resolves the paths and
 invokes the `Workflow` tool for you.
 
-### Swappable agent backend (Claude Code ↔ codex / cursor)
-
-The workflows are plain JS that normally run on **Claude Code's `Workflow` tool** (which provides the
-`agent()` / `parallel()` / `pipeline()` / `workflow()` orchestration primitives). To run the **same
-workflows** under a different coding-agent CLI — primarily **codex** or **cursor-agent** — GEAK ships a
-**standalone Node runtime** (`interface/runtime/`) that re-implements those primitives itself and
-dispatches each `agent()` call to a one-shot backend process. All parallelism and one-level nesting
-happen in the runtime, so the agent CLI does **not** need to support parallel or nested subagents.
-
-Two orthogonal axes live in `interface/runtime/registry.json`: **agents** (which CLI: claude / codex /
-cursor / qwen / kimi) × **models** (which endpoint). A **profile** pins one `(agent, model)` combo.
-Select a backend with `--agent` / `--profile` (or `GEAK_AGENT_BACKEND` / `GEAK_AGENT_PROFILE`) — or set
-nothing and let a **configured provider key pick it for you** (`OPENAI_API_KEY` or `AMDKEY` ⇒ codex,
-as long as no other backend's credentials are set too); the
-`.js` workflows / roles / knowledge are used unmodified. **e2e** always goes through `run_e2e.py` (which
-auto-routes to the runtime once a backend is selected) and **single kernels** through `run_workflow.mjs`.
-The two main backends — **codex** and **cursor** — are documented next.
-
-#### codex backend — install and run a GEAK optimization
-
-Four steps: install the CLI, export one key, verify the wiring, start the run. The key you export does
-two things — it **selects codex** as the backend and **auto-configures its provider** — so there is no
-`config.toml` to edit, no provider to choose, and no backend flag to pass.
-
-**1. Install the codex CLI** (do not assume it is already present):
-
-```bash
-node -v                                  # need Node.js v20+ (install via nvm / pkg manager / nodejs.org)
-npm i -g @openai/codex@0.146.1           # pin 0.146.1 — 0.147 breaks with gateways
-#   no write access to /usr/local? use a user-level prefix instead:
-#   npm config set prefix "$HOME/.npm-global" && export PATH="$HOME/.npm-global/bin:$PATH"
-#   npm i -g @openai/codex@0.146.1
-codex --version                          # expect 0.146.1
-```
-
-**2. Export one provider key.** That single variable is the whole configuration:
-
-```bash
-export OPENAI_API_KEY=sk-...    # -> OpenAI official (api.openai.com)
-# export AMDKEY=<32hex>         # -> AMD gateway (llm-api.amd.com/Unified, adds Ocp-Apim-Subscription-Key)
-```
-
-Neither needs `SSL_CERT_FILE` — both endpoints present publicly-trusted certificates (the AMD gateway's
-is DigiCert-signed), so the system trust store is enough. Only a private intranet gateway would need one.
-To use some other OpenAI-compatible endpoint, set `OPENAI_BASE_URL`; it wins over both.
-
-Selection reads the **shape** of the credential environment rather than one key's presence: a key picks
-codex only while no *other* backend's credentials are set. An Anthropic-side variable
-(`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) sitting
-next to `AMDKEY` is ambiguous, so the run stays on the native Claude path instead of being silently
-moved onto codex. Force codex in that situation with `GEAK_AGENT_BACKEND=codex`, or switch off
-key-based selection altogether with `GEAK_AGENT_AUTO=0`.
-
-**3. Verify the wiring** before committing to a long optimization run:
-
-```bash
-node interface/runtime/selftest.mjs                    # runtime unit checks; no GPU, no key needed
-
-# and once you have the handoff.json from step 4, resolve the run without executing it:
-python interface/run_e2e.py handoff.json result.json --dry-run | grep agent_backend
-#   -> "agent_backend": "agent=codex (from key)"       # the key selected codex
-#   -> "agent_backend": "native (claude/Workflow)"     # it did NOT — see the shape rule above
-```
-
-**4. Start the optimization.** codex has **no natural-language mode** (that path needs Claude Code's
-`Workflow` tool), so drive it through `run_e2e.py` for a whole model or `run_workflow.mjs` for a single
-kernel. The natural-language `use path_to_GEAK/... to optimize ...` examples further below are
-**Claude-only**.
-
-```bash
-# --- e2e (whole-model serving throughput): describe the run in a handoff.json ---
-cat > handoff.json <<'JSON'
-{ "schema_version": 2,
-  "model_path": "/models/Qwen3.5-27B-FP8",
-  "framework": "sglang", "tp": 1, "gpu_ids": "0",
-  "workload": { "isl": 1024, "osl": 1024, "conc": 64 },
-  "exp_root": "/abs/work/geak" }
-JSON
-# required: model_path, exp_root (its basename MUST be `geak`); rest has defaults.
-# full schema + fields: interface/run_e2e.md
-python interface/run_e2e.py handoff.json result.json     # auto-routes to the codex runtime
-
-# --- single kernel ---
-node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
-  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
-```
-
-Model and thinking level are optional — the defaults are meant to be left alone:
-
-| Knob | Default | Why you'd change it |
-| --- | --- | --- |
-| `GEAK_CODEX_MODEL` | the selected provider's `default_model` (`gpt-5.6-sol` on both) | A model id is **endpoint-specific**. Never reuse one gateway's id on another or codex 404s on the first turn. |
-| `GEAK_AGENT_PROFILE=codex-gpt56` (e2e) or `--profile codex-gpt56` (single kernel) | — | Pins official OpenAI's suffixless `gpt-5.6`, which exists only on `api.openai.com`. Also survives a stray gateway key, since a pinned model carries its own endpoint. |
-| `GEAK_CODEX_EFFORT` | `xhigh` | codex's scale is `none`, `low`, `medium`, `high`, `xhigh` — it has **no** `max`, so `xhigh` already is the maximum. `max` is accepted as an alias for it; anything off that scale is rejected up front. |
-
-Overrides & troubleshooting: `GEAK_CODEX_AUTOCONFIG=0` disables auto-config (falls back to
-`interface/runtime/codex-home/config.toml`); `GEAK_CODEX_EXTRA_ARGS="-c model_provider=..."` pins a provider
-manually. 401 → key unset/invalid; 404 model → `GEAK_CODEX_MODEL` unavailable on that endpoint or not
-Responses-API-capable; TLS error → a private gateway needs `SSL_CERT_FILE` (neither official OpenAI nor
-the AMD gateway does). See [`interface/runtime/SETUP.md`](interface/runtime/SETUP.md) for the full setup.
-
-#### cursor backend — runs on Cursor cloud (NOT via a gateway)
-
-`cursor-agent` uses **Cursor-side models on Cursor's own cloud**, so it needs no gateway, no
-`SSL_CERT_FILE`, and no shim — but requests + code leave for Cursor's cloud, and the model is a
-Cursor-side id (not one your gateway serves).
-
-```bash
-# 1) install cursor-agent (see Cursor docs), then authenticate ONCE:
-cursor-agent login                          # or: export CURSOR_API_KEY=...
-export GEAK_CURSOR_MODEL=composer-2.5       # a Cursor-side model id (e.g. composer-2.5, sonnet-4-thinking)
-
-# 2) run — single kernel:
-node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent cursor \
-  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
-# e2e:
-export GEAK_AGENT_BACKEND=cursor
-python interface/run_e2e.py handoff.json result.json
-```
-
-> Because cursor uses Cursor-side models + cloud, it **cannot** join a strict "same gateway, same model"
-> comparison against codex/claude. More detail: [`interface/runtime/SETUP.md`](interface/runtime/SETUP.md) §B.
-
-**Controlled (agent × model) comparison experiments are built in** — sweep the matrix, N repeats,
-fixed task/budget, get a comparison table (speedup / success-rate / wall; no token/cost):
-
-```bash
-node interface/runtime/experiment.mjs --script kernel_workflow/kernel_workflow.js \
-  --agents claude,codex,cursor --models default --repeats 3 \
-  --args '{"kernel_path":"/abs/knn","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
-```
-
-Adding a new CLI = a `registry.json` entry (zero code). Full env knobs, the compatibility checklist,
-and a no-GPU smoke test (`node interface/runtime/selftest.mjs`) are in
-[interface/run_e2e.md](interface/run_e2e.md) and
-[interface/runtime/DESIGN.md](interface/runtime/DESIGN.md).
+> Don't have Claude Code? The same workflows also run on the **codex CLI** —
+> see [Running GEAK on the codex CLI](#running-geak-on-the-codex-cli).
 
 ---
 
@@ -324,6 +190,94 @@ GEAK/
 ├── examples/            # Example kernel tasks, benchmark comparisons, real e2e runs
 └── exp/                 # Experiment outputs (timestamped per run)
 ```
+
+## Running GEAK on the codex CLI
+
+The **same** workflows also run on the **codex CLI**: a standalone Node runtime
+(`interface/runtime/`) supplies the orchestration primitives and dispatches each agent turn to a
+one-shot `codex exec` process, so the `.js` workflows / roles / knowledge are used unmodified.
+
+### 1. Install
+
+```bash
+node -v                            # need Node.js v20+
+npm i -g @openai/codex@0.146.1     # pin 0.146.1 -- 0.147 breaks with gateways
+codex --version                    # expect 0.146.1
+# no write access to /usr/local?   npm config set prefix "$HOME/.npm-global"
+#                                  export PATH="$HOME/.npm-global/bin:$PATH"
+```
+
+### 2. Configure — one provider key
+
+That single variable is the whole configuration: it **selects codex** *and* **auto-configures its
+provider**, so there is no `config.toml` to edit and no backend flag to pass.
+
+```bash
+export OPENAI_API_KEY=sk-...    # -> OpenAI official (api.openai.com)
+# export AMDKEY=<32hex>         # -> AMD gateway (llm-api.amd.com/Unified)
+# another OpenAI-compatible endpoint? set OPENAI_BASE_URL -- it wins over both.
+```
+
+Neither needs `SSL_CERT_FILE`; both endpoints present publicly-trusted certificates.
+
+Selection reads the **shape** of the credential environment, not one key's presence: a key picks codex
+only while no *other* backend's credentials are set. An `ANTHROPIC_*` / `CLAUDE_CODE_OAUTH_TOKEN`
+variable sitting next to `AMDKEY` is ambiguous, so the run stays on the native Claude path rather than
+being moved onto codex silently. Force it with `GEAK_AGENT_BACKEND=codex`, or switch key-based
+selection off with `GEAK_AGENT_AUTO=0`.
+
+### 3. Verify
+
+```bash
+node interface/runtime/selftest.mjs      # runtime unit checks; no GPU, no key needed
+
+# once you have a handoff.json (step 4), resolve the run without executing it:
+python interface/run_e2e.py handoff.json result.json --dry-run | grep agent_backend
+#   "agent_backend": "agent=codex (from key)"    -> wired up
+#   "agent_backend": "native (claude/Workflow)"  -> not selected; see the shape rule above
+```
+
+### 4. Run
+
+codex has **no natural-language mode** (that path needs Claude Code's `Workflow` tool), so drive it
+from the command line — `run_e2e.py` for a whole model, `run_workflow.mjs` for a single kernel:
+
+```bash
+# e2e (whole-model serving throughput) -- the run is described by a handoff.json:
+cat > handoff.json <<'JSON'
+{ "schema_version": 2,
+  "model_path": "/models/Qwen3.5-27B-FP8",
+  "framework": "sglang", "tp": 1, "gpu_ids": "0",
+  "workload": { "isl": 1024, "osl": 1024, "conc": 64 },
+  "exp_root": "/abs/work/geak" }
+JSON
+# required: model_path, exp_root (basename MUST be `geak`); rest has defaults -- interface/run_e2e.md
+python interface/run_e2e.py handoff.json result.json     # auto-routes to the codex runtime
+
+# single kernel:
+node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
+  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
+```
+
+### Knobs and troubleshooting
+
+The defaults are meant to be left alone:
+
+| Knob | Default | Why change it |
+| --- | --- | --- |
+| `GEAK_CODEX_MODEL` | the provider's `default_model` (`gpt-5.6-sol`) | Model ids are **endpoint-specific** — reusing one gateway's id on another 404s on the first turn. |
+| `GEAK_AGENT_PROFILE=codex-gpt56` (e2e) / `--profile codex-gpt56` (kernel) | — | Pins OpenAI's suffixless `gpt-5.6`; a pinned model carries its own endpoint, so it survives a stray gateway key. |
+| `GEAK_CODEX_EFFORT` | `xhigh` | codex's scale is `none`…`xhigh` and has **no** `max` (accepted as an alias); off-scale values are rejected up front. |
+
+401 → key unset or invalid. 404 model → not served by that endpoint, or not Responses-API-capable.
+TLS error → only a private gateway needs `SSL_CERT_FILE`. `GEAK_CODEX_AUTOCONFIG=0` falls back to
+`interface/runtime/codex-home/config.toml`; `GEAK_CODEX_EXTRA_ARGS="-c model_provider=..."` pins a
+provider manually.
+
+Full env knobs and the compatibility checklist:
+[`interface/runtime/SETUP.md`](interface/runtime/SETUP.md),
+[`interface/run_e2e.md`](interface/run_e2e.md),
+[`interface/runtime/DESIGN.md`](interface/runtime/DESIGN.md).
 
 ## Approaches compared
 
