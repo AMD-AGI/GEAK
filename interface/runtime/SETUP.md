@@ -1,144 +1,161 @@
-# 快速上手:在你自己的机器上跑 GEAK 可切换后端(codex / cursor)
+# Setup — running GEAK on the codex CLI
 
-> 这个分支的 runtime **自包含、零 npm 依赖**(只用 Node 内置模块)。`git pull` 后,只需装好 CLI、设几个环境变量,即可跑。设计/架构见 `DESIGN.md`。
+> The runtime in this directory is **self-contained and has zero npm dependencies** (Node built-ins
+> only). After a `git pull` you only need the CLI installed and a couple of environment variables.
+> For the design and architecture, see [`DESIGN.md`](DESIGN.md).
 
-本层目录:`interface/runtime/`。以下命令假设在**仓库根**执行。
+This layer lives in `interface/runtime/`. All commands below assume you are at the **repo root**.
 
 ---
 
-> **原 SaFE 网关(`global.primus-safe.amd.com`)已停用**,相关配置全部移除,由 AMD 网关
-> (`llm-api.amd.com/Unified`,见下方 `AMDKEY`)接替。原 A 节那套"经 SaFE 跑 claude"的
-> 步骤连同 `codex-opus48` / `codex-gpt54` / `qwen-opus48` / `kimi-opus48` 一起删掉了。
->
-> AMD 网关认的是 `Ocp-Apim-Subscription-Key` 头(**只**认这个,单给 Bearer 是 401),而
-> **qwen / kimi 没有下发自定义头的通路**(只会把 key 放进 Bearer),所以这两个 CLI 目前
-> 接不上 AMD 网关,暂不支持;要用就自己 `export OPENAI_BASE_URL=...` 指一个 Bearer 鉴权的端点。
+## How a key selects codex and configures its provider
 
-## A. codex 自动按 key 选网关(OpenAI 官方 / AMD)
+codex's provider is configured **automatically** — no hand-written `config.toml`, no `setup.sh`, no
+provider to pick. Setting the key also **selects codex as the backend**, so you do not even need
+`GEAK_AGENT_BACKEND=codex`. When launching codex the runtime resolves, first match wins, and emits
+`-c model_providers.geak_auto.*` overrides:
 
-codex 的 provider **自动配置**,无需手写 config.toml、无需 `setup.sh`、无需选 provider;
-配好 key 同时也**选中了 codex 这个后端**,连 `GEAK_AGENT_BACKEND=codex` 都不用设。
-runtime 在启动 codex 时按下面顺序解析(第一个命中),生成 `-c model_providers.geak_auto.*` 覆盖:
+1. An explicit **`OPENAI_BASE_URL`** (or the selected model's `base_url`) → use it as-is (any
+   OpenAI-compatible gateway).
+2. Otherwise **pick by which key is non-empty**: `AMDKEY` → AMD gateway, `OPENAI_API_KEY` → official
+   OpenAI.
 
-1. **显式 `OPENAI_BASE_URL`**(或所选 model 的 base_url)→ 直接用它(任意 OpenAI 兼容网关)。
-2. 否则**按"哪个 key 非空"自动选**:`AMDKEY`→AMD、`OPENAI_API_KEY`→OpenAI 官方。
+The auto-selected provider carries its own **`default_model`** (used when `GEAK_CODEX_MODEL` is
+unset); both are currently `gpt-5.6-sol`. Endpoint and model id live in the same entry on purpose: an
+id is only valid on its own endpoint.
 
-自动选中的那条 provider 还带自己的 **`default_model`**(`GEAK_CODEX_MODEL` 没设时用它),
-目前两条都是 `gpt-5.6-sol`。端点和 model id 写在同一条里是有意的:id 只在自己的端点上有效。
-同一份 `provider_autoselect` 也是**后端选择**的依据:没显式指定
-`--agent` / `--profile` / `GEAK_AGENT_BACKEND` 时,key 自己就能把这次运行落到 codex 上。
+The AMD gateway authenticates with the `Ocp-Apim-Subscription-Key` header — **only** that header; a
+bare Bearer token gets a 401. The runtime attaches it for you.
 
-判定看的是**整个凭据环境的形状**,不是"某个 key 在不在"——一个 key 只有在**没有其他后端的
-凭据也配着**的时候才选中自己那个后端:
+### The selection rule is about the shape of the whole credential environment
 
-| 环境 | 跑哪个 |
+Not "is this key present". A key selects its backend only while **no other backend's credentials are
+also set**:
+
+| Environment | Runs |
 | --- | --- |
-| 只有 `AMDKEY` 或 `OPENAI_API_KEY` | **codex** |
-| 只有 anthropic 侧(`ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` 任一) | claude |
-| **两边都配** | claude(`default_profile`) |
-| 什么都没配 | claude |
+| only `AMDKEY` or `OPENAI_API_KEY` | **codex** |
+| only Anthropic-side (any of `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN`) | claude |
+| **both sides set** | claude (`default_profile`) |
+| nothing set | claude |
 
-两边都配时不猜、退回默认,是为了不劫持一套已经在跑的 claude 部署:只要有人 export 了
-`AMDKEY`,原本的 claude 流程就被静默换掉,这种事很难排查。什么都没配时也退回 claude,
-因为那种环境下 claude CLI 很可能是用别的方式认证的(已登录的 CLI、Bedrock)。
-这套规则和 hyperloom `common/llm_config.py` 的 `is_openai_only()` / `is_anthropic_only()`
-一致。要在两边都配的环境里强制走 codex,显式写 `--agent codex` 或
-`GEAK_AGENT_BACKEND=codex` 即可;`GEAK_AGENT_AUTO=0` 则完全关掉自动选。
+Declining to guess when both are set protects a running claude deployment: otherwise anyone who
+exports `AMDKEY` silently replaces the existing claude path, which is painful to diagnose. Falling
+back to claude when nothing is set is deliberate too — in that environment the claude CLI is probably
+authenticated some other way (an already-logged-in CLI, Bedrock). This matches hyperloom
+`common/llm_config.py`'s `is_openai_only()` / `is_anthropic_only()`.
 
-### 前置:安装 codex CLI(不要假设已装好)
+To force codex in an environment that has both, pass `--agent codex` explicitly or set
+`GEAK_AGENT_BACKEND=codex`. `GEAK_AGENT_AUTO=0` switches key-based selection off entirely (falling
+back to the registry's `default_profile`, i.e. claude).
+
+---
+
+## Install the codex CLI
+
+Do not assume it is already present.
+
 ```bash
-# 1) Node.js v20+(codex 依赖)
-node -v        # 无 node 或 <20:先装 Node 20+(nvm / 系统包管理器 / nodejs.org)
+# 1) Node.js v20+ (codex needs it)
+node -v        # no node, or < 20: install Node 20+ (nvm / system package manager / nodejs.org)
 
-# 2) 安装 codex CLI —— 务必 pin 0.146.1(0.147 与网关不兼容)
+# 2) install the codex CLI -- pin 0.146.1 (0.147 is incompatible with gateways)
 npm i -g @openai/codex@0.146.1
-#   若没有 /usr/local 写权限,用用户级 prefix:
+#   no write access to /usr/local? use a user-level prefix:
 #   npm config set prefix "$HOME/.npm-global"
-#   export PATH="$HOME/.npm-global/bin:$PATH"      # 建议写进 ~/.bashrc
+#   export PATH="$HOME/.npm-global/bin:$PATH"      # worth persisting in ~/.bashrc
 #   npm i -g @openai/codex@0.146.1
 
-# 3) 验证
-codex --version        # 期望 0.146.1
+# 3) verify
+codex --version        # expect 0.146.1
 ```
 
-### 第 1 步:选 provider —— 设对应的 key(二选一)
-```bash
-# AMD 网关(自动补 Ocp-Apim-Subscription-Key 头 + llm-api.amd.com/Unified)
-export AMDKEY="<32位hex 订阅 key>"
-# 证书是公信的,不需要 SSL_CERT_FILE
+## Step 1 — pick a provider by setting its key
 
-# 或 —— 官方 OpenAI(公网 CA,无需 shim / SSL_CERT_FILE / config.toml)
+```bash
+# AMD gateway (adds the Ocp-Apim-Subscription-Key header + llm-api.amd.com/Unified)
+export AMDKEY="<32-hex subscription key>"
+# its certificate is publicly trusted -- no SSL_CERT_FILE needed
+
+# or -- official OpenAI (public CA; no shim, no SSL_CERT_FILE, no config.toml)
 # export OPENAI_API_KEY="sk-....."
 ```
-> `GEAK_CODEX_MODEL` 是**可选**的:不设就用那条 provider 的 `default_model`(两条都是 `gpt-5.6-sol`)。
-> 要覆盖时注意 id 只在自己的端点上有效:AMD 有 `gpt-5.6-sol` / `-terra` / `-luna`,但**没有**
-> 不带后缀的 `gpt-5.6`;官方账号能用哪些取决于你的 entitlement。
->
-> 想直接用**官方的 `gpt-5.6`**(不带后缀,只有官方端点有)就 pin 死那条 profile:
-> `--profile codex-gpt56`。pin 住的 model 自带 `base_url` 和 `OPENAI_API_KEY`,优先级
-> 高于按 key 自动选,所以即使环境里还留着 `AMDKEY` 也不会被切到网关上去。
-> 这条**未实测**(手边没有官方 key),你的账号若 404/400 就退回
-> `--profile codex-openai` + `GEAK_CODEX_MODEL=<你能用的 id>`。
->
-> AMD 网关上 **gpt 系两个协议都正常**(`/v1/responses` 含流式、`/v1/chat/completions` 实测均 200);
-> 但 **claude 系基本不答**(Opus 全 500、Sonnet-5 504,只有 `Claude-Sonnet-4.5` 通),所以
-> registry 里没有 pin 任何 claude 模型。
 
-### 第 2 步:运行(第 1 步的 key 已选中 codex,直接跑)
+`GEAK_CODEX_MODEL` is **optional**: unset, the provider's `default_model` is used (`gpt-5.6-sol` on
+both). When overriding it, remember an id is only valid on its own endpoint — the AMD gateway serves
+`gpt-5.6-sol` / `-terra` / `-luna` but **not** the suffixless `gpt-5.6`, and which ids an official
+account can use depends on its entitlement.
+
+To use official OpenAI's **suffixless `gpt-5.6`** (which exists only on that endpoint), pin the
+profile: `--profile codex-gpt56` for a single kernel, `GEAK_AGENT_PROFILE=codex-gpt56` for e2e. A
+pinned model brings its own `base_url` and `OPENAI_API_KEY` and outranks key-based auto-selection, so
+a stray `AMDKEY` in the environment will not move the run onto the gateway. This combination is
+**untested here** (no official key on hand); if your account returns 404/400, fall back to
+`--profile codex-openai` with `GEAK_CODEX_MODEL=<an id you can use>`.
+
+> On the AMD gateway the **gpt family works over both protocols** (`/v1/responses` including
+> streaming, and `/v1/chat/completions` — both measured 200), but the **claude family mostly does not
+> answer** (Opus all 500, Sonnet-5 504; only `Claude-Sonnet-4.5` succeeded). That is why the registry
+> pins no claude model.
+
+## Step 2 — run
+
+The key from step 1 has already selected codex, so just run it.
+
 ```bash
-# 想覆盖自动选择才需要设,例如回到 claude:export GEAK_AGENT_BACKEND=claude
+# only needed to override auto-selection, e.g. to go back to claude:
+# export GEAK_AGENT_BACKEND=claude
 
-# e2e(整模型吞吐):用 handoff.json 描述任务(字段/示例见 interface/run_e2e.md)
-python3 interface/run_e2e.py <handoff.json> <result.json>
+# e2e (whole-model throughput): a JSON describes the run. run_e2e.py takes the path as its first
+# argument and never hardcodes a name -- its usage string calls it a handoff.
+# Fields and a full example: interface/run_e2e.md
+python3 interface/run_e2e.py run_spec.json result.json
 
-# 单核:
+# single kernel:
 node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
   --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
 ```
 
-### 覆盖 / 关闭 / 排错
-- **thinking level(reasoning effort)默认拉满**。注意 codex 自己的档位只有
-  `none`/`low`/`medium`/`high`/`xhigh`,**没有 `max`** —— `xhigh` 就是它的最高档。所以
-  runtime 下发的是 `-c model_reasoning_effort=xhigh`;`GEAK_CODEX_EFFORT=max` 仍可写,会被
-  翻译成 `xhigh`(和 hyperloom `resolve_codex_reasoning_effort` 同一套映射),写别的非法值
-  会直接报错而不是丢给 codex。也可以用
-  `GEAK_CODEX_EXTRA_ARGS="-c model_reasoning_effort=high"` 显式钉(优先)。
-- 任意网关:`export OPENAI_BASE_URL=https://你的网关/v1`(+ 对应 key)——优先于 key 自动选。
-- 关闭自动配置:`export GEAK_CODEX_AUTOCONFIG=0`(回落到 `codex-home/config.toml`)。
-- 关闭"按 key 自动选后端":`export GEAK_AGENT_AUTO=0`(回到 registry 的 `default_profile`,即 claude)。
-- 手动指定 provider:`export GEAK_CODEX_EXTRA_ARGS="-c model_provider=openai"`(优先于自动)。
-- base_url 指向 `127.0.0.1`/`localhost`(即本地 shim)时**不会**自动覆盖,保留 config.toml 的 `safe_shim` 路径。
-- 401 → key 空/无效;404 model → `GEAK_CODEX_MODEL` 不可用或不支持 Responses API;TLS 错 → 内网网关需 `SSL_CERT_FILE`(官方 OpenAI 不需要)。
+## Knobs
 
----
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `GEAK_CODEX_MODEL` | the provider's `default_model` (`gpt-5.6-sol`) | Model id. Endpoint-specific — see step 1. |
+| `GEAK_CODEX_EFFORT` | `xhigh` | Thinking level. |
+| `GEAK_AGENT_PROFILE` / `--profile` | — | Pin an `(agent, model)` combo including its endpoint. |
+| `GEAK_AGENT_BACKEND` / `--agent` | — | Pin the agent only; the model still resolves by key. |
+| `GEAK_AGENT_AUTO` | `1` | `0` disables key-based backend selection. |
+| `GEAK_CODEX_AUTOCONFIG` | `1` | `0` disables provider auto-config (falls back to `codex-home/config.toml`). |
+| `GEAK_CODEX_EXTRA_ARGS` | — | Raw `-c key=value` overrides passed to codex; wins over auto-config. |
+| `OPENAI_BASE_URL` | — | Any OpenAI-compatible gateway; wins over key-based selection. |
 
-## B. cursor(注意:走 Cursor 私有云,**不经**任何网关)
+**Thinking level is maxed out by default.** codex's own scale is `none` / `low` / `medium` / `high` /
+`xhigh` and has **no `max`** — `xhigh` *is* its top setting, so the runtime emits
+`-c model_reasoning_effort=xhigh`. `GEAK_CODEX_EFFORT=max` is still accepted and translates to
+`xhigh` (the same mapping as hyperloom's `resolve_codex_reasoning_effort`); any other off-scale value
+is rejected up front rather than passed through to codex. To pin it explicitly instead, use
+`GEAK_CODEX_EXTRA_ARGS="-c model_reasoning_effort=high"`.
 
-cursor 与 shim/网关无关,不需要 `setup.sh`。
+One special case: when `base_url` points at `127.0.0.1` / `localhost` (i.e. the local shim), the
+runtime does **not** auto-override it, preserving the `safe_shim` path from `config.toml`.
 
-### 前提
-1. `cursor-agent` CLI 装好。
-2. **你自己的 Cursor Team 账号**:`cursor-agent login`(登录态存 `~/.config/cursor/auth.json`)。别人的账号带不过去;需要你有对应 Team 的访问权。或设 `export CURSOR_API_KEY=...`。
+## Troubleshooting
 
-### 步骤
+| Symptom | Cause |
+| --- | --- |
+| `401` | key empty or invalid |
+| `404` on the model | `GEAK_CODEX_MODEL` not served by that endpoint, or not Responses-API-capable |
+| TLS error | a private intranet gateway needs `SSL_CERT_FILE` (neither official OpenAI nor the AMD gateway does) |
+
+To check the runtime itself is not broken — no network, no GPU, no key required:
+
 ```bash
-cursor-agent login          # 首次
-# 可选:选模型(Cursor 侧 id,如 composer-2.5 / sonnet-4-thinking)
-export GEAK_CURSOR_MODEL="composer-2.5"
-node interface/runtime/run_workflow.mjs <workflow.js> --profile cursor
+node interface/runtime/selftest.mjs      # expect 50/50
 ```
 
-> 提醒:cursor 的请求和代码会**外发到 Cursor 云**,且模型是 Cursor 侧模型 —— 因此它**不能**和 codex/qwen 做"同网关同模型"的严格对照。
+## What each file is
 
----
-
-## 验证 runtime 本身没坏(可选,不需网络/GPU)
-```bash
-node interface/runtime/selftest.mjs      # 期望 50/50
-```
-
-## 各文件是什么
-- `run_workflow.mjs` runtime 核心 · `config.mjs`+`registry.json` 后端/模型配置
-- `backends/` 后端契约与 generic 实现 · `schema.mjs` 结构化输出
-- `responses_shim.mjs` codex+claude 的 de-stream 代理 · `setup.sh` 一键起环境
-- `codex-home/config.toml` 仓库内 CODEX_HOME(providers:`safe_shim` 默认 / `openai` 官方)
+- `run_workflow.mjs` — runtime core · `config.mjs` + `registry.json` — backend/model configuration
+- `backends/` — the backend contract and its generic implementation · `schema.mjs` — structured output
+- `responses_shim.mjs` — de-streaming proxy · `setup.sh` — one-shot environment bring-up
+- `codex-home/config.toml` — in-repo `CODEX_HOME` (providers: `safe_shim` default, `openai` official)

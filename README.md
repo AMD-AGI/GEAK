@@ -237,10 +237,13 @@ node interface/runtime/run_workflow.mjs kernel_workflow/kernel_workflow.js --age
   --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
 ```
 
-Model / thinking-level knobs, troubleshooting and the compatibility checklist:
-[`interface/runtime/SETUP.md`](interface/runtime/SETUP.md),
-[`interface/run_e2e.md`](interface/run_e2e.md),
-[`interface/runtime/DESIGN.md`](interface/runtime/DESIGN.md).
+Going further:
+
+- [`interface/runtime/SETUP.md`](interface/runtime/SETUP.md) — model and thinking-level knobs, how
+  the key picks a provider, what to do about a 401/404/TLS error.
+- [`interface/run_e2e.md`](interface/run_e2e.md) — every field of the run spec, and what each stage does.
+- [`interface/runtime/DESIGN.md`](interface/runtime/DESIGN.md) — how the runtime re-implements the
+  orchestration primitives, and what is known to differ from a Claude Code run.
 
 ## Approaches compared
 

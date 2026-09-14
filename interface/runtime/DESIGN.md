@@ -321,8 +321,8 @@ would reject+resample, silently mis-routing logic. It is enforced (deep-equal me
 
 | Level | Native Claude Code (default) | Swapped backend (runtime) |
 |---|---|---|
-| kernel | one NL prompt: *"use .../kernel_workflow to optimize .../knn"* | one command: `node run_workflow.mjs kernel_workflow/kernel_workflow.js --profile qwen --args '{...}'` |
-| e2e | one NL prompt: *"use .../e2e_workflow to optimize inference for /models/…, sglang, …"* | one command: `GEAK_AGENT_PROFILE=qwen python run_e2e.py handoff.json result.json` |
+| kernel | one NL prompt: *"use .../kernel_workflow to optimize .../knn"* | one command: `node run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex --args '{...}'` |
+| e2e | one NL prompt: *"use .../e2e_workflow to optimize inference for /models/…, sglang, …"* | one command: `GEAK_AGENT_BACKEND=codex python run_e2e.py run_spec.json result.json` |
 
 **How the native "one prompt" works.** With `enableWorkflows`+`ultracode` enabled, Claude Code
 (the model) reads the NL, uses the path in the prompt to pick the script and the script's
@@ -330,7 +330,8 @@ would reject+resample, silently mis-routing logic. It is enforced (deep-equal me
 `{scriptPath, args}`. The NL → `(script, args)` mapping is a **model capability**, not something
 the runtime reproduces.
 
-**`run_e2e.py` routing.** `run_e2e.py` reads `handoff.json`, maps its stable fields onto
+**`run_e2e.py` routing.** `run_e2e.py` reads the run-spec JSON named by its first argument (the
+usage string calls it a handoff; the filename is the caller's), maps its stable fields onto
 `e2e_workflow.js` args, and then either invokes the native Workflow tool (backend unset,
 byte-for-byte unchanged) or shells out to `run_workflow.mjs` (backend/profile set). It performs
 no NL understanding — that step only exists in the interactive native path.
