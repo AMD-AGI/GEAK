@@ -156,6 +156,19 @@ const withOpt = build({ workload_kind: 'agentx_trace_replay',
 ok(/\|\| INFERENCEX_PATH='\/ix'$/m.test(withOpt.AGENTX_ENV), 'a supplied INFERENCEX_PATH is declared');
 ok(/\|\| AGENTX_PROFILE_WARMUP_S='120'$/m.test(withOpt.AGENTX_ENV), 'profile window placement is declarable');
 
+// The failed-request tolerance is one of those optional knobs, and for a specific reason: pinning
+// it here would freeze one tolerance across the whole run, and the client adapter is the only
+// place that knows whether the leg it is about to run is exploring (a bad tail costs one probe) or
+// producing a number that will be compared (where failures are the long trajectories, so dropping
+// them flatters whichever leg crashed). Declaring it must still win, for a run that needs one
+// tolerance end to end.
+ok(!/AGENTX_FAILED_REQUEST_THRESHOLD/.test(sc.AGENTX_ENV),
+  'no failed-request threshold is pinned by default, so the client can set it per measurement purpose');
+const withThresh = build({ workload_spec: { kind: 'agentx_trace_replay',
+  failed_request_threshold: 0.02 } });
+ok(/\|\| AGENTX_FAILED_REQUEST_THRESHOLD='0.02'$/m.test(withThresh.AGENTX_ENV),
+  'a declared failed-request threshold is still pinned for every leg');
+
 // ── 5. workload_spec overrides the canonical defaults, field by field ───────────────────────────
 console.log('\n# an explicit spec overrides the defaults it names, and only those');
 const ov = build({ workload_spec: {

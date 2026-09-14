@@ -145,6 +145,40 @@ class AgentXClientCanonicalityTest(unittest.TestCase):
         self.assertEqual(rec["noncanonical_reasons_seen"], "")
         self.assertIn("3600", rec["_argv"])
 
+    # ---- failed-request tolerance is chosen by what the measurement is for -------------------
+    # aiperf enforces the threshold itself (on breach it cancels the run), and adapter_bench
+    # propagates the non-zero exit, so this value decides whether a leg that crashed can come back
+    # as a clean number. It has to differ by purpose: a search leg is exploring, while parity,
+    # validation and canonical legs produce numbers that get compared against each other, and the
+    # requests that fail are the long trajectories -- dropping them flatters whichever leg broke.
+
+    def _threshold(self, **env):
+        argv = self._run(**env)["_argv"]
+        self.assertIn("--failed-request-threshold", argv)
+        return argv[argv.index("--failed-request-threshold") + 1]
+
+    def test_a_search_leg_keeps_the_permissive_tolerance(self):
+        self.assertEqual(self._threshold(MEASUREMENT_PURPOSE="search"), "0.10")
+
+    def test_a_leg_whose_number_gets_compared_tolerates_almost_no_failures(self):
+        for purpose in ("parity", "validation", "canonical"):
+            with self.subTest(purpose=purpose):
+                self.assertEqual(self._threshold(MEASUREMENT_PURPOSE=purpose), "0.01")
+
+    def test_an_explicitly_declared_threshold_overrides_the_purpose_default(self):
+        """A run that needs one tolerance end to end can still declare it."""
+        self.assertEqual(
+            self._threshold(MEASUREMENT_PURPOSE="validation",
+                            AGENTX_FAILED_REQUEST_THRESHOLD="0.2"), "0.2")
+
+    def test_the_20260912_crashed_leg_would_no_longer_pass_a_compared_leg(self):
+        """Regression pin: that leg killed EngineCore, failed 7.368%, and was accepted."""
+        observed_failure_rate = 0.07368
+        self.assertGreater(observed_failure_rate,
+                           float(self._threshold(MEASUREMENT_PURPOSE="parity")))
+        self.assertLess(observed_failure_rate,
+                        float(self._threshold(MEASUREMENT_PURPOSE="search")))
+
     def test_a_pinned_non_canonical_corpus_is_stamped(self):
         rec = self._run(
             MEASUREMENT_PURPOSE="parity",

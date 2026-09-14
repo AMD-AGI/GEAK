@@ -603,7 +603,12 @@ const AGENTX_DEFAULTS = {
   geak_loop_duration_s: 900,  // inner search legs (scenario floor)
   warmup_requests_per_lane: 10,
   warmup_grace_period_s: 1800,
-  failed_request_threshold: 0.10,
+  // Failed-request tolerance is deliberately NOT defaulted here. Pinning one number for the whole
+  // run flattens the distinction between a leg that is exploring and a leg whose number will be
+  // compared, and the client is the only place that knows which one it is running
+  // (MEASUREMENT_PURPOSE). Declaring a value still overrides the client, for a run that needs a
+  // specific tolerance end to end.
+  failed_request_threshold: null,
   metric_basis: 'aggregate_total_token_tok_s',
 };
 const AGENTX = IS_AGENTX ? Object.assign({}, AGENTX_DEFAULTS, WORKLOAD_SPEC) : null;
@@ -761,12 +766,12 @@ const _agentxEnvPairs = () => {
     ['GEAK_AGENTX_LOOP_DURATION_S', AGENTX.geak_loop_duration_s],
     ['AGENTX_WARMUP_REQUESTS_PER_LANE', AGENTX.warmup_requests_per_lane],
     ['AGENTX_WARMUP_GRACE_PERIOD', AGENTX.warmup_grace_period_s],
-    ['AGENTX_FAILED_REQUEST_THRESHOLD', AGENTX.failed_request_threshold],
   ];
   // Optional, only when the caller supplied them: the aiperf binary, the
   // InferenceX checkout that may hold map_aiperf.py (GEAK vendors a fallback),
   // and the profile-window placement.
   const opt = [
+    ['AGENTX_FAILED_REQUEST_THRESHOLD', AGENTX.failed_request_threshold],
     ['AIPERF_BIN', AGENTX.aiperf_bin],
     ['INFERENCEX_PATH', AGENTX.inferencex_path],
     ['AGENTX_PROFILE_WARMUP_S', AGENTX.profile_warmup_s],
