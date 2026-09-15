@@ -13,6 +13,15 @@ import { buildInvocation } from '../config.mjs';
 // Factory: bind a resolved agent recipe + model into a backend object with the
 // standard { name, runAgent } shape the runtime expects.
 export function makeGenericBackend({ agentName, agent, model }) {
+  // Resolve the invocation ONCE here, at construction — which runs during startup
+  // in resolveBackend(). buildInvocation is otherwise reached only from runAgent,
+  // i.e. once per agent() call, so a provider that cannot resolve would not raise
+  // until the FIRST agent call, already deep inside a workflow. That is precisely
+  // the late failure the check in buildInvocation exists to prevent, so the check
+  // has to be pulled forward to be worth anything. buildInvocation is pure, so
+  // this throwaway build has no effect beyond raising; per-call modelOverride
+  // changes only the -m value, never which provider resolves.
+  buildInvocation(agent, model, '', { env: process.env });
   return {
     name: agentName,
     agent,

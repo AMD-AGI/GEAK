@@ -199,7 +199,9 @@ async function testConfig() {
 
   // buildInvocation: arg-delivery agent puts prompt last, stdin off
   const c = resolveSelection(reg, { agent: 'codex' });
-  const invC = buildInvocation(c.agent, null, 'PROMPT_TEXT', { env: {} });
+  // a key is incidental setup here, not part of what this asserts: buildInvocation
+  // now refuses to build a codex invocation that would resolve to no provider at all
+  const invC = buildInvocation(c.agent, null, 'PROMPT_TEXT', { env: { FIXTURE_GW_KEY: 'x' } });
   eq(invC.promptOnStdin, false, 'codex prompt via arg');
   eq(invC.args[invC.args.length - 1], 'PROMPT_TEXT', 'codex prompt appended as last arg');
 
@@ -234,6 +236,20 @@ async function testConfig() {
   // (f) caller pins model_provider via extra args -> skip autoconfig
   const invPin = buildInvocation(c.agent, null, 'P', { env: { OPENAI_BASE_URL: 'https://api.openai.com/v1', GEAK_CODEX_EXTRA_ARGS: '-c model_provider=my_provider' } });
   eq(cval(invPin.args, 'model_provider'), 'my_provider', 'extra_args model_provider wins over autoconfig');
+  // (g) no key, no base_url, nothing pinned -> REFUSE to build rather than emit an
+  // invocation with no provider at all. Without this the run reaches codex, codex
+  // falls back to a ~/.codex/config.toml that does not exist in GEAK's containers,
+  // and the failure lands at the first agent() call instead of at startup.
+  let noProv = ''; try { buildInvocation(c.agent, null, 'P', { env: {} }); }
+  catch (e) { noProv = e.message; }
+  ok(/no provider resolved/.test(noProv), 'codex with no key and no base_url throws at build time');
+  ok(noProv.includes('FIXTURE_GW_KEY') && noProv.includes('OPENAI_API_KEY'),
+    'the refusal names the key env vars that would fix it');
+  // ...but GEAK_CODEX_AUTOCONFIG=0 is a deliberate opt-out, so it must still build
+  let offOk = true; try { buildInvocation(c.agent, null, 'P', { env: { GEAK_CODEX_AUTOCONFIG: '0' } }); }
+  catch { offOk = false; }
+  ok(offOk, 'GEAK_CODEX_AUTOCONFIG=0 still builds without a provider (opt-out is intentional)');
+
   // codex thinking level: default xhigh (its true maximum — it has no 'max'),
   // GEAK_CODEX_EFFORT override, extra_args pin not double-emitted
   eq(cval(invOai.args, 'model_reasoning_effort'), 'xhigh', 'codex effort defaults to xhigh');
@@ -352,8 +368,15 @@ async function testProviderDefaultModel() {
     'an explicitly chosen endpoint gets no inherited default (it would 404)');
   eq(modelOf({ GEAK_AMDKEY: 'x', GEAK_CODEX_AUTOCONFIG: '0' }), '',
     'no auto-config means no auto model');
-  eq(modelOf({ SAFE_API_KEY: 'ak-x' }), '',
-    'a de-listed key supplies no endpoint and no model');
+  // A de-listed key supplies no endpoint, so there is nothing to run against. That
+  // used to yield a silent no-provider invocation (and no -m); it is now refused at
+  // build time, which is the whole point of the check — a stale SAFE_API_KEY left in
+  // someone's shell is exactly the environment that produced a first-agent-call
+  // failure with an error naming neither the key nor the endpoint.
+  let delisted = ''; try { modelOf({ SAFE_API_KEY: 'ak-x' }); }
+  catch (e) { delisted = e.message; }
+  ok(/no provider resolved/.test(delisted),
+    'a de-listed key supplies no endpoint, and is refused rather than run');
 
   // The AMD gateway authenticates on Ocp-Apim-Subscription-Key ONLY: a request
   // carrying just the Bearer is a 401, while the APIM header alone is a 200 on

@@ -219,6 +219,23 @@ export function buildInvocation(agent, model, prompt, opts = {}) {
         }
       }
     }
+    // Fail fast when autoconfig is ON, nothing is pinned, and yet no endpoint
+    // resolved: that means no key matched any provider_autoselect entry and no
+    // base_url was given, so the block above emitted NOTHING and codex silently
+    // falls back to its own ~/.codex/config.toml -- which does not exist in the
+    // containers GEAK runs in. The run then dies at the FIRST agent call, hours
+    // into a workflow, with an error that names neither the key nor the config.
+    // This is the exact shape hyperloom's .env filter produces when the key name
+    // is not allowlisted: GEAK_AGENT_BACKEND=codex gets through, the key does
+    // not. Raising here costs one line of startup and names the fix.
+    if (!baseUrl && !providerPinned) {
+      const names = (agent.provider_autoselect || [])
+        .map((p) => p && p.key_env).filter(Boolean);
+      throw new Error(
+        `codex selected but no provider resolved: set one of ${names.join(' / ')}, `
+        + 'or OPENAI_BASE_URL, or disable auto-config with GEAK_CODEX_AUTOCONFIG=0 '
+        + "to use codex's own config.toml");
+    }
   }
 
   // codex thinking level. codex only knows none|low|medium|high|xhigh — 'max' is
