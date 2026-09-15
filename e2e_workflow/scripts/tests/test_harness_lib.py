@@ -121,6 +121,8 @@ FP8_E4M3FN = _Dtype("float8_e4m3fn", 1, True, 448.0)
 FP8_E5M2 = _Dtype("float8_e5m2", 1, True, 57344.0)
 FP8_E4M3FNUZ = _Dtype("float8_e4m3fnuz", 1, True, 240.0)
 FP8_E5M2FNUZ = _Dtype("float8_e5m2fnuz", 1, True, 57344.0)
+# Packed sub-byte: two fp4 per byte, and no copy_kernel on ROCm -- see _to_device.
+FP4 = _Dtype("float4_e2m1fn_x2", 1, True, 6.0)
 
 # Every fake randn() cycles this pattern, so amax/RMS over a synthesized operand is a known number.
 # 4.0 (not 3.0) because 4.0 * 0.1 is exactly representable and 3.0 * 0.1 is not.
@@ -3224,6 +3226,26 @@ class TestOracleSharedAndLazy(_HarnessTestCase):
         self.assertIsNot(out, leaf["data"])          # the move really did make a new object
         self.assertIs(getattr(out, "is_shuffled", False), True)
         self.assertEqual(getattr(out, "quant_mode", None), "mxfp4")
+
+    def test_reconstruct_captured_rehydrates_a_dtype_with_no_copy_kernel(self):
+        """ROCm torch 2.9 cannot `.to("cuda")` a float4_e2m1fn_x2 tensor -- an MXFP4 oracle would be
+        unreplayable. The identical storage crosses as a uint8 view and is restored to its dtype."""
+        class _Fp4(_T):
+            def to(self, *args, **kw):
+                if self.dtype is not UINT8:
+                    raise NotImplementedError('"copy_kernel" not implemented for \'Float4_e2m1fn_x2\'')
+                return _Fp4(self.shape, self.tolist(), dtype=self.dtype,
+                            device=(args[0] if args else kw.get("device")))
+
+            def view(self, dtype):
+                return _Fp4(self.shape, self.tolist(), dtype=dtype, device=self.device)
+
+        out = hl.reconstruct_captured(
+            {"__tensor__": True, "data": _Fp4((2,), fill=1.5, dtype=FP4),
+             "attrs": {"is_shuffled": True}}, device="cuda")
+        self.assertIs(out.dtype, FP4)
+        self.assertEqual(out.device, "cuda")
+        self.assertIs(getattr(out, "is_shuffled", False), True)
 
     def test_reconstruct_captured_without_attrs_is_unchanged(self):
         out = hl.reconstruct_captured({"__tensor__": True, "data": _T((2,), fill=1.5)}, "cpu")

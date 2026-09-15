@@ -154,6 +154,7 @@ def _fake_torch():
     torch = types.ModuleType("torch")
     torch.capturing = False
     torch.saved = []
+    torch.uint8 = "torch.uint8"
     torch.is_tensor = lambda o: isinstance(o, (FakeTensor, ExplodingTensor))
     torch.cuda = types.SimpleNamespace(
         is_current_stream_capturing=lambda: torch.capturing)
@@ -344,6 +345,68 @@ class TestSnapshot(_RecorderTestCase):
 
         got = cs._snapshot(_Big())
         self.assertEqual(got["__repr__"], "X" * 200)
+
+
+# --------------------------------------------------------------------------- #
+# _to_cpu_clone -- sub-byte dtypes have no copy kernel
+# --------------------------------------------------------------------------- #
+class _NoCopyKernelTensor(FakeTensor):
+    """An MXFP4 tensor: ROCm torch 2.9 has no ``copy_kernel`` for float4_e2m1fn_x2, so a direct D2H
+    raises. Only a ``uint8`` view of the identical storage can cross the bus."""
+
+    def __init__(self, shape, dtype="torch.float4_e2m1fn_x2", **kw):
+        super().__init__(shape, dtype=dtype, **kw)
+        self.viewed_as = []
+
+    def to(self, device):
+        if self.dtype != "torch.uint8":
+            raise NotImplementedError('"copy_kernel" not implemented for \'Float4_e2m1fn_x2\'')
+        return _NoCopyKernelTensor(self.shape, self.dtype, device=device)
+
+    def clone(self):
+        return _NoCopyKernelTensor(self.shape, self.dtype, device=self.device)
+
+    def view(self, dtype):
+        self.viewed_as.append(dtype)
+        out = _NoCopyKernelTensor(self.shape, dtype, device=self.device)
+        out.viewed_as = self.viewed_as
+        return out
+
+
+class TestSubByteDtypeCopy(_RecorderTestCase):
+    def test_mxfp4_operand_is_captured_instead_of_silently_dropped(self):
+        # Without the fallback the raise escapes into the hook's blanket except and the run records
+        # ZERO cases -- for exactly the MXFP4 MoE seams this harness exists to capture.
+        t = _NoCopyKernelTensor((256, 128))
+        got = cs._snapshot(t)
+        self.assertEqual(got["dtype"], "torch.float4_e2m1fn_x2")
+        self.assertEqual(got["shape"], [256, 128])
+
+    def test_the_stored_data_lands_back_in_the_original_dtype_not_uint8(self):
+        # A uint8 oracle would replay as garbage operands rather than fail loudly.
+        src = _NoCopyKernelTensor((256, 128))
+        data = cs._snapshot(src)["data"]
+        self.assertEqual(src.viewed_as, ["torch.uint8"])   # the detour was really taken
+        self.assertEqual(data.dtype, "torch.float4_e2m1fn_x2")
+        self.assertEqual(data.device, "cpu")
+
+    def test_a_normal_tensor_never_takes_the_byte_view_detour(self):
+        t = FakeTensor((4, 8))
+        t.view = lambda dtype: self.fail("byte-view fallback used on a dtype that copies fine")
+        self.assertEqual(cs._snapshot(t)["dtype"], "torch.float16")
+
+    def test_an_unrelated_copy_failure_reports_its_own_cause_not_the_views(self):
+        # OOM must stay diagnosable; the fallback is inapplicable and must not mask it.
+        class _Oom(FakeTensor):
+            def to(self, device):
+                raise RuntimeError("HIP out of memory")
+
+            def view(self, dtype):
+                raise RuntimeError("view size is not compatible with input tensor's size and stride")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            cs._snapshot(_Oom((4, 8)))
+        self.assertIn("out of memory", str(ctx.exception))
 
 
 # --------------------------------------------------------------------------- #

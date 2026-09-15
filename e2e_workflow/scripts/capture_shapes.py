@@ -520,12 +520,30 @@ def _tensor_attrs(x):
     return attrs
 
 
+def _to_cpu_clone(x):
+    """``x.detach().to("cpu").clone()``, with a byte-view fallback for sub-byte dtypes.
+
+    ROCm torch 2.9 has no ``copy_kernel`` for ``float4_e2m1fn_x2``, so the plain D2H raises
+    ``NotImplementedError`` — and the hook's blanket except then records ZERO cases, silently, for
+    exactly the MXFP4 seams we most want to capture. The same storage copied through a ``uint8``
+    view needs no per-dtype kernel and is bitwise-equal. Mirrored by harness_lib._to_device.
+    """
+    torch = _torch()
+    try:
+        return x.detach().to("cpu").clone()
+    except (NotImplementedError, RuntimeError) as exc:
+        try:
+            return x.detach().view(torch.uint8).to("cpu").clone().view(x.dtype)
+        except Exception:
+            raise exc  # fallback inapplicable (non-contiguous, OOM, ...) — report the real cause
+
+
 def _snapshot(x):
     """Detach+clone tensors to CPU so later in-place ops can't corrupt the oracle. Pass scalars/None
     through; summarize unsupported objects by repr so the record stays loadable."""
     torch = _torch()
     if torch.is_tensor(x):
-        snap = {"__tensor__": True, "data": x.detach().to("cpu").clone(),
+        snap = {"__tensor__": True, "data": _to_cpu_clone(x),
                 "dtype": str(x.dtype), "device": str(x.device),
                 "shape": list(x.shape), "contiguous": bool(x.is_contiguous())}
         attrs = _tensor_attrs(x)

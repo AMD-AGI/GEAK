@@ -566,11 +566,28 @@ def apply_captured_attrs(t, attrs):
     return t
 
 
+def _to_device(t, device):
+    """``t.to(device)`` with a byte-view fallback for sub-byte dtypes.
+
+    Reverse of capture_shapes._to_cpu_clone: ROCm torch 2.9 has no ``copy_kernel`` for
+    ``float4_e2m1fn_x2``, so rehydrating an MXFP4 oracle onto the GPU raises. Same storage,
+    same bits, through a ``uint8`` view.
+    """
+    try:
+        return t.to(device)
+    except (NotImplementedError, RuntimeError) as exc:
+        try:
+            import torch
+            return t.view(torch.uint8).to(device).view(t.dtype)
+        except Exception:
+            raise exc
+
+
 def reconstruct_captured(obj, device="cpu"):
     """Inverse of capture_shapes._snapshot (shared refs must already be resolved)."""
     if isinstance(obj, dict) and obj.get("__tensor__"):
         t = obj["data"]
-        t = t.to(device) if hasattr(t, "to") else t
+        t = _to_device(t, device) if hasattr(t, "to") else t
         return apply_captured_attrs(t, obj.get("attrs"))
     if isinstance(obj, dict) and set(obj.keys()) == {"__repr__"}:
         return obj["__repr__"]
