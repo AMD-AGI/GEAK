@@ -24,14 +24,12 @@ your return which mode you were in).
 1. **The per-op tuned store**: every table this phase has ever proven, keyed per op, and it survives
    runs whose e2e number went the wrong way. This is the same store, on the same plane, that the
    orchestrator writes your accepted ops back into — read it with the key-addressed `resolve-remote`,
-   not the directory-addressed `resolve`. The distinction is load-bearing: the write goes to the
-   shared service, and a directory read looks only at this run's own checkout, which is created
-   empty and deleted with the run. Reading the wrong one is silent — it returns
-   `kernel_page_not_found` exactly like a genuinely empty page.
+   not the directory-addressed `resolve`. The write goes to the shared service, while a directory
+   read looks only at this run's own checkout, created empty and deleted with the run. Reading the
+   wrong one is silent — it returns `kernel_page_not_found` exactly like a genuinely empty page.
 
    Run `TUNED_KB_ENV_PRELUDE` once first (it exports the store credentials; without it a remote read
-   fails as unauthenticated, which also looks like an empty page). Then ask once per op, before
-   searching it:
+   fails as unauthenticated — the same false empty). Then ask once per op, before searching it:
    ```bash
    eval "$TUNED_KB_ENV_PRELUDE"
    python3 "$TUNED_KB_SCRIPT" resolve-remote --plane "$TUNED_KB_PLANE" \
@@ -46,12 +44,18 @@ your return which mode you were in).
    no precision are still offered.
    A read takes exactly ONE plane, so `TUNED_KB_PLANE` is never `both`. When it is `remote` and the
    answer comes back with no candidates, retry that op once against the local mirror
-   (`--plane local --store "$TUNED_KB_STORE"`) before concluding the page is empty; say in your
-   return which plane answered.
+   (`--plane local --store "$TUNED_KB_STORE"`) before concluding the page is empty; record the plane
+   that ANSWERED as that op's `"read_plane"` (`remote|local`) — per op, not once for the phase.
 
    Each candidate hands you `artifact_paths` (copy these), `artifact_names` (**install each under this
    name — the runtime finds it under no other**), `apply_env`, `cache_invalidation`. Your accepted ops
    are written back here by the orchestrator, gated on `isolated_speedup` and `engaged`.
+   Carry the candidate's `session_id` onto that op's entry too, with `"source": "recall"`. With
+   `read_plane` it is the address the orchestrator attests the outcome back to; misaddress it and a
+   table that turns out dead here keeps its rank for every box after you. That attestation does not
+   wait on your `gate`: a recall you installed and measured is reported whether or not the phase
+   banked a win, so report its own `engaged` and `isolated_speedup` honestly even inside a `no_win`
+   return. Ops you never got onto the GPU are left out — an offer nobody benched is not evidence.
 2. **The deployment KB** (`KB_REFERENCE_DIR`): what earlier runs on this whole deployment measured. An
    accepted-kernel entry tagged `from tuning skillset` names its bundle under `KB_CACHE_DIR` and the
    env var binding it.
@@ -158,10 +162,9 @@ without asking you a question.
 
 Write `EVAL_DIR/tuning/tuning_report.md`: what you targeted and why, per attempt what you changed and
 what it measured (including the failures — an explained dead end saves the next person from repeating
-it), the correctness and engagement evidence, and the pre/post A/B — including which
-`MEASUREMENT_MODE` produced it, since a number taken in one lifecycle is not comparable to one taken
-in another. The System Architect quotes this in the final report, so put real numbers in it and mark
-absent things as absent.
+it), the correctness and engagement evidence, and the pre/post A/B — naming the `MEASUREMENT_MODE`
+that produced it, since the lifecycle is part of the number. The System Architect quotes this in the
+final report, so put real numbers in it and mark absent things as absent.
 
 ### Return JSON
 
@@ -181,7 +184,9 @@ soon as the gate is decided, before writing the report — if you can only do on
   "preflight": {"audit_path": "...", "claims_report": "...", "absent": ["levers this image cannot provide"]},
   "ops_tuned": [
     {"op": "...", "backend": "...", "tuner": "...", "shapes": "...", "isolated_speedup": 1.0,
-     "artifact": "<EVAL_DIR>/tuning/...", "engaged": true, "note": "..."}
+     "artifact": "<EVAL_DIR>/tuning/...", "engaged": true, "note": "...",
+     "source": "search|recall", "session_id": "<the recalled record's id, when source=recall>",
+     "read_plane": "<remote|local — which plane ANSWERED for this op, when source=recall>"}
   ],
   "deploy_bundle": "<EVAL_DIR>/tuning/deploy",
   "deploy_verified": true,
