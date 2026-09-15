@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shlex
 from pathlib import Path
+
+import pytest
 
 _HERE = Path(__file__).resolve().parent
 
@@ -424,6 +427,64 @@ def test_accepted_config_publishes_a_validated_env_map(tmp_path: Path) -> None:
     assert config["env_unparsed"] == ["EXTRA_ENV=)."]
     # The raw string is preserved: it is what the run actually exported.
     assert "EXTRA_ENV=)." in config["env"]
+
+
+@pytest.mark.parametrize("value", [
+    '{"pattern":"(a|b)","key":"x;y"}',
+    "/models/(a b)/config.json",
+    "a;b&c|d<e>f(g)`literal`",
+    "a'b\"c\\d\nsecond line",
+    "",
+])
+def test_accepted_env_preserves_shell_quoted_literal_values(value: str) -> None:
+    raw = shlex.join(["SGLANG_TEST_CONFIG=" + value, "RUN_EVAL=true"])
+    config = rx._accepted_config_with_env_map({"env": raw})
+    assert config["env"] == raw
+    assert config["env_map"] == {"SGLANG_TEST_CONFIG": value, "RUN_EVAL": "true"}
+    assert "env_unparsed" not in config
+
+
+def test_quoted_env_key_must_be_a_complete_identifier() -> None:
+    raw = shlex.join(["A\n=bad", "RUN_EVAL=true"])
+    config = rx._accepted_config_with_env_map({"env": raw})
+    assert config["env_map"] == {"RUN_EVAL": "true"}
+    assert config["env_unparsed"] == ["A\n=bad"]
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ('CUSTOM_CONFIG_PATH="/models/(a b)/config.json"',
+     {"CUSTOM_CONFIG_PATH": "/models/(a b)/config.json"}),
+    (r"CUSTOM_CONFIG_PATH=/models/\(a\ b\)/config.json",
+     {"CUSTOM_CONFIG_PATH": "/models/(a b)/config.json"}),
+    (r"A=x\;y;B=2;", {"A": "x;y", "B": "2"}),
+    ("A='x;y';B=2;", {"A": "x;y", "B": "2"}),
+    ("'A=1;B=2'", {"A": "1;B=2"}),
+    ("A=1;B=2;", {"A": "1", "B": "2"}),
+])
+def test_only_unquoted_unescaped_semicolons_separate_env_assignments(raw, expected) -> None:
+    assert rx._parse_env_assignments(raw) == (expected, [])
+
+
+@pytest.mark.parametrize("raw", ["A=1;EXTRA_ENV=).", 'A="safe"&bad', "A=(bad)", "A=1;command"])
+def test_unquoted_shell_fragments_reject_the_whole_joined_token(raw: str) -> None:
+    parsed, rejected = rx._parse_env_assignments(raw)
+    assert parsed == {}
+    assert rejected == shlex.split(raw)
+
+
+def test_historical_kimi_prose_still_recovers_clean_assignments() -> None:
+    raw = ('(INIT_ENV empty; EXTRA_ENV=""). Effective server env comes from the replayed recipe: '
+           'SGLANG_USE_AITER=1 RUN_EVAL=true; GPU pinning is asserted by the launcher.')
+    config = rx._accepted_config_with_env_map({"env": raw})
+    assert config["env_map"] == {"SGLANG_USE_AITER": "1", "RUN_EVAL": "true"}
+    assert "EXTRA_ENV=)." in config["env_unparsed"]
+    assert config["env"] == raw
+
+
+def test_broken_quoting_retains_legacy_assignment_recovery() -> None:
+    parsed, rejected = rx._parse_env_assignments('EXTRA_ENV="). RUN_EVAL=true; A=1;B=2;')
+    assert parsed == {"RUN_EVAL": "true", "A": "1", "B": "2"}
+    assert rejected == ['EXTRA_ENV=").']
 
 
 def test_an_overlay_recorded_at_a_stale_path_is_found_under_the_eval_dir(

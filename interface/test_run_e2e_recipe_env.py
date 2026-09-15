@@ -21,8 +21,11 @@ Two fixes are pinned here:
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -424,3 +427,42 @@ def test_recipe_env_block_degrades_for_unreadable_or_undecodable_files(
     corrupt = tmp_path / "corrupt.yaml"
     corrupt.write_bytes(b"envs:\n  BAD: \xff\n")
     assert rx._recipe_env_block(str(corrupt)) == {}
+
+
+@pytest.mark.parametrize("backend", ["sglang", "vllm"])
+@pytest.mark.parametrize("launcher", ["native", "magpie"])
+@pytest.mark.parametrize(
+    "removals,extra,expected_removals,expected_flags",
+    [
+        (["--drop"], "", ["--drop"], "--keep 1"),
+        (["--drop"], "--drop", [], "--keep 1 --drop"),
+        (["--limit=8"], "--limit 9", ["--limit 8"], "--drop --keep 1 --limit 9"),
+        ([], "", [], "--drop --keep 1"),
+    ],
+)
+def test_removals_reach_benchmark_environment(
+    tmp_path, backend, launcher, removals, extra, expected_removals, expected_flags
+):
+    handoff = {
+        "schema_version": 2, "framework": backend, "bench_launcher": launcher,
+        "model_path": "/model", "exp_root": str(tmp_path),
+        "eval_dir": str(tmp_path / "eval"),
+        "baseline_env_spec": {"config": {
+            "server_launch_flags": "--drop --keep 1",
+            "extra_server_args": extra, "remove_args": removals,
+        }},
+    }
+    with patch.dict(os.environ, {"GEAK_REMOVE_ARGS": '["--stale"]'}, clear=True):
+        mapped = rx.map_args(handoff)
+        assert mapped["initial_extra_server_args"] == expected_flags
+        assert mapped["initial_remove_args"] == expected_removals
+        assert rx.apply_bench_launcher(handoff) == launcher
+        assert json.loads(os.environ.get("GEAK_REMOVE_ARGS", "[]")) == expected_removals
+        if not expected_removals:
+            assert "GEAK_REMOVE_ARGS" not in os.environ
+
+
+def test_legacy_handoff_clears_inherited_removal_controls():
+    with patch.dict(os.environ, {"GEAK_REMOVE_ARGS": '["--stale"]'}, clear=True):
+        rx.apply_bench_launcher({"framework": "sglang", "bench_launcher": "native"})
+        assert "GEAK_REMOVE_ARGS" not in os.environ

@@ -18,6 +18,21 @@ The serving stack is **pluggable**: `BACKEND` (sglang|vllm; default sglang) sele
 `scripts/adapters/<backend>.sh`, which `bench_e2e.sh` sources. Everything you launch/bench MUST be
 driven through `bench_e2e.sh` with `BACKEND=<backend>` so the stack stays a swappable detail.
 
+When `INIT_ENV_COMPLETE=true`, use `INIT_ENV` as the resolved assignment string,
+including when it is empty. Do not fill it from the original recipe. Apply
+`INIT_UNSET_ENVS` (setup) or `FINAL_FLAGS.unset_envs` (validation) by exporting their
+JSON array as `GEAK_UNSET_ENVS` for `bench_e2e.sh`. The adapter removes those names
+before current assignments; omitting an assignment alone does not remove it.
+
+Pass the supplied `GEAK_REMOVE_ARGS` JSON string to the benchmark as well,
+including `[]` when it clears a previous seed. The benchmark verifies remaining
+flag removals against the live server before measuring. Treat
+`server_args_unverified` as a rejected launch; do not substitute another harness
+or report a throughput for it. Keep the validation receipt with the launch.
+In final validation, persist and return `validation_status="server_args_unverified"`
+with zero verified throughput when either leg fails this check. This rejection
+must not be replaced by an earlier throughput or an intermediate win.
+
 ## Isolation contract (non-negotiable)
 - The user's model weights and the installed serving-stack packages (sglang/vllm/aiter/…) are
   **READ-ONLY**. Never edit site-packages. Every change reaches the server through a reversible
@@ -34,6 +49,7 @@ Inputs: `LAUNCH_SCRIPT` (path to a bench/launch script; may be empty), `MODEL_PA
 (sglang|vllm; default sglang), `EXP_ROOT`, `EVAL_DIR_OVERRIDE` (may be empty), `MODEL_NAME_HINT`,
 `TASK`, `SKILL_DIR`, `GPU_IDS`, `SERVING_TP`/`SERVING_GPU` (serving config invariant), `WORKLOAD`
 (ISL/OSL/conc), `INIT_FLAGS` (seed `--server` flags from the caller's best config; may be empty),
+`INIT_ARGS_MODE` (optional `replace`: `INIT_FLAGS` is complete, including an empty string),
 `INIT_ENV` (seed `KEY=VAL` env from the caller's best config; may be empty),
 `INIT_BASE_OVERLAY` (the caller's current-best Python overlay/source stack),
 `MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, and
@@ -94,6 +110,8 @@ Steps:
    the baseline MUST be measured ON them (pass `EXTRA_SERVER_ARGS`/`EXTRA_ENV`), so GEAK's baseline
    == the caller's best config and later kernel gains compound on top of it. Use the copied bench script
    (substitute the actual SERVING_TP / SERVING_GPU values from your inputs):
+   When `INIT_ARGS_MODE=replace`, pass `INIT_FLAGS` verbatim, including empty flags;
+   do not restore recipe flags or substitute setup defaults for that argument string.
    ```bash
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/baseline" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
    ISL=<isl> OSL=<osl> CONC=<conc> PROFILE=0 \
