@@ -62,7 +62,10 @@ Write `profile/round_<R>/profile_roofline.json` and a human-readable `profile_ro
     "attainable_speedup": 1.023,
     "expected_e2e_gain_pct": 0.59,
     "headroom_class": "underperforming|moderate|saturated|unknown",
-    "confidence": "low|medium|high",
+    "measurement_basis": "counters|mixed|model",  // where the ACHIEVED side came from
+    "bytes_measured": false, "flops_measured": false,
+    "rankable": false,                  // true only when the verdict's own axis was counted (§5)
+    "confidence": "low|medium|high",    // DERIVED from the basis, not self-reported
     "suspect": false,
     "byte_reduction_levers": ["..."],   // populated only when headroom_class=saturated
     "notes": "assumptions made, what would sharpen this"
@@ -213,11 +216,30 @@ Do not guess. Emit `modeled: false` and degrade this entry (§6 L2).
 | **B** after extract | the REAL shapes/dtypes the Kernel Extractor captured for the unittest | `medium` | rank as a secondary key |
 | **C** after op_bench | rocprofv3 counters on the isolated op (measured bytes/FLOPs) | `high` | rank as a secondary key; may be cited in the report |
 
+**The achieved side must be COUNTED, and the tool now says whether it was.** Real shapes (stage B)
+still only buy you a better *estimate*: `2·M·N·K` is the cost of the arithmetic you assume the kernel
+performs, and `experts_hit` is an expected value over a routing distribution nobody observed. Neither
+is a measurement. `roofline_metrics` therefore carries `bytes_measured` / `flops_measured` — both
+**default to false**, because a caller that says nothing about provenance is reporting an estimate —
+and derives `measurement_basis`, `confidence` and `rankable` from them instead of trusting a
+self-reported `confidence`.
+
+`rankable` is decided **per axis**: `roofline_pct` is achieved/peak on ONE roof, so the quantity that
+roof is made of has to be real — bytes for a memory-side verdict, FLOPs for a compute-side one.
+Counting traffic does not license a compute-bound claim. A `suspect` or no-verdict row is never
+rankable however it was obtained.
+
 Stage A is inherently coarse: at profile time the exact operand shapes have not been captured yet.
 **Re-run this skill at stage B/C and overwrite the artifact.** Because the decision to spend the *next*
 budget unit happens after the *previous* kernel's extract, refined numbers arrive in time to matter.
 
 ### Stage C — counter measurement (rocprofv3)
+Feed the counters straight in with `roofline_tools.roofline_metrics_from_counters(counters, t, ...)`:
+it builds the achieved side from them, falls back to your `bytes_est` / `flops_est` for whichever
+side the collection is missing, and marks each side accordingly — so a partial collection still
+produces a row, and the row still says which half of it was counted. It returns `None` when neither
+side is usable, which means "stay at stage A/B" and is visible to you, not a silent zero.
+
 Measure on the ISOLATED op (the Op Benchmarker already has it isolated — no extra server run):
 - bytes: `FETCH_SIZE` + `WRITE_SIZE` (both in **KiB**) → `(FETCH_SIZE + WRITE_SIZE) · 1024`
 - FLOPs: `MfmaFlops`, or `MfmaFlopsBF16`/`F16`/`F32`/`F64` per dtype

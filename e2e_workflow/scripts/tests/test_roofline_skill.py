@@ -279,6 +279,117 @@ class TestHeadScoping(unittest.TestCase):
         self.assertAlmostEqual(rt.experts_hit(256, 512), 221.0, delta=3.0)
 
 
+class TestMeasurementBasis(unittest.TestCase):
+    """An estimate may annotate; only a measurement may rank.
+
+    `2*M*N*K` is the cost of the arithmetic we ASSUME the kernel does, and `experts_hit` is an
+    expected value over a router nobody observed. Both are priors. Before this contract existed the
+    artifact could not tell them apart from counted traffic, so a modelled row could be ranked on.
+    """
+
+    def test_analytic_rows_are_not_rankable(self):
+        for name, m in (("moe", _moe_metrics()), ("attn", _attn_metrics())):
+            self.assertEqual(m["measurement_basis"], "model", name)
+            self.assertEqual(m["confidence"], "low", name)
+            self.assertFalse(m["rankable"], name)
+            self.assertIn("do not rank", m["basis_note"], name)
+
+    def test_analytic_rows_keep_their_verdict(self):
+        """Not rankable is not "no answer": SKILL.md section 5 keeps stage A as display+annotate,
+        and the ranking inversion above is computed from exactly these rows."""
+        m = _moe_metrics()
+        self.assertEqual(m["headroom_class"], "saturated")
+        self.assertGreater(m["roofline_pct"], 0.0)
+
+    def test_counted_traffic_makes_a_memory_verdict_rankable(self):
+        p = _peaks()
+        # The reference MoE layer: ~697 MB of fp8 weights streamed in 98.9 us (FETCH_SIZE is KiB).
+        counters = {"FETCH_SIZE": 697e6 / 1024.0, "WRITE_SIZE": 0.0}
+        per_expert_elems = 2 * MOE["inter"] * MOE["hidden"] + MOE["hidden"] * MOE["inter"]
+        m = rt.roofline_metrics_from_counters(
+            counters, 98.9e-6, p["hbm_bw_bytes_s"], rt.peak_flops_for(p, "fp8"),
+            rt.TARGET_EFF["moe"], pct_gpu_time=26.45,
+            flops_est=2 * MOE["M"] * MOE["top_k"] * per_expert_elems)
+
+        self.assertTrue(m["bytes_measured"])
+        self.assertFalse(m["flops_measured"])
+        self.assertEqual(m["bound_type"], "memory")
+        # The verdict sits on the memory roof and the bytes under it were counted -> rankable.
+        self.assertEqual(m["measurement_basis"], "mixed")
+        self.assertEqual(m["confidence"], "medium")
+        self.assertTrue(m["rankable"])
+        self.assertNotIn("basis_note", m)
+
+    def test_rankability_follows_the_axis_the_verdict_sits_on(self):
+        """Counting bytes does not license a COMPUTE-side verdict, and vice versa.
+
+        This is the sharp edge of the rule: `roofline_pct` is achieved/peak on one roof, so the
+        quantity that roof is made of is the one that has to be real.
+        """
+        p = _peaks()
+        # High AI -> compute side. Bytes counted, FLOPs modelled => the verdict axis is modelled.
+        m = rt.roofline_metrics(1e6, 1e12, 1e-3, p["hbm_bw_bytes_s"],
+                                rt.peak_flops_for(p, "fp8"), 0.90,
+                                pct_gpu_time=10.0, bytes_measured=True, flops_measured=False)
+        self.assertGreater(m["arithmetic_intensity"], m["ridge_point"])
+        self.assertEqual(m["measurement_basis"], "mixed")
+        self.assertEqual(m["confidence"], "low")
+        self.assertFalse(m["rankable"])
+        self.assertIn("achieved FLOPs", m["basis_note"])
+
+    def test_both_axes_counted_is_high_confidence(self):
+        p = _peaks()
+        # 6.1 GB moved and 5e11 FLOPs executed in 1 ms -> 6.1 TB/s, AI 81 (left of the 312 ridge).
+        m = rt.roofline_metrics_from_counters(
+            {"FETCH_SIZE": 4e6, "WRITE_SIZE": 2e6, "MfmaFlopsBF16": 5e11},
+            1e-3, p["hbm_bw_bytes_s"], rt.peak_flops_for(p, "bf16"), rt.TARGET_EFF["gemm"])
+
+        self.assertEqual(m["bound_type"], "memory")
+
+        self.assertEqual(m["measurement_basis"], "counters")
+        self.assertEqual(m["confidence"], "high")
+        self.assertTrue(m["rankable"])
+
+    def test_default_is_estimate_not_measurement(self):
+        """An un-migrated caller says nothing about provenance, and nothing must read as model."""
+        p = _peaks()
+        m = rt.roofline_metrics(2e8, 1e8, 100e-6, p["hbm_bw_bytes_s"],
+                                rt.peak_flops_for(p, "bf16"), 0.90, pct_gpu_time=10.0)
+        self.assertEqual(m["measurement_basis"], "model")
+        self.assertFalse(m["rankable"])
+
+    def test_measured_but_infeasible_is_still_not_rankable(self):
+        """suspect and no-verdict rows stay unrankable however they were obtained -- counting the
+        bytes does not rescue a row whose ratio is impossible."""
+        p = _peaks()
+        # Well above the dispatch floor, so this is the infeasible branch and not the latency one.
+        over = rt.roofline_metrics(1e12, 1e6, 100e-6, p["hbm_bw_bytes_s"],
+                                   rt.peak_flops_for(p, "fp8"), 0.90,
+                                   bytes_measured=True, flops_measured=True)
+        self.assertTrue(over["suspect"])
+        self.assertEqual(over["headroom_class"], "unknown")
+        self.assertFalse(over["rankable"])
+
+    def test_no_usable_counters_returns_none(self):
+        """None = "stay at stage A/B", visible to the caller. Never a silent zero."""
+        p = _peaks()
+        self.assertIsNone(rt.roofline_metrics_from_counters(
+            {}, 1e-3, p["hbm_bw_bytes_s"], rt.peak_flops_for(p, "bf16"), 0.90))
+        self.assertIsNone(rt.roofline_metrics_from_counters(
+            {"MemUnitStalled": 5.0}, 1e-3, p["hbm_bw_bytes_s"],
+            rt.peak_flops_for(p, "bf16"), 0.90))
+
+    def test_basis_is_a_closed_set(self):
+        p = _peaks()
+        rows = [_moe_metrics(), _attn_metrics(), _moe_metrics(all_experts=True),
+                rt.roofline_metrics_from_counters(
+                    {"FETCH_SIZE": 2e6, "MfmaFlopsBF16": 5e12}, 1e-3, p["hbm_bw_bytes_s"],
+                    rt.peak_flops_for(p, "bf16"), 0.90)]
+        for m in rows:
+            self.assertIn(m["measurement_basis"], rt.MEASUREMENT_BASES)
+            self.assertIn(m["confidence"], ("low", "medium", "high"))
+
+
 class TestSkillDocConsistency(unittest.TestCase):
     """The helper's priors must not drift from the SKILL.md table that documents them."""
 
@@ -292,6 +403,16 @@ class TestSkillDocConsistency(unittest.TestCase):
         for frag in ("dense GEMM | **0.90**", "MoE / grouped GEMM | **0.90**",
                      "attention decode (paged) | **0.50**"):
             self.assertIn(frag, text, "SKILL.md target_eff table drifted from roofline_tools.TARGET_EFF")
+
+    def test_measurement_basis_contract_is_documented(self):
+        """The basis fields are only useful if the consumer is told what they mean."""
+        with open(os.path.join(os.path.dirname(PEAKS_MD), "SKILL.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        for frag in ("measurement_basis", "bytes_measured", "rankable",
+                     "roofline_metrics_from_counters"):
+            self.assertIn(frag, text, "SKILL.md does not document the measurement-basis contract")
+        self.assertEqual(rt.MEASUREMENT_BASES, ("counters", "mixed", "model"))
+        self.assertIn("counters|mixed|model", text)
 
     def test_workload_contract_is_stated(self):
         """The hard constraint the byte-reduction track must not violate."""
