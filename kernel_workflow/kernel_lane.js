@@ -632,8 +632,27 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+// GEAK-ABLATION-ARMS-v1 (B6): registered mechanical dispatches are folded into the NEXT
+// agent instead of getting an agent of their own. In the historical Qwen3 run the
+// storage-reclaim agent -- whose whole job is to run one fixed bash command -- cost
+// 152 calls across 8 agents ($13.90), because every one of them paid the full
+// bootstrap floor and then held a conversation. Folding removes the dispatch; the
+// command still runs, verbatim, as the next agent's first action.
+const ABLATION_ARM = String(A.ablation_arm || '').trim().toUpperCase();
+const ABL_B6 = ABLATION_ARM === 'B6';
+const ABL_PENDING = [];
+const ABL_DRAINED = [];
+function ablDrainPrelude() {
+  if (!ABL_PENDING.length) return '';
+  const cmds = ABL_PENDING.splice(0, ABL_PENDING.length);
+  for (const c of cmds) ABL_DRAINED.push(c);
+  return '## FIRST, run these registered maintenance commands EXACTLY as written, then continue with your task.\n' +
+    cmds.map((c) => '```bash\n' + c + '\n```').join('\n') + '\n\n';
+}
+
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
+  if (ABL_B6 && typeof p === 'string') { const pre = ablDrainPrelude(); if (pre) p = pre + p; }
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     try {
       if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return await agent(p, o);
@@ -1538,6 +1557,10 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     `   bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${EVAL_DIR} --keep-round ${round};` +
     ` fi` +
     `; echo STORAGE_RECLAIM_DONE round=${round}`;
+  if (ABL_B6) {
+    ABL_PENDING.push(reclaimCmd);
+    log(`  [B6] storage reclaim r${round} folded into the next agent — no dedicated dispatch.`);
+  } else
   await agentT(
     `Storage reclaim after round ${round} (issue #429). Run EXACTLY this bash, then return ` +
     `{ok:true, note:"reclaimed"}. Do NOT stop optimizing — reclaim frees disk so later rounds can run.\n` +

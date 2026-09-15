@@ -1,0 +1,66 @@
+{
+  "run_id": "unified_attn_3d_decode_task-gpt-oss-120b-e2e-20260908",
+  "date": "2026-09-08",
+  "kernel_names": [
+    "kernel_unified_attention_3d"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "cap-the-kv-split-by-the-call-s-own-grid-fill-then-buy-the-re-attention-decode-gfx950-decode",
+      "title": "Cap the KV split by the call's own grid fill, then buy the rest with pipeline depth",
+      "description": "Cap the KV split at the call's own grid fill so the reduce dispatch disappears, then add pipeline depth not waves: 1.23x weighted on paged decode.",
+      "keywords": [
+        "split-kv",
+        "dispatch-collapse",
+        "grid-fill",
+        "num-stages",
+        "software-pipelining",
+        "ilp",
+        "occupancy",
+        "attention-decode",
+        "decode",
+        "paged-attention",
+        "graph-replay",
+        "triton",
+        "gfx950"
+      ],
+      "kernels": [
+        "kernel_unified_attention_3d"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "bf16 paged 'unified' split-K decode attention in Triton on gfx950/MI355X whose wrapper splits K by a constant floor even when the un-split grid already fills the device, and which is timed through a captured graph replay",
+      "layer": "learned",
+      "lifecycle": "active",
+      "levers": [
+        "algo.split-kv-granularity",
+        "compute.launch-tuning"
+      ],
+      "cost": "L2",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.2336x time-weighted isolated vs the frozen baseline (director-verified, correctness PASS); per case 1.24x on the dominant decode bucket that carries 99.9% of the weight, 1.18x on the second decode shape, and 1.00x on the m=1 decode shape which the scope guard leaves untouched; interleaved-median A/B with zero spread on the dominant case",
+      "roofline": "memory-bound before and after, moving from roughly 0.77 to roughly 0.81 of realistic achievable HBM read bandwidth while resident occupancy sits at about 0.29 of the register-occupancy ceiling — the signature of a loop limited by in-flight loads per wave rather than by wave count",
+      "verified_on": "2026-09-08",
+      "last_seen": "2026-09-08",
+      "lever": "When such a wrapper carries a constant minimum split of K, compute per call how many segments are needed to reach about one workgroup per CU from this call's own program count, and cap the split there; when the cap lands at one, the partial buffers and the whole second reduce dispatch disappear, and the remaining time comes from deeper software pipelining of the KV loads rather than from more resident waves.",
+      "apply": "All host-side: derive the cap from (this call's un-split program count, CU count) and clamp the split constant, then apply the launch-meta override as a wrapper AFTER the stock config function returns, so the split arithmetic and the derived occupancy term never see the new warp count; scope the override to the collapsed outcome so the un-collapsed low-batch path keeps its stock tuple by construction.",
+      "stack": "total 1.2336x isolated (director-verified) = two directions compounded, incremental in landing order\n  - 1. fill-aware split collapse to a single dispatch - 1.1765x standalone (round 1, verified) - the bulk of the win\n  - 2. launch-meta re-tune on the collapsed geometry - +5.4% on top of (1) (round 2, verified); about six sevenths of it is pipeline depth alone, the rest a wider warp count kept for the registers it frees\n  - note: a third round was a deliberate null that shipped nothing, so the total is the round-2 cumulative",
+      "verify": "Check the dispatch count per shape actually falls to one and print the launch tuple the wrapper chose for each bucket; then re-time interleaved control/candidate/control/candidate inside one session and report the median, since an unreplicated 2% arm here failed to reproduce in a second block.",
+      "pitfall": "A constant split of one won the weighted metric while regressing the low-batch decode shape about 32% -> the split factor was a constant instead of a function of the launched grid -> derive the cap from this call's own program count and scope the launch override to the collapsed path.\nHalving the split rather than collapsing it landed below the incumbent, and narrowing the partials to bf16 was exactly neutral -> the cost is the reduce DISPATCH, not the partial traffic -> price the direction on whether it deletes the dispatch, not on how much partial traffic it removes.\nAn apparent 28% win measured under an eager driver came back as a 6% regression under the captured graph -> the harness events a graph replay, so a deleted launch is free while the fences it needed are real device time -> re-measure every eager win under the graph before believing it.\nFreed registers looked like a licence for a deeper pipeline and the deeper arm cost 5% -> pipeline depth is an LDS-budget knob (the pipelined build requests a large dynamic-LDS multibuffer), not a register knob -> read the compiled binary's dynamic LDS request before deepening.\nDoubling resident waves via the warp count measured nothing against a same-session control -> the loop was short of in-flight loads per wave, not of waves -> attribute the gain to depth and keep the wider warp count only for the registers it saves.",
+      "caution": "Also verify the depth choice against the call's own trip count: carrying the same depth onto the short-trip low-batch path cost about 6% there because a pipeline that deep never fills; and also verify which of the two knobs pays on your own shape, since a neighbouring split-KV decode family on this arch measured a second resident wave as the payoff and deeper pipelining as a loss.",
+      "source": "run unified_attn_3d_decode_task under the gpt-oss-120b e2e campaign, 2026-09-08; director-verified time-weighted 1.2336x over 3 rounds / 6 directions, correctness PASS on the eager, ragged, min-tail and graph-replay legs",
+      "attempts": 2,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0
+    }
+  ]
+}

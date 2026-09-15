@@ -1,0 +1,67 @@
+{
+  "run_id": "e2e-qwen3-14b-fp8-20260910-133807-a8w8-blockscale-decode-lane",
+  "date": "2026-09-11",
+  "kernel_names": [
+    "ck_a8w8_blockscale_gemm_E0_Set_decode_qkv_gate_up"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "stream-the-read-once-weight-operand-of-a-decode-bucket-fp8-block-scale-gemm",
+      "title": "Stream the read-once weight operand of a decode-bucket fp8 block-scale GEMM",
+      "description": "Decode-bucket fp8 block-scale GEMM is weight-stream bound: a non-temporal hint on the read-once weight load alone carried 1.40x of a 1.3969x stack",
+      "keywords": [
+        "cache-modifier",
+        "non-temporal-loads",
+        "quantized-gemm",
+        "fp8",
+        "block-scale",
+        "decode",
+        "m-bucket",
+        "bucket-routing",
+        "split-k",
+        "triton",
+        "gfx950",
+        "isa-inspection",
+        "memory-bound",
+        "measurement-discipline"
+      ],
+      "kernels": [
+        "gemm_a8w8_blockscale",
+        "_gemm_a8w8_blockscale_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "decode",
+      "key": "fp8 e4m3 block-scale A8W8 linear (qkv + gate_up) on a decode-weighted mixed shape set, weight-stream bound · gfx950/MI355X · Triton behind a host dispatch seam",
+      "lifecycle": "active",
+      "layer": "learned",
+      "levers": [
+        "mem.non-temporal-load",
+        "host.dispatch-seam",
+        "algo.split-k"
+      ],
+      "cost": "L2",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.3969x cumulative time-weighted over the frozen baseline (director-verified, medians of 3 with a null band of 1.006-1.011): the gate_up decode M=64 bucket carrying 81.65% of the weight goes 1.44x, the other five buckets are held at ~1.00x by design, so the unweighted geomean reads only 1.13x — quote the weighted figure.",
+      "roofline": "memory-bound before and after: the dominant decode bucket moves ~59% -> ~88% of the re-measured achievable streaming-read roof; that bucket's hard ceiling is ~1.76x, of which 1.44x is banked. The prefill arm is compute-leaning (~47% of the fp8 dense roof, tile-quantisation capped at ~1.41x) and does not respond to the same lever.",
+      "verified_on": "2026-09-11",
+      "lever": "At small decode M the weight operand dwarfs the activation, so the op is a weight stream, not a GEMM: try a non-temporal / streaming cache hint on the WEIGHT load alone (activation and scales left at default), on top of a split-K=2 tile with fp16 partials to fill the grid. The mechanism is removing a pointless cache fill for a buffer read once and larger than cache — a bimodal warm/cold kernel collapses to one fast mode.",
+      "apply": "Land it behind a static (M-bucket, N, K) -> config table with default fall-through to the tuned vendor path: host-side shapes only (no device syncs, no autotune), a plain dict, backend bound on first eager sight and refused inside a live graph capture. The seam is what lets one bucket be swapped, and a later experiment abandoned behind a defaulted-off flag, while the other buckets stay pinned at parity.",
+      "stack": "total 1.3969x cumulative time-weighted (director-verified), three directions in landing order\n  - 1. host dispatch seam + corrected compiled-instance selection — 1.061x standalone (round 1, verified)\n  - 2. split-K=2 with fp16 partials and KSUB depth on the dominant decode bucket — 1.013x standalone, 1.077x once routed behind (1) (round 1, verified)\n  - 3. non-temporal hint on the weight load — 1.406x standalone measured on top of (1,2), 1.409x integrated (round 2, verified); it carries essentially the whole result\n  - note: attribution is incremental in landing order, not independent; a third round spent on reduce fusion returned no patch and the cumulative was unchanged.",
+      "verify": "Diff the emitted ISA for the non-temporal bit rather than trusting the argument, then A/B interleaved against an in-session control on the unmodified path in the same workspace, medians of 3 full harness runs, and check the excluded-case line so the dominant bucket was not dropped as a pseudo-identity.",
+      "pitfall": "the winning knob was already plumbed and read None for a whole round → a cache-modifier argument defaults to nothing and nobody re-checks it → audit what is plumbed-but-unset before funding an authoring lane; here two of four modifier spellings and the eviction-policy argument lowered to no ISA change at all\n- pitfall: a pure-read bandwidth probe put the roof ~3x low and mis-sized every target → it was measured under the ambient cache policy with narrow per-workgroup blocks, so it timed cache fill instead of the read roof → re-measure the floor as a grid over cache policy x per-workgroup block size x workgroup count, with the WINNING policy\n- pitfall: fp16 split-K partials passed every dense case and failed the sparse graph-replay case → the tolerance floor scales with the RMS of the reference, and mostly zero-padded rows shrink it → gate numerics on the sparsest case, and keep a split-K=1 fall-through that costs the win but not correctness\n- pitfall: collapsing the split-K reduce into the GEMM removed a dispatch and still lost → device-scope release on a multi-XCD part lowers to a per-workgroup L2 writeback that costs far more than the dispatch saved, and the relaxed ordering that was fast raced intermittently → price the coherence flag before sizing a fusion, and discard a leg that fails parity on any of its runs however fast it timed\n- pitfall: the same patch read ~0.3pp apart across sessions → session-to-session drift on the identical canonical → interleave the control with the candidate in one session before believing a sub-0.5pp gap\n- pitfall: a harness-side per-call window sits between every dispatch, on the baseline legs too → graph replay plus cache flush, untouchable from kernel source → it dilutes the reported ratio (kernel-time-only the bucket reads 1.51x against the harness's 1.44x), so size targets against the op floor including it",
+      "caution": "also verify the hint per operand and per bucket rather than per kernel: it won on the read-once weight stream here, so check the activation, the scale metadata and the output stores separately, and re-check the sign on each M bucket — and also verify the width of the per-workgroup request, since a dot-operand layout can force a byte-wide load that no contiguity fix changes.",
+      "source": "run e2e-qwen3-14b-fp8-20260910-133807, a8w8 block-scale decode lane, rounds 1-3 tech_lead_report + director re-measurement, 2026-09-11",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0
+    }
+  ]
+}

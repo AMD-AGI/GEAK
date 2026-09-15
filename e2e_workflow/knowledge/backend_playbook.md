@@ -43,6 +43,83 @@ experience; treat the seed as priors, not gospel — the unittest is the judge.
   `saturated`/`attainable=1.0` roofline verdict to size the opportunity; the launch-overhead win is invisible
   to it. This is the exact "measured EXCEEDS predicted attainable" failure mode — flag loudly.
 
+- 2026-09-08 · gfx950 sglang+aiter Triton `kernel_unified_attention_3d` (gpt-oss-120b, ALL_DECODE, 5.01% head):
+  roofline predicted `attainable_speedup=1.0`, `expected_e2e_gain_pct=0.0` (`roofline_pct` 0.567,
+  `bound_type=latency`, headroom **saturated**, confidence **low**). MEASURED isolated **1.2336x**
+  byte-exact, e2e +0.402% (kernel-only A/B, gate=stack). **Measured EXCEEDS predicted attainable — flag
+  loudly**, and it is the SAME failure mode as the 2026-08-19 mxfp4 MoE line above: the win was a
+  DISPATCH COLLAPSE (split-K NS 4→1 removes a whole `reduce_segments` launch + an fp32 segment
+  round-trip), which a device-time byte/FLOP model structurally cannot see. Rule forming across two
+  confirms: when `bound_type` is `latency`/launch-shaped, treat `saturated` as "no BYTE headroom", never
+  as "no headroom" — the Amdahl e2e SIZING, by contrast, was accurate (predicted ~+0.3-1.0% at a 5% head,
+  measured +0.402%), so keep ranking on pct_gpu_time and use roofline only to pick the MECHANISM.
+
+- 2026-09-09 · gfx950 vLLM fp8 quant/norm prologue cluster (`_act_mul_and_dynamic_fp8_group_quant`,
+  Qwen3-14B-FP8 TP1, decode-bound, 5.0% row / 13.63% cluster): roofline predicted `roofline_pct` 0.089,
+  `attainable_speedup=1.0`, `expected_e2e_gain_pct=0.0`, headroom **unknown**, confidence **low**.
+  MEASURED iso **1.741x** geomean and e2e **+3.966%**. **Measured EXCEEDS predicted attainable — flag
+  loudly**, third confirm of the same failure mode (see the two lines above). Note the distinct
+  signature here: `roofline_pct` was very LOW (8.9%) yet the model still returned `attainable=1.0` with
+  `headroom_class=unknown` — i.e. the model declined to make a prediction and the pipeline read that as
+  "no headroom". Treat `unknown`/`attainable=1.0` at low `roofline_pct` as UNMODELED, never as
+  saturated. Correct behavior held (confidence low → not ranked on, candidate not dropped).
+  · The Amdahl sizing, by contrast, was EXACT: 13.63% at the conservative serving-weighted 1.3847x
+  bounds the gain at +3.94% and the measurement landed on +3.97%. Keep sizing on
+  `pct_gpu_time x serving-weighted iso`; use roofline only to pick the mechanism.
+  · Second calibration from the same round, this one at the KERNEL level: three kernels were rewritten
+  and only the one whose per-launch cost was ABOVE the box's ~5.6 us dispatch floor improved
+  (8.12 -> 5.64 us); the two already at the floor returned -2.1% / +2.2%. Add a floor check to the
+  screen — a small kernel at the dispatch floor has no recoverable time regardless of its %GPU, and
+  the only lever left for it is removing launches.
+
+- 2026-09-09 · gfx950 sglang+aiter native-mxfp4 MoE (gpt-oss-120b TP1, decode-dominated), round-1
+  re-profile of the accepted stack. The roofline artifact was **stage A / confidence low on every entry**,
+  so per doctrine it was displayed and NOT ranked on — correct behavior, but note what it emitted:
+  `attainable_speedup=1.0` / `expected_e2e_gain_pct=0.0` for BOTH ck_tile MoeFlatmm heads (37.73% and
+  20.98%, `roofline_pct` 1.0, `headroom_class=unknown`) and `saturated`/1.0 for unified_attention_3d
+  (5.37%, `roofline_pct` 0.794). A stage-A prior that returns `expected_e2e_gain_pct=0.0` for 64% of GPU
+  time carries ZERO ranking information — `ranking_by_expected_gain` degenerated to a copy of
+  `ranking_by_pct`. Treat stage A as "not a prior at all" and do not spend a phase reading it.
+  · The direction actually measured this round (the `elementwise_overhead` cluster, 5.2% combined) was
+  **absent from the roofline entries entirely** — the artifact only models head-threshold rows — so there
+  was no prediction to score. Fourth data point for the same rule: the model is silent or `unknown`
+  exactly where the launch/dispatch-shaped wins live. Hand-computed effective bandwidth on that cluster
+  (153 GB/s on a 737 KB copy, 138 GB/s on a 393 KB fill, ~3% of HBM roofline) was what actually settled
+  it, and it settled it as "no BYTE headroom, launch-latency-bound" — the same signature the three lines
+  above say to route to launch-removal, not to a rewrite.
+  · Amdahl sizing was again the reliable half: the pad-attributable share was bounded at ~3.3% of GPU
+  time with an e2e ceiling well under 1%, which is why the cluster was dropped from the kernel layer
+  without spending a server boot or an oracle capture.
+
+- 2026-09-10 · gfx950 sglang+aiter, gpt-oss-120b TP1 decode, round-2 milestone —
+  `unified_attention_3d` (5.37% GPU). Roofline (stage A, confidence low) predicted
+  `attainable_speedup=1.0` / `headroom_class=saturated` / `expected_e2e_gain_pct=0.0`; the isolated
+  measurement was **1.1226x byte-exact**. That is the SECOND time this seam beat its own saturated
+  verdict (1.234x previously) — record it loudly: a device-time byte/FLOP model cannot see a
+  dispatch-collapse win, so a `saturated` label must never retire a high-%GPU seam.
+  · The e2e half of the prior looked right (+0.186% measured vs 0.0 predicted) but for the WRONG reason
+  and must not be scored as a hit: the candidate never executed (host fast path unreachable at HIP-graph
+  capture), so the leg measured stock against stock. An `expected_e2e_gain_pct` can only be calibrated
+  against an ENGAGEMENT-PROVEN leg; check engagement before writing a calibration line.
+  · Amdahl remained the honest bound: ceiling +0.586% (5.37% x 1.1226x), measured +0.186%, noise band
+  0.5% — the ceiling correctly said "stack-only at best" before the budget was spent.
+
+- 2026-09-11 · gfx950 vLLM+aiter, Qwen3-14B-FP8 TP1 (isl/osl/conc 1024/1024/64), round-1 milestone —
+  the direction that PAID (`_act_mul_and_dynamic_fp8_group_quant_kernel` launcher re-geometry, 4.96% GPU
+  at round_head) had NO roofline entry at all: the stage-A artifact only models rows at/above the 5%
+  head threshold, so the winning candidate sat just under the bar and was unmodeled. **Fifth consecutive
+  data point for the same rule — the prior is silent exactly where the launch/geometry-shaped wins
+  live.** Score: no prediction, so nothing to calibrate; Amdahl did the work instead (4.96% x 2.063x
+  => ceiling +2.53%, measured +1.6005% e2e, inside it and above the 0.5% band).
+  · Every modeled row this round carried `confidence: low` except `kernel_unified_attention_3d`
+  (medium, `roofline_pct` 0.70, `saturated`) — and the re-profile agrees with that one: hbm_util 0.702
+  against a 0.50 target, i.e. byte reduction or nothing. Ranking on the low-confidence rows would have
+  been actively misleading here: `attainable_speedup` 2.93-8.35x with `expected_e2e_gain_pct` up to
+  11.6% on CK rows whose measured bake-offs closed at 1.00x in a previous round of this same run.
+  Direction of the error is consistent and one-sided: **stage-A `attainable_speedup` on library CK/GEMM
+  rows is grossly OPTIMISTIC (it reads a low `roofline_pct` as recoverable headroom), while it is
+  SILENT/`saturated` on the seams that actually moved.** Keep using it to flag saturation, not to rank.
+
 ## How to use this in a run
 1. Architect reads the Profiler Top-N classification + shapes.
 2. For `library_*` kernels → hand to Config Tuner with the ranked swaps above (no source edit).

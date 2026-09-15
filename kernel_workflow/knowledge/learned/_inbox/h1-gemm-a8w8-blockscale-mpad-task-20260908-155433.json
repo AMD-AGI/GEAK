@@ -1,0 +1,69 @@
+{
+  "run_id": "h1_gemm_a8w8_blockscale_mpad_task_20260908_155433",
+  "date": "2026-09-08",
+  "kernel_names": [
+    "gemm_a8w8_blockscale_mpad"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "rank-a-shape-routed-gemm-on-the-traffic-weighted-gate-when-the-grader-s-buckets-are-disjoint",
+      "description": "When the grader's shape buckets miss the deployed ones, rank on the traffic-weighted gate: a graded tie hid 1.054->1.116 from a per-regime launch quad",
+      "keywords": [
+        "method",
+        "measurement-discipline",
+        "ab-methodology",
+        "bucket-routing",
+        "m-bucket",
+        "size-gating",
+        "block-m",
+        "num-warps",
+        "num-stages",
+        "host-runtime",
+        "fp8",
+        "block-scale",
+        "quantized-gemm",
+        "latency-bound",
+        "triton",
+        "gfx950"
+      ],
+      "kernels": [
+        "_bs_gemm_mpad"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "n/a",
+      "key": "grading a shape-routed fp8 block-scaled prefill GEMM on gfx950/CDNA4 when the oracle's M buckets are 128-unaligned and every deployed shape is 128-aligned",
+      "layer": "learned",
+      "levers": [
+        "sched.per-regime-launch-constexpr",
+        "host.bucket-routing"
+      ],
+      "cost": "L1",
+      "lifecycle": "active",
+      "type": "method",
+      "confidence": "★★",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "effect": "1.0967x isolated director-verified geomean over a tuned vendor M-padding instance; the call-weighted gate over the deployed prefill shapes went 0.9263 (seed) -> 1.1155, per shape M=8192/N=34816 1.054 -> 1.118-1.121, M=7393 1.071 -> 1.139-1.159, and M=1024/N=34816 ~1.011 (excluded) -> 1.035-1.070 reclaimed, with no regression on the narrow-N arm",
+      "roofline": "latency-bound before and after, sub-case dependency-wait dominant (wave cycles ~28% active / ~38% dependency wait / ~34% issue wait); VALU busy ~32% against MFMA ~34% at ~0.28 of dense fp8 peak; occupancy 50% of max, no LDS, no scratch",
+      "verified_on": "2026-09-08",
+      "last_seen": "2026-09-08",
+      "title": "Rank a shape-routed GEMM on the traffic-weighted gate, not on the grader's buckets",
+      "lever": "when the grading harness times only shape buckets the deployed traffic does not send, treat the graded metric as a FLOOR gate and rank candidates on a call-weighted gate over the real served shapes; the headroom then sits in the regimes the grader never executes, and per-regime launch constexprs are what reaches it.",
+      "apply": "key the host routing table on (M-regime, N, K) with a measured per-bucket whitelist, then give each aligned large-M regime its own launch-constexpr quad (here BLOCK_M=256, num_warps=8, tl.range num_stages=3, pipeliner num_stages=3) while the ragged small-M and narrow-N regimes stay at BLOCK_M=128.",
+      "stack": "total 1.0967x isolated (director-verified geomean) = three directions compounded, tracked on the traffic-weighted gate\n  - 1. re-key the routing table on (M-regime, N, K) + measured whitelist + operand guards - gate 0.9263 -> 1.0168 (round 1, verified) - reverses a downstream reject\n  - 2. rectangular tile-order swizzle shipped per regime, two excluded buckets reclaimed - 1.0168 -> 1.0538 (round 2, verified)\n  - 3. per-regime launch-constexpr quad on the aligned large-M regimes - 1.0538 -> 1.1155 (round 3, verified) - the largest step, and a tie on the graded metric\n  - note: attribution is incremental in landing order, not independent; (3) was never isolated against the seed.",
+      "verify": "diff the launch constexprs per regime to confirm the quad actually engaged, then take >=5 order-alternated paired draws on both gates: the traffic-weighted one must move, and the graded one must stay above its own measured no-op floor.",
+      "pitfall": "the harness reported IMPROVED=false on the build carrying the largest traffic gain -> the graded set times only the 128-unaligned M buckets and the winning change was scoped to the 128-aligned regimes it never runs -> rank on the traffic-weighted gate, floor-gate on the graded one (no-op floor here median 1.013 / max 1.042).\nthe seed passed the kernel gate and was rejected downstream at -2.3% -> the table was keyed on (N,K) alone, so aligned traffic shapes ran a config tuned for the unaligned graded buckets -> add the M-regime to the key.\nBLOCK_M and num_warps swept one at a time read the wrong sign (num_warps=8 is -25% at BLOCK_M=128 and +3pt at 256; BLOCK_M=256 with num_warps=4 spills to 0.165x) -> they are one knob -> sweep the quad jointly per regime.\n'host side exhausted after ~21 variants' closed the axis that later paid 6 points -> the claim generalised from the swept subspace (tile order, XCD remap, chunking) to knobs that had never been in the sweep -> enumerate the unswept knobs before calling an axis closed.\na bucket dropped as a ~1.01 fall-through came back at 1.035-1.070 -> its exclusion was an artefact of the tiling in force when it was measured -> re-test every excluded bucket after any tiling change.\nsingle screening draws swung by up to 3.5x -> external contention on the box -> gate on the median of five order-alternated paired draws against a 5-7% screening noise floor, discarding a visibly destroyed draw.",
+      "caution": "also verify the profile is current before funding a counter-based mechanism: the VALU-per-MFMA gap that funded this round had already been paid down by an earlier waves-per-eu change, the shipped ISA shows zero accumulator-register copies, and the block-scale rescale is one fp32 FMA per accumulator element per scale block - fixed by the scale-block size, so the quad won by HIDING that cost, not removing it.",
+      "source": "run h1_gemm_a8w8_blockscale_mpad_task_20260908_155433, 2026-09-08, gfx950/MI355X-class; 3 rounds, director-verified 1.0967, oracle parity PASS on all runs"
+    }
+  ]
+}

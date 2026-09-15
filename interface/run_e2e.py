@@ -529,6 +529,22 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # resume continues from where a previous phase invocation left off.
     if h.get("state"):
         ps_args["state"] = h["state"]
+    # GEAK-ABLATION-ARMS-v1: forward the ablation knobs to the workflow. Allowlisted
+    # rather than a blanket passthrough so a stray handoff key can never reach args and
+    # change a production run's behaviour. Absent keys are omitted entirely, so a handoff
+    # with no ablation block maps byte-identically to the pre-patch build.
+    for _abl_k in ("ablation_arm", "ablation_seed", "ablation_head_trial_ms",
+                   "ablation_audit_probability",
+                   # GEAK-ABLATION-ARMS-v2: preparation, the implementation trial and an
+                   # audited continuation are separate budget lines. v1 charged all three
+                   # to one clock, so a head could be paused for slow PREPARATION and an
+                   # admitted head could then author without any limit at all.
+                   "ablation_prep_ms", "ablation_audit_ms",
+                   # Knowledge inputs must be identical and pinned across arms, or a later
+                   # arm reads what an earlier arm learned and the comparison is confounded.
+                   "perf_knowledge_dir", "warm_start", "use_learned_kb"):
+        if h.get(_abl_k) is not None:
+            ps_args[_abl_k] = str(h[_abl_k])
     # Pin ONE EVAL_DIR for the whole run (workflow reads A.eval_dir ->
     # EVAL_DIR_OVERRIDE). Without it, every PHASE=setup invocation mints a fresh
     # timestamped dir, so a re-entered setup leaves an abandoned preflight-only

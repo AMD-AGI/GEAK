@@ -255,3 +255,6 @@ perf_knowledge/expert_skills/tuning/**/.pytest_cache/
 perf_knowledge/expert_skills/tuning/**/.ruff_cache/
 perf_knowledge/expert_skills/tuning/**/*.pyc
 perf_knowledge/expert_skills/tuning/**/*.pyo
+
+# Generated e2e image outputs
+e2e_workflow/scripts/outputs/

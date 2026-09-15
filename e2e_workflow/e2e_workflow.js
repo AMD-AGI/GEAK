@@ -20,11 +20,38 @@ export const meta = {
 // ---------------------------------------------------------------------------
 // Args + defaults. A JS workflow can't read its own path, so workflow_dir is passed in.
 // ---------------------------------------------------------------------------
-const A = args || {};
+let _rawArgs = args;
+let _parseErr = '';
+// The driver agent sometimes passes `args` as a JSON STRING rather than an object. The
+// string is COMPLETE -- measured 2026-09-15: a valid 32-key object with `state` intact --
+// but carries a stray trailing character (one spurious '}'), so a plain JSON.parse throws
+// 'Extra data', the coercion fails, workflow_dir is undefined and the run aborts in 28ms.
+// This is NOT truncation and NOT a payload-size problem; trimming the state does not fix
+// it. Parse tolerantly: retry while dropping trailing junk, bounded so a genuinely
+// malformed payload still fails loudly instead of looping.
+if (typeof _rawArgs === 'string') {
+  let _s = _rawArgs.trim();
+  for (let _i = 0; _i < 8 && _s.length > 1; _i++) {
+    try { _rawArgs = JSON.parse(_s); _parseErr = ''; break; }
+    catch (_e) { _parseErr = String((_e && _e.message) || _e); _s = _s.slice(0, -1).trim(); }
+  }
+}
+const A = _rawArgs || {};
 const WORKFLOW_DIR = String(A.workflow_dir || '').replace(/\/+$/, '');
 if (!WORKFLOW_DIR) {
-  throw new Error('args.workflow_dir is required: absolute path to the dir holding e2e_workflow.js, ' +
-    'roles/, knowledge/, scripts/ (the dirname of this script).');
+  let _preview;
+  try {
+    _preview = typeof _rawArgs === 'object' && _rawArgs !== null
+      ? 'object keys=[' + Object.keys(_rawArgs).join(',') + ']'
+      : JSON.stringify(_rawArgs);
+  } catch (_e) { _preview = '<unstringifiable>'; }
+  const _s = typeof args === 'string' ? args : '';
+  throw new Error('args.workflow_dir is required. DIAGNOSTIC: typeof args=' + (typeof args) +
+    ' typeof _rawArgs=' + (typeof _rawArgs) +
+    ' rawStrLen=' + _s.length +
+    ' parseErr=' + _parseErr +
+    ' tail=' + JSON.stringify(_s.slice(-200)) +
+    ' preview=' + String(_preview).slice(0, 200));
 }
 // The UNCHANGED single-kernel workflow. Default: sibling "kernel_workflow" dir next to this one.
 const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
@@ -48,7 +75,9 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 // be the defect this repo keeps re-making — there are seven call sites today, and the eighth would
 // silently take the lane's own default (on) with nothing to catch it. test_e2e_lane_defaults.py
 // fails if a `scriptPath: KERNEL_WF_SCRIPT` call is added that does not route through this.
-const laneArgs = (wfArgs) => ({ use_learned_kb: LANE_USE_LEARNED_KB, ...wfArgs });
+// GEAK-ABLATION-ARMS-v2: ablLaneArgs() forwards the arm to the nested kernel lane.
+// Without it B6 was staged in the parent and silently never activated in the child.
+const laneArgs = (wfArgs) => ({ use_learned_kb: LANE_USE_LEARNED_KB, ...ablLaneArgs(), ...wfArgs });
 
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
@@ -1133,8 +1162,121 @@ function agentTimeoutFor() {
   return Math.max(120000, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
 }
 
-function agentBounded(rawPrompt, opts) {
+// ===========================================================================
+// GEAK-ABLATION-ARMS-v1 — phase-resumed cost ablations (research/ablations/README.md)
+// ===========================================================================
+// Inert unless args.ablation_arm names an arm. `''` and `A1` are the control:
+// every helper below returns its off-value, so the dispatched prompts and the
+// head loop are byte-identical to the pre-patch build.
+//
+// Math.random() and Date.now() throw in workflow scripts, so the audit draw is a
+// SEEDED hash of (seed, head) — which is also what the protocol requires: a
+// recorded seed that makes the continuation set reproducible across arms.
+// GEAK-ABLATION-ARMS-v2 canonical names. The wall-clock arm is B4-TIME because this
+// runtime is never told a price, so "$10 or 20 minutes" can only be the 20 minutes.
+// The routing arm is B5-EFFORT because a lower effort tier is the SAME model, not a
+// cheaper one: it is not evidence about a cheap/strong model cascade. B4/B5 remain
+// aliases so a v1 handoff still runs, and the resolved name goes in the return.
+const ABL_RAW_ARM = String(A.ablation_arm || '').trim().toUpperCase();
+const ABL_ALIASES = { B4: 'B4-TIME', B5: 'B5-EFFORT', B45: 'B45-TIME-EFFORT' };
+const ABLATION_ARM = ABL_ALIASES[ABL_RAW_ARM] || ABL_RAW_ARM;
+const ABL_ACTIVE = ABLATION_ARM !== '' && ABLATION_ARM !== 'A1';
+const ABL = (arm) => ABLATION_ARM === arm || ABLATION_ARM === ABL_ALIASES[arm] ||
+  (ABLATION_ARM === 'B45-TIME-EFFORT' && (arm === 'B4' || arm === 'B5'));
+// The kernel lane is a separate workflow script with its own args. laneArgs() used to
+// forward only use_learned_kb, so B6 -- which lives in the lane -- never switched on.
+function ablLaneArgs() {
+  // A1 and the unset case forward NOTHING: the control's lane args must be byte-identical
+  // to the pre-patch build, not merely behaviourally inert.
+  if (!ABL_ACTIVE) return {};
+  return { ablation_arm: ABL_RAW_ARM, ablation_seed: String(A.ablation_seed || '') };
+}
+const ABL_SEED = String(A.ablation_seed || 'geak-ablation-2026');
+// Pilot limits, NOT calibrated thresholds (study.json says so explicitly). The
+// dollar half of "$10 or 20 minutes" is unenforceable here: the workflow runtime
+// is never told what a call cost. Wall-clock is the half this layer owns.
+// v1 charged extraction, bake-off and authoring to ONE clock, so a head could be
+// killed for slow PREPARATION, or be admitted at 19 minutes and then author for hours.
+// v2 separates them: preparation, the implementation trial, and an audited
+// continuation each have their own cap. Validation is NOT cut by any of them -- it is
+// the run's own FINAL_RESERVE, and the arm must pay it in full.
+const ABL_IMPL_MS = parseInt(A.ablation_head_trial_ms != null ? A.ablation_head_trial_ms : 1200000, 10);
+const ABL_PREP_MS = parseInt(A.ablation_prep_ms != null ? A.ablation_prep_ms : 1200000, 10);
+const ABL_AUDIT_MS = parseInt(A.ablation_audit_ms != null ? A.ablation_audit_ms : ABL_IMPL_MS, 10);
+const ABL_HEAD_TRIAL_MS = ABL_IMPL_MS;                 // v1 name kept for the event log
+const ABL_AUDIT_P = Number(A.ablation_audit_probability != null ? A.ablation_audit_probability : 0.1);
+const ABL_EVENTS = [];
+function ablEvent(o) { if (ABLATION_ARM) ABL_EVENTS.push(o); }
+// The elapsed clock is only armed when time_budget_s is supplied, so B4 without one
+// would silently never fire and report itself as "identical to A1" -- the one failure
+// mode that would quietly invalidate the whole comparison. Refuse to run instead.
+if (ABL('B4') && TIME_BUDGET_MS == null) {
+  throw new Error('ablation_arm=' + ABLATION_ARM + ' requires time_budget_s: without it the ' +
+    'elapsed clock is never armed and the head trial gate can never fire.');
+}
+function ablDraw(key) {
+  let h = 2166136261; const s = ABL_SEED + ':' + key;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return ((h >>> 0) % 1000000) / 1000000;
+}
+// B4 readiness: promote to measurement ONLY for an exact non-incumbent candidate
+// that compiled, was correct, and actually integrated on the frozen workload.
+// Readiness is not a gain claim -- adoption still needs the unchanged A/B harness.
+// v1 accepted "isolated > 1 and some patch-like field", which is a SPEEDUP claim wearing
+// readiness' clothes. v2 returns the evidence itself: an exact candidate identity hash,
+// whether that identity differs from the frozen incumbent, and the compile/correctness
+// records the authoring layer actually produced. Integration is reported, never inferred
+// -- at the pre-author gate nothing has been integrated yet, and saying otherwise is how
+// a gate starts promoting unmeasured candidates.
+function ablCandId(c) {
+  const body = [c && c.final_patch, c && c.code_patch, c && c.apply_env, c && c.apply_flags,
+    c && c.tuning_artifact, c && c.kernel_eval_dir].map((x) => String(x || '')).join('\u0000');
+  let h1 = 2166136261, h2 = 2246822519;
+  for (let i = 0; i < body.length; i++) {
+    h1 ^= body.charCodeAt(i); h1 = Math.imul(h1, 16777619);
+    h2 ^= body.charCodeAt(body.length - 1 - i); h2 = Math.imul(h2, 2654435761);
+  }
+  return body.trim() ? ((h1 >>> 0).toString(16) + (h2 >>> 0).toString(16)) : '';
+}
+function ablCandEvidence(c, incumbentId) {
+  const id = ablCandId(c);
+  return {
+    candidate_id: id,
+    has_identity: !!id,
+    non_incumbent: !!id && id !== incumbentId,
+    // The kernel layer only emits final_patch after its immutable oracle passed, and the
+    // bake-off only reports a winner after it ran. Those are the compile/correctness
+    // records available here; nothing else is claimed.
+    compile_ok: !!(c && (c.final_patch || c.code_patch || c.tuning_artifact || c.apply_env || c.apply_flags)),
+    correctness_ok: !!(c && (c.kind === 'authored' ? c.final_patch : c.isolated > 0)),
+    integration_ok: !!(c && c.integration_ok),      // only the e2e A/B can set this
+    isolated: (c && c.isolated) || 0,
+  };
+}
+function ablHeadReady(cands, ext, incumbentId) {
+  if (!(ext && ext.task_dir)) return false;
+  return (cands || []).some((c) => {
+    const e = ablCandEvidence(c, incumbentId);
+    return e.has_identity && e.non_incumbent && e.compile_ok && e.correctness_ok;
+  });
+}
+// B5 router: cheap tier ONLY for bounded tasks with an objective validator, never
+// for authoring, oracles, or adjudication, and never on a retry (attempt > 0
+// escalates with the failure attached, charging both attempts to the task).
+const ABL_CHEAP_LABELS = /^(storage:reclaim|bakeoff |extract_op |roofline )/;
+function ablEffortFor(opts, attempt) {
+  if (!ABL('B5') || attempt > 0) return null;
+  const label = String((opts && opts.label) || '');
+  return ABL_CHEAP_LABELS.test(label) ? 'low' : null;
+}
+
+function agentBounded(rawPrompt, opts, ablAttempt) {
   const prompt = withProcessSafety(rawPrompt);
+  const ablEffort = ablEffortFor(opts, ablAttempt || 0);
+  if (ablEffort) {
+    opts = { ...(opts || {}), effort: ablEffort };
+    ablEvent({ event: 'route', label: (opts && opts.label) || '', tier: 'cheap', effort: ablEffort });
+  }
   const timeoutMs = agentTimeoutFor();
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
@@ -1154,7 +1296,14 @@ async function safeAgent(prompt, opts, tries = 3) {
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
-      const r = await agentBounded(prompt, opts);
+      // B5-EFFORT is a CASCADE, not a coin flip: the escalated attempt must see what the
+      // cheap attempt actually produced, or it is just an independent retry at a higher
+      // tier. Both attempts are charged to the task. Inert for every other arm, so A1's
+      // retry prompt stays byte-identical.
+      const p2 = (ABL('B5') && i > 0 && typeof prompt === 'string')
+        ? prompt + `\n\n## PREVIOUS ATTEMPT FAILED — do not repeat it\nA cheaper-effort attempt at this exact task failed with:\n\`\`\`\n${String(lastErr).slice(0, 2000)}\n\`\`\`\nDiagnose that failure before acting.\n`
+        : prompt;
+      const r = await agentBounded(p2, opts, i);
       if (r) return r;
       lastErr = 'null/empty result';
     } catch (e) { lastErr = String(e); }
@@ -1803,16 +1952,27 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
 // Run a nested kernel workflow with a fast-mode time cap. When FAST_MODE is off it returns the raw
 // workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
 // existing null-guards treat it as "no kernel" and continue.
+// GEAK-ABLATION-ARMS-v2: the head loop publishes the REMAINING implementation cap here
+// before each nested author. A budget the parent cannot enforce on in-flight work is not
+// a budget, so B4's cap races the nested workflow exactly as fast-mode's does. null means
+// no ablation cap, and then this function behaves exactly as it did pre-patch.
+let ABL_NESTED_CAP_MS = null;
 function fastBoundedWorkflow(ref, wfArgs, label) {
   // noteKernelKB returns `r` unchanged, so the caller's null-guards are untouched.
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
-  if (!FAST_MODE || typeof setTimeout !== 'function' || !(FAST_HEAD_WF_MS > 0)) return p;
+  const ablCap = ABL('B4') && ABL_NESTED_CAP_MS != null ? ABL_NESTED_CAP_MS : null;
+  const fastCap = FAST_MODE && FAST_HEAD_WF_MS > 0 ? FAST_HEAD_WF_MS : null;
+  const capMs = ablCap != null && fastCap != null ? Math.min(ablCap, fastCap) : (ablCap != null ? ablCap : fastCap);
+  if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
   let to;
   const guard = new Promise((resolve) => {
     to = setTimeout(() => {
-      log(`  [fast-mode] nested kernel workflow ${label || ''} exceeded ${Math.round(FAST_HEAD_WF_MS / 60000)}min — abandoning (null) to stay on budget.`);
+      log(`  [${ablCap != null && capMs === ablCap ? ABLATION_ARM : 'fast-mode'}] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
+      if (ablCap != null && capMs === ablCap) {
+        ablEvent({ event: 'nested_cap', label: label || '', cap_ms: capMs, action: 'abandon' });
+      }
       resolve(null);
-    }, FAST_HEAD_WF_MS);
+    }, capMs);
   });
   return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
 }
@@ -3926,6 +4086,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       break;
     }
     headDispatched++;
+    // B4 measures THIS head's trial against its own start, not the run clock.
+    const ablHeadStart = ELAPSED_MS;
     // (h1) Extract the op into a standalone immutable unittest. The op-identity guard already forced a
     // fused/monolithic head to op_kind=moe with GEMM_SYNTH off (gemmSynthFor) so it is extracted as the
     // fused op bound at its live seam — never decomposed into a standalone dense GEMM. Nothing is skipped.
@@ -3995,8 +4157,64 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // Author/rewrite route: write (+optimize) a fresh impl per planned language via the recursive kernel
     // layer. mode=author writes a from-scratch baseline then optimizes it; mode=optimize rewrites an
     // existing editable impl. The immutable oracle in ext.task_dir is the judge for both.
-    const plan = (bake.author_plan || []).slice(0, HEAD_AUTHOR_MAX);
+    let plan = (bake.author_plan || []).slice(0, HEAD_AUTHOR_MAX);
+    // --- B4 gate -----------------------------------------------------------
+    // The author route is the expensive part of a head. Give it one bounded trial;
+    // at the deadline continue only if this head already holds an integrated
+    // non-incumbent candidate, else pause -- with a seeded 10% audit continuation
+    // so late winners inside that horizon remain estimable.
+    // Identity of the incumbent this head is measured against: a candidate equal to it is
+    // not a candidate. Taken from the frozen config the checkpoint was resumed on.
+    const ablIncumbentId = ablCandId({ apply_env: curEnv, apply_flags: curFlags, code_patch: curOverlay });
+    let ablImplStart = ELAPSED_MS;      // the implementation clock starts AFTER preparation
+    let ablImplCap = ABL_IMPL_MS;
+    let ablAudited = false;
+    if (ABL('B4')) {
+      const prepMs = ELAPSED_MS - ablHeadStart;
+      const ready = ablHeadReady(headCands, ext, ablIncumbentId);
+      // GATE 1 -- preparation. Extraction + bake-off had their own budget; blowing it is a
+      // reason to stop spending on this head, and it is charged to preparation, not to the
+      // implementation trial that has not started yet.
+      if (!ready && prepMs >= ABL_PREP_MS) {
+        const draw = ablDraw(h.short_name);
+        ablAudited = draw < ABL_AUDIT_P;
+        ablEvent({ event: 'prep_gate', head: h.short_name, pct_gpu_time: h.pct_gpu_time,
+          action: ablAudited ? 'audit_continue' : 'pause', ready: false, draw,
+          audit_probability: ABL_AUDIT_P, prep_ms: prepMs, prep_cap_ms: ABL_PREP_MS,
+          candidates: headCands.length,
+          reason: 'preparation budget exhausted with no evidence-bearing non-incumbent candidate' });
+        log(`  [${ABLATION_ARM}] ${h.short_name}: PREP budget spent (${Math.round(prepMs / 60000)}min), no candidate -> ${ablAudited ? 'AUDIT-CONTINUE' : 'PAUSE'} (draw ${draw.toFixed(4)} vs p=${ABL_AUDIT_P}).`);
+        if (!ablAudited) {
+          history.ledger.push({ direction: h.short_name, verdict: 'paused',
+            lesson: `${ABLATION_ARM}: preparation budget expired before any candidate existed` });
+          plan = [];
+        } else {
+          ablImplCap = ABL_AUDIT_MS;    // the audit continuation is a SEPARATE budget line
+        }
+      } else {
+        ablEvent({ event: 'prep_gate', head: h.short_name, pct_gpu_time: h.pct_gpu_time,
+          action: 'admit', ready, prep_ms: prepMs, prep_cap_ms: ABL_PREP_MS,
+          candidates: headCands.length, impl_cap_ms: ablImplCap });
+      }
+    }
     for (const ap of plan) {
+      // GATE 2 -- implementation. v1 admitted the author route and then never looked at the
+      // clock again, so a head admitted at 19 minutes could author for hours. The cap is
+      // checked before every language AND handed down to the nested workflow, which is the
+      // only boundary that can actually contain work already in flight.
+      if (ABL('B4')) {
+        const implMs = ELAPSED_MS - ablImplStart;
+        if (implMs >= ablImplCap) {
+          ablEvent({ event: 'impl_gate', head: h.short_name, action: 'stop',
+            impl_ms: implMs, impl_cap_ms: ablImplCap, audited: ablAudited,
+            remaining_plan: plan.length, reason: 'implementation trial budget exhausted' });
+          log(`  [${ABLATION_ARM}] ${h.short_name}: implementation budget spent (${Math.round(implMs / 60000)}min of ${Math.round(ablImplCap / 60000)}min) — stopping the author route.`);
+          history.ledger.push({ direction: h.short_name, verdict: 'paused',
+            lesson: `${ABLATION_ARM}: implementation trial budget expired` });
+          break;
+        }
+        ABL_NESTED_CAP_MS = Math.max(60000, ablImplCap - implMs);
+      }
       const lang = ap.language || 'triton';
       let al;
       // Retry the nested author on a TRANSIENT/early failure (threw, or returned with no real
@@ -4745,6 +4963,11 @@ const wfReturn = {
   deep_mode: DEEP_MODE,   // true => HeadKernel runs the long cross-backend co-optimization scheduler (20h)
   backend: BACKEND,
   phases_run: PHASES,
+  ablation: { arm: ABLATION_ARM || 'A1', requested_arm: ABL_RAW_ARM || 'A1',
+    active: ABL_ACTIVE, seed: ABL_SEED, patch_version: 'GEAK-ABLATION-ARMS-v2',
+    budgets_ms: { prep: ABL_PREP_MS, implementation: ABL_IMPL_MS, audit_continuation: ABL_AUDIT_MS,
+      validation_reserve: FINAL_RESERVE_MS, total_time_budget: TIME_BUDGET_MS },
+    head_trial_ms: ABL_HEAD_TRIAL_MS, audit_probability: ABL_AUDIT_P, events: ABL_EVENTS },
   eval_dir: EVAL_DIR,
   model_name: MODEL_NAME,
   baseline_throughput_tok_s: BASELINE_TPUT,

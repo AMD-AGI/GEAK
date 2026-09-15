@@ -1,0 +1,65 @@
+{
+  "run_id": "h0-gemm-a8w8-blockscale-20260908",
+  "date": "2026-09-08",
+  "kernel_names": [
+    "gemm_a8w8_blockscale"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "route-the-small-m-large-n-corner-to-the-authored-kernel-the",
+      "description": "Keep an authored fp8 block-scaled GEMM only in the small-M/large-N corner and route every other shape back to the tuned vendor stack: 1.31x weighted.",
+      "keywords": [
+        "quantized-gemm",
+        "fp8",
+        "block-scale",
+        "backend-routing",
+        "dispatch-shim",
+        "size-gating",
+        "skinny-m",
+        "decode",
+        "vendor-library",
+        "triton",
+        "gfx950",
+        "frozen-baseline",
+        "harness-artifact"
+      ],
+      "kernels": [
+        "_gemm_a8w8_blockscale_kernel"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "decode",
+      "key": "fp8 e4m3 block-scaled [128,128] GEMM against a per-shape-tuned vendor CK stack, gfx950 - authored Triton wins only in the small-M/large-N decode corner",
+      "layer": "learned",
+      "lifecycle": "active",
+      "levers": [
+        "host.shape-regime-dispatch",
+        "compute.per-bucket-config-table"
+      ],
+      "cost": "L3",
+      "type": "routing",
+      "confidence": "★★",
+      "effect": "1.3143x weighted, director-verified over 3 runs, non-overlapping: decode M=64 1.39x carries 81.5% of the metric and decode M=1 1.74x; prefill M=1024 and the qkv cases route to the vendor arm at ~1.00, giving a 1.30x floor when every routed arm is pinned to 1.00",
+      "roofline": "latency-bound throughout: vendor arm ~36% of achievable HBM read on the decode case, authored arm ~51%, still ~1.95x off the read roof; dependency wait overtakes issue wait as the dominant stall",
+      "verified_on": "2026-09-08",
+      "last_seen": "2026-09-08",
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "attempts": 1,
+      "title": "Route the small-M large-N corner to the authored kernel, everything else to the vendor stack",
+      "lever": "When an authored kernel beats a per-shape-tuned vendor library on some shapes of one op and loses on others, keep it and add a host-side shape-metadata predicate instead of chasing the losing shapes: authored arm iff M<=128 and N>=16384, vendor arm otherwise. Read three per-shape tables side by side first - a loss pattern shared by every independent implementation is a regime boundary, not three separate mistakes.",
+      "apply": "A predicate on pure ints off the tensor shapes at the seam - no device read, no host sync, still one GEMM launch per call on either arm - in front of an authored kernel that carries its own per-(N,K,M-bucket) config table.",
+      "stack": "total 1.3143x weighted director-verified = two directions, incremental in landing order\n  - 1. authored fused fp8 block-scaled kernel + per-(N,K,M-bucket) config table - ~1.31x weighted standalone (round 1, verified) - carries essentially the whole win\n  - 2. the shape-regime dispatch predicate - +3.25% weighted on top of (1) (round 1 integrate, verified) - converts four regressed arms to ~1.00 and leaves the 81.5%-weight decode win untouched\n  - note: attribution is incremental, not independent; three later config/staging rounds added nothing on top.",
+      "verify": "Check the harness's candidate-engaged flag AND which implementation file the seam resolves to, then rank on the scored cold number - the hot-cache ordering inverted here, with the authored arm slower hot and much faster cold.",
+      "pitfall": "Four routed-to-vendor arms printed 1.01-1.06 with the identical vendor kernel on both legs -> a leg-ordering/cache artifact in the harness, not an optimization -> pin every routed arm to exactly 1.00 and quote that as the defensible floor (1.30 vs 1.35 here).\nA byte-identical kernel printed ratios spanning ~4% across runs -> the live baseline leg drifts run to run -> rank candidates on a 3-run median against one frozen baseline, since that band is wider than most config deltas.\nThe vendor fallback arm was unreachable -> the alias had already been rebound to the seam -> capture the vendor entry point at import time, before the rebind.\nA sweep point with matrix_instr_nonkdim=16 and BLOCK_N=16 passed every eager leg and failed graph replay -> an eager-only screen -> run the full correctness gate, graph replay included, on any config the sweep reaches.",
+      "caution": "Also verify where the boundary sits on your own shape set before widening it: here the authored arm lost at M=1024 and at N=7168 (too few N-tiles to hide the weight stream), so the corner was narrow and shape-specific.",
+      "source": "run e2e_Qwen3-14B-FP8 20260907 lane h0_gemm_a8w8_blockscale, 2026-09-08, director-validated weighted 1.3143, correctness PASS 3/3, candidate_engaged=true"
+    }
+  ]
+}
