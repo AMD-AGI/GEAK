@@ -211,10 +211,6 @@ export OPENAI_API_KEY=sk-...        # -> OpenAI official (api.openai.com)
 # export OPENAI_BASE_URL=...        # -> any other OpenAI-compatible endpoint; wins over both
 ```
 
-> A key selects codex only while no `ANTHROPIC_*` / `CLAUDE_CODE_OAUTH_TOKEN` is also set — with
-> both, the run stays on Claude **silently**. Force it with `--agent codex` or
-> `GEAK_AGENT_BACKEND=codex`; full rule in [`SETUP.md`](interface/runtime/SETUP.md).
-
 ### 3. Run
 
 Natural-language launch is **not wired up for codex yet** (it needs Claude Code's `Workflow` tool), so
@@ -222,7 +218,7 @@ drive it from the command line — `run_e2e.py` for a whole model, `run_workflow
 
 ```bash
 # e2e (whole-model serving throughput). A JSON says WHAT to optimize -- the same information the
-# natural-language example above carries. Filename is yours (run_e2e.py's usage calls it a handoff).
+# natural-language example above carries. Filename is yours -- it is just the first argument.
 cat > run_spec.json <<'JSON'
 { "schema_version": 2,
   "model_path": "/models/Qwen3.5-27B-FP8",
