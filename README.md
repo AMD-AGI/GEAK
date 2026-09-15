@@ -213,8 +213,8 @@ export OPENAI_API_KEY=sk-...        # -> OpenAI official (api.openai.com)
 
 ### 3. Run
 
-Natural-language launch is **not wired up for codex yet** (it needs Claude Code's `Workflow` tool), so
-drive it from the command line — `run_e2e.py` for a whole model, `run_workflow.mjs` for a single kernel:
+Natural-language launch is **not wired up for codex yet**, so drive it from the command line —
+`run_e2e.py` for a whole model, `run_workflow.mjs` for a single kernel:
 
 ```bash
 # e2e (whole-model serving throughput). A JSON says WHAT to optimize -- the same information the
