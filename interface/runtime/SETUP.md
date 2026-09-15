@@ -18,7 +18,7 @@ no provider to pick. Setting the key also **selects codex as the backend**, so y
 
 1. An explicit **`OPENAI_BASE_URL`** (or the selected model's `base_url`) → use it as-is (any
    OpenAI-compatible gateway).
-2. Otherwise **pick by which key is non-empty**: `AMDKEY` → AMD gateway, `OPENAI_API_KEY` → official
+2. Otherwise **pick by which key is non-empty**: `GEAK_AMDKEY` → AMD gateway, `OPENAI_API_KEY` → official
    OpenAI.
 
 The auto-selected provider carries its own **`default_model`** (used when `GEAK_CODEX_MODEL` is
@@ -28,6 +28,26 @@ id is only valid on its own endpoint.
 The AMD gateway authenticates with the `Ocp-Apim-Subscription-Key` header — **only** that header; a
 bare Bearer token gets a 401. The runtime attaches it for you.
 
+### Why the AMD key is `GEAK_AMDKEY` and the OpenAI ones are not prefixed
+
+GEAK's usual caller is hyperloom, whose standard way to configure a deployment is a `.env` file — and
+that file is filtered. `common/env_safety.py` admits a name only if it is in `DOTENV_EXACT_ALLOWLIST`
+or starts with a `DOTENV_PREFIX_ALLOWLIST` prefix. `"GEAK_"` is one of those prefixes, so any name
+GEAK invents for itself gets through without asking hyperloom to change anything. A bare `AMDKEY` is
+in neither list: it is dropped with a single line of stderr (`Preflight: WARNING — ignoring
+unsupported .env key AMDKEY`), while `GEAK_AGENT_BACKEND=codex` beside it *is* admitted. The result
+is the worst shape available — codex selected, no key, no provider overrides emitted, and a failure
+that only surfaces at the first agent call.
+
+`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_CUSTOM_HEADERS` are left alone on purpose. They are
+already in that exact allowlist, so a prefix buys nothing; they are ecosystem-standard names; and
+renaming them would silently move every environment that already exports `OPENAI_API_KEY` back onto
+claude.
+
+None of this applies to a plain `export` in the launching shell. Both of hyperloom's file-based
+loaders only fill a name that is *absent* from `os.environ`, so an ambient variable is never filtered
+— the allowlist governs the `.env` route alone.
+
 ### The selection rule is about the shape of the whole credential environment
 
 Not "is this key present". A key selects its backend only while **no other backend's credentials are
@@ -35,13 +55,13 @@ also set**:
 
 | Environment | Runs |
 | --- | --- |
-| only `AMDKEY` or `OPENAI_API_KEY` | **codex** |
+| only `GEAK_AMDKEY` or `OPENAI_API_KEY` | **codex** |
 | only Anthropic-side (any of `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN`) | claude |
 | **both sides set** | claude (`default_profile`) |
 | nothing set | claude |
 
 Declining to guess when both are set protects a running claude deployment: otherwise anyone who
-exports `AMDKEY` silently replaces the existing claude path, which is painful to diagnose. Falling
+exports `GEAK_AMDKEY` silently replaces the existing claude path, which is painful to diagnose. Falling
 back to claude when nothing is set is deliberate too — in that environment the claude CLI is probably
 authenticated some other way (an already-logged-in CLI, Bedrock). This matches hyperloom
 `common/llm_config.py`'s `is_openai_only()` / `is_anthropic_only()`.
@@ -75,7 +95,7 @@ codex --version        # expect 0.146.1
 
 ```bash
 # AMD gateway (adds the Ocp-Apim-Subscription-Key header + llm-api.amd.com/Unified)
-export AMDKEY="<32-hex subscription key>"
+export GEAK_AMDKEY="<32-hex subscription key>"
 # its certificate is publicly trusted -- no SSL_CERT_FILE needed
 
 # or -- official OpenAI (public CA; no SSL_CERT_FILE needed)
@@ -90,7 +110,7 @@ account can use depends on its entitlement.
 To use official OpenAI's **suffixless `gpt-5.6`** (which exists only on that endpoint), pin the
 profile: `--profile codex-gpt56` for a single kernel, `GEAK_AGENT_PROFILE=codex-gpt56` for e2e. A
 pinned model brings its own `base_url` and `OPENAI_API_KEY` and outranks key-based auto-selection, so
-a stray `AMDKEY` in the environment will not move the run onto the gateway. This combination is
+a stray `GEAK_AMDKEY` in the environment will not move the run onto the gateway. This combination is
 **untested here** (no official key on hand); if your account returns 404/400, fall back to
 `--profile codex-openai` with `GEAK_CODEX_MODEL=<an id you can use>`.
 

@@ -181,7 +181,7 @@ export function buildInvocation(agent, model, prompt, opts = {}) {
   //       base_url) is used directly. key_env defaults to OPENAI_API_KEY.
   //   (2) key-driven auto-SELECT — when no base_url is available, walk
   //       agent.provider_autoselect in order and pick the first provider whose
-  //       trigger_env is set: AMDKEY->AMD gateway, OPENAI_API_KEY->OpenAI official.
+  //       trigger_env is set: GEAK_AMDKEY->AMD gateway, OPENAI_API_KEY->OpenAI official.
   //       Each entry carries base_url / key_env / default_model and optional
   //       env_http_headers, so "give the AMD key -> AMD, the OpenAI key ->
   //       OpenAI". The same list drives deriveAgentFromEnv, which picks the agent

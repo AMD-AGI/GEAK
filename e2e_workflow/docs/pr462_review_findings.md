@@ -182,7 +182,7 @@ flakiness on their side, not a missing entry in `provider_autoselect` (codex has
 `user` header anyway). Worth knowing because the failure text names a header and reads like a config
 bug: retry once before changing anything.
 
-Backend selection itself was reviewed and is **working as designed**: with only `AMDKEY` and/or
+Backend selection itself was reviewed and is **working as designed**: with only `GEAK_AMDKEY` and/or
 `OPENAI_API_KEY` set the run goes to codex; with neither it goes to baseline. One caveat worth
 knowing — the exclusion rule in `_derive_agent_from_env` means that if the image also bakes in any
 `ANTHROPIC_*` variable, auto-selection declines and the run silently falls back to `default_profile`

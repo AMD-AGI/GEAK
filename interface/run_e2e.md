@@ -42,7 +42,7 @@ parallel/nested subagents.
 | Selection (flag or env) | Effect |
 | --- | --- |
 | *(none, no provider key)* | Native Claude Code `Workflow` tool — unchanged |
-| *(none, only `AMDKEY` or `OPENAI_API_KEY` set)* | runtime on codex — **setting the key is the selection** |
+| *(none, only `GEAK_AMDKEY` or `OPENAI_API_KEY` set)* | runtime on codex — **setting the key is the selection** |
 | `GEAK_AGENT_PROFILE=codex-gpt56` | runtime, profile's agent+model |
 | `GEAK_AGENT_BACKEND=codex` | runtime, agent `codex` (back-compat alias for `--agent`) |
 | `GEAK_MODEL=<name>` | override the model axis (registry `models` key) |
@@ -67,7 +67,7 @@ Env knobs (all optional):
 | `GEAK_SCHEMA_RETRIES` | in-call structured-output retries | `2` |
 | `GEAK_<CLI>_BIN` / `GEAK_<CLI>_MODEL` | per-CLI binary / model override | registry |
 | `GEAK_<CLI>_APPROVE` / `GEAK_<CLI>_EXTRA_ARGS` | auto-approve flag / extra CLI args | registry |
-| `AMDKEY` | AMD gateway key; also selects codex | inherited |
+| `GEAK_AMDKEY` | AMD gateway key; also selects codex. `GEAK_`-prefixed so it survives hyperloom's `.env` allowlist — see SETUP.md | inherited |
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` | OpenAI-compatible provider auth (codex); the key also selects codex | inherited |
 | `ANTHROPIC_BASE_URL` / `ANTHROPIC_*` | Anthropic provider auth (claude) | inherited |
 | `GEAK_AGENT_AUTO` | `0` disables key-based backend selection | `1` |

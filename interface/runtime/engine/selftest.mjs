@@ -269,7 +269,7 @@ async function testCredentialDerivedAgent() {
   eq(pick({}), 'claude', 'no keys: registry default_profile still applies');
   eq(pick({ ANTHROPIC_API_KEY: 'sk-ant-x' }), 'claude', 'an Anthropic-only setup is unchanged');
   eq(pick({ OPENAI_API_KEY: 'sk-x' }), 'codex', 'an OpenAI key alone selects codex — no flags');
-  eq(pick({ AMDKEY: 'x' }), 'codex', 'an AMD gateway key alone selects codex — no flags');
+  eq(pick({ GEAK_AMDKEY: 'x' }), 'codex', 'an AMD gateway key alone selects codex — no flags');
   eq(pick({ SAFE_API_KEY: 'ak-x' }), 'claude', 'a de-listed key triggers nothing — removing a provider removes its trigger');
   eq(pick({ OPENAI_API_KEY: 'sk-x', GEAK_AGENT_AUTO: '0' }), 'claude', 'GEAK_AGENT_AUTO=0 opts out');
   eq(pick({ OPENAI_API_KEY: 'sk-x' }, { agent: 'claude' }), 'claude', 'an explicit agent outranks the key');
@@ -295,10 +295,10 @@ async function testCredentialDerivedAgent() {
   // (openai_only -> codex; anthropic_only / both / unconfigured -> claude).
   const shapes = [
     ['openai_only', { OPENAI_API_KEY: 'sk-x' }, 'codex'],
-    ['gateway_only', { AMDKEY: 'x' }, 'codex'],
+    ['gateway_only', { GEAK_AMDKEY: 'x' }, 'codex'],
     ['anthropic_only', { ANTHROPIC_API_KEY: 'sk-ant-x' }, 'claude'],
     ['both_configured', { OPENAI_API_KEY: 'sk-x', ANTHROPIC_API_KEY: 'sk-ant-x' }, 'claude'],
-    ['gateway_plus_anthropic', { AMDKEY: 'x', ANTHROPIC_API_KEY: 'sk-ant-x' }, 'claude'],
+    ['gateway_plus_anthropic', { GEAK_AMDKEY: 'x', ANTHROPIC_API_KEY: 'sk-ant-x' }, 'claude'],
     ['unconfigured', {}, 'claude'],
   ];
   for (const [shapeName, env, expected] of shapes) {
@@ -307,7 +307,7 @@ async function testCredentialDerivedAgent() {
   // Every Anthropic-side variable counts, not just the API key — a subscription
   // token or a bare base_url is just as much a configured Claude deployment.
   for (const v of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']) {
-    eq(pick({ AMDKEY: 'x', [v]: 'set' }), 'claude', `${v} alone is enough to block the hijack`);
+    eq(pick({ GEAK_AMDKEY: 'x', [v]: 'set' }), 'claude', `${v} alone is enough to block the hijack`);
   }
   // The exclusion must not be a hardcoded Anthropic special case.
   const three = {
@@ -322,7 +322,7 @@ async function testCredentialDerivedAgent() {
   eq(deriveAgentFromEnv(three, { MYCLI_KEY: 'k', SIDE_A_KEY: 'a' }), '',
     'credential_env is read generically, so any agent can block an ambiguous auto-select');
   // Ambiguity blocks only the GUESS; asking for codex explicitly still works.
-  eq(pick({ AMDKEY: 'x', ANTHROPIC_API_KEY: 'y' }, { agent: 'codex' }), 'codex',
+  eq(pick({ GEAK_AMDKEY: 'x', ANTHROPIC_API_KEY: 'y' }, { agent: 'codex' }), 'codex',
     'an explicit --agent overrides the ambiguity, so the escape hatch stays open');
 }
 
@@ -340,17 +340,17 @@ async function testProviderDefaultModel() {
   const provider = (trigger) => (real.agents.codex.provider_autoselect || [])
     .find((p) => p.trigger_env === trigger);
 
-  eq(modelOf({ AMDKEY: 'x' }), provider('AMDKEY').default_model,
+  eq(modelOf({ GEAK_AMDKEY: 'x' }), provider('GEAK_AMDKEY').default_model,
     "a gateway key alone yields that gateway's default model");
   eq(modelOf({ OPENAI_API_KEY: 'sk-x' }), provider('OPENAI_API_KEY').default_model,
     'the official endpoint supplies its own default too');
   ok((real.agents.codex.provider_autoselect || []).every((p) => p.default_model),
     'every auto-selectable provider declares a default — otherwise codex runs with no -m');
-  eq(modelOf({ AMDKEY: 'x', GEAK_CODEX_MODEL: 'mine' }), 'mine',
+  eq(modelOf({ GEAK_AMDKEY: 'x', GEAK_CODEX_MODEL: 'mine' }), 'mine',
     'GEAK_CODEX_MODEL outranks the provider default');
-  eq(modelOf({ AMDKEY: 'x', OPENAI_BASE_URL: 'https://other/v1' }), '',
+  eq(modelOf({ GEAK_AMDKEY: 'x', OPENAI_BASE_URL: 'https://other/v1' }), '',
     'an explicitly chosen endpoint gets no inherited default (it would 404)');
-  eq(modelOf({ AMDKEY: 'x', GEAK_CODEX_AUTOCONFIG: '0' }), '',
+  eq(modelOf({ GEAK_AMDKEY: 'x', GEAK_CODEX_AUTOCONFIG: '0' }), '',
     'no auto-config means no auto model');
   eq(modelOf({ SAFE_API_KEY: 'ak-x' }), '',
     'a de-listed key supplies no endpoint and no model');
@@ -364,16 +364,16 @@ async function testProviderDefaultModel() {
   // text (an '=x' substring also matches '=xhigh'), making the leak check below
   // both flaky and far weaker than it looks.
   const SECRET = 'sk-sentinel-must-not-appear-in-argv';
-  const amd = buildInvocation(codex, null, 'P', { env: { AMDKEY: SECRET } }).args;
+  const amd = buildInvocation(codex, null, 'P', { env: { GEAK_AMDKEY: SECRET } }).args;
   const cval = (args, k) => {
     for (let i = 0; i < args.length - 1; i++) {
       if (args[i] === '-c' && args[i + 1].startsWith(k + '=')) return args[i + 1].slice(k.length + 1);
     }
     return undefined;
   };
-  eq(cval(amd, 'model_providers.geak_auto.env_http_headers.Ocp-Apim-Subscription-Key'), '"AMDKEY"',
+  eq(cval(amd, 'model_providers.geak_auto.env_http_headers.Ocp-Apim-Subscription-Key'), '"GEAK_AMDKEY"',
     'AMD provider carries the APIM header — the only credential the gateway accepts');
-  eq(cval(amd, 'model_providers.geak_auto.env_key'), '"AMDKEY"', 'AMD provider still declares env_key (codex needs one)');
+  eq(cval(amd, 'model_providers.geak_auto.env_key'), '"GEAK_AMDKEY"', 'AMD provider still declares env_key (codex needs one)');
   // -c values land in argv, which is world-readable via `ps`, so they must name
   // the env var rather than inline the secret.
   ok(!amd.some((a) => String(a).includes(SECRET)), 'the key value never reaches argv');
@@ -381,7 +381,7 @@ async function testProviderDefaultModel() {
   // A pinned registry model still wins, and brings its own endpoint. Pinning must
   // beat a live trigger, or a stray key would silently redirect the run.
   const pinned = resolveSelection(real, { agent: 'codex', model: 'openai_official' });
-  const argsPinned = buildInvocation(pinned.agent, pinned.model, 'P', { env: { AMDKEY: 'x' } }).args;
+  const argsPinned = buildInvocation(pinned.agent, pinned.model, 'P', { env: { GEAK_AMDKEY: 'x' } }).args;
   eq(argsPinned[argsPinned.indexOf('-m') + 1], pinned.model.id, 'a pinned model outranks the provider default');
   eq(cval(argsPinned, 'model_providers.geak_auto.base_url'), `"${pinned.model.base_url}"`,
     "a pinned model keeps its OWN endpoint even while a gateway key is set");
@@ -391,17 +391,17 @@ async function testProviderDefaultModel() {
   // its own endpoint and Bearer key along instead of inheriting the gateway's.
   const g56 = resolveSelection(real, { profile: 'codex-gpt56' });
   eq(g56.agentName, 'codex', 'codex-gpt56 runs on codex');
-  const args56 = buildInvocation(g56.agent, g56.model, 'P', { env: { AMDKEY: 'x' } }).args;
+  const args56 = buildInvocation(g56.agent, g56.model, 'P', { env: { GEAK_AMDKEY: 'x' } }).args;
   eq(args56[args56.indexOf('-m') + 1], 'gpt-5.6', 'codex-gpt56 pins the suffixless official id');
   eq(cval(args56, 'model_providers.geak_auto.base_url'), '"https://api.openai.com/v1"',
     'gpt-5.6 resolves to api.openai.com, not to whichever gateway key is set');
   eq(cval(args56, 'model_providers.geak_auto.env_key'), '"OPENAI_API_KEY"',
-    'the official endpoint authenticates on the Bearer key, not AMDKEY');
+    'the official endpoint authenticates on the Bearer key, not GEAK_AMDKEY');
   eq(cval(args56, 'model_providers.geak_auto.env_http_headers.Ocp-Apim-Subscription-Key'), undefined,
     'no APIM header leaks onto the official endpoint');
   // The mirror image of that locality: a suffixless id as the AMD default would 404
   // on every run — the trap that got the old gpt56 entry deleted.
-  ok(!/^gpt-5\.\d+$/.test(provider('AMDKEY').default_model),
+  ok(!/^gpt-5\.\d+$/.test(provider('GEAK_AMDKEY').default_model),
     'the AMD provider default stays a gateway-local id');
 
   // codex's scale is none|low|medium|high|xhigh. It has no 'max', so emitting one
@@ -421,14 +421,14 @@ async function testProviderDefaultModel() {
     }
     return undefined;
   };
-  eq(effortOf({ AMDKEY: 'x' }), 'xhigh', 'argv carries xhigh, not the unsupported max');
-  eq(effortOf({ AMDKEY: 'x', GEAK_CODEX_EFFORT: 'max' }), 'xhigh', 'GEAK_CODEX_EFFORT=max still means xhigh');
-  eq(effortOf({ AMDKEY: 'x', GEAK_CODEX_EFFORT: 'low' }), 'low', 'GEAK_CODEX_EFFORT picks a lower level');
+  eq(effortOf({ GEAK_AMDKEY: 'x' }), 'xhigh', 'argv carries xhigh, not the unsupported max');
+  eq(effortOf({ GEAK_AMDKEY: 'x', GEAK_CODEX_EFFORT: 'max' }), 'xhigh', 'GEAK_CODEX_EFFORT=max still means xhigh');
+  eq(effortOf({ GEAK_AMDKEY: 'x', GEAK_CODEX_EFFORT: 'low' }), 'low', 'GEAK_CODEX_EFFORT picks a lower level');
   const pinnedEffortArgs = buildInvocation(codex, null, 'P',
-    { env: { AMDKEY: 'x', GEAK_CODEX_EXTRA_ARGS: '-c model_reasoning_effort=high' } }).args;
+    { env: { GEAK_AMDKEY: 'x', GEAK_CODEX_EXTRA_ARGS: '-c model_reasoning_effort=high' } }).args;
   eq(pinnedEffortArgs.filter((a) => String(a).startsWith('model_reasoning_effort=')).length, 1,
     'an effort pinned in extra args is not double-emitted');
-  eq(effortOf({ AMDKEY: 'x', GEAK_CODEX_EXTRA_ARGS: '-c model_reasoning_effort=high' }), 'high',
+  eq(effortOf({ GEAK_AMDKEY: 'x', GEAK_CODEX_EXTRA_ARGS: '-c model_reasoning_effort=high' }), 'high',
     'and the pinned value is the one that survives');
 }
 

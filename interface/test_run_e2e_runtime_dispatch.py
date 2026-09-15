@@ -29,9 +29,9 @@ import pytest
 _HERE = Path(__file__).resolve().parent
 
 # Every variable that can influence selection. Cleared before each load so the
-# developer's own shell (a stray AMDKEY is enough) cannot change the verdict.
+# developer's own shell (a stray GEAK_AMDKEY is enough) cannot change the verdict.
 _SELECTION_ENV = (
-    "AMDKEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+    "GEAK_AMDKEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
     "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "GEAK_AGENT_BACKEND", "GEAK_AGENT_PROFILE", "GEAK_MODEL", "GEAK_AGENT_AUTO",
@@ -65,7 +65,7 @@ def test_no_credentials_stays_on_the_native_path(monkeypatch):
     assert rx._runtime_selection_args() == []
 
 
-@pytest.mark.parametrize("key", ["AMDKEY", "OPENAI_API_KEY"])
+@pytest.mark.parametrize("key", ["GEAK_AMDKEY", "OPENAI_API_KEY"])
 def test_a_provider_key_alone_selects_codex(monkeypatch, key):
     """Both codex provider_autoselect triggers must select codex by themselves;
     the label says "(from key)" so an operator can see it was not explicit."""
@@ -79,13 +79,13 @@ def test_a_provider_key_alone_selects_codex(monkeypatch, key):
 def test_an_ambiguous_credential_environment_keeps_native(monkeypatch):
     """A gateway key sitting next to an Anthropic-side variable is ambiguous.
     Silently moving that run onto codex would change which model answered."""
-    rx = _fresh(monkeypatch, AMDKEY="x" * 32, ANTHROPIC_API_KEY="sk-ant-x")
+    rx = _fresh(monkeypatch, GEAK_AMDKEY="x" * 32, ANTHROPIC_API_KEY="sk-ant-x")
     assert rx.AUTO_BACKEND == ""
     assert rx.USE_RUNTIME is False
 
 
 def test_geak_agent_auto_off_disables_key_based_selection(monkeypatch):
-    rx = _fresh(monkeypatch, AMDKEY="x" * 32, GEAK_AGENT_AUTO="0")
+    rx = _fresh(monkeypatch, GEAK_AMDKEY="x" * 32, GEAK_AGENT_AUTO="0")
     assert rx.AUTO_BACKEND == ""
     assert rx.USE_RUNTIME is False
 
@@ -93,7 +93,7 @@ def test_geak_agent_auto_off_disables_key_based_selection(monkeypatch):
 def test_explicit_backend_wins_and_is_not_labelled_as_derived(monkeypatch):
     """An explicit backend short-circuits derivation entirely: AUTO_BACKEND
     stays empty, so the label must not claim the key chose it."""
-    rx = _fresh(monkeypatch, GEAK_AGENT_BACKEND="codex", AMDKEY="x" * 32)
+    rx = _fresh(monkeypatch, GEAK_AGENT_BACKEND="codex", GEAK_AMDKEY="x" * 32)
     assert rx.AUTO_BACKEND == ""
     assert rx.EFFECTIVE_BACKEND == "codex"
     assert rx.runtime_combo_label() == "agent=codex"
@@ -111,7 +111,7 @@ def test_a_profile_selects_the_runtime_and_carries_a_model_override(monkeypatch)
 def test_an_unreadable_registry_degrades_to_native(monkeypatch, tmp_path):
     """Selection reads registry.json for the credential names. If it cannot be
     read there is no basis to reroute the run, so it must stay native."""
-    rx = _fresh(monkeypatch, AMDKEY="x" * 32)
+    rx = _fresh(monkeypatch, GEAK_AMDKEY="x" * 32)
     monkeypatch.setattr(rx, "RUNTIME_REGISTRY", tmp_path / "missing.json")
     assert rx._derive_agent_from_env() == ""
 
