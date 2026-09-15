@@ -51,6 +51,16 @@ try:
 except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
     from effective_config import resolve_effective_config
 
+try:
+    from interface import claude_trace_mirror
+except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
+    import claude_trace_mirror
+
+try:
+    from interface import geak_outcome_report
+except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
+    import geak_outcome_report
+
 SCHEMA_VERSION = 2
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
 E2E_CHECKPOINT_SCHEMA_VERSION = 2
@@ -219,6 +229,96 @@ USE_RUNTIME = bool(EFFECTIVE_BACKEND or AGENT_PROFILE)
 # backstop, so this can never exceed the run's hard budget.
 DONE_GRACE_S = float(os.environ.get("GEAK_DONE_GRACE_S", "1800"))
 DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
+
+# Claude Code keeps this run's ENTIRE LLM ledger under its own home, which the
+# launching environment picks and which on a container is routinely an overlay
+# that dies with the container. These two pieces of state let the run copy that
+# ledger into its own (durable) eval_dir as it goes. See claude_trace_mirror.
+_LAST_SDK_SESSION: dict[str, str] = {}
+_MIRROR_STATE: dict[str, float] = {"t": 0.0}
+_RUN_EXP_ROOT: dict[str, str] = {}
+
+# Seconds between mid-run mirror passes. `_emit` is the guaranteed final shot,
+# but a container destroyed at hour 12 of 18 never runs atexit handlers and
+# never delivers SIGTERM, so the ledger has to be copied while the run lives.
+# 0 disables the mid-run pass.
+TRACE_MIRROR_EVERY_S = float(os.environ.get("GEAK_TRACE_MIRROR_INTERVAL_S", "900"))
+
+
+def _note_session_id(msg: object) -> None:
+    """Record the SDK session id if this message carries one.
+
+    Module-level (rather than inline in the message loop) so it is testable
+    without importing ``claude_agent_sdk``. A message type that has no such
+    attribute, a ``None``, or a non-string all degrade to a no-op: there is no
+    path here that raises into the message loop.
+
+    Args:
+        msg: Any SDK message object or decoded CLI payload.
+    """
+    sid = getattr(msg, "session_id", None)
+    if not isinstance(sid, str) and isinstance(msg, dict):
+        sid = msg.get("session_id")
+    if isinstance(sid, str) and sid.strip():
+        _LAST_SDK_SESSION["session_id"] = sid.strip()
+
+
+def _sdk_child_env() -> dict[str, str]:
+    """Build the environment overlay for the Claude Code child process.
+
+    Module-level so it is testable without importing ``claude_agent_sdk``.
+
+    ``GEAK_CLAUDE_CONFIG_DIR`` is deliberately opt-in rather than defaulted to
+    a per-run directory: the Claude config dir holds OAuth credentials,
+    settings, plugins and cross-run session resume, so pointing a fresh empty
+    one at every run trades a working login for durability the trace mirror
+    already provides unconditionally. Set it only with a seeded directory.
+
+    Returns:
+        Variables to overlay on the child's environment.
+    """
+    env: dict[str, str] = {}
+    # Claude Code refuses bypassPermissions under root unless it is running
+    # in an explicit sandbox. Scope this to the SDK child process only.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        env["IS_SANDBOX"] = "1"
+    config_dir = os.environ.get("GEAK_CLAUDE_CONFIG_DIR", "").strip()
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    return env
+
+
+def _mirror_trace(eval_dir: object, *, throttle: bool = False) -> dict:
+    """Mirror this run's Claude ledger into ``eval_dir``.
+
+    Args:
+        eval_dir: This run's eval dir. Falsy values are a no-op.
+        throttle: When true, do nothing unless ``TRACE_MIRROR_EVERY_S`` has
+            elapsed since the last pass. Uses a monotonic clock, so a burst of
+            task notifications costs one mirror.
+
+    Returns:
+        The mirror receipt, or a status dict explaining why nothing was done.
+        Never raises — telemetry must not be able to end a run.
+    """
+    if not eval_dir:
+        return {"status": "no_eval_dir"}
+    if throttle:
+        if TRACE_MIRROR_EVERY_S <= 0:
+            return {"status": "disabled"}
+        now = time.monotonic()
+        if now - _MIRROR_STATE["t"] < TRACE_MIRROR_EVERY_S:
+            return {"status": "throttled"}
+        _MIRROR_STATE["t"] = now
+    try:
+        return claude_trace_mirror.mirror_run_trace(
+            eval_dir,
+            exp_root=_RUN_EXP_ROOT.get("exp_root") or None,
+            session_id=_LAST_SDK_SESSION.get("session_id"),
+            render=not throttle,
+        )
+    except Exception as exc:  # pragma: no cover - mirror_run_trace catches its own
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 
 # ---------------------------------------------------------------------------
@@ -1859,11 +1959,6 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
         extra: dict = {}
         if CLAUDE_EFFORT in VALID_EFFORTS:
             extra["effort"] = CLAUDE_EFFORT
-        sdk_env: dict[str, str] = {}
-        # Claude Code refuses bypassPermissions under root unless it is running
-        # in an explicit sandbox. Scope this to the SDK child process only.
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            sdk_env["IS_SANDBOX"] = "1"
         return ClaudeAgentOptions(
             model=CLAUDE_MODEL,
             allowed_tools=ALLOWED_TOOLS,
@@ -1871,7 +1966,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
             settings=WORKFLOW_SETTINGS,
             extra_args=extra,
             cwd=str(E2E_DIR),
-            env=sdk_env,
+            env=_sdk_child_env(),
             **({"cli_path": CLAUDE_BIN} if CLAUDE_BIN else {}),
         )
 
@@ -1895,6 +1990,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                 await client.query(prompt)
                 async for msg in client.receive_messages():
                     chunks.extend(_iter_message_text(msg))
+                    _note_session_id(msg)
                     name = type(msg).__name__
                     if name == "TaskStartedMessage":
                         tid = getattr(msg, "task_id", None)
@@ -1916,6 +2012,13 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                         summ = getattr(msg, "summary", None)
                         if isinstance(summ, str) and summ.strip():
                             chunks.append(summ)
+                        # Phase-granularity heartbeat: cheap insurance against
+                        # losing the ledger to a container that never gets to
+                        # run _emit. Rate-limited, incremental, best-effort.
+                        # A run that backgrounds nothing emits no notifications
+                        # and gets only the final shot -- acceptable, because
+                        # such runs are short.
+                        _mirror_trace(eval_dir, throttle=True)
                     elif name == "ResultMessage":
                         saw_result = True
 
@@ -1975,6 +2078,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
         with anyio.fail_after(timeout_s):
             async for msg in query(prompt=prompt, options=_opts()):
                 chunks.extend(_iter_message_text(msg))
+                _note_session_id(msg)
         return "\n".join(chunks)
 
     return anyio.run(_run_client if ClaudeSDKClient is not None else _run_query)
@@ -1992,7 +2096,10 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
     ]
     if CLAUDE_EFFORT in VALID_EFFORTS:
         cmd += ["--effort", CLAUDE_EFFORT]
+    # IS_SANDBOX stays unconditional on this path (pre-existing behaviour);
+    # _sdk_child_env only adds the opt-in config-dir redirect on top.
     env = dict(os.environ, IS_SANDBOX="1")
+    env.update(_sdk_child_env())
     proc = subprocess.run(
         cmd, cwd=str(E2E_DIR), env=env, capture_output=True, text=True,
         timeout=timeout_s,
@@ -2006,6 +2113,7 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
     try:
         wrapped = json.loads(out)
         if isinstance(wrapped, dict):
+            _note_session_id(wrapped)
             return str(wrapped.get("result") or wrapped.get("text") or out)
     except json.JSONDecodeError:
         pass
@@ -6618,6 +6726,23 @@ def main(argv: list[str]) -> int:
     exp_root = Path(h.get("exp_root") or "")
     eval_dir_hint = ps_args["eval_dir"]
 
+    # Telemetry durability: Claude Code writes this run's whole LLM ledger into
+    # its own config home. If that home is on a different filesystem from
+    # exp_root -- which is by construction this run's durable output location --
+    # then the ledger has a different lifetime from the run that produced it,
+    # and a container overlay takes it with it. Warn and continue: an 18-hour
+    # optimization job must never die over telemetry.
+    _RUN_EXP_ROOT["exp_root"] = str(exp_root)
+    if os.environ.get("GEAK_TELEMETRY_WARN", "1") != "0":
+        try:
+            for _home in claude_trace_mirror.candidate_homes():
+                _warning = claude_trace_mirror.warn_if_volatile(_home, exp_root)
+                if _warning:
+                    print(f"[run_e2e] WARNING: {_warning}", file=sys.stderr, flush=True)
+                break
+        except Exception:
+            pass
+
     # ── Guaranteed interface-file emission ──────────────────────────────────
     # CONTRACT: as long as GEAK produced ANY measured E2E effect on disk,
     # result.json (+ kernel_journey.json) MUST be written. No termination,
@@ -6691,6 +6816,22 @@ def main(argv: list[str]) -> int:
                     out["final_report_synthesized"] = not had_report
             except Exception as fr_exc:
                 out["final_report_error"] = f"{type(fr_exc).__name__}: {fr_exc}"
+            # What the run bought, beside what it cost: the throughput each
+            # phase measured, read from this run's own artifacts. This runs
+            # before the trace mirror because the mirror's HTML report joins the
+            # two, and a join needs both halves on disk first.
+            try:
+                out["outcome_report"] = geak_outcome_report.write(eval_dir)
+            except Exception as or_exc:
+                out["outcome_report_error"] = f"{type(or_exc).__name__}: {or_exc}"
+            # Claude Code's LLM ledger lives in a home this run does not own and
+            # whose lifetime it does not control. Mirror it into eval_dir so the
+            # run's cost record shares the run's own durability. Local-filesystem
+            # work, so it belongs before the atomic result.json write below.
+            try:
+                out["claude_trace"] = _mirror_trace(eval_dir)
+            except Exception as ct_exc:
+                out["claude_trace_error"] = f"{type(ct_exc).__name__}: {ct_exc}"
         if out.get("baseline_basis"):
             try:
                 updated_reports = _update_baseline_alignment_reports(out)
