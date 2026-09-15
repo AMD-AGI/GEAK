@@ -955,8 +955,8 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
             ok, err = correct(cand_out, base_snap, tol)
             note = "value-parity vs live baseline (correctness gates; speedup reports)"
             floor = (noise_floor or {}).get(f"{sig}|{i}")
-            if not ok and floor is not None and math.isfinite(err) and math.isfinite(floor) \
-                    and err <= floor * noise_margin:
+            if (not ok and floor is not None and math.isfinite(err)
+                    and math.isfinite(floor) and err <= floor * noise_margin):
                 ok = True
                 note = (f"within the baseline's own run-to-run spread "
                         f"(err {err:.5g} <= {noise_margin}x floor {floor:.5g})")

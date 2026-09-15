@@ -3322,6 +3322,31 @@ const history = ST.history || { insights: [], ledger: [], milestones: [], bottle
 // never decomposed into a standalone dense GEMM — so dense-GEMM synth is off for it.
 function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
 
+// Every kernel_extractor invocation needs the same evaluation context; only the head and its GPU
+// differ. PROFILE_TOPN is the load-bearing one: kernel_selection.py --check-device-kernel reads it
+// to reject a mis-declared kernel name BEFORE a capture is paid for, so a call site that forgot it
+// silently lost that check. Assembled once here instead of retyped at each site.
+function extractorInputs(kernel, gpuId, extra) {
+  return {
+    EVAL_DIR, MODEL_PATH, GPU_ID: gpuId, WORKLOAD, KERNEL: kernel,
+    CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+    ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+    PROFILE_TOPN: profile ? profile.profile_topN_json : '',
+    ...(extra || {}),
+  };
+}
+
+// The op track adds dense-GEMM synth plus the shape regimes. The unittest MUST span BOTH: steady-state
+// serving is decode/TPOT-bound, so a head GEMM tuned only on the GPU-time-dominant prefill M regresses
+// decode and loses e2e. The decode M (= running batch ≈ conc) is passed explicitly so it is never
+// dropped, plus a per-step M=1. See kernel_extractor.md "Shapes must span BOTH regimes".
+const extractOpInputs = (kernel, gpuId) => extractorInputs(kernel, gpuId, {
+  GEMM_SYNTH: gemmSynthFor(kernel),
+  REQUIRE_DECODE_BUCKET: true,
+  DECODE_M_BUCKETS: [1, CONC],
+  PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
+});
+
 // ===========================================================================
 // PHASE: TuningSkillset — the VENDORED tuning skillset, run WHOLE and STANDALONE, BEFORE HeadKernel.
 //
@@ -3789,14 +3814,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     const GLOBAL_KB = `${EVAL_DIR}/deep_head/GLOBAL_KB.md`;
     const prepHead = async (h) => {
       const ext = await extractWithBaseline(
-        'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
-          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
-          ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-          PROFILE_TOPN: profile ? profile.profile_topN_json : '',
-          CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-          REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
-          PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
-        },
+        'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.',
+        extractOpInputs(h, GPU_LIST[0]),
         { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
       if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
@@ -4156,14 +4175,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       return ISO.with(1, async (g) => {
         const gpu = g[0];
         const ext = await extractWithBaseline(
-          'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
-            EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
-            ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-            PROFILE_TOPN: profile ? profile.profile_topN_json : '',
-            CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-            REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
-            PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
-          },
+          'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.',
+          extractOpInputs(h, gpu),
           { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
         if (!ext || ext.smoke !== 'pass' || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
         const bake = await safeAgent(
@@ -4359,19 +4372,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // fused/monolithic head to op_kind=moe with GEMM_SYNTH off (gemmSynthFor) so it is extracted as the
     // fused op bound at its live seam — never decomposed into a standalone dense GEMM. Nothing is skipped.
     const ext = await extractWithBaseline(
-      'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
-        ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-        PROFILE_TOPN: profile ? profile.profile_topN_json : '',
-        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
-        // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
-        // Pass the decode M explicitly (= running batch ≈ conc) so it is never dropped, plus a
-        // per-step M=1. See kernel_extractor.md "Shapes must span BOTH regimes".
-        REQUIRE_DECODE_BUCKET: true,
-        DECODE_M_BUCKETS: [1, CONC],
-        PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
-      },
+      'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.',
+      extractOpInputs(h, h.gpu_id),
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
     const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
     if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
@@ -4686,12 +4688,8 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   // once (no timing conflict) and accepted overlays carry forward in order.
   const optimized = await parallel(cands.map((c) => async () => {
     const ext = await extractWithBaseline(
-      'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
-        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-        PROFILE_TOPN: profile ? profile.profile_topN_json : '',
-      },
+      'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.',
+      extractorInputs(c, c.gpu_id),
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
     if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
       return { c, skip: true, reason: `extraction failed/non-editable (${ext ? ext.notes || ext.unittest_smoke : 'none'})` };

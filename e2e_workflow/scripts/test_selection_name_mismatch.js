@@ -98,12 +98,23 @@ test('the seam corrective still descends', () => {
 });
 
 test('every extract site is given the profile to check the declared name against', () => {
-  const sites = (SRC.match(/'kernel_extractor', 'extract(_op)?'/g) || []).length;
-  const passed = (SRC.match(/PROFILE_TOPN: profile \? profile\.profile_topN_json : ''/g) || []).length;
-  assert.ok(sites > 0, 'no kernel_extractor call sites found');
-  assert.ok(passed >= sites,
-    `${sites} extractor call sites but only ${passed} pass PROFILE_TOPN; a site without it cannot ` +
-    'run the pre-capture name check and pays for the typo with a full capture');
+  // Counting two independent literals proves nothing (a site can omit PROFILE_TOPN while some other
+  // role's Inputs keeps the global count up). Every extractor site must build its Inputs through the
+  // ONE helper that carries it, so the check cannot be lost by retyping an object literal.
+  const sites = SRC.match(/'kernel_extractor', 'extract(_op)?'[^]{0,200}/g) || [];
+  assert.ok(sites.length > 0, 'no kernel_extractor call sites found');
+  for (const site of sites) {
+    assert.ok(/extract(or|Op)Inputs\(/.test(site),
+      `an extractor call site builds its Inputs inline instead of via extractorInputs(); without ` +
+      `PROFILE_TOPN it cannot run the pre-capture name check and pays for a typo with a full capture:\n` +
+      site.split('\n').slice(0, 3).join('\n'));
+  }
+  const helper = extract('function extractorInputs(', '\n}');
+  assert.ok(/PROFILE_TOPN: profile \? profile\.profile_topN_json : ''/.test(helper),
+    'extractorInputs no longer passes PROFILE_TOPN, so no extract site can run the name check');
+  // The op track must still reach the same helper rather than forking its own literal.
+  assert.ok(/const extractOpInputs = \([^)]*\) => extractorInputs\(/.test(SRC),
+    'extractOpInputs no longer delegates to extractorInputs');
 });
 
 console.log(failures ? `\nFAIL (${failures})` : '\nPASS');

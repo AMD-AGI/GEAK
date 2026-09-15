@@ -182,9 +182,15 @@ freeze an out-of-regime oracle nobody should trust.
    # every later check except this one, and reads downstream as "the seam is wrong" -- which sends the
    # extractor descending through callables it can never fix. This costs no GPU, no server, no capture.
    # On failure: DO NOT proceed. COPY the right name verbatim out of profile_kernel_candidates.
-   python3 "$SKILL_DIR/scripts/kernel_selection.py" \
-     --target "<selected module:attr>" --device-kernel "<KERNEL.device_kernel>" \
-     --profile-top-n "$PROFILE_TOPN" --check-device-kernel || exit 1
+   # PROFILE_TOPN can be empty on a resumed run whose state predates the profile. Then the check
+   # CANNOT run -- say so in `notes`; its absence is not a pass, and must not abort the extraction.
+   if [ -s "$PROFILE_TOPN" ]; then
+     python3 "$SKILL_DIR/scripts/kernel_selection.py" \
+       --target "<selected module:attr>" --device-kernel "<KERNEL.device_kernel>" \
+       --profile-top-n "$PROFILE_TOPN" --check-device-kernel || exit 1
+   else
+     echo "WARN: PROFILE_TOPN is empty - pre-capture device_kernel name check SKIPPED (report in notes)"
+   fi
    # FREEZE the live serving stack as this task's baseline env, then hang the capture hook off a COPY
    # of it. --from is what stacks them: two overlay dirs on PYTHONPATH do NOT compound (only the first
    # sitecustomize is imported), so capturing on a bare hook overlay would silently capture the
