@@ -1,0 +1,69 @@
+{
+  "run_id": "unified_attn_3d_decode_task-gpt-oss-120b-e2e-20260909",
+  "date": "2026-09-09",
+  "kernel_names": [
+    "kernel_unified_attention_3d"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "cap-the-kv-split-by-the-call-s-own-grid-fill-then-buy-the-re-attention-decode-gfx950-decode",
+      "title": "Cap the KV split by the call's own grid fill, then buy the rest with pipeline depth",
+      "description": "Cap the KV split at the call's own grid fill so the reduce dispatch vanishes, then RE-DERIVE the launch tuple on the collapsed grid: 1.12x weighted.",
+      "keywords": [
+        "split-kv",
+        "dispatch-collapse",
+        "grid-fill",
+        "num-stages",
+        "num-warps",
+        "launch-meta",
+        "software-pipelining",
+        "waves-per-eu",
+        "attention-decode",
+        "decode",
+        "paged-attention",
+        "graph-replay",
+        "measurement-noise",
+        "instruction-schedule",
+        "triton",
+        "gfx950"
+      ],
+      "kernels": [
+        "kernel_unified_attention_3d"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "attention_decode",
+      "regime": "decode",
+      "key": "bf16 paged 'unified' split-K decode attention in Triton on gfx950/MI355X whose wrapper splits K by a constant floor even when the un-split grid already fills the device, and which is timed through a captured graph replay",
+      "layer": "learned",
+      "lifecycle": "active",
+      "levers": [
+        "algo.split-kv-granularity",
+        "compute.launch-tuning"
+      ],
+      "cost": "L2",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "1.1226x isolated geomean vs the frozen baseline (director-verified, correctness PASS); per case about 1.26x on the dominant decode bucket that carries ~99.7% of the weight in a contention-free single-process A/B, 1.13-1.21x across the longer-context decode guard shapes, and ~1.00x on the m=1 decode shape the gate leaves at its stock high split count",
+      "roofline": "memory-bound before and after, moving from roughly 0.68 to roughly 0.76 of nameplate HBM read rate - about 0.90 of the achievable band - on a working set that is provably the irreducible K+V+Q+out traffic; resident waves sit at about 0.34 of the register-occupancy ceiling, so what is left is a grid-fill limit, not a register limit, and the fixed per-call structure grows to about 0.41 of the call",
+      "verified_on": "2026-09-09",
+      "last_seen": "2026-09-09",
+      "lever": "Cap the wrapper's constant K split from this call's own program count so it lands near one workgroup per CU; when the cap reaches one, the partial buffers and the whole second reduce dispatch disappear - and then RE-DERIVE the launch tuple on the collapsed geometry instead of carrying the pre-collapse one, because the sign of every pipeline knob flips with the split count.",
+      "apply": "All host-side: clamp the split from (un-split program count, CU count), then apply a launch-meta override AFTER the stock config function returns and gate it on the collapsed outcome, so the surviving high-split low-batch bucket keeps its stock tuple by construction; sweep warp count x pipeline depth x waves-per-eu as one crossed grid rather than as independent axes.",
+      "stack": "total 1.1226x isolated (director-verified) = two directions compounded, incremental in landing order\n  - 1. fill-aware split collapse to a single dispatch - about 1.11x standalone (round 1, claimed) - the bulk of the win, and it also deletes the in-kernel partial store and the per-segment tail masking\n  - 2. launch-meta re-derive on the collapsed grid - +5.4% on top of (1) (round 2, verified) - it REVERSED round 1's launch point rather than extending it, and pipeline depth carries most of it\n  - 3. a third round on instruction scheduling, LDS staging, loop shaping and grid swizzle banked nothing; the figure recorded against it is (1)+(2) re-timed, not a new delta\n  - note: attribution is incremental in landing order; (1) was never re-isolated against the frozen baseline after the merge, so its share is approximate",
+      "verify": "Confirm per shape that the dispatch count actually falls to one and the reduce kernel is absent from the trace, print the launch tuple the wrapper chose for each bucket, and re-time control/candidate interleaved inside one quiet single-process session - the harness baseline leg read several percent hot in three separate rounds here and inflated every printed ratio.",
+      "pitfall": "A launch point tuned on the pre-collapse grid regressed the collapsed one by about 8% -> the knobs were fitted against a different program count and occupancy term -> re-derive the tuple after any grid change and gate it on the split value.\nA one-factor-at-a-time sweep closed both winning knobs as losers (wider warps alone about -1%, deeper pipeline alone about +1.5%, the pair +5.4%) -> the two interact through the per-CU occupancy term -> sweep them as a crossed grid.\nA compiler scheduling hint changed nothing and raised no error -> an unrecognised value for that field is silently ignored by this fork -> confirm engagement from the kernel hash or the compiled-cache JSON rather than from the absence of an error.\nThe compiled artifact appeared to use zero LDS -> that field is the STATIC group-segment size, which a JIT passing shared memory dynamically at launch leaves at zero -> read the 'shared' entry in the compiled-kernel JSON instead.\nA round reported a verified speedup that was really the previous round's patch re-measured as a recovery floor -> the re-verification was recorded against the new direction -> read each worker result directly before crediting a direction with a delta.",
+      "caution": "Also verify the instrument's own noise band before crediting anything small: repeated re-measurement of the unchanged base spanned about +-1% here and every point in the fourth axis landed inside it; also verify how much of the call is fixed per-call structure before funding more kernel work, since that share GREW as real work was removed and it caps the realistic ceiling well below a zero-cost-kernel estimate.",
+      "source": "run unified_attn_3d_decode_task under the gpt-oss-120b e2e campaign, 2026-09-09; director-verified 1.1226x geomean over 3 rounds / 6 directions, correctness PASS; second independent run of this lane, agreeing with the 2026-09-08 run on both directions and their order",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0
+    }
+  ]
+}

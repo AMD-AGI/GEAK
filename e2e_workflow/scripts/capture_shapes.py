@@ -484,6 +484,65 @@ def _should_share_kwarg(key, value, policy, share_min_bytes):
     return False
 
 
+def _share_positions():
+    """Positional-arg indices whose LARGE tensors go into the oracle shared pool (opt-in).
+
+    ``share_large`` only ever de-duplicated KWARGS, because that is how every seam captured so far
+    was called. A seam reached with positional weights (aiter ``fused_moe_2stages(hidden_states,
+    w1, w2, ...)``) therefore paid the full multi-GiB expert weights ONCE PER CASE, and the issue
+    #429 byte budget then skipped exactly the cases the extraction needed (the decode M=CONC batch).
+    Opt in per capture with ``CAPTURE_SHARE_POSITIONS="1,2"``; unset keeps the old behaviour byte for
+    byte, so no other extraction changes.
+    """
+    raw = (os.environ.get("CAPTURE_SHARE_POSITIONS") or "").strip()
+    out = []
+    for part in raw.replace(",", " ").split():
+        try:
+            out.append(int(part))
+        except ValueError:
+            continue
+    return out
+
+
+def _positional_share_key(index, value):
+    """Identity key for a shared positional tensor.
+
+    Keyed by (index, dtype, shape, storage address) so a PERSISTENT tensor (a model weight, same
+    address on every call) is stored once, while a transient buffer that merely happens to reuse a
+    freed address at a different shape/dtype gets its own key. This is the aliasing trap that makes
+    a shared oracle record self-inconsistent, so the key is deliberately narrow.
+    """
+    torch = _torch()
+    try:
+        ptr = int(value.data_ptr())
+    except Exception:
+        ptr = 0
+    return f"__pos{index}__{value.dtype}_{tuple(value.shape)}_{ptr}"
+
+
+def _snapshot_args(args, shared_store, policy, share_min_bytes):
+    """Snapshot positional args; large tensors at opted-in positions are stored once (see above)."""
+    positions = _share_positions()
+    if policy == "full" or not positions or not isinstance(args, (list, tuple)):
+        return _snapshot(args), 0, []
+    torch = _torch()
+    snap = []
+    shared_added = 0
+    shared_keys = []
+    for index, value in enumerate(args):
+        if (index in positions and torch.is_tensor(value)
+                and _estimate_object_bytes(value) >= share_min_bytes):
+            key = _positional_share_key(index, value)
+            if key not in shared_store:
+                shared_store[key] = _snapshot(value)
+                shared_added += _estimate_object_bytes(value)
+            snap.append({"__shared__": key})
+            shared_keys.append(key)
+        else:
+            snap.append(_snapshot(value))
+    return tuple(snap), shared_added, shared_keys
+
+
 def _snapshot_kwargs(kwargs, shared_store, policy, share_min_bytes):
     """Snapshot kwargs; large/static weight tensors are stored once in ``shared_store``."""
     if policy == "full" or not isinstance(kwargs, dict):
@@ -592,6 +651,20 @@ def _wrapper(*args, **kwargs):
                             est_case -= nbytes
                             if key not in shared_store:
                                 est_shared_add += nbytes
+                if policy != "full":
+                    torch_mod = _torch()
+                    for index in _share_positions():
+                        if index >= len(args):
+                            continue
+                        value = args[index]
+                        if not torch_mod.is_tensor(value):
+                            continue
+                        nbytes = _estimate_object_bytes(value)
+                        if nbytes < share_min:
+                            continue
+                        est_case -= nbytes
+                        if _positional_share_key(index, value) not in shared_store:
+                            est_shared_add += nbytes
                 effective_need = max(0, est_case) + est_shared_add
                 if case_limit > 0 and effective_need > case_limit:
                     s["seen"].add(sig)
@@ -630,12 +703,16 @@ def _wrapper(*args, **kwargs):
                 else:
                     snap_kwargs, shared_added, shared_keys = _snapshot_kwargs(
                         kwargs, shared_store, policy, share_min)
+                    snap_args, pos_shared_added, pos_shared_keys = _snapshot_args(
+                        args, shared_store, policy, share_min)
+                    shared_added += pos_shared_added
+                    shared_keys = list(shared_keys) + list(pos_shared_keys)
                     s["seen"].add(sig)
                     s["regime_seen"].add(regime)
                     s["records"].append({
                         "sig": sig,
                         "regime": regime,
-                        "args": _snapshot(args),
+                        "args": snap_args,
                         "kwargs": snap_kwargs,
                         "output": _snapshot(out),
                         "shared_keys": shared_keys,
