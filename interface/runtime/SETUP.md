@@ -95,9 +95,16 @@ a stray `AMDKEY` in the environment will not move the run onto the gateway. This
 `--profile codex-openai` with `GEAK_CODEX_MODEL=<an id you can use>`.
 
 > On the AMD gateway the **gpt family works over both protocols** (`/v1/responses` including
-> streaming, and `/v1/chat/completions` — both measured 200), but the **claude family mostly does not
-> answer** (Opus all 500, Sonnet-5 504; only `Claude-Sonnet-4.5` succeeded). That is why the registry
-> pins no claude model.
+> streaming, and `/v1/chat/completions` — both measured 200), but the **claude family does not answer
+> over the OpenAI protocol**: `claude-opus-4-8` / `-4-1` / `Claude-Sonnet-4.5` / `claude-sonnet-5` all
+> return 500 on `/v1/chat/completions` and fail to complete on `/v1/responses` (re-measured
+> 2026-09-15). That is why the registry pins no claude model.
+>
+> This is a *protocol* limit, not a model one, and the asymmetry is worth knowing: the same
+> `claude-opus-4-8` answers 200 over the gateway's native **Anthropic** `/v1/messages` endpoint. So a
+> claude model on this gateway is reachable from GEAK's baseline path (Claude Code, configured with
+> `ANTHROPIC_BASE_URL` + `ANTHROPIC_CUSTOM_HEADERS`) but not from this runtime, which drives codex
+> over the OpenAI protocol. Use gpt ids here.
 
 ## Step 2 — run
 
