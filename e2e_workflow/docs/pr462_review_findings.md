@@ -177,10 +177,18 @@ Runtime-internal, only reachable on the codex path:
 Gateway-side, not ours: the AMD gateway intermittently answers a codex request with
 `{"error":"Missing required header","message":"The 'user' header with a valid User NTID is mandatory
 for application 'GEAK_GROUP'..."}`. Seen twice in ~11 live runs, each time as the FIRST request of a
-session, with 3/3 and 6/6 clean immediately afterwards under an identical environment — so it is
-flakiness on their side, not a missing entry in `provider_autoselect` (codex has no way to send a
-`user` header anyway). Worth knowing because the failure text names a header and reads like a config
-bug: retry once before changing anything.
+session, with 3/3 and 6/6 clean immediately afterwards under an identical environment — an identical
+request succeeding seconds later is what makes this flakiness on their side rather than a missing
+config. Worth knowing because the failure text names a header and reads like a config bug: retry once
+before changing anything.
+
+(An earlier version of this note argued the case differently — that codex has no way to send a `user`
+header at all. That is wrong. `env_http_headers` in `provider_autoselect` is exactly that mechanism:
+it maps a header name to an env var name, and `config.mjs:218` emits each pair as
+`-c model_providers.<P>.env_http_headers.<h>=<env var>`. Today the AMD entry maps only
+`Ocp-Apim-Subscription-Key`, so if this ever stops being intermittent, the fix is a second pair —
+`"user": "GEAK_AMD_NTID"` — not a code change. The flakiness conclusion stands on the retry evidence
+above; it never needed the impossibility claim.)
 
 Backend selection itself was reviewed and is **working as designed**: with only `GEAK_AMDKEY` and/or
 `OPENAI_API_KEY` set the run goes to codex; with neither it goes to baseline. One caveat worth
