@@ -49,6 +49,33 @@ try:
 except Exception as _e:
     _m = {"modules": [], "rebinds": [], "markers": [], "captures": []}
 
+# Recursion guard. sitecustomize is auto-imported by EVERY interpreter that inherits PYTHONPATH,
+# including the short-lived ROCm helper SCRIPTS a package shells out to while it is being imported
+# (flydsl's `rocm_agent_enumerator -name` arch probe, run from aiter.ops.flydsl at import time).
+# Applying the overlay inside that helper re-imports the target package, which shells out again --
+# unbounded process recursion that pins ~1GB per level and OOMs the box. Only the workload
+# interpreter needs the overlay; a toolchain probe must run bare.
+try:
+    _argv0 = os.path.realpath(sys.argv[0]) if (getattr(sys, "argv", None) and sys.argv[0]) else ""
+except Exception:
+    _argv0 = ""
+if _argv0.startswith("/opt/rocm/") or os.path.basename(_argv0) in (
+        "rocm_agent_enumerator", "rocminfo", "hipcc", "hipconfig", "amdgpu-arch", "roc-obj"):
+    sys.stderr.write("[overlay] skipped for ROCm toolchain helper %s\n" % (_argv0 or "?"))
+    _m = {"modules": [], "rebinds": [], "markers": [], "captures": []}
+
+# A kernel task dir is sys.path[0] for its own leg_runner.py, and the task contract names its driver
+# `unittest.py`. Injecting a patched module below imports the target package (and torch), whose
+# `from unittest import mock` would then resolve to that driver -- the injection aborts and leaves a
+# half-initialised module in sys.modules, so the candidate leg reports "module has no attribute".
+# Hide any such directory for the duration of the overlay application only, then restore sys.path.
+_SAVED_SYS_PATH = list(sys.path)
+try:
+    sys.path[:] = [_p for _p in sys.path
+                   if not os.path.isfile(os.path.join(_p or ".", "unittest.py"))]
+except Exception:
+    sys.path[:] = _SAVED_SYS_PATH
+
 # (a) inject patched submodules under their dotted names BEFORE anything imports them.
 for _e in _m.get("modules", []):
     try:
@@ -96,6 +123,8 @@ for _e in _m.get("markers", []):
         seam_trace.install(_e["target"])
     except Exception as _ex:
         sys.stderr.write("[overlay] seam marker install FAILED %r: %r\n" % (_e, _ex))
+
+sys.path[:] = _SAVED_SYS_PATH
 '''
 
 

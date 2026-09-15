@@ -1,0 +1,67 @@
+{
+  "run_id": "fp8_quant_norm_prologue_cluster_task-qwen3-14b-fp8-20260911",
+  "date": "2026-09-11",
+  "kernel_names": [
+    "_act_mul_and_dynamic_fp8_group_quant_kernel"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "retune-the-launcher-per-m-bucket-before-touching-an-elementwise-fp8-group-quant-body",
+      "description": "Per-M-bucket BLOCK_SIZE_N/num_warps table on a fused SiLU-mul + per-1x128 fp8 group-quant Triton prologue: 2.06x geomean, kernel body byte-identical",
+      "keywords": [
+        "quantize-cast",
+        "fp8",
+        "triton",
+        "launch-config",
+        "m-bucket",
+        "per-bucket-tuning",
+        "num-warps",
+        "block-size",
+        "valu-bound",
+        "bottleneck-shift",
+        "dispatch-floor",
+        "measurement-floor",
+        "harness-artifact",
+        "closed-axis",
+        "gfx950"
+      ],
+      "kernels": [
+        "_act_mul_and_dynamic_fp8_group_quant_kernel",
+        "act_mul_and_fp8_group_quant"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "quantize_cast",
+      "regime": "both",
+      "key": "fused SiLU-mul + dynamic per-1x128 fp8 group-quant prologue (aiter Triton) on gfx950, one dispatch, decode and prefill M buckets scored under a fixed measurement window",
+      "lifecycle": "active",
+      "layer": "learned",
+      "title": "Retune the launcher per M bucket before touching an element-wise fp8 group-quant body",
+      "type": "lever",
+      "confidence": "★★",
+      "effect": "2.06x director-verified unweighted geomean vs the frozen baseline, parity bit-identical (err=0 on all five legs). The launcher table alone carries the whole run: elements-per-lane 0.5 -> 8.0, VALU-per-element 6.3x lower, kernel device time 4.96x faster at prefill and 1.93x at decode, with the kernel body byte-identical to the golden. Two further rounds (about 100 body variants) produced real device-time wins (up to -11% prefill) and none cleared the scoring noise floor.",
+      "roofline": "both buckets VALU-issue bound before; after, the bound SPLITS - prefill stays compute-bound (VALU ~0.95 of CU-busy) and simultaneously reaches ~0.63 of HBM peak, decode leaves the compute regime (VALU ~0.39, HBM ~0.19) into GPU-fill/issue-wait with ~1.1 average resident waves per SIMD. Zero-cost-kernel ceiling is ~2.15x weighted and the incumbent already sits at ~0.99 of it.",
+      "cost": "L2",
+      "levers": [
+        "host.launch-config",
+        "compute.launch-tuning"
+      ],
+      "verified_on": "2026-09-11",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "lever": "On an element-wise quant-cast fused into an activation, spend the first direction on a per-M-bucket launch table (BLOCK_SIZE_N x num_warps x waves_per_eu x num_stages), not on the body: a stock launcher that gives well under one element per lane makes every wave pay a fixed ~50-instruction prologue, and buying elements-per-lane back is worth more than any instruction-count edit that follows.",
+      "apply": "Host/wrapper-only edit: bucket M at dispatch into a config table (here decode BLOCK_SIZE_N=512 / 1 warp, prefill 1024 / 2 warps, waves_per_eu=0, num_stages=1) and keep the compiled body byte-identical, so parity risk is near zero. Register each arm under its own symbol, gate it on its table row plus a proved-safe shape predicate, early-return before the stock dispatch, and add NO catch-all default.",
+      "verify": "Frozen-baseline isolated A/B per bucket plus oracle parity on every leg, and confirm each bucket actually resolves to its own row. Judge candidates on profiler dispatch durations, not on the scored ratio: the harness compresses a device win by about 3x at decode and 2x at prefill, so a decode direction needs a >5% device win to be visible at all. Re-read the bottleneck split after every config change - it is a property of the config, not of the source.",
+      "pitfall": "A config read as the fastest in a raw sweep but was silently wrong -> BLOCK_SIZE_N=2048 does not divide N_half=17408 (8.5 tiles), so the grid truncated and the EVEN_N path broke -> require the block to divide the row, and check the parity error before the time on every sweep row.\nThe entry profile showed both buckets issue-saturated and sent two rounds after instruction count -> its 'per-SIMD' VALU utilisation divided total VALU cycles by CU count on a 4-SIMD-per-CU part, so it read ~4x high -> classify the regime from convention-free per-wave counters (VALU per wave, waves launched vs resident), never from a utilisation percentage whose denominator you did not check.\nA merged candidate read +0.75% and re-measured at -0.01% against the same incumbent -> the verifier scores one rep per case with zero spread, so promotion rode a single draw of a process whose own run-to-run spread is the size of every remaining effect -> decide promotion with an interleaved multi-rep A/B against a paired control, never one verify draw.\nA 50-launch graph chain used to rank variants mis-ranked them -> back-to-back graph nodes overlap, so it reported a much shorter time than the true dispatch duration and compressed the spread -> rank on profiler dispatch durations and use the graph chain only to measure the dispatch floor.\nTaking a baseline control by reverting the kernel source aborted the run -> the pseudo-identity guard rejects an unchanged source -> check the committed patch out into a separate workspace, git init and commit the canonical source there, and verify the patch applies standalone.",
+      "caution": "Also price the fixed measurement window before funding any body direction: here candidate device time plus a constant predicted the scored number within 4% in both buckets, ~75% of the scored decode number was window and a further large share per-dispatch floor, so the addressable fraction was under a tenth of the score. Also verify occupancy hints per bucket - waves_per_eu>0 cost about 4% at decode but two orders of magnitude at prefill, and an N-major launch grid removed the need for the hint entirely.",
+      "source": "/shared_nfs/aditysin/geak-outs/Qwen3-14B-FP8-NEW/e2e_Qwen3-14B-FP8_20260910_133807_993_9138/kernels/_exp/team_fp8_quant_norm_prologue_cluster_task_20260911_053904_1559218_1211/fp8_quant_norm_prologue_cluster_task/tech_lead_report.md (3 rounds + 2 integrate passes, director-verified 2026-09-11)"
+    }
+  ]
+}

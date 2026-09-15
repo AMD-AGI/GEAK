@@ -1,0 +1,64 @@
+{
+  "run_id": "e2e_gpt-oss-120b_20260909_025102_1511_19828",
+  "date": "2026-09-09",
+  "kernel_names": [
+    "aiter_tuned_gemm_a16w16_decode_cluster"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "route-per-shape-and-rank-backends-under-the-harness-cold-cache-regime",
+      "title": "Route per shape, and rank the backends under the harness's own cold-cache regime",
+      "description": "Decode-weighted bf16 GEMM mix: no single backend wins — narrow-N to the in-tree tuned kernel, wide-N/prefill to the vendor library, 1.055x.",
+      "keywords": [
+        "backend-routing",
+        "bucket-routing",
+        "dense-gemm",
+        "bf16",
+        "gfx950",
+        "hipblaslt",
+        "host-runtime",
+        "decode",
+        "prefill",
+        "measurement-discipline",
+        "frozen-baseline",
+        "split-k"
+      ],
+      "kernels": [
+        "tuned_gemm_a16w16",
+        "hgemm_bf16"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "dense_gemm",
+      "regime": "both",
+      "key": "bf16 a16w16 dense GEMM served as a weighted decode+prefill shape mix on gfx950/MI355X, behind one editable host dispatch file that can pick a backend per shape",
+      "layer": "learned",
+      "lifecycle": "active",
+      "levers": [
+        "host.backend-routing",
+        "host.dispatch-table"
+      ],
+      "cost": "L2",
+      "type": "routing",
+      "confidence": "★★",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "effect": "1.055x weighted isolated vs the frozen baseline, whose own arm sat below 1.00x; per-case the narrow-N (N=128) decode bucket goes ~0.66x -> parity, the largest decode bucket ~1.16x, both prefill buckets ~1.21-1.24x, and one decode bucket stays ~0.98x",
+      "roofline": "every decode bucket sits memory-side of the ridge: the largest one is at ~1.0 of achievable read bandwidth (saturated), the one still open is within ~1.2x of a bare read of its own weights; 40-70% of each decode bucket's timed window is harness graph-replay + event-record infrastructure, which caps the kernel-side ceiling near 1.14x weighted",
+      "verified_on": "2026-09-09",
+      "lever": "When a weighted serving mix spans narrow-N decode and wide-N prefill shapes, treat the backend as a per-shape routing decision instead of one global swap: swapping the whole mix to the vendor library scored below 1.00x, while the same library routed only to wide-N and prefill was a win, and narrow-N routed back to the in-tree tuned split-K kernel recovered the rest.",
+      "apply": "One host-side static table keyed by (M, N, K, dtypes, has_bias) selecting backend plus tuned geometry, behind a warmed launcher cache and a capture guard; keep each contested route switchable by env so a bucket can be re-raced without a rebuild.",
+      "stack": "total 1.055x director-verified (weighted) = three lanes hand-merged into ONE route table, not a patch stack\n  - 1. narrow-N (N=128) shapes routed back to the in-tree tuned split-K kernel - 1.070x standalone (round 1, verified) - recovers ~23% of the metric and all of the pre-routing loss; the mechanism is kernel quality (~2.2x better at the SAME CTA count), not occupancy\n  - 2. the per-shape dispatch table itself, with wide-N and both prefill shapes routed to the vendor library - 1.068x standalone (round 1, verified); the prefill legs are ~1.21-1.24x each, ~10% of the metric\n  - 3. the largest decode bucket routed to the vendor library - ~1.16x on that bucket, 1.019x as a standalone lane (round 1, verified)\n  - note: attribution is by bucket ownership, not incremental stacking - each lane rewrote the same single editable file end-to-end, so the lanes could not be diff-stacked; a whole second round of backend and geometry search added ~+0.00% weighted on top.",
+      "verify": "Confirm the intended backend actually engaged per shape (a route trace, not inference from the score), then recompute the weighted score yourself from the per-case line over ALL buckets, median of >=3 interleaved oracle runs; treat a single-bucket move under ~3% as unproven.",
+      "pitfall": "printed headline read higher than the honest score -> the harness marks any bucket landing within 1e-4 relative of its baseline as a pseudo-identity and EXCLUDES it, so an unchanged bucket carrying ~22% weight is dropped and lifts the mean -> recompute over all buckets from the per-case line.\nan in-process sweep reported a ~24% geometry win the oracle flatly denied -> the first geometry compiled in a process times systematically slow, penalising whichever config is measured first (usually the incumbent) -> compile and time a throwaway config before the real ones.\nan autotuner timed with warm back-to-back repeats ranked the vendor library first on narrow-N and scored below 1.00x -> the oracle flushes the last-level cache before every sample -> replicate the flush, one launch per event window, take the median; the ranking inverts under cold timing.\nprobing several vendor backends inside one process memory-faulted the GPU -> mixed backend initialisation in one address space -> probe one backend per subprocess; the identical candidates were clean that way.\nthe same build scored ~0.97 under the tracing profiler and 1.055 clean -> profiler perturbation inflates per-kernel medians -> decide by cold-flushed A/B and read the cold minimum rather than any profiled headline.",
+      "caution": "Also verify a newly registered route wins the cold-flushed autotune before it is taken, so a route swap cannot regress a bucket; and also verify whether your own graph-capture wrapper helps at all here - measured against eager on the same op it was the higher floor, so it can subtract rather than add.",
+      "source": "run e2e_gpt-oss-120b_20260909_025102 lane, 2026-09-09, gfx950/MI355X; round_1_metrics.json + tech_lead_report.md in the run's eval dir, director-verified"
+    }
+  ]
+}
