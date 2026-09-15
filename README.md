@@ -210,7 +210,7 @@ One variable is the whole configuration: it **selects codex** *and* **configures
 
 ```bash
 export OPENAI_API_KEY=sk-...        # -> OpenAI official (api.openai.com)
-# export GEAK_AMDKEY=<32hex>         # -> AMD gateway (llm-api.amd.com/Unified)
+# export GEAK_AMDKEY=<32hex>        # -> AMD gateway (llm-api.amd.com/Unified)
 # export OPENAI_BASE_URL=...        # -> any other OpenAI-compatible endpoint; wins over both
 ```
 
