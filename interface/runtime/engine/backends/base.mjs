@@ -64,6 +64,16 @@ export function spawnAgent({ cmd, args = [], prompt = '', cwd, env, timeoutMs = 
       resolve({ stdout, stderr, code });
     });
 
+    // A CLI that dies before reading its prompt (bad key, unloadable config,
+    // wrong version) leaves us writing to a closed pipe. That EPIPE arrives as
+    // an ASYNCHRONOUS 'error' event on the stdin STREAM -- `child.on('error')`
+    // above is a different emitter and the try/catch below cannot see it
+    // either, so with no listener here it is an uncaught exception that kills
+    // the runtime and replaces the CLI's own diagnostic with our stack trace.
+    // Swallow it: 'close' still fires, and settles with the child's exit code
+    // and stderr, which is the message the user actually needs.
+    child.stdin.on('error', () => { /* child exited first; 'close' reports why */ });
+
     // Feed the prompt on stdin so we never hit ARG_MAX with large prompts.
     // When the CLI takes the prompt as a positional arg instead (promptOnStdin
     // false), it is already in `args`; just close stdin.
@@ -71,8 +81,8 @@ export function spawnAgent({ cmd, args = [], prompt = '', cwd, env, timeoutMs = 
       if (promptOnStdin) child.stdin.write(prompt);
       child.stdin.end();
     } catch (e) {
-      // stdin may already be closed if the child died immediately; the close/
-      // error handler will settle the promise.
+      // Synchronous throws only (e.g. ERR_STREAM_WRITE_AFTER_END); the async
+      // EPIPE is handled by the listener above.
     }
   });
 }

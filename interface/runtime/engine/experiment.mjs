@@ -90,6 +90,10 @@ function runOne({ script, argsJson, agent, model, rep, outDir, timeoutMs }) {
     if (timeoutMs > 0) killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, timeoutMs);
     child.stdout.on('data', (d) => { out += d.toString(); process.stdout.write(`[${tag}] ${d}`); });
     child.stderr.on('data', (d) => { err += d.toString(); });
+    // Without this an ENOENT (no `node` on PATH) is an unhandled 'error' event,
+    // i.e. an uncaught exception that takes the whole sweep down. Record it as
+    // this combo's failure instead; 'close' fires afterwards and settles.
+    child.on('error', (e) => { err += `spawn error: ${e.message}\n`; });
     child.on('close', async (code) => {
       if (killer) clearTimeout(killer);
       let result = null;
