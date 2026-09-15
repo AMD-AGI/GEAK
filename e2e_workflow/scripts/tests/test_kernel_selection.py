@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Regression tests for machine-verified live kernel selection."""
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -706,6 +708,38 @@ class TestTheDeclaredKernelIsCheckedAgainstTheProfile(unittest.TestCase):
         self.assertTrue(names[0].startswith("mfma_moe1"))
         self.assertEqual(ks.profile_kernel_names({"top_kernels": [
             {"device_kernel": "k", "name": "k", "short_name": "k"}]}), ["k"])
+
+    def test_every_shape_parse_profile_can_hand_back_is_read(self):
+        """parse_profile's topN document has changed shape more than once (a bare row array, rows
+        under `rows`/`kernels`). Reading only one of them yields an EMPTY name list, and an empty
+        list is indistinguishable from "the profiler recorded nothing" -- i.e. it fails open and the
+        pre-capture check silently stops checking."""
+        rows = [{"device_kernel": "k_a"}, {"name": "k_b"}, {"short_name": "k_c"}]
+        for doc in (rows, {"rows": rows}, {"kernels": rows}, {"top_kernels": rows}):
+            self.assertEqual(ks.profile_kernel_names(doc), ["k_a", "k_b", "k_c"])
+
+    def test_unreadable_rows_are_skipped_instead_of_crashing_the_check(self):
+        """A pre-capture check that raises on a stray row costs the whole extraction (the role runs
+        it with `|| exit 1`), and the profile is written by a different tool."""
+        self.assertEqual(ks.profile_kernel_names(
+            ["not-a-row", None, {"device_kernel": "k"}, {"device_kernel": "  "}, {}]), ["k"])
+        self.assertEqual(ks.profile_kernel_names(None), [])
+        self.assertEqual(ks.profile_kernel_names({"top_kernels": []}), [])
+
+    def test_a_profile_with_no_kernels_refuses_the_run_rather_than_passing_the_name(self):
+        """Fail LOUD, not open: with no names to check against, "not found" and "nothing to check"
+        are the same answer, and the second one would certify the typo this check exists to catch."""
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = os.path.join(tmp, "profile_topN.json")
+            with open(empty, "w") as fh:
+                json.dump({"top_kernels": []}, fh)
+            for argv in ([], ["--profile-top-n", empty]):
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as cm:
+                        ks.main(["--target", TARGET, "--device-kernel", KERNEL,
+                                 "--check-device-kernel", *argv])
+                self.assertEqual(cm.exception.code, 2)
+                self.assertIn("--profile-top-n", err.getvalue())
 
     def test_a_name_the_profiler_never_recorded_is_refused_with_the_list_it_should_come_from(self):
         verdict = ks.verify(TARGET, self.TYPO, self.meta(), trace(),

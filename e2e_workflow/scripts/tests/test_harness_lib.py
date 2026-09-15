@@ -2350,6 +2350,205 @@ class TestDeclaredAttrs(_HarnessTestCase):
             self.assertIn(repr(name), str(cm.exception))
 
 
+class TestKernelMatcherLookup(unittest.TestCase):
+    """`kernel_matches` is loaded out of the VENDORED kernel_selection.py rather than re-implemented,
+    so canonicalisation cannot drift from e2e_workflow.js. A task dir vendored before that file
+    existed must degrade to "no matcher" (the gate then reports unchecked), never explode: refusing
+    to measure because a sanity check could not load is strictly worse than not running the check."""
+
+    @contextlib.contextmanager
+    def _unloaded(self):
+        prev = sys.modules.pop("kernel_selection", _MISSING)
+        try:
+            yield
+        finally:
+            if prev is _MISSING:
+                sys.modules.pop("kernel_selection", None)
+            else:
+                sys.modules["kernel_selection"] = prev
+
+    def test_the_real_vendored_matcher_is_returned(self):
+        with self._unloaded():
+            self.assertTrue(hl._kernel_matcher()("ck::kernel_moe_mxgemm<float>", "kernel_moe_mxgemm"))
+
+    def test_an_absent_kernel_selection_py_is_not_an_error(self):
+        with self._unloaded(), _patched(os.path, exists=lambda p: False):
+            self.assertIsNone(hl._kernel_matcher())
+            # nothing half-built left registered for the next caller to import successfully
+            self.assertNotIn("kernel_selection", sys.modules)
+
+    def test_a_file_that_fails_to_load_is_not_an_error_either(self):
+        broken = types.SimpleNamespace(
+            util=types.SimpleNamespace(spec_from_file_location=lambda *a, **k: 1 / 0))
+        with self._unloaded(), _patched(hl, importlib=broken):
+            self.assertIsNone(hl._kernel_matcher())
+            self.assertNotIn("kernel_selection", sys.modules)
+
+
+class TestObservedDeviceKernels(_CudaTestCase):
+    """The EVIDENCE the dispatch gate rules on: which GPU kernels a leg actually launched.
+
+    The gate below is only as good as this reader. It gets its names out of a chrome trace, so the
+    two failure modes that matter are silent: reading the wrong rows (host-side `cpu_op` rows carry
+    kernel-ish names and would make ANY seam look like it launched the right kernel) and losing the
+    per-case keying (one case's kernels attributed to another's sig). Both produce a well-formed
+    verdict, so nothing downstream can notice. Fake `torch.profiler` -- the trace is a document, and
+    a document is exactly what can be written by hand."""
+
+    @contextlib.contextmanager
+    def _profiler(self, *docs):
+        """Install a torch.profiler whose export_chrome_trace writes the next scripted doc."""
+        seen = {"activities": [], "exports": 0}
+        pending = list(docs)
+        mod = types.ModuleType("torch.profiler")
+
+        class _Profile:
+            def __init__(self, activities=None, **kw):
+                seen["activities"].append(list(activities or []))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def export_chrome_trace(self, path):
+                seen["exports"] += 1
+                with open(path, "w") as fh:
+                    json.dump(pending.pop(0) if pending else {"traceEvents": []}, fh)
+
+        mod.profile = _Profile
+        mod.ProfilerActivity = types.SimpleNamespace(CPU="CPU", CUDA="CUDA")
+        prev = sys.modules.get("torch.profiler", _MISSING)
+        sys.modules["torch.profiler"] = mod
+        self.torch.profiler = mod
+        try:
+            yield seen
+        finally:
+            if prev is _MISSING:
+                sys.modules.pop("torch.profiler", None)
+            else:
+                sys.modules["torch.profiler"] = prev
+
+    @staticmethod
+    def _trace(*events):
+        return {"traceEvents": list(events)}
+
+    @staticmethod
+    def _kernel(name):
+        return {"cat": "kernel", "name": name}
+
+    def _calls(self):
+        seen = []
+        return seen, seen.append
+
+    def test_only_device_kernel_rows_are_read(self):
+        """A `cpu_op` row is named after the ATEN op, and an `ac2g` flow row after the kernel it
+        points at. Counting either would let a seam that launched nothing certify itself."""
+        seen, call = self._calls()
+        with self._profiler(self._trace(
+                {"cat": "cpu_op", "name": "aten::mm"},
+                {"cat": "kernel", "name": "mfma_moe1_silu_mul_afp4_wfp4_bf16"},
+                {"cat": "gpu_memcpy", "name": "Memcpy DtoH"},
+                {"cat": "ac2g", "name": "mfma_moe1_silu_mul_afp4_wfp4_bf16"},
+                {"ph": "M", "name": "process_name"})):
+            got = hl.observed_device_kernels(call, [{"sig": "prefill"}])
+        self.assertEqual(got, {"prefill": ["mfma_moe1_silu_mul_afp4_wfp4_bf16"]})
+
+    def test_each_case_is_profiled_and_keyed_separately(self):
+        """Per-sig keying is the whole point: the gate reports WHICH case dispatched wrong, and a
+        MoE seam routinely launches a different kernel for decode than for prefill."""
+        seen, call = self._calls()
+        with self._profiler(self._trace(self._kernel("decode_attn")),
+                            self._trace(self._kernel("ck::kernel_moe_mxgemm"))) as prof:
+            got = hl.observed_device_kernels(call, [{"sig": "decode", "m": 1},
+                                                    {"sig": "prefill_M16384", "m": 16384}])
+        self.assertEqual(got, {"decode": ["decode_attn"],
+                               "prefill_M16384": ["ck::kernel_moe_mxgemm"]})
+        self.assertEqual(prof["exports"], 2)
+        self.assertEqual([c["sig"] for c in seen[:3]], ["decode"] * 3)   # warmup+warmup+profiled
+
+    def test_repeated_launches_are_reported_once_in_launch_order(self):
+        """One case launches the same kernel many times; the gate compares NAMES, so the list is a
+        set with an order, not a histogram."""
+        seen, call = self._calls()
+        with self._profiler(self._trace(
+                self._kernel("b"), self._kernel("a"), self._kernel("b"), self._kernel("a"))):
+            got = hl.observed_device_kernels(call, [{"sig": "s"}])
+        self.assertEqual(got["s"], ["b", "a"])
+
+    def test_the_case_is_warmed_up_before_it_is_profiled(self):
+        """First call of a JIT/autotuned op compiles and picks a config; profiling THAT records the
+        tuner's trial kernels, not the steady-state one the server runs."""
+        seen, call = self._calls()
+        with self._profiler(self._trace(self._kernel("k"))):
+            hl.observed_device_kernels(call, [{"sig": "s"}], warmup=3)
+        self.assertEqual(len(seen), 4)
+        with self._profiler(self._trace(self._kernel("k"))):
+            hl.observed_device_kernels(call, [{"sig": "s"}], warmup=0)
+        self.assertEqual(len(seen), 5)
+        with self._profiler(self._trace(self._kernel("k"))):
+            hl.observed_device_kernels(call, [{"sig": "s"}], warmup=-2)   # never a negative range
+        self.assertEqual(len(seen), 6)
+
+    def test_the_device_is_synchronised_around_the_profiled_call(self):
+        """Async launches that land after the profiler exits are simply absent from the trace."""
+        seen, call = self._calls()
+        before = self.stack.syncs
+        with self._profiler(self._trace(self._kernel("k"))):
+            hl.observed_device_kernels(call, [{"sig": "s"}])
+        self.assertEqual(self.stack.syncs - before, 2)
+
+    def test_both_activities_are_requested(self):
+        """CUDA alone drops the correlation rows some torch builds need to emit `cat: kernel`."""
+        seen, call = self._calls()
+        with self._profiler(self._trace()) as prof:
+            hl.observed_device_kernels(call, [{"sig": "s"}])
+        self.assertEqual(prof["activities"], [["CPU", "CUDA"]])
+
+    def test_a_bare_list_trace_is_read_too(self):
+        """Older torch exports the event array at the top level instead of under traceEvents."""
+        seen, call = self._calls()
+        with self._profiler([self._kernel("k"), {"cat": "cpu_op", "name": "aten::mm"}]):
+            got = hl.observed_device_kernels(call, [{"sig": "s"}])
+        self.assertEqual(got, {"s": ["k"]})
+
+    def test_a_trace_with_nothing_readable_reports_an_empty_list_not_an_error(self):
+        """Empty == "no evidence", which assert_baseline_dispatch reports as unchecked. Raising here
+        would convert a profiler that is unavailable into a failed measurement."""
+        seen, call = self._calls()
+        for doc in ({"traceEvents": None}, {}, [], {"traceEvents": ["not-a-dict", None]},
+                    {"traceEvents": [{"cat": "kernel", "name": ""},
+                                     {"cat": "kernel", "name": None},
+                                     {"cat": None, "name": "k"}]}):
+            with self._profiler(doc):
+                self.assertEqual(hl.observed_device_kernels(call, [{"sig": "s"}]), {"s": []})
+
+    def test_a_case_with_no_sig_is_keyed_by_position(self):
+        """cases.py is task-generated; a missing/blank sig must not collapse two cases onto one key
+        and silently halve the evidence."""
+        seen, call = self._calls()
+        with self._profiler(self._trace(self._kernel("k0")), self._trace(self._kernel("k1"))):
+            got = hl.observed_device_kernels(call, [{}, {"sig": ""}])
+        self.assertEqual(got, {"0": ["k0"], "1": ["k1"]})
+
+    def test_the_trace_file_does_not_outlive_the_read(self):
+        """One profiled case of a real MoE seam exports tens of MB; the legs run under the task dir."""
+        seen, call = self._calls()
+        paths = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def mkdtemp(*a, **kw):
+            paths.append(real_mkdtemp(*a, **kw))
+            return paths[-1]
+
+        with self._profiler(self._trace(self._kernel("k"))):
+            with _patched(tempfile, mkdtemp=mkdtemp):
+                hl.observed_device_kernels(call, [{"sig": "s"}])
+        self.assertTrue(paths)
+        self.assertFalse(any(os.path.exists(p) for p in paths))
+
+
 class TestBaselineDispatchGate(_HarnessTestCase):
     """The baseline leg must launch the kernel the task is NAMED after, else it measures a dispatch
     flip and no existing gate can catch it (the golden was frozen from that same wrong baseline).
