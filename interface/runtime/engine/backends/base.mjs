@@ -1,11 +1,11 @@
 // Backend adapter contract + shared subprocess helper.
 //
 // A backend turns one agent() call into ONE one-shot coding-agent subprocess
-// (claude -p / qwen -p). It knows nothing about parallelism, phases, budgets or
-// nesting — the runtime (run_workflow.mjs) owns all of that. This is exactly why
-// swapping to qcoder works even though qwen-code cannot itself orchestrate
-// parallel/nested subagents: the runtime spawns N independent one-shot processes
-// and the backend only has to run one prompt to completion.
+// (claude -p / codex exec). It knows nothing about parallelism, phases, budgets
+// or nesting — the runtime (run_workflow.mjs) owns all of that. This is exactly
+// why a CLI that cannot itself orchestrate parallel or nested subagents is still
+// usable: the runtime spawns N independent one-shot processes and the backend
+// only has to run one prompt to completion.
 //
 // A backend module must export:
 //   name: string

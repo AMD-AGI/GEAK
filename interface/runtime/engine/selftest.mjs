@@ -171,25 +171,29 @@ async function testConfig() {
           { trigger_env: 'FIXTURE_PLAIN_KEY', base_url: 'https://plain.example.com/v1', key_env: 'FIXTURE_PLAIN_KEY' },
           { trigger_env: 'OPENAI_API_KEY', base_url: 'https://api.openai.com/v1', key_env: 'OPENAI_API_KEY' },
         ] },
-      qwen: { bin: 'qwen', prompt: 'stdin', args: ['-p'], approve: '--yolo', model_flag: '-m', base_url_env: 'OPENAI_BASE_URL', dialect: 'openai' },
+      // A SYNTHETIC agent, deliberately not any shipped one: it exercises the
+      // config-driven fields the two real agents happen not to combine (stdin
+      // delivery + an approve flag + a model endpoint). Keeping it nameless-by-
+      // design means trimming the registry never silently deletes coverage.
+      stub: { bin: 'stub-cli', prompt: 'stdin', args: ['-p'], approve: '--yolo', model_flag: '-m', base_url_env: 'OPENAI_BASE_URL', dialect: 'openai' },
     },
-    models: { qc: { id: 'Qwen3-Coder', base_url: 'http://ep:8000/v1', key_env: 'OPENAI_API_KEY' } },
-    profiles: { claude: { agent: 'claude' }, qwen: { agent: 'qwen', model: 'qc' } },
+    models: { sm: { id: 'Stub-Model-1', base_url: 'http://ep:8000/v1', key_env: 'OPENAI_API_KEY' } },
+    profiles: { claude: { agent: 'claude' }, stub: { agent: 'stub', model: 'sm' } },
   };
 
   // resolveSelection precedence
   eq(resolveSelection(reg, {}).agentName, 'claude', 'resolve default_profile');
-  eq(resolveSelection(reg, { profile: 'qwen' }).modelName, 'qc', 'resolve profile supplies model');
-  eq(resolveSelection(reg, { profile: 'qwen', model: null, agent: 'codex' }).agentName, 'codex', 'agent overrides profile agent');
+  eq(resolveSelection(reg, { profile: 'stub' }).modelName, 'sm', 'resolve profile supplies model');
+  eq(resolveSelection(reg, { profile: 'stub', model: null, agent: 'codex' }).agentName, 'codex', 'agent overrides profile agent');
   let threw = false; try { resolveSelection(reg, { agent: 'nope' }); } catch { threw = true; }
   ok(threw, 'resolveSelection throws on unknown agent');
 
   // buildInvocation: stdin agent with model endpoint
-  const q = resolveSelection(reg, { profile: 'qwen' });
+  const q = resolveSelection(reg, { profile: 'stub' });
   const invQ = buildInvocation(q.agent, q.model, 'PROMPT', { env: {} });
-  eq(invQ.cmd, 'qwen', 'buildInvocation cmd');
+  eq(invQ.cmd, 'stub-cli', 'buildInvocation cmd');
   ok(invQ.args.includes('--yolo'), 'buildInvocation approve flag');
-  ok(invQ.args.includes('-m') && invQ.args.includes('Qwen3-Coder'), 'buildInvocation model flag+id');
+  ok(invQ.args.includes('-m') && invQ.args.includes('Stub-Model-1'), 'buildInvocation model flag+id');
   eq(invQ.env.OPENAI_BASE_URL, 'http://ep:8000/v1', 'buildInvocation routes base_url');
   eq(invQ.promptOnStdin, true, 'buildInvocation stdin delivery');
 
@@ -242,13 +246,16 @@ async function testConfig() {
   // neutralizeForBackend
   const p = 'Return ONLY the structured JSON (a StructuredOutput tool is forced).';
   ok(neutralizeForBackend(p, 'claude') === p, 'neutralize no-op for claude');
-  ok(!/StructuredOutput tool is forced/.test(neutralizeForBackend(p, 'qwen')), 'neutralize strips Claude wording for non-claude');
+  ok(!/StructuredOutput tool is forced/.test(neutralizeForBackend(p, 'codex')), 'neutralize strips Claude wording for non-claude');
 
-  // real registry.json loads + resolves the shipped profiles
+  // real registry.json loads + resolves the shipped profiles. The registry ships
+  // exactly two agents; an unknown name must fail loudly rather than fall back,
+  // so a stale `--agent qwen` in someone's script cannot silently run on claude.
   const real = await loadRegistry();
-  eq(resolveSelection(real, { profile: 'qwen' }).agentName, 'qwen', 'shipped registry: qwen profile');
+  eq(resolveSelection(real, { profile: 'codex-gpt56' }).modelName, 'openai_gpt56', 'shipped registry: codex-gpt56 profile pins its model');
   eq(resolveSelection(real, { agent: 'codex' }).agentName, 'codex', 'shipped registry: codex agent');
-  eq(resolveSelection(real, { agent: 'kimi' }).agentName, 'kimi', 'shipped registry: kimi agent');
+  let gone = false; try { resolveSelection(real, { agent: 'qwen' }); } catch { gone = true; }
+  ok(gone, 'shipped registry: a retired agent name is rejected, not silently ignored');
 }
 
 // Configuring a provider key must be enough to land on that key's CLI with no

@@ -2,15 +2,16 @@
 // Backend CONFORMANCE test — "does this CLI backend actually support GEAK?"
 //
 // selftest.mjs tests the RUNTIME against a FAKE backend (no CLI needed).
-// conformance.mjs tests a REAL backend (codex / cursor / qwen / …) against the
-// small set of capabilities GEAK genuinely requires. If every REQUIRED probe
-// passes, the backend can drive GEAK: it can run headless one-shot, emit valid
-// structured output (incl. enum), execute Bash, and Read/Write files outside cwd.
+// conformance.mjs tests a REAL backend against the small set of capabilities
+// GEAK genuinely requires. If every REQUIRED probe passes, the backend can drive
+// GEAK: it can run headless one-shot, emit valid structured output (incl. enum),
+// execute Bash, and Read/Write files outside cwd. This is also the gate for
+// ADDING a backend: describe the CLI in registry.json, then prove it here.
 //
 //   node conformance.mjs --profile codex
-//   node conformance.mjs --agent cursor --model default
+//   node conformance.mjs --agent codex --model openai_official
 //   node conformance.mjs --fake            # self-check the harness (no real CLI)
-//   node conformance.mjs --profile qwen --quick   # skip the concurrency probe
+//   node conformance.mjs --profile codex --quick   # skip the concurrency probe
 //
 // Each probe maps to an R-item (see SETUP.md) so a failure is actionable.
 // Exit code 0 = CONFORMS, 1 = one or more required probes failed, 2 = usage.

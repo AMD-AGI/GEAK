@@ -23,28 +23,35 @@ Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
 file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
 
-### Agent backend (swappable: Claude Code ↔ qwen-code/qcoder)
+### Agent backend (swappable: Claude Code ↔ codex)
 
 By default `run_e2e.py` drives the JS workflow through **Claude Code's `Workflow`
-tool** (SDK preferred, `claude -p` CLI fallback). Set `GEAK_AGENT_PROFILE` (or
-`GEAK_AGENT_BACKEND`) to run the SAME workflow on the **standalone Node runtime**
-(`interface/runtime/engine/run_workflow.mjs`) with a different agent CLI instead — the
-runtime re-implements the Workflow globals (`agent/parallel/pipeline/phase/
-workflow`) and dispatches each `agent()` to a one-shot backend process, so the
-agent CLI itself does NOT need to support parallel/nested subagents.
+tool** (SDK preferred, `claude -p` CLI fallback). The SAME workflow can run on the
+**standalone Node runtime** (`interface/runtime/engine/run_workflow.mjs`) against the
+codex CLI instead — the runtime re-implements the Workflow globals
+(`agent/parallel/pipeline/phase/workflow`) and dispatches each `agent()` to a
+one-shot backend process, so the agent CLI itself does NOT need to support
+parallel/nested subagents.
 
 **Two orthogonal axes**, defined in `interface/runtime/engine/registry.json`:
-`agents` (how to drive a CLI: claude / qwen / codex / kimi) × `models` (an
-endpoint). A `profile` pins one `(agent, model)` combo.
+`agents` (how to drive a CLI: `claude` / `codex`) × `models` (an endpoint). A
+`profile` pins one `(agent, model)` combo. Adding a third agent is a data change
+— a new `agents` entry plus a passing `conformance.mjs --agent <name>`; see
+`runtime/SETUP.md` for the R1–R7 bring-up checklist.
 
 | Selection (flag or env) | Effect |
 | --- | --- |
-| *(none)* | Native Claude Code `Workflow` tool — unchanged |
-| `GEAK_AGENT_PROFILE=qwen` | runtime, profile's agent+model |
+| *(none, no provider key)* | Native Claude Code `Workflow` tool — unchanged |
+| *(none, only `AMDKEY` or `OPENAI_API_KEY` set)* | runtime on codex — **setting the key is the selection** |
+| `GEAK_AGENT_PROFILE=codex-gpt56` | runtime, profile's agent+model |
 | `GEAK_AGENT_BACKEND=codex` | runtime, agent `codex` (back-compat alias for `--agent`) |
 | `GEAK_MODEL=<name>` | override the model axis (registry `models` key) |
 
-Precedence: CLI flag (`--profile`/`--agent`/`--model`) > env > `registry.default_profile`.
+Precedence: CLI flag (`--profile`/`--agent`/`--model`) > env > key-based
+auto-selection > `registry.default_profile`. A key only selects codex while no
+`ANTHROPIC_*` / `CLAUDE_CODE_OAUTH_TOKEN` is also set, so exporting a gateway key
+next to an existing Claude setup does not hijack it; `GEAK_AGENT_AUTO=0` turns
+key-based selection off entirely.
 
 Env knobs (all optional):
 
@@ -60,23 +67,23 @@ Env knobs (all optional):
 | `GEAK_SCHEMA_RETRIES` | in-call structured-output retries | `2` |
 | `GEAK_<CLI>_BIN` / `GEAK_<CLI>_MODEL` | per-CLI binary / model override | registry |
 | `GEAK_<CLI>_APPROVE` / `GEAK_<CLI>_EXTRA_ARGS` | auto-approve flag / extra CLI args | registry |
-| `OPENAI_BASE_URL` / `OPENAI_API_KEY` | OpenAI-compatible provider auth (qwen/codex/kimi) | inherited |
+| `AMDKEY` | AMD gateway key; also selects codex | inherited |
+| `OPENAI_BASE_URL` / `OPENAI_API_KEY` | OpenAI-compatible provider auth (codex); the key also selects codex | inherited |
 | `ANTHROPIC_BASE_URL` / `ANTHROPIC_*` | Anthropic provider auth (claude) | inherited |
+| `GEAK_AGENT_AUTO` | `0` disables key-based backend selection | `1` |
 
-Prereqs for a non-native backend: Node 20+ on `PATH` (the runtime itself needs
-only 18; the codex CLI needs 20), plus the chosen CLI
-(`npm i -g @qwen-code/qwen-code`, `@openai/codex`, `@moonshotai/kimi-code`, …)
-and a reachable endpoint. The two `.js` workflows, `roles/`, `knowledge/`, and
-`scripts/` are used **unmodified** on every backend. Confirm each CLI's exact
-headless / auto-approve / sandbox flags against the R1–R7 bring-up checklist
-in `runtime/SETUP.md` and adjust `registry.json`.
+Prereqs for the non-native backend: Node 20+ on `PATH` (the runtime itself needs
+only 18; the codex CLI needs 20), plus `npm i -g @openai/codex@0.146.1` and a
+reachable endpoint. The two `.js` workflows, `roles/`, `knowledge/`, and
+`scripts/` are used **unmodified** on every backend. Full setup, knobs and
+troubleshooting: `runtime/SETUP.md`.
 
 The single-kernel `kernel_workflow.js` has no Python wrapper; run it on the
 runtime directly:
 
 ```bash
 node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.js \
-  --profile qwen \
+  --agent codex \
   --args '{"kernel_path":"/abs/kernel","workflow_dir":"/abs/kernel_workflow","budget":6}'
 ```
 
@@ -86,7 +93,7 @@ node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.j
 node interface/runtime/engine/experiment.mjs \
   --script kernel_workflow/kernel_workflow.js \
   --args '{"kernel_path":"/abs/knn","workflow_dir":"/abs/kernel_workflow","budget":6}' \
-  --agents claude,qwen,codex --models default --repeats 3 --out ./exp_compare
+  --agents claude,codex --models default --repeats 3 --out ./exp_compare
 # -> results.jsonl + summary.md/csv (speedup / success-rate / wall / schema-fails; no token/cost)
 ```
 

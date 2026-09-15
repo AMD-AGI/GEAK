@@ -1,5 +1,5 @@
 {
-  "_comment": "Config-driven agent/model registry for the GEAK standalone runtime. Two orthogonal axes: 'agents' (how to drive a code-agent CLI, model-independent) and 'models' (an endpoint, CLI-independent). A 'profile' pins one (agent, model) combo. See SETUP.md R1-R7 for the fields that must be confirmed per CLI with `<cli> --help` at bring-up. Flags below are best-effort defaults; override any without editing code via env (GEAK_<CLI>_* / GEAK_QWEN_EXTRA_ARGS) or a backends/<name>.mjs escape hatch. An agent's 'credential_env' lists every env var that means 'this CLI's provider side is configured' (its provider_autoselect trigger_env names count too). Auto-selection reads it as an EXCLUSION: a key only selects its own agent when no OTHER agent's side is configured, so exporting a gateway key next to an existing Claude setup falls back to default_profile instead of silently moving the run onto codex. Same rule as hyperloom's is_openai_only()/is_anthropic_only() in common/llm_config.py.",
+  "_comment": "Config-driven agent/model registry for the GEAK standalone runtime. Two orthogonal axes: 'agents' (how to drive a code-agent CLI, model-independent) and 'models' (an endpoint, CLI-independent). A 'profile' pins one (agent, model) combo. Two agents are SUPPORTED: claude (native) and codex. Adding a third is a data change, not a code change — write another entry with the same fields, then prove it with `conformance.mjs --agent <name>` (see SETUP.md R1-R7 for what has to be confirmed per CLI with `<cli> --help` at bring-up). Entries for qwen-code, kimi-cli and cursor-agent were removed on purpose rather than left here untested: an unverified entry reads as a supported backend. Flags below are best-effort defaults; override any without editing code via env (GEAK_<CLI>_*, e.g. GEAK_CODEX_EXTRA_ARGS) or a backends/<name>.mjs escape hatch. An agent's 'credential_env' lists every env var that means 'this CLI's provider side is configured' (its provider_autoselect trigger_env names count too). Auto-selection reads it as an EXCLUSION: a key only selects its own agent when no OTHER agent's side is configured, so exporting a gateway key next to an existing Claude setup falls back to default_profile instead of silently moving the run onto codex. Same rule as hyperloom's is_openai_only()/is_anthropic_only() in common/llm_config.py.",
   "default_profile": "claude",
   "agents": {
     "claude": {
@@ -24,26 +24,6 @@
       "bin_env": "GEAK_CLAUDE_BIN",
       "model_env": "GEAK_CLAUDE_MODEL"
     },
-    "qwen": {
-      "bin": "qwen",
-      "prompt": "stdin",
-      "args": [
-        "-p"
-      ],
-      "approve": "--yolo",
-      "model_flag": "-m",
-      "base_url_env": "OPENAI_BASE_URL",
-      "env": {
-        "QWEN_CODE_SUPPRESS_YOLO_WARNING": "1"
-      },
-      "dialect": "openai",
-      "structured": "prompt",
-      "note": "non-interactive auth needs ~/.qwen/settings.json {security.auth.selectedType:'openai'}; OpenAI-compatible via OPENAI_API_KEY/OPENAI_BASE_URL, which is the ONLY way to give it an endpoint — it sends the key as a Bearer and cannot attach a custom auth header, so a gateway needing one (like AMD's Ocp-Apim-Subscription-Key) is out of reach. Last verified 2026-07-31 against the now-decommissioned SaFE gateway; re-confirm against whatever endpoint you point it at.",
-      "bin_env": "GEAK_QWEN_BIN",
-      "model_env": "GEAK_QWEN_MODEL",
-      "approve_env": "GEAK_QWEN_APPROVE",
-      "extra_args_env": "GEAK_QWEN_EXTRA_ARGS"
-    },
     "codex": {
       "bin": "codex",
       "prompt": "stdin",
@@ -66,40 +46,9 @@
         { "trigger_env": "OPENAI_API_KEY", "base_url": "https://api.openai.com/v1", "key_env": "OPENAI_API_KEY", "default_model": "gpt-5.6-sol" }
       ],
       "note": "Rust bin: wire_api=responses. Provider is AUTO-CONFIGURED via `-c model_providers.geak_auto.*` overrides; codex needs no config.toml and no CODEX_HOME. Resolution: (1) explicit OPENAI_BASE_URL (or the selected model's base_url) is used directly; (2) else key-driven auto-SELECT walks provider_autoselect and picks the first provider whose trigger_env is set — AMDKEY->AMD (adds Ocp-Apim header), OPENAI_API_KEY->OpenAI official. Those same trigger_env names also SELECT this agent when nothing was named explicitly (see deriveAgentFromEnv in config.mjs), so configuring a key is by itself enough to run on codex. Each entry also carries default_model — the id used when GEAK_CODEX_MODEL is unset; it lives in the SAME entry as base_url because a model id is only valid on its own endpoint. The AMD gateway (which replaces the decommissioned SaFE one) authenticates on Ocp-Apim-Subscription-Key ALONE — a Bearer-only request is a 401, the header alone is a 200 on both /responses and /chat/completions (measured 2026-09-09, gpt-5.6-sol); env_key is emitted anyway because codex requires one and the extra Bearer is harmless. Its gpt models work on both wire protocols; its Claude models mostly do not answer for this subscription (500/504), which is why no claude model is pinned. Disable with GEAK_CODEX_AUTOCONFIG=0 (provider) / GEAK_AGENT_AUTO=0 (selection); GEAK_CODEX_EXTRA_ARGS with model_provider= wins. SSL_CERT_FILE still needed for intranet-gateway CAs (not public OpenAI)."
-    },
-    "kimi": {
-      "bin": "kimi",
-      "prompt": "arg",
-      "args": [
-        "--quiet",
-        "--afk",
-        "-p"
-      ],
-      "dialect": "openai",
-      "structured": "prompt",
-      "bin_env": "GEAK_KIMI_BIN",
-      "model_env": "GEAK_KIMI_MODEL",
-      "note": "official kimi-cli (PyPI, install via uv --python 3.13). OpenAI-compatible via ~/.kimi/config.toml (type=openai_legacy, default_model). --quiet=print+final-only, --afk=unattended auto-approve. Needs SSL_CERT_FILE for gateway CA. prompt is the value of -p (last arg); model via config default_model (generic path omits -m to keep -p<prompt> adjacent)."
-    },
-    "cursor": {
-      "bin": "cursor-agent",
-      "prompt": "arg",
-      "args": [
-        "--force",
-        "--print",
-        "--output-format",
-        "text"
-      ],
-      "model_flag": "--model",
-      "dialect": "cursor-cloud",
-      "structured": "prompt",
-      "bin_env": "GEAK_CURSOR_BIN",
-      "model_env": "GEAK_CURSOR_MODEL",
-      "extra_args_env": "GEAK_CURSOR_EXTRA_ARGS",
-      "note": "AgentKernelArena-style cursor-agent CLI (--force --print). Auth via cursor-agent's own login / CURSOR_API_KEY in env; runs on Cursor cloud (NOT SaFE gateway); no base_url. Model = Cursor-side id (e.g. sonnet-4-thinking). Verify --output-format/model against `cursor-agent --help` at bring-up; stream-json parsing may be needed if text mode is noisy."
     }
   },
-  "_models_comment": "Pinned endpoints, CLI-independent. base_url is applied to the agent's base_url_env; keys stay in env (never in this file). The old SaFE gateway (global.primus-safe.amd.com) is DECOMMISSIONED — its entries were dropped rather than repointed. The AMD gateway that replaces it (llm-api.amd.com/Unified, reached via AMDKEY in codex's provider_autoselect) authenticates on the Ocp-Apim-Subscription-Key header, which only the codex path can send; qwen/kimi have no way to attach it, so no gateway-backed model is listed for them. Point them at an endpoint yourself via OPENAI_BASE_URL if needed.",
+  "_models_comment": "Pinned endpoints, CLI-independent. base_url is applied to the agent's base_url_env; keys stay in env (never in this file). The old SaFE gateway (global.primus-safe.amd.com) is DECOMMISSIONED — its entries were dropped rather than repointed. The AMD gateway that replaces it (llm-api.amd.com/Unified) is NOT listed here: it authenticates on the Ocp-Apim-Subscription-Key header, which a plain base_url+key_env entry cannot express, so it lives in codex's provider_autoselect (triggered by AMDKEY) instead. Only endpoints reachable with plain Bearer auth belong in this map. Any other OpenAI-compatible endpoint can be used ad hoc via OPENAI_BASE_URL without adding an entry.",
   "models": {
     "openai_official": {
       "id": "<your-openai-model-id>",
@@ -118,14 +67,8 @@
     "claude": {
       "agent": "claude"
     },
-    "qwen": {
-      "agent": "qwen"
-    },
     "codex": {
       "agent": "codex"
-    },
-    "kimi": {
-      "agent": "kimi"
     },
     "codex-openai": {
       "agent": "codex",
@@ -134,9 +77,6 @@
     "codex-gpt56": {
       "agent": "codex",
       "model": "openai_gpt56"
-    },
-    "cursor": {
-      "agent": "cursor"
     }
   }
 }

@@ -27,6 +27,11 @@ endpoint). A **profile** pins one `(agent, model)` pair. Setting a provider key 
 to select an agent — see `SETUP.md` for that rule and for the R1–R7 requirements a candidate CLI has
 to satisfy.
 
+Two agents ship: **`claude`** and **`codex`**. Adding a third is a data change, not a code change —
+write an `agents` entry with the same fields, then prove it with `conformance.mjs --agent <name>`.
+Only agents that have passed that gate belong in the registry; an untested entry reads to the next
+person as a supported backend.
+
 ```bash
 node interface/runtime/engine/selftest.mjs                        # expect 105/105
 node interface/runtime/engine/run_workflow.mjs <workflow.js> --agent codex --args '{...}'

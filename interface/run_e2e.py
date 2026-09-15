@@ -2049,7 +2049,7 @@ def _invoke_via_runtime(
 
     Bypasses Claude Code's Workflow tool entirely: the runtime provides the
     Workflow globals and dispatches agent() calls to the selected agent CLI
-    (claude | qwen | codex | kimi) via the config registry. The workflow's
+    (claude | codex) via the config registry. The workflow's
     top-level return value is captured from the runtime's ``--result-file`` (most
     robust); we fall back to parsing stdout and finally to the on-disk
     ``workflow_return.json`` the JS also writes.

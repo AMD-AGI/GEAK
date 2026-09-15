@@ -7,9 +7,9 @@
 //   agent() parallel() pipeline() phase() log() workflow() args budget
 // That runtime is Claude-Code-only, so the workflows cannot run under any other
 // agent. This module re-implements those globals as an ordinary Node process and
-// dispatches each agent() call to a PLUGGABLE backend (claude | qwen | ...).
+// dispatches each agent() call to a PLUGGABLE backend (claude | codex | ...).
 // The parallelism and one-level nesting live HERE, so the agent CLI does not
-// need to support either — which is what makes qcoder (qwen-code) usable.
+// need to support either — which is what makes a plain one-shot CLI usable.
 //
 // The workflow .js files are executed UNMODIFIED.
 //

@@ -12,7 +12,7 @@
 //   node interface/runtime/engine/experiment.mjs \
 //     --script kernel_workflow/kernel_workflow.js \
 //     --args '{"kernel_path":"/abs/knn","workflow_dir":"/abs/kernel_workflow","budget":6}' \
-//     --agents claude,qwen,codex --models default --repeats 3 \
+//     --agents claude,codex --models default --repeats 3 \
 //     --out ./exp_compare
 //
 // Axes:

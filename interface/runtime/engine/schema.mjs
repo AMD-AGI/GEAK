@@ -2,7 +2,7 @@
 //
 // Claude Code's Workflow `agent(prompt, {schema})` forces a StructuredOutput
 // tool call and returns a validated object. A generic coding-agent CLI (claude
-// -p / qwen -p) has no such forced tool, so we emulate it: append a JSON-Schema
+// -p / codex exec) has no such forced tool, so we emulate it: append a JSON-Schema
 // instruction to the prompt, then extract + lightly validate the JSON the agent
 // prints. Parsing/validation failure is thrown by the caller so the script's
 // agentT() retry/degrade-to-null path (kernel_workflow.js) tolerates it exactly

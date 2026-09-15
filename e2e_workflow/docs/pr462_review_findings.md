@@ -1,7 +1,7 @@
 # PR #462 review findings (swappable agent backends)
 
-Two defects found while reviewing `feat/swappable-agent-backends-v3`. Both are fixed on the
-branch. This note records *why*, so neither change is re-introduced by accident.
+Findings from reviewing `feat/swappable-agent-backends-v3`. All are fixed on the branch. This note
+records *why*, so none of the changes is re-introduced by accident.
 
 ---
 
@@ -174,8 +174,39 @@ Runtime-internal, only reachable on the codex path:
 - `registry.json` pins the `claude` agent to `--allowedTools Bash Read Write`; the baseline
   workflow's WebSearch/WebFetch are unavailable under the runtime path.
 
+Gateway-side, not ours: the AMD gateway intermittently answers a codex request with
+`{"error":"Missing required header","message":"The 'user' header with a valid User NTID is mandatory
+for application 'GEAK_GROUP'..."}`. Seen twice in ~11 live runs, each time as the FIRST request of a
+session, with 3/3 and 6/6 clean immediately afterwards under an identical environment — so it is
+flakiness on their side, not a missing entry in `provider_autoselect` (codex has no way to send a
+`user` header anyway). Worth knowing because the failure text names a header and reads like a config
+bug: retry once before changing anything.
+
 Backend selection itself was reviewed and is **working as designed**: with only `AMDKEY` and/or
 `OPENAI_API_KEY` set the run goes to codex; with neither it goes to baseline. One caveat worth
 knowing — the exclusion rule in `_derive_agent_from_env` means that if the image also bakes in any
 `ANTHROPIC_*` variable, auto-selection declines and the run silently falls back to `default_profile`
 (baseline) even though a gateway key is present.
+
+---
+
+## Finding 4 — the registry advertised three backends nobody had verified (FIXED by removal)
+
+`registry.json` shipped five agents (`claude`, `qwen`, `codex`, `kimi`, `cursor`) and seven
+profiles. Only `claude` and `codex` were ever exercised: the `qwen` entry's own note dates its last
+verification to 2026-07-31 **against the now-decommissioned SaFE gateway**, and `kimi` / `cursor`
+carry "verify … at bring-up" instructions rather than results. Since the supported surface is now the
+AMD gateway plus an OpenAI API key, and neither `qwen` nor `kimi` can attach the
+`Ocp-Apim-Subscription-Key` header the AMD gateway requires, those entries could not have worked
+against the one gateway that matters.
+
+A registry entry is not documentation of an experiment — it is an offer. Leaving three unverified
+CLIs in it meant `--agent kimi` resolved cleanly and then failed somewhere deep in a subprocess.
+Removed: the three agents, their three profiles, and the `--profile qwen` / `npm i -g
+@qwen-code/qwen-code` / `@moonshotai/kimi-code` instructions in `interface/run_e2e.md`.
+
+Nothing in the runtime was specific to them — the removal is data plus comments. `selftest.mjs`'s
+fixture registry kept the same coverage by renaming its second agent to a clearly synthetic `stub`
+(it exercises stdin delivery + an approve flag + a model endpoint, which the two real agents do not
+combine), and gained an assertion that a retired name now **throws** rather than resolving, so a
+stale `--agent qwen` in someone's script fails loudly instead of quietly running on claude.
