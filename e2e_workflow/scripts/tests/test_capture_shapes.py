@@ -90,7 +90,7 @@ def _reset_state(mod):
     mod._STATE.update(
         target=None, out_dir=None, max_cases=5, num_steps=0,
         records=[], seen=set(), orig=None, mod=None, attr=None,
-        installed=False, calls=0,
+        installed=False, bind_pending=False, calls=0,
         regime_seen=set(), decode_lead_max=256,
         sequence=[], seq_cap=256, in_graph_calls=0,
         shape_counts={}, shape_meta={},
@@ -1013,6 +1013,95 @@ class TestInstall(_RecorderTestCase):
         expected_prefix = os.path.join(
             self.out_dir, f"capture.pid-{os.getpid()}.rank-")
         self.assertTrue(cs._STATE["out_dir"].startswith(expected_prefix))
+
+
+# --------------------------------------------------------------------------- #
+# deferred bind -- the overlay must not import the target at interpreter startup
+# --------------------------------------------------------------------------- #
+class TestDeferredBind(_RecorderTestCase):
+    """install() runs from sitecustomize, i.e. DURING interpreter startup. If it imported the target
+    there it would reorder every later import in the process -- and that is not theoretical: pulling
+    aiter.fused_moe in from sitecustomize makes FlyDSL's JIT abort with "LLVM ERROR: Do not know how to
+    expand this operator's operand!" on a kernel that compiles fine in the identical un-overlaid run.
+    So the hook is armed at install and bound on the APPLICATION's own import."""
+
+    def _unimported_module(self, name="lazy_serving_layer", body="def op(*a, **k):\n    return 'OUT'\n"):
+        d = tempfile.mkdtemp(prefix="capture_shapes_lazy_")
+        self.addCleanup(shutil.rmtree, d, True)
+        with open(os.path.join(d, name + ".py"), "w") as fh:
+            fh.write(body)
+        sys.path.insert(0, d)
+        self.addCleanup(lambda: sys.path.remove(d) if d in sys.path else None)
+        self.addCleanup(sys.modules.pop, name, None)
+        importlib.invalidate_caches()
+        self.assertNotIn(name, sys.modules)
+        return name
+
+    def _arm(self, name):
+        with _stderr() as err:
+            cs.install(f"{name}:op", self.out_dir)
+        self.addCleanup(_drop_bind_shims)
+        return err.getvalue()
+
+    def test_install_does_not_import_the_target(self):
+        name = self._unimported_module()
+        err = self._arm(name)
+        self.assertNotIn(name, sys.modules)          # the whole point
+        self.assertFalse(cs._STATE["installed"])
+        self.assertTrue(cs._STATE["bind_pending"])
+        self.assertIn("armed", err)
+
+    def test_the_application_importing_the_target_binds_the_hook(self):
+        name = self._unimported_module()
+        self._arm(name)
+        with _stderr() as err:
+            mod = importlib.import_module(name)
+        self.assertTrue(cs._STATE["installed"])
+        self.assertIs(mod.op.__wrapped__, cs._STATE["orig"])
+        self.assertIn("hooked", err.getvalue())
+        with _stderr():
+            self.assertEqual(mod.op(FakeTensor((4, 8))), "OUT")
+        self.assertEqual(cs._STATE["shape_counts"], {"T(4, 8):torch.float16": 1})
+
+    def test_the_shim_does_not_outlive_the_bind(self):
+        # A finder left on sys.meta_path would re-run find_spec for every later import in the process.
+        name = self._unimported_module()
+        before = len(sys.meta_path)
+        self._arm(name)
+        self.assertEqual(len(sys.meta_path), before + 1)
+        with _stderr():
+            importlib.import_module(name)
+        self.assertEqual(len(sys.meta_path), before)
+
+    def test_an_unrelated_import_is_not_disturbed(self):
+        name = self._unimported_module()
+        other = self._unimported_module(name="other_lazy_serving_layer")
+        self._arm(name)
+        with _stderr():
+            importlib.import_module(other)
+        self.assertFalse(cs._STATE["installed"])
+        self.assertNotIn(name, sys.modules)
+
+    def test_a_native_target_is_still_refused_loudly_just_at_bind(self):
+        # The wrappability check needs the object, so it cannot stay at install; it must still be an
+        # exception the operator sees, not a mid-run SIGSEGV.
+        name = self._unimported_module(name="native_lazy_serving_layer", body="op = len\n")
+        with _env(CAPTURE_WRAP_UNSAFE=None):
+            self._arm(name)
+            with self.assertRaises(RuntimeError) as ctx:
+                importlib.import_module(name)
+        self.assertIn("refusing to wrap non-Python callable", str(ctx.exception))
+
+    def test_an_already_imported_target_binds_immediately(self):
+        # No deferral when there is nothing to defer -- in-process callers keep the old behavior.
+        mod, err = self._hook()
+        self.assertTrue(cs._STATE["installed"])
+        self.assertIn("hooked", err)
+        self.assertIs(mod.op.__wrapped__, cs._STATE["orig"])
+
+
+def _drop_bind_shims():
+    sys.meta_path[:] = [f for f in sys.meta_path if not isinstance(f, cs._BindOnImport)]
 
 
 # --------------------------------------------------------------------------- #
