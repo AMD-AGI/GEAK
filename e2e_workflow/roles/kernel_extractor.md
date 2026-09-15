@@ -101,7 +101,8 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (the Architect'
 short_name, classification, extract_hint = the `module:attr` callable to hook, candidate_backends,
 regime, and — when an upstream TraceLens prior was available — OPTIONAL `source_hint` (resolved source
 file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_OVERLAY` (the accepted-kernel stack
-carried forward — may be empty on the first milestone), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`.
+carried forward — may be empty on the first milestone), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`,
+and `PROFILE_TOPN` (the profiler's own topN JSON — the ONLY authority on how a device kernel is spelled).
 
 ### Resolve + HONOR the ONLINE REGIME first (same contract as PHASE=extract_op)
 The #1 cause of "isolated win, e2e loss/crash" is a unittest that SYNTHESIZES its inputs with OFFLINE
@@ -176,6 +177,14 @@ freeze an out-of-regime oracle nobody should trust.
    capture overlay, driven by the SAME workload as the profile so shapes match the regime:
    ```bash
    TASK="$EVAL_DIR/kernels/<short_name>_task"; mkdir -p "$TASK"
+   # FIRST, before any capture: prove KERNEL.device_kernel is a name the PROFILER actually recorded.
+   # It is hand-transcribed prose until this passes. One `_HA_S_` mistyped as `_AS_` is invisible to
+   # every later check except this one, and reads downstream as "the seam is wrong" -- which sends the
+   # extractor descending through callables it can never fix. This costs no GPU, no server, no capture.
+   # On failure: DO NOT proceed. COPY the right name verbatim out of profile_kernel_candidates.
+   python3 "$SKILL_DIR/scripts/kernel_selection.py" \
+     --target "<selected module:attr>" --device-kernel "<KERNEL.device_kernel>" \
+     --profile-top-n "$PROFILE_TOPN" --check-device-kernel || exit 1
    # FREEZE the live serving stack as this task's baseline env, then hang the capture hook off a COPY
    # of it. --from is what stacks them: two overlay dirs on PYTHONPATH do NOT compound (only the first
    # sitecustomize is imported), so capturing on a bare hook overlay would silently capture the
@@ -203,6 +212,7 @@ freeze an out-of-regime oracle nobody should trust.
      --capture-meta "$TASK"/capture.pid-*.rank-*/meta.json \
      --torch-trace "$TASK"/selection_trace.pid-*.rank-*.call-*.json \
      --candidate-target "<candidate module:attr>" \
+     --profile-top-n "$PROFILE_TOPN" \
      --task-dir "$TASK" \
      --out "$TASK/selection_validation.json"
    ```
@@ -215,6 +225,13 @@ freeze an out-of-regime oracle nobody should trust.
    **promotes** the selected process's `meta.json` + `reference_io.pt` into the task root and **reclaims**
    every `capture.pid-*` directory (issue #429 — do NOT leave per-rank oracles around). On failure or
    before a capture retry, reclaim without promote:
+
+   🔴 **`device_kernel_name_mismatch` is NOT `device_kernel_not_under_target`.** The first means the
+   seam launched GPU work but nothing spelled like `--device-kernel`; the verdict lists what it *did*
+   launch in `kernels_under_target`. The seam is LIVE — keep it, keep the capture, and fix the NAME by
+   copying one of those strings verbatim. Descending to another callable there repairs a defect that is
+   not present and starts a search with no terminating condition. Only `device_kernel_not_under_target`
+   (the marker launched nothing at all) means the seam is wrong and you should go deeper.
 
    ```bash
    python3 "$SKILL_DIR/scripts/capture_shapes.py" --cleanup-task-dir "$TASK" --no-promote
@@ -695,7 +712,8 @@ needs an op task dir the **Op Benchmarker** can bake-off across backends. `edit=
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (Architect head candidate: short_name,
 op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for attn, and OPTIONAL
 TraceLens `source_hint`/`launcher_hint`/`bound_type`), `GEMM_SYNTH` (bool, default true),
-`CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, and OPTIONAL `PROFILE_WORKLOAD_JSON` (the profiler's
+`CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, `PROFILE_TOPN` (the profiler's own topN JSON — the ONLY
+authority on how a device kernel is spelled), and OPTIONAL `PROFILE_WORKLOAD_JSON` (the profiler's
 per-(shape,dtype) weighted workload model — slice this kernel's cases into `workload_path`, see below).
 
 > **TraceLens shape double-check (mandatory when the shapes came from TraceLens).** If `KERNEL.shapes`

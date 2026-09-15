@@ -1437,7 +1437,9 @@ function kernelSelectionVerified(h, ext) {
   if (!verdict || verdict.contract !== 'kernel_selection')
     return { ok: false, why: 'kernel_selection.py verdict is missing' };
   if (verdict.ok !== true)
-    return { ok: false,
+    // `codes`/`verdict` travel with the failure so the retry can tell "wrong seam" from "right seam,
+    // wrong NAME". Only the first is repaired by descending to another callable.
+    return { ok: false, codes: (verdict.failed || []).slice(), verdict,
       why: `kernel_selection.py failed: ${(verdict.failed || []).join(', ') || 'unknown'}` };
   if (String(verdict.target_callable || '').trim() !== target)
     return { ok: false,
@@ -1556,8 +1558,29 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
     const selection = kernelSelectionVerified(head, ext);
     const needBaseline = !hasFrozenBaseline(ext);
     const priorTarget = String((ext && ext.target_callable) || '').trim();
-    if (priorTarget && !attemptedTargets.includes(priorTarget)) attemptedTargets.push(priorTarget);
-    const selectionCorrective = selection.ok ? '' :
+    // A seam whose marker launched kernels IS live; what failed is the hand-transcribed device_kernel
+    // NAME. Banning that seam (below) would forbid the one correct answer, and "descend deeper" is a
+    // repair for a defect that is not there — a search with no terminating condition. One gemm head
+    // burned 13.6h and seven captures that way, re-hunting a seam that was right on attempt 1.
+    const nameCodes = (selection.codes || []);
+    const nameOnly = !selection.ok &&
+      (nameCodes.includes('device_kernel_name_mismatch') ||
+       nameCodes.includes('device_kernel_not_in_profile')) &&
+      !nameCodes.includes('device_kernel_not_under_target');
+    if (priorTarget && !nameOnly && !attemptedTargets.includes(priorTarget))
+      attemptedTargets.push(priorTarget);
+    const observedNames = (((selection.verdict || {}).kernels_under_target) || [])
+      .map((entry) => `${entry && entry.name} (${entry && entry.launches} launches)`);
+    const profileNames = (((selection.verdict || {}).profile_kernel_candidates) || []).slice(0, 20);
+    const selectionCorrective = selection.ok ? '' : nameOnly ?
+      ` PRIOR ATTEMPT SELECTED A LIVE SEAM BUT DECLARED THE WRONG GPU KERNEL NAME: ${selection.why}. ` +
+      `The seam '${priorTarget}' demonstrably launched GPU work, so DO NOT descend to another callable ` +
+      'and DO NOT re-run capture to hunt a different seam — keep this target_callable. Fix KERNEL.device_kernel ' +
+      'by COPYING a name verbatim from the profiler, never by re-typing or abbreviating it. ' +
+      (observedNames.length ? `Kernels this seam actually launched: ${observedNames.join('; ')}. ` : '') +
+      (profileNames.length ? `Names recorded in PROFILE_TOPN: ${profileNames.join('; ')}. ` : '') +
+      'Then re-run kernel_selection.py with --profile-top-n "$PROFILE_TOPN" and return its JSON verbatim ' +
+      'as selection_validation.' :
       ` PRIOR ATTEMPT DID NOT SELECT THE PROFILED GPU KERNEL: ${selection.why}. ` +
       'Treat KERNEL.live_call_seam as prose only. Merge KERNEL.seam_candidates with any missing inner ' +
       'launcher found from source/runtime inspection; preserve existing candidate classifications. ' +
@@ -3679,6 +3702,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
           ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+          PROFILE_TOPN: profile ? profile.profile_topN_json : '',
           CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
           REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
           PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
@@ -4045,6 +4069,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
             ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+            PROFILE_TOPN: profile ? profile.profile_topN_json : '',
             CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
             REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
             PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
@@ -4247,6 +4272,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+        PROFILE_TOPN: profile ? profile.profile_topN_json : '',
         CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
         // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
@@ -4574,6 +4600,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
         CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+        PROFILE_TOPN: profile ? profile.profile_topN_json : '',
       },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
     if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
