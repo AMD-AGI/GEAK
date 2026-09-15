@@ -18,6 +18,10 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
+from e2e_workflow.scripts.runtime_csv import build_runtime_csv
+
 _HERE = Path(__file__).resolve().parent
 
 
@@ -117,6 +121,27 @@ def test_headline_is_not_inflated_by_tuning(tmp_path):
     assert out["throughput_speedup"] == 1.2
     assert out["final_throughput_tok_s"] == 1200.0
     assert "part of the headline" in out["tuning_skillset"]["explanation"]
+
+
+def test_verified_runtime_table_is_bound_to_the_accepted_environment(tmp_path):
+    baseline = tmp_path / "stock.csv"
+    baseline.write_text("M,kernel\n64,stock\n128,retained\n")
+    tuned = tmp_path / "tuned.csv"
+    tuned.write_text("M,kernel\n64,candidate\n")
+    output = tmp_path / "final/tuning/runtime/gemm"
+    table = build_runtime_csv(baseline, [tuned], output, "AITER_CONFIG_GEMM_BF16", ["M"])
+    tuning = _tuning(
+        runtime_csv_manifests=[str(output / "runtime_csv.json")],
+        apply_env=table["apply_env"], live_tree_files=[], cache_invalidation=[], deploy_bundle="",
+    )
+    wf = _wf(accepted_config={"flags": "", "env": table["apply_env"]}, tuning_skillset=tuning)
+    result = _norm(tmp_path, wf)
+    assert result["tuning_skillset"]["runtime_csvs"] == [table]
+    assert result["accepted_config"]["env_map"] == {table["env_name"]: table["candidate"]["path"]}
+    assert result["tuning_skillset"]["reaches_production_via"]["final_launch_runs_deploy"] is False
+    wf["accepted_config"]["env"] = table["baseline_env"]
+    with pytest.raises(ValueError, match="does not select"):
+        _norm(tmp_path, wf)
 
 
 # --------------------------------------------------------------------------- content

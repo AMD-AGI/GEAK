@@ -238,6 +238,63 @@ class TestMapArgs(_RunE2ECase):
         h.update(extra)
         return h
 
+    def test_complete_launch_does_not_restore_removed_recipe_flags(self):
+        recipe = self.tmp / "baseline.yaml"
+        recipe.write_text(
+            "benchmark:\n  envs:\n"
+            "    EXTRA_SGLANG_ARGS: --disable-cuda-graph --moe-runner-backend triton "
+            "--disable-shared-experts-fusion --context-length 11264\n"
+            "    SGLANG_USE_AITER: '1'\n",
+            encoding="utf-8",
+        )
+        full_args = "--context-length 9728 --cuda-graph-max-bs 64 --mem-fraction-static 0.8"
+        h = self._handoff(
+            schema_version=2,
+            framework="sglang",
+            launch_recipe=str(recipe),
+            accepted_flags="--context-length 9728 --cuda-graph-max-bs 64",
+            baseline_env_spec={"config": {
+                "server_launch_flags": full_args,
+                "extra_server_args": "--context-length 9728 --cuda-graph-max-bs 64",
+            }},
+        )
+        ps = rx.map_args(h)
+        self.assertEqual(ps["initial_extra_server_args"], full_args)
+        self.assertEqual(ps["initial_args_mode"], "replace")
+        self.assertEqual(ps["initial_extra_env"], "SGLANG_USE_AITER=1")
+        self.assertEqual(ps["launch_script"], str(recipe))
+
+    def test_unavailable_launch_snapshot_keeps_recipe_arguments(self):
+        recipe = self.tmp / "baseline.yaml"
+        recipe.write_text(
+            "benchmark:\n  envs:\n    EXTRA_VLLM_ARGS: --block-size 128\n",
+            encoding="utf-8",
+        )
+        for config in ({}, {"server_launch_flags": ""}, {"server_launch_flags": "  "}):
+            with self.subTest(config=config):
+                h = self._handoff(
+                    schema_version=2,
+                    framework="vllm",
+                    launch_recipe=str(recipe),
+                    accepted_flags="--max-num-seqs 64",
+                    baseline_env_spec={"config": config},
+                )
+                ps = rx.map_args(h)
+                self.assertEqual(
+                    ps["initial_extra_server_args"], "--block-size 128 --max-num-seqs 64"
+                )
+                self.assertEqual(ps["initial_args_mode"], "replace")
+
+    def test_legacy_delta_is_not_labelled_a_complete_launch(self):
+        ps = rx.map_args(self._handoff(accepted_flags="--cuda-graph-max-bs 64"))
+        self.assertEqual(ps["initial_extra_server_args"], "--cuda-graph-max-bs 64")
+        self.assertNotIn("initial_args_mode", ps)
+
+    def test_complete_empty_launch_is_explicit(self):
+        ps = rx.map_args(self._handoff(schema_version=2, baseline_env_spec={}))
+        self.assertEqual(ps["initial_extra_server_args"], "")
+        self.assertEqual(ps["initial_args_mode"], "replace")
+
     def test_optional_workflow_knobs_are_forwarded_verbatim(self):
         """launch_recipe / phases / carried state are the resume channel:
         dropping one silently re-runs a phase the caller pinned.
