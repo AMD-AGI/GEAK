@@ -61,6 +61,12 @@ UTIL_BOUND_THRESHOLD = 0.60
 #: to "unknown" rather than inventing a category the consumer has no routing rule for.
 BOUND_TYPES = ("memory", "compute", "latency", "unknown")
 
+#: How the ACHIEVED side of the ratio was obtained. Only hardware counters are a measurement:
+#: `2*M*N*K` is what the op would cost if the kernel did exactly the arithmetic we assume, and
+#: `experts_hit` is an expected value over a routing distribution nobody observed. Both are useful
+#: priors and neither is a result. `mixed` = one axis counted, the other modelled.
+MEASUREMENT_BASES = ("counters", "mixed", "model")
+
 
 def select_entries(entries, min_pct_gpu=DEFAULT_MIN_PCT_GPU, top_n=DEFAULT_TOP_N):
     """Head-scoped selection: the entries worth a roofline estimate, biggest first.
@@ -185,6 +191,11 @@ def experts_hit(num_experts, pairs):
     """Expected number of DISTINCT experts touched by `pairs` = M*top_k routed token-expert pairs.
 
     E*(1-(1-1/E)^pairs). At decode this is what decides MoE weight traffic.
+
+    This is an EXPECTED VALUE over an assumed-uniform router, not an observation: a router with any
+    real skew touches fewer experts, and one batch is not its mean. Bytes derived from it therefore
+    go into `roofline_metrics` with `bytes_measured=False`, which is the default -- the resulting
+    row is an annotation, and only `roofline_metrics_from_counters` can make it rankable.
     """
     try:
         E, n = float(num_experts), float(pairs)
@@ -197,9 +208,50 @@ def experts_hit(num_experts, pairs):
 
 # ---------------------------------------------------------------- the metric
 
+def _tag_basis(out, roof_axis, bytes_measured, flops_measured):
+    """Record how the achieved side was obtained, and whether that makes the row rankable.
+
+    Rankability is decided per AXIS, not per row: `roofline_pct` is achieved/peak on ONE roof, so
+    what has to be counted is the quantity that roof is made of -- bytes for a memory-side verdict,
+    FLOPs for a compute-side one. A memory-bound row whose bytes came from FETCH_SIZE/WRITE_SIZE is
+    a measurement even if nobody counted its FLOPs; a compute-side row resting on `2*M*N*K` is not,
+    however plausible the arithmetic looks.
+    """
+    out["bytes_measured"] = bool(bytes_measured)
+    out["flops_measured"] = bool(flops_measured)
+    if bytes_measured and flops_measured:
+        out["measurement_basis"] = "counters"
+    elif bytes_measured or flops_measured:
+        out["measurement_basis"] = "mixed"
+    else:
+        out["measurement_basis"] = "model"
+    axis_measured = flops_measured if roof_axis == "compute" else bytes_measured
+    out["confidence"] = (
+        "high" if out["measurement_basis"] == "counters"
+        else "medium" if axis_measured else "low"
+    )
+    out["rankable"] = bool(
+        axis_measured and not out.get("suspect") and out.get("headroom_class") != "unknown"
+    )
+    if not axis_measured:
+        out["basis_note"] = (
+            "achieved %s is an ESTIMATE, not a measurement -- display and annotate only, do not "
+            "rank on it (SKILL.md section 5). Re-run with rocprofv3 counters via "
+            "roofline_metrics_from_counters() to make this row rankable."
+            % ("FLOPs" if roof_axis == "compute" else "bytes")
+        )
+    return out
+
+
 def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_eff,
-                     pct_gpu_time=0.0, launch_overhead_s=LAUNCH_OVERHEAD_S):
+                     pct_gpu_time=0.0, launch_overhead_s=LAUNCH_OVERHEAD_S,
+                     bytes_measured=False, flops_measured=False):
     """Core arithmetic of SKILL.md section 3 step 5. Returns a dict, or None on unusable input.
+
+    `bytes_measured` / `flops_measured` state where the ACHIEVED side came from, and they default
+    to False because an un-migrated caller is telling us nothing -- and "nothing" must read as an
+    estimate, not as a measurement. They set `measurement_basis`, `confidence` and `rankable`; see
+    `_tag_basis`. Prefer `roofline_metrics_from_counters`, which sets them from the counters.
 
     Two outcomes deliberately produce NO verdict (`headroom_class="unknown"`), because in both the
     ratio is not evidence about the kernel:
@@ -245,7 +297,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
                    headroom_class="unknown",
                    note="per-launch time is within launch-overhead scale -> dispatch-bound; "
                         "roofline not applicable, lever is fusion / graph capture")
-        return out
+        return _tag_basis(out, roof_axis, bytes_measured, flops_measured)
 
     # (2) Infeasible: raw_pct outside (0,1] means the byte/FLOP model is wrong, NOT that the kernel is
     # at the wall -- so it must not yield a verdict. (A compute-axis >100% is usually an unvalidated
@@ -259,7 +311,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
                    note="model infeasible (raw %.3f outside (0,1]) -> NOT a saturation verdict; "
                         "re-estimate with a tighter model or measure with counters (stage C)"
                         % raw_pct)
-        return out
+        return _tag_basis(out, roof_axis, bytes_measured, flops_measured)
 
     # (3) True limiter by utilization. If NEITHER roof is near its ceiling (and we already ruled out
     # the dispatch floor), the kernel is latency/occupancy-bound. It still has recoverable headroom --
@@ -275,7 +327,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
     out.update(bound_type=bound, roofline_pct=raw_pct, attainable_speedup=attainable,
                expected_e2e_gain_pct=float(pct_gpu_time or 0.0) * (1.0 - 1.0 / attainable),
                headroom_class=classify_headroom(raw_pct, tgt))
-    return out
+    return _tag_basis(out, roof_axis, bytes_measured, flops_measured)
 
 
 def classify_headroom(roofline_pct, target_eff):
@@ -361,6 +413,35 @@ def flops_from_counters(counters, mfma_flops_per_mop_f8=512.0):
     return None
 
 
+def roofline_metrics_from_counters(counters, t_seconds, peak_bw, peak_flops, target_eff,
+                                   pct_gpu_time=0.0, mfma_flops_per_mop_f8=512.0,
+                                   launch_overhead_s=LAUNCH_OVERHEAD_S,
+                                   bytes_est=None, flops_est=None):
+    """Stage C: the same metric, with the achieved side COUNTED instead of assumed.
+
+    This is the path SKILL.md section 5 calls the high-confidence one, and until now nothing
+    connected the counter helpers above to the metric below them -- so every published row was an
+    estimate wearing a measurement's clothes.
+
+    Whichever side the counters do not carry falls back to `bytes_est` / `flops_est` (the analytic
+    model) and is marked unmeasured, so a partial collection still yields a row and the row still
+    says which half of it was counted. Returns None when neither side is usable at all, which is a
+    caller-visible "stay at stage A/B", not a silent zero.
+    """
+    measured_bytes = bytes_from_counters(counters)
+    measured_flops = flops_from_counters(counters, mfma_flops_per_mop_f8)
+    b = measured_bytes if measured_bytes is not None else bytes_est
+    f = measured_flops if measured_flops is not None else flops_est
+    if not b and not f:
+        return None
+    return roofline_metrics(
+        b or 0.0, f or 0.0, t_seconds, peak_bw, peak_flops, target_eff,
+        pct_gpu_time=pct_gpu_time, launch_overhead_s=launch_overhead_s,
+        bytes_measured=measured_bytes is not None,
+        flops_measured=measured_flops is not None,
+    )
+
+
 # ---------------------------------------------------------------- self-test
 
 def _selftest():
@@ -415,6 +496,22 @@ def _selftest():
     assert allx["suspect"] and allx["roofline_pct"] <= 1.0, allx
     print("L3    : all-expert bytes -> raw %.2f clamped to %.2f, suspect=True  OK"
           % (allx["roofline_pct_raw"], allx["roofline_pct"]))
+
+    # Basis: the two rows above are analytic (2*M*N*K + an assumed router), so neither may rank.
+    assert moe["measurement_basis"] == "model" and moe["rankable"] is False, moe
+    assert attn["measurement_basis"] == "model" and attn["rankable"] is False, attn
+    # The same MoE launch with its traffic actually counted: memory-side verdict, bytes measured.
+    ctr = {"FETCH_SIZE": wbytes / 1024.0, "WRITE_SIZE": 0.0}
+    measured = roofline_metrics_from_counters(
+        ctr, t_layer, peaks["hbm_bw_bytes_s"], peak_flops_for(peaks, "fp8"), TARGET_EFF["moe"],
+        pct_gpu_time=26.45, flops_est=2 * M * tk * (2 * I * H + H * I))
+    assert measured["bytes_measured"] and not measured["flops_measured"], measured
+    assert measured["measurement_basis"] == "mixed" and measured["bound_type"] == "memory"
+    assert measured["rankable"] is True and measured["confidence"] == "medium", measured
+    ok &= abs(measured["roofline_pct"] - moe["roofline_pct"]) < 1e-9   # same number, now earned
+    print("Basis : modelled MoE/Attn rankable=False; counted MoE rankable=True (%s, %s)  OK"
+          % (measured["measurement_basis"], measured["confidence"]))
+    assert roofline_metrics_from_counters({}, t_layer, peaks["hbm_bw_bytes_s"], 1e15, 0.9) is None
 
     # degradation: unusable inputs return None instead of raising
     for bad in [(0, 0, 1e-6, 1e12, 1e15, 0.9), (1, 1, 0, 1e12, 1e15, 0.9), (None, None, None, None, None, None)]:
