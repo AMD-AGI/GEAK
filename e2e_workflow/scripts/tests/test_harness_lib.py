@@ -580,7 +580,7 @@ class TestArch(_HarnessTestCase):
             self.assertTrue(hl.fp8_is_fnuz(arch), arch)
 
     def test_cdna4_and_unknown_archs_use_the_ocp_fp8(self):
-        for arch in ("gfx950", "gfx1100", "", None):
+        for arch in ("gfx950", "gfx1100", "gfx1151", "", None):
             self.assertFalse(hl.fp8_is_fnuz(arch), arch)
 
 

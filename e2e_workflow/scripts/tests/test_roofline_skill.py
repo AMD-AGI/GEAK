@@ -73,6 +73,24 @@ class TestPeaks(unittest.TestCase):
         self.assertIsNotNone(p)
         self.assertAlmostEqual(p["hbm_bw_bytes_s"], 5.3e12, delta=1e9)
 
+    def test_gfx1151_tabulated_on_the_memory_axis(self):
+        """RDNA3.5 APU. The row carries the memory axis and the CU count; no compute peaks are
+        tabulated, so peak_flops_for declines rather than answering on a different basis from the
+        CDNA rows."""
+        p = rt.load_peaks(PEAKS_MD, "gfx1151")
+        self.assertIsNotNone(p)
+        self.assertAlmostEqual(p["hbm_bw_bytes_s"], 256.0e9, delta=1e9)
+        self.assertEqual(p["cu"], 40)
+        self.assertEqual(p["source"], "table")
+        self.assertIsNone(rt.peak_flops_for(p, "bf16"))
+
+    def test_bf16_equals_fp16_on_every_arch_that_tabulates_flops(self):
+        """peaks.md's own load-bearing cross-check: the matrix core runs both at the same rate
+        (MFMA on CDNA, WMMA on RDNA), so an inequality means the compute axis is inflated."""
+        for gfx in ("gfx942", "gfx950"):
+            p = rt.load_peaks(PEAKS_MD, gfx)
+            self.assertEqual(p["flops"]["bf16"], p["flops"]["fp16"], gfx)
+
     def test_L1_unknown_gfx_returns_none(self):
         """Unknown gfx -> None, so the caller falls back to derived peaks at confidence=low."""
         self.assertIsNone(rt.load_peaks(PEAKS_MD, "gfx-does-not-exist"))
