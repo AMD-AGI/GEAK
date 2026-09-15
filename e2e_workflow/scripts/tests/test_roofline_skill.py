@@ -390,6 +390,94 @@ class TestMeasurementBasis(unittest.TestCase):
             self.assertIn(m["confidence"], ("low", "medium", "high"))
 
 
+#: SKILL.md 9.1 — the MoE stage-1 head of run 20260907T031112Z-58636ae3, verbatim from its
+#: profile_roofline.json round 0. bf16 peak because that is the ridge the run recorded (312.5).
+Q38_MOE1 = dict(bytes_est=815504879, flops_est=5368709120, t_launch_s=69.857e-6,
+                pct_gpu=20.615, peak_bw=8.0e12, peak_flops=2.5e15)
+#: The same seam with its traffic COUNTED: rocprofv3 FETCH_SIZE/WRITE_SIZE on the task package's
+#: decode M=64 case, median of 4 dispatches (see roofline-autit/moe_measured_0915/MEASUREMENT.md).
+#: Different operating point than the run above (E=256/inter=2048, CK dispatch) -- what is locked
+#: here is feasible-and-rankable vs impossible-and-not, not a bytes-to-bytes delta.
+Q38_MOE1_MEASURED = dict(fetch_kib=334391.0, write_kib=276.0, t_dispatch_s=142.28e-6)
+
+
+class TestAssumedDistributionCounterExample(unittest.TestCase):
+    """SKILL.md 9.1: the run where an assumed router cost the biggest kernel its verdict.
+
+    Locked because it is the evidence for the whole measurement-basis contract. The modelled bytes
+    imply 1.46x of peak HBM -- not imprecise, impossible -- so the L3 ladder refuses a verdict, and
+    20.6% of GPU time yields no routing signal. Counting the traffic makes the same kernel routable.
+    """
+
+    def _modelled(self):
+        return rt.roofline_metrics(
+            Q38_MOE1["bytes_est"], Q38_MOE1["flops_est"], Q38_MOE1["t_launch_s"],
+            Q38_MOE1["peak_bw"], Q38_MOE1["peak_flops"], rt.TARGET_EFF["moe"],
+            pct_gpu_time=Q38_MOE1["pct_gpu"])
+
+    def _measured(self):
+        return rt.roofline_metrics_from_counters(
+            {"FETCH_SIZE": Q38_MOE1_MEASURED["fetch_kib"],
+             "WRITE_SIZE": Q38_MOE1_MEASURED["write_kib"]},
+            Q38_MOE1_MEASURED["t_dispatch_s"],
+            Q38_MOE1["peak_bw"], Q38_MOE1["peak_flops"], rt.TARGET_EFF["moe"],
+            pct_gpu_time=Q38_MOE1["pct_gpu"], flops_est=Q38_MOE1["flops_est"])
+
+    def test_modelled_bytes_are_physically_impossible(self):
+        m = self._modelled()
+        self.assertAlmostEqual(m["hbm_util"], 1.459, places=2)
+        self.assertTrue(m["suspect"])
+        # >=1.46x over-count, straight from the artifact: the model claims more bytes than the
+        # kernel could have moved at peak in its own measured time.
+        self.assertGreater(m["bytes_est"], m["bytes_upper_bound"])
+        self.assertAlmostEqual(m["bytes_est"] / m["bytes_upper_bound"], 1.459, places=2)
+
+    def test_the_biggest_kernel_in_the_run_gets_no_verdict(self):
+        m = self._modelled()
+        self.assertEqual(m["headroom_class"], "unknown")
+        self.assertEqual(m["measurement_basis"], "model")
+        self.assertFalse(m["rankable"])
+
+    def test_counting_the_traffic_makes_it_routable(self):
+        c = self._measured()
+        self.assertAlmostEqual(c["hbm_util"], 0.301, places=2)
+        self.assertFalse(c["suspect"])
+        self.assertEqual(c["headroom_class"], "underperforming")
+        self.assertAlmostEqual(c["attainable_speedup"], 2.99, places=1)
+        self.assertTrue(c["rankable"])
+
+    def test_the_two_rows_route_to_opposite_tracks(self):
+        """Not a precision difference -- a different lever.
+
+        The modelled row's prose concluded 'AT or very near the memory roof, so the lever is BYTE
+        REDUCTION', inferred from the direction of an infeasible number. Counted, both utilisations
+        are under 0.60, so it is latency/occupancy-bound and section 7 sends it to occupancy and
+        dependency chains instead.
+        """
+        m, c = self._modelled(), self._measured()
+        self.assertEqual(m["bound_type"], "memory")
+        self.assertEqual(c["bound_type"], "latency")
+        self.assertLess(c["hbm_util"], 0.60)
+        self.assertLess(c["compute_util"], 0.60)
+
+    def test_the_contrast_is_the_point(self):
+        """Modelled: impossible and unusable. Counted: feasible, and it routes."""
+        m, c = self._modelled(), self._measured()
+        self.assertGreater(m["roofline_pct_raw"], 1.0)
+        self.assertLessEqual(c["roofline_pct"], 1.0)
+        self.assertFalse(m["rankable"])
+        self.assertTrue(c["rankable"])
+
+    def test_worked_example_is_written_down(self):
+        with open(os.path.join(os.path.dirname(PEAKS_MD), "SKILL.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("9.1 Worked counter-example", text)
+        self.assertIn("mfma_moe1_silu_mul_afp4_wfp4_bf16", text)
+        self.assertIn("1.459", text)
+        # The caveat is load-bearing: the two columns are different operating points.
+        self.assertIn("Do not read the two columns as the same measurement", text)
+
+
 class TestSkillDocConsistency(unittest.TestCase):
     """The helper's priors must not drift from the SKILL.md table that documents them."""
 

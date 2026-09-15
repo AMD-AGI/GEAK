@@ -363,3 +363,64 @@ headroom puts attention first. The run that produced these numbers spent its bud
 measured **−0.064% e2e** (isolated 1.047×, predicted 1.023× ✅); the attention kernel it reached later
 yielded **1.56× isolated** (predicted 1.7× ✅). Both predictions were calibrated — and the MoE was
 correctly identified as needing a byte-reduction lever, not another tuning pass.
+
+## 9.1 Worked counter-example — what an assumed distribution costs (real run)
+
+§9 is the case where the byte model happened to be right. This is the case where it was not, and it
+is why §5 makes the achieved side declare its provenance.
+
+**Qwen3.8-2.4T-A95B-MXFP4, gfx950, sglang, TP8, isl/osl 8k/1k, conc 64** — decode-dominated.
+`mfma_moe1_silu_mul_afp4_wfp4_bf16_t32x128x256_pm1_async_v32`, the **largest kernel in the run at
+20.6% of GPU time**. 512 experts, top_k=10, M=64 ⇒ 640 (token, expert) pairs, so
+`experts_hit = 512·(1−(1−1/512)^640) = 365.5`. At 2.228 MB of fp4 weights + e8m0 scales per expert
+that is **815.5 MB per launch**, against a measured 69.86 µs.
+
+The modelled row is not merely imprecise, it is **impossible**: 11.67 TB/s, or **1.459× of peak HBM**.
+`bytes_upper_bound` — the most the kernel could have moved in its own measured 69.86 µs at 8 TB/s — is
+558.9 MB against the model's 815.5 MB, so the estimate is over by **≥1.46×** on the artifact's own
+arithmetic, before anyone profiles anything. The §6 L3 ladder caught it and refused a verdict, which
+is the ladder working. But refusing a verdict on the biggest kernel in the run means the analysis
+produced **no routing signal at all** for 20.6% of GPU time. Stage-2 of the same op failed identically
+at 1.203×.
+
+**And the prose went on to route it anyway.** The entry concluded *"the kernel is AT or very near the
+memory roof, so the lever is BYTE REDUCTION"* — inferred from the direction of an infeasible number,
+because a byte model that overshoots feels like evidence of saturation. It is not. Four byte-reduction
+levers were enumerated underneath it. That is a modelling failure turning into a plan.
+
+### What the counted traffic says
+
+`rocprofv3 --pmc FETCH_SIZE / WRITE_SIZE` on the task package's decode M=64 case, through
+`roofline_metrics_from_counters`:
+
+| | bytes modelled (serving run) | bytes counted (task package) |
+|---|---|---|
+| bytes / dispatch | 815.5 MB *(assumed)* | 326.8 MiB *(counted)* |
+| achieved HBM BW | 11.67 TB/s | 2.41 TB/s |
+| `hbm_util` vs the 8 TB/s table peak | **1.459** | 0.301 |
+| `bound_type` | memory | **latency** |
+| `headroom_class` | **unknown** | underperforming |
+| `attainable_speedup` | — | **2.99×** |
+| `measurement_basis` / `rankable` | `model` / **false** | `mixed` / **true** |
+
+The measured point is nowhere near the memory roof — both utilisations are far below 0.60, so it is
+**latency/occupancy-bound**, and per §7 the lever is occupancy and dependency chains, *not* the byte
+reduction the modelled row prescribed. The two rows do not merely differ in precision; they route to
+opposite tracks.
+
+**Do not read the two columns as the same measurement.** The task package dispatches at E=256 /
+inter=2048 and resolves to the CK `ck::kernel_moe_mxgemm` family, while the serving run profiled
+E=512 / inter-per-rank=512 and named the AITER ASM symbol. The campaign's own audit of the ASM kernel
+at its decode M=64 case lands at 0.66 of the same table peak. Three points, three answers — which is
+the argument: the achieved side depends on the operating point and the dispatched backend, so it has
+to be **counted per measurement**, not modelled once and reused. What survives every reading is that
+the counted numbers are feasible and rankable while the modelled one was neither.
+
+**Quote which roof.** That 2.41 TB/s is 0.301 of the 8 TB/s *table* peak and 0.382 of this box's
+~6.31 TB/s *empirical* microbenchmark peak; the campaign's head-kernel table reports the ASM kernel
+against a third reference again (73.05%). Same class of measurement, three denominators (§8.2).
+
+*Sources: modelled side — `profile_roofline.json` round 0 of run `20260907T031112Z-58636ae3`. Counted
+side — rocprofv3 1.1.0 on MI355X / ROCm 7.2.0, median of 4 dispatches, FETCH_SIZE and WRITE_SIZE
+collected in separate passes because the pair overflows the hardware counter slots in one
+(`error code 38`); full provenance in `roofline-autit/moe_measured_0915/MEASUREMENT.md`.*
