@@ -103,9 +103,6 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions
 Then just describe what you want in natural language (examples below). Claude Code resolves the paths and
 invokes the `Workflow` tool for you.
 
-> Don't have Claude Code? The same workflows also run on the **codex CLI** —
-> see [Running GEAK on the codex CLI](#running-geak-on-the-codex-cli).
-
 ---
 
 ## e2e_workflow — whole-model serving throughput ⭐
@@ -214,10 +211,9 @@ export OPENAI_API_KEY=sk-...        # -> OpenAI official (api.openai.com)
 # export OPENAI_BASE_URL=...        # -> any other OpenAI-compatible endpoint; wins over both
 ```
 
-> A key selects codex only while **no Anthropic-side credential is also set**. If the environment
-> also carries `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` /
-> `CLAUDE_CODE_OAUTH_TOKEN`, the run stays on Claude rather than hijacking it — pass `--agent codex`
-> or set `GEAK_AGENT_BACKEND=codex` to force it. See [`SETUP.md`](interface/runtime/SETUP.md).
+> A key selects codex only while no `ANTHROPIC_*` / `CLAUDE_CODE_OAUTH_TOKEN` is also set — with
+> both, the run stays on Claude **silently**. Force it with `--agent codex` or
+> `GEAK_AGENT_BACKEND=codex`; full rule in [`SETUP.md`](interface/runtime/SETUP.md).
 
 ### 3. Run
 
