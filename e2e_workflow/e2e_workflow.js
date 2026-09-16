@@ -835,7 +835,7 @@ const EXTRACT_OP_SCHEMA = obj({
   device_kernel: { type: 'string' },
   seam_candidates: arrObj,
   selection_validation: { type: 'object', additionalProperties: true },
-  smoke: { type: 'string' }, notes: { type: 'string' },
+  smoke: { type: ['string', 'object'] }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
 const OPBENCH_SCHEMA = obj({
@@ -857,7 +857,7 @@ const EXTRACT_SCHEMA = obj({
   short_name: { type: 'string' }, editable: { type: 'boolean' }, task_dir: { type: 'string' },
   source_path_in_sglang: { type: 'string' }, target_callable: { type: 'string' },
   num_cases: { type: 'number' }, regimes_captured: arrStr, candidate_backends: arrStr,
-  build: { type: 'boolean' }, unittest_smoke: { type: 'string' },
+  build: { type: 'boolean' }, unittest_smoke: { type: ['string', 'object'] },
   // the baseline leg is an ENVIRONMENT (baseline_overlay/ = a frozen CURRENT_OVERLAY snapshot), and
   // candidate_bind is the ONE entry layered on top of it to make the candidate leg.
   candidate_bind: { type: 'object', additionalProperties: true },
@@ -1518,6 +1518,20 @@ function admitHeads(queue, stage) {
   return admitted;
 }
 
+// Extractor agents can return the same exact verdict with different casing or in a result/status wrapper.
+// Normalize only the literal word "pass" so summaries containing both failures and passes stay rejected.
+function isPassStatus(value) {
+  if (typeof value === 'string') {
+    return value.trim().toLowerCase() === 'pass';
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const statuses = [value.result, value.status].filter((status) => status != null);
+    return statuses.length > 0 && statuses.every((status) =>
+      typeof status === 'string' && status.trim().toLowerCase() === 'pass');
+  }
+  return false;
+}
+
 // A FROZEN baseline is resolvable when the extractor seeded baseline_overlay/ + declared
 // meta.candidate_bind (kernel track), or set an importable meta.baseline_callable (op track).
 // That is the language-independent speedup denominator.
@@ -1535,7 +1549,8 @@ const hasFrozenBaseline = (ext) =>
 // are the roleAgent args; `opts` is the safeAgent opts (phase/label/schema). Used by every extract
 // site (deep, opt-A, milestone/head extract_op, and the non-op milestone extract).
 async function extractWithBaseline(role, phase, intro, inputs, opts) {
-  const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
+  const smokeOk = (e) => !!(e && e.task_dir &&
+    (isPassStatus(e.smoke) || isPassStatus(e.unittest_smoke)));
   const head = (inputs && inputs.KERNEL) || {};
   const captureIntro = `${intro} CAPTURE STORAGE BOUNDS (issue #429): every capture EXTRA_ENV MUST include ` +
     `\`${CAPTURE_STORAGE_ENV}\`. Use kernel_selection.py with --task-dir "$TASK" so the selected oracle is ` +
@@ -3685,7 +3700,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         },
         { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
-      if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
+      if (!ext || !isPassStatus(ext.smoke) || !ext.task_dir) {
         const why = ext ? ext.notes || ext.smoke : 'none';
         log(`  [deep] ${h.short_name}: op extraction failed (${why})${isDominant ? ' [DOMINANT — flagged]' : ''}; skipping.`);
         if (isDominant) flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract', gate: 'extract_failed', reason: why });
@@ -4050,7 +4065,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
           },
           { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
-        if (!ext || ext.smoke !== 'pass' || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
+        if (!ext || !isPassStatus(ext.smoke) || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
         const bake = await safeAgent(
           roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
             EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
@@ -4258,7 +4273,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       },
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
     const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
-    if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
+    if (!ext || !isPassStatus(ext.smoke) || !ext.task_dir) {
       const why = ext ? ext.notes || ext.smoke : 'none';
       if (isDominant) {
         log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU) op extraction FAILED (${why}) — flagged, NOT silently skipped.`);
@@ -4576,7 +4591,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
       },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
-    if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
+    if (!ext || ext.editable === false || !isPassStatus(ext.unittest_smoke) || !ext.task_dir) {
       return { c, skip: true, reason: `extraction failed/non-editable (${ext ? ext.notes || ext.unittest_smoke : 'none'})` };
     }
     // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
