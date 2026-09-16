@@ -623,6 +623,37 @@ def attribute(groups, timeline):
             ambiguous[(wf, key)] = sum(1 for e in slots if (e.get("attempt") or 1) == 1) > 1
 
     ordered = sorted(groups, key=lambda g: (g["t0_ms"] is None, g["t0_ms"] or 0))
+
+    def _owners_for(g, key):
+        owners = [wf for wf in by_wf if key in labels_of_wf[wf]]
+        if len(owners) > 1:
+            # Only `director` collides in practice. The kernel layer's eval dirs
+            # live under <e2e eval>/kernels/_exp/, so the prompt says which it is.
+            nested = "/kernels/_exp/" in (g.get("prompt") or "")
+            pick = [w for w in owners if (w != "e2e_workflow") == nested]
+            owners = pick or owners
+        return owners
+
+    # How many conversations will land in each (wf, key) bucket. When this differs from
+    # the number of recorded dispatches (len(slots)) the positional cursor is mapping an
+    # INCOMPLETE set: a surviving transcript can be slotted onto an attempt it did not
+    # produce -- e.g. attempt 1 hung with no transcript, attempt 2 answered, so the lone
+    # transcript falls on slot 0 (attempt 1). Such a match still gets a best-effort
+    # phase/label, but its attempt identity and recorded outcome are a guess, so it is
+    # `inferred`, never claimed as exact `timeline`.
+    conv_per_bucket = defaultdict(int)
+    for g in ordered:
+        if g["role"] == DRIVER:
+            continue
+        key = _conv_key(g["role"], g["subphase"])
+        for wf in _owners_for(g, key):
+            conv_per_bucket[(wf, key)] += 1
+            break
+    incomplete = {}
+    for wf, keys in by_wf.items():
+        for key, slots in keys.items():
+            incomplete[(wf, key)] = conv_per_bucket.get((wf, key), 0) != len(slots)
+
     cursor = defaultdict(int)
     for g in ordered:
         g["label"] = _conv_key(g["role"], g["subphase"])
@@ -631,14 +662,7 @@ def attribute(groups, timeline):
             g["phase"], g["attribution"] = DRIVER, "driver"
             continue
         key = g["label"]
-        owners = [wf for wf in by_wf if key in labels_of_wf[wf]]
-        if len(owners) > 1:
-            # Only `director` collides in practice. The kernel layer's eval dirs
-            # live under <e2e eval>/kernels/_exp/, so the prompt says which it is.
-            nested = "/kernels/_exp/" in (g.get("prompt") or "")
-            pick = [w for w in owners if (w != "e2e_workflow") == nested]
-            owners = pick or owners
-        for wf in owners:
+        for wf in _owners_for(g, key):
             slots = by_wf[wf].get(key) or []
             i = cursor[(wf, key)]
             if i < len(slots):
@@ -649,7 +673,13 @@ def attribute(groups, timeline):
                 g["label"] = e["label"]
                 g["workflow"] = e["workflow"]
                 g["attempt"] = e["attempt"]
-                g["attribution"] = "inferred" if ambiguous.get((wf, key)) else "timeline"
+                reliable = not ambiguous.get((wf, key)) and not incomplete.get((wf, key))
+                g["attribution"] = "timeline" if reliable else "inferred"
+                # Carry the recorded outcome ONLY when we reliably know which attempt this
+                # transcript is; otherwise leave it unknown (None) rather than promote a
+                # guessed attempt's ok to fact. The timeline keeps its own per-attempt
+                # outcomes (surfaced via the unmatched/`agent_attempts_failed` path).
+                g["ok"] = e["ok"] if reliable else None
                 break
         else:
             # No timeline slot: group by the agent's own identity rather than dumping
@@ -958,7 +988,11 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
         durs = [c["duration_ms"] for c in g["calls"] if c["duration_ms"] is not None]
         agent_rows.append({
             "workflow": g.get("workflow", ""), "phase": g["phase"], "label": g["label"],
-            "attempt": g.get("attempt", 1), "ok": True, "attribution": g["attribution"],
+            # `ok` carries the reliably-matched timeline outcome; None when the join is a
+            # guess (ambiguous/incomplete mapping). Groups from a run with no timeline at
+            # all default True -- a transcript exists, and there is no recorded outcome to
+            # contradict. Never hardcode True over a known-uncertain mapping.
+            "attempt": g.get("attempt", 1), "ok": g.get("ok", True), "attribution": g["attribution"],
             "started_at": _ms_to_iso(g["t0_ms"]), "ended_at": _ms_to_iso(g["t1_ms"]),
             "span_ms": (g["t1_ms"] - g["t0_ms"]) if (g["t0_ms"] is not None and g["t1_ms"] is not None) else None,
             "llm_ms": sum(durs),

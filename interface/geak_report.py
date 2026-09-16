@@ -180,32 +180,63 @@ def _write_manifest(root, dirs, model, run_id, n_art):
 
 def _persist(eval_dir, calls_path, report_dir, model, persist_root):
     """Copy ledger + per-call JSON + report into the shared per-model/per-run
-    layout ``<root>/<model>/<run_id>/{...}``. Each run owns its directory: it is
-    cleared and rewritten atomically on regeneration (pruning only its OWN stale
-    artifacts), and different runs of the same model never collide."""
+    layout ``<root>/<model>/<run_id>/{...}``. Each run owns its directory, and
+    different runs of the same model never collide.
+
+    Regeneration is ATOMIC and NON-DESTRUCTIVE. The old code cleared ``root`` with
+    ``rmtree`` *before* copying, so any failure mid-copy (disk full, a source file
+    vanishing, an interrupt) left the run with a half-deleted export and no way
+    back. Instead the new export is fully written into a sibling stage directory
+    and swapped in with a single ``os.replace`` only once complete; the previous
+    valid export is retired to the side first and kept until the swap succeeds, so
+    at no point is there no valid export, and a staging failure leaves the prior
+    one exactly as it was."""
     run_id = _run_id(calls_path)
-    root = os.path.join(persist_root, model, run_id)
-    # Regeneration replaces this run's export in place — prune its own obsolete
-    # files (e.g. a shorter re-run) without touching any other run's directory.
+    model_root = os.path.join(persist_root, model)
+    root = os.path.join(model_root, run_id)
+    os.makedirs(model_root, exist_ok=True)
+    stage = os.path.join(model_root, "%s.stage-%d" % (run_id, os.getpid()))
+    shutil.rmtree(stage, ignore_errors=True)      # clear an orphaned prior stage
+    try:
+        dirs = {name: os.path.join(stage, name) for name in PERSIST_SUBDIRS}
+        for d in dirs.values():
+            os.makedirs(d, exist_ok=True)
+        # ledger: everything under reports/trace/
+        trace_dir = os.path.dirname(calls_path)
+        for fn in os.listdir(trace_dir):
+            src = os.path.join(trace_dir, fn)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(dirs["geak_run_ledger"], fn))
+        # per-call raw artifacts
+        n_art = _write_per_call_artifacts(calls_path, dirs["geak_llm_artifacts"])
+        # report
+        for fn in os.listdir(report_dir):
+            src = os.path.join(report_dir, fn)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(dirs["report"], fn))
+        _write_manifest(stage, dirs, model, run_id, n_art)
+    except BaseException:
+        # Staging failed: drop the partial stage and leave the prior export intact.
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    # Promote. os.replace cannot drop a non-empty directory, so retire the old
+    # export to the side FIRST (only now that the new one is fully staged), swap
+    # the stage in, then delete the retired copy. If the swap itself fails, roll
+    # the retired copy back so a valid export always remains.
+    retired = None
     if os.path.isdir(root):
-        shutil.rmtree(root, ignore_errors=True)
-    dirs = {name: os.path.join(root, name) for name in PERSIST_SUBDIRS}
-    for d in dirs.values():
-        os.makedirs(d, exist_ok=True)
-    # ledger: everything under reports/trace/
-    trace_dir = os.path.dirname(calls_path)
-    for fn in os.listdir(trace_dir):
-        src = os.path.join(trace_dir, fn)
-        if os.path.isfile(src):
-            shutil.copy2(src, os.path.join(dirs["geak_run_ledger"], fn))
-    # per-call raw artifacts
-    n_art = _write_per_call_artifacts(calls_path, dirs["geak_llm_artifacts"])
-    # report
-    for fn in os.listdir(report_dir):
-        src = os.path.join(report_dir, fn)
-        if os.path.isfile(src):
-            shutil.copy2(src, os.path.join(dirs["report"], fn))
-    _write_manifest(root, dirs, model, run_id, n_art)
+        retired = os.path.join(model_root, "%s.old-%d" % (run_id, os.getpid()))
+        shutil.rmtree(retired, ignore_errors=True)
+        os.replace(root, retired)
+    try:
+        os.replace(stage, root)
+    except BaseException:
+        if retired is not None and not os.path.isdir(root):
+            os.replace(retired, root)             # roll back to the prior export
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    if retired is not None:
+        shutil.rmtree(retired, ignore_errors=True)
     return root, n_art
 
 

@@ -76,6 +76,40 @@ class TestPersistIsolation(unittest.TestCase):
             self.assertEqual(len(os.listdir(os.path.join(dst_b, "geak_llm_artifacts"))), 2)
 
 
+class TestPersistAtomicRegen(unittest.TestCase):
+    """Astra Finding 3: regenerating a run's export must not destroy the prior valid
+    export if the new one fails to write. The old code rmtree'd the run dir BEFORE
+    copying, so any mid-copy failure left a half-deleted export and nothing to fall
+    back to. Regeneration now stages then atomically swaps, so a staging failure
+    leaves the previous export exactly as it was."""
+
+    def test_failed_regeneration_leaves_prior_export_intact(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_test_") as tmp:
+            shared = os.path.join(tmp, "shared")
+            dst, _ = _run_export(tmp, "same", 2, shared)          # a good export exists
+            good = sorted(os.listdir(os.path.join(dst, "geak_llm_artifacts")))
+            self.assertEqual(len(good), 2)
+
+            def _boom(*a, **k):
+                raise RuntimeError("disk full mid-copy")
+
+            orig = R._write_per_call_artifacts
+            R._write_per_call_artifacts = _boom
+            try:
+                with self.assertRaises(RuntimeError):
+                    _run_export(tmp, "same", 2, shared)           # regenerate -> fails mid-stage
+            finally:
+                R._write_per_call_artifacts = orig
+
+            # The prior export is untouched: same dir, same two artifacts, still readable.
+            self.assertTrue(os.path.isdir(dst))
+            self.assertEqual(sorted(os.listdir(os.path.join(dst, "geak_llm_artifacts"))), good)
+            # No stage/retired debris is left behind under the model directory.
+            model_dir = os.path.dirname(dst)
+            debris = [d for d in os.listdir(model_dir) if ".stage-" in d or ".old-" in d]
+            self.assertEqual(debris, [])
+
+
 class TestNoCaptureStatus(unittest.TestCase):
     def test_empty_transcript_glob_reports_no_capture(self):
         with tempfile.TemporaryDirectory(prefix="geak_report_test_") as tmp:
