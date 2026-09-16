@@ -247,6 +247,42 @@ def node_detail(node):
     }
 
 
+TERMINAL_STOPS = {"end_turn", "tool_use", "stop_sequence", "max_tokens"}
+
+
+def completeness(rows, meta=None):
+    """Three DISTINCT signals, not one 'complete' flag (per review):
+
+    * workflow_completion — did the run's own telemetry come through whole?
+      Taken from the ledger meta (``complete`` / ``warnings``); unknown if no
+      meta was supplied.
+    * capture_completeness — how many API responses have a terminal stop record.
+      A response with no terminal ``stop_reason`` was captured mid-flight; its
+      usage/output may be partial.
+    * cost_coverage — a fixed caveat: dollars are child-scope, estimated from a
+      rate card, and exclude parent driver/resume/monitor scope. Never an invoice.
+    """
+    total = len(rows)
+    incomplete = [r for r in rows if (r.get("stop_reason") or "") not in TERMINAL_STOPS]
+    meta = meta or {}
+    warnings = list(meta.get("warnings") or [])
+    return {
+        "workflow_completion": {
+            "complete": meta.get("complete") if meta else None,
+            "attribution_mode": meta.get("attribution_mode"),
+            "warnings": warnings,
+        },
+        "capture_completeness": {
+            "api_calls": total,
+            "incomplete_output": len(incomplete),
+            "complete": len(incomplete) == 0,
+        },
+        "cost_coverage": "child-scope, estimated from a fixed rate card "
+                         "(not an SDK total, not an invoice); excludes parent "
+                         "driver/resume/monitor scope.",
+    }
+
+
 def run_totals(nodes):
     """Whole-run aggregates plus a per-model split, for the report header."""
     total = {"calls": 0, "llm_ms": 0.0, "cost_usd": 0.0,
@@ -272,9 +308,20 @@ def run_totals(nodes):
 # --------------------------------------------------------------------------- #
 # Markdown
 # --------------------------------------------------------------------------- #
-def render_markdown(nodes, root, model):
+def render_markdown(nodes, root, model, comp=None):
     total, per_model = run_totals(nodes)
     out = ["# GEAK run report — %s" % model, ""]
+    if comp:
+        cap = comp["capture_completeness"]
+        wf = comp["workflow_completion"]
+        out += ["## Completeness", "",
+                "- **workflow telemetry**: %s%s" % (
+                    {True: "complete", False: "incomplete", None: "unknown"}[wf["complete"]],
+                    (" — " + "; ".join(wf["warnings"])) if wf["warnings"] else ""),
+                "- **capture**: %s/%s API responses have a terminal stop%s"
+                % (cap["api_calls"] - cap["incomplete_output"], cap["api_calls"],
+                   "" if cap["complete"] else " (%d captured mid-flight — usage/output may be partial)" % cap["incomplete_output"]),
+                "- **cost coverage**: %s" % comp["cost_coverage"], ""]
     out += ["## Run totals", ""]
     out += ["- **API calls**: %s" % _n(total["calls"])]
     out += ["- **LLM wall time**: %s" % _hms(total["llm_ms"])]
@@ -341,7 +388,7 @@ def _tree_json(node):
     return out
 
 
-def render_html(nodes, root, model):
+def render_html(nodes, root, model, comp=None):
     total, per_model = run_totals(nodes)
     payload = {
         "model": model,
@@ -350,6 +397,7 @@ def render_html(nodes, root, model):
                       sorted(per_model.items(), key=lambda kv: -kv[1]["cost_usd"])],
         "tree": _tree_json(root),
         "buckets": [{"key": k, "label": lbl} for k, lbl in COST_BUCKETS],
+        "completeness": comp,
     }
     data = json.dumps(payload).replace("</", "<\\/")
     title = html.escape("GEAK run report — %s" % model)
@@ -437,6 +485,22 @@ _HTML_TEMPLATE = r"""<!doctype html>
   tot.appendChild(chip(n(tt.tokens.output),'output tokens'));
   D.per_model.forEach(function(pm){ tot.appendChild(chip(usd(pm.cost_usd), pm.model+' ('+n(pm.calls)+')')); });
 
+  // Completeness banner: three distinct signals, not one flag.
+  var C=D.completeness;
+  if(C){
+    var cap=C.capture_completeness, wf=C.workflow_completion;
+    var b=document.createElement('div'); b.className='totals'; b.style.borderTop='none';
+    var wfTxt = wf.complete===true?'complete':(wf.complete===false?'incomplete':'unknown');
+    var capTxt = (cap.api_calls-cap.incomplete_output)+'/'+cap.api_calls+' terminal'
+      + (cap.complete?'':(' · '+cap.incomplete_output+' mid-flight'));
+    b.appendChild(chip(wfTxt,'workflow telemetry'+((wf.warnings&&wf.warnings.length)?' ⚠':'')));
+    b.appendChild(chip(capTxt, cap.complete?'capture complete':'capture partial'));
+    var cc=document.createElement('div'); cc.className='chip'; cc.style.maxWidth='420px';
+    cc.innerHTML='<b>cost coverage</b><span>'+esc(C.cost_coverage)+'</span>';
+    b.appendChild(cc);
+    tot.parentNode.insertBefore(b, tot.nextSibling);
+  }
+
   // Tree
   var sel=null;
   function detailPanel(d){
@@ -522,17 +586,30 @@ _HTML_TEMPLATE = r"""<!doctype html>
 # --------------------------------------------------------------------------- #
 # Entry points
 # --------------------------------------------------------------------------- #
-def render(rows, model="run"):
+def render(rows, model="run", meta=None):
     """Return (html_str, md_str) for a list of call rows."""
     nodes = agentize(rows)
     root = build_tree(nodes)
-    return render_html(nodes, root, model), render_markdown(nodes, root, model)
+    comp = completeness(rows, meta)
+    return (render_html(nodes, root, model, comp),
+            render_markdown(nodes, root, model, comp))
+
+
+def _read_ledger_meta(calls_path):
+    """Best-effort: the ledger's token_stats.json (sibling of llm_calls.jsonl)
+    carries the run's completeness meta. Absent/unreadable -> None."""
+    stats = os.path.join(os.path.dirname(calls_path), "token_stats.json")
+    try:
+        with open(stats, "r", encoding="utf-8") as fh:
+            return (json.load(fh) or {}).get("meta")
+    except (OSError, ValueError):
+        return None
 
 
 def write(calls_path, out_dir, model="run"):
     """Read ``llm_calls.jsonl`` and write the HTML + MD report. Returns paths."""
     rows = read_calls(calls_path)
-    html_str, md_str = render(rows, model)
+    html_str, md_str = render(rows, model, _read_ledger_meta(calls_path))
     os.makedirs(out_dir, exist_ok=True)
     base = "geak_run_report_%s" % model
     html_path = os.path.join(out_dir, base + ".html")

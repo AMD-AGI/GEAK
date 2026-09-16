@@ -146,6 +146,36 @@ class TestRunTotals(unittest.TestCase):
         self.assertEqual(set(per_model), {"claude-opus-5", "claude-sonnet-5"})
 
 
+class TestCompleteness(unittest.TestCase):
+    def test_three_distinct_signals(self):
+        rows = [call("engineer", "d1", 10), call("verify", "d1", 20)]
+        rows[0]["stop_reason"] = "end_turn"
+        rows[1]["stop_reason"] = "tool_use"
+        c = R.completeness(rows, meta={"complete": True, "warnings": [],
+                                       "attribution_mode": "recorded"})
+        self.assertTrue(c["workflow_completion"]["complete"])
+        self.assertEqual(c["capture_completeness"]["api_calls"], 2)
+        self.assertEqual(c["capture_completeness"]["incomplete_output"], 0)
+        self.assertIn("child-scope", c["cost_coverage"])
+
+    def test_missing_terminal_stop_is_flagged_incomplete(self):
+        rows = [call("engineer", "d1", 10), call("engineer", "d1", 20)]
+        rows[0]["stop_reason"] = "end_turn"
+        rows[1]["stop_reason"] = None   # captured mid-flight
+        c = R.completeness(rows)
+        self.assertEqual(c["capture_completeness"]["incomplete_output"], 1)
+        self.assertFalse(c["capture_completeness"]["complete"])
+        self.assertIsNone(c["workflow_completion"]["complete"])  # no meta -> unknown
+
+    def test_completeness_surfaces_in_outputs(self):
+        rows = [call("engineer", "d1", 10)]
+        rows[0]["stop_reason"] = None
+        html, md = R.render(rows, "M", meta={"complete": False,
+                                             "warnings": ["no agent_timeline.json"]})
+        self.assertIn("capture", md.lower())
+        self.assertIn("mid-flight", html.lower())
+
+
 class TestRender(unittest.TestCase):
     def _rows(self):
         return [call("director", "", 10, output="dir-out", prompt="dir-prompt"),
