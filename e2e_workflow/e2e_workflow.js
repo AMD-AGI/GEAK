@@ -113,6 +113,9 @@ const laneArgs = (wfArgs) => ({
   use_learned_kb: LANE_USE_LEARNED_KB,
   ...ablLaneArgs(),
   ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
+  // routing is opt-in and forwarded ONLY when the parent set it explicitly, so a routing run reaches
+  // the child lane's helper scopes instead of the experiment silently covering the parent alone.
+  ...(A.routing != null ? { routing: String(A.routing) } : {}),
   ...wfArgs,
 });
 
@@ -1355,7 +1358,9 @@ function ablEffortFor(opts, attempt) {
 }
 
 // --- Expt-3 complexity routing (INLINE; canonical + tested source: routing/tier_map.js) ------
-function __routeAgentTimeoutMs() { try { return agentTimeoutFor(); } catch (e) { return 0; } }
+// A thrown agentTimeoutFor() must NOT silently disarm the hung-agent guard (return 0). Fall back to the
+// un-budgeted AGENT_TIMEOUT_MS -- a known >0 bound -- so a hung cheap attempt is still caught and escalated.
+function __routeAgentTimeoutMs() { try { return agentTimeoutFor(); } catch (e) { return AGENT_TIMEOUT_MS; } }
 // <<ROUTING-INLINE-START>> (routing/routing_dryrun.js extracts between these sentinels and runs it;
 // this region is BYTE-IDENTICAL in e2e_workflow.js and kernel_workflow/kernel_lane.js. Contract,
 // mirroring routing/tier_map.js — unit-tested in routing/tier_map.test.js:
@@ -1380,7 +1385,7 @@ const ROUTE_SEP = String.fromCharCode(0);   // scope-key separator: textual in s
 const ROUTE_TIER_MAP = (function () {
   const m = {};
   // e2e_workflow.js persists canonical workflow_return.json (non-fatal; run_e2e recovers from disk).
-  m['Validate' + ROUTE_SEP + 'file_writer:persist:workflow-return'] = { tier: 'cheap', kind: 'verbatim_write' };
+  m['Validate' + ROUTE_SEP + 'persist-workflow-return'] = { tier: 'cheap', kind: 'verbatim_write' };
   // e2e_workflow.js writes measured_on_this_box.md, a verbatim markdown table.
   m['WarmStart' + ROUTE_SEP + 'warm_start:record-measurements'] = { tier: 'cheap', kind: 'verbatim_write' };
   return m;
@@ -1485,6 +1490,12 @@ async function __routeEscalate(prompt, opts, decision) {
   const r2 = await __agentGuarded(prompt, strongOpts);
   const v2 = __routeValidate(decision.kind, prompt, r2, readFile, expected);
   __routeAttempts.push({ label: lbl, phase: ph, model: ROUTE_MODEL_STRONG, attempt: 2, ok: !!v2.ok, verified: !!v2.verified, reason: v2.reason, escalated: true });
+  // Return the strong result unconditionally: it is the SAME model a non-routing build pins, which it
+  // runs UNGATED -- nulling a failed-gate strong result would make routing-ON stricter than routing-OFF
+  // and regress a result the baseline would have accepted. The failed gate is not swallowed: it is
+  // recorded above (attempt 2, ok=false) and surfaced here for the operator (cf. tier_map.js's
+  // 'strong-unverified' accepted-state).
+  if (!v2.ok) { try { log(`  [route] ${lbl} strong fallback ALSO failed the gate (${v2.reason}) — returning it UNVERIFIED (matches non-routing baseline, recorded as strong-unverified).`); } catch (e) {} }
   return r2;
 }
 // <<ROUTING-INLINE-END>>
@@ -1508,13 +1519,12 @@ async function safeAgent(prompt, opts, tries = 3) {
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
-      // B5-EFFORT is a CASCADE, not a coin flip: the escalated attempt must see what the
-      // cheap attempt actually produced, or it is just an independent retry at a higher
-      // tier. Both attempts are charged to the task. Inert for every other arm, so A1's
-      // retry prompt stays byte-identical.
-      const p2 = (ABL('B5') && i > 0 && typeof prompt === 'string')
-        ? prompt + `\n\n## PREVIOUS ATTEMPT FAILED — do not repeat it\nA cheaper-effort attempt at this exact task failed with:\n\`\`\`\n${String(lastErr).slice(0, 2000)}\n\`\`\`\nDiagnose that failure before acting.\n`
-        : prompt;
+      // B5-EFFORT is FULLY DORMANT on this branch: routing supersedes it and its effort-tier
+      // producer ablEffortFor() has NO call site here, so no cheaper-effort attempt is ever run.
+      // The old B5 retry-prompt therefore described an attempt that never happened -- a false
+      // "a cheaper-effort attempt ... failed" premise (Astra). Removed unconditionally: every arm
+      // now retries with the plain prompt (non-B5 arms already did, so OFF stays byte-identical).
+      const p2 = prompt;
       const ev = tlAgent(prompt, opts, i + 1);   // record AT DISPATCH; ok=false until it resolves
       const r = await agentBounded(p2, opts, i);
       if (r) {
@@ -5366,7 +5376,13 @@ if (EVAL_DIR && LLM_STATS) {
     // `instance` = this run's eval dir: a stable per-run identity so the parser can dedupe a
     // nested timeline reached twice (parent-merge + glob) WITHOUT collapsing two distinct lanes
     // that happen to share a shape. Unique per run, and available with no Date/random.
-    const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR });
+    // `route_attempts` surfaces the routing seam's per-attempt record (model/ok/verified/escalated)
+    // into the persisted artifact -- otherwise __routeAttempts is collected and never emitted, leaving
+    // the cheap-vs-strong routing decisions invisible in the run's timeline. Empty ([]) when routing is
+    // OFF, so the OFF artifact is unchanged in substance. Token COST still comes from the transcripts
+    // (both attempts each open their own conversation); this is the decision/attribution audit trail.
+    const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR,
+      ...(typeof __routeAttempts !== 'undefined' && __routeAttempts.length ? { route_attempts: __routeAttempts } : {}) });
     const tlPath = `${EVAL_DIR}/reports/trace/agent_timeline.json`;
     await safeAgent(
       `You are the file_writer. PHASE=persist_llm_stats.\n` +

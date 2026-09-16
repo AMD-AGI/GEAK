@@ -500,6 +500,9 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // This explicit arg object drops nothing load-bearing that the parent set: forward llm_stats
       // when supplied so a parent opt-out reaches each lane (unset stays absent -> lane default on).
       ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
+      // Forward the Expt-3 routing switch the same way, so a routed bake-off reaches every lane's
+      // kernel_lane (unset stays absent -> routing OFF -> byte-identical run).
+      ...(A.routing != null ? { routing: String(A.routing) } : {}),
       // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
       // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
       update_experience: 'off',
