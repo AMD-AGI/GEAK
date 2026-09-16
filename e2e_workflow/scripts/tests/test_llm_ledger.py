@@ -66,20 +66,35 @@ def user_rec(text, sec):
     return {"type": "user", "timestamp": _ts(sec), "message": {"role": "user", "content": text}}
 
 
-def asst_rec(sec, mid, inp=0, read=0, write5=0, write1h=0, out=0, model="claude-opus-4-8"):
+def asst_rec(sec, mid, inp=0, read=0, write5=0, write1h=0, out=0, model="claude-opus-4-8",
+             text=None, thinking=None):
+    """A synthetic assistant record.
+
+    ``text``/``thinking`` inject typed content blocks so the output-capture path
+    can be exercised; when both are None the message carries no content, matching
+    the older fixtures that only cared about token counts.
+    """
+    message = {
+        "id": mid, "model": model, "role": "assistant", "stop_reason": "tool_use",
+        "usage": {
+            "input_tokens": inp,
+            "cache_read_input_tokens": read,
+            "cache_creation_input_tokens": write5 + write1h,
+            "cache_creation": {"ephemeral_5m_input_tokens": write5,
+                               "ephemeral_1h_input_tokens": write1h},
+            "output_tokens": out, "service_tier": "standard",
+        },
+    }
+    if text is not None or thinking is not None:
+        blocks = []
+        if thinking is not None:
+            blocks.append({"type": "thinking", "thinking": thinking})
+        if text is not None:
+            blocks.append({"type": "text", "text": text})
+        message["content"] = blocks
     return {
         "type": "assistant", "timestamp": _ts(sec), "requestId": "req_" + mid,
-        "message": {
-            "id": mid, "model": model, "role": "assistant", "stop_reason": "tool_use",
-            "usage": {
-                "input_tokens": inp,
-                "cache_read_input_tokens": read,
-                "cache_creation_input_tokens": write5 + write1h,
-                "cache_creation": {"ephemeral_5m_input_tokens": write5,
-                                   "ephemeral_1h_input_tokens": write1h},
-                "output_tokens": out, "service_tier": "standard",
-            },
-        },
+        "message": message,
     }
 
 
@@ -478,6 +493,99 @@ class TestDiscovery(LedgerTestBase):
         with open(p, "w", encoding="utf-8") as fh:
             fh.write("x" * (1024 * 1024 - 5) + self.eval_dir + "\n")
         self.assertTrue(L._mentions(p, self.eval_dir))
+
+
+class TestCostBreakdown(unittest.TestCase):
+    """The per-bucket split a report shows must reconcile to the single total."""
+
+    def _row(self, model="claude-opus-4-8"):
+        return {"model": model, "input_tokens": 1_000_000,
+                "cache_read_input_tokens": 2_000_000, "cache_creation_input_tokens": 3_000_000,
+                "cache_write_5m_tokens": 2_000_000, "cache_write_1h_tokens": 1_000_000,
+                "output_tokens": 500_000}
+
+    def test_buckets_sum_to_cost_of(self):
+        row = self._row()
+        bd = L.cost_breakdown(row, L.DEFAULT_RATES)
+        self.assertAlmostEqual(sum(bd.values()), L.cost_of(row, L.DEFAULT_RATES), places=9)
+
+    def test_each_bucket_is_priced_from_its_own_tokens(self):
+        # Opus: in 5, read 0.5, 5m-write 6.25, 1h-write 10, out 25 (per M).
+        bd = L.cost_breakdown(self._row(), L.DEFAULT_RATES)
+        self.assertAlmostEqual(bd["uncached_input"], 5.00, places=6)   # 1M * 5
+        self.assertAlmostEqual(bd["cache_read"], 1.00, places=6)       # 2M * 0.5
+        self.assertAlmostEqual(bd["cache_write"], 22.50, places=6)     # 2M*6.25 + 1M*10
+        self.assertAlmostEqual(bd["output"], 12.50, places=6)          # 0.5M * 25
+        self.assertEqual(bd["router"], 0.0)                            # static router: no LLM call
+
+    def test_router_bucket_is_labelled_zero_not_absent(self):
+        """The static deterministic router spends nothing, but the line must exist
+        so a future dynamic router has a place to report its cost."""
+        self.assertIn("router", L.cost_breakdown(self._row(), L.DEFAULT_RATES))
+
+    def test_uncached_input_is_the_fresh_bucket_only(self):
+        """'uncached-context' is Anthropic's input_tokens — cache is already netted
+        out of it, so it must not be re-derived from the total."""
+        row = dict(self._row(), input_tokens=0)
+        self.assertEqual(L.cost_breakdown(row, L.DEFAULT_RATES)["uncached_input"], 0.0)
+
+    def test_breakdown_respects_per_model_rates(self):
+        opus = L.cost_breakdown(self._row("claude-opus-4-8"), L.DEFAULT_RATES)
+        rates = dict(L.DEFAULT_RATES, **{"claude-sonnet-5": dict(
+            L.DEFAULT_RATES["_default"], input=2.0, output=10.0, cache_read=0.2,
+            cache_write_5m=2.5, cache_write_1h=4.0)})
+        sonnet = L.cost_breakdown(self._row("claude-sonnet-5"), rates)
+        self.assertLess(sonnet["output"], opus["output"])             # 10 vs 25 per M
+        self.assertAlmostEqual(sonnet["cache_read"], 0.40, places=6)  # 2M * 0.2
+
+
+class TestOutputCapture(LedgerTestBase):
+    """Output (thinking + response) must be recorded, not just the input prompt."""
+
+    def _run_with_content(self):
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("director", "setup", self.eval_dir), 0),
+            asst_rec(1, "m1", inp=10, read=1000, write5=500, out=100,
+                     thinking="weighing tile sizes", text="I'll raise BLOCK_SIZE_M."),
+        ])
+        return self.build()
+
+    def test_output_and_thinking_are_captured(self):
+        rows, _, _, _ = self._run_with_content()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["output"], "I'll raise BLOCK_SIZE_M.")
+        self.assertEqual(rows[0]["thinking"], "weighing tile sizes")
+
+    def test_per_call_prompt_is_populated(self):
+        rows, _, _, _ = self._run_with_content()
+        self.assertIn("You are the director", rows[0]["prompt"])
+
+    def test_each_row_carries_a_cost_breakdown_summing_to_cost_usd(self):
+        rows, _, _, _ = self._run_with_content()
+        r = rows[0]
+        self.assertAlmostEqual(sum(r["cost_breakdown"].values()), r["cost_usd"], places=6)
+
+    def test_content_absent_leaves_empty_strings_not_crash(self):
+        """Older transcripts (no content blocks) must still ledger cleanly."""
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("director", "setup", self.eval_dir), 0),
+            asst_rec(1, "m1", inp=10, out=100),
+        ])
+        rows, _, _, _ = self.build()
+        self.assertEqual(rows[0]["output"], "")
+        self.assertEqual(rows[0]["thinking"], "")
+
+    def test_partial_flush_keeps_the_larger_output_with_its_text(self):
+        """When a duplicate message id is merged to the larger token count, the
+        captured text must travel with the kept copy."""
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("director", "setup", self.eval_dir), 0),
+            asst_rec(1, "m1", out=10, text="partial"),
+            asst_rec(2, "m1", out=100, text="the full answer"),
+        ])
+        rows, _, _, _ = self.build()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["output"], "the full answer")
 
 
 class TestOutputs(LedgerTestBase):
