@@ -86,10 +86,20 @@ def _num(v):
 
 
 def _agent_key(row):
-    """One conversation = one agent node. The timeline label is the stable id
-    when present; otherwise role + sub_phase keeps distinct scopes apart."""
-    label = row.get("agent_label") or ""
-    return (label, row.get("role") or "", row.get("sub_phase") or "")
+    """One conversation = one agent node.
+
+    ``group_id`` (written by the ledger) is the authoritative identity: it ties a
+    row to the exact agent attempt that produced it, so retries and the same role
+    in different transcripts stay SEPARATE nodes instead of collapsing into one.
+    When it is absent (older ledgers, hand-built rows) fall back to the transcript
+    plus the role/label, which still keeps agents in different transcripts apart.
+    """
+    gid = row.get("group_id")
+    if gid:
+        return ("gid", gid)
+    return (row.get("transcript") or row.get("source") or "",
+            row.get("agent_label") or "",
+            row.get("role") or "", row.get("sub_phase") or "")
 
 
 def agentize(rows):
@@ -149,10 +159,13 @@ def agentize(rows):
             node["thinkings"].append(r["thinking"])
         # Keep every API response distinct — an agent attempt is not one call.
         cw = int(_num(r.get("cache_write_5m_tokens"))) + int(_num(r.get("cache_write_1h_tokens")))
+        # duration is kept as None when the transcript never gave us one, so the
+        # report can say "unknown" instead of coercing a missing span to 0s.
+        dur = r.get("duration_ms")
         node["api_calls"].append({
             "ts": r.get("ts"),
             "model": r.get("model") or "",
-            "duration_ms": _num(r.get("duration_ms")),
+            "duration_ms": None if dur is None else _num(dur),
             "stop_reason": r.get("stop_reason") or "",
             "message_id": r.get("message_id") or "",
             "tokens": {"uncached_input": int(_num(r.get("input_tokens"))),
@@ -298,10 +311,15 @@ def run_totals(nodes):
             total["cost"][k] += d["cost"][k]
         for k in total["tokens"]:
             total["tokens"][k] += d["tokens"][k]
-        for m in (d["models"] or ["(unknown)"]):
+        # Per-model totals come from the INDIVIDUAL provider responses, so a node
+        # that switched models (routing/fallback) splits its cost across the
+        # models that actually served it. Summing whole-node cost into every model
+        # present would double-count; this keeps Σ(per-model) == run total.
+        for c in n["api_calls"]:
+            m = c.get("model") or "(unknown)"
             pm = per_model.setdefault(m, {"calls": 0, "cost_usd": 0.0})
-            pm["calls"] += d["calls"]
-            pm["cost_usd"] += d["cost_usd"]
+            pm["calls"] += 1
+            pm["cost_usd"] += _num(c.get("cost_usd"))
     return total, per_model
 
 
@@ -324,7 +342,7 @@ def render_markdown(nodes, root, model, comp=None):
                 "- **cost coverage**: %s" % comp["cost_coverage"], ""]
     out += ["## Run totals", ""]
     out += ["- **API calls**: %s" % _n(total["calls"])]
-    out += ["- **LLM wall time**: %s" % _hms(total["llm_ms"])]
+    out += ["- **Billed span (Σ per-call, not wall-time)**: %s" % _hms(total["llm_ms"])]
     out += ["- **Cost**: %s" % _usd(total["cost_usd"])]
     out += ["  - " + ", ".join("%s %s" % (lbl, _usd(total["cost"][k]))
                                for k, lbl in COST_BUCKETS)]
@@ -453,6 +471,11 @@ _HTML_TEMPLATE = r"""<!doctype html>
   table.api { border-collapse:collapse; width:100%; font-size:12px; margin-top:6px; }
   table.api th, table.api td { border-bottom:1px solid var(--line); padding:3px 8px; text-align:left; white-space:nowrap; }
   table.api th { color:var(--muted); font-weight:600; }
+  tr.apirow { cursor:pointer; }
+  tr.apirow:hover td { background:var(--sel); }
+  tr.apidetail { display:none; }
+  tr.apidetail.open { display:table-row; }
+  tr.apidetail td { white-space:normal; }
   .empty { color:var(--muted); padding:24px; }
 </style></head>
 <body>
@@ -479,7 +502,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
   var tt=D.total, tot=document.getElementById('totals');
   function chip(v,l){ var d=document.createElement('div'); d.className='chip'; d.innerHTML='<b>'+v+'</b><span>'+l+'</span>'; return d; }
   tot.appendChild(chip(n(tt.calls),'API calls'));
-  tot.appendChild(chip(hms(tt.llm_ms),'LLM wall time'));
+  tot.appendChild(chip(hms(tt.llm_ms),'billed span (Σ per-call, not wall-time)'));
   tot.appendChild(chip(usd(tt.cost_usd),'total cost'));
   tot.appendChild(chip(n(tt.tokens.cache_read),'cache-read tokens'));
   tot.appendChild(chip(n(tt.tokens.output),'output tokens'));
@@ -531,15 +554,30 @@ _HTML_TEMPLATE = r"""<!doctype html>
       +'<dt>total input tok</dt><dd>'+n(tk.total_input)+'</dd>'
       +'</dl>';
     if(d.attribution) h+='<div class="sub" style="color:var(--muted);font-size:12px">attribution: '+esc(d.attribution)+'</div>';
-    // Per-API-call table: an agent attempt expands to its provider responses.
+    // Per-API-call table: an agent attempt expands to its provider responses,
+    // and EACH response row opens to its own input buckets / output / thinking —
+    // so the requested per-call drill-down reaches individual responses, not just
+    // the agent-level concatenation.
     if(api.length){
+      var span = function(ms){ return ms==null ? '—' : hms(ms); };
       var rows=api.map(function(c,i){
-        return '<tr><td>'+(i+1)+'</td><td>'+esc(c.model.replace('claude-',''))+'</td><td>'+hms(c.duration_ms)+'</td>'
-          +'<td style="text-align:right">'+n(c.tokens.output)+'</td>'
+        var ct=c.tokens||{}, cc=c.cost||{};
+        var costLine = BUCKETS.map(function(b){ return esc(b.label)+' '+usd(cc[b.key]||0); }).join(' · ');
+        var detail=''
+          +'<tr class="apidetail"><td></td><td colspan="5">'
+          +'<div class="sub" style="color:var(--muted);font-size:12px">'
+          +'msg '+esc(c.message_id||'—')+' · tokens: uncached-input '+n(ct.uncached_input)
+          +' · cache-read '+n(ct.cache_read)+' · cache-write '+n(ct.cache_write)+' · output '+n(ct.output)+'</div>'
+          +'<div class="sub" style="color:var(--muted);font-size:12px">cost: '+costLine+'</div>'
+          +'<details><summary>thinking</summary><pre>'+esc(c.thinking||'(none captured)')+'</pre></details>'
+          +'<details><summary>output</summary><pre>'+esc(c.output||'(none captured)')+'</pre></details>'
+          +'</td></tr>';
+        return '<tr class="apirow" data-i="'+i+'"><td>'+(i+1)+'</td><td>'+esc(c.model.replace('claude-',''))+'</td><td>'+span(c.duration_ms)+'</td>'
+          +'<td style="text-align:right">'+n(ct.output)+'</td>'
           +'<td style="text-align:right">'+usd(c.cost_usd)+'</td>'
-          +'<td>'+esc(c.stop_reason||'')+'</td></tr>';
+          +'<td>'+esc(c.stop_reason||'')+'</td></tr>'+detail;
       }).join('');
-      h+='<details open><summary>API calls ('+api.length+')</summary>'
+      h+='<details open><summary>API calls ('+api.length+') — click a row to open its input/output/thinking</summary>'
         +'<div style="overflow-x:auto"><table class="api"><thead><tr><th>#</th><th>model</th><th>span</th><th>out tok</th><th>cost</th><th>stop</th></tr></thead><tbody>'
         +rows+'</tbody></table></div></details>';
     }
@@ -549,9 +587,17 @@ _HTML_TEMPLATE = r"""<!doctype html>
     return h;
   }
   function show(d, rowEl){
-    document.getElementById('panel').innerHTML = detailPanel(d);
+    var panel=document.getElementById('panel');
+    panel.innerHTML = detailPanel(d);
     if(sel) sel.classList.remove('sel');
     sel=rowEl; if(sel) sel.classList.add('sel');
+    // Each API-call row toggles its own detail row (input buckets / output / thinking).
+    panel.querySelectorAll('tr.apirow').forEach(function(tr){
+      tr.addEventListener('click', function(){
+        var det=tr.nextElementSibling;
+        if(det && det.classList.contains('apidetail')) det.classList.toggle('open');
+      });
+    });
   }
   function drawNode(node, ul){
     var li=document.createElement('li'); li.className='node';
