@@ -587,6 +587,43 @@ class TestOutputCapture(LedgerTestBase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["output"], "the full answer")
 
+    def _blockrec(self, sec, mid, block, index, out):
+        """One assistant record carrying a single content block, with the
+        transcript's ``apiBlockIndex`` so blocks of one response merge by block."""
+        return {"type": "assistant", "timestamp": _ts(sec), "apiBlockIndex": index,
+                "requestId": "req_" + mid,
+                "message": {"id": mid, "model": "claude-opus-4-8", "stop_reason": "tool_use",
+                            "content": [block],
+                            "usage": {"input_tokens": 5, "output_tokens": out}}}
+
+    def test_earlier_content_blocks_survive_a_tool_use_final_record(self):
+        """Astra P1 #2: one response emits thinking, text, then a tool_use record
+        that carries the largest output count. Keeping only the largest-usage
+        record dropped the earlier thinking/text; merging by block keeps them."""
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("engineer", "compute", self.eval_dir), 0),
+            self._blockrec(1, "msg_mb", {"type": "thinking", "thinking": "Earlier reasoning"}, 0, 2),
+            self._blockrec(2, "msg_mb", {"type": "text", "text": "Earlier response text"}, 1, 2),
+            self._blockrec(3, "msg_mb", {"type": "tool_use", "id": "t1", "name": "Bash",
+                                         "input": {"command": "true"}}, 2, 100),
+        ])
+        rows, _, _, _ = self.build()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["output_tokens"], 100)          # usage from the largest record
+        self.assertEqual(rows[0]["output"], "Earlier response text")   # text block recovered
+        self.assertEqual(rows[0]["thinking"], "Earlier reasoning")     # thinking block recovered
+
+    def test_cumulative_flush_does_not_duplicate_text(self):
+        """A block re-flushed as it grows must be kept once (the longest), not
+        concatenated onto its own prefix."""
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("engineer", "compute", self.eval_dir), 0),
+            self._blockrec(1, "msg_c", {"type": "text", "text": "Hello"}, 0, 3),
+            self._blockrec(2, "msg_c", {"type": "text", "text": "Hello world, done."}, 0, 6),
+        ])
+        rows, _, _, _ = self.build()
+        self.assertEqual(rows[0]["output"], "Hello world, done.")
+
 
 class TestOutputs(LedgerTestBase):
     def _one_run(self):

@@ -124,11 +124,27 @@ def _sha256(path):
     return h.hexdigest()
 
 
-def _write_manifest(root, dirs, model, n_art):
+def _run_id(calls_path):
+    """A stable identity for THIS run, derived from the set of API responses it
+    captured (message ids). The same run regenerated hashes to the same id — so
+    its export replaces itself in place — while a different run (different calls)
+    lands in its own directory and stays individually recoverable. Two runs of
+    the same model can therefore never overwrite or mix each other's artifacts."""
+    ids = sorted({(r.get("message_id") or r.get("group_id") or "")
+                  for r in tree.read_calls(calls_path)} - {""})
+    if not ids:
+        ids = [os.path.abspath(calls_path)]
+    digest = hashlib.sha256("|".join(ids).encode("utf-8")).hexdigest()[:12]
+    return "run-%s" % digest
+
+
+def _write_manifest(root, dirs, model, run_id, n_art):
     """A manifest so a shared export is self-describing: what the dollars mean,
     what the prompt text is (a snippet, not the wire prompt), and a hash per file
-    so the archive is verifiable. Costs are estimated from a fixed rate card, not
-    an invoice."""
+    so the archive is verifiable. It enumerates ONLY this run's files (the run
+    lives in its own directory) and records the run identity, so a shared export
+    can never be read as covering more than the one run it belongs to. Costs are
+    estimated from a fixed rate card, not an invoice."""
     files = {}
     for name, d in dirs.items():
         for fn in sorted(os.listdir(d)):
@@ -138,6 +154,7 @@ def _write_manifest(root, dirs, model, n_art):
                                                "bytes": os.path.getsize(fp)}
     manifest = {
         "model": model,
+        "run_id": run_id,
         "layout": list(PERSIST_SUBDIRS),
         "per_call_artifacts": n_art,
         "basis": {
@@ -162,8 +179,16 @@ def _write_manifest(root, dirs, model, n_art):
 
 
 def _persist(eval_dir, calls_path, report_dir, model, persist_root):
-    """Copy ledger + per-call JSON + report into the shared per-model layout."""
-    root = os.path.join(persist_root, model)
+    """Copy ledger + per-call JSON + report into the shared per-model/per-run
+    layout ``<root>/<model>/<run_id>/{...}``. Each run owns its directory: it is
+    cleared and rewritten atomically on regeneration (pruning only its OWN stale
+    artifacts), and different runs of the same model never collide."""
+    run_id = _run_id(calls_path)
+    root = os.path.join(persist_root, model, run_id)
+    # Regeneration replaces this run's export in place — prune its own obsolete
+    # files (e.g. a shorter re-run) without touching any other run's directory.
+    if os.path.isdir(root):
+        shutil.rmtree(root, ignore_errors=True)
     dirs = {name: os.path.join(root, name) for name in PERSIST_SUBDIRS}
     for d in dirs.values():
         os.makedirs(d, exist_ok=True)
@@ -180,7 +205,7 @@ def _persist(eval_dir, calls_path, report_dir, model, persist_root):
         src = os.path.join(report_dir, fn)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(dirs["report"], fn))
-    _write_manifest(root, dirs, model, n_art)
+    _write_manifest(root, dirs, model, run_id, n_art)
     return root, n_art
 
 
@@ -196,6 +221,16 @@ def run(eval_dir=None, transcripts=None, model=None, rates_path=None,
         if not calls:
             return {"status": "no-calls",
                     "reason": "ledger produced no llm_calls.jsonl (no transcripts?)"}
+        # A ledger can write an EMPTY llm_calls.jsonl (e.g. an explicit transcript
+        # glob that matches nothing) — that is a captured-nothing run, not a
+        # healthy one. Report it as such rather than emitting a zero-call "ok".
+        row_count = sum(1 for _ in tree.read_calls(calls))
+        if row_count == 0:
+            meta = tree._read_ledger_meta(calls) or {}
+            return {"status": "no-capture", "calls": calls,
+                    "reason": "ledger captured 0 API calls (no matching transcripts / "
+                              "nothing in the run window)",
+                    "warnings": list(meta.get("warnings") or [])}
         name = _model_name(eval_dir, model)
         report_dir = out_dir or os.path.join(eval_dir, "report")
         html_path, md_path = tree.write(calls, report_dir, name)

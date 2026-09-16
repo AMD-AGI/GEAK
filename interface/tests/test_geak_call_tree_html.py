@@ -265,5 +265,54 @@ class TestAcceptanceFixtures(unittest.TestCase):
         self.assertIn("engineer", md)
 
 
+class TestNodeIdentity(unittest.TestCase):
+    """Astra P1 #1: separate agent attempts must stay separate nodes, keyed by the
+    ledger's stable group_id (with a transcript fallback), NOT by role/label."""
+
+    def test_same_label_different_group_id_stays_two_nodes(self):
+        a = call("engineer", "d1", 10, label="engineer:d1")
+        b = call("engineer", "d1", 20, label="engineer:d1")  # same role/label = a retry
+        a["group_id"], b["group_id"] = "agent-x.jsonl#0", "agent-x.jsonl#1"
+        nodes = R.agentize([a, b])
+        self.assertEqual(len(nodes), 2)
+
+    def test_same_label_different_transcript_stays_two_nodes(self):
+        # No group_id (older ledger): the transcript still keeps attempts apart.
+        a = call("engineer", "d1", 10, label="engineer:d1")
+        b = call("engineer", "d1", 20, label="engineer:d1")
+        a["transcript"], b["transcript"] = "agent-a.jsonl", "agent-b.jsonl"
+        self.assertEqual(len(R.agentize([a, b])), 2)
+
+    def test_same_group_id_folds_into_one_node(self):
+        a = call("engineer", "d1", 10)
+        b = call("engineer", "d1", 20)
+        a["group_id"] = b["group_id"] = "agent-x.jsonl#0"
+        nodes = R.agentize([a, b])
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0]["calls"], 2)
+
+
+class TestPerModelNoDoubleCount(unittest.TestCase):
+    """Astra P1 #3: per-model totals come from individual responses; a mixed-model
+    node must not add its whole cost to every model. Σ(per-model) == run total."""
+
+    def test_mixed_model_node_splits_cost_by_response(self):
+        opus = call("engineer", "d1", 10, model="claude-opus-5", cost=1.0)
+        sonnet = call("engineer", "d1", 20, model="claude-sonnet-5", cost=2.0)
+        # one agent, two models (routing/fallback) — same group_id
+        opus["group_id"] = sonnet["group_id"] = "agent-x.jsonl#0"
+        nodes = R.agentize([opus, sonnet])
+        self.assertEqual(len(nodes), 1)  # one mixed-model node
+        total, per_model = R.run_totals(nodes)
+        self.assertAlmostEqual(total["cost_usd"], 3.0)
+        self.assertAlmostEqual(per_model["claude-opus-5"]["cost_usd"], 1.0)
+        self.assertAlmostEqual(per_model["claude-sonnet-5"]["cost_usd"], 2.0)
+        self.assertEqual(per_model["claude-opus-5"]["calls"], 1)
+        # the defect was Σ(per-model) = 6.0 (whole node cost added to each model)
+        self.assertAlmostEqual(
+            sum(pm["cost_usd"] for pm in per_model.values()), total["cost_usd"])
+        self.assertEqual(sum(pm["calls"] for pm in per_model.values()), total["calls"])
+
+
 if __name__ == "__main__":
     unittest.main()
