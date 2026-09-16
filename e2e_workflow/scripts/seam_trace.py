@@ -56,6 +56,22 @@ def _trace_path(trace_index):
     return f"{root}.call-{trace_index}{ext or '.json'}"
 
 
+def _capturing():
+    """True while this thread's stream is capturing a CUDA/HIP graph.
+
+    Every profiler operation -- __enter__, __exit__, export_chrome_trace -- issues host-side work
+    (event queries, a sync) that is illegal mid-capture. On ROCm it does not merely raise: the failed
+    call poisons the process, and the next library handle creation dies with
+    ``HIPBLAS_STATUS_INTERNAL_ERROR when calling hipblasCreate(handle)``, taking the engine down
+    during warmup graph capture. So the marker layer becomes a no-op for the duration of a capture.
+    Guarded: older torch lacks the query."""
+    try:
+        import torch
+        return bool(torch.cuda.is_current_stream_capturing())
+    except Exception:
+        return False
+
+
 def _record_install_markers():
     """Put proof of successful installation in every process-local trace."""
     import torch
@@ -68,6 +84,10 @@ def _start_profile():
     """Start the next bounded process-local root-call profile."""
     with _PROFILE["lock"]:
         if _PROFILE["active"] or _PROFILE["done"]:
+            return False
+        if _capturing():
+            # Starting a profile inside a graph capture is both useless (the trace would describe
+            # capture, not execution) and fatal to the process. Wait for a real eager call.
             return False
         budget = max(1, int(os.environ.get("GEAK_SELECTION_PROFILE_CALLS", "32")))
         if _PROFILE["trace_index"] >= budget:
@@ -112,6 +132,10 @@ def _finish_profile():
     """Stop and atomically export this process's trace once."""
     with _PROFILE["lock"]:
         if not _PROFILE["active"] or _PROFILE["done"]:
+            return
+        if _capturing():
+            # Defer: the profile stays active and is exported by the next root call that leaves
+            # outside a capture (or by the atexit hook). Exporting here would kill the process.
             return
         profiler = _PROFILE.get("profiler")
         out = _PROFILE.get("out")
@@ -191,6 +215,10 @@ def install(target):
 
     @functools.wraps(original)
     def marked(*args, **kwargs):
+        if _capturing():
+            # Pure pass-through mid-capture: no profile lifecycle, no record_function node baked
+            # into the captured graph.
+            return original(*args, **kwargs)
         root_call = _enter_call()
         try:
             import torch

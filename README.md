@@ -130,6 +130,30 @@ use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8,
 **Output** lands under `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`,
 `architect_report.md`, `final/` (overlay + patch + `final_launch.sh`), and per-stage artifacts.
 
+### Example — AgentX trace replay
+
+`ISL/OSL=…` above describes a synthetic sweep, where every request has the same shape. An AgentX
+submission instead replays a recorded corpus: the client owns the request mix and the duration, and
+because the corpus is ~140:1 prefill-to-output it is graded on **total** tok/s rather than output-only.
+Say so, and the workflow configures the whole run for it:
+
+```
+use path_to_GEAK/e2e_workflow to optimize inference for /models/Kimi-K3 on vllm, gpus 0-7 tp=8,
+workload_kind=agentx_trace_replay (the canonical AgentX corpus; grade on total tok/s).
+isl/osl 114000/819 are the average shape to OPTIMIZE for, not a benchmark to reproduce.
+```
+
+Check the box before starting — every AgentX prerequisite is otherwise invisible until a server has
+already been launched and warmed:
+
+```bash
+MODEL=/models/Kimi-K3 bash e2e_workflow/scripts/agentx_smoke.sh
+```
+
+See [`e2e_workflow/README.md` → *Standalone AgentX*](e2e_workflow/README.md#standalone-agentx-trace-replay-no-orchestrator)
+for the full arg spelling, what the declaration changes, and the two things that surprise people
+(`isl`/`osl` are not a benchmark; search legs are non-canonical by design).
+
 ---
 
 ## kernel_workflow — single kernel

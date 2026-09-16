@@ -39,34 +39,71 @@ Stdlib only.
 import argparse, importlib, json, os, shutil, subprocess, sys
 
 SITECUSTOMIZE = r'''# Auto-generated reversible overlay (e2e_workflow). Drop this dir from PYTHONPATH to revert.
-import json, os, sys, importlib, importlib.util
+import json, os, sys, importlib, importlib.abc, importlib.util
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _MAN = os.path.join(_HERE, "_overlay_manifest.json")
-try:
-    with open(_MAN) as _fh:
-        _m = json.load(_fh)
-except Exception as _e:
-    _m = {"modules": [], "rebinds": [], "markers": [], "captures": []}
+_EMPTY = {"modules": [], "rebinds": [], "markers": [], "captures": []}
 
-# (a) inject patched submodules under their dotted names BEFORE anything imports them.
+# FORK-BOMB GUARD -- do not remove.
+# The ROCm/HIP arch probes (rocm_agent_enumerator, rocminfo, offload-arch, hipconfig, ...) are
+# themselves python scripts, and they inherit PYTHONPATH from whoever shells out to them. Installing
+# an overlay whose hooks import a GPU library (e.g. `aiter`, which probes the arch at import) makes
+# that child re-enter THIS file, import the library again, and shell out again -- an unbounded
+# recursive process spawn that wedges the whole node (observed: 13.7k processes, load 590, every
+# subsequent vLLM launch failing torch.distributed rendezvous with "2/8 clients joined").
+# The overlay has no business running inside an arch probe, so no-op there.
+_ARGV0 = (sys.argv[0] if sys.argv else "") or ""
+_PROBES = {"rocm_agent_enumerator", "rocminfo", "offload-arch", "amdgpu-arch", "hipconfig", "hipcc",
+           "hipinfo", "rocm-smi", "rocm_smi.py"}
+if os.path.basename(_ARGV0) in _PROBES or os.path.abspath(_ARGV0 or ".").startswith(
+        ("/opt/rocm", "/usr/local/rocm")):
+    _m = dict(_EMPTY)
+else:
+    try:
+        with open(_MAN) as _fh:
+            _m = json.load(_fh)
+    except Exception as _e:
+        _m = dict(_EMPTY)
+
+# (a) inject patched submodules under their dotted names, through the NORMAL import machinery.
+#
+# A meta_path FINDER, not an eager exec at interpreter start. Eager exec was wrong twice over:
+#   * It executed the patched submodule BEFORE the interpreter had finished starting and before the
+#     package's own __init__ ran, so the patched file's imports fired in a different ORDER than a real
+#     import would have used. Library state that is built once at first-import (arch probes, tile/config
+#     registries, JIT/codegen caches) then gets built from a different entry point. Observed on the
+#     aiter FlyDSL MoE seam: the candidate leg (module entry -> eager exec) aborted inside the kernel
+#     JIT compiler while the baseline leg (empty manifest -> no eager exec) compiled the same kernel.
+#   * It left TWO live module objects for the same dotted name: the package __init__ later imported the
+#     real submodule anyway, and any `from a.b import c` binding it made still pointed at the UNPATCHED
+#     copy -- so part of the process silently kept calling the original code while the leg was labelled
+#     "candidate". That corrupts both parity and speedup results.
+# The finder claims the name at the moment something actually imports it: exactly one module object,
+# created in the normal order, with the parent attribute bound by Python itself. With an EMPTY manifest
+# the finder is still installed and simply claims nothing, so the baseline and candidate legs take
+# BYTE-IDENTICAL startup paths -- which is what makes a two-leg timing comparison mean anything.
+_MODS = {}
 for _e in _m.get("modules", []):
     try:
-        _dotted, _file = _e["module"], os.path.join(_HERE, _e["file"])
-        _spec = importlib.util.spec_from_file_location(_dotted, _file)
-        _mod = importlib.util.module_from_spec(_spec)
-        sys.modules[_dotted] = _mod
-        _spec.loader.exec_module(_mod)
-        # bind as attribute on the parent so both `from a.b import c` and `import a.b; a.b.c` see the patch.
-        if "." in _dotted:
-            _parent, _child = _dotted.rsplit(".", 1)
-            try:
-                setattr(importlib.import_module(_parent), _child, _mod)
-            except Exception:
-                pass
-        sys.stderr.write("[overlay] injected module %s <- %s\n" % (_dotted, _file))
+        _MODS[_e["module"]] = os.path.join(_HERE, _e["file"])
     except Exception as _ex:
-        sys.stderr.write("[overlay] module inject FAILED %r: %r\n" % (_e, _ex))
+        sys.stderr.write("[overlay] bad module entry %r: %r\n" % (_e, _ex))
+
+
+class _OverlayFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, _name, _path=None, _target=None):
+        _file = _MODS.get(_name)
+        if _file is None:
+            return None
+        sys.stderr.write("[overlay] injected module %s <- %s\n" % (_name, _file))
+        return importlib.util.spec_from_file_location(_name, _file)
+
+
+sys.meta_path.insert(0, _OverlayFinder())
+for _dotted in _MODS:
+    if _dotted in sys.modules:   # imported before sitecustomize ran -> the overlay would be a no-op
+        sys.stderr.write("[overlay] WARNING %s was already imported before the overlay finder\n" % _dotted)
 
 # (b) rebind single attributes (monkeypatch).
 for _e in _m.get("rebinds", []):

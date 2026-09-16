@@ -123,6 +123,116 @@ Workflow({
 // Single-kernel pass-through (backward compatible): pass kernel_path instead of model_path.
 ```
 
+## Standalone AgentX (trace replay, no orchestrator)
+
+`isl`/`osl`/`conc` describe a **synthetic sweep**: every request is the same shape, and the profile and
+the bench use it identically. An AgentX submission is not that. It replays a recorded corpus, so the
+client owns the request mix, the arrival pattern, its own warmup and the measurement duration — and
+because that corpus is ~140:1 prefill-to-output, it is graded on **total** (input+output) tok/s, not
+the output-only axis a sweep is graded on.
+
+Under Hyperloom this arrives as environment variables that `interface/run_e2e.py` exports. Standalone,
+declare it in the args instead — one line is enough, and it fills the canonical setup:
+
+```
+Workflow({
+  scriptPath: "<E2E_DIR>/e2e_workflow.js",
+  args: {
+    model_path: "/models/Kimi-K3", workflow_dir: "<E2E_DIR>", backend: "vllm",
+    gpu_ids: "0,1,2,3,4,5,6,7", tp: 8,
+    workload_kind: "agentx_trace_replay",   // <- the whole declaration
+    conc: 8,
+  }
+})
+```
+
+Note there is no `isl`/`osl` here. Nothing is measured at them on a trace replay — aiperf owns the
+sequence lengths — but the roles still read them when they size tiles and synthesize GEMM shapes, so
+leaving them at the synthetic `1024/1024` default would aim the whole kernel search orders of
+magnitude below the real load. So the run **measures its own shape**: `bench_e2e.sh` reports the
+average it actually served as `observed_isl`/`observed_osl` in `bench_summary.json`, and right after
+Setup the workflow reads that off the baseline and adopts it, with
+`shape_provenance=agentx_measured_this_run`. This is why no corpus average is hardcoded anywhere: the
+number moves with the corpus, the tokenizer and the window, and a constant in the source would be
+read as fact by every role long after it went stale. All kernel work is scheduled after the baseline,
+so the measurement always exists before anything needs it.
+
+Until the baseline lands the shape is openly `1024/1024` with
+`shape_provenance=agentx_pending_baseline`, and role prompts mark it a placeholder that must not be
+used for kernel sizing. If the baseline reports no shape at all (a client that never returned token
+totals), the run continues on that placeholder and says so loudly rather than inventing a number.
+
+To pin the shape yourself instead — targeting a regime deliberately, or feeding in a figure you
+measured elsewhere — declare it, and the measurement will not override you:
+
+```
+    workload_spec: { kind: "agentx_trace_replay", corpus: "<yours>",
+                     observed_isl: 120000, observed_osl: 800 },   // -> shape_provenance=agentx_observed
+```
+
+`workload_kind` expands to the graded setup: scenario `inferencex-agentx-mvp`, corpus
+`semianalysis_cc_traces_weka_062126`, 393 entries, a 3600s canonical window with 900s inner search
+legs, and `aggregate_total_token_tok_s` as the metric basis. Override any part with the long spelling,
+which is the same object Hyperloom puts on its handoff:
+
+```
+    workload_spec: {
+      kind: "agentx_trace_replay",
+      corpus: "semianalysis_cc_traces_weka_062126", num_entries: 393,
+      duration_s: 3600,            // canonical/parity window
+      geak_loop_duration_s: 900,   // inner search legs (the scenario's own floor)
+      concurrency: 8,
+      metric_basis: "aggregate_total_token_tok_s",
+      warmup_requests_per_lane: 10, warmup_grace_period_s: 1800,
+      failed_request_threshold: 0.10,
+      observed_isl: 0, observed_osl: 0,  // optional; omit to measure it off the baseline
+      inferencex_path: "/opt/InferenceX",  // optional; GEAK vendors map_aiperf.py
+      aiperf_bin: "aiperf",                // optional
+      profile_warmup_s: 2700, profile_window_s: 20,   // optional window placement
+    },
+```
+
+**Check the box first.** Every AgentX prerequisite is invisible until the client has already launched
+and warmed a server, so a missing one costs 20+ minutes to discover:
+
+```bash
+bash e2e_workflow/scripts/agentx_smoke.sh                    # environment only
+MODEL=/models/Kimi-K3 bash e2e_workflow/scripts/agentx_smoke.sh
+BASE_URL=http://127.0.0.1:8000 bash e2e_workflow/scripts/agentx_smoke.sh   # + a real short replay
+```
+
+It never launches a server. Its most important check is that `aiperf` actually supports `--scenario`:
+a stock aiperf cannot replay the corpus at all, but pointed at a server it will still report a
+throughput — a "successful" run that measured a different workload.
+
+### What the declaration changes
+
+The workflow composes one `bench_env.sh` and the Director writes it beside the copied bench script;
+`bench_e2e.sh` and `bench_replica.sh` source it from next to themselves, so every bench in the run —
+including the ones role agents issue from their own prompts — selects the trace client and the total-token
+axis. Each line assigns only an unset-or-empty name, so anything already exported still wins and you can
+override one knob on the command line. Every role prompt also gains a workload-identity block stating
+what the run measures. **Without a declaration none of this exists**: no file is written, the source is a
+no-op, the prompts are byte-identical, and the fixed ISL/OSL path is exactly as before.
+
+### Two things that surprise people
+
+**`isl`/`osl` are not a benchmark here.** A trace corpus spans orders of magnitude in request length,
+so there is no single ISL — read the real distribution off the run's own export. They are only the
+shape to optimize for: what roles synthesize GEMM inputs and pick tiles against. Nothing is measured
+at them, and measured on this stack a synthetic sweep at those lengths came out ~2.76x the
+trace-replay throughput, so it is not a cheaper approximation of the real number.
+
+**Search legs are non-canonical by design.** They run the scenario's 900s floor instead of the canonical
+3600s, so the client stamps them `submission_valid=false` with the deviations attached. Both legs of an
+A/B deviate identically, so the comparison is sound; the number simply cannot be reported as a
+submission. Only a `parity`/`validation` leg runs the full window.
+
+Profiling places its window at 75% into the replay (2700s on the canonical leg), because at load start
+aiperf is still resolving the corpus and draining per-lane warmups — a window opened there records the
+ramp, not the steady state. If the replay ends before the window opens, GEAK captures **no** trace rather
+than substituting a synthetic one that would look authentic.
+
 ## Modes: default · fast · deep
 One pipeline, three depths — selected by the `fast_mode` / `deep_mode` args (both default `false` =
 **default** mode; they are mutually exclusive, **deep takes precedence**). Only the HeadKernel depth and
@@ -272,6 +382,8 @@ knowledge/             e2e_optimization, profile_parse, preflight (env self-chec
 knowledge/analysis_skills/  pluggable profile-analysis skills (INDEX.md + one dir per skill; `roofline` ships by default)
 knowledge/tuning_skillset_integration.md  how the VENDORED ../tuning_skillset/ is wired in (+ its manifest)
 scripts/               bench_e2e.sh (backend-agnostic dispatcher), adapters/{sglang,vllm}.sh, parse_profile.py (Top-N), op_bench.py, capture_shapes.py, overlay_setup.py
+scripts/adapters/clients/  pluggable BENCH CLIENTS (the timed load): agentx.sh (AgentX trace replay via aiperf) + map_aiperf.py vendored beside it so a standalone run needs no InferenceX checkout
+scripts/agentx_smoke.sh  AgentX readiness check: run it BEFORE a trace-replay run (never launches a server). See "Standalone AgentX" above.
 scripts/tuning_skillset_sync.py  integrity gate on the vendored skillset (--verify / --update / --sync)
 scripts/server_teardown.sh  the shared server-kill contract (identity verified at LAUNCH: pid, pgid, /proc start time). Every script that launches a server, including role-authored capture scripts, must source it instead of hand-rolling a kill.
 ```

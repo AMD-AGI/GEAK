@@ -96,6 +96,10 @@ def from_runs(args):
         return xs
 
     tps, ttft, tpot = [], [], []
+    # The request shape this run ACTUALLY served, averaged per request.  On a trace replay the
+    # corpus owns the sequence lengths, so a measured run is the only place the real shape is
+    # knowable, and it moves with the corpus, the tokenizer and the context window.
+    isls, osls = [], []
     with open(args.runs) as fh:
         for line in fh:
             line = line.strip()
@@ -113,6 +117,13 @@ def from_runs(args):
                 x = _num(d, *src)
                 if x is not None:
                     dst.append(x)
+            n = _num(d, "completed", "request_count")
+            if n and n > 0:
+                for key, dst in (("total_input_tokens", isls),
+                                 ("total_output_tokens", osls)):
+                    t = _num(d, key)
+                    if t is not None:
+                        dst.append(t / n)
     cold = read(args.cold) if args.cold else []
     med, spread = _med3(tps), _spread_pct(tps)
     total = _is_total()
@@ -126,6 +137,10 @@ def from_runs(args):
         "output_throughput_tok_s_spread_pct": None if total else spread,
         "ttft_ms_median": _med3(ttft),
         "tpot_ms_median": _med3(tpot),
+        # None when the client did not report token totals, so a consumer can tell
+        # "not measured" from a measured value.
+        "observed_isl": _med3(isls),
+        "observed_osl": _med3(osls),
         "runs": len(tps),
         "all_throughput": tps,
         # Optional diagnostic cold round (BENCH_COLD_FINAL=1): one fresh-server round with
@@ -201,6 +216,10 @@ def from_replicas(args):
         "output_throughput_tok_s_spread_pct": spread if is_output else None,
         "ttft_ms_median": _med3(col("ttft_ms_median")),
         "tpot_ms_median": _med3(col("tpot_ms_median")),
+        # Carried through the aggregate as well, so a caller reads the same key whichever
+        # lifecycle produced the summary (see the shape note in from_runs).
+        "observed_isl": _med3(col("observed_isl")),
+        "observed_osl": _med3(col("observed_osl")),
         "runs": args.successful,
         "all_throughput": tps,
         "metric_basis": basis,
