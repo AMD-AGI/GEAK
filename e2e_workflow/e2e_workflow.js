@@ -37,6 +37,29 @@ if (typeof _rawArgs === 'string') {
   }
 }
 const A = _rawArgs || {};
+// LLM token+time accounting (PURELY ADDITIVE; args.llm_stats="false" makes it a no-op).
+// DELIBERATELY NO TIMESTAMPS: Date.now()/new Date() are unavailable in workflow scripts. Every
+// duration in the report comes from the transcripts (scripts/llm_ledger.py); this records only the
+// role/phase/attempt identity of each agent call so the ledger attributes tokens to the right agent.
+const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'e2e_workflow', events: [], nested: [] };
+const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
+function tlAgent(prompt, o, attempt, ok) {
+  if (!LLM_STATS) return;
+  // Identity comes from the PROMPT, not opts.label: labels are free-form display strings. The
+  // prompt's opening line always carries `You are the <role>. PHASE=<sub_phase>.`, the same line the
+  // transcript records, so the ledger folds this call under its own agent instead of its predecessor.
+  const m = TL_ROLE_RE.exec(String(prompt || ''));
+  LLM_TL.events.push({
+    seq: LLM_TL.events.length,
+    phase: (o && o.phase) || '',
+    label: (o && o.label) || 'agent',
+    role: m ? m[1] : '',
+    sub_phase: m ? m[2] : '',
+    attempt: attempt,
+    ok: !!ok,
+  });
+}
 const WORKFLOW_DIR = String(A.workflow_dir || '').replace(/\/+$/, '');
 if (!WORKFLOW_DIR) {
   let _preview;
@@ -964,6 +987,10 @@ let KB_RECALL = { e2e: null, kernel: [] };
 // could say a kernel was authored from scratch while the lane had in fact adopted a stored patch.
 // Called from the two bounded wrappers and the two direct workflow() sites, i.e. every lane call.
 function noteKernelKB(r, label) {
+  // Absorb a nested kernel run's own agent timeline (kernel_workflow/kernel_lane return it on
+  // llm_timeline). This is the one funnel every lane return passes through, so it captures every
+  // nested run's attempts for the ledger's "plus N nested kernel run(s)" accounting.
+  if (r && r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
   const w = r && r.warm_start;
   if (w && typeof w === 'object') {
     KB_RECALL.kernel.push({
@@ -1304,9 +1331,14 @@ async function safeAgent(prompt, opts, tries = 3) {
         ? prompt + `\n\n## PREVIOUS ATTEMPT FAILED — do not repeat it\nA cheaper-effort attempt at this exact task failed with:\n\`\`\`\n${String(lastErr).slice(0, 2000)}\n\`\`\`\nDiagnose that failure before acting.\n`
         : prompt;
       const r = await agentBounded(p2, opts, i);
-      if (r) return r;
+      if (r) {
+        if (r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
+        tlAgent(prompt, opts, i + 1, true);
+        return r;
+      }
+      tlAgent(prompt, opts, i + 1, false);
       lastErr = 'null/empty result';
-    } catch (e) { lastErr = String(e); }
+    } catch (e) { tlAgent(prompt, opts, i + 1, false); lastErr = String(e); }
     log(`agent[${(opts && opts.label) || '?'}] attempt ${i + 1}/${tries} failed: ${String(lastErr).slice(0, 160)}`);
   }
   log(`agent[${(opts && opts.label) || '?'}] DEGRADED to null after ${tries} tries (${String(lastErr).slice(0, 120)})`);
@@ -5138,6 +5170,33 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
     : kbNoWinVerdict ? `Director declared no win (${wfReturn.validation_status}) — the ${wfReturn.throughput_speedup}x same-session ratio is box-drift, not a gain`
     : 'no final throughput measured';
   log(`[kb] not recording this run: ${why}.`);
+}
+
+// Persist the agent timeline so the ledger can attribute tokens/time to the right role. The script
+// has no filesystem access, so a tiny agent writes the file and re-runs the collector. Entirely
+// best-effort: accounting must never fail a run that produced a real speedup.
+if (EVAL_DIR && LLM_STATS) {
+  try {
+    const tlJson = JSON.stringify(LLM_TL);
+    const tlPath = `${EVAL_DIR}/reports/trace/agent_timeline.json`;
+    await safeAgent(
+      `You are the file_writer. PHASE=persist_llm_stats.\n` +
+      `Do exactly two things, in order:\n` +
+      `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
+      `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
+      '```json\n' + tlJson + '\n```\n\n' +
+      `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false):\n` +
+      `   python3 "${WORKFLOW_DIR}/scripts/llm_ledger.py" --eval-dir "${EVAL_DIR}"\n\n` +
+      `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
+      { phase: 'Validate', label: 'file_writer:persist_llm_stats',
+        schema: obj({ written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } }, []) },
+      2);
+    const nestedNote = LLM_TL.nested.length ? ' plus ' + LLM_TL.nested.length + ' nested kernel run(s)' : '';
+    log(`LLM token+time ledger -> ${EVAL_DIR}/reports/trace/. ` +
+        `${LLM_TL.events.length} agent attempts recorded${nestedNote}.`);
+  } catch (e) {
+    log(`LLM stats emit failed (NON-FATAL — the run is unaffected): ${String(e)}`);
+  }
 }
 
 return wfReturn;

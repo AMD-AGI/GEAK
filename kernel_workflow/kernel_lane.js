@@ -650,12 +650,35 @@ function ablDrainPrelude() {
     cmds.map((c) => '```bash\n' + c + '\n```').join('\n') + '\n\n';
 }
 
+// LLM token+time accounting (PURELY ADDITIVE; args.llm_stats="false" makes it a no-op).
+// DELIBERATELY NO TIMESTAMPS: Date.now()/new Date() are unavailable in workflow scripts. Every
+// duration in the report comes from the transcripts (scripts/llm_ledger.py); this records only the
+// role/phase/attempt identity of each agent call so the ledger attributes tokens to the right agent.
+const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_lane', events: [], nested: [] };
+const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
+function tlAgent(prompt, o, attempt, ok) {
+  if (!LLM_STATS) return;
+  const m = TL_ROLE_RE.exec(String(prompt || ''));
+  LLM_TL.events.push({
+    seq: LLM_TL.events.length,
+    phase: (o && o.phase) || '',
+    label: (o && o.label) || 'agent',
+    role: m ? m[1] : '',
+    sub_phase: m ? m[2] : '',
+    attempt: attempt,
+    ok: !!ok,
+  });
+}
+
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
   if (ABL_B6 && typeof p === 'string') { const pre = ablDrainPrelude(); if (pre) p = pre + p; }
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     try {
-      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return await agent(p, o);
+      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const r0 = await agent(p, o); tlAgent(p, o, attempt, !!r0); return r0;
+      }
       let to;
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
@@ -664,11 +687,14 @@ async function agentT(p, o) {
         }, AGENT_TIMEOUT_MS);
       });
       // A timeout resolves null (returned as-is, no retry). An API/agent error rejects -> caught below.
-      return await Promise.race([
-        agent(p, o).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+      const r = await Promise.race([
+        agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
         guard,
       ]);
+      tlAgent(p, o, attempt, !!r);
+      return r;
     } catch (e) {
+      tlAgent(p, o, attempt, false);
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
       if (attempt < AGENT_RETRIES) {
         log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} hit an API/agent error (${msg}) — retrying so a transient outage doesn't kill the run.`);
@@ -1785,6 +1811,7 @@ const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
 
 return {
   mode: MODE,
+  llm_timeline: LLM_STATS ? LLM_TL : undefined,
   target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
   authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
