@@ -1354,14 +1354,103 @@ function ablEffortFor(opts, attempt) {
   return ABL_CHEAP_LABELS.test(label) ? 'low' : null;
 }
 
-function agentBounded(rawPrompt, opts, ablAttempt) {
-  const prompt = withProcessSafety(rawPrompt);
-  const ablEffort = ablEffortFor(opts, ablAttempt || 0);
-  if (ablEffort) {
-    opts = { ...(opts || {}), effort: ablEffort };
-    ablEvent({ event: 'route', label: (opts && opts.label) || '', tier: 'cheap', effort: ablEffort });
-  }
-  const timeoutMs = agentTimeoutFor();
+// --- Expt-3 complexity routing (INLINE; canonical + tested source: routing/tier_map.js) ------
+function __routeAgentTimeoutMs() { try { return agentTimeoutFor(); } catch (e) { return 0; } }
+// <<ROUTING-INLINE-START>> (routing/routing_dryrun.js extracts between these sentinels and runs it;
+// this region is BYTE-IDENTICAL in e2e_workflow.js and kernel_workflow/kernel_lane.js. Contract,
+// mirroring routing/tier_map.js — unit-tested in routing/tier_map.test.js:
+//   * OFF unless A.routing is truthy (or GEAK_ROUTING=1 for a harness) -> __routeDecide() returns
+//     null for every scope -> no opts.model is set -> the run is BYTE-IDENTICAL to a non-routing build.
+//   * ON + un-mapped scope -> null -> pinned strong model (fall through).
+//   * ON + mapped scope + an in-runtime deterministic verifier available (real fs on the standalone
+//     Node runtime, Path B) -> a cheap Sonnet attempt, a machine-checked artifact GATE, and ONE strong
+//     (Opus) fallback that BYPASSES the cheap map on gate failure. Every attempt is recorded in
+//     __routeAttempts; hard cap of 2 attempts (1 cheap + 1 strong).
+//   * ON + mapped scope + NO verifier available (native Workflow child, Path A: no require()/fs, no
+//     host verifier bound yet) -> routing SUPPRESSED: stay on the pinned strong model. A cheap attempt
+//     that can never be gated must NOT be accepted (weak != pass), and running it then always
+//     escalating would be strictly MORE expensive -> we do not route until a verifier exists. Whether
+//     the native child CAN be given a host verifier is the Gate-2 question.
+// Native Workflow scripts get no require()/fs, so this is inlined, not imported; the .js module is the
+// reviewable, unit-tested source of truth. __routeAgentTimeoutMs() is a per-file shim (defined just
+// above this region) so the guarded single attempt reuses each lane's own timeout.
+const ROUTE_MODEL_STRONG = 'claude-opus-4-8';
+const ROUTE_MODEL_CHEAP = 'claude-sonnet-5';
+const ROUTE_SEP = String.fromCharCode(0);   // scope-key separator: textual in source, U+0000 at runtime
+const ROUTE_TIER_MAP = (function () {
+  const m = {};
+  // e2e_workflow.js persists canonical workflow_return.json (non-fatal; run_e2e recovers from disk).
+  m['Validate' + ROUTE_SEP + 'file_writer:persist:workflow-return'] = { tier: 'cheap', kind: 'verbatim_write' };
+  // e2e_workflow.js writes measured_on_this_box.md, a verbatim markdown table.
+  m['WarmStart' + ROUTE_SEP + 'warm_start:record-measurements'] = { tier: 'cheap', kind: 'verbatim_write' };
+  return m;
+})();
+const ROUTE_TIER_MODEL = { cheap: ROUTE_MODEL_CHEAP, strong: ROUTE_MODEL_STRONG };
+const ROUTING_ON = (function () {
+  const a = String(A.routing != null ? A.routing : '').trim().toLowerCase();
+  if (a === 'true' || a === '1' || a === 'on') return true;
+  // args win; only consult env when args left it unset, and only if process exists (Path A may not).
+  if (a === '') { try { return String(process.env.GEAK_ROUTING || '').trim() === '1'; } catch (e) { return false; } }
+  return false;                             // any explicit false-ish value stays OFF (args-off beats env-on)
+})();
+const __routeAttempts = [];                 // every routed attempt (model, ok, verified) for the ledger / dry-run
+function __routeLabelPrefix(label) {
+  const s = String(label == null ? '' : label);
+  const sp = s.indexOf(' ');                // colon is part of the static identity; a space starts dynamic text
+  return sp >= 0 ? s.slice(0, sp) : s;
+}
+function __routeReadFile() {
+  // A deterministic in-runtime verifier: real fs on the standalone Node runtime (Path B); absent on the
+  // native Workflow child (Path A) until a host verifier is bound (Gate-2). Returns a
+  // readFile(path)->string|null, or null when no verifier is available in this runtime.
+  try {
+    var fs = require('fs');
+    if (fs && typeof fs.readFileSync === 'function') {
+      return function (p) { try { return fs.readFileSync(p, 'utf8'); } catch (e) { return null; } };
+    }
+  } catch (e) {}
+  return null;
+}
+function __routeDecide(opts) {
+  if (!ROUTING_ON) return null;
+  const key = ((opts && opts.phase) || '') + ROUTE_SEP + __routeLabelPrefix(opts && opts.label);
+  const entry = ROUTE_TIER_MAP[key];
+  if (!entry) return null;                  // un-mapped -> pinned strong (fall through)
+  const model = ROUTE_TIER_MODEL[entry.tier];
+  if (!model || model === ROUTE_MODEL_STRONG) return null;   // strong tier == no override
+  const readFile = __routeReadFile();
+  return { model: model, kind: entry.kind, gated: !!readFile, readFile: readFile };
+}
+const __ROUTE_PATH_RE = /create the file\s+"([^"]+)"/i;
+// Fence-length aware: capture the FIRST run of >=3 backticks and match the SAME-length closing run, so
+// a ````markdown outer block is not truncated by an inner ``` block.
+const __ROUTE_FENCE_RE = /(`{3,})[a-zA-Z0-9]*\r?\n([\s\S]*?)\r?\n\1(?:\r?\n|$)/;
+function __routeExpected(prompt) {
+  const p = String(prompt == null ? '' : prompt);
+  const pm = __ROUTE_PATH_RE.exec(p);
+  const fm = __ROUTE_FENCE_RE.exec(p);
+  return { path: pm ? pm[1] : null, content: fm ? fm[2] : null };
+}
+function __routeCheckVerbatim(prompt, result, readFile, expected) {
+  const want = (expected && expected.content != null) ? expected : __routeExpected(prompt);
+  if (!want.path || want.content == null) return { ok: false, verified: false, reason: 'no expected path/content' };
+  if (result && result.path && String(result.path) !== want.path) return { ok: false, verified: false, reason: 'receipt path != expected' };
+  if (typeof readFile !== 'function') return { ok: false, verified: false, weak: true, reason: 'no verifier' };
+  var onDisk; try { onDisk = readFile(want.path); } catch (e) { onDisk = null; }
+  if (onDisk == null) return { ok: false, verified: true, reason: 'artifact absent' };
+  var got = String(onDisk);
+  var ok = got === String(want.content) || got === String(want.content) + '\n';   // declared trailing-newline tolerance
+  return { ok: ok, verified: true, reason: ok ? 'artifact matches' : 'artifact differs' };
+}
+function __routeValidate(kind, prompt, result, readFile, expected) {
+  if (kind === 'verbatim_write') return __routeCheckVerbatim(prompt, result, readFile, expected);
+  return { ok: !!result, verified: false, reason: result ? 'nonempty (no validator)' : 'empty' };
+}
+function __agentGuarded(prompt, opts) {
+  // A single hung-agent-guarded agent() call (each routed attempt reuses it). Timeout via the per-file
+  // shim __routeAgentTimeoutMs(). A timeout resolves null -> the attempt reads as a failed attempt.
+  var timeoutMs = 0;
+  try { timeoutMs = __routeAgentTimeoutMs(); } catch (e) { timeoutMs = 0; }
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
   const guard = new Promise((resolve) => {
@@ -1374,6 +1463,45 @@ function agentBounded(rawPrompt, opts, ablAttempt) {
     agent(prompt, opts).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
     guard,
   ]);
+}
+async function __routeEscalate(prompt, opts, decision) {
+  // cheap attempt -> deterministic gate -> ONE strong fallback that BYPASSES the cheap map. Records
+  // BOTH attempts. A cheap attempt that times out resolves null via __agentGuarded, fails the gate, and
+  // escalates. Residual for the live gates (needs the runtime abort signal): a timed-out cheap child
+  // could still write AFTER the strong fallback; the post-strong gate below DETECTS a divergent
+  // artifact, but true prevention is aborting the cheap child.
+  const lbl = (opts && opts.label) || 'agent';
+  const ph = (opts && opts.phase) || '';
+  const readFile = decision.readFile;
+  const expected = __routeExpected(prompt);
+  const cheapOpts = Object.assign({}, opts, { model: decision.model });
+  try { log(`  [route] ${lbl} @${ph} -> ${decision.model} (cheap attempt 1/2)`); } catch (e) {}
+  const r1 = await __agentGuarded(prompt, cheapOpts);
+  const v1 = __routeValidate(decision.kind, prompt, r1, readFile, expected);
+  __routeAttempts.push({ label: lbl, phase: ph, model: decision.model, attempt: 1, ok: !!v1.ok, verified: !!v1.verified, reason: v1.reason });
+  if (v1.ok) return r1;
+  const strongOpts = Object.assign({}, opts, { model: ROUTE_MODEL_STRONG });
+  try { log(`  [route] ${lbl} cheap failed gate (${v1.reason}) — escalating to ${ROUTE_MODEL_STRONG} (2/2, bypassing cheap map)`); } catch (e) {}
+  const r2 = await __agentGuarded(prompt, strongOpts);
+  const v2 = __routeValidate(decision.kind, prompt, r2, readFile, expected);
+  __routeAttempts.push({ label: lbl, phase: ph, model: ROUTE_MODEL_STRONG, attempt: 2, ok: !!v2.ok, verified: !!v2.verified, reason: v2.reason, escalated: true });
+  return r2;
+}
+// <<ROUTING-INLINE-END>>
+
+// Expt-3 routing SUPERSEDES the B5-EFFORT ablation seam on this branch: agentBounded now routes via
+// __routeDecide/__routeEscalate (opt-in A.routing). The B5-EFFORT effort-tier code (ablEffortFor, and
+// the safeAgent cascade-prompt) stays DEFINED but is intentionally NOT wired here — dormant on this
+// branch. The 3rd `ablAttempt` arg is kept so callers passing it still bind; it is unused.
+function agentBounded(rawPrompt, opts, ablAttempt) {   // eslint-disable-line no-unused-vars
+  const prompt = withProcessSafety(rawPrompt);
+  const decision = __routeDecide(opts);
+  if (!decision) return __agentGuarded(prompt, opts);          // OFF / un-mapped: exact original behavior
+  if (!decision.gated) {                                       // mapped but no in-runtime verifier -> SUPPRESS
+    try { log(`  [route] ${(opts && opts.label) || 'agent'} @${(opts && opts.phase) || ''} SUPPRESSED (no in-runtime verifier; staying on ${ROUTE_MODEL_STRONG})`); } catch (e) {}
+    return __agentGuarded(prompt, opts);
+  }
+  return __routeEscalate(prompt, opts, decision);              // cheap-first + artifact gate + strong fallback
 }
 
 async function safeAgent(prompt, opts, tries = 3) {

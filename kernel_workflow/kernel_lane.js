@@ -675,7 +675,46 @@ function tlAgent(prompt, o, attempt) {
   return e;
 }
 
+// --- Expt-3 complexity routing (PoC): route deterministic helper scopes to a cheap model.
+// OFF unless A.routing is truthy (or GEAK_ROUTING=1 for a harness) -> __routeModel() returns
+// undefined for every scope -> no opts.model is set -> the run is BYTE-IDENTICAL to a non-routing
+// build. Reversible via git on expt/3-routing. Keys = `${phase}` + U+0000 + labelPrefix (everything
+// before the first space), so dynamic round/tag suffixes collapse to one stable scope identity.
+// <<ROUTING-INLINE-START>>
+const ROUTE_MODEL_CHEAP = 'claude-sonnet-5';
+const ROUTE_SEP = String.fromCharCode(0);   // scope-key separator: textual in source, U+0000 at runtime
+const ROUTE_TIER_MAP = (function () {
+  const m = {};
+  // Deterministic fixed-script helpers in the light knn lane (schema-forced, low reasoning):
+  m['Optimize' + ROUTE_SEP + 'clock'] = ROUTE_MODEL_CHEAP;            // clock ${tag} (effort:'low', CLOCK_SCHEMA)
+  m['Optimize' + ROUTE_SEP + 'storage:reclaim'] = ROUTE_MODEL_CHEAP; // storage:reclaim r${round}
+  m['WarmStart' + ROUTE_SEP + 'warm_start:resolve'] = ROUTE_MODEL_CHEAP; // warm_start:resolve
+  return m;
+})();
+const ROUTING_ON = (function () {
+  const a = String(A.routing != null ? A.routing : '').trim().toLowerCase();
+  if (a === 'true' || a === '1' || a === 'on') return true;
+  if (a === '') { try { return String(process.env.GEAK_ROUTING || '').trim() === '1'; } catch (e) { return false; } }
+  return false;                             // any explicit false-ish value stays OFF (args-off beats env-on)
+})();
+function __routeLabelPrefix(label) {
+  const s = String(label == null ? '' : label);
+  const sp = s.indexOf(' ');                // colon is part of static identity; a space starts dynamic text
+  return sp >= 0 ? s.slice(0, sp) : s;
+}
+function __routeModel(opts) {
+  if (!ROUTING_ON) return undefined;        // OFF -> no override -> byte-identical
+  const key = ((opts && opts.phase) || '') + ROUTE_SEP + __routeLabelPrefix(opts && opts.label);
+  return ROUTE_TIER_MAP[key];               // cheap model id, or undefined -> pinned strong (fall through)
+}
+// <<ROUTING-INLINE-END>>
+
 async function agentT(p, o) {
+  const __rm = __routeModel(o);
+  if (__rm) {                               // mapped deterministic helper -> route cheap (clone opts, don't mutate)
+    o = Object.assign({}, o, { model: __rm });
+    try { log(`  [route] ${(o && o.label) || 'agent'} @${(o && o.phase) || ''} -> ${__rm}`); } catch (e) {}
+  }
   const label = (o && o.label) ? o.label : 'agent';
   if (ABL_B6 && typeof p === 'string') { const pre = ablDrainPrelude(); if (pre) p = pre + p; }
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
@@ -710,6 +749,7 @@ async function agentT(p, o) {
   }
   return null;
 }
+
 
 // ---------------------------------------------------------------------------
 // WALL-CLOCK DEADLINE (opt-in; absent => byte-identical to a build without it).
