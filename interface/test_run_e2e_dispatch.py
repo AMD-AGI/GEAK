@@ -2677,7 +2677,7 @@ class TestMain(_RunE2ECase):
         report.write_text("# GEAK final report\n", encoding="utf-8")
         seen = {}
 
-        def ok_invoke(prompt, timeout_s, eval_dir):
+        def ok_invoke(prompt, timeout_s, eval_dir, ps_args=None):
             seen.update(prompt=prompt, timeout_s=timeout_s, eval_dir=eval_dir)
             return {"eval_dir": str(self.eval_dir),
                     "baseline_throughput_tok_s": 461.314,
@@ -2755,7 +2755,7 @@ class TestMain(_RunE2ECase):
     def test_sigterm_handler_self_stops_as_a_timeout(self):
         """The outer runner's graceful stop must be converted into a TimeoutError
         so the finally-block flushes the interface files instead of being killed."""
-        def invoke_then_term(prompt, timeout_s, eval_dir):
+        def invoke_then_term(prompt, timeout_s, eval_dir, ps_args=None):
             handler = signal.getsignal(signal.SIGTERM)
             handler(signal.SIGTERM, None)
             raise AssertionError("the SIGTERM handler must raise")
@@ -2774,7 +2774,7 @@ class TestMain(_RunE2ECase):
     def test_recovery_failure_after_a_crashed_workflow_is_contained(self):
         """Both the post-crash recovery and the one inside _emit raise; the run
         must degrade to a parseable error file, never propagate."""
-        def boom_invoke(prompt, timeout_s, eval_dir):
+        def boom_invoke(prompt, timeout_s, eval_dir, ps_args=None):
             raise RuntimeError("agent died")
 
         def boom_recover(exp_root):
@@ -2798,7 +2798,7 @@ class TestMain(_RunE2ECase):
              "output_parity": "pass"},
         )
 
-        def boom(prompt, timeout_s, eval_dir):
+        def boom(prompt, timeout_s, eval_dir, ps_args=None):
             raise rx.WorkflowParseError("agent printed prose")
 
         self.patch_rx("invoke_workflow", boom)
