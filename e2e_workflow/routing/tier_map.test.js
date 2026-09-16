@@ -181,6 +181,29 @@ async function runEscalationTests() {
     ok_('escalate: capped at 2 attempts even on double-fail', calls.length === 2 && attempts.length === 2);
   }
 
+  // (D) a THROWN dispatch is still recorded, then re-thrown (audit trail survives a transport error),
+  //     and the exception MESSAGE (which can carry prompt text / credentials) never leaks into the row.
+  {
+    const attempts = [];
+    const secret = 'BEARER sk-leak-me-please';
+    const run = async () => { const e = new TypeError(secret); throw e; };
+    let threw = false, caught = null;
+    try {
+      await R.escalate('p', { phase: 'Validate', label: 'persist-workflow-return' }, decision, run,
+        { readFile: () => null, expected: EXPECTED, record: a => attempts.push(a) });
+    } catch (e) { threw = true; caught = e; }
+    ok_('escalate: a thrown cheap dispatch propagates (transport-retry policy preserved)',
+        threw && caught && caught.message === secret);
+    ok_('escalate: the thrown attempt is recorded (not silent)',
+        attempts.length === 1 && attempts[0].attempt === 1 && attempts[0].threw === true && attempts[0].ok === false);
+    ok_('escalate: throw record carries exception CLASS + correlation id, NOT the message',
+        attempts[0].reason === 'dispatch threw (TypeError)' &&
+        typeof attempts[0].cid === 'string' && attempts[0].cid.length > 0 &&
+        !JSON.stringify(attempts[0]).includes('sk-leak-me-please'));
+    ok_('escalate: a throw on attempt 1 makes NO second dispatch (cap holds as a ceiling)',
+        attempts.length === 1);
+  }
+
   console.log(`\n${fails === 0 ? 'ALL PASS' : 'FAIL'} — ${n - fails}/${n} checks`);
   process.exit(fails === 0 ? 0 : 1);
 }

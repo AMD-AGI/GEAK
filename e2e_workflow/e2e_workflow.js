@@ -1471,23 +1471,43 @@ function __agentGuarded(prompt, opts) {
 }
 async function __routeEscalate(prompt, opts, decision) {
   // cheap attempt -> deterministic gate -> ONE strong fallback that BYPASSES the cheap map. Records
-  // BOTH attempts. A cheap attempt that times out resolves null via __agentGuarded, fails the gate, and
-  // escalates. Residual for the live gates (needs the runtime abort signal): a timed-out cheap child
-  // could still write AFTER the strong fallback; the post-strong gate below DETECTS a divergent
-  // artifact, but true prevention is aborting the cheap child.
+  // EVERY physical dispatch, at a fixed cap of 2 per cascade (1 cheap + 1 strong; a throw on the cheap
+  // attempt propagates and the strong one is never made, so the cap is a ceiling, never exceeded). A
+  // cheap attempt that TIMES OUT resolves null via __agentGuarded, fails the gate, and escalates; a
+  // cheap attempt that THROWS (transport error / aborted child) is recorded here too, then re-thrown so
+  // the caller's transport-retry policy is preserved. Residual for the live gates (needs the runtime
+  // abort signal): a timed-out cheap child could still write AFTER the strong fallback; the post-strong
+  // gate below DETECTS a divergent artifact, but true prevention is aborting the cheap child.
   const lbl = (opts && opts.label) || 'agent';
   const ph = (opts && opts.phase) || '';
   const readFile = decision.readFile;
   const expected = __routeExpected(prompt);
+  let __seq = 0;
+  // One physical dispatch. On a THROW we still stamp an audit row -- otherwise a rejected agent()
+  // leaves no trace and the cascade under-reports the calls it actually made. We record the exception
+  // CLASS and a short correlation id ONLY, never the message: an error string can carry prompt text or
+  // credentials. Then re-throw unchanged so nothing downstream sees swallowed transport errors.
+  const dispatch = async (p, o, attempt, extra) => {
+    const cid = `${ph || 'wf'}:${lbl}:a${attempt}#${++__seq}`;
+    try {
+      return await __agentGuarded(p, o);
+    } catch (e) {
+      const cls = (e && e.name) || (e && e.constructor && e.constructor.name) || 'Error';
+      __routeAttempts.push(Object.assign(
+        { label: lbl, phase: ph, model: o.model, attempt: attempt, ok: false, verified: false,
+          reason: `dispatch threw (${cls})`, cid: cid, threw: true }, extra || {}));
+      throw e;
+    }
+  };
   const cheapOpts = Object.assign({}, opts, { model: decision.model });
   try { log(`  [route] ${lbl} @${ph} -> ${decision.model} (cheap attempt 1/2)`); } catch (e) {}
-  const r1 = await __agentGuarded(prompt, cheapOpts);
+  const r1 = await dispatch(prompt, cheapOpts, 1);
   const v1 = __routeValidate(decision.kind, prompt, r1, readFile, expected);
   __routeAttempts.push({ label: lbl, phase: ph, model: decision.model, attempt: 1, ok: !!v1.ok, verified: !!v1.verified, reason: v1.reason });
   if (v1.ok) return r1;
   const strongOpts = Object.assign({}, opts, { model: ROUTE_MODEL_STRONG });
   try { log(`  [route] ${lbl} cheap failed gate (${v1.reason}) — escalating to ${ROUTE_MODEL_STRONG} (2/2, bypassing cheap map)`); } catch (e) {}
-  const r2 = await __agentGuarded(prompt, strongOpts);
+  const r2 = await dispatch(prompt, strongOpts, 2, { escalated: true });
   const v2 = __routeValidate(decision.kind, prompt, r2, readFile, expected);
   __routeAttempts.push({ label: lbl, phase: ph, model: ROUTE_MODEL_STRONG, attempt: 2, ok: !!v2.ok, verified: !!v2.verified, reason: v2.reason, escalated: true });
   // Return the strong result unconditionally: it is the SAME model a non-routing build pins, which it
