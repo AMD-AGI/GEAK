@@ -185,6 +185,36 @@ def _content_parts(message):
     return "\n".join(resp), "\n".join(think)
 
 
+def _content_blocks(message):
+    """Yield ``(kind, position, text)`` for each content block of an assistant
+    message; ``kind`` is ``"resp"`` (a ``text`` block) or ``"think"`` (a
+    ``thinking``/``redacted_thinking`` block). ``position`` is the block's index
+    within this message's content list — combined with the record's
+    ``apiBlockIndex`` it identifies which block a record is (re-)flushing, so the
+    same response streamed across several records merges by block instead of the
+    largest-usage record silently dropping the others' text.
+    """
+    if not isinstance(message, dict):
+        return []
+    content = message.get("content")
+    if isinstance(content, str):
+        return [("resp", 0, content)] if content else []
+    out = []
+    if isinstance(content, list):
+        for j, b in enumerate(content):
+            if not isinstance(b, dict):
+                continue
+            t = b.get("type")
+            if t == "text" and isinstance(b.get("text"), str):
+                out.append(("resp", j, b["text"]))
+            elif t in ("thinking", "redacted_thinking"):
+                if isinstance(b.get("thinking"), str):
+                    out.append(("think", j, b["thinking"]))
+                elif t == "redacted_thinking":
+                    out.append(("think", j, "[redacted]"))
+    return out
+
+
 def read_jsonl(path):
     """Yield objects from a JSONL file, skipping anything unparseable.
 
@@ -329,10 +359,18 @@ def calls_of(group, source):
     """One row per API call in this conversation, deduplicated.
 
     Dedupe key is message.id: the same response is sometimes flushed to the
-    transcript twice. We keep the copy with the largest output_tokens (a partial
-    flush can only undercount) and the EARLIEST timestamp (when it landed).
+    transcript twice. USAGE (token counts) is taken from the copy with the
+    largest output_tokens — a partial flush can only undercount — at the EARLIEST
+    timestamp. CONTENT (output/thinking) is merged SEPARATELY, by block: the same
+    response can emit a thinking block, a text block, and a later tool_use block
+    as three records that share one id, and the usage-bearing record is not a full
+    copy of the earlier blocks' text. We collect every block seen for the id,
+    keyed by ``(kind, apiBlockIndex + position)``, keeping the LONGEST text per
+    block (a cumulative flush grows in place, so longest = most complete, and this
+    never concatenates a block onto its own earlier prefix). See ``_content_blocks``.
     """
     by_id, order, prev_ts = {}, [], None
+    content_by_id = {}  # id -> {(kind, idx): longest_text}
     for rec in group["records"]:
         ts = _iso_to_ms(rec.get("timestamp"))
         if rec.get("type") != "assistant":
@@ -344,6 +382,16 @@ def calls_of(group, source):
         key = msg.get("id") or rec.get("requestId") or rec.get("uuid")
         cache = usage.get("cache_creation") or {}
         resp_text, think_text = _content_parts(msg)
+        # Merge content by block identity, independent of the usage-record choice.
+        base = rec.get("apiBlockIndex")
+        base = 0 if base is None else base
+        blocks = content_by_id.setdefault(key, {})
+        for kind, pos, text in _content_blocks(msg):
+            if not text:
+                continue
+            bk = (kind, base + pos)
+            if len(text) >= len(blocks.get(bk, "")):
+                blocks[bk] = text
         row = {
             "ts_ms": ts,
             "duration_ms": (ts - prev_ts) if (ts is not None and prev_ts is not None and ts >= prev_ts) else None,
@@ -379,6 +427,13 @@ def calls_of(group, source):
                 by_id[key]["ts_ms"], by_id[key]["duration_ms"] = keep_ts, keep_dur
         if ts is not None:
             prev_ts = ts
+    # Reassemble each kept row's output/thinking from ALL of its blocks (the
+    # usage-winning record alone can miss earlier text/thinking blocks).
+    for key, row in by_id.items():
+        blocks = content_by_id.get(key) or {}
+        ordered = sorted(blocks.items(), key=lambda it: it[0][1])
+        row["output"] = "\n".join(t for (kind, _), t in ordered if kind == "resp")
+        row["thinking"] = "\n".join(t for (kind, _), t in ordered if kind == "think")
     return [by_id[k] for k in order]
 
 
@@ -824,13 +879,19 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
     groups = []
     for path in transcripts:
         recs = list(read_jsonl(path))
-        for g in split_conversations(recs):
-            g["calls"] = calls_of(g, os.path.basename(path))
+        base = os.path.basename(path)
+        for ci, g in enumerate(split_conversations(recs)):
+            g["calls"] = calls_of(g, base)
             if not g["calls"]:
                 continue
             ts = [c["ts_ms"] for c in g["calls"] if c["ts_ms"] is not None]
             g["t0_ms"], g["t1_ms"] = (min(ts), max(ts)) if ts else (None, None)
             g["transcript"] = path
+            # Stable per-conversation identity: one agent attempt = one group.
+            # Two attempts that share a role/label — retries, or the same role in
+            # separate transcripts — stay distinct nodes because the id carries
+            # the transcript + the conversation's ordinal within it.
+            g["group_id"] = "%s#%d" % (base, ci)
             groups.append(g)
 
     # Drop everything outside the run's own window BEFORE attributing, so a
@@ -861,6 +922,7 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
             c["agent_label"] = g["label"]
             c["attribution"] = g["attribution"]
             c["transcript"] = os.path.basename(g["transcript"])
+            c["group_id"] = g["group_id"]
             c["prompt"] = g.get("prompt", "")
             c["total_input_tokens"] = total_input(c)
             c["cost_usd"] = round(cost_of(c, rates), 6)
