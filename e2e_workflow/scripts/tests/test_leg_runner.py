@@ -62,6 +62,14 @@ _HARNESS_STUB = textwrap.dedent('''
     def deployment_graph_mode(regime):
         return regime.get("graph_mode", False)
 
+    def observed_device_kernels(call, cases, warmup=2):
+        calls.append(("observed_device_kernels", warmup, [c["sig"] for c in cases]))
+        out = {}
+        for c in cases:
+            call(c)                      # the REAL reader profiles this; here just prove it is fed
+            out[c["sig"]] = [c["sig"] + "_device_kernel", "Memset"]
+        return out
+
     def time_op(fn, graph=False, detail=False):
         calls.append(("time_op", graph, detail))
         fn()
@@ -349,6 +357,53 @@ class ModeTime(_LegRunnerTestCase):
         out = json.loads(self._main("--task", self.task, "--mode", "time"))
         self.assertIsNone(out["cases"][0]["ms"])
         self.assertIsNone(out["cases"][0]["timer"])
+
+
+class ModeDispatch(_LegRunnerTestCase):
+    """`--mode dispatch` answers ONE question for assert_baseline_dispatch: which GPU kernels does
+    this leg launch, per bucket. It must profile the SAME callable `--mode time` measures -- reading
+    dispatch off the eager op while the deployment (and the timing leg) runs a compiled one would
+    certify a kernel that never runs in the measurement."""
+
+    def test_dispatch_reports_kernels_per_bucket_plus_the_leg_identity(self):
+        self._task_dir()
+        self._target_module()
+        out = json.loads(self._main("--task", self.task, "--mode", "dispatch"))
+        self.assertEqual(out["kernels"], {"decode": ["decode_device_kernel", "Memset"],
+                                          "prefill": ["prefill_device_kernel", "Memset"]})
+        # The identity is what proves the kernels were read off the BASELINE overlay's code.
+        self.assertTrue(out["identity"]["qualname"].endswith("<lambda>"))
+
+    def test_the_case_args_are_what_gets_called(self):
+        """The reader is handed `lambda c: call(c["args"])`; passing the whole case dict instead
+        would launch nothing and read as "no evidence" on every task."""
+        self._task_dir()
+        self._target_module()
+        self._main("--task", self.task, "--mode", "dispatch")
+        self.assertEqual(sys.modules["cases"].seen, [{"m": 1}, {"m": 4096}])
+
+    def test_bucket_selects_exactly_one_case(self):
+        self._task_dir()
+        self._target_module()
+        out = json.loads(self._main("--task", self.task, "--mode", "dispatch",
+                                    "--bucket", "prefill"))
+        self.assertEqual(list(out["kernels"]), ["prefill"])
+
+    def test_unknown_bucket_observes_nothing_rather_than_everything(self):
+        self._task_dir()
+        self._target_module()
+        out = json.loads(self._main("--task", self.task, "--mode", "dispatch", "--bucket", "nope"))
+        self.assertEqual(out["kernels"], {})
+
+    def test_the_compiled_callable_is_profiled_when_the_deployment_compiles(self):
+        self._task_dir(meta={"target_callable": "fake_live_stack:op",
+                             "regime": {"compile_mode": "max-autotune"}})
+        self._target_module()
+        self._main("--task", self.task, "--mode", "dispatch")
+        h = sys.modules["harness_lib"]
+        self.assertIn(("compiled_op", "max-autotune"), h.calls)
+        self.assertEqual([c for c in h.calls if c[0] == "wrapped"],
+                         [("wrapped", 1), ("wrapped", 4096)])
 
 
 class ModeOracle(_LegRunnerTestCase):

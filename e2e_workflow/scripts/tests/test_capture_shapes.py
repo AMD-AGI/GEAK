@@ -90,7 +90,7 @@ def _reset_state(mod):
     mod._STATE.update(
         target=None, out_dir=None, max_cases=5, num_steps=0,
         records=[], seen=set(), orig=None, mod=None, attr=None,
-        installed=False, calls=0,
+        installed=False, bind_pending=False, calls=0,
         regime_seen=set(), decode_lead_max=256,
         sequence=[], seq_cap=256, in_graph_calls=0,
         shape_counts={}, shape_meta={},
@@ -154,6 +154,7 @@ def _fake_torch():
     torch = types.ModuleType("torch")
     torch.capturing = False
     torch.saved = []
+    torch.uint8 = "torch.uint8"
     torch.is_tensor = lambda o: isinstance(o, (FakeTensor, ExplodingTensor))
     torch.cuda = types.SimpleNamespace(
         is_current_stream_capturing=lambda: torch.capturing)
@@ -344,6 +345,114 @@ class TestSnapshot(_RecorderTestCase):
 
         got = cs._snapshot(_Big())
         self.assertEqual(got["__repr__"], "X" * 200)
+
+
+# --------------------------------------------------------------------------- #
+# _to_cpu_clone -- sub-byte dtypes have no copy kernel
+# --------------------------------------------------------------------------- #
+class _NoCopyKernelTensor(FakeTensor):
+    """An MXFP4 tensor: ROCm torch 2.9 has no ``copy_kernel`` for float4_e2m1fn_x2, so a direct D2H
+    raises. Only a ``uint8`` view of the identical storage can cross the bus."""
+
+    def __init__(self, shape, dtype="torch.float4_e2m1fn_x2", **kw):
+        super().__init__(shape, dtype=dtype, **kw)
+        self.viewed_as = []
+
+    def to(self, device):
+        if self.dtype != "torch.uint8":
+            raise NotImplementedError('"copy_kernel" not implemented for \'Float4_e2m1fn_x2\'')
+        return _NoCopyKernelTensor(self.shape, self.dtype, device=device)
+
+    def clone(self):
+        return _NoCopyKernelTensor(self.shape, self.dtype, device=self.device)
+
+    def view(self, dtype):
+        self.viewed_as.append(dtype)
+        out = _NoCopyKernelTensor(self.shape, dtype, device=self.device)
+        out.viewed_as = self.viewed_as
+        return out
+
+
+class TestSubByteDtypeCopy(_RecorderTestCase):
+    def test_mxfp4_operand_is_captured_instead_of_silently_dropped(self):
+        # Without the fallback the raise escapes into the hook's blanket except and the run records
+        # ZERO cases -- for exactly the MXFP4 MoE seams this harness exists to capture.
+        t = _NoCopyKernelTensor((256, 128))
+        got = cs._snapshot(t)
+        self.assertEqual(got["dtype"], "torch.float4_e2m1fn_x2")
+        self.assertEqual(got["shape"], [256, 128])
+
+    def test_the_stored_data_lands_back_in_the_original_dtype_not_uint8(self):
+        # A uint8 oracle would replay as garbage operands rather than fail loudly.
+        src = _NoCopyKernelTensor((256, 128))
+        data = cs._snapshot(src)["data"]
+        self.assertEqual(src.viewed_as, ["torch.uint8"])   # the detour was really taken
+        self.assertEqual(data.dtype, "torch.float4_e2m1fn_x2")
+        self.assertEqual(data.device, "cpu")
+
+    def test_a_normal_tensor_never_takes_the_byte_view_detour(self):
+        t = FakeTensor((4, 8))
+        t.view = lambda dtype: self.fail("byte-view fallback used on a dtype that copies fine")
+        self.assertEqual(cs._snapshot(t)["dtype"], "torch.float16")
+
+    def test_an_unrelated_copy_failure_reports_its_own_cause_not_the_views(self):
+        # OOM must stay diagnosable; the fallback is inapplicable and must not mask it.
+        class _Oom(FakeTensor):
+            def to(self, device):
+                raise RuntimeError("HIP out of memory")
+
+            def view(self, dtype):
+                raise RuntimeError("view size is not compatible with input tensor's size and stride")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            cs._snapshot(_Oom((4, 8)))
+        self.assertIn("out of memory", str(ctx.exception))
+
+
+# --------------------------------------------------------------------------- #
+# _tensor_attrs -- loader-set dispatch metadata torch.save would drop
+# --------------------------------------------------------------------------- #
+class TestTensorAttrs(_RecorderTestCase):
+    def test_loader_set_attribute_is_recorded_alongside_the_data(self):
+        t = FakeTensor((4, 8))
+        t.is_shuffled = True          # aiter's fused-MoE FlyDSL-vs-CK gate reads exactly this
+        got = cs._snapshot(t)
+        self.assertEqual(got["attrs"], {"is_shuffled": True})
+
+    def test_plain_tensor_records_no_attrs_key_at_all(self):
+        # Intrinsic fields (shape/dtype/device) live in FakeTensor.__dict__ too; re-recording them
+        # would let a stale duplicate override the first-class snapshot key on restore.
+        self.assertNotIn("attrs", cs._snapshot(FakeTensor((4, 8))))
+
+    def test_values_that_cannot_round_trip_are_dropped_not_repred(self):
+        # A repr string would read truthy to `getattr(w, "...", False)` and flip a dispatch gate the
+        # captured server never took -- worse than an absent attribute.
+        t = FakeTensor((4, 8))
+        t.helper = lambda: None
+        t.buddy = FakeTensor((2,))
+        t.quant_mode = "mxfp4"
+        t.tile = (16, 16)
+        self.assertEqual(cs._snapshot(t)["attrs"], {"quant_mode": "mxfp4", "tile": (16, 16)})
+
+    def test_private_and_oversized_attributes_are_bounded(self):
+        t = FakeTensor((4, 8))
+        t._internal = True
+        t.tag = "y" * 500
+        for i in range(cs._ATTR_MAX_COUNT + 10):
+            setattr(t, "k%03d" % i, i)
+        attrs = cs._snapshot(t)["attrs"]
+        self.assertNotIn("_internal", attrs)
+        self.assertEqual(len(attrs), cs._ATTR_MAX_COUNT)
+        if "tag" in attrs:
+            self.assertEqual(len(attrs["tag"]), cs._ATTR_MAX_STR)
+
+    def test_an_exploding_dict_read_yields_no_attrs_rather_than_killing_capture(self):
+        class _Hostile:
+            @property
+            def __dict__(self):
+                raise RuntimeError("no introspection")
+
+        self.assertEqual(cs._tensor_attrs(_Hostile()), {})
 
 
 # --------------------------------------------------------------------------- #
@@ -553,7 +662,29 @@ class TestFlush(_RecorderTestCase):
         self.assertTrue(meta["oracle_complete"])
         self.assertFalse(meta["build"])
         self.assertIn("Do NOT edit", meta["note"])
+        self.assertIn("capture_env", meta)
         self.assertIn("flushed 2 case(s)", err.getvalue())
+
+    def test_meta_records_the_dispatch_steering_env_and_nothing_else(self):
+        # Which backend the captured server ran is decided by env as much as by inputs; without it a
+        # UT that reproduces the wrong kernel can only be diagnosed from server logs.
+        self._drive()
+        with _env(AITER_CONFIG_FMOE="/tmp/t.csv", VLLM_USE_FLYDSL="1", HOME="/root"), _stderr():
+            cs._flush()
+        env = self._meta()["capture_env"]
+        self.assertEqual(env.get("AITER_CONFIG_FMOE"), "/tmp/t.csv")
+        self.assertEqual(env.get("VLLM_USE_FLYDSL"), "1")
+        self.assertNotIn("HOME", env)
+
+    def test_a_credential_that_matches_the_prefixes_is_recorded_by_name_only(self):
+        """`GEAK_KB_STORE_TOKEN` matches `^GEAK_`, this runs in the SERVER process, and meta.json is
+        published with the task dir. The name is dispatch-relevant; the value is a secret."""
+        self._drive()
+        with _env(GEAK_KB_STORE_TOKEN="s3cr3t", AITER_CONFIG_FMOE="/tmp/t.csv"), _stderr():
+            cs._flush()
+        env = self._meta()["capture_env"]
+        self.assertEqual(env.get("GEAK_KB_STORE_TOKEN"), "<redacted>")
+        self.assertEqual(env.get("AITER_CONFIG_FMOE"), "/tmp/t.csv")
 
     def test_cases_carry_shapes_dtypes_and_their_real_call_count(self):
         self._drive()
@@ -882,6 +1013,95 @@ class TestInstall(_RecorderTestCase):
         expected_prefix = os.path.join(
             self.out_dir, f"capture.pid-{os.getpid()}.rank-")
         self.assertTrue(cs._STATE["out_dir"].startswith(expected_prefix))
+
+
+# --------------------------------------------------------------------------- #
+# deferred bind -- the overlay must not import the target at interpreter startup
+# --------------------------------------------------------------------------- #
+class TestDeferredBind(_RecorderTestCase):
+    """install() runs from sitecustomize, i.e. DURING interpreter startup. If it imported the target
+    there it would reorder every later import in the process -- and that is not theoretical: pulling
+    aiter.fused_moe in from sitecustomize makes FlyDSL's JIT abort with "LLVM ERROR: Do not know how to
+    expand this operator's operand!" on a kernel that compiles fine in the identical un-overlaid run.
+    So the hook is armed at install and bound on the APPLICATION's own import."""
+
+    def _unimported_module(self, name="lazy_serving_layer", body="def op(*a, **k):\n    return 'OUT'\n"):
+        d = tempfile.mkdtemp(prefix="capture_shapes_lazy_")
+        self.addCleanup(shutil.rmtree, d, True)
+        with open(os.path.join(d, name + ".py"), "w") as fh:
+            fh.write(body)
+        sys.path.insert(0, d)
+        self.addCleanup(lambda: sys.path.remove(d) if d in sys.path else None)
+        self.addCleanup(sys.modules.pop, name, None)
+        importlib.invalidate_caches()
+        self.assertNotIn(name, sys.modules)
+        return name
+
+    def _arm(self, name):
+        with _stderr() as err:
+            cs.install(f"{name}:op", self.out_dir)
+        self.addCleanup(_drop_bind_shims)
+        return err.getvalue()
+
+    def test_install_does_not_import_the_target(self):
+        name = self._unimported_module()
+        err = self._arm(name)
+        self.assertNotIn(name, sys.modules)          # the whole point
+        self.assertFalse(cs._STATE["installed"])
+        self.assertTrue(cs._STATE["bind_pending"])
+        self.assertIn("armed", err)
+
+    def test_the_application_importing_the_target_binds_the_hook(self):
+        name = self._unimported_module()
+        self._arm(name)
+        with _stderr() as err:
+            mod = importlib.import_module(name)
+        self.assertTrue(cs._STATE["installed"])
+        self.assertIs(mod.op.__wrapped__, cs._STATE["orig"])
+        self.assertIn("hooked", err.getvalue())
+        with _stderr():
+            self.assertEqual(mod.op(FakeTensor((4, 8))), "OUT")
+        self.assertEqual(cs._STATE["shape_counts"], {"T(4, 8):torch.float16": 1})
+
+    def test_the_shim_does_not_outlive_the_bind(self):
+        # A finder left on sys.meta_path would re-run find_spec for every later import in the process.
+        name = self._unimported_module()
+        before = len(sys.meta_path)
+        self._arm(name)
+        self.assertEqual(len(sys.meta_path), before + 1)
+        with _stderr():
+            importlib.import_module(name)
+        self.assertEqual(len(sys.meta_path), before)
+
+    def test_an_unrelated_import_is_not_disturbed(self):
+        name = self._unimported_module()
+        other = self._unimported_module(name="other_lazy_serving_layer")
+        self._arm(name)
+        with _stderr():
+            importlib.import_module(other)
+        self.assertFalse(cs._STATE["installed"])
+        self.assertNotIn(name, sys.modules)
+
+    def test_a_native_target_is_still_refused_loudly_just_at_bind(self):
+        # The wrappability check needs the object, so it cannot stay at install; it must still be an
+        # exception the operator sees, not a mid-run SIGSEGV.
+        name = self._unimported_module(name="native_lazy_serving_layer", body="op = len\n")
+        with _env(CAPTURE_WRAP_UNSAFE=None):
+            self._arm(name)
+            with self.assertRaises(RuntimeError) as ctx:
+                importlib.import_module(name)
+        self.assertIn("refusing to wrap non-Python callable", str(ctx.exception))
+
+    def test_an_already_imported_target_binds_immediately(self):
+        # No deferral when there is nothing to defer -- in-process callers keep the old behavior.
+        mod, err = self._hook()
+        self.assertTrue(cs._STATE["installed"])
+        self.assertIn("hooked", err)
+        self.assertIs(mod.op.__wrapped__, cs._STATE["orig"])
+
+
+def _drop_bind_shims():
+    sys.meta_path[:] = [f for f in sys.meta_path if not isinstance(f, cs._BindOnImport)]
 
 
 # --------------------------------------------------------------------------- #

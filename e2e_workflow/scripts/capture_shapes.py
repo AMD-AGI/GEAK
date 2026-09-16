@@ -7,8 +7,10 @@ server process (via the sitecustomize/monkeypatch overlay mechanism), records (a
 for the first few DISTINCT input-shape signatures seen during a short bench window, and writes a
 torch-loadable `reference_io.pt` + `meta.json`.
 
-This module is meant to be imported at server startup through an overlay PYTHONPATH (it registers the
-hook on import), OR called as a function from a custom preimport. It does NOT launch the server
+This module is meant to be imported at server startup through an overlay PYTHONPATH (it arms the
+hook there and binds it when the server itself imports the target — importing the target from
+sitecustomize would reorder the application's imports; see install()), OR called as a function from a
+custom preimport. It does NOT launch the server
 itself — pair it with scripts/bench_e2e.sh (drive the same workload as the profile so shapes match
 the regime).
 
@@ -38,11 +40,23 @@ _TMP_ARTIFACT_RE = re.compile(r"\.(?:pt|json)\.tmp-\d+")
 # Heuristic names for expert/static parameter tensors (used by moe_slim / share_large).
 _WEIGHT_KEY_RE = re.compile(
     r"(^w[123]$|^weight$|expert_w|gate_up|down_proj|up_proj|_weight$)", re.I)
+# Names already recorded as first-class snapshot keys: a __dict__ duplicate would override the real
+# one on restore. (Plain torch.Tensor keeps these as descriptors, but subclasses/wrappers do not.)
+_ATTR_SKIP = frozenset(("shape", "dtype", "device", "data", "contiguous", "attrs"))
+_ATTR_MAX_COUNT = 32
+_ATTR_MAX_STR = 200
+# Env that steers BACKEND DISPATCH (tuned-config tables, backend enables, arch pins) — recorded for
+# comparison only, never re-exported: replaying with a table the captured server did not have is its
+# own infidelity. Broad by design, so credential-looking names are redacted: this runs in the SERVER
+# process (GEAK_KB_STORE_TOKEN matches ^GEAK_) and meta.json is published with the task dir.
+_ENV_CAPTURE_RE = re.compile(
+    r"^(AITER|GEAK|SGLANG|VLLM|TORCH|TORCHINDUCTOR|PYTORCH|TRITON|HIP|ROCM|HSA|CK|GPU)_|FLYDSL")
+_ENV_REDACT_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CRED|AUTH|COOKIE|SESSION)", re.I)
 
 _STATE = {
     "target": None, "out_dir": None, "max_cases": 5, "num_steps": 0,
     "records": [], "seen": set(), "lock": threading.Lock(), "orig": None,
-    "mod": None, "attr": None, "installed": False, "calls": 0,
+    "mod": None, "attr": None, "installed": False, "bind_pending": False, "calls": 0,
     # regime coverage for the oracle: the classic failure is a single-case oracle (only ONE shape recorded,
     # e.g. one decode step), which under-tests correctness. We guarantee at least one case per regime
     # (decode vs prefill) even if that overshoots max_cases, so the immutable oracle exercises BOTH the q=1
@@ -371,6 +385,21 @@ def reclaim_workspace_captures(eval_dir, workspace_budget=0):
     return telemetry
 
 
+def _env_snapshot():
+    """Dispatch-steering env of the capturing process (see ``_ENV_CAPTURE_RE``), secrets redacted.
+
+    Lets a UT that reproduces the wrong kernel be diagnosed from the task dir instead of server logs:
+    an empty ``AITER_CONFIG_FMOE`` here means the captured server ran the heuristic path, so a UT that
+    exports a tuned table is measuring a third code path deployment never took.
+    """
+    env = {}
+    for key in sorted(os.environ):
+        if _ENV_CAPTURE_RE.search(key):
+            env[key] = ("<redacted>" if _ENV_REDACT_RE.search(key)
+                        else str(os.environ[key])[:_ATTR_MAX_STR])
+    return env
+
+
 def _write_capture_manifest(out_dir, extra=None):
     """Lightweight size/shape manifest written when the heavy oracle is skipped or reclaiming."""
     s = _STATE
@@ -453,14 +482,76 @@ def _torch():
     return torch
 
 
+def _attr_value(value):
+    """``(value, keep)`` — keep only attributes that survive ``torch.save`` as plain data.
+
+    Anything else (tensors, modules, callables) is DROPPED rather than repr'd: a restored repr string
+    would still read truthy to a ``getattr(w, "...", False)`` dispatch gate.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
+        return value, True
+    if isinstance(value, str):
+        return value[:_ATTR_MAX_STR], True
+    if (isinstance(value, (list, tuple)) and len(value) <= 8
+            and all(v is None or isinstance(v, (bool, int, float, str)) for v in value)):
+        return type(value)(value), True
+    return None, False
+
+
+def _tensor_attrs(x):
+    """Loader-set Python attributes from the tensor's ``__dict__`` — ``torch.save`` drops these.
+
+    Several backends carry their DISPATCH DECISION there rather than in the data: aiter's fused-MoE
+    gate reads ``getattr(w1, "is_shuffled", False)`` to choose FlyDSL vs CK, so an oracle replayed
+    without the label runs a different kernel than the captured server did.
+    """
+    try:
+        items = list((getattr(x, "__dict__", None) or {}).items())
+    except Exception:
+        return {}
+    attrs = {}
+    for key, value in items:
+        if not isinstance(key, str) or key.startswith("_") or key in _ATTR_SKIP:
+            continue
+        attr_value, keep = _attr_value(value)
+        if not keep:
+            continue
+        attrs[key] = attr_value
+        if len(attrs) >= _ATTR_MAX_COUNT:
+            break
+    return attrs
+
+
+def _to_cpu_clone(x):
+    """``x.detach().to("cpu").clone()``, with a byte-view fallback for sub-byte dtypes.
+
+    ROCm torch 2.9 has no ``copy_kernel`` for ``float4_e2m1fn_x2``, so the plain D2H raises
+    ``NotImplementedError`` — and the hook's blanket except then records ZERO cases, silently, for
+    exactly the MXFP4 seams we most want to capture. The same storage copied through a ``uint8``
+    view needs no per-dtype kernel and is bitwise-equal. Mirrored by harness_lib._to_device.
+    """
+    torch = _torch()
+    try:
+        return x.detach().to("cpu").clone()
+    except (NotImplementedError, RuntimeError) as exc:
+        try:
+            return x.detach().view(torch.uint8).to("cpu").clone().view(x.dtype)
+        except Exception:
+            raise exc  # fallback inapplicable (non-contiguous, OOM, ...) — report the real cause
+
+
 def _snapshot(x):
     """Detach+clone tensors to CPU so later in-place ops can't corrupt the oracle. Pass scalars/None
     through; summarize unsupported objects by repr so the record stays loadable."""
     torch = _torch()
     if torch.is_tensor(x):
-        return {"__tensor__": True, "data": x.detach().to("cpu").clone(),
+        snap = {"__tensor__": True, "data": _to_cpu_clone(x),
                 "dtype": str(x.dtype), "device": str(x.device),
                 "shape": list(x.shape), "contiguous": bool(x.is_contiguous())}
+        attrs = _tensor_attrs(x)
+        if attrs:
+            snap["attrs"] = attrs
+        return snap
     if isinstance(x, (list, tuple)):
         return type(x)(_snapshot(v) for v in x)
     if isinstance(x, dict):
@@ -771,6 +862,7 @@ def _flush(write_oracle=True):
         "budget_exceeded": bool(s.get("budget_exceeded")),
         "budget_skip_count": int(s.get("budget_skip_count") or 0),
         "oracle_save_count": int(s.get("oracle_save_count") or 0),
+        "capture_env": _env_snapshot(),
         "build": False,  # default: pure-python/triton; Extractor flips to True for HIP/CK/asm tasks
         "note": "Oracle captured from baseline. Do NOT edit unittest.py or reference_io.pt during opt.",
     }
@@ -840,32 +932,65 @@ def _make_wrapper(orig):
     return _w
 
 
+class _BindOnImport:
+    """Meta-path shim that runs ``callback`` right after ``mod_name`` is first executed.
+
+    It never imports anything itself: it defers to the normal finders for the spec and only decorates
+    that spec's loader. See install() for why the overlay must not pull the target in early.
+    """
+
+    def __init__(self, mod_name, callback):
+        self.mod_name, self.callback, self._busy = mod_name, callback, False
+
+    def find_spec(self, name, path=None, target=None):
+        if name != self.mod_name or self._busy:
+            return None
+        self._busy = True  # our own find_spec re-enters the meta path; don't recurse
+        try:
+            spec = importlib.util.find_spec(name)
+        except Exception:
+            return None
+        finally:
+            self._busy = False
+        if spec is None or spec.loader is None or not hasattr(spec.loader, "exec_module"):
+            return None
+        inner, cb = spec.loader.exec_module, self.callback
+
+        def exec_module(module):
+            inner(module)
+            try:
+                sys.meta_path.remove(self)
+            except ValueError:
+                pass
+            cb()
+
+        spec.loader.exec_module = exec_module  # loader instance is created per-spec, so this is local
+        return spec
+
+
 def install(target, out_dir, max_cases=5):
     """Wrap module:attr to record I/O. Registers an atexit flush. Idempotent.
 
-    Fails FAST at install (server startup) if the target is a native/non-Python callable that a plain
-    Python wrapper cannot safely stand in for — converting the old unpredictable mid-run SIGSEGV (which
-    took the whole server down and lost the run) into a clear, actionable startup error so the Extractor
-    picks a Python-level seam. Override with CAPTURE_WRAP_UNSAFE=1 to force (e.g. when the caller only
-    reads shapes, never the JIT internals)."""
+    If the target module is not imported yet — the normal case, since the overlay's sitecustomize runs
+    during interpreter startup — the wrap is DEFERRED until the application imports it. Importing the
+    target from sitecustomize instead would reorder the whole application's imports, and that is not
+    hypothetical: pulling ``aiter.fused_moe`` in at startup makes FlyDSL's JIT abort the process with
+    ``LLVM ERROR: Do not know how to expand this operator's operand!`` when it later compiles
+    flydsl_moe1_afp4_wfp4_bf16_t32x128x256_w2, while the identical run without the overlay compiles the
+    same kernel fine. An instrumentation hook must not perturb what it observes.
+
+    Fails FAST at install (server startup) on things that need no import — a bad byte budget or persist
+    policy, or a module root that does not exist. The non-Python-callable check necessarily waits for
+    the bind: a plain Python wrapper cannot safely stand in for a native/triton-JIT callable (it
+    SIGSEGVs the server mid-run), so we raise a clear error the moment the target resolves rather than
+    letting the Extractor find out from a corefile. Override with CAPTURE_WRAP_UNSAFE=1 to force."""
     s = _STATE
-    if s["installed"]:
+    if s["installed"] or s.get("bind_pending"):
         return
     mod_name, attr = target.split(":", 1)
-    mod = importlib.import_module(mod_name)
-    # attr may be dotted (e.g. Class.method): resolve the binding owner + leaf, but keep the full
-    # module path + dotted attr in meta so kernel_selection's f"{module}:{attr}" == target check holds.
-    owner = mod
-    for part in attr.split(".")[:-1]:
-        owner = getattr(owner, part)
-    leaf = attr.split(".")[-1]
-    orig = getattr(owner, leaf)
-    if not _wrappable(orig) and os.environ.get("CAPTURE_WRAP_UNSAFE", "0") != "1":
-        raise RuntimeError(
-            f"[capture_shapes] refusing to wrap non-Python callable {target} "
-            f"({type(orig).__module__}.{type(orig).__name__}): a plain-function stand-in for a native/"
-            f"triton-JIT callable SIGSEGVs the server (e.g. mxfp4 matmul_ogs). Hook a Python-level seam "
-            f"(its caller) instead, or set CAPTURE_WRAP_UNSAFE=1 to force.")
+    root = mod_name.split(".")[0]
+    if root not in sys.modules and importlib.util.find_spec(root) is None:
+        raise ModuleNotFoundError(f"[capture_shapes] no module named {root!r} (target {target})")
     out_dir = _process_out_dir(out_dir)
     try:
         byte_budget = parse_byte_budget(os.environ.get("CAPTURE_BYTE_BUDGET", _DEFAULT_BYTE_BUDGET))
@@ -882,8 +1007,7 @@ def install(target, out_dir, max_cases=5):
             f"[capture_shapes] invalid CAPTURE_PERSIST_POLICY={persist_policy!r} "
             f"(expected full|share_large|moe_slim)")
     s.update(target=target, out_dir=out_dir, max_cases=int(max_cases),
-             orig=orig, mod=mod, attr=attr, installed=True,
-             byte_budget=byte_budget, case_byte_limit=case_byte_limit,
+             attr=attr, byte_budget=byte_budget, case_byte_limit=case_byte_limit,
              persist_policy=persist_policy, share_min_bytes=share_min_bytes or (16 << 20),
              shared_tensors={}, shared_bytes_est=0,
              oracle_bytes_est=0, budget_exceeded=False,
@@ -894,13 +1018,43 @@ def install(target, out_dir, max_cases=5):
         s["flush_every"] = 1
     elif os.environ.get("CAPTURE_FLUSH_EVERY"):
         s["flush_every"] = max(1, int(os.environ["CAPTURE_FLUSH_EVERY"]))
+    if mod_name in sys.modules:
+        _bind(mod_name, attr)
+        return
+    s["bind_pending"] = True
+    sys.meta_path.insert(0, _BindOnImport(mod_name, lambda: _bind(mod_name, attr)))
+    sys.stderr.write(
+        f"[capture_shapes] armed {target}; will hook when {mod_name} is imported\n")
+
+
+def _bind(mod_name, attr):
+    """Resolve the target and swap in the wrapper. Runs either inline (module already imported) or
+    from the _BindOnImport shim, i.e. on the application's own import of the module."""
+    s = _STATE
+    if s["installed"]:
+        return
+    mod = importlib.import_module(mod_name)
+    # attr may be dotted (e.g. Class.method): resolve the binding owner + leaf, but keep the full
+    # module path + dotted attr in meta so kernel_selection's f"{module}:{attr}" == target check holds.
+    owner = mod
+    for part in attr.split(".")[:-1]:
+        owner = getattr(owner, part)
+    leaf = attr.split(".")[-1]
+    orig = getattr(owner, leaf)
+    if not _wrappable(orig) and os.environ.get("CAPTURE_WRAP_UNSAFE", "0") != "1":
+        raise RuntimeError(
+            f"[capture_shapes] refusing to wrap non-Python callable {s['target']} "
+            f"({type(orig).__module__}.{type(orig).__name__}): a plain-function stand-in for a native/"
+            f"triton-JIT callable SIGSEGVs the server (e.g. mxfp4 matmul_ogs). Hook a Python-level seam "
+            f"(its caller) instead, or set CAPTURE_WRAP_UNSAFE=1 to force.")
+    s.update(orig=orig, mod=mod, installed=True, bind_pending=False)
     setattr(owner, leaf, _make_wrapper(orig))
     atexit.register(_flush)
     sys.stderr.write(
-        f"[capture_shapes] hooked {target}; recording up to {max_cases} cases -> {out_dir}"
-        f" (byte_budget={byte_budget or 'unlimited'}"
-        f" case_limit={case_byte_limit or 'unlimited'}"
-        f" policy={persist_policy})\n")
+        f"[capture_shapes] hooked {s['target']}; recording up to {s['max_cases']} cases -> {s['out_dir']}"
+        f" (byte_budget={s['byte_budget'] or 'unlimited'}"
+        f" case_limit={s['case_byte_limit'] or 'unlimited'}"
+        f" policy={s['persist_policy']})\n")
 
 
 # Allow configuration purely via env (so a generic overlay sitecustomize can call install()):

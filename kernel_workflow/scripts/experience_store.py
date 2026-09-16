@@ -85,7 +85,7 @@ from kb.attest import RETIRE_THRESHOLD as _RETIRE_THRESHOLD
 from kb.curate import collapse_by_direction, demote_hinted
 from kb.ladder import publish
 from kb.plane import open_plane, read_planes
-from kb.store_local import CHAMPION_METRIC, SAFE_COMPONENT_CHARS
+from kb.store_local import CHAMPION_METRIC, SAFE_COMPONENT_CHARS, KBStoreError
 
 try:
     import yaml
@@ -2261,6 +2261,33 @@ def _store_near_misses(store, cid: str):
                   (other.split(":")))
 
 
+def _alt_views(store, cid: str, alts, cache_dir: str, unusable: list):
+    """Same-direction runners-up, materialized. An unusable one is dropped, not raised.
+
+    Alternates are listed with a `patch_path`, so one that resolves to nothing is worse than an
+    alternate that was never offered -- the next reader cannot tell a missing file from a broken
+    export. Dropping it keeps that guarantee while refusing to let a runner-up's broken manifest
+    cost the caller the primary candidate it is attached to.
+    """
+    out = []
+    for alt in alts:
+        try:
+            bundle = store.materialize(cid, alt, cache_dir)
+        except (KBStoreError, OSError) as e:
+            unusable.append({"session_id": alt.session_id,
+                             "speedup": round(alt.speedup or 0.0, 4),
+                             "reason": str(e)[:200], "as": "alternate"})
+            continue
+        out.append({
+            "session_id": alt.session_id,
+            "patch_path": os.path.join(bundle, "files", "patch.diff"),
+            "speedup": round(alt.speedup or 0.0, 4),
+            "bench_key": str((alt.value.get("metric") or {}).get("bench_key") or ""),
+            "techniques": _techniques(alt.value),
+        })
+    return out
+
+
 def cmd_resolve_remote(a) -> dict:
     """Rank the top-N candidates under one canonical id and mirror their prose, like `resolve`.
 
@@ -2412,11 +2439,29 @@ def cmd_resolve_remote(a) -> dict:
 
     cache_dir = a.cache_dir or os.path.join(os.path.dirname(os.path.abspath(a.refs_dir)), "kb_cache")
     views = []
+    unusable = []
     for c, alt_of in zip(top, alternates):
         meta = _value_as_meta(c.value, gfx)
         metric = meta.get("metric") or {}
         # Only now do artifact bytes move: the ranking above read knowledge documents alone.
-        bundle = store.materialize(cid, c, cache_dir)
+        #
+        # materialize() refuses a session whose knowledge document names an artifact its manifest
+        # does not hold, and that refusal is right -- handing an agent a patch path that resolves
+        # to nothing is worse than a loud failure. But the refusal is about ONE session and this
+        # loop reads a PAGE. Letting it propagate makes a single half-committed upload take down
+        # every other record at the same address, including the ones ranked below it. Drop the
+        # offender, say so in `filtered`, keep reading.
+        # (KBStoreError, OSError): the store plane refuses an uncommitted manifest with the
+        # former, the local plane fails mid-copy on a manifest naming a file that is gone with the
+        # latter. Both are one session being unusable. Neither is broad enough to swallow a
+        # programming error in the loop below.
+        try:
+            bundle = store.materialize(cid, c, cache_dir)
+        except (KBStoreError, OSError) as e:
+            unusable.append({"session_id": c.session_id,
+                             "speedup": round(c.speedup or 0.0, 4),
+                             "reason": str(e)[:200]})
+            continue
         views.append({
             "key": c.session_id,
             "meta": meta,
@@ -2439,20 +2484,21 @@ def cmd_resolve_remote(a) -> dict:
             # Alternates are materialized too. They are same-direction runners-up, so there are few
             # of them, and a candidate listed with a path that resolves to nothing is worse than not
             # listing it: the next reader cannot tell a missing file from a broken export.
-            "alts": [{
-                "session_id": alt.session_id,
-                "patch_path": os.path.join(store.materialize(cid, alt, cache_dir),
-                                           "files", "patch.diff"),
-                "speedup": round(alt.speedup or 0.0, 4),
-                "bench_key": str((alt.value.get("metric") or {}).get("bench_key") or ""),
-                "techniques": _techniques(alt.value),
-            } for alt in alt_of],
+            "alts": _alt_views(store, cid, alt_of, cache_dir, unusable),
             "extra": {"slug": requested_slug, "canonical_id": cid,
                       "session_id": c.session_id, "is_champion": c.is_champion},
         })
 
+    if unusable:
+        stats["unusable_sessions"] = unusable
+    # A page can hold records and still offer nothing, if every record it holds is unusable. That
+    # reads identically to an empty page unless it is named, and the two want opposite fixes.
+    if not views:
+        return dict(base_out, filtered=stats, read_reason="all_candidates_unusable")
+
+    # `len(views)`, not `len(top)`: an unusable candidate was ranked but never offered.
     summary = (
-        f"{len(top)} direction(s) offered from {stats['total']} recorded candidate(s): "
+        f"{len(views)} direction(s) offered from {stats['total']} recorded candidate(s): "
         f"{stats['below_min_speedup']} below {min_speedup:g}x, "
         f"{collapsed} same-direction re-discoveries moved to `alternates`."
         + ({"any_version": f" Served from `{cid}` — the version-agnostic page; nothing was"

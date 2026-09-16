@@ -9,6 +9,7 @@ so what is pinned here is the SELECTION, not the plumbing:
   - the loop: re-writing code the store already holds is a reproduction, not a new entry.
 """
 
+import argparse
 import json
 import os
 import subprocess
@@ -1944,3 +1945,92 @@ def test_the_sync_can_be_narrowed_to_the_kernel_the_read_is_about(tmp_path):
     summary = _sync(root, store, "--kernel-name", "fused_moe_kernel", "--gfx", "gfx950")
     assert summary["entries"] == 1 and summary["skipped"]["filtered"] == 1
     assert len(_sessions(store)) == 1
+
+
+def _resolve_args(store, refs, **over):
+    """The Namespace `resolve-remote` is dispatched with. Spelled out because the case below has to
+    reach past the CLI to substitute one store method."""
+    a = argparse.Namespace(
+        plane="local", store=str(store), scan=25, canonical_id="",
+        kernel_name="fused_moe_kernel", language="triton", gfx="gfx950",
+        producer="geak", gpu="", framework_version="unspecified",
+        top_n=5, refs_dir=str(refs), cache_dir="", min_speedup=1.05,
+        carrier="patch", precision="", include_retired=False)
+    for k, v in over.items():
+        setattr(a, k, v)
+    return a
+
+
+class _BreakOne(object):
+    """A store that ranks everything and can lay out everything but one session.
+
+    That combination is what the live defect looks like and is not reachable by mutating the local
+    store on disk: a session the tree cannot lay out is also one the tree does not list, so it never
+    reaches materialize(). The refusal that bit us comes from `RemoteKBStore.materialize`, which
+    checks the knowledge document's OWN artifact declaration against the manifest the service
+    actually holds — a check with no local counterpart, since a directory cannot promise a file it
+    does not contain.
+    """
+
+    def __init__(self, inner, victim):
+        self._inner, self._victim = inner, victim
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def materialize(self, canonical_id, candidate, destination):
+        sid = getattr(candidate, "session_id", candidate)
+        if sid == self._victim:
+            from kb.store_local import KBStoreError
+            raise KBStoreError("%s declares report.md but %s holds no manifest for this session"
+                               % (sid, canonical_id))
+        return self._inner.materialize(canonical_id, candidate, destination)
+
+
+def test_one_unusable_session_does_not_take_the_whole_page_down(tmp_path):
+    """A record whose knowledge document names an artifact its manifest never received makes
+    materialize() refuse. The refusal is right — a candidate offered with a `patch_path` that
+    resolves to nothing is worse than one never offered.
+
+    But the refusal is about ONE session and the read is about a PAGE, and it was raised from inside
+    the per-candidate loop. `main()`'s never-crash-the-caller handler then turns that into
+    `{"read_reason": "exception: ...", "candidates": []}` and exit 0 — indistinguishable from a page
+    with nothing on it, so the lane cold-starts on a kernel it has experience for. Same shape as the
+    malformed-tuned-entry case above, one plane over.
+
+    Observed live on `fused_moe_kernel:triton:gfx950`: one 2026-08-30 upload that committed
+    patch.diff but not report.md hid eight healthy sessions. The break is seeded on the TOP-ranked
+    record here on purpose — what such a record silently costs is everything ranked below it.
+    """
+    es = _store_module()
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_a", speedup=4.0, direction="tile-retune")
+    stacked(root, "20260101_000000_b", speedup=2.0, direction="vectorize")
+    stacked(root, "20260101_000000_c", speedup=1.5, direction="unroll")
+    store = seed_store(tmp_path, root)
+
+    healthy = es.cmd_resolve_remote(_resolve_args(store, tmp_path / "r0"))
+    assert [round(c["speedup"], 2) for c in healthy["candidates"]] == [4.0, 2.0, 1.5]
+    victim = healthy["candidates"][0]["session_id"]
+
+    real_read_planes = es.read_planes
+    es.read_planes = lambda a, metric: (
+        [(_BreakOne(st, victim), plane) for st, plane in real_read_planes(a, metric)[0]],
+        real_read_planes(a, metric)[1])
+    try:
+        out = es.cmd_resolve_remote(_resolve_args(store, tmp_path / "r1"))
+        dead = es.cmd_resolve_remote(_resolve_args(
+            store, tmp_path / "r2", min_speedup=3.0))       # leaves the broken one alone on the page
+    finally:
+        es.read_planes = real_read_planes
+
+    assert out["read_reason"] == "read"
+    # The two ranked BELOW the break are still offered, and renumbered — not silently short a rank.
+    assert [round(c["speedup"], 2) for c in out["candidates"]] == [2.0, 1.5]
+    assert [c["rank"] for c in out["candidates"]] == [1, 2]
+    assert [u["session_id"] for u in out["filtered"]["unusable_sessions"]] == [victim]
+
+    # Named, not swallowed: "this page is empty" and "everything on this page is broken" read the
+    # same from the outside and want opposite fixes.
+    assert dead["read_reason"] == "all_candidates_unusable" and not dead["candidates"]
+    assert [u["session_id"] for u in dead["filtered"]["unusable_sessions"]] == [victim]

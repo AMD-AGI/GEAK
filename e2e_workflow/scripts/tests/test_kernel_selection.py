@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Regression tests for machine-verified live kernel selection."""
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -284,6 +286,51 @@ class TestSelectionVerdict(unittest.TestCase):
         verdict = ks.verify(TARGET, KERNEL, self.meta(), trace(under_target=False))
         self.assertFalse(verdict["ok"])
         self.assertIn("device_kernel_not_under_target", verdict["failed"])
+        self.assertEqual(verdict["kernels_under_target"], [])
+
+    def test_a_launching_seam_names_what_it_launched(self):
+        verdict = ks.verify(TARGET, KERNEL, self.meta(), trace())
+        self.assertTrue(verdict["ok"])
+        self.assertEqual(
+            verdict["kernels_under_target"],
+            [{"name": f"void vllm::{KERNEL}<bf16>(int)", "launches": 1}])
+        self.assertEqual(verdict["kernels_under_target_omitted"], 0)
+
+    def test_a_misspelled_kernel_is_not_reported_as_a_wrong_seam(self):
+        """The defect that cost 13.6h and seven captures.
+
+        `aiter.tuned_gemm:gemm_a16w16` was the live seam from the first attempt and its marker
+        launched the profiled kernel 48 times, but the declared name had been hand-transcribed
+        `Bias_AS_SAV` for a profile that spells it `Bias_HA_S_SAV`. The verdict said
+        `device_kernel_not_under_target`, which indicts the SEAM, so the extractor descended and
+        re-captured against four other callables -- the one repair that could not work.
+        """
+        declared = "Cijk_Alik_Bljk_BBS_BH_Bias_AS_SAV_UserArgs_MT16x16x1024"
+        ran = "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x1024_MI16x16x1_SN"
+        self.assertFalse(ks.kernel_matches(declared, ran))
+        events = [event for event in trace() if event.get("cat") != "kernel"]
+        events.append({"cat": "kernel", "name": ran, "ph": "X", "ts": 120, "dur": 25,
+                       "args": {"External id": 7}})
+        verdict = ks.verify(TARGET, declared, self.meta(), events)
+        self.assertFalse(verdict["ok"])
+        self.assertIn("device_kernel_name_mismatch", verdict["failed"])
+        self.assertNotIn("device_kernel_not_under_target", verdict["failed"])
+        self.assertIn(ran, [entry["name"] for entry in verdict["kernels_under_target"]])
+
+    def test_what_ran_under_the_seam_is_counted_and_what_is_dropped_is_stated(self):
+        """A truncated list that looked complete would read as 'the declared name is not here'."""
+        events = trace(kernel="k0")
+        for index in range(1, ks.KERNELS_UNDER_TARGET_LIMIT + 5):
+            events.append({"cat": "kernel", "name": f"k{index}", "ph": "X",
+                           "ts": 130 + index, "dur": 1, "args": {"External id": 7}})
+            events.append({"cat": "kernel", "name": f"k{index}", "ph": "X",
+                           "ts": 160 + index, "dur": 1, "args": {"External id": 7}})
+        verdict = ks.verify(TARGET, KERNEL, self.meta(), events)
+        under = verdict["kernels_under_target"]
+        self.assertEqual(len(under), ks.KERNELS_UNDER_TARGET_LIMIT)
+        self.assertEqual(verdict["kernels_under_target_omitted"], 5)
+        # Two launches each beat the single `k0`, so the busiest names are the ones spelled out.
+        self.assertEqual([entry["launches"] for entry in under[:2]], [2, 2])
 
     def test_async_kernel_after_marker_is_linked_by_external_id(self):
         events = [
@@ -634,6 +681,104 @@ class TestSelectionVerdict(unittest.TestCase):
             self.assertEqual(verdict["deeper_live_candidates"], [inner])
             self.assertEqual(
                 sorted(verdict["live_candidate_targets"]), sorted([mid, inner]))
+
+
+class TestTheDeclaredKernelIsCheckedAgainstTheProfile(unittest.TestCase):
+    """A declared kernel is transcribed by hand; the profile is the only place it can be checked.
+
+    The 13.6h gemm run declared `Cijk_..._Bias_AS_SAV_...`, a spelling that appears in no profile
+    artifact -- only in the three files the extractor wrote itself. The profile's own rank-5 row
+    (7.06% of GPU time) spells it `Bias_HA_S_SAV`. Reading that list costs no server and no GPU.
+    """
+
+    PROFILE = {"top_kernels": [
+        {"rank": 1, "device_kernel": "mfma_moe1_silu_mul_afp4_wfp4_bf16_t32x128x256"},
+        {"rank": 5, "device_kernel":
+            "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x1024_MI16x16x1_SN"},
+    ]}
+    TYPO = "Cijk_Alik_Bljk_BBS_BH_Bias_AS_SAV_UserArgs_MT16x16x1024"
+
+    def meta(self):
+        module, attr = TARGET.split(":", 1)
+        return {"module": module, "attr": attr, "total_calls_observed": 7}
+
+    def test_names_are_read_in_rank_order_without_duplicates(self):
+        names = ks.profile_kernel_names(self.PROFILE)
+        self.assertEqual(len(names), 2)
+        self.assertTrue(names[0].startswith("mfma_moe1"))
+        self.assertEqual(ks.profile_kernel_names({"top_kernels": [
+            {"device_kernel": "k", "name": "k", "short_name": "k"}]}), ["k"])
+
+    def test_every_shape_parse_profile_can_hand_back_is_read(self):
+        """parse_profile's topN document has changed shape more than once (a bare row array, rows
+        under `rows`/`kernels`). Reading only one of them yields an EMPTY name list, and an empty
+        list is indistinguishable from "the profiler recorded nothing" -- i.e. it fails open and the
+        pre-capture check silently stops checking."""
+        rows = [{"device_kernel": "k_a"}, {"name": "k_b"}, {"short_name": "k_c"}]
+        for doc in (rows, {"rows": rows}, {"kernels": rows}, {"top_kernels": rows}):
+            self.assertEqual(ks.profile_kernel_names(doc), ["k_a", "k_b", "k_c"])
+
+    def test_unreadable_rows_are_skipped_instead_of_crashing_the_check(self):
+        """A pre-capture check that raises on a stray row costs the whole extraction (the role runs
+        it with `|| exit 1`), and the profile is written by a different tool."""
+        self.assertEqual(ks.profile_kernel_names(
+            ["not-a-row", None, {"device_kernel": "k"}, {"device_kernel": "  "}, {}]), ["k"])
+        self.assertEqual(ks.profile_kernel_names(None), [])
+        self.assertEqual(ks.profile_kernel_names({"top_kernels": []}), [])
+
+    def test_a_profile_with_no_kernels_refuses_the_run_rather_than_passing_the_name(self):
+        """Fail LOUD, not open: with no names to check against, "not found" and "nothing to check"
+        are the same answer, and the second one would certify the typo this check exists to catch."""
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = os.path.join(tmp, "profile_topN.json")
+            with open(empty, "w") as fh:
+                json.dump({"top_kernels": []}, fh)
+            for argv in ([], ["--profile-top-n", empty]):
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as cm:
+                        ks.main(["--target", TARGET, "--device-kernel", KERNEL,
+                                 "--check-device-kernel", *argv])
+                self.assertEqual(cm.exception.code, 2)
+                self.assertIn("--profile-top-n", err.getvalue())
+
+    def test_a_name_the_profiler_never_recorded_is_refused_with_the_list_it_should_come_from(self):
+        verdict = ks.verify(TARGET, self.TYPO, self.meta(), trace(),
+                            profile_kernels=ks.profile_kernel_names(self.PROFILE))
+        self.assertFalse(verdict["ok"])
+        self.assertIn("device_kernel_not_in_profile", verdict["failed"])
+        self.assertIn("Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x1024_MI16x16x1_SN",
+                      verdict["profile_kernel_candidates"])
+
+    def test_a_recorded_name_passes_and_offers_no_candidates(self):
+        verdict = ks.verify(TARGET, KERNEL, self.meta(), trace(), profile_kernels=[
+            f"void vllm::{KERNEL}<bf16>(int)"])
+        self.assertNotIn("device_kernel_not_in_profile", verdict["failed"])
+        self.assertEqual(verdict["profile_kernel_candidates"], [])
+
+    def test_no_profile_leaves_the_check_off_rather_than_failing_every_verdict(self):
+        verdict = ks.verify(TARGET, KERNEL, self.meta(), trace())
+        self.assertTrue(verdict["ok"], verdict)
+        self.assertEqual(verdict["profile_kernel_candidates"], [])
+
+    def test_the_cli_can_refuse_the_name_before_any_capture_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_path = os.path.join(tmp, "profile_topN.json")
+            out_path = os.path.join(tmp, "check.json")
+            with open(profile_path, "w") as fh:
+                json.dump(self.PROFILE, fh)
+            code = ks.main(["--target", TARGET, "--device-kernel", self.TYPO,
+                            "--profile-top-n", profile_path, "--check-device-kernel",
+                            "--out", out_path])
+            self.assertEqual(code, 1)
+            with open(out_path) as fh:
+                report = json.load(fh)
+        self.assertEqual(report["contract"], "device_kernel_in_profile")
+        self.assertEqual(report["failed"], ["device_kernel_not_in_profile"])
+        self.assertEqual(len(report["profile_kernel_candidates"]), 2)
+
+    def test_the_verification_path_still_demands_a_capture_and_a_trace(self):
+        with self.assertRaises(SystemExit):
+            ks.main(["--target", TARGET, "--device-kernel", KERNEL])
 
 
 class TestTheVerdictRefusesMalformedInput(unittest.TestCase):

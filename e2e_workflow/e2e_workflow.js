@@ -666,6 +666,23 @@ const CAPTURE_CASE_BYTE_LIMIT = String(A.capture_case_byte_limit != null ? A.cap
 const CAPTURE_PERSIST_POLICY = String(A.capture_persist_policy != null ? A.capture_persist_policy : 'share_large');
 const CAPTURE_WORKSPACE_BUDGET = String(A.capture_workspace_budget != null ? A.capture_workspace_budget : '32GiB');
 const CAPTURE_STORAGE_ENV = `CAPTURE_BYTE_BUDGET=${CAPTURE_BYTE_BUDGET} CAPTURE_CASE_BYTE_LIMIT=${CAPTURE_CASE_BYTE_LIMIT} CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY}`;
+// ---- PER-HEAD EXTRACTION WALL-CLOCK BUDGET ----
+// A retry COUNT does not bound extraction cost. The real envelope is the product of three limits that
+// were never multiplied out: BASELINE_EXTRACT_RETRIES (3, so 4 invocations) x safeAgent's internal
+// tries (3) x AGENT_TIMEOUT_MS (2h when no global budget is set) = up to 24h on ONE head. And the
+// global ELAPSED clock only exists when time_budget_s is passed, so a budget-less run has no guard at
+// all. In the 20260907 session that envelope was not hypothetical: one gemm head spent 13h34m over 7
+// captures and one moe head 2h45m over 6, and NEITHER ever reached the optimization lane — ~16h that
+// produced no kernel work. The only extraction that did reach it took 63min over 3 attempts.
+//
+// So bound the thing that actually costs: wall-clock per head, spanning every attempt. The default is
+// ~1.9x the one observed success, which still cuts ~12h off that session. A head that exhausts it is
+// NOT silently dropped -- it lands on the SAME failure path as any other failed extraction, so a
+// dominant head is flagged and surfaced rather than quietly skipped.
+const CAPTURE_BUDGET_MS = parseInt(A.capture_budget_s != null ? A.capture_budget_s : 7200, 10) * 1000; // 120min
+// Below one server boot there is no attempt worth starting -- boots measured at 15-30min on this model.
+// Starting one anyway buys a guaranteed-useless invocation and, worse, an overrun past the budget.
+const CAPTURE_MIN_ATTEMPT_MS = parseInt(A.capture_min_attempt_s != null ? A.capture_min_attempt_s : 900, 10) * 1000;
 const TASK = A.task || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
@@ -1213,9 +1230,38 @@ function agentTimeoutFor() {
   return Math.max(120000, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
 }
 
+// A relative stopwatch for one bounded stretch of work. Same construction as the global ELAPSED clock
+// above and for the same reason: rungs armed all at once at ABSOLUTE offsets, never as a self-rearming
+// chain, so a late rung delays only itself instead of compounding into a drifting under-count. Date.now()
+// is unavailable in Workflow scripts, so this is the only way to read elapsed time here.
+// With no setTimeout the budget is unenforceable, and the stopwatch reports Infinity -- every caller
+// then behaves exactly as it did before this existed, rather than aborting work it cannot time.
+function stopwatch(budgetMs) {
+  const armed = typeof setTimeout === 'function' && budgetMs > 0;
+  let elapsed = 0;
+  const timers = [];
+  if (armed) {
+    const step = Math.max(30000, Math.ceil(budgetMs / 240));   // >=30s granularity, <=241 rungs
+    for (let at = step; at <= budgetMs + step; at += step) {
+      const mark = at;
+      const t = setTimeout(() => { if (mark > elapsed) elapsed = mark; }, mark);   // max: stays monotonic
+      if (t && t.unref) t.unref();
+      timers.push(t);
+    }
+  }
+  return {
+    remainingMs: () => (armed ? Math.max(0, budgetMs - elapsed) : Infinity),
+    spentMin: () => Math.round(elapsed / 60000),
+    stop: () => { for (const t of timers) clearTimeout(t); timers.length = 0; },
+  };
+}
+
 function agentBounded(rawPrompt, opts) {
   const prompt = withProcessSafety(rawPrompt);
-  const timeoutMs = agentTimeoutFor();
+  // opts.timeoutCapMs lets a CALLER that owns its own budget cap this attempt below the global hung-guard.
+  // Absent (every existing call site) the cap is Infinity and the timeout is byte-identical to before.
+  const cap = (opts && Number.isFinite(opts.timeoutCapMs)) ? Math.max(60000, opts.timeoutCapMs) : Infinity;
+  const timeoutMs = Math.min(agentTimeoutFor(), cap);
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
   const guard = new Promise((resolve) => {
@@ -1233,6 +1279,13 @@ function agentBounded(rawPrompt, opts) {
 async function safeAgent(prompt, opts, tries = 3) {
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
+    // opts.abortIf lets a caller with its own budget stop RETRYING inside this funnel. Without it the
+    // three internal tries are invisible to every caller, and each one is armed with the full hung-guard
+    // -- which is how a "3 retries" loop turns into a 24h envelope. Absent, nothing changes.
+    if (opts && typeof opts.abortIf === 'function' && opts.abortIf()) {
+      log(`agent[${(opts && opts.label) || '?'}] not retrying (${i}/${tries} used): caller's budget is spent.`);
+      return null;
+    }
     try {
       const r = await agentBounded(prompt, opts);
       if (r) return r;
@@ -1437,7 +1490,9 @@ function kernelSelectionVerified(h, ext) {
   if (!verdict || verdict.contract !== 'kernel_selection')
     return { ok: false, why: 'kernel_selection.py verdict is missing' };
   if (verdict.ok !== true)
-    return { ok: false,
+    // `codes`/`verdict` travel with the failure so the retry can tell "wrong seam" from "right seam,
+    // wrong NAME". Only the first is repaired by descending to another callable.
+    return { ok: false, codes: (verdict.failed || []).slice(), verdict,
       why: `kernel_selection.py failed: ${(verdict.failed || []).join(', ') || 'unknown'}` };
   if (String(verdict.target_callable || '').trim() !== target)
     return { ok: false,
@@ -1541,85 +1596,143 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
     `\`${CAPTURE_STORAGE_ENV}\`. Use kernel_selection.py with --task-dir "$TASK" so the selected oracle is ` +
     `promoted and all capture.pid-* dirs are reclaimed. Unittests for large MoE oracles MUST use ` +
     `h.iter_eager_cases_from_oracle / h.check_correct_multi_lazy.`;
-  let ext = await safeAgent(roleAgent(role, phase, captureIntro, {
-    ...(inputs || {}),
-    CAPTURE_STORAGE_ENV,
-    CAPTURE_BYTE_BUDGET,
-    CAPTURE_CASE_BYTE_LIMIT,
-    CAPTURE_PERSIST_POLICY,
-  }), opts);
-  let tries = 0;
-  const attemptedTargets = [];
-  const complete = (e) => hasFrozenBaseline(e) && kernelSelectionVerified(head, e).ok;
-  while (smokeOk(ext) && !complete(ext) && tries < BASELINE_EXTRACT_RETRIES) {
-    tries++;
-    const selection = kernelSelectionVerified(head, ext);
-    const needBaseline = !hasFrozenBaseline(ext);
-    const priorTarget = String((ext && ext.target_callable) || '').trim();
-    if (priorTarget && !attemptedTargets.includes(priorTarget)) attemptedTargets.push(priorTarget);
-    const selectionCorrective = selection.ok ? '' :
-      ` PRIOR ATTEMPT DID NOT SELECT THE PROFILED GPU KERNEL: ${selection.why}. ` +
-      'Treat KERNEL.live_call_seam as prose only. Merge KERNEL.seam_candidates with any missing inner ' +
-      'launcher found from source/runtime inspection; preserve existing candidate classifications. ' +
-      'BEFORE re-running capture, reclaim prior process-local artifacts: ' +
-      '`python3 "$SKILL_DIR/scripts/capture_shapes.py" --cleanup-task-dir "$TASK" --no-promote` ' +
-      '(issue #429 — never accumulate capture.pid-* oracles across retries). ' +
-      'Install safe markers for every relevant candidate, never native/JIT kernel_entry objects. Run ' +
-      'kernel_selection.py over every process-local capture and all root-call traces with --task-dir "$TASK". ' +
-      'Return its JSON verbatim as selection_validation. Select the deepest live inner_launcher/op_seam across all ' +
-      'calls/ranks; a fused head must select the whole-op op_seam. Rejecting the previous outer wrapper ' +
-      'is not success. Do not return any ATTEMPTED_TARGET_CALLABLES value again.';
-    const baselineCorrective = needBaseline ?
-      ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. You MUST seed baseline_overlay/ from ' +
-      'CURRENT_OVERLAY (the live serving stack = the speedup denominator), declare meta.candidate_bind ' +
-      '(the ONE overlay entry built from kernel_src/), prove both legs differ via h.assert_legs_differ, ' +
-      'then return baseline_frozen:true. An extraction with no frozen baseline is INVALID and will be discarded.' : '';
-    log(`  ${(opts && opts.label) || role}: extraction contract incomplete ` +
-      `(${selection.ok ? 'kernel selected' : selection.why}; ` +
-      `${needBaseline ? 'baseline missing (baseline_overlay/ + meta.candidate_bind)' : 'baseline frozen'}). ` +
-      `RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
-    // Best-effort reclaim before the agent retries (issue #429 storage amplification).
-    if (ext && ext.task_dir) {
-      try {
-        const { execFileSync } = require('child_process');
-        execFileSync('python3', [
-          `${WORKFLOW_DIR}/scripts/capture_shapes.py`,
-          '--cleanup-task-dir', String(ext.task_dir),
-          '--no-promote',
-        ], { stdio: 'pipe', timeout: 120000 });
-        log(`  ${(opts && opts.label) || role}: reclaimed capture artifacts under ${ext.task_dir}`);
-      } catch (cleanupErr) {
-        log(`  ${(opts && opts.label) || role}: capture reclaim skipped (${cleanupErr && cleanupErr.message ? cleanupErr.message : cleanupErr})`);
+  // One budget for this head's WHOLE extraction, armed before the first attempt and spanning every
+  // retry -- including safeAgent's internal ones, which no caller could see before. Capping each
+  // attempt at what is LEFT is the half that matters: a single invocation could otherwise run the
+  // full 2h hung-guard and blow a 2h budget by itself, no matter what the loop below checks.
+  const budget = stopwatch(CAPTURE_BUDGET_MS);
+  const spent = () => budget.remainingMs() < CAPTURE_MIN_ATTEMPT_MS;
+  const bounded = () => ({ ...(opts || {}), timeoutCapMs: budget.remainingMs(), abortIf: spent });
+  try {
+    let ext = await safeAgent(roleAgent(role, phase, captureIntro, {
+      ...(inputs || {}),
+      CAPTURE_STORAGE_ENV,
+      CAPTURE_BYTE_BUDGET,
+      CAPTURE_CASE_BYTE_LIMIT,
+      CAPTURE_PERSIST_POLICY,
+    }), bounded());
+    let tries = 0;
+    let budgetSpent = false;
+    const attemptedTargets = [];
+    const complete = (e) => hasFrozenBaseline(e) && kernelSelectionVerified(head, e).ok;
+    while (smokeOk(ext) && !complete(ext) && tries < BASELINE_EXTRACT_RETRIES) {
+      if (spent()) {
+        // Stop BEFORE paying for an attempt, not after. The result so far still flows into the checks
+        // below, so an extraction that is merely incomplete is reported as incomplete for its own reason
+        // -- the budget only decides that there will be no further attempt to fix it.
+        budgetSpent = true;
+        log(`  ${(opts && opts.label) || role}: capture budget spent (${budget.spentMin()}min of ` +
+          `${Math.round(CAPTURE_BUDGET_MS / 60000)}min over ${tries + 1} attempt(s)) — no further re-extraction. ` +
+          `Raise with args.capture_budget_s if this head is worth more.`);
+        break;
       }
+      tries++;
+      const selection = kernelSelectionVerified(head, ext);
+      const needBaseline = !hasFrozenBaseline(ext);
+      const priorTarget = String((ext && ext.target_callable) || '').trim();
+      // A seam whose marker launched kernels IS live; what failed is the hand-transcribed device_kernel
+      // NAME. Banning that seam (below) would forbid the one correct answer, and "descend deeper" is a
+      // repair for a defect that is not there — a search with no terminating condition. One gemm head
+      // burned 13.6h and seven captures that way, re-hunting a seam that was right on attempt 1.
+      const nameCodes = (selection.codes || []);
+      const nameOnly = !selection.ok &&
+        (nameCodes.includes('device_kernel_name_mismatch') ||
+         nameCodes.includes('device_kernel_not_in_profile')) &&
+        !nameCodes.includes('device_kernel_not_under_target');
+      if (priorTarget && !nameOnly && !attemptedTargets.includes(priorTarget))
+        attemptedTargets.push(priorTarget);
+      const observedNames = (((selection.verdict || {}).kernels_under_target) || [])
+        .map((entry) => `${entry && entry.name} (${entry && entry.launches} launches)`);
+      const profileNames = (((selection.verdict || {}).profile_kernel_candidates) || []).slice(0, 20);
+      const selectionCorrective = selection.ok ? '' : nameOnly ?
+        ` PRIOR ATTEMPT SELECTED A LIVE SEAM BUT DECLARED THE WRONG GPU KERNEL NAME: ${selection.why}. ` +
+        `The seam '${priorTarget}' demonstrably launched GPU work, so DO NOT descend to another callable ` +
+        'and DO NOT re-run capture to hunt a different seam — keep this target_callable. Fix KERNEL.device_kernel ' +
+        'by COPYING a name verbatim from the profiler, never by re-typing or abbreviating it. ' +
+        (observedNames.length ? `Kernels this seam actually launched: ${observedNames.join('; ')}. ` : '') +
+        (profileNames.length ? `Names recorded in PROFILE_TOPN: ${profileNames.join('; ')}. ` : '') +
+        'Then re-run kernel_selection.py with --profile-top-n "$PROFILE_TOPN" and return its JSON verbatim ' +
+        'as selection_validation.' :
+        ` PRIOR ATTEMPT DID NOT SELECT THE PROFILED GPU KERNEL: ${selection.why}. ` +
+        'Treat KERNEL.live_call_seam as prose only. Merge KERNEL.seam_candidates with any missing inner ' +
+        'launcher found from source/runtime inspection; preserve existing candidate classifications. ' +
+        'BEFORE re-running capture, reclaim prior process-local artifacts: ' +
+        '`python3 "$SKILL_DIR/scripts/capture_shapes.py" --cleanup-task-dir "$TASK" --no-promote` ' +
+        '(issue #429 — never accumulate capture.pid-* oracles across retries). ' +
+        'Install safe markers for every relevant candidate, never native/JIT kernel_entry objects. Run ' +
+        'kernel_selection.py over every process-local capture and all root-call traces with --task-dir "$TASK". ' +
+        'Return its JSON verbatim as selection_validation. Select the deepest live inner_launcher/op_seam across all ' +
+        'calls/ranks; a fused head must select the whole-op op_seam. Rejecting the previous outer wrapper ' +
+        'is not success. Do not return any ATTEMPTED_TARGET_CALLABLES value again.';
+      const baselineCorrective = needBaseline ?
+        ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. You MUST seed baseline_overlay/ from ' +
+        'CURRENT_OVERLAY (the live serving stack = the speedup denominator), declare meta.candidate_bind ' +
+        '(the ONE overlay entry built from kernel_src/), prove both legs differ via h.assert_legs_differ, ' +
+        'then return baseline_frozen:true. An extraction with no frozen baseline is INVALID and will be discarded.' : '';
+      log(`  ${(opts && opts.label) || role}: extraction contract incomplete ` +
+        `(${selection.ok ? 'kernel selected' : selection.why}; ` +
+        `${needBaseline ? 'baseline missing (baseline_overlay/ + meta.candidate_bind)' : 'baseline frozen'}). ` +
+        `RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
+      // Best-effort reclaim before the agent retries (issue #429 storage amplification).
+      if (ext && ext.task_dir) {
+        try {
+          const { execFileSync } = require('child_process');
+          execFileSync('python3', [
+            `${WORKFLOW_DIR}/scripts/capture_shapes.py`,
+            '--cleanup-task-dir', String(ext.task_dir),
+            '--no-promote',
+          ], { stdio: 'pipe', timeout: 120000 });
+          log(`  ${(opts && opts.label) || role}: reclaimed capture artifacts under ${ext.task_dir}`);
+        } catch (cleanupErr) {
+          log(`  ${(opts && opts.label) || role}: capture reclaim skipped (${cleanupErr && cleanupErr.message ? cleanupErr.message : cleanupErr})`);
+        }
+      }
+      ext = await safeAgent(
+        roleAgent(role, phase, captureIntro + selectionCorrective + baselineCorrective, {
+          ...(inputs || {}),
+          CAPTURE_STORAGE_ENV,
+          CAPTURE_BYTE_BUDGET,
+          CAPTURE_CASE_BYTE_LIMIT,
+          CAPTURE_PERSIST_POLICY,
+          PRIOR_TARGET_CALLABLE: priorTarget,
+          PRIOR_SELECTION_VALIDATION: (ext && ext.selection_validation) || {},
+          ATTEMPTED_TARGET_CALLABLES: attemptedTargets.slice(),
+        }),
+        bounded());
     }
-    ext = await safeAgent(
-      roleAgent(role, phase, captureIntro + selectionCorrective + baselineCorrective, {
-        ...(inputs || {}),
-        CAPTURE_STORAGE_ENV,
-        CAPTURE_BYTE_BUDGET,
-        CAPTURE_CASE_BYTE_LIMIT,
-        CAPTURE_PERSIST_POLICY,
-        PRIOR_TARGET_CALLABLE: priorTarget,
-        PRIOR_SELECTION_VALIDATION: (ext && ext.selection_validation) || {},
-        ATTEMPTED_TARGET_CALLABLES: attemptedTargets.slice(),
-      }),
-      opts);
+    // Why the attempts stopped. Reported on every failure below so a budget cut is never mistaken for
+    // a head that is genuinely unextractable -- the first is raised with a knob, the second is not.
+    const why = budgetSpent
+      ? `the ${Math.round(CAPTURE_BUDGET_MS / 60000)}min capture budget (args.capture_budget_s) was spent ` +
+        `after ${tries + 1} attempt(s)`
+      : `${BASELINE_EXTRACT_RETRIES} re-extractions`;
+    const finalSelection = kernelSelectionVerified(head, ext);
+    if (smokeOk(ext) && !finalSelection.ok) {
+      log(`  ${(opts && opts.label) || role}: kernel selection still unverified after ` +
+        `${why} — ABORTING (${finalSelection.why}).`);
+      return { ...ext, smoke: 'fail', unittest_smoke: 'fail', selection_failed: true,
+        capture_budget_spent: budgetSpent,
+        notes: `kernel selection failed after ${why}: ${finalSelection.why} — ${ext.notes || ''}` };
+    }
+    if (smokeOk(ext) && !hasFrozenBaseline(ext)) {
+      log(`  ${(opts && opts.label) || role}: STILL no frozen baseline after ${why} ` +
+        `— ABORTING this extraction (refusing a fake speedup vs the candidate's own scaffold).`);
+      return { ...ext, smoke: 'fail', unittest_smoke: 'fail', capture_budget_spent: budgetSpent,
+        notes: `no frozen baseline after ${why} ` +
+          `(baseline_overlay/ + meta.candidate_bind required as the speedup denominator) — ${ext.notes || ''}` };
+    }
+    // A head that never smoke-passed at all, cut by the budget, would otherwise return null/unmarked and
+    // read downstream as an ordinary extraction failure. Say which it was.
+    if (budgetSpent && !smokeOk(ext)) {
+      return { ...(ext || {}), smoke: 'fail', unittest_smoke: 'fail', capture_budget_spent: true,
+        notes: `extraction never smoke-passed and ${why} — ${(ext && ext.notes) || ''}` };
+    }
+    return ext;
+  } finally {
+    // Timers are unref'd, so a leaked stopwatch cannot hold the process open — but it would keep
+    // firing for a head that already finished, and there is one per extraction.
+    budget.stop();
   }
-  const finalSelection = kernelSelectionVerified(head, ext);
-  if (smokeOk(ext) && !finalSelection.ok) {
-    log(`  ${(opts && opts.label) || role}: kernel selection still unverified after ` +
-      `${BASELINE_EXTRACT_RETRIES} re-extractions — ABORTING (${finalSelection.why}).`);
-    return { ...ext, smoke: 'fail', unittest_smoke: 'fail', selection_failed: true,
-      notes: `kernel selection failed: ${finalSelection.why} — ${ext.notes || ''}` };
-  }
-  if (smokeOk(ext) && !hasFrozenBaseline(ext)) {
-    log(`  ${(opts && opts.label) || role}: STILL no frozen baseline after ${BASELINE_EXTRACT_RETRIES} ` +
-      `re-extractions — ABORTING this extraction (refusing a fake speedup vs the candidate's own scaffold).`);
-    return { ...ext, smoke: 'fail', unittest_smoke: 'fail',
-      notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
-        `(baseline_overlay/ + meta.candidate_bind required as the speedup denominator) — ${ext.notes || ''}` };
-  }
-  return ext;
 }
 
 // abDone == the integrator measured BOTH legs (ref + cand) and emitted a real
@@ -3209,6 +3322,31 @@ const history = ST.history || { insights: [], ledger: [], milestones: [], bottle
 // never decomposed into a standalone dense GEMM — so dense-GEMM synth is off for it.
 function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
 
+// Every kernel_extractor invocation needs the same evaluation context; only the head and its GPU
+// differ. PROFILE_TOPN is the load-bearing one: kernel_selection.py --check-device-kernel reads it
+// to reject a mis-declared kernel name BEFORE a capture is paid for, so a call site that forgot it
+// silently lost that check. Assembled once here instead of retyped at each site.
+function extractorInputs(kernel, gpuId, extra) {
+  return {
+    EVAL_DIR, MODEL_PATH, GPU_ID: gpuId, WORKLOAD, KERNEL: kernel,
+    CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+    ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+    PROFILE_TOPN: profile ? profile.profile_topN_json : '',
+    ...(extra || {}),
+  };
+}
+
+// The op track adds dense-GEMM synth plus the shape regimes. The unittest MUST span BOTH: steady-state
+// serving is decode/TPOT-bound, so a head GEMM tuned only on the GPU-time-dominant prefill M regresses
+// decode and loses e2e. The decode M (= running batch ≈ conc) is passed explicitly so it is never
+// dropped, plus a per-step M=1. See kernel_extractor.md "Shapes must span BOTH regimes".
+const extractOpInputs = (kernel, gpuId) => extractorInputs(kernel, gpuId, {
+  GEMM_SYNTH: gemmSynthFor(kernel),
+  REQUIRE_DECODE_BUCKET: true,
+  DECODE_M_BUCKETS: [1, CONC],
+  PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
+});
+
 // ===========================================================================
 // PHASE: TuningSkillset — the VENDORED tuning skillset, run WHOLE and STANDALONE, BEFORE HeadKernel.
 //
@@ -3676,13 +3814,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     const GLOBAL_KB = `${EVAL_DIR}/deep_head/GLOBAL_KB.md`;
     const prepHead = async (h) => {
       const ext = await extractWithBaseline(
-        'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
-          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
-          ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-          CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-          REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
-          PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
-        },
+        'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.',
+        extractOpInputs(h, GPU_LIST[0]),
         { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
       if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
@@ -4042,13 +4175,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       return ISO.with(1, async (g) => {
         const gpu = g[0];
         const ext = await extractWithBaseline(
-          'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
-            EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
-            ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-            CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-            REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
-            PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
-          },
+          'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.',
+          extractOpInputs(h, gpu),
           { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
         if (!ext || ext.smoke !== 'pass' || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
         const bake = await safeAgent(
@@ -4244,18 +4372,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // fused/monolithic head to op_kind=moe with GEMM_SYNTH off (gemmSynthFor) so it is extracted as the
     // fused op bound at its live seam — never decomposed into a standalone dense GEMM. Nothing is skipped.
     const ext = await extractWithBaseline(
-      'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
-        ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
-        // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
-        // Pass the decode M explicitly (= running batch ≈ conc) so it is never dropped, plus a
-        // per-step M=1. See kernel_extractor.md "Shapes must span BOTH regimes".
-        REQUIRE_DECODE_BUCKET: true,
-        DECODE_M_BUCKETS: [1, CONC],
-        PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
-      },
+      'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.',
+      extractOpInputs(h, h.gpu_id),
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
     const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
     if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
@@ -4570,11 +4688,8 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   // once (no timing conflict) and accepted overlays carry forward in order.
   const optimized = await parallel(cands.map((c) => async () => {
     const ext = await extractWithBaseline(
-      'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
-        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-      },
+      'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.',
+      extractorInputs(c, c.gpu_id),
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
     if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
       return { c, skip: true, reason: `extraction failed/non-editable (${ext ? ext.notes || ext.unittest_smoke : 'none'})` };

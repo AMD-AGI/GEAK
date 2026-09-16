@@ -182,6 +182,43 @@ def kernel_matches(expected, observed):
     return want_args.startswith(got_args) or got_args.startswith(want_args)
 
 
+def profile_kernel_names(doc):
+    """Every kernel name the profiler itself recorded, from a ``parse_profile`` topN document.
+
+    Read in rank order and de-duplicated, so the nearest-candidates report leads with the rows that
+    own the most GPU time -- which is what a declared name was meant to be copied from.
+    """
+    rows = []
+    if isinstance(doc, dict):
+        rows = doc.get("top_kernels") or doc.get("rows") or doc.get("kernels") or []
+    elif isinstance(doc, list):
+        rows = doc
+    names = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for field in ("device_kernel", "name", "short_name"):
+            value = str(row.get(field) or "").strip()
+            if value and value not in names:
+                names.append(value)
+    return names
+
+
+def declared_kernel_in_profile(device_kernel, profile_names):
+    """``(found, candidates)`` for a declared kernel against the profiler's own names.
+
+    A name that appears nowhere in the profile is a transcription defect, and it is cheaper to say so
+    from the profile alone than to discover it from a capture: this check needs no server, no trace
+    and no GPU. ``candidates`` is the profile's list, offered verbatim so the caller can copy from it
+    rather than retype it.
+    """
+    names = list(profile_names or [])
+    if not names:
+        return True, []
+    found = any(kernel_matches(device_kernel, name) for name in names)
+    return found, ([] if found else names)
+
+
 def _device_projection(event):
     """True for the GPU-timeline copy of a host annotation (``gpu_user_annotation``).
 
@@ -276,6 +313,12 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel):
         if corr is not None:
             related_correlations.add(corr)
     matched = []
+    # Every kernel the marker demonstrably launched, whether or not it is the one that was declared.
+    # `matched` alone cannot tell "the seam is wrong" from "the seam is right and the declared NAME is
+    # wrong", and only the first is fixable by descending. One run spent 13.6h and seven captures
+    # re-hunting a seam that was correct from the first attempt because the declared kernel was a
+    # hand-transcribed `Cijk_..._Bias_AS_SAV_...` for a profile that spells it `Bias_HA_S_SAV`.
+    launched = {}
     for event in trace_events or []:
         if not isinstance(event, dict) or event.get("cat") != "kernel":
             continue
@@ -284,8 +327,12 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel):
         corr = args.get("correlation")
         linked = (ext is not None and ext in related_external_ids) or (
             corr is not None and corr in related_correlations)
-        if linked and kernel_matches(device_kernel, event.get("name")):
-            matched.append(str(event.get("name") or ""))
+        if not linked:
+            continue
+        name = str(event.get("name") or "")
+        launched[name] = launched.get(name, 0) + 1
+        if kernel_matches(device_kernel, name):
+            matched.append(name)
     return {
         "target": target_callable,
         "marker": marker,
@@ -294,7 +341,26 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel):
         "related_external_ids": related_external_ids,
         "related_correlations": related_correlations,
         "matched": matched,
+        "launched": launched,
     }
+
+
+# How many distinct launched kernel names the verdict spells out. A seam that really is the op
+# launches a handful; an outer wrapper can cover hundreds, and the point of the list is to be read.
+# Whatever is dropped is COUNTED in `kernels_under_target_omitted` -- a truncated list that looked
+# complete would answer "the declared name is not among these" when it might have been.
+KERNELS_UNDER_TARGET_LIMIT = 20
+
+
+def _kernels_under_target(launched):
+    """``launched`` name->count as a descending, reportable list plus the number omitted."""
+    ordered = sorted(
+        (launched or {}).items(), key=lambda item: (-item[1], item[0]))
+    shown = ordered[:KERNELS_UNDER_TARGET_LIMIT]
+    return (
+        [{"name": name, "launches": count} for name, count in shown],
+        len(ordered) - len(shown),
+    )
 
 
 def _is_nested(inner_spans, outer_spans):
@@ -310,7 +376,8 @@ def _is_nested(inner_spans, outer_spans):
     return False
 
 
-def verify(target_callable, device_kernel, capture_meta, trace_events, candidate_targets=None):
+def verify(target_callable, device_kernel, capture_meta, trace_events, candidate_targets=None,
+           profile_kernels=None):
     target_callable = str(target_callable or "").strip()
     device_kernel = str(device_kernel or "").strip()
     failed = []
@@ -319,6 +386,9 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
         failed.append("invalid_target_callable")
     if not device_kernel:
         failed.append("missing_device_kernel")
+    in_profile, profile_candidates = declared_kernel_in_profile(device_kernel, profile_kernels)
+    if not in_profile:
+        failed.append("device_kernel_not_in_profile")
 
     meta_target = ""
     observed_calls = 0
@@ -354,6 +424,7 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
     selected_evidence = evidence.get(target_callable) or {
         "marker": MARKER_PREFIX + target_callable, "spans": [], "marker_calls": 0,
         "related_external_ids": set(), "related_correlations": set(), "matched": [],
+        "launched": {},
     }
     marker = selected_evidence["marker"]
     spans = selected_evidence["spans"]
@@ -362,8 +433,14 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
 
     related_external_ids = selected_evidence["related_external_ids"]
     matched = selected_evidence["matched"]
+    under_target, omitted_under_target = _kernels_under_target(selected_evidence.get("launched"))
     if not matched:
-        failed.append("device_kernel_not_under_target")
+        # Both are failures and both fail closed -- the split only says WHICH thing to fix. Descending
+        # to another callable is the answer to exactly one of them; against the other it is a fix for a
+        # defect that is not there, and the search it starts has no terminating condition.
+        failed.append(
+            "device_kernel_name_mismatch" if under_target
+            else "device_kernel_not_under_target")
     deeper = [
         candidate for candidate, candidate_evidence in evidence.items()
         if candidate != target_callable and candidate_evidence["matched"]
@@ -396,6 +473,9 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
         "target_marker_calls": selected_evidence["marker_calls"],
         "matched_kernel_calls": len(matched),
         "matched_kernel_names": sorted(set(matched)),
+        "kernels_under_target": under_target,
+        "kernels_under_target_omitted": omitted_under_target,
+        "profile_kernel_candidates": profile_candidates,
         "correlated_external_ids": len(related_external_ids),
         "correlated_launch_correlations": len(selected_evidence.get("related_correlations") or ()),
         "candidate_targets_tested": installed_candidates,
@@ -427,10 +507,15 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True, help="exact module:attr selected seam")
     parser.add_argument("--device-kernel", required=True, help="GPU kernel selected from profile")
-    parser.add_argument("--capture-meta", required=True, nargs="+",
+    parser.add_argument("--capture-meta", nargs="+", default=[],
                         help="one or more process-local capture_shapes meta.json files")
-    parser.add_argument("--torch-trace", required=True, nargs="+",
+    parser.add_argument("--torch-trace", nargs="+", default=[],
                         help="one or more process-local capture traces (.json or .json.gz)")
+    parser.add_argument("--profile-top-n", default="",
+                        help="parse_profile topN JSON; --device-kernel must name a kernel it recorded")
+    parser.add_argument("--check-device-kernel", action="store_true",
+                        help="validate --device-kernel against --profile-top-n and exit, before "
+                             "any capture is run; needs no trace, no server and no GPU")
     parser.add_argument("--candidate-target", action="append", default=[],
                         help="exact module:attr candidate marked in the same trace; repeat for all candidates")
     parser.add_argument("--out", default="", help="optional verdict JSON path")
@@ -439,6 +524,35 @@ def main(argv=None):
     parser.add_argument("--no-reclaim-captures", action="store_true",
                         help="skip promote/reclaim of process-local capture artifacts")
     args = parser.parse_args(argv)
+
+    profile_kernels = []
+    if args.profile_top_n:
+        with open(args.profile_top_n) as fh:
+            profile_kernels = profile_kernel_names(json.load(fh))
+
+    if args.check_device_kernel:
+        if not profile_kernels:
+            parser.error("--check-device-kernel needs --profile-top-n with recorded kernels")
+        found, candidates = declared_kernel_in_profile(args.device_kernel, profile_kernels)
+        report = {
+            "contract": "device_kernel_in_profile",
+            "ok": found,
+            "device_kernel": args.device_kernel,
+            "profile_top_n": args.profile_top_n,
+            "profile_kernel_candidates": candidates,
+            "failed": [] if found else ["device_kernel_not_in_profile"],
+        }
+        payload = json.dumps(report, indent=2)
+        if args.out:
+            with open(args.out, "w") as fh:
+                fh.write(payload + "\n")
+        print(payload)
+        return 0 if found else 1
+
+    # Optional only for --check-device-kernel above. The verification path still requires both, and
+    # says so rather than certifying a seam from an empty trace.
+    if not args.capture_meta or not args.torch_trace:
+        parser.error("--capture-meta and --torch-trace are required unless --check-device-kernel")
 
     trace_paths = list(args.torch_trace)
     attempts = []
@@ -455,7 +569,8 @@ def main(argv=None):
             ]
         if not matching_traces:
             verdict = verify(
-                args.target, args.device_kernel, meta, [], args.candidate_target)
+                args.target, args.device_kernel, meta, [], args.candidate_target,
+                profile_kernels)
             verdict["failed"].append("capture_process_trace_missing")
             verdict["ok"] = False
             verdict["deepest_verified"] = False
@@ -465,7 +580,8 @@ def main(argv=None):
             meta_path,
             matching_traces,
             verify(args.target, args.device_kernel, meta,
-                   merge_process_traces(matching_traces), args.candidate_target),
+                   merge_process_traces(matching_traces), args.candidate_target,
+                   profile_kernels),
         ))
     # The strongest single process seeds the verdict shape, but every field that survives below is
     # recomputed across ALL attempts. Only the meta path stays process-specific, so it is named for
@@ -517,6 +633,18 @@ def main(argv=None):
     verdict["matched_kernel_names"] = sorted({
         name for item in all_verdicts for name in item["matched_kernel_names"]
     })
+    # Merge what each rank reported. Every rank already truncated at the limit, so a name dropped by
+    # all of them stays dropped: the omitted count is a LOWER bound on distinct names not spelled out,
+    # which is why it is summed rather than recomputed from the merged list alone.
+    merged_under_target = {}
+    for item in all_verdicts:
+        for entry in item.get("kernels_under_target") or ():
+            name = str(entry.get("name") or "")
+            merged_under_target[name] = (
+                merged_under_target.get(name, 0) + int(entry.get("launches") or 0))
+    verdict["kernels_under_target"], dropped_on_merge = _kernels_under_target(merged_under_target)
+    verdict["kernels_under_target_omitted"] = dropped_on_merge + sum(
+        int(item.get("kernels_under_target_omitted") or 0) for item in all_verdicts)
     verdict["process_verdicts"] = [
         {
             "capture_meta_file": meta_path,

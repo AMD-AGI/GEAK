@@ -38,13 +38,16 @@ It exists to close two systematic "isolated win / e2e loss" holes that a naive p
       form (observed-vs-ceiling) available to any downstream e2e comparison; an observed delta far above
       the ceiling is box drift / measurement error, not the kernel.
 """
+import importlib.util
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -548,11 +551,44 @@ def to_device_like(ref, dev):
     return ref.to(dev) if hasattr(ref, "to") else ref
 
 
+def apply_captured_attrs(t, attrs):
+    """Re-attach the loader-set attributes ``capture_shapes._tensor_attrs`` recorded.
+
+    MUST run AFTER any ``.to(device)``: ``.to()`` returns a fresh tensor with an empty ``__dict__``,
+    so attributes applied before the move are silently dropped — exactly how a replayed MoE oracle
+    loses ``w1.is_shuffled`` and falls into a different dispatch branch than deployment.
+    """
+    for key, value in (attrs or {}).items():
+        try:
+            setattr(t, key, value)
+        except (AttributeError, RuntimeError, TypeError):
+            pass   # tensor subclasses may refuse arbitrary attributes; a missing label beats a crash
+    return t
+
+
+def _to_device(t, device):
+    """``t.to(device)`` with a byte-view fallback for sub-byte dtypes.
+
+    Reverse of capture_shapes._to_cpu_clone: ROCm torch 2.9 has no ``copy_kernel`` for
+    ``float4_e2m1fn_x2``, so rehydrating an MXFP4 oracle onto the GPU raises. Same storage,
+    same bits, through a ``uint8`` view.
+    """
+    try:
+        return t.to(device)
+    except (NotImplementedError, RuntimeError) as exc:
+        try:
+            import torch
+            return t.view(torch.uint8).to(device).view(t.dtype)
+        except Exception:
+            raise exc
+
+
 def reconstruct_captured(obj, device="cpu"):
     """Inverse of capture_shapes._snapshot (shared refs must already be resolved)."""
     if isinstance(obj, dict) and obj.get("__tensor__"):
         t = obj["data"]
-        return t.to(device) if hasattr(t, "to") else t
+        t = _to_device(t, device) if hasattr(t, "to") else t
+        return apply_captured_attrs(t, obj.get("attrs"))
     if isinstance(obj, dict) and set(obj.keys()) == {"__repr__"}:
         return obj["__repr__"]
     if isinstance(obj, dict):
@@ -560,6 +596,54 @@ def reconstruct_captured(obj, device="cpu"):
     if isinstance(obj, (list, tuple)):
         return type(obj)(reconstruct_captured(v, device) for v in obj)
     return obj
+
+
+def apply_declared_attrs(args, meta):
+    """Apply ``meta.live_tensor_attrs`` = {operand: {attr: value}} to a rehydrated ``args`` bundle.
+
+    The RETROFIT path for an oracle captured before ``capture_shapes`` recorded ``attrs``: the blob
+    carries the loader's preshuffled BYTES with its FLAG stripped, unrecoverable from the file, so the
+    declaration is the only repair short of recapturing. A capture that HAS ``attrs`` needs nothing —
+    ``reconstruct_captured`` replays those, and an explicit declaration overrides them.
+
+    Operands are addressed by kwarg name, or ``"pos[<i>]"`` for a positional, in any of the bundle
+    shapes in use: the ``{"pos", "kw"}`` split, a flat kwargs mapping (``fn(**args)``, which is what
+    ``iter_eager_cases_from_oracle`` yields), or a bare positional sequence.
+
+    RAISES on a declaration that matches no operand. The per-task helper this replaces returned early
+    on an empty spec, so a typo'd or stale name read exactly like "nothing to restore" and the leg
+    went on quietly measuring the wrong backend — the failure this mechanism exists to prevent.
+    """
+    spec = (meta or {}).get("live_tensor_attrs") or {}
+    if not spec:
+        return args
+    if isinstance(args, dict) and ("pos" in args or "kw" in args):
+        pos, kw = list(args.get("pos") or ()), (args.get("kw") or {})
+    elif isinstance(args, dict):
+        pos, kw = [], args
+    elif isinstance(args, (list, tuple)):
+        pos, kw = list(args), {}
+    else:
+        pos, kw = [], {}
+    missing = []
+    for name, attrs in spec.items():
+        m = re.match(r"^pos\[(\d+)\]$", str(name))
+        if m:
+            i = int(m.group(1))
+            target = pos[i] if i < len(pos) else None
+        else:
+            target = kw.get(name)
+        if target is None or not hasattr(target, "shape"):
+            missing.append(name)
+            continue
+        apply_captured_attrs(target, attrs)
+    if missing:
+        raise HarnessIncompleteError(
+            "meta.live_tensor_attrs declares %s, which %s not a tensor operand of this call. The "
+            "declaration exists to restore a dispatch-steering attribute the capture dropped; a name "
+            "that does not land restores nothing and the leg silently runs the wrong backend."
+            % (", ".join(repr(x) for x in missing), "is" if len(missing) == 1 else "are"))
+    return args
 
 
 def load_reference_io(path, map_location="cpu"):
@@ -588,8 +672,12 @@ def resolve_oracle_shared(obj, shared):
     return obj
 
 
-def iter_eager_cases_from_oracle(path, device="cpu"):
-    """Yield ``{args, ref, sig, regime}`` one record at a time (memory-friendly for multi-GiB MoE)."""
+def iter_eager_cases_from_oracle(path, device="cpu", meta=None):
+    """Yield ``{args, ref, sig, regime}`` one record at a time (memory-friendly for multi-GiB MoE).
+
+    Pass ``meta`` when the task declares ``live_tensor_attrs``, else the correctness cases miss the
+    dispatch flag the timing legs were retrofitted with and the two gates grade different backends.
+    """
     blob = load_reference_io(path, map_location="cpu")
     shared = blob.get("shared") or {}
     for record in blob.get("records") or []:
@@ -605,16 +693,16 @@ def iter_eager_cases_from_oracle(path, device="cpu"):
             for name, value in zip(names, args_pos):
                 args.setdefault(name, value)
         yield {
-            "args": args,
+            "args": apply_declared_attrs(args, meta),
             "ref": ref,
             "sig": record.get("sig", ""),
             "regime": record.get("regime", ""),
         }
 
 
-def eager_cases_from_oracle(path, device="cpu"):
+def eager_cases_from_oracle(path, device="cpu", meta=None):
     """Materialize all eager cases; prefer ``iter_eager_cases_from_oracle`` for large oracles."""
-    return list(iter_eager_cases_from_oracle(path, device=device))
+    return list(iter_eager_cases_from_oracle(path, device=device, meta=meta))
 
 
 def check_correct_multi_lazy(call, case_iter, tol, max_keep_live=2):
@@ -819,7 +907,7 @@ def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3)
 # --------------------------------------------------------------------------- (b) random-value parity vs live baseline
 def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
                              draws=3, warmup=10, repeats=50, inner=1, graph=False, seed=0,
-                             baseline_outputs=None):
+                             baseline_outputs=None, noise_floor=None, noise_margin=2.0):
     """Validate the candidate against the LIVE frozen baseline on MANY RANDOM INPUT VALUE DRAWS at the
     SAME online-aligned shapes (NOT random shapes — dims are fixed per `sig`, only values vary). The
     frozen oracle (`reference_io.pt`) pins ONE recorded input+golden; this catches value-dependent bugs
@@ -840,6 +928,10 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
         `"<sig>|<draw>"`. Same seed => same inputs, so the two legs never have to be co-resident. When
         it is given, `baseline_call` is ignored and `speedup` is None here (timing comes from
         `measure_legs`).
+    `noise_floor` (from `baseline_noise_floor`) = per-key error the BASELINE shows against ITSELF at the
+        same seed. A case that misses `tol` but stays within `noise_margin` x that floor is passed and
+        labelled — the deviation is the op's own launch-to-launch reduction order, not the candidate's.
+        Absent (None) the gate is exactly as strict as before.
     `baseline_call(args) -> out` is the LEGACY in-process form, kept for op_bench / single-process tasks.
         `current_call(args) -> out` invokes the candidate in kernel_src/.
     `shapes` is a list of {"sig": <label>, "make_inputs": callable(rng) -> args}. `make_inputs` builds a
@@ -878,6 +970,13 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
                                  "speedup": None, "note": f"value-parity raised: {e!r}"})
                 continue
             ok, err = correct(cand_out, base_snap, tol)
+            note = "value-parity vs live baseline (correctness gates; speedup reports)"
+            floor = (noise_floor or {}).get(f"{sig}|{i}")
+            if (not ok and floor is not None and math.isfinite(err)
+                    and math.isfinite(floor) and err <= floor * noise_margin):
+                ok = True
+                note = (f"within the baseline's own run-to-run spread "
+                        f"(err {err:.5g} <= {noise_margin}x floor {floor:.5g})")
             all_ok = all_ok and ok
             if baseline_outputs is not None:
                 speedup = None                             # timing belongs to measure_legs, not here
@@ -888,7 +987,8 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
             per_case.append({"case": f"random[{i}]:{sig}", "correct": ok,
                              "max_rel_err": round(err, 5) if math.isfinite(err) else None,
                              "speedup": round(speedup, 3) if speedup else None,
-                             "note": "value-parity vs live baseline (correctness gates; speedup reports)"})
+                             "noise_floor": round(floor, 5) if floor is not None and math.isfinite(floor) else None,
+                             "note": note})
     return all_ok, per_case
 
 
@@ -1140,7 +1240,8 @@ UT_HARNESS_INCOMPLETE_SENTINEL = "UT_HARNESS_INCOMPLETE"
 # deployment fact `deployment_graph_mode(regime)` (regime.cuda_graph, from the launch flags), and a
 # graph-deploy kernel that supplies no >=2-shape replay bundle FAILS CLOSED instead of silently passing.
 def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
-                    baseline_call=None, baseline_outputs=None, replay=None, draws=3):
+                    baseline_call=None, baseline_outputs=None, replay=None, draws=3,
+                    noise_floor=None):
     """The SINGLE correctness entrypoint every generated unittest must call. Runs, in order:
       1. eager multi-case vs oracle (`check_correct_multi`) — also the output-independence check;
       2. random-value parity vs the frozen live baseline (`check_random_vs_baseline`);
@@ -1169,7 +1270,7 @@ def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
                          "leg via baseline_random_outputs) or a legacy in-process baseline_call")
     r_ok, perr = check_random_vs_baseline(baseline_call, current_call, random_shapes, tol,
                                           draws=draws, graph=deployment_graph_mode(regime),
-                                          baseline_outputs=baseline_outputs)
+                                          baseline_outputs=baseline_outputs, noise_floor=noise_floor)
     report["random"] = perr
     ok = ok and r_ok
 
@@ -1374,6 +1475,109 @@ def assert_legs_differ(task_dir, base, cand, meta, timeout=600):
     return bi, ci
 
 
+def _kernel_matcher():
+    """``kernel_matches`` from the vendored ``kernel_selection.py``, or None when it is absent.
+
+    Deliberately NOT re-implemented: ``canonical_kernel_name`` must stay identical to
+    ``canonicalDeviceKernel`` in e2e_workflow.js, and a second copy is a second thing to drift.
+    """
+    name = "kernel_selection"
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name + ".py")
+    try:
+        if name not in sys.modules:
+            if not os.path.exists(path):
+                return None
+            spec = importlib.util.spec_from_file_location(name, path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)   # register only once it imported, never a half-built module
+            sys.modules[name] = mod
+        return getattr(sys.modules[name], "kernel_matches")
+    except Exception:
+        return None
+
+
+def observed_device_kernels(call, cases, warmup=2):
+    """GPU kernel names one call of each case actually launches, read off a one-shot profile.
+
+    The oracle records the op's INPUTS, never the process configuration that steers backend dispatch
+    (tuned-config env, backend enables, loader-set weight attributes) — so a task can name itself
+    after one kernel and, on replay, run a different one. This makes that divergence observable.
+    """
+    torch = _torch()
+    from torch.profiler import ProfilerActivity, profile
+    seen = {}
+    for case in cases:
+        for _ in range(max(0, warmup)):
+            call(case)
+        sync(torch)
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            call(case)
+            sync(torch)
+        names = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "trace.json")
+            prof.export_chrome_trace(path)
+            with open(path) as fh:
+                doc = json.load(fh)
+        for event in (doc.get("traceEvents") if isinstance(doc, dict) else doc) or []:
+            if isinstance(event, dict) and str(event.get("cat") or "") == "kernel":
+                name = str(event.get("name") or "")
+                if name and name not in names:
+                    names.append(name)
+        seen[str(case.get("sig") or len(seen))] = names
+    return seen
+
+
+def assert_baseline_dispatch(task_dir, base, meta, timeout=600):
+    """Refuse to measure unless the BASELINE leg launches the kernel this task is named after.
+
+    When it does not — the replayed oracle lost a loader-set dispatch label, the capture-time env is
+    not reproduced — every downstream number is about a kernel production never ran, and correctness
+    cannot catch it: the golden was frozen from that same wrong baseline, so it agrees with itself.
+
+    Raises ``HarnessIncompleteError`` (UT-GENERATION defect, exit 3) rather than returning False, so a
+    mismatch reads as "regenerate the UT", never "reject the kernel". Returns ``checked: False`` — never
+    a verdict — when the evidence cannot be gathered at all (no kernel names in the profile, or the
+    dispatch leg does not run: task dir vendored before the mode, no torch.profiler).
+    """
+    want = str((meta or {}).get("device_kernel") or "").strip()
+    matches = _kernel_matcher()
+    if not want or matches is None:
+        return {"checked": False, "why": "no device_kernel in meta" if not want
+                else "kernel_selection.py not vendored next to harness_lib.py"}
+    try:
+        observed = _run_leg(os.path.abspath(task_dir), base, "dispatch", timeout=timeout)
+    except (RuntimeError, subprocess.TimeoutExpired, OSError) as exc:
+        # A leg that will not RUN is not a leg that ran the wrong kernel — degrade rather than block
+        # an otherwise fine measurement.
+        return {"checked": False, "why": f"dispatch leg did not run: {str(exc)[:300]}",
+                "device_kernel": want}
+    per_case = (observed or {}).get("kernels") or {}
+    all_names = [n for names in per_case.values() for n in names]
+    if not all_names:
+        return {"checked": False, "why": "profile returned no device kernels", "device_kernel": want}
+    hit = [sig for sig, names in per_case.items() if any(matches(want, n) for n in names)]
+    if not hit:
+        reason = (
+            f"baseline leg never launches meta.device_kernel {want!r}; it launched "
+            f"{sorted(set(all_names))[:8]}. The task is named after one kernel and measures another, "
+            "so its speedup is a DISPATCH FLIP, not an optimization. Causes, in order: (1) the oracle "
+            "lost a loader-set weight attribute that gates the backend — recapture, or declare it in "
+            "meta.live_tensor_attrs and apply it with apply_declared_attrs after rehydration; "
+            "(2) meta.capture_env differs from this process's env; (3) the captured shapes never reach "
+            "the bucket the name came from — if the observed list holds the SAME kernel family at a "
+            "different tile, device_kernel was taken from a profile bucket this oracle did not capture, "
+            "so recapture that bucket rather than renaming; (4) meta.device_kernel names a kernel the "
+            "selected seam does not reach at all. Do NOT 'fix' this by exporting a tuned config the "
+            "captured server did not have — that is a THIRD code path.")
+        print(f"{UT_HARNESS_INCOMPLETE_SENTINEL}: {reason}")
+        raise HarnessIncompleteError(reason)
+    # Reported, not raised on: one bucket legitimately reaching a different tile of the same family is
+    # shape-dependent dispatch, but it does mean the name does not describe every case being timed.
+    return {"checked": True, "device_kernel": want, "matched_cases": sorted(hit),
+            "unmatched_cases": sorted(set(per_case) - set(hit)), "per_case": per_case}
+
+
 def _median(xs):
     s = sorted(xs)
     n = len(s)
@@ -1410,6 +1614,7 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
     task = os.path.abspath(task_dir)
     base, cand = build_candidate_overlay(task, meta)
     assert_legs_differ(task, base, cand, meta)
+    assert_baseline_dispatch(task, base, meta)
     lo, hi = undecided
     per_case = []
     for sig in _run_leg(task, base, "list", timeout=timeout)["sigs"]:
@@ -1443,11 +1648,33 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
     return per_case
 
 
-def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600):
+def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600, rep=0):
     """Random-draw outputs recorded by the BASELINE leg in its own process, for
-    `check_random_vs_baseline(baseline_outputs=...)`. Same seed => same inputs on both sides."""
+    `check_random_vs_baseline(baseline_outputs=...)`. Same seed => same inputs on both sides.
+    `rep` only picks a distinct output file so the SAME recording can be taken twice
+    (see `baseline_noise_floor`)."""
     task = os.path.abspath(task_dir)
-    out = os.path.join(task, "_baseline_random.pt")
+    out = os.path.join(task, "_baseline_random.pt" if not rep else f"_baseline_random.rep{int(rep)}.pt")
     _run_leg(task, os.path.join(task, "baseline_overlay"), "oracle",
              out=out, seed=seed, draws=draws, timeout=timeout)
     return _torch().load(out, map_location="cpu")
+
+
+def baseline_noise_floor(task_dir, meta, tol, *, seed=0, draws=0, timeout=3600, baseline_outputs=None):
+    """The BASELINE leg's own run-to-run spread, as `{"<sig>|<draw>": max_rel_err}`.
+
+    Records the baseline a SECOND time at the same seed — same inputs, same code, same overlay — and
+    scores it against the first with the very metric the candidate is judged by. Whatever comes back
+    is not the candidate's error; it is the floor. Kernels that accumulate with atomics or split-k
+    (FlyDSL MoE, persist_cu* variants) reorder their reduction per launch, and `correct`'s
+    `atol = tol*RMS(ref)` turns a 1e-05 absolute wobble on a near-zero element into a 0.5 "relative
+    error". Holding a candidate below a floor the baseline cannot hold itself to fails honest kernels.
+    Costs one extra oracle leg (~15-25s); skip it only for provably deterministic ops."""
+    a = baseline_outputs if baseline_outputs is not None else baseline_random_outputs(
+        task_dir, meta, seed=seed, draws=draws, timeout=timeout)
+    b = baseline_random_outputs(task_dir, meta, seed=seed, draws=draws, timeout=timeout, rep=1)
+    floor = {}
+    for k, ref in a.items():
+        if k in b:
+            floor[k] = correct(b[k], ref, tol)[1]
+    return floor
